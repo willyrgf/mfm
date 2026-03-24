@@ -11,23 +11,26 @@ use mfm_state_aave_v3::portfolio::semantic::{
 use mfm_state_aave_v3::portfolio::semantic_adapters::{
     AaveDebtObservationRuntimeAdapter, AaveReserveObservationRuntimeAdapter,
 };
-use mfm_state_portfolio::model::{validate_portfolio_bundle, NetworkConfig};
+use mfm_state_portfolio::model::{
+    validate_portfolio_bundle, NetworkConfig, NetworkFamilyConfig,
+};
 use mfm_state_portfolio::semantic::{
-    AdapterId, CompiledObservationBatch, CompiledObservationBinding,
-    DerivedUnitPriceValuationPayload, DirectPriceSourcePayload, DirectPriceValuationPayload,
-    Erc20BalanceObservationPayload, EvmRoutePolicy, EvmSubjectLocator,
-    FixedUnitPriceValuationPayload, Instrument, InstrumentSemantics,
-    NativeBalanceObservationPayload, NetworkFamily, NetworkView, ObservationPlanRequest,
-    ObservationProjection, ObservationTarget, PlannerAdapter, PlanningError,
-    PortfolioExecutionSpec, PortfolioRequest, PortfolioSemanticCompiler, PortfolioSemanticConfig,
-    Position, PositionSemantics, QuantitySchema, SemanticCatalog, SemanticCatalogError,
-    SemanticCatalogParts, SourcePreparationTask, Subject, SubjectKind, SubjectPlanRequest,
-    SubjectPlannerAdapter, SubjectResolutionTask, Valuation, ValuationPlanRequest,
-    ValuationPlannerAdapter, ValuationSemantics, ValuationTask, Venue, VenueId, ViewPinTask,
-    ViewPlanRequest, ViewPlannerAdapter,
+    AdapterId, BitcoinRoutePolicy, BitcoinSubjectLocator, BitcoinUtxoSetObservationPayload,
+    CompiledObservationBatch, CompiledObservationBinding, DerivedUnitPriceValuationPayload,
+    DirectPriceSourcePayload, DirectPriceValuationPayload, Erc20BalanceObservationPayload,
+    EvmRoutePolicy, EvmSubjectLocator, FixedUnitPriceValuationPayload, Instrument,
+    InstrumentSemantics, NativeBalanceObservationPayload, NetworkFamily, NetworkView,
+    ObservationPlanRequest, ObservationProjection, ObservationTarget, PlannerAdapter,
+    PlanningError, PortfolioExecutionSpec, PortfolioRequest, PortfolioSemanticCompiler,
+    PortfolioSemanticConfig, Position, PositionSemantics, QuantitySchema, SemanticCatalog,
+    SemanticCatalogError, SemanticCatalogParts, SourcePreparationTask, Subject, SubjectKind,
+    SubjectPlanRequest, SubjectPlannerAdapter, SubjectResolutionTask, Valuation,
+    ValuationPlanRequest, ValuationPlannerAdapter, ValuationSemantics, ValuationTask, Venue,
+    VenueId, ViewPinTask, ViewPlanRequest, ViewPlannerAdapter,
 };
 use mfm_state_portfolio::semantic_adapters::{
-    DerivedUnitPriceRuntimeAdapter, EvmAddressSubjectRuntimeAdapter,
+    BitcoinAddressSubjectRuntimeAdapter, BitcoinUtxoSetObservationRuntimeAdapter,
+    BitcoinViewRuntimeAdapter, DerivedUnitPriceRuntimeAdapter, EvmAddressSubjectRuntimeAdapter,
     EvmErc20BalanceObservationRuntimeAdapter, EvmNativeBalanceObservationRuntimeAdapter,
     EvmOracleDirectPriceRuntimeAdapter, EvmViewRuntimeAdapter, FixedUnitPriceRuntimeAdapter,
 };
@@ -35,22 +38,26 @@ use mfm_state_symbol::model::{
     BalanceReaderConfig, PriceSourceRef, QuoteValuationConfig, SymbolConfig, SymbolKind,
     ValuationReaderConfig, ValuationSourceConfig, ValuationSourceReaderConfig,
 };
-use mfm_state_wallet::model::WalletConfig;
+use mfm_state_wallet::model::{WalletConfig, WalletSubjectKind};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 const ADAPTER_RESOLVE_SUBJECT_EVM_ADDRESS: &str = "resolve_subject/evm_address";
+const ADAPTER_RESOLVE_SUBJECT_BITCOIN_ADDRESS: &str = "resolve_subject/bitcoin_address";
 const ADAPTER_PIN_VIEW_EVM: &str = "pin_view/evm";
+const ADAPTER_PIN_VIEW_BITCOIN: &str = "pin_view/bitcoin";
 const ADAPTER_RESOLVE_VALUATION_FIXED: &str = "resolve_valuation/fixed_unit_price";
 const ADAPTER_RESOLVE_VALUATION_EVM_ORACLE: &str = "resolve_valuation/evm_oracle_direct_price";
 const ADAPTER_RESOLVE_VALUATION_DERIVED: &str = "resolve_valuation/derived_unit_price";
 const ADAPTER_OBSERVE_EVM_NATIVE_BALANCE: &str = "observe_position/evm/native_balance";
 const ADAPTER_OBSERVE_EVM_ERC20_BALANCE: &str = "observe_position/evm/erc20_balance";
+const ADAPTER_OBSERVE_BITCOIN_UTXO_SET: &str = "observe_position/bitcoin/utxo_set";
 const ADAPTER_OBSERVE_AAVE_RESERVE: &str = "observe_position/aave_v3/reserve_position";
 const ADAPTER_OBSERVE_AAVE_DEBT: &str = "observe_position/aave_v3/debt_position";
 
 const READER_HINT_EVM_NATIVE_BALANCE: &str = "evm/native_balance";
 const READER_HINT_EVM_ERC20_BALANCE: &str = "evm/erc20_balance";
+const READER_HINT_BITCOIN_UTXO_SET: &str = "bitcoin/utxo_set";
 const READER_HINT_AAVE_RESERVE: &str = "aave_v3/reserve_position";
 const READER_HINT_AAVE_DEBT: &str = "aave_v3/debt_position";
 
@@ -60,6 +67,7 @@ pub fn builtin_semantic_catalog() -> Result<SemanticCatalog, SemanticCatalogErro
         observation_planners: vec![
             Arc::new(EvmNativeBalanceObservationPlannerAdapter),
             Arc::new(EvmErc20BalanceObservationPlannerAdapter),
+            Arc::new(BitcoinUtxoSetObservationPlannerAdapter),
             Arc::new(AaveReserveObservationPlannerAdapter),
             Arc::new(AaveDebtObservationPlannerAdapter),
         ],
@@ -68,10 +76,16 @@ pub fn builtin_semantic_catalog() -> Result<SemanticCatalog, SemanticCatalogErro
             Arc::new(EvmOracleDirectPricePlannerAdapter),
             Arc::new(DerivedUnitPricePlannerAdapter),
         ],
-        subject_planners: vec![Arc::new(EvmAddressSubjectPlannerAdapter)],
-        subject_runtimes: vec![Arc::new(EvmAddressSubjectRuntimeAdapter)],
-        view_planners: vec![Arc::new(EvmViewPlannerAdapter)],
-        view_runtimes: vec![Arc::new(EvmViewRuntimeAdapter)],
+        subject_planners: vec![
+            Arc::new(EvmAddressSubjectPlannerAdapter),
+            Arc::new(BitcoinAddressSubjectPlannerAdapter),
+        ],
+        subject_runtimes: vec![
+            Arc::new(EvmAddressSubjectRuntimeAdapter),
+            Arc::new(BitcoinAddressSubjectRuntimeAdapter),
+        ],
+        view_planners: vec![Arc::new(EvmViewPlannerAdapter), Arc::new(BitcoinViewPlannerAdapter)],
+        view_runtimes: vec![Arc::new(EvmViewRuntimeAdapter), Arc::new(BitcoinViewRuntimeAdapter)],
         valuation_runtimes: vec![
             Arc::new(FixedUnitPriceRuntimeAdapter),
             Arc::new(EvmOracleDirectPriceRuntimeAdapter),
@@ -80,6 +94,7 @@ pub fn builtin_semantic_catalog() -> Result<SemanticCatalog, SemanticCatalogErro
         observation_runtimes: vec![
             Arc::new(EvmNativeBalanceObservationRuntimeAdapter),
             Arc::new(EvmErc20BalanceObservationRuntimeAdapter),
+            Arc::new(BitcoinUtxoSetObservationRuntimeAdapter),
             Arc::new(AaveReserveObservationRuntimeAdapter),
             Arc::new(AaveDebtObservationRuntimeAdapter),
         ],
@@ -500,30 +515,65 @@ fn lower_symbol(
 }
 
 fn lower_network_view(network: &NetworkConfig) -> Result<NetworkView, PlanningError> {
-    Ok(NetworkView {
-        network_view_id: network.network_id.clone(),
-        network_id: network.network_id.clone(),
-        family: NetworkFamily::Evm,
-        route_policy: to_value(&EvmRoutePolicy {
+    match network.family {
+        NetworkFamilyConfig::Evm => {
+            let chain_id = network.chain_id.ok_or_else(|| {
+                compile_error(
+                    "missing_network_chain_id",
+                    format!(
+                        "network `{}` did not declare an evm chain_id for semantic lowering",
+                        network.network_id
+                    ),
+                )
+            })?;
+            Ok(NetworkView {
+                network_view_id: network.network_id.clone(),
+                network_id: network.network_id.clone(),
+                family: NetworkFamily::Evm,
+                route_policy: to_value(&EvmRoutePolicy {
+                    network_id: network.network_id.clone(),
+                    chain_id,
+                    control_scope: network.control_scope.clone(),
+                })?,
+                metadata: network.metadata.clone(),
+            })
+        }
+        NetworkFamilyConfig::Bitcoin => Ok(NetworkView {
+            network_view_id: network.network_id.clone(),
             network_id: network.network_id.clone(),
-            chain_id: network.chain_id,
-            control_scope: network.control_scope.clone(),
-        })?,
-        metadata: network.metadata.clone(),
-    })
+            family: NetworkFamily::Bitcoin,
+            route_policy: to_value(&BitcoinRoutePolicy {
+                network_id: network.network_id.clone(),
+                control_scope: network.control_scope.clone(),
+            })?,
+            metadata: network.metadata.clone(),
+        }),
+    }
 }
 
 fn lower_subject(wallet: &WalletConfig) -> Result<Subject, PlanningError> {
-    Ok(Subject {
-        subject_id: wallet.wallet_id.clone(),
-        kind: SubjectKind::EvmAddress,
-        locator: to_value(&EvmSubjectLocator {
-            network_id: wallet.network_id.clone(),
-            address: wallet.address.clone(),
-            implementation: wallet.implementation.clone(),
-        })?,
-        metadata: wallet.metadata.clone(),
-    })
+    match wallet.subject_kind {
+        WalletSubjectKind::EvmAddress => Ok(Subject {
+            subject_id: wallet.wallet_id.clone(),
+            kind: SubjectKind::EvmAddress,
+            locator: to_value(&EvmSubjectLocator {
+                network_id: wallet.network_id.clone(),
+                address: wallet.address.clone(),
+                implementation: wallet.implementation.clone(),
+            })?,
+            metadata: wallet.metadata.clone(),
+        }),
+        WalletSubjectKind::BitcoinAddress => Ok(Subject {
+            subject_id: wallet.wallet_id.clone(),
+            kind: SubjectKind::BitcoinAddress,
+            locator: to_value(&BitcoinSubjectLocator {
+                network_id: wallet.network_id.clone(),
+                address: wallet.address.clone(),
+                implementation: wallet.implementation.clone(),
+            })?,
+            metadata: wallet.metadata.clone(),
+        }),
+    }
 }
 
 fn route_policy_for_network(
@@ -536,9 +586,51 @@ fn route_policy_for_network(
             format!("network `{network_id}` was not found for semantic route policy lowering"),
         )
     })?;
+    if network.family != NetworkFamilyConfig::Evm {
+        return Err(compile_error(
+            "unsupported_route_policy_family",
+            format!(
+                "network `{}` family `{:?}` does not support evm route policy lowering",
+                network.network_id, network.family
+            ),
+        ));
+    }
     Ok(EvmRoutePolicy {
         network_id: network.network_id.clone(),
-        chain_id: network.chain_id,
+        chain_id: network.chain_id.ok_or_else(|| {
+            compile_error(
+                "missing_network_chain_id",
+                format!(
+                    "network `{}` did not declare an evm chain_id for route policy lowering",
+                    network.network_id
+                ),
+            )
+        })?,
+        control_scope: network.control_scope.clone(),
+    })
+}
+
+fn bitcoin_route_policy_for_network(
+    networks_by_id: &HashMap<&str, &NetworkConfig>,
+    network_id: &str,
+) -> Result<BitcoinRoutePolicy, PlanningError> {
+    let network = networks_by_id.get(network_id).copied().ok_or_else(|| {
+        compile_error(
+            "missing_network_for_route_policy",
+            format!("network `{network_id}` was not found for semantic route policy lowering"),
+        )
+    })?;
+    if network.family != NetworkFamilyConfig::Bitcoin {
+        return Err(compile_error(
+            "unsupported_route_policy_family",
+            format!(
+                "network `{}` family `{:?}` does not support bitcoin route policy lowering",
+                network.network_id, network.family
+            ),
+        ));
+    }
+    Ok(BitcoinRoutePolicy {
+        network_id: network.network_id.clone(),
         control_scope: network.control_scope.clone(),
     })
 }
@@ -609,6 +701,46 @@ fn build_position(
     }
 
     let projection = observation_projection(symbol);
+    let network = networks_by_id
+        .get(symbol.network_id.as_str())
+        .copied()
+        .ok_or_else(|| {
+            compile_error(
+                "missing_network_for_position",
+                format!(
+                    "network `{}` was not found while lowering position `{}`",
+                    symbol.network_id, symbol.symbol_id
+                ),
+            )
+        })?;
+    if network.family == NetworkFamilyConfig::Bitcoin {
+        return match &symbol.balance_reader {
+            BalanceReaderConfig::NativeBalance {} => Ok((
+                Position {
+                    position_id: symbol.symbol_id.clone(),
+                    instrument_id: symbol.symbol_id.clone(),
+                    semantics: PositionSemantics::UtxoSet,
+                    venue_id: None,
+                    reader_hint: Some(READER_HINT_BITCOIN_UTXO_SET.to_string()),
+                    metadata: to_object_map(&BitcoinUtxoSetObservationPayload {
+                        projection,
+                        route_policy: bitcoin_route_policy_for_network(
+                            networks_by_id,
+                            &symbol.network_id,
+                        )?,
+                    })?,
+                },
+                Vec::new(),
+            )),
+            _ => Err(compile_error(
+                "unsupported_bitcoin_balance_reader",
+                format!(
+                    "symbol `{}` used unsupported bitcoin balance reader configuration",
+                    symbol.symbol_id
+                ),
+            )),
+        };
+    }
     let route_policy = route_policy_for_network(networks_by_id, &symbol.network_id)?;
     match &symbol.balance_reader {
         BalanceReaderConfig::NativeBalance {} => Ok((
@@ -958,6 +1090,37 @@ impl SubjectPlannerAdapter for EvmAddressSubjectPlannerAdapter {
     }
 }
 
+struct BitcoinAddressSubjectPlannerAdapter;
+
+impl PlannerAdapter for BitcoinAddressSubjectPlannerAdapter {
+    fn id(&self) -> AdapterId {
+        AdapterId(ADAPTER_RESOLVE_SUBJECT_BITCOIN_ADDRESS.to_string())
+    }
+}
+
+impl SubjectPlannerAdapter for BitcoinAddressSubjectPlannerAdapter {
+    fn supports(&self, req: &SubjectPlanRequest<'_>) -> bool {
+        req.subject.kind == SubjectKind::BitcoinAddress
+    }
+
+    fn plan(&self, req: SubjectPlanRequest<'_>) -> Result<SubjectResolutionTask, PlanningError> {
+        let adapter = self.id();
+        let _locator: BitcoinSubjectLocator =
+            decode_value(&adapter, "subject_locator", &req.subject.locator)?;
+        Ok(SubjectResolutionTask {
+            task_id: format!("resolve.{}", req.subject.subject_id),
+            subject_id: req.subject.subject_id.clone(),
+            kind: req.subject.kind.clone(),
+            adapter: adapter.clone(),
+            payload: value_to_object_map(
+                &req.subject.locator,
+                "subject.locator",
+                &req.subject.subject_id,
+            )?,
+        })
+    }
+}
+
 struct EvmViewPlannerAdapter;
 
 impl PlannerAdapter for EvmViewPlannerAdapter {
@@ -974,6 +1137,40 @@ impl ViewPlannerAdapter for EvmViewPlannerAdapter {
     fn plan(&self, req: ViewPlanRequest<'_>) -> Result<ViewPinTask, PlanningError> {
         let adapter = self.id();
         let _policy: EvmRoutePolicy = decode_value(
+            &adapter,
+            "view_route_policy",
+            &req.network_view.route_policy,
+        )?;
+        Ok(ViewPinTask {
+            task_id: format!("pin.{}", req.network_view.network_view_id),
+            network_view_id: req.network_view.network_view_id.clone(),
+            family: req.network_view.family.clone(),
+            adapter: adapter.clone(),
+            payload: value_to_object_map(
+                &req.network_view.route_policy,
+                "network_view.route_policy",
+                &req.network_view.network_view_id,
+            )?,
+        })
+    }
+}
+
+struct BitcoinViewPlannerAdapter;
+
+impl PlannerAdapter for BitcoinViewPlannerAdapter {
+    fn id(&self) -> AdapterId {
+        AdapterId(ADAPTER_PIN_VIEW_BITCOIN.to_string())
+    }
+}
+
+impl ViewPlannerAdapter for BitcoinViewPlannerAdapter {
+    fn supports(&self, req: &ViewPlanRequest<'_>) -> bool {
+        req.network_view.family == NetworkFamily::Bitcoin
+    }
+
+    fn plan(&self, req: ViewPlanRequest<'_>) -> Result<ViewPinTask, PlanningError> {
+        let adapter = self.id();
+        let _policy: BitcoinRoutePolicy = decode_value(
             &adapter,
             "view_route_policy",
             &req.network_view.route_policy,
@@ -1142,6 +1339,39 @@ impl mfm_state_portfolio::semantic::ObservationPlannerAdapter
             decode_object_map(&adapter, "position_payload", &req.position.metadata)?;
         Ok(build_observation_binding(
             ADAPTER_OBSERVE_EVM_ERC20_BALANCE,
+            req.target,
+            req.position,
+            to_object_map(&payload)?,
+        ))
+    }
+}
+
+struct BitcoinUtxoSetObservationPlannerAdapter;
+
+impl PlannerAdapter for BitcoinUtxoSetObservationPlannerAdapter {
+    fn id(&self) -> AdapterId {
+        AdapterId(ADAPTER_OBSERVE_BITCOIN_UTXO_SET.to_string())
+    }
+}
+
+impl mfm_state_portfolio::semantic::ObservationPlannerAdapter
+    for BitcoinUtxoSetObservationPlannerAdapter
+{
+    fn supports(&self, req: &ObservationPlanRequest<'_>) -> bool {
+        req.subject.kind == SubjectKind::BitcoinAddress
+            && req.network_view.family == NetworkFamily::Bitcoin
+            && req.position.reader_hint.as_deref() == Some(READER_HINT_BITCOIN_UTXO_SET)
+    }
+
+    fn plan(
+        &self,
+        req: ObservationPlanRequest<'_>,
+    ) -> Result<CompiledObservationBinding, PlanningError> {
+        let adapter = self.id();
+        let payload: BitcoinUtxoSetObservationPayload =
+            decode_object_map(&adapter, "position_payload", &req.position.metadata)?;
+        Ok(build_observation_binding(
+            ADAPTER_OBSERVE_BITCOIN_UTXO_SET,
             req.target,
             req.position,
             to_object_map(&payload)?,

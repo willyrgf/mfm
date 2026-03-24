@@ -7,13 +7,33 @@ use mfm_state_symbol::model::{
     QuoteCode, SymbolConfig, SymbolConfigError, ValuationReaderConfig, ValuationSourceRegistry,
     ValuationSourceRegistryError,
 };
-use mfm_state_wallet::model::{validate_wallet_config, WalletConfig, WalletConfigError};
+use mfm_state_wallet::model::{
+    validate_wallet_config, WalletConfig, WalletConfigError, WalletSubjectKind,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
 fn default_control_scope() -> String {
     DEFAULT_CONTROL_SCOPE.to_string()
+}
+
+fn default_network_family() -> NetworkFamilyConfig {
+    NetworkFamilyConfig::Evm
+}
+
+fn portfolio_output_schema_version() -> u64 {
+    2
+}
+
+/// Supported network families on the canonical portfolio config surface.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkFamilyConfig {
+    /// Ethereum-compatible execution network.
+    Evm,
+    /// Bitcoin-family execution network.
+    Bitcoin,
 }
 
 /// Canonical top-level portfolio configuration.
@@ -64,8 +84,12 @@ impl PortfolioConfig {
 pub struct NetworkConfig {
     /// Stable machine identifier for the network.
     pub network_id: String,
-    /// EVM chain id for the network.
-    pub chain_id: u64,
+    /// Declared execution family for the network.
+    #[serde(default = "default_network_family")]
+    pub family: NetworkFamilyConfig,
+    /// EVM chain id for the network when `family = "evm"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chain_id: Option<u64>,
     /// Stable control-plane scope used for managed rpc.control reads on this network.
     #[serde(default = "default_control_scope")]
     pub control_scope: String,
@@ -74,15 +98,33 @@ pub struct NetworkConfig {
     pub metadata: BTreeMap<String, Value>,
 }
 
-/// Concrete pinned network block captured in a snapshot.
+/// Concrete execution anchor captured for one pinned network.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "family", rename_all = "snake_case")]
+pub enum ExecutionAnchor {
+    /// EVM execution pinned to one block number on one chain id.
+    Evm {
+        /// EVM chain id.
+        chain_id: u64,
+        /// Concrete pinned block number.
+        block_number: u64,
+    },
+    /// Bitcoin execution pinned to one height and block hash.
+    Bitcoin {
+        /// Concrete pinned block height.
+        height: u64,
+        /// Concrete pinned block hash.
+        block_hash: String,
+    },
+}
+
+/// Concrete pinned network view captured in a snapshot/report artifact.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NetworkPin {
     /// Stable network identifier.
     pub network_id: String,
-    /// EVM chain id.
-    pub chain_id: u64,
-    /// Concrete pinned block number.
-    pub block_number: u64,
+    /// Concrete pinned execution anchor.
+    pub anchor: ExecutionAnchor,
 }
 
 /// Canonical snapshot for one wallet inside a portfolio snapshot.
@@ -92,6 +134,8 @@ pub struct WalletSnapshot {
     pub wallet_id: String,
     /// Canonical wallet address.
     pub address: String,
+    /// Canonical wallet subject kind.
+    pub subject_kind: WalletSubjectKind,
     /// Stable network identifier.
     pub network_id: String,
     /// Observations collected for the wallet.
@@ -114,6 +158,9 @@ impl WalletSnapshot {
 /// Canonical portfolio snapshot artifact.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PortfolioSnapshot {
+    /// Version of the public snapshot schema.
+    #[serde(default = "portfolio_output_schema_version")]
+    pub schema_version: u64,
     /// Stable portfolio identifier.
     pub portfolio_id: String,
     /// Generation timestamp in milliseconds since epoch.
@@ -180,6 +227,9 @@ pub struct PortfolioSnapshotError {
 /// Canonical report derived from the snapshot artifact.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PortfolioReport {
+    /// Version of the public report schema.
+    #[serde(default = "portfolio_output_schema_version")]
+    pub schema_version: u64,
     /// Stable portfolio identifier.
     pub portfolio_id: String,
     /// Generation timestamp in milliseconds since epoch.
@@ -269,6 +319,18 @@ pub enum PortfolioConfigError {
         /// Network id associated with the failure.
         network_id: String,
     },
+    /// EVM networks require an explicit chain id.
+    #[error("network `{network_id}` with family `evm` must declare chain_id")]
+    MissingEvmChainId {
+        /// Network id associated with the failure.
+        network_id: String,
+    },
+    /// Bitcoin networks must not declare an EVM chain id.
+    #[error("network `{network_id}` with family `bitcoin` must not declare chain_id")]
+    UnexpectedBitcoinChainId {
+        /// Network id associated with the failure.
+        network_id: String,
+    },
     /// Two networks shared the same network id.
     #[error("network_id `{network_id}` must be unique")]
     DuplicateNetworkId {
@@ -305,6 +367,22 @@ pub enum PortfolioConfigError {
         /// Unknown network id.
         network_id: String,
     },
+    /// Wallet subject family did not match the referenced network family.
+    #[error(
+        "wallet `{wallet_id}` subject_kind `{:?}` did not match network `{network_id}` family `{:?}`",
+        wallet_subject_kind,
+        network_family
+    )]
+    WalletSubjectNetworkFamilyMismatch {
+        /// Wallet id associated with the failure.
+        wallet_id: String,
+        /// Network id associated with the failure.
+        network_id: String,
+        /// Wallet subject kind selected in config.
+        wallet_subject_kind: WalletSubjectKind,
+        /// Network family selected by the referenced network.
+        network_family: NetworkFamilyConfig,
+    },
     /// Wallet referenced an unknown symbol.
     #[error("wallet `{wallet_id}` referenced unknown symbol `{symbol_id}`")]
     UnknownWalletSymbol {
@@ -340,6 +418,19 @@ pub enum PortfolioConfigError {
         symbol_id: String,
         /// Underlying symbol validation failure.
         source: SymbolConfigError,
+    },
+    /// Symbol used a reader or symbol kind unsupported by the referenced network family.
+    #[error(
+        "symbol `{symbol_id}` used unsupported kind/reader for network `{network_id}` family `{:?}`",
+        network_family
+    )]
+    UnsupportedSymbolNetworkFamily {
+        /// Symbol id associated with the failure.
+        symbol_id: String,
+        /// Network id associated with the failure.
+        network_id: String,
+        /// Network family selected by the referenced network.
+        network_family: NetworkFamilyConfig,
     },
     /// Symbol referenced an unknown network.
     #[error("symbol `{symbol_id}` referenced unknown network `{network_id}`")]
@@ -504,6 +595,12 @@ pub fn validate_portfolio_config(cfg: &PortfolioConfig) -> Result<(), PortfolioC
                 network_id: symbol.network_id.clone(),
             });
         }
+        let network = cfg
+            .networks
+            .iter()
+            .find(|network| network.network_id == symbol.network_id)
+            .expect("validated network id must exist");
+        validate_symbol_for_network_family(symbol, network)?;
         if let Some(underlying_symbol_id) = &symbol.underlying_symbol_id {
             if !symbol_ids.contains(underlying_symbol_id) {
                 return Err(PortfolioConfigError::UnknownUnderlyingSymbol {
@@ -532,6 +629,19 @@ pub fn validate_portfolio_config(cfg: &PortfolioConfig) -> Result<(), PortfolioC
             return Err(PortfolioConfigError::UnknownWalletNetwork {
                 wallet_id: wallet.wallet_id.clone(),
                 network_id: wallet.network_id.clone(),
+            });
+        }
+        let network = cfg
+            .networks
+            .iter()
+            .find(|network| network.network_id == wallet.network_id)
+            .expect("validated network id must exist");
+        if !wallet_subject_matches_network_family(wallet.subject_kind, network.family) {
+            return Err(PortfolioConfigError::WalletSubjectNetworkFamilyMismatch {
+                wallet_id: wallet.wallet_id.clone(),
+                network_id: wallet.network_id.clone(),
+                wallet_subject_kind: wallet.subject_kind,
+                network_family: network.family,
             });
         }
         for symbol_id in &wallet.symbol_ids {
@@ -636,6 +746,55 @@ fn validate_network_config(network: &NetworkConfig) -> Result<(), PortfolioConfi
             reason,
         }
     })?;
+    match network.family {
+        NetworkFamilyConfig::Evm => {
+            if network.chain_id.is_none() {
+                return Err(PortfolioConfigError::MissingEvmChainId {
+                    network_id: network.network_id.clone(),
+                });
+            }
+        }
+        NetworkFamilyConfig::Bitcoin => {
+            if network.chain_id.is_some() {
+                return Err(PortfolioConfigError::UnexpectedBitcoinChainId {
+                    network_id: network.network_id.clone(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn wallet_subject_matches_network_family(
+    subject_kind: WalletSubjectKind,
+    network_family: NetworkFamilyConfig,
+) -> bool {
+    matches!(
+        (subject_kind, network_family),
+        (WalletSubjectKind::EvmAddress, NetworkFamilyConfig::Evm)
+            | (WalletSubjectKind::BitcoinAddress, NetworkFamilyConfig::Bitcoin)
+    )
+}
+
+fn validate_symbol_for_network_family(
+    symbol: &SymbolConfig,
+    network: &NetworkConfig,
+) -> Result<(), PortfolioConfigError> {
+    if network.family == NetworkFamilyConfig::Bitcoin
+        && !matches!(
+            (&symbol.kind, &symbol.balance_reader),
+            (
+                mfm_state_symbol::model::SymbolKind::NativeBalance,
+                mfm_state_symbol::model::BalanceReaderConfig::NativeBalance {}
+            )
+        )
+    {
+        return Err(PortfolioConfigError::UnsupportedSymbolNetworkFamily {
+            symbol_id: symbol.symbol_id.clone(),
+            network_id: network.network_id.clone(),
+            network_family: network.family,
+        });
+    }
     Ok(())
 }
 
@@ -772,7 +931,9 @@ mod tests {
         BalanceReaderConfig, ObservationQuantity, ObservationSource, ObservationValue,
         ObservationValueSourceRef, SymbolConfigError,
     };
-    use mfm_state_wallet::model::{WalletConfigError, WalletImplementationConfig};
+    use mfm_state_wallet::model::{
+        WalletConfigError, WalletImplementationConfig, WalletSubjectKind,
+    };
     use serde_json::json;
 
     #[test]
@@ -926,6 +1087,7 @@ mod tests {
                 wallet_id: "wallet_treasury_eth".to_string(),
                 source: WalletConfigError::InvalidAddress {
                     address: "0x000000000000000000000000000000000000DEAD".to_string(),
+                    subject_kind: WalletSubjectKind::EvmAddress,
                 },
             }
         );
@@ -1061,24 +1223,30 @@ mod tests {
         );
 
         let mut snapshot = PortfolioSnapshot {
+            schema_version: 2,
             portfolio_id: "portfolio_main".to_string(),
             generated_at_ms: 1,
             network_pins: vec![
                 NetworkPin {
                     network_id: "ethereum-mainnet".to_string(),
-                    chain_id: 1,
-                    block_number: 10,
+                    anchor: ExecutionAnchor::Evm {
+                        chain_id: 1,
+                        block_number: 10,
+                    },
                 },
                 NetworkPin {
                     network_id: "arbitrum-mainnet".to_string(),
-                    chain_id: 42161,
-                    block_number: 20,
+                    anchor: ExecutionAnchor::Evm {
+                        chain_id: 42161,
+                        block_number: 20,
+                    },
                 },
             ],
             wallets: vec![
                 WalletSnapshot {
                     wallet_id: "wallet_treasury_eth".to_string(),
                     address: "0x000000000000000000000000000000000000dead".to_string(),
+                    subject_kind: WalletSubjectKind::EvmAddress,
                     network_id: "ethereum-mainnet".to_string(),
                     observations: vec![
                         observation(
@@ -1096,6 +1264,7 @@ mod tests {
                 WalletSnapshot {
                     wallet_id: "wallet_ops_arb".to_string(),
                     address: "0x000000000000000000000000000000000000beef".to_string(),
+                    subject_kind: WalletSubjectKind::EvmAddress,
                     network_id: "arbitrum-mainnet".to_string(),
                     observations: vec![observation(
                         "wallet_ops_arb",
@@ -1388,7 +1557,14 @@ mod tests {
                         } else {
                             "ethereum-mainnet".to_string()
                         },
-                        block_number: 1,
+                        anchor: mfm_state_symbol::model::ObservationAnchor::Evm {
+                            chain_id: if symbol_id.contains("arbitrum") {
+                                42161
+                            } else {
+                                1
+                            },
+                            block_number: 1,
+                        },
                     }],
                 })
                 .collect(),
@@ -1399,7 +1575,14 @@ mod tests {
                 } else {
                     "ethereum-mainnet".to_string()
                 },
-                block_number: 1,
+                anchor: mfm_state_symbol::model::ObservationAnchor::Evm {
+                    chain_id: if symbol_id.contains("arbitrum") {
+                        42161
+                    } else {
+                        1
+                    },
+                    block_number: 1,
+                },
             },
             metadata: BTreeMap::new(),
         }

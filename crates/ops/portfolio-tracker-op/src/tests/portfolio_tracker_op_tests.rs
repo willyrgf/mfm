@@ -21,7 +21,9 @@ use mfm_machine::stores::StreamId;
 use mfm_sdk::op::{CompositeOpSpec, PlannedOp, PlannedOpKind};
 use mfm_sdk::unstable::SdkPlanResolver;
 use mfm_state_common::test_support as op_test_support;
-use mfm_state_portfolio::model::{PortfolioQuoteTotal, PortfolioReport, PortfolioSnapshot};
+use mfm_state_portfolio::model::{
+    ExecutionAnchor, PortfolioQuoteTotal, PortfolioReport, PortfolioSnapshot,
+};
 use tokio::sync::Mutex;
 
 const ERC20_DECIMALS_SELECTOR: &str = "0x313ce567";
@@ -107,37 +109,60 @@ impl LiveIoTransport for CountingTransport {
             .cloned()
             .unwrap_or_default();
 
-        let count_key = match kind {
-            "prepare_sources" => format!("prepare_sources@{network_id}"),
-            _ => classify_call(method, network_id, &params),
-        };
+        let count_key = classify_call(kind, method, network_id, &params, &call.request);
         {
             let mut counts = self.counts.lock().await;
             *counts.entry(count_key).or_default() += 1;
         }
 
-        if kind == "prepare_sources" {
-            let network_id = call
-                .request
-                .get("network_id")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default();
-            let control_scope = call
-                .request
-                .get("control_scope")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("shared");
-            return Ok(serde_json::json!({
-                "control_scope": control_scope,
-                "network_id": network_id,
-                "pool_kind": "test",
-                "available_source_ids": ["source-1"],
-                "ranked_source_ids": ["source-1"],
-                "sources": [{
-                    "source_id": "source-1",
-                    "healthy": true
-                }]
-            }));
+        match kind {
+            "prepare_sources" => {
+                let network_id = call
+                    .request
+                    .get("network_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default();
+                let control_scope = call
+                    .request
+                    .get("control_scope")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("shared");
+                return Ok(serde_json::json!({
+                    "control_scope": control_scope,
+                    "network_id": network_id,
+                    "pool_kind": "test",
+                    "available_source_ids": ["source-1"],
+                    "ranked_source_ids": ["source-1"],
+                    "sources": [{
+                        "source_id": "source-1",
+                        "healthy": true
+                    }]
+                }));
+            }
+            "bitcoin_anchor" => {
+                return Ok(serde_json::json!({
+                    "height": 840000,
+                    "block_hash": "00000000000000000000000000000000000000000000000000000000000000aa"
+                }));
+            }
+            "bitcoin_scan_utxos" => {
+                let address = call
+                    .request
+                    .get("address")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default();
+                return match address {
+                    "1BoatSLRHtKNngkdXEeobR76b53LETtpyT" => {
+                        Ok(serde_json::json!({ "amount_sats": "5000000" }))
+                    }
+                    _ => Err(IoError::Other(info(
+                        "unexpected_bitcoin_scan_utxos_call",
+                        ErrorCategory::Unknown,
+                        "unexpected bitcoin_scan_utxos payload",
+                    ))),
+                };
+            }
+            _ => {}
         }
 
         match method {
@@ -238,8 +263,24 @@ impl LiveIoTransport for CountingTransport {
     }
 }
 
-fn classify_call(method: &str, network_id: &str, params: &[serde_json::Value]) -> String {
-    match method {
+fn classify_call(
+    kind: &str,
+    method: &str,
+    network_id: &str,
+    params: &[serde_json::Value],
+    request: &serde_json::Value,
+) -> String {
+    match kind {
+        "prepare_sources" => format!("prepare_sources@{network_id}"),
+        "bitcoin_anchor" => format!("bitcoin_anchor@{network_id}"),
+        "bitcoin_scan_utxos" => {
+            let address = request
+                .get("address")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown");
+            format!("bitcoin_scan_utxos:{address}@{network_id}")
+        }
+        _ => match method {
         "eth_chainId" | "eth_blockNumber" => format!("{method}@{network_id}"),
         "eth_getBalance" => {
             let wallet = params
@@ -274,6 +315,7 @@ fn classify_call(method: &str, network_id: &str, params: &[serde_json::Value]) -
             format!("eth_call:{label}:{to}@{network_id}")
         }
         _ => format!("{method}@{network_id}"),
+        },
     }
 }
 
@@ -432,6 +474,7 @@ impl EventRecorder for NoopRecorder {
 #[test]
 fn expand_uses_canonical_multi_network_graph() {
     let op = PortfolioTrackerOp;
+    assert_eq!(op.op_version(), "v2");
     let composite = into_composite(
         op.expand(
             OpPath("portfolio_tracker.main".to_string()),
@@ -541,6 +584,7 @@ async fn at_live_then_replay_determinism() {
         &portfolio_snapshot_report_context_key(),
     ))
     .expect("typed report");
+    assert_eq!(report.schema_version, 2);
     assert_eq!(report.portfolio_id, "portfolio_main");
     assert_eq!(report.error_count, 0);
     assert_eq!(report.wallet_summaries.len(), 2);
@@ -558,6 +602,7 @@ async fn at_live_then_replay_determinism() {
     assert_eq!(portfolio_btc.net_value_dec, "0.300500000000000000");
 
     let snapshot = load_snapshot_artifact(&stores, &context_snapshot).await;
+    assert_eq!(snapshot.schema_version, 2);
     assert_eq!(snapshot.portfolio_id, "portfolio_main");
     assert_eq!(snapshot.network_pins.len(), 2);
     assert_eq!(snapshot.wallets.len(), 2);
@@ -657,6 +702,134 @@ async fn at_live_then_replay_determinism() {
         got.get("eth_call:balance_of:0x0000000000000000000000000000000000000001@ethereum-mainnet")
             .copied()
             .unwrap_or(0),
+        1
+    );
+}
+
+#[tokio::test]
+async fn mixed_evm_and_bitcoin_wallets_share_the_semantic_runtime() {
+    let counts = Arc::new(Mutex::new(HashMap::new()));
+    let factory: Arc<dyn LiveIoTransportFactory> =
+        Arc::new(CountingTransportFactory::new(Arc::clone(&counts)));
+    let Harness {
+        engine,
+        registry,
+        planner,
+        pipeline,
+        stores,
+        cfg,
+    } = build_harness(mixed_family_op_config(), factory, None);
+
+    let res = op_test_support::start_pipeline_with_defaults(
+        Arc::clone(&engine),
+        &stores,
+        Arc::clone(&registry),
+        Arc::clone(&planner),
+        pipeline,
+        cfg,
+    )
+    .await
+    .expect("start");
+
+    assert_eq!(res.phase, RunPhase::Completed);
+    let final_snapshot_id = res.final_snapshot_id.expect("final snapshot");
+    let context_snapshot = load_context_snapshot(&stores, &final_snapshot_id).await;
+    let report: PortfolioReport = serde_json::from_value(read_required_context_value(
+        &context_snapshot,
+        &portfolio_snapshot_report_context_key(),
+    ))
+    .expect("typed report");
+    assert_eq!(report.schema_version, 2);
+    assert_eq!(report.portfolio_id, "portfolio_mixed_families");
+    assert_eq!(report.error_count, 0);
+    assert_eq!(report.wallet_summaries.len(), 2);
+    assert_eq!(report.network_pins.len(), 2);
+
+    let snapshot = load_snapshot_artifact(&stores, &context_snapshot).await;
+    assert_eq!(snapshot.schema_version, 2);
+    assert_eq!(snapshot.network_pins.len(), 2);
+    assert_eq!(snapshot.wallets.len(), 2);
+
+    let btc_pin = snapshot
+        .network_pins
+        .iter()
+        .find(|pin| pin.network_id == "bitcoin-mainnet")
+        .expect("bitcoin pin");
+    assert_eq!(
+        btc_pin.anchor,
+        ExecutionAnchor::Bitcoin {
+            height: 840000,
+            block_hash:
+                "00000000000000000000000000000000000000000000000000000000000000aa".to_string(),
+        }
+    );
+
+    let btc_wallet = snapshot
+        .wallets
+        .iter()
+        .find(|wallet| wallet.wallet_id == "wallet_cold_btc")
+        .expect("bitcoin wallet");
+    assert_eq!(
+        btc_wallet.subject_kind,
+        mfm_state_wallet::model::WalletSubjectKind::BitcoinAddress
+    );
+    assert_eq!(btc_wallet.address, "1BoatSLRHtKNngkdXEeobR76b53LETtpyT");
+    assert_eq!(btc_wallet.observations.len(), 1);
+    assert_eq!(
+        btc_wallet.observations[0].source.balance_reader_kind,
+        "bitcoin_utxo_set"
+    );
+    assert_eq!(btc_wallet.observations[0].quantity.raw_dec, "5000000");
+    assert_eq!(btc_wallet.observations[0].quantity.amount_dec, "0.05000000");
+
+    let eth_wallet = snapshot
+        .wallets
+        .iter()
+        .find(|wallet| wallet.wallet_id == "wallet_treasury_eth")
+        .expect("ethereum wallet");
+    assert_eq!(
+        eth_wallet.subject_kind,
+        mfm_state_wallet::model::WalletSubjectKind::EvmAddress
+    );
+    assert_eq!(eth_wallet.observations.len(), 1);
+
+    let got = counts.lock().await.clone();
+    assert_eq!(
+        got.get("prepare_sources@ethereum-mainnet")
+            .copied()
+            .unwrap_or(0),
+        1
+    );
+    assert_eq!(
+        got.get("prepare_sources@bitcoin-mainnet")
+            .copied()
+            .unwrap_or(0),
+        1
+    );
+    assert_eq!(
+        got.get("eth_chainId@ethereum-mainnet")
+            .copied()
+            .unwrap_or(0),
+        1
+    );
+    assert_eq!(
+        got.get("eth_blockNumber@ethereum-mainnet")
+            .copied()
+            .unwrap_or(0),
+        1
+    );
+    assert_eq!(
+        got.get("bitcoin_anchor@bitcoin-mainnet")
+            .copied()
+            .unwrap_or(0),
+        1
+    );
+    assert_eq!(
+        got.get(
+            "bitcoin_scan_utxos:1BoatSLRHtKNngkdXEeobR76b53LETtpyT@bitcoin-mainnet"
+        )
+        .copied()
+        .unwrap_or(0),
         1
     );
 }
@@ -1094,6 +1267,117 @@ fn canonical_op_config() -> serde_json::Value {
                     "metadata": {}
                 }
             ]
+        }
+    })
+}
+
+fn mixed_family_op_config() -> serde_json::Value {
+    serde_json::json!({
+        "portfolio": {
+            "portfolio_id": "portfolio_mixed_families",
+            "quote_codes": ["USD", "BTC"],
+            "networks": [
+                {
+                    "network_id": "ethereum-mainnet",
+                    "family": "evm",
+                    "chain_id": 1,
+                    "metadata": {}
+                },
+                {
+                    "network_id": "bitcoin-mainnet",
+                    "family": "bitcoin",
+                    "metadata": {}
+                }
+            ],
+            "wallets": [
+                {
+                    "wallet_id": "wallet_treasury_eth",
+                    "address": "0x000000000000000000000000000000000000dead",
+                    "network_id": "ethereum-mainnet",
+                    "implementation": { "kind": "address_only" },
+                    "symbol_ids": ["eth.native.ethereum-mainnet"],
+                    "metadata": {}
+                },
+                {
+                    "wallet_id": "wallet_cold_btc",
+                    "address": "1BoatSLRHtKNngkdXEeobR76b53LETtpyT",
+                    "subject_kind": "bitcoin_address",
+                    "network_id": "bitcoin-mainnet",
+                    "implementation": { "kind": "address_only" },
+                    "symbol_ids": ["btc.native.bitcoin-mainnet"],
+                    "metadata": {}
+                }
+            ],
+            "symbol_configs": [
+                {
+                    "symbol_id": "eth.native.ethereum-mainnet",
+                    "display_symbol": "ETH",
+                    "kind": "native_balance",
+                    "role": "native",
+                    "network_id": "ethereum-mainnet",
+                    "protocol": null,
+                    "balance_reader": { "kind": "native_balance" },
+                    "valuation": {
+                        "quotes": [
+                            {
+                                "quote": "USD",
+                                "priced_symbol_id": "eth.native.ethereum-mainnet",
+                                "reader": {
+                                    "kind": "fixed_unit_price",
+                                    "unit_price_dec": "2000.00"
+                                }
+                            },
+                            {
+                                "quote": "BTC",
+                                "priced_symbol_id": "eth.native.ethereum-mainnet",
+                                "reader": {
+                                    "kind": "fixed_unit_price",
+                                    "unit_price_dec": "0.10"
+                                }
+                            }
+                        ]
+                    },
+                    "decimals": 18,
+                    "underlying_symbol_id": null,
+                    "metadata": {}
+                },
+                {
+                    "symbol_id": "btc.native.bitcoin-mainnet",
+                    "display_symbol": "BTC",
+                    "kind": "native_balance",
+                    "role": "native",
+                    "network_id": "bitcoin-mainnet",
+                    "protocol": null,
+                    "balance_reader": { "kind": "native_balance" },
+                    "valuation": {
+                        "quotes": [
+                            {
+                                "quote": "USD",
+                                "priced_symbol_id": "btc.native.bitcoin-mainnet",
+                                "reader": {
+                                    "kind": "fixed_unit_price",
+                                    "unit_price_dec": "30000.00"
+                                }
+                            },
+                            {
+                                "quote": "BTC",
+                                "priced_symbol_id": "btc.native.bitcoin-mainnet",
+                                "reader": {
+                                    "kind": "fixed_unit_price",
+                                    "unit_price_dec": "1.00"
+                                }
+                            }
+                        ]
+                    },
+                    "decimals": 8,
+                    "underlying_symbol_id": null,
+                    "metadata": {}
+                }
+            ],
+            "metadata": {}
+        },
+        "valuation_source_registry": {
+            "sources": []
         }
     })
 }

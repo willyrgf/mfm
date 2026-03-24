@@ -340,26 +340,46 @@ pub struct ObservationValue {
     pub source_refs: Vec<ObservationValueSourceRef>,
 }
 
-/// Concrete price source ref pinned to a network block.
+/// Concrete execution anchor captured for one observation source.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "family", rename_all = "snake_case")]
+pub enum ObservationAnchor {
+    /// EVM observation pinned to one block on one chain.
+    Evm {
+        /// EVM chain id.
+        chain_id: u64,
+        /// Concrete pinned block number.
+        block_number: u64,
+    },
+    /// Bitcoin observation pinned to one height and block hash.
+    Bitcoin {
+        /// Concrete pinned block height.
+        height: u64,
+        /// Concrete pinned block hash.
+        block_hash: String,
+    },
+}
+
+/// Concrete price source ref pinned to a network anchor.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObservationValueSourceRef {
     /// Stable source identifier.
     pub source_id: String,
     /// Stable network identifier.
     pub network_id: String,
-    /// Concrete pinned block number.
-    pub block_number: u64,
+    /// Concrete pinned execution anchor.
+    pub anchor: ObservationAnchor,
 }
 
-/// Concrete balance source pinned to a network block.
+/// Concrete balance source pinned to a network anchor.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObservationSource {
     /// Canonical balance reader kind.
     pub balance_reader_kind: String,
     /// Stable network identifier.
     pub network_id: String,
-    /// Concrete pinned block number.
-    pub block_number: u64,
+    /// Concrete pinned execution anchor.
+    pub anchor: ObservationAnchor,
 }
 
 /// Validation errors for canonical symbol configs.

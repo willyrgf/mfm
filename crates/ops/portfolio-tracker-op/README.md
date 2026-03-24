@@ -1,10 +1,22 @@
 # mfm-op-portfolio-tracker
 
-Portfolio tracking operation (`op_id = "portfolio_tracker"`, `op_version = "v1"`).
+Portfolio tracking operation (`op_id = "portfolio_tracker"`, `op_version = "v2"`).
 
 This op is the thin planner for the canonical multi-network portfolio snapshot flow. It validates
-the canonical `portfolio` plus `valuation_source_registry` config surfaces and wires the reusable
-wallet, symbol, Aave, and portfolio shared states.
+the canonical `portfolio` plus `valuation_source_registry` config surfaces and wires the fixed
+semantic runtime:
+
+- `PrepareExecutionSources`
+- `ResolveSubjects`
+- `PinExecutionViews`
+- `ResolveValuationInputs`
+- `ObserveCompiledBatch`
+- `MergeObservations`
+- `AssembleSnapshot`
+- `ProjectReport`
+
+Protocol and network specialization now happens in the semantic adapter catalog rather than through
+protocol-specific graph shapes.
 
 Docs:
 - `docs/redesign.md`

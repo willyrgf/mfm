@@ -23,8 +23,8 @@ use num_traits::{Signed, Zero};
 use serde::{Deserialize, Serialize};
 
 use crate::model::{
-    BalanceReaderConfig, Observation, ObservationQuantity, ObservationSource, ObservationValue,
-    ObservationValueSourceRef, QuoteCode, SymbolConfig, ValuationReaderConfig,
+    BalanceReaderConfig, Observation, ObservationAnchor, ObservationQuantity, ObservationSource,
+    ObservationValue, ObservationValueSourceRef, QuoteCode, SymbolConfig, ValuationReaderConfig,
     ValuationSourceReaderConfig, ValuationSourceRegistry,
 };
 
@@ -47,10 +47,8 @@ pub struct NetworkRouteConfig {
 pub struct PinnedNetwork {
     /// Stable network identifier.
     pub network_id: String,
-    /// EVM chain id.
-    pub chain_id: u64,
-    /// Concrete pinned block number.
-    pub block_number: u64,
+    /// Concrete pinned execution anchor.
+    pub anchor: ObservationAnchor,
 }
 
 /// Resolved direct price value for one valuation source.
@@ -177,6 +175,7 @@ impl State for ReadDirectPricesState {
                     oracle_kind,
                     config,
                 } => {
+                    let (_chain_id, block_number) = evm_pin(pin)?;
                     mfm_evm_runtime::states::price::read_evm_oracle_unit_price(
                         &self.state_id,
                         io,
@@ -184,12 +183,13 @@ impl State for ReadDirectPricesState {
                         &network.control_scope,
                         oracle_kind,
                         config,
-                        pin.block_number,
+                        block_number,
                     )
                     .await?
                     .unit_price_dec
                 }
             };
+            let (chain_id, block_number) = evm_pin(pin)?;
 
             direct_prices.push(DirectPriceValue {
                 source_id: source_cfg.source_id.clone(),
@@ -200,7 +200,10 @@ impl State for ReadDirectPricesState {
                 source_ref: ObservationValueSourceRef {
                     source_id: source_cfg.source_id.clone(),
                     network_id: source_cfg.network_id.clone(),
-                    block_number: pin.block_number,
+                    anchor: ObservationAnchor::Evm {
+                        chain_id,
+                        block_number,
+                    },
                 },
             });
         }
@@ -435,6 +438,7 @@ async fn build_observation(
     control_scope: &str,
     direct_prices_by_id: &HashMap<&str, &DirectPriceValue>,
 ) -> Result<Observation, StateError> {
+    let (chain_id, block_number) = evm_pin(pin)?;
     let (raw_dec, decimals, amount_dec, balance_reader_kind) = match &symbol.balance_reader {
         BalanceReaderConfig::NativeBalance {} => {
             let raw = read_native_balance(
@@ -443,7 +447,7 @@ async fn build_observation(
                 network_id,
                 control_scope,
                 &wallet.address,
-                pin.block_number,
+                block_number,
             )
             .await?;
             let decimals = symbol.decimals.unwrap_or(18);
@@ -464,7 +468,7 @@ async fn build_observation(
                         network_id,
                         control_scope,
                         token_address,
-                        pin.block_number,
+                        block_number,
                     )
                     .await?
                 }
@@ -476,7 +480,7 @@ async fn build_observation(
                 control_scope,
                 token_address,
                 &wallet.address,
-                pin.block_number,
+                block_number,
             )
             .await?;
             (
@@ -515,10 +519,29 @@ async fn build_observation(
         source: ObservationSource {
             balance_reader_kind,
             network_id: pin.network_id.clone(),
-            block_number: pin.block_number,
+            anchor: ObservationAnchor::Evm {
+                chain_id,
+                block_number,
+            },
         },
         metadata: BTreeMap::new(),
     })
+}
+
+fn evm_pin(pin: &PinnedNetwork) -> Result<(u64, u64), StateError> {
+    match &pin.anchor {
+        ObservationAnchor::Evm {
+            chain_id,
+            block_number,
+        } => Ok((*chain_id, *block_number)),
+        ObservationAnchor::Bitcoin { .. } => Err(state_unknown_msg(
+            "unsupported_pinned_network_family",
+            format!(
+                "symbol runtime slice only supports evm anchors but `{}` was bitcoin",
+                pin.network_id
+            ),
+        )),
+    }
 }
 
 /// Builds canonical valuation outputs for one symbol amount using the already-resolved direct

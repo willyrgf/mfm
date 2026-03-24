@@ -17,13 +17,13 @@ use mfm_state_common::local_io_helpers::emit_report_event;
 use mfm_state_common::output::write_output_artifact;
 use mfm_state_common::states::meta;
 use mfm_state_symbol::model::{Observation, QuoteCode, SymbolRole};
-use mfm_state_wallet::model::ResolvedWallet;
+use mfm_state_wallet::model::{ResolvedWallet, WalletSubjectKind};
 use num_bigint::BigInt;
 use num_traits::{Signed, Zero};
 
 use crate::model::{
-    validate_portfolio_bundle, NetworkPin, PortfolioConfig, PortfolioQuoteTotal, PortfolioReport,
-    PortfolioSnapshot, PortfolioSnapshotError, WalletReport, WalletSnapshot,
+    validate_portfolio_bundle, ExecutionAnchor, NetworkPin, PortfolioConfig, PortfolioQuoteTotal,
+    PortfolioReport, PortfolioSnapshot, PortfolioSnapshotError, WalletReport, WalletSnapshot,
 };
 
 /// Pins each required network to a concrete block for one portfolio execution.
@@ -103,7 +103,16 @@ impl State for PinPortfolioNetworksState {
                 "eth_chainId",
             )
             .await?;
-            if chain_id != network.chain_id {
+            let expected_chain_id = network.chain_id.ok_or_else(|| {
+                state_unknown_msg(
+                    "missing_network_chain_id",
+                    format!(
+                        "network `{}` did not declare an evm chain_id for pinning",
+                        network.network_id
+                    ),
+                )
+            })?;
+            if chain_id != expected_chain_id {
                 return Err(state_error_with_state(
                     self.state_id.clone(),
                     "network_chain_id_mismatch",
@@ -126,8 +135,10 @@ impl State for PinPortfolioNetworksState {
             .await?;
             pins.push(NetworkPin {
                 network_id: network.network_id.clone(),
-                chain_id,
-                block_number,
+                anchor: ExecutionAnchor::Evm {
+                    chain_id,
+                    block_number,
+                },
             });
         }
 
@@ -211,6 +222,7 @@ impl State for WritePortfolioSnapshotState {
             .map(|wallet| WalletSnapshot {
                 wallet_id: wallet.wallet_id.clone(),
                 address: wallet.address,
+                subject_kind: WalletSubjectKind::EvmAddress,
                 network_id: wallet.network_id.clone(),
                 observations: observations_by_wallet
                     .get(wallet.wallet_id.as_str())
@@ -227,6 +239,7 @@ impl State for WritePortfolioSnapshotState {
         symbol_configs.sort_by(|left, right| left.symbol_id.cmp(&right.symbol_id));
 
         let mut snapshot = PortfolioSnapshot {
+            schema_version: 2,
             portfolio_id: self.portfolio.portfolio_id.clone(),
             generated_at_ms,
             network_pins,
@@ -314,6 +327,7 @@ impl State for WritePortfolioReportState {
             .collect::<Result<Vec<_>, StateError>>()?;
 
         let mut report = PortfolioReport {
+            schema_version: 2,
             portfolio_id: snapshot.portfolio_id.clone(),
             generated_at_ms: snapshot.generated_at_ms,
             network_pins: snapshot.network_pins.clone(),
@@ -1018,16 +1032,20 @@ mod tests {
     #[tokio::test]
     async fn write_portfolio_report_derives_net_exposure_buckets() {
         let snapshot = PortfolioSnapshot {
+            schema_version: 2,
             portfolio_id: "portfolio_roles".to_string(),
             generated_at_ms: 1234,
             network_pins: vec![NetworkPin {
                 network_id: "ethereum-mainnet".to_string(),
-                chain_id: 1,
-                block_number: 100,
+                anchor: ExecutionAnchor::Evm {
+                    chain_id: 1,
+                    block_number: 100,
+                },
             }],
             wallets: vec![WalletSnapshot {
                 wallet_id: "wallet_main".to_string(),
                 address: "0x000000000000000000000000000000000000dead".to_string(),
+                subject_kind: WalletSubjectKind::EvmAddress,
                 network_id: "ethereum-mainnet".to_string(),
                 observations: vec![
                     observation_with_value(
@@ -1129,13 +1147,15 @@ mod tests {
             networks: vec![
                 crate::model::NetworkConfig {
                     network_id: "ethereum-mainnet".to_string(),
-                    chain_id: 1,
+                    family: crate::model::NetworkFamilyConfig::Evm,
+                    chain_id: Some(1),
                     control_scope: mfm_collectors_rpc_control::DEFAULT_CONTROL_SCOPE.to_string(),
                     metadata: BTreeMap::new(),
                 },
                 crate::model::NetworkConfig {
                     network_id: "arbitrum-mainnet".to_string(),
-                    chain_id: 42161,
+                    family: crate::model::NetworkFamilyConfig::Evm,
+                    chain_id: Some(42161),
                     control_scope: mfm_collectors_rpc_control::DEFAULT_CONTROL_SCOPE.to_string(),
                     metadata: BTreeMap::new(),
                 },
@@ -1144,6 +1164,7 @@ mod tests {
                 WalletConfig {
                     wallet_id: "wallet_treasury_eth".to_string(),
                     address: "0x000000000000000000000000000000000000dead".to_string(),
+                    subject_kind: WalletSubjectKind::EvmAddress,
                     network_id: "ethereum-mainnet".to_string(),
                     implementation: WalletImplementationConfig::AddressOnly {},
                     symbol_ids: vec![
@@ -1155,6 +1176,7 @@ mod tests {
                 WalletConfig {
                     wallet_id: "wallet_ops_arb".to_string(),
                     address: "0x000000000000000000000000000000000000beef".to_string(),
+                    subject_kind: WalletSubjectKind::EvmAddress,
                     network_id: "arbitrum-mainnet".to_string(),
                     implementation: WalletImplementationConfig::AddressOnly {},
                     symbol_ids: vec!["eth.native.arbitrum-mainnet".to_string()],
@@ -1368,7 +1390,10 @@ mod tests {
             source: mfm_state_symbol::model::ObservationSource {
                 balance_reader_kind: "test".to_string(),
                 network_id: "ethereum-mainnet".to_string(),
-                block_number: 100,
+                anchor: mfm_state_symbol::model::ObservationAnchor::Evm {
+                    chain_id: 1,
+                    block_number: 100,
+                },
             },
             metadata: BTreeMap::new(),
         }
