@@ -126,7 +126,9 @@ For the current inventory of registered ops and production states, see
 
 ### Strict op vs state contract
 Operation (`impl Operation`) is a planning abstraction:
-- MUST validate op input shape and produce deterministic `StateGraph` output.
+- MUST validate op input shape and produce deterministic planning output.
+- MAY recursively compose sub-operations and/or directly produce state-graph structure.
+- MUST converge to a deterministic final `StateGraph` before runtime starts.
 - MUST declare op imports/exports (`OpIo`) as an interface contract.
 - MUST NOT execute runtime side effects.
 - MUST NOT perform ambient IO (`fs/network/time/env/process`) in `expand()`.
@@ -137,6 +139,7 @@ State (`impl State`) is an execution abstraction:
 - MUST encapsulate executable workflow behavior (including side effects via `IoProvider` only).
 - MUST be reusable where practical; keep scope single-responsibility.
 - MUST NOT perform pipeline/topology planning.
+- MUST NOT invoke operations or request planner re-entry.
 - MUST NOT parse transport payloads or own CLI/REST contract decisions.
 
 Rule of thumb:
@@ -144,11 +147,21 @@ Rule of thumb:
 - If code implements `State::handle`, it belongs to a shared state crate unless it is a justified op-local output/aggregation state.
 
 ### Ops are planning abstractions
-- An op resolves to a concrete `StateGraph` given `OpConfig` and `RunConfig`.
+- An op resolves to deterministic planning output given `OpConfig` and `RunConfig`.
+- That planning may recursively compose sub-ops before flattening to a concrete `StateGraph`.
 - `expand()` must be deterministic and must not perform IO.
+
+### Recursive operation planning
+- MFM should converge on one planning abstraction: recursive operation planning.
+- A root op may expand into sub-ops; sub-ops may expand recursively or directly into states.
+- The planner must flatten the result into one final `ExecutionPlan` before runtime starts.
+- Runtime executes states only.
+- States must never invoke ops or reshape the graph.
 
 ### Flattened pipelines
 - Multiple ops are flattened into one execution plan and one run.
+- The same flattening rule should apply whether composition came from caller-supplied pipelines or
+  recursive op expansion.
 - Shared context is namespaced; cross-op imports/exports are explicit.
 
 ### Nested child runs
