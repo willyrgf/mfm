@@ -128,6 +128,13 @@ The pinned execution view.
 This is not just "network". It is the concrete replayable view of a network or ledger for one run:
 family plus pinned anchor.
 
+Naming note:
+
+- `NetworkView` is the semantic noun
+- `ExecutionView`, `PinExecutionViews`, and `ExecutionViewPin` below are operational planner/runtime
+  forms of the same semantic concept
+- they should not be treated as a second primary semantic center
+
 ### 3. `Instrument`
 
 The unit being accounted for.
@@ -191,6 +198,33 @@ An observation binds together:
 - valuation outputs
 
 These seven semantics are the primary actors of the refactor.
+
+### Observation identity must be explicit
+
+Observation merge, deterministic ordering, and duplicate detection must use an explicit semantic
+identity, not ad hoc tuples chosen independently by states.
+
+The minimum observation identity should be:
+
+```rust
+struct ObservationKey {
+    subject_id: String,
+    network_view_id: String,
+    instrument_id: String,
+    position_kind: String,
+    venue_id: Option<String>,
+    discriminator: Option<String>,
+}
+```
+
+Rules:
+
+- `ObservationKey` is planner-owned
+- merge and canonical ordering should be expressed in terms of `ObservationKey`
+- if two compiled bindings in one execution spec would produce the same `ObservationKey`, that is a
+  planner error unless an explicit aggregation boundary is declared
+- v1 portfolio read models may continue to project this identity through familiar surfaces such as
+  wallet and symbol ids, but those projection aliases are not the primary semantic identity
 
 ### Action semantics are a separate layer
 
@@ -302,6 +336,25 @@ Runtime-time responsibilities:
 - execute only compiled homogeneous batches
 - use `IoProvider` only for side effects and data acquisition
 - never rediscover graph topology or choose new adapter families
+
+### Resume and auditability
+
+For v1, `manifest.input_params` remains the durable source of truth for resume.
+
+That means:
+
+- resume may intentionally recompile from raw config against current planner code
+- exact cross-build or cross-cutover planner equivalence is not guaranteed
+- callers must not assume that changing planner code preserves resume equivalence across versions
+
+For auditability and debugging, the planner should also persist the compiled execution spec as a
+content-addressed artifact.
+
+Rules:
+
+- the compiled execution spec artifact is optional but recommended in v1
+- if persisted or hashed, it must obey canonical JSON and secret-safety invariants
+- the compiled execution spec artifact is not the authoritative runtime resume input in v1
 
 ### Batches are planner products, not runtime discoveries
 
@@ -520,9 +573,9 @@ struct PlannedOpGraph {
 }
 
 struct PlannedOpNode {
+    child_op_local_id: String,
     op_id: String,
     op_version: String,
-    op_path: String,
     op_config: serde_json::Value,
 }
 ```
@@ -565,7 +618,8 @@ The SDK flattening algorithm should work like this:
 4. recursively expand every child op
 5. flatten the resulting child graphs into one final `StateGraph`
 6. preserve declared dependency ordering between child ops
-7. apply the normal namespacing and import/export wiring rules
+7. apply the normal namespacing and import/export wiring rules using full child op paths
+8. reject duplicate child-op identities, duplicate flattened state ids, and duplicate exported ports
 
 That is the correct place to solve the current two-planner split.
 
@@ -573,6 +627,31 @@ The exact Rust surface may differ, but the invariant must hold:
 
 - recursive op composition is a planner concern
 - the final planner output before runtime is one flat `StateGraph`
+
+### Child-op identity, namespacing, and flattening contract
+
+Recursive planning needs an explicit identity and wiring model, otherwise flattening becomes
+ambiguous.
+
+Rules:
+
+- every child op must declare a parent-local `child_op_local_id`
+- sibling `child_op_local_id`s must be unique within one parent op
+- the planner assigns the full child op path as:
+  - `<parent_op_path>.<child_op_local_id>`
+- full child op paths must be unique within the flattened planning tree
+- context namespacing uses the full hierarchical child op path, not only the root step path
+- child-op imports and exports are resolved against that full child op path
+- duplicate exported ports in one flattened planning scope are planner errors
+- there is no implicit "last writer wins" export policy for recursive child-op composition
+
+Flattening order must also be deterministic.
+
+Recommended rule:
+
+- topologically order child-op dependencies
+- use lexical order of full child op path as the stable tie-breaker
+- apply the same rule recursively before emitting final flattened state nodes
 
 ### State identity in the first cut
 
@@ -584,10 +663,18 @@ local state segment as needed.
 
 Example:
 
-- `portfolio_snapshot.main.observe_holdings__evm_mainnet_batch_01`
+- `portfolio_snapshot.main.observe_holdings__evm_mainnet__batch_01`
 
 This is less elegant than true hierarchical state ids, but it keeps the refactor focused on
 planning semantics rather than machine-runtime surgery.
+
+The important distinction is:
+
+- full hierarchical child-op identity lives in `OpPath`
+- flat runtime-visible `StateId` remains a three-segment id in v1
+- nested lineage is encoded into `state_local_id` using deterministic `__`-joined local ids
+- context namespacing and import/export resolution must still use the full hierarchical child-op
+  path, not the flattened `StateId`
 
 ### Compiled observation binding shape
 
@@ -599,24 +686,22 @@ The minimum compiled binding should carry:
 ```rust
 struct CompiledObservationBinding {
     binding_id: String,
-    subject_id: String,
-    network_view_id: String,
-    instrument_id: String,
-    position_kind: String,
-    venue_id: Option<String>,
+    observation_key: ObservationKey,
     valuation_ids: Vec<String>,
-    adapter_family: String,
+    adapter: AdapterId,
     adapter_payload: serde_json::Value,
 }
 ```
 
 Rules:
 
-- `adapter_family` is planner-selected and deterministic
+- `adapter` is planner-selected and deterministic
 - `adapter_payload` is opaque to generic states
 - `adapter_payload` may contain contract refs or ledger-specific execution details
 - if a compiled binding is persisted or hashed, it must obey the repo-wide canonical JSON and
   secret-safety invariants
+- generic semantic states must not reinterpret `adapter_payload` beyond routing to the selected
+  adapter
 
 ### Compiled observation batch shape
 
@@ -625,7 +710,7 @@ The runtime-facing batch unit should be explicit and planner-owned.
 ```rust
 struct CompiledObservationBatch {
     batch_id: String,
-    adapter_family: String,
+    adapter: AdapterId,
     network_view_id: String,
     bindings: Vec<CompiledObservationBinding>,
 }
@@ -633,7 +718,7 @@ struct CompiledObservationBatch {
 
 Recommended invariants:
 
-- one batch uses exactly one `adapter_family`
+- one batch uses exactly one exact executable adapter id
 - one batch targets exactly one pinned `network_view_id`
 - every binding in the batch is executable by the same runtime state implementation
 - batch ordering is deterministic
@@ -669,6 +754,12 @@ Examples:
 
 Contract addresses, selectors, and token refs may still live inside adapter payloads, but they do
 not define venue identity.
+
+Additional contract:
+
+- `venue_id` must be unique within one semantic config
+- `venue_id` is intended to remain stable across manifests and runs for the same logical venue
+- changing adapter payload details must not require changing `venue_id`
 
 ### State topology for the first cut
 
@@ -1668,7 +1759,7 @@ Target state family:
 
 1. `PrepareExecutionSourcesState`
 2. `PinExecutionViewState`
-3. `ResolveWalletSubjectsState`
+3. `ResolveSubjectsState`
 4. `ResolveUnitPricesState`
 5. `ObservePortfolioBatchState`
 6. `MergeObservationsState`
@@ -1690,8 +1781,8 @@ This section translates the central semantic model above into execution vocabula
   - ensure required live source families are available before reads begin
 - `PinExecutionView`
   - freeze each required network family to a replayable anchor
-- `ResolveWalletSubjects`
-  - resolve configured wallet declarations into runtime subjects and capabilities
+- `ResolveSubjects`
+  - resolve configured subject declarations into runtime subjects and capabilities
 - `ResolveUnitPrices`
   - resolve all externally-read pricing inputs needed by downstream observations
 - `ObservePortfolioBatch`
@@ -1705,8 +1796,8 @@ This section translates the central semantic model above into execution vocabula
 
 ### Primary execution nouns
 
-- `WalletSubject`
-  - the resolved runtime subject corresponding to `Wallet`
+- `ResolvedSubject`
+  - the resolved runtime subject corresponding to the configured `Subject`
 - `ExecutionView`
   - the replayable pinned view corresponding to `NetworkView`
 - `ExecutionAnchor`
@@ -1715,12 +1806,12 @@ This section translates the central semantic model above into execution vocabula
   - the planned instrument class
 - `PositionSemantics`
   - the planned holding or liability class
-- `ProtocolVenueRef`
+- `VenueId`
   - semantic venue metadata used by planner and runtime
 - `ValuationTask`
   - one planned unit-price acquisition or derivation task
-- `ObservationTask`
-  - one planned quantity acquisition plus normalization task
+- `CompiledObservationBinding`
+  - one planner-compiled quantity acquisition plus normalization unit
 
 ### Instrument semantics
 
@@ -1745,14 +1836,14 @@ pub enum PositionSemantics {
 }
 ```
 
-### Protocol venue semantics
+### Venue semantics
 
 ```rust
-pub struct ProtocolVenueRef {
-    pub protocol_id: String,
-    pub venue_kind: String,
+pub struct VenueId {
     pub venue_id: String,
-    pub network_id: String,
+    pub venue_kind: String,
+    pub network_id: Option<String>,
+    pub parent_venue_id: Option<String>,
 }
 ```
 
@@ -1828,7 +1919,7 @@ For example:
 
 - `PinExecutionViewState` executes `ViewPinTask`s
 - `ResolveUnitPricesState` executes `ValuationTask`s
-- `ObservePortfolioBatchState` executes `ObservationTask`s
+- `ObservePortfolioBatchState` executes `CompiledObservationBatch`s
 
 ### 4. Persistence and replay model
 
@@ -1858,7 +1949,7 @@ Examples:
 - `protocol = aave_v3` plus `reader = reserve_position` becomes:
   - `InstrumentSemantics::FungibleToken`
   - `PositionSemantics::LendingDeposit`
-  - a concrete `ProtocolVenueRef` for the market and reserve
+  - a concrete semantic `VenueId` for the market and reserve
 - a wallet declaration becomes an `EvmAddressSubject` today, and later may become a
   `BitcoinDescriptorSubject`
 
@@ -1914,7 +2005,7 @@ pub enum NetworkFamily {
 pub enum CapabilityKind {
     PrepareSources,
     PinView,
-    ResolveWallet,
+    ResolveSubject,
     ResolveValue,
     ObservePosition,
 }
@@ -1955,16 +2046,18 @@ This is the semantic generalization of today's EVM-only `NetworkPin`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PortfolioExecutionSpec {
     pub source_tasks: Vec<SourcePreparationTask>,
-    pub wallet_tasks: Vec<WalletResolutionTask>,
+    pub subject_tasks: Vec<SubjectResolutionTask>,
     pub view_tasks: Vec<ViewPinTask>,
     pub valuation_tasks: Vec<ValuationTask>,
-    pub observation_batches: Vec<ObservationBatch>,
+    pub observation_batches: Vec<CompiledObservationBatch>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ObservationBatch {
+pub struct CompiledObservationBatch {
     pub batch_id: String,
-    pub tasks: Vec<ObservationTask>,
+    pub adapter: AdapterId,
+    pub network_view_id: String,
+    pub bindings: Vec<CompiledObservationBinding>,
 }
 ```
 
@@ -1981,7 +2074,7 @@ pub trait ObservationPlannerAdapter: PlannerAdapter {
     fn plan(
         &self,
         req: ObservationPlanRequest<'_>,
-    ) -> Result<ObservationTask, PlanningError>;
+    ) -> Result<CompiledObservationBinding, PlanningError>;
 }
 
 pub trait ValuationPlannerAdapter: PlannerAdapter {
@@ -2006,7 +2099,7 @@ pub trait ObservationRuntimeAdapter: Send + Sync {
 
     async fn observe(
         &self,
-        task: &ObservationTask,
+        binding: &CompiledObservationBinding,
         input: ObservationRuntimeInput<'_>,
     ) -> Result<Observation, StateError>;
 }
@@ -2023,22 +2116,18 @@ pub trait ValuationRuntimeAdapter: Send + Sync {
 }
 ```
 
-### Task payload model
+### Compiled binding payload model
 
 To avoid a giant cross-workspace enum that grows with every protocol, planned tasks should have a
 small generic envelope plus an adapter-owned canonical payload:
 
 ```rust
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ObservationTask {
-    pub task_id: String,
+pub struct CompiledObservationBinding {
+    pub binding_id: String,
+    pub observation_key: ObservationKey,
     pub adapter: AdapterId,
-    pub wallet_id: String,
-    pub symbol_id: String,
-    pub network_id: String,
-    pub instrument: InstrumentSemantics,
-    pub position: PositionSemantics,
-    pub protocol_venue: Option<ProtocolVenueRef>,
+    pub valuation_ids: Vec<String>,
     pub payload: BTreeMap<String, serde_json::Value>,
 }
 ```
@@ -2052,6 +2141,10 @@ Rules for `payload`:
 
 This keeps the semantic API stable while allowing protocol-specific payloads to grow.
 
+The semantic layer should use one compiled observation model only. `CompiledObservationBinding` and
+`CompiledObservationBatch` are the canonical planner/runtime bridge; parallel
+`ObservationTask` / `ObservationBatch` models should not coexist as separate architectural centers.
+
 ### Semantic catalog
 
 ```rust
@@ -2060,7 +2153,7 @@ pub struct SemanticCatalog {
     pub observation_runtimes: HashMap<AdapterId, Arc<dyn ObservationRuntimeAdapter>>,
     pub valuation_planners: Vec<Arc<dyn ValuationPlannerAdapter>>,
     pub valuation_runtimes: HashMap<AdapterId, Arc<dyn ValuationRuntimeAdapter>>,
-    pub wallet_resolvers: HashMap<AdapterId, Arc<dyn WalletRuntimeAdapter>>,
+    pub subject_resolvers: HashMap<AdapterId, Arc<dyn SubjectRuntimeAdapter>>,
     pub view_pinners: HashMap<AdapterId, Arc<dyn ViewRuntimeAdapter>>,
 }
 ```
@@ -2118,12 +2211,12 @@ In the target design:
    - `NetworkFamily::Evm`
    - `InstrumentSemantics::FungibleToken`
    - `PositionSemantics::LendingDeposit` or `PositionSemantics::LendingDebt`
-   - an `Aave` `ProtocolVenueRef`
+   - an `Aave` `VenueId`
 2. the compiler selects one adapter:
    - `observe_position/evm/aave_v3.reserve_position`
    - or `observe_position/evm/aave_v3.debt_position`
-3. the compiler emits a normal `ObservationTask`
-4. `ObservePortfolioBatchState` executes that task just like any other
+3. the compiler emits a normal `CompiledObservationBinding`
+4. `ObservePortfolioBatchState` executes that binding inside its compiled batch just like any other
 5. the adapter returns the same canonical `Observation` shape as every other position observation
 
 That means:
@@ -2142,7 +2235,7 @@ What remains Aave-specific:
 
 What becomes generic:
 
-- wallet iteration
+- subject iteration
 - batch execution
 - observation output shape
 - merge behavior
@@ -2162,7 +2255,7 @@ Bitcoin would plug into:
 
 ### Wallet subject model
 
-A future wallet normalization phase could produce:
+A future subject normalization phase could produce:
 
 - descriptor-backed subject
 - script pubkey subject
@@ -2240,6 +2333,11 @@ If adding a new crate is too large for the first step, this module can start und
   - Bitcoin-specific planner/runtime adapters
 
 ## Migration Plan
+
+This phased sketch is retained as explanatory decomposition only.
+
+If it conflicts with the hard-cutover commit sequence above, the hard-cutover commit sequence
+governs and no compatibility-preserving phase should be inferred.
 
 ### Phase 1: Introduce semantic compilation without changing public behavior
 

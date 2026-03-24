@@ -1,6 +1,6 @@
 # MFM Design Contract
 
-> Last updated: 2026-03-16
+> Last updated: 2026-03-24
 > Status: Authoritative design contract.
 >
 > This document defines non-negotiable architecture and execution semantics.
@@ -245,6 +245,12 @@ Normative rules:
 - runtime executes states only
 - states MUST NOT invoke operations or request planner re-entry
 - caller-visible pipelines, when used, MUST converge to the same flattening semantics
+- each child op MUST declare a unique parent-local identity
+- child-op flattening order MUST be deterministic
+- context namespacing and import/export wiring MUST use full hierarchical child `OpPath`
+- duplicate child-op paths, duplicate exported ports, and duplicate flattened `StateId`s are
+  invalid plans
+- recursive composition MUST NOT rely on implicit "last writer wins" export behavior
 - the exact SDK or `Operation` helper surface MAY evolve, but flatten-before-runtime is the
   invariant that implementations MUST preserve
 
@@ -307,6 +313,8 @@ Recommended fields:
 - config references
 - env allowlist + captured values
 - run configuration and IO mode
+- optional compiled execution-spec artifact reference for audit/inspection only; in v1 this MUST
+  NOT replace `manifest.input_params` as the authoritative resume input
 
 ### 8.2 Hashing contract
 - Structured payloads: canonical JSON bytes -> hash -> artifact ID.
@@ -381,11 +389,16 @@ For the current registry-backed op catalog, see [`docs/ops-and-states.md`](ops-a
 ### 11.2 Flattened composition
 If op A has N states and op B has M states, pipeline graph size is `N + M` states in one run.
 
+The same flattening contract applies whether composition comes from caller-visible pipelines or
+recursive child-op expansion.
+
 ### 11.3 ID stability rules
 ID conventions:
-- `OpPath = <machine_id>.<step_id>`
-- `StateId = <machine_id>.<step_id>.<state_local_id>`
-- each segment must match: `^[a-z][a-z0-9_]{0,62}$`
+- `OpPath = <machine_id>.<step_id>(.<child_op_local_id>)*`
+- `StateId = <machine_id>.<step_id>.<flattened_state_local_id>`
+- each dotted path component must match: `^[a-z][a-z0-9_]{0,62}$`
+- `flattened_state_local_id` MAY encode nested lineage using deterministic `__`-joined validated
+  local ids
 - dots are separators only
 
 Single-op run convention:
@@ -394,7 +407,7 @@ Single-op run convention:
   - `step_id = main`
 
 ### 11.4 Namespaced context and explicit wiring
-- context keys are namespaced by op path by default
+- context keys are namespaced by the full hierarchical op path by default
 - cross-op data flow uses explicit imports/exports validated by planner
 
 ### 11.5 Nested runs
@@ -1398,7 +1411,11 @@ pub mod pipeline {
     pub trait PipelinePlanner: Send + Sync {
         /// Implementations MUST:
         /// - resolve ops via `OperationRegistry`
-        /// - ensure all `StateId`s are unique and match "<machine_id>.<step_id>.<state_local_id>"
+        /// - support recursive child-op expansion before runtime starts
+        /// - assign deterministic hierarchical child `OpPath`s during flattening
+        /// - ensure all flattened `StateId`s are unique and match the
+        ///   "<machine_id>.<step_id>.<flattened_state_local_id>" convention
+        /// - reject duplicate child-op paths and duplicate exported ports
         /// - enforce step order by adding dependency edges between step graphs (flattened composition)
         fn build_execution_plan(
             &self,
