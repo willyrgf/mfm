@@ -436,6 +436,9 @@ pub mod pipeline {
     use crate::ids::{MachineId, StepId};
     use crate::op::OperationRegistry;
 
+    /// Schema version used by the v1 compiled execution spec artifact.
+    pub const COMPILED_EXECUTION_SPEC_SCHEMA_V1: &str = "compiled_execution_spec/v1";
+
     /// One pipeline step.
     ///
     /// Contract:
@@ -480,11 +483,127 @@ pub mod pipeline {
         pub input: serde_json::Value,
     }
 
+    /// Fully qualified runtime slot reference emitted in compiled execution specs.
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct QualifiedSlotRef {
+        /// Fully qualified leaf op path that owns the slot.
+        pub op_path: String,
+        /// Slot name relative to that op path, for example `out.report`.
+        pub slot: String,
+    }
+
+    /// One resolved import binding recorded for audit/debug compiled specs.
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct CompiledImportBinding {
+        /// Fully qualified child or leaf op path receiving the import.
+        pub to_op_path: String,
+        /// Import name on the op being recorded.
+        pub import: String,
+        /// Resolved slot supplying that import.
+        pub source: QualifiedSlotRef,
+    }
+
+    /// One explicit ordering edge between child ops in the compiled execution spec.
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct CompiledAfterEdge {
+        /// Upstream child op path.
+        pub from_op_path: String,
+        /// Downstream child op path.
+        pub to_op_path: String,
+    }
+
+    /// One explicit re-export alias in the compiled execution spec.
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct CompiledReExport {
+        /// Export name exposed by the recorded op.
+        pub export: String,
+        /// Resolved slot backing that export.
+        pub source: QualifiedSlotRef,
+    }
+
+    /// One op instance recorded in the compiled execution spec artifact.
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct CompiledOpRecord {
+        /// Hierarchical op path for this planned op instance.
+        pub op_path: String,
+        /// Stable operation identifier.
+        pub op_id: String,
+        /// Stable operation version.
+        pub op_version: String,
+        /// Declared interface imports in deterministic planner order.
+        pub imports: Vec<String>,
+        /// Declared interface exports in deterministic planner order.
+        pub exports: Vec<String>,
+        /// Resolved import bindings for this op instance.
+        pub import_bindings: Vec<CompiledImportBinding>,
+        /// Explicit child ordering edges owned by this op instance.
+        pub after: Vec<CompiledAfterEdge>,
+        /// Explicit parent re-exports owned by this op instance.
+        pub re_exports: Vec<CompiledReExport>,
+    }
+
+    /// One root export resolution entry in the compiled execution spec artifact.
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct CompiledRootExport {
+        /// Export name visible at the pipeline root.
+        pub export: String,
+        /// Resolved slot that backs the root export.
+        pub slot: QualifiedSlotRef,
+    }
+
+    /// Planner-visible lineage for one lowered runtime state id.
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct CompiledStateLineage {
+        /// Lowered runtime state identifier.
+        pub state_id: String,
+        /// Hierarchical op path that owns the state.
+        pub op_path: String,
+        /// Local state identifier within that op path.
+        pub state_local_id: String,
+    }
+
+    /// Optional audit/debug artifact emitted by planners in v1.
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct CompiledExecutionSpec {
+        /// Schema version for this artifact.
+        pub schema_version: String,
+        /// Root pipeline or machine identifier.
+        pub root_op_id: String,
+        /// Root pipeline or machine version.
+        pub root_op_version: String,
+        /// Root planning scope for this artifact.
+        pub root_op_path: String,
+        /// Flattened planned op records in deterministic planner order.
+        pub ops: Vec<CompiledOpRecord>,
+        /// Root export resolution table.
+        pub root_exports: Vec<CompiledRootExport>,
+        /// Planner-visible state lineage for every lowered runtime state.
+        pub state_lineage: Vec<CompiledStateLineage>,
+        /// Planner-owned semantic payloads. v1 keeps this as free-form canonical JSON.
+        pub planner_payloads: serde_json::Value,
+    }
+
+    /// Planner result used by launchers to persist audit/debug artifacts alongside the runtime plan.
+    pub struct PlannedPipelineExecution {
+        /// Final runtime plan handed to `mfm-machine`.
+        pub execution_plan: ExecutionPlan,
+        /// Optional compiled execution spec artifact for audit/debug use.
+        pub compiled_execution_spec: Option<CompiledExecutionSpec>,
+    }
+
     /// Pipeline planning contract (flattened composition).
     ///
     /// For the standard implementation that validates pipeline wiring and produces the flattened
     /// execution graph used by `mfm-machine`, see [`crate::unstable::DefaultPipelinePlanner`].
     pub trait PipelinePlanner: Send + Sync {
+        /// Builds the runtime plan plus any optional audit/debug compiled-spec payload.
+        fn build_planned_execution(
+            &self,
+            registry: Arc<dyn OperationRegistry>,
+            pipeline: &Pipeline,
+            run_config: &RunConfig,
+        ) -> Result<PlannedPipelineExecution, SdkError>;
+
         /// Implementations MUST:
         /// - resolve ops via `OperationRegistry`
         /// - support recursive child-op expansion before runtime starts
@@ -500,7 +619,10 @@ pub mod pipeline {
             registry: Arc<dyn OperationRegistry>,
             pipeline: &Pipeline,
             run_config: &RunConfig,
-        ) -> Result<ExecutionPlan, SdkError>;
+        ) -> Result<ExecutionPlan, SdkError> {
+            self.build_planned_execution(registry, pipeline, run_config)
+                .map(|planned| planned.execution_plan)
+        }
     }
 }
 
