@@ -251,6 +251,8 @@ Normative rules:
 - duplicate child-op paths, duplicate exported ports, and duplicate flattened `StateId`s are
   invalid plans
 - recursive composition MUST NOT rely on implicit "last writer wins" export behavior
+- planner-visible state lineage MUST be carried by `StateAddr { op_path, state_local_id }`, not by
+  overloading runtime `StateId`
 - the exact SDK or `Operation` helper surface MAY evolve, but flatten-before-runtime is the
   invariant that implementations MUST preserve
 
@@ -397,8 +399,11 @@ ID conventions:
 - `OpPath = <machine_id>.<step_id>(.<child_op_local_id>)*`
 - `StateId = <machine_id>.<step_id>.<flattened_state_local_id>`
 - each dotted path component must match: `^[a-z][a-z0-9_]{0,62}$`
-- `flattened_state_local_id` MAY encode nested lineage using deterministic `__`-joined validated
-  local ids
+- `flattened_state_local_id` MUST be derived by taking the `OpPath` segments after the root
+  `<machine_id>.<step_id>`, appending `state_local_id`, and joining those validated local ids with
+  `__`
+- if the leaf op is the root step, `flattened_state_local_id = state_local_id`
+- lowering does not escape underscores; collisions after lowering are invalid plans
 - dots are separators only
 
 Single-op run convention:
@@ -410,9 +415,38 @@ Single-op run convention:
 - context keys are namespaced by the full hierarchical op path by default
 - cross-op data flow uses explicit imports/exports validated by planner
 
+### 11.4A Compiled execution spec
+For audit/debug in v1, planners MAY persist a compiled execution spec artifact.
+
+Normative rules:
+- the compiled execution spec artifact is optional and is not the authoritative resume input
+- resume MUST continue to rebuild from `RunManifest.input_params`
+- if persisted, the artifact kind SHOULD be `ArtifactKind::Other("compiled_execution_spec")`
+- persisted compiled specs MUST obey canonical-JSON and no-secrets invariants
+- the minimum v1 schema MUST include:
+  - `schema_version = "compiled_execution_spec/v1"`
+  - root op identity: `root_op_id`, `root_op_version`, `root_op_path`
+  - ordered op records with interface, import bindings, ordering edges, and re-exports
+  - ordered root export resolution entries
+  - ordered `state_lineage` entries mapping lowered `StateId` to `StateAddr`
+  - `planner_payloads` for planner-owned semantic payloads such as compiled observation batches and
+    valuation tasks
+- emitted arrays MUST use deterministic planner order; hash-iteration order is forbidden
+
 ### 11.5 Nested runs
 Engine-managed child runs are deferred.
 When introduced, linkage events are required (`ChildRunSpawned`).
+
+### 11.6 Public portfolio schema cuts
+If a breaking change to a persisted or public portfolio JSON surface becomes necessary
+(`PortfolioSnapshotRequest`, `PortfolioSnapshotResponse`, `PortfolioSnapshot`, or
+`PortfolioReport`), the same change MUST:
+
+- cut the op version to `portfolio_tracker v2`
+- add a top-level `schema_version` field to each changed JSON object with value `2`
+- update CLI/REST/docs in the same commit
+
+Purely additive changes that preserve existing field meaning do not require this cut.
 
 ## 12. Storage Contract
 
