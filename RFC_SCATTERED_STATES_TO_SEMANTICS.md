@@ -1,4 +1,4 @@
-# RFC: Scattered States To Semantics For `mfm::portfolio::snapshot`
+# RFC: From Scattered States To Semantic Execution And Recursive Operation Planning
 
 Status: draft
 
@@ -6,14 +6,18 @@ Last updated: 2026-03-24
 
 ## Summary
 
-This RFC proposes restructuring portfolio execution from protocol-specific state proliferation toward
-a semantics-first runtime built from a small fixed set of semantic states:
+This RFC proposes restructuring MFM execution away from protocol-specific state proliferation and
+toward a semantics-first runtime plus a single recursive planning model for the whole project.
+
+`mfm::portfolio::snapshot` is the first proving ground, not the only target.
+
+The portfolio runtime should be rebuilt from a small fixed set of semantic execution states:
 
 - `PrepareExecutionSources`
-- `PinExecutionView`
-- `ResolveWalletSubjects`
-- `ResolveUnitPrices`
-- `ObservePortfolioBatch`
+- `PinExecutionViews`
+- `ResolveSubjects`
+- `ResolveValuationInputs`
+- `ObserveCompiledBatch`
 - `MergeObservations`
 - `AssembleSnapshot`
 - `ProjectReport`
@@ -21,48 +25,70 @@ a semantics-first runtime built from a small fixed set of semantic states:
 The key change is to move protocol and network specialization out of the state graph shape and into
 adapter registries plus a pure semantic compiler, centered on the following primary semantics:
 
-- `Wallet`
+- `Subject`
 - `NetworkView`
 - `Instrument`
 - `Position`
-- `ProtocolVenue`
+- `Venue`
 - `Valuation`
 - `Observation`
+
+This RFC also proposes a project-wide planning model:
+
+- a root operation may expand into sub-operations
+- sub-operations may expand into more sub-operations or directly into states
+- the SDK planner must recursively flatten the result into one final `StateGraph` /
+  `ExecutionPlan` before runtime starts
+- the runtime executes states only
+
+The right slogan is:
+
+- ops compile ops
+- runtime executes states
 
 This RFC treats:
 
 - `Swap`, `Borrow`, and `Lend` as `ActionSemantics`
-- `ContractRef` as an adapter-owned implementation detail
+- `ContractRef` as an adapter-owned implementation detail carried only inside compiled bindings
 - `Snapshot` and `Report` as projection and read-model semantics
-
-That is the core reframing of the document: MFM today is not fundamentally "wallet, asset,
-network, protocol, swap, borrow, lend". It is closer to "subject, pinned venue,
-instrument-and-position, valuation, observation, projection", with action semantics as the next
-clean layer to introduce.
 
 The resulting design preserves the current execution model and invariants:
 
 - binaries remain transport-only
-- ops remain thin and deterministic
+- ops remain thin, deterministic planners
 - reusable executable logic lives in shared state/runtime crates
+- planning still happens entirely before runtime starts
 - replayability stays centered on append-only events plus content-addressed artifacts
 - state logic continues to use `IoProvider` only
 - secrets remain forbidden from persisted surfaces
 
-The intended outcome is not "fewer adapters". It is "fewer state types and a more stable semantic
-execution topology". Protocol-specific growth should happen in adapters and typed config decoders,
-not in the op DAG.
+The intended outcome is not "fewer adapters". It is:
+
+- fewer state types
+- one project-wide planning abstraction
+- a more stable semantic execution topology
+
+Protocol-specific growth should happen in adapters and typed config decoders, not in the op DAG or
+in runtime graph-shaping logic.
 
 ## Goals
 
 - Replace protocol-first state expansion with semantic planning over canonical config.
-- Make `Wallet`, `NetworkView`, `Instrument`, `Position`, `ProtocolVenue`, `Valuation`, and
+- Unify MFM around one planning abstraction: recursive operation planning that flattens into one
+  final `ExecutionPlan` before runtime starts.
+- Make `Subject`, `NetworkView`, `Instrument`, `Position`, `Venue`, `Valuation`, and
   `Observation` the central vocabulary of the refactor.
+- Use `mfm::portfolio::snapshot` as the first proving ground for rules that are intended to apply
+  to the whole project.
 - Keep the op planner deterministic and free of ambient IO.
+- Keep all domain planning in planner layers and out of states.
 - Preserve the current canonical `Observation`, snapshot, and report flow where possible.
 - Make adapter selection explicit, testable, and deterministic.
+- Make planner-time batch partitioning explicit, testable, and deterministic.
 - Allow EVM, Aave, Bitcoin, zkEVM, and future protocol families to plug into the same semantic
   execution model.
+- Force at least one non-EVM portfolio source through the new semantic model as part of the
+  refactor so generic semantics are validated immediately.
 - Keep protocol-specific validation and acquisition logic out of generic semantic states.
 
 ## Non-Goals
@@ -74,24 +100,30 @@ not in the op DAG.
 - This RFC does not require dynamic runtime plugin loading in v1. A deterministic in-process
   registry compiled into the app bundle is sufficient.
 - This RFC does not require changing the public CLI entrypoint or shell wrapper contract.
+- This RFC does not introduce nested runtime planning, runtime-dispatched sub-ops, or state-driven
+  graph reshaping.
+- This RFC does not introduce child runs, nested manifests, or engine-visible op hierarchy for
+  recursive planning.
+- This RFC does not change the current executor contract that execution remains sequential in v1;
+  graph independence may express future parallelism, but fan-out/join remains deferred.
 
 ## Central Semantic Model
 
 The refactor should be organized around seven primary semantics.
 
-### 1. `Wallet`
+### 1. `Subject`
 
 The acting or observed subject.
 
-Today this is expressed as wallet config and resolved wallet identity. Over time this can broaden to
-other subject forms, but the semantic role stays the same: "who owns or acts".
+Today this is often expressed as wallet config and resolved wallet identity. Over time this must
+broaden to other subject forms, but the semantic role stays the same: "who owns or acts".
 
 ### 2. `NetworkView`
 
-The pinned execution venue.
+The pinned execution view.
 
-This is not just "network". It is the concrete replayable view of that network for one run:
-network family plus pinned anchor.
+This is not just "network". It is the concrete replayable view of a network or ledger for one run:
+family plus pinned anchor.
 
 ### 3. `Instrument`
 
@@ -102,6 +134,7 @@ Examples:
 - native coin
 - fungible token
 - quote unit
+- BTC UTXO-denominated asset
 
 ### 4. `Position`
 
@@ -116,7 +149,7 @@ Examples:
 - staked claim
 - UTXO set
 
-### 5. `ProtocolVenue`
+### 5. `Venue`
 
 The semantic venue in which a position exists.
 
@@ -127,8 +160,8 @@ Examples:
 - Uniswap pool
 - vault
 
-This is deliberately distinct from `ContractRef`. Protocol venue is semantic. Contract references
-are implementation detail.
+This is deliberately distinct from `ContractRef`. Venue is semantic and should use stable
+user-authored ids. Contract references are implementation detail.
 
 ### 6. `Valuation`
 
@@ -146,11 +179,11 @@ The canonical read-model record produced by execution.
 
 An observation binds together:
 
-- wallet subject
+- subject
 - pinned network view
 - instrument
 - position semantics
-- optional protocol venue
+- optional venue
 - quantity
 - valuation outputs
 
@@ -159,7 +192,7 @@ These seven semantics are the primary actors of the refactor.
 ### Action semantics are a separate layer
 
 `Swap`, `Borrow`, and `Lend` are important, but they should not be modeled as peers of
-`Wallet`, `NetworkView`, or `Observation` in this RFC.
+`Subject`, `NetworkView`, or `Observation` in this RFC.
 
 They belong to a future `ActionSemantics` layer:
 
@@ -191,6 +224,106 @@ Contract addresses, RPC method names, ABI selectors, token addresses, pool addre
 implementation locators should remain adapter-owned details.
 
 They must not become top-level semantic categories in the planner.
+
+The planner may still freeze them into compiled adapter payloads chosen deterministically at plan
+time. They remain adapter-owned implementation details, not primary semantic nouns.
+
+## Project-Wide Planning Model
+
+This refactor is not only about `mfm::portfolio::snapshot`. It also defines the planning model MFM
+should use across the project.
+
+### One planning abstraction: recursive operation planning
+
+MFM should have one planning abstraction, not two domain-level planning mechanisms.
+
+That abstraction should be recursive operation planning:
+
+1. A root operation may expand into sub-operations.
+2. Sub-operations may expand into more sub-operations or directly into states.
+3. The SDK planner must recursively flatten the result into one final `StateGraph` /
+   `ExecutionPlan` before runtime starts.
+4. The runtime executes states only.
+5. States never invoke ops, choose sub-ops, or reshape the graph.
+
+The key architectural distinction is:
+
+1. Planning composition.
+   This is recursive and may involve `op -> ops -> ops -> states`.
+2. Execution.
+   This is always `states` only.
+
+The right slogan is not "ops execute ops."
+
+It is:
+
+- ops compile ops
+- runtime executes states
+
+### Converging the current two planning layers
+
+Today MFM has a historical split between:
+
+- pipeline-level planning in the SDK
+- op-level planning in `Operation::expand()`
+
+The long-term target of this RFC is to collapse that conceptual split into one recursive planning
+model.
+
+Whether the caller enters through a pipeline or a single root op, planning should converge on the
+same semantics:
+
+- recursive op composition
+- deterministic flattening
+- one final execution plan
+- one run
+- one append-only `run:*` stream family for that run
+
+This RFC does not require the user-facing pipeline surface to disappear immediately. It does require
+planning semantics to converge.
+
+### Planner-time versus runtime-time dispatch
+
+Planner-time responsibilities:
+
+- semantic validation
+- adapter-family selection
+- stable venue-id resolution
+- batch partitioning
+- dependency and ordering shaping
+- compilation of opaque adapter payloads
+
+Runtime-time responsibilities:
+
+- execute only compiled states
+- execute only compiled homogeneous batches
+- use `IoProvider` only for side effects and data acquisition
+- never rediscover graph topology or choose new adapter families
+
+### Batches are planner products, not runtime discoveries
+
+A state should remain unitary in responsibility, not necessarily single-item.
+
+That means one state may execute one compiled homogeneous batch.
+
+Examples:
+
+- one batch of subject-resolution work
+- one batch of valuation-source reads
+- one batch of position observations for one adapter family on one pinned view
+
+What matters is that the batch boundary is decided by the planner, not by runtime graph shaping.
+
+Graph independence may express future parallelism, but executor behavior remains sequential in v1.
+
+## Initial Decisions Locked In By This RFC
+
+- `Subject` replaces `Wallet` in the semantic core.
+- Portfolio observation remains fail-fast in v1 for easier debugging and clearer migration.
+- Venue identifiers are user-authored stable semantic ids.
+- `ContractRef` remains adapter-owned and must not become a first-class planner semantic.
+- At least one non-EVM portfolio source must be implemented as part of this refactor so the new
+  semantic core is validated beyond the EVM slice.
 
 ## The Problem
 
