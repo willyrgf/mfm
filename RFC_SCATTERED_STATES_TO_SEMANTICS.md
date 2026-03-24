@@ -325,6 +325,124 @@ Graph independence may express future parallelism, but executor behavior remains
 - At least one non-EVM portfolio source must be implemented as part of this refactor so the new
   semantic core is validated beyond the EVM slice.
 
+## Target Architecture
+
+### Project-wide planning target
+
+The target architecture is:
+
+- a root op may expand into sub-ops
+- sub-ops may expand recursively or directly into states
+- the planner recursively flattens the result into one final `StateGraph` before runtime starts
+- runtime executes states only
+
+This means batch partitioning, ordering, and semantic adapter selection are planning concerns.
+States execute compiled units only.
+
+The recursive structure may be:
+
+- `op -> states`
+- `op -> ops -> states`
+- `op -> ops -> ops -> states`
+
+The runtime model remains:
+
+- one final execution plan
+- one run
+- one append-only `run:*` stream family for that run
+
+No state may:
+
+- invoke an op
+- choose a sub-op
+- reshape the graph
+- rediscover batch topology dynamically
+
+### Portfolio snapshot as the first consumer
+
+`mfm::portfolio::snapshot` should be the first consumer of this project-wide planning model.
+
+The user-facing entrypoint may remain the same while the internal planning model changes.
+
+A first-cut root op shape should be:
+
+- `portfolio_snapshot`
+  - `prepare_execution_sources`
+  - `pin_execution_views`
+  - `resolve_subjects`
+  - `resolve_valuation_inputs`
+  - `observe_account_holdings`
+  - `observe_venue_positions`
+  - `assemble_snapshot`
+  - `project_report`
+
+These names describe semantic planner boundaries, not mandatory public op ids. They may begin as
+internal composite-op boundaries while the transport layer still points at the existing public
+feature surface.
+
+### Portfolio observation sub-op expansion
+
+The two observation sub-ops are where most protocol and ledger variation should be compiled away.
+
+Examples:
+
+- `observe_account_holdings`
+  - native account balances
+  - fungible token balances
+  - non-EVM account or UTXO-backed holdings
+- `observe_venue_positions`
+  - Aave reserve positions
+  - Aave debt positions
+  - future pool, vault, or staking venue positions
+
+Each of those planner boundaries may expand into multiple compiled observation batches.
+
+The batch partitioning key should be semantic and planner-owned. It will typically include:
+
+- adapter family
+- pinned execution view
+- compatible venue or position reader shape
+- any additional deterministic batch-compatibility dimensions
+
+### State topology for the first cut
+
+The first cut should flatten to a final state DAG that is still small and semantically stable:
+
+1. `PrepareExecutionSources`
+2. `PinExecutionViews`
+3. `ResolveSubjects`
+4. `ResolveValuationInputs`
+5. `ObserveCompiledBatchState` repeated `N` times
+6. `MergeObservations`
+7. `AssembleSnapshot`
+8. `ProjectReport`
+
+The crucial rule is that `ObserveCompiledBatchState` is not allowed to inspect raw user config and
+decide what it is. The planner already decided that.
+
+### Observation batch contract
+
+Each compiled observation batch should be homogeneous from the runtime's point of view.
+
+That means a batch state should execute one already-compiled family of work such as:
+
+- one EVM native/erc20 holdings batch for one pinned view
+- one Aave reserve/debt batch for one pinned view
+- one non-EVM holdings batch for one pinned view
+
+All observation paths must converge on the same canonical `Observation` output shape so that:
+
+- merge stays generic
+- snapshot assembly stays generic
+- report projection stays generic
+
+### Fail-fast behavior
+
+The first cut remains fail-fast.
+
+If any required source preparation, execution-view pinning, valuation input resolution, or
+observation batch fails, the run fails immediately. Partial portfolio snapshots are deferred.
+
 ## The Problem
 
 This section preserves the earlier current-state trace with only light editorial changes. It

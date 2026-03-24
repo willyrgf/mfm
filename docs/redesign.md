@@ -54,12 +54,14 @@ Normative `rpc.control` contract:
 Reusable planning definition (`impl Operation`) with:
 - input schema
 - run configuration schema
-- deterministic expansion into a state graph
+- deterministic expansion into sub-operations and/or state-graph structure
 - output schema
 
 Normative constraints:
 - `expand()` MUST be deterministic for equivalent `(op_config, run_config)`.
 - `expand()` MUST NOT perform ambient IO (`fs/network/time/env/process`).
+- operation planning MAY be recursive, but it MUST flatten to one final execution plan before
+  runtime starts.
 - operation code MUST NOT execute workflow side effects.
 - operation code SHOULD stay focused on config validation + state graph wiring.
 
@@ -80,6 +82,7 @@ Normative constraints:
 - state handlers MUST execute runtime behavior through explicit dependencies (`DynContext`, `IoProvider`, `EventRecorder`).
 - side effects MUST route through `IoProvider` only (no ambient IO).
 - reusable executable behavior SHOULD live in shared-state crates.
+- state handlers MUST NOT invoke operations, re-enter planners, or reshape execution topology.
 - op-local states are allowed only for domain-specific output/aggregation behavior that is not a shared primitive.
 
 ### 3.4 Context
@@ -229,7 +232,19 @@ Migration policy for internal crate/module paths:
 `crates/sdk/` owns orchestration ergonomics:
 - operation registry
 - pipeline planner helpers
+- recursive operation composition and flattening into one final `ExecutionPlan`
 - run launch/resume glue over machine + stores
+
+### 6.3A Recursive planning contract
+MFM has one planning abstraction: recursive operation planning.
+
+Normative rules:
+- a root operation MAY expand into sub-operations
+- sub-operations MAY expand recursively or directly into states
+- planning MUST fully flatten into one final `ExecutionPlan` before `RunStarted`
+- runtime executes states only
+- states MUST NOT invoke operations or request planner re-entry
+- caller-visible pipelines, when used, MUST converge to the same flattening semantics
 
 ### 6.4 Live IO adapter model
 Canonical layering:
