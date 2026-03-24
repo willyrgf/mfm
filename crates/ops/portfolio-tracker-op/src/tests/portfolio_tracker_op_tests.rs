@@ -18,7 +18,7 @@ use mfm_machine::recorder::EventRecorder;
 use mfm_machine::replay_io::ReplayIo;
 use mfm_machine::runtime::{DefaultExecutionEngine, EngineFailpoints};
 use mfm_machine::stores::StreamId;
-use mfm_sdk::op::{LeafOpSpec, PlannedOp, PlannedOpKind};
+use mfm_sdk::op::{CompositeOpSpec, PlannedOp, PlannedOpKind};
 use mfm_sdk::unstable::SdkPlanResolver;
 use mfm_state_common::test_support as op_test_support;
 use mfm_state_portfolio::model::{PortfolioQuoteTotal, PortfolioReport, PortfolioSnapshot};
@@ -28,10 +28,10 @@ const ERC20_DECIMALS_SELECTOR: &str = "0x313ce567";
 const LATEST_ROUND_DATA_SELECTOR: &str = "0xfeaf968c";
 const BALANCE_OF_SELECTOR_PREFIX: &str = "0x70a08231";
 
-fn into_leaf(planned: PlannedOp) -> LeafOpSpec {
+fn into_composite(planned: PlannedOp) -> CompositeOpSpec {
     match planned.kind {
-        PlannedOpKind::Leaf(spec) => spec,
-        PlannedOpKind::Composite(_) => panic!("expected leaf planned op"),
+        PlannedOpKind::Composite(spec) => spec,
+        PlannedOpKind::Leaf(_) => panic!("expected composite planned op"),
     }
 }
 
@@ -300,9 +300,14 @@ fn build_harness(
     evm_factory: Arc<dyn LiveIoTransportFactory>,
     failpoints: Option<EngineFailpoints>,
 ) -> Harness {
-    let op: mfm_sdk::op::DynOperation = Arc::new(PortfolioTrackerOp);
-    let (registry, planner, pipeline) =
-        op_test_support::single_op_plan(op, op_config).expect("pipeline");
+    let registry = op_test_support::registry_with_ops(portfolio_tracker_ops());
+    let planner = op_test_support::default_pipeline_planner();
+    let pipeline = mfm_sdk::unstable::single_op_pipeline(
+        OpId::must_new(OP_ID.to_string()),
+        OP_VERSION.to_string(),
+        op_config,
+    )
+    .expect("pipeline");
     let stores = op_test_support::in_memory_stores();
 
     let resolver = Arc::new(SdkPlanResolver::new(
@@ -427,7 +432,7 @@ impl EventRecorder for NoopRecorder {
 #[test]
 fn expand_uses_canonical_multi_network_graph() {
     let op = PortfolioTrackerOp;
-    let graph = into_leaf(
+    let composite = into_composite(
         op.expand(
             OpPath("portfolio_tracker.main".to_string()),
             &canonical_op_config(),
@@ -436,66 +441,69 @@ fn expand_uses_canonical_multi_network_graph() {
         .expect("expand"),
     );
 
-    let ids: Vec<_> = graph
-        .states
+    let child_ids: Vec<_> = composite
+        .children
         .iter()
-        .map(|state| state.state_id.as_str().to_string())
+        .map(|child| child.child_op_local_id.0.clone())
         .collect();
+    assert!(child_ids.contains(&PREPARE_EXECUTION_SOURCES_CHILD_ID.to_string()));
+    assert!(child_ids.contains(&RESOLVE_SUBJECTS_CHILD_ID.to_string()));
+    assert!(child_ids.contains(&PIN_EXECUTION_VIEWS_CHILD_ID.to_string()));
+    assert!(child_ids.contains(&RESOLVE_VALUATION_INPUTS_CHILD_ID.to_string()));
+    assert!(child_ids.contains(&MERGE_OBSERVATIONS_CHILD_ID.to_string()));
+    assert!(child_ids.contains(&ASSEMBLE_SNAPSHOT_CHILD_ID.to_string()));
+    assert!(child_ids.contains(&PROJECT_REPORT_CHILD_ID.to_string()));
+    let semantic_spec = compile_semantic_execution(&parse_config(&canonical_op_config()).expect("cfg"))
+        .expect("semantic spec");
     assert_eq!(
-        ids,
-        vec![
-            "portfolio_tracker.main.prepare_sources",
-            "portfolio_tracker.main.pin_networks",
-            "portfolio_tracker.main.resolve_wallets",
-            "portfolio_tracker.main.read_direct_prices",
-            "portfolio_tracker.main.collect_observations",
-            "portfolio_tracker.main.collect_aave_observations",
-            "portfolio_tracker.main.merge_observations",
-            "portfolio_tracker.main.write_snapshot",
-            "portfolio_tracker.main.write_report",
-        ]
+        child_ids
+            .iter()
+            .filter(|child_id| child_id.starts_with("observe_"))
+            .count(),
+        semantic_spec.observation_batches.len()
     );
 
-    let edges: Vec<_> = graph
-        .edges
+    let bindings: Vec<_> = composite
+        .bindings
         .iter()
-        .map(|edge| (edge.from.as_str().to_string(), edge.to.as_str().to_string()))
+        .map(|binding| {
+            (
+                binding.to_child.0.clone(),
+                binding.import.0.clone(),
+                match &binding.source {
+                    mfm_sdk::op::PortSource::ParentImport(port) => {
+                        format!("parent:{}", port.0)
+                    }
+                    mfm_sdk::op::PortSource::ChildExport { child, export } => {
+                        format!("child:{}:{}", child.0, export.0)
+                    }
+                },
+            )
+        })
         .collect();
-    assert!(edges.contains(&(
-        "portfolio_tracker.main.pin_networks".to_string(),
-        "portfolio_tracker.main.resolve_wallets".to_string()
+    assert!(bindings.contains(&(
+        RESOLVE_SUBJECTS_CHILD_ID.to_string(),
+        PORT_PREPARED_SOURCES.to_string(),
+        format!(
+            "child:{}:{}",
+            PREPARE_EXECUTION_SOURCES_CHILD_ID, PORT_PREPARED_SOURCES
+        ),
     )));
-    assert!(edges.contains(&(
-        "portfolio_tracker.main.prepare_sources".to_string(),
-        "portfolio_tracker.main.pin_networks".to_string()
+    assert!(bindings.contains(&(
+        PIN_EXECUTION_VIEWS_CHILD_ID.to_string(),
+        PORT_PREPARED_SOURCES.to_string(),
+        format!(
+            "child:{}:{}",
+            PREPARE_EXECUTION_SOURCES_CHILD_ID, PORT_PREPARED_SOURCES
+        ),
     )));
-    assert!(edges.contains(&(
-        "portfolio_tracker.main.pin_networks".to_string(),
-        "portfolio_tracker.main.read_direct_prices".to_string()
-    )));
-    assert!(edges.contains(&(
-        "portfolio_tracker.main.resolve_wallets".to_string(),
-        "portfolio_tracker.main.collect_observations".to_string()
-    )));
-    assert!(edges.contains(&(
-        "portfolio_tracker.main.resolve_wallets".to_string(),
-        "portfolio_tracker.main.collect_aave_observations".to_string()
-    )));
-    assert!(edges.contains(&(
-        "portfolio_tracker.main.read_direct_prices".to_string(),
-        "portfolio_tracker.main.collect_observations".to_string()
-    )));
-    assert!(edges.contains(&(
-        "portfolio_tracker.main.read_direct_prices".to_string(),
-        "portfolio_tracker.main.collect_aave_observations".to_string()
-    )));
-    assert!(edges.contains(&(
-        "portfolio_tracker.main.collect_aave_observations".to_string(),
-        "portfolio_tracker.main.merge_observations".to_string()
-    )));
-    assert!(edges.contains(&(
-        "portfolio_tracker.main.collect_observations".to_string(),
-        "portfolio_tracker.main.merge_observations".to_string()
+    assert!(bindings.contains(&(
+        RESOLVE_VALUATION_INPUTS_CHILD_ID.to_string(),
+        PORT_PINNED_VIEWS.to_string(),
+        format!(
+            "child:{}:{}",
+            PIN_EXECUTION_VIEWS_CHILD_ID, PORT_PINNED_VIEWS
+        ),
     )));
 }
 

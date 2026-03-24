@@ -23,70 +23,64 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use mfm_evm_runtime::states::rpc_control::{PrepareSourcesState, RpcControlNetworkRoute};
 use mfm_machine::config::RunConfig;
 use mfm_machine::errors::ErrorCategory;
 use mfm_machine::ids::{ContextKey, FactKey, OpId, OpPath};
-use mfm_machine::plan::DependencyEdge;
 use mfm_sdk::errors::SdkError;
-use mfm_sdk::ids::PortKey;
+use mfm_sdk::ids::{ChildOpLocalId, PortKey};
 use mfm_sdk::op::{
-    leaf_state_id, leaf_state_node, LeafOpSpec, OpInterface, Operation, PlannedOp, PlannedOpKind,
+    AfterEdge, ChildOpInstance, CompositeOpSpec, DynOperation, ImportBinding, OpInterface,
+    Operation, PlannedOp, PlannedOpKind, PortSource, ReExportBinding,
 };
-use mfm_state_aave_v3::portfolio::model::{
-    is_aave_protocol_position, validate_aave_portfolio_config,
-};
-use mfm_state_aave_v3::portfolio::states::CollectAaveObservationsState;
+use mfm_state_aave_v3::portfolio::model::validate_aave_portfolio_config;
 use mfm_state_common::errors as op_errors;
 use mfm_state_portfolio::model::{
     decode_portfolio_config, validate_portfolio_bundle, PortfolioConfig,
 };
-use mfm_state_portfolio::states::{
-    PinPortfolioNetworksState, WritePortfolioReportState, WritePortfolioSnapshotState,
-};
+use mfm_state_portfolio::semantic::PortfolioExecutionSpec;
 use mfm_state_symbol::model::{decode_valuation_source_registry, ValuationSourceRegistry};
-use mfm_state_symbol::states::{
-    CollectObservationsState, MergeObservationsState, NetworkRouteConfig, ReadDirectPricesState,
-};
-use mfm_state_wallet::model::WalletConfig;
-use mfm_state_wallet::states::ResolveWalletsState;
 use serde_json::Value;
 
 mod semantic;
+mod semantic_ops;
 
 use semantic::{builtin_semantic_catalog, DefaultPortfolioSemanticCompiler};
+use semantic_ops::{
+    assemble_snapshot_config, child_ops, merge_observations_config, observe_batch_config,
+    pin_execution_views_config, prepare_sources_config, resolve_subjects_config,
+    resolve_valuations_config, ASSEMBLE_SNAPSHOT_CHILD_ID, ASSEMBLE_SNAPSHOT_OP_ID,
+    MERGE_OBSERVATIONS_CHILD_ID, MERGE_OBSERVATIONS_OP_ID, OBSERVE_COMPILED_BATCH_OP_ID,
+    PIN_EXECUTION_VIEWS_CHILD_ID, PIN_EXECUTION_VIEWS_OP_ID, PORT_OBSERVATIONS, PORT_PINNED_VIEWS,
+    PORT_PREPARED_SOURCES, PORT_REPORT, PORT_RESOLVED_SUBJECTS, PORT_RESOLVED_VALUATIONS,
+    PORT_SNAPSHOT, PORT_SNAPSHOT_ARTIFACT_ID, PREPARE_EXECUTION_SOURCES_CHILD_ID,
+    PREPARE_EXECUTION_SOURCES_OP_ID, PROJECT_REPORT_CHILD_ID, PROJECT_REPORT_OP_ID,
+    RESOLVE_SUBJECTS_CHILD_ID, RESOLVE_SUBJECTS_OP_ID, RESOLVE_VALUATION_INPUTS_CHILD_ID,
+    RESOLVE_VALUATION_INPUTS_OP_ID,
+};
 
 const OP_ID: &str = "portfolio_tracker";
 const OP_VERSION: &str = "v1";
 const MAIN_OP_PATH: &str = "portfolio_tracker.main";
 
-const KEY_RESOLVED_WALLETS: &str = "resolved_wallets";
-const KEY_NETWORK_PINS: &str = "network_pins";
-const KEY_DIRECT_PRICES: &str = "direct_prices";
-const KEY_BASE_OBSERVATIONS: &str = "base_observations";
-const KEY_AAVE_OBSERVATIONS: &str = "aave_observations";
-const KEY_OBSERVATIONS: &str = "observations";
-const KEY_SNAPSHOT: &str = "snapshot";
-const KEY_SNAPSHOT_ARTIFACT_ID: &str = "snapshot_artifact_id";
-const KEY_REPORT: &str = "report";
-
-fn ctx_key(suffix: &'static str) -> ContextKey {
-    ContextKey(suffix.to_string())
-}
-
 /// Returns the context key that stores the canonical portfolio snapshot JSON.
 pub fn portfolio_snapshot_context_key() -> ContextKey {
-    ContextKey(format!("{MAIN_OP_PATH}.out.{KEY_SNAPSHOT}"))
+    ContextKey(format!(
+        "{MAIN_OP_PATH}.{ASSEMBLE_SNAPSHOT_CHILD_ID}.out.{PORT_SNAPSHOT}"
+    ))
 }
 
 /// Returns the context key that stores the canonical portfolio snapshot artifact id.
 pub fn portfolio_snapshot_artifact_id_context_key() -> ContextKey {
-    ContextKey(format!("{MAIN_OP_PATH}.out.{KEY_SNAPSHOT_ARTIFACT_ID}"))
+    ContextKey(format!(
+        "{MAIN_OP_PATH}.{ASSEMBLE_SNAPSHOT_CHILD_ID}.out.{PORT_SNAPSHOT_ARTIFACT_ID}"
+    ))
 }
 
 /// Returns the context key that stores the canonical portfolio report JSON.
 pub fn portfolio_snapshot_report_context_key() -> ContextKey {
-    ContextKey(format!("{MAIN_OP_PATH}.out.{KEY_REPORT}"))
+    ContextKey(format!(
+        "{MAIN_OP_PATH}.{PROJECT_REPORT_CHILD_ID}.out.{PORT_REPORT}"
+    ))
 }
 
 #[derive(Clone, Debug)]
@@ -141,47 +135,72 @@ fn output_fact_key(op_path: &OpPath) -> FactKey {
     FactKey(format!("portfolio:output|op:{}", op_path.0))
 }
 
-fn network_routes(portfolio: &PortfolioConfig) -> Vec<NetworkRouteConfig> {
-    portfolio
-        .networks
-        .iter()
-        .map(|network| NetworkRouteConfig {
-            network_id: network.network_id.clone(),
-            control_scope: network.control_scope.clone(),
-        })
-        .collect()
+fn compile_semantic_execution(
+    cfg: &PortfolioTrackerConfig,
+) -> Result<PortfolioExecutionSpec, SdkError> {
+    let semantic_catalog = builtin_semantic_catalog().map_err(|err| {
+        sdk_input_error(
+            "semantic_catalog_construction_failed",
+            format!("failed to construct semantic adapter catalog: {err}"),
+        )
+    })?;
+    let semantic_request = mfm_state_portfolio::semantic::PortfolioRequest {
+        portfolio: cfg.portfolio.clone(),
+        valuation_source_registry: cfg.valuation_source_registry.clone(),
+    };
+    mfm_state_portfolio::semantic::PortfolioSemanticCompiler::compile(
+        &DefaultPortfolioSemanticCompiler,
+        &semantic_request,
+        &semantic_catalog,
+    )
+    .map_err(|err| {
+        sdk_input_error(
+            "semantic_compilation_failed",
+            format!("failed to compile semantic execution spec: {err}"),
+        )
+    })
 }
 
-fn split_symbols(
-    portfolio: &PortfolioConfig,
-) -> (
-    Vec<mfm_state_symbol::model::SymbolConfig>,
-    Vec<mfm_state_symbol::model::SymbolConfig>,
-) {
-    let mut base_symbols = Vec::new();
-    let mut aave_symbols = Vec::new();
-    for symbol in &portfolio.symbol_configs {
-        if is_aave_protocol_position(symbol) {
-            aave_symbols.push(symbol.clone());
-        } else {
-            base_symbols.push(symbol.clone());
-        }
+fn child_export(child_id: &str, export: &str) -> PortSource {
+    PortSource::ChildExport {
+        child: ChildOpLocalId(child_id.to_string()),
+        export: PortKey(export.to_string()),
     }
-    (base_symbols, aave_symbols)
 }
 
-fn filter_wallets_for_symbol_ids(
-    wallets: &[WalletConfig],
-    allowed_symbol_ids: &HashSet<String>,
-) -> Vec<WalletConfig> {
-    wallets
-        .iter()
-        .filter_map(|wallet| {
-            let mut wallet = wallet.clone();
-            wallet
-                .symbol_ids
-                .retain(|symbol_id| allowed_symbol_ids.contains(symbol_id));
-            (!wallet.symbol_ids.is_empty()).then_some(wallet)
+fn import_binding(to_child: &str, import: &str, source: PortSource) -> ImportBinding {
+    ImportBinding {
+        to_child: ChildOpLocalId(to_child.to_string()),
+        import: PortKey(import.to_string()),
+        source,
+    }
+}
+
+fn re_export_binding(export: &str, source: PortSource) -> ReExportBinding {
+    ReExportBinding {
+        export: PortKey(export.to_string()),
+        source,
+    }
+}
+
+fn observe_child_local_id(index: usize, batch_id: &str) -> String {
+    let prefix = format!("observe_{index}_");
+    let sanitized = sanitize_child_local_id(batch_id);
+    // The lowered runtime state id appends `__run` to the child segment, so the child-local-id
+    // must stay within the remaining identifier budget for the flat `<machine>.<step>.<state>`
+    // contract.
+    let suffix_len = 58usize.saturating_sub(prefix.len());
+    let suffix: String = sanitized.chars().take(suffix_len).collect();
+    format!("{prefix}{suffix}")
+}
+
+fn sanitize_child_local_id(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| match ch {
+            'a'..='z' | '0'..='9' | '_' => ch,
+            'A'..='Z' => ch.to_ascii_lowercase(),
+            _ => '_',
         })
         .collect()
 }
@@ -189,6 +208,13 @@ fn filter_wallets_for_symbol_ids(
 /// Thin planner op that validates canonical portfolio inputs and wires the shared runtime states.
 #[derive(Clone, Default)]
 pub struct PortfolioTrackerOp;
+
+/// Returns the built-in portfolio tracker root op plus its internal semantic child ops.
+pub fn portfolio_tracker_ops() -> Vec<DynOperation> {
+    let mut ops = vec![Arc::new(PortfolioTrackerOp) as DynOperation];
+    ops.extend(child_ops());
+    ops
+}
 
 impl Operation for PortfolioTrackerOp {
     fn op_id(&self) -> OpId {
@@ -206,229 +232,171 @@ impl Operation for PortfolioTrackerOp {
         _run_config: &RunConfig,
     ) -> Result<PlannedOp, SdkError> {
         let cfg = parse_config(op_config)?;
-        let semantic_catalog = builtin_semantic_catalog().map_err(|err| {
-            sdk_input_error(
-                "semantic_catalog_construction_failed",
-                format!("failed to construct semantic adapter catalog: {err}"),
-            )
-        })?;
-        let semantic_request = mfm_state_portfolio::semantic::PortfolioRequest {
-            portfolio: cfg.portfolio.clone(),
-            valuation_source_registry: cfg.valuation_source_registry.clone(),
-        };
-        mfm_state_portfolio::semantic::PortfolioSemanticCompiler::compile(
-            &DefaultPortfolioSemanticCompiler,
-            &semantic_request,
-            &semantic_catalog,
-        )
-        .map_err(|err| {
-            sdk_input_error(
-                "semantic_compilation_failed",
-                format!("failed to compile semantic execution spec: {err}"),
-            )
-        })?;
+        let spec = compile_semantic_execution(&cfg)?;
+        let mut children = vec![
+            ChildOpInstance {
+                child_op_local_id: ChildOpLocalId(PREPARE_EXECUTION_SOURCES_CHILD_ID.to_string()),
+                op_id: OpId::must_new(PREPARE_EXECUTION_SOURCES_OP_ID.to_string()),
+                op_version: semantic_ops::INTERNAL_OP_VERSION.to_string(),
+                op_config: prepare_sources_config(&spec)?,
+            },
+            ChildOpInstance {
+                child_op_local_id: ChildOpLocalId(RESOLVE_SUBJECTS_CHILD_ID.to_string()),
+                op_id: OpId::must_new(RESOLVE_SUBJECTS_OP_ID.to_string()),
+                op_version: semantic_ops::INTERNAL_OP_VERSION.to_string(),
+                op_config: resolve_subjects_config(&spec)?,
+            },
+            ChildOpInstance {
+                child_op_local_id: ChildOpLocalId(PIN_EXECUTION_VIEWS_CHILD_ID.to_string()),
+                op_id: OpId::must_new(PIN_EXECUTION_VIEWS_OP_ID.to_string()),
+                op_version: semantic_ops::INTERNAL_OP_VERSION.to_string(),
+                op_config: pin_execution_views_config(&spec)?,
+            },
+            ChildOpInstance {
+                child_op_local_id: ChildOpLocalId(RESOLVE_VALUATION_INPUTS_CHILD_ID.to_string()),
+                op_id: OpId::must_new(RESOLVE_VALUATION_INPUTS_OP_ID.to_string()),
+                op_version: semantic_ops::INTERNAL_OP_VERSION.to_string(),
+                op_config: resolve_valuations_config(&spec)?,
+            },
+        ];
+        let mut bindings = vec![
+            import_binding(
+                RESOLVE_SUBJECTS_CHILD_ID,
+                PORT_PREPARED_SOURCES,
+                child_export(PREPARE_EXECUTION_SOURCES_CHILD_ID, PORT_PREPARED_SOURCES),
+            ),
+            import_binding(
+                PIN_EXECUTION_VIEWS_CHILD_ID,
+                PORT_PREPARED_SOURCES,
+                child_export(PREPARE_EXECUTION_SOURCES_CHILD_ID, PORT_PREPARED_SOURCES),
+            ),
+            import_binding(
+                RESOLVE_VALUATION_INPUTS_CHILD_ID,
+                PORT_PINNED_VIEWS,
+                child_export(PIN_EXECUTION_VIEWS_CHILD_ID, PORT_PINNED_VIEWS),
+            ),
+        ];
 
-        let routes = network_routes(&cfg.portfolio);
-        let (base_symbols, aave_symbols) = split_symbols(&cfg.portfolio);
-        let base_symbol_ids: HashSet<_> = base_symbols
-            .iter()
-            .map(|symbol| symbol.symbol_id.clone())
-            .collect();
-        let aave_symbol_ids: HashSet<_> = aave_symbols
-            .iter()
-            .map(|symbol| symbol.symbol_id.clone())
-            .collect();
-        let base_wallets = filter_wallets_for_symbol_ids(&cfg.portfolio.wallets, &base_symbol_ids);
-        let aave_wallets = filter_wallets_for_symbol_ids(&cfg.portfolio.wallets, &aave_symbol_ids);
+        let mut merge_input_ports = Vec::new();
+        let mut seen_observe_child_ids = HashSet::new();
+        for (index, batch) in spec.observation_batches.iter().enumerate() {
+            let child_id = observe_child_local_id(index, batch.batch_id.as_str());
+            if !seen_observe_child_ids.insert(child_id.clone()) {
+                return Err(sdk_input_error(
+                    "duplicate_observe_child_id",
+                    format!(
+                        "semantic batch `{}` lowered to duplicate child op id `{child_id}`",
+                        batch.batch_id
+                    ),
+                ));
+            }
+            children.push(ChildOpInstance {
+                child_op_local_id: ChildOpLocalId(child_id.clone()),
+                op_id: OpId::must_new(OBSERVE_COMPILED_BATCH_OP_ID.to_string()),
+                op_version: semantic_ops::INTERNAL_OP_VERSION.to_string(),
+                op_config: observe_batch_config(batch)?,
+            });
+            bindings.push(import_binding(
+                child_id.as_str(),
+                PORT_RESOLVED_SUBJECTS,
+                child_export(RESOLVE_SUBJECTS_CHILD_ID, PORT_RESOLVED_SUBJECTS),
+            ));
+            bindings.push(import_binding(
+                child_id.as_str(),
+                PORT_PINNED_VIEWS,
+                child_export(PIN_EXECUTION_VIEWS_CHILD_ID, PORT_PINNED_VIEWS),
+            ));
+            bindings.push(import_binding(
+                child_id.as_str(),
+                PORT_RESOLVED_VALUATIONS,
+                child_export(RESOLVE_VALUATION_INPUTS_CHILD_ID, PORT_RESOLVED_VALUATIONS),
+            ));
+            let merge_port = format!("batch_{index}");
+            merge_input_ports.push(merge_port.clone());
+            bindings.push(import_binding(
+                MERGE_OBSERVATIONS_CHILD_ID,
+                merge_port.as_str(),
+                child_export(child_id.as_str(), PORT_OBSERVATIONS),
+            ));
+        }
 
-        let mut states = Vec::new();
-        let mut edges = Vec::new();
-
-        let rpc_sources = cfg
-            .portfolio
-            .networks
-            .iter()
-            .map(|network| RpcControlNetworkRoute {
-                network_id: network.network_id.clone(),
-                control_scope: network.control_scope.clone(),
-            })
-            .collect();
-
-        let prepare_sources_sid = leaf_state_id(&op_path, "prepare_sources")?;
-        states.push(leaf_state_node(
-            &op_path,
-            "prepare_sources",
-            Arc::new(PrepareSourcesState {
-                state_id: prepare_sources_sid.clone(),
-                networks: rpc_sources,
-            }),
-        )?);
-
-        let pin_networks_sid = leaf_state_id(&op_path, "pin_networks")?;
-        edges.push(DependencyEdge {
-            from: prepare_sources_sid,
-            to: pin_networks_sid.clone(),
+        children.push(ChildOpInstance {
+            child_op_local_id: ChildOpLocalId(MERGE_OBSERVATIONS_CHILD_ID.to_string()),
+            op_id: OpId::must_new(MERGE_OBSERVATIONS_OP_ID.to_string()),
+            op_version: semantic_ops::INTERNAL_OP_VERSION.to_string(),
+            op_config: merge_observations_config(merge_input_ports)?,
         });
-        states.push(leaf_state_node(
-            &op_path,
-            "pin_networks",
-            Arc::new(PinPortfolioNetworksState {
-                state_id: pin_networks_sid.clone(),
-                portfolio: cfg.portfolio.clone(),
-                valuation_sources: cfg.valuation_source_registry.clone(),
-                output_key: ctx_key(KEY_NETWORK_PINS),
-            }),
-        )?);
+        children.push(ChildOpInstance {
+            child_op_local_id: ChildOpLocalId(ASSEMBLE_SNAPSHOT_CHILD_ID.to_string()),
+            op_id: OpId::must_new(ASSEMBLE_SNAPSHOT_OP_ID.to_string()),
+            op_version: semantic_ops::INTERNAL_OP_VERSION.to_string(),
+            op_config: assemble_snapshot_config(&cfg.portfolio, output_fact_key(&op_path))?,
+        });
+        children.push(ChildOpInstance {
+            child_op_local_id: ChildOpLocalId(PROJECT_REPORT_CHILD_ID.to_string()),
+            op_id: OpId::must_new(PROJECT_REPORT_OP_ID.to_string()),
+            op_version: semantic_ops::INTERNAL_OP_VERSION.to_string(),
+            op_config: serde_json::json!({}),
+        });
 
-        let resolve_wallets_sid = leaf_state_id(&op_path, "resolve_wallets")?;
-        edges.push(DependencyEdge {
-            from: pin_networks_sid.clone(),
-            to: resolve_wallets_sid.clone(),
-        });
-        states.push(leaf_state_node(
-            &op_path,
-            "resolve_wallets",
-            Arc::new(ResolveWalletsState {
-                state_id: resolve_wallets_sid.clone(),
-                wallets: cfg.portfolio.wallets.clone(),
-                output_key: ctx_key(KEY_RESOLVED_WALLETS),
-            }),
-        )?);
-
-        let read_direct_prices_sid = leaf_state_id(&op_path, "read_direct_prices")?;
-        edges.push(DependencyEdge {
-            from: pin_networks_sid,
-            to: read_direct_prices_sid.clone(),
-        });
-        states.push(leaf_state_node(
-            &op_path,
-            "read_direct_prices",
-            Arc::new(ReadDirectPricesState {
-                state_id: read_direct_prices_sid.clone(),
-                symbols: cfg.portfolio.symbol_configs.clone(),
-                valuation_sources: cfg.valuation_source_registry.clone(),
-                networks: routes.clone(),
-                network_pins_key: ctx_key(KEY_NETWORK_PINS),
-                output_key: ctx_key(KEY_DIRECT_PRICES),
-            }),
-        )?);
-
-        let collect_observations_sid = leaf_state_id(&op_path, "collect_observations")?;
-        edges.push(DependencyEdge {
-            from: resolve_wallets_sid.clone(),
-            to: collect_observations_sid.clone(),
-        });
-        edges.push(DependencyEdge {
-            from: read_direct_prices_sid.clone(),
-            to: collect_observations_sid.clone(),
-        });
-        states.push(leaf_state_node(
-            &op_path,
-            "collect_observations",
-            Arc::new(CollectObservationsState {
-                state_id: collect_observations_sid.clone(),
-                wallets: base_wallets,
-                symbols: base_symbols,
-                networks: routes.clone(),
-                resolved_wallets_key: ctx_key(KEY_RESOLVED_WALLETS),
-                network_pins_key: ctx_key(KEY_NETWORK_PINS),
-                direct_prices_key: ctx_key(KEY_DIRECT_PRICES),
-                output_key: ctx_key(KEY_BASE_OBSERVATIONS),
-            }),
-        )?);
-
-        let collect_aave_observations_sid = leaf_state_id(&op_path, "collect_aave_observations")?;
-        edges.push(DependencyEdge {
-            from: resolve_wallets_sid.clone(),
-            to: collect_aave_observations_sid.clone(),
-        });
-        edges.push(DependencyEdge {
-            from: read_direct_prices_sid.clone(),
-            to: collect_aave_observations_sid.clone(),
-        });
-        states.push(leaf_state_node(
-            &op_path,
-            "collect_aave_observations",
-            Arc::new(CollectAaveObservationsState {
-                state_id: collect_aave_observations_sid.clone(),
-                wallets: aave_wallets,
-                symbols: aave_symbols,
-                networks: routes.clone(),
-                resolved_wallets_key: ctx_key(KEY_RESOLVED_WALLETS),
-                network_pins_key: ctx_key(KEY_NETWORK_PINS),
-                direct_prices_key: ctx_key(KEY_DIRECT_PRICES),
-                output_key: ctx_key(KEY_AAVE_OBSERVATIONS),
-            }),
-        )?);
-
-        let merge_observations_sid = leaf_state_id(&op_path, "merge_observations")?;
-        edges.push(DependencyEdge {
-            from: collect_observations_sid,
-            to: merge_observations_sid.clone(),
-        });
-        edges.push(DependencyEdge {
-            from: collect_aave_observations_sid,
-            to: merge_observations_sid.clone(),
-        });
-        states.push(leaf_state_node(
-            &op_path,
-            "merge_observations",
-            Arc::new(MergeObservationsState {
-                state_id: merge_observations_sid.clone(),
-                input_keys: vec![
-                    ctx_key(KEY_BASE_OBSERVATIONS),
-                    ctx_key(KEY_AAVE_OBSERVATIONS),
-                ],
-                output_key: ctx_key(KEY_OBSERVATIONS),
-            }),
-        )?);
-
-        let write_snapshot_sid = leaf_state_id(&op_path, "write_snapshot")?;
-        edges.push(DependencyEdge {
-            from: merge_observations_sid,
-            to: write_snapshot_sid.clone(),
-        });
-        states.push(leaf_state_node(
-            &op_path,
-            "write_snapshot",
-            Arc::new(WritePortfolioSnapshotState {
-                state_id: write_snapshot_sid.clone(),
-                portfolio: cfg.portfolio,
-                resolved_wallets_key: ctx_key(KEY_RESOLVED_WALLETS),
-                network_pins_key: ctx_key(KEY_NETWORK_PINS),
-                observations_key: ctx_key(KEY_OBSERVATIONS),
-                fact_key: output_fact_key(&op_path),
-                artifact_id_output_key: ctx_key(KEY_SNAPSHOT_ARTIFACT_ID),
-                snapshot_output_key: ctx_key(KEY_SNAPSHOT),
-            }),
-        )?);
-
-        let write_report_sid = leaf_state_id(&op_path, "write_report")?;
-        edges.push(DependencyEdge {
-            from: write_snapshot_sid,
-            to: write_report_sid.clone(),
-        });
-        states.push(leaf_state_node(
-            &op_path,
-            "write_report",
-            Arc::new(WritePortfolioReportState {
-                state_id: write_report_sid,
-                snapshot_key: ctx_key(KEY_SNAPSHOT),
-                output_key: ctx_key(KEY_REPORT),
-                event_name: "portfolio_tracker.completed",
-            }),
-        )?);
+        bindings.push(import_binding(
+            ASSEMBLE_SNAPSHOT_CHILD_ID,
+            PORT_RESOLVED_SUBJECTS,
+            child_export(RESOLVE_SUBJECTS_CHILD_ID, PORT_RESOLVED_SUBJECTS),
+        ));
+        bindings.push(import_binding(
+            ASSEMBLE_SNAPSHOT_CHILD_ID,
+            PORT_PINNED_VIEWS,
+            child_export(PIN_EXECUTION_VIEWS_CHILD_ID, PORT_PINNED_VIEWS),
+        ));
+        bindings.push(import_binding(
+            ASSEMBLE_SNAPSHOT_CHILD_ID,
+            PORT_OBSERVATIONS,
+            child_export(MERGE_OBSERVATIONS_CHILD_ID, PORT_OBSERVATIONS),
+        ));
+        bindings.push(import_binding(
+            PROJECT_REPORT_CHILD_ID,
+            PORT_SNAPSHOT,
+            child_export(ASSEMBLE_SNAPSHOT_CHILD_ID, PORT_SNAPSHOT),
+        ));
 
         Ok(PlannedOp {
             interface: OpInterface {
                 imports: Vec::new(),
                 exports: vec![
-                    PortKey(KEY_SNAPSHOT_ARTIFACT_ID.to_string()),
-                    PortKey(KEY_REPORT.to_string()),
+                    PortKey(PORT_SNAPSHOT_ARTIFACT_ID.to_string()),
+                    PortKey(PORT_REPORT.to_string()),
                 ],
             },
-            kind: PlannedOpKind::Leaf(LeafOpSpec { states, edges }),
+            kind: PlannedOpKind::Composite(CompositeOpSpec {
+                children,
+                bindings,
+                order: Vec::<AfterEdge>::new(),
+                re_exports: vec![
+                    re_export_binding(
+                        PORT_SNAPSHOT_ARTIFACT_ID,
+                        child_export(ASSEMBLE_SNAPSHOT_CHILD_ID, PORT_SNAPSHOT_ARTIFACT_ID),
+                    ),
+                    re_export_binding(
+                        PORT_REPORT,
+                        child_export(PROJECT_REPORT_CHILD_ID, PORT_REPORT),
+                    ),
+                ],
+            }),
         })
+    }
+
+    fn planner_payload(
+        &self,
+        _op_path: OpPath,
+        op_config: &Value,
+        _run_config: &RunConfig,
+    ) -> Result<Option<Value>, SdkError> {
+        let cfg = parse_config(op_config)?;
+        let spec = compile_semantic_execution(&cfg)?;
+        Ok(Some(serde_json::json!({
+            "semantic_execution_spec": spec
+        })))
     }
 }
 
