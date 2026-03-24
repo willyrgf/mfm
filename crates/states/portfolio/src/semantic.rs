@@ -25,10 +25,11 @@ pub use compiler::{PortfolioRequest, PortfolioSemanticCompiler};
 /// projections remain stable while planner/runtime internals move to semantic compilation.
 pub use mfm_state_symbol::model::Observation;
 pub use payloads::{
-    DerivedUnitPriceValuationPayload, DirectPriceSourcePayload, DirectPriceValuationPayload,
-    Erc20BalanceObservationPayload, EvmResolvedSubjectValue, EvmRoutePolicy, EvmSubjectLocator,
-    FixedUnitPriceValuationPayload, NativeBalanceObservationPayload, ObservationProjection,
-    QuantitySchema,
+    BitcoinResolvedSubjectValue, BitcoinRoutePolicy, BitcoinSubjectLocator,
+    BitcoinUtxoSetObservationPayload, DerivedUnitPriceValuationPayload,
+    DirectPriceSourcePayload, DirectPriceValuationPayload, Erc20BalanceObservationPayload,
+    EvmResolvedSubjectValue, EvmRoutePolicy, EvmSubjectLocator, FixedUnitPriceValuationPayload,
+    NativeBalanceObservationPayload, ObservationProjection, QuantitySchema,
 };
 
 /// Stable semantic venue identifier authored by portfolio config.
@@ -59,6 +60,8 @@ impl std::fmt::Display for AdapterId {
 pub enum SubjectKind {
     /// An EVM account or contract address subject.
     EvmAddress,
+    /// A Bitcoin address subject.
+    BitcoinAddress,
     /// A Bitcoin descriptor-backed subject.
     BitcoinDescriptor,
 }

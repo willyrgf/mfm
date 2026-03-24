@@ -18,7 +18,9 @@ use mfm_machine::state::{SnapshotPolicy, State, StateOutcome};
 use mfm_state_common::ctx::{read_typed, write_json};
 use mfm_state_common::errors::{state_from_io, state_unknown, state_unknown_msg};
 use mfm_state_common::states::meta;
-use mfm_state_symbol::model::{Observation, ObservationQuantity, ObservationSource, SymbolConfig};
+use mfm_state_symbol::model::{
+    Observation, ObservationAnchor, ObservationQuantity, ObservationSource, SymbolConfig,
+};
 use mfm_state_symbol::states::{
     build_observation_values, DirectPriceValue, NetworkRouteConfig, PinnedNetwork,
 };
@@ -187,6 +189,7 @@ async fn build_aave_observation(
     control_scope: &str,
     direct_prices: &[DirectPriceValue],
 ) -> Result<Observation, StateError> {
+    let (chain_id, block_number) = evm_pin(pin)?;
     let cfg = decode_aave_protocol_position_config(symbol).map_err(|err| {
         state_unknown_msg(
             "invalid_aave_reader_config",
@@ -219,7 +222,7 @@ async fn build_aave_observation(
                         reserve_cfg.market.pool_address.as_str(),
                         &wallet.address,
                         reserve.reserve_index,
-                        pin.block_number,
+                        block_number,
                     )
                     .await?;
                     Some((required, enabled))
@@ -237,7 +240,7 @@ async fn build_aave_observation(
                         control_scope,
                         reserve.a_token_address.as_str(),
                         &wallet.address,
-                        pin.block_number,
+                        block_number,
                     )
                     .await?
                 }
@@ -302,7 +305,7 @@ async fn build_aave_observation(
                 control_scope,
                 token_address,
                 &wallet.address,
-                pin.block_number,
+                block_number,
             )
             .await?;
 
@@ -337,7 +340,7 @@ async fn build_aave_observation(
                 network_id,
                 control_scope,
                 token_address,
-                pin.block_number,
+                block_number,
             )
             .await?
         }
@@ -362,10 +365,29 @@ async fn build_aave_observation(
         source: ObservationSource {
             balance_reader_kind,
             network_id: pin.network_id.clone(),
-            block_number: pin.block_number,
+            anchor: ObservationAnchor::Evm {
+                chain_id,
+                block_number,
+            },
         },
         metadata,
     })
+}
+
+fn evm_pin(pin: &PinnedNetwork) -> Result<(u64, u64), StateError> {
+    match &pin.anchor {
+        ObservationAnchor::Evm {
+            chain_id,
+            block_number,
+        } => Ok((*chain_id, *block_number)),
+        ObservationAnchor::Bitcoin { .. } => Err(state_unknown_msg(
+            "unsupported_pinned_network_family",
+            format!(
+                "aave runtime slice only supports evm anchors but `{}` was bitcoin",
+                pin.network_id
+            ),
+        )),
+    }
 }
 
 async fn read_token_decimals(
@@ -775,8 +797,11 @@ mod tests {
             ContextKey("network_pins".to_string()),
             json!([{
                 "network_id": "ethereum-mainnet",
-                "chain_id": 1,
-                "block_number": 100
+                "anchor": {
+                    "family": "evm",
+                    "chain_id": 1,
+                    "block_number": 100
+                }
             }]),
         )
         .expect("network pins");
@@ -786,6 +811,7 @@ mod tests {
         let wallets = vec![WalletConfig {
             wallet_id: "wallet_main".to_string(),
             address: "0x000000000000000000000000000000000000beef".to_string(),
+            subject_kind: mfm_state_wallet::model::WalletSubjectKind::EvmAddress,
             network_id: "ethereum-mainnet".to_string(),
             implementation: mfm_state_wallet::model::WalletImplementationConfig::AddressOnly {},
             symbol_ids: vec![
@@ -907,8 +933,10 @@ mod tests {
         };
         let pin = PinnedNetwork {
             network_id: "ethereum-mainnet".to_string(),
-            chain_id: 1,
-            block_number: 100,
+            anchor: ObservationAnchor::Evm {
+                chain_id: 1,
+                block_number: 100,
+            },
         };
 
         let mut io = MockIo;

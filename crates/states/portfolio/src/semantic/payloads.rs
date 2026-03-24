@@ -28,6 +28,30 @@ pub struct EvmResolvedSubjectValue {
     pub capabilities: WalletCapabilities,
 }
 
+/// Planner/runtime payload for one Bitcoin address subject locator.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BitcoinSubjectLocator {
+    /// Stable network identifier for the subject.
+    pub network_id: String,
+    /// Canonical Bitcoin address for the subject.
+    pub address: String,
+    /// Configured wallet implementation used to derive the subject.
+    pub implementation: WalletImplementationConfig,
+}
+
+/// Runtime-resolved Bitcoin address subject value.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BitcoinResolvedSubjectValue {
+    /// Stable network identifier for the resolved subject.
+    pub network_id: String,
+    /// Canonical Bitcoin address for the resolved subject.
+    pub address: String,
+    /// Stable resolved implementation kind.
+    pub implementation_kind: String,
+    /// Runtime capabilities derived during resolution.
+    pub capabilities: WalletCapabilities,
+}
+
 /// Planner-owned EVM execution routing policy.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EvmRoutePolicy {
@@ -36,6 +60,15 @@ pub struct EvmRoutePolicy {
     /// Expected EVM chain id for this route.
     pub chain_id: u64,
     /// Stable control-plane scope used for managed RPC reads.
+    pub control_scope: String,
+}
+
+/// Planner-owned Bitcoin execution routing policy.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BitcoinRoutePolicy {
+    /// Stable network identifier addressed by this route.
+    pub network_id: String,
+    /// Stable control-plane scope used for managed source reads.
     pub control_scope: String,
 }
 
@@ -83,6 +116,15 @@ pub struct Erc20BalanceObservationPayload {
     pub route_policy: EvmRoutePolicy,
     /// Canonical token contract address.
     pub token_address: String,
+}
+
+/// Planner/runtime payload for one Bitcoin UTXO-set observation binding.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BitcoinUtxoSetObservationPayload {
+    /// Read-model projection preserved for the emitted observation.
+    pub projection: ObservationProjection,
+    /// Route policy used for the pinned Bitcoin read.
+    pub route_policy: BitcoinRoutePolicy,
 }
 
 /// Planner/runtime payload for one fixed-unit-price valuation task.

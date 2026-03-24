@@ -17,7 +17,9 @@ use mfm_state_portfolio::semantic::{
     ObservationRuntimeAdapter, ObservationRuntimeInput, PinnedNetworkView, ResolvedSubject,
     RuntimeAdapter,
 };
-use mfm_state_symbol::model::{ObservationQuantity, ObservationSource, ObservationValue};
+use mfm_state_symbol::model::{
+    ObservationAnchor, ObservationQuantity, ObservationSource, ObservationValue,
+};
 use num_bigint::BigInt;
 use num_traits::Signed;
 use serde::Deserialize;
@@ -160,7 +162,10 @@ impl ObservationRuntimeAdapter for AaveReserveObservationRuntimeAdapter {
             source: ObservationSource {
                 balance_reader_kind: "protocol_position:aave_v3:reserve_position".to_string(),
                 network_id: pinned.network_id.clone(),
-                block_number,
+                anchor: ObservationAnchor::Evm {
+                    chain_id: payload.route_policy.chain_id,
+                    block_number,
+                },
             },
             metadata,
         })
@@ -309,7 +314,10 @@ impl ObservationRuntimeAdapter for AaveDebtObservationRuntimeAdapter {
             source: ObservationSource {
                 balance_reader_kind: "protocol_position:aave_v3:debt_position".to_string(),
                 network_id: pinned.network_id.clone(),
-                block_number,
+                anchor: ObservationAnchor::Evm {
+                    chain_id: payload.route_policy.chain_id,
+                    block_number,
+                },
             },
             metadata,
         })

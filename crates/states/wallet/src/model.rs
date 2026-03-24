@@ -6,6 +6,20 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
+fn default_wallet_subject_kind() -> WalletSubjectKind {
+    WalletSubjectKind::EvmAddress
+}
+
+/// Canonical subject kind selected for one wallet declaration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WalletSubjectKind {
+    /// Wallet resolves to an EVM address subject.
+    EvmAddress,
+    /// Wallet resolves to a Bitcoin address subject.
+    BitcoinAddress,
+}
+
 /// Canonical wallet config referenced by portfolio configs.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct WalletConfig {
@@ -13,6 +27,9 @@ pub struct WalletConfig {
     pub wallet_id: String,
     /// Canonical wallet address.
     pub address: String,
+    /// Subject family resolved for this wallet declaration.
+    #[serde(default = "default_wallet_subject_kind")]
+    pub subject_kind: WalletSubjectKind,
     /// Stable network identifier.
     pub network_id: String,
     /// Wallet implementation selection.
@@ -109,11 +126,13 @@ pub enum WalletConfigError {
     /// `address` was empty.
     #[error("address must be non-empty")]
     EmptyAddress,
-    /// `address` was invalid or not normalized.
-    #[error("address must be a normalized EVM address: {address}")]
+    /// `address` was invalid for the selected subject kind.
+    #[error("address must be valid for subject_kind `{subject_kind:?}`: {address}")]
     InvalidAddress {
         /// Invalid wallet address input.
         address: String,
+        /// Subject kind that rejected the address.
+        subject_kind: WalletSubjectKind,
     },
     /// `network_id` was empty.
     #[error("network_id must be non-empty")]
@@ -151,14 +170,26 @@ pub fn validate_wallet_config(cfg: &WalletConfig) -> Result<(), WalletConfigErro
     if cfg.address.trim().is_empty() {
         return Err(WalletConfigError::EmptyAddress);
     }
-    let normalized =
-        normalize_address(&cfg.address).map_err(|_| WalletConfigError::InvalidAddress {
-            address: cfg.address.clone(),
-        })?;
-    if normalized != cfg.address {
-        return Err(WalletConfigError::InvalidAddress {
-            address: cfg.address.clone(),
-        });
+    match cfg.subject_kind {
+        WalletSubjectKind::EvmAddress => {
+            let normalized =
+                normalize_address(&cfg.address).map_err(|_| WalletConfigError::InvalidAddress {
+                    address: cfg.address.clone(),
+                    subject_kind: cfg.subject_kind,
+                })?;
+            if normalized != cfg.address {
+                return Err(WalletConfigError::InvalidAddress {
+                    address: cfg.address.clone(),
+                    subject_kind: cfg.subject_kind,
+                });
+            }
+        }
+        WalletSubjectKind::BitcoinAddress => {
+            validate_bitcoin_address(&cfg.address).map_err(|_| WalletConfigError::InvalidAddress {
+                address: cfg.address.clone(),
+                subject_kind: cfg.subject_kind,
+            })?;
+        }
     }
     if cfg.network_id.trim().is_empty() {
         return Err(WalletConfigError::EmptyNetworkId);
@@ -201,4 +232,37 @@ fn json_object_value(map: &BTreeMap<String, Value>) -> Value {
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect(),
     )
+}
+
+fn validate_bitcoin_address(raw: &str) -> Result<(), String> {
+    if raw.trim() != raw {
+        return Err("address must not contain surrounding whitespace".to_string());
+    }
+    if raw.len() < 14 || raw.len() > 90 {
+        return Err("address length was outside the supported bitcoin envelope".to_string());
+    }
+    if !raw.is_ascii() {
+        return Err("address must be ASCII".to_string());
+    }
+
+    let base58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+    let bech32 = "023456789acdefghjklmnpqrstuvwxyz";
+    if raw.starts_with("bc1") || raw.starts_with("tb1") || raw.starts_with("bcrt1") {
+        if raw != raw.to_ascii_lowercase() {
+            return Err("bech32 bitcoin addresses must already be lowercase".to_string());
+        }
+        if !raw.chars().all(|ch| bech32.contains(ch)) {
+            return Err("bech32 bitcoin address contained unsupported characters".to_string());
+        }
+        return Ok(());
+    }
+
+    let first = raw.chars().next().unwrap_or_default();
+    if !matches!(first, '1' | '3' | '2' | 'm' | 'n') {
+        return Err("unsupported bitcoin address prefix".to_string());
+    }
+    if !raw.chars().all(|ch| base58.contains(ch)) {
+        return Err("base58 bitcoin address contained unsupported characters".to_string());
+    }
+    Ok(())
 }

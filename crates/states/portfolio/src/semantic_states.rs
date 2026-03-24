@@ -2,11 +2,12 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use mfm_collectors_rpc_control::{EvmIoClient, DEFAULT_CONTROL_SCOPE};
+use mfm_collectors_rpc_control::{EvmIoClient, PrepareSourcesResponse, DEFAULT_CONTROL_SCOPE};
 use mfm_machine::context::DynContext;
 use mfm_machine::errors::{ErrorCategory, StateError};
+use mfm_machine::hashing::artifact_id_for_json;
 use mfm_machine::ids::{ContextKey, FactKey, StateId};
-use mfm_machine::io::IoProvider;
+use mfm_machine::io::{IoCall, IoProvider};
 use mfm_machine::meta::StateMeta;
 use mfm_machine::recorder::EventRecorder;
 use mfm_machine::state::{SnapshotPolicy, State, StateOutcome};
@@ -21,7 +22,8 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::model::{
-    NetworkPin, PortfolioConfig, PortfolioSnapshot, PortfolioSnapshotError, WalletSnapshot,
+    ExecutionAnchor as SnapshotExecutionAnchor, NetworkPin, PortfolioConfig, PortfolioSnapshot,
+    PortfolioSnapshotError, WalletSnapshot,
 };
 use crate::semantic::{
     CompiledObservationBatch, ExecutionAnchor, NetworkFamily, ObservationRuntimeInput,
@@ -29,6 +31,7 @@ use crate::semantic::{
     SubjectKind, SubjectResolutionTask, SubjectRuntimeInput, ValuationRuntimeInput, ValuationTask,
     ViewPinTask, ViewRuntimeInput,
 };
+use mfm_state_wallet::model::WalletSubjectKind;
 
 /// Fixed semantic runtime state that prepares execution sources for compiled tasks.
 #[derive(Clone)]
@@ -101,10 +104,40 @@ impl State for PrepareExecutionSourcesState {
                         )
                     })?
                 }
-                NetworkFamily::Bitcoin => return Err(state_unknown_msg(
-                    "unsupported_prepare_sources_family",
-                    "bitcoin source preparation is not wired into the fixed semantic runtime yet",
-                )),
+                NetworkFamily::Bitcoin => {
+                    let payload: EvmPreparedSourcesPayload =
+                        decode_object_map("source_preparation_task", &task.task_id, &task.payload)?;
+                    let control_scope = if payload.control_scope.trim().is_empty() {
+                        DEFAULT_CONTROL_SCOPE.to_string()
+                    } else {
+                        payload.control_scope.clone()
+                    };
+                    let response = prepare_bitcoin_sources(
+                        &self.state_id,
+                        io,
+                        control_scope,
+                        payload.network_id.clone(),
+                    )
+                    .await?;
+                    if !response.sources.iter().any(|entry| entry.healthy) {
+                        return Err(state_error_with_state(
+                            self.state_id.clone(),
+                            "rpc_control_no_healthy_sources",
+                            ErrorCategory::Rpc,
+                            false,
+                            format!(
+                                "no responsive rpc.control sources found for bitcoin network `{}` and scope `{}`",
+                                response.network_id, response.control_scope
+                            ),
+                        ));
+                    }
+                    serde_json::to_value(response).map_err(|_| {
+                        state_unknown(
+                            "prepared_sources_serialize_failed",
+                            "failed to serialize prepared source payload",
+                        )
+                    })?
+                }
             };
             prepared.insert(task.network_view_id, value);
         }
@@ -647,13 +680,18 @@ impl State for AssembleSnapshotState {
                         block_number,
                     } => NetworkPin {
                         network_id: pinned.network_id.clone(),
-                        chain_id: *chain_id,
-                        block_number: *block_number,
+                        anchor: SnapshotExecutionAnchor::Evm {
+                            chain_id: *chain_id,
+                            block_number: *block_number,
+                        },
                     },
-                    ExecutionAnchor::Bitcoin { .. } => return Err(state_unknown_msg(
-                        "snapshot_schema_requires_version_cut",
-                        "bitcoin execution views require a versioned snapshot/report contract cut",
-                    )),
+                    ExecutionAnchor::Bitcoin { height, block_hash } => NetworkPin {
+                        network_id: pinned.network_id.clone(),
+                        anchor: SnapshotExecutionAnchor::Bitcoin {
+                            height: *height,
+                            block_hash: block_hash.clone(),
+                        },
+                    },
                 };
             if network_pins_by_id
                 .insert(network_pin.network_id.clone(), network_pin)
@@ -684,22 +722,41 @@ impl State for AssembleSnapshotState {
                         ),
                     )
                 })?;
-            let resolved = match subject.kind {
-                SubjectKind::EvmAddress => decode_subject_value::<EvmResolvedSubjectValue>(
-                    subject,
-                    "resolved_subject_value",
-                )?,
+            let (address, network_id, subject_kind) = match subject.kind {
+                SubjectKind::EvmAddress => {
+                    let resolved = decode_subject_value::<EvmResolvedSubjectValue>(
+                        subject,
+                        "resolved_subject_value",
+                    )?;
+                    (
+                        resolved.address,
+                        resolved.network_id,
+                        WalletSubjectKind::EvmAddress,
+                    )
+                }
+                SubjectKind::BitcoinAddress => {
+                    let resolved = decode_subject_value::<BitcoinResolvedSubjectValue>(
+                        subject,
+                        "resolved_subject_value",
+                    )?;
+                    (
+                        resolved.address,
+                        resolved.network_id,
+                        WalletSubjectKind::BitcoinAddress,
+                    )
+                }
                 SubjectKind::BitcoinDescriptor => {
                     return Err(state_unknown_msg(
-                        "snapshot_schema_requires_version_cut",
-                        "bitcoin subjects require a versioned snapshot/report contract cut",
+                        "unsupported_subject_kind",
+                        "bitcoin descriptor subjects are not wired into snapshot assembly yet",
                     ))
                 }
             };
             wallets.push(WalletSnapshot {
                 wallet_id: wallet.wallet_id,
-                address: resolved.address,
-                network_id: resolved.network_id,
+                address,
+                subject_kind,
+                network_id,
                 observations: observations_by_wallet
                     .get(subject.subject_id.as_str())
                     .cloned()
@@ -716,6 +773,7 @@ impl State for AssembleSnapshotState {
 
         let generated_at_ms = io.now_millis().await.map_err(state_from_io)?;
         let mut snapshot = PortfolioSnapshot {
+            schema_version: 2,
             portfolio_id: self.portfolio.portfolio_id.clone(),
             generated_at_ms,
             network_pins: network_pins_by_id.into_values().collect(),
@@ -798,6 +856,62 @@ struct EvmPreparedSourcesPayload {
 struct EvmResolvedSubjectValue {
     network_id: String,
     address: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct BitcoinResolvedSubjectValue {
+    network_id: String,
+    address: String,
+}
+
+async fn prepare_bitcoin_sources(
+    state_id: &StateId,
+    io: &mut dyn IoProvider,
+    control_scope: String,
+    network_id: String,
+) -> Result<PrepareSourcesResponse, StateError> {
+    let response = call_rpc_control_raw(
+        state_id,
+        io,
+        serde_json::json!({
+            "kind": "prepare_sources",
+            "family": "bitcoin",
+            "control_scope": control_scope,
+            "network_id": network_id,
+        }),
+    )
+    .await?;
+    serde_json::from_value(response).map_err(|err| {
+        state_unknown_msg(
+            "prepared_source_decode_failed",
+            format!("bitcoin prepared source payload decode failed: {err}"),
+        )
+    })
+}
+
+async fn call_rpc_control_raw(
+    state_id: &StateId,
+    io: &mut dyn IoProvider,
+    request: Value,
+) -> Result<Value, StateError> {
+    let request_id = artifact_id_for_json(&request).map_err(|err| {
+        state_unknown_msg(
+            "semantic_runtime_request_not_canonical",
+            format!("semantic runtime request was not canonical json: {err}"),
+        )
+    })?;
+    io.call(IoCall {
+        namespace: "rpc.control".to_string(),
+        request,
+        fact_key: Some(FactKey(format!(
+            "mfm:rpc.control|state:{}|req:{}",
+            state_id.as_str(),
+            request_id.0
+        ))),
+    })
+    .await
+    .map_err(state_from_io)
+    .map(|result| result.response)
 }
 
 fn decode_object_map<T: for<'de> Deserialize<'de>>(
@@ -1135,13 +1249,19 @@ mod tests {
                     source_refs: vec![ObservationValueSourceRef {
                         source_id: "source-1".to_string(),
                         network_id: "ethereum-mainnet".to_string(),
-                        block_number: 100,
+                        anchor: mfm_state_symbol::model::ObservationAnchor::Evm {
+                            chain_id: 1,
+                            block_number: 100,
+                        },
                     }],
                 }],
                 source: ObservationSource {
                     balance_reader_kind: "native_balance".to_string(),
                     network_id: "ethereum-mainnet".to_string(),
-                    block_number: 100,
+                    anchor: mfm_state_symbol::model::ObservationAnchor::Evm {
+                        chain_id: 1,
+                        block_number: 100,
+                    },
                 },
                 metadata: BTreeMap::new(),
             })
@@ -1421,7 +1541,14 @@ mod tests {
             "0x000000000000000000000000000000000000dead"
         );
         assert_eq!(snapshot.network_pins.len(), 1);
-        assert_eq!(snapshot.network_pins[0].block_number, 100);
+        assert_eq!(snapshot.schema_version, 2);
+        assert_eq!(
+            snapshot.network_pins[0].anchor,
+            SnapshotExecutionAnchor::Evm {
+                chain_id: 1,
+                block_number: 100,
+            }
+        );
     }
 
     #[tokio::test]
