@@ -676,18 +676,28 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
         local main_exit_code
         local post_exit_code
 
-        runner_type="$(task_runner_type "$task_id")"
-        if [ "$runner_type" != "shell" ] && task_has_hooks "$task_id"; then
-          echo "ERROR: task '$task_id' defines runtime hooks but runner type '$runner_type' is unsupported"
+        if ! runner_type="$(task_runner_type "$task_id")"; then
+          echo "ERROR: failed to resolve runner type for task '$task_id'" >&2
           return 3
         fi
-        runtime_plan_shell="$(task_runtime_plan_shell "$task_id")" || return 3
+        if [ "$runner_type" != "shell" ] && task_has_hooks "$task_id"; then
+          echo "ERROR: task '$task_id' defines runtime hooks but runner type '$runner_type' is unsupported" >&2
+          return 3
+        fi
+        if ! runtime_plan_shell="$(task_runtime_plan_shell "$task_id")"; then
+          echo "ERROR: failed to resolve runtime plan for task '$task_id'" >&2
+          return 3
+        fi
 
         set +e
         case "$runner_type" in
           shell)
             if run_task_hooks "$task_id" "pre" "$@"; then
-              command="$(task_runner_command "$task_id")"
+              if ! command="$(task_runner_command "$task_id")"; then
+                echo "ERROR: failed to resolve runner command for task '$task_id'" >&2
+                exit_code=3
+                break
+              fi
               run_in_sandbox_runtime "$runtime_plan_shell" "$command" "$@"
               main_exit_code="$?"
 
@@ -724,13 +734,17 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
             fi
             ;;
           derivation)
-            package_path="$(task_runner_package "$task_id")"
-            command="$(task_runner_command "$task_id")"
-            if [ -z "$package_path" ]; then
-              echo "ERROR: task '$task_id' derivation runner requires runner.package"
+            if ! package_path="$(task_runner_package "$task_id")"; then
+              echo "ERROR: failed to resolve runner package for task '$task_id'" >&2
+              exit_code=3
+            elif ! command="$(task_runner_command "$task_id")"; then
+              echo "ERROR: failed to resolve runner command for task '$task_id'" >&2
+              exit_code=3
+            elif [ -z "$package_path" ]; then
+              echo "ERROR: task '$task_id' derivation runner requires runner.package" >&2
               exit_code=3
             elif [ -z "$command" ]; then
-              echo "ERROR: task '$task_id' derivation runner requires runner.command"
+              echo "ERROR: task '$task_id' derivation runner requires runner.command" >&2
               exit_code=3
             else
               run_in_sandbox_runtime "$runtime_plan_shell" "$command" "$@"
@@ -758,11 +772,14 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
         local backoff_sec
 
         if ! task_descriptor_exists "$task_id"; then
-          echo "ERROR: unknown task '$task_id'"
+          echo "ERROR: unknown task '$task_id'" >&2
           return "$NIXFIED_EXIT_USAGE"
         fi
 
-        max_attempts="$(task_max_attempts "$task_id")"
+        if ! max_attempts="$(task_max_attempts "$task_id")"; then
+          echo "ERROR: failed to resolve max attempts for task '$task_id'" >&2
+          return 3
+        fi
 
         while [ "$attempt" -le "$max_attempts" ]; do
           if execute_task_once "$task_id" "$@"; then
@@ -810,12 +827,15 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
         else
           effective_workflow_id="$workflow_id"
         fi
-        echo "INFO: task context runId=$run_id workflowId=$effective_workflow_id taskId=$task_id"
+        echo "INFO: task context runId=$run_id workflowId=$effective_workflow_id taskId=$task_id" >&2
 
         if [ -n "''${NIXFIED_SELECTED_SERVICES_CSV_OVERRIDE+x}" ]; then
           selected_services_csv="''${NIXFIED_SELECTED_SERVICES_CSV_OVERRIDE}"
         else
-          selected_services_csv="$(task_selected_services_csv "$task_id" "$@")"
+          if ! selected_services_csv="$(task_selected_services_csv "$task_id" "$@")"; then
+            echo "ERROR: failed to resolve selected services for task '$task_id'" >&2
+            return 3
+          fi
         fi
 
         if [ -n "$workflow_id" ]; then

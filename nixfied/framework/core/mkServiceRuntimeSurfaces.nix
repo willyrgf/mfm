@@ -178,8 +178,16 @@ let
         exit 3
       fi
 
-      if [ -z "$runtime_dir_base" ] || [[ "$runtime_dir_base" == *"$"* ]]; then
-        runtime_dir_base="''${NIXFIED_RUNTIME_DIR_BASE:-$runtime_dir_base}"
+      if [ -z "$runtime_dir_base" ]; then
+        runtime_dir_base="''${NIXFIED_RUNTIME_DIR_BASE:-}"
+      elif [ -n "''${NIXFIED_RUNTIME_DIR_BASE:-}" ]; then
+        runtime_dir_base="$NIXFIED_RUNTIME_DIR_BASE"
+      fi
+
+      if [ -n "$runtime_dir_base" ]; then
+        if ! runtime_dir_base="$(resolve_runtime_path_expr_or_error "$runtime_dir_base")"; then
+          exit 3
+        fi
       fi
 
       SLOT_RUNTIME_SCOPE_ROOT="''${NIXFIED_RUNTIME_DIR_SCOPE:-''${NIXFIED_RUNTIME_DIR_SCOPE_OVERRIDE:-}}"

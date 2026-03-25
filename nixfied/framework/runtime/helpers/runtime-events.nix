@@ -681,10 +681,10 @@ let
       esac
     }
 
-    add_allowed_root "''${BASE_DIR:-$BASE_DIR_DEFAULT}"
-    add_allowed_root "$CI_ARTIFACTS_BASE_DEFAULT"
-    add_allowed_root "''${CI_ARTIFACTS_BASE:-}"
-    add_allowed_root "''${CI_ARTIFACTS_DIR:-}"
+    add_allowed_root "$(resolve_runtime_path_expr "''${BASE_DIR:-$BASE_DIR_DEFAULT}")"
+    add_allowed_root "$(resolve_runtime_path_expr "$CI_ARTIFACTS_BASE_DEFAULT")"
+    add_allowed_root "$(resolve_runtime_path_expr "''${CI_ARTIFACTS_BASE:-}")"
+    add_allowed_root "$(resolve_runtime_path_expr "''${CI_ARTIFACTS_DIR:-}")"
 
     case "$LOG_PATH_CANON" in
       "$EPHEMERAL_PREFIX"*)

@@ -315,6 +315,7 @@ in
       local registry_root_value
       local artifacts_dir_value
       local services_root
+      local -a runtime_shell_cmd
 
       resolve_project_root_workdir() {
         local project_root_real="${builtins.toString projectRoot}"
@@ -427,8 +428,13 @@ in
       log_level_default="$ENV_SANDBOX_STATIC_LOG_LEVEL_DEFAULT"
       output_mode_default="$ENV_SANDBOX_STATIC_OUTPUT_MODE_DEFAULT"
 
-      if [ -z "$runtime_dir_base" ] || [[ "$runtime_dir_base" == *"$"* ]]; then
+      if [ -z "$runtime_dir_base" ]; then
         runtime_dir_base="$RUNTIME_DIR_BASE_DEFAULT"
+      fi
+      if [ -n "$runtime_dir_base" ]; then
+        if ! runtime_dir_base="$(resolve_runtime_path_expr_or_error "$runtime_dir_base")"; then
+          return 3
+        fi
       fi
       if [ -n "$runtime_scope_override" ]; then
         runtime_scope_root="$runtime_scope_override"
@@ -900,9 +906,31 @@ in
 
       umask "$umask_value"
 
+      runtime_shell_cmd=(${pkgs.bash}/bin/bash -euo pipefail)
+      if [ "''${NIXFIED_DEBUG_TRACE_RUNTIME:-0}" = "1" ]; then
+        runtime_shell_cmd=(${pkgs.bash}/bin/bash -x -euo pipefail)
+      fi
+
+      local runtime_command_file
+      runtime_command_file="$(mktemp "$tmp_value/nixfied-runtime-command.XXXXXX.sh")" || {
+        echo "ERROR: unable to create runtime command file in '$tmp_value'" >&2
+        return 1
+      }
+      if ! printf '%s\n' "$command" > "$runtime_command_file"; then
+        rm -f "$runtime_command_file"
+        echo "ERROR: unable to write runtime command file '$runtime_command_file'" >&2
+        return 1
+      fi
+      chmod 700 "$runtime_command_file" || {
+        rm -f "$runtime_command_file"
+        echo "ERROR: unable to mark runtime command file executable '$runtime_command_file'" >&2
+        return 1
+      }
+
       (
+        trap 'rm -f "$runtime_command_file"' EXIT
         cd "$workdir"
-        "''${env_cmd[@]}" ${pkgs.bash}/bin/bash -euo pipefail -c "$command" -- "$@"
+        "''${env_cmd[@]}" "''${runtime_shell_cmd[@]}" "$runtime_command_file" "$@"
       )
     }
 

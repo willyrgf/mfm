@@ -157,4 +157,46 @@
       return 1
     fi
   }
+
+  resolve_runtime_path_expr() {
+    local expr="$1"
+    local token=""
+    local xdg_data_home="''${XDG_DATA_HOME:-$HOME/.local/share}"
+    local xdg_state_home="''${XDG_STATE_HOME:-$HOME/.local/state}"
+    local xdg_cache_home="''${XDG_CACHE_HOME:-$HOME/.cache}"
+    local tmpdir_value="''${TMPDIR:-/tmp}"
+
+    printf -v token '$%s' '{XDG_DATA_HOME:-$HOME/.local/share}'
+    expr="''${expr//"$token"/$xdg_data_home}"
+
+    printf -v token '$%s' '{XDG_STATE_HOME:-$HOME/.local/state}'
+    expr="''${expr//"$token"/$xdg_state_home}"
+
+    printf -v token '$%s' '{XDG_CACHE_HOME:-$HOME/.cache}'
+    expr="''${expr//"$token"/$xdg_cache_home}"
+
+    printf -v token '$%s' '{TMPDIR:-/tmp}'
+    expr="''${expr//"$token"/$tmpdir_value}"
+
+    printf -v token '$%s' '{HOME}'
+    expr="''${expr//"$token"/$HOME}"
+
+    token='$HOME'
+    expr="''${expr//"$token"/$HOME}"
+
+    printf '%s' "$expr"
+  }
+
+  resolve_runtime_path_expr_or_error() {
+    local expr="$1"
+    local resolved=""
+
+    resolved="$(resolve_runtime_path_expr "$expr")" || return 1
+    if [[ "$resolved" == *"$"* ]]; then
+      echo "ERROR: unresolved runtime path expression '$expr'" >&2
+      return 1
+    fi
+
+    printf '%s' "$resolved"
+  }
 ''

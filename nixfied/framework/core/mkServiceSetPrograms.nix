@@ -568,8 +568,8 @@ let
                 json)
                   json_records=""
                   json_separator=""
-                  payload_file="$(mktemp "$TMPDIR/service-set-${serviceSet.name}-export.XXXXXX")"
-                  validate_stderr="$(mktemp "$TMPDIR/service-set-${serviceSet.name}-export.validate.XXXXXX")"
+                  payload_file="$(mktemp "''${TMPDIR:-/tmp}/service-set-${serviceSet.name}-export.XXXXXX")"
+                  validate_stderr="$(mktemp "''${TMPDIR:-/tmp}/service-set-${serviceSet.name}-export.validate.XXXXXX")"
                   for service_name in "''${selected_services[@]}"; do
                     required_json="false"
                     if [ "$(service_record_required "$service_name")" = "1" ]; then
