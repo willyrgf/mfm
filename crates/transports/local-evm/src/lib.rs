@@ -66,6 +66,7 @@ impl LiveIoTransport for LocalEvmIoTransport {
         match call.namespace.as_str() {
             "local.evm.signer_address" => handle_evm_signer_address(call.request),
             "local.evm.sign_legacy_create" => handle_evm_sign_legacy_create(call.request),
+            "local.evm.sign_legacy_call" => handle_evm_sign_legacy_call(call.request),
             _ => Err(io_other(
                 "unknown_namespace",
                 ErrorCategory::Unknown,
@@ -93,6 +94,29 @@ pub struct LocalEvmSignLegacyCreateCall {
     /// Value encoded as a hex quantity.
     pub value_hex: String,
     /// Deployment calldata encoded as hex.
+    pub data_hex: String,
+}
+
+/// Request shape for signing a legacy contract call transaction locally.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LocalEvmSignLegacyCallCall {
+    /// Environment variable containing the private key hex.
+    pub signing_key_env: String,
+    /// Expected sender address for the signing key.
+    pub from: String,
+    /// Target address for the transaction.
+    pub to: String,
+    /// Chain ID used for replay protection.
+    pub chain_id: u64,
+    /// Nonce encoded as a hex quantity.
+    pub nonce_hex: String,
+    /// Gas price encoded as a hex quantity.
+    pub gas_price_hex: String,
+    /// Gas limit encoded as a hex quantity.
+    pub gas_limit_hex: String,
+    /// Value encoded as a hex quantity.
+    pub value_hex: String,
+    /// Call data encoded as hex.
     pub data_hex: String,
 }
 
@@ -207,12 +231,71 @@ impl<'a> LocalEvmIoClient<'a> {
             )
         })
     }
+
+    /// Signs a legacy contract call transaction through the local transport.
+    pub async fn sign_legacy_call(
+        &mut self,
+        req: LocalEvmSignLegacyCallCall,
+    ) -> Result<String, IoError> {
+        let request = serde_json::json!({
+            "env_name_hex": hex::encode(req.signing_key_env.as_bytes()),
+            "from": req.from,
+            "to": req.to,
+            "chain_id": req.chain_id,
+            "nonce_hex": req.nonce_hex,
+            "gas_price_hex": req.gas_price_hex,
+            "gas_limit_hex": req.gas_limit_hex,
+            "value_hex": req.value_hex,
+            "data_hex": req.data_hex,
+        });
+        let fact_key = self.fact_key("sign_legacy_call", &request)?;
+        let result = self
+            .io
+            .call(IoCall {
+                namespace: "local.evm.sign_legacy_call".to_string(),
+                request,
+                fact_key: Some(fact_key),
+            })
+            .await?;
+        let raw_tx_hex = result
+            .response
+            .get("raw_tx_hex")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                io_other(
+                    "evm_response_invalid",
+                    ErrorCategory::ParsingInput,
+                    "local signer returned non-string raw transaction",
+                )
+            })?;
+
+        normalize_hex_str(raw_tx_hex).map_err(|_| {
+            io_other(
+                "evm_response_invalid",
+                ErrorCategory::ParsingInput,
+                "local signer returned invalid raw transaction hex",
+            )
+        })
+    }
 }
 
 #[derive(Debug, Deserialize)]
 struct EvmSignLegacyCreateRequest {
     env_name_hex: String,
     from: String,
+    chain_id: u64,
+    nonce_hex: String,
+    gas_price_hex: String,
+    gas_limit_hex: String,
+    value_hex: String,
+    data_hex: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct EvmSignLegacyCallRequest {
+    env_name_hex: String,
+    from: String,
+    to: String,
     chain_id: u64,
     nonce_hex: String,
     gas_price_hex: String,
@@ -231,6 +314,12 @@ type LocalError = LocalTransportError;
 fn handle_evm_sign_legacy_create(request: serde_json::Value) -> Result<serde_json::Value, IoError> {
     let req: EvmSignLegacyCreateRequest = parse_request(request)?;
     let response = evm_sign_legacy_create(req).map_err(LocalError::into_io)?;
+    encode_response(response)
+}
+
+fn handle_evm_sign_legacy_call(request: serde_json::Value) -> Result<serde_json::Value, IoError> {
+    let req: EvmSignLegacyCallRequest = parse_request(request)?;
+    let response = evm_sign_legacy_call(req).map_err(LocalError::into_io)?;
     encode_response(response)
 }
 
@@ -282,6 +371,69 @@ fn evm_sign_legacy_create(
         &req.nonce_hex,
         &req.gas_price_hex,
         &req.gas_limit_hex,
+        &req.value_hex,
+        &data_bytes,
+    )?;
+
+    Ok(serde_json::json!({ "raw_tx_hex": raw_tx_hex }))
+}
+
+fn evm_sign_legacy_call(req: EvmSignLegacyCallRequest) -> Result<serde_json::Value, LocalError> {
+    let signing_key = signing_key_from_env_name_hex(&req.env_name_hex)?;
+    let signer_addr = signer_address_hex(&signing_key);
+    let configured_from = normalize_address(&req.from).map_err(|_| {
+        LocalError::new(
+            "invalid_op_config",
+            ErrorCategory::ParsingInput,
+            "invalid from address",
+        )
+    })?;
+
+    if signer_addr != configured_from {
+        return Err(LocalError::new(
+            "signing_key_address_mismatch",
+            ErrorCategory::ParsingInput,
+            "signing key did not match configured from address",
+        ));
+    }
+
+    let configured_to = normalize_address(&req.to).map_err(|_| {
+        LocalError::new(
+            "invalid_op_config",
+            ErrorCategory::ParsingInput,
+            "invalid to address",
+        )
+    })?;
+    let to_bytes = hex_to_bytes(&configured_to).map_err(|_| {
+        LocalError::new(
+            "invalid_op_config",
+            ErrorCategory::ParsingInput,
+            "invalid to address",
+        )
+    })?;
+
+    let data_hex = normalize_hex_str(&req.data_hex).map_err(|_| {
+        LocalError::new(
+            "invalid_op_config",
+            ErrorCategory::ParsingInput,
+            "invalid call data hex",
+        )
+    })?;
+    let data_bytes = hex_to_bytes(&data_hex).map_err(|_| {
+        LocalError::new(
+            "invalid_op_config",
+            ErrorCategory::ParsingInput,
+            "invalid call data hex",
+        )
+    })?;
+
+    let raw_tx_hex = sign_legacy_call_raw_tx(
+        &signing_key,
+        req.chain_id,
+        &req.nonce_hex,
+        &req.gas_price_hex,
+        &req.gas_limit_hex,
+        &to_bytes,
         &req.value_hex,
         &data_bytes,
     )?;
@@ -396,6 +548,64 @@ fn sign_legacy_create_raw_tx(
         gas_price,
         gas_limit,
         Vec::new(),
+        value,
+        data.to_vec(),
+        v_bytes,
+        r,
+        s,
+    ]);
+    Ok(bytes_to_hex_prefixed(&signed))
+}
+
+fn sign_legacy_call_raw_tx(
+    signing_key: &SigningKey,
+    chain_id: u64,
+    nonce_hex: &str,
+    gas_price_hex: &str,
+    gas_limit_hex: &str,
+    to_addr: &[u8],
+    value_hex: &str,
+    data: &[u8],
+) -> Result<String, LocalError> {
+    let nonce = hex_quantity_to_rlp_bytes(nonce_hex)?;
+    let gas_price = hex_quantity_to_rlp_bytes(gas_price_hex)?;
+    let gas_limit = hex_quantity_to_rlp_bytes(gas_limit_hex)?;
+    let value = hex_quantity_to_rlp_bytes(value_hex)?;
+    let chain_id_bytes = u128_to_min_be(u128::from(chain_id));
+
+    let unsigned = rlp_encode_list(&[
+        nonce.clone(),
+        gas_price.clone(),
+        gas_limit.clone(),
+        to_addr.to_vec(),
+        value.clone(),
+        data.to_vec(),
+        chain_id_bytes.clone(),
+        Vec::new(),
+        Vec::new(),
+    ]);
+
+    let sighash = keccak256(&unsigned);
+    let (sig, recid) = signing_key
+        .sign_prehash_recoverable(sighash.as_slice())
+        .map_err(|_| {
+            LocalError::new(
+                "signing_failed",
+                ErrorCategory::Unknown,
+                "failed to sign call transaction",
+            )
+        })?;
+    let sig_bytes = sig.to_bytes();
+    let r = trim_leading_zero_bytes(&sig_bytes[..32]);
+    let s = trim_leading_zero_bytes(&sig_bytes[32..]);
+    let v = u128::from(chain_id) * 2 + 35 + u128::from(u8::from(recid));
+    let v_bytes = u128_to_min_be(v);
+
+    let signed = rlp_encode_list(&[
+        nonce,
+        gas_price,
+        gas_limit,
+        to_addr.to_vec(),
         value,
         data.to_vec(),
         v_bytes,

@@ -893,6 +893,7 @@ fn phase_b_pipeline(
                     "network_id": NETWORK_ID,
                     "control_scope": control_scope,
                     "from": supplier.clone(),
+                    "signing_key_env": "MFM_AAVE_V3_PARITY_DEPLOY_SIGNING_KEY",
                     "contract_address": usdc_address.clone(),
                     "calls": [{
                         "function": "approve",
@@ -913,6 +914,7 @@ fn phase_b_pipeline(
                     "network_id": NETWORK_ID,
                     "control_scope": control_scope,
                     "from": borrower.clone(),
+                    "signing_key_env": "MFM_AAVE_V3_PARITY_DEPLOY_SIGNING_KEY",
                     "contract_address": wbtc_address.clone(),
                     "calls": [{
                         "function": "approve",
@@ -933,6 +935,7 @@ fn phase_b_pipeline(
                     "network_id": NETWORK_ID,
                     "control_scope": control_scope,
                     "from": supplier.clone(),
+                    "signing_key_env": "MFM_AAVE_V3_PARITY_DEPLOY_SIGNING_KEY",
                     "contract_address": pool_address.clone(),
                     "calls": [{
                         "function": "supply",
@@ -958,6 +961,7 @@ fn phase_b_pipeline(
                     "network_id": NETWORK_ID,
                     "control_scope": control_scope,
                     "from": borrower.clone(),
+                    "signing_key_env": "MFM_AAVE_V3_PARITY_DEPLOY_SIGNING_KEY",
                     "contract_address": pool_address.clone(),
                     "calls": [{
                         "function": "supply",
@@ -983,6 +987,7 @@ fn phase_b_pipeline(
                     "network_id": NETWORK_ID,
                     "control_scope": control_scope,
                     "from": borrower.clone(),
+                    "signing_key_env": "MFM_AAVE_V3_PARITY_DEPLOY_SIGNING_KEY",
                     "contract_address": pool_address.clone(),
                     "calls": [{
                         "function": "borrow",

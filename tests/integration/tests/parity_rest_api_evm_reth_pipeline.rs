@@ -329,6 +329,7 @@ async fn parity_reth_pipeline_contract_from_nix() {
                     "network_id": NETWORK_ID,
                     "control_scope": control_scope.as_str(),
                     "from": from,
+                    "signing_key_env": signing_key_env,
                     "calls": [
                         {"function": "setValue", "args": [7]}
                     ],

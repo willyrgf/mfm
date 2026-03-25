@@ -152,6 +152,8 @@ pub struct EvmConfigureStateConfig {
     pub control_scope: String,
     /// Sender address used for configuration transactions.
     pub from: String,
+    /// Optional environment variable name used for local signing.
+    pub signing_key_env: Option<String>,
     /// Optional inline contract address; falls back to context when absent.
     pub contract_address: Option<String>,
     /// Calls to execute against the deployed contract.
@@ -432,13 +434,27 @@ impl State for EvmConfigureState {
             }
 
             let mut client = EvmIoClient::new(self.state_id.clone(), io);
-            let tx_hash = evm_rpc::send_transaction_for_network(
-                &mut client,
-                &self.cfg.network_id,
-                &control_scope,
-                tx,
-            )
-            .await?;
+            let tx_hash = if let Some(env_name) = self.cfg.signing_key_env.as_deref() {
+                evm_rpc::send_signed_call_transaction_for_network(
+                    &mut client,
+                    &self.cfg.network_id,
+                    &control_scope,
+                    env_name,
+                    &self.cfg.from,
+                    &to,
+                    &calldata,
+                    call.value_hex.as_deref(),
+                )
+                .await?
+            } else {
+                evm_rpc::send_transaction_for_network(
+                    &mut client,
+                    &self.cfg.network_id,
+                    &control_scope,
+                    tx,
+                )
+                .await?
+            };
             drop(client);
             let receipt = evm_rpc::wait_for_receipt_for_network(
                 &self.state_id,
@@ -875,6 +891,7 @@ mod tests {
                 network_id: "ethereum-mainnet".to_string(),
                 control_scope: "".to_string(),
                 from: "0x1111111111111111111111111111111111111111".to_string(),
+                signing_key_env: None,
                 contract_address: None,
                 calls: vec![EvmConfigureRuntimeCall {
                     function: "setValue".to_string(),
