@@ -179,21 +179,14 @@ fn nix_system() -> String {
 }
 
 fn split_flake_app_ref(app: &str) -> Result<(&str, &str), IoError> {
-    let Some((flake_url, fragment)) = app.split_once('#') else {
-        return Err(IoError::Other(info(
+    let ref_parts = FlakeAppRef::parse(app).ok_or_else(|| {
+        IoError::Other(info(
             CODE_NIX_REQUEST_INVALID,
             ErrorCategory::ParsingInput,
-            "flake app ref must contain a '#' fragment",
-        )));
-    };
-    if flake_url.is_empty() || fragment.is_empty() {
-        return Err(IoError::Other(info(
-            CODE_NIX_REQUEST_INVALID,
-            ErrorCategory::ParsingInput,
-            "flake app ref must have non-empty flake url and fragment",
-        )));
-    }
-    Ok((flake_url, fragment))
+            "flake app ref must contain a non-empty URL and fragment",
+        ))
+    })?;
+    Ok((ref_parts.url, ref_parts.fragment))
 }
 
 fn attr_path_for_program(system: &str, fragment: &str) -> String {
@@ -213,11 +206,27 @@ fn flake_installable_target(flake_url: &str, attr: &str) -> String {
 
 fn store_root_from_program_path(program_path: &str) -> Option<String> {
     let rest = program_path.strip_prefix("/nix/store/")?;
-    let entry = rest.split('/').next()?;
+    let entry = rest.split_once('/').map(|(entry, _)| entry).unwrap_or(rest);
     if entry.is_empty() {
         return None;
     }
     Some(format!("/nix/store/{entry}"))
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FlakeAppRef<'a> {
+    url: &'a str,
+    fragment: &'a str,
+}
+
+impl<'a> FlakeAppRef<'a> {
+    fn parse(value: &'a str) -> Option<Self> {
+        let (url, fragment) = value.split_once('#')?;
+        if url.is_empty() || fragment.is_empty() {
+            return None;
+        }
+        Some(Self { url, fragment })
+    }
 }
 
 fn trim_command_output(bytes: &[u8], max_bytes: usize) -> Option<String> {

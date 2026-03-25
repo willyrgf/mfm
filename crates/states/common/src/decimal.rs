@@ -33,6 +33,29 @@ impl fmt::Display for DecimalArithmeticError {
 
 impl std::error::Error for DecimalArithmeticError {}
 
+#[derive(Clone, Copy, Debug)]
+struct DecimalParts<'a> {
+    whole: &'a str,
+    frac: &'a str,
+}
+
+impl<'a> DecimalParts<'a> {
+    fn split(digits_part: &'a str) -> Result<Self, DecimalArithmeticError> {
+        let (whole, frac) = match digits_part.split_once('.') {
+            Some((whole, frac)) => {
+                if frac.contains('.') {
+                    return Err(DecimalArithmeticError::InvalidDecimalString {
+                        value: digits_part.to_string(),
+                    });
+                }
+                (whole, frac)
+            }
+            None => (digits_part, ""),
+        };
+        Ok(Self { whole, frac })
+    }
+}
+
 /// Multiplies two decimal strings and returns a normalized string with a deterministic scale.
 pub fn multiply_decimal_strings(left: &str, right: &str) -> Result<String, DecimalArithmeticError> {
     let left = DecimalValue::parse_non_negative(left)?;
@@ -105,14 +128,11 @@ impl DecimalValue {
             });
         }
 
-        let mut it = digits_part.split('.');
-        let whole = it.next().unwrap_or("");
-        let frac = it.next().unwrap_or("");
-        if it.next().is_some() {
-            return Err(DecimalArithmeticError::InvalidDecimalString {
+        let DecimalParts { whole, frac } = DecimalParts::split(digits_part).map_err(|_| {
+            DecimalArithmeticError::InvalidDecimalString {
                 value: input.to_string(),
-            });
-        }
+            }
+        })?;
 
         let has_invalid_digits =
             |part: &str| !part.is_empty() && !part.chars().all(|ch| ch.is_ascii_digit());
@@ -273,6 +293,14 @@ mod tests {
         assert!(matches!(
             divide_decimal_strings("1", "0").err(),
             Some(DecimalArithmeticError::DivisionByZero)
+        ));
+    }
+
+    #[test]
+    fn parse_signed_decimal_rejects_multiple_decimal_separators() {
+        assert!(matches!(
+            DecimalValue::parse_signed("1.2.3").err(),
+            Some(DecimalArithmeticError::InvalidDecimalString { .. })
         ));
     }
 }

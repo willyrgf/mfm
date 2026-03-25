@@ -1,5 +1,26 @@
 use alloy_primitives::U256;
 
+#[derive(Clone, Copy, Debug)]
+struct DecimalParts<'a> {
+    integer: &'a str,
+    fraction: &'a str,
+}
+
+impl<'a> DecimalParts<'a> {
+    fn split(raw: &'a str) -> Option<Self> {
+        let (integer, fraction) = match raw.split_once('.') {
+            Some((integer, fraction)) => {
+                if fraction.contains('.') {
+                    return None;
+                }
+                (integer, fraction)
+            }
+            None => (raw, ""),
+        };
+        Some(Self { integer, fraction })
+    }
+}
+
 pub(crate) fn parse_scaled_u256(
     value: &str,
     scale: u8,
@@ -13,10 +34,10 @@ pub(crate) fn parse_scaled_u256(
         return Err("must be non-negative".to_string());
     }
 
-    let (int_part, frac_part) = match raw.split_once('.') {
-        Some((int_part, frac_part)) => (int_part, frac_part),
-        None => (raw, ""),
+    let Some(parts) = DecimalParts::split(raw) else {
+        return Err("invalid decimal separators".to_string());
     };
+    let (int_part, frac_part) = (parts.integer, parts.fraction);
 
     let int_part = if int_part.is_empty() { "0" } else { int_part };
     if !int_part.chars().all(|ch| ch.is_ascii_digit()) {
@@ -92,5 +113,10 @@ mod tests {
     #[test]
     fn parse_scaled_u256_rejects_non_digit_tail() {
         assert!(parse_scaled_u256("0.5a", 2, false).is_err());
+    }
+
+    #[test]
+    fn parse_scaled_u256_rejects_multiple_decimal_separators() {
+        assert!(parse_scaled_u256("1.2.3", 2, false).is_err());
     }
 }

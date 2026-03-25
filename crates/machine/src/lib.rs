@@ -169,6 +169,33 @@ pub mod ids {
         state_local_id: &'a str,
     }
 
+    impl<'a> OpPathParts<'a> {
+        fn parse(value: &'a str) -> Option<Self> {
+            let (machine, suffix) = value.split_once('.')?;
+            let (step, child_path) = match suffix.split_once('.') {
+                Some((step, child_path)) => (step, Some(child_path)),
+                None => (suffix, None),
+            };
+            Some(Self {
+                machine,
+                step,
+                child_path,
+            })
+        }
+    }
+
+    impl<'a> StateIdParts<'a> {
+        fn parse(value: &'a str) -> Option<Self> {
+            let (machine, suffix) = value.split_once('.')?;
+            let (step, state_local_id) = suffix.split_once('.')?;
+            Some(Self {
+                machine,
+                step,
+                state_local_id,
+            })
+        }
+    }
+
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     struct ContextKeyParts<'a> {
         slot: ContextSlot,
@@ -313,12 +340,7 @@ pub mod ids {
         }
 
         fn parts(&self) -> OpPathParts<'_> {
-            let mut segments = self.0.splitn(3, '.');
-            OpPathParts {
-                machine: segments.next().unwrap_or(""),
-                step: segments.next().unwrap_or(""),
-                child_path: segments.next(),
-            }
+            OpPathParts::parse(&self.0).expect("OpPath format validated in constructor")
         }
 
         /// Returns the machine and step components of a validated operation path.
@@ -420,12 +442,7 @@ pub mod ids {
         }
 
         fn parts(&self) -> StateIdParts<'_> {
-            let mut segments = self.0.splitn(3, '.');
-            StateIdParts {
-                machine: segments.next().unwrap_or(""),
-                step: segments.next().unwrap_or(""),
-                state_local_id: segments.next().unwrap_or(""),
-            }
+            StateIdParts::parse(&self.0).expect("StateId format validated in constructor")
         }
 
         /// Returns the machine component of a validated state id.
