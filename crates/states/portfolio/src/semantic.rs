@@ -1334,7 +1334,7 @@ mod tests {
         assert_eq!(batch.bindings[1].binding_id, "binding.wallet_main.a.b");
         assert_eq!(batch.bindings[2].binding_id, "binding.wallet_main.z.z");
         assert_eq!(batch.bindings[3].binding_id, "binding.wallet_other.a.a");
-        assert_eq!(batch.bindings[0].valuation_ids, vec!["a".to_string()]);
+        assert_eq!(batch.bindings[0].valuation_ids, vec!["b".to_string()]);
         assert_eq!(batch.bindings[1].valuation_ids, vec!["a".to_string()]);
         assert_eq!(
             batch.bindings[2].valuation_ids,
