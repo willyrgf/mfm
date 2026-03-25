@@ -652,6 +652,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bf88ba1141d185c399bee5288d850d63b8369520c1eafc32a0430b5b6c287bf4"
 dependencies = [
  "sha2",
+ "tinyvec",
 ]
 
 [[package]]
@@ -2473,6 +2474,7 @@ name = "mfm-state-wallet"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "bs58",
  "mfm-evm-core",
  "mfm-machine",
  "mfm-state-common",

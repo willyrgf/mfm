@@ -22,7 +22,9 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use tracing::warn;
 
-use mfm_collectors_btc_jsonrpc_http::{BtcJsonRpcClient, BtcJsonRpcConfig};
+use mfm_collectors_btc_jsonrpc_http::{
+    BtcJsonRpcClient, BtcJsonRpcConfig, BlockchainInfo,
+};
 use mfm_collectors_evm_jsonrpc_http::{
     EvmJsonRpcHttpConfig, EvmJsonRpcHttpTransportFactory, EvmJsonRpcSource, EvmRoutingStrategy,
     EvmSourceKind,
@@ -55,6 +57,16 @@ const ENV_BTC_RPC_PASSWORD: &str = "MFM_BTC_RPC_PASSWORD";
 const DEFAULT_POOL_KIND: &str = "default";
 const PROBE_REFRESH_INTERVAL_MS: u64 = 15_000;
 const FAILURE_COOLDOWN_MS: u64 = 15_000;
+
+fn bitcoin_chain_for_network_id(network_id: &str) -> Option<&'static str> {
+    match network_id {
+        "bitcoin-mainnet" => Some("main"),
+        "bitcoin-testnet" => Some("test"),
+        "bitcoin-signet" => Some("signet"),
+        "bitcoin-regtest" => Some("regtest"),
+        _ => None,
+    }
+}
 
 /// Control-plane persistence backend used by `rpc.control`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -1588,28 +1600,67 @@ impl RpcControlTransport {
 
     async fn handle_bitcoin_anchor(
         &mut self,
-        _network_id: &str,
+        network_id: &str,
     ) -> Result<serde_json::Value, IoError> {
-        let client = self.ensure_btc_client()?;
-        let info = client.get_blockchain_info().await.map_err(|err| {
-            io_transport(
-                "btc_rpc_anchor_failed",
-                ErrorCategory::Unknown,
-                true,
-                format!("bitcoin anchor request failed: {err}"),
-            )
-        })?;
+        let info = self
+            .ensure_matching_btc_network(network_id)
+            .await?;
         Ok(serde_json::json!({
             "height": info.blocks,
             "block_hash": info.bestblockhash,
         }))
     }
 
+    async fn ensure_matching_btc_network(
+        &mut self,
+        network_id: &str,
+    ) -> Result<BlockchainInfo, IoError> {
+        let network_id = network_id.trim();
+        if network_id.is_empty() {
+            return Err(io_transport(
+                "btc_rpc_network_invalid",
+                ErrorCategory::ParsingInput,
+                false,
+                "bitcoin network_id must not be empty",
+            ));
+        }
+        let expected_chain = bitcoin_chain_for_network_id(network_id).ok_or_else(|| {
+            io_transport(
+                "btc_rpc_network_unsupported",
+                ErrorCategory::ParsingInput,
+                false,
+                format!("unsupported bitcoin network id `{network_id}`"),
+            )
+        })?;
+        let client = self.ensure_btc_client()?;
+        let info = client.get_blockchain_info().await.map_err(|err| {
+            io_transport(
+                "btc_rpc_network_query_failed",
+                ErrorCategory::Unknown,
+                true,
+                format!("bitcoin network query failed: {err}"),
+            )
+        })?;
+        if info.chain != expected_chain {
+            return Err(io_transport(
+                "btc_rpc_network_mismatch",
+                ErrorCategory::ParsingInput,
+                false,
+                format!(
+                    "bitcoin request for `{network_id}` expects chain `{expected_chain}`, but rpc reports `{}`",
+                    info.chain,
+                ),
+            ));
+        }
+        Ok(info)
+    }
+
     async fn handle_bitcoin_scan_utxos(
         &mut self,
-        _network_id: &str,
+        network_id: &str,
         address: &str,
     ) -> Result<serde_json::Value, IoError> {
+        let _info = self.ensure_matching_btc_network(network_id).await?;
         let client = self.ensure_btc_client()?;
         let sats = client.address_balance_sats(address).await.map_err(|err| {
             io_transport(
@@ -1886,6 +1937,15 @@ mod tests {
             .resolve_network_scope(None)
             .expect_err("multi-network catalog should require network");
         assert_eq!(io_error_code(&err), "rpc_control_network_required");
+    }
+
+    #[test]
+    fn bitcoin_network_chain_mapping_is_known() {
+        assert_eq!(bitcoin_chain_for_network_id("bitcoin-mainnet"), Some("main"));
+        assert_eq!(bitcoin_chain_for_network_id("bitcoin-testnet"), Some("test"));
+        assert_eq!(bitcoin_chain_for_network_id("bitcoin-signet"), Some("signet"));
+        assert_eq!(bitcoin_chain_for_network_id("bitcoin-regtest"), Some("regtest"));
+        assert_eq!(bitcoin_chain_for_network_id("bitcoin-dev"), None);
     }
 
     #[tokio::test]

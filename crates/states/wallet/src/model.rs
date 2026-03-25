@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use bs58;
 use mfm_evm_core::encoding::normalize_address;
 use mfm_machine::hashing::{canonical_json_bytes, CanonicalJsonError};
 use serde::{Deserialize, Serialize};
@@ -266,5 +267,23 @@ fn validate_bitcoin_address(raw: &str) -> Result<(), String> {
     if !raw.chars().all(|ch| base58.contains(ch)) {
         return Err("base58 bitcoin address contained unsupported characters".to_string());
     }
+    bs58::decode(raw)
+        .with_check(None)
+        .into_vec()
+        .map_err(|_| "base58 bitcoin address checksum validation failed".to_string())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_bitcoin_address;
+
+    #[test]
+    fn validate_bitcoin_address_rejects_bad_base58_checksum() {
+        assert!(validate_bitcoin_address("1BoatSLRHtKNngkdXEeobR76b53LETtpyT").is_ok());
+        assert!(
+            validate_bitcoin_address("1BoatSLRHtKNngkdXEeobR76b53LETtpyY").is_err(),
+            "checksum mismatch should be rejected"
+        );
+    }
 }
