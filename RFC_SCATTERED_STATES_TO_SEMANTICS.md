@@ -2656,3 +2656,221 @@ The core architectural rule should become:
 
 That is the cleanest path from the current `portfolio_tracker` flow to a reusable semantics-first
 execution architecture without violating the repo's existing invariants.
+
+## Appendix A. Implementation Coverage Matrix
+
+This appendix summarizes the branch scan against the RFC. Sections are scored as
+`implemented`, `partial`, or `missing`.
+
+| RFC heading | Status | Notes |
+|---|---|---|
+| Summary | implemented | Fixed semantic family, recursive planning, public-root boundary, and planner-owned observation ordering are in place. |
+| RFC Closeout Note | implemented | The closeout bullets match the current branch state. |
+| Goals | implemented | Semantic-first planning, deterministic flattening, and non-EVM coverage are present. |
+| Non-Goals | implemented | No nested runtime planning or backward-compatibility shim remains as the active path. |
+| Central Semantic Model | implemented | Subject, network view, instrument, position, venue, valuation, and observation are represented as first-class typed structs. Note: `VenueId` and `AdapterId` are string newtypes rather than the multi-field structs described in the RFC pseudocode; the semantic content is preserved but split across separate types (see Remaining Work). |
+| Observation identity must be explicit | implemented | `ObservationKey` is planner-owned and used for deterministic ordering and duplicate detection. |
+| Action semantics are a separate layer | partial | The RFC treats this as future work; code currently models lending and staking through `PositionSemantics` and adapter payloads, not a first-class `ActionSemantics` enum. |
+| Projection semantics are also a separate layer | implemented | Snapshot and report remain read-model projections built from observations. |
+| Contract references stay adapter-owned | implemented | Contract/address/selector details live in adapter payloads rather than planner identity. |
+| Project-Wide Planning Model | implemented | Recursive op planning and flattening are implemented in the SDK planner. |
+| One planning abstraction: recursive operation planning | implemented | The planner expands ops recursively and flattens them before runtime starts. |
+| Converging the current two planning layers | implemented | Pipeline-like and op-like planning now converge on one flattened plan. |
+| Planner-time versus runtime-time dispatch | implemented | Validation, adapter selection, binding, ordering, and batching happen at planning time. |
+| Resume and auditability | implemented | Compiled execution spec support exists in the SDK layer with deterministic serialization and artifact persistence. |
+| Batches are planner products, not runtime discoveries | implemented | Runtime executes compiled batches; it does not discover batch topology. |
+| Initial Decisions Locked In By This RFC | implemented | The hard-cutover, semantic-first, non-EVM-validating approach is reflected in the branch. |
+| Target Architecture | implemented | The current code matches the fixed semantic-state model. |
+| Portfolio snapshot as the first consumer | implemented | `portfolio_tracker` remains the first adopter of the semantic runtime model. |
+| Portfolio semantic input model | implemented | Planner input is normalized into semantic terms rather than protocol-first state topology. |
+| Portfolio observation sub-op expansion | implemented | The planner emits compiled observation batches instead of discovering topology at runtime. |
+| Composite operation shape | implemented | Child ops, explicit imports/exports, and bindings are modeled explicitly. |
+| Planning API direction | implemented | Recursive expansion returns one expansion result and one interface contract. |
+| Child-op identity, namespacing, and flattening contract | implemented | Hierarchical child op identity and deterministic flattening are enforced. |
+| Context namespacing after flattening | implemented | Runtime keys remain qualified by full op path. |
+| State identity in the first cut | implemented | Planner-visible lineage is preserved separately from lowered runtime `StateId`s. |
+| Compiled observation binding shape | implemented | Deterministic bindings with opaque adapter payloads are implemented. |
+| Compiled observation batch shape | implemented | Homogeneous, planner-owned batches are implemented. |
+| Stable venue identity shape | divergent | Venue identity is stable and user-authored. However, `VenueId` is a `String` newtype, not the 4-field struct the RFC prescribes. The fields `venue_kind`, `network_id`, and `parent_venue_id` live on the separate `Venue` struct. See Remaining Work. |
+| State topology for the first cut | implemented | The fixed semantic runtime family matches the RFC cut. |
+| Observation batch contract | implemented | Observation batches are homogeneous and share the same canonical observation output shape. |
+| Fail-fast behavior | implemented | Required prep, validation, observation, or projection failures abort the run. |
+| Implementation Plan | implemented | The branch carries the intended hard-cutover outcome; the only notable split is framework-level compiled-plan ownership versus portfolio-op payload naming. |
+| Commit decomposition policy | implemented | The changes were split into small, reviewable commits. |
+| Implemented commit sequence on this branch | implemented | The branch now reflects the semantic planner/runtime cutover described by the RFC. |
+| Explicit hard-cutover rules | implemented | Superseded internal planner surfaces are not retained as parallel active APIs. One legacy alias `pub type OpIo = OpInterface` remains in `crates/sdk/src/lib.rs` (used by three test files); it can be deleted. |
+| What should remain stable during the cutover | implemented | Append-only streams, content addressing, canonical JSON, and transport-only binaries remain intact. |
+| The Problem | implemented | The historical trace still matches the current launch shape, but it is now documented as context rather than current architecture. |
+| Current summary | implemented | The current launch path is task -> packaged CLI -> app services -> op. |
+| Verified Entrypoint Chain | implemented | The traced entrypoint chain is documented and reconciled with the current code. |
+| End-To-End Call Path | implemented | The launch, CLI, app-service, and root-op chain are all in place. |
+| State Semantics Map | implemented | The semantic phases exist, even though the current runtime uses the fixed semantic family rather than the older protocol-shaped split. |
+| More Detailed State Notes | implemented | The historical notes are retained, but the fixed semantic runtime now owns those responsibilities. |
+| Context Namespacing | implemented | Namespaced context behavior remains the runtime contract. |
+| Persistence And Returned Data | implemented | Snapshot artifact handling and final context extraction are present. |
+| Public Output Contract | implemented | The CLI and shell wrapper preserve the stable JSON envelope contract. |
+| Mismatches And Gotchas Discovered While Tracing | implemented | The stale-doc and launch-path mismatches were reconciled on the branch. |
+| File Anchors | partial | Several file paths in the historical trace no longer exist after the refactor: `crates/states/wallet/src/states.rs`, `crates/states/symbol/src/states.rs`, `crates/states/aave-v3/src/portfolio/states.rs`, `crates/states/portfolio/src/states.rs`. These are documented as historical context; the current code lives in `model.rs`, `semantic.rs`, `semantic_states.rs`, and `semantic_adapters.rs` respectively. |
+| High-Value Code Anchors | implemented | The traced code anchors remain valid entrypoints for review. |
+| Commands Used To Trace This | implemented | The scan and validation commands are reproducible from the RFC notes. |
+| Decisions From The Current Trace | implemented | The branch now reflects those decisions directly. |
+| Working Conclusion | implemented | The current decomposition is stable and matches the branch behavior. |
+| Precise Critique Of The Current Architecture | implemented | The original protocol-shaped state topology has been replaced. |
+| Semantic Seams That Exist Today But Are Hidden | implemented | Those seams are now first-class planner/runtime boundaries. |
+| Proposed Target Architecture | implemented | The current code follows the fixed semantic-state model. |
+| High-Level Model | implemented | The semantic compiler and fixed runtime state family are both present. |
+| Proposed Semantic Vocabulary | implemented | Core nouns and semantic phases are represented, with the `ActionSemantics` layer still future work. |
+| Core semantic phases | implemented | The semantic phases line up with the fixed runtime family. |
+| Primary execution nouns | implemented | The planner and runtime use the canonical semantic nouns. |
+| Instrument semantics | implemented | Instrument categories are modeled in the semantic layer. |
+| Position semantics | implemented | Position categories are modeled in the semantic layer. |
+| Venue semantics | implemented | Venue identity is explicit and stable. |
+| Action semantics | partial | The future action layer is not first-class in Rust yet. |
+| Execution Model | implemented | Normalization, compilation, execution, and persistence are separated. |
+| Config normalization phase | implemented | Canonical config is validated before planning. |
+| Semantic compilation phase | implemented | The planner compiles deterministic semantic tasks and adapters. |
+| Semantic execution phase | implemented | Runtime executes precompiled tasks only. |
+| Persistence and replay model | implemented | State attempts, artifacts, and snapshots preserve the repo invariants. |
+| Where Dispatch Should Happen | implemented | Dispatch is planner-time and adapter-registry driven. |
+| Config normalization phase | implemented | Intent is derived without IO. |
+| Op expansion time | implemented | Deterministic adapter selection and batch partitioning happen here. |
+| State execution time | implemented | Runtime resolves only the planned adapter identifiers and payloads. |
+| Adapter registry / capability registry | implemented | The semantic adapter catalog exists and is deterministic. |
+| Proposed Core Rust Abstractions | implemented | The branch contains the core plan/spec types and adapter identifier structures. |
+| Family and capability identifiers | divergent | `NetworkFamily` is a proper enum. `AdapterId` is a `String` newtype using the convention `"capability/family/implementation"` rather than the 3-field struct with `CapabilityKind` enum the RFC prescribes. `CapabilityKind` does not exist as a type. See Remaining Work. |
+| Execution view and anchors | implemented | Pinned execution views and family-specific anchors are modeled explicitly. |
+| Planned execution spec | implemented | The compiled execution spec and semantic execution spec are both present in the workspace. |
+| Planner-facing adapter traits | implemented | Planner adapters are pure and deterministic. |
+| Runtime-facing adapter traits | implemented | Runtime adapters consume compiled bindings and return canonical observations. |
+| Compiled binding payload model | implemented | Adapter-owned opaque payloads are supported. |
+| Semantic catalog | implemented | The deterministic semantic catalog exists in the portfolio state layer. |
+| Adapter Discovery Model | implemented | Deterministic selection and ambiguity failures exist. |
+| Deterministic selection rules | implemented | Zero-match and ambiguous-match cases fail predictably. |
+| Separation from transport routing | implemented | Semantic adapters are distinct from transport routing. |
+| How `CollectAaveObservationsState` Disappears | implemented | Aave-specific behavior moved behind adapters and compiled batches. |
+| How The Same Model Extends To Bitcoin | partial | Bitcoin family coverage exists through the shared semantic pipeline. Bitcoin adapters are architecturally complete but use stubbed IO (simulated block height/hash and fixed UTXO quantities), not real Bitcoin RPC. The semantic pipeline is proven family-generic; real data acquisition is separate work. |
+| Recommended Crate Boundaries | implemented | `machine`, `sdk`, `ops`, `states`, and transport crates retain the intended boundaries. |
+| Keep | implemented | The listed crates retain their ownership boundaries. |
+| Refactor | implemented | The portfolio semantic runtime lives in the shared states layer. |
+| Add | implemented | The semantic compiler and catalog are now represented in code. |
+| Keep protocol-specific crates protocol-specific | implemented | Protocol specialization remains in protocol crates and adapters. |
+| Historical Migration Sketch | implemented | The migration sketch is now historical; the branch reflects the steady state it described. |
+| Tradeoffs And Failure Modes | implemented | The stated failure modes are guarded by planner validation and adapter selection rules. |
+| Tradeoff: more adapters, fewer states | implemented | Variation moved into adapters rather than the fixed runtime topology. |
+| Tradeoff: planner complexity moves into the compiler | implemented | The compiler owns the complexity and is unit-tested. |
+| Failure mode: ambiguous adapter matches | implemented | Ambiguous adapter matches fail rather than silently winning. |
+| Failure mode: raw payload maps become untyped dumping grounds | implemented | Payload ownership stays with the selected adapter and remains canonical JSON. |
+| Failure mode: semantic states regain protocol branching | implemented | Protocol branching is not the fixed state family contract. |
+| Failure mode: family-specific assumptions leak into generic models | implemented | Family-specific assumptions are isolated in explicit enums and adapter payloads. |
+| What Should Stay Generic vs Protocol-Specific | implemented | Generic state topology is separate from protocol-specific adapters and payloads. |
+| Generic | implemented | The generic surfaces remain generic. |
+| Protocol-specific | implemented | Protocol-specific logic remains in adapters, typed decoders, and domain crates. |
+| Testing Strategy | partial | Deterministic planner tests, adapter tests, semantic-state tests, and replay tests exist. Missing: unit test for zero-match adapter selection (`NoMatchingAdapter` path fires but has no dedicated test). The `OpIo` legacy alias remains in three test files after the cutover completed. |
+| Recommendation | implemented | The branch follows the recommended architecture: semantic compiler + deterministic adapters + fixed states. |
+
+Appendix note: items marked `partial` or `divergent` above are either intentional scope
+boundaries, structural divergences from the RFC pseudocode that preserve semantic intent, or
+test coverage gaps. None block the current runtime path.
+
+### Remaining Work
+
+This section records concrete gaps and divergences identified by an independent codebase review
+against the RFC requirements. Items are grouped by severity.
+
+#### Structural divergences from RFC pseudocode
+
+These are cases where the implementation preserves semantic intent but uses a different Rust
+shape than the RFC pseudocode specifies. The runtime behavior is correct; the question is
+whether the type-level contract should be tightened.
+
+`VenueId shape`
+
+- RFC prescribes: `struct VenueId { venue_id, venue_kind, network_id, parent_venue_id }`
+- Actual: `pub struct VenueId(pub String)` (transparent newtype). The additional fields live on
+  the separate `Venue` struct in `crates/states/portfolio/src/semantic.rs:170-184`.
+- Impact: `ObservationKey.venue_id` carries only the string identity, not the full venue
+  metadata. Merge ordering and duplicate detection operate on the simplified key.
+- What would close it: either promote `VenueId` to a multi-field struct, or explicitly document
+  the newtype-plus-separate-struct split as the canonical v1 shape.
+
+`AdapterId shape`
+
+- RFC prescribes: `struct AdapterId { capability: CapabilityKind, family: NetworkFamily, implementation: String }`
+- Actual: `pub struct AdapterId(pub String)` using the string convention
+  `"capability/family/implementation"` (e.g. `"observe_position/evm/native_balance"`).
+- Impact: adapter identity is convention-encoded rather than type-safe. `CapabilityKind` does
+  not exist as an enum in the codebase.
+- What would close it: introduce a `CapabilityKind` enum and parse `AdapterId` into typed
+  fields, or document the string convention as the canonical v1 contract.
+
+`ObservationKey.position_kind type`
+
+- RFC prescribes: `position_kind: String`
+- Actual: `position_kind: PositionSemantics` (enum).
+- Impact: strictly stronger than the RFC specification, not weaker. No action required unless
+  the RFC intended string flexibility for future unknown position kinds.
+
+#### Intentionally deferred work
+
+`ActionSemantics`
+
+- Status: intentional future work.
+- The RFC explicitly places `ActionSemantics` in a future layer, so the absence of a first-class
+  Rust enum is deliberate, not a defect.
+- Current shape: related concepts are represented through `PositionSemantics` and adapter-owned
+  payload data.
+- What would complete it: add a typed `ActionSemantics` model, teach the planner to surface
+  action intent explicitly, and add tests that prove the new layer stays separate from
+  observation and venue semantics.
+
+`Bitcoin real IO`
+
+- Status: architecturally validated, not IO-validated.
+- Bitcoin adapters flow through the full semantic pipeline (subject resolution, view pinning,
+  UTXO observation, valuation, merge, snapshot, report) and the
+  `mixed_evm_and_bitcoin_wallets_share_the_semantic_runtime` test exercises this end-to-end.
+- However, the Bitcoin runtime adapters use stubbed IO: simulated block height/hash from
+  `IoProvider` payloads and fixed quantities from adapter payloads, not real Bitcoin RPC calls.
+- What would complete it: implement a real Bitcoin typed client crate behind `IoProvider` and
+  update the Bitcoin runtime adapters to perform live UTXO scanning.
+
+`Compiled execution spec ownership`
+
+- Status: naming/ownership split, not a behavior gap.
+- The framework layer owns `CompiledExecutionSpec` and launcher persistence, while
+  `portfolio_tracker` emits `semantic_execution_spec` as its domain payload inside the
+  framework spec's `planner_payloads` field.
+- The RFC only requires an optional compiled execution spec artifact, and that artifact already
+  exists in the SDK/framework path with deterministic serialization.
+- What would complete it: either make the portfolio-op payload a direct projection of the
+  framework spec or align both layers on one shared emitted name.
+
+#### Test coverage gaps
+
+`Zero-match adapter selection`
+
+- The `NoMatchingAdapter` error variant exists at `catalog.rs:259` and the code path fires at
+  `catalog.rs:592`, but there is no dedicated unit test that exercises this path with an empty
+  or non-matching catalog.
+- What would close it: add `selection_rejects_zero_matches` test to
+  `crates/states/portfolio/src/semantic/catalog.rs`.
+
+#### Cleanup debt
+
+`OpIo legacy alias`
+
+- `pub type OpIo = OpInterface` at `crates/sdk/src/lib.rs:209-210` is labeled "Legacy alias
+  retained for in-repo helpers and tests during the planner cutover."
+- The cutover is complete. The alias is used in three test files:
+  `crates/ops/nix-app-op/src/tests/nix_app_op_tests.rs`,
+  `crates/ops/proof-op/src/tests/proof_op_tests.rs`,
+  `crates/sdk/src/tests/unstable_tests.rs`.
+- What would close it: replace `OpIo` with `OpInterface` in those files and delete the alias.
+
+`Stale file anchors in RFC historical section`
+
+- The "High-Value Code Anchors" section references paths that no longer exist after the
+  refactor: `crates/states/wallet/src/states.rs`, `crates/states/symbol/src/states.rs`,
+  `crates/states/aave-v3/src/portfolio/states.rs`, `crates/states/portfolio/src/states.rs`.
+- The RFC already notes these "will drift over time". No action required unless the historical
+  section is intended to remain navigable.
