@@ -249,11 +249,16 @@ mfm_cli run start [OPTIONS]
 ```
 
 **Key Options:**
-- `--op-id <ID>`: Operation id (default: `proof`)
+- `--op-id <ID>`: Public root operation id (default: `proof`)
 - `--op-version <VERSION>`: Operation version (default: `v1`)
 - `--op-config-json <JSON>`: Operation config JSON (must be canonical-json-hashable; no floats)
 - `--database-url <URL>`: PostgreSQL connection string (default: `$DATABASE_URL`)
 - `--artifact-root <PATH>`: Artifact store root directory (default: `$MFM_ARTIFACT_ROOT` or `~/.mfm/run_artifacts`)
+
+`run start` accepts only public root ops from the built-in app bundle. Planner-internal semantic
+ids such as `portfolio_prepare_execution_sources` and `portfolio_project_report` are registered for
+recursive planning only and are rejected with `op_not_public`. Use `run pipeline start` when you
+need an explicit custom pipeline payload.
 
 **Examples:**
 ```sh
@@ -265,6 +270,23 @@ mfm_cli run start
 # Start with an explicit op config JSON
 mfm_cli run start --op-config-json '{"message":"hello"}'
 ```
+
+Current built-in public root ops for `run start` are:
+
+- `proof`
+- `keystore_import`
+- `keystore_list`
+- `keystore_delete`
+- `keystore_tx_sign`
+- `evm_read`
+- `evm_contract_from_nix`
+- `evm_deploy`
+- `evm_configure`
+- `evm_validate`
+- `evm_deploy_configure_validate`
+- `portfolio_tracker`
+- `nix_app`
+- `aave_v3_origin_adapt_deploy`
 
 ### `run pipeline start`
 
