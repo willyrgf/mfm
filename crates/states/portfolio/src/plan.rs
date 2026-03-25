@@ -92,29 +92,39 @@ impl AdapterId {
     /// Handles both 2-segment (`resolve_subject/evm_address` yields `None` implementation)
     /// and 3-segment (`observe_position/evm/native_balance`) patterns.
     pub fn parse_parts(&self) -> Option<AdapterIdParts<'_>> {
-        let mut segments = self.0.splitn(3, '/');
-        let capability = segments.next()?;
+        let (capability, rest) = self.0.split_once('/')?;
         if !is_adapter_id_segment(capability) {
             return None;
         }
 
-        let family = segments.next()?;
+        let (family, _implementation) = match rest.split_once('/') {
+            Some((family, implementation)) => {
+                if !is_adapter_id_segment(family) || family.is_empty() {
+                    return None;
+                }
+                if implementation.is_empty()
+                    || implementation.contains('/')
+                    || !is_adapter_id_segment(implementation)
+                {
+                    return None;
+                }
+                return Some(AdapterIdParts::ThreeSegment {
+                    capability,
+                    family,
+                    implementation,
+                });
+            }
+            None => (rest, ""),
+        };
         if !is_adapter_id_segment(family) {
             return None;
         }
 
-        let Some(implementation) = segments.next() else {
-            return Some(AdapterIdParts::TwoSegment { capability, family });
-        };
-        if implementation.contains('/') || !is_adapter_id_segment(implementation) {
-            return None;
+        if !family.is_empty() {
+            Some(AdapterIdParts::TwoSegment { capability, family })
+        } else {
+            None
         }
-
-        Some(AdapterIdParts::ThreeSegment {
-            capability,
-            family,
-            implementation,
-        })
     }
 
     /// Split into a tuple for legacy call sites.
