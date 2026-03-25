@@ -442,8 +442,8 @@ If a breaking change to a persisted or public portfolio JSON surface becomes nec
 (`PortfolioSnapshotRequest`, `PortfolioSnapshotResponse`, `PortfolioSnapshot`, or
 `PortfolioReport`), the same change MUST:
 
-- cut the op version to `portfolio_tracker v2`
-- add a top-level `schema_version` field to each changed JSON object with value `2`
+- keep `portfolio_tracker` as `v1` (no compatibility-preserving migration phase on this branch)
+- add/update top-level `schema_version` on each changed public JSON object to the next schema value
 - update CLI/REST/docs in the same commit
 
 Purely additive changes that preserve existing field meaning do not require this cut.

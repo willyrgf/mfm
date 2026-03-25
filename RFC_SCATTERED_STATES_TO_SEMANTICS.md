@@ -9,7 +9,7 @@ Last updated: 2026-03-25
 This RFC proposes restructuring MFM execution away from protocol-specific state proliferation and
 toward a semantics-first runtime plus a single recursive planning model for the whole project.
 
-This design is implemented on the current `portfolio_tracker v2` runtime path. The built-in
+This design is implemented on the current `portfolio_tracker` runtime path. The built-in
 portfolio flow now runs through the fixed semantic state family, recursive op flattening, and the
 semantic adapter catalogs described below.
 
@@ -1212,7 +1212,7 @@ The most important finding is that the current live code path is:
 2. `task.mfm.portfolio.snapshot` shell wrapper
 3. packaged `mfm_cli --output-format json portfolio snapshot --request-file ...`
 4. `AppServices::start_portfolio_snapshot`
-5. single-op run for `portfolio_tracker v2`
+5. single-op run for `portfolio_tracker v1`
 6. namespaced state graph
 7. final context snapshot extraction
 8. raw JSON envelope emitted unchanged to stdout
@@ -1378,7 +1378,7 @@ Store semantics:
 - starts `RunsStartRequest::Single`
 - uses:
   - `op_id = "portfolio_tracker"`
-  - `op_version = "v2"`
+  - `op_version = "v1"`
 
 Default run config semantics:
 
@@ -2542,16 +2542,23 @@ runtime that this sketch described.
 The branch state after implementation is:
 
 - recursive op flattening is live in the SDK planner path
-- `portfolio_tracker` is cut over to `v2`
+- `portfolio_tracker` is now the canonical `v1` root operation (no compatibility-preserving migration phase)
 - snapshot and report artifacts emit `schema_version = 2`
 - generic semantic observation and valuation runtime states are live
 - mixed EVM and Bitcoin portfolio coverage runs through the same semantic graph
 
-The remaining implementation work is now narrow and explicit:
+The migration-specified implementation work from this section is complete.
 
-- close the `ObservationKey` ordering gap at runtime
-- stop exposing semantic child ops as public root-op targets
-- finish the matching docs and public-surface cleanup
+- This section’s cleanup hardening has landed:
+  - docs and public contract alignment for the canonical `portfolio_tracker v1` path
+    (`docs/redesign.md`, `bin/cli/README.md`, `bin/rest-api/README.md`)
+  - regression fixture coverage for public rejection of planner-internal child ops
+    (`crates/app/src/lib.rs`)
+  - canonical observation ordering regression for planner-level `ObservationKey` normalization
+    (`crates/states/portfolio/src/semantic.rs`)
+- Mixed EVM + Bitcoin coverage remains exercised through the same semantic family path by existing
+  `mixed_evm_and_bitcoin_wallets_share_the_semantic_runtime` test coverage in
+  `crates/ops/portfolio-tracker-op/src/tests/portfolio_tracker_op_tests.rs`.
 
 There is still no pending compatibility-preserving migration phase.
 

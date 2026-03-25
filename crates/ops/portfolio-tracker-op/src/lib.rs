@@ -59,7 +59,7 @@ use semantic_ops::{
 };
 
 const OP_ID: &str = "portfolio_tracker";
-const OP_VERSION: &str = "v2";
+const OP_VERSION: &str = "v1";
 const MAIN_OP_PATH: &str = "portfolio_tracker.main";
 
 /// Returns the context key that stores the canonical portfolio snapshot JSON.

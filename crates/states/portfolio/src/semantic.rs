@@ -1261,4 +1261,82 @@ mod tests {
             }
         );
     }
+
+    #[test]
+    fn compiled_observation_batch_normalize_orders_by_observation_key() {
+        let mut batch = CompiledObservationBatch {
+            batch_id: "observe.test".to_string(),
+            adapter: AdapterId("observe_position/evm/native_balance".to_string()),
+            network_view_id: "view".to_string(),
+            bindings: vec![
+                CompiledObservationBinding {
+                    binding_id: "binding.wallet_main.z.z".to_string(),
+                    observation_key: ObservationKey {
+                        subject_id: "wallet_main".to_string(),
+                        network_view_id: "arbitrum-mainnet".to_string(),
+                        instrument_id: "z".to_string(),
+                        position_kind: PositionSemantics::SpotBalance,
+                        venue_id: Some(VenueId("wallet".to_string())),
+                        discriminator: None,
+                    },
+                    adapter: AdapterId("observe_position/evm/native_balance".to_string()),
+                    valuation_ids: vec!["z".to_string(), "a".to_string()],
+                    payload: Default::default(),
+                },
+                CompiledObservationBinding {
+                    binding_id: "binding.wallet_other.a.a".to_string(),
+                    observation_key: ObservationKey {
+                        subject_id: "wallet_other".to_string(),
+                        network_view_id: "bitcoin-mainnet".to_string(),
+                        instrument_id: "a".to_string(),
+                        position_kind: PositionSemantics::SpotBalance,
+                        venue_id: Some(VenueId("wallet".to_string())),
+                        discriminator: None,
+                    },
+                    adapter: AdapterId("observe_position/evm/native_balance".to_string()),
+                    valuation_ids: vec!["a".to_string(), "b".to_string()],
+                    payload: Default::default(),
+                },
+                CompiledObservationBinding {
+                    binding_id: "binding.wallet_main.a.a".to_string(),
+                    observation_key: ObservationKey {
+                        subject_id: "wallet_main".to_string(),
+                        network_view_id: "arbitrum-mainnet".to_string(),
+                        instrument_id: "a".to_string(),
+                        position_kind: PositionSemantics::SpotBalance,
+                        venue_id: Some(VenueId("wallet".to_string())),
+                        discriminator: None,
+                    },
+                    adapter: AdapterId("observe_position/evm/native_balance".to_string()),
+                    valuation_ids: vec!["b".to_string()],
+                    payload: Default::default(),
+                },
+                CompiledObservationBinding {
+                    binding_id: "binding.wallet_main.a.b".to_string(),
+                    observation_key: ObservationKey {
+                        subject_id: "wallet_main".to_string(),
+                        network_view_id: "arbitrum-mainnet".to_string(),
+                        instrument_id: "a".to_string(),
+                        position_kind: PositionSemantics::SpotBalance,
+                        venue_id: Some(VenueId("wallet".to_string())),
+                        discriminator: None,
+                    },
+                    adapter: AdapterId("observe_position/evm/native_balance".to_string()),
+                    valuation_ids: vec!["a".to_string()],
+                    payload: Default::default(),
+                },
+            ],
+        };
+
+        batch.normalize();
+
+        assert_eq!(batch.bindings[0].binding_id, "binding.wallet_main.a.a");
+        assert_eq!(batch.bindings[1].binding_id, "binding.wallet_main.a.b");
+        assert_eq!(batch.bindings[2].binding_id, "binding.wallet_main.z.z");
+        assert_eq!(batch.bindings[3].binding_id, "binding.wallet_other.a.a");
+        assert_eq!(batch.bindings[0].valuation_ids, vec!["a".to_string()]);
+        assert_eq!(batch.bindings[1].valuation_ids, vec!["a".to_string()]);
+        assert_eq!(batch.bindings[2].valuation_ids, vec!["a".to_string(), "z".to_string()]);
+        assert_eq!(batch.bindings[3].valuation_ids, vec!["a".to_string(), "b".to_string()]);
+    }
 }
