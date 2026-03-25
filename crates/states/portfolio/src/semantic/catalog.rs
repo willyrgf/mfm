@@ -906,6 +906,39 @@ mod tests {
     }
 
     #[test]
+    fn selection_rejects_zero_matches() {
+        let (target, subject, view, position, instrument, venue, valuations) = sample_semantics();
+        let non_matching = Arc::new(StubObservationPlanner {
+            adapter: AdapterId("observe_position/bitcoin/utxo_set".to_string()),
+            match_family: NetworkFamily::Bitcoin,
+            match_semantics: super::super::InstrumentSemantics::NativeAsset,
+            emitted_binding: sample_binding("observe_position/bitcoin/utxo_set"),
+        }) as Arc<dyn ObservationPlannerAdapter>;
+        let catalog = SemanticCatalog::new(SemanticCatalogParts {
+            observation_planners: vec![non_matching],
+            ..SemanticCatalogParts::default()
+        })
+        .expect("catalog");
+
+        assert_eq!(
+            catalog
+                .plan_observation(sample_request(
+                    &target,
+                    &subject,
+                    &view,
+                    &position,
+                    &instrument,
+                    Some(&venue),
+                    &valuations,
+                ))
+                .unwrap_err(),
+            PlanningError::NoMatchingAdapter {
+                kind: "observation",
+            }
+        );
+    }
+
+    #[test]
     fn planning_normalizes_emitted_binding_payloads() {
         let (target, subject, view, position, instrument, venue, valuations) = sample_semantics();
         let planner = Arc::new(StubObservationPlanner {

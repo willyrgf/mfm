@@ -20,6 +20,7 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use tracing::warn;
 
+use mfm_collectors_btc_jsonrpc_http::{BtcJsonRpcClient, BtcJsonRpcConfig};
 use mfm_collectors_evm_jsonrpc_http::{
     EvmJsonRpcHttpConfig, EvmJsonRpcHttpTransportFactory, EvmJsonRpcSource, EvmRoutingStrategy,
     EvmSourceKind,
@@ -45,6 +46,9 @@ use mfm_machine::stores::{StreamAppend, StreamStore};
 const ENV_EVM_RPC_SOURCES_JSON: &str = "MFM_EVM_RPC_SOURCES_JSON";
 const ENV_EVM_RPC_PREFERRED_ORDER: &str = "MFM_EVM_RPC_PREFERRED_ORDER";
 const ENV_EVM_RPC_REQUIRE_GET_PROOF_IDS: &str = "MFM_EVM_RPC_REQUIRE_GET_PROOF_IDS";
+const ENV_BTC_RPC_URL: &str = "MFM_BTC_RPC_URL";
+const ENV_BTC_RPC_USER: &str = "MFM_BTC_RPC_USER";
+const ENV_BTC_RPC_PASSWORD: &str = "MFM_BTC_RPC_PASSWORD";
 
 const DEFAULT_POOL_KIND: &str = "default";
 const PROBE_REFRESH_INTERVAL_MS: u64 = 15_000;
@@ -776,8 +780,17 @@ impl LiveIoTransportFactory for RpcControlTransportFactory {
             None
         };
 
+        let btc_client = std::env::var(ENV_BTC_RPC_URL).ok().map(|rpc_url| {
+            BtcJsonRpcClient::new(BtcJsonRpcConfig {
+                rpc_url,
+                rpc_user: std::env::var(ENV_BTC_RPC_USER).ok(),
+                rpc_password: std::env::var(ENV_BTC_RPC_PASSWORD).ok(),
+            })
+        });
+
         Box::new(RpcControlTransport {
             executor,
+            btc_client,
             control_plane_store,
             catalog: self.catalog.clone(),
             config_error: self.config_error.clone(),
@@ -787,6 +800,7 @@ impl LiveIoTransportFactory for RpcControlTransportFactory {
 
 struct RpcControlTransport {
     executor: Option<Box<dyn LiveIoTransport>>,
+    btc_client: Option<BtcJsonRpcClient>,
     control_plane_store: ControlPlaneStore,
     catalog: BootstrapCatalog,
     config_error: Option<RpcControlConfigError>,
@@ -1548,6 +1562,58 @@ impl RpcControlTransport {
             }
         }
     }
+
+    fn ensure_btc_client(&mut self) -> Result<&mut BtcJsonRpcClient, IoError> {
+        self.btc_client.as_mut().ok_or_else(|| {
+            io_transport(
+                "btc_rpc_not_configured",
+                ErrorCategory::Unknown,
+                false,
+                format!(
+                    "Bitcoin RPC not configured: set {} to enable Bitcoin IO",
+                    ENV_BTC_RPC_URL
+                ),
+            )
+        })
+    }
+
+    async fn handle_bitcoin_anchor(
+        &mut self,
+        _network_id: &str,
+    ) -> Result<serde_json::Value, IoError> {
+        let client = self.ensure_btc_client()?;
+        let info = client.get_blockchain_info().await.map_err(|err| {
+            io_transport(
+                "btc_rpc_anchor_failed",
+                ErrorCategory::Unknown,
+                true,
+                format!("bitcoin anchor request failed: {err}"),
+            )
+        })?;
+        Ok(serde_json::json!({
+            "height": info.blocks,
+            "block_hash": info.bestblockhash,
+        }))
+    }
+
+    async fn handle_bitcoin_scan_utxos(
+        &mut self,
+        _network_id: &str,
+        address: &str,
+    ) -> Result<serde_json::Value, IoError> {
+        let client = self.ensure_btc_client()?;
+        let sats = client.address_balance_sats(address).await.map_err(|err| {
+            io_transport(
+                "btc_rpc_scan_utxos_failed",
+                ErrorCategory::Unknown,
+                true,
+                format!("bitcoin scan utxos failed: {err}"),
+            )
+        })?;
+        Ok(serde_json::json!({
+            "amount_sats": sats.to_string(),
+        }))
+    }
 }
 
 #[async_trait]
@@ -1580,6 +1646,14 @@ impl LiveIoTransport for RpcControlTransport {
                 self.handle_prepare_sources(&control_scope, &network_id)
                     .await
             }
+            RpcControlRequest::BitcoinAnchor { network_id, .. } => {
+                self.handle_bitcoin_anchor(&network_id).await
+            }
+            RpcControlRequest::BitcoinScanUtxos {
+                address,
+                network_id,
+                ..
+            } => self.handle_bitcoin_scan_utxos(&network_id, &address).await,
         }
     }
 }
@@ -1634,6 +1708,7 @@ mod tests {
         let preferred_order = sources.iter().map(|source| source.id.clone()).collect();
         RpcControlTransport {
             executor: None,
+            btc_client: None,
             control_plane_store: ControlPlaneStore::PostgresEnv { store: None },
             catalog: BootstrapCatalog {
                 sources,
@@ -1650,6 +1725,7 @@ mod tests {
         let preferred_order = sources.iter().map(|source| source.id.clone()).collect();
         RpcControlTransport {
             executor: Some(Box::new(StubExecutor)),
+            btc_client: None,
             control_plane_store: ControlPlaneStore::StreamBacked(
                 StreamBackedControlPlaneStore::new(streams),
             ),

@@ -33,6 +33,12 @@ pub use payloads::{
 };
 
 /// Stable semantic venue identifier authored by portfolio config.
+///
+/// V1 canonical shape: transparent string newtype. The RFC pseudocode prescribed a
+/// multi-field struct (`venue_id`, `venue_kind`, `network_id`, `parent_venue_id`), but the
+/// implementation splits venue metadata onto the separate [`Venue`] struct. The
+/// `PortfolioSemanticConfig.venues` list provides the join between identity and metadata.
+/// This is the intentional v1 contract.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct VenueId(pub String);
@@ -44,9 +50,33 @@ impl std::fmt::Display for VenueId {
 }
 
 /// Stable planner-selected adapter identifier.
+///
+/// V1 canonical shape: transparent string newtype using the slash convention
+/// `"capability/family/implementation"`. Examples:
+/// - 2-segment: `"resolve_subject/evm_address"`, `"pin_view/bitcoin"`
+/// - 3-segment: `"observe_position/evm/native_balance"`, `"resolve_valuation/fixed_unit_price"`
+///
+/// The RFC pseudocode prescribed a multi-field struct (`capability: CapabilityKind`,
+/// `family: NetworkFamily`, `implementation: String`). The string convention carries
+/// the same information and is the intentional v1 contract. Use [`AdapterId::parts()`]
+/// for structured access.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct AdapterId(pub String);
+
+impl AdapterId {
+    /// Split into structured parts: `(capability, family, implementation)`.
+    ///
+    /// Handles both 2-segment (`resolve_subject/evm_address` yields `None` implementation)
+    /// and 3-segment (`observe_position/evm/native_balance`) patterns.
+    pub fn parts(&self) -> (&str, &str, Option<&str>) {
+        let mut segments = self.0.splitn(3, '/');
+        let capability = segments.next().unwrap_or("");
+        let family = segments.next().unwrap_or("");
+        let implementation = segments.next();
+        (capability, family, implementation)
+    }
+}
 
 impl std::fmt::Display for AdapterId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -163,6 +193,31 @@ pub enum PositionSemantics {
     StakedClaim,
     /// UTXO-backed balance set.
     UtxoSet,
+}
+
+/// Semantic action intent for future transaction workflows.
+///
+/// Reserved by the RFC for a planned action-intent layer. Not yet wired into planner
+/// traits or runtime adapters — exists as a stable type namespace for future use.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionSemantics {
+    /// Token swap.
+    Swap,
+    /// Borrow from a lending market.
+    Borrow,
+    /// Lend to a lending market.
+    Lend,
+    /// Repay a lending-market debt.
+    Repay,
+    /// Deposit into a protocol.
+    Deposit,
+    /// Withdraw from a protocol.
+    Withdraw,
+    /// Stake an asset.
+    Stake,
+    /// Unstake an asset.
+    Unstake,
 }
 
 /// One semantic venue declaration.
@@ -665,6 +720,10 @@ impl CompiledObservationBatch {
     }
 }
 
+/// Stable JSON key under which [`PortfolioExecutionSpec`] is emitted inside
+/// `CompiledExecutionSpec.planner_payloads`.
+pub const PORTFOLIO_EXECUTION_SPEC_KEY: &str = "semantic_execution_spec";
+
 /// Planner-owned compiled execution spec for semantic portfolio execution.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PortfolioExecutionSpec {
@@ -1055,6 +1114,41 @@ fn ensure_canonical_execution_payload(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn action_semantics_serde_round_trip() {
+        let variants = vec![
+            ActionSemantics::Swap,
+            ActionSemantics::Borrow,
+            ActionSemantics::Lend,
+            ActionSemantics::Repay,
+            ActionSemantics::Deposit,
+            ActionSemantics::Withdraw,
+            ActionSemantics::Stake,
+            ActionSemantics::Unstake,
+        ];
+        for variant in &variants {
+            let json = serde_json::to_string(variant).expect("serialize");
+            let back: ActionSemantics = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(&back, variant);
+        }
+        assert_eq!(
+            serde_json::to_string(&ActionSemantics::Swap).unwrap(),
+            "\"swap\""
+        );
+    }
+
+    #[test]
+    fn adapter_id_parts_three_segments() {
+        let id = AdapterId("observe_position/evm/native_balance".to_string());
+        assert_eq!(id.parts(), ("observe_position", "evm", Some("native_balance")));
+    }
+
+    #[test]
+    fn adapter_id_parts_two_segments() {
+        let id = AdapterId("resolve_subject/evm_address".to_string());
+        assert_eq!(id.parts(), ("resolve_subject", "evm_address", None));
+    }
 
     fn sample_semantic_config() -> PortfolioSemanticConfig {
         PortfolioSemanticConfig {

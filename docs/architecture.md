@@ -129,7 +129,7 @@ Operation (`impl Operation`) is a planning abstraction:
 - MUST validate op input shape and produce deterministic planning output.
 - MAY recursively compose sub-operations and/or directly produce state-graph structure.
 - MUST converge to a deterministic final `StateGraph` before runtime starts.
-- MUST declare op imports/exports (`OpIo`) as an interface contract.
+- MUST declare op imports/exports (`OpInterface`) as an interface contract.
 - MUST NOT execute runtime side effects.
 - MUST NOT perform ambient IO (`fs/network/time/env/process`) in `expand()`.
 - MUST NOT implement `State` handlers in reusable paths.
