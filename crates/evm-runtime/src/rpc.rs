@@ -6,7 +6,9 @@ use mfm_machine::ids::{FactKey, StateId};
 use mfm_machine::io::IoProvider;
 use mfm_state_common::errors as op_errors;
 use mfm_state_common::rpc as op_rpc;
-use mfm_transports_local_evm::{LocalEvmIoClient, LocalEvmSignLegacyCreateCall};
+use mfm_transports_local_evm::{
+    LocalEvmIoClient, LocalEvmSignLegacyCallCall, LocalEvmSignLegacyCreateCall,
+};
 
 use crate::dcv as shared_dcv;
 
@@ -314,6 +316,29 @@ pub struct LegacyCreateTxSigningRequest<'a> {
     pub constructor_payload: &'a [u8],
 }
 
+/// Inputs required to locally sign a legacy contract call transaction.
+#[derive(Clone, Debug)]
+pub struct LegacyCallTxSigningRequest<'a> {
+    /// Environment variable name that contains the signing key.
+    pub signing_key_env: &'a str,
+    /// Sender address.
+    pub from: &'a str,
+    /// Target address.
+    pub to: &'a str,
+    /// Chain id used for signing.
+    pub chain_id: u64,
+    /// Nonce expressed as a canonical hex quantity.
+    pub nonce_hex: &'a str,
+    /// Gas price expressed as a canonical hex quantity.
+    pub gas_price_hex: &'a str,
+    /// Gas limit expressed as a canonical hex quantity.
+    pub gas_limit_hex: &'a str,
+    /// Value expressed as a canonical hex quantity.
+    pub value_hex: &'a str,
+    /// Call payload bytes.
+    pub call_payload: &'a [u8],
+}
+
 /// Asks the local EVM transport to sign a legacy contract-creation transaction.
 pub async fn local_sign_legacy_create_raw_tx(
     client: &mut EvmIoClient<'_>,
@@ -331,6 +356,29 @@ pub async fn local_sign_legacy_create_raw_tx(
             gas_limit_hex: req.gas_limit_hex.to_string(),
             value_hex: req.value_hex.to_string(),
             data_hex: shared_dcv::bytes_to_hex_prefixed(req.constructor_payload),
+        })
+        .await
+        .map_err(op_errors::state_from_io)
+}
+
+/// Asks the local EVM transport to sign a legacy contract call transaction.
+pub async fn local_sign_legacy_call_raw_tx(
+    client: &mut EvmIoClient<'_>,
+    req: LegacyCallTxSigningRequest<'_>,
+) -> Result<String, StateError> {
+    let state_id = client.state_id().clone();
+    let mut local = LocalEvmIoClient::new(state_id, client.io_mut());
+    local
+        .sign_legacy_call(LocalEvmSignLegacyCallCall {
+            signing_key_env: req.signing_key_env.to_string(),
+            from: req.from.to_string(),
+            to: req.to.to_string(),
+            chain_id: req.chain_id,
+            nonce_hex: req.nonce_hex.to_string(),
+            gas_price_hex: req.gas_price_hex.to_string(),
+            gas_limit_hex: req.gas_limit_hex.to_string(),
+            value_hex: req.value_hex.to_string(),
+            data_hex: shared_dcv::bytes_to_hex_prefixed(req.call_payload),
         })
         .await
         .map_err(op_errors::state_from_io)
@@ -457,6 +505,110 @@ pub async fn send_signed_create_transaction_with_nonce_for_network(
             gas_limit_hex: &gas_hex,
             value_hex: value_hex.unwrap_or("0x0"),
             constructor_payload,
+        },
+    )
+    .await?;
+
+    send_raw_transaction_for_network(client, network_id, control_scope, &raw_tx_hex).await
+}
+
+/// Signs and submits a contract call transaction for the supplied managed network and scope using the next pending nonce.
+pub async fn send_signed_call_transaction_for_network(
+    client: &mut EvmIoClient<'_>,
+    network_id: &str,
+    control_scope: &str,
+    signing_key_env: &str,
+    from: &str,
+    to: &str,
+    call_payload: &[u8],
+    value_hex: Option<&str>,
+) -> Result<String, StateError> {
+    let nonce_hex =
+        transaction_count_hex_for_network(client, network_id, control_scope, from).await?;
+    send_signed_call_transaction_with_nonce_for_network(
+        client,
+        network_id,
+        control_scope,
+        signing_key_env,
+        from,
+        to,
+        &nonce_hex,
+        call_payload,
+        value_hex,
+    )
+    .await
+}
+
+/// Signs and submits a contract call transaction for the supplied managed network, scope, and nonce.
+#[allow(clippy::too_many_arguments)]
+pub async fn send_signed_call_transaction_with_nonce_for_network(
+    client: &mut EvmIoClient<'_>,
+    network_id: &str,
+    control_scope: &str,
+    signing_key_env: &str,
+    from: &str,
+    to: &str,
+    nonce_hex: &str,
+    call_payload: &[u8],
+    value_hex: Option<&str>,
+) -> Result<String, StateError> {
+    let configured_from = shared_dcv::normalize_address(from).map_err(|_| {
+        op_errors::state_unknown("invalid_from_address", "from address was invalid")
+    })?;
+    let configured_to = shared_dcv::normalize_address(to)
+        .map_err(|_| op_errors::state_unknown("invalid_to_address", "to address was invalid"))?;
+    let nonce_hex =
+        normalize_quantity_hex(nonce_hex, "signed call nonce must be a valid hex quantity")?;
+
+    let tx_obj = {
+        let mut tx = serde_json::json!({
+            "from": configured_from,
+            "to": configured_to,
+            "data": shared_dcv::bytes_to_hex_prefixed(call_payload),
+        });
+        if let Some(v) = value_hex {
+            tx["value"] = serde_json::json!(v);
+        }
+        tx
+    };
+
+    let gas_hex = estimate_gas_hex_for_network(client, network_id, control_scope, &tx_obj).await?;
+    let gas_price_hex = gas_price_hex_for_network(client, network_id, control_scope).await?;
+    let chain_id = client
+        .call(managed_call(
+            network_id,
+            control_scope,
+            "eth_chainId",
+            serde_json::json!([]),
+        ))
+        .await
+        .map_err(op_errors::state_from_io)?;
+    let chain_id = op_rpc::expect_string(
+        &chain_id.response,
+        "evm_response_invalid",
+        "eth_chainId returned non-string chain id",
+    )?;
+    let chain_id = normalize_quantity_hex(&chain_id, "eth_chainId returned invalid chain id")?;
+    let chain_id = u64::from_str_radix(
+        chain_id
+            .strip_prefix("0x")
+            .expect("normalized quantity must have prefix"),
+        16,
+    )
+    .map_err(|_| op_errors::state_unknown("evm_response_invalid", "eth_chainId overflowed u64"))?;
+
+    let raw_tx_hex = local_sign_legacy_call_raw_tx(
+        client,
+        LegacyCallTxSigningRequest {
+            signing_key_env,
+            from: &configured_from,
+            to: &configured_to,
+            chain_id,
+            nonce_hex: &nonce_hex,
+            gas_price_hex: &gas_price_hex,
+            gas_limit_hex: &gas_hex,
+            value_hex: value_hex.unwrap_or("0x0"),
+            call_payload,
         },
     )
     .await?;

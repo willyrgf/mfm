@@ -180,6 +180,9 @@ struct EvmConfigureConfig {
     from: String,
 
     #[serde(default)]
+    signing_key_env: Option<String>,
+
+    #[serde(default)]
     contract_address: Option<String>,
 
     calls: Vec<ConfigureCallConfig>,
@@ -867,6 +870,12 @@ impl Operation for EvmConfigureOp {
             op_errors::sdk_parse_error("invalid_op_config", "artifact_port must be non-empty")
         })?;
 
+        if let Some(env_name) = cfg.signing_key_env.as_deref() {
+            ensure_nonempty_env_name(env_name).map_err(|_| {
+                op_errors::sdk_parse_error("invalid_op_config", "signing_key_env must be non-empty")
+            })?;
+        }
+
         if cfg.calls.is_empty() {
             return Err(op_errors::sdk_parse_error(
                 "invalid_op_config",
@@ -950,6 +959,7 @@ impl Operation for EvmConfigureOp {
                 network_id: cfg.network_id,
                 control_scope: cfg.control_scope,
                 from,
+                signing_key_env: cfg.signing_key_env,
                 contract_address,
                 calls: calls
                     .into_iter()

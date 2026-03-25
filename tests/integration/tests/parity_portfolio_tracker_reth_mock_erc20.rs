@@ -421,7 +421,7 @@ async fn parity_portfolio_tracker_snapshot_with_mock_erc20_mint() {
         .to_string();
     let from_norm = normalize_address_lower(&from);
 
-    // Used only by the deploy step (signed raw tx). `evm_configure` uses `eth_sendTransaction`.
+    // Used by both deploy and configure steps to sign raw transactions locally.
     let signing_key_env = "MFM_EVM_PARITY_DEPLOY_SIGNING_KEY";
     std::env::set_var(signing_key_env, RETH_DEV_ACCOUNT0_PRIVATE_KEY);
 
