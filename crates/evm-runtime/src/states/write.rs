@@ -28,8 +28,6 @@ const KEY_CONTRACT_ARTIFACT: &str = "contract_artifact";
 const KEY_CONTRACT_ADDRESS: &str = "contract_address";
 const KEY_DEPLOY_TX_HASH: &str = "deploy_tx_hash";
 const KEY_DEPLOY_RECEIPT: &str = "deploy_receipt";
-const KEY_CONFIGURE_TX_HASHES: &str = "configure_tx_hashes";
-const KEY_CONFIGURE_RECEIPTS: &str = "configure_receipts";
 const KEY_VALIDATED: &str = "validated";
 const KEY_CHAIN_ID: &str = "chain_id";
 const KEY_CLIENT_VERSION: &str = "client_version";
@@ -120,6 +118,10 @@ pub struct EvmConfigureStateConfig {
     pub contract_address: Option<String>,
     /// Calls to execute against the deployed contract.
     pub calls: Vec<EvmConfigureRuntimeCall>,
+    /// Context key used to write the configure transaction hashes export.
+    pub tx_hashes_export_key: String,
+    /// Context key used to write the configure receipts export.
+    pub receipts_export_key: String,
     /// Delay between receipt polls in milliseconds.
     pub poll_interval_ms: u64,
     /// Maximum number of receipt polls before timing out.
@@ -407,12 +409,12 @@ impl State for EvmConfigureState {
 
         context_write_json(
             ctx,
-            KEY_CONFIGURE_TX_HASHES,
+            &self.cfg.tx_hashes_export_key,
             serde_json::Value::Array(tx_hashes),
         )?;
         context_write_json(
             ctx,
-            KEY_CONFIGURE_RECEIPTS,
+            &self.cfg.receipts_export_key,
             serde_json::Value::Array(receipts),
         )?;
 

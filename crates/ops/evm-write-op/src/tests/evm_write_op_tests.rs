@@ -154,6 +154,35 @@ fn configure_io_imports_contract_address_when_unset() {
 }
 
 #[test]
+fn configure_io_exports_custom_keys_when_overridden() {
+    let op = EvmConfigureOp;
+    let io = planned_interface(
+        op.expand(
+            OpPath("m.main".to_string()),
+            &serde_json::json!({
+                "artifact": sample_artifact(),
+                "network_id": "ethereum-mainnet",
+                "from": "0x1111111111111111111111111111111111111111",
+                "calls": [{"function":"setValue","args":[1]}],
+                "tx_hashes_export_key": "approve_tx_hashes",
+                "receipts_export_key": "approve_receipts"
+            }),
+            &op_test_support::run_config_live(),
+        )
+        .expect("expand"),
+    );
+
+    assert!(io
+        .exports
+        .iter()
+        .any(|k| k.0.as_str() == "approve_tx_hashes"));
+    assert!(io
+        .exports
+        .iter()
+        .any(|k| k.0.as_str() == "approve_receipts"));
+}
+
+#[test]
 fn contract_from_nix_io_imports_result_and_exports_artifact() {
     let op = EvmContractFromNixOp;
     let io = planned_interface(

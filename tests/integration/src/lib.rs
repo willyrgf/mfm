@@ -14,10 +14,12 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use mfm_collectors_evm_jsonrpc_http::EvmSourceKind;
 use mfm_collectors_rpc_control::{EvmIoClient, JsonRpcCall, DEFAULT_CONTROL_SCOPE};
 use mfm_machine::engine::Stores;
+use mfm_machine::errors::IoError;
 use mfm_machine::ids::{FactKey, RunId, StateId};
 use mfm_machine::live_io::{
     FactIndex, LiveIo, LiveIoEnv, LiveIoTransportFactory, NoopFactRecorder,
@@ -28,6 +30,19 @@ use mfm_transports_rpc_control::{
     RpcControlPlaneStorageMode, RpcControlTransportFactory,
 };
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+
+const RPC_CONTROL_HELPER_MAX_ATTEMPTS: usize = 5;
+const RPC_CONTROL_HELPER_RETRY_DELAY_MS: u64 = 200;
+
+fn io_error_retryable(err: &IoError) -> bool {
+    match err {
+        IoError::MissingFactKey(info)
+        | IoError::Transport(info)
+        | IoError::RateLimited(info)
+        | IoError::Other(info) => info.retryable,
+        IoError::MissingFact { info, .. } => info.retryable,
+    }
+}
 
 /// Helpers for persisting parity run ids between coordinated integration-test phases.
 pub mod parity_run_ids {
@@ -320,39 +335,51 @@ pub mod rpc_control {
         method: &str,
         params: serde_json::Value,
     ) -> serde_json::Value {
-        let state_id = StateId::must_new("rpc_control.integration.helper_call".to_string());
-        let run_id = RunId(uuid::Uuid::new_v4());
-        let stream_store = Arc::clone(&streams);
-        let artifacts_store = Arc::clone(&artifacts);
-        let transport = transport_for_state(
-            stream_store,
-            artifacts_store,
-            run_id,
-            state_id.clone(),
-            sources.to_vec(),
-        );
-        let mut live = LiveIo::new(
-            run_id,
-            state_id.clone(),
-            0,
-            artifacts,
-            FactIndex::default(),
-            Arc::new(NoopFactRecorder),
-            transport,
-        );
-        let mut client = EvmIoClient::new(state_id, &mut live);
-        client
-            .call(JsonRpcCall::for_scope_and_network(
-                control_scope,
-                network_id,
-                method,
-                params,
-            ))
-            .await
-            .unwrap_or_else(|err| {
-                panic!("rpc.control call failed: {err:?}");
-            })
-            .response
+        for attempt in 0..RPC_CONTROL_HELPER_MAX_ATTEMPTS {
+            let state_id = StateId::must_new("rpc_control.integration.helper_call".to_string());
+            let run_id = RunId(uuid::Uuid::new_v4());
+            let stream_store = Arc::clone(&streams);
+            let artifacts_store = Arc::clone(&artifacts);
+            let transport = transport_for_state(
+                stream_store,
+                artifacts_store,
+                run_id,
+                state_id.clone(),
+                sources.to_vec(),
+            );
+            let mut live = LiveIo::new(
+                run_id,
+                state_id.clone(),
+                0,
+                Arc::clone(&artifacts),
+                FactIndex::default(),
+                Arc::new(NoopFactRecorder),
+                transport,
+            );
+            let mut client = EvmIoClient::new(state_id, &mut live);
+            match client
+                .call(JsonRpcCall::for_scope_and_network(
+                    control_scope,
+                    network_id,
+                    method,
+                    params.clone(),
+                ))
+                .await
+            {
+                Ok(response) => return response.response,
+                Err(err)
+                    if attempt + 1 < RPC_CONTROL_HELPER_MAX_ATTEMPTS
+                        && io_error_retryable(&err) =>
+                {
+                    std::thread::sleep(Duration::from_millis(RPC_CONTROL_HELPER_RETRY_DELAY_MS));
+                }
+                Err(err) => {
+                    panic!("rpc.control call failed: {err:?}");
+                }
+            }
+        }
+
+        unreachable!("rpc.control retry loop must return or panic")
     }
 
     /// Convenience alias for making a control-plane call with an explicit fact key.
@@ -394,35 +421,52 @@ pub mod rpc_control {
         method: &str,
         params: serde_json::Value,
     ) -> serde_json::Value {
-        let run_id = RunId(uuid::Uuid::new_v4());
-        let stream_store = Arc::clone(&streams);
-        let artifacts_store = Arc::clone(&artifacts);
-        let transport = transport_for_state(
-            stream_store,
-            artifacts_store,
-            run_id,
-            state_id.clone(),
-            sources.to_vec(),
-        );
-        let mut live = LiveIo::new(
-            run_id,
-            state_id.clone(),
-            0,
-            artifacts,
-            FactIndex::default(),
-            Arc::new(NoopFactRecorder),
-            transport,
-        );
-        let mut client = EvmIoClient::new(state_id, &mut live);
-        client
-            .call_with_fact_key(
-                JsonRpcCall::for_scope_and_network(control_scope, network_id, method, params),
-                fact_key,
-            )
-            .await
-            .unwrap_or_else(|err| {
-                panic!("rpc.control call failed: {err:?}");
-            })
-            .response
+        for attempt in 0..RPC_CONTROL_HELPER_MAX_ATTEMPTS {
+            let run_id = RunId(uuid::Uuid::new_v4());
+            let stream_store = Arc::clone(&streams);
+            let artifacts_store = Arc::clone(&artifacts);
+            let transport = transport_for_state(
+                stream_store,
+                artifacts_store,
+                run_id,
+                state_id.clone(),
+                sources.to_vec(),
+            );
+            let mut live = LiveIo::new(
+                run_id,
+                state_id.clone(),
+                0,
+                Arc::clone(&artifacts),
+                FactIndex::default(),
+                Arc::new(NoopFactRecorder),
+                transport,
+            );
+            let mut client = EvmIoClient::new(state_id.clone(), &mut live);
+            match client
+                .call_with_fact_key(
+                    JsonRpcCall::for_scope_and_network(
+                        control_scope,
+                        network_id,
+                        method,
+                        params.clone(),
+                    ),
+                    fact_key.clone(),
+                )
+                .await
+            {
+                Ok(response) => return response.response,
+                Err(err)
+                    if attempt + 1 < RPC_CONTROL_HELPER_MAX_ATTEMPTS
+                        && io_error_retryable(&err) =>
+                {
+                    std::thread::sleep(Duration::from_millis(RPC_CONTROL_HELPER_RETRY_DELAY_MS));
+                }
+                Err(err) => {
+                    panic!("rpc.control call failed: {err:?}");
+                }
+            }
+        }
+
+        unreachable!("rpc.control retry loop must return or panic")
     }
 }

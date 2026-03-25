@@ -15,8 +15,8 @@ use mfm_machine::config::{
 use mfm_machine::context::DynContext;
 use mfm_machine::engine::{RunPhase, Stores};
 use mfm_machine::errors::ContextError;
-use mfm_machine::events::event_envelopes_from_stream_records;
-use mfm_machine::ids::{ContextKey, OpId};
+use mfm_machine::events::{event_envelopes_from_stream_records, Event, KernelEvent};
+use mfm_machine::ids::{ContextKey, OpId, RunId};
 use mfm_machine::stores::{ArtifactStore, StreamId, StreamStore};
 use mfm_machine_test_support::init_test_observability;
 use mfm_sdk::ids::{MachineId, StepId};
@@ -163,6 +163,69 @@ async fn connect_postgres_with_retry(max_attempts: u32, delay_ms: u64) -> Postgr
         "postgres config after retries (DATABASE_URL={}): {:?}",
         db_url, last_err
     );
+}
+
+fn summarize_error_details(details: Option<&serde_json::Value>) -> Option<String> {
+    details.and_then(|value| serde_json::to_string(value).ok())
+}
+
+async fn run_failure_diagnostics(streams: Arc<dyn StreamStore>, run_id: RunId) -> String {
+    let stream = match streams
+        .read_range(&StreamId::run(run_id), 1, None)
+        .await
+        .and_then(|records| event_envelopes_from_stream_records(run_id, records))
+    {
+        Ok(stream) => stream,
+        Err(err) => {
+            return format!("run_id={} read_range_failed={err:?}", run_id.0);
+        }
+    };
+
+    let mut last_state_entered: Option<(u64, String, u32)> = None;
+    let mut last_state_failed: Option<(u64, String, String, bool, String, Option<String>)> = None;
+
+    for envelope in stream {
+        match envelope.event {
+            Event::Kernel(KernelEvent::StateEntered {
+                state_id, attempt, ..
+            }) => {
+                last_state_entered = Some((envelope.seq, state_id.to_string(), attempt));
+            }
+            Event::Kernel(KernelEvent::StateFailed {
+                state_id, error, ..
+            }) => {
+                last_state_failed = Some((
+                    envelope.seq,
+                    state_id.to_string(),
+                    error.info.code.0,
+                    error.info.retryable,
+                    error.info.message,
+                    summarize_error_details(error.info.details.as_ref()),
+                ));
+            }
+            _ => {}
+        }
+    }
+
+    let mut parts = vec![format!("run_id={}", run_id.0)];
+    if let Some((seq, state_id, attempt)) = last_state_entered {
+        parts.push(format!(
+            "last_state_entered={state_id} attempt={attempt} seq={seq}"
+        ));
+    }
+    if let Some((seq, state_id, code, retryable, message, details)) = last_state_failed {
+        parts.push(format!(
+            "state_failed={state_id} seq={seq} code={code} retryable={retryable} message={message}"
+        ));
+        if let Some(details) = details {
+            parts.push(format!("state_failed_details={details}"));
+        }
+    }
+    if parts.len() == 1 {
+        parts.push("no_state_failed_event_found".to_string());
+    }
+
+    parts.join("; ")
 }
 
 const RETH_DEV_ACCOUNT0_PRIVATE_KEY: &str =
@@ -323,7 +386,10 @@ async fn parity_reth_pipeline_contract_from_nix() {
         .await
         .expect("start pipeline");
 
-    assert_eq!(run.phase, RunPhase::Completed);
+    if run.phase != RunPhase::Completed {
+        let diagnostics = run_failure_diagnostics(Arc::clone(&streams), run.run_id).await;
+        panic!("expected Completed, got {:?}; {}", run.phase, diagnostics);
+    }
     let final_snapshot_id = run.final_snapshot_id.expect("final snapshot");
 
     let snapshot_bytes = artifacts
