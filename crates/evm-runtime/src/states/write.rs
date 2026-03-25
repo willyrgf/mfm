@@ -6,9 +6,11 @@
 //! Thin op crates should compose these states rather than reimplementing write-path behavior.
 
 use async_trait::async_trait;
-use mfm_collectors_rpc_control::{parse_u64_hex_value, EvmIoClient, JsonRpcCall};
+use mfm_collectors_rpc_control::{
+    parse_u64_hex_value, EvmIoClient, JsonRpcCall, DEFAULT_CONTROL_SCOPE,
+};
 use mfm_machine::context::DynContext;
-use mfm_machine::errors::StateError;
+use mfm_machine::errors::{ErrorCategory, StateError};
 use mfm_machine::ids::{ContextKey, StateId};
 use mfm_machine::io::IoProvider;
 use mfm_machine::meta::StateMeta;
@@ -41,6 +43,42 @@ fn managed_call(
     JsonRpcCall::new(method, params)
         .with_control_scope(control_scope.to_string())
         .with_network_id(network_id.to_string())
+}
+
+fn normalized_control_scope(control_scope: &str) -> String {
+    let trimmed = control_scope.trim();
+    if trimmed.is_empty() {
+        DEFAULT_CONTROL_SCOPE.to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+async fn prepare_managed_sources(
+    state_id: &StateId,
+    io: &mut dyn IoProvider,
+    network_id: &str,
+    control_scope: &str,
+) -> Result<String, StateError> {
+    let control_scope = normalized_control_scope(control_scope);
+    let mut client = EvmIoClient::new(state_id.clone(), io);
+    let response = client
+        .prepare_sources_in_scope(control_scope.clone(), network_id.to_string())
+        .await
+        .map_err(op_errors::state_from_io)?;
+    if !response.sources.iter().any(|entry| entry.healthy) {
+        return Err(op_errors::state_error_with_state(
+            state_id.clone(),
+            "rpc_control_no_healthy_sources",
+            ErrorCategory::Rpc,
+            true,
+            format!(
+                "no responsive rpc.control sources found for network `{}` and scope `{}`",
+                response.network_id, response.control_scope
+            ),
+        ));
+    }
+    Ok(control_scope)
 }
 
 /// Runtime configuration for [`EvmDeployState`].
@@ -275,6 +313,13 @@ impl State for EvmDeployState {
         .map_err(|_| {
             op_errors::state_unknown("invalid_op_config", "constructor args did not match ABI")
         })?;
+        let control_scope = prepare_managed_sources(
+            &self.state_id,
+            io,
+            &self.cfg.network_id,
+            &self.cfg.control_scope,
+        )
+        .await?;
 
         let mut client = EvmIoClient::new(self.state_id.clone(), io);
 
@@ -290,7 +335,7 @@ impl State for EvmDeployState {
             evm_rpc::send_signed_create_transaction_for_network(
                 &mut client,
                 &self.cfg.network_id,
-                &self.cfg.control_scope,
+                &control_scope,
                 env_name,
                 &self.cfg.from,
                 &constructor_payload,
@@ -301,7 +346,7 @@ impl State for EvmDeployState {
             evm_rpc::send_transaction_for_network(
                 &mut client,
                 &self.cfg.network_id,
-                &self.cfg.control_scope,
+                &control_scope,
                 tx,
             )
             .await?
@@ -312,7 +357,7 @@ impl State for EvmDeployState {
             &self.state_id,
             io,
             &self.cfg.network_id,
-            &self.cfg.control_scope,
+            &control_scope,
             &tx_hash,
             self.cfg.poll_interval_ms,
             self.cfg.max_receipt_polls,
@@ -356,6 +401,13 @@ impl State for EvmConfigureState {
             op_errors::state_unknown("invalid_contract_artifact", "contract artifact was invalid")
         })?;
         let to = resolve_contract_address(ctx, &self.cfg.contract_address)?;
+        let control_scope = prepare_managed_sources(
+            &self.state_id,
+            io,
+            &self.cfg.network_id,
+            &self.cfg.control_scope,
+        )
+        .await?;
 
         let mut tx_hashes: Vec<serde_json::Value> = Vec::new();
         let mut receipts: Vec<serde_json::Value> = Vec::new();
@@ -383,7 +435,7 @@ impl State for EvmConfigureState {
             let tx_hash = evm_rpc::send_transaction_for_network(
                 &mut client,
                 &self.cfg.network_id,
-                &self.cfg.control_scope,
+                &control_scope,
                 tx,
             )
             .await?;
@@ -392,7 +444,7 @@ impl State for EvmConfigureState {
                 &self.state_id,
                 io,
                 &self.cfg.network_id,
-                &self.cfg.control_scope,
+                &control_scope,
                 &tx_hash,
                 self.cfg.poll_interval_ms,
                 self.cfg.max_receipt_polls,
@@ -451,13 +503,20 @@ impl State for EvmValidateState {
                 op_rpc::validation_assertion_error_message(&err),
             )
         })?;
+        let control_scope = prepare_managed_sources(
+            &self.state_id,
+            io,
+            &self.cfg.network_id,
+            &self.cfg.control_scope,
+        )
+        .await?;
 
         let mut client = EvmIoClient::new(self.state_id.clone(), io);
 
         let client_version_res = client
             .call(managed_call(
                 &self.cfg.network_id,
-                &self.cfg.control_scope,
+                &control_scope,
                 "web3_clientVersion",
                 serde_json::json!([]),
             ))
@@ -479,7 +538,7 @@ impl State for EvmValidateState {
         let chain_id = client
             .call(managed_call(
                 &self.cfg.network_id,
-                &self.cfg.control_scope,
+                &control_scope,
                 "eth_chainId",
                 serde_json::json!([]),
             ))
@@ -505,7 +564,7 @@ impl State for EvmValidateState {
             let res = client
                 .call(managed_call(
                     &self.cfg.network_id,
-                    &self.cfg.control_scope,
+                    &control_scope,
                     "eth_call",
                     serde_json::json!([{ "to": to, "data": ra.data_hex }, "latest"]),
                 ))
@@ -537,7 +596,7 @@ impl State for EvmValidateState {
             let logs_res = client
                 .call(managed_call(
                     &self.cfg.network_id,
-                    &self.cfg.control_scope,
+                    &control_scope,
                     "eth_getLogs",
                     serde_json::json!([{
                         "address": to,
@@ -621,5 +680,310 @@ pub(crate) fn resolve_contract_address(
                 op_errors::state_unknown("ctx_type_mismatch", "context contract address invalid")
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use async_trait::async_trait;
+    use mfm_machine::errors::{ContextError, ErrorInfo, IoError, RunError};
+    use mfm_machine::events::DomainEvent;
+    use mfm_machine::ids::{ArtifactId, ErrorCode, FactKey};
+    use mfm_machine::io::{IoCall, IoResult};
+    use serde_json::Value;
+
+    #[derive(Default)]
+    struct MapContext {
+        values: std::collections::BTreeMap<String, serde_json::Value>,
+    }
+
+    impl DynContext for MapContext {
+        fn read(&self, key: &ContextKey) -> Result<Option<serde_json::Value>, ContextError> {
+            Ok(self.values.get(&key.0).cloned())
+        }
+
+        fn write(&mut self, key: ContextKey, value: serde_json::Value) -> Result<(), ContextError> {
+            self.values.insert(key.0, value);
+            Ok(())
+        }
+
+        fn delete(&mut self, key: &ContextKey) -> Result<(), ContextError> {
+            self.values.remove(&key.0);
+            Ok(())
+        }
+
+        fn dump(&self) -> Result<serde_json::Value, ContextError> {
+            let mut out = serde_json::Map::new();
+            for (key, value) in &self.values {
+                out.insert(key.clone(), value.clone());
+            }
+            Ok(serde_json::Value::Object(out))
+        }
+    }
+
+    #[derive(Default)]
+    struct NoopRecorder;
+
+    #[async_trait]
+    impl EventRecorder for NoopRecorder {
+        async fn emit(&mut self, _event: DomainEvent) -> Result<(), RunError> {
+            Ok(())
+        }
+
+        async fn emit_many(&mut self, _events: Vec<DomainEvent>) -> Result<(), RunError> {
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct TrackingIo {
+        calls: Vec<IoCall>,
+        prepare_sources_healthy: bool,
+    }
+
+    fn io_info(code: &'static str, message: impl Into<String>) -> ErrorInfo {
+        ErrorInfo {
+            code: ErrorCode(code.to_string()),
+            category: ErrorCategory::Unknown,
+            retryable: false,
+            message: message.into(),
+            details: None,
+        }
+    }
+
+    #[async_trait]
+    impl IoProvider for TrackingIo {
+        async fn call(&mut self, call: IoCall) -> Result<IoResult, IoError> {
+            self.calls.push(call.clone());
+
+            let kind = call
+                .request
+                .get("kind")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            match kind {
+                "prepare_sources" => Ok(IoResult {
+                    response: serde_json::json!({
+                        "control_scope": call.request.get("control_scope").and_then(Value::as_str).unwrap_or("shared"),
+                        "network_id": call.request.get("network_id").and_then(Value::as_str).unwrap_or("ethereum-mainnet"),
+                        "pool_kind": "test",
+                        "available_source_ids": ["source-1"],
+                        "ranked_source_ids": ["source-1"],
+                        "sources": [{
+                            "source_id": "source-1",
+                            "healthy": self.prepare_sources_healthy,
+                        }],
+                    }),
+                    recorded_payload_id: None,
+                }),
+                "evm_call" => {
+                    let method = call
+                        .request
+                        .get("method")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    let response = match method {
+                        "eth_estimateGas" => serde_json::json!("0x5208"),
+                        "eth_gasPrice" => serde_json::json!("0x1"),
+                        "eth_sendTransaction" => serde_json::json!(
+                            "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                        ),
+                        "eth_getTransactionReceipt" => serde_json::json!({ "status": "0x1" }),
+                        "web3_clientVersion" => serde_json::json!("reth/v1.0.0"),
+                        "eth_chainId" => serde_json::json!("0x1"),
+                        other => {
+                            return Err(IoError::Other(io_info(
+                                "unexpected_method",
+                                format!("unexpected method `{other}`"),
+                            )));
+                        }
+                    };
+                    Ok(IoResult {
+                        response,
+                        recorded_payload_id: None,
+                    })
+                }
+                _ => Err(IoError::Other(io_info(
+                    "unexpected_call_kind",
+                    "unexpected call kind",
+                ))),
+            }
+        }
+
+        async fn record_value(
+            &mut self,
+            _key: FactKey,
+            _value: serde_json::Value,
+        ) -> Result<ArtifactId, IoError> {
+            Ok(ArtifactId("0".repeat(64)))
+        }
+
+        async fn get_recorded_fact(
+            &mut self,
+            _key: &FactKey,
+        ) -> Result<Option<ArtifactId>, IoError> {
+            Ok(None)
+        }
+
+        async fn now_millis(&mut self) -> Result<u64, IoError> {
+            Ok(0)
+        }
+
+        async fn random_bytes(&mut self, n: usize) -> Result<Vec<u8>, IoError> {
+            Ok(vec![0; n])
+        }
+    }
+
+    fn sample_artifact_config() -> shared_dcv::ContractArtifactConfig {
+        serde_json::from_value(serde_json::json!({
+            "abi": [
+                {
+                    "type": "function",
+                    "name": "setValue",
+                    "inputs": [{"name": "x", "type": "uint256"}],
+                    "outputs": []
+                }
+            ],
+            "bytecode": {
+                "object": "0x60006000"
+            }
+        }))
+        .expect("artifact config")
+    }
+
+    #[tokio::test]
+    async fn configure_prepares_sources_before_write_calls() {
+        let mut ctx = MapContext::default();
+        ctx.write(
+            ContextKey(KEY_CONTRACT_ADDRESS.to_string()),
+            serde_json::json!("0x1111111111111111111111111111111111111111"),
+        )
+        .expect("write contract address");
+        let mut io = TrackingIo {
+            calls: Vec::new(),
+            prepare_sources_healthy: true,
+        };
+        let mut rec = NoopRecorder;
+
+        EvmConfigureState {
+            state_id: StateId::must_new("evm.write.configure".to_string()),
+            cfg: EvmConfigureStateConfig {
+                artifact: Some(sample_artifact_config()),
+                artifact_port: KEY_CONTRACT_ARTIFACT.to_string(),
+                network_id: "ethereum-mainnet".to_string(),
+                control_scope: "".to_string(),
+                from: "0x1111111111111111111111111111111111111111".to_string(),
+                contract_address: None,
+                calls: vec![EvmConfigureRuntimeCall {
+                    function: "setValue".to_string(),
+                    args: vec![serde_json::json!(1)],
+                    value_hex: None,
+                }],
+                tx_hashes_export_key: "configure_tx_hashes".to_string(),
+                receipts_export_key: "configure_receipts".to_string(),
+                poll_interval_ms: 0,
+                max_receipt_polls: 1,
+            },
+        }
+        .handle(&mut ctx, &mut io, &mut rec)
+        .await
+        .expect("configure");
+
+        assert_eq!(
+            io.calls[0].request.get("kind").and_then(Value::as_str),
+            Some("prepare_sources")
+        );
+        assert_eq!(
+            io.calls[0]
+                .request
+                .get("control_scope")
+                .and_then(Value::as_str),
+            Some("shared")
+        );
+        assert_eq!(
+            io.calls[1].request.get("method").and_then(Value::as_str),
+            Some("eth_estimateGas")
+        );
+    }
+
+    #[tokio::test]
+    async fn validate_prepares_sources_before_read_assertions() {
+        let mut ctx = MapContext::default();
+        ctx.write(
+            ContextKey(KEY_CONTRACT_ADDRESS.to_string()),
+            serde_json::json!("0x1111111111111111111111111111111111111111"),
+        )
+        .expect("write contract address");
+        let mut io = TrackingIo {
+            calls: Vec::new(),
+            prepare_sources_healthy: true,
+        };
+        let mut rec = NoopRecorder;
+
+        EvmValidateState {
+            state_id: StateId::must_new("evm.write.validate".to_string()),
+            cfg: EvmValidateStateConfig {
+                artifact: Some(sample_artifact_config()),
+                artifact_port: KEY_CONTRACT_ARTIFACT.to_string(),
+                network_id: "ethereum-mainnet".to_string(),
+                control_scope: "shared".to_string(),
+                contract_address: None,
+                expected_chain_id: 1,
+                require_client_substring: "reth".to_string(),
+                read_assertions: Vec::new(),
+                event_assertions: Vec::new(),
+            },
+        }
+        .handle(&mut ctx, &mut io, &mut rec)
+        .await
+        .expect("validate");
+
+        assert_eq!(
+            io.calls[0].request.get("kind").and_then(Value::as_str),
+            Some("prepare_sources")
+        );
+        assert_eq!(
+            io.calls[1].request.get("method").and_then(Value::as_str),
+            Some("web3_clientVersion")
+        );
+    }
+
+    #[tokio::test]
+    async fn deploy_fails_fast_when_no_managed_sources_are_healthy() {
+        let mut ctx = MapContext::default();
+        let mut io = TrackingIo {
+            calls: Vec::new(),
+            prepare_sources_healthy: false,
+        };
+        let mut rec = NoopRecorder;
+
+        let err = EvmDeployState {
+            state_id: StateId::must_new("evm.write.deploy".to_string()),
+            cfg: EvmDeployStateConfig {
+                artifact: Some(sample_artifact_config()),
+                artifact_port: KEY_CONTRACT_ARTIFACT.to_string(),
+                network_id: "ethereum-mainnet".to_string(),
+                control_scope: "shared".to_string(),
+                from: "0x1111111111111111111111111111111111111111".to_string(),
+                constructor_args: Vec::new(),
+                value_hex: None,
+                signing_key_env: None,
+                poll_interval_ms: 0,
+                max_receipt_polls: 1,
+            },
+        }
+        .handle(&mut ctx, &mut io, &mut rec)
+        .await
+        .expect_err("deploy should fail before issuing write calls");
+
+        assert_eq!(err.info.code.0, "rpc_control_no_healthy_sources");
+        assert!(err.info.retryable);
+        assert_eq!(io.calls.len(), 1);
+        assert_eq!(
+            io.calls[0].request.get("kind").and_then(Value::as_str),
+            Some("prepare_sources")
+        );
     }
 }
