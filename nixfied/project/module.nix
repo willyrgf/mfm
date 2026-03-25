@@ -229,7 +229,8 @@ let
   ciCargoRustEnv = (builtins.removeAttrs sharedCargoRustEnv [ "RUSTC_WRAPPER" ]) // {
     CARGO_BUILD_JOBS = "1";
   };
-  ciArtifactsRoot = conf.process.artifactsRoot or "/tmp/nixfied-artifacts-${project.id}";
+  ciArtifactsRoot =
+    conf.process.artifactsRoot or "\${XDG_CACHE_HOME:-$HOME/.cache}/nixfied-artifacts-${project.id}";
   ciShellAppContractsTimeoutSec = 300;
   sharedStatePolicy = {
     workspace = {

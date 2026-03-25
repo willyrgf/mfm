@@ -96,9 +96,10 @@ jobs:
             done
           fi
 
-          echo "Artifacts root: /tmp/nixfied-runtime/mfm/artifacts"
-          ls -la /tmp/nixfied-runtime/mfm/artifacts || true
-          latest_run="$(find /tmp/nixfied-runtime/mfm/artifacts -maxdepth 1 -type d -name 'run-*' 2>/dev/null | sort | tail -n 1)"
+          NIXFIED_ARTIFACTS="${XDG_CACHE_HOME:-$HOME/.cache}/nixfied-runtime/mfm/artifacts"
+          echo "Artifacts root: $NIXFIED_ARTIFACTS"
+          ls -la "$NIXFIED_ARTIFACTS" || true
+          latest_run="$(find "$NIXFIED_ARTIFACTS" -maxdepth 1 -type d -name 'run-*' 2>/dev/null | sort | tail -n 1)"
           if [ -n "$latest_run" ] && [ -d "$latest_run" ]; then
             echo "Latest run artifacts: $latest_run"
             find "$latest_run" -maxdepth 2 -type f | sort || true
@@ -119,5 +120,5 @@ jobs:
           name: ci-artifacts-full-${{ matrix.runner }}
           path: |
             /tmp/ci-artifacts
-            /tmp/nixfied-runtime/mfm/artifacts
+            ~/.cache/nixfied-runtime/mfm/artifacts
           if-no-files-found: ignore

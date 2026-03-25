@@ -7,7 +7,7 @@
 
 let
   projectId = (project.project or { }).id or "project";
-  counterRoot = "/tmp/nixfied-runtime/${projectId}/id-counters";
+  counterRootSuffix = "/${projectId}/id-counters";
   resolvedLoggingPrelude =
     if loggingPrelude != null && loggingPrelude != "" then
       loggingPrelude
@@ -45,7 +45,12 @@ let
   mkUniqueId = pkgs.writeShellScript "mk-unique-id" ''
     set -euo pipefail
 
-    COUNTER_ROOT="${counterRoot}"
+    if [ -n "''${NIX_BUILD_TOP:-}" ]; then
+      RUNTIME_BASE="''${TMPDIR:-/tmp}/nixfied-runtime"
+    else
+      RUNTIME_BASE="''${XDG_CACHE_HOME:-$HOME/.cache}/nixfied-runtime"
+    fi
+    COUNTER_ROOT="''${NIXFIED_RUNTIME_BASE:-$RUNTIME_BASE}${counterRootSuffix}"
     LOCK_FILE="$COUNTER_ROOT/global.lock"
     COUNTER_FILE="$COUNTER_ROOT/global.counter"
     mkdir -p "$COUNTER_ROOT"
@@ -92,7 +97,12 @@ let
         ;;
     esac
 
-    COUNTER_ROOT="${counterRoot}"
+    if [ -n "''${NIX_BUILD_TOP:-}" ]; then
+      RUNTIME_BASE="''${TMPDIR:-/tmp}/nixfied-runtime"
+    else
+      RUNTIME_BASE="''${XDG_CACHE_HOME:-$HOME/.cache}/nixfied-runtime"
+    fi
+    COUNTER_ROOT="''${NIXFIED_RUNTIME_BASE:-$RUNTIME_BASE}${counterRootSuffix}"
     SAFE_PLAN_ID="$(printf '%s' "$PLAN_ID" | ${pkgs.gnused}/bin/sed 's/[^A-Za-z0-9._-]/_/g')"
     LOCK_FILE="$COUNTER_ROOT/run-$SAFE_PLAN_ID.lock"
     COUNTER_FILE="$COUNTER_ROOT/run-$SAFE_PLAN_ID.counter"

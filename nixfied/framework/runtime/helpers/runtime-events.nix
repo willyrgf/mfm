@@ -30,7 +30,7 @@ let
     else if project ? state && project.state ? registryRoot then
       project.state.registryRoot
     else
-      processCfg.registryRoot or "/tmp/nixfied-runtime/${projectId}/registry";
+      processCfg.registryRoot or "\${XDG_CACHE_HOME:-$HOME/.cache}/nixfied-runtime/${projectId}/registry";
   baseDirExpr =
     if project ? state && project.state ? policy && project.state.policy ? runtimeBase then
       project.state.policy.runtimeBase

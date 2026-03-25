@@ -8,8 +8,8 @@
     discoveryScope = lib.mkDefault "project";
     workspace.mode = lib.mkDefault "project-root-hash";
     workspace.hashLength = lib.mkDefault 12;
-    roots.runtimeBase = lib.mkDefault "/tmp/nixfied-runtime/${config.nixfied.identity.projectId}/runtime";
-    roots.registryRoot = lib.mkDefault "/tmp/nixfied-runtime/${config.nixfied.identity.projectId}/registry";
-    roots.artifactsRoot = lib.mkDefault "/tmp/nixfied-artifacts-${config.nixfied.identity.projectId}";
+    roots.runtimeBase = lib.mkDefault "\${XDG_CACHE_HOME:-$HOME/.cache}/nixfied-runtime/${config.nixfied.identity.projectId}/runtime";
+    roots.registryRoot = lib.mkDefault "\${XDG_CACHE_HOME:-$HOME/.cache}/nixfied-runtime/${config.nixfied.identity.projectId}/registry";
+    roots.artifactsRoot = lib.mkDefault "\${XDG_CACHE_HOME:-$HOME/.cache}/nixfied-artifacts-${config.nixfied.identity.projectId}";
   };
 }
