@@ -31,3 +31,4 @@ mfm-artifact-store-fs = { path = "../../crates/storages/artifact-store-fs" }
 mfm-artifact-store-s3 = { path = "../../crates/storages/artifact-store-s3" }
 mfm-stream-store-mem = { path = "../../crates/storages/stream-store-mem" }
 mfm-stream-store-postgres = { path = "../../crates/storages/stream-store-postgres" }
+mfm-op-portfolio-tracker = { path = "../../crates/ops/portfolio-tracker-op" }

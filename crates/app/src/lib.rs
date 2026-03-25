@@ -2025,6 +2025,24 @@ mod tests {
             .expect("public root op should remain registered");
     }
 
+    #[test]
+    fn portfolio_tracker_root_op_remains_v1() {
+        let bundle = make_engine_bundle();
+
+        let op = bundle
+            .registry
+            .resolve(&OpId::must_new("portfolio_tracker".to_string()), "v1")
+            .expect("public root op should remain v1");
+        assert_eq!(op.op_version(), "v1");
+
+        assert!(
+            bundle
+                .registry
+                .resolve(&OpId::must_new("portfolio_tracker".to_string()), "v2")
+                .is_err()
+        );
+    }
+
     #[tokio::test]
     async fn start_run_rejects_portfolio_internal_child_ops() {
         let services = test_services(make_engine_bundle());

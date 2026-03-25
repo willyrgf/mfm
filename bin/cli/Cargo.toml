@@ -26,6 +26,7 @@ hex = "0.4"
 mfm-op-keystore = { package = "mfm-op-keystore-shim", path = "../../crates/ops/keystore-op" }
 mfm-state-portfolio = { path = "../../crates/states/portfolio" }
 mfm-state-symbol = { path = "../../crates/states/symbol" }
+mfm-op-portfolio-tracker = { path = "../../crates/ops/portfolio-tracker-op" }
 tempfile = "3.0"
 assert_cmd = "2.0"
 predicates = "3.0"
