@@ -51,18 +51,15 @@ use mfm_machine::live_io_registry::{HashMapTransportRegistry, TransportRegistry}
 use mfm_machine::live_io_router::RouterLiveIoTransportFactory;
 use mfm_machine::runtime::{ChildRunLiveIoTransportFactory, DefaultExecutionEngine, PlanResolver};
 use mfm_machine::stores::{ArtifactStore, StreamId, StreamRecord, StreamStore};
-use mfm_op_aave_v3_origin_adapt::{AaveV3OriginAdaptDeployOp, AAVE_V3_ORIGIN_ADAPT_DEPLOY_OP_ID};
+use mfm_op_aave_v3_origin_adapt::AaveV3OriginAdaptDeployOp;
 use mfm_op_evm_deploy_configure_validate::{
     EvmDeployConfigureValidateOp, EVM_DEPLOY_CONFIGURE_VALIDATE_OP_ID,
     EVM_DEPLOY_CONFIGURE_VALIDATE_OP_VERSION,
 };
 use mfm_op_evm_read::EvmReadOp;
 use mfm_op_evm_write::{EvmConfigureOp, EvmContractFromNixOp, EvmDeployOp, EvmValidateOp};
-use mfm_op_keystore_admin::{
-    KeystoreDeleteOp, KeystoreImportOp, KeystoreListOp, KEYSTORE_DELETE_OP_ID,
-    KEYSTORE_IMPORT_OP_ID, KEYSTORE_LIST_OP_ID,
-};
-use mfm_op_keystore_tx::{KeystoreTxSignOp, TX_SIGN_OP_ID};
+use mfm_op_keystore_admin::{KeystoreDeleteOp, KeystoreImportOp, KeystoreListOp};
+use mfm_op_keystore_tx::KeystoreTxSignOp;
 use mfm_op_nix_app::NixAppOp;
 use mfm_op_portfolio_tracker::{
     is_portfolio_tracker_internal_op_id, portfolio_snapshot_artifact_id_context_key,
@@ -131,45 +128,26 @@ fn context_value_with_slot_fallback(
     None
 }
 
-fn is_public_single_start_op_id(op_id: &OpId) -> bool {
-    matches!(
-        op_id.as_str(),
-        "proof"
-            | KEYSTORE_IMPORT_OP_ID
-            | KEYSTORE_LIST_OP_ID
-            | KEYSTORE_DELETE_OP_ID
-            | TX_SIGN_OP_ID
-            | "evm_read"
-            | "evm_contract_from_nix"
-            | "evm_deploy"
-            | "evm_configure"
-            | "evm_validate"
-            | EVM_DEPLOY_CONFIGURE_VALIDATE_OP_ID
-            | "portfolio_tracker"
-            | "nix_app"
-            | AAVE_V3_ORIGIN_ADAPT_DEPLOY_OP_ID
-    )
-}
-
-fn ensure_public_single_start_op(op_id: &OpId) -> Result<(), AppError> {
-    if is_public_single_start_op_id(op_id) {
-        return Ok(());
+fn ensure_single_start_op(
+    registry: &dyn OperationRegistry,
+    op_id: &OpId,
+    op_version: &str,
+) -> Result<(), AppError> {
+    if is_portfolio_tracker_internal_op_id(op_id.as_str()) {
+        return Err(AppError::new(
+            ErrorClass::BadRequest,
+            "op_not_public",
+            format!(
+                "op_id `{}` is not a public run.start target: planner-internal semantic child ops are not valid run.start targets",
+                op_id.as_str()
+            ),
+        ));
     }
 
-    let detail = if is_portfolio_tracker_internal_op_id(op_id.as_str()) {
-        "planner-internal semantic child ops are not valid run.start targets"
-    } else {
-        "run.start accepts only public root ops"
-    };
-
-    Err(AppError::new(
-        ErrorClass::BadRequest,
-        "op_not_public",
-        format!(
-            "op_id `{}` is not a public run.start target: {detail}",
-            op_id.as_str()
-        ),
-    ))
+    registry
+        .resolve(op_id, op_version)
+        .map_err(|err| AppError::new(ErrorClass::BadRequest, err.info.code.0, err.info.message))
+        .map(|_| ())
 }
 
 /// High-level error classes used by application-facing APIs.
@@ -722,7 +700,11 @@ impl AppServices {
                         "op_id must match ^[a-z][a-z0-9_]{0,62}$",
                     )
                 })?;
-                ensure_public_single_start_op(&op_id)?;
+                ensure_single_start_op(
+                    self.bundle.registry.as_ref(),
+                    &op_id,
+                    req.op_version.as_str(),
+                )?;
                 let pipeline =
                     single_op_pipeline(op_id, req.op_version, req.op_config).map_err(|e| {
                         AppError::new(ErrorClass::BadRequest, e.info.code.0, e.info.message)
@@ -1808,19 +1790,31 @@ mod tests {
     use super::*;
 
     use async_trait::async_trait;
+    use mfm_machine::config::RunConfig;
+    use mfm_machine::context::DynContext;
     use mfm_machine::engine::Stores;
-    use mfm_machine::errors::{IoError, RunError, StorageError};
-    use mfm_machine::ids::{ArtifactId, FactKey, RunId, StateId};
+    use mfm_machine::errors::{ErrorCategory, IoError, RunError, StateError, StorageError};
+    use mfm_machine::ids::{ArtifactId, ErrorCode, FactKey, OpId, OpPath, RunId, StateId};
     use mfm_machine::io::IoCall;
+    use mfm_machine::io::IoProvider;
     use mfm_machine::live_io::{LiveIoEnv, LiveIoTransportFactory};
     use mfm_machine::live_io_registry::{HashMapTransportRegistry, TransportRegistry};
     use mfm_machine::live_io_router::RouterLiveIoTransportFactory;
+    use mfm_machine::meta::{DependencyStrategy, Idempotency, SideEffectKind, StateMeta};
+    use mfm_machine::recorder::EventRecorder;
     use mfm_machine::runtime::{ChildRunLiveIoTransportFactory, PlanResolver};
+    use mfm_machine::state::{SnapshotPolicy, State, StateOutcome};
     use mfm_machine::stores::{
         AppendBatchResult, ArtifactKind, ArtifactStore, StreamAppend, StreamId, StreamRecord,
         StreamStore,
     };
     use mfm_op_portfolio_tracker::portfolio_tracker_internal_op_ids;
+    use mfm_sdk::errors::SdkError;
+    use mfm_sdk::op::{
+        leaf_state_node, LeafOpSpec, OpInterface, Operation, PlannedOp, PlannedOpKind,
+    };
+    use mfm_sdk::unstable::HashMapOperationRegistry;
+    use std::collections::HashMap;
     use std::sync::Arc;
 
     #[derive(Clone)]
@@ -1857,6 +1851,43 @@ mod tests {
 
     #[derive(Clone)]
     struct NoopArtifactStore;
+
+    #[derive(Clone, Default)]
+    struct InMemoryArtifactStore {
+        inner: Arc<tokio::sync::Mutex<HashMap<ArtifactId, Vec<u8>>>>,
+    }
+
+    #[async_trait]
+    impl ArtifactStore for InMemoryArtifactStore {
+        async fn put(
+            &self,
+            _kind: ArtifactKind,
+            bytes: Vec<u8>,
+        ) -> Result<ArtifactId, StorageError> {
+            let id = mfm_machine::hashing::artifact_id_for_bytes(&bytes);
+            let mut inner = self.inner.lock().await;
+            inner.insert(id.clone(), bytes);
+            Ok(id)
+        }
+
+        async fn get(&self, id: &ArtifactId) -> Result<Vec<u8>, StorageError> {
+            let inner = self.inner.lock().await;
+            inner.get(id).cloned().ok_or_else(|| {
+                StorageError::NotFound(mfm_machine::errors::ErrorInfo {
+                    code: ErrorCode("artifact_not_found".to_string()),
+                    category: ErrorCategory::Storage,
+                    retryable: false,
+                    message: "artifact not found".to_string(),
+                    details: None,
+                })
+            })
+        }
+
+        async fn exists(&self, id: &ArtifactId) -> Result<bool, StorageError> {
+            let inner = self.inner.lock().await;
+            Ok(inner.contains_key(id))
+        }
+    }
 
     #[async_trait]
     impl ArtifactStore for NoopArtifactStore {
@@ -2007,6 +2038,99 @@ mod tests {
             .await
             .expect_err("invalid child-run payload should fail at wrapper boundary");
         assert_io_error_code(err, "child_run_request_invalid");
+    }
+
+    #[tokio::test]
+    async fn start_run_allows_plugin_registered_root_op() {
+        #[derive(Clone)]
+        struct TestPluginSingleState;
+
+        #[async_trait]
+        impl State for TestPluginSingleState {
+            fn meta(&self) -> StateMeta {
+                StateMeta {
+                    tags: Vec::new(),
+                    depends_on: Vec::new(),
+                    depends_on_strategy: DependencyStrategy::Latest,
+                    side_effects: SideEffectKind::Pure,
+                    idempotency: Idempotency::None,
+                }
+            }
+
+            async fn handle(
+                &self,
+                _ctx: &mut dyn DynContext,
+                _io: &mut dyn IoProvider,
+                _rec: &mut dyn EventRecorder,
+            ) -> Result<StateOutcome, StateError> {
+                Ok(StateOutcome {
+                    snapshot: SnapshotPolicy::Never,
+                })
+            }
+        }
+
+        struct TestPluginSingleOp;
+
+        impl Operation for TestPluginSingleOp {
+            fn op_id(&self) -> OpId {
+                OpId::must_new("plugin_single_op")
+            }
+
+            fn op_version(&self) -> String {
+                "v1".to_string()
+            }
+
+            fn expand(
+                &self,
+                op_path: OpPath,
+                _op_config: &serde_json::Value,
+                _run_config: &RunConfig,
+            ) -> Result<PlannedOp, SdkError> {
+                Ok(PlannedOp {
+                    interface: OpInterface {
+                        imports: Vec::new(),
+                        exports: Vec::new(),
+                    },
+                    kind: PlannedOpKind::Leaf(LeafOpSpec {
+                        states: vec![leaf_state_node(
+                            &op_path,
+                            "done",
+                            Arc::new(TestPluginSingleState),
+                        )?],
+                        edges: Vec::new(),
+                    }),
+                })
+            }
+        }
+
+        struct TestPlugin;
+
+        impl OperationPlugin for TestPlugin {
+            fn register_operations(&self, registry: &mut HashMapOperationRegistry) {
+                registry.register(Arc::new(TestPluginSingleOp));
+            }
+        }
+
+        let bundle = AppBuilder::new()
+            .with_operation_plugin(Arc::new(TestPlugin))
+            .build()
+            .expect("builder should include plugin-registered root op");
+        let services = AppServices::new(
+            bundle,
+            Arc::new(NoopStreamStore),
+            Arc::new(InMemoryArtifactStore::default()),
+        );
+
+        let response = services
+            .start_run(RunsStartRequest::Single(SingleOpStartRequest {
+                op_id: "plugin_single_op".to_string(),
+                op_version: "v1".to_string(),
+                op_config: serde_json::json!({}),
+            }))
+            .await
+            .expect("plugin-registered root op should be startable");
+
+        assert_ne!(response.phase, "failed");
     }
 
     #[test]

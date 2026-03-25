@@ -187,14 +187,12 @@ pub mod op {
     }
 
     fn validate_child_op_local_id(child_op_local_id: &str) -> Result<(), SdkError> {
-        OpPath::new(format!("m.s.{child_op_local_id}"))
-            .map(|_| ())
-            .map_err(|_| {
-                sdk_error(
-                    "invalid_child_op_local_id",
-                    "child_op_local_id must match ^[a-z][a-z0-9_]{0,62}$",
-                )
-            })
+        OpId::new(child_op_local_id).map(|_| ()).map_err(|_| {
+            sdk_error(
+                "invalid_child_op_local_id",
+                "child_op_local_id must match ^[a-z][a-z0-9_]{0,62}$",
+            )
+        })
     }
 
     /// Declared operation interface for planner validation and parent-owned bindings.
@@ -205,7 +203,6 @@ pub mod op {
         /// Ports this operation makes available to a parent for re-binding or re-export.
         pub exports: Vec<PortKey>,
     }
-
 
     /// One leaf state plus its planner-visible lineage.
     #[derive(Clone)]
