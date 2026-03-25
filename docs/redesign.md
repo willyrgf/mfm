@@ -1365,9 +1365,9 @@ pub mod op {
     use crate::errors::SdkError;
     use crate::ids::PortKey;
 
-    /// Declared op IO surface for pipeline validation.
+    /// Declared op interface surface for pipeline validation.
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-    pub struct OpIo {
+    pub struct OpInterface {
         pub imports: Vec<PortKey>,
         pub exports: Vec<PortKey>,
     }
@@ -1377,19 +1377,18 @@ pub mod op {
     /// Contract:
     /// - `op_id` + `op_version` MUST be stable across environments.
     /// - `expand()` MUST be deterministic and MUST NOT perform IO.
-    /// - `expand()` MUST assign StateIds of the form: "<op_path>.<state_local_id>" (3 segments).
+    /// - `expand()` returns a `PlannedOp` (leaf or composite) that the SDK planner
+    ///   recursively flattens into a flat execution plan.
     pub trait Operation: Send + Sync {
         fn op_id(&self) -> OpId;
         fn op_version(&self) -> String;
-
-        fn io(&self, op_config: &serde_json::Value) -> Result<OpIo, SdkError>;
 
         fn expand(
             &self,
             op_path: OpPath,
             op_config: &serde_json::Value,
             run_config: &RunConfig,
-        ) -> Result<StateGraph, SdkError>;
+        ) -> Result<PlannedOp, SdkError>;
     }
 
     pub type DynOperation = Arc<dyn Operation>;

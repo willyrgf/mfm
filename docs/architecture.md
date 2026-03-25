@@ -267,6 +267,15 @@ Runtime wiring rules:
 - Namespace routing is hierarchical longest-prefix matching (`group` or `group.*`), so narrow groups override broader groups.
 - Deterministic computed outputs should use `IoProvider::record_value(...)` for fact recording instead of passthrough transport no-ops.
 
+### Semantic adapter system (portfolio domain)
+The portfolio domain (`crates/states/portfolio/`) uses a semantic adapter architecture:
+- `SemanticCatalog` — deterministic adapter registry with exactly-one-match selection for observation, subject, view, and valuation planning.
+- `AdapterId` — transparent string newtype using the slash convention `"capability/family/implementation"` (canonical v1 contract). Use `AdapterId::parts()` for structured access.
+- `VenueId` — transparent string newtype. Venue metadata lives on the separate `Venue` struct.
+- Fixed semantic state family — 8 states (PrepareExecutionSources through ProjectReport) form the runtime topology; variation enters through adapters, not state branching.
+- Multi-network support — the same semantic pipeline handles EVM and Bitcoin wallet observations.
+  Bitcoin IO uses `crates/collectors/btc-jsonrpc-http` (JSON-RPC over HTTP via `reqwest`), dispatched through the `rpc.control` transport when `MFM_BTC_RPC_URL` is configured.
+
 ## 7. Thin-Binary Request Flow
 
 Target flow:

@@ -2,7 +2,7 @@
 name = "mfm-transports-rpc-control"
 version = "0.1.0"
 edition = "2021"
-description = "Live rpc.control transport for managed EVM RPC routing"
+description = "Live rpc.control transport for managed EVM and Bitcoin RPC routing"
 repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
 readme = "README.md"
