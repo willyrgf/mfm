@@ -104,7 +104,8 @@ nix run .#ci -- --mode <mode> --summary
 - Framework service hooks and model-level service tasks share the same launcher/runtime policy path, but this repo does not currently expose public `service::*::start` apps.
 - Local supervisor wrappers in `nixfied/local/default.nix` (`up`, `down`, `svc-*`) are intentional prod-only overrides.
 - `mfm_cli` is the compatibility passthrough wrapper over the packaged `mfm-cli` binary; `mfm_rest_api`/`svc-*` now use strict typed contracts.
-- `mfm::portfolio::snapshot` is a strict json app that owns stdout, directly manages Postgres/Helios readiness through `SVC_*` hooks, and emits validated raw `mfm_cli` JSON payloads.
+- `mfm::portfolio::snapshot` is a strict json app that owns process/bootstrap orchestration, stdout envelope
+  validation, and readiness mediation via `SVC_*` hooks while forwarding validated `mfm_cli` payloads unchanged.
 - `nix run .#help` lists exposed core apps; invoke `mfm::portfolio::snapshot` directly by name.
 - CI help/docs metadata comes from `nixfied/project/ci.nix` at `commands.ci.api`, and is mirrored into `apps.<system>.ci.meta.nixfied.api`.
 - Project scripts should prefer framework policy helpers and `task.ops.ready`/`task.ops.health` surfaces over duplicating service policy or readiness logic.
@@ -118,7 +119,8 @@ nix run .#ci -- --mode <mode> --summary
   - `batch-runner` for `ci`
   - `passthrough` retained for compatibility on `mfm_cli`
 - Unknown args are rejected at the shell-contract boundary for typed/json commands before domain execution.
-- `mfm::portfolio::snapshot` preserves `mfm_cli` as the output-contract authority and returns the raw JSON payload unchanged.
+- `mfm::portfolio::snapshot` preserves `mfm_cli` as the output-contract authority and returns the validated
+  `mfm_cli` payload unchanged.
 - CI now validates command class policies and runtime behavior (including unknown-arg probes and JSON-shape checks) in `shell-app-contracts`.
 
 ### Process-first ops:
@@ -141,7 +143,8 @@ nix run .#ci -- --mode <mode> --summary
   - `SERVICE_DISCOVERY_SCOPE=local|global`
 - Migration note:
   - `SERVICE_REUSE_POLICY` and `MFM_KEEP_SERVICES` are rejected by `mfm::portfolio::snapshot`.
-  - Preserve or tear down snapshot-managed services via `SERVICE_*` policy envs on `mfm::portfolio::snapshot`; the underlying workflow and lifecycle tasks are internal.
+- Preserve or tear down snapshot-managed services via `SERVICE_*` policy envs on `mfm::portfolio::snapshot`; the direct-task
+  launch and lifecycle handling remain internal.
 
 ### Run binaries:
 

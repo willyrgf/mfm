@@ -95,12 +95,19 @@ The branch that closes this RFC establishes the following steady state:
   `run.start` entrypoints
 - app- and doc-level public surfaces refer to the root `portfolio_tracker` contract, with stable
   root exports for `snapshot`, `snapshot_artifact_id`, and `report`
+- public app shell and CLI ownership are explicit and stable:
+  - shell task owns process bootstrap, service lifecycle orchestration, and output-envelope handling
+  - `mfm_cli` owns the public `FeatureExecutionResult` payload schema
+- `task.mfm.portfolio.snapshot` is the canonical launch shape (no workflow hop in the current path)
+- Helios remains optional in launch orchestration: Postgres is mandatory, Helios is opportunistic
 
 RFC closeout validation for this branch is:
 
-- `SKIP_HELIOS=1 nix run .#format`
-- `SKIP_HELIOS=1 nix run .#check`
-- `SKIP_HELIOS=1 nix run .#test`
+- `nix run .#format`
+- `nix run .#check`
+- `nix run .#test`
+
+Use temporary `SKIP_HELIOS=1` prefixes only if your local services hooks are unavailable.
 
 Parity and broader Nixfied integration workflows remain desirable hardening, but they are tracked
 separately from this RFC because current failures are service/bootstrap issues rather than semantic
@@ -1683,11 +1690,11 @@ Current code path:
 
 - app -> task -> packaged CLI -> app services -> op
 
-Stale docs still describe:
+Docs now describe this path directly:
 
-- app -> workflow -> hidden lifecycle tasks
+- app -> task -> packaged CLI -> app services -> op
 
-Files to update eventually:
+Files previously marked stale and now reconciled:
 
 - `README.md`
 - `docs/helios.md`
@@ -1698,12 +1705,8 @@ The task's `requirements.services` includes:
 
 - `postgres`
 
-The shell code then opportunistically uses Helios when hooks are available.
-
-That means there is a semantic mismatch between:
-
-- model-declared service requirements
-- shell-level optional Helios bootstrap behavior
+Shell code uses Helios opportunistically only when hooks are available.
+Helios is not a launch-time hard requirement; launch behavior is still anchored by Postgres.
 
 #### 3. Wallet support is narrower than the config surface
 
@@ -1792,7 +1795,7 @@ and will drift over time.
   - `crates/sdk/src/unstable.rs:467-500`
 - inventory docs:
   - `docs/ops-and-states.md:46-77`
-- stale docs to reconcile later:
+- stale docs now reconciled:
   - `README.md:107-121`
   - `docs/helios.md:16-34`
 
@@ -1824,25 +1827,14 @@ nix eval --json '.#apps.<system>."mfm::portfolio::snapshot"'
 
 Then inspect the launcher path returned by that command.
 
-### Open Questions From The Current Trace
+### Decisions From The Current Trace
 
-1. Should the public app go back to an explicit workflow model, or should the direct-task shape be
-   treated as canonical?
-2. Should Helios become an explicit model requirement, or should the app remain "Postgres required,
-   Helios opportunistic, direct RPC bootstrap authoritative"?
-3. Should the state semantics be documented as:
-   - a portfolio-specific RFC
-   - an expansion of `docs/ops-and-states.md`
-   - or both?
-4. Should the replay boundary be described primarily around:
-   - pinned networks
-   - canonical observations
-   - canonical snapshot artifact
-   rather than around the task wrapper?
-5. Do we want a more explicit semantic distinction between:
-   - snapshot production
-   - report projection
-   - stdout envelope ownership
+- Canonical launch path is the direct task, not a workflow hop.
+- Helios is optional/opportunistic with Postgres required.
+- State semantics and execution inventory are documented here plus `docs/ops-and-states.md`.
+- Replay boundary is pinned network views + canonical observations + snapshot artifact.
+- Snapshot/report are separate projections; the shell wrapper owns envelope validation and passthrough while
+  `mfm_cli` owns the feature payload contract.
 
 ### Working Conclusion
 
