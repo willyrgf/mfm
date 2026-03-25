@@ -114,6 +114,7 @@ serviceModule.mkServiceModule {
     httpPortVar = slots.portVarName config.portKeyHttp;
     wsPortVar = slots.portVarName config.portKeyWs;
     authPortVar = slots.portVarName config.portKeyAuth;
+    p2pPortVar = slots.portVarName config.portKeyP2p;
     serviceDir = slots.getServiceDir config.dataDirName;
     dataDir = slots.getServiceDir config.dataDirName;
     logFile = "${slots.getServiceDir config.dataDirName}/logs/reth.log";

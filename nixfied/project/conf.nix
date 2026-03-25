@@ -85,6 +85,7 @@ rec {
     rethHttp = 8545;
     rethWs = 8546;
     rethAuth = 8551;
+    rethP2p = 30303;
     heliosRpc = 8547;
   };
 
@@ -283,6 +284,7 @@ rec {
       portKeyHttp = "rethHttp";
       portKeyWs = "rethWs";
       portKeyAuth = "rethAuth";
+      portKeyP2p = "rethP2p";
       dataDirName = "reth";
       network = "local";
       devMode = true;
