@@ -66,7 +66,8 @@ use mfm_op_keystore_tx::{KeystoreTxSignOp, TX_SIGN_OP_ID};
 use mfm_op_nix_app::NixAppOp;
 use mfm_op_portfolio_tracker::{
     is_portfolio_tracker_internal_op_id, portfolio_snapshot_artifact_id_context_key,
-    portfolio_snapshot_report_context_key, portfolio_tracker_internal_ops,
+    portfolio_snapshot_report_context_key, portfolio_tracker_internal_op_ids,
+    portfolio_tracker_internal_ops,
     portfolio_tracker_public_ops,
 };
 use mfm_op_proof::ProofOp;
@@ -2012,49 +2013,12 @@ mod tests {
     fn default_registry_keeps_portfolio_internal_ops_for_planning() {
         let bundle = make_engine_bundle();
 
-        bundle
-            .registry
-            .resolve(
-                &OpId::must_new("portfolio_prepare_execution_sources".to_string()),
-                "v1",
-            )
-            .expect("internal op should remain registered for recursive planning");
-        bundle
-            .registry
-            .resolve(&OpId::must_new("portfolio_resolve_subjects".to_string()), "v1")
-            .expect("internal op should remain registered for recursive planning");
-        bundle
-            .registry
-            .resolve(
-                &OpId::must_new("portfolio_pin_execution_views".to_string()),
-                "v1",
-            )
-            .expect("internal op should remain registered for recursive planning");
-        bundle
-            .registry
-            .resolve(
-                &OpId::must_new("portfolio_resolve_valuation_inputs".to_string()),
-                "v1",
-            )
-            .expect("internal op should remain registered for recursive planning");
-        bundle
-            .registry
-            .resolve(
-                &OpId::must_new("portfolio_observe_compiled_batch".to_string()),
-                "v1",
-            )
-            .expect("internal op should remain registered for recursive planning");
-        bundle
-            .registry
-            .resolve(
-                &OpId::must_new("portfolio_merge_observations".to_string()),
-                "v1",
-            )
-            .expect("internal op should remain registered for recursive planning");
-        bundle
-            .registry
-            .resolve(&OpId::must_new("portfolio_assemble_snapshot".to_string()), "v1")
-            .expect("internal op should remain registered for recursive planning");
+        for op_id in portfolio_tracker_internal_op_ids() {
+            bundle
+                .registry
+                .resolve(&OpId::must_new((*op_id).to_string()), "v1")
+                .expect("internal op should remain registered for recursive planning");
+        }
         bundle
             .registry
             .resolve(&OpId::must_new("portfolio_tracker".to_string()), "v1")
@@ -2065,19 +2029,10 @@ mod tests {
     async fn start_run_rejects_portfolio_internal_child_ops() {
         let services = test_services(make_engine_bundle());
 
-        for op_id in [
-            "portfolio_prepare_execution_sources",
-            "portfolio_resolve_subjects",
-            "portfolio_pin_execution_views",
-            "portfolio_resolve_valuation_inputs",
-            "portfolio_observe_compiled_batch",
-            "portfolio_merge_observations",
-            "portfolio_assemble_snapshot",
-            "portfolio_project_report",
-        ] {
+        for op_id in portfolio_tracker_internal_op_ids() {
             let err = services
                 .start_run(RunsStartRequest::Single(SingleOpStartRequest {
-                    op_id: op_id.to_string(),
+                    op_id: (*op_id).to_string(),
                     op_version: "v1".to_string(),
                     op_config: serde_json::json!({}),
                 }))

@@ -222,17 +222,22 @@ pub fn portfolio_tracker_ops() -> Vec<DynOperation> {
 
 /// Returns whether `op_id` refers to a planner-internal semantic child op.
 pub fn is_portfolio_tracker_internal_op_id(op_id: &str) -> bool {
-    matches!(
-        op_id,
-        PREPARE_EXECUTION_SOURCES_OP_ID
-            | RESOLVE_SUBJECTS_OP_ID
-            | PIN_EXECUTION_VIEWS_OP_ID
-            | RESOLVE_VALUATION_INPUTS_OP_ID
-            | OBSERVE_COMPILED_BATCH_OP_ID
-            | MERGE_OBSERVATIONS_OP_ID
-            | ASSEMBLE_SNAPSHOT_OP_ID
-            | PROJECT_REPORT_OP_ID
-    )
+    portfolio_tracker_internal_op_ids().contains(&op_id)
+}
+
+/// Returns the canonical list of planner-internal semantic child op ids.
+pub fn portfolio_tracker_internal_op_ids() -> &'static [&'static str] {
+    const IDS: &[&str] = &[
+        PREPARE_EXECUTION_SOURCES_OP_ID,
+        RESOLVE_SUBJECTS_OP_ID,
+        PIN_EXECUTION_VIEWS_OP_ID,
+        RESOLVE_VALUATION_INPUTS_OP_ID,
+        OBSERVE_COMPILED_BATCH_OP_ID,
+        MERGE_OBSERVATIONS_OP_ID,
+        ASSEMBLE_SNAPSHOT_OP_ID,
+        PROJECT_REPORT_OP_ID,
+    ];
+    IDS
 }
 
 impl Operation for PortfolioTrackerOp {
