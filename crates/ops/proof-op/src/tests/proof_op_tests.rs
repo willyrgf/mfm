@@ -23,7 +23,9 @@ use mfm_machine::runtime::{
 use mfm_machine::stores::StreamId;
 use mfm_state_common::test_support as op_test_support;
 
-use mfm_sdk::op::{leaf_state_id, leaf_state_node, LeafOpSpec, OpInterface, PlannedOp, PlannedOpKind};
+use mfm_sdk::op::{
+    leaf_state_id, leaf_state_node, LeafOpSpec, OpInterface, PlannedOp, PlannedOpKind,
+};
 use mfm_sdk::unstable::SdkPlanResolver;
 
 #[derive(Clone)]

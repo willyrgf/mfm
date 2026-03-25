@@ -176,14 +176,12 @@ pub mod op {
     }
 
     fn validate_state_local_id(state_local_id: &str) -> Result<(), SdkError> {
-        StateId::new(format!("m.s.{state_local_id}"))
-            .map(|_| ())
-            .map_err(|_| {
-                sdk_error(
-                    "invalid_state_local_id",
-                    "state_local_id must match ^[a-z][a-z0-9_]{0,62}$",
-                )
-            })
+        OpId::new(state_local_id).map(|_| ()).map_err(|_| {
+            sdk_error(
+                "invalid_state_local_id",
+                "state_local_id must match ^[a-z][a-z0-9_]{0,62}$",
+            )
+        })
     }
 
     fn validate_child_op_local_id(child_op_local_id: &str) -> Result<(), SdkError> {
@@ -351,15 +349,8 @@ pub mod op {
         state_local_id: impl Into<String>,
     ) -> Result<StateId, SdkError> {
         let addr = state_addr(op_path, state_local_id)?;
-        let mut segments = addr.op_path.as_str().split('.');
-        let Some(machine_id) = segments.next() else {
-            return Err(sdk_error("invalid_op_path", "invalid operation path"));
-        };
-        let Some(step_id) = segments.next() else {
-            return Err(sdk_error("invalid_op_path", "invalid operation path"));
-        };
-
-        let mut flattened = segments.collect::<Vec<_>>().join("__");
+        let (machine_id, step_id) = addr.op_path.machine_and_step();
+        let mut flattened = addr.op_path.flattened_child_path().unwrap_or_default();
         if !flattened.is_empty() {
             flattened.push_str("__");
         }

@@ -178,7 +178,10 @@ impl BtcJsonRpcClient {
             req = req.basic_auth(user, Some(pass));
         }
 
-        let resp = req.send().await.map_err(|e| BtcRpcError::Http(e.to_string()))?;
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| BtcRpcError::Http(e.to_string()))?;
         let status = resp.status().as_u16();
         if status < 200 || status >= 300 {
             let body = resp
@@ -207,7 +210,9 @@ impl BtcJsonRpcClient {
 
     /// Calls `getblockchaininfo` and returns the current chain state.
     pub async fn get_blockchain_info(&self) -> Result<BlockchainInfo, BtcRpcError> {
-        let result = self.rpc_call("getblockchaininfo", serde_json::json!([])).await?;
+        let result = self
+            .rpc_call("getblockchaininfo", serde_json::json!([]))
+            .await?;
         serde_json::from_value(result).map_err(|e| BtcRpcError::InvalidJson(e.to_string()))
     }
 
@@ -297,7 +302,10 @@ mod tests {
         assert!(result.success);
         assert_eq!(result.unspents.len(), 1);
         assert_eq!(result.unspents[0].txid, "abc123");
-        assert_eq!((result.total_amount * 100_000_000.0).round() as u64, 5_000_000);
+        assert_eq!(
+            (result.total_amount * 100_000_000.0).round() as u64,
+            5_000_000
+        );
     }
 
     #[test]

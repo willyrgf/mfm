@@ -55,7 +55,7 @@ use mfm_machine::events::{event_envelopes_from_stream_records, Event, KernelEven
 use mfm_machine::hashing::{
     artifact_id_for_bytes, artifact_id_for_json, canonical_json_bytes, CanonicalJsonError,
 };
-use mfm_machine::ids::{ContextKey, ErrorCode, OpId, OpPath, RunId, StateId};
+use mfm_machine::ids::{ContextKey, ContextSlot, ErrorCode, OpId, OpPath, RunId, StateId};
 use mfm_machine::io::IoProvider;
 use mfm_machine::meta::{Idempotency, SideEffectKind, StateMeta};
 use mfm_machine::plan::{DependencyEdge, ExecutionPlan, StateGraph, StateNode};
@@ -1281,22 +1281,19 @@ impl NamespacedContext<'_> {
         ContextKey(format!("{}.{}", self.op_path.0, slot))
     }
 
-    fn explicit_slot(key: &ContextKey) -> Option<(&str, &str)> {
-        key.0.split_once('.').filter(|(prefix, suffix)| {
-            matches!(*prefix, "in" | "out" | "work") && !suffix.is_empty()
-        })
+    fn explicit_slot(key: &ContextKey) -> Option<(ContextSlot, &str)> {
+        key.explicit_slot()
     }
 
     fn qualify_read(&self, key: &ContextKey) -> ContextKey {
         if let Some((prefix, suffix)) = Self::explicit_slot(key) {
             return match prefix {
-                "in" => self
+                ContextSlot::In => self
                     .import_sources
                     .get(suffix)
                     .cloned()
                     .unwrap_or_else(|| self.qualify_slot(&key.0)),
-                "out" | "work" => self.qualify_slot(&key.0),
-                _ => unreachable!("validated explicit slot prefix"),
+                ContextSlot::Out | ContextSlot::Work => self.qualify_slot(&key.0),
             };
         }
 
@@ -1772,12 +1769,45 @@ fn single_op_report_error_from_sdk(err: SdkError) -> SingleOpReportError {
     SingleOpReportError::new(err.info.code.0, err.info.message)
 }
 
+pub fn context_value_with_slot_fallback(
+    snapshot: &serde_json::Value,
+    key: &ContextKey,
+) -> Option<serde_json::Value> {
+    let candidates = context_key_candidates(&key.0);
+    if let Some(value) = candidates
+        .into_iter()
+        .find_map(|candidate| snapshot.get(&candidate).cloned())
+    {
+        return Some(value);
+    }
+
+    let (op_path, leaf) = key.0.rsplit_once(".out.")?;
+    let nested_prefix = format!("{op_path}.");
+    let nested_suffix = format!(".out.{leaf}");
+    let snapshot_obj = snapshot.as_object()?;
+    let mut matches: Vec<&serde_json::Value> = snapshot_obj
+        .iter()
+        .filter(|(candidate, _)| {
+            candidate.starts_with(&nested_prefix)
+                && candidate.len() > key.0.len()
+                && candidate.ends_with(&nested_suffix)
+        })
+        .map(|(_, value)| value)
+        .collect();
+    if matches.len() == 1 {
+        return matches.pop().map(|value| value.clone());
+    }
+
+    None
+}
+
 fn context_key_candidates(key: &str) -> Vec<String> {
-    let mut candidates = vec![key.to_string()];
-    if key.contains(".in.") || key.contains(".out.") || key.contains(".work.") {
+    let key = ContextKey(key.to_string());
+    let mut candidates = vec![key.0.clone()];
+    if key.explicit_slot().is_some() {
         return candidates;
     }
-    let Some((prefix, leaf)) = key.rsplit_once('.') else {
+    let Some((prefix, leaf)) = key.0.rsplit_once('.') else {
         return candidates;
     };
     candidates.push(format!("{prefix}.out.{leaf}"));
@@ -1963,15 +1993,14 @@ pub async fn execute_single_op_report<T: serde::de::DeserializeOwned>(
         SingleOpReportError::new("InvalidSnapshot", "final snapshot artifact was not JSON")
     })?;
 
-    let report_value = context_key_candidates(&req.report_context_key)
-        .into_iter()
-        .find_map(|candidate| snapshot.get(&candidate).cloned())
-        .ok_or_else(|| {
-            SingleOpReportError::new(
-                "MissingReport",
-                "run completed without a report payload in snapshot context",
-            )
-        })?;
+    let report_value =
+        context_value_with_slot_fallback(&snapshot, &ContextKey(req.report_context_key))
+            .ok_or_else(|| {
+                SingleOpReportError::new(
+                    "MissingReport",
+                    "run completed without a report payload in snapshot context",
+                )
+            })?;
 
     serde_json::from_value(report_value).map_err(|_| {
         SingleOpReportError::new(

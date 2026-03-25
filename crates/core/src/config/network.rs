@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use thiserror::Error;
 
+use super::decimal;
+
 /// Supported network families in static configuration.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -82,97 +84,13 @@ impl Network {
     /// # Ok::<(), mfm_core::config::network::NetworkValueError>(())
     /// ```
     pub fn min_balance_wei(&self, decimals: u8) -> Result<U256, NetworkValueError> {
-        decimal_str_to_u256_units(&self.min_balance_coin, decimals).map_err(|reason| {
+        decimal::parse_scaled_u256(&self.min_balance_coin, decimals, false).map_err(|reason| {
             NetworkValueError::InvalidMinBalance {
                 value: self.min_balance_coin.clone(),
                 reason,
             }
         })
     }
-}
-
-fn decimal_str_to_u256_units(value: &str, decimals: u8) -> Result<U256, String> {
-    let s = value.trim();
-    if s.is_empty() {
-        return Err("empty string".to_string());
-    }
-    if s.starts_with('-') {
-        return Err("must be non-negative".to_string());
-    }
-
-    let (int_part, frac_part_opt) = match s.split_once('.') {
-        Some((a, b)) => (a, Some(b)),
-        None => (s, None),
-    };
-
-    let int_part = if int_part.is_empty() { "0" } else { int_part };
-    if !int_part.chars().all(|c| c.is_ascii_digit()) {
-        return Err("invalid integer digits".to_string());
-    }
-
-    let frac_part = frac_part_opt.unwrap_or("");
-    if !frac_part.chars().all(|c| c.is_ascii_digit()) {
-        return Err("invalid fractional digits".to_string());
-    }
-    let decimals_usize = decimals as usize;
-    if frac_part.len() > decimals_usize {
-        return Err(format!(
-            "too many decimal places (max {decimals}, got {})",
-            frac_part.len()
-        ));
-    }
-
-    let scale = pow10_u256(decimals);
-    let int_units = parse_u256_decimal(int_part)?
-        .checked_mul(scale)
-        .ok_or_else(|| "value out of range".to_string())?;
-
-    let frac_units = if decimals == 0 {
-        if frac_part.chars().any(|c| c != '0') {
-            return Err("fractional part not allowed when decimals=0".to_string());
-        }
-        U256::from(0u8)
-    } else if frac_part.is_empty() {
-        U256::from(0u8)
-    } else {
-        let mut frac_scaled = frac_part.to_string();
-        frac_scaled.push_str(&"0".repeat(decimals_usize - frac_part.len()));
-        parse_u256_decimal(&frac_scaled)?
-    };
-
-    int_units
-        .checked_add(frac_units)
-        .ok_or_else(|| "value out of range".to_string())
-}
-
-fn pow10_u256(exp: u8) -> U256 {
-    let mut v = U256::from(1u8);
-    for _ in 0..exp {
-        v *= U256::from(10u8);
-    }
-    v
-}
-
-fn parse_u256_decimal(s: &str) -> Result<U256, String> {
-    let s = s.trim();
-    if s.is_empty() {
-        return Err("empty number".to_string());
-    }
-
-    let mut v = U256::from(0u8);
-    for ch in s.chars() {
-        if !ch.is_ascii_digit() {
-            return Err("invalid digit".to_string());
-        }
-        let digit = ch as u8 - b'0';
-        v = v
-            .checked_mul(U256::from(10u8))
-            .ok_or_else(|| "value out of range".to_string())?;
-        v = v
-            .checked_add(U256::from(digit))
-            .ok_or_else(|| "value out of range".to_string())?;
-    }
-    Ok(v)
 }
 
 /// Mapping of named network definitions.

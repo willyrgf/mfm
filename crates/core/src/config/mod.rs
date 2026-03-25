@@ -67,6 +67,7 @@ use zeroize::Zeroizing;
 
 /// Authentication-method configuration entries.
 pub mod authentication;
+mod decimal;
 /// DEX registry configuration entries.
 pub mod dexes;
 /// Network registry configuration entries.

@@ -213,7 +213,7 @@ fn flake_installable_target(flake_url: &str, attr: &str) -> String {
 
 fn store_root_from_program_path(program_path: &str) -> Option<String> {
     let rest = program_path.strip_prefix("/nix/store/")?;
-    let (entry, _) = rest.split_once('/').unwrap_or((rest, ""));
+    let entry = rest.split('/').next()?;
     if entry.is_empty() {
         return None;
     }
