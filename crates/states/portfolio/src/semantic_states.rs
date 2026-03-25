@@ -21,7 +21,7 @@ use mfm_state_common::states::meta;
 use mfm_state_symbol::model::{Observation, QuoteCode, SymbolRole};
 use num_bigint::BigInt;
 use num_traits::{Signed, Zero};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::model::{
@@ -29,12 +29,32 @@ use crate::model::{
     PortfolioReport, PortfolioSnapshot, PortfolioSnapshotError, WalletReport, WalletSnapshot,
 };
 use crate::semantic::{
-    CompiledObservationBatch, ExecutionAnchor, NetworkFamily, ObservationRuntimeInput,
-    PinnedNetworkView, ResolvedSubject, ResolvedUnitPrice, SemanticCatalog, SourcePreparationTask,
-    SubjectKind, SubjectResolutionTask, SubjectRuntimeInput, ValuationRuntimeInput, ValuationTask,
-    ViewPinTask, ViewRuntimeInput,
+    CompiledObservationBatch, ExecutionAnchor, NetworkFamily, ObservationKey,
+    ObservationRuntimeInput, PinnedNetworkView, ResolvedSubject, ResolvedUnitPrice,
+    SemanticCatalog, SourcePreparationTask, SubjectKind, SubjectResolutionTask,
+    SubjectRuntimeInput, ValuationRuntimeInput, ValuationTask, ViewPinTask, ViewRuntimeInput,
 };
 use mfm_state_wallet::model::WalletSubjectKind;
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct KeyedObservation {
+    observation_key: ObservationKey,
+    observation: Observation,
+}
+
+impl KeyedObservation {
+    fn new(observation_key: ObservationKey, mut observation: Observation) -> Self {
+        observation.normalize();
+        Self {
+            observation_key,
+            observation,
+        }
+    }
+}
+
+fn sort_keyed_observations(observations: &mut [KeyedObservation]) {
+    observations.sort_by(|left, right| left.observation_key.cmp(&right.observation_key));
+}
 
 /// Fixed semantic runtime state that prepares execution sources for compiled tasks.
 #[derive(Clone)]
@@ -492,7 +512,7 @@ pub struct ObserveCompiledBatchState {
     pub pinned_views_key: ContextKey,
     /// Context key that contains resolved valuations.
     pub resolved_valuations_key: ContextKey,
-    /// Context key that receives the canonical observations emitted by the batch.
+    /// Context key that receives the planner-keyed observations emitted by the batch.
     pub output_key: ContextKey,
 }
 
@@ -545,7 +565,7 @@ impl State for ObserveCompiledBatchState {
 
         let mut observations = Vec::with_capacity(self.batch.bindings.len());
         for binding in &self.batch.bindings {
-            let mut observation = runtime
+            let observation = runtime
                 .observe(
                     &self.state_id,
                     _io,
@@ -557,14 +577,13 @@ impl State for ObserveCompiledBatchState {
                     },
                 )
                 .await?;
-            observation.normalize();
-            observations.push(observation);
+            observations.push(KeyedObservation::new(
+                binding.observation_key.clone(),
+                observation,
+            ));
         }
 
-        observations.sort_by(|left, right| {
-            (left.wallet_id.as_str(), left.symbol_id.as_str())
-                .cmp(&(right.wallet_id.as_str(), right.symbol_id.as_str()))
-        });
+        sort_keyed_observations(&mut observations);
 
         write_json(
             ctx,
@@ -588,7 +607,7 @@ impl State for ObserveCompiledBatchState {
 pub struct MergeObservationsState {
     /// Stable state identifier assigned by the execution plan.
     pub state_id: StateId,
-    /// Context keys that contain `Vec<Observation>` payloads.
+    /// Context keys that contain planner-keyed observation payloads.
     pub input_keys: Vec<ContextKey>,
     /// Context key that receives the merged observations.
     pub output_key: ContextKey,
@@ -608,7 +627,7 @@ impl State for MergeObservationsState {
     ) -> Result<StateOutcome, StateError> {
         let mut observations = Vec::new();
         for input_key in &self.input_keys {
-            let mut next: Vec<Observation> = read_typed(
+            let mut next: Vec<KeyedObservation> = read_typed(
                 ctx,
                 input_key,
                 "missing_observations",
@@ -619,10 +638,11 @@ impl State for MergeObservationsState {
             observations.append(&mut next);
         }
 
-        observations.sort_by(|left, right| {
-            (left.wallet_id.as_str(), left.symbol_id.as_str())
-                .cmp(&(right.wallet_id.as_str(), right.symbol_id.as_str()))
-        });
+        sort_keyed_observations(&mut observations);
+        let observations: Vec<Observation> = observations
+            .into_iter()
+            .map(|entry| entry.observation)
+            .collect();
         let value = serde_json::to_value(&observations).map_err(|_| {
             state_unknown(
                 "observations_serialize_failed",
@@ -1520,6 +1540,7 @@ mod tests {
     #[derive(Clone)]
     struct StubObservationRuntime {
         adapter: AdapterId,
+        observations_by_binding_id: HashMap<String, Observation>,
     }
 
     impl RuntimeAdapter for StubObservationRuntime {
@@ -1534,9 +1555,12 @@ mod tests {
             &self,
             _state_id: &StateId,
             _io: &mut dyn IoProvider,
-            _binding: &crate::semantic::CompiledObservationBinding,
+            binding: &crate::semantic::CompiledObservationBinding,
             _input: ObservationRuntimeInput<'_>,
         ) -> Result<Observation, StateError> {
+            if let Some(observation) = self.observations_by_binding_id.get(&binding.binding_id) {
+                return Ok(observation.clone());
+            }
             Ok(Observation {
                 wallet_id: "wallet_main".to_string(),
                 symbol_id: "eth.native.ethereum-mainnet".to_string(),
@@ -1646,6 +1670,7 @@ mod tests {
                 })],
                 observation_runtimes: vec![Arc::new(StubObservationRuntime {
                     adapter: AdapterId("observe_position/evm/native_balance".to_string()),
+                    observations_by_binding_id: HashMap::new(),
                 })],
                 ..SemanticCatalogParts::default()
             })
@@ -1965,33 +1990,56 @@ mod tests {
         let mut ctx = MapContext::default();
         ctx.write(
             ContextKey("work.observations.a".to_string()),
-            serde_json::json!([observation_with_value(
-                "wallet_b",
-                "eth.native.ethereum-mainnet",
-                SymbolRole::Native,
-                QuoteCode::Usd,
-                "2.5"
-            ),]),
+            serde_json::to_value(vec![keyed_observation_with_value(
+                observation_key(
+                    "wallet_main",
+                    "ethereum-mainnet",
+                    "zzz.instrument.ethereum-mainnet",
+                ),
+                observation_with_value(
+                    "wallet_main",
+                    "aaa.symbol.ethereum-mainnet",
+                    SymbolRole::Native,
+                    QuoteCode::Usd,
+                    "2.5",
+                ),
+            )])
+            .expect("serialize"),
         )
         .expect("write");
         ctx.write(
             ContextKey("work.observations.b".to_string()),
-            serde_json::json!([
-                observation_with_value(
-                    "wallet_a",
-                    "usdc.wallet.ethereum-mainnet",
-                    SymbolRole::Asset,
-                    QuoteCode::Usd,
-                    "1.0"
+            serde_json::to_value(vec![
+                keyed_observation_with_value(
+                    observation_key(
+                        "wallet_main",
+                        "arbitrum-mainnet",
+                        "aaa.instrument.arbitrum-mainnet",
+                    ),
+                    observation_with_value(
+                        "wallet_main",
+                        "zzz.symbol.arbitrum-mainnet",
+                        SymbolRole::Asset,
+                        QuoteCode::Usd,
+                        "1.0",
+                    ),
                 ),
-                observation_with_value(
-                    "wallet_a",
-                    "eth.native.ethereum-mainnet",
-                    SymbolRole::Native,
-                    QuoteCode::Usd,
-                    "3.0"
+                keyed_observation_with_value(
+                    observation_key(
+                        "wallet_treasury",
+                        "ethereum-mainnet",
+                        "eth.native.ethereum-mainnet",
+                    ),
+                    observation_with_value(
+                        "wallet_treasury",
+                        "eth.native.ethereum-mainnet",
+                        SymbolRole::Native,
+                        QuoteCode::Usd,
+                        "3.0",
+                    ),
                 ),
-            ]),
+            ])
+            .expect("serialize"),
         )
         .expect("write");
 
@@ -2014,12 +2062,130 @@ mod tests {
         )
         .expect("typed");
         assert_eq!(observations.len(), 3);
-        assert_eq!(observations[0].wallet_id, "wallet_a");
-        assert_eq!(observations[0].symbol_id, "eth.native.ethereum-mainnet");
-        assert_eq!(observations[1].wallet_id, "wallet_a");
-        assert_eq!(observations[1].symbol_id, "usdc.wallet.ethereum-mainnet");
-        assert_eq!(observations[2].wallet_id, "wallet_b");
+        assert_eq!(observations[0].wallet_id, "wallet_main");
+        assert_eq!(observations[0].symbol_id, "zzz.symbol.arbitrum-mainnet");
+        assert_eq!(observations[1].wallet_id, "wallet_main");
+        assert_eq!(observations[1].symbol_id, "aaa.symbol.ethereum-mainnet");
+        assert_eq!(observations[2].wallet_id, "wallet_treasury");
         assert_eq!(observations[2].symbol_id, "eth.native.ethereum-mainnet");
+    }
+
+    #[tokio::test]
+    async fn observe_compiled_batch_orders_outputs_by_observation_key() {
+        let mut ctx = MapContext::default();
+        ctx.write(
+            ContextKey("work.resolved_subjects".to_string()),
+            serde_json::json!({}),
+        )
+        .expect("write subjects");
+        ctx.write(
+            ContextKey("work.pinned_views".to_string()),
+            serde_json::json!({}),
+        )
+        .expect("write views");
+        ctx.write(
+            ContextKey("work.resolved_valuations".to_string()),
+            serde_json::json!({}),
+        )
+        .expect("write valuations");
+
+        let mut observations_by_binding_id = HashMap::new();
+        observations_by_binding_id.insert(
+            "binding.ethereum".to_string(),
+            observation_with_value(
+                "wallet_main",
+                "aaa.symbol.ethereum-mainnet",
+                SymbolRole::Native,
+                QuoteCode::Usd,
+                "2.5",
+            ),
+        );
+        observations_by_binding_id.insert(
+            "binding.arbitrum".to_string(),
+            observation_with_value(
+                "wallet_main",
+                "zzz.symbol.arbitrum-mainnet",
+                SymbolRole::Asset,
+                QuoteCode::Usd,
+                "1.0",
+            ),
+        );
+
+        let catalog = Arc::new(
+            SemanticCatalog::new(SemanticCatalogParts {
+                observation_runtimes: vec![Arc::new(StubObservationRuntime {
+                    adapter: AdapterId("observe_position/evm/native_balance".to_string()),
+                    observations_by_binding_id,
+                })],
+                ..SemanticCatalogParts::default()
+            })
+            .expect("catalog"),
+        );
+
+        ObserveCompiledBatchState {
+            state_id: StateId::must_new("portfolio.semantic.observe_batch".to_string()),
+            batch: CompiledObservationBatch {
+                batch_id: "observe.batch".to_string(),
+                adapter: AdapterId("observe_position/evm/native_balance".to_string()),
+                network_view_id: "ethereum-mainnet".to_string(),
+                bindings: vec![
+                    crate::semantic::CompiledObservationBinding {
+                        binding_id: "binding.ethereum".to_string(),
+                        observation_key: observation_key(
+                            "wallet_main",
+                            "ethereum-mainnet",
+                            "zzz.instrument.ethereum-mainnet",
+                        ),
+                        adapter: AdapterId("observe_position/evm/native_balance".to_string()),
+                        valuation_ids: Vec::new(),
+                        payload: BTreeMap::new(),
+                    },
+                    crate::semantic::CompiledObservationBinding {
+                        binding_id: "binding.arbitrum".to_string(),
+                        observation_key: observation_key(
+                            "wallet_main",
+                            "arbitrum-mainnet",
+                            "aaa.instrument.arbitrum-mainnet",
+                        ),
+                        adapter: AdapterId("observe_position/evm/native_balance".to_string()),
+                        valuation_ids: Vec::new(),
+                        payload: BTreeMap::new(),
+                    },
+                ],
+            },
+            catalog,
+            resolved_subjects_key: ContextKey("work.resolved_subjects".to_string()),
+            pinned_views_key: ContextKey("work.pinned_views".to_string()),
+            resolved_valuations_key: ContextKey("work.resolved_valuations".to_string()),
+            output_key: ContextKey("work.batch_observations".to_string()),
+        }
+        .handle(&mut ctx, &mut TestIo::default(), &mut NoopRecorder)
+        .await
+        .expect("observe batch");
+
+        let observations: Vec<KeyedObservation> = serde_json::from_value(
+            ctx.read(&ContextKey("work.batch_observations".to_string()))
+                .expect("read")
+                .expect("observations"),
+        )
+        .expect("typed keyed observations");
+        assert_eq!(observations.len(), 2);
+        assert_eq!(
+            observations[0].observation_key.network_view_id,
+            "arbitrum-mainnet"
+        );
+        assert_eq!(
+            observations[0].observation.symbol_id,
+            "zzz.symbol.arbitrum-mainnet"
+        );
+        assert_eq!(
+            observations[1].observation_key.network_view_id,
+            "ethereum-mainnet"
+        );
+        assert_eq!(
+            observations[1].observation.symbol_id,
+            "aaa.symbol.ethereum-mainnet"
+        );
     }
 
     #[tokio::test]
@@ -2148,6 +2314,28 @@ mod tests {
             },
             metadata: BTreeMap::new(),
         }
+    }
+
+    fn observation_key(
+        subject_id: &str,
+        network_view_id: &str,
+        instrument_id: &str,
+    ) -> ObservationKey {
+        ObservationKey {
+            subject_id: subject_id.to_string(),
+            network_view_id: network_view_id.to_string(),
+            instrument_id: instrument_id.to_string(),
+            position_kind: crate::semantic::PositionSemantics::SpotBalance,
+            venue_id: None,
+            discriminator: None,
+        }
+    }
+
+    fn keyed_observation_with_value(
+        observation_key: ObservationKey,
+        observation: Observation,
+    ) -> KeyedObservation {
+        KeyedObservation::new(observation_key, observation)
     }
 
     fn find_quote_total(totals: &[PortfolioQuoteTotal], quote: QuoteCode) -> PortfolioQuoteTotal {
