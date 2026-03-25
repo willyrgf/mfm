@@ -64,18 +64,86 @@ impl std::fmt::Display for VenueId {
 #[serde(transparent)]
 pub struct AdapterId(pub String);
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Parsed shape of an adapter identifier.
+pub enum AdapterIdParts<'a> {
+    /// Two-segment form: `<capability>/<family>`.
+    TwoSegment {
+        /// Adapter capability segment.
+        capability: &'a str,
+        /// Adapter family segment.
+        family: &'a str,
+    },
+    /// Three-segment form: `<capability>/<family>/<implementation>`.
+    ThreeSegment {
+        /// Adapter capability segment.
+        capability: &'a str,
+        /// Adapter family segment.
+        family: &'a str,
+        /// Adapter implementation segment.
+        implementation: &'a str,
+    },
+}
+
 impl AdapterId {
     /// Split into structured parts: `(capability, family, implementation)`.
     ///
     /// Handles both 2-segment (`resolve_subject/evm_address` yields `None` implementation)
     /// and 3-segment (`observe_position/evm/native_balance`) patterns.
-    pub fn parts(&self) -> (&str, &str, Option<&str>) {
+    pub fn parse_parts(&self) -> Option<AdapterIdParts<'_>> {
         let mut segments = self.0.splitn(3, '/');
-        let capability = segments.next().unwrap_or("");
-        let family = segments.next().unwrap_or("");
-        let implementation = segments.next();
-        (capability, family, implementation)
+        let capability = segments.next()?;
+        if !is_adapter_id_segment(capability) {
+            return None;
+        }
+
+        let family = segments.next()?;
+        if !is_adapter_id_segment(family) {
+            return None;
+        }
+
+        let Some(implementation) = segments.next() else {
+            return Some(AdapterIdParts::TwoSegment { capability, family });
+        };
+        if implementation.contains('/') || !is_adapter_id_segment(implementation) {
+            return None;
+        }
+
+        Some(AdapterIdParts::ThreeSegment {
+            capability,
+            family,
+            implementation,
+        })
     }
+
+    /// Split into a tuple for legacy call sites.
+    ///
+    /// Prefer [`Self::parse_parts`] for typed pattern matching.
+    pub fn parts(&self) -> (&str, &str, Option<&str>) {
+        match self.parse_parts() {
+            Some(AdapterIdParts::TwoSegment { capability, family }) => (capability, family, None),
+            Some(AdapterIdParts::ThreeSegment {
+                capability,
+                family,
+                implementation,
+            }) => (capability, family, Some(implementation)),
+            None => ("", "", None),
+        }
+    }
+}
+
+fn is_adapter_id_segment(part: &str) -> bool {
+    let mut chars = part.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if part.len() > 63 {
+        return false;
+    }
+    if !first.is_ascii_lowercase() {
+        return false;
+    }
+    chars.all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_')
 }
 
 impl std::fmt::Display for AdapterId {
@@ -1141,13 +1209,43 @@ mod tests {
     #[test]
     fn adapter_id_parts_three_segments() {
         let id = AdapterId("observe_position/evm/native_balance".to_string());
-        assert_eq!(id.parts(), ("observe_position", "evm", Some("native_balance")));
+        assert_eq!(
+            id.parts(),
+            ("observe_position", "evm", Some("native_balance"))
+        );
+        assert_eq!(
+            id.parse_parts(),
+            Some(AdapterIdParts::ThreeSegment {
+                capability: "observe_position",
+                family: "evm",
+                implementation: "native_balance"
+            })
+        );
     }
 
     #[test]
     fn adapter_id_parts_two_segments() {
         let id = AdapterId("resolve_subject/evm_address".to_string());
         assert_eq!(id.parts(), ("resolve_subject", "evm_address", None));
+        assert_eq!(
+            id.parse_parts(),
+            Some(AdapterIdParts::TwoSegment {
+                capability: "resolve_subject",
+                family: "evm_address"
+            })
+        );
+    }
+
+    #[test]
+    fn adapter_id_parts_rejects_bad_shapes() {
+        let dotted = AdapterId("observe_position/evm/native/balance".to_string());
+        assert_eq!(dotted.parts(), ("", "", None));
+
+        let bad_capability = AdapterId("1resolve_subject/evm".to_string());
+        assert_eq!(bad_capability.parts(), ("", "", None));
+
+        let bad_char = AdapterId("observe-position/evm".to_string());
+        assert_eq!(bad_char.parts(), ("", "", None));
     }
 
     fn sample_semantic_config() -> PortfolioSemanticConfig {
