@@ -1769,6 +1769,12 @@ fn single_op_report_error_from_sdk(err: SdkError) -> SingleOpReportError {
     SingleOpReportError::new(err.info.code.0, err.info.message)
 }
 
+/// Resolves a context key by trying direct and slot-prefixed snapshot fallbacks.
+///
+/// This first checks all direct candidates produced by [`context_key_candidates`].
+/// If no direct candidate exists, it falls back to matching nested `.out.` shaped keys.
+///
+/// Returns a matching value clone when one candidate is found, otherwise `None`.
 pub fn context_value_with_slot_fallback(
     snapshot: &serde_json::Value,
     key: &ContextKey,
@@ -1795,7 +1801,7 @@ pub fn context_value_with_slot_fallback(
         .map(|(_, value)| value)
         .collect();
     if matches.len() == 1 {
-        return matches.pop().map(|value| value.clone());
+        return matches.pop().cloned();
     }
 
     None

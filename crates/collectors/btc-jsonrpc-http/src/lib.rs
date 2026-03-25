@@ -145,16 +145,18 @@ struct JsonRpcErrorObj {
 
 impl BtcJsonRpcClient {
     /// Creates a new client with the given configuration.
-    pub fn new(config: BtcJsonRpcConfig) -> Self {
+    pub fn new(config: BtcJsonRpcConfig) -> Result<Self, BtcRpcError> {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
             .build()
-            .expect("reqwest client");
-        Self {
+            .map_err(|err| {
+                BtcRpcError::Http(format!("failed to build bitcoin rpc client: {err}"))
+            })?;
+        Ok(Self {
             config,
             http,
             next_id: AtomicU64::new(1),
-        }
+        })
     }
 
     /// Low-level JSON-RPC call returning the raw `result` value.
@@ -183,7 +185,7 @@ impl BtcJsonRpcClient {
             .await
             .map_err(|e| BtcRpcError::Http(e.to_string()))?;
         let status = resp.status().as_u16();
-        if status < 200 || status >= 300 {
+        if !(200..300).contains(&status) {
             let body = resp
                 .text()
                 .await
@@ -250,7 +252,7 @@ mod tests {
             rpc_user: None,
             rpc_password: None,
         };
-        let _ = BtcJsonRpcClient::new(config);
+        let _ = BtcJsonRpcClient::new(config).expect("constructor should not fail");
     }
 
     #[test]

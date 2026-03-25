@@ -22,7 +22,9 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use tracing::warn;
 
-use mfm_collectors_btc_jsonrpc_http::{BlockchainInfo, BtcJsonRpcClient, BtcJsonRpcConfig};
+use mfm_collectors_btc_jsonrpc_http::{
+    BlockchainInfo, BtcJsonRpcClient, BtcJsonRpcConfig, BtcRpcError,
+};
 use mfm_collectors_evm_jsonrpc_http::{
     EvmJsonRpcHttpConfig, EvmJsonRpcHttpTransportFactory, EvmJsonRpcSource, EvmRoutingStrategy,
     EvmSourceKind,
@@ -819,7 +821,7 @@ impl LiveIoTransportFactory for RpcControlTransportFactory {
 
 struct RpcControlTransport {
     executor: Option<Box<dyn LiveIoTransport>>,
-    btc_client: Option<BtcJsonRpcClient>,
+    btc_client: Option<Result<BtcJsonRpcClient, BtcRpcError>>,
     control_plane_store: ControlPlaneStore,
     catalog: BootstrapCatalog,
     config_error: Option<RpcControlConfigError>,
@@ -1583,8 +1585,8 @@ impl RpcControlTransport {
     }
 
     fn ensure_btc_client(&mut self) -> Result<&mut BtcJsonRpcClient, IoError> {
-        self.btc_client.as_mut().ok_or_else(|| {
-            io_transport(
+        match self.btc_client.as_mut() {
+            None => Err(io_transport(
                 "btc_rpc_not_configured",
                 ErrorCategory::Unknown,
                 false,
@@ -1592,8 +1594,15 @@ impl RpcControlTransport {
                     "Bitcoin RPC not configured: set {} to enable Bitcoin IO",
                     ENV_BTC_RPC_URL
                 ),
-            )
-        })
+            )),
+            Some(Ok(client)) => Ok(client),
+            Some(Err(err)) => Err(io_transport(
+                "btc_rpc_client_init_failed",
+                ErrorCategory::Unknown,
+                false,
+                format!("Bitcoin RPC client initialization failed: {err}"),
+            )),
+        }
     }
 
     async fn handle_bitcoin_anchor(
@@ -1655,8 +1664,23 @@ impl RpcControlTransport {
         &mut self,
         network_id: &str,
         address: &str,
+        expected_height: u64,
+        expected_block_hash: &str,
     ) -> Result<serde_json::Value, IoError> {
-        let _info = self.ensure_matching_btc_network(network_id).await?;
+        let info = self.ensure_matching_btc_network(network_id).await?;
+        if info.blocks != expected_height || info.bestblockhash != expected_block_hash {
+            return Err(io_transport(
+                "btc_rpc_scan_utxos_anchor_mismatch",
+                ErrorCategory::ParsingInput,
+                false,
+                format!(
+                    "bitcoin scan utxos request anchored at {expected_height}@{expected_block_hash}, \
+                    but node reports {actual_height}@{actual_hash}",
+                    actual_height = info.blocks,
+                    actual_hash = info.bestblockhash
+                ),
+            ));
+        }
         let client = self.ensure_btc_client()?;
         let sats = client.address_balance_sats(address).await.map_err(|err| {
             io_transport(
@@ -1708,8 +1732,13 @@ impl LiveIoTransport for RpcControlTransport {
             RpcControlRequest::BitcoinScanUtxos {
                 address,
                 network_id,
+                height,
+                block_hash,
                 ..
-            } => self.handle_bitcoin_scan_utxos(&network_id, &address).await,
+            } => {
+                self.handle_bitcoin_scan_utxos(&network_id, &address, height, &block_hash)
+                    .await
+            }
         }
     }
 }

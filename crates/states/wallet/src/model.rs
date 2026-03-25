@@ -254,7 +254,13 @@ fn validate_bitcoin_address(raw: &str) -> Result<(), String> {
         if raw != raw.to_ascii_lowercase() {
             return Err("bech32 bitcoin addresses must already be lowercase".to_string());
         }
-        if !raw.chars().all(|ch| bech32.contains(ch)) {
+        let payload = raw
+            .split_once('1')
+            .map(|(_, payload)| payload)
+            .ok_or_else(|| {
+                "bech32 bitcoin address is missing the separator character".to_string()
+            })?;
+        if payload.is_empty() || !payload.chars().all(|ch| bech32.contains(ch)) {
             return Err("bech32 bitcoin address contained unsupported characters".to_string());
         }
         return Ok(());
