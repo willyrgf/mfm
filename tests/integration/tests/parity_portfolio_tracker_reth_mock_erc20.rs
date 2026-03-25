@@ -30,6 +30,8 @@ use mfm_transports_rpc_control::RpcControlBootstrapSource;
 
 const NETWORK_ID: &str = "ethereum-mainnet";
 const CONTROL_SCOPE: &str = "parity.portfolio_tracker.mock_erc20";
+const PARITY_RUN_MAX_ATTEMPTS: u32 = 3;
+const PARITY_RUN_RETRY_DELAY_MS: u64 = 250;
 
 #[derive(Default)]
 struct MapContext {
@@ -216,9 +218,9 @@ fn run_config_with_allowlist(allowlist: Vec<String>) -> RunConfig {
     RunConfig {
         io_mode: IoMode::Live,
         retry_policy: RetryPolicy {
-            max_attempts: 1,
+            max_attempts: PARITY_RUN_MAX_ATTEMPTS,
             backoff: BackoffPolicy::Fixed {
-                delay: Duration::from_millis(0),
+                delay: Duration::from_millis(PARITY_RUN_RETRY_DELAY_MS),
             },
         },
         event_profile: EventProfile::Normal,
