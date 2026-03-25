@@ -66,8 +66,7 @@ use mfm_op_keystore_tx::{KeystoreTxSignOp, TX_SIGN_OP_ID};
 use mfm_op_nix_app::NixAppOp;
 use mfm_op_portfolio_tracker::{
     is_portfolio_tracker_internal_op_id, portfolio_snapshot_artifact_id_context_key,
-    portfolio_snapshot_report_context_key, portfolio_tracker_internal_op_ids,
-    portfolio_tracker_internal_ops,
+    portfolio_snapshot_report_context_key, portfolio_tracker_internal_ops,
     portfolio_tracker_public_ops,
 };
 use mfm_op_proof::ProofOp;
@@ -1821,6 +1820,7 @@ mod tests {
         AppendBatchResult, ArtifactKind, ArtifactStore, StreamAppend, StreamId, StreamRecord,
         StreamStore,
     };
+    use mfm_op_portfolio_tracker::portfolio_tracker_internal_op_ids;
     use std::sync::Arc;
 
     #[derive(Clone)]
@@ -2035,12 +2035,10 @@ mod tests {
             .expect("public root op should remain v1");
         assert_eq!(op.op_version(), "v1");
 
-        assert!(
-            bundle
-                .registry
-                .resolve(&OpId::must_new("portfolio_tracker".to_string()), "v2")
-                .is_err()
-        );
+        assert!(bundle
+            .registry
+            .resolve(&OpId::must_new("portfolio_tracker".to_string()), "v2")
+            .is_err());
     }
 
     #[tokio::test]

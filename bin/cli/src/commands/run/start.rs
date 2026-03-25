@@ -1,9 +1,7 @@
 use crate::commands::result::{CommandError, CommandOutput, CommandResult};
 use crate::commands::CommandContext;
 use crate::presentation::output::handle_command_result;
-use crate::support::app_services::{
-    command_error_from_app_error, make_app_services_from_args,
-};
+use crate::support::app_services::{command_error_from_app_error, make_app_services_from_args};
 #[cfg(test)]
 use crate::support::run_stores::make_ephemeral_stores;
 use crate::support::run_stores::RunStoresArgs;
@@ -70,8 +68,11 @@ mod tests {
     #[tokio::test]
     async fn execute_internal_rejects_portfolio_internal_child_ops() {
         let stores = make_ephemeral_stores(None);
-        let services =
-            AppServices::new(mfm_app::make_engine_bundle(), stores.streams, stores.artifacts);
+        let services = AppServices::new(
+            mfm_app::make_engine_bundle(),
+            stores.streams,
+            stores.artifacts,
+        );
 
         for op_id in portfolio_tracker_internal_op_ids() {
             let args = StartArgs {
