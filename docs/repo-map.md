@@ -11,7 +11,7 @@ Generated from `docs/repo-index.json`.
 - `AGENTS.md` - Agent instructions and collaboration constraints.
 - `docs/architecture.md` - Project documentation.
 - `docs/ops-and-states.md` - Project documentation.
-- `docs/redesign.md` - Project documentation.
+- `docs/design.md` - Project documentation.
 
 ## Components
 - `Cargo.toml` (rust-cargo)

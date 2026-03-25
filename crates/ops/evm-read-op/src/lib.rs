@@ -3,7 +3,7 @@
 #![warn(missing_docs)]
 //! EVM read-only op.
 //!
-//! Source of truth: `docs/redesign.md` (v4).
+//! Source of truth: `docs/design.md` (v4).
 //!
 //! This op is intentionally small: it exists as the first “real” vertical slice that demonstrates:
 //! - deterministic facts recording in live mode

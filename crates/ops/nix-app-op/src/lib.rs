@@ -3,7 +3,7 @@
 #![warn(missing_docs)]
 //! Nix-app execution op.
 //!
-//! Source of truth: `docs/redesign.md` (v4), especially the Replay/IO contract.
+//! Source of truth: `docs/design.md` (v4), especially the Replay/IO contract.
 //!
 //! This op expands into a single state that requests external execution via `namespace="exec"`.
 //!

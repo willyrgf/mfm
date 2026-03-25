@@ -1,7 +1,7 @@
 //! Proc-macro support for the `mfm-machine` runtime.
 //!
 //! This crate reserves the proc-macro integration point for compile-time helpers that mirror the
-//! stable runtime contract described in `docs/redesign.md`.
+//! stable runtime contract described in `docs/design.md`.
 //!
 //! The crate currently exposes no public derive or attribute macros. Downstream crates typically
 //! do not need to depend on it directly until that surface exists.

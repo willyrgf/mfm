@@ -4,7 +4,7 @@ This file exists as the Nixfied discovery-friendly detailed reference for MFM.
 
 Use these documents together:
 
-- [`docs/redesign.md`](redesign.md) for the full runtime, persistence, replay, and secret-handling contract.
+- [`docs/design.md`](design.md) for the full runtime, persistence, replay, and secret-handling contract.
 - [`docs/ops-and-states.md`](ops-and-states.md) for the current op and state inventory.
 - [`docs/helios.md`](helios.md) for Helios-backed snapshot wiring and service checks.
 - [`bin/cli/README.md`](../bin/cli/README.md) and [`bin/rest-api/README.md`](../bin/rest-api/README.md) for user-facing transport contracts.

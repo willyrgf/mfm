@@ -51,7 +51,7 @@
       "exists": true
     },
     {
-      "path": "docs/redesign.md",
+      "path": "docs/design.md",
       "purpose": "Project documentation.",
       "priority": 20,
       "exists": true

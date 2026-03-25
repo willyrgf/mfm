@@ -1,7 +1,7 @@
 # MFM Architecture Guide
 
 > Contributor-facing architecture overview.
-> Normative design contract: [`docs/redesign.md`](redesign.md).
+> Normative design contract: [`docs/design.md`](design.md).
 
 ## 1. How To Use This Document
 
@@ -9,14 +9,14 @@ Use this guide to decide where code belongs and what invariants must hold.
 
 Read order for contributors:
 1. This document (`docs/architecture.md`) for boundaries and implementation placement.
-2. [`docs/redesign.md`](redesign.md) for normative execution and storage semantics.
+2. [`docs/design.md`](design.md) for normative execution and storage semantics.
 3. [`AGENTS.md`](../AGENTS.md) for workflow, CI parity, and contribution rules.
 
 For the current registered ops and production states, see [`docs/ops-and-states.md`](ops-and-states.md).
 For canonical RPC control-plane routing, bootstrap, and executor-boundary behavior, see
 [`docs/evm-rpc-routing.md`](evm-rpc-routing.md).
 
-If code conflicts with `docs/redesign.md`, treat that as a contract violation until the contract is intentionally updated.
+If code conflicts with `docs/design.md`, treat that as a contract violation until the contract is intentionally updated.
 
 ## 2. MFM In 5 Minutes
 
@@ -164,6 +164,20 @@ Rule of thumb:
   errors.
 - The exact operation API may evolve to represent child-op expansion explicitly; the invariant is
   flatten-before-runtime, not a specific helper signature.
+
+### Semantic core and action-layer boundary
+- Core execution semantics are: `Subject`, `NetworkView`, `Instrument`, `Position`, `Venue`,
+  `Valuation`, and `Observation`.
+- `Observation` is the canonical execution read-model; `Snapshot` and `Report` are projection/read-model
+  layers produced from observations.
+- `ContractRef` and transport locator details remain adapter-owned implementation details.
+- `ActionSemantics` is reserved as the action intent vocabulary (for example `Swap`, `Borrow`, `Lend`,
+  `Repay`, `Deposit`, `Withdraw`, `Stake`, `Unstake`) and is intentionally separate from current
+  observation-first execution semantics.
+- `ActionSemantics` integration is future work; the current implementation treats it as a stable type
+  namespace while planner/runtime execution focuses on observations and projections.
+- `ObservationKey` is planner-owned identity for deterministic ordering and duplicate detection.
+- Canonical split remains: ops compile a fixed semantic runtime topology; runtime executes states only.
 
 Practical dispatch split:
 - planner-time dispatch owns semantic validation, exact adapter selection, batch partitioning,
@@ -348,7 +362,9 @@ If the answer spans multiple layers, split responsibilities explicitly rather th
 ## 12. Related Documents
 
 - Current ops/states inventory: [`docs/ops-and-states.md`](ops-and-states.md)
-- Normative contract: [`docs/redesign.md`](redesign.md)
+- Normative contract: [`docs/design.md`](design.md)
+- Semantic execution and recursive planning principles: [`docs/RFC_SCATTERED_STATES_TO_SEMANTICS.md`](RFC_SCATTERED_STATES_TO_SEMANTICS.md)
+- Offline cache/vendoring planning notes: [`docs/RFC_VENDORED_PROJECT.md`](RFC_VENDORED_PROJECT.md)
 - RPC control-plane and EVM executor runbook: [`docs/evm-rpc-routing.md`](evm-rpc-routing.md)
 - Contribution and CI rules: [`AGENTS.md`](../AGENTS.md)
 - Root project overview: [`README.md`](../README.md)

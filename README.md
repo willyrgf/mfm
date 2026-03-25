@@ -48,7 +48,8 @@ States are the core execution unit. Ops are planners (`expand` builds determinis
 
 Start here:
 
-- Design contract (source of truth): [`docs/redesign.md`](docs/redesign.md)
+- Design contract (source of truth): [`docs/design.md`](docs/design.md)
+- Canonical rename note: `docs/redesign.md` is now a compatibility pointer to [`docs/design.md`](docs/design.md).
 - One-page overview + invariants: [`docs/architecture.md`](docs/architecture.md)
 - Current ops/states inventory: [`docs/ops-and-states.md`](docs/ops-and-states.md)
 - Contribution rules / CI parity: [`AGENTS.md`](AGENTS.md)

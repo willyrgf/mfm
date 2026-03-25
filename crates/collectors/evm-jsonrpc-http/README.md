@@ -68,5 +68,5 @@ Telemetry keeps diagnostics safe:
 - `rpc_endpoint` is sanitized to `scheme://host:port`
 
 Docs:
-- [`../../../docs/redesign.md`](../../../docs/redesign.md)
+- [`../../../docs/design.md`](../../../docs/design.md)
 - [`../../../docs/evm-rpc-routing.md`](../../../docs/evm-rpc-routing.md)
