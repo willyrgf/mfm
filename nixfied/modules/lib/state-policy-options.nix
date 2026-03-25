@@ -68,19 +68,19 @@ in
   roots = {
     runtimeBase = lib.mkOption {
       type = t.str;
-      default = "/tmp/nixfied-runtime/{projectId}/{workspaceId}/runtime";
+      default = "\${XDG_CACHE_HOME:-$HOME/.cache}/nixfied-runtime/{projectId}/{workspaceId}/runtime";
       description = "Template for the runtime base root. Supports {projectId} and {workspaceId}.";
     };
 
     registryRoot = lib.mkOption {
       type = t.str;
-      default = "/tmp/nixfied-runtime/{projectId}/{workspaceId}/registry";
+      default = "\${XDG_CACHE_HOME:-$HOME/.cache}/nixfied-runtime/{projectId}/{workspaceId}/registry";
       description = "Template for the registry root. Supports {projectId} and {workspaceId}.";
     };
 
     artifactsRoot = lib.mkOption {
       type = t.str;
-      default = "/tmp/nixfied-artifacts-{projectId}-{workspaceId}";
+      default = "\${XDG_CACHE_HOME:-$HOME/.cache}/nixfied-artifacts-{projectId}-{workspaceId}";
       description = "Template for the artifacts root. Supports {projectId} and {workspaceId}.";
     };
   };

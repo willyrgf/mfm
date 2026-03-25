@@ -191,8 +191,8 @@ rec {
   };
 
   process = {
-    registryRoot = "/tmp/nixfied-runtime/${project.id}";
-    artifactsRoot = "/tmp/nixfied-artifacts-${project.id}";
+    registryRoot = "\${XDG_CACHE_HOME:-$HOME/.cache}/nixfied-runtime/${project.id}";
+    artifactsRoot = "\${XDG_CACHE_HOME:-$HOME/.cache}/nixfied-artifacts-${project.id}";
     workspaceId = project.id;
   };
 
