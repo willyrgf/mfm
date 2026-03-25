@@ -1682,7 +1682,7 @@ impl RpcControlTransport {
             ));
         }
         let client = self.ensure_btc_client()?;
-        let sats = client.address_balance_sats(address).await.map_err(|err| {
+        let result = client.scan_tx_out_set(address).await.map_err(|err| {
             io_transport(
                 "btc_rpc_scan_utxos_failed",
                 ErrorCategory::Unknown,
@@ -1690,6 +1690,23 @@ impl RpcControlTransport {
                 format!("bitcoin scan utxos failed: {err}"),
             )
         })?;
+
+        if result.height != expected_height || result.bestblock != expected_block_hash {
+            return Err(io_transport(
+                "btc_rpc_scan_utxos_anchor_mismatch",
+                ErrorCategory::ParsingInput,
+                false,
+                format!(
+                    "bitcoin scan utxos request anchored at {expected_height}@{expected_block_hash}, \
+                    but actual scan executed at {actual_height}@{actual_hash}",
+                    actual_height = result.height,
+                    actual_hash = result.bestblock
+                ),
+            ));
+        }
+
+        let sats = (result.total_amount * 100_000_000.0).round() as u64;
+
         Ok(serde_json::json!({
             "amount_sats": sats.to_string(),
         }))

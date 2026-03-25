@@ -682,6 +682,13 @@ impl AppServices {
             RunsStartRequest::Pipeline(req) => {
                 tracing::Span::current().record("request_kind", "pipeline");
                 tracing::Span::current().record("machine_id", req.pipeline.machine_id.0.as_str());
+                for step in &req.pipeline.steps {
+                    ensure_single_start_op(
+                        self.bundle.registry.as_ref(),
+                        &step.op_id,
+                        step.op_version.as_str(),
+                    )?;
+                }
                 (
                     req.pipeline,
                     req.input,
