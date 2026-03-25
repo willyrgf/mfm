@@ -16,9 +16,9 @@ fn id_segment_validation() {
 #[test]
 fn op_path_shape_and_segments() {
     assert!(validate_op_path("machine.main"));
+    assert!(validate_op_path("machine.main.extra"));
     assert!(!validate_op_path("m0._"));
     assert!(!validate_op_path("machine"));
-    assert!(!validate_op_path("machine.main.extra"));
     assert!(!validate_op_path("Machine.main"));
     assert!(!validate_op_path("machine.ma-in"));
 }

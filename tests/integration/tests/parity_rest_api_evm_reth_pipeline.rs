@@ -58,6 +58,36 @@ impl DynContext for MapContext {
     }
 }
 
+fn snapshot_value_with_slot_fallback<'a>(
+    snapshot: &'a serde_json::Value,
+    key: &str,
+) -> Option<&'a serde_json::Value> {
+    let mut candidates = vec![key.to_string()];
+    if !key.contains(".in.") && !key.contains(".out.") && !key.contains(".work.") {
+        if let Some((prefix, leaf)) = key.rsplit_once('.') {
+            candidates.push(format!("{prefix}.out.{leaf}"));
+            candidates.push(format!("{prefix}.work.{leaf}"));
+        }
+    }
+
+    candidates
+        .into_iter()
+        .find_map(|candidate| snapshot.get(&candidate))
+}
+
+fn required_snapshot_value<'a>(
+    snapshot: &'a serde_json::Value,
+    key: &str,
+) -> &'a serde_json::Value {
+    snapshot_value_with_slot_fallback(snapshot, key).unwrap_or_else(|| {
+        let keys = snapshot
+            .as_object()
+            .map(|obj| obj.keys().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        panic!("missing snapshot key `{key}`; keys={keys:?}");
+    })
+}
+
 fn run_config_with_allowlist(allowlist: Vec<String>) -> RunConfig {
     RunConfig {
         io_mode: IoMode::Live,
@@ -303,39 +333,38 @@ async fn parity_reth_pipeline_contract_from_nix() {
     let snapshot: serde_json::Value =
         serde_json::from_slice(&snapshot_bytes).expect("decode snapshot json");
 
-    let contract_address = snapshot
-        .get("evm_reth_pipeline.deploy.contract_address")
-        .and_then(|v| v.as_str())
-        .expect("contract address");
+    let contract_address =
+        required_snapshot_value(&snapshot, "evm_reth_pipeline.deploy.contract_address")
+            .as_str()
+            .expect("contract address");
     assert!(contract_address.starts_with("0x"));
 
-    let deploy_tx_hash = snapshot
-        .get("evm_reth_pipeline.deploy.deploy_tx_hash")
-        .and_then(|v| v.as_str())
-        .expect("deploy tx hash");
+    let deploy_tx_hash =
+        required_snapshot_value(&snapshot, "evm_reth_pipeline.deploy.deploy_tx_hash")
+            .as_str()
+            .expect("deploy tx hash");
     assert!(deploy_tx_hash.starts_with("0x"));
 
-    let configure_tx_hashes = snapshot
-        .get("evm_reth_pipeline.configure.configure_tx_hashes")
-        .and_then(|v| v.as_array())
-        .expect("configure tx hashes");
+    let configure_tx_hashes =
+        required_snapshot_value(&snapshot, "evm_reth_pipeline.configure.configure_tx_hashes")
+            .as_array()
+            .expect("configure tx hashes");
     assert!(!configure_tx_hashes.is_empty());
 
     assert_eq!(
-        snapshot.get("evm_reth_pipeline.validate.validated"),
-        Some(&serde_json::json!(true))
+        required_snapshot_value(&snapshot, "evm_reth_pipeline.validate.validated"),
+        &serde_json::json!(true)
     );
 
-    let chain_id = snapshot
-        .get("evm_reth_pipeline.validate.chain_id")
-        .and_then(|v| v.as_u64())
+    let chain_id = required_snapshot_value(&snapshot, "evm_reth_pipeline.validate.chain_id")
+        .as_u64()
         .expect("validate chain id");
     assert_eq!(chain_id, expected_chain_id);
 
-    let client_version = snapshot
-        .get("evm_reth_pipeline.validate.client_version")
-        .and_then(|v| v.as_str())
-        .expect("validate client version");
+    let client_version =
+        required_snapshot_value(&snapshot, "evm_reth_pipeline.validate.client_version")
+            .as_str()
+            .expect("validate client version");
     assert!(client_version.to_ascii_lowercase().contains("reth"));
 
     let head = streams

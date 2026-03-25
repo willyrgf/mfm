@@ -60,6 +60,36 @@ impl DynContext for MapContext {
     }
 }
 
+fn snapshot_value_with_slot_fallback<'a>(
+    snapshot: &'a serde_json::Value,
+    key: &str,
+) -> Option<&'a serde_json::Value> {
+    let mut candidates = vec![key.to_string()];
+    if !key.contains(".in.") && !key.contains(".out.") && !key.contains(".work.") {
+        if let Some((prefix, leaf)) = key.rsplit_once('.') {
+            candidates.push(format!("{prefix}.out.{leaf}"));
+            candidates.push(format!("{prefix}.work.{leaf}"));
+        }
+    }
+
+    candidates
+        .into_iter()
+        .find_map(|candidate| snapshot.get(&candidate))
+}
+
+fn required_snapshot_value<'a>(
+    snapshot: &'a serde_json::Value,
+    key: &str,
+) -> &'a serde_json::Value {
+    snapshot_value_with_slot_fallback(snapshot, key).unwrap_or_else(|| {
+        let keys = snapshot
+            .as_object()
+            .map(|obj| obj.keys().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        panic!("missing snapshot key `{key}`; keys={keys:?}");
+    })
+}
+
 fn json_post(uri: &str, body: serde_json::Value) -> Request<Body> {
     let s = serde_json::to_string(&body).expect("json request must serialize");
     Request::builder()
@@ -511,10 +541,10 @@ async fn parity_portfolio_tracker_snapshot_with_mock_erc20_mint() {
     let snapshot: serde_json::Value =
         serde_json::from_slice(&snapshot_bytes).expect("decode snapshot json");
 
-    let token_address = snapshot
-        .get("evm_mock_erc20_setup.deploy.contract_address")
-        .and_then(|v| v.as_str())
-        .expect("contract address");
+    let token_address =
+        required_snapshot_value(&snapshot, "evm_mock_erc20_setup.deploy.contract_address")
+            .as_str()
+            .expect("contract address");
     let token_address_norm = normalize_address_lower(token_address);
 
     // 2) Run `portfolio.snapshot` feature end-to-end (REST feature execution path).

@@ -701,6 +701,7 @@ in
           portKeyHttp = rethService.portKeyHttp or "rethHttp";
           portKeyWs = rethService.portKeyWs or "rethWs";
           portKeyAuth = rethService.portKeyAuth or "rethAuth";
+          portKeyP2p = rethService.portKeyP2p or "rethP2p";
           dataDirName = rethService.dataDirName or "reth";
           network = rethService.network or "local";
           devMode = rethService.devMode or false;
