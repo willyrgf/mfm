@@ -15,19 +15,20 @@ nix run .#mfm::portfolio::snapshot -- ./portfolio-request.json
 ```
 
 The public wrapper lives in `nixfied/project/module.nix` as `task.mfm.portfolio.snapshot`.
-It owns stdout and directly:
+It owns process/bootstrap and envelope validation and then:
 
 - validates the request-file contract
-- manages Postgres and Helios lifecycle through `SVC_POSTGRES_*` / `SVC_HELIOS_*` hooks
+- manages Postgres readiness and optional Helios lifecycle through `SVC_POSTGRES_*` / `SVC_HELIOS_*` hooks
 - runs the packaged `mfm_cli --output-format json portfolio snapshot --request-file ...`
-- validates the returned JSON envelope before replaying it to stdout
+- validates the returned JSON envelope before replaying `mfm_cli` payload to stdout unchanged
 
-The public task remains the stdout authority. It enforces:
+The public task remains the stdout envelope authority. It enforces:
 
 - exactly one positional request-file argument
 - a readable canonical portfolio snapshot request JSON file
 - defaults `HELIOS_NETWORK` to `mainnet` and rejects non-mainnet values
-- Postgres + Helios lifecycle orchestration with `SERVICE_*` policy envs
+- Postgres lifecycle orchestration with `SERVICE_*` policy envs
+- optional Helios lifecycle orchestration when hooks are available
 - workflow sequencing with preflight, service start, packaged CLI execution, and always-run teardown
 - validated `mfm_cli --output-format json` output only on stdout
 
