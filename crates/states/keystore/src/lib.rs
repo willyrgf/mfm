@@ -27,7 +27,7 @@
 //! let report_key: ContextKey = output_context_key("keystore_tx.sign");
 //!
 //! assert_eq!(tx.chain_id, 1);
-//! assert_eq!(report_key.0, "keystore_tx.sign.report");
+//! assert_eq!(report_key.0, "keystore_tx.sign.out.report");
 //! ```
 
 /// Local keystore-specific `State` implementations used by op planners.
