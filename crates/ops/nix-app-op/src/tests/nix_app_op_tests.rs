@@ -19,7 +19,7 @@ use mfm_machine::replay_io::ReplayIo;
 use mfm_machine::runtime::{DefaultExecutionEngine, EngineFailpoints};
 use mfm_machine::state::{SnapshotPolicy, State, StateOutcome};
 use mfm_sdk::ids::{MachineId, PortKey, StepId};
-use mfm_sdk::op::{leaf_state_node, LeafOpSpec, OpIo, Operation, PlannedOp, PlannedOpKind};
+use mfm_sdk::op::{leaf_state_node, LeafOpSpec, OpInterface, Operation, PlannedOp, PlannedOpKind};
 use mfm_sdk::pipeline::{Pipeline, PipelineStep};
 use mfm_sdk::unstable::SdkPlanResolver;
 use mfm_state_common::test_support as op_test_support;
@@ -211,7 +211,7 @@ impl Operation for MarkerOp {
 
         let export_key = cfg.key.clone();
         Ok(PlannedOp {
-            interface: OpIo {
+            interface: OpInterface {
                 imports: Vec::new(),
                 exports: vec![PortKey(export_key)],
             },

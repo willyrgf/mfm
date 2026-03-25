@@ -122,6 +122,28 @@ pub enum RpcControlRequest {
         /// probed, and ranked.
         network_id: String,
     },
+    /// Bitcoin chain anchor request (block height + hash).
+    BitcoinAnchor {
+        /// Stable control-plane scope.
+        #[serde(default = "default_control_scope")]
+        control_scope: String,
+        /// Stable Bitcoin network identifier (e.g. `"bitcoin-mainnet"`).
+        network_id: String,
+    },
+    /// Bitcoin UTXO balance scan for a single address.
+    BitcoinScanUtxos {
+        /// Stable control-plane scope.
+        #[serde(default = "default_control_scope")]
+        control_scope: String,
+        /// Stable Bitcoin network identifier.
+        network_id: String,
+        /// Bitcoin address to scan.
+        address: String,
+        /// Block height at which to anchor the scan.
+        height: u64,
+        /// Block hash at which to anchor the scan.
+        block_hash: String,
+    },
 }
 
 /// Summary returned for one prepared source.
@@ -575,6 +597,66 @@ mod tests {
                 "control_scope": "shared",
                 "network_id": "ethereum-mainnet",
             })
+        );
+    }
+
+    #[test]
+    fn bitcoin_anchor_request_serializes() {
+        let request = serde_json::to_value(RpcControlRequest::BitcoinAnchor {
+            control_scope: "shared".to_string(),
+            network_id: "bitcoin-mainnet".to_string(),
+        })
+        .expect("request json");
+
+        assert_eq!(
+            request,
+            serde_json::json!({
+                "kind": "bitcoin_anchor",
+                "control_scope": "shared",
+                "network_id": "bitcoin-mainnet",
+            })
+        );
+    }
+
+    #[test]
+    fn bitcoin_scan_utxos_request_serializes() {
+        let request = serde_json::to_value(RpcControlRequest::BitcoinScanUtxos {
+            control_scope: "shared".to_string(),
+            network_id: "bitcoin-mainnet".to_string(),
+            address: "1BoatSLRHtKNngkdXEeobR76b53LETtpyT".to_string(),
+            height: 840000,
+            block_hash: "0000000000000000000320283a032748cef8227873ff4872689bf23f1cda83a5"
+                .to_string(),
+        })
+        .expect("request json");
+
+        assert_eq!(
+            request,
+            serde_json::json!({
+                "kind": "bitcoin_scan_utxos",
+                "control_scope": "shared",
+                "network_id": "bitcoin-mainnet",
+                "address": "1BoatSLRHtKNngkdXEeobR76b53LETtpyT",
+                "height": 840000,
+                "block_hash": "0000000000000000000320283a032748cef8227873ff4872689bf23f1cda83a5",
+            })
+        );
+    }
+
+    #[test]
+    fn bitcoin_anchor_request_deserializes_from_adapter_shape() {
+        let json = serde_json::json!({
+            "kind": "bitcoin_anchor",
+            "control_scope": "shared",
+            "network_id": "bitcoin-mainnet"
+        });
+        let request: RpcControlRequest = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(
+            request,
+            RpcControlRequest::BitcoinAnchor {
+                control_scope: "shared".to_string(),
+                network_id: "bitcoin-mainnet".to_string(),
+            }
         );
     }
 

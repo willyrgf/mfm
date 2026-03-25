@@ -9,6 +9,7 @@ members = [
 	"crates/app",
 	"crates/collectors/exec",
 	"crates/collectors/evm",
+	"crates/collectors/btc-jsonrpc-http",
 	"crates/collectors/evm-jsonrpc-http",
 	"crates/collectors/local-fs",
 	"crates/collectors/local-keystore",

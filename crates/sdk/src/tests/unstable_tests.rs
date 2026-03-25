@@ -1,5 +1,5 @@
 use super::*;
-use crate::op::{OpIo, PortSource};
+use crate::op::{OpInterface, PortSource};
 use mfm_machine::config::{
     BackoffPolicy, ContextCheckpointing, EventProfile, ExecutionMode, IoMode, RetryPolicy,
     RunConfig,
@@ -328,7 +328,7 @@ impl TestOp {
         state_id: &str,
         key: &'static str,
         value: serde_json::Value,
-        io: OpIo,
+        io: OpInterface,
     ) -> Self {
         let state: DynState = Arc::new(WriteKeyState { key, value });
         Self {
@@ -350,7 +350,7 @@ impl TestOp {
         state_id: &str,
         read_key: &'static str,
         write_key: &'static str,
-        io: OpIo,
+        io: OpInterface,
     ) -> Self {
         let state: DynState = Arc::new(ReadThenWriteState {
             read_key,
@@ -396,7 +396,7 @@ struct DynamicWriteOp {
     state_local_id: &'static str,
     key: &'static str,
     value: serde_json::Value,
-    interface: OpIo,
+    interface: OpInterface,
     planner_payload: Option<serde_json::Value>,
 }
 
@@ -407,7 +407,7 @@ impl DynamicWriteOp {
         state_local_id: &'static str,
         key: &'static str,
         value: serde_json::Value,
-        interface: OpIo,
+        interface: OpInterface,
     ) -> Self {
         Self {
             op_id: OpId::must_new(op_id.to_string()),
@@ -474,7 +474,7 @@ struct DynamicReadThenWriteOp {
     state_local_id: &'static str,
     read_key: &'static str,
     write_key: &'static str,
-    interface: OpIo,
+    interface: OpInterface,
 }
 
 impl DynamicReadThenWriteOp {
@@ -484,7 +484,7 @@ impl DynamicReadThenWriteOp {
         state_local_id: &'static str,
         read_key: &'static str,
         write_key: &'static str,
-        interface: OpIo,
+        interface: OpInterface,
     ) -> Self {
         Self {
             op_id: OpId::must_new(op_id.to_string()),
@@ -594,7 +594,7 @@ fn planner_adds_step_barrier_edges() {
         "m.step1.s1",
         "k",
         serde_json::json!("v1"),
-        OpIo {
+        OpInterface {
             imports: Vec::new(),
             exports: Vec::new(),
         },
@@ -605,7 +605,7 @@ fn planner_adds_step_barrier_edges() {
         "m.step2.s1",
         "k",
         serde_json::json!("v2"),
-        OpIo {
+        OpInterface {
             imports: Vec::new(),
             exports: Vec::new(),
         },
@@ -652,7 +652,7 @@ fn planner_flattens_composite_children_in_lexical_topological_order() {
         "write",
         "alpha",
         serde_json::json!(1),
-        OpIo {
+        OpInterface {
             imports: Vec::new(),
             exports: Vec::new(),
         },
@@ -663,7 +663,7 @@ fn planner_flattens_composite_children_in_lexical_topological_order() {
         "write",
         "beta",
         serde_json::json!(2),
-        OpIo {
+        OpInterface {
             imports: Vec::new(),
             exports: Vec::new(),
         },
@@ -672,7 +672,7 @@ fn planner_flattens_composite_children_in_lexical_topological_order() {
         "root",
         "v1",
         crate::op::PlannedOp {
-            interface: OpIo {
+            interface: OpInterface {
                 imports: Vec::new(),
                 exports: Vec::new(),
             },
@@ -723,7 +723,7 @@ fn planner_derives_child_dependencies_from_export_bindings() {
         "write",
         "payload",
         serde_json::json!("v1"),
-        OpIo {
+        OpInterface {
             imports: Vec::new(),
             exports: vec![PortKey("payload".to_string())],
         },
@@ -734,7 +734,7 @@ fn planner_derives_child_dependencies_from_export_bindings() {
         "consume",
         "input",
         "seen",
-        OpIo {
+        OpInterface {
             imports: vec![PortKey("input".to_string())],
             exports: Vec::new(),
         },
@@ -743,7 +743,7 @@ fn planner_derives_child_dependencies_from_export_bindings() {
         "root",
         "v1",
         crate::op::PlannedOp {
-            interface: OpIo {
+            interface: OpInterface {
                 imports: Vec::new(),
                 exports: Vec::new(),
             },
@@ -802,7 +802,7 @@ fn planner_rejects_duplicate_pipeline_export_ports() {
         "m.step1.s1",
         "x",
         serde_json::json!("v1"),
-        OpIo {
+        OpInterface {
             imports: Vec::new(),
             exports: vec![PortKey("shared".to_string())],
         },
@@ -813,7 +813,7 @@ fn planner_rejects_duplicate_pipeline_export_ports() {
         "m.step2.s1",
         "x",
         serde_json::json!("v2"),
-        OpIo {
+        OpInterface {
             imports: Vec::new(),
             exports: vec![PortKey("shared".to_string())],
         },
@@ -858,7 +858,7 @@ fn planner_rejects_missing_child_import_binding() {
         "consume",
         "value",
         "seen",
-        OpIo {
+        OpInterface {
             imports: vec![PortKey("value".to_string())],
             exports: Vec::new(),
         },
@@ -867,7 +867,7 @@ fn planner_rejects_missing_child_import_binding() {
         "root",
         "v1",
         crate::op::PlannedOp {
-            interface: OpIo {
+            interface: OpInterface {
                 imports: Vec::new(),
                 exports: Vec::new(),
             },
@@ -907,7 +907,7 @@ fn planner_rejects_lowered_state_id_collisions_across_nested_children() {
         "write",
         "value",
         serde_json::json!(1),
-        OpIo {
+        OpInterface {
             imports: Vec::new(),
             exports: Vec::new(),
         },
@@ -916,7 +916,7 @@ fn planner_rejects_lowered_state_id_collisions_across_nested_children() {
         "nested",
         "v1",
         crate::op::PlannedOp {
-            interface: OpIo {
+            interface: OpInterface {
                 imports: Vec::new(),
                 exports: Vec::new(),
             },
@@ -932,7 +932,7 @@ fn planner_rejects_lowered_state_id_collisions_across_nested_children() {
         "root",
         "v1",
         crate::op::PlannedOp {
-            interface: OpIo {
+            interface: OpInterface {
                 imports: Vec::new(),
                 exports: Vec::new(),
             },
@@ -1000,7 +1000,7 @@ fn planner_rejects_apply_side_effect_without_idempotency_key() {
         op_id: OpId::must_new("op".to_string()),
         op_version: "v1".to_string(),
         planned: crate::op::PlannedOp {
-            interface: OpIo {
+            interface: OpInterface {
                 imports: Vec::new(),
                 exports: Vec::new(),
             },
@@ -1038,7 +1038,7 @@ fn planner_validates_unsatisfied_import() {
         "m.step1.s1",
         "x",
         "y",
-        OpIo {
+        OpInterface {
             imports: vec![PortKey("x".to_string())],
             exports: Vec::new(),
         },
@@ -1098,7 +1098,7 @@ async fn launcher_rejects_secrets_in_manifest_input() {
         "m.step1.s1",
         "k",
         serde_json::json!("v1"),
-        OpIo {
+        OpInterface {
             imports: Vec::new(),
             exports: Vec::new(),
         },
@@ -1176,7 +1176,7 @@ async fn namespacing_prevents_context_collisions_and_wires_imports() {
         "m.step1.s1",
         "x",
         serde_json::json!("v1"),
-        OpIo {
+        OpInterface {
             imports: Vec::new(),
             exports: vec![PortKey("x".to_string())],
         },
@@ -1187,7 +1187,7 @@ async fn namespacing_prevents_context_collisions_and_wires_imports() {
         "m.step2.s1",
         "x",
         "y",
-        OpIo {
+        OpInterface {
             imports: vec![PortKey("x".to_string())],
             exports: Vec::new(),
         },
@@ -1198,7 +1198,7 @@ async fn namespacing_prevents_context_collisions_and_wires_imports() {
         "m.step3.s1",
         "x",
         serde_json::json!("v2"),
-        OpIo {
+        OpInterface {
             imports: Vec::new(),
             exports: Vec::new(),
         },
@@ -1303,7 +1303,7 @@ async fn recursive_composite_imports_flow_through_parent_bindings() {
         "write",
         "payload",
         serde_json::json!("v1"),
-        OpIo {
+        OpInterface {
             imports: Vec::new(),
             exports: vec![PortKey("payload".to_string())],
         },
@@ -1314,7 +1314,7 @@ async fn recursive_composite_imports_flow_through_parent_bindings() {
         "consume",
         "input",
         "seen",
-        OpIo {
+        OpInterface {
             imports: vec![PortKey("input".to_string())],
             exports: Vec::new(),
         },
@@ -1323,7 +1323,7 @@ async fn recursive_composite_imports_flow_through_parent_bindings() {
         "root_composite",
         "v1",
         crate::op::PlannedOp {
-            interface: OpIo {
+            interface: OpInterface {
                 imports: vec![PortKey("payload".to_string())],
                 exports: Vec::new(),
             },
@@ -1432,7 +1432,7 @@ fn planner_emits_deterministic_compiled_execution_spec() {
         "write",
         "payload",
         serde_json::json!("v1"),
-        OpIo {
+        OpInterface {
             imports: Vec::new(),
             exports: vec![PortKey("payload".to_string())],
         },
@@ -1441,7 +1441,7 @@ fn planner_emits_deterministic_compiled_execution_spec() {
         "root",
         "v1",
         crate::op::PlannedOp {
-            interface: OpIo {
+            interface: OpInterface {
                 imports: Vec::new(),
                 exports: vec![PortKey("payload".to_string())],
             },
@@ -1478,7 +1478,7 @@ fn planner_emits_deterministic_compiled_execution_spec() {
         "write",
         "payload",
         serde_json::json!("v1"),
-        OpIo {
+        OpInterface {
             imports: Vec::new(),
             exports: vec![PortKey("payload".to_string())],
         },
@@ -1487,7 +1487,7 @@ fn planner_emits_deterministic_compiled_execution_spec() {
         "root",
         "v1",
         crate::op::PlannedOp {
-            interface: OpIo {
+            interface: OpInterface {
                 imports: Vec::new(),
                 exports: vec![PortKey("payload".to_string())],
             },
@@ -1533,7 +1533,7 @@ fn planner_records_op_planner_payloads_in_compiled_execution_spec() {
             "write",
             "payload",
             serde_json::json!("v1"),
-            OpIo {
+            OpInterface {
                 imports: Vec::new(),
                 exports: vec![PortKey("payload".to_string())],
             },
@@ -1579,7 +1579,7 @@ async fn launcher_persists_compiled_execution_spec_artifact() {
         "write",
         "payload",
         serde_json::json!("v1"),
-        OpIo {
+        OpInterface {
             imports: Vec::new(),
             exports: vec![PortKey("payload".to_string())],
         },
@@ -1588,7 +1588,7 @@ async fn launcher_persists_compiled_execution_spec_artifact() {
         "root",
         "v1",
         crate::op::PlannedOp {
-            interface: OpIo {
+            interface: OpInterface {
                 imports: Vec::new(),
                 exports: vec![PortKey("payload".to_string())],
             },
@@ -1627,7 +1627,7 @@ async fn launcher_persists_compiled_execution_spec_artifact() {
         "write",
         "payload",
         serde_json::json!("v1"),
-        OpIo {
+        OpInterface {
             imports: Vec::new(),
             exports: vec![PortKey("payload".to_string())],
         },
@@ -1636,7 +1636,7 @@ async fn launcher_persists_compiled_execution_spec_artifact() {
         "root",
         "v1",
         crate::op::PlannedOp {
-            interface: OpIo {
+            interface: OpInterface {
                 imports: Vec::new(),
                 exports: vec![PortKey("payload".to_string())],
             },
@@ -1733,7 +1733,7 @@ async fn sdk_plan_resolver_rebuilds_plan_from_manifest() {
         "m.step1.s1",
         "k",
         serde_json::json!("v1"),
-        OpIo {
+        OpInterface {
             imports: Vec::new(),
             exports: Vec::new(),
         },
@@ -1787,7 +1787,7 @@ async fn single_op_report_returns_typed_report() {
         "report_op.main.s1",
         "report",
         serde_json::json!({"value": 42}),
-        OpIo {
+        OpInterface {
             imports: Vec::new(),
             exports: Vec::new(),
         },
@@ -1832,7 +1832,7 @@ async fn single_op_report_errors_when_report_key_missing() {
         "report_missing_op.main.s1",
         "unused",
         serde_json::json!({"value": 1}),
-        OpIo {
+        OpInterface {
             imports: Vec::new(),
             exports: Vec::new(),
         },
@@ -1923,7 +1923,7 @@ impl crate::op::Operation for FailOp {
         _run_config: &RunConfig,
     ) -> Result<crate::op::PlannedOp, SdkError> {
         Ok(crate::op::PlannedOp {
-            interface: OpIo {
+            interface: OpInterface {
                 imports: Vec::new(),
                 exports: Vec::new(),
             },

@@ -37,7 +37,7 @@ use mfm_state_common::errors as op_errors;
 use mfm_state_portfolio::model::{
     decode_portfolio_config, validate_portfolio_bundle, PortfolioConfig,
 };
-use mfm_state_portfolio::semantic::PortfolioExecutionSpec;
+use mfm_state_portfolio::semantic::{PortfolioExecutionSpec, PORTFOLIO_EXECUTION_SPEC_KEY};
 use mfm_state_symbol::model::{decode_valuation_source_registry, ValuationSourceRegistry};
 use serde_json::Value;
 
@@ -424,7 +424,7 @@ impl Operation for PortfolioTrackerOp {
         let cfg = parse_config(op_config)?;
         let spec = compile_semantic_execution(&cfg)?;
         Ok(Some(serde_json::json!({
-            "semantic_execution_spec": spec
+            (PORTFOLIO_EXECUTION_SPEC_KEY): spec
         })))
     }
 }

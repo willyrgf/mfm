@@ -206,8 +206,6 @@ pub mod op {
         pub exports: Vec<PortKey>,
     }
 
-    /// Legacy alias retained for in-repo helpers and tests during the planner cutover.
-    pub type OpIo = OpInterface;
 
     /// One leaf state plus its planner-visible lineage.
     #[derive(Clone)]
