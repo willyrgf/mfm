@@ -104,7 +104,7 @@ nix run .#ci -- --mode <mode> --summary
 - Framework service hooks and model-level service tasks share the same launcher/runtime policy path, but this repo does not currently expose public `service::*::start` apps.
 - Local supervisor wrappers in `nixfied/local/default.nix` (`up`, `down`, `svc-*`) are intentional prod-only overrides.
 - `mfm_cli` is the compatibility passthrough wrapper over the packaged `mfm-cli` binary; `mfm_rest_api`/`svc-*` now use strict typed contracts.
-- `mfm::portfolio::snapshot` is a strict json app that owns stdout, delegates sequencing to `workflow.mfm.portfolio.snapshot`, and emits validated raw `mfm_cli` JSON payloads.
+- `mfm::portfolio::snapshot` is a strict json app that owns stdout, directly manages Postgres/Helios readiness through `SVC_*` hooks, and emits validated raw `mfm_cli` JSON payloads.
 - `nix run .#help` lists exposed core apps; invoke `mfm::portfolio::snapshot` directly by name.
 - CI help/docs metadata comes from `nixfied/project/ci.nix` at `commands.ci.api`, and is mirrored into `apps.<system>.ci.meta.nixfied.api`.
 - Project scripts should prefer framework policy helpers and `task.ops.ready`/`task.ops.health` surfaces over duplicating service policy or readiness logic.

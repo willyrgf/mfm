@@ -15,15 +15,12 @@ nix run .#mfm::portfolio::snapshot -- ./portfolio-request.json
 ```
 
 The public wrapper lives in `nixfied/project/module.nix` as `task.mfm.portfolio.snapshot`.
-It owns stdout and delegates sequencing to the internal workflow:
+It owns stdout and directly:
 
-- `workflow.mfm.portfolio.snapshot`
-
-That workflow currently composes hidden implementation tasks:
-
-- `task.mfm.portfolio.snapshot.services-start`
-- `task.mfm.portfolio.snapshot.exec`
-- `task.mfm.portfolio.snapshot.services-stop`
+- validates the request-file contract
+- manages Postgres and Helios lifecycle through `SVC_POSTGRES_*` / `SVC_HELIOS_*` hooks
+- runs the packaged `mfm_cli --output-format json portfolio snapshot --request-file ...`
+- validates the returned JSON envelope before replaying it to stdout
 
 The public task remains the stdout authority. It enforces:
 
@@ -77,24 +74,20 @@ Important Helios env vars:
 - `HELIOS_READY_INTERVAL_SECS`
 
 Model-derived executor env uses `HELIOSRPC_PORT`. Internal snapshot tasks still
-export `HELIOS_RPC_PORT` locally only where CLI routing expects that alias, but
-service lifecycle hooks resolve the canonical model port keys directly.
+resolve the canonical model port keys directly; the public snapshot task uses
+`HELIOSRPC_PORT` for its managed local Helios wiring.
 
-Runtime bootstrap reconstructed inside `task.mfm.portfolio.snapshot.exec`:
+Runtime bootstrap inside `task.mfm.portfolio.snapshot`:
 
 - `DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:$POSTGRES_PORT/mfm`
-- `MFM_SNAPSHOT_REQUEST_FILE=/absolute/path/to/portfolio-request.json`
+- request file passed as `--request-file /absolute/path/to/portfolio-request.json`
 - managed RPC bootstrap:
-  - `MFM_EVM_RPC_SOURCES_JSON=[{"id":"helios_local","network_id":"ethereum-mainnet","rpc_url":"http://127.0.0.1:$HELIOS_RPC_PORT","kind":"local"}]`
+  - `MFM_EVM_RPC_SOURCES_JSON=[{"id":"helios_local","network_id":"ethereum-mainnet","rpc_url":"http://127.0.0.1:$HELIOSRPC_PORT","kind":"local"}]`
   - `MFM_EVM_RPC_PREFERRED_ORDER=helios_local`
-
-Secret-bearing env is reconstructed per task and is not persisted in the
-services handoff file. The handoff JSON stores only non-secret ownership and
-path metadata needed for teardown.
 
 `mfm_cli` is no longer launched via `cargo run` from the snapshot path. It is
 packaged once through `conf.packages."mfm-cli"` and reused by both
-`nix run .#mfm_cli` and `task.mfm.portfolio.snapshot.exec`.
+`nix run .#mfm_cli` and `task.mfm.portfolio.snapshot`.
 
 ## Project Wiring
 
@@ -107,11 +100,10 @@ network defaults).
 - The local source is explicitly marked `real`, and framework readiness uses the `strict`
   profile so `ready -- --service helios --source local` rejects shim or unknown source kinds.
 
-`task.mfm.portfolio.snapshot.services-start` remains the coarse lifecycle task,
-but it now delegates service lifecycle to `SVC_POSTGRES_*` / `SVC_HELIOS_*`
-hooks exported by Nixfied instead of importing service scripts directly into
-`nixfied/project/module.nix`. The snapshot workflow selects the Helios hook path
-from workflow requirements rather than a project-local service catalog branch.
+`task.mfm.portfolio.snapshot` performs lifecycle orchestration directly through
+`SVC_POSTGRES_*` / `SVC_HELIOS_*` hooks exported by Nixfied instead of routing
+through a project-local workflow split or importing service scripts directly
+into `nixfied/project/module.nix`.
 
 The parity CI path also uses `SVC_HELIOS_FULL_START_TEST`, `SVC_HELIOS_READY`,
 and `SVC_HELIOS_STOP`; the repo no longer carries the previous Python Helios

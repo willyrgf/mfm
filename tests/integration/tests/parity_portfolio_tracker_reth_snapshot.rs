@@ -232,7 +232,7 @@ async fn parity_portfolio_snapshot_feature_against_reth_eth_only() {
     assert_eq!(a["data"]["encoding"], "json");
     let out = a["data"]["value"].clone();
     assert_eq!(out["portfolio_id"], "reth-eth-only");
-    assert_eq!(out["network_pins"][0]["chain_id"], chain_id);
+    assert_eq!(out["network_pins"][0]["anchor"]["chain_id"], chain_id);
     assert_eq!(out["wallets"][0]["address"], wallet_address);
     assert_eq!(
         out["wallets"][0]["observations"]
