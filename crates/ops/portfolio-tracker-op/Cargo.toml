@@ -2,6 +2,7 @@
 name = "mfm-op-portfolio-tracker"
 version = "0.1.0"
 edition = "2021"
+description = "Composite portfolio snapshot op with semantic compilation and multi-network observation"
 
 [dependencies]
 serde = { workspace = true }

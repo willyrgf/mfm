@@ -1,16 +1,18 @@
 #![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 #![warn(missing_docs)]
-//! Live `rpc.control` transport for managed EVM RPC routing.
+//! Live `rpc.control` transport for managed EVM and Bitcoin RPC routing.
 //!
 //! This transport keeps `rpc.control` as the canonical state-facing ingress while reusing the
-//! existing HTTP JSON-RPC executor internally. It owns:
-//! - bootstrap source catalog parsing from env
-//! - durable `rpc_source:*` and `source_pool:*` updates
-//! - source probing and ranking
+//! existing HTTP JSON-RPC executors internally. It owns:
+//! - bootstrap source catalog parsing from env (EVM)
+//! - durable `rpc_source:*` and `source_pool:*` updates (EVM)
+//! - source probing and ranking (EVM)
 //! - managed source selection for unpinned EVM calls
+//! - Bitcoin `getblockchaininfo` and `scantxoutset` dispatch via `MFM_BTC_RPC_URL`
 //!
-//! The inner `evm` transport is treated as an executor only. Every managed call is pinned to one
-//! concrete source before dispatch, so route choice and cooldown authority stay here.
+//! The inner `evm` transport is treated as an executor only. Every managed EVM call is pinned to
+//! one concrete source before dispatch, so route choice and cooldown authority stay here.
+//! Bitcoin calls are dispatched directly to the configured Bitcoin Core endpoint.
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
