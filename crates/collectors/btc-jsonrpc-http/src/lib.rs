@@ -113,6 +113,12 @@ pub struct ScannedUtxo {
 pub struct ScanTxOutSetResult {
     /// Whether the scan completed successfully.
     pub success: bool,
+    /// Block height of the scanned UTXO set.
+    #[serde(default)]
+    pub height: u64,
+    /// Best block hash of the scanned UTXO set.
+    #[serde(default)]
+    pub bestblock: String,
     /// Total amount in BTC across all matching UTXOs.
     pub total_amount: f64,
     /// Individual unspent outputs.
