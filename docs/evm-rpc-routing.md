@@ -10,7 +10,7 @@ This document is the operator and contributor runbook for two related surfaces:
   and control-plane internals
 
 Normative architecture references:
-- `docs/redesign.md`
+- `docs/design.md`
 - `docs/architecture.md`
 
 ## 1. Canonical Runtime Contract

@@ -23,7 +23,7 @@ It is inspired by the practices used in large Rust codebases: modular crates, st
 
 ## Design Contract (Architecture Invariants)
 
-- `docs/redesign.md` is the design contract. If code disagrees with it, the code is wrong (until the doc is updated).
+- `docs/design.md` is the design contract. If code disagrees with it, the code is wrong (until the doc is updated).
 - `docs/architecture.md` is the contributor-facing one-pager.
 - `docs/ops-and-states.md` is the current inventory of registered ops and production state implementations.
 
@@ -57,7 +57,7 @@ Nixfied is the canonical entrypoint for dev/test/build/check/ci:
 - `README.md`: project disclaimer.
 - `docs/repo-map.md`: Repository map
 - `docs/architecture.md`: one-page architecture overview + invariants.
-- `docs/redesign.md`: full design contract (authoritative).
+- `docs/design.md`: full design contract (authoritative).
 - `docs/ops-and-states.md`: current inventory of registered ops and production state implementations.
 - `bin/cli/README.md`: CLI behavior and JSON output contract.
 - `crates/machine/README.md`: state machine concepts and usage.
@@ -265,7 +265,7 @@ When changing CLI/REST behavior, update the relevant docs in the same change:
 - `bin/cli/README.md` for CLI contract/usage changes.
 - `bin/rest-api/README.md` for REST surface/contract changes.
 - `docs/architecture.md` if architectural boundaries or responsibilities change.
-- `docs/redesign.md` if runtime/storage/replay contract semantics change.
+- `docs/design.md` if runtime/storage/replay contract semantics change.
 - Public library API changes must update rustdoc in the same change.
 - Keep `#![warn(missing_docs)]` enabled in library crates; new library crates should add it from the start.
 - New public items must include rustdoc on the item and its public fields or methods.

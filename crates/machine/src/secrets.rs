@@ -1,6 +1,6 @@
 //! Secrets scanning and redaction helpers.
 //!
-//! Source of truth: `docs/redesign.md` (v4).
+//! Source of truth: `docs/design.md` (v4).
 //!
 //! Hard rule: secrets must not appear in persisted surfaces:
 //! - manifests, events, artifacts (including fact payloads and context snapshots), CLI/API outputs, and error details.

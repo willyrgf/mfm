@@ -4,7 +4,7 @@
 //! `mfm-machine` defines the stable identifiers, execution-plan types, context and IO
 //! abstractions, and storage interfaces used throughout the workspace. Runtime implementations
 //! live in unstable submodules such as [`runtime`] and [`live_io`], while the types in this file
-//! model the architectural contract described in `docs/redesign.md`.
+//! model the architectural contract described in `docs/design.md`.
 //!
 //! # Example
 //!
@@ -82,7 +82,7 @@
 //! assert_eq!(plan.op_id.as_str(), "portfolio_snapshot");
 //! ```
 //!
-//! Source of truth: `docs/redesign.md` Appendix C.1.
+//! Source of truth: `docs/design.md` Appendix C.1.
 #![warn(missing_docs)]
 
 use async_trait::async_trait;

@@ -18,7 +18,7 @@ Use this document when you need the current catalog:
 - which op-local `State` implementations are still intentional exceptions
 
 Use `docs/architecture.md` for placement and boundary rules.
-Use `docs/redesign.md` for normative semantics and invariants.
+Use `docs/design.md` for normative semantics and invariants.
 
 Current snapshot:
 

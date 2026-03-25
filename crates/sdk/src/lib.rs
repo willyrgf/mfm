@@ -6,7 +6,7 @@
 //! It provides stable identifiers, operation and pipeline traits, and launcher contracts for
 //! turning deterministic op descriptions into executable `mfm-machine` plans.
 //!
-//! Source of truth: `docs/redesign.md` (v4) Appendix C.2.
+//! Source of truth: `docs/design.md` (v4) Appendix C.2.
 //!
 //! # Examples
 //!

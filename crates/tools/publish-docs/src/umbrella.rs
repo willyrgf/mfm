@@ -37,7 +37,7 @@ pub(crate) fn render_readme(
     out.push_str("The live runtime inventory still lives in the repository docs:\n\n");
     out.push_str("- `docs/ops-and-states.md`\n");
     out.push_str("- `docs/architecture.md`\n");
-    out.push_str("- `docs/redesign.md`\n");
+    out.push_str("- `docs/design.md`\n");
 
     for section in [
         CatalogSection::EngineSdk,

@@ -1,6 +1,6 @@
 //! Replay IO implementation.
 //!
-//! Source of truth: `docs/redesign.md` (v4).
+//! Source of truth: `docs/design.md` (v4).
 //! Not part of the stable API contract (Appendix C.1).
 
 use std::sync::Arc;

@@ -154,7 +154,7 @@ rec {
       "AGENTS.md"
       "docs/architecture.md"
       "docs/DETAILED.md"
-      "docs/redesign.md"
+      "docs/design.md"
       "docs/ops-and-states.md"
       "docs/UPGRADE.md"
     ];

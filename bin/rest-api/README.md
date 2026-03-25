@@ -148,6 +148,6 @@ Supported `feature_id` values (current):
 
 Docs:
 
-- Design contract: [`../../docs/redesign.md`](../../docs/redesign.md)
+- Design contract: [`../../docs/design.md`](../../docs/design.md)
 - Architecture overview: [`../../docs/architecture.md`](../../docs/architecture.md)
 - CLI docs (parallel surface): [`../cli/README.md`](../cli/README.md)

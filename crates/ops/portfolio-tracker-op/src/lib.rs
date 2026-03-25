@@ -4,7 +4,7 @@
 //! Canonical portfolio snapshot planner op.
 //!
 //! Source of truth:
-//! - `docs/redesign.md`
+//! - `docs/design.md`
 //! - `docs/ops-and-states.md`
 //!
 //! `portfolio_tracker` remains a thin planner that validates canonical config inputs and wires the

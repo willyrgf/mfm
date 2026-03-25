@@ -7,4 +7,4 @@ client for managed RPC control-plane operations such as routed EVM calls and sou
 prepare/setup/probe/rank actions. Managed request identity includes explicit `control_scope`
 (`shared` by default) and explicit `network_id` for canonical managed calls.
 
-Docs: [`../../../docs/redesign.md`](../../../docs/redesign.md)
+Docs: [`../../../docs/design.md`](../../../docs/design.md)

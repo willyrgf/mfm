@@ -3,7 +3,7 @@
 #![warn(missing_docs)]
 //! Proof op (acceptance tests).
 //!
-//! Source of truth: `docs/redesign.md`.
+//! Source of truth: `docs/design.md`.
 //!
 //! This crate is intentionally thin: it assembles reusable shared states into a deterministic
 //! acceptance-test workflow that exercises read IO, idempotent side effects, and output writing.

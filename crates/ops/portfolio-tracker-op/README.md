@@ -19,6 +19,6 @@ Protocol and network specialization now happens in the semantic adapter catalog 
 protocol-specific graph shapes.
 
 Docs:
-- `docs/redesign.md`
+- `docs/design.md`
 - `docs/ops-and-states.md`
 - `bin/cli/README.md`

@@ -21,7 +21,7 @@ The live runtime inventory still lives in the repository docs:
 
 - `docs/ops-and-states.md`
 - `docs/architecture.md`
-- `docs/redesign.md`
+- `docs/design.md`
 
 ## Engine And SDK
 
