@@ -22,9 +22,7 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use tracing::warn;
 
-use mfm_collectors_btc_jsonrpc_http::{
-    BtcJsonRpcClient, BtcJsonRpcConfig, BlockchainInfo,
-};
+use mfm_collectors_btc_jsonrpc_http::{BlockchainInfo, BtcJsonRpcClient, BtcJsonRpcConfig};
 use mfm_collectors_evm_jsonrpc_http::{
     EvmJsonRpcHttpConfig, EvmJsonRpcHttpTransportFactory, EvmJsonRpcSource, EvmRoutingStrategy,
     EvmSourceKind,
@@ -1602,9 +1600,7 @@ impl RpcControlTransport {
         &mut self,
         network_id: &str,
     ) -> Result<serde_json::Value, IoError> {
-        let info = self
-            .ensure_matching_btc_network(network_id)
-            .await?;
+        let info = self.ensure_matching_btc_network(network_id).await?;
         Ok(serde_json::json!({
             "height": info.blocks,
             "block_hash": info.bestblockhash,
@@ -1941,10 +1937,22 @@ mod tests {
 
     #[test]
     fn bitcoin_network_chain_mapping_is_known() {
-        assert_eq!(bitcoin_chain_for_network_id("bitcoin-mainnet"), Some("main"));
-        assert_eq!(bitcoin_chain_for_network_id("bitcoin-testnet"), Some("test"));
-        assert_eq!(bitcoin_chain_for_network_id("bitcoin-signet"), Some("signet"));
-        assert_eq!(bitcoin_chain_for_network_id("bitcoin-regtest"), Some("regtest"));
+        assert_eq!(
+            bitcoin_chain_for_network_id("bitcoin-mainnet"),
+            Some("main")
+        );
+        assert_eq!(
+            bitcoin_chain_for_network_id("bitcoin-testnet"),
+            Some("test")
+        );
+        assert_eq!(
+            bitcoin_chain_for_network_id("bitcoin-signet"),
+            Some("signet")
+        );
+        assert_eq!(
+            bitcoin_chain_for_network_id("bitcoin-regtest"),
+            Some("regtest")
+        );
         assert_eq!(bitcoin_chain_for_network_id("bitcoin-dev"), None);
     }
 

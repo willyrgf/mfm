@@ -12,12 +12,10 @@ use mfm_state_aave_v3::portfolio::plan_payloads::{
     AaveDebtObservationPayload, AaveReserveObservationPayload,
 };
 use mfm_state_portfolio::dispatch_adapters::{
-    BitcoinAddressSubjectRuntimeAdapter, BitcoinViewRuntimeAdapter,
-    BitcoinUtxoSetObservationRuntimeAdapter, DerivedUnitPriceRuntimeAdapter,
-    EvmAddressSubjectRuntimeAdapter, EvmViewRuntimeAdapter,
-    EvmErc20BalanceObservationRuntimeAdapter,
-    EvmNativeBalanceObservationRuntimeAdapter, EvmOracleDirectPriceRuntimeAdapter,
-    FixedUnitPriceRuntimeAdapter,
+    BitcoinAddressSubjectRuntimeAdapter, BitcoinUtxoSetObservationRuntimeAdapter,
+    BitcoinViewRuntimeAdapter, DerivedUnitPriceRuntimeAdapter, EvmAddressSubjectRuntimeAdapter,
+    EvmErc20BalanceObservationRuntimeAdapter, EvmNativeBalanceObservationRuntimeAdapter,
+    EvmOracleDirectPriceRuntimeAdapter, EvmViewRuntimeAdapter, FixedUnitPriceRuntimeAdapter,
 };
 use mfm_state_portfolio::model::{validate_portfolio_bundle, NetworkConfig, NetworkFamilyConfig};
 use mfm_state_portfolio::plan::{
