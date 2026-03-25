@@ -486,6 +486,7 @@ pub mod ids {
     }
 
     impl ContextSlot {
+        #[allow(dead_code)]
         fn as_str(&self) -> &'static str {
             match self {
                 ContextSlot::In => "in",
@@ -494,6 +495,7 @@ pub mod ids {
             }
         }
 
+        #[allow(dead_code)]
         fn matches_any(prefix: &str) -> bool {
             matches!(prefix, "in" | "out" | "work")
         }
