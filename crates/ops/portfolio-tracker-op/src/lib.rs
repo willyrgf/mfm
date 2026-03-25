@@ -64,23 +64,17 @@ const MAIN_OP_PATH: &str = "portfolio_tracker.main";
 
 /// Returns the context key that stores the canonical portfolio snapshot JSON.
 pub fn portfolio_snapshot_context_key() -> ContextKey {
-    ContextKey(format!(
-        "{MAIN_OP_PATH}.{ASSEMBLE_SNAPSHOT_CHILD_ID}.out.{PORT_SNAPSHOT}"
-    ))
+    ContextKey(format!("{MAIN_OP_PATH}.out.{PORT_SNAPSHOT}"))
 }
 
 /// Returns the context key that stores the canonical portfolio snapshot artifact id.
 pub fn portfolio_snapshot_artifact_id_context_key() -> ContextKey {
-    ContextKey(format!(
-        "{MAIN_OP_PATH}.{ASSEMBLE_SNAPSHOT_CHILD_ID}.out.{PORT_SNAPSHOT_ARTIFACT_ID}"
-    ))
+    ContextKey(format!("{MAIN_OP_PATH}.out.{PORT_SNAPSHOT_ARTIFACT_ID}"))
 }
 
 /// Returns the context key that stores the canonical portfolio report JSON.
 pub fn portfolio_snapshot_report_context_key() -> ContextKey {
-    ContextKey(format!(
-        "{MAIN_OP_PATH}.{PROJECT_REPORT_CHILD_ID}.out.{PORT_REPORT}"
-    ))
+    ContextKey(format!("{MAIN_OP_PATH}.out.{PORT_REPORT}"))
 }
 
 #[derive(Clone, Debug)]
@@ -209,11 +203,36 @@ fn sanitize_child_local_id(value: &str) -> String {
 #[derive(Clone, Default)]
 pub struct PortfolioTrackerOp;
 
-/// Returns the built-in portfolio tracker root op plus its internal semantic child ops.
+/// Returns the built-in public portfolio tracker root op.
+pub fn portfolio_tracker_public_ops() -> Vec<DynOperation> {
+    vec![Arc::new(PortfolioTrackerOp) as DynOperation]
+}
+
+/// Returns the planner-internal semantic child ops used to lower `portfolio_tracker`.
+pub fn portfolio_tracker_internal_ops() -> Vec<DynOperation> {
+    child_ops()
+}
+
+/// Returns the full portfolio tracker operation bundle, including planner-internal child ops.
 pub fn portfolio_tracker_ops() -> Vec<DynOperation> {
-    let mut ops = vec![Arc::new(PortfolioTrackerOp) as DynOperation];
-    ops.extend(child_ops());
+    let mut ops = portfolio_tracker_public_ops();
+    ops.extend(portfolio_tracker_internal_ops());
     ops
+}
+
+/// Returns whether `op_id` refers to a planner-internal semantic child op.
+pub fn is_portfolio_tracker_internal_op_id(op_id: &str) -> bool {
+    matches!(
+        op_id,
+        PREPARE_EXECUTION_SOURCES_OP_ID
+            | RESOLVE_SUBJECTS_OP_ID
+            | PIN_EXECUTION_VIEWS_OP_ID
+            | RESOLVE_VALUATION_INPUTS_OP_ID
+            | OBSERVE_COMPILED_BATCH_OP_ID
+            | MERGE_OBSERVATIONS_OP_ID
+            | ASSEMBLE_SNAPSHOT_OP_ID
+            | PROJECT_REPORT_OP_ID
+    )
 }
 
 impl Operation for PortfolioTrackerOp {
@@ -364,6 +383,7 @@ impl Operation for PortfolioTrackerOp {
             interface: OpInterface {
                 imports: Vec::new(),
                 exports: vec![
+                    PortKey(PORT_SNAPSHOT.to_string()),
                     PortKey(PORT_SNAPSHOT_ARTIFACT_ID.to_string()),
                     PortKey(PORT_REPORT.to_string()),
                 ],
@@ -373,6 +393,10 @@ impl Operation for PortfolioTrackerOp {
                 bindings,
                 order: Vec::<AfterEdge>::new(),
                 re_exports: vec![
+                    re_export_binding(
+                        PORT_SNAPSHOT,
+                        child_export(ASSEMBLE_SNAPSHOT_CHILD_ID, PORT_SNAPSHOT),
+                    ),
                     re_export_binding(
                         PORT_SNAPSHOT_ARTIFACT_ID,
                         child_export(ASSEMBLE_SNAPSHOT_CHILD_ID, PORT_SNAPSHOT_ARTIFACT_ID),
