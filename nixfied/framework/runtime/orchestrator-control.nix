@@ -21,7 +21,7 @@ pkgs.writeShellScriptBin "nixfied-orchestrator-control" ''
   set -euo pipefail
   ${shellCommon}
 
-  REGISTRY_ROOT_DEFAULT=${lib.escapeShellArg model.state.policy.registryRoot}
+  REGISTRY_ROOT_DEFAULT="${model.state.policy.registryRoot}"
   REGISTRY_ROOT="''${REGISTRY_ROOT:-$REGISTRY_ROOT_DEFAULT}"
   RUNS_DIR="$REGISTRY_ROOT/orchestrator/runs"
   RUN_LOCKS_DIR="$REGISTRY_ROOT/orchestrator/locks"

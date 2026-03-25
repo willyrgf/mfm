@@ -8,3 +8,6 @@
 config.yaml
 result
 NIXFIED_PROMPT_PLAN.md
+# Safety net: literal unexpanded shell-variable directories (nixfied runtime bug)
+${XDG_CACHE_HOME:-$HOME/.cache}/
+${XDG_DATA_HOME:-$HOME/.local/share}/

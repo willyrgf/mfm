@@ -181,8 +181,8 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
       MODEL_FILE=${pkgs.lib.escapeShellArg (builtins.toString modelFile)}
       export NIXFIED_MODEL_FILE="$MODEL_FILE"
       PROJECT_ROOT=${pkgs.lib.escapeShellArg (builtins.toString projectRoot)}
-      REGISTRY_ROOT_DEFAULT=${pkgs.lib.escapeShellArg model.state.policy.registryRoot}
-      ARTIFACTS_ROOT_DEFAULT=${pkgs.lib.escapeShellArg model.state.policy.artifactsRoot}
+      REGISTRY_ROOT_DEFAULT="${model.state.policy.registryRoot}"
+      ARTIFACTS_ROOT_DEFAULT="${model.state.policy.artifactsRoot}"
       if [ -n "''${REGISTRY_ROOT+x}" ]; then
         REGISTRY_ROOT_EXPLICIT=1
       else

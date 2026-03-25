@@ -117,8 +117,8 @@ pkgs.writeShellScriptBin "nixfied-orchestrator" ''
   export NIXFIED_EXECUTOR_BIN="$EXECUTOR_PROGRAM"
   EPHEMERAL_EXECUTOR_WRAPPER=${lib.escapeShellArg (builtins.toString ephemeralExecutorWrapper)}
   PROJECT_ROOT=${lib.escapeShellArg (builtins.toString projectRoot)}
-  REGISTRY_ROOT_DEFAULT=${lib.escapeShellArg model.state.policy.registryRoot}
-  ARTIFACTS_ROOT_DEFAULT=${lib.escapeShellArg model.state.policy.artifactsRoot}
+  REGISTRY_ROOT_DEFAULT="${model.state.policy.registryRoot}"
+  ARTIFACTS_ROOT_DEFAULT="${model.state.policy.artifactsRoot}"
   if [ -n "''${REGISTRY_ROOT+x}" ]; then
     REGISTRY_ROOT_EXPLICIT=1
   else

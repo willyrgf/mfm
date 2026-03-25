@@ -139,7 +139,7 @@ let
     SLOT_RUNTIME_SLOT_DEFAULT=${lib.escapeShellArg (toString model.runtime.slot.default)}
     SLOT_RUNTIME_ENV_DEFAULT=${lib.escapeShellArg model.runtime.env.default}
     SLOT_RUNTIME_SLOT_STRIDE=${lib.escapeShellArg (toString model.runtime.slot.stride)}
-    SLOT_RUNTIME_DIR_BASE=${lib.escapeShellArg model.runtime.directories.base}
+    SLOT_RUNTIME_DIR_BASE="${model.runtime.directories.base}"
 
     normalize_slot_runtime_token() {
       printf '%s' "$1" | ${pkgs.coreutils}/bin/tr '[:lower:].-:/ ' '[:upper:]______' | ${pkgs.coreutils}/bin/tr -c 'A-Z0-9_' '_'

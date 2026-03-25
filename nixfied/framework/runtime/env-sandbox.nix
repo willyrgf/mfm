@@ -113,14 +113,14 @@ in
         pkgs.lib.toUpper (pkgs.lib.replaceStrings [ "-" "." ] [ "_" "_" ] model.identity.projectId)
       )
     }
-    RUNTIME_DIR_BASE_DEFAULT=${pkgs.lib.escapeShellArg model.runtime.directories.base}
+    RUNTIME_DIR_BASE_DEFAULT="${model.runtime.directories.base}"
     ENV_SANDBOX_STATIC_RUNTIME_PACKAGES_PATH=${lib.escapeShellArg staticRuntimePackagesPath}
     ENV_SANDBOX_STATIC_RUNTIME_SLOT_VAR=${lib.escapeShellArg model.runtime.slot.var}
     ENV_SANDBOX_STATIC_RUNTIME_ENV_VAR=${lib.escapeShellArg model.runtime.env.var}
     ENV_SANDBOX_STATIC_RUNTIME_SLOT_DEFAULT=${lib.escapeShellArg (toString model.runtime.slot.default)}
     ENV_SANDBOX_STATIC_RUNTIME_ENV_DEFAULT=${lib.escapeShellArg model.runtime.env.default}
     ENV_SANDBOX_STATIC_RUNTIME_SLOT_STRIDE=${lib.escapeShellArg (toString model.runtime.slot.stride)}
-    ENV_SANDBOX_STATIC_RUNTIME_DIR_BASE=${lib.escapeShellArg model.runtime.directories.base}
+    ENV_SANDBOX_STATIC_RUNTIME_DIR_BASE="${model.runtime.directories.base}"
     ENV_SANDBOX_STATIC_LOG_LEVEL_DEFAULT=${lib.escapeShellArg model.runtime.logging.levelDefault}
     ENV_SANDBOX_STATIC_OUTPUT_MODE_DEFAULT=${lib.escapeShellArg model.runtime.logging.outputDefault}
     ENV_SANDBOX_STATIC_RUNTIME_PRIMITIVES_TSV=${lib.escapeShellArg staticRuntimePrimitivesTsv}
