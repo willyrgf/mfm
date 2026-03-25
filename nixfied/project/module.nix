@@ -320,11 +320,14 @@ let
     # evaluation does not trip over mutable target/ files.
     run_id_component="''${NIXFIED_ORCHESTRATOR_RUN_ID:-''${NIXFIED_RUN_ID:-''${NIX_ENV:-0}}}"
     run_id_component="$(printf '%s' "$run_id_component" | tr './:' '__')"
+    task_id_component="''${NIXFIED_TASK_ID:-unknown-task}"
+    task_id_component="$(printf '%s' "$task_id_component" | tr './:' '__')"
     cache_root="''${TMPDIR:-/tmp}/mfm-ci-cache/$run_id_component"
-    # Share Cargo cache per CI run to avoid rebuilding identical crates/tests.
+    # Keep Cargo cache stable per CI task to prevent parallel CI units
+    # from sharing intermediate object files.
     export CARGO_HOME="''${CARGO_HOME:-$cache_root/cargo-home}"
     mkdir -p "$CARGO_HOME"
-    export CARGO_TARGET_DIR="''${CARGO_TARGET_DIR:-$cache_root/cargo-target}"
+    export CARGO_TARGET_DIR="''${CARGO_TARGET_DIR:-$cache_root/cargo-target/$task_id_component}"
     mkdir -p "$CARGO_TARGET_DIR"
 
     run_with_log() {
