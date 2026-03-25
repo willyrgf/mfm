@@ -14,8 +14,8 @@ use mfm_machine::stores::{
     AppendBatchResult, ArtifactKind, ArtifactStore, StreamAppend, StreamId, StreamRecord,
     StreamStore,
 };
-use mfm_stream_store_mem::MemStreamStore;
 use mfm_op_portfolio_tracker::portfolio_tracker_internal_op_ids;
+use mfm_stream_store_mem::MemStreamStore;
 
 static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
