@@ -297,6 +297,7 @@ let
 
   slotInfo = pkgs.writeShellScript "nixfied-slot-info" ''
     set -euo pipefail
+    ${commonRuntimeShell}
     ${slotRuntimePrelude}
 
     resolve_slot_runtime_context
@@ -324,6 +325,7 @@ let
 
   serviceDirResolver = pkgs.writeShellScript "nixfied-service-dir" ''
     set -euo pipefail
+    ${commonRuntimeShell}
     ${slotRuntimePrelude}
 
     data_dir_name="''${1:-}"
