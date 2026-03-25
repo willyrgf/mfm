@@ -6,7 +6,7 @@ edition = "2021"
 [dependencies]
 async-trait = { workspace = true }
 mfm-machine = { path = "../../machine" }
-s3 = { package = "rust-s3", version = "0.37.1", default-features = false, features = ["tokio-rustls-tls"] }
+s3 = { package = "rust-s3", version = "0.37.1", default-features = false, features = ["tokio-native-tls"] }
 
 [dev-dependencies]
 
