@@ -102,6 +102,14 @@ fn default_control_scope() -> String {
     "shared".to_string()
 }
 
+fn default_configure_tx_hashes_export_key() -> String {
+    KEY_CONFIGURE_TX_HASHES.to_string()
+}
+
+fn default_configure_receipts_export_key() -> String {
+    KEY_CONFIGURE_RECEIPTS.to_string()
+}
+
 #[derive(Clone, Debug, Deserialize)]
 struct ContractArtifactConfig {
     abi: serde_json::Value,
@@ -175,6 +183,12 @@ struct EvmConfigureConfig {
     contract_address: Option<String>,
 
     calls: Vec<ConfigureCallConfig>,
+
+    #[serde(default = "default_configure_tx_hashes_export_key")]
+    tx_hashes_export_key: String,
+
+    #[serde(default = "default_configure_receipts_export_key")]
+    receipts_export_key: String,
 
     #[serde(default = "default_poll_interval_ms")]
     poll_interval_ms: u64,
@@ -859,6 +873,18 @@ impl Operation for EvmConfigureOp {
                 "evm_configure requires at least one call",
             ));
         }
+        if cfg.tx_hashes_export_key.trim().is_empty() {
+            return Err(op_errors::sdk_parse_error(
+                "invalid_op_config",
+                "tx_hashes_export_key must be non-empty",
+            ));
+        }
+        if cfg.receipts_export_key.trim().is_empty() {
+            return Err(op_errors::sdk_parse_error(
+                "invalid_op_config",
+                "receipts_export_key must be non-empty",
+            ));
+        }
 
         let parsed_abi = if let Some(artifact) = &cfg.artifact {
             let (abi, _bytecode) = parse_artifact(artifact).map_err(|_| {
@@ -933,6 +959,8 @@ impl Operation for EvmConfigureOp {
                         value_hex: c.value_hex,
                     })
                     .collect(),
+                tx_hashes_export_key: cfg.tx_hashes_export_key.clone(),
+                receipts_export_key: cfg.receipts_export_key.clone(),
                 poll_interval_ms: cfg.poll_interval_ms,
                 max_receipt_polls: cfg.max_receipt_polls,
             },
@@ -950,8 +978,8 @@ impl Operation for EvmConfigureOp {
             interface: OpInterface {
                 imports,
                 exports: vec![
-                    PortKey(KEY_CONFIGURE_TX_HASHES.to_string()),
-                    PortKey(KEY_CONFIGURE_RECEIPTS.to_string()),
+                    PortKey(cfg.tx_hashes_export_key),
+                    PortKey(cfg.receipts_export_key),
                 ],
             },
             kind: PlannedOpKind::Leaf(LeafOpSpec {

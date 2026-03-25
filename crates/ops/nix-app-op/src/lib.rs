@@ -64,6 +64,7 @@ impl Operation for NixAppOp {
         })?;
 
         let sid = leaf_state_id(&op_path, "run")?;
+        let export_key = cfg.write_result_to.clone();
         let state = Arc::new(NixExecState {
             state_id: sid.clone(),
             cfg,
@@ -72,7 +73,7 @@ impl Operation for NixAppOp {
         Ok(PlannedOp {
             interface: OpInterface {
                 imports: Vec::new(),
-                exports: vec![PortKey("result".to_string())],
+                exports: vec![PortKey(export_key)],
             },
             kind: PlannedOpKind::Leaf(LeafOpSpec {
                 states: vec![leaf_state_node(&op_path, "run", state)?],

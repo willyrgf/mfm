@@ -165,30 +165,62 @@ fn parse_u64_hex(s: &str) -> u64 {
     u64::from_str_radix(trimmed, 16).expect("hex string must parse as u64")
 }
 
-fn snapshot_kind(snapshot: &serde_json::Value, key: &str) -> Option<String> {
-    snapshot
-        .get(format!("{key}.kind"))
-        .and_then(|v| v.as_str())
-        .map(ToString::to_string)
-        .or_else(|| {
-            snapshot
-                .get(key)
-                .and_then(|v| v.get("kind"))
-                .and_then(|v| v.as_str())
-                .map(ToString::to_string)
-        })
+fn snapshot_key_candidates(key: &str) -> Vec<String> {
+    let mut candidates = vec![key.to_string()];
+    if !key.contains(".in.") && !key.contains(".out.") && !key.contains(".work.") {
+        if let Some((prefix, leaf)) = key.rsplit_once('.') {
+            candidates.push(format!("{prefix}.out.{leaf}"));
+            candidates.push(format!("{prefix}.work.{leaf}"));
+        }
+    }
+    candidates
 }
 
-fn snapshot_value<'a>(snapshot: &'a serde_json::Value, key: &str) -> Option<&'a serde_json::Value> {
-    if let Some(v) = snapshot.get(key) {
-        return Some(v);
-    }
-
+fn nested_snapshot_value<'a>(
+    snapshot: &'a serde_json::Value,
+    key: &str,
+) -> Option<&'a serde_json::Value> {
     let mut current = snapshot;
     for segment in key.split('.') {
         current = current.get(segment)?;
     }
     Some(current)
+}
+
+fn snapshot_kind(snapshot: &serde_json::Value, key: &str) -> Option<String> {
+    snapshot_key_candidates(key)
+        .into_iter()
+        .find_map(|candidate| {
+            snapshot
+                .get(format!("{candidate}.kind"))
+                .and_then(|v| v.as_str())
+                .or_else(|| {
+                    nested_snapshot_value(snapshot, &format!("{candidate}.kind"))
+                        .and_then(|v| v.as_str())
+                })
+                .or_else(|| {
+                    snapshot
+                        .get(&candidate)
+                        .and_then(|v| v.get("kind"))
+                        .and_then(|v| v.as_str())
+                })
+                .or_else(|| {
+                    nested_snapshot_value(snapshot, &candidate)
+                        .and_then(|v| v.get("kind"))
+                        .and_then(|v| v.as_str())
+                })
+                .map(ToString::to_string)
+        })
+}
+
+fn snapshot_value<'a>(snapshot: &'a serde_json::Value, key: &str) -> Option<&'a serde_json::Value> {
+    snapshot_key_candidates(key)
+        .into_iter()
+        .find_map(|candidate| {
+            snapshot
+                .get(&candidate)
+                .or_else(|| nested_snapshot_value(snapshot, &candidate))
+        })
 }
 
 fn json_post(uri: &str, body: serde_json::Value) -> Request<Body> {
@@ -790,7 +822,7 @@ fn phase_a_pipeline() -> Pipeline {
                     "program_path": fetch_origin_program,
                     "stdin_json": {},
                     "timeout_ms": 300000,
-                    "write_result_to": "result",
+                    "write_result_to": "fetch_origin_result",
                 }),
             },
             PipelineStep {
@@ -801,7 +833,7 @@ fn phase_a_pipeline() -> Pipeline {
                     "program_path": compile_origin_program,
                     "stdin_json": {},
                     "timeout_ms": 600000,
-                    "write_result_to": "result",
+                    "write_result_to": "compile_origin_result",
                 }),
             },
             PipelineStep {
@@ -812,7 +844,7 @@ fn phase_a_pipeline() -> Pipeline {
                     "program_path": deploy_origin_program,
                     "stdin_json": {},
                     "timeout_ms": 600000,
-                    "write_result_to": "result",
+                    "write_result_to": "deploy_origin_result",
                 }),
             },
             PipelineStep {
@@ -820,7 +852,7 @@ fn phase_a_pipeline() -> Pipeline {
                 op_id: OpId::must_new("aave_v3_origin_adapt_deploy".to_string()),
                 op_version: "v1".to_string(),
                 op_config: serde_json::json!({
-                    "origin_deploy_port": "result",
+                    "origin_deploy_port": "deploy_origin_result",
                     "deploy_manifest_export_key": "deploy_manifest",
                 }),
             },
@@ -864,6 +896,8 @@ fn phase_b_pipeline(
                         "function": "approve",
                         "args": [pool_address.clone(), USDC_SUPPLY_AMOUNT],
                     }],
+                    "tx_hashes_export_key": "approve_usdc_tx_hashes",
+                    "receipts_export_key": "approve_usdc_receipts",
                     "poll_interval_ms": 200,
                     "max_receipt_polls": 120,
                 }),
@@ -882,6 +916,8 @@ fn phase_b_pipeline(
                         "function": "approve",
                         "args": [pool_address.clone(), WBTC_COLLATERAL_AMOUNT],
                     }],
+                    "tx_hashes_export_key": "approve_wbtc_tx_hashes",
+                    "receipts_export_key": "approve_wbtc_receipts",
                     "poll_interval_ms": 200,
                     "max_receipt_polls": 120,
                 }),
@@ -905,6 +941,8 @@ fn phase_b_pipeline(
                             0,
                         ],
                     }],
+                    "tx_hashes_export_key": "supply_usdc_tx_hashes",
+                    "receipts_export_key": "supply_usdc_receipts",
                     "poll_interval_ms": 200,
                     "max_receipt_polls": 120,
                 }),
@@ -928,6 +966,8 @@ fn phase_b_pipeline(
                             0,
                         ],
                     }],
+                    "tx_hashes_export_key": "supply_wbtc_tx_hashes",
+                    "receipts_export_key": "supply_wbtc_receipts",
                     "poll_interval_ms": 200,
                     "max_receipt_polls": 120,
                 }),
@@ -952,6 +992,8 @@ fn phase_b_pipeline(
                             borrower.clone(),
                         ],
                     }],
+                    "tx_hashes_export_key": "borrow_usdc_tx_hashes",
+                    "receipts_export_key": "borrow_usdc_receipts",
                     "poll_interval_ms": 200,
                     "max_receipt_polls": 120,
                 }),
@@ -1108,7 +1150,7 @@ async fn parity_aave_v3_reth_scenario_pipeline() {
     assert_eq!(
         snapshot_kind(
             &phase_a_snapshot,
-            "aave_v3_reth_pipeline.fetch_origin.result"
+            "aave_v3_reth_pipeline.fetch_origin.fetch_origin_result"
         )
         .as_deref(),
         Some("aave_v3_origin_source_v1")
@@ -1116,7 +1158,7 @@ async fn parity_aave_v3_reth_scenario_pipeline() {
     assert_eq!(
         snapshot_kind(
             &phase_a_snapshot,
-            "aave_v3_reth_pipeline.compile_origin.result"
+            "aave_v3_reth_pipeline.compile_origin.compile_origin_result"
         )
         .as_deref(),
         Some("aave_v3_origin_compile_manifest_v1")
@@ -1124,7 +1166,7 @@ async fn parity_aave_v3_reth_scenario_pipeline() {
     assert_eq!(
         snapshot_kind(
             &phase_a_snapshot,
-            "aave_v3_reth_pipeline.deploy_origin_stack.result"
+            "aave_v3_reth_pipeline.deploy_origin_stack.deploy_origin_result"
         )
         .as_deref(),
         Some("aave_v3_origin_deploy_output_v1")
