@@ -365,14 +365,21 @@ fn parse_csv_env(var_name: &str) -> Vec<String> {
     std::env::var(var_name)
         .ok()
         .into_iter()
-        .flat_map(|raw| {
-            raw.split(',')
-                .map(str::trim)
-                .map(str::to_string)
-                .collect::<Vec<_>>()
-        })
-        .filter(|s| !s.is_empty())
+        .flat_map(|raw| CsvValues::from_raw(&raw).into_iter())
         .collect()
+}
+
+#[derive(Clone, Debug)]
+struct CsvValues;
+
+impl CsvValues {
+    fn from_raw(raw: &str) -> Vec<String> {
+        raw.split(',')
+            .map(str::trim)
+            .map(str::to_string)
+            .filter(|value| !value.is_empty())
+            .collect()
+    }
 }
 
 fn parse_u64_env(var_name: &str) -> Option<u64> {
