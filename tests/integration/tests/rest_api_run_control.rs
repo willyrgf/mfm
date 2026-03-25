@@ -15,6 +15,7 @@ use mfm_machine::stores::{
     StreamStore,
 };
 use mfm_stream_store_mem::MemStreamStore;
+use mfm_op_portfolio_tracker::portfolio_tracker_internal_op_ids;
 
 static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -636,6 +637,74 @@ async fn feature_execute_run_start_happy_path() {
     assert_eq!(v["data"]["feature_id"], "run.start");
     assert_eq!(v["data"]["result"]["phase"], "completed");
     assert!(v["data"]["result"]["run_id"].as_str().is_some());
+}
+
+#[tokio::test]
+async fn feature_execute_run_start_rejects_portfolio_internal_child_ops() {
+    let streams: Arc<dyn StreamStore> = Arc::new(MemStreamStore::new());
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let artifacts: Arc<dyn ArtifactStore> =
+        Arc::new(FsArtifactStore::new(tmp.path().to_path_buf()));
+
+    let bundle = mfm_rest_api::make_engine_bundle();
+    let app = mfm_rest_api::make_app(mfm_rest_api::AppState {
+        bundle,
+        streams,
+        artifacts,
+    });
+
+    for op_id in portfolio_tracker_internal_op_ids() {
+        let resp = app
+            .clone()
+            .oneshot(json_post(
+                "/v1/features/run.start/execute",
+                serde_json::json!({
+                    "payload": {"op_id": op_id, "op_version": "v1", "op_config": {}}
+                }),
+            ))
+            .await
+            .expect("feature execute response");
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let v = response_json(resp).await;
+        assert_eq!(v["status"], "error");
+        assert_eq!(v["error"]["code"], "op_not_public");
+    }
+}
+
+#[tokio::test]
+async fn run_start_rejects_portfolio_internal_child_ops() {
+    let streams: Arc<dyn StreamStore> = Arc::new(MemStreamStore::new());
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let artifacts: Arc<dyn ArtifactStore> =
+        Arc::new(FsArtifactStore::new(tmp.path().to_path_buf()));
+
+    let bundle = mfm_rest_api::make_engine_bundle();
+    let app = mfm_rest_api::make_app(mfm_rest_api::AppState {
+        bundle,
+        streams,
+        artifacts,
+    });
+
+    for op_id in portfolio_tracker_internal_op_ids() {
+        let resp = app
+            .clone()
+            .oneshot(json_post(
+                "/v1/runs/start",
+                serde_json::json!({
+                    "op_id": op_id,
+                    "op_version": "v1",
+                    "op_config": {}
+                }),
+            ))
+            .await
+            .expect("start response");
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let v = response_json(resp).await;
+        assert_eq!(v["status"], "error");
+        assert_eq!(v["error"]["code"], "op_not_public");
+    }
 }
 
 // Holding `ENV_LOCK` across `.await` is intentional: we mutate process env vars
