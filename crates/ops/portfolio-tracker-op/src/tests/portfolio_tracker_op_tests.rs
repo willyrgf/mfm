@@ -1,6 +1,6 @@
 use super::*;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -577,6 +577,83 @@ fn expand_uses_canonical_multi_network_graph() {
             PIN_EXECUTION_VIEWS_CHILD_ID, PORT_PINNED_VIEWS
         ),
     )));
+}
+
+#[test]
+fn expand_uses_semantic_state_ids_without_protocol_fragments() {
+    let cfg = parse_config(&canonical_op_config()).expect("parse config");
+    let spec = compile_semantic_execution(&cfg).expect("compile semantic");
+
+    let registry = op_test_support::registry_with_ops(portfolio_tracker_ops());
+    let planner = op_test_support::default_pipeline_planner();
+    let pipeline = mfm_sdk::unstable::single_op_pipeline(
+        OpId::must_new(OP_ID.to_string()),
+        OP_VERSION.to_string(),
+        canonical_op_config(),
+    )
+    .expect("pipeline");
+
+    let plan = planner
+        .build_execution_plan(
+            Arc::clone(&registry),
+            &pipeline,
+            &op_test_support::run_config_live(),
+        )
+        .expect("plan");
+
+    let mut observed_suffixes = HashSet::new();
+    let mut non_observe_suffixes = HashSet::new();
+    for state in &plan.graph.states {
+        let id = state.id.as_str();
+        assert!(
+            id.starts_with("portfolio_tracker.main."),
+            "state id should remain under root namespace: {id}"
+        );
+        let suffix = id
+            .strip_prefix("portfolio_tracker.main.")
+            .expect("portfolio_tracker.main.");
+        if suffix.starts_with("observe_") {
+            assert!(
+                suffix.ends_with("__run"),
+                "observe batch state should be a lowered leaf state: {suffix}"
+            );
+            assert!(
+                observed_suffixes.insert(suffix.to_string()),
+                "duplicate observe batch state id found: {suffix}"
+            );
+            continue;
+        }
+
+        assert!(
+            suffix.ends_with("__run"),
+            "leaf runtime state IDs should end with `__run` in this flattened shape: {suffix}"
+        );
+        assert!(
+            non_observe_suffixes.insert(suffix.to_string()),
+            "duplicate non-observe state id found: {suffix}"
+        );
+        assert!(
+            suffix == "prepare_execution_sources__run"
+                || suffix == "resolve_subjects__run"
+                || suffix == "pin_execution_views__run"
+                || suffix == "resolve_valuation_inputs__run"
+                || suffix == "merge_observations__run"
+                || suffix == "assemble_snapshot__run"
+                || suffix == "project_report__run",
+            "unexpected non-observe portfolio runtime state id: {suffix}"
+        );
+    }
+
+    assert_eq!(observed_suffixes.len(), spec.observation_batches.len());
+    assert_eq!(non_observe_suffixes.len(), 7);
+
+    assert!(non_observe_suffixes.contains("prepare_execution_sources__run"));
+    assert!(non_observe_suffixes.contains("resolve_subjects__run"));
+    assert!(non_observe_suffixes.contains("pin_execution_views__run"));
+    assert!(non_observe_suffixes.contains("resolve_valuation_inputs__run"));
+    assert!(non_observe_suffixes.contains("merge_observations__run"));
+    assert!(non_observe_suffixes.contains("assemble_snapshot__run"));
+    assert!(non_observe_suffixes.contains("project_report__run"));
 }
 
 #[tokio::test]
