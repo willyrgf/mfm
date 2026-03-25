@@ -111,6 +111,35 @@ fn opt_i64_to_u64(value: Option<i64>, field: &'static str) -> Result<Option<u64>
     value.map(|value| i64_to_u64(value, field)).transpose()
 }
 
+#[derive(Clone, Copy, Debug)]
+struct StreamIdTripleParts<'a> {
+    control_scope: &'a str,
+    network_id: &'a str,
+    terminal: &'a str,
+}
+
+impl<'a> StreamIdTripleParts<'a> {
+    fn parse(stream_id_key: &'a StreamId) -> Option<Self> {
+        let mut parts = stream_id_key.key().split(':');
+        let first = parts.next()?;
+        let second = parts.next()?;
+        let third = parts.next()?;
+        if parts.next().is_some() || first.is_empty() || second.is_empty() || third.is_empty() {
+            return None;
+        }
+
+        Some(Self {
+            control_scope: first,
+            network_id: second,
+            terminal: third,
+        })
+    }
+}
+
+fn parse_3_part_stream_key(stream_id: &StreamId) -> Option<StreamIdTripleParts<'_>> {
+    StreamIdTripleParts::parse(stream_id)
+}
+
 /// Validation error for [`RpcSourceRef`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RpcSourceRefError {
@@ -170,15 +199,12 @@ impl RpcSourceRef {
                 stream_id.as_str().to_string(),
             ));
         }
-        let mut parts = stream_id.key().split(':');
-        let (Some(control_scope), Some(network_id), Some(source_id), None) =
-            (parts.next(), parts.next(), parts.next(), parts.next())
-        else {
+        let Some(parts) = parse_3_part_stream_key(stream_id) else {
             return Err(RpcSourceRefError::InvalidStreamId(
                 stream_id.as_str().to_string(),
             ));
         };
-        Self::new(control_scope, network_id, source_id)
+        Self::new(parts.control_scope, parts.network_id, parts.terminal)
     }
 
     /// Returns the control-scope identifier.
@@ -297,15 +323,12 @@ impl SourcePoolRef {
                 stream_id.as_str().to_string(),
             ));
         }
-        let mut parts = stream_id.key().split(':');
-        let (Some(control_scope), Some(network_id), Some(pool_kind), None) =
-            (parts.next(), parts.next(), parts.next(), parts.next())
-        else {
+        let Some(parts) = parse_3_part_stream_key(stream_id) else {
             return Err(SourcePoolRefError::InvalidStreamId(
                 stream_id.as_str().to_string(),
             ));
         };
-        Self::new(control_scope, network_id, pool_kind)
+        Self::new(parts.control_scope, parts.network_id, parts.terminal)
     }
 
     /// Returns the control-scope identifier.
@@ -2459,6 +2482,25 @@ mod tests {
     }
 
     #[test]
+    fn rpc_source_ref_rejects_malformed_stream_key() {
+        let malformed = StreamId::new("rpc_source:shared:eth-mainnet:primary:extra")
+            .expect("stream id constructor accepts literal key");
+        let err = RpcSourceRef::from_stream_id(&malformed).expect_err("malformed child path");
+        assert!(matches!(
+            err,
+            RpcSourceRefError::InvalidStreamId(value) if value == malformed.as_str()
+        ));
+
+        let malformed = StreamId::new("rpc_source:shared::primary")
+            .expect("stream id constructor accepts empty segment in stream key");
+        let err = RpcSourceRef::from_stream_id(&malformed).expect_err("empty network id");
+        assert!(matches!(
+            err,
+            RpcSourceRefError::InvalidStreamId(value) if value == malformed.as_str()
+        ));
+    }
+
+    #[test]
     fn source_pool_ref_round_trips_through_stream_id() {
         let pool_ref = pool_ref();
         let stream_id = pool_ref.stream_id();
@@ -2478,6 +2520,25 @@ mod tests {
                 value: "default pool".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn source_pool_ref_rejects_malformed_stream_key() {
+        let malformed = StreamId::new("source_pool:shared:eth-mainnet:default:extra")
+            .expect("stream id constructor accepts literal key");
+        let err = SourcePoolRef::from_stream_id(&malformed).expect_err("malformed source kind");
+        assert!(matches!(
+            err,
+            SourcePoolRefError::InvalidStreamId(value) if value == malformed.as_str()
+        ));
+
+        let malformed = StreamId::new("source_pool:shared::default")
+            .expect("stream id constructor accepts empty segment in stream key");
+        let err = SourcePoolRef::from_stream_id(&malformed).expect_err("empty network id");
+        assert!(matches!(
+            err,
+            SourcePoolRefError::InvalidStreamId(value) if value == malformed.as_str()
+        ));
     }
 
     #[test]

@@ -155,6 +155,37 @@ pub mod ids {
     #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
     pub struct ContextKey(pub String);
 
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct OpPathParts<'a> {
+        machine: &'a str,
+        step: &'a str,
+        child_path: Option<&'a str>,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct StateIdParts<'a> {
+        machine: &'a str,
+        step: &'a str,
+        state_local_id: &'a str,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct ContextKeyParts<'a> {
+        slot: ContextSlot,
+        suffix: &'a str,
+    }
+
+    /// Canonical context slot prefix used for key qualification and fallback lookup.
+    #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+    pub enum ContextSlot {
+        /// Input keys passed from parent operations.
+        In,
+        /// Output keys exposed by state exports.
+        Out,
+        /// Internal work keys written during planning/runtime.
+        Work,
+    }
+
     /// Stable machine-readable error code.
     #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
     pub struct ErrorCode(pub String);
@@ -280,6 +311,32 @@ pub mod ids {
         pub fn as_str(&self) -> &str {
             &self.0
         }
+
+        fn parts(&self) -> OpPathParts<'_> {
+            let mut segments = self.0.splitn(3, '.');
+            OpPathParts {
+                machine: segments.next().unwrap_or(""),
+                step: segments.next().unwrap_or(""),
+                child_path: segments.next(),
+            }
+        }
+
+        /// Returns the machine and step components of a validated operation path.
+        pub fn machine_and_step(&self) -> (&str, &str) {
+            let parts = self.parts();
+            (parts.machine, parts.step)
+        }
+
+        /// Returns the child path suffix after `<machine>.<step>`, if any.
+        pub fn child_path(&self) -> Option<&str> {
+            self.parts().child_path
+        }
+
+        /// Returns the flattened child suffix using `__` between path segments.
+        pub fn flattened_child_path(&self) -> Option<String> {
+            self.child_path()
+                .map(|child_path| child_path.replace('.', "__"))
+        }
     }
 
     impl TryFrom<String> for OpPath {
@@ -360,6 +417,68 @@ pub mod ids {
         /// Returns the validated identifier as a borrowed string slice.
         pub fn as_str(&self) -> &str {
             &self.0
+        }
+
+        fn parts(&self) -> StateIdParts<'_> {
+            let mut segments = self.0.splitn(3, '.');
+            StateIdParts {
+                machine: segments.next().unwrap_or(""),
+                step: segments.next().unwrap_or(""),
+                state_local_id: segments.next().unwrap_or(""),
+            }
+        }
+
+        /// Returns the machine component of a validated state id.
+        pub fn machine(&self) -> &str {
+            self.parts().machine
+        }
+
+        /// Returns the step component of a validated state id.
+        pub fn step(&self) -> &str {
+            self.parts().step
+        }
+
+        /// Returns the local state segment of a validated state id.
+        pub fn state_local_id(&self) -> &str {
+            self.parts().state_local_id
+        }
+    }
+
+    impl ContextKey {
+        fn explicit_slot_parts(&self) -> Option<ContextKeyParts<'_>> {
+            let (prefix, suffix) = self.0.split_once('.')?;
+            if suffix.is_empty() {
+                return None;
+            }
+
+            let slot = match prefix {
+                "in" => ContextSlot::In,
+                "out" => ContextSlot::Out,
+                "work" => ContextSlot::Work,
+                _ => return None,
+            };
+
+            Some(ContextKeyParts { slot, suffix })
+        }
+
+        /// Returns the explicit slot prefix if this key is already slot-qualified.
+        pub fn explicit_slot(&self) -> Option<(ContextSlot, &str)> {
+            self.explicit_slot_parts()
+                .map(|parts| (parts.slot, parts.suffix))
+        }
+    }
+
+    impl ContextSlot {
+        fn as_str(&self) -> &'static str {
+            match self {
+                ContextSlot::In => "in",
+                ContextSlot::Out => "out",
+                ContextSlot::Work => "work",
+            }
+        }
+
+        fn matches_any(prefix: &str) -> bool {
+            matches!(prefix, "in" | "out" | "work")
         }
     }
 
@@ -1429,17 +1548,20 @@ pub mod stores {
             Self::new(value).expect("stream id must satisfy <family>:<key>")
         }
 
-        /// Returns the stream family prefix.
-        pub fn family(&self) -> &str {
+        fn family_and_key(&self) -> (&str, &str) {
             self.0
                 .split_once(':')
-                .map(|(family, _)| family)
-                .unwrap_or("")
+                .expect("StreamId format validated in constructor")
+        }
+
+        /// Returns the stream family prefix.
+        pub fn family(&self) -> &str {
+            self.family_and_key().0
         }
 
         /// Returns the stream key suffix.
         pub fn key(&self) -> &str {
-            self.0.split_once(':').map(|(_, key)| key).unwrap_or("")
+            self.family_and_key().1
         }
 
         /// Returns the validated stream identifier as a borrowed string slice.

@@ -55,3 +55,19 @@ fn serde_rejects_invalid_op_and_state_ids() {
     let bad_state_id = serde_json::from_str::<StateId>("\"machine.main.extra.parts\"");
     assert!(bad_state_id.is_err());
 }
+
+#[test]
+fn op_path_parts_are_directly_addressable() {
+    let op_path = OpPath::must_new("portfolio_snapshot.fetch_balances.reporting");
+    assert_eq!(op_path.machine_and_step(), ("portfolio_snapshot", "fetch_balances"));
+    assert_eq!(op_path.child_path(), Some("reporting"));
+    assert_eq!(op_path.flattened_child_path(), Some("reporting".to_string()));
+}
+
+#[test]
+fn state_id_parts_are_directly_addressable() {
+    let state_id = StateId::must_new("portfolio_snapshot.fetch_balances.read_eth");
+    assert_eq!(state_id.machine(), "portfolio_snapshot");
+    assert_eq!(state_id.step(), "fetch_balances");
+    assert_eq!(state_id.state_local_id(), "read_eth");
+}
