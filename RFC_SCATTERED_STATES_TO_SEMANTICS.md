@@ -2,7 +2,7 @@
 
 Status: implemented
 
-Last updated: 2026-03-24
+Last updated: 2026-03-25
 
 ## Summary
 
@@ -1219,17 +1219,17 @@ What the current code shows:
 - the public app points directly to `task.mfm.portfolio.snapshot`
 - the generated launcher records no workflow id for `task.mfm.portfolio.snapshot`
 
-What stale docs still say:
+What earlier repo docs said at draft time:
 
-- `README.md` says the app delegates sequencing to `workflow.mfm.portfolio.snapshot`
-- `docs/helios.md` says the public task delegates to:
+- `README.md` described the app as delegating sequencing to `workflow.mfm.portfolio.snapshot`
+- `docs/helios.md` described the public task as delegating to:
   - `workflow.mfm.portfolio.snapshot`
   - `task.mfm.portfolio.snapshot.services-start`
   - `task.mfm.portfolio.snapshot.exec`
   - `task.mfm.portfolio.snapshot.services-stop`
 
-That stale split is important because any redesign work should start from the current shell task,
-not from the older workflow description.
+Those docs have since been corrected. The distinction mattered for the redesign because the work
+had to start from the current shell task, not from the older workflow description.
 
 ### End-To-End Call Path
 
@@ -2502,70 +2502,22 @@ If adding a new crate is too large for the first step, this module can start und
 - future `crates/states/bitcoin`
   - Bitcoin-specific planner/runtime adapters
 
-## Migration Plan
+## Historical Migration Sketch
 
-This phased sketch is retained as explanatory decomposition only.
+This phased sketch is retained only as historical decomposition. The hard-cutover commit sequence
+above is the authoritative implementation record, and the branch has already landed the semantic
+runtime that this sketch described.
 
-If it conflicts with the hard-cutover commit sequence above, the hard-cutover commit sequence
-governs and no compatibility-preserving phase should be inferred.
+The branch state after implementation is:
 
-### Phase 1: Introduce semantic compilation without changing public behavior
+- recursive op flattening is live in the SDK planner path
+- `portfolio_tracker` is cut over to `v2`
+- snapshot and report artifacts emit `schema_version = 2`
+- generic semantic observation and valuation runtime states are live
+- mixed EVM and Bitcoin portfolio coverage runs through the same semantic graph
 
-- add `PortfolioExecutionSpec`
-- add semantic catalog interfaces
-- keep `portfolio_tracker v1`
-- compile current EVM plus Aave config into planned tasks
-- do not change snapshot/report output contract yet
-
-Exit criteria:
-
-- pure compiler tests cover deterministic selection and ambiguity failures
-- no public CLI change
-
-### Phase 2: Collapse observation collection into generic semantic states
-
-- replace `CollectObservationsState` and `CollectAaveObservationsState` with
-  `ObservePortfolioBatchState`
-- keep current `Observation` output unchanged
-- move Aave-specific logic into adapters
-
-Exit criteria:
-
-- no protocol-specific observation states remain in the portfolio flow
-- merge state becomes batch-oriented rather than protocol-oriented
-
-### Phase 3: Replace direct-price special casing with semantic valuation resolution
-
-- replace `ReadDirectPricesState` with `ResolveUnitPricesState`
-- let valuation adapters plan and execute direct or derived inputs
-- use resolved valuation tasks instead of scanning symbols directly inside the state
-
-Exit criteria:
-
-- valuation discovery is compiler-owned
-- valuation execution is adapter-owned
-
-### Phase 4: Generalize network and wallet surfaces
-
-- widen network config beyond EVM-only `chain_id`
-- widen execution pins beyond `block_number`
-- widen wallet subject surfaces beyond normalized EVM address only
-
-If this requires a breaking change to any persisted or public portfolio JSON surface
-(`PortfolioSnapshotRequest`, `PortfolioSnapshotResponse`, `PortfolioSnapshot`, or
-`PortfolioReport`), the same commit must:
-
-- cut the op version to `portfolio_tracker v2`
-- add a top-level `schema_version` field to each changed JSON object and set it to `2`
-- update CLI/REST/docs in the same change
-
-Purely additive changes that preserve existing field meaning do not require the version cut above.
-
-### Phase 5: Add non-EVM support
-
-- implement Bitcoin family adapters
-- keep the semantic state graph unchanged
-- verify replay and artifact behavior across mixed-family portfolios
+Remaining work after implementation is limited to validation and documentation cleanup; there is no
+pending compatibility-preserving migration phase.
 
 ## Tradeoffs And Failure Modes
 

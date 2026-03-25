@@ -629,7 +629,8 @@ async fn parity_portfolio_tracker_snapshot_with_mock_erc20_mint() {
         out.get("network_pins")
             .and_then(|v| v.as_array())
             .and_then(|pins| pins.first())
-            .and_then(|pin| pin.get("chain_id"))
+            .and_then(|pin| pin.get("anchor"))
+            .and_then(|anchor| anchor.get("chain_id"))
             .and_then(|v| v.as_u64()),
         Some(chain_id)
     );

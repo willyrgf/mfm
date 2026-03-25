@@ -1348,7 +1348,10 @@ async fn parity_aave_v3_reth_scenario_pipeline() {
     let snapshot_response = response_json(artifact_resp).await;
     let snapshot = snapshot_response["data"]["value"].clone();
     assert_eq!(snapshot["portfolio_id"], "aave-v3-reth-portfolio");
-    assert_eq!(snapshot["network_pins"][0]["chain_id"], expected_chain_id);
+    assert_eq!(
+        snapshot["network_pins"][0]["anchor"]["chain_id"],
+        expected_chain_id
+    );
 
     let supplier_wallet = find_wallet(&snapshot, "wallet_supplier");
     let supplier_usdc = find_observation(supplier_wallet, "aave_v3.usdc.asset.reth-local");
