@@ -70,11 +70,11 @@
 //! assert_eq!(cfg.quote_codes, vec![QuoteCode::Usd]);
 //! # Ok::<(), mfm_state_portfolio::model::PortfolioConfigError>(())
 //! ```
+/// Base semantic runtime adapters shared by portfolio execution flows.
+pub mod dispatch_adapters;
+/// Fixed semantic runtime state family for compiled portfolio execution.
+pub mod execution_states;
 /// Canonical portfolio-domain models, validation helpers, and normalization utilities.
 pub mod model;
 /// Semantic portfolio vocabulary, compiled execution specs, and validation helpers.
-pub mod semantic;
-/// Base semantic runtime adapters shared by portfolio execution flows.
-pub mod semantic_adapters;
-/// Fixed semantic runtime state family for compiled portfolio execution.
-pub mod semantic_states;
+pub mod plan;

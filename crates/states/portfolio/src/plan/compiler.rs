@@ -2,7 +2,7 @@ use mfm_state_symbol::model::ValuationSourceRegistry;
 
 use crate::model::PortfolioConfig;
 
-use super::{PlanningError, PortfolioExecutionSpec, SemanticCatalog};
+use super::{DispatchCatalog, PlanningError, PortfolioExecutionSpec};
 
 /// Canonical planner request for semantic portfolio compilation.
 #[derive(Clone, Debug, PartialEq)]
@@ -14,11 +14,11 @@ pub struct PortfolioRequest {
 }
 
 /// Pure compiler that lowers canonical portfolio requests into semantic execution specs.
-pub trait PortfolioSemanticCompiler: Send + Sync {
+pub trait PortfolioPlanCompiler: Send + Sync {
     /// Compiles the request into one planner-owned semantic execution spec.
     fn compile(
         &self,
         request: &PortfolioRequest,
-        catalog: &SemanticCatalog,
+        catalog: &DispatchCatalog,
     ) -> Result<PortfolioExecutionSpec, PlanningError>;
 }

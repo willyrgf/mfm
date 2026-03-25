@@ -37,15 +37,15 @@ use mfm_state_common::errors as op_errors;
 use mfm_state_portfolio::model::{
     decode_portfolio_config, validate_portfolio_bundle, PortfolioConfig,
 };
-use mfm_state_portfolio::semantic::{PortfolioExecutionSpec, PORTFOLIO_EXECUTION_SPEC_KEY};
+use mfm_state_portfolio::plan::{PortfolioExecutionSpec, PORTFOLIO_EXECUTION_SPEC_KEY};
 use mfm_state_symbol::model::{decode_valuation_source_registry, ValuationSourceRegistry};
 use serde_json::Value;
 
-mod semantic;
-mod semantic_ops;
+mod plan;
+mod plan_ops;
 
-use semantic::{builtin_semantic_catalog, DefaultPortfolioSemanticCompiler};
-use semantic_ops::{
+use plan::{builtin_dispatch_catalog, DefaultPortfolioPlanCompiler};
+use plan_ops::{
     assemble_snapshot_config, child_ops, merge_observations_config, observe_batch_config,
     pin_execution_views_config, prepare_sources_config, resolve_subjects_config,
     resolve_valuations_config, ASSEMBLE_SNAPSHOT_CHILD_ID, ASSEMBLE_SNAPSHOT_OP_ID,
@@ -129,21 +129,21 @@ fn output_fact_key(op_path: &OpPath) -> FactKey {
     FactKey(format!("portfolio:output|op:{}", op_path.0))
 }
 
-fn compile_semantic_execution(
+fn compile_portfolio_plan(
     cfg: &PortfolioTrackerConfig,
 ) -> Result<PortfolioExecutionSpec, SdkError> {
-    let semantic_catalog = builtin_semantic_catalog().map_err(|err| {
+    let semantic_catalog = builtin_dispatch_catalog().map_err(|err| {
         sdk_input_error(
             "semantic_catalog_construction_failed",
             format!("failed to construct semantic adapter catalog: {err}"),
         )
     })?;
-    let semantic_request = mfm_state_portfolio::semantic::PortfolioRequest {
+    let semantic_request = mfm_state_portfolio::plan::PortfolioRequest {
         portfolio: cfg.portfolio.clone(),
         valuation_source_registry: cfg.valuation_source_registry.clone(),
     };
-    mfm_state_portfolio::semantic::PortfolioSemanticCompiler::compile(
-        &DefaultPortfolioSemanticCompiler,
+    mfm_state_portfolio::plan::PortfolioPlanCompiler::compile(
+        &DefaultPortfolioPlanCompiler,
         &semantic_request,
         &semantic_catalog,
     )
@@ -256,30 +256,30 @@ impl Operation for PortfolioTrackerOp {
         _run_config: &RunConfig,
     ) -> Result<PlannedOp, SdkError> {
         let cfg = parse_config(op_config)?;
-        let spec = compile_semantic_execution(&cfg)?;
+        let spec = compile_portfolio_plan(&cfg)?;
         let mut children = vec![
             ChildOpInstance {
                 child_op_local_id: ChildOpLocalId(PREPARE_EXECUTION_SOURCES_CHILD_ID.to_string()),
                 op_id: OpId::must_new(PREPARE_EXECUTION_SOURCES_OP_ID.to_string()),
-                op_version: semantic_ops::INTERNAL_OP_VERSION.to_string(),
+                op_version: plan_ops::INTERNAL_OP_VERSION.to_string(),
                 op_config: prepare_sources_config(&spec)?,
             },
             ChildOpInstance {
                 child_op_local_id: ChildOpLocalId(RESOLVE_SUBJECTS_CHILD_ID.to_string()),
                 op_id: OpId::must_new(RESOLVE_SUBJECTS_OP_ID.to_string()),
-                op_version: semantic_ops::INTERNAL_OP_VERSION.to_string(),
+                op_version: plan_ops::INTERNAL_OP_VERSION.to_string(),
                 op_config: resolve_subjects_config(&spec)?,
             },
             ChildOpInstance {
                 child_op_local_id: ChildOpLocalId(PIN_EXECUTION_VIEWS_CHILD_ID.to_string()),
                 op_id: OpId::must_new(PIN_EXECUTION_VIEWS_OP_ID.to_string()),
-                op_version: semantic_ops::INTERNAL_OP_VERSION.to_string(),
+                op_version: plan_ops::INTERNAL_OP_VERSION.to_string(),
                 op_config: pin_execution_views_config(&spec)?,
             },
             ChildOpInstance {
                 child_op_local_id: ChildOpLocalId(RESOLVE_VALUATION_INPUTS_CHILD_ID.to_string()),
                 op_id: OpId::must_new(RESOLVE_VALUATION_INPUTS_OP_ID.to_string()),
-                op_version: semantic_ops::INTERNAL_OP_VERSION.to_string(),
+                op_version: plan_ops::INTERNAL_OP_VERSION.to_string(),
                 op_config: resolve_valuations_config(&spec)?,
             },
         ];
@@ -317,7 +317,7 @@ impl Operation for PortfolioTrackerOp {
             children.push(ChildOpInstance {
                 child_op_local_id: ChildOpLocalId(child_id.clone()),
                 op_id: OpId::must_new(OBSERVE_COMPILED_BATCH_OP_ID.to_string()),
-                op_version: semantic_ops::INTERNAL_OP_VERSION.to_string(),
+                op_version: plan_ops::INTERNAL_OP_VERSION.to_string(),
                 op_config: observe_batch_config(batch)?,
             });
             bindings.push(import_binding(
@@ -347,19 +347,19 @@ impl Operation for PortfolioTrackerOp {
         children.push(ChildOpInstance {
             child_op_local_id: ChildOpLocalId(MERGE_OBSERVATIONS_CHILD_ID.to_string()),
             op_id: OpId::must_new(MERGE_OBSERVATIONS_OP_ID.to_string()),
-            op_version: semantic_ops::INTERNAL_OP_VERSION.to_string(),
+            op_version: plan_ops::INTERNAL_OP_VERSION.to_string(),
             op_config: merge_observations_config(merge_input_ports)?,
         });
         children.push(ChildOpInstance {
             child_op_local_id: ChildOpLocalId(ASSEMBLE_SNAPSHOT_CHILD_ID.to_string()),
             op_id: OpId::must_new(ASSEMBLE_SNAPSHOT_OP_ID.to_string()),
-            op_version: semantic_ops::INTERNAL_OP_VERSION.to_string(),
+            op_version: plan_ops::INTERNAL_OP_VERSION.to_string(),
             op_config: assemble_snapshot_config(&cfg.portfolio, output_fact_key(&op_path))?,
         });
         children.push(ChildOpInstance {
             child_op_local_id: ChildOpLocalId(PROJECT_REPORT_CHILD_ID.to_string()),
             op_id: OpId::must_new(PROJECT_REPORT_OP_ID.to_string()),
-            op_version: semantic_ops::INTERNAL_OP_VERSION.to_string(),
+            op_version: plan_ops::INTERNAL_OP_VERSION.to_string(),
             op_config: serde_json::json!({}),
         });
 
@@ -422,7 +422,7 @@ impl Operation for PortfolioTrackerOp {
         _run_config: &RunConfig,
     ) -> Result<Option<Value>, SdkError> {
         let cfg = parse_config(op_config)?;
-        let spec = compile_semantic_execution(&cfg)?;
+        let spec = compile_portfolio_plan(&cfg)?;
         Ok(Some(serde_json::json!({
             (PORTFOLIO_EXECUTION_SPEC_KEY): spec
         })))

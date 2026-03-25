@@ -5,32 +5,34 @@ use mfm_state_aave_v3::portfolio::model::{
     decode_aave_protocol_position_config, is_aave_protocol_position,
     validate_aave_portfolio_config, AaveProtocolPositionConfig,
 };
-use mfm_state_aave_v3::portfolio::semantic::{
+use mfm_state_aave_v3::portfolio::plan_adapters::{
+    AaveDebtDispatchObservationRuntimeAdapter, AaveReserveDispatchObservationRuntimeAdapter,
+};
+use mfm_state_aave_v3::portfolio::plan_payloads::{
     AaveDebtObservationPayload, AaveReserveObservationPayload,
 };
-use mfm_state_aave_v3::portfolio::semantic_adapters::{
-    AaveDebtObservationRuntimeAdapter, AaveReserveObservationRuntimeAdapter,
+use mfm_state_portfolio::dispatch_adapters::{
+    BitcoinAddressSubjectRuntimeAdapter, BitcoinViewRuntimeAdapter,
+    BitcoinUtxoSetObservationRuntimeAdapter, DerivedUnitPriceRuntimeAdapter,
+    EvmAddressSubjectRuntimeAdapter, EvmViewRuntimeAdapter,
+    EvmErc20BalanceObservationRuntimeAdapter,
+    EvmNativeBalanceObservationRuntimeAdapter, EvmOracleDirectPriceRuntimeAdapter,
+    FixedUnitPriceRuntimeAdapter,
 };
 use mfm_state_portfolio::model::{validate_portfolio_bundle, NetworkConfig, NetworkFamilyConfig};
-use mfm_state_portfolio::semantic::{
+use mfm_state_portfolio::plan::{
     AdapterId, BitcoinRoutePolicy, BitcoinSubjectLocator, BitcoinUtxoSetObservationPayload,
     CompiledObservationBatch, CompiledObservationBinding, DerivedUnitPriceValuationPayload,
-    DirectPriceSourcePayload, DirectPriceValuationPayload, Erc20BalanceObservationPayload,
-    EvmRoutePolicy, EvmSubjectLocator, FixedUnitPriceValuationPayload, Instrument,
-    InstrumentSemantics, NativeBalanceObservationPayload, NetworkFamily, NetworkView,
-    ObservationPlanRequest, ObservationProjection, ObservationTarget, PlannerAdapter,
-    PlanningError, PortfolioExecutionSpec, PortfolioRequest, PortfolioSemanticCompiler,
-    PortfolioSemanticConfig, Position, PositionSemantics, QuantitySchema, SemanticCatalog,
-    SemanticCatalogError, SemanticCatalogParts, SourcePreparationTask, Subject, SubjectKind,
-    SubjectPlanRequest, SubjectPlannerAdapter, SubjectResolutionTask, Valuation,
-    ValuationPlanRequest, ValuationPlannerAdapter, ValuationSemantics, ValuationTask, Venue,
-    VenueId, ViewPinTask, ViewPlanRequest, ViewPlannerAdapter,
-};
-use mfm_state_portfolio::semantic_adapters::{
-    BitcoinAddressSubjectRuntimeAdapter, BitcoinUtxoSetObservationRuntimeAdapter,
-    BitcoinViewRuntimeAdapter, DerivedUnitPriceRuntimeAdapter, EvmAddressSubjectRuntimeAdapter,
-    EvmErc20BalanceObservationRuntimeAdapter, EvmNativeBalanceObservationRuntimeAdapter,
-    EvmOracleDirectPriceRuntimeAdapter, EvmViewRuntimeAdapter, FixedUnitPriceRuntimeAdapter,
+    DirectPriceSourcePayload, DirectPriceValuationPayload, DispatchAdapter, DispatchCatalog,
+    DispatchCatalogError, DispatchCatalogParts, Erc20BalanceObservationPayload, EvmRoutePolicy,
+    EvmSubjectLocator, FixedUnitPriceValuationPayload, Instrument, InstrumentKind,
+    NativeBalanceObservationPayload, NetworkFamily, NetworkView, ObservationPlanRequest,
+    ObservationProjection, ObservationTarget, PlanningError, PortfolioExecutionSpec,
+    PortfolioPlanCompiler, PortfolioPlanConfig, PortfolioRequest, Position, PositionKind,
+    QuantitySchema, SourcePreparationTask, Subject, SubjectKind, SubjectPlanRequest,
+    SubjectPlannerAdapter, SubjectResolutionTask, Valuation, ValuationKind, ValuationPlanRequest,
+    ValuationPlannerAdapter, ValuationTask, Venue, VenueId, ViewPinTask, ViewPlanRequest,
+    ViewPlannerAdapter,
 };
 use mfm_state_symbol::model::{
     BalanceReaderConfig, PriceSourceRef, QuoteValuationConfig, SymbolConfig, SymbolKind,
@@ -60,8 +62,8 @@ const READER_HINT_AAVE_RESERVE: &str = "aave_v3/reserve_position";
 const READER_HINT_AAVE_DEBT: &str = "aave_v3/debt_position";
 
 /// Deterministic built-in semantic catalog for the current portfolio compiler.
-pub fn builtin_semantic_catalog() -> Result<SemanticCatalog, SemanticCatalogError> {
-    SemanticCatalog::new(SemanticCatalogParts {
+pub fn builtin_dispatch_catalog() -> Result<DispatchCatalog, DispatchCatalogError> {
+    DispatchCatalog::new(DispatchCatalogParts {
         observation_planners: vec![
             Arc::new(EvmNativeBalanceObservationPlannerAdapter),
             Arc::new(EvmErc20BalanceObservationPlannerAdapter),
@@ -99,65 +101,65 @@ pub fn builtin_semantic_catalog() -> Result<SemanticCatalog, SemanticCatalogErro
             Arc::new(EvmNativeBalanceObservationRuntimeAdapter),
             Arc::new(EvmErc20BalanceObservationRuntimeAdapter),
             Arc::new(BitcoinUtxoSetObservationRuntimeAdapter),
-            Arc::new(AaveReserveObservationRuntimeAdapter),
-            Arc::new(AaveDebtObservationRuntimeAdapter),
+            Arc::new(AaveReserveDispatchObservationRuntimeAdapter),
+            Arc::new(AaveDebtDispatchObservationRuntimeAdapter),
         ],
     })
 }
 
 /// Default compiler that lowers the current canonical portfolio bundle into semantic execution.
 #[derive(Clone, Default)]
-pub struct DefaultPortfolioSemanticCompiler;
+pub struct DefaultPortfolioPlanCompiler;
 
-impl PortfolioSemanticCompiler for DefaultPortfolioSemanticCompiler {
+impl PortfolioPlanCompiler for DefaultPortfolioPlanCompiler {
     fn compile(
         &self,
         request: &PortfolioRequest,
-        catalog: &SemanticCatalog,
+        catalog: &DispatchCatalog,
     ) -> Result<PortfolioExecutionSpec, PlanningError> {
         validate_portfolio_bundle(&request.portfolio, &request.valuation_source_registry)
             .map_err(|err| compile_error("invalid_portfolio_bundle", err.to_string()))?;
         validate_aave_portfolio_config(&request.portfolio)
             .map_err(|err| compile_error("invalid_aave_portfolio_config", err.to_string()))?;
 
-        let semantic_config = lower_semantic_config(request)?.normalized();
-        semantic_config
+        let plan_config = lower_plan_config(request)?.normalized();
+        plan_config
             .validate()
-            .map_err(|err| compile_error("invalid_semantic_config", err.to_string()))?;
+            .map_err(|err| compile_error("invalid_plan_config", err.to_string()))?;
 
-        let subjects_by_id: HashMap<&str, &Subject> = semantic_config
+        let subjects_by_id: HashMap<&str, &Subject> = plan_config
             .subjects
             .iter()
             .map(|subject| (subject.subject_id.as_str(), subject))
             .collect();
-        let views_by_id: HashMap<&str, &NetworkView> = semantic_config
+        let views_by_id: HashMap<&str, &NetworkView> = plan_config
             .network_views
             .iter()
             .map(|view| (view.network_view_id.as_str(), view))
             .collect();
-        let instruments_by_id: HashMap<&str, &Instrument> = semantic_config
+        let instruments_by_id: HashMap<&str, &Instrument> = plan_config
             .instruments
             .iter()
             .map(|instrument| (instrument.instrument_id.as_str(), instrument))
             .collect();
-        let venues_by_id: HashMap<&str, &Venue> = semantic_config
+        let venues_by_id: HashMap<&str, &Venue> = plan_config
             .venues
             .iter()
             .map(|venue| (venue.venue_id.0.as_str(), venue))
             .collect();
-        let positions_by_id: HashMap<&str, &Position> = semantic_config
+        let positions_by_id: HashMap<&str, &Position> = plan_config
             .positions
             .iter()
             .map(|position| (position.position_id.as_str(), position))
             .collect();
-        let valuations_by_id: HashMap<&str, &Valuation> = semantic_config
+        let valuations_by_id: HashMap<&str, &Valuation> = plan_config
             .valuations
             .iter()
             .map(|valuation| (valuation.valuation_id.as_str(), valuation))
             .collect();
 
         let mut source_tasks = Vec::new();
-        for view in &semantic_config.network_views {
+        for view in &plan_config.network_views {
             source_tasks.push(SourcePreparationTask {
                 task_id: format!("prepare.{}", view.network_view_id),
                 network_view_id: view.network_view_id.clone(),
@@ -171,17 +173,17 @@ impl PortfolioSemanticCompiler for DefaultPortfolioSemanticCompiler {
         }
 
         let mut subject_tasks = Vec::new();
-        for subject in &semantic_config.subjects {
+        for subject in &plan_config.subjects {
             subject_tasks.push(catalog.plan_subject(SubjectPlanRequest { subject })?);
         }
 
         let mut view_tasks = Vec::new();
-        for view in &semantic_config.network_views {
+        for view in &plan_config.network_views {
             view_tasks.push(catalog.plan_view(ViewPlanRequest { network_view: view })?);
         }
 
         let mut valuation_tasks = Vec::new();
-        for valuation in &semantic_config.valuations {
+        for valuation in &plan_config.valuations {
             let instrument = instruments_by_id
                 .get(valuation.instrument_id.as_str())
                 .copied()
@@ -202,7 +204,7 @@ impl PortfolioSemanticCompiler for DefaultPortfolioSemanticCompiler {
 
         let mut batches_by_key: BTreeMap<(AdapterId, String), Vec<CompiledObservationBinding>> =
             BTreeMap::new();
-        for target in &semantic_config.observation_targets {
+        for target in &plan_config.observation_targets {
             let subject = subjects_by_id
                 .get(target.subject_id.as_str())
                 .copied()
@@ -299,8 +301,8 @@ impl PortfolioSemanticCompiler for DefaultPortfolioSemanticCompiler {
         }
 
         let mut spec = PortfolioExecutionSpec {
-            portfolio_id: semantic_config.portfolio_id.clone(),
-            quote_codes: semantic_config.quote_codes.clone(),
+            portfolio_id: plan_config.portfolio_id.clone(),
+            quote_codes: plan_config.quote_codes.clone(),
             source_tasks,
             subject_tasks,
             view_tasks,
@@ -314,9 +316,7 @@ impl PortfolioSemanticCompiler for DefaultPortfolioSemanticCompiler {
     }
 }
 
-fn lower_semantic_config(
-    request: &PortfolioRequest,
-) -> Result<PortfolioSemanticConfig, PlanningError> {
+fn lower_plan_config(request: &PortfolioRequest) -> Result<PortfolioPlanConfig, PlanningError> {
     let networks_by_id: HashMap<&str, &NetworkConfig> = request
         .portfolio
         .networks
@@ -436,7 +436,7 @@ fn lower_semantic_config(
         }
     }
 
-    Ok(PortfolioSemanticConfig {
+    Ok(PortfolioPlanConfig {
         portfolio_id: request.portfolio.portfolio_id.clone(),
         quote_codes: request.portfolio.quote_codes.clone(),
         network_views,
@@ -644,10 +644,10 @@ fn build_instrument(symbol: &SymbolConfig) -> Result<Instrument, PlanningError> 
         instrument_id: symbol.symbol_id.clone(),
         display_symbol: symbol.display_symbol.clone(),
         semantics: match symbol.kind {
-            SymbolKind::NativeBalance => InstrumentSemantics::NativeAsset,
+            SymbolKind::NativeBalance => InstrumentKind::NativeAsset,
             SymbolKind::Erc20Balance
             | SymbolKind::ProtocolPosition
-            | SymbolKind::StakedPosition => InstrumentSemantics::FungibleToken,
+            | SymbolKind::StakedPosition => InstrumentKind::FungibleToken,
         },
         quantity_schema: to_value(&QuantitySchema {
             decimals: symbol.decimals,
@@ -723,7 +723,7 @@ fn build_position(
                 Position {
                     position_id: symbol.symbol_id.clone(),
                     instrument_id: symbol.symbol_id.clone(),
-                    semantics: PositionSemantics::UtxoSet,
+                    semantics: PositionKind::UtxoSet,
                     venue_id: None,
                     reader_hint: Some(READER_HINT_BITCOIN_UTXO_SET.to_string()),
                     metadata: to_object_map(&BitcoinUtxoSetObservationPayload {
@@ -751,7 +751,7 @@ fn build_position(
             Position {
                 position_id: symbol.symbol_id.clone(),
                 instrument_id: symbol.symbol_id.clone(),
-                semantics: PositionSemantics::SpotBalance,
+                semantics: PositionKind::SpotBalance,
                 venue_id: None,
                 reader_hint: Some(READER_HINT_EVM_NATIVE_BALANCE.to_string()),
                 metadata: to_object_map(&NativeBalanceObservationPayload {
@@ -765,7 +765,7 @@ fn build_position(
             Position {
                 position_id: symbol.symbol_id.clone(),
                 instrument_id: symbol.symbol_id.clone(),
-                semantics: PositionSemantics::SpotBalance,
+                semantics: PositionKind::SpotBalance,
                 venue_id: None,
                 reader_hint: Some(READER_HINT_EVM_ERC20_BALANCE.to_string()),
                 metadata: to_object_map(&Erc20BalanceObservationPayload {
@@ -835,7 +835,7 @@ fn build_aave_position(
             Position {
                 position_id: symbol.symbol_id.clone(),
                 instrument_id: underlying_symbol_id.clone(),
-                semantics: PositionSemantics::LendingDeposit,
+                semantics: PositionKind::LendingDeposit,
                 venue_id: Some(reserve_venue_id),
                 reader_hint: Some(READER_HINT_AAVE_RESERVE.to_string()),
                 metadata: to_object_map(&AaveReserveObservationPayload {
@@ -851,7 +851,7 @@ fn build_aave_position(
             Position {
                 position_id: symbol.symbol_id.clone(),
                 instrument_id: underlying_symbol_id.clone(),
-                semantics: PositionSemantics::LendingDebt,
+                semantics: PositionKind::LendingDebt,
                 venue_id: Some(reserve_venue_id),
                 reader_hint: Some(READER_HINT_AAVE_DEBT.to_string()),
                 metadata: to_object_map(&AaveDebtObservationPayload {
@@ -880,7 +880,7 @@ fn build_valuation(
     );
     let (semantics, strategy) = match &quote.reader {
         ValuationReaderConfig::FixedUnitPrice { unit_price_dec } => (
-            ValuationSemantics::FixedUnitPrice,
+            ValuationKind::FixedUnitPrice,
             to_value(&FixedUnitPriceValuationPayload {
                 priced_symbol_id: quote.priced_symbol_id.clone(),
                 unit_price_dec: unit_price_dec.clone(),
@@ -890,7 +890,7 @@ fn build_valuation(
             let source_cfg =
                 lookup_valuation_source(valuation_sources_by_id, &valuation_id, source)?;
             (
-                ValuationSemantics::DirectUnitPrice,
+                ValuationKind::DirectUnitPrice,
                 to_value(&DirectPriceValuationPayload {
                     priced_symbol_id: quote.priced_symbol_id.clone(),
                     source: DirectPriceSourcePayload {
@@ -910,7 +910,7 @@ fn build_valuation(
             let denominator_cfg =
                 lookup_valuation_source(valuation_sources_by_id, &valuation_id, denominator)?;
             (
-                ValuationSemantics::DerivedUnitPrice,
+                ValuationKind::DerivedUnitPrice,
                 to_value(&DerivedUnitPriceValuationPayload {
                     priced_symbol_id: quote.priced_symbol_id.clone(),
                     numerator: DirectPriceSourcePayload {
@@ -1049,7 +1049,7 @@ fn build_observation_binding(
 ) -> CompiledObservationBinding {
     CompiledObservationBinding {
         binding_id: format!("binding.{}", target.target_id),
-        observation_key: mfm_state_portfolio::semantic::ObservationKey {
+        observation_key: mfm_state_portfolio::plan::ObservationKey {
             subject_id: target.subject_id.clone(),
             network_view_id: target.network_view_id.clone(),
             instrument_id: position.instrument_id.clone(),
@@ -1065,7 +1065,7 @@ fn build_observation_binding(
 
 struct EvmAddressSubjectPlannerAdapter;
 
-impl PlannerAdapter for EvmAddressSubjectPlannerAdapter {
+impl DispatchAdapter for EvmAddressSubjectPlannerAdapter {
     fn id(&self) -> AdapterId {
         AdapterId(ADAPTER_RESOLVE_SUBJECT_EVM_ADDRESS.to_string())
     }
@@ -1096,7 +1096,7 @@ impl SubjectPlannerAdapter for EvmAddressSubjectPlannerAdapter {
 
 struct BitcoinAddressSubjectPlannerAdapter;
 
-impl PlannerAdapter for BitcoinAddressSubjectPlannerAdapter {
+impl DispatchAdapter for BitcoinAddressSubjectPlannerAdapter {
     fn id(&self) -> AdapterId {
         AdapterId(ADAPTER_RESOLVE_SUBJECT_BITCOIN_ADDRESS.to_string())
     }
@@ -1127,7 +1127,7 @@ impl SubjectPlannerAdapter for BitcoinAddressSubjectPlannerAdapter {
 
 struct EvmViewPlannerAdapter;
 
-impl PlannerAdapter for EvmViewPlannerAdapter {
+impl DispatchAdapter for EvmViewPlannerAdapter {
     fn id(&self) -> AdapterId {
         AdapterId(ADAPTER_PIN_VIEW_EVM.to_string())
     }
@@ -1161,7 +1161,7 @@ impl ViewPlannerAdapter for EvmViewPlannerAdapter {
 
 struct BitcoinViewPlannerAdapter;
 
-impl PlannerAdapter for BitcoinViewPlannerAdapter {
+impl DispatchAdapter for BitcoinViewPlannerAdapter {
     fn id(&self) -> AdapterId {
         AdapterId(ADAPTER_PIN_VIEW_BITCOIN.to_string())
     }
@@ -1195,7 +1195,7 @@ impl ViewPlannerAdapter for BitcoinViewPlannerAdapter {
 
 struct FixedUnitPricePlannerAdapter;
 
-impl PlannerAdapter for FixedUnitPricePlannerAdapter {
+impl DispatchAdapter for FixedUnitPricePlannerAdapter {
     fn id(&self) -> AdapterId {
         AdapterId(ADAPTER_RESOLVE_VALUATION_FIXED.to_string())
     }
@@ -1203,7 +1203,7 @@ impl PlannerAdapter for FixedUnitPricePlannerAdapter {
 
 impl ValuationPlannerAdapter for FixedUnitPricePlannerAdapter {
     fn supports(&self, req: &ValuationPlanRequest<'_>) -> bool {
-        req.valuation.semantics == ValuationSemantics::FixedUnitPrice
+        req.valuation.semantics == ValuationKind::FixedUnitPrice
     }
 
     fn plan(&self, req: ValuationPlanRequest<'_>) -> Result<ValuationTask, PlanningError> {
@@ -1222,7 +1222,7 @@ impl ValuationPlannerAdapter for FixedUnitPricePlannerAdapter {
 
 struct EvmOracleDirectPricePlannerAdapter;
 
-impl PlannerAdapter for EvmOracleDirectPricePlannerAdapter {
+impl DispatchAdapter for EvmOracleDirectPricePlannerAdapter {
     fn id(&self) -> AdapterId {
         AdapterId(ADAPTER_RESOLVE_VALUATION_EVM_ORACLE.to_string())
     }
@@ -1230,7 +1230,7 @@ impl PlannerAdapter for EvmOracleDirectPricePlannerAdapter {
 
 impl ValuationPlannerAdapter for EvmOracleDirectPricePlannerAdapter {
     fn supports(&self, req: &ValuationPlanRequest<'_>) -> bool {
-        if req.valuation.semantics != ValuationSemantics::DirectUnitPrice {
+        if req.valuation.semantics != ValuationKind::DirectUnitPrice {
             return false;
         }
         serde_json::from_value::<DirectPriceValuationPayload>(req.valuation.strategy.clone())
@@ -1259,7 +1259,7 @@ impl ValuationPlannerAdapter for EvmOracleDirectPricePlannerAdapter {
 
 struct DerivedUnitPricePlannerAdapter;
 
-impl PlannerAdapter for DerivedUnitPricePlannerAdapter {
+impl DispatchAdapter for DerivedUnitPricePlannerAdapter {
     fn id(&self) -> AdapterId {
         AdapterId(ADAPTER_RESOLVE_VALUATION_DERIVED.to_string())
     }
@@ -1267,7 +1267,7 @@ impl PlannerAdapter for DerivedUnitPricePlannerAdapter {
 
 impl ValuationPlannerAdapter for DerivedUnitPricePlannerAdapter {
     fn supports(&self, req: &ValuationPlanRequest<'_>) -> bool {
-        req.valuation.semantics == ValuationSemantics::DerivedUnitPrice
+        req.valuation.semantics == ValuationKind::DerivedUnitPrice
     }
 
     fn plan(&self, req: ValuationPlanRequest<'_>) -> Result<ValuationTask, PlanningError> {
@@ -1286,13 +1286,13 @@ impl ValuationPlannerAdapter for DerivedUnitPricePlannerAdapter {
 
 struct EvmNativeBalanceObservationPlannerAdapter;
 
-impl PlannerAdapter for EvmNativeBalanceObservationPlannerAdapter {
+impl DispatchAdapter for EvmNativeBalanceObservationPlannerAdapter {
     fn id(&self) -> AdapterId {
         AdapterId(ADAPTER_OBSERVE_EVM_NATIVE_BALANCE.to_string())
     }
 }
 
-impl mfm_state_portfolio::semantic::ObservationPlannerAdapter
+impl mfm_state_portfolio::plan::ObservationPlannerAdapter
     for EvmNativeBalanceObservationPlannerAdapter
 {
     fn supports(&self, req: &ObservationPlanRequest<'_>) -> bool {
@@ -1319,13 +1319,13 @@ impl mfm_state_portfolio::semantic::ObservationPlannerAdapter
 
 struct EvmErc20BalanceObservationPlannerAdapter;
 
-impl PlannerAdapter for EvmErc20BalanceObservationPlannerAdapter {
+impl DispatchAdapter for EvmErc20BalanceObservationPlannerAdapter {
     fn id(&self) -> AdapterId {
         AdapterId(ADAPTER_OBSERVE_EVM_ERC20_BALANCE.to_string())
     }
 }
 
-impl mfm_state_portfolio::semantic::ObservationPlannerAdapter
+impl mfm_state_portfolio::plan::ObservationPlannerAdapter
     for EvmErc20BalanceObservationPlannerAdapter
 {
     fn supports(&self, req: &ObservationPlanRequest<'_>) -> bool {
@@ -1352,13 +1352,13 @@ impl mfm_state_portfolio::semantic::ObservationPlannerAdapter
 
 struct BitcoinUtxoSetObservationPlannerAdapter;
 
-impl PlannerAdapter for BitcoinUtxoSetObservationPlannerAdapter {
+impl DispatchAdapter for BitcoinUtxoSetObservationPlannerAdapter {
     fn id(&self) -> AdapterId {
         AdapterId(ADAPTER_OBSERVE_BITCOIN_UTXO_SET.to_string())
     }
 }
 
-impl mfm_state_portfolio::semantic::ObservationPlannerAdapter
+impl mfm_state_portfolio::plan::ObservationPlannerAdapter
     for BitcoinUtxoSetObservationPlannerAdapter
 {
     fn supports(&self, req: &ObservationPlanRequest<'_>) -> bool {
@@ -1385,15 +1385,13 @@ impl mfm_state_portfolio::semantic::ObservationPlannerAdapter
 
 struct AaveReserveObservationPlannerAdapter;
 
-impl PlannerAdapter for AaveReserveObservationPlannerAdapter {
+impl DispatchAdapter for AaveReserveObservationPlannerAdapter {
     fn id(&self) -> AdapterId {
         AdapterId(ADAPTER_OBSERVE_AAVE_RESERVE.to_string())
     }
 }
 
-impl mfm_state_portfolio::semantic::ObservationPlannerAdapter
-    for AaveReserveObservationPlannerAdapter
-{
+impl mfm_state_portfolio::plan::ObservationPlannerAdapter for AaveReserveObservationPlannerAdapter {
     fn supports(&self, req: &ObservationPlanRequest<'_>) -> bool {
         req.subject.kind == SubjectKind::EvmAddress
             && req.network_view.family == NetworkFamily::Evm
@@ -1418,15 +1416,13 @@ impl mfm_state_portfolio::semantic::ObservationPlannerAdapter
 
 struct AaveDebtObservationPlannerAdapter;
 
-impl PlannerAdapter for AaveDebtObservationPlannerAdapter {
+impl DispatchAdapter for AaveDebtObservationPlannerAdapter {
     fn id(&self) -> AdapterId {
         AdapterId(ADAPTER_OBSERVE_AAVE_DEBT.to_string())
     }
 }
 
-impl mfm_state_portfolio::semantic::ObservationPlannerAdapter
-    for AaveDebtObservationPlannerAdapter
-{
+impl mfm_state_portfolio::plan::ObservationPlannerAdapter for AaveDebtObservationPlannerAdapter {
     fn supports(&self, req: &ObservationPlanRequest<'_>) -> bool {
         req.subject.kind == SubjectKind::EvmAddress
             && req.network_view.family == NetworkFamily::Evm
@@ -1656,8 +1652,8 @@ mod tests {
 
     #[test]
     fn compiler_lowers_current_config_into_semantic_execution_spec() {
-        let catalog = builtin_semantic_catalog().expect("catalog");
-        let compiler = DefaultPortfolioSemanticCompiler;
+        let catalog = builtin_dispatch_catalog().expect("catalog");
+        let compiler = DefaultPortfolioPlanCompiler;
         let spec = compiler
             .compile(&sample_request(), &catalog)
             .expect("compiled execution spec");
@@ -1682,8 +1678,8 @@ mod tests {
 
     #[test]
     fn compiler_is_deterministic_across_config_ordering() {
-        let catalog = builtin_semantic_catalog().expect("catalog");
-        let compiler = DefaultPortfolioSemanticCompiler;
+        let catalog = builtin_dispatch_catalog().expect("catalog");
+        let compiler = DefaultPortfolioPlanCompiler;
         let mut request = sample_request();
         request.portfolio.wallets.reverse();
         request.portfolio.symbol_configs.reverse();
@@ -1702,8 +1698,8 @@ mod tests {
 
     #[test]
     fn compiler_rejects_duplicate_semantic_observation_targets() {
-        let catalog = builtin_semantic_catalog().expect("catalog");
-        let compiler = DefaultPortfolioSemanticCompiler;
+        let catalog = builtin_dispatch_catalog().expect("catalog");
+        let compiler = DefaultPortfolioPlanCompiler;
         let mut request = sample_request();
         request.portfolio.wallets[0]
             .symbol_ids
@@ -1711,7 +1707,7 @@ mod tests {
 
         let err = compiler.compile(&request, &catalog).expect_err("must fail");
         assert!(
-            matches!(err, PlanningError::Compile { code, .. } if code == "invalid_semantic_config")
+            matches!(err, PlanningError::Compile { code, .. } if code == "invalid_plan_config")
         );
     }
 }

@@ -120,7 +120,11 @@ struct StreamIdTripleParts<'a> {
 
 impl<'a> StreamIdTripleParts<'a> {
     fn parse(stream_id_key: &'a StreamId) -> Option<Self> {
-        let mut parts = stream_id_key.key().split(':');
+        Self::parse_stream_id_key(stream_id_key.key())
+    }
+
+    fn parse_stream_id_key(stream_id_key: &'a str) -> Option<Self> {
+        let mut parts = stream_id_key.split(':');
         let first = parts.next()?;
         let second = parts.next()?;
         let third = parts.next()?;

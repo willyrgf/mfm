@@ -146,13 +146,13 @@ pub struct ObservationRuntimeInput<'a> {
 }
 
 /// Base trait for pure planner-side semantic adapters.
-pub trait PlannerAdapter: Send + Sync {
+pub trait DispatchAdapter: Send + Sync {
     /// Returns the stable planner-selected adapter id.
     fn id(&self) -> AdapterId;
 }
 
 /// Planner adapter that compiles observation bindings.
-pub trait ObservationPlannerAdapter: PlannerAdapter {
+pub trait ObservationPlannerAdapter: DispatchAdapter {
     /// Returns true when this adapter can compile the provided observation request.
     fn supports(&self, req: &ObservationPlanRequest<'_>) -> bool;
 
@@ -164,7 +164,7 @@ pub trait ObservationPlannerAdapter: PlannerAdapter {
 }
 
 /// Planner adapter that compiles valuation tasks.
-pub trait ValuationPlannerAdapter: PlannerAdapter {
+pub trait ValuationPlannerAdapter: DispatchAdapter {
     /// Returns true when this adapter can compile the provided valuation request.
     fn supports(&self, req: &ValuationPlanRequest<'_>) -> bool;
 
@@ -173,7 +173,7 @@ pub trait ValuationPlannerAdapter: PlannerAdapter {
 }
 
 /// Planner adapter that compiles subject-resolution tasks.
-pub trait SubjectPlannerAdapter: PlannerAdapter {
+pub trait SubjectPlannerAdapter: DispatchAdapter {
     /// Returns true when this adapter can compile the provided subject request.
     fn supports(&self, req: &SubjectPlanRequest<'_>) -> bool;
 
@@ -185,7 +185,7 @@ pub trait SubjectPlannerAdapter: PlannerAdapter {
 }
 
 /// Planner adapter that compiles view-pin tasks.
-pub trait ViewPlannerAdapter: PlannerAdapter {
+pub trait ViewPlannerAdapter: DispatchAdapter {
     /// Returns true when this adapter can compile the provided view-pin request.
     fn supports(&self, req: &ViewPlanRequest<'_>) -> bool;
 
@@ -201,7 +201,7 @@ pub trait RuntimeAdapter: Send + Sync {
 
 /// Runtime adapter that resolves semantic subjects.
 #[async_trait]
-pub trait SubjectRuntimeAdapter: RuntimeAdapter {
+pub trait DispatchSubjectRuntimeAdapter: RuntimeAdapter {
     /// Resolves one semantic subject into a runtime subject payload.
     async fn resolve_subject(
         &self,
@@ -214,7 +214,7 @@ pub trait SubjectRuntimeAdapter: RuntimeAdapter {
 
 /// Runtime adapter that pins semantic network views.
 #[async_trait]
-pub trait ViewRuntimeAdapter: RuntimeAdapter {
+pub trait DispatchViewRuntimeAdapter: RuntimeAdapter {
     /// Pins one semantic execution view into a replayable runtime anchor.
     async fn pin_view(
         &self,
@@ -227,7 +227,7 @@ pub trait ViewRuntimeAdapter: RuntimeAdapter {
 
 /// Runtime adapter that resolves semantic valuations.
 #[async_trait]
-pub trait ValuationRuntimeAdapter: RuntimeAdapter {
+pub trait DispatchValuationRuntimeAdapter: RuntimeAdapter {
     /// Resolves one planner-owned valuation task into a concrete unit price.
     async fn resolve(
         &self,
@@ -240,7 +240,7 @@ pub trait ValuationRuntimeAdapter: RuntimeAdapter {
 
 /// Runtime adapter that observes one compiled semantic binding.
 #[async_trait]
-pub trait ObservationRuntimeAdapter: RuntimeAdapter {
+pub trait DispatchObservationRuntimeAdapter: RuntimeAdapter {
     /// Executes one compiled observation binding and returns the canonical observation read model.
     async fn observe(
         &self,
@@ -339,10 +339,10 @@ impl PlanningError {
 
 /// Catalog-construction and runtime-lookup errors for semantic adapters.
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
-pub enum SemanticCatalogError {
+pub enum DispatchCatalogError {
     /// Duplicate planner adapter ids are forbidden because selection must remain deterministic.
     #[error("duplicate {kind} planner adapter `{adapter}`")]
-    DuplicatePlannerAdapter {
+    DuplicateDispatchAdapter {
         /// Semantic task kind.
         kind: &'static str,
         /// Duplicate planner adapter id.
@@ -368,40 +368,40 @@ pub enum SemanticCatalogError {
 
 /// Deterministic semantic catalog inputs.
 #[derive(Default)]
-pub struct SemanticCatalogParts {
+pub struct DispatchCatalogParts {
     /// Planner adapters for observation compilation.
     pub observation_planners: Vec<Arc<dyn ObservationPlannerAdapter>>,
     /// Runtime adapters for compiled observation execution.
-    pub observation_runtimes: Vec<Arc<dyn ObservationRuntimeAdapter>>,
+    pub observation_runtimes: Vec<Arc<dyn DispatchObservationRuntimeAdapter>>,
     /// Planner adapters for valuation compilation.
     pub valuation_planners: Vec<Arc<dyn ValuationPlannerAdapter>>,
     /// Runtime adapters for valuation execution.
-    pub valuation_runtimes: Vec<Arc<dyn ValuationRuntimeAdapter>>,
+    pub valuation_runtimes: Vec<Arc<dyn DispatchValuationRuntimeAdapter>>,
     /// Planner adapters for subject-resolution compilation.
     pub subject_planners: Vec<Arc<dyn SubjectPlannerAdapter>>,
     /// Runtime adapters for subject resolution.
-    pub subject_runtimes: Vec<Arc<dyn SubjectRuntimeAdapter>>,
+    pub subject_runtimes: Vec<Arc<dyn DispatchSubjectRuntimeAdapter>>,
     /// Planner adapters for execution-view pin compilation.
     pub view_planners: Vec<Arc<dyn ViewPlannerAdapter>>,
     /// Runtime adapters for execution-view pinning.
-    pub view_runtimes: Vec<Arc<dyn ViewRuntimeAdapter>>,
+    pub view_runtimes: Vec<Arc<dyn DispatchViewRuntimeAdapter>>,
 }
 
 /// Deterministic semantic adapter catalog used by the compiler and runtime.
-pub struct SemanticCatalog {
+pub struct DispatchCatalog {
     observation_planners: Vec<Arc<dyn ObservationPlannerAdapter>>,
-    observation_runtimes: BTreeMap<AdapterId, Arc<dyn ObservationRuntimeAdapter>>,
+    observation_runtimes: BTreeMap<AdapterId, Arc<dyn DispatchObservationRuntimeAdapter>>,
     valuation_planners: Vec<Arc<dyn ValuationPlannerAdapter>>,
-    valuation_runtimes: BTreeMap<AdapterId, Arc<dyn ValuationRuntimeAdapter>>,
+    valuation_runtimes: BTreeMap<AdapterId, Arc<dyn DispatchValuationRuntimeAdapter>>,
     subject_planners: Vec<Arc<dyn SubjectPlannerAdapter>>,
-    subject_runtimes: BTreeMap<AdapterId, Arc<dyn SubjectRuntimeAdapter>>,
+    subject_runtimes: BTreeMap<AdapterId, Arc<dyn DispatchSubjectRuntimeAdapter>>,
     view_planners: Vec<Arc<dyn ViewPlannerAdapter>>,
-    view_runtimes: BTreeMap<AdapterId, Arc<dyn ViewRuntimeAdapter>>,
+    view_runtimes: BTreeMap<AdapterId, Arc<dyn DispatchViewRuntimeAdapter>>,
 }
 
-impl SemanticCatalog {
+impl DispatchCatalog {
     /// Builds a deterministic semantic catalog and rejects duplicate adapter ids.
-    pub fn new(parts: SemanticCatalogParts) -> Result<Self, SemanticCatalogError> {
+    pub fn new(parts: DispatchCatalogParts) -> Result<Self, DispatchCatalogError> {
         ensure_unique_planner_ids("observation", &parts.observation_planners)?;
         ensure_unique_planner_ids("valuation", &parts.valuation_planners)?;
         ensure_unique_planner_ids("subject", &parts.subject_planners)?;
@@ -489,11 +489,11 @@ impl SemanticCatalog {
     pub fn observation_runtime(
         &self,
         adapter: &AdapterId,
-    ) -> Result<Arc<dyn ObservationRuntimeAdapter>, SemanticCatalogError> {
+    ) -> Result<Arc<dyn DispatchObservationRuntimeAdapter>, DispatchCatalogError> {
         self.observation_runtimes
             .get(adapter)
             .cloned()
-            .ok_or_else(|| SemanticCatalogError::UnknownRuntimeAdapter {
+            .ok_or_else(|| DispatchCatalogError::UnknownRuntimeAdapter {
                 kind: "observation",
                 adapter: adapter.clone(),
             })
@@ -503,11 +503,11 @@ impl SemanticCatalog {
     pub fn valuation_runtime(
         &self,
         adapter: &AdapterId,
-    ) -> Result<Arc<dyn ValuationRuntimeAdapter>, SemanticCatalogError> {
+    ) -> Result<Arc<dyn DispatchValuationRuntimeAdapter>, DispatchCatalogError> {
         self.valuation_runtimes
             .get(adapter)
             .cloned()
-            .ok_or_else(|| SemanticCatalogError::UnknownRuntimeAdapter {
+            .ok_or_else(|| DispatchCatalogError::UnknownRuntimeAdapter {
                 kind: "valuation",
                 adapter: adapter.clone(),
             })
@@ -517,9 +517,9 @@ impl SemanticCatalog {
     pub fn subject_runtime(
         &self,
         adapter: &AdapterId,
-    ) -> Result<Arc<dyn SubjectRuntimeAdapter>, SemanticCatalogError> {
+    ) -> Result<Arc<dyn DispatchSubjectRuntimeAdapter>, DispatchCatalogError> {
         self.subject_runtimes.get(adapter).cloned().ok_or_else(|| {
-            SemanticCatalogError::UnknownRuntimeAdapter {
+            DispatchCatalogError::UnknownRuntimeAdapter {
                 kind: "subject",
                 adapter: adapter.clone(),
             }
@@ -530,9 +530,9 @@ impl SemanticCatalog {
     pub fn view_runtime(
         &self,
         adapter: &AdapterId,
-    ) -> Result<Arc<dyn ViewRuntimeAdapter>, SemanticCatalogError> {
+    ) -> Result<Arc<dyn DispatchViewRuntimeAdapter>, DispatchCatalogError> {
         self.view_runtimes.get(adapter).cloned().ok_or_else(|| {
-            SemanticCatalogError::UnknownRuntimeAdapter {
+            DispatchCatalogError::UnknownRuntimeAdapter {
                 kind: "view",
                 adapter: adapter.clone(),
             }
@@ -540,15 +540,15 @@ impl SemanticCatalog {
     }
 }
 
-fn ensure_unique_planner_ids<A: PlannerAdapter + ?Sized>(
+fn ensure_unique_planner_ids<A: DispatchAdapter + ?Sized>(
     kind: &'static str,
     planners: &[Arc<A>],
-) -> Result<(), SemanticCatalogError> {
+) -> Result<(), DispatchCatalogError> {
     let mut seen = BTreeSet::new();
     for planner in planners {
         let adapter = planner.id();
         if !seen.insert(adapter.clone()) {
-            return Err(SemanticCatalogError::DuplicatePlannerAdapter { kind, adapter });
+            return Err(DispatchCatalogError::DuplicateDispatchAdapter { kind, adapter });
         }
     }
     Ok(())
@@ -557,7 +557,7 @@ fn ensure_unique_planner_ids<A: PlannerAdapter + ?Sized>(
 fn runtime_map<A: RuntimeAdapter + ?Sized>(
     kind: &'static str,
     adapters: Vec<Arc<A>>,
-) -> Result<BTreeMap<AdapterId, Arc<A>>, SemanticCatalogError> {
+) -> Result<BTreeMap<AdapterId, Arc<A>>, DispatchCatalogError> {
     let mut by_id = BTreeMap::new();
     for adapter in adapters {
         let adapter_id = adapter.id().clone();
@@ -565,7 +565,7 @@ fn runtime_map<A: RuntimeAdapter + ?Sized>(
             .insert(adapter_id.clone(), Arc::clone(&adapter))
             .is_some()
         {
-            return Err(SemanticCatalogError::DuplicateRuntimeAdapter {
+            return Err(DispatchCatalogError::DuplicateRuntimeAdapter {
                 kind,
                 adapter: adapter_id,
             });
@@ -580,7 +580,7 @@ fn select_planner<A, F>(
     supports: F,
 ) -> Result<Arc<A>, PlanningError>
 where
-    A: PlannerAdapter + ?Sized + 'static,
+    A: DispatchAdapter + ?Sized + 'static,
     F: Fn(&A) -> bool,
 {
     let mut matches: Vec<Arc<A>> = planners
@@ -647,11 +647,11 @@ mod tests {
     struct StubObservationPlanner {
         adapter: AdapterId,
         match_family: NetworkFamily,
-        match_semantics: super::super::InstrumentSemantics,
+        match_semantics: super::super::InstrumentKind,
         emitted_binding: CompiledObservationBinding,
     }
 
-    impl PlannerAdapter for StubObservationPlanner {
+    impl DispatchAdapter for StubObservationPlanner {
         fn id(&self) -> AdapterId {
             self.adapter.clone()
         }
@@ -682,7 +682,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl ObservationRuntimeAdapter for StubObservationRuntime {
+    impl DispatchObservationRuntimeAdapter for StubObservationRuntime {
         async fn observe(
             &self,
             _state_id: &StateId,
@@ -748,7 +748,7 @@ mod tests {
             Position {
                 position_id: "eth_spot".to_string(),
                 instrument_id: "eth".to_string(),
-                semantics: super::super::PositionSemantics::SpotBalance,
+                semantics: super::super::PositionKind::SpotBalance,
                 venue_id: Some(super::super::VenueId("wallet".to_string())),
                 reader_hint: None,
                 metadata: BTreeMap::new(),
@@ -756,7 +756,7 @@ mod tests {
             super::super::Instrument {
                 instrument_id: "eth".to_string(),
                 display_symbol: Some("ETH".to_string()),
-                semantics: super::super::InstrumentSemantics::NativeAsset,
+                semantics: super::super::InstrumentKind::NativeAsset,
                 quantity_schema: serde_json::json!({"decimals": 18}),
                 metadata: BTreeMap::new(),
             },
@@ -773,7 +773,7 @@ mod tests {
                     valuation_id: "eth_usd".to_string(),
                     instrument_id: "eth".to_string(),
                     quote: QuoteCode::Usd,
-                    semantics: super::super::ValuationSemantics::DirectUnitPrice,
+                    semantics: super::super::ValuationKind::DirectUnitPrice,
                     strategy: serde_json::json!({"source_id": "chainlink_eth_usd"}),
                     metadata: BTreeMap::new(),
                 },
@@ -781,7 +781,7 @@ mod tests {
                     valuation_id: "eth_btc".to_string(),
                     instrument_id: "eth".to_string(),
                     quote: QuoteCode::Btc,
-                    semantics: super::super::ValuationSemantics::DirectUnitPrice,
+                    semantics: super::super::ValuationKind::DirectUnitPrice,
                     strategy: serde_json::json!({"source_id": "chainlink_eth_btc"}),
                     metadata: BTreeMap::new(),
                 },
@@ -796,7 +796,7 @@ mod tests {
                 subject_id: "wallet_main".to_string(),
                 network_view_id: "ethereum_live".to_string(),
                 instrument_id: "eth".to_string(),
-                position_kind: super::super::PositionSemantics::SpotBalance,
+                position_kind: super::super::PositionKind::SpotBalance,
                 venue_id: Some(super::super::VenueId("wallet".to_string())),
                 discriminator: None,
             },
@@ -824,28 +824,28 @@ mod tests {
         let matching = Arc::new(StubObservationPlanner {
             adapter: AdapterId("observe_position/evm/native_balance".to_string()),
             match_family: NetworkFamily::Evm,
-            match_semantics: super::super::InstrumentSemantics::NativeAsset,
+            match_semantics: super::super::InstrumentKind::NativeAsset,
             emitted_binding: sample_binding("observe_position/evm/native_balance"),
         }) as Arc<dyn ObservationPlannerAdapter>;
         let non_matching = Arc::new(StubObservationPlanner {
             adapter: AdapterId("observe_position/bitcoin/utxo_set".to_string()),
             match_family: NetworkFamily::Bitcoin,
-            match_semantics: super::super::InstrumentSemantics::NativeAsset,
+            match_semantics: super::super::InstrumentKind::NativeAsset,
             emitted_binding: sample_binding("observe_position/bitcoin/utxo_set"),
         }) as Arc<dyn ObservationPlannerAdapter>;
 
-        let first = SemanticCatalog::new(SemanticCatalogParts {
+        let first = DispatchCatalog::new(DispatchCatalogParts {
             observation_planners: vec![Arc::clone(&matching), Arc::clone(&non_matching)],
-            ..SemanticCatalogParts::default()
+            ..DispatchCatalogParts::default()
         })
         .expect("catalog")
         .plan_observation(req)
         .expect("planned observation");
 
         let (target, subject, view, position, instrument, venue, valuations) = sample_semantics();
-        let second = SemanticCatalog::new(SemanticCatalogParts {
+        let second = DispatchCatalog::new(DispatchCatalogParts {
             observation_planners: vec![non_matching, matching],
-            ..SemanticCatalogParts::default()
+            ..DispatchCatalogParts::default()
         })
         .expect("catalog")
         .plan_observation(sample_request(
@@ -868,18 +868,18 @@ mod tests {
         let first = Arc::new(StubObservationPlanner {
             adapter: AdapterId("observe_position/evm/a".to_string()),
             match_family: NetworkFamily::Evm,
-            match_semantics: super::super::InstrumentSemantics::NativeAsset,
+            match_semantics: super::super::InstrumentKind::NativeAsset,
             emitted_binding: sample_binding("observe_position/evm/a"),
         }) as Arc<dyn ObservationPlannerAdapter>;
         let second = Arc::new(StubObservationPlanner {
             adapter: AdapterId("observe_position/evm/b".to_string()),
             match_family: NetworkFamily::Evm,
-            match_semantics: super::super::InstrumentSemantics::NativeAsset,
+            match_semantics: super::super::InstrumentKind::NativeAsset,
             emitted_binding: sample_binding("observe_position/evm/b"),
         }) as Arc<dyn ObservationPlannerAdapter>;
-        let catalog = SemanticCatalog::new(SemanticCatalogParts {
+        let catalog = DispatchCatalog::new(DispatchCatalogParts {
             observation_planners: vec![second, first],
-            ..SemanticCatalogParts::default()
+            ..DispatchCatalogParts::default()
         })
         .expect("catalog");
 
@@ -911,12 +911,12 @@ mod tests {
         let non_matching = Arc::new(StubObservationPlanner {
             adapter: AdapterId("observe_position/bitcoin/utxo_set".to_string()),
             match_family: NetworkFamily::Bitcoin,
-            match_semantics: super::super::InstrumentSemantics::NativeAsset,
+            match_semantics: super::super::InstrumentKind::NativeAsset,
             emitted_binding: sample_binding("observe_position/bitcoin/utxo_set"),
         }) as Arc<dyn ObservationPlannerAdapter>;
-        let catalog = SemanticCatalog::new(SemanticCatalogParts {
+        let catalog = DispatchCatalog::new(DispatchCatalogParts {
             observation_planners: vec![non_matching],
-            ..SemanticCatalogParts::default()
+            ..DispatchCatalogParts::default()
         })
         .expect("catalog");
 
@@ -944,15 +944,15 @@ mod tests {
         let planner = Arc::new(StubObservationPlanner {
             adapter: AdapterId("observe_position/evm/native_balance".to_string()),
             match_family: NetworkFamily::Evm,
-            match_semantics: super::super::InstrumentSemantics::NativeAsset,
+            match_semantics: super::super::InstrumentKind::NativeAsset,
             emitted_binding: CompiledObservationBinding {
                 valuation_ids: vec!["eth_usd".to_string(), "eth_btc".to_string()],
                 ..sample_binding("observe_position/evm/native_balance")
             },
         }) as Arc<dyn ObservationPlannerAdapter>;
-        let catalog = SemanticCatalog::new(SemanticCatalogParts {
+        let catalog = DispatchCatalog::new(DispatchCatalogParts {
             observation_planners: vec![planner],
-            ..SemanticCatalogParts::default()
+            ..DispatchCatalogParts::default()
         })
         .expect("catalog");
 
@@ -982,10 +982,10 @@ mod tests {
     fn runtime_lookup_uses_exact_planned_adapter_id() {
         let adapter = Arc::new(StubObservationRuntime {
             adapter: AdapterId("observe_position/evm/native_balance".to_string()),
-        }) as Arc<dyn ObservationRuntimeAdapter>;
-        let catalog = SemanticCatalog::new(SemanticCatalogParts {
+        }) as Arc<dyn DispatchObservationRuntimeAdapter>;
+        let catalog = DispatchCatalog::new(DispatchCatalogParts {
             observation_runtimes: vec![Arc::clone(&adapter)],
-            ..SemanticCatalogParts::default()
+            ..DispatchCatalogParts::default()
         })
         .expect("catalog");
 
@@ -1003,7 +1003,7 @@ mod tests {
         };
         assert_eq!(
             err,
-            SemanticCatalogError::UnknownRuntimeAdapter {
+            DispatchCatalogError::UnknownRuntimeAdapter {
                 kind: "observation",
                 adapter: AdapterId("observe_position/evm/other".to_string()),
             }

@@ -19,7 +19,7 @@ use mfm_machine::replay_io::ReplayIo;
 use mfm_machine::runtime::{DefaultExecutionEngine, EngineFailpoints};
 use mfm_machine::stores::StreamId;
 use mfm_sdk::op::{CompositeOpSpec, PlannedOp, PlannedOpKind};
-use mfm_sdk::unstable::SdkPlanResolver;
+use mfm_sdk::unstable::{context_value_with_slot_fallback, SdkPlanResolver};
 use mfm_state_common::test_support as op_test_support;
 use mfm_state_portfolio::model::{
     ExecutionAnchor, PortfolioQuoteTotal, PortfolioReport, PortfolioSnapshot,
@@ -388,30 +388,7 @@ fn read_required_context_value(
     snapshot: &serde_json::Value,
     key: &ContextKey,
 ) -> serde_json::Value {
-    if let Some(value) = snapshot.get(&key.0).cloned() {
-        return value;
-    }
-
-    if let Some((op_path, leaf)) = key.0.rsplit_once(".out.") {
-        let nested_prefix = format!("{op_path}.");
-        let nested_suffix = format!(".out.{leaf}");
-        let matches: Vec<serde_json::Value> = snapshot
-            .as_object()
-            .into_iter()
-            .flat_map(|obj| obj.iter())
-            .filter(|(candidate, _)| {
-                candidate.starts_with(&nested_prefix)
-                    && candidate.len() > key.0.len()
-                    && candidate.ends_with(&nested_suffix)
-            })
-            .map(|(_, value)| value.clone())
-            .collect();
-        if matches.len() == 1 {
-            return matches.into_iter().next().expect("single nested match");
-        }
-    }
-
-    snapshot.get(&key.0).cloned().unwrap_or_else(|| {
+    context_value_with_slot_fallback(snapshot, key).unwrap_or_else(|| {
         let keys = snapshot
             .as_object()
             .map(|obj| obj.keys().cloned().collect::<Vec<_>>())
@@ -524,9 +501,8 @@ fn expand_uses_canonical_multi_network_graph() {
     assert!(child_ids.contains(&MERGE_OBSERVATIONS_CHILD_ID.to_string()));
     assert!(child_ids.contains(&ASSEMBLE_SNAPSHOT_CHILD_ID.to_string()));
     assert!(child_ids.contains(&PROJECT_REPORT_CHILD_ID.to_string()));
-    let semantic_spec =
-        compile_semantic_execution(&parse_config(&canonical_op_config()).expect("cfg"))
-            .expect("semantic spec");
+    let semantic_spec = compile_portfolio_plan(&parse_config(&canonical_op_config()).expect("cfg"))
+        .expect("semantic spec");
     assert_eq!(
         child_ids
             .iter()
@@ -582,7 +558,7 @@ fn expand_uses_canonical_multi_network_graph() {
 #[test]
 fn expand_uses_semantic_state_ids_without_protocol_fragments() {
     let cfg = parse_config(&canonical_op_config()).expect("parse config");
-    let spec = compile_semantic_execution(&cfg).expect("compile semantic");
+    let spec = compile_portfolio_plan(&cfg).expect("compile semantic");
 
     let registry = op_test_support::registry_with_ops(portfolio_tracker_ops());
     let planner = op_test_support::default_pipeline_planner();

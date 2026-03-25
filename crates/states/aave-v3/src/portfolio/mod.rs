@@ -41,7 +41,7 @@
 
 /// Typed Aave V3 config models and validation helpers for portfolio positions.
 pub mod model;
-/// Shared semantic payloads for compiled Aave V3 portfolio execution.
-pub mod semantic;
 /// Runtime adapters for compiled Aave V3 semantic portfolio observations.
-pub mod semantic_adapters;
+pub mod plan_adapters;
+/// Shared semantic payloads for compiled Aave V3 portfolio execution.
+pub mod plan_payloads;

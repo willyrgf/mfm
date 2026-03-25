@@ -11,14 +11,15 @@ mod compiler;
 mod payloads;
 
 pub use catalog::{
-    ExecutionAnchor, ObservationPlanRequest, ObservationPlannerAdapter, ObservationRuntimeAdapter,
-    ObservationRuntimeInput, PinnedNetworkView, PlannerAdapter, PlanningError, ResolvedSubject,
-    ResolvedUnitPrice, RuntimeAdapter, SemanticCatalog, SemanticCatalogError, SemanticCatalogParts,
-    SubjectPlanRequest, SubjectPlannerAdapter, SubjectRuntimeAdapter, SubjectRuntimeInput,
-    ValuationPlanRequest, ValuationPlannerAdapter, ValuationRuntimeAdapter, ValuationRuntimeInput,
-    ViewPlanRequest, ViewPlannerAdapter, ViewRuntimeAdapter, ViewRuntimeInput,
+    DispatchAdapter, DispatchCatalog, DispatchCatalogError, DispatchCatalogParts,
+    DispatchObservationRuntimeAdapter, DispatchSubjectRuntimeAdapter,
+    DispatchValuationRuntimeAdapter, DispatchViewRuntimeAdapter, ExecutionAnchor,
+    ObservationPlanRequest, ObservationPlannerAdapter, ObservationRuntimeInput, PinnedNetworkView,
+    PlanningError, ResolvedSubject, ResolvedUnitPrice, RuntimeAdapter, SubjectPlanRequest,
+    SubjectPlannerAdapter, SubjectRuntimeInput, ValuationPlanRequest, ValuationPlannerAdapter,
+    ValuationRuntimeInput, ViewPlanRequest, ViewPlannerAdapter, ViewRuntimeInput,
 };
-pub use compiler::{PortfolioRequest, PortfolioSemanticCompiler};
+pub use compiler::{PortfolioPlanCompiler, PortfolioRequest};
 /// Canonical observation read model emitted by semantic portfolio execution.
 ///
 /// The semantic cutover keeps the existing observation artifact shape so snapshot/report
@@ -37,7 +38,7 @@ pub use payloads::{
 /// V1 canonical shape: transparent string newtype. The RFC pseudocode prescribed a
 /// multi-field struct (`venue_id`, `venue_kind`, `network_id`, `parent_venue_id`), but the
 /// implementation splits venue metadata onto the separate [`Venue`] struct. The
-/// `PortfolioSemanticConfig.venues` list provides the join between identity and metadata.
+/// `PortfolioPlanConfig.venues` list provides the join between identity and metadata.
 /// This is the intentional v1 contract.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -215,7 +216,7 @@ impl NetworkView {
 /// Supported instrument semantics.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum InstrumentSemantics {
+pub enum InstrumentKind {
     /// Native ledger asset.
     NativeAsset,
     /// Fungible token or asset.
@@ -232,7 +233,7 @@ pub struct Instrument {
     /// Optional display symbol used in read models.
     pub display_symbol: Option<String>,
     /// Semantic instrument kind.
-    pub semantics: InstrumentSemantics,
+    pub semantics: InstrumentKind,
     /// Opaque quantity schema interpreted by planner/runtime adapters.
     pub quantity_schema: Value,
     /// Stable semantic metadata.
@@ -248,7 +249,7 @@ impl Instrument {
 /// Supported position semantics.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum PositionSemantics {
+pub enum PositionKind {
     /// Spot account or wallet balance.
     SpotBalance,
     /// Lending-market collateral or deposit position.
@@ -269,7 +270,7 @@ pub enum PositionSemantics {
 /// traits or runtime adapters — exists as a stable type namespace for future use.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ActionSemantics {
+pub enum ActionKind {
     /// Token swap.
     Swap,
     /// Borrow from a lending market.
@@ -319,7 +320,7 @@ pub struct Position {
     /// Instrument tracked by this position.
     pub instrument_id: String,
     /// Semantic position kind.
-    pub semantics: PositionSemantics,
+    pub semantics: PositionKind,
     /// Optional semantic venue reference.
     pub venue_id: Option<VenueId>,
     /// Optional planner-side reader hint.
@@ -337,7 +338,7 @@ impl Position {
 /// Supported valuation semantics.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ValuationSemantics {
+pub enum ValuationKind {
     /// Fixed unit price encoded in planner config.
     FixedUnitPrice,
     /// Direct unit price read from an execution source.
@@ -356,7 +357,7 @@ pub struct Valuation {
     /// Quote unit emitted by the valuation.
     pub quote: QuoteCode,
     /// Semantic valuation strategy kind.
-    pub semantics: ValuationSemantics,
+    pub semantics: ValuationKind,
     /// Opaque adapter-owned valuation strategy payload.
     pub strategy: Value,
     /// Stable semantic metadata.
@@ -396,7 +397,7 @@ impl ObservationTarget {
 
 /// Planner-owned semantic portfolio configuration.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct PortfolioSemanticConfig {
+pub struct PortfolioPlanConfig {
     /// Stable portfolio identifier.
     pub portfolio_id: String,
     /// Quote units requested by the portfolio.
@@ -420,7 +421,7 @@ pub struct PortfolioSemanticConfig {
     pub metadata: BTreeMap<String, Value>,
 }
 
-impl PortfolioSemanticConfig {
+impl PortfolioPlanConfig {
     /// Sorts nested collections into a deterministic canonical order.
     pub fn normalize(&mut self) {
         self.quote_codes.sort();
@@ -468,14 +469,14 @@ impl PortfolioSemanticConfig {
     }
 
     /// Validates semantic identities, references, and canonical-json-safe opaque fields.
-    pub fn validate(&self) -> Result<(), SemanticConfigError> {
+    pub fn validate(&self) -> Result<(), PlanConfigError> {
         ensure_non_empty_id("portfolio", &self.portfolio_id)?;
         ensure_canonical_json_object("portfolio", &self.portfolio_id, "metadata", &self.metadata)?;
 
         let mut seen_quotes = BTreeSet::new();
         for quote in &self.quote_codes {
             if !seen_quotes.insert(*quote) {
-                return Err(SemanticConfigError::DuplicateQuoteCode { quote: *quote });
+                return Err(PlanConfigError::DuplicateQuoteCode { quote: *quote });
             }
         }
 
@@ -549,7 +550,7 @@ impl PortfolioSemanticConfig {
         )?;
         for position in &self.positions {
             if !instrument_ids.contains(position.instrument_id.as_str()) {
-                return Err(SemanticConfigError::UnknownReference {
+                return Err(PlanConfigError::UnknownReference {
                     entity: "position",
                     id: position.position_id.clone(),
                     field: "instrument_id",
@@ -558,7 +559,7 @@ impl PortfolioSemanticConfig {
             }
             if let Some(venue_id) = &position.venue_id {
                 if !venue_ids.contains(venue_id.0.as_str()) {
-                    return Err(SemanticConfigError::UnknownReference {
+                    return Err(PlanConfigError::UnknownReference {
                         entity: "position",
                         id: position.position_id.clone(),
                         field: "venue_id",
@@ -582,7 +583,7 @@ impl PortfolioSemanticConfig {
         )?;
         for valuation in &self.valuations {
             if !instrument_ids.contains(valuation.instrument_id.as_str()) {
-                return Err(SemanticConfigError::UnknownReference {
+                return Err(PlanConfigError::UnknownReference {
                     entity: "valuation",
                     id: valuation.valuation_id.clone(),
                     field: "instrument_id",
@@ -606,13 +607,13 @@ impl PortfolioSemanticConfig {
         let mut seen_targets = BTreeSet::new();
         for target in &self.observation_targets {
             if !seen_targets.insert(target.target_id.as_str()) {
-                return Err(SemanticConfigError::DuplicateId {
+                return Err(PlanConfigError::DuplicateId {
                     entity: "observation_target",
                     id: target.target_id.clone(),
                 });
             }
             if !subject_ids.contains(target.subject_id.as_str()) {
-                return Err(SemanticConfigError::UnknownReference {
+                return Err(PlanConfigError::UnknownReference {
                     entity: "observation_target",
                     id: target.target_id.clone(),
                     field: "subject_id",
@@ -620,7 +621,7 @@ impl PortfolioSemanticConfig {
                 });
             }
             if !network_view_ids.contains(target.network_view_id.as_str()) {
-                return Err(SemanticConfigError::UnknownReference {
+                return Err(PlanConfigError::UnknownReference {
                     entity: "observation_target",
                     id: target.target_id.clone(),
                     field: "network_view_id",
@@ -628,7 +629,7 @@ impl PortfolioSemanticConfig {
                 });
             }
             if !position_ids.contains(target.position_id.as_str()) {
-                return Err(SemanticConfigError::UnknownReference {
+                return Err(PlanConfigError::UnknownReference {
                     entity: "observation_target",
                     id: target.target_id.clone(),
                     field: "position_id",
@@ -638,13 +639,13 @@ impl PortfolioSemanticConfig {
             let mut seen_target_valuations = BTreeSet::new();
             for valuation_id in &target.valuation_ids {
                 if !seen_target_valuations.insert(valuation_id.as_str()) {
-                    return Err(SemanticConfigError::DuplicateId {
+                    return Err(PlanConfigError::DuplicateId {
                         entity: "observation_target.valuation_id",
                         id: valuation_id.clone(),
                     });
                 }
                 if !valuation_ids.contains(valuation_id.as_str()) {
-                    return Err(SemanticConfigError::UnknownReference {
+                    return Err(PlanConfigError::UnknownReference {
                         entity: "observation_target",
                         id: target.target_id.clone(),
                         field: "valuation_ids",
@@ -674,7 +675,7 @@ pub struct ObservationKey {
     /// Stable semantic instrument identifier.
     pub instrument_id: String,
     /// Stable semantic position kind.
-    pub position_kind: PositionSemantics,
+    pub position_kind: PositionKind,
     /// Optional semantic venue identifier.
     pub venue_id: Option<VenueId>,
     /// Optional planner-owned discriminator for multiple rows in one semantic bucket.
@@ -837,13 +838,13 @@ impl PortfolioExecutionSpec {
     }
 
     /// Validates planner-owned execution identities, batch homogeneity, and payload safety.
-    pub fn validate(&self) -> Result<(), SemanticExecutionSpecError> {
+    pub fn validate(&self) -> Result<(), PlanExecutionSpecError> {
         ensure_non_empty_execution_id("portfolio", &self.portfolio_id)?;
 
         let mut seen_quotes = BTreeSet::new();
         for quote in &self.quote_codes {
             if !seen_quotes.insert(*quote) {
-                return Err(SemanticExecutionSpecError::DuplicateQuoteCode { quote: *quote });
+                return Err(PlanExecutionSpecError::DuplicateQuoteCode { quote: *quote });
             }
         }
 
@@ -906,7 +907,7 @@ impl PortfolioExecutionSpec {
             for binding in &batch.bindings {
                 ensure_non_empty_execution_id("adapter", &binding.adapter.0)?;
                 if binding.adapter != batch.adapter {
-                    return Err(SemanticExecutionSpecError::BatchAdapterMismatch {
+                    return Err(PlanExecutionSpecError::BatchAdapterMismatch {
                         batch_id: batch.batch_id.clone(),
                         binding_id: binding.binding_id.clone(),
                         batch_adapter: batch.adapter.clone(),
@@ -914,7 +915,7 @@ impl PortfolioExecutionSpec {
                     });
                 }
                 if binding.observation_key.network_view_id != batch.network_view_id {
-                    return Err(SemanticExecutionSpecError::BatchNetworkViewMismatch {
+                    return Err(PlanExecutionSpecError::BatchNetworkViewMismatch {
                         batch_id: batch.batch_id.clone(),
                         binding_id: binding.binding_id.clone(),
                         batch_network_view_id: batch.network_view_id.clone(),
@@ -922,20 +923,20 @@ impl PortfolioExecutionSpec {
                     });
                 }
                 if !seen_observation_keys.insert(binding.observation_key.clone()) {
-                    return Err(SemanticExecutionSpecError::DuplicateObservationKey {
+                    return Err(PlanExecutionSpecError::DuplicateObservationKey {
                         key: Box::new(binding.observation_key.clone()),
                     });
                 }
                 let mut seen_binding_valuations = BTreeSet::new();
                 for valuation_id in &binding.valuation_ids {
                     if !seen_binding_valuations.insert(valuation_id.as_str()) {
-                        return Err(SemanticExecutionSpecError::DuplicateId {
+                        return Err(PlanExecutionSpecError::DuplicateId {
                             kind: "compiled_observation_binding.valuation_id",
                             id: valuation_id.clone(),
                         });
                     }
                     if !valuation_ids.contains(valuation_id.as_str()) {
-                        return Err(SemanticExecutionSpecError::UnknownValuationId {
+                        return Err(PlanExecutionSpecError::UnknownValuationId {
                             binding_id: binding.binding_id.clone(),
                             valuation_id: valuation_id.clone(),
                         });
@@ -955,7 +956,7 @@ impl PortfolioExecutionSpec {
 
 /// Validation errors for semantic portfolio config.
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
-pub enum SemanticConfigError {
+pub enum PlanConfigError {
     /// One semantic identifier was empty.
     #[error("{entity} id must be non-empty")]
     EmptyId {
@@ -1004,7 +1005,7 @@ pub enum SemanticConfigError {
 
 /// Validation errors for compiled semantic execution specs.
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
-pub enum SemanticExecutionSpecError {
+pub enum PlanExecutionSpecError {
     /// One compiled execution identifier was empty.
     #[error("{kind} must be non-empty")]
     EmptyId {
@@ -1087,9 +1088,9 @@ fn json_object_value(map: &BTreeMap<String, Value>) -> Value {
     Value::Object(object)
 }
 
-fn ensure_non_empty_id(entity: &'static str, id: &str) -> Result<(), SemanticConfigError> {
+fn ensure_non_empty_id(entity: &'static str, id: &str) -> Result<(), PlanConfigError> {
     if id.is_empty() {
-        return Err(SemanticConfigError::EmptyId { entity });
+        return Err(PlanConfigError::EmptyId { entity });
     }
     Ok(())
 }
@@ -1097,9 +1098,9 @@ fn ensure_non_empty_id(entity: &'static str, id: &str) -> Result<(), SemanticCon
 fn ensure_non_empty_execution_id(
     kind: &'static str,
     id: &str,
-) -> Result<(), SemanticExecutionSpecError> {
+) -> Result<(), PlanExecutionSpecError> {
     if id.is_empty() {
-        return Err(SemanticExecutionSpecError::EmptyId { kind });
+        return Err(PlanExecutionSpecError::EmptyId { kind });
     }
     Ok(())
 }
@@ -1107,12 +1108,12 @@ fn ensure_non_empty_execution_id(
 fn unique_ids<'a>(
     entity: &'static str,
     ids: impl Iterator<Item = &'a String>,
-) -> Result<BTreeSet<&'a str>, SemanticConfigError> {
+) -> Result<BTreeSet<&'a str>, PlanConfigError> {
     let mut seen = BTreeSet::new();
     for id in ids {
         ensure_non_empty_id(entity, id)?;
         if !seen.insert(id.as_str()) {
-            return Err(SemanticConfigError::DuplicateId {
+            return Err(PlanConfigError::DuplicateId {
                 entity,
                 id: id.clone(),
             });
@@ -1124,12 +1125,12 @@ fn unique_ids<'a>(
 fn unique_execution_ids<'a>(
     kind: &'static str,
     ids: impl Iterator<Item = &'a String>,
-) -> Result<BTreeSet<&'a str>, SemanticExecutionSpecError> {
+) -> Result<BTreeSet<&'a str>, PlanExecutionSpecError> {
     let mut seen = BTreeSet::new();
     for id in ids {
         ensure_non_empty_execution_id(kind, id)?;
         if !seen.insert(id.as_str()) {
-            return Err(SemanticExecutionSpecError::DuplicateId {
+            return Err(PlanExecutionSpecError::DuplicateId {
                 kind,
                 id: id.clone(),
             });
@@ -1143,9 +1144,9 @@ fn ensure_canonical_json_value(
     id: &str,
     field: &'static str,
     value: &Value,
-) -> Result<(), SemanticConfigError> {
+) -> Result<(), PlanConfigError> {
     canonical_json_bytes(value).map(|_| ()).map_err(|reason| {
-        SemanticConfigError::InvalidCanonicalJson {
+        PlanConfigError::InvalidCanonicalJson {
             entity,
             id: id.to_string(),
             field,
@@ -1159,7 +1160,7 @@ fn ensure_canonical_json_object(
     id: &str,
     field: &'static str,
     value: &BTreeMap<String, Value>,
-) -> Result<(), SemanticConfigError> {
+) -> Result<(), PlanConfigError> {
     ensure_canonical_json_value(entity, id, field, &json_object_value(value))
 }
 
@@ -1167,16 +1168,14 @@ fn ensure_canonical_execution_payload(
     entity: &'static str,
     id: &str,
     payload: &BTreeMap<String, Value>,
-) -> Result<(), SemanticExecutionSpecError> {
+) -> Result<(), PlanExecutionSpecError> {
     canonical_json_bytes(&json_object_value(payload))
         .map(|_| ())
-        .map_err(
-            |reason| SemanticExecutionSpecError::InvalidCanonicalPayload {
-                entity,
-                id: id.to_string(),
-                reason,
-            },
-        )
+        .map_err(|reason| PlanExecutionSpecError::InvalidCanonicalPayload {
+            entity,
+            id: id.to_string(),
+            reason,
+        })
 }
 
 #[cfg(test)]
@@ -1186,22 +1185,22 @@ mod tests {
     #[test]
     fn action_semantics_serde_round_trip() {
         let variants = vec![
-            ActionSemantics::Swap,
-            ActionSemantics::Borrow,
-            ActionSemantics::Lend,
-            ActionSemantics::Repay,
-            ActionSemantics::Deposit,
-            ActionSemantics::Withdraw,
-            ActionSemantics::Stake,
-            ActionSemantics::Unstake,
+            ActionKind::Swap,
+            ActionKind::Borrow,
+            ActionKind::Lend,
+            ActionKind::Repay,
+            ActionKind::Deposit,
+            ActionKind::Withdraw,
+            ActionKind::Stake,
+            ActionKind::Unstake,
         ];
         for variant in &variants {
             let json = serde_json::to_string(variant).expect("serialize");
-            let back: ActionSemantics = serde_json::from_str(&json).expect("deserialize");
+            let back: ActionKind = serde_json::from_str(&json).expect("deserialize");
             assert_eq!(&back, variant);
         }
         assert_eq!(
-            serde_json::to_string(&ActionSemantics::Swap).unwrap(),
+            serde_json::to_string(&ActionKind::Swap).unwrap(),
             "\"swap\""
         );
     }
@@ -1248,8 +1247,8 @@ mod tests {
         assert_eq!(bad_char.parts(), ("", "", None));
     }
 
-    fn sample_semantic_config() -> PortfolioSemanticConfig {
-        PortfolioSemanticConfig {
+    fn sample_plan_config() -> PortfolioPlanConfig {
+        PortfolioPlanConfig {
             portfolio_id: "portfolio_main".to_string(),
             quote_codes: vec![QuoteCode::Usd],
             network_views: vec![NetworkView {
@@ -1268,7 +1267,7 @@ mod tests {
             instruments: vec![Instrument {
                 instrument_id: "eth".to_string(),
                 display_symbol: Some("ETH".to_string()),
-                semantics: InstrumentSemantics::NativeAsset,
+                semantics: InstrumentKind::NativeAsset,
                 quantity_schema: serde_json::json!({"decimals": 18}),
                 metadata: BTreeMap::new(),
             }],
@@ -1283,7 +1282,7 @@ mod tests {
             positions: vec![Position {
                 position_id: "eth_spot".to_string(),
                 instrument_id: "eth".to_string(),
-                semantics: PositionSemantics::SpotBalance,
+                semantics: PositionKind::SpotBalance,
                 venue_id: Some(VenueId("wallet".to_string())),
                 reader_hint: None,
                 metadata: BTreeMap::new(),
@@ -1292,7 +1291,7 @@ mod tests {
                 valuation_id: "eth_usd".to_string(),
                 instrument_id: "eth".to_string(),
                 quote: QuoteCode::Usd,
-                semantics: ValuationSemantics::DirectUnitPrice,
+                semantics: ValuationKind::DirectUnitPrice,
                 strategy: serde_json::json!({"source_id": "chainlink_eth_usd"}),
                 metadata: BTreeMap::new(),
             }],
@@ -1361,7 +1360,7 @@ mod tests {
                         subject_id: "wallet_main".to_string(),
                         network_view_id: "ethereum_live".to_string(),
                         instrument_id: "eth".to_string(),
-                        position_kind: PositionSemantics::SpotBalance,
+                        position_kind: PositionKind::SpotBalance,
                         venue_id: Some(VenueId("wallet".to_string())),
                         discriminator: None,
                     },
@@ -1377,8 +1376,8 @@ mod tests {
     }
 
     #[test]
-    fn semantic_config_validates_and_normalizes() {
-        let mut cfg = sample_semantic_config();
+    fn plan_config_validates_and_normalizes() {
+        let mut cfg = sample_plan_config();
         cfg.quote_codes.push(QuoteCode::Btc);
         cfg.quote_codes.reverse();
         cfg.normalize();
@@ -1388,8 +1387,8 @@ mod tests {
     }
 
     #[test]
-    fn semantic_config_rejects_duplicate_venue_ids() {
-        let mut cfg = sample_semantic_config();
+    fn plan_config_rejects_duplicate_venue_ids() {
+        let mut cfg = sample_plan_config();
         cfg.venues.push(Venue {
             venue_id: VenueId("wallet".to_string()),
             display_name: None,
@@ -1401,7 +1400,7 @@ mod tests {
 
         assert_eq!(
             cfg.validate().unwrap_err(),
-            SemanticConfigError::DuplicateId {
+            PlanConfigError::DuplicateId {
                 entity: "venue",
                 id: "wallet".to_string(),
             }
@@ -1409,13 +1408,13 @@ mod tests {
     }
 
     #[test]
-    fn semantic_config_rejects_unknown_target_reference() {
-        let mut cfg = sample_semantic_config();
+    fn plan_config_rejects_unknown_target_reference() {
+        let mut cfg = sample_plan_config();
         cfg.observation_targets[0].position_id = "missing".to_string();
 
         assert_eq!(
             cfg.validate().unwrap_err(),
-            SemanticConfigError::UnknownReference {
+            PlanConfigError::UnknownReference {
                 entity: "observation_target",
                 id: "wallet_eth".to_string(),
                 field: "position_id",
@@ -1433,7 +1432,7 @@ mod tests {
 
         assert!(matches!(
             spec.validate().unwrap_err(),
-            SemanticExecutionSpecError::DuplicateObservationKey { .. }
+            PlanExecutionSpecError::DuplicateObservationKey { .. }
         ));
     }
 
@@ -1446,7 +1445,7 @@ mod tests {
 
         assert_eq!(
             spec.validate().unwrap_err(),
-            SemanticExecutionSpecError::InvalidCanonicalPayload {
+            PlanExecutionSpecError::InvalidCanonicalPayload {
                 entity: "valuation_task",
                 id: "eth_usd".to_string(),
                 reason: CanonicalJsonError::FloatNotAllowed,
@@ -1467,7 +1466,7 @@ mod tests {
                         subject_id: "wallet_main".to_string(),
                         network_view_id: "arbitrum-mainnet".to_string(),
                         instrument_id: "z".to_string(),
-                        position_kind: PositionSemantics::SpotBalance,
+                        position_kind: PositionKind::SpotBalance,
                         venue_id: Some(VenueId("wallet".to_string())),
                         discriminator: None,
                     },
@@ -1481,7 +1480,7 @@ mod tests {
                         subject_id: "wallet_other".to_string(),
                         network_view_id: "bitcoin-mainnet".to_string(),
                         instrument_id: "a".to_string(),
-                        position_kind: PositionSemantics::SpotBalance,
+                        position_kind: PositionKind::SpotBalance,
                         venue_id: Some(VenueId("wallet".to_string())),
                         discriminator: None,
                     },
@@ -1495,7 +1494,7 @@ mod tests {
                         subject_id: "wallet_main".to_string(),
                         network_view_id: "arbitrum-mainnet".to_string(),
                         instrument_id: "a".to_string(),
-                        position_kind: PositionSemantics::SpotBalance,
+                        position_kind: PositionKind::SpotBalance,
                         venue_id: Some(VenueId("wallet".to_string())),
                         discriminator: None,
                     },
@@ -1509,7 +1508,7 @@ mod tests {
                         subject_id: "wallet_main".to_string(),
                         network_view_id: "arbitrum-mainnet".to_string(),
                         instrument_id: "a".to_string(),
-                        position_kind: PositionSemantics::SpotBalance,
+                        position_kind: PositionKind::SpotBalance,
                         venue_id: Some(VenueId("wallet".to_string())),
                         discriminator: None,
                     },
