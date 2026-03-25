@@ -586,6 +586,15 @@ fn child_export(child: &str, export: &str) -> PortSource {
 }
 
 #[test]
+fn child_op_path_rejects_dotted_child_id() {
+    let parent = OpPath::must_new("proof.main");
+    let err = crate::op::child_op_path(&parent, "child.with.dot")
+        .expect_err("expected dotted child id to be invalid");
+
+    assert_eq!(err.info.code.0, "invalid_child_op_local_id");
+}
+
+#[test]
 fn planner_adds_step_barrier_edges() {
     let mut reg = HashMapOperationRegistry::default();
     reg.register(Arc::new(TestOp::new_write(
