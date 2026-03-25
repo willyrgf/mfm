@@ -4,7 +4,7 @@
 //! Shared portfolio-domain schema and semantic runtime for canonical portfolio snapshots.
 //!
 //! This crate owns the canonical portfolio-domain schema plus the fixed semantic runtime,
-//! planner/runtime payloads, and runtime adapters used by `portfolio_tracker v2`.
+//! planner/runtime payloads, and runtime adapters used by `portfolio_tracker`.
 //!
 //! # Examples
 //!

@@ -497,7 +497,7 @@ impl EventRecorder for NoopRecorder {
 #[test]
 fn expand_uses_canonical_multi_network_graph() {
     let op = PortfolioTrackerOp;
-    assert_eq!(op.op_version(), "v2");
+    assert_eq!(op.op_version(), "v1");
     let planned = op
         .expand(
             OpPath("portfolio_tracker.main".to_string()),

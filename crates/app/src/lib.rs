@@ -1006,7 +1006,7 @@ impl AppServices {
         req: PortfolioSnapshotRequest,
     ) -> Result<PortfolioSnapshotResponse, AppError> {
         const OP_ID: &str = "portfolio_tracker";
-        const OP_VERSION: &str = "v2";
+        const OP_VERSION: &str = "v1";
 
         validate_portfolio_bundle(&req.portfolio, &req.valuation_source_registry).map_err(
             |err| AppError::invalid_request(format!("invalid portfolio snapshot request: {err}")),
@@ -2021,7 +2021,43 @@ mod tests {
             .expect("internal op should remain registered for recursive planning");
         bundle
             .registry
-            .resolve(&OpId::must_new("portfolio_tracker".to_string()), "v2")
+            .resolve(&OpId::must_new("portfolio_resolve_subjects".to_string()), "v1")
+            .expect("internal op should remain registered for recursive planning");
+        bundle
+            .registry
+            .resolve(
+                &OpId::must_new("portfolio_pin_execution_views".to_string()),
+                "v1",
+            )
+            .expect("internal op should remain registered for recursive planning");
+        bundle
+            .registry
+            .resolve(
+                &OpId::must_new("portfolio_resolve_valuation_inputs".to_string()),
+                "v1",
+            )
+            .expect("internal op should remain registered for recursive planning");
+        bundle
+            .registry
+            .resolve(
+                &OpId::must_new("portfolio_observe_compiled_batch".to_string()),
+                "v1",
+            )
+            .expect("internal op should remain registered for recursive planning");
+        bundle
+            .registry
+            .resolve(
+                &OpId::must_new("portfolio_merge_observations".to_string()),
+                "v1",
+            )
+            .expect("internal op should remain registered for recursive planning");
+        bundle
+            .registry
+            .resolve(&OpId::must_new("portfolio_assemble_snapshot".to_string()), "v1")
+            .expect("internal op should remain registered for recursive planning");
+        bundle
+            .registry
+            .resolve(&OpId::must_new("portfolio_tracker".to_string()), "v1")
             .expect("public root op should remain registered");
     }
 
@@ -2031,6 +2067,12 @@ mod tests {
 
         for op_id in [
             "portfolio_prepare_execution_sources",
+            "portfolio_resolve_subjects",
+            "portfolio_pin_execution_views",
+            "portfolio_resolve_valuation_inputs",
+            "portfolio_observe_compiled_batch",
+            "portfolio_merge_observations",
+            "portfolio_assemble_snapshot",
             "portfolio_project_report",
         ] {
             let err = services
@@ -2044,6 +2086,7 @@ mod tests {
 
             assert_eq!(err.class, ErrorClass::BadRequest);
             assert_eq!(err.code, "op_not_public");
+            assert!(is_portfolio_tracker_internal_op_id(op_id));
         }
     }
 }
