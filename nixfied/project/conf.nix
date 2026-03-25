@@ -122,6 +122,8 @@ rec {
             pkgs.sccache
             pkgs.stdenv.cc
             pkgs.libiconv
+            pkgs.pkg-config
+            (if pkgs.stdenv.isDarwin then pkgs.libressl else pkgs.openssl)
             pkgs.foundry
             pkgs.reth
             pkgs.minio
