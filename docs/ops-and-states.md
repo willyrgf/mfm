@@ -22,7 +22,8 @@ Use `docs/redesign.md` for normative semantics and invariants.
 
 Current snapshot:
 
-- Built-in registered ops: `14`
+- Built-in public root ops: `14`
+- Planner-internal registered child ops: `8` (`portfolio_tracker` semantic lowering only)
 - Shared production `State` impls: `33`
 - Intentional op-local production `State` impls: `3`
 
@@ -30,8 +31,9 @@ Planning model note:
 
 - This inventory is intentionally focused on built-in/public root ops registered in the default app
   bundle and on production runtime states.
-- Under the target recursive planning model, internal composite sub-ops may exist without becoming
-  new public entry points.
+- The default app registry also keeps planner-internal portfolio semantic child ops available so
+  recursive flattening can resolve them, but public `run.start` entrypoints reject those internal
+  ids.
 - Runtime execution units remain states only; internal recursive op expansion must flatten before
   runtime starts.
 - This document does not attempt to enumerate every future internal composite planning boundary.
@@ -39,7 +41,9 @@ Planning model note:
 ## Built-In Ops
 
 The built-in app bundle registers these public root ops in
-`DefaultOperationPlugin::register_operations`.
+`DefaultOperationPlugin::register_operations`. Public single-op entrypoints such as CLI `run start`
+and REST `/v1/runs/start` accept only these root ops; planner-internal semantic ids are not public
+API.
 
 | Op ID | Version | Owner | Purpose | Primary states | Entry points |
 |---|---|---|---|---|---|
@@ -83,10 +87,10 @@ flattening.
 | `crates/states/keystore/src/states/admin.rs` | `KeystoreImportState`, `KeystoreListState`, `KeystoreDeleteState` | Reusable keystore administration flows | `keystore_import`, `keystore_list`, `keystore_delete` |
 | `crates/states/keystore/src/states/tx.rs` | `KeystoreTxSignState` | Reusable local keystore signing flow | `keystore_tx_sign` |
 | `crates/evm-runtime/src/states/read.rs` | `ReadHexStringState`, `ReadU256HexState`, `EthCallState`, `ReadU64HexState`, `NativeBalanceState`, `TokenBalanceState` | Reusable control-plane-backed chain read/query states | `evm_read`, `portfolio_tracker` |
-| `crates/evm-runtime/src/states/rpc_control.rs` | `PrepareSourcesState` | Reusable `rpc.control` source preparation and responsiveness preflight | `portfolio_tracker` |
+| `crates/evm-runtime/src/states/rpc_control.rs` | `PrepareSourcesState` | Reusable `rpc.control` source preparation and responsiveness preflight | none directly; shared contract used by semantic and EVM write runtimes |
 | `crates/evm-runtime/src/states/price.rs` | `read_evm_oracle_unit_price` | Reusable control-plane-backed EVM oracle price reads for valuation source execution | `portfolio_tracker` |
 | `crates/states/portfolio/src/semantic_states.rs` | `PrepareExecutionSourcesState`, `ResolveSubjectsState`, `PinExecutionViewsState`, `ResolveValuationInputsState`, `ObserveCompiledBatchState`, `MergeObservationsState`, `AssembleSnapshotState`, `ProjectReportState` | Fixed semantic runtime states for source preparation, subject/view resolution, valuation resolution, batch observation, merge, and snapshot/report projection | `portfolio_tracker` |
-| `crates/evm-runtime/src/states/write.rs` | `NixArtifactToEvmContractState`, `EvmDeployState`, `EvmConfigureState`, `EvmValidateState` | Reusable contract artifact adaptation and deploy/configure/validate states routed through `rpc.control` | `evm_contract_from_nix`, `evm_deploy`, `evm_configure`, `evm_validate` |
+| `crates/evm-runtime/src/states/write.rs` | `NixArtifactToEvmContractState`, `EvmDeployState`, `EvmConfigureState`, `EvmValidateState` | Reusable contract artifact adaptation and deploy/configure/validate states routed through `rpc.control`, with managed-source preflight before write/validate calls | `evm_contract_from_nix`, `evm_deploy`, `evm_configure`, `evm_validate` |
 | `crates/states/aave-v3/src/states.rs` | `LoadCompileManifestState`, `DeployContractState`, `WaitForReceiptState`, `CollectDeployOutputsState`, `WriteDeployManifestState`, `AdaptOriginDeployOutputState`, `LoadDeployManifestState`, `ConfigureRuntimeCallState`, `WaitForConfigReceiptState`, `CollectConfigOutputsState`, `WriteConfigReportState` | Reusable Aave V3 deploy/configure/adaptation flow states | Direct built-in use today: `aave_v3_origin_adapt_deploy` for adaptation; the remaining states are reusable flow building blocks not yet registered as standalone built-in ops |
 
 ## Intentional Op-Local Production States

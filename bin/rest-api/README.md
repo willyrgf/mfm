@@ -116,16 +116,28 @@ per-quote `assets_value_dec`, `collateral_value_dec`, `debt_value_dec`, `staked_
 one portfolio flow must isolate managed `rpc.control` source state from another flow on the same
 network.
 
-Supported `op_id` values (current):
+Supported public root `op_id` values for `/v1/runs/start` and feature `run.start` (current):
 
 - `proof` (default)
-- `evm_read`
+- `keystore_import`
+- `keystore_list`
+- `keystore_delete`
 - `keystore_tx_sign`
+- `evm_read`
+- `evm_contract_from_nix`
+- `evm_deploy`
+- `evm_configure`
+- `evm_validate`
+- `evm_deploy_configure_validate`
 - `portfolio_tracker`
 - `nix_app`
+- `aave_v3_origin_adapt_deploy`
 
 Notes:
 - `evm_read` executes through the shared `rpc.control`-backed EVM read states.
+- Planner-internal semantic ids such as `portfolio_prepare_execution_sources` and
+  `portfolio_project_report` remain registered for recursive expansion but are rejected by public
+  single-op entrypoints with `op_not_public`.
 
 There are no dedicated keystore tx endpoints. Use generic run APIs (`/v1/runs/start`,
 `/v1/runs/:run_id/resume`) with those `op_id` values.

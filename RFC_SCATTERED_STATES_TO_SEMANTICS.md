@@ -1,6 +1,6 @@
 # RFC: From Scattered States To Semantic Execution And Recursive Operation Planning
 
-Status: implementation landed, closeout remaining
+Status: implemented
 
 Last updated: 2026-03-25
 
@@ -9,16 +9,17 @@ Last updated: 2026-03-25
 This RFC proposes restructuring MFM execution away from protocol-specific state proliferation and
 toward a semantics-first runtime plus a single recursive planning model for the whole project.
 
-This design is substantially implemented on the current `portfolio_tracker v2` runtime path. The
-built-in portfolio flow now runs through the fixed semantic state family, recursive op flattening,
-and the semantic adapter catalogs described below.
+This design is implemented on the current `portfolio_tracker v2` runtime path. The built-in
+portfolio flow now runs through the fixed semantic state family, recursive op flattening, and the
+semantic adapter catalogs described below.
 
-However, the RFC end-state is not fully closed yet. The remaining work is narrow and explicit:
+The final closeout points that were still open in the previous branch review have now landed:
 
-- runtime observation ordering still needs to use planner-owned `ObservationKey` semantics end to
-  end rather than falling back to legacy `wallet_id` / `symbol_id` projection ordering
-- internal semantic child ops still need to stop leaking through the public root-op surface
-- docs and app-facing extraction surfaces still need to finish aligning to that steady state
+- runtime observation ordering follows planner-owned `ObservationKey` semantics end to end
+- planner-internal semantic child ops remain registered for recursive expansion, but public
+  `run.start` entrypoints accept only public root ops
+- app-facing portfolio extraction helpers and docs now describe the steady state through the root
+  `portfolio_tracker` contract rather than child-op-qualified implementation details
 
 `mfm::portfolio::snapshot` is the first proving ground, not the only target.
 
@@ -82,73 +83,28 @@ The intended outcome is not "fewer adapters". It is:
 Protocol-specific growth should happen in adapters and typed config decoders, not in the op DAG or
 in runtime graph-shaping logic.
 
-## Remaining RFC Closeout Work
+## RFC Closeout Note
 
-The semantic runtime cutover is live, but this RFC should not be treated as fully complete until
-the items below land.
+The branch that closes this RFC establishes the following steady state:
 
-### Required for RFC closeout
+- `ObservationKey` is the canonical planner-owned observation identity, and runtime ordering in
+  `ObserveCompiledBatch` and `MergeObservations` is expressed in terms of that key rather than
+  legacy wallet/symbol projection aliases
+- `portfolio_tracker` is the public root operation; semantic child ops such as
+  `portfolio_prepare_execution_sources` remain planner-internal and are rejected by public
+  `run.start` entrypoints
+- app- and doc-level public surfaces refer to the root `portfolio_tracker` contract, with stable
+  root exports for `snapshot`, `snapshot_artifact_id`, and `report`
 
-1. Observation canonical ordering must follow `ObservationKey` end-to-end.
+RFC closeout validation for this branch is:
 
-The planner already owns `ObservationKey`, rejects duplicate semantic identities inside one
-execution spec, and normalizes compiled bindings in `ObservationKey` order.
+- `SKIP_HELIOS=1 nix run .#format`
+- `SKIP_HELIOS=1 nix run .#check`
+- `SKIP_HELIOS=1 nix run .#test`
 
-What is still missing:
-
-- runtime ordering in `ObserveCompiledBatch` and `MergeObservations` still falls back to
-  `wallet_id` / `symbol_id`
-- canonical merge and deterministic ordering therefore still depend on v1 read-model projection
-  aliases instead of planner-owned semantic identity
-- regression tests still need to lock in `ObservationKey`-driven ordering so future changes do not
-  silently reintroduce alias-based ordering
-
-The steady-state rule remains:
-
-- duplicate detection is planner-owned through `ObservationKey`
-- canonical ordering boundaries should also be expressed in terms of `ObservationKey`
-- v1 snapshot/report surfaces may continue projecting through familiar wallet/symbol fields, but
-  those aliases must not remain the primary semantic ordering key
-
-2. Internal semantic child ops must stop leaking as public root ops.
-
-The recursive planning model explicitly allows internal composite child ops, but they are not meant
-to become user-addressable built-in root operations.
-
-What is still missing:
-
-- the semantic child ops used by `portfolio_tracker` are still registered in the default app
-  operation registry
-- generic `run.start` callers can therefore target internal ids such as
-  `portfolio_prepare_execution_sources` directly
-- some app-facing helpers and docs still expose child-stage names as if they were stable public
-  architecture
-
-The steady-state rule remains:
-
-- `portfolio_tracker` is the public root op
-- semantic child ops are planner-owned implementation structure
-- app- and doc-level public surfaces should rely on stable root-op contracts rather than
-  child-op-qualified implementation details
-
-3. Docs and inventories must describe the implemented steady state only after items 1 and 2 land.
-
-What is still missing:
-
-- this RFC must not claim full implementation until the residual RFC blockers above are closed
-- `docs/ops-and-states.md`, CLI docs, and REST docs must stay aligned with the actual public root
-  op surface and runtime ownership boundaries
-- app-facing extraction helpers should stop depending on internal child-op naming when a stable
-  root-op surface is available
-
-### Desirable follow-up hardening after RFC closeout
-
-These items matter, but they are not part of the remaining RFC blocker set:
-
-- parity / integration stabilization around reth-backed mock ERC-20 setup and managed-source
-  health retries
-- small shared-state cleanup where semantic source preparation can reuse lower-level
-  `rpc.control` helpers without reintroducing protocol-shaped graph topology
+Parity and broader Nixfied integration workflows remain desirable hardening, but they are tracked
+separately from this RFC because current failures are service/bootstrap issues rather than semantic
+architecture gaps.
 
 ## Goals
 
