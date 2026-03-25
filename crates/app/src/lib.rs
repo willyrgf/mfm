@@ -72,8 +72,8 @@ use mfm_sdk::launcher::{LaunchPipeline, RunLauncher};
 use mfm_sdk::op::OperationRegistry;
 use mfm_sdk::pipeline::{Pipeline, PipelinePlanner, PipelineStep};
 use mfm_sdk::unstable::{
-    single_op_pipeline, DefaultPipelinePlanner, DefaultRunLauncher, HashMapOperationRegistry,
-    SdkPlanResolver,
+    context_value_with_slot_fallback as sdk_context_value_with_slot_fallback, single_op_pipeline,
+    DefaultPipelinePlanner, DefaultRunLauncher, HashMapOperationRegistry, SdkPlanResolver,
 };
 use mfm_state_portfolio::model::{validate_portfolio_bundle, PortfolioReport};
 use mfm_state_symbol::model::ValuationSourceRegistry;
@@ -93,39 +93,7 @@ fn context_value_with_slot_fallback(
     snapshot: &serde_json::Value,
     key: &ContextKey,
 ) -> Option<serde_json::Value> {
-    let mut candidates = vec![key.0.clone()];
-    if !key.0.contains(".in.") && !key.0.contains(".out.") && !key.0.contains(".work.") {
-        if let Some((prefix, leaf)) = key.0.rsplit_once('.') {
-            candidates.push(format!("{prefix}.out.{leaf}"));
-            candidates.push(format!("{prefix}.work.{leaf}"));
-        }
-    }
-
-    if let Some(value) = candidates
-        .into_iter()
-        .find_map(|candidate| snapshot.get(&candidate).cloned())
-    {
-        return Some(value);
-    }
-
-    let (op_path, leaf) = key.0.rsplit_once(".out.")?;
-    let nested_prefix = format!("{op_path}.");
-    let nested_suffix = format!(".out.{leaf}");
-    let snapshot_obj = snapshot.as_object()?;
-    let mut matches: Vec<&serde_json::Value> = snapshot_obj
-        .iter()
-        .filter(|(candidate, _)| {
-            candidate.starts_with(&nested_prefix)
-                && candidate.len() > key.0.len()
-                && candidate.ends_with(&nested_suffix)
-        })
-        .map(|(_, value)| value)
-        .collect();
-    if matches.len() == 1 {
-        return matches.pop().cloned();
-    }
-
-    None
+    sdk_context_value_with_slot_fallback(snapshot, key)
 }
 
 fn ensure_single_start_op(

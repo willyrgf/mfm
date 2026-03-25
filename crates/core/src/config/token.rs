@@ -4,7 +4,9 @@
 //! records. Helpers in this module keep user-authored slippage strings in a normalized basis-point
 //! form for downstream execution layers.
 
+use super::decimal;
 use alloy_primitives::Address;
+use alloy_primitives::U256;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use thiserror::Error;
@@ -77,74 +79,24 @@ impl TokenNetwork {
     pub fn slippage_bps(&self) -> Result<u32, SlippageParseError> {
         let raw = self.slippage.trim();
         let raw = raw.strip_suffix('%').unwrap_or(raw).trim();
-
-        if raw.is_empty() {
-            return Err(SlippageParseError::InvalidSlippage {
+        let scaled = decimal::parse_scaled_u256(raw, 2, true).map_err(|reason| {
+            SlippageParseError::InvalidSlippage {
                 value: self.slippage.clone(),
-                reason: "empty string".to_string(),
-            });
-        }
-        if raw.starts_with('-') {
-            return Err(SlippageParseError::InvalidSlippage {
-                value: self.slippage.clone(),
-                reason: "must be non-negative".to_string(),
-            });
-        }
-
-        let (int_part, frac_part_opt) = match raw.split_once('.') {
-            Some((a, b)) => (a, Some(b)),
-            None => (raw, None),
-        };
-
-        let int_part = if int_part.is_empty() { "0" } else { int_part };
-        if !int_part.chars().all(|c| c.is_ascii_digit()) {
-            return Err(SlippageParseError::InvalidSlippage {
-                value: self.slippage.clone(),
-                reason: "invalid integer digits".to_string(),
-            });
-        }
-
-        let int_percent: u32 =
-            int_part
-                .parse()
-                .map_err(|_| SlippageParseError::InvalidSlippage {
-                    value: self.slippage.clone(),
-                    reason: "integer part out of range".to_string(),
-                })?;
-
-        let frac_part = frac_part_opt.unwrap_or("");
-        if !frac_part.chars().all(|c| c.is_ascii_digit()) {
-            return Err(SlippageParseError::InvalidSlippage {
-                value: self.slippage.clone(),
-                reason: "invalid fractional digits".to_string(),
-            });
-        }
-
-        // Percent has 2 decimal places of precision for bps (0.01% = 1 bps).
-        let frac_padded = match frac_part.len() {
-            0 => "00".to_string(),
-            1 => format!("{frac_part}0"),
-            2 => frac_part.to_string(),
-            _ => {
-                let (head, tail) = frac_part.split_at(2);
-                if tail.chars().any(|c| c != '0') {
-                    return Err(SlippageParseError::InvalidSlippage {
-                        value: self.slippage.clone(),
-                        reason: "too many decimal places (max 2)".to_string(),
-                    });
-                }
-                head.to_string()
+                reason,
             }
-        };
+        })?;
 
-        let frac_percent: u32 = frac_padded.parse().unwrap_or(0);
-        let bps = int_percent
-            .checked_mul(100)
-            .and_then(|v| v.checked_add(frac_percent))
-            .ok_or_else(|| SlippageParseError::InvalidSlippage {
+        if scaled > U256::from(10_000u32) {
+            return Err(SlippageParseError::InvalidSlippage {
                 value: self.slippage.clone(),
-                reason: "value out of range".to_string(),
-            })?;
+                reason: "must be <= 100% (<= 10000 bps)".to_string(),
+            });
+        }
+
+        let bps = u32::try_from(scaled).map_err(|_| SlippageParseError::InvalidSlippage {
+            value: self.slippage.clone(),
+            reason: "value out of range".to_string(),
+        })?;
 
         if bps > 10_000 {
             return Err(SlippageParseError::InvalidSlippage {
@@ -202,5 +154,52 @@ impl Tokens {
     /// Keys are the logical token identifiers from the YAML registry such as `weth` or `usdc`.
     pub fn get(&self, key: &str) -> Option<&Token> {
         self.0.get(key)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn slippage_bps_parses_percent_strings() {
+        let token = TokenNetwork {
+            name: "Wrapped Ether".to_string(),
+            kind: Kind::Erc20,
+            network_id: "mainnet".to_string(),
+            address: Address::ZERO,
+            slippage: "0.50%".to_string(),
+            path_token: "weth".to_string(),
+            decimals: Some(18),
+        };
+        assert_eq!(token.slippage_bps().expect("valid"), 50);
+    }
+
+    #[test]
+    fn slippage_bps_rejects_out_of_range_or_malformed_input() {
+        let invalid_cases = [
+            ("", "empty string"),
+            ("-1", "must be non-negative"),
+            ("100.001", "too many decimal places"),
+            ("abc", "invalid"),
+            ("101", "must be <= 100%"),
+            ("100.01", "must be <= 100%"),
+        ];
+
+        for (value, reason_fragment) in invalid_cases {
+            let token = TokenNetwork {
+                name: "Wrapped Ether".to_string(),
+                kind: Kind::Erc20,
+                network_id: "mainnet".to_string(),
+                address: Address::ZERO,
+                slippage: value.to_string(),
+                path_token: "weth".to_string(),
+                decimals: Some(18),
+            };
+            let err = token
+                .slippage_bps()
+                .expect_err("invalid slippage should fail");
+            assert!(err.to_string().contains(reason_fragment), "{value} {err:?}");
+        }
     }
 }

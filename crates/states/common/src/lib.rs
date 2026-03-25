@@ -26,6 +26,8 @@
 
 /// Context read/write helpers that map low-level context failures into stable state errors.
 pub mod ctx;
+/// Helpers for decimal arithmetic over decimal-string payloads.
+pub mod decimal;
 /// Error constructors shared by reusable state implementations and op helpers.
 pub mod errors;
 /// Helpers for generating stable idempotency scopes and content-addressed keys.

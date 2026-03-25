@@ -305,11 +305,10 @@ struct TestOp {
 }
 
 fn test_leaf_state(state_id: &str, state: DynState) -> crate::op::LeafStateNode {
-    let mut segments = state_id.split('.');
-    let machine_id = segments.next().expect("machine segment");
-    let step_id = segments.next().expect("step segment");
-    let state_local_id = segments.next().expect("local segment");
-    assert!(segments.next().is_none(), "test state ids stay flat");
+    let state_id = StateId::must_new(state_id.to_string());
+    let machine_id = state_id.machine();
+    let step_id = state_id.step();
+    let state_local_id = state_id.state_local_id();
 
     crate::op::LeafStateNode {
         addr: crate::ids::StateAddr {
