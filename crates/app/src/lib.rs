@@ -51,19 +51,23 @@ use mfm_machine::live_io_registry::{HashMapTransportRegistry, TransportRegistry}
 use mfm_machine::live_io_router::RouterLiveIoTransportFactory;
 use mfm_machine::runtime::{ChildRunLiveIoTransportFactory, DefaultExecutionEngine, PlanResolver};
 use mfm_machine::stores::{ArtifactStore, StreamId, StreamRecord, StreamStore};
-use mfm_op_aave_v3_origin_adapt::AaveV3OriginAdaptDeployOp;
+use mfm_op_aave_v3_origin_adapt::{AaveV3OriginAdaptDeployOp, AAVE_V3_ORIGIN_ADAPT_DEPLOY_OP_ID};
 use mfm_op_evm_deploy_configure_validate::{
     EvmDeployConfigureValidateOp, EVM_DEPLOY_CONFIGURE_VALIDATE_OP_ID,
     EVM_DEPLOY_CONFIGURE_VALIDATE_OP_VERSION,
 };
 use mfm_op_evm_read::EvmReadOp;
 use mfm_op_evm_write::{EvmConfigureOp, EvmContractFromNixOp, EvmDeployOp, EvmValidateOp};
-use mfm_op_keystore_admin::{KeystoreDeleteOp, KeystoreImportOp, KeystoreListOp};
-use mfm_op_keystore_tx::KeystoreTxSignOp;
+use mfm_op_keystore_admin::{
+    KeystoreDeleteOp, KeystoreImportOp, KeystoreListOp, KEYSTORE_DELETE_OP_ID,
+    KEYSTORE_IMPORT_OP_ID, KEYSTORE_LIST_OP_ID,
+};
+use mfm_op_keystore_tx::{KeystoreTxSignOp, TX_SIGN_OP_ID};
 use mfm_op_nix_app::NixAppOp;
 use mfm_op_portfolio_tracker::{
-    portfolio_snapshot_artifact_id_context_key, portfolio_snapshot_report_context_key,
-    portfolio_tracker_ops,
+    is_portfolio_tracker_internal_op_id, portfolio_snapshot_artifact_id_context_key,
+    portfolio_snapshot_report_context_key, portfolio_tracker_internal_ops,
+    portfolio_tracker_public_ops,
 };
 use mfm_op_proof::ProofOp;
 use mfm_sdk::ids::{MachineId, StepId};
@@ -100,9 +104,72 @@ fn context_value_with_slot_fallback(
         }
     }
 
-    candidates
+    if let Some(value) = candidates
         .into_iter()
         .find_map(|candidate| snapshot.get(&candidate).cloned())
+    {
+        return Some(value);
+    }
+
+    let (op_path, leaf) = key.0.rsplit_once(".out.")?;
+    let nested_prefix = format!("{op_path}.");
+    let nested_suffix = format!(".out.{leaf}");
+    let snapshot_obj = snapshot.as_object()?;
+    let mut matches: Vec<&serde_json::Value> = snapshot_obj
+        .iter()
+        .filter(|(candidate, _)| {
+            candidate.starts_with(&nested_prefix)
+                && candidate.len() > key.0.len()
+                && candidate.ends_with(&nested_suffix)
+        })
+        .map(|(_, value)| value)
+        .collect();
+    if matches.len() == 1 {
+        return matches.pop().cloned();
+    }
+
+    None
+}
+
+fn is_public_single_start_op_id(op_id: &OpId) -> bool {
+    matches!(
+        op_id.as_str(),
+        "proof"
+            | KEYSTORE_IMPORT_OP_ID
+            | KEYSTORE_LIST_OP_ID
+            | KEYSTORE_DELETE_OP_ID
+            | TX_SIGN_OP_ID
+            | "evm_read"
+            | "evm_contract_from_nix"
+            | "evm_deploy"
+            | "evm_configure"
+            | "evm_validate"
+            | EVM_DEPLOY_CONFIGURE_VALIDATE_OP_ID
+            | "portfolio_tracker"
+            | "nix_app"
+            | AAVE_V3_ORIGIN_ADAPT_DEPLOY_OP_ID
+    )
+}
+
+fn ensure_public_single_start_op(op_id: &OpId) -> Result<(), AppError> {
+    if is_public_single_start_op_id(op_id) {
+        return Ok(());
+    }
+
+    let detail = if is_portfolio_tracker_internal_op_id(op_id.as_str()) {
+        "planner-internal semantic child ops are not valid run.start targets"
+    } else {
+        "run.start accepts only public root ops"
+    };
+
+    Err(AppError::new(
+        ErrorClass::BadRequest,
+        "op_not_public",
+        format!(
+            "op_id `{}` is not a public run.start target: {detail}",
+            op_id.as_str()
+        ),
+    ))
 }
 
 /// High-level error classes used by application-facing APIs.
@@ -470,7 +537,10 @@ impl OperationPlugin for DefaultOperationPlugin {
         registry.register(Arc::new(EvmConfigureOp));
         registry.register(Arc::new(EvmValidateOp));
         registry.register(Arc::new(EvmDeployConfigureValidateOp));
-        for op in portfolio_tracker_ops() {
+        for op in portfolio_tracker_public_ops() {
+            registry.register(op);
+        }
+        for op in portfolio_tracker_internal_ops() {
             registry.register(op);
         }
         registry.register(Arc::new(NixAppOp));
@@ -652,6 +722,7 @@ impl AppServices {
                         "op_id must match ^[a-z][a-z0-9_]{0,62}$",
                     )
                 })?;
+                ensure_public_single_start_op(&op_id)?;
                 let pipeline =
                     single_op_pipeline(op_id, req.op_version, req.op_config).map_err(|e| {
                         AppError::new(ErrorClass::BadRequest, e.info.code.0, e.info.message)
@@ -1843,6 +1914,14 @@ mod tests {
         }
     }
 
+    fn test_services(bundle: EngineBundle) -> AppServices {
+        AppServices::new(
+            bundle,
+            Arc::new(NoopStreamStore),
+            Arc::new(NoopArtifactStore),
+        )
+    }
+
     #[test]
     fn default_transport_plugin_registers_expected_namespace_groups() {
         let registry = default_transport_registry();
@@ -1927,5 +2006,44 @@ mod tests {
             .await
             .expect_err("invalid child-run payload should fail at wrapper boundary");
         assert_io_error_code(err, "child_run_request_invalid");
+    }
+
+    #[test]
+    fn default_registry_keeps_portfolio_internal_ops_for_planning() {
+        let bundle = make_engine_bundle();
+
+        bundle
+            .registry
+            .resolve(
+                &OpId::must_new("portfolio_prepare_execution_sources".to_string()),
+                "v1",
+            )
+            .expect("internal op should remain registered for recursive planning");
+        bundle
+            .registry
+            .resolve(&OpId::must_new("portfolio_tracker".to_string()), "v2")
+            .expect("public root op should remain registered");
+    }
+
+    #[tokio::test]
+    async fn start_run_rejects_portfolio_internal_child_ops() {
+        let services = test_services(make_engine_bundle());
+
+        for op_id in [
+            "portfolio_prepare_execution_sources",
+            "portfolio_project_report",
+        ] {
+            let err = services
+                .start_run(RunsStartRequest::Single(SingleOpStartRequest {
+                    op_id: op_id.to_string(),
+                    op_version: "v1".to_string(),
+                    op_config: serde_json::json!({}),
+                }))
+                .await
+                .expect_err("planner-internal op must not be publicly startable");
+
+            assert_eq!(err.class, ErrorClass::BadRequest);
+            assert_eq!(err.code, "op_not_public");
+        }
     }
 }

@@ -388,6 +388,29 @@ fn read_required_context_value(
     snapshot: &serde_json::Value,
     key: &ContextKey,
 ) -> serde_json::Value {
+    if let Some(value) = snapshot.get(&key.0).cloned() {
+        return value;
+    }
+
+    if let Some((op_path, leaf)) = key.0.rsplit_once(".out.") {
+        let nested_prefix = format!("{op_path}.");
+        let nested_suffix = format!(".out.{leaf}");
+        let matches: Vec<serde_json::Value> = snapshot
+            .as_object()
+            .into_iter()
+            .flat_map(|obj| obj.iter())
+            .filter(|(candidate, _)| {
+                candidate.starts_with(&nested_prefix)
+                    && candidate.len() > key.0.len()
+                    && candidate.ends_with(&nested_suffix)
+            })
+            .map(|(_, value)| value.clone())
+            .collect();
+        if matches.len() == 1 {
+            return matches.into_iter().next().expect("single nested match");
+        }
+    }
+
     snapshot.get(&key.0).cloned().unwrap_or_else(|| {
         let keys = snapshot
             .as_object()
@@ -475,14 +498,19 @@ impl EventRecorder for NoopRecorder {
 fn expand_uses_canonical_multi_network_graph() {
     let op = PortfolioTrackerOp;
     assert_eq!(op.op_version(), "v2");
-    let composite = into_composite(
-        op.expand(
+    let planned = op
+        .expand(
             OpPath("portfolio_tracker.main".to_string()),
             &canonical_op_config(),
             &op_test_support::run_config_live(),
         )
-        .expect("expand"),
-    );
+        .expect("expand");
+    assert!(planned
+        .interface
+        .exports
+        .iter()
+        .any(|export| export.0 == PORT_SNAPSHOT));
+    let composite = into_composite(planned);
 
     let child_ids: Vec<_> = composite
         .children
@@ -580,6 +608,11 @@ async fn at_live_then_replay_determinism() {
     let final_snapshot_id = res.final_snapshot_id.clone().expect("final snapshot");
 
     let context_snapshot = load_context_snapshot(&stores, &final_snapshot_id).await;
+    let snapshot_from_root_export: PortfolioSnapshot = serde_json::from_value(
+        read_required_context_value(&context_snapshot, &portfolio_snapshot_context_key()),
+    )
+    .expect("typed root-exported snapshot");
+    assert_eq!(snapshot_from_root_export.portfolio_id, "portfolio_main");
     let report: PortfolioReport = serde_json::from_value(read_required_context_value(
         &context_snapshot,
         &portfolio_snapshot_report_context_key(),
