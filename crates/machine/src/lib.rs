@@ -1525,6 +1525,12 @@ pub mod stores {
     #[serde(try_from = "String", into = "String")]
     pub struct StreamId(String);
 
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct StreamIdParts<'a> {
+        family: &'a str,
+        key: &'a str,
+    }
+
     impl StreamId {
         /// Creates a stream identifier after validating the storage naming contract.
         pub fn new(value: impl Into<String>) -> Result<Self, crate::ids::IdValidationError> {
@@ -1548,10 +1554,17 @@ pub mod stores {
             Self::new(value).expect("stream id must satisfy <family>:<key>")
         }
 
-        fn family_and_key(&self) -> (&str, &str) {
-            self.0
+        fn parts(&self) -> StreamIdParts<'_> {
+            let (family, key) = self
+                .0
                 .split_once(':')
-                .expect("StreamId format validated in constructor")
+                .expect("StreamId format validated in constructor");
+            StreamIdParts { family, key }
+        }
+
+        fn family_and_key(&self) -> (&str, &str) {
+            let parts = self.parts();
+            (parts.family, parts.key)
         }
 
         /// Returns the stream family prefix.

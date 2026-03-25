@@ -12,6 +12,7 @@ use mfm_machine::meta::StateMeta;
 use mfm_machine::recorder::EventRecorder;
 use mfm_machine::state::{SnapshotPolicy, State, StateOutcome};
 use mfm_state_common::ctx::{read_typed, write_json};
+use mfm_state_common::decimal::{DecimalArithmeticError, DecimalValue};
 use mfm_state_common::errors::{
     state_error_with_state, state_from_io, state_unknown, state_unknown_msg,
 };
@@ -19,8 +20,6 @@ use mfm_state_common::local_io_helpers::emit_report_event;
 use mfm_state_common::output::write_output_artifact;
 use mfm_state_common::states::meta;
 use mfm_state_symbol::model::{Observation, QuoteCode, SymbolRole};
-use num_bigint::BigInt;
-use num_traits::{Signed, Zero};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -28,11 +27,11 @@ use crate::model::{
     ExecutionAnchor as SnapshotExecutionAnchor, NetworkPin, PortfolioConfig, PortfolioQuoteTotal,
     PortfolioReport, PortfolioSnapshot, PortfolioSnapshotError, WalletReport, WalletSnapshot,
 };
-use crate::semantic::{
-    CompiledObservationBatch, ExecutionAnchor, NetworkFamily, ObservationKey,
+use crate::plan::{
+    CompiledObservationBatch, DispatchCatalog, ExecutionAnchor, NetworkFamily, ObservationKey,
     ObservationRuntimeInput, PinnedNetworkView, ResolvedSubject, ResolvedUnitPrice,
-    SemanticCatalog, SourcePreparationTask, SubjectKind, SubjectResolutionTask,
-    SubjectRuntimeInput, ValuationRuntimeInput, ValuationTask, ViewPinTask, ViewRuntimeInput,
+    SourcePreparationTask, SubjectKind, SubjectResolutionTask, SubjectRuntimeInput,
+    ValuationRuntimeInput, ValuationTask, ViewPinTask, ViewRuntimeInput,
 };
 use mfm_state_wallet::model::WalletSubjectKind;
 
@@ -190,7 +189,7 @@ pub struct ResolveSubjectsState {
     /// Planner-owned subject resolution tasks.
     pub tasks: Vec<SubjectResolutionTask>,
     /// Runtime adapter catalog keyed by planned adapter id.
-    pub catalog: Arc<SemanticCatalog>,
+    pub catalog: Arc<DispatchCatalog>,
     /// Context key that contains prepared source payloads.
     pub prepared_sources_key: ContextKey,
     /// Context key that receives resolved subjects keyed by semantic subject id.
@@ -293,7 +292,7 @@ pub struct PinExecutionViewsState {
     /// Planner-owned view pin tasks.
     pub tasks: Vec<ViewPinTask>,
     /// Runtime adapter catalog keyed by planned adapter id.
-    pub catalog: Arc<SemanticCatalog>,
+    pub catalog: Arc<DispatchCatalog>,
     /// Context key that contains prepared source payloads.
     pub prepared_sources_key: ContextKey,
     /// Context key that receives pinned execution views keyed by semantic network view id.
@@ -393,7 +392,7 @@ pub struct ResolveValuationInputsState {
     /// Planner-owned valuation tasks.
     pub tasks: Vec<ValuationTask>,
     /// Runtime adapter catalog keyed by planned adapter id.
-    pub catalog: Arc<SemanticCatalog>,
+    pub catalog: Arc<DispatchCatalog>,
     /// Context key that contains pinned execution views.
     pub pinned_views_key: ContextKey,
     /// Context key that receives resolved unit prices keyed by valuation id.
@@ -505,7 +504,7 @@ pub struct ObserveCompiledBatchState {
     /// Planner-owned compiled batch to execute.
     pub batch: CompiledObservationBatch,
     /// Runtime adapter catalog keyed by planned adapter id.
-    pub catalog: Arc<SemanticCatalog>,
+    pub catalog: Arc<DispatchCatalog>,
     /// Context key that contains resolved subjects.
     pub resolved_subjects_key: ContextKey,
     /// Context key that contains pinned execution views.
@@ -1068,26 +1067,19 @@ fn derive_quote_totals(
     for observation in observations {
         for value in &observation.values {
             let entry = totals.entry(value.quote).or_default();
+            let value_dec = parse_decimal_value(&value.value_dec)?;
             match observation.role {
                 SymbolRole::Native | SymbolRole::Asset => {
-                    entry.assets_value = entry
-                        .assets_value
-                        .add(&DecimalValue::parse(&value.value_dec)?);
+                    entry.assets_value = entry.assets_value.add(&value_dec);
                 }
                 SymbolRole::Collateral => {
-                    entry.collateral_value = entry
-                        .collateral_value
-                        .add(&DecimalValue::parse(&value.value_dec)?);
+                    entry.collateral_value = entry.collateral_value.add(&value_dec);
                 }
                 SymbolRole::Debt => {
-                    entry.debt_value = entry
-                        .debt_value
-                        .add(&DecimalValue::parse(&value.value_dec)?);
+                    entry.debt_value = entry.debt_value.add(&value_dec);
                 }
                 SymbolRole::Staked => {
-                    entry.staked_value = entry
-                        .staked_value
-                        .add(&DecimalValue::parse(&value.value_dec)?);
+                    entry.staked_value = entry.staked_value.add(&value_dec);
                 }
             }
         }
@@ -1126,6 +1118,19 @@ fn quote_totals_to_vec(
         .collect()
 }
 
+fn parse_decimal_value(value: &str) -> Result<DecimalValue, StateError> {
+    DecimalValue::parse_signed(value).map_err(|err| match err {
+        DecimalArithmeticError::InvalidDecimalString { value } => state_unknown_msg(
+            "invalid_decimal_string",
+            format!("invalid decimal string `{value}`"),
+        ),
+        DecimalArithmeticError::DivisionByZero => state_unknown(
+            "division_by_zero",
+            "decimal value conversion failed because denominator was zero",
+        ),
+    })
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct QuoteTotalsAccumulator {
     assets_value: DecimalValue,
@@ -1159,141 +1164,6 @@ impl QuoteTotalsAccumulator {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct DecimalValue {
-    digits: BigInt,
-    scale: u32,
-}
-
-impl Default for DecimalValue {
-    fn default() -> Self {
-        Self::zero()
-    }
-}
-
-impl DecimalValue {
-    fn zero() -> Self {
-        Self {
-            digits: BigInt::ZERO,
-            scale: 0,
-        }
-    }
-
-    fn parse(input: &str) -> Result<Self, StateError> {
-        let trimmed = input.trim();
-        if trimmed.is_empty() {
-            return Err(state_unknown_msg(
-                "invalid_decimal_string",
-                format!("invalid decimal string `{input}`"),
-            ));
-        }
-
-        let (negative, digits_part) = match trimmed.strip_prefix('-') {
-            Some(rest) => (true, rest),
-            None => (false, trimmed),
-        };
-        let parts: Vec<_> = digits_part.split('.').collect();
-        if parts.len() > 2
-            || parts
-                .iter()
-                .any(|part| !part.is_empty() && !part.chars().all(|ch| ch.is_ascii_digit()))
-        {
-            return Err(state_unknown_msg(
-                "invalid_decimal_string",
-                format!("invalid decimal string `{input}`"),
-            ));
-        }
-
-        let whole = parts[0];
-        let frac = parts.get(1).copied().unwrap_or("");
-        let digits = format!("{whole}{frac}");
-        let digits = if digits.is_empty() {
-            "0"
-        } else {
-            digits.as_str()
-        };
-        let mut parsed: BigInt = digits.parse().map_err(|_| {
-            state_unknown_msg(
-                "invalid_decimal_string",
-                format!("invalid decimal string `{input}`"),
-            )
-        })?;
-        if negative && !parsed.is_zero() {
-            parsed = -parsed;
-        }
-        Ok(Self {
-            digits: parsed,
-            scale: frac.len() as u32,
-        })
-    }
-
-    fn add(&self, other: &Self) -> Self {
-        let scale = self.scale.max(other.scale);
-        Self {
-            digits: self.scaled_digits(scale) + other.scaled_digits(scale),
-            scale,
-        }
-    }
-
-    fn sub(&self, other: &Self) -> Self {
-        let scale = self.scale.max(other.scale);
-        Self {
-            digits: self.scaled_digits(scale) - other.scaled_digits(scale),
-            scale,
-        }
-    }
-
-    fn scaled_digits(&self, scale: u32) -> BigInt {
-        if self.scale == scale {
-            self.digits.clone()
-        } else {
-            &self.digits * ten_pow(scale - self.scale)
-        }
-    }
-
-    fn to_canonical_string(&self) -> String {
-        self.to_string_with_min_scale(self.scale)
-    }
-
-    fn to_string_with_min_scale(&self, min_scale: u32) -> String {
-        let negative = self.digits.is_negative();
-        let digits = self.digits.abs().to_string();
-        let scale = self.scale as usize;
-        let mut out = if scale == 0 {
-            digits
-        } else if digits.len() <= scale {
-            format!("0.{}{}", "0".repeat(scale - digits.len()), digits)
-        } else {
-            let split = digits.len() - scale;
-            format!("{}.{}", &digits[..split], &digits[split..])
-        };
-
-        if let Some((whole, frac)) = out.split_once('.') {
-            let mut frac = frac.to_string();
-            while frac.len() > min_scale as usize && frac.ends_with('0') {
-                frac.pop();
-            }
-            if frac.len() < min_scale as usize {
-                frac.push_str(&"0".repeat(min_scale as usize - frac.len()));
-            }
-            out = format!("{whole}.{frac}");
-        } else if min_scale > 0 {
-            out.push('.');
-            out.push_str(&"0".repeat(min_scale as usize));
-        }
-
-        if negative && out != "0" {
-            format!("-{out}")
-        } else {
-            out
-        }
-    }
-}
-
-fn ten_pow(n: u32) -> BigInt {
-    BigInt::from(10u8).pow(n)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1310,9 +1180,10 @@ mod tests {
     };
 
     use crate::model::{PortfolioQuoteTotal, PortfolioReport};
-    use crate::semantic::{
-        AdapterId, ExecutionAnchor, ObservationRuntimeAdapter, RuntimeAdapter,
-        SemanticCatalogParts, SubjectRuntimeAdapter, ValuationRuntimeAdapter, ViewRuntimeAdapter,
+    use crate::plan::{
+        AdapterId, DispatchCatalogParts, DispatchObservationRuntimeAdapter,
+        DispatchSubjectRuntimeAdapter, DispatchValuationRuntimeAdapter, DispatchViewRuntimeAdapter,
+        ExecutionAnchor, RuntimeAdapter,
     };
 
     #[derive(Default)]
@@ -1451,7 +1322,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl SubjectRuntimeAdapter for StubSubjectRuntime {
+    impl DispatchSubjectRuntimeAdapter for StubSubjectRuntime {
         async fn resolve_subject(
             &self,
             _state_id: &StateId,
@@ -1485,7 +1356,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl ViewRuntimeAdapter for StubViewRuntime {
+    impl DispatchViewRuntimeAdapter for StubViewRuntime {
         async fn pin_view(
             &self,
             _state_id: &StateId,
@@ -1517,7 +1388,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl ValuationRuntimeAdapter for StubValuationRuntime {
+    impl DispatchValuationRuntimeAdapter for StubValuationRuntime {
         async fn resolve(
             &self,
             _state_id: &StateId,
@@ -1550,12 +1421,12 @@ mod tests {
     }
 
     #[async_trait]
-    impl ObservationRuntimeAdapter for StubObservationRuntime {
+    impl DispatchObservationRuntimeAdapter for StubObservationRuntime {
         async fn observe(
             &self,
             _state_id: &StateId,
             _io: &mut dyn IoProvider,
-            binding: &crate::semantic::CompiledObservationBinding,
+            binding: &crate::plan::CompiledObservationBinding,
             _input: ObservationRuntimeInput<'_>,
         ) -> Result<Observation, StateError> {
             if let Some(observation) = self.observations_by_binding_id.get(&binding.binding_id) {
@@ -1655,9 +1526,9 @@ mod tests {
         .expect("portfolio")
     }
 
-    fn sample_catalog(mismatch_subject_id: Option<String>) -> Arc<SemanticCatalog> {
+    fn sample_catalog(mismatch_subject_id: Option<String>) -> Arc<DispatchCatalog> {
         Arc::new(
-            SemanticCatalog::new(SemanticCatalogParts {
+            DispatchCatalog::new(DispatchCatalogParts {
                 subject_runtimes: vec![Arc::new(StubSubjectRuntime {
                     adapter: AdapterId("resolve_subject/evm_address".to_string()),
                     mismatch_subject_id,
@@ -1672,7 +1543,7 @@ mod tests {
                     adapter: AdapterId("observe_position/evm/native_balance".to_string()),
                     observations_by_binding_id: HashMap::new(),
                 })],
-                ..SemanticCatalogParts::default()
+                ..DispatchCatalogParts::default()
             })
             .expect("catalog"),
         )
@@ -1786,13 +1657,13 @@ mod tests {
                 batch_id: "observe.ethereum-mainnet.native".to_string(),
                 adapter: AdapterId("observe_position/evm/native_balance".to_string()),
                 network_view_id: "ethereum-mainnet".to_string(),
-                bindings: vec![crate::semantic::CompiledObservationBinding {
+                bindings: vec![crate::plan::CompiledObservationBinding {
                     binding_id: "binding.wallet_main.eth".to_string(),
-                    observation_key: crate::semantic::ObservationKey {
+                    observation_key: crate::plan::ObservationKey {
                         subject_id: "wallet_main".to_string(),
                         network_view_id: "ethereum-mainnet".to_string(),
                         instrument_id: "eth.native.ethereum-mainnet".to_string(),
-                        position_kind: crate::semantic::PositionSemantics::SpotBalance,
+                        position_kind: crate::plan::PositionKind::SpotBalance,
                         venue_id: None,
                         discriminator: Some("eth.native.ethereum-mainnet".to_string()),
                     },
@@ -2112,12 +1983,12 @@ mod tests {
         );
 
         let catalog = Arc::new(
-            SemanticCatalog::new(SemanticCatalogParts {
+            DispatchCatalog::new(DispatchCatalogParts {
                 observation_runtimes: vec![Arc::new(StubObservationRuntime {
                     adapter: AdapterId("observe_position/evm/native_balance".to_string()),
                     observations_by_binding_id,
                 })],
-                ..SemanticCatalogParts::default()
+                ..DispatchCatalogParts::default()
             })
             .expect("catalog"),
         );
@@ -2129,7 +2000,7 @@ mod tests {
                 adapter: AdapterId("observe_position/evm/native_balance".to_string()),
                 network_view_id: "ethereum-mainnet".to_string(),
                 bindings: vec![
-                    crate::semantic::CompiledObservationBinding {
+                    crate::plan::CompiledObservationBinding {
                         binding_id: "binding.ethereum".to_string(),
                         observation_key: observation_key(
                             "wallet_main",
@@ -2140,7 +2011,7 @@ mod tests {
                         valuation_ids: Vec::new(),
                         payload: BTreeMap::new(),
                     },
-                    crate::semantic::CompiledObservationBinding {
+                    crate::plan::CompiledObservationBinding {
                         binding_id: "binding.arbitrum".to_string(),
                         observation_key: observation_key(
                             "wallet_main",
@@ -2325,7 +2196,7 @@ mod tests {
             subject_id: subject_id.to_string(),
             network_view_id: network_view_id.to_string(),
             instrument_id: instrument_id.to_string(),
-            position_kind: crate::semantic::PositionSemantics::SpotBalance,
+            position_kind: crate::plan::PositionKind::SpotBalance,
             venue_id: None,
             discriminator: None,
         }

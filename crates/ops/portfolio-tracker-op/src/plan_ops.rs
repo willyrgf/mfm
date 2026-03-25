@@ -8,20 +8,20 @@ use mfm_sdk::op::{
     PlannedOpKind,
 };
 use mfm_state_common::errors as op_errors;
-use mfm_state_portfolio::model::PortfolioConfig;
-use mfm_state_portfolio::semantic::{
-    CompiledObservationBatch, PortfolioExecutionSpec, SemanticCatalog, SourcePreparationTask,
-    SubjectResolutionTask, ValuationTask, ViewPinTask,
-};
-use mfm_state_portfolio::semantic_states::{
+use mfm_state_portfolio::execution_states::{
     AssembleSnapshotState, MergeObservationsState, ObserveCompiledBatchState,
     PinExecutionViewsState, PrepareExecutionSourcesState, ProjectReportState, ResolveSubjectsState,
     ResolveValuationInputsState,
 };
+use mfm_state_portfolio::model::PortfolioConfig;
+use mfm_state_portfolio::plan::{
+    CompiledObservationBatch, DispatchCatalog, PortfolioExecutionSpec, SourcePreparationTask,
+    SubjectResolutionTask, ValuationTask, ViewPinTask,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::semantic::builtin_semantic_catalog;
+use crate::plan::builtin_dispatch_catalog;
 
 pub const PREPARE_EXECUTION_SOURCES_CHILD_ID: &str = "prepare_execution_sources";
 pub const RESOLVE_SUBJECTS_CHILD_ID: &str = "resolve_subjects";
@@ -65,8 +65,8 @@ fn local_slot(prefix: &str, port: &str) -> ContextKey {
     ContextKey(format!("{prefix}.{port}"))
 }
 
-fn semantic_catalog() -> Result<Arc<SemanticCatalog>, SdkError> {
-    builtin_semantic_catalog().map(Arc::new).map_err(|err| {
+fn semantic_catalog() -> Result<Arc<DispatchCatalog>, SdkError> {
+    builtin_dispatch_catalog().map(Arc::new).map_err(|err| {
         sdk_input_error(
             "semantic_catalog_construction_failed",
             format!("failed to construct semantic adapter catalog: {err}"),

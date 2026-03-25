@@ -12,6 +12,10 @@ use mfm_machine::errors::{ErrorCategory, StateError};
 use mfm_machine::hashing::artifact_id_for_json;
 use mfm_machine::ids::{FactKey, StateId};
 use mfm_machine::io::{IoCall, IoProvider};
+use mfm_state_common::decimal::{
+    divide_decimal_strings as common_divide_decimal_strings,
+    multiply_decimal_strings as common_multiply_decimal_strings, DecimalArithmeticError,
+};
 use mfm_state_common::errors::{
     state_error_with_state, state_from_io, state_unknown, state_unknown_msg,
 };
@@ -20,20 +24,18 @@ use mfm_state_symbol::model::{
     ObservationValueSourceRef, ValuationSourceReaderConfig,
 };
 use mfm_state_wallet::model::{WalletCapabilities, WalletImplementationConfig};
-use num_bigint::BigInt;
-use num_traits::Zero;
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::semantic::{
+use crate::plan::{
     AdapterId, BitcoinResolvedSubjectValue, BitcoinRoutePolicy, BitcoinSubjectLocator,
     BitcoinUtxoSetObservationPayload, DerivedUnitPriceValuationPayload, DirectPriceSourcePayload,
     DirectPriceValuationPayload, EvmResolvedSubjectValue, EvmRoutePolicy, EvmSubjectLocator,
     ExecutionAnchor, FixedUnitPriceValuationPayload, NativeBalanceObservationPayload,
-    ObservationRuntimeAdapter, ObservationRuntimeInput, PinnedNetworkView, ResolvedSubject,
-    ResolvedUnitPrice, RuntimeAdapter, SubjectKind, SubjectResolutionTask, SubjectRuntimeAdapter,
-    SubjectRuntimeInput, ValuationRuntimeAdapter, ValuationRuntimeInput, ValuationTask,
-    ViewPinTask, ViewRuntimeAdapter, ViewRuntimeInput,
+    DispatchObservationRuntimeAdapter, ObservationRuntimeInput, PinnedNetworkView, ResolvedSubject,
+    ResolvedUnitPrice, RuntimeAdapter, SubjectKind, SubjectResolutionTask,
+    DispatchSubjectRuntimeAdapter, SubjectRuntimeInput, DispatchValuationRuntimeAdapter,
+    ValuationRuntimeInput, ValuationTask, ViewPinTask, DispatchViewRuntimeAdapter, ViewRuntimeInput,
 };
 
 const ADAPTER_RESOLVE_SUBJECT_EVM_ADDRESS: &str = "resolve_subject/evm_address";
@@ -59,7 +61,7 @@ impl RuntimeAdapter for EvmAddressSubjectRuntimeAdapter {
 }
 
 #[async_trait]
-impl SubjectRuntimeAdapter for EvmAddressSubjectRuntimeAdapter {
+impl DispatchSubjectRuntimeAdapter for EvmAddressSubjectRuntimeAdapter {
     async fn resolve_subject(
         &self,
         state_id: &StateId,
@@ -120,7 +122,7 @@ impl RuntimeAdapter for BitcoinAddressSubjectRuntimeAdapter {
 }
 
 #[async_trait]
-impl SubjectRuntimeAdapter for BitcoinAddressSubjectRuntimeAdapter {
+impl DispatchSubjectRuntimeAdapter for BitcoinAddressSubjectRuntimeAdapter {
     async fn resolve_subject(
         &self,
         state_id: &StateId,
@@ -181,7 +183,7 @@ impl RuntimeAdapter for EvmViewRuntimeAdapter {
 }
 
 #[async_trait]
-impl ViewRuntimeAdapter for EvmViewRuntimeAdapter {
+impl DispatchViewRuntimeAdapter for EvmViewRuntimeAdapter {
     async fn pin_view(
         &self,
         state_id: &StateId,
@@ -287,7 +289,7 @@ struct BitcoinAnchorResponse {
 }
 
 #[async_trait]
-impl ViewRuntimeAdapter for BitcoinViewRuntimeAdapter {
+impl DispatchViewRuntimeAdapter for BitcoinViewRuntimeAdapter {
     async fn pin_view(
         &self,
         state_id: &StateId,
@@ -382,7 +384,7 @@ impl RuntimeAdapter for FixedUnitPriceRuntimeAdapter {
 }
 
 #[async_trait]
-impl ValuationRuntimeAdapter for FixedUnitPriceRuntimeAdapter {
+impl DispatchValuationRuntimeAdapter for FixedUnitPriceRuntimeAdapter {
     async fn resolve(
         &self,
         _state_id: &StateId,
@@ -416,7 +418,7 @@ impl RuntimeAdapter for EvmOracleDirectPriceRuntimeAdapter {
 }
 
 #[async_trait]
-impl ValuationRuntimeAdapter for EvmOracleDirectPriceRuntimeAdapter {
+impl DispatchValuationRuntimeAdapter for EvmOracleDirectPriceRuntimeAdapter {
     async fn resolve(
         &self,
         state_id: &StateId,
@@ -452,7 +454,7 @@ impl RuntimeAdapter for DerivedUnitPriceRuntimeAdapter {
 }
 
 #[async_trait]
-impl ValuationRuntimeAdapter for DerivedUnitPriceRuntimeAdapter {
+impl DispatchValuationRuntimeAdapter for DerivedUnitPriceRuntimeAdapter {
     async fn resolve(
         &self,
         state_id: &StateId,
@@ -490,12 +492,12 @@ impl RuntimeAdapter for EvmNativeBalanceObservationRuntimeAdapter {
 }
 
 #[async_trait]
-impl ObservationRuntimeAdapter for EvmNativeBalanceObservationRuntimeAdapter {
+impl DispatchObservationRuntimeAdapter for EvmNativeBalanceObservationRuntimeAdapter {
     async fn observe(
         &self,
         state_id: &StateId,
         io: &mut dyn IoProvider,
-        binding: &crate::semantic::CompiledObservationBinding,
+        binding: &crate::plan::CompiledObservationBinding,
         input: ObservationRuntimeInput<'_>,
     ) -> Result<Observation, StateError> {
         let payload: NativeBalanceObservationPayload = decode_object_map(
@@ -562,15 +564,15 @@ impl RuntimeAdapter for EvmErc20BalanceObservationRuntimeAdapter {
 }
 
 #[async_trait]
-impl ObservationRuntimeAdapter for EvmErc20BalanceObservationRuntimeAdapter {
+impl DispatchObservationRuntimeAdapter for EvmErc20BalanceObservationRuntimeAdapter {
     async fn observe(
         &self,
         state_id: &StateId,
         io: &mut dyn IoProvider,
-        binding: &crate::semantic::CompiledObservationBinding,
+        binding: &crate::plan::CompiledObservationBinding,
         input: ObservationRuntimeInput<'_>,
     ) -> Result<Observation, StateError> {
-        let payload: crate::semantic::Erc20BalanceObservationPayload = decode_object_map(
+        let payload: crate::plan::Erc20BalanceObservationPayload = decode_object_map(
             "compiled_observation_binding",
             &binding.binding_id,
             &binding.payload,
@@ -653,12 +655,12 @@ struct BitcoinUtxoBalanceResponse {
 }
 
 #[async_trait]
-impl ObservationRuntimeAdapter for BitcoinUtxoSetObservationRuntimeAdapter {
+impl DispatchObservationRuntimeAdapter for BitcoinUtxoSetObservationRuntimeAdapter {
     async fn observe(
         &self,
         state_id: &StateId,
         io: &mut dyn IoProvider,
-        binding: &crate::semantic::CompiledObservationBinding,
+        binding: &crate::plan::CompiledObservationBinding,
         input: ObservationRuntimeInput<'_>,
     ) -> Result<Observation, StateError> {
         let payload: BitcoinUtxoSetObservationPayload = decode_object_map(
@@ -784,7 +786,7 @@ async fn resolve_direct_source(
 }
 
 fn resolved_evm_subject_for_binding(
-    binding: &crate::semantic::CompiledObservationBinding,
+    binding: &crate::plan::CompiledObservationBinding,
     resolved_subjects: &BTreeMap<String, ResolvedSubject>,
 ) -> Result<EvmResolvedSubjectValue, StateError> {
     let subject = resolved_subjects
@@ -819,7 +821,7 @@ fn resolved_evm_subject_for_binding(
 }
 
 fn resolved_bitcoin_subject_for_binding(
-    binding: &crate::semantic::CompiledObservationBinding,
+    binding: &crate::plan::CompiledObservationBinding,
     resolved_subjects: &BTreeMap<String, ResolvedSubject>,
 ) -> Result<BitcoinResolvedSubjectValue, StateError> {
     let subject = resolved_subjects
@@ -854,7 +856,7 @@ fn resolved_bitcoin_subject_for_binding(
 }
 
 fn pinned_evm_view_for_binding<'a>(
-    binding: &crate::semantic::CompiledObservationBinding,
+    binding: &crate::plan::CompiledObservationBinding,
     pinned_views: &'a BTreeMap<String, PinnedNetworkView>,
     route_policy: &EvmRoutePolicy,
 ) -> Result<&'a PinnedNetworkView, StateError> {
@@ -906,7 +908,7 @@ fn pinned_evm_view_for_binding<'a>(
 }
 
 fn pinned_bitcoin_view_for_binding<'a>(
-    binding: &crate::semantic::CompiledObservationBinding,
+    binding: &crate::plan::CompiledObservationBinding,
     pinned_views: &'a BTreeMap<String, PinnedNetworkView>,
     route_policy: &BitcoinRoutePolicy,
 ) -> Result<&'a PinnedNetworkView, StateError> {
@@ -946,7 +948,7 @@ fn pinned_bitcoin_view_for_binding<'a>(
 }
 
 fn build_observation_values_from_resolved(
-    binding: &crate::semantic::CompiledObservationBinding,
+    binding: &crate::plan::CompiledObservationBinding,
     amount_dec: &str,
     input: ObservationRuntimeInput<'_>,
 ) -> Result<Vec<ObservationValue>, StateError> {
@@ -1194,116 +1196,32 @@ async fn read_erc20_balance(
 }
 
 fn multiply_decimal_strings(left: &str, right: &str) -> Result<String, StateError> {
-    let left = DecimalValue::parse(left)?;
-    let right = DecimalValue::parse(right)?;
-    let product = DecimalValue {
-        digits: left.digits * right.digits,
-        scale: left.scale + right.scale,
-    };
-    Ok(product.to_string_with_min_scale(left.scale.max(right.scale)))
+    common_multiply_decimal_strings(left, right).map_err(decimal_string_error)
 }
 
 fn divide_decimal_strings(numerator: &str, denominator: &str) -> Result<String, StateError> {
-    let numerator = DecimalValue::parse(numerator)?;
-    let denominator = DecimalValue::parse(denominator)?;
-    if denominator.digits.is_zero() {
-        return Err(state_unknown(
+    common_divide_decimal_strings(numerator, denominator).map_err(|err| match err {
+        DecimalArithmeticError::InvalidDecimalString { value } => state_unknown_msg(
+            "invalid_decimal_string",
+            format!("invalid decimal string `{value}`"),
+        ),
+        DecimalArithmeticError::DivisionByZero => state_unknown(
             "division_by_zero",
             "derived unit price denominator must be non-zero",
-        ));
-    }
-
-    let min_scale = numerator.scale.max(denominator.scale).max(8);
-    let working_scale = min_scale + 18;
-    let scaled_numerator = numerator.digits * ten_pow(working_scale + denominator.scale);
-    let scaled_denominator = denominator.digits * ten_pow(numerator.scale);
-    let quotient = scaled_numerator / scaled_denominator;
-    Ok(DecimalValue {
-        digits: quotient,
-        scale: working_scale,
-    }
-    .to_string_with_min_scale(min_scale))
+        ),
+    })
 }
 
-fn ten_pow(n: u32) -> BigInt {
-    BigInt::from(10u8).pow(n)
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct DecimalValue {
-    digits: BigInt,
-    scale: u32,
-}
-
-impl DecimalValue {
-    fn parse(input: &str) -> Result<Self, StateError> {
-        let trimmed = input.trim();
-        if trimmed.is_empty() || trimmed.starts_with('-') {
-            return Err(state_unknown_msg(
-                "invalid_decimal_string",
-                format!("invalid decimal string `{input}`"),
-            ));
-        }
-
-        let parts: Vec<_> = trimmed.split('.').collect();
-        if parts.len() > 2
-            || parts
-                .iter()
-                .any(|part| !part.is_empty() && !part.chars().all(|ch| ch.is_ascii_digit()))
-        {
-            return Err(state_unknown_msg(
-                "invalid_decimal_string",
-                format!("invalid decimal string `{input}`"),
-            ));
-        }
-
-        let whole = parts[0];
-        let frac = parts.get(1).copied().unwrap_or("");
-        let digits = format!("{whole}{frac}");
-        let digits = if digits.is_empty() {
-            "0"
-        } else {
-            digits.as_str()
-        };
-        let parsed: BigInt = digits.parse().map_err(|_| {
-            state_unknown_msg(
-                "invalid_decimal_string",
-                format!("invalid decimal string `{input}`"),
-            )
-        })?;
-        Ok(Self {
-            digits: parsed,
-            scale: frac.len() as u32,
-        })
-    }
-
-    fn to_string_with_min_scale(&self, min_scale: u32) -> String {
-        let digits = self.digits.to_string();
-        let scale = self.scale as usize;
-        let mut out = if scale == 0 {
-            digits
-        } else if digits.len() <= scale {
-            format!("0.{}{}", "0".repeat(scale - digits.len()), digits)
-        } else {
-            let split = digits.len() - scale;
-            format!("{}.{}", &digits[..split], &digits[split..])
-        };
-
-        if let Some((whole, frac)) = out.split_once('.') {
-            let mut frac = frac.to_string();
-            while frac.len() > min_scale as usize && frac.ends_with('0') {
-                frac.pop();
-            }
-            if frac.len() < min_scale as usize {
-                frac.push_str(&"0".repeat(min_scale as usize - frac.len()));
-            }
-            out = format!("{whole}.{frac}");
-        } else if min_scale > 0 {
-            out.push('.');
-            out.push_str(&"0".repeat(min_scale as usize));
-        }
-
-        out
+fn decimal_string_error(err: DecimalArithmeticError) -> StateError {
+    match err {
+        DecimalArithmeticError::InvalidDecimalString { value } => state_unknown_msg(
+            "invalid_decimal_string",
+            format!("invalid decimal string `{value}`"),
+        ),
+        DecimalArithmeticError::DivisionByZero => state_unknown(
+            "division_by_zero",
+            "decimal operation failed because the denominator was zero",
+        ),
     }
 }
 
@@ -1466,7 +1384,7 @@ mod tests {
                 &ViewPinTask {
                     task_id: "pin.ethereum-mainnet".to_string(),
                     network_view_id: "ethereum-mainnet".to_string(),
-                    family: crate::semantic::NetworkFamily::Evm,
+                    family: crate::plan::NetworkFamily::Evm,
                     adapter: AdapterId(ADAPTER_PIN_VIEW_EVM.to_string()),
                     payload: BTreeMap::from([
                         ("network_id".to_string(), json!("ethereum-mainnet")),
@@ -1521,7 +1439,7 @@ mod tests {
             PinnedNetworkView {
                 network_view_id: "ethereum-mainnet".to_string(),
                 network_id: "ethereum-mainnet".to_string(),
-                family: crate::semantic::NetworkFamily::Evm,
+                family: crate::plan::NetworkFamily::Evm,
                 anchor: ExecutionAnchor::Evm {
                     chain_id: 1,
                     block_number: 100,
@@ -1652,13 +1570,13 @@ mod tests {
                 json!("0x0de0b6b3a7640000"),
             )]),
         };
-        let binding = crate::semantic::CompiledObservationBinding {
+        let binding = crate::plan::CompiledObservationBinding {
             binding_id: "binding.wallet_main.eth".to_string(),
-            observation_key: crate::semantic::ObservationKey {
+            observation_key: crate::plan::ObservationKey {
                 subject_id: "wallet_main".to_string(),
                 network_view_id: "ethereum-mainnet".to_string(),
                 instrument_id: "eth.native.ethereum-mainnet".to_string(),
-                position_kind: crate::semantic::PositionSemantics::SpotBalance,
+                position_kind: crate::plan::PositionKind::SpotBalance,
                 venue_id: None,
                 discriminator: Some("eth.native.ethereum-mainnet".to_string()),
             },
@@ -1716,7 +1634,7 @@ mod tests {
                         PinnedNetworkView {
                             network_view_id: "ethereum-mainnet".to_string(),
                             network_id: "ethereum-mainnet".to_string(),
-                            family: crate::semantic::NetworkFamily::Evm,
+                            family: crate::plan::NetworkFamily::Evm,
                             anchor: ExecutionAnchor::Evm {
                                 chain_id: 1,
                                 block_number: 100,
@@ -1769,13 +1687,13 @@ mod tests {
                 ),
             ]),
         };
-        let binding = crate::semantic::CompiledObservationBinding {
+        let binding = crate::plan::CompiledObservationBinding {
             binding_id: "binding.wallet_main.usdc".to_string(),
-            observation_key: crate::semantic::ObservationKey {
+            observation_key: crate::plan::ObservationKey {
                 subject_id: "wallet_main".to_string(),
                 network_view_id: "ethereum-mainnet".to_string(),
                 instrument_id: "usdc.wallet.ethereum-mainnet".to_string(),
-                position_kind: crate::semantic::PositionSemantics::SpotBalance,
+                position_kind: crate::plan::PositionKind::SpotBalance,
                 venue_id: None,
                 discriminator: Some("usdc.wallet.ethereum-mainnet".to_string()),
             },
@@ -1837,7 +1755,7 @@ mod tests {
                         PinnedNetworkView {
                             network_view_id: "ethereum-mainnet".to_string(),
                             network_id: "ethereum-mainnet".to_string(),
-                            family: crate::semantic::NetworkFamily::Evm,
+                            family: crate::plan::NetworkFamily::Evm,
                             anchor: ExecutionAnchor::Evm {
                                 chain_id: 1,
                                 block_number: 100,

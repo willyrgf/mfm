@@ -11,31 +11,32 @@ use mfm_evm_core::encoding::{
 use mfm_machine::errors::StateError;
 use mfm_machine::ids::StateId;
 use mfm_machine::io::IoProvider;
+use mfm_state_common::decimal::{
+    multiply_decimal_strings as common_multiply_decimal_strings, DecimalArithmeticError,
+};
 use mfm_state_common::errors::{state_from_io, state_unknown, state_unknown_msg};
-use mfm_state_portfolio::semantic::{
-    AdapterId, CompiledObservationBinding, EvmResolvedSubjectValue, ExecutionAnchor, Observation,
-    ObservationRuntimeAdapter, ObservationRuntimeInput, PinnedNetworkView, ResolvedSubject,
-    RuntimeAdapter,
+use mfm_state_portfolio::plan::{
+    AdapterId, CompiledObservationBinding, DispatchObservationRuntimeAdapter,
+    EvmResolvedSubjectValue, ExecutionAnchor, Observation, ObservationRuntimeInput,
+    PinnedNetworkView, ResolvedSubject, RuntimeAdapter,
 };
 use mfm_state_symbol::model::{
     ObservationAnchor, ObservationQuantity, ObservationSource, ObservationValue,
 };
-use num_bigint::BigInt;
-use num_traits::Signed;
 use serde::Deserialize;
 use serde_json::Value;
 
 use crate::portfolio::model::{AaveDebtKind, AAVE_V3_PROTOCOL_ID};
-use crate::portfolio::semantic::{AaveDebtObservationPayload, AaveReserveObservationPayload};
+use crate::portfolio::plan_payloads::{AaveDebtObservationPayload, AaveReserveObservationPayload};
 
 const ADAPTER_OBSERVE_AAVE_RESERVE: &str = "observe_position/aave_v3/reserve_position";
 const ADAPTER_OBSERVE_AAVE_DEBT: &str = "observe_position/aave_v3/debt_position";
 
 /// Runtime adapter for compiled Aave reserve-position observations.
 #[derive(Clone, Debug, Default)]
-pub struct AaveReserveObservationRuntimeAdapter;
+pub struct AaveReserveDispatchObservationRuntimeAdapter;
 
-impl RuntimeAdapter for AaveReserveObservationRuntimeAdapter {
+impl RuntimeAdapter for AaveReserveDispatchObservationRuntimeAdapter {
     fn id(&self) -> &AdapterId {
         static ID: std::sync::OnceLock<AdapterId> = std::sync::OnceLock::new();
         ID.get_or_init(|| AdapterId(ADAPTER_OBSERVE_AAVE_RESERVE.to_string()))
@@ -43,7 +44,7 @@ impl RuntimeAdapter for AaveReserveObservationRuntimeAdapter {
 }
 
 #[async_trait]
-impl ObservationRuntimeAdapter for AaveReserveObservationRuntimeAdapter {
+impl DispatchObservationRuntimeAdapter for AaveReserveDispatchObservationRuntimeAdapter {
     async fn observe(
         &self,
         state_id: &StateId,
@@ -174,9 +175,9 @@ impl ObservationRuntimeAdapter for AaveReserveObservationRuntimeAdapter {
 
 /// Runtime adapter for compiled Aave debt-position observations.
 #[derive(Clone, Debug, Default)]
-pub struct AaveDebtObservationRuntimeAdapter;
+pub struct AaveDebtDispatchObservationRuntimeAdapter;
 
-impl RuntimeAdapter for AaveDebtObservationRuntimeAdapter {
+impl RuntimeAdapter for AaveDebtDispatchObservationRuntimeAdapter {
     fn id(&self) -> &AdapterId {
         static ID: std::sync::OnceLock<AdapterId> = std::sync::OnceLock::new();
         ID.get_or_init(|| AdapterId(ADAPTER_OBSERVE_AAVE_DEBT.to_string()))
@@ -184,7 +185,7 @@ impl RuntimeAdapter for AaveDebtObservationRuntimeAdapter {
 }
 
 #[async_trait]
-impl ObservationRuntimeAdapter for AaveDebtObservationRuntimeAdapter {
+impl DispatchObservationRuntimeAdapter for AaveDebtDispatchObservationRuntimeAdapter {
     async fn observe(
         &self,
         state_id: &StateId,
@@ -353,7 +354,7 @@ fn resolved_evm_subject_for_binding(
 fn pinned_evm_view_for_binding<'a>(
     binding: &CompiledObservationBinding,
     pinned_views: &'a BTreeMap<String, PinnedNetworkView>,
-    route_policy: &mfm_state_portfolio::semantic::EvmRoutePolicy,
+    route_policy: &mfm_state_portfolio::plan::EvmRoutePolicy,
 ) -> Result<&'a PinnedNetworkView, StateError> {
     let pinned = pinned_views
         .get(binding.observation_key.network_view_id.as_str())
@@ -593,91 +594,16 @@ fn encode_get_user_configuration(wallet: &Address) -> String {
 }
 
 fn multiply_decimal_strings(left: &str, right: &str) -> Result<String, StateError> {
-    let left = DecimalValue::parse(left)?;
-    let right = DecimalValue::parse(right)?;
-    let product = DecimalValue {
-        digits: left.digits * right.digits,
-        scale: left.scale + right.scale,
-    };
-    Ok(product.to_string_with_min_scale(left.scale.max(right.scale)))
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct DecimalValue {
-    digits: BigInt,
-    scale: u32,
-}
-
-impl DecimalValue {
-    fn parse(input: &str) -> Result<Self, StateError> {
-        let trimmed = input.trim();
-        if trimmed.is_empty() || trimmed.starts_with('-') {
-            return Err(state_unknown_msg(
-                "invalid_decimal_string",
-                format!("invalid decimal string `{input}`"),
-            ));
-        }
-        let parts: Vec<_> = trimmed.split('.').collect();
-        if parts.len() > 2
-            || parts
-                .iter()
-                .any(|part| !part.is_empty() && !part.chars().all(|ch| ch.is_ascii_digit()))
-        {
-            return Err(state_unknown_msg(
-                "invalid_decimal_string",
-                format!("invalid decimal string `{input}`"),
-            ));
-        }
-        let whole = parts[0];
-        let frac = parts.get(1).copied().unwrap_or("");
-        let digits = format!("{whole}{frac}");
-        let digits = if digits.is_empty() {
-            "0"
-        } else {
-            digits.as_str()
-        };
-        Ok(Self {
-            digits: digits.parse().map_err(|_| {
-                state_unknown_msg(
-                    "invalid_decimal_string",
-                    format!("invalid decimal string `{input}`"),
-                )
-            })?,
-            scale: frac.len() as u32,
-        })
-    }
-
-    fn to_string_with_min_scale(&self, min_scale: u32) -> String {
-        let negative = self.digits.is_negative();
-        let digits = self.digits.abs().to_string();
-        let scale = self.scale as usize;
-        let mut out = if scale == 0 {
-            digits
-        } else if digits.len() <= scale {
-            format!("0.{}{}", "0".repeat(scale - digits.len()), digits)
-        } else {
-            let split = digits.len() - scale;
-            format!("{}.{}", &digits[..split], &digits[split..])
-        };
-        if let Some((whole, frac)) = out.split_once('.') {
-            let mut frac = frac.to_string();
-            while frac.len() > min_scale as usize && frac.ends_with('0') {
-                frac.pop();
-            }
-            if frac.len() < min_scale as usize {
-                frac.push_str(&"0".repeat(min_scale as usize - frac.len()));
-            }
-            out = format!("{whole}.{frac}");
-        } else if min_scale > 0 {
-            out.push('.');
-            out.push_str(&"0".repeat(min_scale as usize));
-        }
-        if negative && out != "0" {
-            format!("-{out}")
-        } else {
-            out
-        }
-    }
+    common_multiply_decimal_strings(left, right).map_err(|err| match err {
+        DecimalArithmeticError::InvalidDecimalString { value } => state_unknown_msg(
+            "invalid_decimal_string",
+            format!("invalid decimal string `{value}`"),
+        ),
+        DecimalArithmeticError::DivisionByZero => state_unknown(
+            "division_by_zero",
+            "decimal operation failed because the denominator was zero",
+        ),
+    })
 }
 
 #[cfg(test)]
@@ -687,7 +613,7 @@ mod tests {
     use mfm_machine::errors::{ErrorCategory, ErrorInfo, IoError};
     use mfm_machine::ids::{ArtifactId, ErrorCode, FactKey};
     use mfm_machine::io::{IoCall, IoResult};
-    use mfm_state_portfolio::semantic::{ObservationKey, PositionSemantics};
+    use mfm_state_portfolio::plan::{ObservationKey, PositionKind};
     use mfm_state_symbol::model::QuoteCode;
     use serde_json::json;
 
@@ -830,7 +756,7 @@ mod tests {
             "wallet_main".to_string(),
             ResolvedSubject {
                 subject_id: "wallet_main".to_string(),
-                kind: mfm_state_portfolio::semantic::SubjectKind::EvmAddress,
+                kind: mfm_state_portfolio::plan::SubjectKind::EvmAddress,
                 value: serde_json::to_value(EvmResolvedSubjectValue {
                     network_id: "ethereum-mainnet".to_string(),
                     address: "0x000000000000000000000000000000000000beef".to_string(),
@@ -852,7 +778,7 @@ mod tests {
             PinnedNetworkView {
                 network_view_id: "ethereum-mainnet".to_string(),
                 network_id: "ethereum-mainnet".to_string(),
-                family: mfm_state_portfolio::semantic::NetworkFamily::Evm,
+                family: mfm_state_portfolio::plan::NetworkFamily::Evm,
                 anchor: ExecutionAnchor::Evm {
                     chain_id: 1,
                     block_number: 100,
@@ -861,10 +787,10 @@ mod tests {
         )])
     }
 
-    fn resolved_valuations() -> BTreeMap<String, mfm_state_portfolio::semantic::ResolvedUnitPrice> {
+    fn resolved_valuations() -> BTreeMap<String, mfm_state_portfolio::plan::ResolvedUnitPrice> {
         BTreeMap::from([(
             "usdc.quote.usd".to_string(),
-            mfm_state_portfolio::semantic::ResolvedUnitPrice {
+            mfm_state_portfolio::plan::ResolvedUnitPrice {
                 valuation_id: "usdc.quote.usd".to_string(),
                 instrument_id: "usdc.wallet.ethereum-mainnet".to_string(),
                 priced_symbol_id: "usdc.wallet.ethereum-mainnet".to_string(),
@@ -878,7 +804,7 @@ mod tests {
 
     #[tokio::test]
     async fn reserve_runtime_emits_collateral_metadata_and_values() {
-        let adapter = AaveReserveObservationRuntimeAdapter;
+        let adapter = AaveReserveDispatchObservationRuntimeAdapter;
         let mut io = TestIo;
         let binding = CompiledObservationBinding {
             binding_id: "binding.aave.reserve".to_string(),
@@ -886,7 +812,7 @@ mod tests {
                 subject_id: "wallet_main".to_string(),
                 network_view_id: "ethereum-mainnet".to_string(),
                 instrument_id: "usdc.wallet.ethereum-mainnet".to_string(),
-                position_kind: PositionSemantics::LendingDeposit,
+                position_kind: PositionKind::LendingDeposit,
                 venue_id: None,
                 discriminator: Some("aave_v3.usdc.collateral.ethereum-mainnet".to_string()),
             },
@@ -942,7 +868,7 @@ mod tests {
 
     #[tokio::test]
     async fn debt_runtime_emits_debt_kind_metadata_and_values() {
-        let adapter = AaveDebtObservationRuntimeAdapter;
+        let adapter = AaveDebtDispatchObservationRuntimeAdapter;
         let mut io = TestIo;
         let binding = CompiledObservationBinding {
             binding_id: "binding.aave.debt".to_string(),
@@ -950,7 +876,7 @@ mod tests {
                 subject_id: "wallet_main".to_string(),
                 network_view_id: "ethereum-mainnet".to_string(),
                 instrument_id: "usdc.wallet.ethereum-mainnet".to_string(),
-                position_kind: PositionSemantics::LendingDebt,
+                position_kind: PositionKind::LendingDebt,
                 venue_id: None,
                 discriminator: Some("aave_v3.usdc.debt.ethereum-mainnet".to_string()),
             },
