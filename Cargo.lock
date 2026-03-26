@@ -1896,7 +1896,6 @@ dependencies = [
  "mfm-stream-store-postgres",
  "predicates",
  "rand 0.9.1",
- "reqwest",
  "serde",
  "serde_json",
  "tempfile",
@@ -1977,11 +1976,9 @@ dependencies = [
 name = "mfm-collectors-btc-jsonrpc-http"
 version = "0.1.0"
 dependencies = [
- "async-trait",
  "reqwest",
  "serde",
  "serde_json",
- "tokio",
  "tracing",
 ]
 
@@ -2294,7 +2291,6 @@ name = "mfm-op-portfolio-tracker"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "mfm-evm-runtime",
  "mfm-machine",
  "mfm-sdk",
  "mfm-state-aave-v3",
@@ -2382,8 +2378,6 @@ dependencies = [
  "mfm-state-portfolio",
  "mfm-state-symbol",
  "mfm-state-wallet",
- "num-bigint",
- "num-traits",
  "serde",
  "serde_json",
  "thiserror",
@@ -2449,35 +2443,23 @@ dependencies = [
 name = "mfm-state-symbol"
 version = "0.1.0"
 dependencies = [
- "alloy-primitives",
- "async-trait",
- "mfm-collectors-rpc-control",
  "mfm-evm-core",
- "mfm-evm-runtime",
  "mfm-machine",
- "mfm-state-common",
- "mfm-state-wallet",
- "num-bigint",
- "num-traits",
  "serde",
  "serde_json",
  "thiserror",
- "tokio",
 ]
 
 [[package]]
 name = "mfm-state-wallet"
 version = "0.1.0"
 dependencies = [
- "async-trait",
  "bs58",
  "mfm-evm-core",
  "mfm-machine",
- "mfm-state-common",
  "serde",
  "serde_json",
  "thiserror",
- "tokio",
 ]
 
 [[package]]
