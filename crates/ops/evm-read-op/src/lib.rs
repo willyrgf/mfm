@@ -45,8 +45,8 @@ fn sdk_err(code: &'static str, message: &'static str) -> SdkError {
     errors::sdk_error(code, ErrorCategory::Unknown, false, message)
 }
 
-fn ctx_key(op_path: &OpPath, suffix: &'static str) -> ContextKey {
-    ContextKey(format!("{}.{}", op_path.0, suffix))
+fn ctx_key(suffix: &'static str) -> ContextKey {
+    ContextKey(suffix.to_string())
 }
 
 fn default_true() -> bool {
@@ -126,7 +126,7 @@ impl Operation for EvmReadOp {
                     cfg.network_id.clone(),
                     "eth_chainId",
                     serde_json::json!([]),
-                    ctx_key(&op_path, "chain_id"),
+                    ctx_key("chain_id"),
                 )
                 .with_control_scope(cfg.control_scope.clone()),
             );
@@ -142,7 +142,7 @@ impl Operation for EvmReadOp {
                     cfg.network_id.clone(),
                     "eth_blockNumber",
                     serde_json::json!([]),
-                    ctx_key(&op_path, "block_number"),
+                    ctx_key("block_number"),
                 )
                 .with_control_scope(cfg.control_scope.clone()),
             );

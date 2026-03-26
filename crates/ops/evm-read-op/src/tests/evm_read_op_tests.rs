@@ -198,6 +198,16 @@ async fn at_live_then_replay_determinism() {
     }
 
     let v = ctx.dump().expect("dump");
+    assert_eq!(
+        v.get("evm_read.main.out.chain_id")
+            .and_then(serde_json::Value::as_u64),
+        Some(1)
+    );
+    assert_eq!(
+        v.get("evm_read.main.out.block_number")
+            .and_then(serde_json::Value::as_u64),
+        Some(123)
+    );
     let computed = artifact_id_for_json(&v).expect("hash");
     assert_eq!(computed, final_snapshot_id);
 
