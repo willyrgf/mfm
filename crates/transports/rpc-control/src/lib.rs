@@ -1764,6 +1764,10 @@ impl LiveIoTransport for RpcControlTransport {
 mod tests {
     use super::*;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio::sync::oneshot;
 
     use mfm_stream_store_mem::MemStreamStore;
 
@@ -1836,6 +1840,122 @@ mod tests {
                 preferred_order,
             },
             config_error: None,
+        }
+    }
+
+    #[derive(Clone)]
+    struct StubBitcoinServer {
+        url: String,
+        shutdown: Option<oneshot::Sender<()>>,
+    }
+
+    impl Drop for StubBitcoinServer {
+        fn drop(&mut self) {
+            if let Some(tx) = self.shutdown.take() {
+                let _ = tx.send(());
+            }
+        }
+    }
+
+    fn header_end(buf: &[u8]) -> Option<usize> {
+        buf.windows(4).position(|w| w == b"\r\n\r\n")
+    }
+
+    fn parse_content_length(header: &str) -> usize {
+        for line in header.lines() {
+            let lc = line.to_ascii_lowercase();
+            if let Some(rest) = lc.strip_prefix("content-length:") {
+                return rest.trim().parse::<usize>().unwrap_or(0);
+            }
+        }
+        0
+    }
+
+    async fn handle_stub_connection(
+        mut stream: TcpStream,
+        responses: Arc<Vec<serde_json::Value>>,
+        calls: Arc<AtomicUsize>,
+    ) -> Result<(), ()> {
+        let mut buf = Vec::new();
+        let mut temp = [0u8; 1024];
+        let mut total_needed: Option<usize> = None;
+
+        loop {
+            let read_n = stream.read(&mut temp).await.map_err(|_| ())?;
+            if read_n == 0 {
+                return Err(());
+            }
+            buf.extend_from_slice(&temp[..read_n]);
+
+            if let Some(end) = header_end(&buf) {
+                if total_needed.is_none() {
+                    let header = std::str::from_utf8(&buf[..end]).map_err(|_| ())?;
+                    let content_len = parse_content_length(header);
+                    total_needed = Some(end + 4 + content_len);
+                }
+                if let Some(needed) = total_needed {
+                    if buf.len() >= needed {
+                        break;
+                    }
+                }
+            }
+        }
+
+        let call_index = calls.fetch_add(1, Ordering::SeqCst);
+        let response = responses
+            .get(call_index)
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({ "jsonrpc": "2.0", "id": 1, "result": {} }));
+        let body = response.to_string();
+        let status_line = "HTTP/1.1 200 OK\r\n".to_string();
+        let headers = format!(
+            "content-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+            body.len()
+        );
+        stream
+            .write_all(status_line.as_bytes())
+            .await
+            .map_err(|_| ())?;
+        stream.write_all(headers.as_bytes()).await.map_err(|_| ())?;
+        stream.write_all(body.as_bytes()).await.map_err(|_| ())?;
+        Ok(())
+    }
+
+    async fn start_stub_btc_server(responses: Vec<serde_json::Value>) -> StubBitcoinServer {
+        let responses = Arc::new(responses);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let addr = listener.local_addr().expect("local addr");
+
+        let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
+        let responses_for_loop = Arc::clone(&responses);
+        let calls_for_loop = Arc::clone(&calls);
+
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = &mut shutdown_rx => {
+                        break;
+                    }
+                    accepted = listener.accept() => {
+                        let Ok((stream, _)) = accepted else {
+                            break;
+                        };
+                        let responses = Arc::clone(&responses_for_loop);
+                        let calls = Arc::clone(&calls_for_loop);
+                        tokio::spawn(async move {
+                            let _ = handle_stub_connection(stream, responses, calls).await;
+                        });
+                    }
+                }
+            }
+        });
+
+        StubBitcoinServer {
+            url: format!("http://127.0.0.1:{}/", addr.port()),
+            shutdown: Some(shutdown_tx),
         }
     }
 
@@ -2126,5 +2246,63 @@ mod tests {
             prepared.available_source_ids,
             vec!["arb_primary".to_string()]
         );
+    }
+
+    #[tokio::test]
+    async fn bitcoin_scan_utxos_rejects_anchor_mismatch_after_scan() {
+        let expected_height = 840_000_u64;
+        let expected_hash = "0000000000000000000320283a032748cef8227873ff4872689bf23f1cda83a5";
+        let server = start_stub_btc_server(vec![
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "chain": "main",
+                    "blocks": expected_height,
+                    "bestblockhash": expected_hash,
+                }
+            }),
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "success": true,
+                    "height": expected_height + 1,
+                    "bestblock": "000000000000000000000000000000000000000000000000000000000000000000",
+                    "total_amount": 0.0,
+                }
+            }),
+        ])
+        .await;
+
+        let client = BtcJsonRpcClient::new(BtcJsonRpcConfig {
+            rpc_url: server.url.clone(),
+            rpc_user: None,
+            rpc_password: None,
+        })
+        .expect("test config should create client");
+
+        let mut transport = RpcControlTransport {
+            executor: None,
+            btc_client: Some(Ok(client)),
+            control_plane_store: ControlPlaneStore::PostgresEnv { store: None },
+            catalog: BootstrapCatalog {
+                sources: Vec::new(),
+                preferred_order: Vec::new(),
+            },
+            config_error: None,
+        };
+
+        let err = transport
+            .handle_bitcoin_scan_utxos(
+                "bitcoin-mainnet",
+                "bc1qqqexample",
+                expected_height,
+                expected_hash,
+            )
+            .await
+            .expect_err("scan with changed anchor should be rejected");
+
+        assert_eq!(io_error_code(&err), "btc_rpc_scan_utxos_anchor_mismatch");
     }
 }
