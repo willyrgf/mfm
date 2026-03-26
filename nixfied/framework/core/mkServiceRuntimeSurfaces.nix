@@ -142,7 +142,33 @@ let
     SLOT_RUNTIME_DIR_BASE="${model.runtime.directories.base}"
 
     normalize_slot_runtime_token() {
-      printf '%s' "$1" | ${pkgs.coreutils}/bin/tr '[:lower:].-:/ ' '[:upper:]______' | ${pkgs.coreutils}/bin/tr -c 'A-Z0-9_' '_'
+      local value="$1"
+      local normalized=""
+      local char=""
+      local idx=0
+
+      value="''${value//./_}"
+      value="''${value//-/_}"
+      value="''${value//:/_}"
+      value="''${value//\//_}"
+      value="''${value// /_}"
+      value="''${value^^}"
+
+      # Keep token normalization in bash so slot-info matches the Nix-side
+      # normalizeToken logic on both GNU and BSD userlands.
+      for ((idx = 0; idx < ''${#value}; idx++)); do
+        char="''${value:idx:1}"
+        case "$char" in
+          [A-Z]|[0-9]|_)
+            normalized+="$char"
+            ;;
+          *)
+            normalized+="_"
+            ;;
+        esac
+      done
+
+      printf '%s' "$normalized"
     }
 
     resolve_slot_runtime_context() {
