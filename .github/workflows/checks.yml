@@ -39,7 +39,6 @@ jobs:
     name: Nixfied CI (full, ${{ matrix.runner }})
     runs-on: ${{ matrix.runner }}
     env:
-      CI_ARTIFACTS_ROOT: ${{ runner.temp }}/mfm-ci-artifacts
       LOG_TEE: "1"
       LOG_LEVEL: "debug"
       OUTPUT_MODE: "both"
@@ -72,6 +71,8 @@ jobs:
           key: nix-${{ runner.os }}-${{ runner.arch }}-${{ github.ref_name }}-${{ hashFiles('flake.lock', 'flake.nix', 'Cargo.lock', '.github/workflows/checks.yml', 'nixfied/**/*.nix') }}
 
       - name: Nixfied CI (full) (skip helios)
+        env:
+          CI_ARTIFACTS_ROOT: ${{ runner.temp }}/mfm-ci-artifacts
         run: |
           SKIP_HELIOS=1 nix run .#ci $NIX_CMD_OPTS -- --full --summary
 
