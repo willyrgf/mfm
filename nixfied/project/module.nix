@@ -30,6 +30,8 @@ let
     pkgs.nix
   ];
 
+  opensslBuildPackage = if pkgs.stdenv.isDarwin then pkgs.libressl else pkgs.openssl;
+
   commonRuntimeInputs = coreRuntimeInputs ++ (conf.tooling.runtimePackages or [ ]);
 
   solcPackage = if pkgs ? solc then pkgs.solc else null;
@@ -228,6 +230,9 @@ let
   # temp paths across repeated runs.
   ciCargoRustEnv = (builtins.removeAttrs sharedCargoRustEnv [ "RUSTC_WRAPPER" ]) // {
     CARGO_BUILD_JOBS = "1";
+    OPENSSL_DIR = "${opensslBuildPackage}";
+    OPENSSL_LIB_DIR = "${opensslBuildPackage}/lib";
+    OPENSSL_INCLUDE_DIR = "${opensslBuildPackage}/include";
   };
   ciArtifactsRoot =
     conf.process.artifactsRoot or "\${XDG_CACHE_HOME:-$HOME/.cache}/nixfied-artifacts-${project.id}";
