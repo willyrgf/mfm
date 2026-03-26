@@ -2151,8 +2151,38 @@ mod tests {
                     op_version: "v1".to_string(),
                     op_config: serde_json::json!({}),
                 }))
+            .await
+            .expect_err("planner-internal op must not be publicly startable");
+
+            assert_eq!(err.class, ErrorClass::BadRequest);
+            assert_eq!(err.code, "op_not_public");
+            assert!(is_portfolio_tracker_internal_op_id(op_id));
+        }
+    }
+
+    #[tokio::test]
+    async fn start_run_rejects_portfolio_internal_ops_in_pipeline() {
+        let services = test_services(make_engine_bundle());
+
+        for op_id in portfolio_tracker_internal_op_ids() {
+            let pipeline = Pipeline {
+                machine_id: MachineId("portfolio_tracker".to_string()),
+                pipeline_version: "v1".to_string(),
+                steps: vec![PipelineStep {
+                    step_id: StepId("main".to_string()),
+                    op_id: OpId::must_new((*op_id).to_string()),
+                    op_version: "v1".to_string(),
+                    op_config: serde_json::json!({}),
+                }],
+            };
+            let err = services
+                .start_run(RunsStartRequest::Pipeline(PipelineStartRequest {
+                    pipeline,
+                    input: serde_json::json!({}),
+                    run_config: None,
+                }))
                 .await
-                .expect_err("planner-internal op must not be publicly startable");
+                .expect_err("internal pipeline step should be rejected");
 
             assert_eq!(err.class, ErrorClass::BadRequest);
             assert_eq!(err.code, "op_not_public");
