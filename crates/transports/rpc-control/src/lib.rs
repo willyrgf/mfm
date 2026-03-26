@@ -1763,8 +1763,8 @@ impl LiveIoTransport for RpcControlTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
     use tokio::sync::oneshot;
@@ -1843,7 +1843,6 @@ mod tests {
         }
     }
 
-    #[derive(Clone)]
     struct StubBitcoinServer {
         url: String,
         shutdown: Option<oneshot::Sender<()>>,

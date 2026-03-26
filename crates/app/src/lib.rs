@@ -2151,8 +2151,8 @@ mod tests {
                     op_version: "v1".to_string(),
                     op_config: serde_json::json!({}),
                 }))
-            .await
-            .expect_err("planner-internal op must not be publicly startable");
+                .await
+                .expect_err("planner-internal op must not be publicly startable");
 
             assert_eq!(err.class, ErrorClass::BadRequest);
             assert_eq!(err.code, "op_not_public");

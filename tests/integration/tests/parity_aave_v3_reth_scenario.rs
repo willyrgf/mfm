@@ -32,6 +32,10 @@ use tower::ServiceExt;
 
 const RETH_DEV_ACCOUNT0_PRIVATE_KEY: &str =
     "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
+const RETH_DEV_ACCOUNT1_PRIVATE_KEY: &str =
+    "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
+const RETH_DEV_ACCOUNT2_PRIVATE_KEY: &str =
+    "0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a";
 
 const SCENARIO_REPORT_KIND: &str = "aave_v3_reth_scenario_report_v1";
 const DEPLOY_MANIFEST_KIND: &str = "aave_v3_deploy_manifest_v1";
@@ -893,7 +897,7 @@ fn phase_b_pipeline(
                     "network_id": NETWORK_ID,
                     "control_scope": control_scope,
                     "from": supplier.clone(),
-                    "signing_key_env": "MFM_AAVE_V3_PARITY_DEPLOY_SIGNING_KEY",
+                    "signing_key_env": "MFM_AAVE_V3_PARITY_SUPPLIER_SIGNING_KEY",
                     "contract_address": usdc_address.clone(),
                     "calls": [{
                         "function": "approve",
@@ -914,7 +918,7 @@ fn phase_b_pipeline(
                     "network_id": NETWORK_ID,
                     "control_scope": control_scope,
                     "from": borrower.clone(),
-                    "signing_key_env": "MFM_AAVE_V3_PARITY_DEPLOY_SIGNING_KEY",
+                    "signing_key_env": "MFM_AAVE_V3_PARITY_BORROWER_SIGNING_KEY",
                     "contract_address": wbtc_address.clone(),
                     "calls": [{
                         "function": "approve",
@@ -935,7 +939,7 @@ fn phase_b_pipeline(
                     "network_id": NETWORK_ID,
                     "control_scope": control_scope,
                     "from": supplier.clone(),
-                    "signing_key_env": "MFM_AAVE_V3_PARITY_DEPLOY_SIGNING_KEY",
+                    "signing_key_env": "MFM_AAVE_V3_PARITY_SUPPLIER_SIGNING_KEY",
                     "contract_address": pool_address.clone(),
                     "calls": [{
                         "function": "supply",
@@ -961,7 +965,7 @@ fn phase_b_pipeline(
                     "network_id": NETWORK_ID,
                     "control_scope": control_scope,
                     "from": borrower.clone(),
-                    "signing_key_env": "MFM_AAVE_V3_PARITY_DEPLOY_SIGNING_KEY",
+                    "signing_key_env": "MFM_AAVE_V3_PARITY_BORROWER_SIGNING_KEY",
                     "contract_address": pool_address.clone(),
                     "calls": [{
                         "function": "supply",
@@ -987,7 +991,7 @@ fn phase_b_pipeline(
                     "network_id": NETWORK_ID,
                     "control_scope": control_scope,
                     "from": borrower.clone(),
-                    "signing_key_env": "MFM_AAVE_V3_PARITY_DEPLOY_SIGNING_KEY",
+                    "signing_key_env": "MFM_AAVE_V3_PARITY_BORROWER_SIGNING_KEY",
                     "contract_address": pool_address.clone(),
                     "calls": [{
                         "function": "borrow",
@@ -1084,6 +1088,14 @@ async fn parity_aave_v3_reth_scenario_pipeline() {
     std::env::set_var(
         "MFM_AAVE_V3_PARITY_DEPLOY_SIGNING_KEY",
         RETH_DEV_ACCOUNT0_PRIVATE_KEY,
+    );
+    std::env::set_var(
+        "MFM_AAVE_V3_PARITY_SUPPLIER_SIGNING_KEY",
+        RETH_DEV_ACCOUNT1_PRIVATE_KEY,
+    );
+    std::env::set_var(
+        "MFM_AAVE_V3_PARITY_BORROWER_SIGNING_KEY",
+        RETH_DEV_ACCOUNT2_PRIVATE_KEY,
     );
     std::env::set_var("MFM_AAVE_V3_ORIGIN_SUPPLIER", &actors.supplier);
     std::env::set_var("MFM_AAVE_V3_ORIGIN_BORROWER", &actors.borrower);

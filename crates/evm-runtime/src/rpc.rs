@@ -513,6 +513,7 @@ pub async fn send_signed_create_transaction_with_nonce_for_network(
 }
 
 /// Signs and submits a contract call transaction for the supplied managed network and scope using the next pending nonce.
+#[allow(clippy::too_many_arguments)]
 pub async fn send_signed_call_transaction_for_network(
     client: &mut EvmIoClient<'_>,
     network_id: &str,

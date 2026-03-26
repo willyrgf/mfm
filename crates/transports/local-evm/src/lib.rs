@@ -557,6 +557,7 @@ fn sign_legacy_create_raw_tx(
     Ok(bytes_to_hex_prefixed(&signed))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn sign_legacy_call_raw_tx(
     signing_key: &SigningKey,
     chain_id: u64,
