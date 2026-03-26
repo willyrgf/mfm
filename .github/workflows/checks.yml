@@ -39,6 +39,7 @@ jobs:
     name: Nixfied CI (full, ${{ matrix.runner }})
     runs-on: ${{ matrix.runner }}
     env:
+      CI_ARTIFACTS_ROOT: ${{ runner.temp }}/mfm-ci-artifacts
       LOG_TEE: "1"
       LOG_LEVEL: "debug"
       OUTPUT_MODE: "both"
@@ -78,47 +79,11 @@ jobs:
         run: |
           nix run .#mfm_cli $NIX_CMD_OPTS -- --help
 
-      - name: Debug CI artifacts (on failure)
-        if: failure()
-        run: |
-          echo "Artifacts root: /tmp/ci-artifacts"
-          ls -la /tmp/ci-artifacts || true
-          if [ -d /tmp/ci-artifacts/latest ]; then
-            echo "Latest artifact files:"
-            find /tmp/ci-artifacts/latest -maxdepth 2 -type f | sort || true
-            for log in ci-output.log tests.log; do
-              path="/tmp/ci-artifacts/latest/$log"
-              if [ -f "$path" ]; then
-                echo ""
-                echo "---- tail: $path ----"
-                tail -n 200 "$path" || true
-              fi
-            done
-          fi
-
-          NIXFIED_ARTIFACTS="${XDG_CACHE_HOME:-$HOME/.cache}/nixfied-runtime/mfm/artifacts"
-          echo "Artifacts root: $NIXFIED_ARTIFACTS"
-          ls -la "$NIXFIED_ARTIFACTS" || true
-          latest_run="$(find "$NIXFIED_ARTIFACTS" -maxdepth 1 -type d -name 'run-*' 2>/dev/null | sort | tail -n 1)"
-          if [ -n "$latest_run" ] && [ -d "$latest_run" ]; then
-            echo "Latest run artifacts: $latest_run"
-            find "$latest_run" -maxdepth 2 -type f | sort || true
-            for log in summary.json ci-output.log tests.log postgres-service.log minio-service.log reth-service.log; do
-              path="$latest_run/$log"
-              if [ -f "$path" ]; then
-                echo ""
-                echo "---- tail: $path ----"
-                tail -n 200 "$path" || true
-              fi
-            done
-          fi
-
       - name: Upload CI artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: ci-artifacts-full-${{ matrix.runner }}
           path: |
-            /tmp/ci-artifacts
-            ~/.cache/nixfied-runtime/mfm/artifacts
+            ${{ runner.temp }}/mfm-ci-artifacts
           if-no-files-found: ignore

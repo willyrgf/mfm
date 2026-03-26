@@ -410,7 +410,9 @@ let
                   continue
                 fi
 
-                output_file="$TMPDIR/service-set-${serviceSet.name}-${operation}-''${service_name}.log"
+                log_dir="''${CI_ARTIFACTS_DIR:-''${TMPDIR:-/tmp}}"
+                mkdir -p "$log_dir"
+                output_file="$log_dir/service-set-${serviceSet.name}-${operation}-''${service_name}.log"
                 if "$service_program_path" >"$output_file" 2>&1; then
                   cat "$output_file"
                 else
