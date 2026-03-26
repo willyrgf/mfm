@@ -236,9 +236,16 @@ let
     OPENSSL_LIB_DIR = "${opensslLibPackage}/lib";
     OPENSSL_INCLUDE_DIR = "${opensslDevPackage}/include";
   };
+  ciClippyCargoEnv = ciCargoRustEnv // {
+    MFM_CI_CARGO_CACHE_SCOPE = "clippy-ci";
+  };
+  ciNextestCargoEnv = ciCargoRustEnv // {
+    MFM_CI_CARGO_CACHE_SCOPE = "nextest-ci";
+  };
   ciArtifactsRoot =
     conf.process.artifactsRoot or "\${XDG_CACHE_HOME:-$HOME/.cache}/nixfied-artifacts-${project.id}";
   ciShellAppContractsTimeoutSec = 300;
+  parityNextestArchiveFileName = "parity-nextest.tar.zst";
   sharedStatePolicy = {
     workspace = {
       mode = "literal";
@@ -316,9 +323,11 @@ let
   # within .#ci. Clippy still uses its own driver, so reuse remains partial.
   cargoCiClippyCmd = "cargo clippy --profile ci --workspace --lib --examples --tests --benches --all-features -- -D warnings";
   cargoNextestCiCmd = "cargo nextest run --cargo-profile ci";
+  cargoNextestArchiveCiCmd = "cargo nextest archive --cargo-profile ci";
   cargoNextestWorkspaceCiCmd = "${cargoNextestCiCmd} --workspace";
   parityNextestArgs = "-p mfm-integration-tests --features parity-tests -p mfm --features parity-tests";
   parityNextestCmd = "${cargoNextestCiCmd} ${parityNextestArgs}";
+  parityNextestArchiveCmd = "${cargoNextestArchiveCiCmd} ${parityNextestArgs}";
 
   ciStepPreamble = ''
     artifacts_dir="''${CI_ARTIFACTS_DIR:-${ciArtifactsRoot}}"
@@ -330,12 +339,17 @@ let
     run_id_component="$(printf '%s' "$run_id_component" | tr './:' '__')"
     task_id_component="''${NIXFIED_TASK_ID:-unknown-task}"
     task_id_component="$(printf '%s' "$task_id_component" | tr './:' '__')"
+    cargo_cache_scope="''${MFM_CI_CARGO_CACHE_SCOPE:-$task_id_component}"
+    cargo_cache_scope="$(printf '%s' "$cargo_cache_scope" | tr './:' '__')"
     cache_root="''${TMPDIR:-/tmp}/mfm-ci-cache/$run_id_component"
-    # Keep Cargo cache stable per CI task to prevent parallel CI units
-    # from sharing intermediate object files.
+    cargo_artifacts_root="''${CI_ARTIFACTS_DIR:-$cache_root}"
+    mkdir -p "$cargo_artifacts_root"
+    # Nixfied keeps CI_ARTIFACTS_DIR stable across a managed workflow and its
+    # nested workflowRef tasks, so compatible CI steps can opt into a shared
+    # Cargo target scope without widening reuse across independent runs.
     export CARGO_HOME="''${CARGO_HOME:-$cache_root/cargo-home}"
     mkdir -p "$CARGO_HOME"
-    export CARGO_TARGET_DIR="''${CARGO_TARGET_DIR:-$cache_root/cargo-target/$task_id_component}"
+    export CARGO_TARGET_DIR="''${CARGO_TARGET_DIR:-$cargo_artifacts_root/cargo-target/$cargo_cache_scope}"
     mkdir -p "$CARGO_TARGET_DIR"
 
     run_with_log() {
@@ -408,6 +422,27 @@ let
     export HELIOS_EXECUTION_RPC_URL=""
     export HELIOS_CONSENSUS_RPC_URL=""
     export HELIOS_CHECKPOINT=""
+  '';
+  parityNextestArchiveShell = ''
+    parity_nextest_archive_file="''${MFM_CI_PARITY_NEXTEST_ARCHIVE_FILE:-$artifacts_dir/${parityNextestArchiveFileName}}"
+    parity_nextest_extract_root="''${MFM_CI_PARITY_NEXTEST_EXTRACT_ROOT:-$artifacts_dir/parity-nextest-extract}"
+
+    require_parity_nextest_archive() {
+      if [ -f "$parity_nextest_archive_file" ]; then
+        return 0
+      fi
+
+      echo "ERROR: missing parity nextest archive path=$parity_nextest_archive_file" >&2
+      echo "INFO: run task.ci.parity-compile first to produce the shared parity archive" >&2
+      return 1
+    }
+
+    parity_nextest_extract_dir_for_task() {
+      local task_id="''${NIXFIED_TASK_ID:-unknown-task}"
+      local task_component
+      task_component="$(printf '%s' "$task_id" | tr './:' '__')"
+      printf '%s/%s' "$parity_nextest_extract_root" "$task_component"
+    }
   '';
   ciServicesRuntimeInputs = commonRuntimeInputs ++ [
     postgresPackage
@@ -554,6 +589,7 @@ let
     {
       taskId,
       needs ? [ ],
+      locks ? [ ],
       skipIfMissingEnv ? [ ],
       requirements ? {
         services = [ ];
@@ -563,9 +599,9 @@ let
       inherit
         taskId
         needs
+        locks
         skipIfMissingEnv
         ;
-      locks = [ ];
       requirements = requirements // {
         services = lib.unique (requirements.services or [ ]);
       };
@@ -1302,7 +1338,7 @@ in
             "quality"
           ];
           runtimeInputs = rustRuntimeInputs;
-          env = ciCargoRustEnv;
+          env = ciClippyCargoEnv;
           command = ''
             set -euo pipefail
             ${ciStepPreamble}
@@ -1439,7 +1475,7 @@ in
             "tests"
           ];
           runtimeInputs = rustRuntimeInputs;
-          env = ciCargoRustEnv;
+          env = ciNextestCargoEnv;
           command = ''
             set -euo pipefail
             ${ciStepPreamble}
@@ -1568,15 +1604,16 @@ in
             "parity"
           ];
           runtimeInputs = rustRuntimeInputs;
-          env = ciCargoRustEnv;
+          env = ciNextestCargoEnv;
           command = ''
             set -euo pipefail
             ${ciStepPreamble}
 
+            archive_file="''${MFM_CI_PARITY_NEXTEST_ARCHIVE_FILE:-$artifacts_dir/${parityNextestArchiveFileName}}"
             log_file="$artifacts_dir/parity-compile.log"
             echo "INFO: running ci step=parity-compile"
-            run_with_log "$log_file" ${parityNextestCmd} --no-run
-            echo "OK: ci step passed step=parity-compile log=$log_file"
+            run_with_log "$log_file" ${parityNextestArchiveCmd} --archive-file "$archive_file"
+            echo "OK: ci step passed step=parity-compile archive=$archive_file log=$log_file"
           '';
         };
 
@@ -1589,15 +1626,19 @@ in
             "parity"
           ];
           runtimeInputs = rustRuntimeInputs;
-          env = ciCargoRustEnv;
+          env = ciNextestCargoEnv;
           command = ''
             set -euo pipefail
             ${ciStepPreamble}
             ${ciParityServiceEnv}
+            ${parityNextestArchiveShell}
 
             log_file="$artifacts_dir/parity-rest-api-smoke.log"
-            echo "INFO: running ci step=parity-rest-api-smoke"
-            run_with_log "$log_file" ${parityNextestCmd} --jobs 1 --test parity_event_store_postgres_contract --test parity_artifact_store_s3_contract --test parity_rest_api_postgres_s3_smoke
+            extract_dir="$(parity_nextest_extract_dir_for_task)"
+            mkdir -p "$extract_dir"
+            require_parity_nextest_archive
+            echo "INFO: running ci step=parity-rest-api-smoke archive=$parity_nextest_archive_file"
+            run_with_log "$log_file" cargo nextest run --archive-file "$parity_nextest_archive_file" --extract-to "$extract_dir" --workspace-remap "$MFM_WORKSPACE_ROOT" --jobs 1 --test parity_event_store_postgres_contract --test parity_artifact_store_s3_contract --test parity_rest_api_postgres_s3_smoke
             echo "OK: ci step passed step=parity-rest-api-smoke log=$log_file"
           '';
         };
@@ -1706,15 +1747,19 @@ in
             "parity"
           ];
           runtimeInputs = rustRuntimeInputs;
-          env = ciCargoRustEnv;
+          env = ciNextestCargoEnv;
           command = ''
             set -euo pipefail
             ${ciStepPreamble}
             ${ciParityServiceEnv}
+            ${parityNextestArchiveShell}
 
             log_file="$artifacts_dir/parity-evm-reth.log"
-            echo "INFO: running ci step=parity-evm-reth"
-            run_with_log "$log_file" ${parityNextestCmd} --jobs 1 --test parity_keystore_reth_tx_send --test evm_rpc_pool_failover --test evm_rpc_getlogs_chunking --test parity_rest_api_evm_reth_pipeline --test parity_portfolio_tracker_reth_mock_erc20 --test parity_portfolio_tracker_reth_snapshot
+            extract_dir="$(parity_nextest_extract_dir_for_task)"
+            mkdir -p "$extract_dir"
+            require_parity_nextest_archive
+            echo "INFO: running ci step=parity-evm-reth archive=$parity_nextest_archive_file"
+            run_with_log "$log_file" cargo nextest run --archive-file "$parity_nextest_archive_file" --extract-to "$extract_dir" --workspace-remap "$MFM_WORKSPACE_ROOT" --jobs 1 --test parity_keystore_reth_tx_send --test evm_rpc_pool_failover --test evm_rpc_getlogs_chunking --test parity_rest_api_evm_reth_pipeline --test parity_portfolio_tracker_reth_mock_erc20 --test parity_portfolio_tracker_reth_snapshot
             echo "OK: ci step passed step=parity-evm-reth log=$log_file"
           '';
         };
@@ -1728,15 +1773,19 @@ in
             "parity"
           ];
           runtimeInputs = rustRuntimeInputs;
-          env = ciCargoRustEnv;
+          env = ciNextestCargoEnv;
           command = ''
             set -euo pipefail
             ${ciStepPreamble}
             ${ciParityServiceEnv}
+            ${parityNextestArchiveShell}
 
             log_file="$artifacts_dir/parity-aave-v3-reth.log"
-            echo "INFO: running ci step=parity-aave-v3-reth"
-            run_with_log "$log_file" ${parityNextestCmd} --test parity_aave_v3_reth_scenario
+            extract_dir="$(parity_nextest_extract_dir_for_task)"
+            mkdir -p "$extract_dir"
+            require_parity_nextest_archive
+            echo "INFO: running ci step=parity-aave-v3-reth archive=$parity_nextest_archive_file"
+            run_with_log "$log_file" cargo nextest run --archive-file "$parity_nextest_archive_file" --extract-to "$extract_dir" --workspace-remap "$MFM_WORKSPACE_ROOT" --test parity_aave_v3_reth_scenario
             echo "OK: ci step passed step=parity-aave-v3-reth log=$log_file"
           '';
         };
@@ -1750,15 +1799,19 @@ in
             "parity"
           ];
           runtimeInputs = rustRuntimeInputs;
-          env = ciCargoRustEnv;
+          env = ciNextestCargoEnv;
           command = ''
             set -euo pipefail
             ${ciStepPreamble}
             ${ciParityServiceEnv}
+            ${parityNextestArchiveShell}
 
             log_file="$artifacts_dir/parity-postgres-state-events-audit.log"
-            echo "INFO: running ci step=parity-postgres-state-events-audit"
-            run_with_log "$log_file" ${parityNextestCmd} --test parity_postgres_state_events_audit
+            extract_dir="$(parity_nextest_extract_dir_for_task)"
+            mkdir -p "$extract_dir"
+            require_parity_nextest_archive
+            echo "INFO: running ci step=parity-postgres-state-events-audit archive=$parity_nextest_archive_file"
+            run_with_log "$log_file" cargo nextest run --archive-file "$parity_nextest_archive_file" --extract-to "$extract_dir" --workspace-remap "$MFM_WORKSPACE_ROOT" --test parity_postgres_state_events_audit
             echo "OK: ci step passed step=parity-postgres-state-events-audit log=$log_file"
           '';
         };
