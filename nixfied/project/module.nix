@@ -1751,13 +1751,46 @@ in
               fi
             }
 
+            postgres_test_database_ready() {
+              psql -h 127.0.0.1 -p "$POSTGRES_PORT" -U postgres -d "$PGDATABASE" -Atqc 'select 1;' >/dev/null 2>&1
+            }
+
+            ensure_postgres_test_db() {
+              if run_service_hook SVC_POSTGRES_READY >/dev/null 2>&1 && postgres_test_database_ready; then
+                echo "OK: reusing postgres with ready test database port=$POSTGRES_PORT database=$PGDATABASE"
+                return 0
+              fi
+
+              if run_service_hook SVC_POSTGRES_READY >/dev/null 2>&1; then
+                echo "INFO: reusing postgres on port=$POSTGRES_PORT and ensuring database=$PGDATABASE"
+                run_logged_hook "postgres-setup-db" "$artifacts_dir/postgres-setup-db.log" run_service_hook SVC_POSTGRES_SETUP_DB
+
+                if postgres_test_database_ready; then
+                  echo "OK: postgres test database ready via reuse port=$POSTGRES_PORT database=$PGDATABASE"
+                  return 0
+                fi
+
+                echo "ERROR: postgres reuse path did not yield a ready test database port=$POSTGRES_PORT database=$PGDATABASE" >&2
+                exit 1
+              fi
+
+              run_logged_hook "postgres-full-start-test" "$artifacts_dir/postgres-full-start.log" run_service_hook SVC_POSTGRES_FULL_START_TEST
+
+              if ! postgres_test_database_ready; then
+                echo "ERROR: postgres startup path did not yield a ready test database port=$POSTGRES_PORT database=$PGDATABASE" >&2
+                exit 1
+              fi
+            }
+
+            require_hook "SVC_POSTGRES_READY"
+            require_hook "SVC_POSTGRES_SETUP_DB"
             require_hook "SVC_POSTGRES_FULL_START_TEST"
             require_hook "SVC_MINIO_FULL_START_TEST"
             require_hook "SVC_MINIO_BUCKET_ENSURE"
             require_hook "SVC_RETH_FULL_START_TEST"
             export MINIO_ROOT_USER="$AWS_ACCESS_KEY_ID"
             export MINIO_ROOT_PASSWORD="$AWS_SECRET_ACCESS_KEY"
-            run_logged_hook "postgres-full-start-test" "$artifacts_dir/postgres-full-start.log" run_service_hook SVC_POSTGRES_FULL_START_TEST
+            ensure_postgres_test_db
             run_logged_hook "minio-full-start-test" "$artifacts_dir/minio-full-start.log" run_service_hook SVC_MINIO_FULL_START_TEST
             run_logged_hook "reth-full-start-test" "$artifacts_dir/reth-full-start.log" run_service_hook SVC_RETH_FULL_START_TEST
 
@@ -2414,7 +2447,12 @@ in
           stages = [ ];
           preRun = {
             tasks = [ "task.ci.services-start" ];
-            serviceSets = [ ];
+            serviceSets = [
+              {
+                serviceSetId = "service-set.ci-parity";
+                operation = "stop";
+              }
+            ];
           };
           postRun = {
             tasks = [ ];
