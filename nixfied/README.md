@@ -63,6 +63,16 @@ Environment defaults:
 - `NIX_ENV=0`
 - `PROJECT_ENV=dev`
 
+Local build caches:
+
+- Cargo-backed tasks redirect mutable outputs into `CARGO_TARGET_DIR=$CI_ARTIFACTS_DIR/cargo-target` so builds do not write into the flake source under `/nix/store`.
+- Local Rust compile tasks and ephemeral `nix run .#ci` workflows enable `RUSTC_WRAPPER=sccache`.
+- Ephemeral runs pin `SCCACHE_DIR` to a stable host-side default at `${XDG_CACHE_HOME:-$HOME/.cache}/nixfied-runtime/<projectId>/sccache`, so compiler reuse survives across ephemeral roots.
+- Ephemeral runs restart the `sccache` daemon and bind its socket under the current ephemeral root, which prevents stale tempdir state from leaking across runs while keeping the cache contents reusable.
+- Set `SCCACHE_DIR` before invoking a task or workflow if you need to override the default compiler cache location.
+- Nix reuses local store outputs automatically when the flake lock and derivation hash match and the outputs are still present in `/nix/store`.
+- If you want locally built Nix outputs to survive garbage collection more aggressively, set `keep-outputs = true` and `keep-derivations = true` in the effective local `nix.conf`; on daemon installs that usually means the system or daemon config.
+
 Service configuration and selectors:
 
 - Configure services in `nixfied/project/conf.nix` under `services.<name>` (`enable`, `ports`, `sources`, `defaultSource`).

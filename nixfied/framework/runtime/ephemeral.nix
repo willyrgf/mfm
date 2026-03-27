@@ -356,6 +356,16 @@ let
       export ${projectIdUpper}_EPHEMERAL_ROOT=$(${mkEphemeralRoot})
       export ${projectIdUpper}_EPHEMERAL=1
 
+      if [ -z "''${SCCACHE_DIR:-}" ]; then
+        host_home="''${HOME:-$CALLER_ROOT}"
+        host_xdg_cache_home="''${XDG_CACHE_HOME:-$host_home/.cache}"
+        export SCCACHE_DIR="$host_xdg_cache_home/nixfied-runtime/${projectId}/sccache"
+      fi
+      if ! mkdir -p "$SCCACHE_DIR"; then
+        log_error "Unable to prepare sccache dir '$SCCACHE_DIR'"
+        exit 1
+      fi
+
       echo ""
       log_info "Ephemeral execution mode"
       log_info "Root: ${refEphRoot}"

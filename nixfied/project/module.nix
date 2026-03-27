@@ -160,6 +160,9 @@ let
       serviceName: isTruthySkipEnvValue (builtins.getEnv (serviceSkipEnvVarName serviceName))
     ) (builtins.attrNames conf.services)
   );
+  projectEnvToken = lib.toUpper (lib.replaceStrings [ "." "-" ] [ "_" "_" ] project.id);
+  projectEphemeralRootEnvVar = "${projectEnvToken}_EPHEMERAL_ROOT";
+  sccacheBinary = "${pkgs.sccache}/bin/sccache";
 
   # Auto-compute SKIP_<SERVICE> env vars from service config (mirrors operations.nix:106-114)
   serviceSkipEnvVars = lib.unique (
@@ -216,11 +219,14 @@ let
     "AWS_REGION"
     "AWS_DEFAULT_REGION"
     "AWS_EC2_METADATA_DISABLED"
+    "SCCACHE_DIR"
+    "SCCACHE_SERVER_UDS_PATH"
   ]
   ++ serviceSkipEnvVars;
 
+  defaultSccacheDirExpr = "\${XDG_CACHE_HOME:-$HOME/.cache}/nixfied-runtime/${project.id}/sccache";
   sharedCargoRustEnv = {
-    RUSTC_WRAPPER = "sccache";
+    RUSTC_WRAPPER = sccacheBinary;
   }
   // lib.optionalAttrs pkgs.stdenv.isDarwin {
     LIBRARY_PATH = "${pkgs.libiconv}/lib";
@@ -228,9 +234,9 @@ let
     CXX = "/usr/bin/clang++";
   };
 
-  # CI runs under ephemeral roots, so persistent sccache state can retain stale
-  # temp paths across repeated runs.
-  ciCargoRustEnv = (builtins.removeAttrs sharedCargoRustEnv [ "RUSTC_WRAPPER" ]) // {
+  # CI runs under ephemeral roots, but the ephemeral wrapper pins SCCACHE_DIR to
+  # a stable host-side cache so local compiler reuse remains safe across runs.
+  ciCargoRustEnv = sharedCargoRustEnv // {
     CARGO_BUILD_JOBS = "1";
     OPENSSL_DIR = "${opensslLibPackage}";
     OPENSSL_LIB_DIR = "${opensslLibPackage}/lib";
@@ -353,9 +359,30 @@ let
     "mfm-integration-tests::parity_postgres_state_events_audit"
   ];
 
+  cargoSccachePreamble = ''
+    export SCCACHE_DIR="''${SCCACHE_DIR:-${defaultSccacheDirExpr}}"
+    mkdir -p "$SCCACHE_DIR"
+
+    # Ephemeral runs keep the compiler cache on the host, but must not reuse a
+    # daemon started under an older ephemeral TMPDIR.
+    project_ephemeral_root_var="${projectEphemeralRootEnvVar}"
+    project_ephemeral_root="''${!project_ephemeral_root_var:-}"
+    if [ -n "$project_ephemeral_root" ]; then
+      ${sccacheBinary} --stop-server >/dev/null 2>&1 || true
+    fi
+    if [ -n "$project_ephemeral_root" ] && [ -z "''${SCCACHE_SERVER_UDS_PATH:-}" ]; then
+      export SCCACHE_SERVER_UDS_PATH="$project_ephemeral_root/tmp/sccache.sock"
+    fi
+
+    if [ -n "''${SCCACHE_SERVER_UDS_PATH:-}" ]; then
+      mkdir -p "$(dirname "$SCCACHE_SERVER_UDS_PATH")"
+    fi
+  '';
+
   ciStepPreamble = ''
     artifacts_dir="''${CI_ARTIFACTS_DIR:-${ciArtifactsRoot}}"
     mkdir -p "$artifacts_dir"
+    ${cargoSccachePreamble}
 
     # Keep Cargo artifacts outside the workspace root so flake/model
     # evaluation does not trip over mutable target/ files.
@@ -397,6 +424,8 @@ let
   '';
 
   cargoWorkspaceTargetPreamble = ''
+    ${cargoSccachePreamble}
+
     # Task apps execute from the flake source under /nix/store, so Cargo outputs
     # must be redirected into a writable per-run location.
     export CARGO_TARGET_DIR="''${CARGO_TARGET_DIR:-''${CI_ARTIFACTS_DIR:-''${TMPDIR:-/tmp}/mfm-task-artifacts}/cargo-target}"
@@ -851,6 +880,7 @@ in
             "DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/mfm nix run .#dev"
           ];
           runtimeInputs = rustRuntimeInputs;
+          env = sharedCargoRustEnv;
           command = ''
             set -euo pipefail
             ${cargoWorkspaceTargetPreamble}
@@ -1165,6 +1195,7 @@ in
           description = "Builds the workspace in release mode with all features enabled.";
           usage = [ "nix run .#build" ];
           runtimeInputs = rustRuntimeInputs;
+          env = sharedCargoRustEnv;
           command = ''
             set -euo pipefail
             ${cargoWorkspaceTargetPreamble}
@@ -1471,13 +1502,16 @@ in
 
               require_task "task.ci"
               require_task "task.ci.services-start"
+              require_task "task.ci.sccache-contracts"
               require_task "task.ci.workflow-basic"
               require_task "task.ci.workflow-parity"
               require_task "task.mfm_cli"
               require_task "task.mfm.portfolio.snapshot"
               require_task "task.mfm_rest_api"
 
+              require_workflow "workflow.ci.basic"
               require_workflow "workflow.ci.full"
+              require_workflow_plan_task "workflow.ci.basic" "task.ci.sccache-contracts"
               require_workflow_plan_task "workflow.ci.full" "task.ci.workflow-basic"
               require_workflow_plan_task "workflow.ci.full" "task.ci.workflow-parity"
 
@@ -1529,6 +1563,99 @@ in
               fi
             '
             echo "OK: ci step passed step=shell-app-contracts log=$log_file"
+          '';
+        };
+
+        ci-sccache-contracts = mkCommandTask {
+          id = "task.ci.sccache-contracts";
+          kind = "ci-step";
+          summary = "CI sccache runtime contract checks";
+          tags = [
+            "ci"
+            "quality"
+          ];
+          runtimeInputs = rustRuntimeInputs;
+          env = ciCargoRustEnv;
+          command = ''
+            set -euo pipefail
+            ${ciStepPreamble}
+
+            log_file="$artifacts_dir/sccache-contracts.log"
+            export NIXFIED_PROJECT_EPHEMERAL_ROOT_VAR="${projectEphemeralRootEnvVar}"
+            echo "INFO: running ci step=sccache-contracts"
+            run_with_log "$log_file" bash -euo pipefail -c '
+              project_ephemeral_root_var="''${NIXFIED_PROJECT_EPHEMERAL_ROOT_VAR:-}"
+              project_ephemeral_root=""
+
+              if [ -z "$project_ephemeral_root_var" ]; then
+                echo "ERROR: missing project ephemeral root env var name"
+                exit 1
+              fi
+
+              eval "project_ephemeral_root=\''${$project_ephemeral_root_var:-}"
+              if [ -z "$project_ephemeral_root" ]; then
+                echo "ERROR: missing project ephemeral root path env=$project_ephemeral_root_var"
+                exit 1
+              fi
+
+              if [ -z "''${CI_ARTIFACTS_DIR:-}" ]; then
+                echo "ERROR: CI_ARTIFACTS_DIR is unset"
+                exit 1
+              fi
+
+              expected_sccache_wrapper="${sccacheBinary}"
+
+              if [ "''${RUSTC_WRAPPER:-}" != "$expected_sccache_wrapper" ]; then
+                echo "ERROR: expected RUSTC_WRAPPER=$expected_sccache_wrapper got=''${RUSTC_WRAPPER:-<unset>}"
+                exit 1
+              fi
+
+              if [ ! -x "$expected_sccache_wrapper" ]; then
+                echo "ERROR: expected nix-provided sccache binary at $expected_sccache_wrapper"
+                exit 1
+              fi
+
+              if [ -z "''${SCCACHE_DIR:-}" ]; then
+                echo "ERROR: SCCACHE_DIR is unset"
+                exit 1
+              fi
+
+              if [ -z "''${SCCACHE_SERVER_UDS_PATH:-}" ]; then
+                echo "ERROR: SCCACHE_SERVER_UDS_PATH is unset"
+                exit 1
+              fi
+
+              if [ ! -d "$SCCACHE_DIR" ]; then
+                echo "ERROR: SCCACHE_DIR does not exist path=$SCCACHE_DIR"
+                exit 1
+              fi
+
+              case "$SCCACHE_DIR" in
+                "$project_ephemeral_root"|"$project_ephemeral_root"/*)
+                  echo "ERROR: SCCACHE_DIR must live outside ephemeral root path=$SCCACHE_DIR ephemeral_root=$project_ephemeral_root"
+                  exit 1
+                  ;;
+              esac
+
+              case "$SCCACHE_SERVER_UDS_PATH" in
+                "$project_ephemeral_root"|"$project_ephemeral_root"/*)
+                  ;;
+                *)
+                  echo "ERROR: SCCACHE_SERVER_UDS_PATH must live under ephemeral root path=$SCCACHE_SERVER_UDS_PATH ephemeral_root=$project_ephemeral_root"
+                  exit 1
+                  ;;
+              esac
+
+              case "$SCCACHE_DIR" in
+                "$CI_ARTIFACTS_DIR"|"$CI_ARTIFACTS_DIR"/*)
+                  echo "ERROR: SCCACHE_DIR must live outside CI_ARTIFACTS_DIR path=$SCCACHE_DIR artifacts=$CI_ARTIFACTS_DIR"
+                  exit 1
+                  ;;
+              esac
+
+              echo "OK: sccache contract path=$SCCACHE_DIR socket=$SCCACHE_SERVER_UDS_PATH wrapper=$RUSTC_WRAPPER"
+            '
+            echo "OK: ci step passed step=sccache-contracts log=$log_file"
           '';
         };
 
@@ -2180,12 +2307,17 @@ in
               taskId = "task.ci.shell-app-contracts";
             };
 
+            sccache-contracts = mkWorkflowUnit {
+              taskId = "task.ci.sccache-contracts";
+            };
+
             tests = mkWorkflowUnit {
               taskId = "task.ci.tests";
               needs = [
                 "fmt"
                 "clippy"
                 "shell-app-contracts"
+                "sccache-contracts"
               ];
             };
           };
