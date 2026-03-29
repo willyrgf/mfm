@@ -22,10 +22,10 @@ Use `docs/design.md` for normative semantics and invariants.
 
 Current snapshot:
 
-- Built-in public root ops: `15`
+- Built-in public root ops: `16`
 - Planner-internal registered child ops: `8` (`portfolio_tracker` semantic lowering only)
-- Shared production `State` impls: `33`
-- Intentional op-local production `State` impls: `3`
+- Shared production `State` impls: `39`
+- Intentional op-local production `State` impls: `1`
 
 Planning model note:
 
@@ -58,6 +58,7 @@ API.
 | `evm_configure` | `v1` | `crates/ops/evm-write-op` | Execute post-deploy runtime calls | `EvmConfigureState` | `mfm run start`, feature `run.start` |
 | `evm_validate` | `v1` | `crates/ops/evm-write-op` | Enforce read/event/client assertions | `EvmValidateState` | `mfm run start`, feature `run.start` |
 | `evm_deploy_configure_validate` | `v1` | `crates/ops/evm-deploy-configure-validate-op` | Compose deploy/configure/validate into one op boundary | Child ops `evm_deploy`, `evm_configure`, `evm_validate` | `mfm run pipeline deploy-configure-validate`, feature `pipeline.deploy_configure_validate.start`, feature `run.start` |
+| `portfolio_config_build` | `v1` | `crates/ops/portfolio-tracker-op` | Build canonical portfolio config into built execution config, publish canonical/built config artifacts, and emit a stable build report | `WriteJsonValueState`, `WriteContextValueArtifactState` | feature `portfolio.config.build`, feature `run.start` |
 | `portfolio_execute` | `v1` | `crates/ops/portfolio-tracker-op` | Execute pre-built portfolio config and produce a canonical replayable multi-network portfolio snapshot and typed report through the fixed semantic runtime | `PrepareExecutionSourcesState`, `ResolveSubjectsState`, `PinExecutionViewsState`, `ResolveValuationInputsState`, `ObserveCompiledBatchState`, `MergeObservationsState`, `AssembleSnapshotState`, `ProjectReportState` | `mfm portfolio snapshot`, feature `portfolio.snapshot`, feature `run.start` |
 | `portfolio_tracker` | `v1` | `crates/ops/portfolio-tracker-op` | Legacy compatibility root that accepts canonical-or-built portfolio config and lowers it to the same fixed semantic runtime | `PrepareExecutionSourcesState`, `ResolveSubjectsState`, `PinExecutionViewsState`, `ResolveValuationInputsState`, `ObserveCompiledBatchState`, `MergeObservationsState`, `AssembleSnapshotState`, `ProjectReportState` | feature `run.start` |
 | `nix_app` | `v1` | `crates/ops/nix-app-op` | Run a nix-resolved program via the exec namespace | `NixExecState` | `mfm run start`, feature `run.start` |
@@ -84,6 +85,7 @@ flattening.
 | Module | State types | Purpose | Used by built-in ops |
 |---|---|---|---|
 | `crates/states/common/src/states/nix.rs` | `NixExecState` | Execute a nix-resolved or pre-resolved program through the exec namespace | `nix_app` |
+| `crates/states/common/src/states/publish.rs` | `WriteJsonValueState`, `WriteContextValueArtifactState` | Deterministic JSON publication and context-to-artifact emission for thin workflow boundaries | `portfolio_config_build` |
 | `crates/states/common/src/states/proof.rs` | `ProofReadState`, `ProofApplySideEffectState` | Typed proof read and side-effect states that avoid raw proof namespace strings | `proof` |
 | `crates/states/keystore/src/states/admin.rs` | `KeystoreImportState`, `KeystoreListState`, `KeystoreDeleteState` | Reusable keystore administration flows | `keystore_import`, `keystore_list`, `keystore_delete` |
 | `crates/states/keystore/src/states/tx.rs` | `KeystoreTxSignState` | Reusable local keystore signing flow | `keystore_tx_sign` |

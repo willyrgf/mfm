@@ -227,6 +227,39 @@ impl PortfolioSnapshotBuiltConfig {
     }
 }
 
+/// Stable report emitted by the portfolio config-build workflow.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PortfolioSnapshotBuildReport {
+    /// Schema version for this report surface.
+    pub schema_version: u32,
+    /// Portfolio identifier carried through from the canonical config.
+    pub portfolio_id: String,
+    /// Content-addressed canonical config artifact id.
+    pub canonical_config_artifact_id: String,
+    /// Content-addressed built config artifact id.
+    pub built_config_artifact_id: String,
+    /// Number of declared networks in the canonical bundle.
+    pub network_count: u64,
+    /// Number of declared wallets in the canonical bundle.
+    pub wallet_count: u64,
+    /// Number of compiled observation batches in the built execution spec.
+    pub observation_batch_count: u64,
+}
+
+impl PortfolioSnapshotBuildReport {
+    /// Current schema version for the build report surface.
+    pub const SCHEMA_VERSION: u32 = 1;
+}
+
+/// Typed outcome produced by the pure portfolio config-build step.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PortfolioSnapshotBuildOutcome {
+    /// Deterministic built config that the execute op consumes.
+    pub built: PortfolioSnapshotBuiltConfig,
+    /// Stable build report derived from the canonical and built config artifacts.
+    pub report: PortfolioSnapshotBuildReport,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 enum PortfolioSnapshotExecutionConfigInput {
@@ -400,6 +433,39 @@ pub fn build_portfolio_snapshot_config(
         execution_spec,
     }
     .normalized())
+}
+
+/// Builds the deterministic execution config plus the stable build report surface.
+pub fn build_portfolio_snapshot_outcome(
+    canonical: PortfolioSnapshotCanonicalConfig,
+) -> Result<PortfolioSnapshotBuildOutcome, PortfolioSnapshotBuildError> {
+    let built = build_portfolio_snapshot_config(canonical)?;
+    let canonical_value = serde_json::to_value(&built.canonical).map_err(|source| {
+        PortfolioSnapshotBuildError::Serialize {
+            stage: "canonical config",
+            source,
+        }
+    })?;
+    let canonical_artifact_id = artifact_id_for_json(&canonical_value).map_err(|source| {
+        PortfolioSnapshotBuildError::CanonicalJson {
+            stage: "canonical config",
+            source,
+        }
+    })?;
+    let built_artifact_id = built.artifact_id()?;
+
+    Ok(PortfolioSnapshotBuildOutcome {
+        report: PortfolioSnapshotBuildReport {
+            schema_version: PortfolioSnapshotBuildReport::SCHEMA_VERSION,
+            portfolio_id: built.canonical.portfolio.portfolio_id.clone(),
+            canonical_config_artifact_id: canonical_artifact_id.0,
+            built_config_artifact_id: built_artifact_id.0,
+            network_count: built.canonical.portfolio.networks.len() as u64,
+            wallet_count: built.canonical.portfolio.wallets.len() as u64,
+            observation_batch_count: built.execution_spec.observation_batches.len() as u64,
+        },
+        built,
+    })
 }
 
 /// Decodes an execution op config into the normalized built representation.
@@ -619,5 +685,28 @@ mod tests {
             err,
             PortfolioSnapshotExecutionConfigError::Decode { .. }
         ));
+    }
+
+    #[test]
+    fn build_outcome_report_is_deterministic_and_matches_artifact_ids() {
+        let canonical = canonicalize_portfolio_snapshot_authored_config(sample_authored_config())
+            .expect("canonical");
+
+        let left = build_portfolio_snapshot_outcome(canonical.clone()).expect("left outcome");
+        let right = build_portfolio_snapshot_outcome(canonical).expect("right outcome");
+
+        assert_eq!(left, right);
+        assert_eq!(
+            left.report.canonical_config_artifact_id,
+            left.built
+                .canonical
+                .artifact_id()
+                .expect("canonical artifact id")
+                .0
+        );
+        assert_eq!(
+            left.report.built_config_artifact_id,
+            left.built.artifact_id().expect("built artifact id").0
+        );
     }
 }

@@ -2,6 +2,8 @@
 
 Portfolio tracking operations:
 
+- `portfolio_config_build/v1`: canonical config build root that publishes built config plus
+  config artifacts
 - `portfolio_execute/v1`: strict built-config execution root used by thin transport adapters
 - `portfolio_tracker/v1`: legacy compatibility root that still accepts canonical-or-built config
 
@@ -17,6 +19,8 @@ same fixed semantic runtime:
 - `AssembleSnapshot`
 - `ProjectReport`
 
+`portfolio_config_build` consumes canonical portfolio config and publishes the typed built config,
+the canonical config artifact id, the built config artifact id, and a stable build report.
 `portfolio_execute` consumes the pre-built execution config emitted by `mfm-portfolio-config`.
 `portfolio_tracker` remains available during migration for callers that still send the legacy
 canonical `portfolio` plus `valuation_source_registry` shape.

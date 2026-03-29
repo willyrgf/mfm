@@ -62,15 +62,20 @@ use mfm_op_keystore_admin::{KeystoreDeleteOp, KeystoreImportOp, KeystoreListOp};
 use mfm_op_keystore_tx::KeystoreTxSignOp;
 use mfm_op_nix_app::NixAppOp;
 use mfm_op_portfolio_tracker::{
-    is_portfolio_tracker_internal_op_id, portfolio_execute_report_context_key,
+    is_portfolio_tracker_internal_op_id, portfolio_config_build_built_artifact_id_context_key,
+    portfolio_config_build_built_config_context_key,
+    portfolio_config_build_canonical_artifact_id_context_key,
+    portfolio_config_build_report_context_key, portfolio_execute_report_context_key,
     portfolio_execute_snapshot_artifact_id_context_key, portfolio_public_ops,
-    portfolio_tracker_internal_ops, PORTFOLIO_EXECUTE_OP_ID, PORTFOLIO_PUBLIC_OP_VERSION,
+    portfolio_tracker_internal_ops, PORTFOLIO_CONFIG_BUILD_OP_ID, PORTFOLIO_EXECUTE_OP_ID,
+    PORTFOLIO_PUBLIC_OP_VERSION,
 };
 use mfm_op_proof::ProofOp;
 use mfm_portfolio_config::{
     build_portfolio_snapshot_config, canonicalize_portfolio_snapshot_authored_config,
     parse_portfolio_snapshot_authored_config, parse_portfolio_snapshot_authored_config_with_hint,
-    AuthoredConfigFormat, PortfolioSnapshotConfigError,
+    AuthoredConfigFormat, PortfolioSnapshotBuildReport, PortfolioSnapshotBuiltConfig,
+    PortfolioSnapshotConfigError,
 };
 use mfm_sdk::ids::{MachineId, StepId};
 use mfm_sdk::launcher::{LaunchPipeline, RunLauncher};
@@ -976,6 +981,77 @@ impl AppServices {
         self.start_deploy_configure_validate(spec).await
     }
 
+    /// Starts a portfolio config-build run and extracts the built config outputs when available.
+    pub async fn start_portfolio_config_build(
+        &self,
+        req: PortfolioConfigBuildRequest,
+    ) -> Result<PortfolioConfigBuildResponse, AppError> {
+        let op_config = serde_json::to_value(&req).map_err(|_| {
+            AppError::invalid_request("failed to encode portfolio config build request")
+        })?;
+
+        let run = self
+            .start_run(RunsStartRequest::Single(SingleOpStartRequest {
+                op_id: PORTFOLIO_CONFIG_BUILD_OP_ID.to_string(),
+                op_version: PORTFOLIO_PUBLIC_OP_VERSION.to_string(),
+                op_config,
+            }))
+            .await?;
+
+        if run.phase == "failed" {
+            return Err(self.failed_run_error(&run.run_id).await?);
+        }
+
+        let mut canonical_config_artifact_id = None;
+        let mut built_config_artifact_id = None;
+        let mut built_config = None;
+        let mut report = None;
+
+        if let Some(final_snapshot_id) = &run.final_snapshot_id {
+            let snapshot = load_context_snapshot_json(
+                self.artifacts.as_ref(),
+                &ArtifactId(final_snapshot_id.clone()),
+            )
+            .await
+            .map_err(app_error_from_context_snapshot_load_error)?;
+
+            canonical_config_artifact_id = decode_optional_snapshot_context_value(
+                &snapshot,
+                &portfolio_config_build_canonical_artifact_id_context_key(),
+                "PortfolioCanonicalConfigArtifactIdDecodeFailed",
+                "failed to decode portfolio canonical config artifact id",
+            )?;
+            built_config_artifact_id = decode_optional_snapshot_context_value(
+                &snapshot,
+                &portfolio_config_build_built_artifact_id_context_key(),
+                "PortfolioBuiltConfigArtifactIdDecodeFailed",
+                "failed to decode portfolio built config artifact id",
+            )?;
+            built_config = decode_optional_snapshot_context_value(
+                &snapshot,
+                &portfolio_config_build_built_config_context_key(),
+                "PortfolioBuiltConfigDecodeFailed",
+                "failed to decode portfolio built config",
+            )?;
+            report = decode_optional_snapshot_context_value(
+                &snapshot,
+                &portfolio_config_build_report_context_key(),
+                "PortfolioConfigBuildReportDecodeFailed",
+                "failed to decode portfolio config build report",
+            )?;
+        }
+
+        Ok(PortfolioConfigBuildResponse {
+            run_id: run.run_id,
+            phase: run.phase,
+            final_snapshot_id: run.final_snapshot_id,
+            canonical_config_artifact_id,
+            built_config_artifact_id,
+            built_config,
+            report,
+        })
+    }
+
     /// Starts a portfolio snapshot run and extracts the final report when available.
     pub async fn start_portfolio_snapshot(
         &self,
@@ -1484,6 +1560,7 @@ enum BuiltinFeature {
     RunStream,
     ArtifactGet,
     PipelineDeployConfigureValidateStart,
+    PortfolioConfigBuild,
     PortfolioSnapshot,
 }
 
@@ -1503,6 +1580,10 @@ impl FeatureCatalog {
         handlers.insert(
             "portfolio.snapshot".to_string(),
             BuiltinFeature::PortfolioSnapshot,
+        );
+        handlers.insert(
+            "portfolio.config.build".to_string(),
+            BuiltinFeature::PortfolioConfigBuild,
         );
 
         let descriptors = vec![
@@ -1658,6 +1739,35 @@ impl FeatureCatalog {
                 }),
             },
             FeatureDescriptor {
+                id: "portfolio.config.build".to_string(),
+                version: "v1".to_string(),
+                kind: FeatureKind::Operation,
+                description:
+                    "Build canonical portfolio config into built execution config and explicit config artifacts"
+                        .to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "portfolio": {"type": "object"},
+                        "valuation_source_registry": {"type": "object"}
+                    },
+                    "required": ["portfolio", "valuation_source_registry"]
+                }),
+                output_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "run_id": {"type": "string"},
+                        "phase": {"type": "string"},
+                        "final_snapshot_id": {"type": ["string", "null"]},
+                        "canonical_config_artifact_id": {"type": ["string", "null"]},
+                        "built_config_artifact_id": {"type": ["string", "null"]},
+                        "built_config": {"type": ["object", "null"]},
+                        "report": {"type": ["object", "null"]}
+                    },
+                    "required": ["run_id", "phase"]
+                }),
+            },
+            FeatureDescriptor {
                 id: "portfolio.snapshot".to_string(),
                 version: "v1".to_string(),
                 kind: FeatureKind::Operation,
@@ -1744,6 +1854,11 @@ impl FeatureCatalog {
                     serde_json::from_value(req.payload).map_err(|_| AppError::invalid_json())?;
                 serde_json::to_value(services.start_deploy_configure_validate(parsed).await?)
             }
+            BuiltinFeature::PortfolioConfigBuild => {
+                let parsed: PortfolioConfigBuildRequest =
+                    serde_json::from_value(req.payload).map_err(|_| AppError::invalid_json())?;
+                serde_json::to_value(services.start_portfolio_config_build(parsed).await?)
+            }
             BuiltinFeature::PortfolioSnapshot => {
                 let parsed: PortfolioSnapshotRequest =
                     serde_json::from_value(req.payload).map_err(|_| AppError::invalid_json())?;
@@ -1783,6 +1898,28 @@ struct RunStreamInput {
     run_id: String,
     from_seq: Option<u64>,
     to_seq: Option<u64>,
+}
+
+/// Request payload for the portfolio config-build feature.
+pub use mfm_portfolio_config::PortfolioSnapshotCanonicalConfig as PortfolioConfigBuildRequest;
+
+/// Response returned after starting a portfolio config-build run.
+#[derive(Clone, Debug, Serialize)]
+pub struct PortfolioConfigBuildResponse {
+    /// UUID string of the run.
+    pub run_id: String,
+    /// Current run phase string.
+    pub phase: String,
+    /// Final snapshot id when the run completed.
+    pub final_snapshot_id: Option<String>,
+    /// Canonical config artifact id, when available.
+    pub canonical_config_artifact_id: Option<String>,
+    /// Built config artifact id, when available.
+    pub built_config_artifact_id: Option<String>,
+    /// Built portfolio config, when available.
+    pub built_config: Option<PortfolioSnapshotBuiltConfig>,
+    /// Stable build report, when available.
+    pub report: Option<PortfolioSnapshotBuildReport>,
 }
 
 /// Request payload for the portfolio snapshot feature.
@@ -2169,6 +2306,13 @@ mod tests {
         bundle
             .registry
             .resolve(
+                &OpId::must_new(PORTFOLIO_CONFIG_BUILD_OP_ID.to_string()),
+                PORTFOLIO_PUBLIC_OP_VERSION,
+            )
+            .expect("config-build public root op should remain registered");
+        bundle
+            .registry
+            .resolve(
                 &OpId::must_new(PORTFOLIO_EXECUTE_OP_ID.to_string()),
                 PORTFOLIO_PUBLIC_OP_VERSION,
             )
@@ -2207,6 +2351,28 @@ mod tests {
         assert!(bundle
             .registry
             .resolve(&OpId::must_new(PORTFOLIO_EXECUTE_OP_ID.to_string()), "v2")
+            .is_err());
+    }
+
+    #[test]
+    fn portfolio_config_build_root_op_remains_v1() {
+        let bundle = make_engine_bundle();
+
+        let op = bundle
+            .registry
+            .resolve(
+                &OpId::must_new(PORTFOLIO_CONFIG_BUILD_OP_ID.to_string()),
+                PORTFOLIO_PUBLIC_OP_VERSION,
+            )
+            .expect("config-build public root op should remain v1");
+        assert_eq!(op.op_version(), PORTFOLIO_PUBLIC_OP_VERSION);
+
+        assert!(bundle
+            .registry
+            .resolve(
+                &OpId::must_new(PORTFOLIO_CONFIG_BUILD_OP_ID.to_string()),
+                "v2"
+            )
             .is_err());
     }
 

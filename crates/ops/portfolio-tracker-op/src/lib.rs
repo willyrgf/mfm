@@ -1,14 +1,20 @@
 #![cfg_attr(test, allow(clippy::disallowed_methods, clippy::disallowed_types))]
 #![cfg_attr(not(test), deny(clippy::disallowed_methods, clippy::disallowed_types))]
 #![warn(missing_docs)]
-//! Canonical portfolio snapshot planner op.
+//! Portfolio config-build and execution planner ops.
 //!
 //! Source of truth:
 //! - `docs/design.md`
 //! - `docs/ops-and-states.md`
 //!
-//! `portfolio_tracker` remains a thin planner that validates canonical config inputs and wires the
-//! reusable shared-state runtime for multi-network portfolio execution.
+//! This crate owns the additive public portfolio workflow boundaries:
+//!
+//! - `portfolio_config_build`: canonical config -> built config plus explicit config artifacts
+//! - `portfolio_execute`: built config -> canonical snapshot/runtime report
+//! - `portfolio_tracker`: legacy compatibility root that still accepts canonical-or-built config
+//!
+//! All three remain thin planners. Pure semantic compilation stays in `mfm-portfolio-config`, and
+//! runtime execution stays in the reusable shared portfolio states.
 //!
 //! # Examples
 //!
@@ -40,7 +46,15 @@ use mfm_state_common::errors as op_errors;
 use mfm_state_portfolio::plan::{PortfolioExecutionSpec, PORTFOLIO_EXECUTION_SPEC_KEY};
 use serde_json::Value;
 
+mod config_build;
 mod plan_ops;
+pub use config_build::{
+    portfolio_config_build_built_artifact_id_context_key,
+    portfolio_config_build_built_config_context_key,
+    portfolio_config_build_canonical_artifact_id_context_key, portfolio_config_build_public_ops,
+    portfolio_config_build_report_context_key, PortfolioConfigBuildOp,
+    PORTFOLIO_CONFIG_BUILD_OP_ID,
+};
 use plan_ops::{
     assemble_snapshot_config, child_ops, merge_observations_config, observe_batch_config,
     pin_execution_views_config, prepare_sources_config, resolve_subjects_config,
@@ -209,7 +223,8 @@ pub fn portfolio_execute_public_ops() -> Vec<DynOperation> {
 
 /// Returns all built-in public portfolio root ops.
 pub fn portfolio_public_ops() -> Vec<DynOperation> {
-    let mut ops = portfolio_tracker_public_ops();
+    let mut ops = portfolio_config_build_public_ops();
+    ops.extend(portfolio_tracker_public_ops());
     ops.extend(portfolio_execute_public_ops());
     ops
 }

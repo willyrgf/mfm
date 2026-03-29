@@ -539,6 +539,7 @@ This is distinct from launch-time and task runtime.
 69. `AppBuilder::build()` registers operations:
 
     - all public built-in root ops
+    - `portfolio_config_build` public build op
     - `portfolio_execute` public op
     - `portfolio_tracker` public compatibility op
     - portfolio planner-internal child ops
@@ -586,6 +587,19 @@ This is distinct from launch-time and task runtime.
     - `max_attempts = 1`
     - `execution_mode = Sequential`
     - `context_checkpointing = AfterEveryState`
+
+`AppServices::start_portfolio_config_build()` now exposes the explicit build-only public boundary.
+It starts `portfolio_config_build/v1`, which consumes the same canonical portfolio request shape
+and publishes:
+
+- the typed built config
+- the canonical config artifact id
+- the built config artifact id
+- a stable build report
+
+`start_portfolio_snapshot()` intentionally remains additive during migration: it still calls the
+pure library build step directly, then starts `portfolio_execute/v1`, so the snapshot command and
+feature keep their existing behavior and output contract.
 
 ### How the request becomes an op/state graph
 
@@ -1325,6 +1339,7 @@ There are several genuinely strong design choices here:
 
 - The outer wrapper keeps operational concerns out of Rust domain code.
 - The Rust CLI remains thin: parse -> call app services -> render result.
+- `portfolio_config_build` and `portfolio_execute` are real planner ops, not transport glue.
 - `portfolio_execute` is a real planner op, not a giant CLI command.
 - `portfolio_tracker` remains as a compatibility root instead of keeping the transport edge fat.
 - Runtime logic is concentrated in reusable semantic states.

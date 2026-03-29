@@ -603,7 +603,47 @@ async fn features_list_exposes_builtin_catalog() {
     assert!(features.iter().any(|f| f["id"] == "run.status"));
     assert!(features.iter().any(|f| f["id"] == "run.stream"));
     assert!(features.iter().any(|f| f["id"] == "artifact.get"));
+    assert!(features.iter().any(|f| f["id"] == "portfolio.config.build"));
     assert!(features.iter().any(|f| f["id"] == "portfolio.snapshot"));
+}
+
+#[tokio::test]
+async fn feature_execute_portfolio_config_build_returns_built_config_and_report() {
+    let streams: Arc<dyn StreamStore> = Arc::new(MemStreamStore::new());
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let artifacts: Arc<dyn ArtifactStore> =
+        Arc::new(FsArtifactStore::new(tmp.path().to_path_buf()));
+
+    let bundle = mfm_rest_api::make_engine_bundle();
+    let app = mfm_rest_api::make_app(mfm_rest_api::AppState {
+        bundle,
+        streams,
+        artifacts,
+    });
+
+    let resp = app
+        .oneshot(json_post(
+            "/v1/features/portfolio.config.build/execute",
+            serde_json::json!({
+                "payload": canonical_portfolio_snapshot_payload()
+            }),
+        ))
+        .await
+        .expect("feature execute response");
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let v = response_json(resp).await;
+    assert_eq!(v["status"], "success");
+    assert_eq!(v["data"]["feature_id"], "portfolio.config.build");
+    assert_eq!(v["data"]["result"]["phase"], "completed");
+    assert_eq!(v["data"]["result"]["report"]["schema_version"], 1);
+    assert_eq!(
+        v["data"]["result"]["report"]["portfolio_id"],
+        "portfolio_main"
+    );
+    assert!(v["data"]["result"]["built_config"].is_object());
+    assert!(v["data"]["result"]["canonical_config_artifact_id"].is_string());
+    assert!(v["data"]["result"]["built_config_artifact_id"].is_string());
 }
 
 #[tokio::test]

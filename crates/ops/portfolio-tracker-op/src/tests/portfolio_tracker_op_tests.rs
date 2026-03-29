@@ -18,6 +18,9 @@ use mfm_machine::recorder::EventRecorder;
 use mfm_machine::replay_io::ReplayIo;
 use mfm_machine::runtime::{DefaultExecutionEngine, EngineFailpoints};
 use mfm_machine::stores::StreamId;
+use mfm_portfolio_config::{
+    PortfolioSnapshotBuildReport, PortfolioSnapshotBuiltConfig, PortfolioSnapshotCanonicalConfig,
+};
 use mfm_sdk::op::{CompositeOpSpec, PlannedOp, PlannedOpKind};
 use mfm_sdk::unstable::{context_value_with_slot_fallback, SdkPlanResolver};
 use mfm_state_common::test_support as op_test_support;
@@ -596,6 +599,90 @@ fn portfolio_execute_rejects_legacy_canonical_config() {
         .expect("legacy canonical config should not decode for portfolio_execute");
 
     assert_eq!(err.info.code.0, "invalid_portfolio_execution_config");
+}
+
+#[tokio::test]
+async fn portfolio_config_build_emits_built_config_artifacts_and_report() {
+    let registry = op_test_support::registry_with_ops(portfolio_tracker_ops());
+    let planner = op_test_support::default_pipeline_planner();
+    let pipeline = mfm_sdk::unstable::single_op_pipeline(
+        OpId::must_new(PORTFOLIO_CONFIG_BUILD_OP_ID.to_string()),
+        PORTFOLIO_PUBLIC_OP_VERSION.to_string(),
+        canonical_op_config(),
+    )
+    .expect("pipeline");
+    let stores = op_test_support::in_memory_stores();
+    let resolver = Arc::new(SdkPlanResolver::new(
+        Arc::clone(&registry),
+        Arc::clone(&planner),
+    ));
+    let engine: Arc<dyn ExecutionEngine> = Arc::new(DefaultExecutionEngine::new(resolver));
+
+    let run = op_test_support::start_pipeline_with_defaults(
+        engine,
+        &stores,
+        registry,
+        planner,
+        pipeline,
+        op_test_support::run_config_live(),
+    )
+    .await
+    .expect("start");
+
+    assert_eq!(run.phase, RunPhase::Completed);
+    let final_snapshot_id = run.final_snapshot_id.expect("final snapshot");
+    let context_snapshot = load_context_snapshot(&stores, &final_snapshot_id).await;
+
+    let built_config: PortfolioSnapshotBuiltConfig =
+        serde_json::from_value(read_required_context_value(
+            &context_snapshot,
+            &portfolio_config_build_built_config_context_key(),
+        ))
+        .expect("built config");
+    let report: PortfolioSnapshotBuildReport = serde_json::from_value(read_required_context_value(
+        &context_snapshot,
+        &portfolio_config_build_report_context_key(),
+    ))
+    .expect("build report");
+    let canonical_artifact_id: String = serde_json::from_value(read_required_context_value(
+        &context_snapshot,
+        &portfolio_config_build_canonical_artifact_id_context_key(),
+    ))
+    .expect("canonical artifact id");
+    let built_artifact_id: String = serde_json::from_value(read_required_context_value(
+        &context_snapshot,
+        &portfolio_config_build_built_artifact_id_context_key(),
+    ))
+    .expect("built artifact id");
+
+    assert_eq!(report.canonical_config_artifact_id, canonical_artifact_id);
+    assert_eq!(report.built_config_artifact_id, built_artifact_id);
+    assert_eq!(
+        report.portfolio_id,
+        built_config.canonical.portfolio.portfolio_id
+    );
+    assert_eq!(
+        report.observation_batch_count as usize,
+        built_config.execution_spec.observation_batches.len()
+    );
+
+    let canonical_bytes = stores
+        .artifacts
+        .get(&ArtifactId(canonical_artifact_id))
+        .await
+        .expect("canonical artifact");
+    let built_bytes = stores
+        .artifacts
+        .get(&ArtifactId(built_artifact_id))
+        .await
+        .expect("built artifact");
+    let canonical_from_artifact: PortfolioSnapshotCanonicalConfig =
+        serde_json::from_slice(&canonical_bytes).expect("canonical artifact json");
+    let built_from_artifact: PortfolioSnapshotBuiltConfig =
+        serde_json::from_slice(&built_bytes).expect("built artifact json");
+
+    assert_eq!(canonical_from_artifact, built_config.canonical);
+    assert_eq!(built_from_artifact, built_config);
 }
 
 #[test]
