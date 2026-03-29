@@ -345,8 +345,8 @@ fn build_harness(
     let registry = op_test_support::registry_with_ops(portfolio_tracker_ops());
     let planner = op_test_support::default_pipeline_planner();
     let pipeline = mfm_sdk::unstable::single_op_pipeline(
-        OpId::must_new(OP_ID.to_string()),
-        OP_VERSION.to_string(),
+        OpId::must_new(PORTFOLIO_TRACKER_OP_ID.to_string()),
+        PORTFOLIO_PUBLIC_OP_VERSION.to_string(),
         op_config,
     )
     .expect("pipeline");
@@ -556,6 +556,49 @@ fn expand_uses_canonical_multi_network_graph() {
 }
 
 #[test]
+fn portfolio_execute_expand_uses_built_multi_network_graph() {
+    let op = PortfolioExecuteOp;
+    assert_eq!(op.op_version(), PORTFOLIO_PUBLIC_OP_VERSION);
+
+    let planned = op
+        .expand(
+            OpPath("portfolio_execute.main".to_string()),
+            &built_op_config(),
+            &op_test_support::run_config_live(),
+        )
+        .expect("expand built config");
+    let composite = into_composite(planned);
+
+    assert!(composite
+        .children
+        .iter()
+        .any(|child| child.child_op_local_id.0 == ASSEMBLE_SNAPSHOT_CHILD_ID));
+    assert!(composite
+        .re_exports
+        .iter()
+        .any(|binding| binding.export.0 == PORT_SNAPSHOT_ARTIFACT_ID));
+    assert!(composite
+        .re_exports
+        .iter()
+        .any(|binding| binding.export.0 == PORT_REPORT));
+}
+
+#[test]
+fn portfolio_execute_rejects_legacy_canonical_config() {
+    let op = PortfolioExecuteOp;
+    let err = op
+        .expand(
+            OpPath("portfolio_execute.main".to_string()),
+            &canonical_op_config(),
+            &op_test_support::run_config_live(),
+        )
+        .err()
+        .expect("legacy canonical config should not decode for portfolio_execute");
+
+    assert_eq!(err.info.code.0, "invalid_portfolio_execution_config");
+}
+
+#[test]
 fn expand_uses_semantic_state_ids_without_protocol_fragments() {
     let cfg = parse_config(&canonical_op_config()).expect("parse config");
     let spec = compile_portfolio_plan(&cfg).expect("compile semantic");
@@ -563,8 +606,8 @@ fn expand_uses_semantic_state_ids_without_protocol_fragments() {
     let registry = op_test_support::registry_with_ops(portfolio_tracker_ops());
     let planner = op_test_support::default_pipeline_planner();
     let pipeline = mfm_sdk::unstable::single_op_pipeline(
-        OpId::must_new(OP_ID.to_string()),
-        OP_VERSION.to_string(),
+        OpId::must_new(PORTFOLIO_TRACKER_OP_ID.to_string()),
+        PORTFOLIO_PUBLIC_OP_VERSION.to_string(),
         canonical_op_config(),
     )
     .expect("pipeline");
@@ -1354,6 +1397,11 @@ fn canonical_op_config() -> serde_json::Value {
             ]
         }
     })
+}
+
+fn built_op_config() -> serde_json::Value {
+    serde_json::to_value(parse_config(&canonical_op_config()).expect("built config"))
+        .expect("built op config json")
 }
 
 fn mixed_family_op_config() -> serde_json::Value {

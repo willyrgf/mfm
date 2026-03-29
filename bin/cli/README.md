@@ -284,6 +284,7 @@ Current built-in public root ops for `run start` are:
 - `evm_configure`
 - `evm_validate`
 - `evm_deploy_configure_validate`
+- `portfolio_execute`
 - `portfolio_tracker`
 - `nix_app`
 - `aave_v3_origin_adapt_deploy`

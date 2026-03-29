@@ -22,7 +22,7 @@ Use `docs/design.md` for normative semantics and invariants.
 
 Current snapshot:
 
-- Built-in public root ops: `14`
+- Built-in public root ops: `15`
 - Planner-internal registered child ops: `8` (`portfolio_tracker` semantic lowering only)
 - Shared production `State` impls: `33`
 - Intentional op-local production `State` impls: `3`
@@ -58,7 +58,8 @@ API.
 | `evm_configure` | `v1` | `crates/ops/evm-write-op` | Execute post-deploy runtime calls | `EvmConfigureState` | `mfm run start`, feature `run.start` |
 | `evm_validate` | `v1` | `crates/ops/evm-write-op` | Enforce read/event/client assertions | `EvmValidateState` | `mfm run start`, feature `run.start` |
 | `evm_deploy_configure_validate` | `v1` | `crates/ops/evm-deploy-configure-validate-op` | Compose deploy/configure/validate into one op boundary | Child ops `evm_deploy`, `evm_configure`, `evm_validate` | `mfm run pipeline deploy-configure-validate`, feature `pipeline.deploy_configure_validate.start`, feature `run.start` |
-| `portfolio_tracker` | `v1` | `crates/ops/portfolio-tracker-op` | Produce a canonical replayable multi-network portfolio snapshot and typed report through the fixed semantic runtime | `PrepareExecutionSourcesState`, `ResolveSubjectsState`, `PinExecutionViewsState`, `ResolveValuationInputsState`, `ObserveCompiledBatchState`, `MergeObservationsState`, `AssembleSnapshotState`, `ProjectReportState` | `mfm portfolio snapshot`, feature `portfolio.snapshot`, feature `run.start` |
+| `portfolio_execute` | `v1` | `crates/ops/portfolio-tracker-op` | Execute pre-built portfolio config and produce a canonical replayable multi-network portfolio snapshot and typed report through the fixed semantic runtime | `PrepareExecutionSourcesState`, `ResolveSubjectsState`, `PinExecutionViewsState`, `ResolveValuationInputsState`, `ObserveCompiledBatchState`, `MergeObservationsState`, `AssembleSnapshotState`, `ProjectReportState` | `mfm portfolio snapshot`, feature `portfolio.snapshot`, feature `run.start` |
+| `portfolio_tracker` | `v1` | `crates/ops/portfolio-tracker-op` | Legacy compatibility root that accepts canonical-or-built portfolio config and lowers it to the same fixed semantic runtime | `PrepareExecutionSourcesState`, `ResolveSubjectsState`, `PinExecutionViewsState`, `ResolveValuationInputsState`, `ObserveCompiledBatchState`, `MergeObservationsState`, `AssembleSnapshotState`, `ProjectReportState` | feature `run.start` |
 | `nix_app` | `v1` | `crates/ops/nix-app-op` | Run a nix-resolved program via the exec namespace | `NixExecState` | `mfm run start`, feature `run.start` |
 | `aave_v3_origin_adapt_deploy` | `v1` | `crates/ops/aave-v3-origin-adapt-op` | Adapt Origin deploy output into an Aave V3 deploy manifest | `AdaptOriginDeployOutputState` | `mfm run start`, feature `run.start` |
 
@@ -86,10 +87,10 @@ flattening.
 | `crates/states/common/src/states/proof.rs` | `ProofReadState`, `ProofApplySideEffectState` | Typed proof read and side-effect states that avoid raw proof namespace strings | `proof` |
 | `crates/states/keystore/src/states/admin.rs` | `KeystoreImportState`, `KeystoreListState`, `KeystoreDeleteState` | Reusable keystore administration flows | `keystore_import`, `keystore_list`, `keystore_delete` |
 | `crates/states/keystore/src/states/tx.rs` | `KeystoreTxSignState` | Reusable local keystore signing flow | `keystore_tx_sign` |
-| `crates/evm-runtime/src/states/read.rs` | `ReadHexStringState`, `ReadU256HexState`, `EthCallState`, `ReadU64HexState`, `NativeBalanceState`, `TokenBalanceState` | Reusable control-plane-backed chain read/query states | `evm_read`, `portfolio_tracker` |
+| `crates/evm-runtime/src/states/read.rs` | `ReadHexStringState`, `ReadU256HexState`, `EthCallState`, `ReadU64HexState`, `NativeBalanceState`, `TokenBalanceState` | Reusable control-plane-backed chain read/query states | `evm_read`, `portfolio_execute`, `portfolio_tracker` |
 | `crates/evm-runtime/src/states/rpc_control.rs` | `PrepareSourcesState` | Reusable `rpc.control` source preparation and responsiveness preflight | none directly; shared contract used by semantic and EVM write runtimes |
-| `crates/evm-runtime/src/states/price.rs` | `read_evm_oracle_unit_price` | Reusable control-plane-backed EVM oracle price reads for valuation source execution | `portfolio_tracker` |
-| `crates/states/portfolio/src/execution_states.rs` | `PrepareExecutionSourcesState`, `ResolveSubjectsState`, `PinExecutionViewsState`, `ResolveValuationInputsState`, `ObserveCompiledBatchState`, `MergeObservationsState`, `AssembleSnapshotState`, `ProjectReportState` | Fixed semantic runtime states for source preparation, subject/view resolution, valuation resolution, batch observation, merge, and snapshot/report projection | `portfolio_tracker` |
+| `crates/evm-runtime/src/states/price.rs` | `read_evm_oracle_unit_price` | Reusable control-plane-backed EVM oracle price reads for valuation source execution | `portfolio_execute`, `portfolio_tracker` |
+| `crates/states/portfolio/src/execution_states.rs` | `PrepareExecutionSourcesState`, `ResolveSubjectsState`, `PinExecutionViewsState`, `ResolveValuationInputsState`, `ObserveCompiledBatchState`, `MergeObservationsState`, `AssembleSnapshotState`, `ProjectReportState` | Fixed semantic runtime states for source preparation, subject/view resolution, valuation resolution, batch observation, merge, and snapshot/report projection | `portfolio_execute`, `portfolio_tracker` |
 | `crates/evm-runtime/src/states/write.rs` | `NixArtifactToEvmContractState`, `EvmDeployState`, `EvmConfigureState`, `EvmValidateState` | Reusable contract artifact adaptation and deploy/configure/validate states routed through `rpc.control`, with managed-source preflight before write/validate calls | `evm_contract_from_nix`, `evm_deploy`, `evm_configure`, `evm_validate` |
 | `crates/states/aave-v3/src/states.rs` | `LoadCompileManifestState`, `DeployContractState`, `WaitForReceiptState`, `CollectDeployOutputsState`, `WriteDeployManifestState`, `AdaptOriginDeployOutputState`, `LoadDeployManifestState`, `ConfigureRuntimeCallState`, `WaitForConfigReceiptState`, `CollectConfigOutputsState`, `WriteConfigReportState` | Reusable Aave V3 deploy/configure/adaptation flow states | Direct built-in use today: `aave_v3_origin_adapt_deploy` for adaptation; the remaining states are reusable flow building blocks not yet registered as standalone built-in ops |
 

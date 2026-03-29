@@ -55,13 +55,15 @@ use mfm_machine::events::{event_envelopes_from_stream_records, Event, KernelEven
 use mfm_machine::hashing::{
     artifact_id_for_bytes, artifact_id_for_json, canonical_json_bytes, CanonicalJsonError,
 };
-use mfm_machine::ids::{ContextKey, ContextSlot, ErrorCode, OpId, OpPath, RunId, StateId};
+use mfm_machine::ids::{
+    ArtifactId, ContextKey, ContextSlot, ErrorCode, OpId, OpPath, RunId, StateId,
+};
 use mfm_machine::io::IoProvider;
 use mfm_machine::meta::{Idempotency, SideEffectKind, StateMeta};
 use mfm_machine::plan::{DependencyEdge, ExecutionPlan, StateGraph, StateNode};
 use mfm_machine::recorder::EventRecorder;
 use mfm_machine::state::{DynState, State, StateOutcome};
-use mfm_machine::stores::{ArtifactKind, StreamId};
+use mfm_machine::stores::{ArtifactKind, ArtifactStore, StreamId};
 
 use crate::errors::SdkError;
 use crate::ids::{MachineId, PortKey, StepId};
@@ -1727,6 +1729,34 @@ impl SingleOpReportError {
     }
 }
 
+/// Error returned while loading a persisted context snapshot artifact.
+#[derive(Debug)]
+pub enum ContextSnapshotLoadError {
+    /// Loading the artifact bytes from the content store failed.
+    Storage(StorageError),
+    /// The artifact existed but was not valid JSON.
+    InvalidSnapshot,
+}
+
+impl std::fmt::Display for ContextSnapshotLoadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Storage(err) => {
+                let info = match err {
+                    StorageError::Concurrency(info)
+                    | StorageError::NotFound(info)
+                    | StorageError::Corruption(info)
+                    | StorageError::Other(info) => info,
+                };
+                write!(f, "{}: {}", info.code.0, info.message)
+            }
+            Self::InvalidSnapshot => f.write_str("context snapshot artifact was not JSON"),
+        }
+    }
+}
+
+impl std::error::Error for ContextSnapshotLoadError {}
+
 fn single_op_report_error_from_storage(err: StorageError) -> SingleOpReportError {
     let info = match err {
         StorageError::Concurrency(info)
@@ -1769,6 +1799,23 @@ fn single_op_report_error_from_sdk(err: SdkError) -> SingleOpReportError {
     SingleOpReportError::new(err.info.code.0, err.info.message)
 }
 
+fn context_snapshot_load_error_from_storage(err: StorageError) -> ContextSnapshotLoadError {
+    ContextSnapshotLoadError::Storage(err)
+}
+
+/// Loads and decodes a persisted context snapshot artifact as JSON.
+pub async fn load_context_snapshot_json(
+    artifacts: &dyn ArtifactStore,
+    snapshot_id: &ArtifactId,
+) -> Result<serde_json::Value, ContextSnapshotLoadError> {
+    let snapshot_bytes = artifacts
+        .get(snapshot_id)
+        .await
+        .map_err(context_snapshot_load_error_from_storage)?;
+
+    serde_json::from_slice(&snapshot_bytes).map_err(|_| ContextSnapshotLoadError::InvalidSnapshot)
+}
+
 /// Resolves a context key by trying direct and slot-prefixed snapshot fallbacks.
 ///
 /// This first checks all direct candidates produced by [`context_key_candidates`].
@@ -1805,6 +1852,17 @@ pub fn context_value_with_slot_fallback(
     }
 
     None
+}
+
+/// Resolves and decodes a typed context value by trying direct and slot-prefixed snapshot
+/// fallbacks.
+pub fn decode_context_value_with_slot_fallback<T: serde::de::DeserializeOwned>(
+    snapshot: &serde_json::Value,
+    key: &ContextKey,
+) -> Result<Option<T>, serde_json::Error> {
+    context_value_with_slot_fallback(snapshot, key)
+        .map(serde_json::from_value)
+        .transpose()
 }
 
 fn context_key_candidates(key: &str) -> Vec<String> {
@@ -1989,31 +2047,28 @@ pub async fn execute_single_op_report<T: serde::de::DeserializeOwned>(
         )
     })?;
 
-    let snapshot_bytes = stores
-        .artifacts
-        .get(&final_snapshot_id)
+    let snapshot = load_context_snapshot_json(stores.artifacts.as_ref(), &final_snapshot_id)
         .await
-        .map_err(single_op_report_error_from_storage)?;
+        .map_err(|err| match err {
+            ContextSnapshotLoadError::Storage(err) => single_op_report_error_from_storage(err),
+            ContextSnapshotLoadError::InvalidSnapshot => {
+                SingleOpReportError::new("InvalidSnapshot", "final snapshot artifact was not JSON")
+            }
+        })?;
 
-    let snapshot: serde_json::Value = serde_json::from_slice(&snapshot_bytes).map_err(|_| {
-        SingleOpReportError::new("InvalidSnapshot", "final snapshot artifact was not JSON")
-    })?;
-
-    let report_value =
-        context_value_with_slot_fallback(&snapshot, &ContextKey(req.report_context_key))
-            .ok_or_else(|| {
-                SingleOpReportError::new(
-                    "MissingReport",
-                    "run completed without a report payload in snapshot context",
-                )
-            })?;
-
-    serde_json::from_value(report_value).map_err(|_| {
-        SingleOpReportError::new(
-            "InvalidReport",
-            "failed to decode report payload from final snapshot",
-        )
-    })
+    decode_context_value_with_slot_fallback(&snapshot, &ContextKey(req.report_context_key))
+        .map_err(|_| {
+            SingleOpReportError::new(
+                "InvalidReport",
+                "failed to decode report payload from final snapshot",
+            )
+        })?
+        .ok_or_else(|| {
+            SingleOpReportError::new(
+                "MissingReport",
+                "run completed without a report payload in snapshot context",
+            )
+        })
 }
 
 /// Helpers for spawning and awaiting engine-managed child runs through the runtime IO surface.

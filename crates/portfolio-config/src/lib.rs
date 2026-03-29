@@ -318,7 +318,7 @@ pub enum PortfolioSnapshotBuildError {
 #[derive(Debug, Error)]
 pub enum PortfolioSnapshotExecutionConfigError {
     /// Decoding the op config as a canonical or built config failed.
-    #[error("portfolio_tracker op_config decode failed: {source}")]
+    #[error("portfolio execution op_config decode failed: {source}")]
     Decode {
         /// Underlying decode error.
         #[source]
@@ -427,6 +427,26 @@ pub fn decode_portfolio_snapshot_execution_config(
             Ok(built)
         }
     }
+}
+
+/// Decodes a built execution op config into the normalized built representation.
+///
+/// This is the strict execution boundary used by `portfolio_execute/v1`.
+pub fn decode_portfolio_snapshot_built_config(
+    value: &Value,
+) -> Result<PortfolioSnapshotBuiltConfig, PortfolioSnapshotExecutionConfigError> {
+    let built = serde_json::from_value::<PortfolioSnapshotBuiltConfig>(value.clone())
+        .map_err(|source| PortfolioSnapshotExecutionConfigError::Decode { source })?
+        .normalized();
+    validate_portfolio_bundle(
+        &built.canonical.portfolio,
+        &built.canonical.valuation_source_registry,
+    )?;
+    built
+        .execution_spec
+        .validate()
+        .map_err(|source| PortfolioSnapshotExecutionConfigError::InvalidExecutionSpec { source })?;
+    Ok(built)
 }
 
 fn detect_authored_format(raw: &str) -> AuthoredConfigFormat {
@@ -583,5 +603,21 @@ mod tests {
 
         assert_eq!(decoded_from_canonical, built);
         assert_eq!(decoded_from_built, built);
+    }
+
+    #[test]
+    fn decode_built_config_rejects_legacy_canonical_shape() {
+        let canonical = canonicalize_portfolio_snapshot_authored_config(sample_authored_config())
+            .expect("canonical");
+
+        let err = decode_portfolio_snapshot_built_config(
+            &serde_json::to_value(&canonical).expect("canonical json"),
+        )
+        .expect_err("legacy canonical shape should not decode as built config");
+
+        assert!(matches!(
+            err,
+            PortfolioSnapshotExecutionConfigError::Decode { .. }
+        ));
     }
 }

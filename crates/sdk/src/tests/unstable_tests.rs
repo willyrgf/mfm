@@ -1832,6 +1832,49 @@ async fn single_op_report_returns_typed_report() {
 }
 
 #[tokio::test]
+async fn load_context_snapshot_json_decodes_and_extracts_typed_value() {
+    let artifacts = MemArtifactStore::default();
+    let snapshot = serde_json::json!({
+        "portfolio_execute.main.out.report": {
+            "value": 42
+        }
+    });
+    let snapshot_id = artifacts
+        .put(
+            ArtifactKind::ContextSnapshot,
+            serde_json::to_vec(&snapshot).expect("snapshot bytes"),
+        )
+        .await
+        .expect("store snapshot");
+
+    let loaded = load_context_snapshot_json(&artifacts, &snapshot_id)
+        .await
+        .expect("load context snapshot");
+    let report: Option<serde_json::Value> = decode_context_value_with_slot_fallback(
+        &loaded,
+        &ContextKey("portfolio_execute.main.out.report".to_string()),
+    )
+    .expect("decode typed report");
+
+    assert_eq!(report, Some(serde_json::json!({"value": 42})));
+}
+
+#[tokio::test]
+async fn load_context_snapshot_json_rejects_non_json_artifacts() {
+    let artifacts = MemArtifactStore::default();
+    let snapshot_id = artifacts
+        .put(ArtifactKind::ContextSnapshot, b"not-json".to_vec())
+        .await
+        .expect("store non-json artifact");
+
+    let err = load_context_snapshot_json(&artifacts, &snapshot_id)
+        .await
+        .expect_err("non-json snapshot must fail");
+
+    assert!(matches!(err, ContextSnapshotLoadError::InvalidSnapshot));
+}
+
+#[tokio::test]
 async fn single_op_report_errors_when_report_key_missing() {
     let mut reg = HashMapOperationRegistry::default();
     reg.register(Arc::new(TestOp::new_write(

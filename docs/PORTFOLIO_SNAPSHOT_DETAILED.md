@@ -233,7 +233,7 @@ Responsibilities:
 
 - validate request bundle
 - encode request as `op_config`
-- lower `portfolio_tracker/v1` into a fixed semantic graph
+- lower `portfolio_execute/v1` into a fixed semantic graph
 
 Key files:
 
@@ -539,7 +539,8 @@ This is distinct from launch-time and task runtime.
 69. `AppBuilder::build()` registers operations:
 
     - all public built-in root ops
-    - `portfolio_tracker` public op
+    - `portfolio_execute` public op
+    - `portfolio_tracker` public compatibility op
     - portfolio planner-internal child ops
 
 70. It registers transports:
@@ -569,15 +570,15 @@ This is distinct from launch-time and task runtime.
 
 ### Request validation and conversion into a run
 
-73. `AppServices::start_portfolio_snapshot()` validates the request bundle with
-    `validate_portfolio_bundle(&req.portfolio, &req.valuation_source_registry)`.
-74. It serializes the full request into `op_config`.
+73. `AppServices::start_portfolio_snapshot()` builds deterministic execution config with
+    `build_portfolio_snapshot_config(req)`.
+74. It serializes that built config into `op_config`.
 75. It starts a single-op run:
 
-    - `op_id = "portfolio_tracker"`
+    - `op_id = "portfolio_execute"`
     - `op_version = "v1"`
 
-76. `start_run()` wraps that as a one-step pipeline with `machine_id = portfolio_tracker` and
+76. `start_run()` wraps that as a one-step pipeline with `machine_id = portfolio_execute` and
     `step_id = main`.
 77. `default_run_config()` sets current runtime behavior:
 
@@ -590,17 +591,15 @@ This is distinct from launch-time and task runtime.
 
 78. `DefaultRunLauncher::start_pipeline()` asks the planner to build planned execution.
 79. The planner validates the pipeline, resolves the root op from the registry, and calls
-    `PortfolioTrackerOp::expand()`.
-80. `PortfolioTrackerOp::parse_config()` expects a JSON object with:
+    `PortfolioExecuteOp::expand()`.
+80. `PortfolioExecuteOp::parse_built_config()` expects a JSON object with:
 
-    - `portfolio`
-    - `valuation_source_registry`
+    - `canonical`
+    - `execution_spec`
 
-81. It decodes `PortfolioConfig` and `ValuationSourceRegistry`, validates both, and also validates
-    Aave-specific portfolio config.
-82. `compile_portfolio_plan()` builds the semantic dispatch catalog and compiles a
-    `PortfolioExecutionSpec`.
-83. `PortfolioTrackerOp::expand()` lowers the semantic spec into child ops:
+81. It normalizes the built config, validates the bundled canonical portfolio bundle, and validates
+    the compiled `PortfolioExecutionSpec`.
+82. `PortfolioExecuteOp::expand()` lowers the semantic spec into child ops:
 
     - `prepare_execution_sources`
     - `resolve_subjects`
@@ -772,7 +771,7 @@ This is distinct from launch-time and task runtime.
 128. It normalizes the snapshot and writes the full JSON snapshot into context key:
 
     ```text
-    portfolio_tracker.main.out.snapshot
+    portfolio_execute.main.out.snapshot
     ```
 
 129. It then calls `write_output_artifact(...)`.
@@ -781,7 +780,7 @@ This is distinct from launch-time and task runtime.
     - checks whether the fact key already exists
     - records the value through `io.record_value(fact_key, value)`
     - stores the returned artifact id in context key
-      `portfolio_tracker.main.out.snapshot_artifact_id`
+      `portfolio_execute.main.out.snapshot_artifact_id`
     - emits `artifact_written` if this is the first binding for that fact key
 
 131. That output artifact is the canonical persisted `PortfolioSnapshot` JSON artifact.
@@ -794,7 +793,7 @@ This is distinct from launch-time and task runtime.
 135. It writes the report JSON to context key:
 
     ```text
-    portfolio_tracker.main.out.report
+    portfolio_execute.main.out.report
     ```
 
 136. It emits a domain event named `portfolio_tracker.completed`.
@@ -812,15 +811,14 @@ This is distinct from launch-time and task runtime.
 139. `AppServices::start_portfolio_snapshot()` receives the completed run result.
 140. If the run phase is `"failed"`, it scans the run stream backward for the most recent
      `StateFailed` event and maps that error to an `AppError`.
-141. If the run completed and `final_snapshot_id` exists, it fetches that artifact from the
-     artifact store.
-142. It decodes the artifact bytes as a context snapshot JSON object.
-143. It reads, with slot fallback:
+141. If the run completed and `final_snapshot_id` exists, it loads that artifact through
+     `mfm_sdk::unstable::load_context_snapshot_json(...)`.
+142. It reads, with typed slot-fallback decoding:
 
-    - `portfolio_tracker.main.out.snapshot_artifact_id`
-    - `portfolio_tracker.main.out.report`
+    - `portfolio_execute.main.out.snapshot_artifact_id`
+    - `portfolio_execute.main.out.report`
 
-144. It deserializes those values and constructs:
+143. It deserializes those values and constructs:
 
     ```rust
     PortfolioSnapshotResponse {
@@ -1119,19 +1117,19 @@ state at launch time, not hard-coded in the snapshot task body.
 Important writes during the flow:
 
 - `mfm.compiled_execution_spec_artifact_id`
-- `portfolio_tracker.main.out.prepared_sources`
-- `portfolio_tracker.main.out.resolved_subjects`
-- `portfolio_tracker.main.out.pinned_views`
-- `portfolio_tracker.main.out.resolved_valuations`
-- `portfolio_tracker.main.out.observations`
-- `portfolio_tracker.main.out.snapshot`
-- `portfolio_tracker.main.out.snapshot_artifact_id`
-- `portfolio_tracker.main.out.report`
+- `portfolio_execute.main.out.prepared_sources`
+- `portfolio_execute.main.out.resolved_subjects`
+- `portfolio_execute.main.out.pinned_views`
+- `portfolio_execute.main.out.resolved_valuations`
+- `portfolio_execute.main.out.observations`
+- `portfolio_execute.main.out.snapshot`
+- `portfolio_execute.main.out.snapshot_artifact_id`
+- `portfolio_execute.main.out.report`
 
 The final response extraction reads:
 
-- `portfolio_tracker.main.out.snapshot_artifact_id`
-- `portfolio_tracker.main.out.report`
+- `portfolio_execute.main.out.snapshot_artifact_id`
+- `portfolio_execute.main.out.report`
 
 from the final context snapshot artifact addressed by `final_snapshot_id`.
 
@@ -1327,7 +1325,8 @@ There are several genuinely strong design choices here:
 
 - The outer wrapper keeps operational concerns out of Rust domain code.
 - The Rust CLI remains thin: parse -> call app services -> render result.
-- `portfolio_tracker` is a real planner op, not a giant CLI command.
+- `portfolio_execute` is a real planner op, not a giant CLI command.
+- `portfolio_tracker` remains as a compatibility root instead of keeping the transport edge fat.
 - Runtime logic is concentrated in reusable semantic states.
 - The engine persists manifest, context snapshots, output artifacts, and kernel events in a clean
   event-sourced model.
@@ -1394,7 +1393,7 @@ Then the Rust CLI does the real work:
 
 - parse request
 - build app services
-- start `portfolio_tracker`
+- start `portfolio_execute`
 - lower it to a fixed semantic state graph
 - run the graph sequentially through the machine runtime
 - persist machine checkpoints and output artifacts

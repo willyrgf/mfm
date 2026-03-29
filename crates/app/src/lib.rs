@@ -62,9 +62,9 @@ use mfm_op_keystore_admin::{KeystoreDeleteOp, KeystoreImportOp, KeystoreListOp};
 use mfm_op_keystore_tx::KeystoreTxSignOp;
 use mfm_op_nix_app::NixAppOp;
 use mfm_op_portfolio_tracker::{
-    is_portfolio_tracker_internal_op_id, portfolio_snapshot_artifact_id_context_key,
-    portfolio_snapshot_report_context_key, portfolio_tracker_internal_ops,
-    portfolio_tracker_public_ops,
+    is_portfolio_tracker_internal_op_id, portfolio_execute_report_context_key,
+    portfolio_execute_snapshot_artifact_id_context_key, portfolio_public_ops,
+    portfolio_tracker_internal_ops, PORTFOLIO_EXECUTE_OP_ID, PORTFOLIO_PUBLIC_OP_VERSION,
 };
 use mfm_op_proof::ProofOp;
 use mfm_portfolio_config::{
@@ -77,8 +77,9 @@ use mfm_sdk::launcher::{LaunchPipeline, RunLauncher};
 use mfm_sdk::op::OperationRegistry;
 use mfm_sdk::pipeline::{Pipeline, PipelinePlanner, PipelineStep};
 use mfm_sdk::unstable::{
-    context_value_with_slot_fallback as sdk_context_value_with_slot_fallback, single_op_pipeline,
-    DefaultPipelinePlanner, DefaultRunLauncher, HashMapOperationRegistry, SdkPlanResolver,
+    decode_context_value_with_slot_fallback, load_context_snapshot_json, single_op_pipeline,
+    ContextSnapshotLoadError, DefaultPipelinePlanner, DefaultRunLauncher, HashMapOperationRegistry,
+    SdkPlanResolver,
 };
 use mfm_state_portfolio::model::PortfolioReport;
 use mfm_stream_store_postgres::PostgresStreamStore;
@@ -92,13 +93,6 @@ const ENV_ARTIFACT_BACKEND: &str = "MFM_ARTIFACT_BACKEND";
 const ENV_ARTIFACT_ROOT: &str = "MFM_ARTIFACT_ROOT";
 const ENV_DATABASE_URL: &str = "DATABASE_URL";
 const ENV_S3_ENSURE_BUCKET: &str = "MFM_S3_ENSURE_BUCKET";
-
-fn context_value_with_slot_fallback(
-    snapshot: &serde_json::Value,
-    key: &ContextKey,
-) -> Option<serde_json::Value> {
-    sdk_context_value_with_slot_fallback(snapshot, key)
-}
 
 fn ensure_single_start_op(
     registry: &dyn OperationRegistry,
@@ -213,6 +207,27 @@ pub fn app_error_from_storage_error(err: StorageError) -> AppError {
             AppError::new(ErrorClass::Internal, info.code.0, info.message)
         }
     }
+}
+
+fn app_error_from_context_snapshot_load_error(err: ContextSnapshotLoadError) -> AppError {
+    match err {
+        ContextSnapshotLoadError::Storage(err) => app_error_from_storage_error(err),
+        ContextSnapshotLoadError::InvalidSnapshot => AppError::new(
+            ErrorClass::Internal,
+            "ContextSnapshotDecodeFailed",
+            "failed to decode context snapshot json",
+        ),
+    }
+}
+
+fn decode_optional_snapshot_context_value<T: serde::de::DeserializeOwned>(
+    snapshot: &serde_json::Value,
+    key: &ContextKey,
+    code: &'static str,
+    message: &'static str,
+) -> Result<Option<T>, AppError> {
+    decode_context_value_with_slot_fallback(snapshot, key)
+        .map_err(|_| AppError::new(ErrorClass::Internal, code, message))
 }
 
 fn run_stream_id(run_id: RunId) -> StreamId {
@@ -487,7 +502,7 @@ impl OperationPlugin for DefaultOperationPlugin {
         registry.register(Arc::new(EvmConfigureOp));
         registry.register(Arc::new(EvmValidateOp));
         registry.register(Arc::new(EvmDeployConfigureValidateOp));
-        for op in portfolio_tracker_public_ops() {
+        for op in portfolio_public_ops() {
             registry.register(op);
         }
         for op in portfolio_tracker_internal_ops() {
@@ -966,9 +981,6 @@ impl AppServices {
         &self,
         req: PortfolioSnapshotRequest,
     ) -> Result<PortfolioSnapshotResponse, AppError> {
-        const OP_ID: &str = "portfolio_tracker";
-        const OP_VERSION: &str = "v1";
-
         let built = build_portfolio_snapshot_config(req).map_err(|err| {
             AppError::invalid_request(format!("invalid portfolio snapshot request: {err}"))
         })?;
@@ -978,8 +990,8 @@ impl AppServices {
 
         let run = self
             .start_run(RunsStartRequest::Single(SingleOpStartRequest {
-                op_id: OP_ID.to_string(),
-                op_version: OP_VERSION.to_string(),
+                op_id: PORTFOLIO_EXECUTE_OP_ID.to_string(),
+                op_version: PORTFOLIO_PUBLIC_OP_VERSION.to_string(),
                 op_config,
             }))
             .await?;
@@ -992,45 +1004,28 @@ impl AppServices {
         let mut report = None;
 
         if let Some(final_snapshot_id) = &run.final_snapshot_id {
-            let report_key = portfolio_snapshot_report_context_key();
-            let snapshot_artifact_id_key = portfolio_snapshot_artifact_id_context_key();
-            let bytes = self
-                .artifacts
-                .get(&ArtifactId(final_snapshot_id.clone()))
-                .await
-                .map_err(app_error_from_storage_error)?;
+            let report_key = portfolio_execute_report_context_key();
+            let snapshot_artifact_id_key = portfolio_execute_snapshot_artifact_id_context_key();
+            let snapshot = load_context_snapshot_json(
+                self.artifacts.as_ref(),
+                &ArtifactId(final_snapshot_id.clone()),
+            )
+            .await
+            .map_err(app_error_from_context_snapshot_load_error)?;
 
-            let v = serde_json::from_slice::<serde_json::Value>(&bytes).map_err(|_| {
-                AppError::new(
-                    ErrorClass::Internal,
-                    "ContextSnapshotDecodeFailed",
-                    "failed to decode context snapshot json",
-                )
-            })?;
+            snapshot_artifact_id = decode_optional_snapshot_context_value(
+                &snapshot,
+                &snapshot_artifact_id_key,
+                "PortfolioSnapshotArtifactIdDecodeFailed",
+                "failed to decode portfolio snapshot artifact id",
+            )?;
 
-            if let Some(snapshot_artifact_id_value) =
-                context_value_with_slot_fallback(&v, &snapshot_artifact_id_key)
-            {
-                snapshot_artifact_id = Some(
-                    serde_json::from_value(snapshot_artifact_id_value).map_err(|_| {
-                        AppError::new(
-                            ErrorClass::Internal,
-                            "PortfolioSnapshotArtifactIdDecodeFailed",
-                            "failed to decode portfolio snapshot artifact id",
-                        )
-                    })?,
-                );
-            }
-
-            if let Some(report_value) = context_value_with_slot_fallback(&v, &report_key) {
-                report = Some(serde_json::from_value(report_value).map_err(|_| {
-                    AppError::new(
-                        ErrorClass::Internal,
-                        "PortfolioSnapshotReportDecodeFailed",
-                        "failed to decode portfolio snapshot report",
-                    )
-                })?);
-            }
+            report = decode_optional_snapshot_context_value(
+                &snapshot,
+                &report_key,
+                "PortfolioSnapshotReportDecodeFailed",
+                "failed to decode portfolio snapshot report",
+            )?;
         }
 
         Ok(PortfolioSnapshotResponse {
@@ -2171,6 +2166,13 @@ mod tests {
             .registry
             .resolve(&OpId::must_new("portfolio_tracker".to_string()), "v1")
             .expect("public root op should remain registered");
+        bundle
+            .registry
+            .resolve(
+                &OpId::must_new(PORTFOLIO_EXECUTE_OP_ID.to_string()),
+                PORTFOLIO_PUBLIC_OP_VERSION,
+            )
+            .expect("built-config public root op should remain registered");
     }
 
     #[test]
@@ -2186,6 +2188,25 @@ mod tests {
         assert!(bundle
             .registry
             .resolve(&OpId::must_new("portfolio_tracker".to_string()), "v2")
+            .is_err());
+    }
+
+    #[test]
+    fn portfolio_execute_root_op_remains_v1() {
+        let bundle = make_engine_bundle();
+
+        let op = bundle
+            .registry
+            .resolve(
+                &OpId::must_new(PORTFOLIO_EXECUTE_OP_ID.to_string()),
+                PORTFOLIO_PUBLIC_OP_VERSION,
+            )
+            .expect("built-config public root op should remain v1");
+        assert_eq!(op.op_version(), PORTFOLIO_PUBLIC_OP_VERSION);
+
+        assert!(bundle
+            .registry
+            .resolve(&OpId::must_new(PORTFOLIO_EXECUTE_OP_ID.to_string()), "v2")
             .is_err());
     }
 

@@ -1,11 +1,12 @@
 # mfm-op-portfolio-tracker
 
-Portfolio tracking operation (`op_id = "portfolio_tracker"`, `op_version = "v1"`).
+Portfolio tracking operations:
 
-This op is the thin planner for the canonical multi-network portfolio snapshot flow. It consumes
-either the legacy canonical `portfolio` plus `valuation_source_registry` shape or the newer
-pre-built portfolio execution config emitted by `mfm-portfolio-config`, then wires the fixed
-semantic runtime:
+- `portfolio_execute/v1`: strict built-config execution root used by thin transport adapters
+- `portfolio_tracker/v1`: legacy compatibility root that still accepts canonical-or-built config
+
+These ops are thin planners for the canonical multi-network portfolio snapshot flow. They wire the
+same fixed semantic runtime:
 
 - `PrepareExecutionSources`
 - `ResolveSubjects`
@@ -15,6 +16,10 @@ semantic runtime:
 - `MergeObservations`
 - `AssembleSnapshot`
 - `ProjectReport`
+
+`portfolio_execute` consumes the pre-built execution config emitted by `mfm-portfolio-config`.
+`portfolio_tracker` remains available during migration for callers that still send the legacy
+canonical `portfolio` plus `valuation_source_registry` shape.
 
 Protocol and network specialization now happens in the semantic adapter catalog rather than through
 protocol-specific graph shapes.
