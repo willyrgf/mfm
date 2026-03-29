@@ -5,6 +5,10 @@ use clap::Args;
 use mfm_app::{
     AppError, FeatureExecutionResult, PortfolioSnapshotRequest, PortfolioSnapshotResponse,
 };
+use mfm_portfolio_config::{
+    canonicalize_portfolio_snapshot_authored_config, parse_portfolio_snapshot_authored_config,
+    parse_portfolio_snapshot_authored_config_with_hint, AuthoredConfigFormat,
+};
 
 use crate::commands::result::{CommandError, CommandOutput, CommandResult};
 use crate::commands::CommandContext;
@@ -19,7 +23,7 @@ pub(crate) struct SnapshotArgs {
     #[arg(long)]
     pub request_json: Option<String>,
 
-    /// Path to a canonical portfolio snapshot request JSON file
+    /// Path to a portfolio snapshot request JSON or TOML file
     #[arg(long)]
     pub request_file: Option<PathBuf>,
 
@@ -57,11 +61,35 @@ where
 }
 
 fn parse_request(args: &SnapshotArgs) -> Result<PortfolioSnapshotRequest, CommandError> {
-    mfm_app::parse_portfolio_snapshot_request_input(
-        args.request_json.clone(),
-        args.request_file.clone(),
-    )
-    .map_err(command_error_from_app_error)
+    match (&args.request_json, &args.request_file) {
+        (Some(_), Some(_)) => Err(CommandError::new(
+            "InvalidArguments",
+            "Pass only one of --request-json or --request-file",
+        )),
+        (None, None) => Err(CommandError::new(
+            "MissingArgument",
+            "Pass one of --request-json or --request-file",
+        )),
+        (Some(raw), None) => {
+            let authored =
+                parse_portfolio_snapshot_authored_config(raw, AuthoredConfigFormat::Json)
+                    .map_err(command_error_from_config_error)?;
+            canonicalize_portfolio_snapshot_authored_config(authored)
+                .map_err(command_error_from_config_error)
+        }
+        (None, Some(path)) => {
+            let raw = std::fs::read_to_string(path).map_err(|_| {
+                CommandError::new(
+                    "InvalidRequestFile",
+                    "Failed to read --request-file contents",
+                )
+            })?;
+            let authored = parse_portfolio_snapshot_authored_config_with_hint(&raw, Some(path))
+                .map_err(command_error_from_config_error)?;
+            canonicalize_portfolio_snapshot_authored_config(authored)
+                .map_err(command_error_from_config_error)
+        }
+    }
 }
 
 async fn execute_request_with_starter<F, Fut>(
@@ -73,19 +101,27 @@ where
     Fut: Future<Output = Result<PortfolioSnapshotResponse, AppError>>,
 {
     let response = start(request).await.map_err(command_error_from_app_error)?;
-    build_feature_execution_result(response)
+    let result = FeatureExecutionResult::from_serializable("portfolio.snapshot", response)
+        .map_err(|_| CommandError::new("SerializationError", "Failed to serialize result"))?;
+    Ok(CommandOutput::new(result))
 }
 
-fn build_feature_execution_result(
-    response: PortfolioSnapshotResponse,
-) -> CommandResult<FeatureExecutionResult> {
-    let result = FeatureExecutionResult {
-        feature_id: "portfolio.snapshot".to_string(),
-        result: serde_json::to_value(response)
-            .map_err(|_| CommandError::new("SerializationError", "Failed to serialize result"))?,
-    };
-
-    Ok(CommandOutput::new(result))
+fn command_error_from_config_error(
+    err: mfm_portfolio_config::PortfolioSnapshotConfigError,
+) -> CommandError {
+    match err {
+        mfm_portfolio_config::PortfolioSnapshotConfigError::InvalidJson { .. } => {
+            CommandError::new("InvalidJson", "Failed to parse request body as JSON")
+        }
+        mfm_portfolio_config::PortfolioSnapshotConfigError::InvalidToml { .. } => {
+            CommandError::new("InvalidToml", "Failed to parse request body as TOML")
+        }
+        mfm_portfolio_config::PortfolioSnapshotConfigError::InvalidBundle(_)
+        | mfm_portfolio_config::PortfolioSnapshotConfigError::Serialize { .. }
+        | mfm_portfolio_config::PortfolioSnapshotConfigError::CanonicalJson { .. } => {
+            CommandError::new("InvalidRequest", err.to_string())
+        }
+    }
 }
 
 #[cfg(test)]

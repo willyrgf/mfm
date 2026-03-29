@@ -7,11 +7,10 @@ Primary command surfaces covered here:
 
 - `nix run .#mfm::portfolio::snapshot -- /tmp/portfolio-request.json`
 - `mfm_cli --output-format json portfolio snapshot --request-file /tmp/portfolio-request.json`
+- `mfm_cli --output-format json portfolio snapshot --request-file /tmp/portfolio-config.toml`
 
 The current code is authoritative. If a doc disagrees with code, code wins until the doc is
-updated. In particular, `docs/ops-and-states.md` still refers to
-`crates/states/portfolio/src/semantic_states.rs`, while the current implementation lives in
-`crates/states/portfolio/src/execution_states.rs`.
+updated.
 
 Useful companion documents:
 
@@ -512,12 +511,14 @@ This is distinct from launch-time and task runtime.
 60. `bin/cli/src/commands/mod.rs` dispatches to `Commands::Portfolio`.
 61. `bin/cli/src/commands/portfolio/mod.rs` dispatches `PortfolioCommand::Snapshot`.
 62. `snapshot::execute()` calls `execute_internal()`.
-63. `parse_request()` calls `mfm_app::parse_portfolio_snapshot_request_input()`.
-64. `parse_portfolio_snapshot_request_input()`:
+63. `parse_request()` handles the transport boundary directly.
+64. The CLI transport parser:
 
     - rejects both `--request-json` and `--request-file` together
     - rejects neither provided
     - reads the file with `std::fs::read_to_string`
+    - parses authored JSON or TOML via `mfm-portfolio-config`
+    - canonicalizes authored config into the typed canonical request before app handoff
     - deserializes `PortfolioSnapshotRequest` from JSON
 
 ### Store creation and app service wiring
@@ -958,9 +959,13 @@ This is distinct from launch-time and task runtime.
   - `parse_portfolio_snapshot_request_input`
   - `FeatureCatalog`
 
+- [`crates/portfolio-config/src/lib.rs`](../crates/portfolio-config/src/lib.rs)
+  - authored JSON/TOML parsing
+  - canonicalization into the typed portfolio request
+  - deterministic build into the execution op's built config
+
 - [`crates/ops/portfolio-tracker-op/src/lib.rs`](../crates/ops/portfolio-tracker-op/src/lib.rs)
-  - request decoding
-  - semantic plan compilation
+  - legacy canonical vs built-config request decoding
   - child-op lowering
   - root export keys
 
@@ -1011,9 +1016,9 @@ This is distinct from launch-time and task runtime.
 
 ## 5. Data flow
 
-### Input request JSON shape
+### Input request shape
 
-The top-level input is:
+The canonical top-level input is:
 
 ```json
 {

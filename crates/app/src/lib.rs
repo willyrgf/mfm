@@ -67,6 +67,11 @@ use mfm_op_portfolio_tracker::{
     portfolio_tracker_public_ops,
 };
 use mfm_op_proof::ProofOp;
+use mfm_portfolio_config::{
+    build_portfolio_snapshot_config, canonicalize_portfolio_snapshot_authored_config,
+    parse_portfolio_snapshot_authored_config, parse_portfolio_snapshot_authored_config_with_hint,
+    AuthoredConfigFormat, PortfolioSnapshotConfigError,
+};
 use mfm_sdk::ids::{MachineId, StepId};
 use mfm_sdk::launcher::{LaunchPipeline, RunLauncher};
 use mfm_sdk::op::OperationRegistry;
@@ -75,8 +80,7 @@ use mfm_sdk::unstable::{
     context_value_with_slot_fallback as sdk_context_value_with_slot_fallback, single_op_pipeline,
     DefaultPipelinePlanner, DefaultRunLauncher, HashMapOperationRegistry, SdkPlanResolver,
 };
-use mfm_state_portfolio::model::{validate_portfolio_bundle, PortfolioReport};
-use mfm_state_symbol::model::ValuationSourceRegistry;
+use mfm_state_portfolio::model::PortfolioReport;
 use mfm_stream_store_postgres::PostgresStreamStore;
 use mfm_transports_local_evm::LocalEvmIoTransportFactory;
 use mfm_transports_local_fs::LocalFsIoTransportFactory;
@@ -965,13 +969,12 @@ impl AppServices {
         const OP_ID: &str = "portfolio_tracker";
         const OP_VERSION: &str = "v1";
 
-        validate_portfolio_bundle(&req.portfolio, &req.valuation_source_registry).map_err(
-            |err| AppError::invalid_request(format!("invalid portfolio snapshot request: {err}")),
-        )?;
-
-        let op_config = serde_json::to_value(&req).map_err(|_| {
-            AppError::invalid_request("failed to encode portfolio snapshot request")
+        let built = build_portfolio_snapshot_config(req).map_err(|err| {
+            AppError::invalid_request(format!("invalid portfolio snapshot request: {err}"))
         })?;
+
+        let op_config = serde_json::to_value(&built)
+            .map_err(|_| AppError::invalid_request("failed to encode portfolio snapshot config"))?;
 
         let run = self
             .start_run(RunsStartRequest::Single(SingleOpStartRequest {
@@ -1039,7 +1042,7 @@ impl AppServices {
         })
     }
 
-    /// Starts a portfolio snapshot run from either an inline JSON payload or a JSON file.
+    /// Starts a portfolio snapshot run from either an inline JSON payload or a JSON/TOML file.
     pub async fn start_portfolio_snapshot_from_request_input(
         &self,
         request_json: Option<String>,
@@ -1050,37 +1053,73 @@ impl AppServices {
     }
 }
 
-/// Parses a portfolio snapshot request from either an inline JSON payload or a JSON file.
+/// Parses a portfolio snapshot request from either an inline JSON payload or a JSON/TOML file.
 pub fn parse_portfolio_snapshot_request_input(
     request_json: Option<String>,
     request_file: Option<PathBuf>,
 ) -> Result<PortfolioSnapshotRequest, AppError> {
-    let raw_request = match (request_json, request_file) {
-        (Some(_), Some(_)) => {
-            return Err(AppError::new(
-                ErrorClass::BadRequest,
-                "InvalidArguments",
-                "Pass only one of --request-json or --request-file",
-            ));
+    match (request_json, request_file) {
+        (Some(_), Some(_)) => Err(AppError::new(
+            ErrorClass::BadRequest,
+            "InvalidArguments",
+            "Pass only one of --request-json or --request-file",
+        )),
+        (None, None) => Err(AppError::new(
+            ErrorClass::BadRequest,
+            "MissingArgument",
+            "Pass one of --request-json or --request-file",
+        )),
+        (Some(raw), None) => {
+            let authored =
+                parse_portfolio_snapshot_authored_config(&raw, AuthoredConfigFormat::Json)
+                    .map_err(|err| app_error_from_portfolio_config_error(err, Some("JSON")))?;
+            canonicalize_portfolio_snapshot_authored_config(authored)
+                .map_err(|err| app_error_from_portfolio_config_error(err, None))
         }
-        (None, None) => {
-            return Err(AppError::new(
-                ErrorClass::BadRequest,
-                "MissingArgument",
-                "Pass one of --request-json or --request-file",
-            ));
+        (None, Some(path)) => {
+            let raw = std::fs::read_to_string(&path).map_err(|_| {
+                AppError::new(
+                    ErrorClass::BadRequest,
+                    "InvalidRequestFile",
+                    "Failed to read --request-file contents",
+                )
+            })?;
+            let authored =
+                parse_portfolio_snapshot_authored_config_with_hint(&raw, Some(path.as_path()))
+                    .map_err(|err| app_error_from_portfolio_config_error(err, None))?;
+            canonicalize_portfolio_snapshot_authored_config(authored)
+                .map_err(|err| app_error_from_portfolio_config_error(err, None))
         }
-        (Some(raw), None) => raw,
-        (None, Some(path)) => std::fs::read_to_string(path).map_err(|_| {
-            AppError::new(
-                ErrorClass::BadRequest,
-                "InvalidRequestFile",
-                "Failed to read --request-file contents",
-            )
-        })?,
-    };
+    }
+}
 
-    serde_json::from_str(&raw_request).map_err(|_| AppError::invalid_json())
+fn app_error_from_portfolio_config_error(
+    err: PortfolioSnapshotConfigError,
+    format_name: Option<&str>,
+) -> AppError {
+    match err {
+        PortfolioSnapshotConfigError::InvalidJson { .. } => {
+            if let Some(format_name) = format_name {
+                AppError::new(
+                    ErrorClass::BadRequest,
+                    "InvalidJson",
+                    format!("Failed to parse portfolio snapshot {format_name}"),
+                )
+            } else {
+                AppError::invalid_json()
+            }
+        }
+        PortfolioSnapshotConfigError::InvalidToml { .. } => AppError::new(
+            ErrorClass::BadRequest,
+            "InvalidToml",
+            "Failed to parse portfolio snapshot TOML",
+        ),
+        PortfolioSnapshotConfigError::InvalidBundle(_)
+        | PortfolioSnapshotConfigError::Serialize { .. }
+        | PortfolioSnapshotConfigError::CanonicalJson { .. } => {
+            AppError::new(ErrorClass::BadRequest, "InvalidRequest", err.to_string())
+        }
+    }
 }
 
 /// Loads an artifact from the supplied store and returns a JSON-or-hex response body.
@@ -1412,6 +1451,19 @@ pub struct FeatureExecutionResult {
     pub result: serde_json::Value,
 }
 
+impl FeatureExecutionResult {
+    /// Builds a feature result from any serializable payload.
+    pub fn from_serializable(
+        feature_id: impl Into<String>,
+        result: impl Serialize,
+    ) -> Result<Self, serde_json::Error> {
+        Ok(Self {
+            feature_id: feature_id.into(),
+            result: serde_json::to_value(result)?,
+        })
+    }
+}
+
 impl fmt::Display for FeatureExecutionResult {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "feature_id: {}", self.feature_id)?;
@@ -1711,9 +1763,12 @@ impl FeatureCatalog {
             )
         })?;
 
-        Ok(FeatureExecutionResult {
-            feature_id: req.feature_id,
-            result,
+        FeatureExecutionResult::from_serializable(req.feature_id, result).map_err(|_| {
+            AppError::new(
+                ErrorClass::Internal,
+                "SerializationError",
+                "Failed to serialize feature result",
+            )
         })
     }
 }
@@ -1735,14 +1790,8 @@ struct RunStreamInput {
     to_seq: Option<u64>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
 /// Request payload for the portfolio snapshot feature.
-pub struct PortfolioSnapshotRequest {
-    /// Canonical portfolio-owned config surface.
-    pub portfolio: mfm_state_portfolio::model::PortfolioConfig,
-    /// Sibling valuation source registry surface loaded alongside the portfolio config.
-    pub valuation_source_registry: ValuationSourceRegistry,
-}
+pub use mfm_portfolio_config::PortfolioSnapshotCanonicalConfig as PortfolioSnapshotRequest;
 
 /// Response returned after starting a portfolio snapshot feature run.
 #[derive(Clone, Debug, Serialize)]

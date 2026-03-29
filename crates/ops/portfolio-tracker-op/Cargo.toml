@@ -9,6 +9,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 
 mfm-machine = { path = "../../machine" }
+mfm-portfolio-config = { path = "../../portfolio-config" }
 mfm-sdk = { path = "../../sdk" }
 mfm-state-aave-v3 = { path = "../../states/aave-v3" }
 mfm-state-common = { path = "../../states/common" }

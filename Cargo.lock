@@ -1889,6 +1889,7 @@ dependencies = [
  "mfm-op-keystore-shim",
  "mfm-op-keystore-tx",
  "mfm-op-portfolio-tracker",
+ "mfm-portfolio-config",
  "mfm-sdk",
  "mfm-state-portfolio",
  "mfm-state-symbol",
@@ -1922,6 +1923,7 @@ dependencies = [
  "mfm-op-nix-app",
  "mfm-op-portfolio-tracker",
  "mfm-op-proof",
+ "mfm-portfolio-config",
  "mfm-sdk",
  "mfm-state-portfolio",
  "mfm-state-symbol",
@@ -2292,6 +2294,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "mfm-machine",
+ "mfm-portfolio-config",
  "mfm-sdk",
  "mfm-state-aave-v3",
  "mfm-state-common",
@@ -2313,6 +2316,22 @@ dependencies = [
  "mfm-state-common",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "mfm-portfolio-config"
+version = "0.1.0"
+dependencies = [
+ "mfm-machine",
+ "mfm-state-aave-v3",
+ "mfm-state-portfolio",
+ "mfm-state-symbol",
+ "mfm-state-wallet",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "toml",
 ]
 
 [[package]]

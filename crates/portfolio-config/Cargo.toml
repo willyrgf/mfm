@@ -1,0 +1,22 @@
+[package]
+name = "mfm-portfolio-config"
+version = "0.1.0"
+edition = "2021"
+description = "Shared authored, canonical, and built config pipeline for portfolio snapshot workflows"
+repository = "https://github.com/willyrgf/mfm"
+license = "MIT"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+toml = "0.8"
+
+mfm-machine = { path = "../machine", version = "0.1.0" }
+mfm-state-aave-v3 = { path = "../states/aave-v3", version = "0.1.0" }
+mfm-state-portfolio = { path = "../states/portfolio", version = "0.1.0" }
+mfm-state-symbol = { path = "../states/symbol", version = "0.1.0" }
+mfm-state-wallet = { path = "../states/wallet", version = "0.1.0" }
+
+[dev-dependencies]
+tokio = { workspace = true }

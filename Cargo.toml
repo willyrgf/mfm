@@ -26,6 +26,7 @@ members = [
 	"crates/machine-derive",
 	"crates/machine-test-support",
 	"crates/sdk",
+	"crates/portfolio-config",
 	"crates/states/common",
 	"crates/states/keystore",
 	"crates/states/aave-v3",

@@ -26,25 +26,20 @@ use std::sync::Arc;
 use mfm_machine::config::RunConfig;
 use mfm_machine::errors::ErrorCategory;
 use mfm_machine::ids::{ContextKey, FactKey, OpId, OpPath};
+use mfm_portfolio_config::{
+    decode_portfolio_snapshot_execution_config, PortfolioSnapshotBuiltConfig,
+};
 use mfm_sdk::errors::SdkError;
 use mfm_sdk::ids::{ChildOpLocalId, PortKey};
 use mfm_sdk::op::{
     AfterEdge, ChildOpInstance, CompositeOpSpec, DynOperation, ImportBinding, OpInterface,
     Operation, PlannedOp, PlannedOpKind, PortSource, ReExportBinding,
 };
-use mfm_state_aave_v3::portfolio::model::validate_aave_portfolio_config;
 use mfm_state_common::errors as op_errors;
-use mfm_state_portfolio::model::{
-    decode_portfolio_config, validate_portfolio_bundle, PortfolioConfig,
-};
 use mfm_state_portfolio::plan::{PortfolioExecutionSpec, PORTFOLIO_EXECUTION_SPEC_KEY};
-use mfm_state_symbol::model::{decode_valuation_source_registry, ValuationSourceRegistry};
 use serde_json::Value;
 
-mod plan;
 mod plan_ops;
-
-use plan::{builtin_dispatch_catalog, DefaultPortfolioPlanCompiler};
 use plan_ops::{
     assemble_snapshot_config, child_ops, merge_observations_config, observe_batch_config,
     pin_execution_views_config, prepare_sources_config, resolve_subjects_config,
@@ -77,52 +72,15 @@ pub fn portfolio_snapshot_report_context_key() -> ContextKey {
     ContextKey(format!("{MAIN_OP_PATH}.out.{PORT_REPORT}"))
 }
 
-#[derive(Clone, Debug)]
-struct PortfolioTrackerConfig {
-    portfolio: PortfolioConfig,
-    valuation_source_registry: ValuationSourceRegistry,
-}
+type PortfolioTrackerConfig = PortfolioSnapshotBuiltConfig;
 
 fn sdk_input_error(code: &'static str, message: impl Into<String>) -> SdkError {
     op_errors::sdk_error(code, ErrorCategory::ParsingInput, false, message)
 }
 
 fn parse_config(op_config: &Value) -> Result<PortfolioTrackerConfig, SdkError> {
-    let obj = op_config.as_object().ok_or_else(|| {
-        op_errors::sdk_parse_error(
-            "invalid_op_config",
-            "portfolio_tracker op_config must be a JSON object",
-        )
-    })?;
-
-    let portfolio_value = obj.get("portfolio").ok_or_else(|| {
-        sdk_input_error(
-            "missing_portfolio_config",
-            "portfolio_tracker op_config must contain `portfolio`",
-        )
-    })?;
-    let valuation_source_registry_value =
-        obj.get("valuation_source_registry").ok_or_else(|| {
-            sdk_input_error(
-                "missing_valuation_source_registry",
-                "portfolio_tracker op_config must contain `valuation_source_registry`",
-            )
-        })?;
-
-    let portfolio = decode_portfolio_config(portfolio_value)
-        .map_err(|err| sdk_input_error("invalid_portfolio_config", err.to_string()))?;
-    let valuation_source_registry =
-        decode_valuation_source_registry(valuation_source_registry_value)
-            .map_err(|err| sdk_input_error("invalid_valuation_source_registry", err.to_string()))?;
-    validate_portfolio_bundle(&portfolio, &valuation_source_registry)
-        .map_err(|err| sdk_input_error("invalid_portfolio_bundle", err.to_string()))?;
-    validate_aave_portfolio_config(&portfolio)
-        .map_err(|err| sdk_input_error("invalid_aave_portfolio_config", err.to_string()))?;
-
-    Ok(PortfolioTrackerConfig {
-        portfolio,
-        valuation_source_registry,
-    })
+    decode_portfolio_snapshot_execution_config(op_config)
+        .map_err(|err| sdk_input_error("invalid_portfolio_execution_config", err.to_string()))
 }
 
 fn output_fact_key(op_path: &OpPath) -> FactKey {
@@ -132,27 +90,7 @@ fn output_fact_key(op_path: &OpPath) -> FactKey {
 fn compile_portfolio_plan(
     cfg: &PortfolioTrackerConfig,
 ) -> Result<PortfolioExecutionSpec, SdkError> {
-    let semantic_catalog = builtin_dispatch_catalog().map_err(|err| {
-        sdk_input_error(
-            "semantic_catalog_construction_failed",
-            format!("failed to construct semantic adapter catalog: {err}"),
-        )
-    })?;
-    let semantic_request = mfm_state_portfolio::plan::PortfolioRequest {
-        portfolio: cfg.portfolio.clone(),
-        valuation_source_registry: cfg.valuation_source_registry.clone(),
-    };
-    mfm_state_portfolio::plan::PortfolioPlanCompiler::compile(
-        &DefaultPortfolioPlanCompiler,
-        &semantic_request,
-        &semantic_catalog,
-    )
-    .map_err(|err| {
-        sdk_input_error(
-            "semantic_compilation_failed",
-            format!("failed to compile semantic execution spec: {err}"),
-        )
-    })
+    Ok(cfg.execution_spec.clone())
 }
 
 fn child_export(child_id: &str, export: &str) -> PortSource {
@@ -354,7 +292,10 @@ impl Operation for PortfolioTrackerOp {
             child_op_local_id: ChildOpLocalId(ASSEMBLE_SNAPSHOT_CHILD_ID.to_string()),
             op_id: OpId::must_new(ASSEMBLE_SNAPSHOT_OP_ID.to_string()),
             op_version: plan_ops::INTERNAL_OP_VERSION.to_string(),
-            op_config: assemble_snapshot_config(&cfg.portfolio, output_fact_key(&op_path))?,
+            op_config: assemble_snapshot_config(
+                &cfg.canonical.portfolio,
+                output_fact_key(&op_path),
+            )?,
         });
         children.push(ChildOpInstance {
             child_op_local_id: ChildOpLocalId(PROJECT_REPORT_CHILD_ID.to_string()),

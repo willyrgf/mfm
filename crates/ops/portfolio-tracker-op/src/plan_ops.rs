@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use mfm_machine::ids::{ContextKey, FactKey, OpId, OpPath};
+use mfm_portfolio_config::builtin_dispatch_catalog;
 use mfm_sdk::errors::SdkError;
 use mfm_sdk::ids::PortKey;
 use mfm_sdk::op::{
@@ -20,8 +21,6 @@ use mfm_state_portfolio::plan::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-
-use crate::plan::builtin_dispatch_catalog;
 
 pub const PREPARE_EXECUTION_SOURCES_CHILD_ID: &str = "prepare_execution_sources";
 pub const RESOLVE_SUBJECTS_CHILD_ID: &str = "resolve_subjects";

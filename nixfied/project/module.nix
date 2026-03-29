@@ -951,7 +951,7 @@ in
               kind = "positional";
               type = "string";
               required = false;
-              description = "Path to the canonical portfolio snapshot request JSON file.";
+              description = "Path to the portfolio snapshot request file in JSON or TOML.";
             }
           ];
           command = ''

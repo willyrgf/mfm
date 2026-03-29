@@ -2,8 +2,9 @@
 
 Portfolio tracking operation (`op_id = "portfolio_tracker"`, `op_version = "v1"`).
 
-This op is the thin planner for the canonical multi-network portfolio snapshot flow. It validates
-the canonical `portfolio` plus `valuation_source_registry` config surfaces and wires the fixed
+This op is the thin planner for the canonical multi-network portfolio snapshot flow. It consumes
+either the legacy canonical `portfolio` plus `valuation_source_registry` shape or the newer
+pre-built portfolio execution config emitted by `mfm-portfolio-config`, then wires the fixed
 semantic runtime:
 
 - `PrepareExecutionSources`

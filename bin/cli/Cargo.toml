@@ -9,6 +9,7 @@ parity-tests = []
 [dependencies]
 tokio = { workspace = true }
 mfm-machine = { path = "../../crates/machine" }
+mfm-portfolio-config = { path = "../../crates/portfolio-config" }
 mfm-sdk = { path = "../../crates/sdk" }
 mfm-app = { path = "../../crates/app" }
 mfm-op-keystore-tx = { path = "../../crates/ops/keystore-tx-op" }

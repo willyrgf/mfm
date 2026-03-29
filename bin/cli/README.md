@@ -393,10 +393,12 @@ mfm_cli portfolio snapshot --request-json '<REQUEST_JSON>' [OPTIONS]
 ```
 
 **Key Options:**
-- `--request-file <PATH>`: Path to a canonical request JSON file
+- `--request-file <PATH>`: Path to an authored request file in JSON or TOML
 - `--request-json <JSON>`: Inline canonical request JSON payload
 
-The request JSON must use the same in-place contract as the `portfolio.snapshot` feature:
+Both authored formats normalize immediately into the same canonical typed request shape. The
+resulting canonical request must use the same in-place contract as the `portfolio.snapshot`
+feature:
 
 ```json
 {
