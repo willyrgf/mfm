@@ -8,6 +8,7 @@ let
   packagePath =
     {
       discardContext ? false,
+      preserveContext ? false,
       pkg,
     }:
     if pkg == null then
@@ -16,7 +17,7 @@ let
       let
         path = builtins.toString pkg;
       in
-      if discardContext then builtins.unsafeDiscardStringContext path else path;
+      if discardContext && !preserveContext then builtins.unsafeDiscardStringContext path else path;
 
   dropNulls =
     attrs:
@@ -123,6 +124,8 @@ let
         if package != null then
           packagePath {
             inherit discardContext;
+            # Service runtimes still need Nix to realize local package closures.
+            preserveContext = true;
             pkg = package;
           }
         else
@@ -131,6 +134,8 @@ let
         if clientPackage != null then
           packagePath {
             inherit discardContext;
+            # Service runtimes still need Nix to realize local package closures.
+            preserveContext = true;
             pkg = clientPackage;
           }
         else
