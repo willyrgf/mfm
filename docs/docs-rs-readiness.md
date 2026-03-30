@@ -51,6 +51,7 @@ Notes:
 - Use `cargo check -p <crate> --lib` for local compile validation before the upstream versions exist in the registry.
 - Use `cargo package --allow-dirty --list -p <crate>` when you want to inspect the files that would be packaged without requiring the upstream versions to exist in the registry.
 - Use `nix run .#publish-docs -- --dry-run` to validate the current ordered wave from `crates/docs/publish-wave.json`.
+- The desired docs catalog is authored from `crates/docs/catalog.toml` by default; `crates/docs/catalog.json` is also accepted when the TOML file is absent.
 - `publish-docs` now uses the crates.io sparse index as the primary registry signal for planning; transient or cached uncertainty is treated as `wait_registry`, not as permission to publish.
 - Normal `publish-docs` planning only observes the selected wave. Full-catalog registry observation now happens in `nix run .#publish-docs -- sync-umbrella`.
 - `nix run .#publish-docs` now auto-runs the umbrella sync during `apply`/`resume` when `mfm-docs` needs it, then re-plans against the refreshed sync artifact.

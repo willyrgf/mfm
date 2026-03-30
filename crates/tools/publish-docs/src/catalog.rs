@@ -3,18 +3,24 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use mfm_publish_docs_config::{
+    canonicalize_desired_catalog_authored_config, parse_desired_catalog_authored_config_with_hint,
+};
+
 use crate::{
     error::PublishDocsError,
     model::{
-        CatalogPackage, CatalogSection, DesiredCatalog, DocsPolicy, PackageFilter, PublishWave,
-        UmbrellaPolicy, Visibility, WavePackage, WorkspaceState,
+        CatalogPackage, DesiredCatalog, DocsPolicy, PackageFilter, PublishWave, UmbrellaPolicy,
+        Visibility, WavePackage, WorkspaceState,
     },
 };
 
 /// Relative path to the current publish wave file.
 pub(crate) const PUBLISH_WAVE_PATH: &str = "crates/docs/publish-wave.json";
-/// Relative path to the desired-state catalog.
-pub(crate) const DESIRED_CATALOG_PATH: &str = "crates/docs/catalog.toml";
+/// Relative path to the desired-state catalog when authored as TOML.
+pub(crate) const DESIRED_CATALOG_TOML_PATH: &str = "crates/docs/catalog.toml";
+/// Alternate relative path to the desired-state catalog when authored as JSON.
+pub(crate) const DESIRED_CATALOG_JSON_PATH: &str = "crates/docs/catalog.json";
 
 /// Loads `publish-wave.json` from the workspace root.
 pub(crate) fn load_publish_wave(workspace_root: &Path) -> Result<PublishWave, PublishDocsError> {
@@ -29,40 +35,35 @@ pub(crate) fn publish_wave_path(workspace_root: &Path) -> PathBuf {
     workspace_root.join(PUBLISH_WAVE_PATH)
 }
 
-/// Loads `catalog.toml` from the workspace root and validates it against the workspace inventory.
+/// Loads the desired-state catalog from the workspace root and validates it against the workspace
+/// inventory.
 pub(crate) fn load_desired_catalog(
     workspace_root: &Path,
     workspace: &WorkspaceState,
 ) -> Result<DesiredCatalog, PublishDocsError> {
-    let path = workspace_root.join(DESIRED_CATALOG_PATH);
-    let bytes = fs::read_to_string(path)?;
-    let raw: RawCatalog =
-        toml::from_str(&bytes).map_err(|error| PublishDocsError::Other(error.into()))?;
-    let catalog = DesiredCatalog {
-        catalog_version: raw.catalog_version,
-        umbrella_package: raw.umbrella_package,
-        packages: raw
-            .packages
-            .into_iter()
-            .map(|package| CatalogPackage {
-                name: package.name,
-                workspace_path: package.workspace_path,
-                visibility: package.visibility,
-                section: package.section,
-                summary: package.summary,
-                docs_policy: package.docs_policy.unwrap_or(DocsPolicy::RepoOnly),
-                umbrella_policy: package
-                    .umbrella_policy
-                    .unwrap_or(UmbrellaPolicy::WhenPublished),
-                release_priority: package.release_priority.unwrap_or(100),
-                allow_yank: package.allow_yank.unwrap_or(false),
-                owners: package.owners.unwrap_or_default(),
-                notes: package.notes.unwrap_or_default(),
-            })
-            .collect(),
-    };
+    let path = desired_catalog_path(workspace_root)?;
+    let bytes = fs::read_to_string(&path)?;
+    let authored = parse_desired_catalog_authored_config_with_hint(&bytes, Some(path.as_path()))?;
+    let catalog = canonicalize_desired_catalog_authored_config(authored)?;
     validate_catalog(&catalog, workspace)?;
     Ok(catalog)
+}
+
+fn desired_catalog_path(workspace_root: &Path) -> Result<PathBuf, PublishDocsError> {
+    let toml_path = workspace_root.join(DESIRED_CATALOG_TOML_PATH);
+    let json_path = workspace_root.join(DESIRED_CATALOG_JSON_PATH);
+
+    match (toml_path.is_file(), json_path.is_file()) {
+        (true, false) => Ok(toml_path),
+        (false, true) => Ok(json_path),
+        (false, false) => Ok(toml_path),
+        (true, true) => Err(PublishDocsError::CommandFailed {
+            message: format!(
+                "ambiguous desired catalog: both {} and {} exist",
+                DESIRED_CATALOG_TOML_PATH, DESIRED_CATALOG_JSON_PATH
+            ),
+        }),
+    }
 }
 
 /// Applies `--only` and `--from` selection semantics to the wave.
@@ -197,32 +198,18 @@ fn validate_catalog(
     Ok(())
 }
 
-#[derive(Debug, serde::Deserialize)]
-struct RawCatalog {
-    catalog_version: u32,
-    umbrella_package: String,
-    packages: Vec<RawCatalogPackage>,
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct RawCatalogPackage {
-    name: String,
-    workspace_path: String,
-    visibility: Visibility,
-    section: CatalogSection,
-    summary: String,
-    docs_policy: Option<DocsPolicy>,
-    umbrella_policy: Option<UmbrellaPolicy>,
-    release_priority: Option<i64>,
-    allow_yank: Option<bool>,
-    owners: Option<Vec<String>>,
-    notes: Option<String>,
-}
-
 #[cfg(test)]
 mod tests {
-    use super::select_packages;
-    use crate::model::{PackageFilter, PublishWave, WavePackage};
+    use std::{fs, path::PathBuf};
+
+    use semver::Version;
+    use tempfile::tempdir;
+
+    use super::{load_desired_catalog, select_packages};
+    use crate::model::{
+        CatalogPackage, CatalogSection, DesiredCatalog, DocsPolicy, LocalPackage, PackageFilter,
+        PublishWave, UmbrellaPolicy, Visibility, WavePackage, WorkspaceState,
+    };
 
     fn wave() -> PublishWave {
         PublishWave {
@@ -247,6 +234,24 @@ mod tests {
                     docs_rs: "https://docs.rs/c".into(),
                 },
             ],
+        }
+    }
+
+    fn workspace() -> WorkspaceState {
+        WorkspaceState {
+            selected: vec!["mfm-docs".into()],
+            packages: vec![LocalPackage {
+                name: "mfm-docs".into(),
+                version: Version::parse("0.1.0").expect("version"),
+                manifest_path: PathBuf::from("/workspace/crates/docs/Cargo.toml"),
+                workspace_path: PathBuf::from("crates/docs"),
+                has_docs_target: true,
+                readme: None,
+                repository: None,
+                license: None,
+                publish: None,
+                local_dependencies: Vec::new(),
+            }],
         }
     }
 
@@ -281,5 +286,84 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["b".to_string(), "c".to_string()]
         );
+    }
+
+    #[test]
+    fn load_desired_catalog_supports_json_when_toml_missing() {
+        let dir = tempdir().expect("tempdir");
+        let docs_dir = dir.path().join("crates/docs");
+        fs::create_dir_all(&docs_dir).expect("docs dir");
+        fs::write(
+            docs_dir.join("catalog.json"),
+            r#"{
+                "catalog_version": 1,
+                "umbrella_package": "mfm-docs",
+                "packages": [{
+                    "name": "mfm-docs",
+                    "workspace_path": "crates/docs",
+                    "visibility": "public",
+                    "section": "binaries_tooling",
+                    "summary": "Umbrella docs surface"
+                }]
+            }"#,
+        )
+        .expect("write catalog");
+
+        let catalog = load_desired_catalog(dir.path(), &workspace()).expect("load catalog");
+
+        assert_eq!(
+            catalog,
+            DesiredCatalog {
+                catalog_version: 1,
+                umbrella_package: "mfm-docs".into(),
+                packages: vec![CatalogPackage {
+                    name: "mfm-docs".into(),
+                    workspace_path: "crates/docs".into(),
+                    visibility: Visibility::Public,
+                    section: CatalogSection::BinariesTooling,
+                    summary: "Umbrella docs surface".into(),
+                    docs_policy: DocsPolicy::RepoOnly,
+                    umbrella_policy: UmbrellaPolicy::WhenPublished,
+                    release_priority: 100,
+                    allow_yank: false,
+                    owners: Vec::new(),
+                    notes: String::new(),
+                }],
+            }
+        );
+    }
+
+    #[test]
+    fn load_desired_catalog_rejects_ambiguous_toml_and_json() {
+        let dir = tempdir().expect("tempdir");
+        let docs_dir = dir.path().join("crates/docs");
+        fs::create_dir_all(&docs_dir).expect("docs dir");
+        fs::write(
+            docs_dir.join("catalog.toml"),
+            r#"
+                catalog_version = 1
+                umbrella_package = "mfm-docs"
+
+                [[packages]]
+                name = "mfm-docs"
+                workspace_path = "crates/docs"
+                visibility = "public"
+                section = "binaries_tooling"
+                summary = "Umbrella docs surface"
+            "#,
+        )
+        .expect("write toml");
+        fs::write(
+            docs_dir.join("catalog.json"),
+            r#"{
+                "catalog_version": 1,
+                "umbrella_package": "mfm-docs",
+                "packages": []
+            }"#,
+        )
+        .expect("write json");
+
+        let err = load_desired_catalog(dir.path(), &workspace()).expect_err("ambiguous catalog");
+        assert!(err.to_string().contains("ambiguous desired catalog"));
     }
 }

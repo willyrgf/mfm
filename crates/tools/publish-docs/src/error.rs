@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use mfm_publish_docs_config::PublishDocsCatalogConfigError;
 use thiserror::Error;
 
 /// Top-level error type for the Phase-1 publish-docs tool.
@@ -45,6 +46,10 @@ pub(crate) enum PublishDocsError {
     /// A semantic version could not be parsed.
     #[error(transparent)]
     Semver(#[from] semver::Error),
+
+    /// Desired catalog parsing or canonicalization failed.
+    #[error(transparent)]
+    DesiredCatalogConfig(#[from] PublishDocsCatalogConfigError),
 
     /// A generic I/O error occurred.
     #[error(transparent)]

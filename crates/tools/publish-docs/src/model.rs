@@ -1,5 +1,8 @@
 use std::path::PathBuf;
 
+pub(crate) use mfm_publish_docs_config::{
+    CatalogPackage, CatalogSection, DesiredCatalog, DocsPolicy, UmbrellaPolicy, Visibility,
+};
 use semver::Version;
 use serde::{Deserialize, Serialize};
 
@@ -57,113 +60,6 @@ pub(crate) struct PublishWave {
     pub wave: String,
     /// Ordered packages in the wave.
     pub packages: Vec<WavePackage>,
-}
-
-/// Desired public visibility for a catalog entry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum Visibility {
-    /// Crate is part of the intended public surface.
-    Public,
-    /// Crate is internal and should not be treated as public surface.
-    Private,
-    /// Crate is retired and may require operator review or yanking.
-    Retired,
-}
-
-/// Docs hosting policy for a catalog entry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) enum DocsPolicy {
-    /// docs.rs is the intended docs surface.
-    #[serde(rename = "docs-rs")]
-    DocsRs,
-    /// The crate should appear only as a repo-local surface.
-    #[serde(rename = "repo-only")]
-    RepoOnly,
-    /// The crate should be hidden from docs surfacing.
-    #[serde(rename = "hidden")]
-    Hidden,
-}
-
-/// Umbrella inclusion policy for a catalog entry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) enum UmbrellaPolicy {
-    /// Always show on the umbrella page.
-    #[serde(rename = "always")]
-    Always,
-    /// Show only once the crate is published or otherwise externally visible.
-    #[serde(rename = "when-published")]
-    WhenPublished,
-    /// Never show on the umbrella page.
-    #[serde(rename = "never")]
-    Never,
-}
-
-/// Ordering section for umbrella generation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub(crate) enum CatalogSection {
-    /// Engine and SDK crates.
-    #[serde(rename = "engine_sdk")]
-    EngineSdk,
-    /// Core primitives.
-    #[serde(rename = "core")]
-    Core,
-    /// Shared states.
-    #[serde(rename = "states")]
-    States,
-    /// Ops.
-    #[serde(rename = "ops")]
-    Ops,
-    /// Storage crates.
-    #[serde(rename = "storages")]
-    Storages,
-    /// Collector crates.
-    #[serde(rename = "collectors")]
-    Collectors,
-    /// Transport crates.
-    #[serde(rename = "transports")]
-    Transports,
-    /// Binaries and tooling.
-    #[serde(rename = "binaries_tooling")]
-    BinariesTooling,
-}
-
-/// One desired-state catalog entry.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct CatalogPackage {
-    /// Cargo package name.
-    pub name: String,
-    /// Relative workspace path.
-    pub workspace_path: String,
-    /// Desired visibility.
-    pub visibility: Visibility,
-    /// Umbrella section.
-    pub section: CatalogSection,
-    /// Human summary used for README generation.
-    pub summary: String,
-    /// Docs policy for the crate.
-    pub docs_policy: DocsPolicy,
-    /// Umbrella policy for the crate.
-    pub umbrella_policy: UmbrellaPolicy,
-    /// Relative ordering inside a section.
-    pub release_priority: i64,
-    /// Whether yanking is allowed by policy.
-    pub allow_yank: bool,
-    /// Optional owner hints.
-    pub owners: Vec<String>,
-    /// Freeform notes.
-    pub notes: String,
-}
-
-/// Desired-state catalog for the docs surface.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct DesiredCatalog {
-    /// Schema version.
-    pub catalog_version: u32,
-    /// Package name of the umbrella crate.
-    pub umbrella_package: String,
-    /// Catalog entries.
-    pub packages: Vec<CatalogPackage>,
 }
 
 /// Local workspace package facts used by the planner.
