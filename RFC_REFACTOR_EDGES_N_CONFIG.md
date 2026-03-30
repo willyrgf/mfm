@@ -2,16 +2,16 @@
 
 Status: Draft
 
-Last updated: 2026-03-29
+Last updated: 2026-03-30
 
 ## 1. Executive Summary
 
 - The largest architectural problem is not the portfolio snapshot workflow itself. The larger problem is that MFM lacks a shared internal pattern for authored configuration ingestion, normalization, build, and execution across workflow families.
 - Portfolio snapshot is the clearest current example, but the same structural pattern appears in deploy/configure/validate, publish-docs, and shell-heavy workflow wrappers.
-- The repo should converge on a shared authored-config framework built around three typed representations:
+- The repo should converge on a shared authored-config framework built around explicit typed representations, with `BuiltConfig` used only where a workflow has a reusable execution-ready compiled spec:
   - `AuthoredConfig`: human-facing authoring format such as `config.toml` or JSON.
   - `CanonicalConfig`: normalized typed config used for deterministic hashing and planning.
-  - `BuiltConfig`: typed validated derived config consumed by execution ops.
+  - `BuiltConfig`: typed validated derived config consumed by execution ops when that boundary is useful.
 - `config.toml` should be treated as an authoring format, not as the authoritative hashed runtime input.
 - Authoritative persisted and hashed runtime inputs should remain canonical JSON encodings of typed internal structures, with no floats and no secrets.
 - Transport boundaries should own file reading, format detection, and TOML parsing. Internal MFM workflows should begin after parsing and immediate conversion to typed structures.
@@ -87,8 +87,8 @@ A workflow family is a config-driven application surface that owns:
 
 - an authored config shape
 - a canonical typed config
-- a built or compiled config
-- one or more execution ops that consume that built config
+- optionally, a built or compiled config when the workflow has a reusable execution-ready compiled spec
+- one or more planning or execution entrypoints that consume those typed surfaces
 
 Examples in this repo:
 
@@ -110,6 +110,7 @@ The three config stages are:
   - Typed validated derived config produced by the workflow-family build pipeline.
   - Intended to be the authoritative runtime input for execution ops.
   - May include derived plans, expanded targets, prevalidated registries, build metadata, and content-addressed artifact references.
+  - Not every workflow family needs this stage. Planner-heavy families can stop at canonical config and persist typed plan artifacts until a reusable execution-ready compiled spec emerges.
 
 ## 7. Current Diagnosis
 
@@ -570,7 +571,9 @@ Recommendation:
 
 - Treat publish-docs as a strong candidate for the same authored-config framework.
 - It already has a TOML authored surface and typed normalization logic.
-- Over time, it can be aligned with the same build and execute pattern if it is worth bringing fully under the MFM run model.
+- The current workflow most naturally stops at canonical wave/catalog config plus typed plan artifacts rather than at a separate built execution config.
+- The persisted `plan.json` boundary is the useful downstream contract today; it already captures the planner result derived from canonical config plus live workspace and remote observations.
+- Only add a `build -> execute` split if publish-docs later grows a deterministic reusable execution-ready compiled spec that is meaningfully separate from its live planner outputs.
 
 ### 13.3 Aave-Origin and Similar Wrapper-Heavy Flows
 

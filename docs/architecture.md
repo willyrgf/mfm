@@ -185,6 +185,9 @@ Practical dispatch split:
   for audit/inspection
 - runtime-time dispatch owns exact adapter lookup by planned id plus IO execution
 - runtime must not rerun capability matching, rediscover batch topology, or reshape the graph
+- not every config-driven workflow needs a `BuiltConfig` boundary; planner-heavy workflows can
+  stop at canonical config plus typed plan artifacts when there is no reusable execution-ready
+  compiled spec distinct from the live planner result
 
 ### Flattened pipelines
 - Multiple ops are flattened into one execution plan and one run.
