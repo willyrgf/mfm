@@ -1,11 +1,19 @@
 # mfm-op-evm-deploy-configure-validate
 
-Composed operation (`op_id = "evm_deploy_configure_validate"`, `op_version = "v1"`) that expands into the existing:
+This crate owns the additive public deploy/configure/validate workflow boundaries:
 
-1. `evm_deploy`
-2. `evm_configure`
-3. `evm_validate`
+- `evm_deploy_configure_validate_config_build/v1`: canonical config build root that publishes
+  built config plus canonical/built config artifacts and a stable build report
+- `evm_deploy_configure_validate_execute/v1`: strict built-config execution root
+- `evm_deploy_configure_validate/v1`: compatibility root that accepts canonical-or-built config
 
-state graphs, chained sequentially inside a single op boundary.
+`evm_deploy_configure_validate_config_build` keeps authored/canonical transport concerns separate
+from execution by validating the lowered execution payload, publishing the canonical and built
+artifacts, and emitting a stable build report.
 
-This keeps deploy/configure/validate business orchestration in `crates/ops/*` while binaries and `crates/app` remain run-control/transport layers.
+`evm_deploy_configure_validate_execute` consumes the pre-built execution config and lowers it into
+the existing `evm_deploy`, `evm_configure`, and `evm_validate` child graphs.
+
+`evm_deploy_configure_validate` preserves the legacy public contract during migration. Canonical
+input composes the config-build step before the strict execute root, while built input skips
+directly to execution.

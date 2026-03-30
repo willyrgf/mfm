@@ -7,16 +7,19 @@
 //! family. Transport layers parse authored JSON or TOML into
 //! [`DeployConfigureValidateAuthoredConfig`], then immediately canonicalize into
 //! [`DeployConfigureValidateCanonicalConfig`] before building pipeline wrappers around the result.
+//! Internal MFM build workflows then lower the canonical form into
+//! [`DeployConfigureValidateBuiltConfig`] for execution ops.
 //!
-//! The execution op boundary stays unchanged in this phase; this crate only removes ad hoc
-//! transport parsing and default expansion from app/CLI glue.
+//! The semantic lowering in this workflow family is intentionally small today, but the explicit
+//! built-config boundary keeps authored/canonical transport concerns separate from execution
+//! concerns and preserves a stable place for future normalization.
 //!
 //! # Examples
 //!
 //! ```rust
 //! use mfm_authored_config::AuthoredConfigFormat;
 //! use mfm_evm_deploy_configure_validate_config::{
-//!     canonicalize_deploy_configure_validate_authored_config,
+//!     build_deploy_configure_validate_outcome, canonicalize_deploy_configure_validate_authored_config,
 //!     parse_deploy_configure_validate_authored_config,
 //! };
 //!
@@ -29,7 +32,8 @@
 //!     AuthoredConfigFormat::Json,
 //! )?;
 //! let canonical = canonicalize_deploy_configure_validate_authored_config(authored)?;
-//! assert_eq!(canonical.machine_id, "evm_deploy_configure_validate");
+//! let built = build_deploy_configure_validate_outcome(canonical)?.built;
+//! assert_eq!(built.canonical.machine_id, "evm_deploy_configure_validate");
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
@@ -99,6 +103,71 @@ impl DeployConfigureValidateCanonicalConfig {
             }
         })
     }
+}
+
+/// Built execution config for deploy/configure/validate workflows.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DeployConfigureValidateBuiltConfig {
+    /// Canonical config that produced this built execution payload.
+    pub canonical: DeployConfigureValidateCanonicalConfig,
+    /// Execution payload consumed by the strict execution op boundary.
+    pub execution: DeployConfigureValidateExecutionConfig,
+}
+
+impl DeployConfigureValidateBuiltConfig {
+    /// Serializes the built config as a JSON value.
+    pub fn to_json_value(&self) -> Result<Value, DeployConfigureValidateConfigError> {
+        serde_json::to_value(self).map_err(|source| DeployConfigureValidateConfigError::Serialize {
+            stage: "built config",
+            source,
+        })
+    }
+
+    /// Computes the authoritative artifact id for the built config JSON.
+    pub fn artifact_id(&self) -> Result<ArtifactId, DeployConfigureValidateConfigError> {
+        let value = self.to_json_value()?;
+        artifact_id_for_json(&value).map_err(|source| {
+            DeployConfigureValidateConfigError::CanonicalJson {
+                stage: "built config",
+                source,
+            }
+        })
+    }
+}
+
+/// Execution payload consumed by the strict deploy/configure/validate execution op.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DeployConfigureValidateExecutionConfig {
+    /// Deploy sub-op config.
+    pub deploy: Value,
+    /// Configure sub-op config.
+    pub configure: Value,
+    /// Validate sub-op config.
+    pub validate: Value,
+}
+
+/// Stable build report emitted by deploy/configure/validate config-build workflows.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DeployConfigureValidateBuildReport {
+    /// Machine id attached to the canonical config.
+    pub machine_id: String,
+    /// Pipeline version attached to the canonical config.
+    pub pipeline_version: String,
+    /// Content-addressed artifact id for the canonical config.
+    pub canonical_config_artifact_id: String,
+    /// Content-addressed artifact id for the built config.
+    pub built_config_artifact_id: String,
+    /// Number of sequential workflow phases in the lowered execution config.
+    pub phase_count: u64,
+}
+
+/// Pure build outcome for deploy/configure/validate config workflows.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DeployConfigureValidateBuildOutcome {
+    /// Lowered built config payload.
+    pub built: DeployConfigureValidateBuiltConfig,
+    /// Stable build report derived from the canonical and built payloads.
+    pub report: DeployConfigureValidateBuildReport,
 }
 
 /// Errors returned while parsing or canonicalizing deploy/configure/validate config.
@@ -180,6 +249,37 @@ pub fn canonicalize_deploy_configure_validate_authored_config(
     })
 }
 
+/// Builds canonical deploy/configure/validate config into the explicit execution payload.
+pub fn build_deploy_configure_validate_config(
+    canonical: DeployConfigureValidateCanonicalConfig,
+) -> Result<DeployConfigureValidateBuiltConfig, DeployConfigureValidateConfigError> {
+    Ok(DeployConfigureValidateBuiltConfig {
+        execution: DeployConfigureValidateExecutionConfig {
+            deploy: canonical.deploy.clone(),
+            configure: canonical.configure.clone(),
+            validate: canonical.validate.clone(),
+        },
+        canonical,
+    })
+}
+
+/// Builds canonical deploy/configure/validate config and derives the stable build report.
+pub fn build_deploy_configure_validate_outcome(
+    canonical: DeployConfigureValidateCanonicalConfig,
+) -> Result<DeployConfigureValidateBuildOutcome, DeployConfigureValidateConfigError> {
+    let built = build_deploy_configure_validate_config(canonical)?;
+    let canonical_config_artifact_id = built.canonical.artifact_id()?.0;
+    let built_config_artifact_id = built.artifact_id()?.0;
+    let report = DeployConfigureValidateBuildReport {
+        machine_id: built.canonical.machine_id.clone(),
+        pipeline_version: built.canonical.pipeline_version.clone(),
+        canonical_config_artifact_id,
+        built_config_artifact_id,
+        phase_count: 3,
+    };
+    Ok(DeployConfigureValidateBuildOutcome { built, report })
+}
+
 /// Decodes JSON transport input into the canonical deploy/configure/validate config.
 ///
 /// This preserves backward-compatible default materialization for `machine_id`,
@@ -190,6 +290,14 @@ pub fn decode_deploy_configure_validate_canonical_config(
     let authored = serde_json::from_value::<DeployConfigureValidateAuthoredConfig>(value.clone())
         .map_err(|source| DeployConfigureValidateConfigError::InvalidJson { source })?;
     canonicalize_deploy_configure_validate_authored_config(authored)
+}
+
+/// Decodes JSON transport input into the strict built deploy/configure/validate config.
+pub fn decode_deploy_configure_validate_built_config(
+    value: &Value,
+) -> Result<DeployConfigureValidateBuiltConfig, DeployConfigureValidateConfigError> {
+    serde_json::from_value(value.clone())
+        .map_err(|source| DeployConfigureValidateConfigError::InvalidJson { source })
 }
 
 fn default_machine_id() -> String {
@@ -303,5 +411,80 @@ mod tests {
         assert_eq!(canonical.machine_id, "evm_deploy_configure_validate");
         assert_eq!(canonical.pipeline_version, "v1");
         assert_eq!(canonical.input, serde_json::json!({}));
+    }
+
+    #[test]
+    fn json_and_toml_authoring_normalize_to_same_built_outcome() {
+        let json = build_deploy_configure_validate_outcome(
+            canonicalize_deploy_configure_validate_authored_config(
+                parse_deploy_configure_validate_authored_config(
+                    JSON_CONFIG,
+                    AuthoredConfigFormat::Json,
+                )
+                .expect("json parse"),
+            )
+            .expect("json canonical"),
+        )
+        .expect("json build");
+        let toml = build_deploy_configure_validate_outcome(
+            canonicalize_deploy_configure_validate_authored_config(
+                parse_deploy_configure_validate_authored_config_with_hint(
+                    TOML_CONFIG,
+                    Some(Path::new("config.toml")),
+                )
+                .expect("toml parse"),
+            )
+            .expect("toml canonical"),
+        )
+        .expect("toml build");
+
+        assert_eq!(json, toml);
+    }
+
+    #[test]
+    fn built_artifact_id_is_deterministic_across_formats() {
+        let json = build_deploy_configure_validate_outcome(
+            canonicalize_deploy_configure_validate_authored_config(
+                parse_deploy_configure_validate_authored_config(
+                    JSON_CONFIG,
+                    AuthoredConfigFormat::Json,
+                )
+                .expect("json parse"),
+            )
+            .expect("json canonical"),
+        )
+        .expect("json build");
+        let toml = build_deploy_configure_validate_outcome(
+            canonicalize_deploy_configure_validate_authored_config(
+                parse_deploy_configure_validate_authored_config_with_hint(TOML_CONFIG, None)
+                    .expect("toml parse"),
+            )
+            .expect("toml canonical"),
+        )
+        .expect("toml build");
+
+        assert_eq!(
+            json.built.artifact_id().expect("json artifact"),
+            toml.built.artifact_id().expect("toml artifact")
+        );
+        assert_eq!(
+            json.report.built_config_artifact_id,
+            json.built.artifact_id().expect("json artifact").0
+        );
+    }
+
+    #[test]
+    fn decode_built_config_rejects_legacy_canonical_shape() {
+        let err = decode_deploy_configure_validate_built_config(&serde_json::json!({
+            "deploy": {"network_id": "ethereum-mainnet"},
+            "configure": {"network_id": "ethereum-mainnet"},
+            "validate": {"network_id": "ethereum-mainnet"}
+        }))
+        .expect_err("legacy canonical shape should not decode as built config");
+
+        assert!(matches!(
+            err,
+            DeployConfigureValidateConfigError::InvalidJson { .. }
+        ));
     }
 }

@@ -60,8 +60,12 @@ use mfm_machine::runtime::{ChildRunLiveIoTransportFactory, DefaultExecutionEngin
 use mfm_machine::stores::{ArtifactStore, StreamId, StreamRecord, StreamStore};
 use mfm_op_aave_v3_origin_adapt::AaveV3OriginAdaptDeployOp;
 use mfm_op_evm_deploy_configure_validate::{
-    EvmDeployConfigureValidateOp, EVM_DEPLOY_CONFIGURE_VALIDATE_OP_ID,
-    EVM_DEPLOY_CONFIGURE_VALIDATE_OP_VERSION,
+    evm_deploy_configure_validate_public_ops, EVM_DEPLOY_CONFIGURE_VALIDATE_OP_ID,
+    EVM_DEPLOY_CONFIGURE_VALIDATE_PUBLIC_OP_VERSION,
+};
+#[cfg(test)]
+use mfm_op_evm_deploy_configure_validate::{
+    EVM_DEPLOY_CONFIGURE_VALIDATE_CONFIG_BUILD_OP_ID, EVM_DEPLOY_CONFIGURE_VALIDATE_EXECUTE_OP_ID,
 };
 use mfm_op_evm_read::EvmReadOp;
 use mfm_op_evm_write::{EvmConfigureOp, EvmContractFromNixOp, EvmDeployOp, EvmValidateOp};
@@ -519,7 +523,9 @@ impl OperationPlugin for DefaultOperationPlugin {
         registry.register(Arc::new(EvmDeployOp));
         registry.register(Arc::new(EvmConfigureOp));
         registry.register(Arc::new(EvmValidateOp));
-        registry.register(Arc::new(EvmDeployConfigureValidateOp));
+        for op in evm_deploy_configure_validate_public_ops() {
+            registry.register(op);
+        }
         for op in portfolio_public_ops() {
             registry.register(op);
         }
@@ -1477,7 +1483,7 @@ pub fn pipeline_from_deploy_configure_validate_spec(spec: DeployConfigureValidat
         steps: vec![PipelineStep {
             step_id: StepId("main".to_string()),
             op_id: OpId::must_new(EVM_DEPLOY_CONFIGURE_VALIDATE_OP_ID.to_string()),
-            op_version: EVM_DEPLOY_CONFIGURE_VALIDATE_OP_VERSION.to_string(),
+            op_version: EVM_DEPLOY_CONFIGURE_VALIDATE_PUBLIC_OP_VERSION.to_string(),
             op_config: serde_json::json!({
                 "deploy": spec.deploy,
                 "configure": spec.configure,
@@ -2470,6 +2476,108 @@ mod tests {
             assert_eq!(err.code, "op_not_public");
             assert!(is_portfolio_tracker_internal_op_id(op_id));
         }
+    }
+
+    #[test]
+    fn deploy_configure_validate_public_root_ops_remain_registered() {
+        let bundle = make_engine_bundle();
+
+        bundle
+            .registry
+            .resolve(
+                &OpId::must_new(EVM_DEPLOY_CONFIGURE_VALIDATE_OP_ID.to_string()),
+                EVM_DEPLOY_CONFIGURE_VALIDATE_PUBLIC_OP_VERSION,
+            )
+            .expect("compatibility root op should remain registered");
+        bundle
+            .registry
+            .resolve(
+                &OpId::must_new(EVM_DEPLOY_CONFIGURE_VALIDATE_CONFIG_BUILD_OP_ID.to_string()),
+                EVM_DEPLOY_CONFIGURE_VALIDATE_PUBLIC_OP_VERSION,
+            )
+            .expect("config-build root op should remain registered");
+        bundle
+            .registry
+            .resolve(
+                &OpId::must_new(EVM_DEPLOY_CONFIGURE_VALIDATE_EXECUTE_OP_ID.to_string()),
+                EVM_DEPLOY_CONFIGURE_VALIDATE_PUBLIC_OP_VERSION,
+            )
+            .expect("execute root op should remain registered");
+    }
+
+    #[test]
+    fn deploy_configure_validate_root_op_remains_v1() {
+        let bundle = make_engine_bundle();
+
+        let op = bundle
+            .registry
+            .resolve(
+                &OpId::must_new(EVM_DEPLOY_CONFIGURE_VALIDATE_OP_ID.to_string()),
+                EVM_DEPLOY_CONFIGURE_VALIDATE_PUBLIC_OP_VERSION,
+            )
+            .expect("compatibility root op should remain v1");
+        assert_eq!(
+            op.op_version(),
+            EVM_DEPLOY_CONFIGURE_VALIDATE_PUBLIC_OP_VERSION
+        );
+
+        assert!(bundle
+            .registry
+            .resolve(
+                &OpId::must_new(EVM_DEPLOY_CONFIGURE_VALIDATE_OP_ID.to_string()),
+                "v2"
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn deploy_configure_validate_execute_root_op_remains_v1() {
+        let bundle = make_engine_bundle();
+
+        let op = bundle
+            .registry
+            .resolve(
+                &OpId::must_new(EVM_DEPLOY_CONFIGURE_VALIDATE_EXECUTE_OP_ID.to_string()),
+                EVM_DEPLOY_CONFIGURE_VALIDATE_PUBLIC_OP_VERSION,
+            )
+            .expect("execute root op should remain v1");
+        assert_eq!(
+            op.op_version(),
+            EVM_DEPLOY_CONFIGURE_VALIDATE_PUBLIC_OP_VERSION
+        );
+
+        assert!(bundle
+            .registry
+            .resolve(
+                &OpId::must_new(EVM_DEPLOY_CONFIGURE_VALIDATE_EXECUTE_OP_ID.to_string()),
+                "v2"
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn deploy_configure_validate_config_build_root_op_remains_v1() {
+        let bundle = make_engine_bundle();
+
+        let op = bundle
+            .registry
+            .resolve(
+                &OpId::must_new(EVM_DEPLOY_CONFIGURE_VALIDATE_CONFIG_BUILD_OP_ID.to_string()),
+                EVM_DEPLOY_CONFIGURE_VALIDATE_PUBLIC_OP_VERSION,
+            )
+            .expect("config-build root op should remain v1");
+        assert_eq!(
+            op.op_version(),
+            EVM_DEPLOY_CONFIGURE_VALIDATE_PUBLIC_OP_VERSION
+        );
+
+        assert!(bundle
+            .registry
+            .resolve(
+                &OpId::must_new(EVM_DEPLOY_CONFIGURE_VALIDATE_CONFIG_BUILD_OP_ID.to_string()),
+                "v2"
+            )
+            .is_err());
     }
 
     #[tokio::test]

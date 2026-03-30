@@ -283,6 +283,8 @@ Current built-in public root ops for `run start` are:
 - `evm_deploy`
 - `evm_configure`
 - `evm_validate`
+- `evm_deploy_configure_validate_config_build`
+- `evm_deploy_configure_validate_execute`
 - `evm_deploy_configure_validate`
 - `portfolio_config_build`
 - `portfolio_execute`
@@ -327,7 +329,9 @@ mfm_cli run pipeline deploy-configure-validate --spec-file /path/to/config.toml 
 
 `--spec-json` remains inline JSON-only. `--spec-file` accepts authored JSON or TOML and
 canonicalizes it into the same typed pipeline spec before launch, preserving the existing default
-values for `machine_id`, `pipeline_version`, and `input`.
+values for `machine_id`, `pipeline_version`, and `input`. The generated pipeline still targets the
+legacy `evm_deploy_configure_validate` root so existing CLI behavior stays stable while canonical
+input is internally lowered through the new config-build and strict execute boundaries.
 
 ### `run resume`
 

@@ -7,7 +7,11 @@ edition = "2021"
 serde = { workspace = true }
 serde_json = { workspace = true }
 
+mfm-evm-deploy-configure-validate-config = { path = "../../evm-deploy-configure-validate-config" }
 mfm-machine = { path = "../../machine" }
 mfm-sdk = { path = "../../sdk" }
 mfm-state-common = { path = "../../states/common" }
 mfm-op-evm-write = { path = "../evm-write-op" }
+
+[dev-dependencies]
+tokio = { workspace = true }
