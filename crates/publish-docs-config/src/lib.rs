@@ -1,11 +1,10 @@
 #![cfg_attr(test, allow(clippy::disallowed_methods, clippy::disallowed_types))]
 #![cfg_attr(not(test), deny(clippy::disallowed_methods, clippy::disallowed_types))]
 #![warn(missing_docs)]
-//! Shared authored and canonical desired-catalog config pipeline for `publish-docs`.
+//! Shared authored and canonical config pipeline for `publish-docs`.
 //!
-//! Transport boundaries load authored TOML or JSON into [`DesiredCatalogAuthoredConfig`] and
-//! immediately canonicalize it into [`DesiredCatalog`] before workspace-aware validation or plan
-//! building happens.
+//! Transport boundaries load authored TOML or JSON into typed authored config and immediately
+//! canonicalize it before workspace-aware validation or plan building happens.
 //!
 //! This crate owns only format parsing and default materialization. Semantic validation against the
 //! local workspace remains with the `mfm-publish-docs` workflow family.
@@ -113,6 +112,28 @@ pub enum CatalogSection {
     BinariesTooling,
 }
 
+/// Human-authored publish wave entry loaded from TOML or JSON.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WavePackageAuthoredConfig {
+    /// Cargo package name.
+    pub name: String,
+    /// Human-facing wave group name.
+    pub group: String,
+    /// Relative workspace path.
+    pub workspace_path: String,
+    /// Expected docs.rs URL recorded in the wave file.
+    pub docs_rs: String,
+}
+
+/// Human-authored publish wave loaded from TOML or JSON.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublishWaveAuthoredConfig {
+    /// Wave name.
+    pub wave: String,
+    /// Ordered packages in the wave.
+    pub packages: Vec<WavePackageAuthoredConfig>,
+}
+
 /// Human-authored desired catalog entry loaded from TOML or JSON.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CatalogPackageAuthoredConfig {
@@ -195,6 +216,28 @@ pub struct DesiredCatalog {
     pub packages: Vec<CatalogPackage>,
 }
 
+/// Canonical publish wave entry used by `publish-docs`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WavePackage {
+    /// Cargo package name.
+    pub name: String,
+    /// Human-facing wave group name.
+    pub group: String,
+    /// Relative workspace path.
+    pub workspace_path: String,
+    /// Expected docs.rs URL recorded in the wave file.
+    pub docs_rs: String,
+}
+
+/// Canonical publish wave used by `publish-docs`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublishWave {
+    /// Wave name from the authored config.
+    pub wave: String,
+    /// Ordered packages in the wave.
+    pub packages: Vec<WavePackage>,
+}
+
 /// Errors returned while parsing or canonicalizing desired catalog config.
 #[derive(Debug, Error)]
 pub enum PublishDocsCatalogConfigError {
@@ -212,6 +255,71 @@ pub enum PublishDocsCatalogConfigError {
         #[source]
         source: toml::de::Error,
     },
+}
+
+/// Errors returned while parsing or canonicalizing publish wave config.
+#[derive(Debug, Error)]
+pub enum PublishDocsWaveConfigError {
+    /// JSON authored config parsing failed.
+    #[error("failed to parse publish-docs wave config as json: {source}")]
+    InvalidJson {
+        /// Underlying parser error.
+        #[source]
+        source: serde_json::Error,
+    },
+    /// TOML authored config parsing failed.
+    #[error("failed to parse publish-docs wave config as toml: {source}")]
+    InvalidToml {
+        /// Underlying parser error.
+        #[source]
+        source: toml::de::Error,
+    },
+}
+
+/// Parses authored publish wave config using the supplied format.
+pub fn parse_publish_wave_authored_config(
+    raw: &str,
+    format: AuthoredConfigFormat,
+) -> Result<PublishWaveAuthoredConfig, PublishDocsWaveConfigError> {
+    match format {
+        AuthoredConfigFormat::Json => serde_json::from_str(raw)
+            .map_err(|source| PublishDocsWaveConfigError::InvalidJson { source }),
+        AuthoredConfigFormat::Toml => {
+            toml::from_str(raw).map_err(|source| PublishDocsWaveConfigError::InvalidToml { source })
+        }
+    }
+}
+
+/// Parses authored publish wave config using an optional path hint.
+pub fn parse_publish_wave_authored_config_with_hint(
+    raw: &str,
+    path_hint: Option<&Path>,
+) -> Result<PublishWaveAuthoredConfig, PublishDocsWaveConfigError> {
+    parse_authored_config_with_hint(
+        raw,
+        path_hint,
+        |value| parse_publish_wave_authored_config(value, AuthoredConfigFormat::Json),
+        |value| parse_publish_wave_authored_config(value, AuthoredConfigFormat::Toml),
+    )
+}
+
+/// Canonicalizes authored publish wave config.
+pub fn canonicalize_publish_wave_authored_config(
+    authored: PublishWaveAuthoredConfig,
+) -> Result<PublishWave, PublishDocsWaveConfigError> {
+    Ok(PublishWave {
+        wave: authored.wave,
+        packages: authored
+            .packages
+            .into_iter()
+            .map(|package| WavePackage {
+                name: package.name,
+                group: package.group,
+                workspace_path: package.workspace_path,
+                docs_rs: package.docs_rs,
+            })
+            .collect(),
+    })
 }
 
 /// Parses authored desired catalog config using the supplied format.
@@ -272,6 +380,26 @@ pub fn canonicalize_desired_catalog_authored_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const JSON_WAVE: &str = r#"{
+        "wave": "docs-rs-wave-1",
+        "packages": [{
+            "name": "mfm-docs",
+            "group": "umbrella",
+            "workspace_path": "crates/docs",
+            "docs_rs": "https://docs.rs/mfm-docs"
+        }]
+    }"#;
+
+    const TOML_WAVE: &str = r#"
+        wave = "docs-rs-wave-1"
+
+        [[packages]]
+        name = "mfm-docs"
+        group = "umbrella"
+        workspace_path = "crates/docs"
+        docs_rs = "https://docs.rs/mfm-docs"
+    "#;
 
     const JSON_CATALOG: &str = r#"{
         "catalog_version": 1,
@@ -340,5 +468,31 @@ mod tests {
 
         assert_eq!(authored.catalog_version, 1);
         assert_eq!(authored.umbrella_package, "mfm-docs");
+    }
+
+    #[test]
+    fn publish_wave_json_and_toml_authoring_normalize_to_same_canonical_wave() {
+        let json = canonicalize_publish_wave_authored_config(
+            parse_publish_wave_authored_config(JSON_WAVE, AuthoredConfigFormat::Json)
+                .expect("json parse"),
+        )
+        .expect("json canonical");
+        let toml = canonicalize_publish_wave_authored_config(
+            parse_publish_wave_authored_config_with_hint(TOML_WAVE, Some(Path::new("wave.toml")))
+                .expect("toml parse"),
+        )
+        .expect("toml canonical");
+
+        assert_eq!(json, toml);
+    }
+
+    #[test]
+    fn publish_wave_hintless_parse_falls_back_from_json_to_toml() {
+        let authored = parse_publish_wave_authored_config_with_hint(TOML_WAVE, None)
+            .expect("toml parse without hint");
+
+        assert_eq!(authored.wave, "docs-rs-wave-1");
+        assert_eq!(authored.packages.len(), 1);
+        assert_eq!(authored.packages[0].name, "mfm-docs");
     }
 }

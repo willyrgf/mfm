@@ -4,7 +4,8 @@ use std::{
 };
 
 use mfm_publish_docs_config::{
-    canonicalize_desired_catalog_authored_config, parse_desired_catalog_authored_config_with_hint,
+    canonicalize_desired_catalog_authored_config, canonicalize_publish_wave_authored_config,
+    parse_desired_catalog_authored_config_with_hint, parse_publish_wave_authored_config_with_hint,
 };
 
 use crate::{
@@ -15,24 +16,40 @@ use crate::{
     },
 };
 
-/// Relative path to the current publish wave file.
-pub(crate) const PUBLISH_WAVE_PATH: &str = "crates/docs/publish-wave.json";
+/// Relative path to the publish wave when authored as JSON.
+pub(crate) const PUBLISH_WAVE_JSON_PATH: &str = "crates/docs/publish-wave.json";
+/// Alternate relative path to the publish wave when authored as TOML.
+pub(crate) const PUBLISH_WAVE_TOML_PATH: &str = "crates/docs/publish-wave.toml";
 /// Relative path to the desired-state catalog when authored as TOML.
 pub(crate) const DESIRED_CATALOG_TOML_PATH: &str = "crates/docs/catalog.toml";
 /// Alternate relative path to the desired-state catalog when authored as JSON.
 pub(crate) const DESIRED_CATALOG_JSON_PATH: &str = "crates/docs/catalog.json";
 
-/// Loads `publish-wave.json` from the workspace root.
+/// Loads the publish wave from the workspace root.
 pub(crate) fn load_publish_wave(workspace_root: &Path) -> Result<PublishWave, PublishDocsError> {
-    let path = publish_wave_path(workspace_root);
-    let bytes = fs::read(&path)?;
-    let wave = serde_json::from_slice(&bytes)?;
+    let path = publish_wave_path(workspace_root)?;
+    let bytes = fs::read_to_string(&path)?;
+    let authored = parse_publish_wave_authored_config_with_hint(&bytes, Some(path.as_path()))?;
+    let wave = canonicalize_publish_wave_authored_config(authored)?;
     Ok(wave)
 }
 
-/// Returns the absolute path to `publish-wave.json` for the workspace root.
-pub(crate) fn publish_wave_path(workspace_root: &Path) -> PathBuf {
-    workspace_root.join(PUBLISH_WAVE_PATH)
+/// Returns the absolute path to the publish wave for the workspace root.
+pub(crate) fn publish_wave_path(workspace_root: &Path) -> Result<PathBuf, PublishDocsError> {
+    let json_path = workspace_root.join(PUBLISH_WAVE_JSON_PATH);
+    let toml_path = workspace_root.join(PUBLISH_WAVE_TOML_PATH);
+
+    match (json_path.is_file(), toml_path.is_file()) {
+        (true, false) => Ok(json_path),
+        (false, true) => Ok(toml_path),
+        (false, false) => Ok(json_path),
+        (true, true) => Err(PublishDocsError::CommandFailed {
+            message: format!(
+                "ambiguous publish wave: both {} and {} exist",
+                PUBLISH_WAVE_JSON_PATH, PUBLISH_WAVE_TOML_PATH
+            ),
+        }),
+    }
 }
 
 /// Loads the desired-state catalog from the workspace root and validates it against the workspace
@@ -205,7 +222,7 @@ mod tests {
     use semver::Version;
     use tempfile::tempdir;
 
-    use super::{load_desired_catalog, select_packages};
+    use super::{load_desired_catalog, load_publish_wave, select_packages};
     use crate::model::{
         CatalogPackage, CatalogSection, DesiredCatalog, DocsPolicy, LocalPackage, PackageFilter,
         PublishWave, UmbrellaPolicy, Visibility, WavePackage, WorkspaceState,
@@ -365,5 +382,56 @@ mod tests {
 
         let err = load_desired_catalog(dir.path(), &workspace()).expect_err("ambiguous catalog");
         assert!(err.to_string().contains("ambiguous desired catalog"));
+    }
+
+    #[test]
+    fn load_publish_wave_supports_toml_when_json_missing() {
+        let dir = tempdir().expect("tempdir");
+        let docs_dir = dir.path().join("crates/docs");
+        fs::create_dir_all(&docs_dir).expect("docs dir");
+        fs::write(
+            docs_dir.join("publish-wave.toml"),
+            r#"
+                wave = "docs-rs-wave-1"
+
+                [[packages]]
+                name = "a"
+                group = "foundation"
+                workspace_path = "crates/a"
+                docs_rs = "https://docs.rs/a"
+            "#,
+        )
+        .expect("write wave");
+
+        let wave = load_publish_wave(dir.path()).expect("load wave");
+
+        assert_eq!(wave.wave, "docs-rs-wave-1");
+        assert_eq!(wave.packages.len(), 1);
+        assert_eq!(wave.packages[0].name, "a");
+    }
+
+    #[test]
+    fn load_publish_wave_rejects_ambiguous_json_and_toml() {
+        let dir = tempdir().expect("tempdir");
+        let docs_dir = dir.path().join("crates/docs");
+        fs::create_dir_all(&docs_dir).expect("docs dir");
+        fs::write(
+            docs_dir.join("publish-wave.json"),
+            r#"{
+                "wave": "docs-rs-wave-1",
+                "packages": []
+            }"#,
+        )
+        .expect("write json");
+        fs::write(
+            docs_dir.join("publish-wave.toml"),
+            r#"
+                wave = "docs-rs-wave-1"
+            "#,
+        )
+        .expect("write toml");
+
+        let err = load_publish_wave(dir.path()).expect_err("ambiguous wave");
+        assert!(err.to_string().contains("ambiguous publish wave"));
     }
 }

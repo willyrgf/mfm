@@ -4,7 +4,7 @@
 
 //! Phase-1 publish planner and executor for the docs.rs release wave.
 //!
-//! This crate is intentionally scoped to the current `publish-wave.json` workflow.
+//! This crate is intentionally scoped to the current publish-wave workflow.
 //! It replaces the inline shell implementation behind `nix run .#publish-docs`
 //! with typed Rust logic, exact remote observation, and sanitized run artifacts.
 

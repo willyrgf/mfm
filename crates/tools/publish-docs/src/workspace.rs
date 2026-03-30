@@ -10,7 +10,7 @@ use semver::Version;
 use serde::Deserialize;
 
 use crate::{
-    catalog::PUBLISH_WAVE_PATH,
+    catalog::{PUBLISH_WAVE_JSON_PATH, PUBLISH_WAVE_TOML_PATH},
     error::PublishDocsError,
     model::{LocalPackage, WavePackage, WorkspaceState},
 };
@@ -130,7 +130,9 @@ pub(crate) fn workspace_package<'a>(
 }
 
 fn is_workspace_root(path: &Path) -> bool {
-    path.join("Cargo.toml").is_file() && path.join(PUBLISH_WAVE_PATH).is_file()
+    path.join("Cargo.toml").is_file()
+        && (path.join(PUBLISH_WAVE_JSON_PATH).is_file()
+            || path.join(PUBLISH_WAVE_TOML_PATH).is_file())
 }
 
 fn load_metadata(workspace_root: &Path) -> Result<CargoMetadata, PublishDocsError> {

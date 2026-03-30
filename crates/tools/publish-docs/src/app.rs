@@ -1037,6 +1037,11 @@ fn map_error(error: PublishDocsError) -> CommandError {
             message: error.to_string(),
             exit_code: 1,
         },
+        PublishDocsError::PublishWaveConfig(_) => CommandError {
+            code: "InvalidPublishWaveConfig",
+            message: error.to_string(),
+            exit_code: 1,
+        },
         PublishDocsError::Io(_) => CommandError {
             code: "IoError",
             message: error.to_string(),

@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use mfm_publish_docs_config::PublishDocsCatalogConfigError;
+use mfm_publish_docs_config::{PublishDocsCatalogConfigError, PublishDocsWaveConfigError};
 use thiserror::Error;
 
 /// Top-level error type for the Phase-1 publish-docs tool.
@@ -50,6 +50,10 @@ pub(crate) enum PublishDocsError {
     /// Desired catalog parsing or canonicalization failed.
     #[error(transparent)]
     DesiredCatalogConfig(#[from] PublishDocsCatalogConfigError),
+
+    /// Publish wave parsing or canonicalization failed.
+    #[error(transparent)]
+    PublishWaveConfig(#[from] PublishDocsWaveConfigError),
 
     /// A generic I/O error occurred.
     #[error(transparent)]

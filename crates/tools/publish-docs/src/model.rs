@@ -1,7 +1,8 @@
 use std::path::PathBuf;
 
 pub(crate) use mfm_publish_docs_config::{
-    CatalogPackage, CatalogSection, DesiredCatalog, DocsPolicy, UmbrellaPolicy, Visibility,
+    CatalogPackage, CatalogSection, DesiredCatalog, DocsPolicy, PublishWave, UmbrellaPolicy,
+    Visibility, WavePackage,
 };
 use semver::Version;
 use serde::{Deserialize, Serialize};
@@ -38,28 +39,6 @@ pub(crate) struct PackageFilter {
     pub from: Option<String>,
     /// Optional package to process exclusively.
     pub only: Option<String>,
-}
-
-/// One package entry from the publish wave file.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct WavePackage {
-    /// Cargo package name.
-    pub name: String,
-    /// Human-facing wave group name.
-    pub group: String,
-    /// Relative workspace path.
-    pub workspace_path: String,
-    /// Expected docs.rs URL recorded in the static wave file.
-    pub docs_rs: String,
-}
-
-/// Normalized publish wave description.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct PublishWave {
-    /// Wave name from `publish-wave.json`.
-    pub wave: String,
-    /// Ordered packages in the wave.
-    pub packages: Vec<WavePackage>,
 }
 
 /// Local workspace package facts used by the planner.

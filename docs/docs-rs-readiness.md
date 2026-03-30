@@ -50,7 +50,7 @@ Notes:
 - `cargo publish --dry-run` for a crate with `path + version` dependencies still expects the versioned upstream crate to exist on crates.io. A dry-run failure like `no matching package named 'mfm-machine' found` is expected until the earlier publish step has completed.
 - Use `cargo check -p <crate> --lib` for local compile validation before the upstream versions exist in the registry.
 - Use `cargo package --allow-dirty --list -p <crate>` when you want to inspect the files that would be packaged without requiring the upstream versions to exist in the registry.
-- Use `nix run .#publish-docs -- --dry-run` to validate the current ordered wave from `crates/docs/publish-wave.json`.
+- Use `nix run .#publish-docs -- --dry-run` to validate the current ordered wave from `crates/docs/publish-wave.json`; `crates/docs/publish-wave.toml` is also accepted when the JSON file is absent.
 - The desired docs catalog is authored from `crates/docs/catalog.toml` by default; `crates/docs/catalog.json` is also accepted when the TOML file is absent.
 - `publish-docs` now uses the crates.io sparse index as the primary registry signal for planning; transient or cached uncertainty is treated as `wait_registry`, not as permission to publish.
 - Normal `publish-docs` planning only observes the selected wave. Full-catalog registry observation now happens in `nix run .#publish-docs -- sync-umbrella`.

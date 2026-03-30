@@ -101,7 +101,7 @@ pub(crate) fn render_readme(
     out.push_str("\n## Publishing Notes\n\n");
     out.push_str("- Publish this crate after the first published docs.rs surface is live, then add links for later crates as they land.\n");
     out.push_str("- Keep this page role-oriented and high-level; detailed inventories belong in the repository docs.\n");
-    out.push_str("- The publish order is tracked in `crates/docs/publish-wave.json` and consumed by `nix run .#publish-docs`.\n");
+    out.push_str("- The publish order is tracked in `crates/docs/publish-wave.json` today; `crates/docs/publish-wave.toml` is also accepted when the JSON file is absent.\n");
     out
 }
 
