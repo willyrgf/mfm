@@ -32,9 +32,11 @@ use std::sync::Arc;
 use mfm_machine::config::RunConfig;
 use mfm_machine::errors::ErrorCategory;
 use mfm_machine::ids::{ContextKey, FactKey, OpId, OpPath};
+#[cfg(test)]
+use mfm_portfolio_config::decode_portfolio_snapshot_execution_config;
 use mfm_portfolio_config::{
-    decode_portfolio_snapshot_built_config, decode_portfolio_snapshot_execution_config,
-    PortfolioSnapshotBuiltConfig,
+    build_portfolio_snapshot_outcome, decode_portfolio_snapshot_built_config,
+    PortfolioSnapshotBuiltConfig, PortfolioSnapshotCanonicalConfig,
 };
 use mfm_sdk::errors::SdkError;
 use mfm_sdk::ids::{ChildOpLocalId, PortKey};
@@ -77,11 +79,12 @@ pub const PORTFOLIO_PUBLIC_OP_VERSION: &str = "v1";
 
 const PORTFOLIO_TRACKER_MAIN_OP_PATH: &str = "portfolio_tracker.main";
 const PORTFOLIO_EXECUTE_MAIN_OP_PATH: &str = "portfolio_execute.main";
+const PORTFOLIO_TRACKER_BUILD_CHILD_ID: &str = "b";
 
 /// Returns the context key that stores the canonical portfolio snapshot JSON.
 pub fn portfolio_snapshot_context_key() -> ContextKey {
     ContextKey(format!(
-        "{PORTFOLIO_TRACKER_MAIN_OP_PATH}.out.{PORT_SNAPSHOT}"
+        "{PORTFOLIO_TRACKER_MAIN_OP_PATH}.{ASSEMBLE_SNAPSHOT_CHILD_ID}.out.{PORT_SNAPSHOT}"
     ))
 }
 
@@ -96,7 +99,7 @@ pub fn portfolio_execute_snapshot_context_key() -> ContextKey {
 /// Returns the context key that stores the canonical portfolio snapshot artifact id.
 pub fn portfolio_snapshot_artifact_id_context_key() -> ContextKey {
     ContextKey(format!(
-        "{PORTFOLIO_TRACKER_MAIN_OP_PATH}.out.{PORT_SNAPSHOT_ARTIFACT_ID}"
+        "{PORTFOLIO_TRACKER_MAIN_OP_PATH}.{ASSEMBLE_SNAPSHOT_CHILD_ID}.out.{PORT_SNAPSHOT_ARTIFACT_ID}"
     ))
 }
 
@@ -111,7 +114,7 @@ pub fn portfolio_execute_snapshot_artifact_id_context_key() -> ContextKey {
 /// Returns the context key that stores the canonical portfolio report JSON.
 pub fn portfolio_snapshot_report_context_key() -> ContextKey {
     ContextKey(format!(
-        "{PORTFOLIO_TRACKER_MAIN_OP_PATH}.out.{PORT_REPORT}"
+        "{PORTFOLIO_TRACKER_MAIN_OP_PATH}.{PROJECT_REPORT_CHILD_ID}.out.{PORT_REPORT}"
     ))
 }
 
@@ -124,12 +127,28 @@ pub fn portfolio_execute_report_context_key() -> ContextKey {
 
 type PortfolioTrackerConfig = PortfolioSnapshotBuiltConfig;
 
+enum PortfolioTrackerInput {
+    Canonical(PortfolioSnapshotCanonicalConfig),
+    Built(PortfolioSnapshotBuiltConfig),
+}
+
 fn sdk_input_error(code: &'static str, message: impl Into<String>) -> SdkError {
     op_errors::sdk_error(code, ErrorCategory::ParsingInput, false, message)
 }
 
+#[cfg(test)]
 fn parse_config(op_config: &Value) -> Result<PortfolioTrackerConfig, SdkError> {
     decode_portfolio_snapshot_execution_config(op_config)
+        .map_err(|err| sdk_input_error("invalid_portfolio_execution_config", err.to_string()))
+}
+
+fn parse_tracker_input(op_config: &Value) -> Result<PortfolioTrackerInput, SdkError> {
+    if let Ok(cfg) = decode_portfolio_snapshot_built_config(op_config) {
+        return Ok(PortfolioTrackerInput::Built(cfg));
+    }
+
+    serde_json::from_value::<PortfolioSnapshotCanonicalConfig>(op_config.clone())
+        .map(PortfolioTrackerInput::Canonical)
         .map_err(|err| sdk_input_error("invalid_portfolio_execution_config", err.to_string()))
 }
 
@@ -153,6 +172,24 @@ fn planner_payload_from_config(
     parse: fn(&Value) -> Result<PortfolioTrackerConfig, SdkError>,
 ) -> Result<Option<Value>, SdkError> {
     let cfg = parse(op_config)?;
+    let spec = compile_portfolio_plan(&cfg)?;
+    Ok(Some(serde_json::json!({
+        (PORTFOLIO_EXECUTION_SPEC_KEY): spec
+    })))
+}
+
+fn planner_payload_from_tracker_input(op_config: &Value) -> Result<Option<Value>, SdkError> {
+    let cfg = match parse_tracker_input(op_config)? {
+        PortfolioTrackerInput::Canonical(canonical) => {
+            build_portfolio_snapshot_outcome(canonical)
+                .map_err(|err| {
+                    sdk_input_error("invalid_portfolio_execution_config", err.to_string())
+                })?
+                .built
+        }
+        PortfolioTrackerInput::Built(cfg) => cfg,
+    };
+
     let spec = compile_portfolio_plan(&cfg)?;
     Ok(Some(serde_json::json!({
         (PORTFOLIO_EXECUTION_SPEC_KEY): spec
@@ -203,7 +240,7 @@ fn sanitize_child_local_id(value: &str) -> String {
         .collect()
 }
 
-/// Thin planner op that validates canonical portfolio inputs and wires the shared runtime states.
+/// Thin planner op that accepts canonical-or-built config and composes the build/execute workflow.
 #[derive(Clone, Default)]
 pub struct PortfolioTrackerOp;
 
@@ -277,8 +314,12 @@ impl Operation for PortfolioTrackerOp {
         op_config: &Value,
         _run_config: &RunConfig,
     ) -> Result<PlannedOp, SdkError> {
-        let cfg = parse_config(op_config)?;
-        expand_portfolio_execution(op_path, &cfg)
+        match parse_tracker_input(op_config)? {
+            PortfolioTrackerInput::Canonical(canonical) => {
+                expand_portfolio_tracker_from_canonical(op_path, canonical)
+            }
+            PortfolioTrackerInput::Built(cfg) => expand_portfolio_execution(op_path, &cfg),
+        }
     }
 
     fn planner_payload(
@@ -287,7 +328,7 @@ impl Operation for PortfolioTrackerOp {
         op_config: &Value,
         _run_config: &RunConfig,
     ) -> Result<Option<Value>, SdkError> {
-        planner_payload_from_config(op_config, parse_config)
+        planner_payload_from_tracker_input(op_config)
     }
 }
 
@@ -480,6 +521,46 @@ fn expand_portfolio_execution(
                 ),
             ],
         }),
+    })
+}
+
+fn expand_portfolio_tracker_from_canonical(
+    op_path: OpPath,
+    canonical: PortfolioSnapshotCanonicalConfig,
+) -> Result<PlannedOp, SdkError> {
+    let outcome = build_portfolio_snapshot_outcome(canonical.clone())
+        .map_err(|err| sdk_input_error("invalid_portfolio_execution_config", err.to_string()))?;
+    let execution = expand_portfolio_execution(op_path, &outcome.built)?;
+    let interface = execution.interface;
+    let mut spec = match execution.kind {
+        PlannedOpKind::Composite(spec) => spec,
+        PlannedOpKind::Leaf(_) => {
+            return Err(sdk_input_error(
+                "invalid_portfolio_execution_plan",
+                "portfolio execution root unexpectedly lowered to a leaf graph",
+            ));
+        }
+    };
+
+    spec.children.insert(
+        0,
+        ChildOpInstance {
+            child_op_local_id: ChildOpLocalId(PORTFOLIO_TRACKER_BUILD_CHILD_ID.to_string()),
+            op_id: OpId::must_new(PORTFOLIO_CONFIG_BUILD_OP_ID.to_string()),
+            op_version: PORTFOLIO_PUBLIC_OP_VERSION.to_string(),
+            op_config: serde_json::to_value(&canonical).map_err(|err| {
+                sdk_input_error("invalid_portfolio_execution_config", err.to_string())
+            })?,
+        },
+    );
+    spec.order.push(AfterEdge {
+        from_child: ChildOpLocalId(PORTFOLIO_TRACKER_BUILD_CHILD_ID.to_string()),
+        to_child: ChildOpLocalId(PREPARE_EXECUTION_SOURCES_CHILD_ID.to_string()),
+    });
+
+    Ok(PlannedOp {
+        interface,
+        kind: PlannedOpKind::Composite(spec),
     })
 }
 

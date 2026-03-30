@@ -571,15 +571,13 @@ This is distinct from launch-time and task runtime.
 
 ### Request validation and conversion into a run
 
-73. `AppServices::start_portfolio_snapshot()` builds deterministic execution config with
-    `build_portfolio_snapshot_config(req)`.
-74. It serializes that built config into `op_config`.
+73. `AppServices::start_portfolio_snapshot()` serializes the canonical request into `op_config`.
 75. It starts a single-op run:
 
-    - `op_id = "portfolio_execute"`
+    - `op_id = "portfolio_tracker"`
     - `op_version = "v1"`
 
-76. `start_run()` wraps that as a one-step pipeline with `machine_id = portfolio_execute` and
+76. `start_run()` wraps that as a one-step pipeline with `machine_id = portfolio_tracker` and
     `step_id = main`.
 77. `default_run_config()` sets current runtime behavior:
 
@@ -597,23 +595,21 @@ and publishes:
 - the built config artifact id
 - a stable build report
 
-`start_portfolio_snapshot()` intentionally remains additive during migration: it still calls the
-pure library build step directly, then starts `portfolio_execute/v1`, so the snapshot command and
-feature keep their existing behavior and output contract.
+`start_portfolio_snapshot()` no longer calls the pure build helper directly. The canonical request
+now enters the planner through `portfolio_tracker/v1`, which keeps the CLI and feature contract the
+same while moving the canonical-to-built handoff into the op layer.
 
 ### How the request becomes an op/state graph
 
 78. `DefaultRunLauncher::start_pipeline()` asks the planner to build planned execution.
 79. The planner validates the pipeline, resolves the root op from the registry, and calls
-    `PortfolioExecuteOp::expand()`.
-80. `PortfolioExecuteOp::parse_built_config()` expects a JSON object with:
-
-    - `canonical`
-    - `execution_spec`
-
-81. It normalizes the built config, validates the bundled canonical portfolio bundle, and validates
-    the compiled `PortfolioExecutionSpec`.
-82. `PortfolioExecuteOp::expand()` lowers the semantic spec into child ops:
+    `PortfolioTrackerOp::expand()`.
+80. For canonical input, `PortfolioTrackerOp::expand()` builds the deterministic built config in
+    the planner, inserts `portfolio_config_build` as the first child workflow, and then lowers the
+    same built config into the semantic execution child ops.
+81. For built input, `PortfolioTrackerOp::expand()` skips the build child and lowers directly into
+    the semantic execution child ops.
+82. The execution portion of that graph lowers the semantic spec into child ops:
 
     - `prepare_execution_sources`
     - `resolve_subjects`
@@ -829,8 +825,8 @@ feature keep their existing behavior and output contract.
      `mfm_sdk::unstable::load_context_snapshot_json(...)`.
 142. It reads, with typed slot-fallback decoding:
 
-    - `portfolio_execute.main.out.snapshot_artifact_id`
-    - `portfolio_execute.main.out.report`
+    - `portfolio_tracker.main.assemble_snapshot.out.snapshot_artifact_id`
+    - `portfolio_tracker.main.project_report.out.report`
 
 143. It deserializes those values and constructs:
 
@@ -1340,8 +1336,9 @@ There are several genuinely strong design choices here:
 - The outer wrapper keeps operational concerns out of Rust domain code.
 - The Rust CLI remains thin: parse -> call app services -> render result.
 - `portfolio_config_build` and `portfolio_execute` are real planner ops, not transport glue.
-- `portfolio_execute` is a real planner op, not a giant CLI command.
-- `portfolio_tracker` remains as a compatibility root instead of keeping the transport edge fat.
+- `portfolio_tracker` now composes the canonical-input build step inside the op layer instead of in
+  `mfm-app`.
+- `portfolio_execute` remains a real built-config execution op instead of a giant CLI command.
 - Runtime logic is concentrated in reusable semantic states.
 - The engine persists manifest, context snapshots, output artifacts, and kernel events in a clean
   event-sourced model.
@@ -1408,8 +1405,8 @@ Then the Rust CLI does the real work:
 
 - parse request
 - build app services
-- start `portfolio_execute`
-- lower it to a fixed semantic state graph
+- start `portfolio_tracker`
+- let the op layer compose `portfolio_config_build` and the fixed semantic execution graph
 - run the graph sequentially through the machine runtime
 - persist machine checkpoints and output artifacts
 - extract the report and snapshot artifact id from the final context snapshot

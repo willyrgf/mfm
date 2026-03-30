@@ -497,6 +497,7 @@ fn expand_uses_canonical_multi_network_graph() {
         .iter()
         .map(|child| child.child_op_local_id.0.clone())
         .collect();
+    assert!(child_ids.contains(&PORTFOLIO_TRACKER_BUILD_CHILD_ID.to_string()));
     assert!(child_ids.contains(&PREPARE_EXECUTION_SOURCES_CHILD_ID.to_string()));
     assert!(child_ids.contains(&RESOLVE_SUBJECTS_CHILD_ID.to_string()));
     assert!(child_ids.contains(&PIN_EXECUTION_VIEWS_CHILD_ID.to_string()));
@@ -513,49 +514,65 @@ fn expand_uses_canonical_multi_network_graph() {
             .count(),
         semantic_spec.observation_batches.len()
     );
+    assert!(composite.order.iter().any(|edge| {
+        edge.from_child.0 == PORTFOLIO_TRACKER_BUILD_CHILD_ID
+            && edge.to_child.0 == PREPARE_EXECUTION_SOURCES_CHILD_ID
+    }));
 
-    let bindings: Vec<_> = composite
-        .bindings
+    let build_child = composite
+        .children
         .iter()
-        .map(|binding| {
-            (
-                binding.to_child.0.clone(),
-                binding.import.0.clone(),
-                match &binding.source {
-                    mfm_sdk::op::PortSource::ParentImport(port) => {
-                        format!("parent:{}", port.0)
-                    }
-                    mfm_sdk::op::PortSource::ChildExport { child, export } => {
-                        format!("child:{}:{}", child.0, export.0)
-                    }
-                },
-            )
-        })
-        .collect();
-    assert!(bindings.contains(&(
-        RESOLVE_SUBJECTS_CHILD_ID.to_string(),
-        PORT_PREPARED_SOURCES.to_string(),
-        format!(
-            "child:{}:{}",
-            PREPARE_EXECUTION_SOURCES_CHILD_ID, PORT_PREPARED_SOURCES
-        ),
-    )));
-    assert!(bindings.contains(&(
-        PIN_EXECUTION_VIEWS_CHILD_ID.to_string(),
-        PORT_PREPARED_SOURCES.to_string(),
-        format!(
-            "child:{}:{}",
-            PREPARE_EXECUTION_SOURCES_CHILD_ID, PORT_PREPARED_SOURCES
-        ),
-    )));
-    assert!(bindings.contains(&(
-        RESOLVE_VALUATION_INPUTS_CHILD_ID.to_string(),
-        PORT_PINNED_VIEWS.to_string(),
-        format!(
-            "child:{}:{}",
-            PIN_EXECUTION_VIEWS_CHILD_ID, PORT_PINNED_VIEWS
-        ),
-    )));
+        .find(|child| child.child_op_local_id.0 == PORTFOLIO_TRACKER_BUILD_CHILD_ID)
+        .expect("build child");
+    assert_eq!(build_child.op_id.as_str(), PORTFOLIO_CONFIG_BUILD_OP_ID);
+    let build_canonical: PortfolioSnapshotCanonicalConfig =
+        serde_json::from_value(build_child.op_config.clone()).expect("canonical child config");
+    let expected_canonical: PortfolioSnapshotCanonicalConfig =
+        serde_json::from_value(canonical_op_config()).expect("expected canonical config");
+    assert_eq!(build_canonical, expected_canonical);
+
+    assert!(composite
+        .re_exports
+        .iter()
+        .any(|binding| binding.export.0 == PORT_SNAPSHOT));
+    assert!(composite
+        .re_exports
+        .iter()
+        .any(|binding| binding.export.0 == PORT_SNAPSHOT_ARTIFACT_ID));
+    assert!(composite
+        .re_exports
+        .iter()
+        .any(|binding| binding.export.0 == PORT_REPORT));
+}
+
+#[test]
+fn portfolio_tracker_built_input_keeps_the_semantic_runtime_without_build_publication() {
+    let op = PortfolioTrackerOp;
+    let planned = op
+        .expand(
+            OpPath("portfolio_tracker.main".to_string()),
+            &built_op_config(),
+            &op_test_support::run_config_live(),
+        )
+        .expect("expand");
+    let composite = into_composite(planned);
+
+    assert!(composite.bindings.iter().any(|binding| {
+        binding.to_child.0 == RESOLVE_SUBJECTS_CHILD_ID && binding.import.0 == PORT_PREPARED_SOURCES
+    }));
+    assert!(composite.order.is_empty());
+    assert!(composite
+        .children
+        .iter()
+        .all(|child| child.child_op_local_id.0 != PORTFOLIO_TRACKER_BUILD_CHILD_ID));
+    assert!(composite
+        .children
+        .iter()
+        .any(|child| child.child_op_local_id.0 == PREPARE_EXECUTION_SOURCES_CHILD_ID));
+    assert!(composite
+        .children
+        .iter()
+        .any(|child| child.child_op_local_id.0 == PROJECT_REPORT_CHILD_ID));
 }
 
 #[test]
@@ -708,6 +725,7 @@ fn expand_uses_semantic_state_ids_without_protocol_fragments() {
         .expect("plan");
 
     let mut observed_suffixes = HashSet::new();
+    let mut build_suffixes = HashSet::new();
     let mut non_observe_suffixes = HashSet::new();
     for state in &plan.graph.states {
         let id = state.id.as_str();
@@ -718,6 +736,28 @@ fn expand_uses_semantic_state_ids_without_protocol_fragments() {
         let suffix = id
             .strip_prefix("portfolio_tracker.main.")
             .expect("portfolio_tracker.main.");
+
+        let build_prefix = format!("{PORTFOLIO_TRACKER_BUILD_CHILD_ID}__");
+        if let Some(build_suffix) = suffix.strip_prefix(build_prefix.as_str()) {
+            assert!(
+                !build_suffix.is_empty(),
+                "build state IDs should stay in the flattened leaf shape: {build_suffix}"
+            );
+            assert!(
+                build_suffixes.insert(build_suffix.to_string()),
+                "duplicate build state id found: {build_suffix}"
+            );
+            assert!(
+                build_suffix == "write_canonical_artifact_input"
+                    || build_suffix == "write_canonical_artifact"
+                    || build_suffix == "write_built_config"
+                    || build_suffix == "write_built_artifact"
+                    || build_suffix == "write_build_report",
+                "unexpected build state id: {build_suffix}"
+            );
+            continue;
+        }
+
         if suffix.starts_with("observe_") {
             assert!(
                 suffix.ends_with("__run"),
@@ -751,8 +791,14 @@ fn expand_uses_semantic_state_ids_without_protocol_fragments() {
     }
 
     assert_eq!(observed_suffixes.len(), spec.observation_batches.len());
+    assert_eq!(build_suffixes.len(), 5);
     assert_eq!(non_observe_suffixes.len(), 7);
 
+    assert!(build_suffixes.contains("write_canonical_artifact_input"));
+    assert!(build_suffixes.contains("write_canonical_artifact"));
+    assert!(build_suffixes.contains("write_built_config"));
+    assert!(build_suffixes.contains("write_built_artifact"));
+    assert!(build_suffixes.contains("write_build_report"));
     assert!(non_observe_suffixes.contains("prepare_execution_sources__run"));
     assert!(non_observe_suffixes.contains("resolve_subjects__run"));
     assert!(non_observe_suffixes.contains("pin_execution_views__run"));

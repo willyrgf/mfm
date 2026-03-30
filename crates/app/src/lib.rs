@@ -61,21 +61,22 @@ use mfm_op_evm_write::{EvmConfigureOp, EvmContractFromNixOp, EvmDeployOp, EvmVal
 use mfm_op_keystore_admin::{KeystoreDeleteOp, KeystoreImportOp, KeystoreListOp};
 use mfm_op_keystore_tx::KeystoreTxSignOp;
 use mfm_op_nix_app::NixAppOp;
+#[cfg(test)]
+use mfm_op_portfolio_tracker::PORTFOLIO_EXECUTE_OP_ID;
 use mfm_op_portfolio_tracker::{
     is_portfolio_tracker_internal_op_id, portfolio_config_build_built_artifact_id_context_key,
     portfolio_config_build_built_config_context_key,
     portfolio_config_build_canonical_artifact_id_context_key,
-    portfolio_config_build_report_context_key, portfolio_execute_report_context_key,
-    portfolio_execute_snapshot_artifact_id_context_key, portfolio_public_ops,
-    portfolio_tracker_internal_ops, PORTFOLIO_CONFIG_BUILD_OP_ID, PORTFOLIO_EXECUTE_OP_ID,
-    PORTFOLIO_PUBLIC_OP_VERSION,
+    portfolio_config_build_report_context_key, portfolio_public_ops,
+    portfolio_snapshot_artifact_id_context_key, portfolio_snapshot_report_context_key,
+    portfolio_tracker_internal_ops, PORTFOLIO_CONFIG_BUILD_OP_ID, PORTFOLIO_PUBLIC_OP_VERSION,
+    PORTFOLIO_TRACKER_OP_ID,
 };
 use mfm_op_proof::ProofOp;
 use mfm_portfolio_config::{
-    build_portfolio_snapshot_config, canonicalize_portfolio_snapshot_authored_config,
-    parse_portfolio_snapshot_authored_config, parse_portfolio_snapshot_authored_config_with_hint,
-    AuthoredConfigFormat, PortfolioSnapshotBuildReport, PortfolioSnapshotBuiltConfig,
-    PortfolioSnapshotConfigError,
+    canonicalize_portfolio_snapshot_authored_config, parse_portfolio_snapshot_authored_config,
+    parse_portfolio_snapshot_authored_config_with_hint, AuthoredConfigFormat,
+    PortfolioSnapshotBuildReport, PortfolioSnapshotBuiltConfig, PortfolioSnapshotConfigError,
 };
 use mfm_sdk::ids::{MachineId, StepId};
 use mfm_sdk::launcher::{LaunchPipeline, RunLauncher};
@@ -294,13 +295,17 @@ pub fn app_error_from_run_error(err: RunError) -> AppError {
         RunError::Other(info) => info,
     };
 
-    let class = match info.category {
-        ErrorCategory::ParsingInput => ErrorClass::BadRequest,
-        ErrorCategory::OnChain | ErrorCategory::OffChain | ErrorCategory::Rpc => {
-            ErrorClass::BadGateway
-        }
-        ErrorCategory::Storage | ErrorCategory::Context | ErrorCategory::Unknown => {
-            ErrorClass::Internal
+    let class = if info.code.0.starts_with("rpc_control_") {
+        ErrorClass::BadGateway
+    } else {
+        match info.category {
+            ErrorCategory::ParsingInput => ErrorClass::BadRequest,
+            ErrorCategory::OnChain | ErrorCategory::OffChain | ErrorCategory::Rpc => {
+                ErrorClass::BadGateway
+            }
+            ErrorCategory::Storage | ErrorCategory::Context | ErrorCategory::Unknown => {
+                ErrorClass::Internal
+            }
         }
     };
 
@@ -1057,16 +1062,13 @@ impl AppServices {
         &self,
         req: PortfolioSnapshotRequest,
     ) -> Result<PortfolioSnapshotResponse, AppError> {
-        let built = build_portfolio_snapshot_config(req).map_err(|err| {
-            AppError::invalid_request(format!("invalid portfolio snapshot request: {err}"))
+        let op_config = serde_json::to_value(&req).map_err(|_| {
+            AppError::invalid_request("failed to encode portfolio snapshot request")
         })?;
-
-        let op_config = serde_json::to_value(&built)
-            .map_err(|_| AppError::invalid_request("failed to encode portfolio snapshot config"))?;
 
         let run = self
             .start_run(RunsStartRequest::Single(SingleOpStartRequest {
-                op_id: PORTFOLIO_EXECUTE_OP_ID.to_string(),
+                op_id: PORTFOLIO_TRACKER_OP_ID.to_string(),
                 op_version: PORTFOLIO_PUBLIC_OP_VERSION.to_string(),
                 op_config,
             }))
@@ -1080,8 +1082,8 @@ impl AppServices {
         let mut report = None;
 
         if let Some(final_snapshot_id) = &run.final_snapshot_id {
-            let report_key = portfolio_execute_report_context_key();
-            let snapshot_artifact_id_key = portfolio_execute_snapshot_artifact_id_context_key();
+            let report_key = portfolio_snapshot_report_context_key();
+            let snapshot_artifact_id_key = portfolio_snapshot_artifact_id_context_key();
             let snapshot = load_context_snapshot_json(
                 self.artifacts.as_ref(),
                 &ArtifactId(final_snapshot_id.clone()),
