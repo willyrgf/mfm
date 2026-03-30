@@ -34,6 +34,13 @@ use tracing::{debug, info, instrument, warn};
 use mfm_artifact_store_fs::FsArtifactStore;
 use mfm_artifact_store_s3::S3ArtifactStore;
 use mfm_collectors_nix_exec::NixFlakeTransportFactory;
+use mfm_evm_deploy_configure_validate_config::{
+    canonicalize_deploy_configure_validate_authored_config,
+    decode_deploy_configure_validate_canonical_config,
+    parse_deploy_configure_validate_authored_config,
+    parse_deploy_configure_validate_authored_config_with_hint,
+    AuthoredConfigFormat as DcvAuthoredConfigFormat, DeployConfigureValidateConfigError,
+};
 use mfm_machine::config::{
     BackoffPolicy, BuildProvenance, ContextCheckpointing, EventProfile, ExecutionMode, IoMode,
     RetryPolicy, RunConfig,
@@ -75,8 +82,9 @@ use mfm_op_portfolio_tracker::{
 use mfm_op_proof::ProofOp;
 use mfm_portfolio_config::{
     canonicalize_portfolio_snapshot_authored_config, parse_portfolio_snapshot_authored_config,
-    parse_portfolio_snapshot_authored_config_with_hint, AuthoredConfigFormat,
-    PortfolioSnapshotBuildReport, PortfolioSnapshotBuiltConfig, PortfolioSnapshotConfigError,
+    parse_portfolio_snapshot_authored_config_with_hint,
+    AuthoredConfigFormat as PortfolioAuthoredConfigFormat, PortfolioSnapshotBuildReport,
+    PortfolioSnapshotBuiltConfig, PortfolioSnapshotConfigError,
 };
 use mfm_sdk::ids::{MachineId, StepId};
 use mfm_sdk::launcher::{LaunchPipeline, RunLauncher};
@@ -944,45 +952,14 @@ impl AppServices {
         .await
     }
 
-    /// Starts the deploy-configure-validate template from raw JSON or a JSON file.
+    /// Starts the deploy-configure-validate template from raw JSON or a JSON/TOML file.
     #[allow(clippy::disallowed_methods)]
     pub async fn start_deploy_configure_validate_from_spec_input(
         &self,
         spec_json: Option<String>,
         spec_file: Option<PathBuf>,
     ) -> Result<RunStartResponse, AppError> {
-        let raw_spec = match (spec_json, spec_file) {
-            (Some(_), Some(_)) => {
-                return Err(AppError::new(
-                    ErrorClass::BadRequest,
-                    "InvalidArguments",
-                    "Pass only one of --spec-json or --spec-file",
-                ));
-            }
-            (None, None) => {
-                return Err(AppError::new(
-                    ErrorClass::BadRequest,
-                    "MissingArgument",
-                    "Pass one of --spec-json or --spec-file",
-                ));
-            }
-            (Some(s), None) => s,
-            (None, Some(path)) => std::fs::read_to_string(path).map_err(|_| {
-                AppError::new(
-                    ErrorClass::BadRequest,
-                    "InvalidSpecFile",
-                    "Failed to read --spec-file contents",
-                )
-            })?,
-        };
-
-        let spec: DeployConfigureValidateSpec = serde_json::from_str(&raw_spec).map_err(|_| {
-            AppError::new(
-                ErrorClass::BadRequest,
-                "InvalidJson",
-                "Failed to parse deploy/configure/validate spec JSON",
-            )
-        })?;
+        let spec = parse_deploy_configure_validate_spec_input(spec_json, spec_file)?;
         self.start_deploy_configure_validate(spec).await
     }
 
@@ -1144,7 +1121,7 @@ pub fn parse_portfolio_snapshot_request_input(
         )),
         (Some(raw), None) => {
             let authored =
-                parse_portfolio_snapshot_authored_config(&raw, AuthoredConfigFormat::Json)
+                parse_portfolio_snapshot_authored_config(&raw, PortfolioAuthoredConfigFormat::Json)
                     .map_err(|err| app_error_from_portfolio_config_error(err, Some("JSON")))?;
             canonicalize_portfolio_snapshot_authored_config(authored)
                 .map_err(|err| app_error_from_portfolio_config_error(err, None))
@@ -1163,6 +1140,82 @@ pub fn parse_portfolio_snapshot_request_input(
             canonicalize_portfolio_snapshot_authored_config(authored)
                 .map_err(|err| app_error_from_portfolio_config_error(err, None))
         }
+    }
+}
+
+/// Parses a deploy/configure/validate spec from either an inline JSON payload or a JSON/TOML file.
+pub fn parse_deploy_configure_validate_spec_input(
+    spec_json: Option<String>,
+    spec_file: Option<PathBuf>,
+) -> Result<DeployConfigureValidateSpec, AppError> {
+    match (spec_json, spec_file) {
+        (Some(_), Some(_)) => Err(AppError::new(
+            ErrorClass::BadRequest,
+            "InvalidArguments",
+            "Pass only one of --spec-json or --spec-file",
+        )),
+        (None, None) => Err(AppError::new(
+            ErrorClass::BadRequest,
+            "MissingArgument",
+            "Pass one of --spec-json or --spec-file",
+        )),
+        (Some(raw), None) => {
+            let authored = parse_deploy_configure_validate_authored_config(
+                &raw,
+                DcvAuthoredConfigFormat::Json,
+            )
+            .map_err(|err| {
+                app_error_from_deploy_configure_validate_config_error(err, Some("JSON"))
+            })?;
+            canonicalize_deploy_configure_validate_authored_config(authored)
+                .map_err(|err| app_error_from_deploy_configure_validate_config_error(err, None))
+        }
+        (None, Some(path)) => {
+            let raw = std::fs::read_to_string(&path).map_err(|_| {
+                AppError::new(
+                    ErrorClass::BadRequest,
+                    "InvalidSpecFile",
+                    "Failed to read --spec-file contents",
+                )
+            })?;
+            let authored = parse_deploy_configure_validate_authored_config_with_hint(
+                &raw,
+                Some(path.as_path()),
+            )
+            .map_err(|err| app_error_from_deploy_configure_validate_config_error(err, None))?;
+            canonicalize_deploy_configure_validate_authored_config(authored)
+                .map_err(|err| app_error_from_deploy_configure_validate_config_error(err, None))
+        }
+    }
+}
+
+fn app_error_from_deploy_configure_validate_config_error(
+    err: DeployConfigureValidateConfigError,
+    format_name: Option<&str>,
+) -> AppError {
+    match err {
+        DeployConfigureValidateConfigError::InvalidJson { .. } => {
+            if let Some(format_name) = format_name {
+                AppError::new(
+                    ErrorClass::BadRequest,
+                    "InvalidJson",
+                    format!("Failed to parse deploy/configure/validate {format_name}"),
+                )
+            } else {
+                AppError::invalid_json()
+            }
+        }
+        DeployConfigureValidateConfigError::InvalidToml { .. } => AppError::new(
+            ErrorClass::BadRequest,
+            "InvalidToml",
+            "Failed to parse deploy/configure/validate TOML",
+        ),
+        DeployConfigureValidateConfigError::Serialize { .. }
+        | DeployConfigureValidateConfigError::CanonicalJson { .. } => AppError::new(
+            ErrorClass::Internal,
+            "DeployConfigureValidateConfigError",
+            err.to_string(),
+        ),
     }
 }
 
@@ -1414,27 +1467,7 @@ pub enum ArtifactBody {
 }
 
 /// Input payload for the standard deploy-configure-validate pipeline feature.
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct DeployConfigureValidateSpec {
-    /// Machine id to assign to the generated pipeline.
-    #[serde(default = "default_machine_id")]
-    pub machine_id: String,
-
-    /// Version string to assign to the generated pipeline.
-    #[serde(default = "default_pipeline_version")]
-    pub pipeline_version: String,
-
-    /// Additional pipeline input forwarded into the run manifest.
-    #[serde(default = "default_empty_object")]
-    pub input: serde_json::Value,
-
-    /// Operation config for the deploy phase.
-    pub deploy: serde_json::Value,
-    /// Operation config for the configure phase.
-    pub configure: serde_json::Value,
-    /// Operation config for the validate phase.
-    pub validate: serde_json::Value,
-}
+pub use mfm_evm_deploy_configure_validate_config::DeployConfigureValidateCanonicalConfig as DeployConfigureValidateSpec;
 
 /// Converts a deploy-configure-validate spec into the canonical single-step pipeline template.
 pub fn pipeline_from_deploy_configure_validate_spec(spec: DeployConfigureValidateSpec) -> Pipeline {
@@ -1459,14 +1492,6 @@ fn default_op_id() -> String {
 }
 
 fn default_op_version() -> String {
-    "v1".to_string()
-}
-
-fn default_machine_id() -> String {
-    "evm_deploy_configure_validate".to_string()
-}
-
-fn default_pipeline_version() -> String {
     "v1".to_string()
 }
 
@@ -1852,8 +1877,10 @@ impl FeatureCatalog {
                 serde_json::to_value(services.artifact_get(&parsed.artifact_id).await?)
             }
             BuiltinFeature::PipelineDeployConfigureValidateStart => {
-                let parsed: DeployConfigureValidateSpec =
-                    serde_json::from_value(req.payload).map_err(|_| AppError::invalid_json())?;
+                let parsed = decode_deploy_configure_validate_canonical_config(&req.payload)
+                    .map_err(|err| {
+                        app_error_from_deploy_configure_validate_config_error(err, None)
+                    })?;
                 serde_json::to_value(services.start_deploy_configure_validate(parsed).await?)
             }
             BuiltinFeature::PortfolioConfigBuild => {
@@ -2110,6 +2137,53 @@ mod tests {
             Arc::new(NoopStreamStore),
             Arc::new(NoopArtifactStore),
         )
+    }
+
+    #[test]
+    fn parse_deploy_configure_validate_spec_input_materializes_defaults_from_json() {
+        let parsed = parse_deploy_configure_validate_spec_input(
+            Some(
+                serde_json::json!({
+                    "deploy": {"network_id": "ethereum-mainnet"},
+                    "configure": {"network_id": "ethereum-mainnet"},
+                    "validate": {"network_id": "ethereum-mainnet"}
+                })
+                .to_string(),
+            ),
+            None,
+        )
+        .expect("parse spec");
+
+        assert_eq!(parsed.machine_id, "evm_deploy_configure_validate");
+        assert_eq!(parsed.pipeline_version, "v1");
+        assert_eq!(parsed.input, serde_json::json!({}));
+    }
+
+    #[test]
+    fn parse_deploy_configure_validate_spec_input_accepts_toml_file() {
+        let path = std::env::temp_dir().join(format!("mfm-dcv-{}.toml", uuid::Uuid::new_v4()));
+        std::fs::write(
+            &path,
+            r#"
+                [deploy]
+                network_id = "ethereum-mainnet"
+
+                [configure]
+                network_id = "ethereum-mainnet"
+
+                [validate]
+                network_id = "ethereum-mainnet"
+            "#,
+        )
+        .expect("write temp spec");
+
+        let parsed = parse_deploy_configure_validate_spec_input(None, Some(path.clone()))
+            .expect("parse spec");
+        let _ = std::fs::remove_file(path);
+
+        assert_eq!(parsed.machine_id, "evm_deploy_configure_validate");
+        assert_eq!(parsed.pipeline_version, "v1");
+        assert_eq!(parsed.input, serde_json::json!({}));
     }
 
     #[test]

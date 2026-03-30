@@ -26,6 +26,8 @@ members = [
 	"crates/machine-derive",
 	"crates/machine-test-support",
 	"crates/sdk",
+	"crates/authored-config",
+	"crates/evm-deploy-configure-validate-config",
 	"crates/portfolio-config",
 	"crates/states/common",
 	"crates/states/keystore",

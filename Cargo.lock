@@ -1913,6 +1913,7 @@ dependencies = [
  "mfm-artifact-store-fs",
  "mfm-artifact-store-s3",
  "mfm-collectors-nix-exec",
+ "mfm-evm-deploy-configure-validate-config",
  "mfm-machine",
  "mfm-op-aave-v3-origin-adapt",
  "mfm-op-evm-deploy-configure-validate",
@@ -1973,6 +1974,10 @@ dependencies = [
  "tokio",
  "zeroize",
 ]
+
+[[package]]
+name = "mfm-authored-config"
+version = "0.1.0"
 
 [[package]]
 name = "mfm-collectors-btc-jsonrpc-http"
@@ -2104,6 +2109,18 @@ dependencies = [
  "hex",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "mfm-evm-deploy-configure-validate-config"
+version = "0.1.0"
+dependencies = [
+ "mfm-authored-config",
+ "mfm-machine",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "toml",
 ]
 
 [[package]]
@@ -2322,6 +2339,7 @@ dependencies = [
 name = "mfm-portfolio-config"
 version = "0.1.0"
 dependencies = [
+ "mfm-authored-config",
  "mfm-machine",
  "mfm-state-aave-v3",
  "mfm-state-portfolio",

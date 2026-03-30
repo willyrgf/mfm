@@ -322,7 +322,12 @@ Starts a standard 3-step pipeline:
 ```sh
 mfm_cli run pipeline deploy-configure-validate --spec-json '<SPEC_JSON>' [OPTIONS]
 mfm_cli run pipeline deploy-configure-validate --spec-file /path/to/spec.json [OPTIONS]
+mfm_cli run pipeline deploy-configure-validate --spec-file /path/to/config.toml [OPTIONS]
 ```
+
+`--spec-json` remains inline JSON-only. `--spec-file` accepts authored JSON or TOML and
+canonicalizes it into the same typed pipeline spec before launch, preserving the existing default
+values for `machine_id`, `pipeline_version`, and `input`.
 
 ### `run resume`
 

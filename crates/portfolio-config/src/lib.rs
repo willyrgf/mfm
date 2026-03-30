@@ -80,9 +80,10 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
-use std::fmt;
 use std::path::Path;
 
+use mfm_authored_config::parse_authored_config_with_hint;
+pub use mfm_authored_config::AuthoredConfigFormat;
 use mfm_machine::hashing::{artifact_id_for_json, CanonicalJsonError};
 use mfm_machine::ids::ArtifactId;
 use mfm_state_portfolio::model::{
@@ -100,35 +101,6 @@ use thiserror::Error;
 mod defaults;
 
 pub use defaults::{builtin_dispatch_catalog, DefaultPortfolioPlanCompiler};
-
-/// Supported authoring formats for portfolio snapshot config input.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AuthoredConfigFormat {
-    /// JSON-authored config.
-    Json,
-    /// TOML-authored config.
-    Toml,
-}
-
-impl AuthoredConfigFormat {
-    /// Returns the format implied by a path extension, when recognized.
-    pub fn from_path(path: &Path) -> Option<Self> {
-        match path.extension().and_then(|ext| ext.to_str()) {
-            Some(ext) if ext.eq_ignore_ascii_case("json") => Some(Self::Json),
-            Some(ext) if ext.eq_ignore_ascii_case("toml") => Some(Self::Toml),
-            _ => None,
-        }
-    }
-}
-
-impl fmt::Display for AuthoredConfigFormat {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Json => f.write_str("json"),
-            Self::Toml => f.write_str("toml"),
-        }
-    }
-}
 
 /// Human-authored portfolio snapshot config loaded from JSON or TOML.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -393,13 +365,12 @@ pub fn parse_portfolio_snapshot_authored_config_with_hint(
     raw: &str,
     path_hint: Option<&Path>,
 ) -> Result<PortfolioSnapshotAuthoredConfig, PortfolioSnapshotConfigError> {
-    let hinted = path_hint.and_then(AuthoredConfigFormat::from_path);
-    let preferred = hinted.unwrap_or_else(|| detect_authored_format(raw));
-    match parse_portfolio_snapshot_authored_config(raw, preferred) {
-        Ok(parsed) => Ok(parsed),
-        Err(err) if hinted.is_some() => Err(err),
-        Err(_) => parse_portfolio_snapshot_authored_config(raw, preferred.alternate()),
-    }
+    parse_authored_config_with_hint(
+        raw,
+        path_hint,
+        |value| parse_portfolio_snapshot_authored_config(value, AuthoredConfigFormat::Json),
+        |value| parse_portfolio_snapshot_authored_config(value, AuthoredConfigFormat::Toml),
+    )
 }
 
 /// Canonicalizes authored portfolio config into the normalized canonical representation.
@@ -513,22 +484,6 @@ pub fn decode_portfolio_snapshot_built_config(
         .validate()
         .map_err(|source| PortfolioSnapshotExecutionConfigError::InvalidExecutionSpec { source })?;
     Ok(built)
-}
-
-fn detect_authored_format(raw: &str) -> AuthoredConfigFormat {
-    match raw.chars().find(|ch| !ch.is_whitespace()) {
-        Some('{') | Some('[') => AuthoredConfigFormat::Json,
-        _ => AuthoredConfigFormat::Toml,
-    }
-}
-
-impl AuthoredConfigFormat {
-    fn alternate(self) -> Self {
-        match self {
-            Self::Json => Self::Toml,
-            Self::Toml => Self::Json,
-        }
-    }
 }
 
 #[cfg(test)]

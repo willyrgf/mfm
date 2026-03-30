@@ -60,11 +60,11 @@ pub(crate) struct PipelineStartArgs {
 /// Arguments for `mfm run pipeline deploy-configure-validate`.
 #[derive(Args)]
 pub(crate) struct DeployConfigureValidateArgs {
-    /// Spec JSON payload describing deploy/configure/validate op configs
+    /// Spec JSON payload describing deploy/configure/validate op configs.
     #[arg(long)]
     pub spec_json: Option<String>,
 
-    /// Path to a spec JSON file describing deploy/configure/validate op configs
+    /// Path to a spec JSON or TOML file describing deploy/configure/validate op configs.
     #[arg(long)]
     pub spec_file: Option<PathBuf>,
 

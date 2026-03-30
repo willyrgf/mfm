@@ -12,6 +12,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter", "fmt", "json"] }
 
 mfm-machine = { path = "../machine" }
+mfm-evm-deploy-configure-validate-config = { path = "../evm-deploy-configure-validate-config" }
 mfm-portfolio-config = { path = "../portfolio-config" }
 mfm-sdk = { path = "../sdk" }
 mfm-collectors-nix-exec = { path = "../collectors/nix-exec" }
