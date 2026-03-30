@@ -12,6 +12,7 @@ Generated from `docs/repo-index.json`.
 - `docs/architecture.md` - Project documentation.
 - `docs/ops-and-states.md` - Project documentation.
 - `docs/design.md` - Project documentation.
+- `docs/AAVE_ORIGIN_PROMOTION_PLAN.md` - Aave-origin wrapper promotion investigation and phased migration plan.
 
 ## Components
 - `Cargo.toml` (rust-cargo)

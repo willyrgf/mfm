@@ -580,11 +580,29 @@ Recommendation:
 Current seams:
 
 - `nixfied/project/aave-origin-tools.nix`
+- raw `nix_app(fetch) -> nix_app(compile) -> nix_app(deploy) -> aave_v3_origin_adapt_deploy`
+  orchestration in the parity scenario
+- reusable Aave manifest and runtime state substrate already living in `crates/states/aave-v3`
 
 Recommendation:
 
 - Promote shell-heavy build and execution orchestration into internal MFM workflows where practical.
 - Use the same authored-config build and execute split instead of wrapper-level composition.
+- Aave-origin is a stronger `BuiltConfig` candidate than `publish-docs` because its current wrapper
+  already enforces a deterministic fixed phase-A topology:
+  `fetch -> compile -> deploy -> adapt`.
+- The first migration slice should preserve the current external Origin tools as the execution
+  backend and move orchestration behind internal MFM build and execute roots before attempting to
+  rewrite Foundry compile or deploy behavior.
+- The promoted family should use:
+  - typed authored config for source pin, network/control scope, actor addresses, amount inputs,
+    timeout policy, and non-secret env names
+  - pure canonicalization into deterministic typed config
+  - a build step that lowers canonical config into an execution-ready phase-A plan
+  - an execute step that initially composes `nix_app` child ops plus
+    `aave_v3_origin_adapt_deploy`
+- Existing Nix task apps should remain compatibility surfaces during migration rather than being
+  removed in the first phase.
 
 ### 13.4 Generic Result Extraction
 
