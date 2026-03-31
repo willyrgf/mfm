@@ -58,6 +58,15 @@ use mfm_machine::live_io_registry::{HashMapTransportRegistry, TransportRegistry}
 use mfm_machine::live_io_router::RouterLiveIoTransportFactory;
 use mfm_machine::runtime::{ChildRunLiveIoTransportFactory, DefaultExecutionEngine, PlanResolver};
 use mfm_machine::stores::{ArtifactStore, StreamId, StreamRecord, StreamStore};
+#[cfg(test)]
+use mfm_op_aave_v3_origin::{
+    aave_v3_origin_internal_op_ids, AAVE_V3_ORIGIN_STACK_CONFIG_BUILD_OP_ID,
+    AAVE_V3_ORIGIN_STACK_EXECUTE_OP_ID, AAVE_V3_ORIGIN_STACK_OP_ID,
+    AAVE_V3_ORIGIN_STACK_PUBLIC_OP_VERSION,
+};
+use mfm_op_aave_v3_origin::{
+    aave_v3_origin_internal_ops, aave_v3_origin_public_ops, is_aave_v3_origin_internal_op_id,
+};
 use mfm_op_aave_v3_origin_adapt::AaveV3OriginAdaptDeployOp;
 use mfm_op_evm_deploy_configure_validate::{
     evm_deploy_configure_validate_public_ops, EVM_DEPLOY_CONFIGURE_VALIDATE_OP_ID,
@@ -123,6 +132,16 @@ fn ensure_single_start_op(
             "op_not_public",
             format!(
                 "op_id `{}` is not a public run.start target: planner-internal semantic child ops are not valid run.start targets",
+                op_id.as_str()
+            ),
+        ));
+    }
+    if is_aave_v3_origin_internal_op_id(op_id.as_str()) {
+        return Err(AppError::new(
+            ErrorClass::BadRequest,
+            "op_not_public",
+            format!(
+                "op_id `{}` is not a public run.start target: planner-internal Aave V3 Origin child ops are not valid run.start targets",
                 op_id.as_str()
             ),
         ));
@@ -530,6 +549,12 @@ impl OperationPlugin for DefaultOperationPlugin {
             registry.register(op);
         }
         for op in portfolio_tracker_internal_ops() {
+            registry.register(op);
+        }
+        for op in aave_v3_origin_public_ops() {
+            registry.register(op);
+        }
+        for op in aave_v3_origin_internal_ops() {
             registry.register(op);
         }
         registry.register(Arc::new(NixAppOp));
@@ -2479,6 +2504,83 @@ mod tests {
     }
 
     #[test]
+    fn default_registry_keeps_aave_origin_internal_ops_for_planning() {
+        let bundle = make_engine_bundle();
+
+        for op_id in aave_v3_origin_internal_op_ids() {
+            bundle
+                .registry
+                .resolve(&OpId::must_new((*op_id).to_string()), "v1-internal")
+                .expect("internal op should remain registered for recursive planning");
+        }
+        bundle
+            .registry
+            .resolve(
+                &OpId::must_new(AAVE_V3_ORIGIN_STACK_OP_ID.to_string()),
+                AAVE_V3_ORIGIN_STACK_PUBLIC_OP_VERSION,
+            )
+            .expect("public compatibility root should remain registered");
+        bundle
+            .registry
+            .resolve(
+                &OpId::must_new(AAVE_V3_ORIGIN_STACK_CONFIG_BUILD_OP_ID.to_string()),
+                AAVE_V3_ORIGIN_STACK_PUBLIC_OP_VERSION,
+            )
+            .expect("config-build root should remain registered");
+        bundle
+            .registry
+            .resolve(
+                &OpId::must_new(AAVE_V3_ORIGIN_STACK_EXECUTE_OP_ID.to_string()),
+                AAVE_V3_ORIGIN_STACK_PUBLIC_OP_VERSION,
+            )
+            .expect("execute root should remain registered");
+    }
+
+    #[test]
+    fn aave_origin_public_root_ops_remain_v1() {
+        let bundle = make_engine_bundle();
+
+        for op_id in [
+            AAVE_V3_ORIGIN_STACK_OP_ID,
+            AAVE_V3_ORIGIN_STACK_CONFIG_BUILD_OP_ID,
+            AAVE_V3_ORIGIN_STACK_EXECUTE_OP_ID,
+        ] {
+            let op = bundle
+                .registry
+                .resolve(
+                    &OpId::must_new(op_id.to_string()),
+                    AAVE_V3_ORIGIN_STACK_PUBLIC_OP_VERSION,
+                )
+                .expect("public root op should remain v1");
+            assert_eq!(op.op_version(), AAVE_V3_ORIGIN_STACK_PUBLIC_OP_VERSION);
+            assert!(bundle
+                .registry
+                .resolve(&OpId::must_new(op_id.to_string()), "v2")
+                .is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn start_run_rejects_aave_origin_internal_child_ops() {
+        let services = test_services(make_engine_bundle());
+
+        for op_id in aave_v3_origin_internal_op_ids() {
+            let err = services
+                .start_run(RunsStartRequest::Single(SingleOpStartRequest {
+                    op_id: (*op_id).to_string(),
+                    op_version: "v1-internal".to_string(),
+                    op_config: serde_json::json!({}),
+                }))
+                .await
+                .expect_err("planner-internal op must not be publicly startable");
+
+            assert_eq!(err.class, ErrorClass::BadRequest);
+            assert_eq!(err.code, "op_not_public");
+            assert!(is_aave_v3_origin_internal_op_id(op_id));
+        }
+    }
+
+    #[test]
     fn deploy_configure_validate_public_root_ops_remain_registered() {
         let bundle = make_engine_bundle();
 
@@ -2607,6 +2709,36 @@ mod tests {
             assert_eq!(err.class, ErrorClass::BadRequest);
             assert_eq!(err.code, "op_not_public");
             assert!(is_portfolio_tracker_internal_op_id(op_id));
+        }
+    }
+
+    #[tokio::test]
+    async fn start_run_rejects_aave_origin_internal_ops_in_pipeline() {
+        let services = test_services(make_engine_bundle());
+
+        for op_id in aave_v3_origin_internal_op_ids() {
+            let pipeline = Pipeline {
+                machine_id: MachineId("aave_v3_origin_stack".to_string()),
+                pipeline_version: "v1".to_string(),
+                steps: vec![PipelineStep {
+                    step_id: StepId("main".to_string()),
+                    op_id: OpId::must_new((*op_id).to_string()),
+                    op_version: "v1-internal".to_string(),
+                    op_config: serde_json::json!({}),
+                }],
+            };
+            let err = services
+                .start_run(RunsStartRequest::Pipeline(PipelineStartRequest {
+                    pipeline,
+                    input: serde_json::json!({}),
+                    run_config: None,
+                }))
+                .await
+                .expect_err("internal pipeline step should be rejected");
+
+            assert_eq!(err.class, ErrorClass::BadRequest);
+            assert_eq!(err.code, "op_not_public");
+            assert!(is_aave_v3_origin_internal_op_id(op_id));
         }
     }
 }

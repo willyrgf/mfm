@@ -7,6 +7,10 @@ use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use mfm_aave_v3_origin_config::{
+    AaveV3OriginSourceConfig, AaveV3OriginStackCanonicalConfig, AAVE_V3_ORIGIN_BACKEND_COMMIT_SHA,
+    AAVE_V3_ORIGIN_BACKEND_REPO_URL,
+};
 use mfm_artifact_store_s3::S3ArtifactStore;
 use mfm_integration_tests::parity_run_ids::write_parity_aave_run_ids;
 use mfm_integration_tests::rpc_control;
@@ -811,7 +815,7 @@ async fn run_failure_diagnostics(streams: Arc<dyn StreamStore>, run_id: RunId) -
     parts.join("; ")
 }
 
-fn phase_a_pipeline() -> Pipeline {
+fn raw_phase_a_pipeline() -> Pipeline {
     let fetch_origin_program = required_program_path("mfm-aave-v3-origin-fetch");
     let compile_origin_program = required_program_path("mfm-aave-v3-origin-compile");
     let deploy_origin_program = required_program_path("mfm-aave-v3-origin-deploy");
@@ -863,6 +867,43 @@ fn phase_a_pipeline() -> Pipeline {
                 }),
             },
         ],
+    }
+}
+
+fn phase_a_canonical_config(
+    actors: &ScenarioActors,
+    control_scope: &str,
+) -> AaveV3OriginStackCanonicalConfig {
+    AaveV3OriginStackCanonicalConfig {
+        source: AaveV3OriginSourceConfig {
+            repo_url: AAVE_V3_ORIGIN_BACKEND_REPO_URL.to_string(),
+            commit_sha: AAVE_V3_ORIGIN_BACKEND_COMMIT_SHA.to_string(),
+        },
+        network_id: NETWORK_ID.to_string(),
+        control_scope: control_scope.to_string(),
+        deploy_signing_key_env: "MFM_AAVE_V3_PARITY_DEPLOY_SIGNING_KEY".to_string(),
+        rpc_url_env: "MFM_EVM_RPC_URL".to_string(),
+        supplier: actors.supplier.clone(),
+        borrower: actors.borrower.clone(),
+        usdc_supply_amount: USDC_SUPPLY_AMOUNT,
+        wbtc_collateral_amount: WBTC_COLLATERAL_AMOUNT,
+        fetch_timeout_ms: 300_000,
+        compile_timeout_ms: 600_000,
+        deploy_timeout_ms: 600_000,
+    }
+}
+
+fn phase_a_pipeline(actors: &ScenarioActors, control_scope: &str) -> Pipeline {
+    Pipeline {
+        machine_id: MachineId("aave_v3_reth_pipeline".to_string()),
+        pipeline_version: "v1".to_string(),
+        steps: vec![PipelineStep {
+            step_id: StepId("deploy_origin_stack".to_string()),
+            op_id: OpId::must_new("aave_v3_origin_stack".to_string()),
+            op_version: "v1".to_string(),
+            op_config: serde_json::to_value(phase_a_canonical_config(actors, control_scope))
+                .expect("serialize canonical phase A config"),
+        }],
     }
 }
 
@@ -1124,7 +1165,7 @@ async fn parity_aave_v3_reth_scenario_pipeline() {
             Arc::clone(&bundle.registry),
             Arc::clone(&bundle.planner),
             LaunchPipeline {
-                pipeline: phase_a_pipeline(),
+                pipeline: phase_a_pipeline(&actors, &control_scope),
                 input: serde_json::json!({}),
                 run_config: run_config_phase_a,
                 build: BuildProvenance {
@@ -1161,7 +1202,7 @@ async fn parity_aave_v3_reth_scenario_pipeline() {
     assert_eq!(
         snapshot_kind(
             &phase_a_snapshot,
-            "aave_v3_reth_pipeline.adapt_origin_deploy.deploy_manifest",
+            "aave_v3_reth_pipeline.deploy_origin_stack.execute.adapt_origin_deploy.deploy_manifest",
         )
         .as_deref(),
         Some(DEPLOY_MANIFEST_KIND)
@@ -1169,7 +1210,7 @@ async fn parity_aave_v3_reth_scenario_pipeline() {
     assert_eq!(
         snapshot_kind(
             &phase_a_snapshot,
-            "aave_v3_reth_pipeline.fetch_origin.fetch_origin_result"
+            "aave_v3_reth_pipeline.deploy_origin_stack.execute.fetch_origin.fetch_origin_result"
         )
         .as_deref(),
         Some("aave_v3_origin_source_v1")
@@ -1177,7 +1218,7 @@ async fn parity_aave_v3_reth_scenario_pipeline() {
     assert_eq!(
         snapshot_kind(
             &phase_a_snapshot,
-            "aave_v3_reth_pipeline.compile_origin.compile_origin_result"
+            "aave_v3_reth_pipeline.deploy_origin_stack.execute.compile_origin.compile_origin_result"
         )
         .as_deref(),
         Some("aave_v3_origin_compile_manifest_v1")
@@ -1185,7 +1226,7 @@ async fn parity_aave_v3_reth_scenario_pipeline() {
     assert_eq!(
         snapshot_kind(
             &phase_a_snapshot,
-            "aave_v3_reth_pipeline.deploy_origin_stack.deploy_origin_result"
+            "aave_v3_reth_pipeline.deploy_origin_stack.execute.deploy_origin_stack.deploy_origin_result"
         )
         .as_deref(),
         Some("aave_v3_origin_deploy_output_v1")
@@ -1193,7 +1234,7 @@ async fn parity_aave_v3_reth_scenario_pipeline() {
 
     let deploy_manifest = snapshot_value(
         &phase_a_snapshot,
-        "aave_v3_reth_pipeline.adapt_origin_deploy.deploy_manifest",
+        "aave_v3_reth_pipeline.deploy_origin_stack.execute.adapt_origin_deploy.deploy_manifest",
     )
     .cloned()
     .expect("deploy manifest in phase A snapshot");
@@ -1498,4 +1539,101 @@ async fn parity_aave_v3_reth_scenario_pipeline() {
         .is_some_and(|value| !value.is_empty()));
 
     write_parity_aave_run_ids(&phase_a_run.run_id, &phase_b_run.run_id);
+}
+
+#[tokio::test]
+async fn parity_aave_v3_reth_phase_a_raw_wrapper_pipeline() {
+    init_test_observability();
+
+    let pg = connect_postgres_with_retry(20, 250).await;
+    let streams: Arc<dyn StreamStore> = Arc::new(pg);
+
+    let s3 = S3ArtifactStore::from_env().expect("s3 config");
+    s3.ensure_bucket_exists().await.expect("bucket exists");
+    let artifacts: Arc<dyn ArtifactStore> = Arc::new(s3);
+
+    std::env::set_var(
+        "MFM_AAVE_V3_PARITY_DEPLOY_SIGNING_KEY",
+        RETH_DEV_ACCOUNT0_PRIVATE_KEY,
+    );
+
+    let bundle = mfm_rest_api::make_engine_bundle();
+    let launcher = DefaultRunLauncher;
+    let run = launcher
+        .start_pipeline(
+            Arc::clone(&bundle.engine),
+            Stores {
+                streams: Arc::clone(&streams),
+                artifacts: Arc::clone(&artifacts),
+            },
+            Arc::clone(&bundle.registry),
+            Arc::clone(&bundle.planner),
+            LaunchPipeline {
+                pipeline: raw_phase_a_pipeline(),
+                input: serde_json::json!({}),
+                run_config: run_config_with_allowlist(
+                    mfm_machine::config::default_nix_flake_allowlist(),
+                ),
+                build: BuildProvenance {
+                    git_commit: None,
+                    cargo_lock_hash: None,
+                    flake_lock_hash: None,
+                    rustc_version: None,
+                    target_triple: None,
+                    env_allowlist: Vec::new(),
+                },
+                initial_context: Box::new(MapContext::default()),
+            },
+        )
+        .await
+        .expect("start raw phase A pipeline");
+
+    if run.phase != RunPhase::Completed {
+        let diagnostics = run_failure_diagnostics(Arc::clone(&streams), run.run_id).await;
+        panic!(
+            "raw phase A expected Completed, got {:?}; {}",
+            run.phase, diagnostics
+        );
+    }
+
+    let snapshot_id = run.final_snapshot_id.expect("raw phase A final snapshot");
+    let snapshot_bytes = artifacts
+        .get(&snapshot_id)
+        .await
+        .expect("read raw phase A final snapshot");
+    let snapshot: serde_json::Value =
+        serde_json::from_slice(&snapshot_bytes).expect("decode raw phase A snapshot json");
+
+    assert_eq!(
+        snapshot_kind(
+            &snapshot,
+            "aave_v3_reth_pipeline.fetch_origin.fetch_origin_result"
+        )
+        .as_deref(),
+        Some("aave_v3_origin_source_v1")
+    );
+    assert_eq!(
+        snapshot_kind(
+            &snapshot,
+            "aave_v3_reth_pipeline.compile_origin.compile_origin_result"
+        )
+        .as_deref(),
+        Some("aave_v3_origin_compile_manifest_v1")
+    );
+    assert_eq!(
+        snapshot_kind(
+            &snapshot,
+            "aave_v3_reth_pipeline.deploy_origin_stack.deploy_origin_result"
+        )
+        .as_deref(),
+        Some("aave_v3_origin_deploy_output_v1")
+    );
+    assert_eq!(
+        snapshot_kind(
+            &snapshot,
+            "aave_v3_reth_pipeline.adapt_origin_deploy.deploy_manifest",
+        )
+        .as_deref(),
+        Some(DEPLOY_MANIFEST_KIND)
+    );
 }

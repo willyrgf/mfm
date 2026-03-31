@@ -10,6 +10,8 @@ let
       summary,
       description,
       effects ? [ "none" ],
+      passThroughEnv ? [ ],
+      allowSensitivePassThrough ? false,
     }:
     {
       inherit
@@ -64,8 +66,7 @@ let
         workdir = "projectRoot";
         hermetic = true;
         runtimeInputs = [ package ];
-        passThroughEnv = [ ];
-        allowSensitivePassThrough = false;
+        inherit passThroughEnv allowSensitivePassThrough;
         env = { };
         umask = "022";
         locale = "C.UTF-8";
@@ -117,6 +118,10 @@ in
         binary = "mfm-aave-v3-origin-fetch";
         summary = "Fetch Aave V3 origin metadata";
         description = "Downloads and normalizes upstream Aave V3 origin inputs.";
+        passThroughEnv = [
+          "MFM_AAVE_V3_ORIGIN_EXPECTED_REPO_URL"
+          "MFM_AAVE_V3_ORIGIN_EXPECTED_COMMIT_SHA"
+        ];
       };
 
       aave-v3-origin-compile = mkBinaryTask {
@@ -125,6 +130,10 @@ in
         binary = "mfm-aave-v3-origin-compile";
         summary = "Compile Aave V3 origin metadata";
         description = "Compiles fetched Aave V3 origin inputs into MFM-ready outputs.";
+        passThroughEnv = [
+          "MFM_AAVE_V3_ORIGIN_EXPECTED_REPO_URL"
+          "MFM_AAVE_V3_ORIGIN_EXPECTED_COMMIT_SHA"
+        ];
       };
 
       aave-v3-origin-deploy = mkBinaryTask {
@@ -136,6 +145,18 @@ in
         effects = [
           "writes-state"
           "network"
+        ];
+        passThroughEnv = [
+          "MFM_AAVE_V3_ORIGIN_EXPECTED_REPO_URL"
+          "MFM_AAVE_V3_ORIGIN_EXPECTED_COMMIT_SHA"
+          "MFM_AAVE_V3_ORIGIN_DEPLOY_SIGNING_KEY_ENV"
+          "MFM_AAVE_V3_ORIGIN_RPC_URL_ENV"
+          "MFM_AAVE_V3_ORIGIN_DEPLOY_SIGNER_VALUE"
+          "MFM_AAVE_V3_ORIGIN_RPC_URL"
+          "MFM_AAVE_V3_ORIGIN_SUPPLIER"
+          "MFM_AAVE_V3_ORIGIN_BORROWER"
+          "MFM_AAVE_V3_ORIGIN_USDC_SUPPLY_AMOUNT"
+          "MFM_AAVE_V3_ORIGIN_WBTC_COLLATERAL_AMOUNT"
         ];
       };
     };

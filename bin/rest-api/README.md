@@ -128,16 +128,24 @@ Supported public root `op_id` values for `/v1/runs/start` and feature `run.start
 - `evm_deploy`
 - `evm_configure`
 - `evm_validate`
+- `evm_deploy_configure_validate_config_build`
+- `evm_deploy_configure_validate_execute`
 - `evm_deploy_configure_validate`
+- `portfolio_config_build`
+- `portfolio_execute`
 - `portfolio_tracker`
+- `aave_v3_origin_stack_config_build`
+- `aave_v3_origin_stack_execute`
+- `aave_v3_origin_stack`
 - `nix_app`
 - `aave_v3_origin_adapt_deploy`
 
 Notes:
 - `evm_read` executes through the shared `rpc.control`-backed EVM read states.
-- Planner-internal semantic ids such as `portfolio_prepare_execution_sources` and
-  `portfolio_project_report` remain registered for recursive expansion but are rejected by public
-  single-op entrypoints with `op_not_public`.
+- Planner-internal semantic ids such as `portfolio_prepare_execution_sources`,
+  `portfolio_project_report`, `aave_v3_origin_publish_artifact`, and
+  `aave_v3_origin_project_report` remain registered for recursive expansion but are rejected by
+  public single-op entrypoints with `op_not_public`.
 
 There are no dedicated keystore tx endpoints. Use generic run APIs (`/v1/runs/start`,
 `/v1/runs/:run_id/resume`) with those `op_id` values.

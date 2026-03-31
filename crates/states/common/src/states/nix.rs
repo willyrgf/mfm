@@ -1,9 +1,11 @@
 //! Shared state for nix app resolution and command execution.
 
+use std::collections::BTreeMap;
+
 use async_trait::async_trait;
 use mfm_collectors_exec::{ExecIoClient, RunProgramRequest};
-use mfm_collectors_nix::{NixIoClient, ResolveFlakeAppRequest};
-use serde::Deserialize;
+use mfm_collectors_nix::{NixIoClient, ResolveFlakeAppRequest, RunFlakeAppRequest};
+use serde::{Deserialize, Serialize};
 
 use mfm_machine::context::DynContext;
 use mfm_machine::errors::StateError;
@@ -19,7 +21,7 @@ use crate::idempotency as op_idempotency;
 use crate::states::meta;
 
 /// Configuration for [`NixExecState`].
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct NixExecStateConfig {
     /// Fully resolved nix store path to execute directly.
     #[serde(default)]
@@ -37,6 +39,18 @@ pub struct NixExecStateConfig {
     #[serde(default)]
     pub stdin_json: serde_json::Value,
 
+    /// Extra non-secret environment variables passed to the child process.
+    #[serde(default = "default_env")]
+    pub env: serde_json::Value,
+
+    /// Runtime host env bindings injected by the Nix transport when `app` mode is used.
+    ///
+    /// The map key is the target env name exposed to the flake app, and the map value is the
+    /// source env name read from the current host process. Only names are persisted; values are
+    /// resolved at execution time and are never recorded.
+    #[serde(default)]
+    pub host_env_bindings: BTreeMap<String, String>,
+
     /// Execution timeout in milliseconds.
     #[serde(default = "default_timeout_ms")]
     pub timeout_ms: u64,
@@ -48,6 +62,10 @@ pub struct NixExecStateConfig {
 
 fn default_timeout_ms() -> u64 {
     300_000
+}
+
+fn default_env() -> serde_json::Value {
+    serde_json::json!({})
 }
 
 fn default_write_result_to() -> String {
@@ -77,7 +95,20 @@ pub fn validate_nix_exec_config(cfg: &NixExecStateConfig) -> Result<(), String> 
         }
         (Some(_), Some(_)) => Err("provide exactly one of program_path or app".to_string()),
         (None, None) => Err("missing program_path or app".to_string()),
+    }?;
+    if !cfg.env.is_object() {
+        return Err("env must be a JSON object".to_string());
     }
+    if cfg
+        .host_env_bindings
+        .iter()
+        .any(|(target, source)| target.trim().is_empty() || source.trim().is_empty())
+    {
+        return Err(
+            "host_env_bindings must contain non-empty target and source env names".to_string(),
+        );
+    }
+    Ok(())
 }
 
 /// State that resolves a nix app when needed, executes it, and writes the result to context.
@@ -96,7 +127,7 @@ impl NixExecState {
             argv: self.cfg.argv.clone(),
             stdin_json: self.cfg.stdin_json.clone(),
             timeout_ms: self.cfg.timeout_ms,
-            env: serde_json::json!({}),
+            env: self.cfg.env.clone(),
         }
     }
 }
@@ -117,6 +148,31 @@ impl State for NixExecState {
         io: &mut dyn IoProvider,
         _rec: &mut dyn EventRecorder,
     ) -> Result<StateOutcome, StateError> {
+        if let Some(app) = &self.cfg.app {
+            let mut nix = NixIoClient::new(self.state_id.clone(), io);
+            let res = nix
+                .run_flake_app(RunFlakeAppRequest {
+                    app: app.clone(),
+                    argv: self.cfg.argv.clone(),
+                    stdin_json: self.cfg.stdin_json.clone(),
+                    timeout_ms: self.cfg.timeout_ms,
+                    env: self.cfg.env.clone(),
+                    host_env_bindings: self.cfg.host_env_bindings.clone(),
+                })
+                .await
+                .map_err(op_errors::state_from_io)?;
+
+            op_ctx::write_json(
+                ctx,
+                ContextKey(self.cfg.write_result_to.clone()),
+                res.response,
+            )?;
+
+            return Ok(StateOutcome {
+                snapshot: SnapshotPolicy::OnSuccess,
+            });
+        }
+
         let program_path = if let Some(program_path) = &self.cfg.program_path {
             program_path.clone()
         } else {

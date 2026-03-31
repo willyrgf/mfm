@@ -1,23 +1,25 @@
 # Aave-Origin Promotion Plan
 
-Status: proposed next adopter after portfolio, deploy/configure/validate, and publish-docs ingress
+Status: implemented wrapper-heavy adopter for the shared authored-config framework
 
 Last updated: 2026-03-30
 
 ## Summary
 
-This document records the current-state investigation and migration plan for promoting the
+This document records the investigation, implementation decisions, and landed migration shape for promoting the
 Aave-origin wrapper flow into the shared authored-config framework described in
 `RFC_REFACTOR_EDGES_N_CONFIG.md`.
 
 Primary conclusion:
 
-- Aave-origin should adopt explicit authored, canonical, built, and execute boundaries.
+- Aave-origin now uses explicit authored, canonical, built, and execute boundaries.
 - Unlike `publish-docs`, Aave-origin has a real deterministic post-canonicalization build stage:
   the current wrapper already enforces a fixed fetch/compile/deploy/adapt topology with stable
   artifact contracts.
-- The first migration slice should preserve the existing external Origin tools and move orchestration
-  behind internal MFM ops before attempting to rewrite Origin compile or deploy semantics in Rust.
+- The landed backend still preserves the existing external Origin tools and moves orchestration
+  behind internal MFM ops instead of rewriting Origin compile or deploy semantics in Rust.
+- The current compatibility backend still supports exactly one packaged source pin; canonical source
+  config is therefore explicit and validated rather than silently implied by wrapper packaging.
 
 ## Current State
 

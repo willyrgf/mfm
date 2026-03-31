@@ -188,6 +188,9 @@ Practical dispatch split:
 - not every config-driven workflow needs a `BuiltConfig` boundary; planner-heavy workflows can
   stop at canonical config plus typed plan artifacts when there is no reusable execution-ready
   compiled spec distinct from the live planner result
+- current built-config workflow families are portfolio, deploy/configure/validate, and
+  `aave_v3_origin_stack`; `publish-docs` intentionally stops at canonical config plus typed plan
+  artifacts today
 
 ### Flattened pipelines
 - Multiple ops are flattened into one execution plan and one run.

@@ -12,6 +12,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter", "fmt", "json"] }
 
 mfm-machine = { path = "../machine" }
+mfm-aave-v3-origin-config = { path = "../aave-v3-origin-config" }
 mfm-evm-deploy-configure-validate-config = { path = "../evm-deploy-configure-validate-config" }
 mfm-portfolio-config = { path = "../portfolio-config" }
 mfm-sdk = { path = "../sdk" }
@@ -30,6 +31,7 @@ mfm-op-evm-deploy-configure-validate = { path = "../ops/evm-deploy-configure-val
 mfm-op-portfolio-tracker = { path = "../ops/portfolio-tracker-op" }
 mfm-op-nix-app = { path = "../ops/nix-app-op" }
 mfm-op-aave-v3-origin-adapt = { path = "../ops/aave-v3-origin-adapt-op" }
+mfm-op-aave-v3-origin = { path = "../ops/aave-v3-origin-op" }
 mfm-state-portfolio = { path = "../states/portfolio" }
 mfm-state-symbol = { path = "../states/symbol" }
 mfm-artifact-store-fs = { path = "../storages/artifact-store-fs" }

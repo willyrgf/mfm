@@ -1,0 +1,21 @@
+[package]
+name = "mfm-op-aave-v3-origin"
+version = "0.1.0"
+edition = "2021"
+description = "Composite Aave V3 Origin stack ops with typed config build and execution boundaries"
+
+[dependencies]
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+mfm-aave-v3-origin-config = { path = "../../aave-v3-origin-config" }
+mfm-machine = { path = "../../machine" }
+mfm-op-aave-v3-origin-adapt = { path = "../aave-v3-origin-adapt-op" }
+mfm-op-nix-app = { path = "../nix-app-op" }
+mfm-sdk = { path = "../../sdk" }
+mfm-state-aave-v3 = { path = "../../states/aave-v3" }
+mfm-state-common = { path = "../../states/common" }
+
+[dev-dependencies]
+tokio = { workspace = true }

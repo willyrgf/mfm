@@ -1,8 +1,8 @@
 # RFC: Refactor Fat Edges and Introduce a Shared Authored-Config Framework
 
-Status: Draft
+Status: Landed
 
-Last updated: 2026-03-30
+Last updated: 2026-03-31
 
 ## 1. Executive Summary
 
@@ -19,6 +19,10 @@ Last updated: 2026-03-30
 - Reuse should come from a shared internal framework plus workflow-family-specific canonical and built config types, validators, compilers, and execution graphs.
 - The first concrete refactor should be to split portfolio into `portfolio.config.build` and `portfolio.execute`, while extracting shared primitives that other workflow families can reuse.
 - The current app-layer and wrapper-layer procedural glue should be reduced by moving config build, artifact emission, and result extraction behind internal MFM ops and reusable states.
+- Current repo status:
+  - portfolio, deploy/configure/validate, and `aave_v3_origin_stack` now use explicit authored/canonical/built execution boundaries
+  - `publish-docs` now uses shared authored/canonical ingress and intentionally stops there
+  - wrapper-heavy Aave-origin phase-A orchestration is now internal MFM composition instead of raw caller-owned `nix_app` pipelines
 
 ## 2. Problem Statement
 
@@ -586,23 +590,14 @@ Current seams:
 
 Recommendation:
 
-- Promote shell-heavy build and execution orchestration into internal MFM workflows where practical.
-- Use the same authored-config build and execute split instead of wrapper-level composition.
-- Aave-origin is a stronger `BuiltConfig` candidate than `publish-docs` because its current wrapper
-  already enforces a deterministic fixed phase-A topology:
-  `fetch -> compile -> deploy -> adapt`.
-- The first migration slice should preserve the current external Origin tools as the execution
-  backend and move orchestration behind internal MFM build and execute roots before attempting to
-  rewrite Foundry compile or deploy behavior.
-- The promoted family should use:
-  - typed authored config for source pin, network/control scope, actor addresses, amount inputs,
-    timeout policy, and non-secret env names
-  - pure canonicalization into deterministic typed config
-  - a build step that lowers canonical config into an execution-ready phase-A plan
-  - an execute step that initially composes `nix_app` child ops plus
-    `aave_v3_origin_adapt_deploy`
-- Existing Nix task apps should remain compatibility surfaces during migration rather than being
-  removed in the first phase.
+- This migration is now landed as `aave_v3_origin_stack`.
+- Aave-origin follows the same authored-config build and execute split rather than wrapper-level
+  composition.
+- It remains a stronger `BuiltConfig` candidate than `publish-docs` because its wrapper-backed
+  phase-A topology is deterministic: `fetch -> compile -> deploy -> adapt`.
+- The current backend still preserves the existing external Origin tools; internal MFM build and
+  execute roots now own orchestration while Foundry compile/deploy behavior remains external.
+- Existing Nix task apps remain compatibility surfaces over the same backend.
 
 ### 13.4 Generic Result Extraction
 
@@ -781,6 +776,10 @@ Code areas touched:
 Change:
 
 - Apply the same authored-config framework to other workflow families with the same shape.
+- Landed adopters are now:
+  - deploy/configure/validate ingress and build/execute
+  - publish-docs authored/canonical ingress
+  - wrapper-heavy Aave-origin tooling through `aave_v3_origin_stack`
 
 Contract risk:
 

@@ -647,14 +647,14 @@ pub mod config {
 
         /// Allowlisted flake prefixes for `nix.exec` preflight resolution.
         ///
-        /// Example prefix: `github:willyrgf/mfm`.
+        /// Examples: `github:willyrgf/mfm`, `path:.`.
         #[serde(default = "default_nix_flake_allowlist")]
         pub nix_flake_allowlist: Vec<String>,
     }
 
     /// Returns the default allowlist for `nix.exec` flake resolution.
     pub fn default_nix_flake_allowlist() -> Vec<String> {
-        vec!["github:willyrgf/mfm".to_string()]
+        vec!["github:willyrgf/mfm".to_string(), "path:.".to_string()]
     }
 
     /// Minimal run manifest shape (stored as an artifact; hashed via canonical JSON).

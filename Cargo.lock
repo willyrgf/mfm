@@ -1905,16 +1905,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "mfm-aave-v3-origin-config"
+version = "0.1.0"
+dependencies = [
+ "mfm-authored-config",
+ "mfm-evm-core",
+ "mfm-machine",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "toml",
+]
+
+[[package]]
 name = "mfm-app"
 version = "0.1.0"
 dependencies = [
  "async-trait",
  "hex",
+ "mfm-aave-v3-origin-config",
  "mfm-artifact-store-fs",
  "mfm-artifact-store-s3",
  "mfm-collectors-nix-exec",
  "mfm-evm-deploy-configure-validate-config",
  "mfm-machine",
+ "mfm-op-aave-v3-origin",
  "mfm-op-aave-v3-origin-adapt",
  "mfm-op-evm-deploy-configure-validate",
  "mfm-op-evm-read",
@@ -2152,6 +2167,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
+ "mfm-aave-v3-origin-config",
  "mfm-artifact-store-fs",
  "mfm-artifact-store-s3",
  "mfm-collectors-evm-jsonrpc-http",
@@ -2201,6 +2217,23 @@ dependencies = [
  "serde_json",
  "tracing-subscriber",
  "uuid",
+]
+
+[[package]]
+name = "mfm-op-aave-v3-origin"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "mfm-aave-v3-origin-config",
+ "mfm-machine",
+ "mfm-op-aave-v3-origin-adapt",
+ "mfm-op-nix-app",
+ "mfm-sdk",
+ "mfm-state-aave-v3",
+ "mfm-state-common",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

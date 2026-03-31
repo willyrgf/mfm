@@ -111,6 +111,65 @@ fn expand_rejects_missing_program_path_and_app() {
     assert_eq!(err.info.code.0, "invalid_op_config");
 }
 
+#[test]
+fn expand_accepts_non_secret_env_object() {
+    let op = NixAppOp;
+    let cfg = op_test_support::run_config_live();
+    let planned = mfm_sdk::op::Operation::expand(
+        &op,
+        OpPath("machine.main".to_string()),
+        &serde_json::json!({
+            "app": "github:willyrgf/mfm#jq_fmt_example",
+            "env": {
+                "MFM_SELECTOR_ENV": "MFM_RUNTIME_VALUE"
+            }
+        }),
+        &cfg,
+    )
+    .expect("expand");
+
+    assert_eq!(planned.interface.exports.len(), 1);
+}
+
+#[test]
+fn expand_accepts_host_env_bindings() {
+    let op = NixAppOp;
+    let cfg = op_test_support::run_config_live();
+    let planned = mfm_sdk::op::Operation::expand(
+        &op,
+        OpPath("machine.main".to_string()),
+        &serde_json::json!({
+            "app": "github:willyrgf/mfm#jq_fmt_example",
+            "host_env_bindings": {
+                "MFM_TARGET_PRIVATE_KEY": "MFM_SOURCE_SIGNING_KEY"
+            }
+        }),
+        &cfg,
+    )
+    .expect("expand");
+
+    assert_eq!(planned.interface.exports.len(), 1);
+}
+
+#[test]
+fn expand_rejects_non_object_env() {
+    let op = NixAppOp;
+    let cfg = op_test_support::run_config_live();
+    let err = mfm_sdk::op::Operation::expand(
+        &op,
+        OpPath("machine.main".to_string()),
+        &serde_json::json!({
+            "app": "github:willyrgf/mfm#jq_fmt_example",
+            "env": "not-an-object"
+        }),
+        &cfg,
+    )
+    .err()
+    .expect("invalid env must fail");
+
+    assert_eq!(err.info.code.0, "invalid_op_config");
+}
+
 #[derive(Clone)]
 struct CountingExecFactory {
     counts: Arc<Mutex<u64>>,
@@ -146,7 +205,16 @@ impl LiveIoTransport for CountingExecTransport {
     ) -> Result<serde_json::Value, mfm_machine::errors::IoError> {
         *self.counts.lock().await += 1;
         if call.namespace == NAMESPACE_NIX_EXEC {
-            Ok(serde_json::json!({"program_path": "/nix/store/dummy/bin/app"}))
+            let kind = call
+                .request
+                .get("kind")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            if kind == "run_flake_app_v1" {
+                Ok(serde_json::json!({"x": 1}))
+            } else {
+                Ok(serde_json::json!({"program_path": "/nix/store/dummy/bin/app"}))
+            }
         } else {
             Ok(serde_json::json!({"ok": true, "result": {"x": 1}}))
         }
@@ -338,7 +406,7 @@ async fn at_live_then_replay_determinism() {
 }
 
 #[tokio::test]
-async fn at_flake_app_mode_runs_preflight_and_exec_once_each() {
+async fn at_flake_app_mode_runs_via_nix_transport_once() {
     let counts = Arc::new(Mutex::new(0));
     let factory: Arc<dyn LiveIoTransportFactory> =
         Arc::new(CountingExecFactory::new(Arc::clone(&counts)));
@@ -374,7 +442,7 @@ async fn at_flake_app_mode_runs_preflight_and_exec_once_each() {
     .expect("start");
 
     assert_eq!(res.phase, RunPhase::Completed);
-    assert_eq!(*counts.lock().await, 2);
+    assert_eq!(*counts.lock().await, 1);
 }
 
 #[tokio::test]

@@ -692,7 +692,7 @@ pub mod config {
         pub skip_tags: Vec<Tag>,
 
         /// Allowlisted flake prefixes for `nix.exec` preflight resolution.
-        /// Example: `github:willyrgf/mfm`.
+        /// Examples: `github:willyrgf/mfm`, `path:.`.
         pub nix_flake_allowlist: Vec<String>,
     }
 

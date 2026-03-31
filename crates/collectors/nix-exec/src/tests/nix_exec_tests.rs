@@ -13,6 +13,7 @@ use mfm_machine::stores::{
     StreamStore,
 };
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -250,6 +251,23 @@ fn flake_installable_target_uses_attr_path() {
 }
 
 #[test]
+fn repo_local_flake_ref_rewrites_against_workspace_root() {
+    let rewritten = rewrite_repo_local_flake_ref_with_root(
+        "path:.#aave-v3-origin-fetch",
+        Path::new("/tmp/mfm-workspace"),
+    )
+    .expect("rewrite");
+    assert_eq!(rewritten, "path:/tmp/mfm-workspace#aave-v3-origin-fetch");
+
+    let nested = rewrite_repo_local_flake_ref_with_root(
+        "path:./nixfied#tool",
+        Path::new("/tmp/mfm-workspace"),
+    )
+    .expect("rewrite");
+    assert_eq!(nested, "path:/tmp/mfm-workspace/nixfied#tool");
+}
+
+#[test]
 fn flake_ref_prefix_matching_is_boundary_aware() {
     assert!(flake_ref_matches_prefix(
         "github:willyrgf/mfm",
@@ -259,6 +277,12 @@ fn flake_ref_prefix_matching_is_boundary_aware() {
         "github:willyrgf/mfm",
         "github:willyrgf/mfm-malicious#jq_fmt_example"
     ));
+    assert!(flake_ref_matches_prefix(
+        "path:.",
+        "path:.#aave-v3-origin-fetch"
+    ));
+    assert!(flake_ref_matches_prefix("path:.", "path:./nixfied#tool"));
+    assert!(!flake_ref_matches_prefix("path:.", "path:../outside#tool"));
 }
 
 #[test]
@@ -271,6 +295,40 @@ fn store_root_from_program_path_extracts_store_root() {
 fn store_root_from_program_path_rejects_non_store_paths() {
     assert!(store_root_from_program_path("/tmp/app").is_none());
     assert!(store_root_from_program_path("/nix/store/").is_none());
+}
+
+#[test]
+fn inject_host_env_bindings_uses_host_value_without_recording_it() {
+    let source_env = format!("MFM_TEST_HOST_ENV_{}", uuid::Uuid::new_v4().simple());
+    std::env::set_var(&source_env, "secret-value");
+    let mut cmd = tokio::process::Command::new("env");
+    let bindings = HashMap::from([("MFM_TARGET_ENV".to_string(), source_env.clone())]);
+
+    inject_host_env_bindings(&mut cmd, &bindings).expect("inject bindings");
+
+    let envs = cmd.as_std().get_envs().collect::<Vec<_>>();
+    let target = envs
+        .iter()
+        .find(|(key, _)| *key == std::ffi::OsStr::new("MFM_TARGET_ENV"))
+        .and_then(|(_, value)| value.as_ref())
+        .and_then(|value| value.to_str());
+    assert_eq!(target, Some("secret-value"));
+    std::env::remove_var(source_env);
+}
+
+#[test]
+fn inject_host_env_bindings_rejects_missing_source_env() {
+    let mut cmd = tokio::process::Command::new("env");
+    let bindings = HashMap::from([(
+        "MFM_TARGET_ENV".to_string(),
+        "MFM_TEST_MISSING_SOURCE_ENV".to_string(),
+    )]);
+
+    let err = inject_host_env_bindings(&mut cmd, &bindings).expect_err("missing env must fail");
+    match err {
+        IoError::Transport(info) => assert_eq!(info.code.0, CODE_NIX_HOST_ENV_MISSING),
+        other => panic!("expected transport error, got: {other:?}"),
+    }
 }
 
 #[test]
@@ -337,6 +395,13 @@ async fn rejects_disallowed_app_ref_by_default() {
         IoError::Other(info) => assert_eq!(info.code.0, CODE_NIX_APP_NOT_ALLOWED),
         other => panic!("expected Other, got: {other:?}"),
     }
+}
+
+#[test]
+fn default_policy_allows_repo_local_path_refs() {
+    let policy = NixFlakePolicy::default();
+    assert!(flake_ref_allowed(&policy, "path:.#aave-v3-origin-fetch"));
+    assert!(!flake_ref_allowed(&policy, "path:../elsewhere#tool"));
 }
 
 #[tokio::test]

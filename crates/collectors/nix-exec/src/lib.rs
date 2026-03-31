@@ -19,7 +19,7 @@
 //! use mfm_machine::live_io::LiveIoTransportFactory;
 //!
 //! let factory = NixFlakeTransportFactory::new(NixFlakePolicy {
-//!     allow_prefixes: vec!["github:willyrgf/mfm".to_string()],
+//!     allow_prefixes: vec!["github:willyrgf/mfm".to_string(), "path:.".to_string()],
 //! });
 //!
 //! assert_eq!(factory.namespace_group(), NAMESPACE_NIX_EXEC);
@@ -51,9 +51,13 @@ const CODE_NIX_MANIFEST_LOOKUP_FAILED: &str = "nix_manifest_lookup_failed";
 const CODE_NIX_MANIFEST_INVALID: &str = "nix_manifest_invalid";
 const CODE_NIX_EVAL_FAILED: &str = "nix_eval_failed";
 const CODE_NIX_BUILD_FAILED: &str = "nix_build_failed";
+const CODE_NIX_RUN_FAILED: &str = "nix_run_failed";
+const CODE_NIX_HOST_ENV_MISSING: &str = "nix_host_env_missing";
 const CODE_NIX_TIMEOUT: &str = "nix_timeout";
 const CODE_NIX_STDOUT_TOO_LARGE: &str = "nix_stdout_too_large";
 const CODE_NIX_STDERR_TOO_LARGE: &str = "nix_stderr_too_large";
+const CODE_NIX_STDOUT_INVALID_JSON: &str = "nix_stdout_invalid_json";
+const CODE_NIX_STDIN_WRITE_FAILED: &str = "nix_stdin_write_failed";
 const MAX_STDERR_DETAIL_BYTES: usize = 4096;
 const MAX_STDOUT_DETAIL_BYTES: usize = 1024;
 const MAX_NIX_STDOUT_BYTES: usize = 4 * 1024 * 1024;
@@ -89,15 +93,19 @@ fn info_with_details(
 pub struct NixFlakePolicy {
     /// Allowlisted flake ref prefixes.
     ///
-    /// Example: `github:willyrgf/mfm` allows `github:willyrgf/mfm#jq_fmt_example`.
+    /// Examples:
+    /// - `github:willyrgf/mfm` allows `github:willyrgf/mfm#jq_fmt_example`
+    /// - `path:.` allows `path:.#aave-v3-origin-fetch` and resolves against
+    ///   `MFM_WORKSPACE_ROOT` when present
     pub allow_prefixes: Vec<String>,
 }
 
 impl Default for NixFlakePolicy {
     fn default() -> Self {
         Self {
-            // Conservative default: only allow this repo.
-            allow_prefixes: vec!["github:willyrgf/mfm".to_string()],
+            // Conservative default: only allow this repo, either via its published flake ref or
+            // via the current checkout root for internal workflow backends.
+            allow_prefixes: vec!["github:willyrgf/mfm".to_string(), "path:.".to_string()],
         }
     }
 }
@@ -148,6 +156,16 @@ struct NixFlakeTransport {
 struct ResolveFlakeAppV1 {
     app: String,
     timeout_ms: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RunFlakeAppV1 {
+    app: String,
+    argv: Vec<String>,
+    stdin_json: serde_json::Value,
+    timeout_ms: u64,
+    env: std::collections::HashMap<String, String>,
+    host_env_bindings: std::collections::HashMap<String, String>,
 }
 
 fn flake_ref_allowed(policy: &NixFlakePolicy, app: &str) -> bool {
@@ -202,6 +220,67 @@ fn attr_path_for_program(system: &str, fragment: &str) -> String {
 
 fn flake_installable_target(flake_url: &str, attr: &str) -> String {
     format!("{flake_url}#{attr}")
+}
+
+fn repo_local_workspace_root() -> Result<std::path::PathBuf, IoError> {
+    let root = match std::env::var_os("MFM_WORKSPACE_ROOT") {
+        Some(value) if !value.is_empty() => std::path::PathBuf::from(value),
+        _ => std::env::current_dir().map_err(|_| {
+            IoError::Transport(info(
+                CODE_NIX_REQUEST_INVALID,
+                ErrorCategory::Unknown,
+                "failed to resolve workspace root for repo-local flake ref",
+            ))
+        })?,
+    };
+
+    let root = if root.is_absolute() {
+        root
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(root))
+            .map_err(|_| {
+                IoError::Transport(info(
+                    CODE_NIX_REQUEST_INVALID,
+                    ErrorCategory::Unknown,
+                    "failed to resolve workspace root for repo-local flake ref",
+                ))
+            })?
+    };
+
+    Ok(std::fs::canonicalize(&root).unwrap_or(root))
+}
+
+fn rewrite_repo_local_flake_ref_with_root(
+    app: &str,
+    workspace_root: &Path,
+) -> Result<String, IoError> {
+    let Some(suffix) = app.strip_prefix("path:.") else {
+        return Ok(app.to_string());
+    };
+
+    if !(suffix.is_empty()
+        || suffix.starts_with('#')
+        || suffix.starts_with('?')
+        || suffix.starts_with('/'))
+    {
+        return Ok(app.to_string());
+    }
+
+    let root = workspace_root.to_str().ok_or_else(|| {
+        IoError::Other(info(
+            CODE_NIX_REQUEST_INVALID,
+            ErrorCategory::ParsingInput,
+            "workspace root for repo-local flake ref must be utf-8",
+        ))
+    })?;
+
+    Ok(format!("path:{root}{suffix}"))
+}
+
+fn rewrite_repo_local_flake_ref(app: &str) -> Result<String, IoError> {
+    let root = repo_local_workspace_root()?;
+    rewrite_repo_local_flake_ref_with_root(app, &root)
 }
 
 fn store_root_from_program_path(program_path: &str) -> Option<String> {
@@ -332,6 +411,125 @@ fn parse_resolve_request(call: &IoCall) -> Result<ResolveFlakeAppV1, IoError> {
     Ok(ResolveFlakeAppV1 { app, timeout_ms })
 }
 
+fn parse_run_request(call: &IoCall) -> Result<RunFlakeAppV1, IoError> {
+    let obj = call.request.as_object().ok_or_else(|| {
+        IoError::Other(info(
+            CODE_NIX_REQUEST_INVALID,
+            ErrorCategory::ParsingInput,
+            "nix request must be a JSON object",
+        ))
+    })?;
+
+    let kind = obj.get("kind").and_then(|v| v.as_str()).ok_or_else(|| {
+        IoError::Other(info(
+            CODE_NIX_REQUEST_INVALID,
+            ErrorCategory::ParsingInput,
+            "missing nix request kind",
+        ))
+    })?;
+
+    if kind != "run_flake_app_v1" {
+        return Err(IoError::Other(info(
+            CODE_NIX_REQUEST_INVALID,
+            ErrorCategory::ParsingInput,
+            "unsupported nix request kind",
+        )));
+    }
+
+    let app = obj
+        .get("app")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            IoError::Other(info(
+                CODE_NIX_REQUEST_INVALID,
+                ErrorCategory::ParsingInput,
+                "missing app",
+            ))
+        })?
+        .to_string();
+
+    let argv = obj
+        .get("argv")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let stdin_json = obj
+        .get("stdin_json")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+
+    let timeout_ms = obj
+        .get("timeout_ms")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(300_000);
+
+    let env = obj
+        .get("env")
+        .and_then(|v| v.as_object())
+        .map(|m| {
+            m.iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect::<std::collections::HashMap<_, _>>()
+        })
+        .unwrap_or_default();
+    let host_env_bindings = obj
+        .get("host_env_bindings")
+        .and_then(|v| v.as_object())
+        .map(|m| {
+            m.iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect::<std::collections::HashMap<_, _>>()
+        })
+        .unwrap_or_default();
+
+    Ok(RunFlakeAppV1 {
+        app,
+        argv,
+        stdin_json,
+        timeout_ms,
+        env,
+        host_env_bindings,
+    })
+}
+
+fn inject_host_env_bindings(
+    cmd: &mut Command,
+    bindings: &std::collections::HashMap<String, String>,
+) -> Result<(), IoError> {
+    for (target_env, source_env) in bindings {
+        let source_value = std::env::var(source_env).map_err(|_| {
+            IoError::Transport(info_with_details(
+                CODE_NIX_HOST_ENV_MISSING,
+                ErrorCategory::Unknown,
+                "required host env was missing for nix run",
+                serde_json::json!({
+                    "target_env": target_env,
+                    "source_env": source_env,
+                }),
+            ))
+        })?;
+        if source_value.is_empty() {
+            return Err(IoError::Transport(info_with_details(
+                CODE_NIX_HOST_ENV_MISSING,
+                ErrorCategory::Unknown,
+                "required host env was empty for nix run",
+                serde_json::json!({
+                    "target_env": target_env,
+                    "source_env": source_env,
+                }),
+            )));
+        }
+        cmd.env(target_env, source_value);
+    }
+
+    Ok(())
+}
+
 fn run_started_manifest_id(
     stream: &[mfm_machine::events::EventEnvelope],
 ) -> Option<mfm_machine::ids::ArtifactId> {
@@ -420,6 +618,23 @@ async fn run_with_timeout(
     .await
 }
 
+async fn run_with_input_and_timeout(
+    cmd: Command,
+    stdin_bytes: Option<Vec<u8>>,
+    timeout_ms: u64,
+) -> Result<ProcessRunResult, ProcessRunError> {
+    run_command(
+        cmd,
+        stdin_bytes,
+        Duration::from_millis(timeout_ms),
+        StreamLimit {
+            max_stdout_bytes: MAX_NIX_STDOUT_BYTES,
+            max_stderr_bytes: MAX_NIX_STDERR_BYTES,
+        },
+    )
+    .await
+}
+
 fn map_runner_error(
     err: ProcessRunError,
     failure_code: &'static str,
@@ -495,130 +710,253 @@ fn ensure_bounded_output(
     Ok(())
 }
 
+fn ensure_flake_app_allowed(policy: &NixFlakePolicy, app: &str) -> Result<String, IoError> {
+    if !flake_ref_allowed(policy, app) {
+        return Err(IoError::Other(info(
+            CODE_NIX_APP_NOT_ALLOWED,
+            ErrorCategory::Unknown,
+            "flake app ref is not allowed by policy",
+        )));
+    }
+    rewrite_repo_local_flake_ref(app)
+}
+
 #[async_trait]
 impl LiveIoTransport for NixFlakeTransport {
     async fn call(&mut self, call: IoCall) -> Result<serde_json::Value, IoError> {
-        let req = parse_resolve_request(&call)?;
         let policy = self.effective_policy().await?;
-
-        if !flake_ref_allowed(&policy, &req.app) {
-            return Err(IoError::Other(info(
-                CODE_NIX_APP_NOT_ALLOWED,
-                ErrorCategory::Unknown,
-                "flake app ref is not allowed by policy",
-            )));
-        }
-
-        let (flake_url, fragment) = split_flake_app_ref(&req.app)?;
-        let system = nix_system();
-        let attr = attr_path_for_program(&system, fragment);
-        let target = flake_installable_target(flake_url, &attr);
-
-        // 1) Resolve the app program path.
-        let mut eval = Command::new("nix");
-        eval.arg("eval")
-            .arg("--option")
-            .arg("eval-cache")
-            .arg("false")
-            .arg("--raw")
-            .arg("--no-write-lock-file")
-            .arg(&target);
-
-        let out = run_with_timeout(eval, req.timeout_ms)
-            .await
-            .map_err(|err| {
-                map_runner_error(
-                    err,
-                    CODE_NIX_EVAL_FAILED,
-                    "nix eval",
-                    &target,
-                    req.timeout_ms,
-                )
+        let kind = call
+            .request
+            .get("kind")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                IoError::Other(info(
+                    CODE_NIX_REQUEST_INVALID,
+                    ErrorCategory::ParsingInput,
+                    "missing nix request kind",
+                ))
             })?;
-        ensure_bounded_output("nix eval", &target, &out)?;
-        if !out.status.success() {
-            return Err(IoError::Transport(info_with_details(
-                CODE_NIX_EVAL_FAILED,
-                ErrorCategory::Unknown,
-                "nix eval failed",
-                command_failure_details(
-                    "nix eval",
-                    &target,
-                    out.status.code(),
-                    &out.stdout.bytes,
-                    &out.stderr.bytes,
-                ),
-            )));
-        }
 
-        let program_path = String::from_utf8_lossy(&out.stdout.bytes)
-            .trim()
-            .to_string();
-        if !program_path.starts_with("/nix/store/") {
-            return Err(IoError::Other(info(
-                CODE_NIX_REQUEST_INVALID,
-                ErrorCategory::ParsingInput,
-                "resolved program path did not start with /nix/store/",
-            )));
-        }
-        if store_root_from_program_path(&program_path).is_none() {
-            return Err(IoError::Other(info(
-                CODE_NIX_REQUEST_INVALID,
-                ErrorCategory::ParsingInput,
-                "resolved program path was not a valid nix store path",
-            )));
-        }
+        match kind {
+            "resolve_flake_app_v1" => {
+                let req = parse_resolve_request(&call)?;
+                let resolved_app = ensure_flake_app_allowed(&policy, &req.app)?;
+                let (flake_url, fragment) = split_flake_app_ref(&resolved_app)?;
+                let system = nix_system();
+                let attr = attr_path_for_program(&system, fragment);
+                let target = flake_installable_target(flake_url, &attr);
 
-        // 2) Realize the app when the resolved program path is not already present.
-        if !Path::new(&program_path).exists() {
-            let mut build = Command::new("nix");
-            build
-                .arg("build")
-                .arg("--no-link")
-                .arg("--no-write-lock-file")
-                .arg(&target);
+                let mut eval = Command::new("nix");
+                eval.arg("eval")
+                    .arg("--option")
+                    .arg("eval-cache")
+                    .arg("false")
+                    .arg("--raw")
+                    .arg("--apply")
+                    .arg("builtins.unsafeDiscardStringContext")
+                    .arg("--no-write-lock-file")
+                    .arg(&target);
 
-            let out = run_with_timeout(build, req.timeout_ms)
-                .await
-                .map_err(|err| {
-                    map_runner_error(
-                        err,
-                        CODE_NIX_BUILD_FAILED,
-                        "nix build",
-                        &target,
-                        req.timeout_ms,
-                    )
+                let out = run_with_timeout(eval, req.timeout_ms)
+                    .await
+                    .map_err(|err| {
+                        map_runner_error(
+                            err,
+                            CODE_NIX_EVAL_FAILED,
+                            "nix eval",
+                            &target,
+                            req.timeout_ms,
+                        )
+                    })?;
+                ensure_bounded_output("nix eval", &target, &out)?;
+                if !out.status.success() {
+                    return Err(IoError::Transport(info_with_details(
+                        CODE_NIX_EVAL_FAILED,
+                        ErrorCategory::Unknown,
+                        "nix eval failed",
+                        command_failure_details(
+                            "nix eval",
+                            &target,
+                            out.status.code(),
+                            &out.stdout.bytes,
+                            &out.stderr.bytes,
+                        ),
+                    )));
+                }
+
+                let program_path = String::from_utf8_lossy(&out.stdout.bytes)
+                    .trim()
+                    .to_string();
+                if !program_path.starts_with("/nix/store/") {
+                    return Err(IoError::Other(info(
+                        CODE_NIX_REQUEST_INVALID,
+                        ErrorCategory::ParsingInput,
+                        "resolved program path did not start with /nix/store/",
+                    )));
+                }
+                if store_root_from_program_path(&program_path).is_none() {
+                    return Err(IoError::Other(info(
+                        CODE_NIX_REQUEST_INVALID,
+                        ErrorCategory::ParsingInput,
+                        "resolved program path was not a valid nix store path",
+                    )));
+                }
+
+                if !Path::new(&program_path).exists() {
+                    let build_target =
+                        store_root_from_program_path(&program_path).ok_or_else(|| {
+                            IoError::Other(info(
+                                CODE_NIX_REQUEST_INVALID,
+                                ErrorCategory::ParsingInput,
+                                "resolved program path was not a valid nix store path",
+                            ))
+                        })?;
+                    let mut build = Command::new("nix");
+                    build
+                        .arg("build")
+                        .arg("--no-link")
+                        .arg("--no-write-lock-file")
+                        .arg(&build_target);
+
+                    let out = run_with_timeout(build, req.timeout_ms)
+                        .await
+                        .map_err(|err| {
+                            map_runner_error(
+                                err,
+                                CODE_NIX_BUILD_FAILED,
+                                "nix build",
+                                &build_target,
+                                req.timeout_ms,
+                            )
+                        })?;
+                    ensure_bounded_output("nix build", &build_target, &out)?;
+                    if !out.status.success() {
+                        return Err(IoError::Transport(info_with_details(
+                            CODE_NIX_BUILD_FAILED,
+                            ErrorCategory::Unknown,
+                            "nix build failed",
+                            command_failure_details(
+                                "nix build",
+                                &build_target,
+                                out.status.code(),
+                                &out.stdout.bytes,
+                                &out.stderr.bytes,
+                            ),
+                        )));
+                    }
+                    if !Path::new(&program_path).exists() {
+                        return Err(IoError::Transport(info_with_details(
+                            CODE_NIX_BUILD_FAILED,
+                            ErrorCategory::Unknown,
+                            "nix build did not realize resolved program path",
+                            serde_json::json!({
+                                "command": "nix build",
+                                "target": build_target,
+                                "expected_program_path": program_path,
+                            }),
+                        )));
+                    }
+                }
+
+                Ok(serde_json::json!({"program_path": program_path}))
+            }
+            "run_flake_app_v1" => {
+                let req = parse_run_request(&call)?;
+                let resolved_app = ensure_flake_app_allowed(&policy, &req.app)?;
+                let mut cmd = Command::new("nix");
+                cmd.arg("run")
+                    .arg("--no-write-lock-file")
+                    .arg(&resolved_app)
+                    .arg("--");
+                cmd.args(&req.argv);
+                for (key, value) in &req.env {
+                    cmd.env(key, value);
+                }
+                inject_host_env_bindings(&mut cmd, &req.host_env_bindings)?;
+
+                let stdin_bytes = serde_json::to_vec(&req.stdin_json).map_err(|_| {
+                    IoError::Other(info(
+                        CODE_NIX_REQUEST_INVALID,
+                        ErrorCategory::ParsingInput,
+                        "nix run stdin_json could not be serialized",
+                    ))
                 })?;
-            ensure_bounded_output("nix build", &target, &out)?;
-            if !out.status.success() {
-                return Err(IoError::Transport(info_with_details(
-                    CODE_NIX_BUILD_FAILED,
-                    ErrorCategory::Unknown,
-                    "nix build failed",
-                    command_failure_details(
-                        "nix build",
-                        &target,
-                        out.status.code(),
-                        &out.stdout.bytes,
-                        &out.stderr.bytes,
-                    ),
-                )));
-            }
-            if !Path::new(&program_path).exists() {
-                return Err(IoError::Transport(info_with_details(
-                    CODE_NIX_BUILD_FAILED,
-                    ErrorCategory::Unknown,
-                    "nix build did not realize resolved program path",
-                    serde_json::json!({
-                        "command": "nix build",
-                        "target": target,
-                        "expected_program_path": program_path,
-                    }),
-                )));
-            }
-        }
 
-        Ok(serde_json::json!({"program_path": program_path}))
+                let out = run_with_input_and_timeout(cmd, Some(stdin_bytes), req.timeout_ms)
+                    .await
+                    .map_err(|err| {
+                        map_runner_error(
+                            err,
+                            CODE_NIX_RUN_FAILED,
+                            "nix run",
+                            &resolved_app,
+                            req.timeout_ms,
+                        )
+                    })?;
+                ensure_bounded_output("nix run", &resolved_app, &out)?;
+
+                if let Some(stdin_err) = out.stdin_write_error {
+                    if stdin_err.kind != std::io::ErrorKind::BrokenPipe {
+                        return Err(IoError::Transport(info_with_details(
+                            CODE_NIX_STDIN_WRITE_FAILED,
+                            ErrorCategory::Unknown,
+                            "failed to write nix run stdin",
+                            serde_json::json!({
+                                "command": "nix run",
+                                "target": resolved_app,
+                                "io_error_kind": format!("{:?}", stdin_err.kind),
+                            }),
+                        )));
+                    }
+                }
+
+                if let Some(stdin_err) = out.stdin_close_error {
+                    if stdin_err.kind != std::io::ErrorKind::BrokenPipe {
+                        return Err(IoError::Transport(info_with_details(
+                            CODE_NIX_STDIN_WRITE_FAILED,
+                            ErrorCategory::Unknown,
+                            "failed to close nix run stdin",
+                            serde_json::json!({
+                                "command": "nix run",
+                                "target": resolved_app,
+                                "io_error_kind": format!("{:?}", stdin_err.kind),
+                            }),
+                        )));
+                    }
+                }
+
+                if !out.status.success() {
+                    return Err(IoError::Transport(info_with_details(
+                        CODE_NIX_RUN_FAILED,
+                        ErrorCategory::Unknown,
+                        "nix run failed",
+                        command_failure_details(
+                            "nix run",
+                            &resolved_app,
+                            out.status.code(),
+                            &out.stdout.bytes,
+                            &out.stderr.bytes,
+                        ),
+                    )));
+                }
+
+                let response = serde_json::from_slice::<serde_json::Value>(&out.stdout.bytes)
+                    .map_err(|_| {
+                        IoError::Other(info(
+                            CODE_NIX_STDOUT_INVALID_JSON,
+                            ErrorCategory::ParsingInput,
+                            "nix run stdout was not valid JSON",
+                        ))
+                    })?;
+
+                Ok(response)
+            }
+            _ => Err(IoError::Other(info(
+                CODE_NIX_REQUEST_INVALID,
+                ErrorCategory::ParsingInput,
+                "unsupported nix request kind",
+            ))),
+        }
     }
 }
 

@@ -16,6 +16,13 @@ rec {
     set -euo pipefail
 
     origin_source="${aaveV3OriginSource}"
+    expected_repo_url="''${MFM_AAVE_V3_ORIGIN_EXPECTED_REPO_URL:-${aaveV3OriginRepoUrl}}"
+    expected_commit_sha="''${MFM_AAVE_V3_ORIGIN_EXPECTED_COMMIT_SHA:-${aaveV3OriginCommit}}"
+
+    if [ "$expected_repo_url" != "${aaveV3OriginRepoUrl}" ] || [ "$expected_commit_sha" != "${aaveV3OriginCommit}" ]; then
+      echo "requested source $expected_repo_url@$expected_commit_sha is unsupported by the current Aave Origin backend" >&2
+      exit 1
+    fi
 
     ${pkgs.jq}/bin/jq -n -c \
       --arg repo_url "${aaveV3OriginRepoUrl}" \
@@ -35,6 +42,13 @@ rec {
         set -euo pipefail
 
         origin_source="${aaveV3OriginSource}"
+        expected_repo_url="''${MFM_AAVE_V3_ORIGIN_EXPECTED_REPO_URL:-${aaveV3OriginRepoUrl}}"
+        expected_commit_sha="''${MFM_AAVE_V3_ORIGIN_EXPECTED_COMMIT_SHA:-${aaveV3OriginCommit}}"
+
+        if [ "$expected_repo_url" != "${aaveV3OriginRepoUrl}" ] || [ "$expected_commit_sha" != "${aaveV3OriginCommit}" ]; then
+          echo "requested source $expected_repo_url@$expected_commit_sha is unsupported by the current Aave Origin backend" >&2
+          exit 1
+        fi
 
         tmp="$(${pkgs.coreutils}/bin/mktemp -d)"
         cleanup() { ${pkgs.coreutils}/bin/rm -rf "$tmp"; }
@@ -135,12 +149,24 @@ rec {
         set -euo pipefail
 
         origin_source="${aaveV3OriginSource}"
+        expected_repo_url="''${MFM_AAVE_V3_ORIGIN_EXPECTED_REPO_URL:-${aaveV3OriginRepoUrl}}"
+        expected_commit_sha="''${MFM_AAVE_V3_ORIGIN_EXPECTED_COMMIT_SHA:-${aaveV3OriginCommit}}"
 
-        if [ -z "''${MFM_AAVE_V3_PARITY_DEPLOY_SIGNING_KEY-}" ]; then
-          echo "MFM_AAVE_V3_PARITY_DEPLOY_SIGNING_KEY is required" >&2
+        if [ "$expected_repo_url" != "${aaveV3OriginRepoUrl}" ] || [ "$expected_commit_sha" != "${aaveV3OriginCommit}" ]; then
+          echo "requested source $expected_repo_url@$expected_commit_sha is unsupported by the current Aave Origin backend" >&2
           exit 1
         fi
-        export MFM_AAVE_V3_PARITY_DEPLOYER_PRIVATE_KEY="$MFM_AAVE_V3_PARITY_DEPLOY_SIGNING_KEY"
+
+        deploy_signing_key="''${MFM_AAVE_V3_ORIGIN_DEPLOY_SIGNER_VALUE-}"
+        deploy_signing_key_env="''${MFM_AAVE_V3_ORIGIN_DEPLOY_SIGNING_KEY_ENV:-MFM_AAVE_V3_PARITY_DEPLOY_SIGNING_KEY}"
+        if [ -z "$deploy_signing_key" ]; then
+          deploy_signing_key="''${!deploy_signing_key_env-}"
+        fi
+        if [ -z "$deploy_signing_key" ]; then
+          echo "$deploy_signing_key_env is required" >&2
+          exit 1
+        fi
+        export MFM_AAVE_V3_PARITY_DEPLOYER_PRIVATE_KEY="$deploy_signing_key"
 
         if [ -z "''${MFM_AAVE_V3_ORIGIN_SUPPLIER-}" ]; then
           export MFM_AAVE_V3_ORIGIN_SUPPLIER="0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
@@ -154,8 +180,13 @@ rec {
         if [ -z "''${MFM_AAVE_V3_ORIGIN_WBTC_COLLATERAL_AMOUNT-}" ]; then
           export MFM_AAVE_V3_ORIGIN_WBTC_COLLATERAL_AMOUNT="1000000000"
         fi
-        if [ -z "''${MFM_EVM_RPC_URL-}" ]; then
-          echo "MFM_EVM_RPC_URL is required" >&2
+        rpc_url="''${MFM_AAVE_V3_ORIGIN_RPC_URL-}"
+        rpc_url_env="''${MFM_AAVE_V3_ORIGIN_RPC_URL_ENV:-MFM_EVM_RPC_URL}"
+        if [ -z "$rpc_url" ]; then
+          rpc_url="''${!rpc_url_env-}"
+        fi
+        if [ -z "$rpc_url" ]; then
+          echo "$rpc_url_env is required" >&2
           exit 1
         fi
 
@@ -347,7 +378,7 @@ rec {
         (
           cd "$tmp/origin"
           ${pkgs.foundry}/bin/forge script scripts/MfmOriginDeploy.s.sol:MfmOriginDeploy \
-            --rpc-url "$MFM_EVM_RPC_URL" \
+            --rpc-url "$rpc_url" \
             --broadcast \
             > /dev/null
         )
