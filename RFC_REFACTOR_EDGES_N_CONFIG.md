@@ -1,6 +1,6 @@
 # RFC: Refactor Fat Edges and Introduce a Shared Authored-Config Framework
 
-Status: Landed
+Status: Mostly landed; follow-up remaining
 
 Last updated: 2026-03-31
 
@@ -20,9 +20,10 @@ Last updated: 2026-03-31
 - The first concrete refactor should be to split portfolio into `portfolio.config.build` and `portfolio.execute`, while extracting shared primitives that other workflow families can reuse.
 - The current app-layer and wrapper-layer procedural glue should be reduced by moving config build, artifact emission, and result extraction behind internal MFM ops and reusable states.
 - Current repo status:
-  - portfolio, deploy/configure/validate, and `aave_v3_origin_stack` now use explicit authored/canonical/built execution boundaries
+  - portfolio now has explicit authored/canonical/built execution boundaries, build/report publication, and a strict execute root, but some CLI/app compatibility glue still duplicates transport parsing and feature shaping
+  - deploy/configure/validate now has authored/canonical/built config crates plus config-build and execute roots, but final adopter work is still incomplete in app/CLI/parity surfaces and the workflow-family typing remains shallow
   - `publish-docs` now uses shared authored/canonical ingress and intentionally stops there
-  - wrapper-heavy Aave-origin phase-A orchestration is now internal MFM composition instead of raw caller-owned `nix_app` pipelines
+  - wrapper-heavy Aave-origin phase-A orchestration is now internal MFM composition through `aave_v3_origin_stack`, while intentionally retaining the current Nix/Foundry compatibility backend
 
 ## 2. Problem Statement
 
@@ -776,10 +777,21 @@ Code areas touched:
 Change:
 
 - Apply the same authored-config framework to other workflow families with the same shape.
-- Landed adopters are now:
-  - deploy/configure/validate ingress and build/execute
-  - publish-docs authored/canonical ingress
-  - wrapper-heavy Aave-origin tooling through `aave_v3_origin_stack`
+- Adopter status after the landed work to date:
+  - portfolio:
+    - explicit authored/canonical/built types, config-build, execute, and compatibility roots are landed
+    - shared canonical/built artifact publication and stable build-report plumbing are landed
+    - residual work remains to thin CLI/app request parsing and feature-envelope glue
+  - deploy/configure/validate:
+    - authored/canonical/built config crate plus config-build and execute roots are landed
+    - final adopter work is still open in the app/CLI/parity layer, which still primarily exposes the legacy pipeline-template path
+    - the workflow-family config remains only partially typed because deploy/configure/validate payloads are still mostly opaque JSON blobs
+  - publish-docs:
+    - authored/canonical ingress is landed
+    - no built-config split is intended at this stage because the current tool does not have a reusable execution-ready compiled spec distinct from its typed plan/output surfaces
+  - wrapper-heavy Aave-origin tooling:
+    - explicit authored/canonical/built/execute boundaries are landed through `aave_v3_origin_stack`
+    - the backend intentionally still uses the current Nix/Foundry compatibility wrappers rather than a full Rust reimplementation
 
 Contract risk:
 
@@ -794,6 +806,25 @@ Ship independently:
 
 - Yes.
 
+### Remaining Work Before This RFC Should Be Considered Fully Complete
+
+- Finish deploy/configure/validate adoption:
+  - make the new public root-op family the primary app/CLI path instead of continuing to privilege the legacy pipeline-template helper
+  - add integration/parity coverage that exercises the new deploy/configure/validate root family directly
+  - either strengthen workflow-family typing beyond opaque JSON blobs or explicitly document that shallow typing is the intended long-term boundary
+
+- Thin the remaining portfolio transport edges:
+  - reduce duplicated request parsing/canonicalization glue between the CLI and app service entrypoints
+  - remove duplicate feature-envelope shaping where the app feature layer can own it directly
+
+- Make the build boundary more authoritative in compatibility roots:
+  - portfolio, deploy/configure/validate, and Aave-origin compatibility roots still precompute built config in the parent planner and then insert a config-build child mainly for publication/compatibility ordering
+  - if the SDK evolves to support it cleanly, the canonical-input compatibility path should compose build then execute without duplicating canonical-to-built compilation in the parent root
+  - until then, treat this as an acceptable migration seam rather than as the desired end state
+
+- Keep workflow docs synchronized with the landed code:
+  - update workflow-specific docs when parity entrypoints or migration status change so the code remains the authority and the docs remain trustworthy summaries
+
 ## 16. Open Questions and Risks
 
 - Should `BuiltConfig` always be the authoritative runtime input, or are there workflow families where execution should still consume `CanonicalConfig` directly?
@@ -801,7 +832,7 @@ Ship independently:
 - The current planner model separates `expand()` and `planner_payload()`. Eliminating duplicated compilation in some ops may require SDK evolution, not just local refactoring.
 - If raw authored TOML is persisted as an audit artifact, what retention and secrecy rules should apply to avoid leaking sensitive but non-secret authoring context?
 - Which workflow families are worth bringing fully under the run model versus leaving as standalone tools?
-- Some doc drift already exists. For example, `docs/ops-and-states.md` still references `semantic_states.rs` while the portfolio execution code lives in `execution_states.rs`. That drift should be corrected alongside the migration.
+- Doc drift remains a risk as adopter status evolves. For example, workflow-specific migration docs can lag the code and parity tests unless they are updated as part of the same change.
 
 ## 17. Specific Answers to the Original Review Questions
 
