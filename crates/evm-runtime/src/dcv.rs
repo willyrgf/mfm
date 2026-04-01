@@ -53,7 +53,7 @@
 //! ```
 
 use alloy_primitives::keccak256;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use mfm_evm_core::abi as common_abi;
 use mfm_evm_core::encoding;
@@ -62,7 +62,7 @@ use mfm_evm_core::hex as common_hex;
 pub use common_abi::{AbiEvent, AbiFunction, ParsedAbi};
 
 /// JSON contract artifact used by deploy/configure/validate flows.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ContractArtifactConfig {
     /// Contract ABI JSON payload.
     pub abi: serde_json::Value,
@@ -71,7 +71,7 @@ pub struct ContractArtifactConfig {
 }
 
 /// Runtime configuration for a single on-chain function call.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ConfigureCallConfig {
     /// Function name to invoke.
     pub function: String,
@@ -92,7 +92,7 @@ fn default_min_count() -> u64 {
 /// Block selector used by validation reads and event queries.
 ///
 /// Numeric blocks are rendered as hex quantities; string tags are passed through as-is.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum BlockTag {
     /// Explicit block number.
@@ -102,7 +102,7 @@ pub enum BlockTag {
 }
 
 /// Read assertion to evaluate through `eth_call`.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ReadAssertionConfig {
     /// Function name to call.
     pub function: String,
@@ -116,7 +116,7 @@ pub struct ReadAssertionConfig {
 }
 
 /// Event assertion to evaluate with `eth_getLogs`.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct EventAssertionConfig {
     /// Event name expected in the ABI.
     pub event: String,

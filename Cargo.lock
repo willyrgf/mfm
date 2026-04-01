@@ -2130,6 +2130,7 @@ name = "mfm-evm-deploy-configure-validate-config"
 version = "0.1.0"
 dependencies = [
  "mfm-authored-config",
+ "mfm-evm-runtime",
  "mfm-machine",
  "serde",
  "serde_json",

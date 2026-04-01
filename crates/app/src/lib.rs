@@ -2169,9 +2169,19 @@ mod tests {
         let parsed = parse_deploy_configure_validate_spec_input(
             Some(
                 serde_json::json!({
-                    "deploy": {"network_id": "ethereum-mainnet"},
-                    "configure": {"network_id": "ethereum-mainnet"},
-                    "validate": {"network_id": "ethereum-mainnet"}
+                    "deploy": {
+                        "network_id": "ethereum-mainnet",
+                        "from": "0x000000000000000000000000000000000000dead"
+                    },
+                    "configure": {
+                        "network_id": "ethereum-mainnet",
+                        "from": "0x000000000000000000000000000000000000dead",
+                        "calls": []
+                    },
+                    "validate": {
+                        "network_id": "ethereum-mainnet",
+                        "expected_chain_id": 1
+                    }
                 })
                 .to_string(),
             ),
@@ -2192,12 +2202,16 @@ mod tests {
             r#"
                 [deploy]
                 network_id = "ethereum-mainnet"
+                from = "0x000000000000000000000000000000000000dead"
 
                 [configure]
                 network_id = "ethereum-mainnet"
+                from = "0x000000000000000000000000000000000000dead"
+                calls = []
 
                 [validate]
                 network_id = "ethereum-mainnet"
+                expected_chain_id = 1
             "#,
         )
         .expect("write temp spec");

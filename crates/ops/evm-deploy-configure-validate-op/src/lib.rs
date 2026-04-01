@@ -45,6 +45,7 @@ use mfm_sdk::op::{
     Operation, PlannedOp, PlannedOpKind, PortSource, ReExportBinding,
 };
 use mfm_state_common::errors as op_errors;
+use serde::Serialize;
 use serde_json::Value;
 
 mod config_build;
@@ -124,6 +125,18 @@ fn re_export_binding(export: &PortKey) -> ReExportBinding {
     }
 }
 
+fn serialize_execution_phase<T: Serialize>(
+    phase: &T,
+    phase_name: &'static str,
+) -> Result<Value, SdkError> {
+    serde_json::to_value(phase).map_err(|err| {
+        sdk_input_error(
+            "invalid_evm_deploy_configure_validate_execution_config",
+            format!("failed to serialize {phase_name} config: {err}"),
+        )
+    })
+}
+
 fn expand_from_canonical(
     op_path: OpPath,
     canonical: DeployConfigureValidateCanonicalConfig,
@@ -187,19 +200,22 @@ fn plan_execution_leaf(
     cfg: &DeployConfigureValidateExecutionConfig,
     run_config: &RunConfig,
 ) -> Result<(OpInterface, LeafOpSpec), SdkError> {
+    let deploy_config = serialize_execution_phase(&cfg.deploy, "deploy")?;
+    let configure_config = serialize_execution_phase(&cfg.configure, "configure")?;
+    let validate_config = serialize_execution_phase(&cfg.validate, "validate")?;
     let (deploy_interface, deploy_graph) = into_leaf(EvmDeployOp.expand(
         child_op_path(&op_path, "deploy")?,
-        &cfg.deploy,
+        &deploy_config,
         run_config,
     )?)?;
     let (configure_interface, configure_graph) = into_leaf(EvmConfigureOp.expand(
         child_op_path(&op_path, "configure")?,
-        &cfg.configure,
+        &configure_config,
         run_config,
     )?)?;
     let (validate_interface, validate_graph) = into_leaf(EvmValidateOp.expand(
         child_op_path(&op_path, "validate")?,
-        &cfg.validate,
+        &validate_config,
         run_config,
     )?)?;
 

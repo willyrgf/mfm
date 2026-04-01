@@ -25,9 +25,19 @@
 //!
 //! let authored = parse_deploy_configure_validate_authored_config(
 //!     r#"{
-//!         "deploy": {"network_id": "ethereum-mainnet"},
-//!         "configure": {"network_id": "ethereum-mainnet"},
-//!         "validate": {"network_id": "ethereum-mainnet"}
+//!         "deploy": {
+//!             "network_id": "ethereum-mainnet",
+//!             "from": "0x000000000000000000000000000000000000dead"
+//!         },
+//!         "configure": {
+//!             "network_id": "ethereum-mainnet",
+//!             "from": "0x000000000000000000000000000000000000dead",
+//!             "calls": []
+//!         },
+//!         "validate": {
+//!             "network_id": "ethereum-mainnet",
+//!             "expected_chain_id": 1
+//!         }
 //!     }"#,
 //!     AuthoredConfigFormat::Json,
 //! )?;
@@ -41,11 +51,130 @@ use std::path::Path;
 
 use mfm_authored_config::parse_authored_config_with_hint;
 pub use mfm_authored_config::AuthoredConfigFormat;
+use mfm_evm_runtime::dcv::{
+    ConfigureCallConfig, ContractArtifactConfig, EventAssertionConfig, ReadAssertionConfig,
+};
 use mfm_machine::hashing::{artifact_id_for_json, CanonicalJsonError};
 use mfm_machine::ids::ArtifactId;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
+
+fn default_artifact_port() -> String {
+    "contract_artifact".to_string()
+}
+
+fn default_control_scope() -> String {
+    "shared".to_string()
+}
+
+fn default_poll_interval_ms() -> u64 {
+    500
+}
+
+fn default_max_receipt_polls() -> u64 {
+    120
+}
+
+fn default_require_client_substring() -> String {
+    "reth".to_string()
+}
+
+/// Typed authored and canonical deploy-phase config.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DeployConfigureValidateDeployConfig {
+    /// Optional inline contract artifact; falls back to `artifact_port` when absent.
+    #[serde(default)]
+    pub artifact: Option<ContractArtifactConfig>,
+    /// Context key used to load the contract artifact when `artifact` is absent.
+    #[serde(default = "default_artifact_port")]
+    pub artifact_port: String,
+    /// Stable network identifier targeted by the managed RPC calls.
+    pub network_id: String,
+    /// Stable control-plane scope used to isolate managed source state.
+    #[serde(default = "default_control_scope")]
+    pub control_scope: String,
+    /// Deployer address or sender address.
+    pub from: String,
+    /// Constructor arguments passed during deployment.
+    #[serde(default)]
+    pub constructor_args: Vec<Value>,
+    /// Optional deployment value expressed in wei.
+    #[serde(default)]
+    pub value_wei: Option<String>,
+    /// Optional environment variable name used for local signing.
+    #[serde(default)]
+    pub signing_key_env: Option<String>,
+    /// Delay between receipt polls in milliseconds.
+    #[serde(default = "default_poll_interval_ms")]
+    pub poll_interval_ms: u64,
+    /// Maximum number of receipt polls before timing out.
+    #[serde(default = "default_max_receipt_polls")]
+    pub max_receipt_polls: u64,
+}
+
+/// Typed authored and canonical configure-phase config.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DeployConfigureValidateConfigureConfig {
+    /// Optional inline contract artifact; falls back to `artifact_port` when absent.
+    #[serde(default)]
+    pub artifact: Option<ContractArtifactConfig>,
+    /// Context key used to load the contract artifact when `artifact` is absent.
+    #[serde(default = "default_artifact_port")]
+    pub artifact_port: String,
+    /// Stable network identifier targeted by the managed RPC calls.
+    pub network_id: String,
+    /// Stable control-plane scope used to isolate managed source state.
+    #[serde(default = "default_control_scope")]
+    pub control_scope: String,
+    /// Sender address used for configuration transactions.
+    pub from: String,
+    /// Optional environment variable name used for local signing.
+    #[serde(default)]
+    pub signing_key_env: Option<String>,
+    /// Optional inline contract address; falls back to context when absent.
+    #[serde(default)]
+    pub contract_address: Option<String>,
+    /// Calls to execute against the deployed contract.
+    #[serde(default)]
+    pub calls: Vec<ConfigureCallConfig>,
+    /// Delay between receipt polls in milliseconds.
+    #[serde(default = "default_poll_interval_ms")]
+    pub poll_interval_ms: u64,
+    /// Maximum number of receipt polls before timing out.
+    #[serde(default = "default_max_receipt_polls")]
+    pub max_receipt_polls: u64,
+}
+
+/// Typed authored and canonical validate-phase config.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DeployConfigureValidateValidateConfig {
+    /// Optional inline contract artifact; falls back to `artifact_port` when absent.
+    #[serde(default)]
+    pub artifact: Option<ContractArtifactConfig>,
+    /// Context key used to load the contract artifact when `artifact` is absent.
+    #[serde(default = "default_artifact_port")]
+    pub artifact_port: String,
+    /// Stable network identifier targeted by the managed RPC calls.
+    pub network_id: String,
+    /// Stable control-plane scope used to isolate managed source state.
+    #[serde(default = "default_control_scope")]
+    pub control_scope: String,
+    /// Optional inline contract address; falls back to context when absent.
+    #[serde(default)]
+    pub contract_address: Option<String>,
+    /// Expected chain id for the connected RPC endpoint.
+    pub expected_chain_id: u64,
+    /// Substring that must appear in `web3_clientVersion`.
+    #[serde(default = "default_require_client_substring")]
+    pub require_client_substring: String,
+    /// Read assertions evaluated with `eth_call`.
+    #[serde(default)]
+    pub read_assertions: Vec<ReadAssertionConfig>,
+    /// Event assertions evaluated with `eth_getLogs`.
+    #[serde(default)]
+    pub event_assertions: Vec<EventAssertionConfig>,
+}
 
 /// Human-authored deploy/configure/validate config loaded from JSON or TOML.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -60,11 +189,11 @@ pub struct DeployConfigureValidateAuthoredConfig {
     #[serde(default)]
     pub input: Option<Value>,
     /// Operation config for the deploy phase.
-    pub deploy: Value,
+    pub deploy: DeployConfigureValidateDeployConfig,
     /// Operation config for the configure phase.
-    pub configure: Value,
+    pub configure: DeployConfigureValidateConfigureConfig,
     /// Operation config for the validate phase.
-    pub validate: Value,
+    pub validate: DeployConfigureValidateValidateConfig,
 }
 
 /// Canonical deploy/configure/validate config used by transport and pipeline glue.
@@ -77,11 +206,11 @@ pub struct DeployConfigureValidateCanonicalConfig {
     /// Pipeline input payload forwarded into the run manifest.
     pub input: Value,
     /// Operation config for the deploy phase.
-    pub deploy: Value,
+    pub deploy: DeployConfigureValidateDeployConfig,
     /// Operation config for the configure phase.
-    pub configure: Value,
+    pub configure: DeployConfigureValidateConfigureConfig,
     /// Operation config for the validate phase.
-    pub validate: Value,
+    pub validate: DeployConfigureValidateValidateConfig,
 }
 
 impl DeployConfigureValidateCanonicalConfig {
@@ -139,11 +268,11 @@ impl DeployConfigureValidateBuiltConfig {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DeployConfigureValidateExecutionConfig {
     /// Deploy sub-op config.
-    pub deploy: Value,
+    pub deploy: DeployConfigureValidateDeployConfig,
     /// Configure sub-op config.
-    pub configure: Value,
+    pub configure: DeployConfigureValidateConfigureConfig,
     /// Validate sub-op config.
-    pub validate: Value,
+    pub validate: DeployConfigureValidateValidateConfig,
 }
 
 /// Stable build report emitted by deploy/configure/validate config-build workflows.
@@ -318,7 +447,11 @@ mod tests {
 
     const JSON_CONFIG: &str = r#"{
         "deploy": {"network_id": "ethereum-mainnet", "from": "0x000000000000000000000000000000000000dead"},
-        "configure": {"network_id": "ethereum-mainnet", "calls": [{"function": "noop", "args": []}]},
+        "configure": {
+            "network_id": "ethereum-mainnet",
+            "from": "0x000000000000000000000000000000000000dead",
+            "calls": [{"function": "noop", "args": []}]
+        },
         "validate": {"network_id": "ethereum-mainnet", "expected_chain_id": 1}
     }"#;
 
@@ -329,6 +462,7 @@ mod tests {
 
         [configure]
         network_id = "ethereum-mainnet"
+        from = "0x000000000000000000000000000000000000dead"
 
         [[configure.calls]]
         function = "noop"
@@ -402,9 +536,19 @@ mod tests {
     #[test]
     fn decode_json_payload_materializes_missing_defaults() {
         let canonical = decode_deploy_configure_validate_canonical_config(&serde_json::json!({
-            "deploy": {"network_id": "ethereum-mainnet"},
-            "configure": {"network_id": "ethereum-mainnet"},
-            "validate": {"network_id": "ethereum-mainnet"}
+            "deploy": {
+                "network_id": "ethereum-mainnet",
+                "from": "0x000000000000000000000000000000000000dead"
+            },
+            "configure": {
+                "network_id": "ethereum-mainnet",
+                "from": "0x000000000000000000000000000000000000dead",
+                "calls": []
+            },
+            "validate": {
+                "network_id": "ethereum-mainnet",
+                "expected_chain_id": 1
+            }
         }))
         .expect("decode");
 
