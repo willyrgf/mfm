@@ -3,11 +3,8 @@ use std::path::PathBuf;
 
 use clap::Args;
 use mfm_app::{
-    AppError, FeatureExecutionResult, PortfolioSnapshotRequest, PortfolioSnapshotResponse,
-};
-use mfm_portfolio_config::{
-    canonicalize_portfolio_snapshot_authored_config, parse_portfolio_snapshot_authored_config,
-    parse_portfolio_snapshot_authored_config_with_hint, AuthoredConfigFormat,
+    parse_portfolio_snapshot_request_input, AppError, FeatureExecutionResult,
+    PortfolioSnapshotRequest, PortfolioSnapshotResponse,
 };
 
 use crate::commands::result::{CommandError, CommandOutput, CommandResult};
@@ -61,35 +58,8 @@ where
 }
 
 fn parse_request(args: &SnapshotArgs) -> Result<PortfolioSnapshotRequest, CommandError> {
-    match (&args.request_json, &args.request_file) {
-        (Some(_), Some(_)) => Err(CommandError::new(
-            "InvalidArguments",
-            "Pass only one of --request-json or --request-file",
-        )),
-        (None, None) => Err(CommandError::new(
-            "MissingArgument",
-            "Pass one of --request-json or --request-file",
-        )),
-        (Some(raw), None) => {
-            let authored =
-                parse_portfolio_snapshot_authored_config(raw, AuthoredConfigFormat::Json)
-                    .map_err(command_error_from_config_error)?;
-            canonicalize_portfolio_snapshot_authored_config(authored)
-                .map_err(command_error_from_config_error)
-        }
-        (None, Some(path)) => {
-            let raw = std::fs::read_to_string(path).map_err(|_| {
-                CommandError::new(
-                    "InvalidRequestFile",
-                    "Failed to read --request-file contents",
-                )
-            })?;
-            let authored = parse_portfolio_snapshot_authored_config_with_hint(&raw, Some(path))
-                .map_err(command_error_from_config_error)?;
-            canonicalize_portfolio_snapshot_authored_config(authored)
-                .map_err(command_error_from_config_error)
-        }
-    }
+    parse_portfolio_snapshot_request_input(args.request_json.clone(), args.request_file.clone())
+        .map_err(command_error_from_snapshot_parse_error)
 }
 
 async fn execute_request_with_starter<F, Fut>(
@@ -106,21 +76,11 @@ where
     Ok(CommandOutput::new(result))
 }
 
-fn command_error_from_config_error(
-    err: mfm_portfolio_config::PortfolioSnapshotConfigError,
-) -> CommandError {
-    match err {
-        mfm_portfolio_config::PortfolioSnapshotConfigError::InvalidJson { .. } => {
-            CommandError::new("InvalidJson", "Failed to parse request body as JSON")
-        }
-        mfm_portfolio_config::PortfolioSnapshotConfigError::InvalidToml { .. } => {
-            CommandError::new("InvalidToml", "Failed to parse request body as TOML")
-        }
-        mfm_portfolio_config::PortfolioSnapshotConfigError::InvalidBundle(_)
-        | mfm_portfolio_config::PortfolioSnapshotConfigError::Serialize { .. }
-        | mfm_portfolio_config::PortfolioSnapshotConfigError::CanonicalJson { .. } => {
-            CommandError::new("InvalidRequest", err.to_string())
-        }
+fn command_error_from_snapshot_parse_error(err: AppError) -> CommandError {
+    match err.code.as_str() {
+        "InvalidJson" => CommandError::new("InvalidJson", "Failed to parse request body as JSON"),
+        "InvalidToml" => CommandError::new("InvalidToml", "Failed to parse request body as TOML"),
+        _ => command_error_from_app_error(err),
     }
 }
 
@@ -133,6 +93,7 @@ mod tests {
     };
     use mfm_state_symbol::model::QuoteCode;
     use serde_json::json;
+    use tempfile::Builder;
 
     #[tokio::test]
     async fn execute_with_starter_returns_success_payload_with_report_totals() {
@@ -206,6 +167,51 @@ mod tests {
             output.data.result["report"]["totals_by_quote"][0]["net_value_dec"],
             "12.50"
         );
+    }
+
+    #[tokio::test]
+    async fn execute_with_starter_preserves_json_parse_error_contract() {
+        let args = SnapshotArgs {
+            request_json: Some("{".to_string()),
+            request_file: None,
+            stores: RunStoresArgs {
+                artifact_root: None,
+                database_url: None,
+            },
+        };
+
+        let err = execute_with_starter(&args, |_| async move {
+            panic!("starter should not run when request parsing fails")
+        })
+        .await
+        .expect_err("invalid json should fail");
+
+        assert_eq!(err.code, "InvalidJson");
+        assert_eq!(err.message, "Failed to parse request body as JSON");
+    }
+
+    #[tokio::test]
+    async fn execute_with_starter_preserves_toml_parse_error_contract() {
+        let request_file = Builder::new().suffix(".toml").tempfile().expect("tempfile");
+        std::fs::write(request_file.path(), "portfolio = [").expect("write invalid request file");
+
+        let args = SnapshotArgs {
+            request_json: None,
+            request_file: Some(request_file.path().to_path_buf()),
+            stores: RunStoresArgs {
+                artifact_root: None,
+                database_url: None,
+            },
+        };
+
+        let err = execute_with_starter(&args, |_| async move {
+            panic!("starter should not run when request parsing fails")
+        })
+        .await
+        .expect_err("invalid toml should fail");
+
+        assert_eq!(err.code, "InvalidToml");
+        assert_eq!(err.message, "Failed to parse request body as TOML");
     }
 
     fn canonical_request_json() -> serde_json::Value {
