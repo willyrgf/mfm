@@ -2,7 +2,7 @@
 
 Status: implemented wrapper-heavy adopter for the shared authored-config framework
 
-Last updated: 2026-03-30
+Last updated: 2026-04-01
 
 ## Summary
 
@@ -23,14 +23,19 @@ Primary conclusion:
 
 ## Current State
 
-The current parity flow is expressed as a raw pipeline in
-`tests/integration/tests/parity_aave_v3_reth_scenario.rs`:
+The primary parity flow now runs through `aave_v3_origin_stack` in
+`tests/integration/tests/parity_aave_v3_reth_scenario.rs`.
+
+That promoted root op still expands into the current compatibility backend:
 
 1. `nix_app(fetch_origin)` runs `mfm-aave-v3-origin-fetch`
 2. `nix_app(compile_origin)` runs `mfm-aave-v3-origin-compile`
 3. `nix_app(deploy_origin_stack)` runs `mfm-aave-v3-origin-deploy`
 4. `aave_v3_origin_adapt_deploy` converts Origin deploy output into the standard deploy manifest
 5. later scenario steps use generic `evm_configure` and `evm_validate`
+
+A raw wrapper-oriented parity path is still retained as separate compatibility coverage in the same
+test file so the legacy backend remains observable during migration.
 
 The shell tools live in `nixfied/project/aave-origin-tools.nix` and are exposed to developers and
 tasks through `nixfied/project/conf.nix` and `nixfied/local/default.nix`.
@@ -125,6 +130,12 @@ Planned public/internal root ops:
 
 - canonical input composes `aave_v3_origin_stack_config_build -> aave_v3_origin_stack_execute`
 - built input goes straight to `aave_v3_origin_stack_execute`
+
+Current implementation note:
+
+- the compatibility root still precomputes built config in the parent planner before wiring the
+  execute child; the build child remains authoritative for publication/report artifacts, but not
+  yet for execute-child input materialization
 
 Keep `aave_v3_origin_adapt_deploy` as a narrow helper op during migration.
 
@@ -238,7 +249,7 @@ Do not:
 
 - rewrite the Foundry compile or deploy behavior
 - remove current shell tools
-- change the parity scenario pipeline yet
+- remove raw compatibility parity coverage yet
 
 ### Phase 2
 
@@ -263,7 +274,8 @@ Migrate callers onto the internal family boundary.
 
 Changes:
 
-- update parity tests to use `aave_v3_origin_stack` instead of raw `nix_app` orchestration
+- update the primary parity tests to use `aave_v3_origin_stack` instead of raw `nix_app`
+  orchestration
 - add app feature entrypoints if needed
 - keep existing Nix task apps as compatibility wrappers over the same backend
 

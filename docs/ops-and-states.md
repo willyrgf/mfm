@@ -36,6 +36,11 @@ Planning model note:
   ids.
 - Runtime execution units remain states only; internal recursive op expansion must flatten before
   runtime starts.
+- Current canonical-input compatibility roots for portfolio, deploy/configure/validate, and
+  `aave_v3_origin_stack` still precompute built config in the parent planner before wiring the
+  execute child.
+  The build child is authoritative for artifact/report publication and ordering, but execute-child
+  config handoff is still static until the SDK can route child outputs into child op config.
 - This document does not attempt to enumerate every future internal composite planning boundary.
 
 ## Built-In Ops
@@ -73,6 +78,9 @@ Notes:
 
 - `mfm-op-keystore-shim` is a helper wrapper crate, not a registered runtime op.
 - Built-in feature entry points are owned by `FeatureCatalog` in `crates/app/src/lib.rs`.
+- `pipeline.deploy_configure_validate.start` now routes through the public
+  `evm_deploy_configure_validate/v1` root op family instead of assembling a one-step pipeline
+  template in app glue.
 - The default app transport bundle exposes `rpc.control` as the canonical state-facing EVM ingress;
   the raw `evm` executor is kept for internal/direct use only.
 - Built-in `evm_*` ops and canonical `rpc.control` requests require explicit `network_id`;

@@ -607,6 +607,9 @@ same while moving the canonical-to-built handoff into the op layer.
 80. For canonical input, `PortfolioTrackerOp::expand()` builds the deterministic built config in
     the planner, inserts `portfolio_config_build` as the first child workflow, and then lowers the
     same built config into the semantic execution child ops.
+    This is the remaining compatibility seam in the portfolio flow today: the build child still
+    publishes the authoritative artifacts and report, but the execute child input is not yet
+    materialized from child output because child op configs are still static at planning time.
 81. For built input, `PortfolioTrackerOp::expand()` skips the build child and lowers directly into
     the semantic execution child ops.
 82. The execution portion of that graph lowers the semantic spec into child ops:
@@ -1381,8 +1384,10 @@ That is workable, but it creates more than one place where the same contract is 
 
 If I were changing this area, my first refactors would be:
 
-1. Make `mfm_cli portfolio snapshot` dispatch through the same `FeatureCatalog` path used by
-   `portfolio.snapshot`, or at least centralize the envelope construction in one helper.
+1. Finish making `mfm_cli portfolio snapshot` dispatch through the same `FeatureCatalog` path used
+   by `portfolio.snapshot`.
+   Request parsing already goes through the shared app helper; the remaining duplicated boundary is
+   the CLI-owned `FeatureExecutionResult` envelope construction.
 2. Make the outer wrapper validate against a stronger schema-aware contract instead of only checking
    three `jq` predicates.
 3. Consider naming the machine checkpoint id more explicitly in user-facing results, for example
