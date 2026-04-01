@@ -234,6 +234,16 @@ pub mod op {
 
     /// Child operation instance declared by a composite parent.
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct PlannerPayloadConfigSource {
+        /// Parent-local child identity whose planner payload provides the config value.
+        pub child: ChildOpLocalId,
+        /// JSON pointer resolved against that child's planner payload. Empty string selects the
+        /// whole payload.
+        pub pointer: String,
+    }
+
+    /// Child operation instance declared by a composite parent.
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub struct ChildOpInstance {
         /// Unique parent-local child identity.
         pub child_op_local_id: ChildOpLocalId,
@@ -243,6 +253,9 @@ pub mod op {
         pub op_version: String,
         /// Canonical JSON configuration for this child.
         pub op_config: serde_json::Value,
+        /// Optional planner-time config source resolved from another child's planner payload.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub op_config_from_planner_payload: Option<PlannerPayloadConfigSource>,
     }
 
     /// Source for a child import or parent re-export.

@@ -16,9 +16,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use mfm_aave_v3_origin_config::{
-    build_aave_v3_origin_stack_outcome, decode_aave_v3_origin_stack_built_config,
-    decode_aave_v3_origin_stack_canonical_config, AaveV3OriginAdaptStepConfig,
-    AaveV3OriginNixAppStepConfig, AaveV3OriginStackBuiltConfig, AaveV3OriginStackCanonicalConfig,
+    decode_aave_v3_origin_stack_built_config, decode_aave_v3_origin_stack_canonical_config,
+    AaveV3OriginAdaptStepConfig, AaveV3OriginNixAppStepConfig, AaveV3OriginStackBuiltConfig,
+    AaveV3OriginStackCanonicalConfig,
 };
 use mfm_machine::config::RunConfig;
 use mfm_machine::context::DynContext;
@@ -38,7 +38,7 @@ use mfm_sdk::ids::{ChildOpLocalId, PortKey};
 use mfm_sdk::op::{
     child_op_path, leaf_state_id, leaf_state_node, AfterEdge, ChildOpInstance, CompositeOpSpec,
     DynOperation, ImportBinding, LeafOpSpec, OpInterface, Operation, PlannedOp, PlannedOpKind,
-    PortSource, ReExportBinding,
+    PlannerPayloadConfigSource, PortSource, ReExportBinding,
 };
 use mfm_state_aave_v3::manifest::AaveDeployManifest;
 use mfm_state_common::ctx as op_ctx;
@@ -64,8 +64,8 @@ pub const AAVE_V3_ORIGIN_STACK_EXECUTE_OP_ID: &str = "aave_v3_origin_stack_execu
 /// Shared version for the public Aave Origin roots.
 pub const AAVE_V3_ORIGIN_STACK_PUBLIC_OP_VERSION: &str = "v1";
 
-const STACK_BUILD_CHILD_ID: &str = "build";
-const STACK_EXECUTE_CHILD_ID: &str = "execute";
+const STACK_BUILD_CHILD_ID: &str = "b";
+const STACK_EXECUTE_CHILD_ID: &str = "e";
 
 const FETCH_ORIGIN_CHILD_ID: &str = "fetch_origin";
 const COMPILE_ORIGIN_CHILD_ID: &str = "compile_origin";
@@ -331,20 +331,11 @@ fn execute_interface() -> OpInterface {
 }
 
 fn expand_from_canonical(
-    op_path: OpPath,
+    _op_path: OpPath,
     canonical: AaveV3OriginStackCanonicalConfig,
-    run_config: &RunConfig,
+    _run_config: &RunConfig,
 ) -> Result<PlannedOp, SdkError> {
     let canonical_json = serde_json::to_value(&canonical)
-        .map_err(|err| sdk_input_error("invalid_aave_v3_origin_stack_config", err.to_string()))?;
-    let outcome = build_aave_v3_origin_stack_outcome(canonical)
-        .map_err(|err| sdk_input_error("invalid_aave_v3_origin_stack_config", err.to_string()))?;
-    validate_execution_config(
-        child_op_path(&op_path, STACK_EXECUTE_CHILD_ID)?,
-        &outcome.built,
-        run_config,
-    )?;
-    let built_json = serde_json::to_value(&outcome.built)
         .map_err(|err| sdk_input_error("invalid_aave_v3_origin_stack_config", err.to_string()))?;
 
     Ok(PlannedOp {
@@ -356,12 +347,17 @@ fn expand_from_canonical(
                     op_id: OpId::must_new(AAVE_V3_ORIGIN_STACK_CONFIG_BUILD_OP_ID.to_string()),
                     op_version: AAVE_V3_ORIGIN_STACK_PUBLIC_OP_VERSION.to_string(),
                     op_config: canonical_json,
+                    op_config_from_planner_payload: None,
                 },
                 ChildOpInstance {
                     child_op_local_id: ChildOpLocalId(STACK_EXECUTE_CHILD_ID.to_string()),
                     op_id: OpId::must_new(AAVE_V3_ORIGIN_STACK_EXECUTE_OP_ID.to_string()),
                     op_version: AAVE_V3_ORIGIN_STACK_PUBLIC_OP_VERSION.to_string(),
-                    op_config: built_json,
+                    op_config: serde_json::json!({}),
+                    op_config_from_planner_payload: Some(PlannerPayloadConfigSource {
+                        child: ChildOpLocalId(STACK_BUILD_CHILD_ID.to_string()),
+                        pointer: "/built_config".to_string(),
+                    }),
                 },
             ],
             bindings: Vec::new(),
@@ -404,24 +400,28 @@ fn expand_execution(
                     op_id: OpId::must_new("nix_app".to_string()),
                     op_version: "v1".to_string(),
                     op_config: cfg.execution.fetch_origin.to_op_config(),
+                    op_config_from_planner_payload: None,
                 },
                 ChildOpInstance {
                     child_op_local_id: ChildOpLocalId(COMPILE_ORIGIN_CHILD_ID.to_string()),
                     op_id: OpId::must_new("nix_app".to_string()),
                     op_version: "v1".to_string(),
                     op_config: cfg.execution.compile_origin.to_op_config(),
+                    op_config_from_planner_payload: None,
                 },
                 ChildOpInstance {
                     child_op_local_id: ChildOpLocalId(DEPLOY_ORIGIN_CHILD_ID.to_string()),
                     op_id: OpId::must_new("nix_app".to_string()),
                     op_version: "v1".to_string(),
                     op_config: cfg.execution.deploy_origin_stack.to_op_config(),
+                    op_config_from_planner_payload: None,
                 },
                 ChildOpInstance {
                     child_op_local_id: ChildOpLocalId(ADAPT_ORIGIN_CHILD_ID.to_string()),
                     op_id: OpId::must_new(AAVE_V3_ORIGIN_ADAPT_DEPLOY_OP_ID.to_string()),
                     op_version: AAVE_V3_ORIGIN_ADAPT_DEPLOY_OP_VERSION.to_string(),
                     op_config: cfg.execution.adapt_origin_deploy.to_op_config(),
+                    op_config_from_planner_payload: None,
                 },
                 ChildOpInstance {
                     child_op_local_id: ChildOpLocalId(PUBLISH_FETCH_ARTIFACT_CHILD_ID.to_string()),
@@ -432,6 +432,7 @@ fn expand_execution(
                         "output_artifact_id_key": PORT_FETCH_ORIGIN_ARTIFACT_ID,
                         "artifact_role": fetch_artifact_role,
                     }),
+                    op_config_from_planner_payload: None,
                 },
                 ChildOpInstance {
                     child_op_local_id: ChildOpLocalId(
@@ -444,6 +445,7 @@ fn expand_execution(
                         "output_artifact_id_key": PORT_COMPILE_ORIGIN_ARTIFACT_ID,
                         "artifact_role": compile_artifact_role,
                     }),
+                    op_config_from_planner_payload: None,
                 },
                 ChildOpInstance {
                     child_op_local_id: ChildOpLocalId(PUBLISH_DEPLOY_ARTIFACT_CHILD_ID.to_string()),
@@ -454,6 +456,7 @@ fn expand_execution(
                         "output_artifact_id_key": PORT_DEPLOY_ORIGIN_ARTIFACT_ID,
                         "artifact_role": deploy_artifact_role,
                     }),
+                    op_config_from_planner_payload: None,
                 },
                 ChildOpInstance {
                     child_op_local_id: ChildOpLocalId(PROJECT_REPORT_CHILD_ID.to_string()),
@@ -469,6 +472,7 @@ fn expand_execution(
                         "deploy_manifest_key": PORT_DEPLOY_MANIFEST,
                         "report_output_key": PORT_REPORT,
                     }),
+                    op_config_from_planner_payload: None,
                 },
             ],
             bindings: vec![

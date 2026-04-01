@@ -13,6 +13,7 @@ use mfm_sdk::op::{
     Operation, PlannedOp, PlannedOpKind,
 };
 use mfm_state_common::states::publish::{WriteContextValueArtifactState, WriteJsonValueState};
+use serde_json::Value;
 
 /// Public root op id for the canonical-to-built Aave Origin config workflow.
 pub const AAVE_V3_ORIGIN_STACK_CONFIG_BUILD_OP_ID: &str = "aave_v3_origin_stack_config_build";
@@ -220,5 +221,22 @@ impl Operation for AaveV3OriginStackConfigBuildOp {
                 ],
             }),
         })
+    }
+
+    fn planner_payload(
+        &self,
+        _op_path: OpPath,
+        op_config: &Value,
+        _run_config: &RunConfig,
+    ) -> Result<Option<Value>, SdkError> {
+        let canonical = decode_aave_v3_origin_stack_canonical_config(op_config).map_err(|err| {
+            super::sdk_input_error("invalid_aave_v3_origin_stack_build_config", err.to_string())
+        })?;
+        let outcome = build_aave_v3_origin_stack_outcome(canonical).map_err(|err| {
+            super::sdk_input_error("invalid_aave_v3_origin_stack_build_config", err.to_string())
+        })?;
+        Ok(Some(serde_json::json!({
+            "built_config": outcome.built
+        })))
     }
 }

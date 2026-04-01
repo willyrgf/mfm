@@ -13,6 +13,7 @@ use mfm_sdk::op::{
 };
 use mfm_state_common::errors as op_errors;
 use mfm_state_common::states::publish::{WriteContextValueArtifactState, WriteJsonValueState};
+use serde_json::Value;
 
 /// Public root op id for the canonical-to-built portfolio config workflow.
 pub const PORTFOLIO_CONFIG_BUILD_OP_ID: &str = "portfolio_config_build";
@@ -205,5 +206,22 @@ impl Operation for PortfolioConfigBuildOp {
                 ],
             }),
         })
+    }
+
+    fn planner_payload(
+        &self,
+        _op_path: OpPath,
+        op_config: &Value,
+        _run_config: &RunConfig,
+    ) -> Result<Option<Value>, SdkError> {
+        let canonical = serde_json::from_value::<PortfolioSnapshotCanonicalConfig>(
+            op_config.clone(),
+        )
+        .map_err(|err| sdk_input_error("invalid_portfolio_build_config", err.to_string()))?;
+        let outcome = build_portfolio_snapshot_outcome(canonical)
+            .map_err(|err| sdk_input_error("invalid_portfolio_build_config", err.to_string()))?;
+        Ok(Some(serde_json::json!({
+            "built_config": outcome.built
+        })))
     }
 }

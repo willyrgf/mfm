@@ -529,6 +529,73 @@ impl crate::op::Operation for DynamicReadThenWriteOp {
 }
 
 #[derive(Clone)]
+struct ConfigEchoOp {
+    op_id: OpId,
+    op_version: String,
+    state_local_id: &'static str,
+    interface: OpInterface,
+}
+
+impl ConfigEchoOp {
+    fn new(
+        op_id: &str,
+        op_version: &str,
+        state_local_id: &'static str,
+        interface: OpInterface,
+    ) -> Self {
+        Self {
+            op_id: OpId::must_new(op_id.to_string()),
+            op_version: op_version.to_string(),
+            state_local_id,
+            interface,
+        }
+    }
+}
+
+impl crate::op::Operation for ConfigEchoOp {
+    fn op_id(&self) -> OpId {
+        self.op_id.clone()
+    }
+
+    fn op_version(&self) -> String {
+        self.op_version.clone()
+    }
+
+    fn expand(
+        &self,
+        op_path: OpPath,
+        _op_config: &serde_json::Value,
+        _run_config: &RunConfig,
+    ) -> Result<crate::op::PlannedOp, SdkError> {
+        Ok(crate::op::PlannedOp {
+            interface: self.interface.clone(),
+            kind: crate::op::PlannedOpKind::Leaf(crate::op::LeafOpSpec {
+                states: vec![crate::op::leaf_state_node(
+                    &op_path,
+                    self.state_local_id,
+                    Arc::new(WriteKeyState {
+                        key: "ignored",
+                        value: serde_json::Value::Null,
+                    }),
+                )?],
+                edges: Vec::new(),
+            }),
+        })
+    }
+
+    fn planner_payload(
+        &self,
+        _op_path: OpPath,
+        op_config: &serde_json::Value,
+        _run_config: &RunConfig,
+    ) -> Result<Option<serde_json::Value>, SdkError> {
+        Ok(Some(serde_json::json!({
+            "resolved_config": op_config
+        })))
+    }
+}
+
+#[derive(Clone)]
 struct CompositeTestOp {
     op_id: OpId,
     op_version: String,
@@ -570,6 +637,7 @@ fn child_instance(child_id: &str, op_id: &str, op_version: &str) -> crate::op::C
         op_id: OpId::must_new(op_id.to_string()),
         op_version: op_version.to_string(),
         op_config: serde_json::json!({}),
+        op_config_from_planner_payload: None,
     }
 }
 
@@ -855,6 +923,97 @@ fn planner_rejects_duplicate_pipeline_export_ports() {
         Err(err) => err,
     };
     assert_eq!(err.info.code.0, "duplicate_export_port");
+}
+
+#[test]
+fn planner_sources_child_op_config_from_sibling_planner_payload() {
+    let mut reg = HashMapOperationRegistry::default();
+    reg.register(Arc::new(
+        DynamicWriteOp::new(
+            "producer_leaf",
+            "v1",
+            "write",
+            "payload",
+            serde_json::json!("v1"),
+            OpInterface {
+                imports: Vec::new(),
+                exports: Vec::new(),
+            },
+        )
+        .with_planner_payload(serde_json::json!({
+            "built_config": {
+                "network_id": "ethereum-mainnet",
+                "plan_kind": "built"
+            }
+        })),
+    ));
+    reg.register(Arc::new(ConfigEchoOp::new(
+        "consumer_leaf",
+        "v1",
+        "consume",
+        OpInterface {
+            imports: Vec::new(),
+            exports: Vec::new(),
+        },
+    )));
+    reg.register(Arc::new(CompositeTestOp::new(
+        "root",
+        "v1",
+        crate::op::PlannedOp {
+            interface: OpInterface {
+                imports: Vec::new(),
+                exports: Vec::new(),
+            },
+            kind: crate::op::PlannedOpKind::Composite(crate::op::CompositeOpSpec {
+                children: vec![
+                    crate::op::ChildOpInstance {
+                        child_op_local_id: crate::ids::ChildOpLocalId("consumer".to_string()),
+                        op_id: OpId::must_new("consumer_leaf".to_string()),
+                        op_version: "v1".to_string(),
+                        op_config: serde_json::json!({}),
+                        op_config_from_planner_payload: Some(
+                            crate::op::PlannerPayloadConfigSource {
+                                child: crate::ids::ChildOpLocalId("producer".to_string()),
+                                pointer: "/built_config".to_string(),
+                            },
+                        ),
+                    },
+                    child_instance("producer", "producer_leaf", "v1"),
+                ],
+                bindings: Vec::new(),
+                order: Vec::new(),
+                re_exports: Vec::new(),
+            }),
+        },
+    )));
+
+    let spec = DefaultPipelinePlanner
+        .build_planned_execution(
+            Arc::new(reg),
+            &single_op_pipeline(
+                OpId::must_new("root".to_string()),
+                "v1".to_string(),
+                serde_json::json!({}),
+            )
+            .expect("pipeline"),
+            &run_config_live(),
+        )
+        .expect("planned execution")
+        .compiled_execution_spec
+        .expect("compiled execution spec");
+
+    assert_eq!(
+        spec.planner_payloads["root.main.consumer"]["resolved_config"],
+        serde_json::json!({
+            "network_id": "ethereum-mainnet",
+            "plan_kind": "built"
+        })
+    );
+
+    assert!(spec
+        .ops
+        .iter()
+        .any(|record| record.op_path == "root.main.consumer"));
 }
 
 #[test]

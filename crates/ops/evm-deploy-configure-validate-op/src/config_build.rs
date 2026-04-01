@@ -13,6 +13,7 @@ use mfm_sdk::op::{
     Operation, PlannedOp, PlannedOpKind,
 };
 use mfm_state_common::states::publish::{WriteContextValueArtifactState, WriteJsonValueState};
+use serde_json::Value;
 
 /// Public root op id for the canonical-to-built deploy/configure/validate config workflow.
 pub const EVM_DEPLOY_CONFIGURE_VALIDATE_CONFIG_BUILD_OP_ID: &str =
@@ -232,5 +233,29 @@ impl Operation for EvmDeployConfigureValidateConfigBuildOp {
                 ],
             }),
         })
+    }
+
+    fn planner_payload(
+        &self,
+        _op_path: OpPath,
+        op_config: &Value,
+        _run_config: &RunConfig,
+    ) -> Result<Option<Value>, SdkError> {
+        let canonical =
+            decode_deploy_configure_validate_canonical_config(op_config).map_err(|err| {
+                super::sdk_input_error(
+                    "invalid_evm_deploy_configure_validate_build_config",
+                    err.to_string(),
+                )
+            })?;
+        let outcome = build_deploy_configure_validate_outcome(canonical).map_err(|err| {
+            super::sdk_input_error(
+                "invalid_evm_deploy_configure_validate_build_config",
+                err.to_string(),
+            )
+        })?;
+        Ok(Some(serde_json::json!({
+            "built_config": outcome.built
+        })))
     }
 }

@@ -70,7 +70,7 @@ use crate::ids::{MachineId, PortKey, StepId};
 use crate::launcher::{LaunchPipeline, RunLauncher};
 use crate::op::{
     child_op_path, leaf_state_id, DynOperation, LeafOpSpec, LeafStateNode, OpInterface,
-    OperationRegistry, PlannedOp, PlannedOpKind, PortSource,
+    OperationRegistry, PlannedOp, PlannedOpKind, PlannerPayloadConfigSource, PortSource,
 };
 use crate::pipeline::{
     CompiledAfterEdge, CompiledExecutionSpec, CompiledImportBinding, CompiledOpRecord,
@@ -688,16 +688,76 @@ fn flatten_composite_op(
         }
     }
 
+    let child_ids: BTreeSet<String> = children_by_id.keys().cloned().collect();
+
+    let mut expansion_dependencies: BTreeSet<(String, String)> = BTreeSet::new();
+    for child in children_by_id.values() {
+        if let Some(PlannerPayloadConfigSource {
+            child: source_child,
+            pointer: _,
+        }) = &child.op_config_from_planner_payload
+        {
+            let source_id = source_child.0.clone();
+            let target_id = child.child_op_local_id.0.clone();
+            if !child_ids.contains(&source_id) {
+                return Err(sdk_error(
+                    "unknown_child_op",
+                    ErrorCategory::ParsingInput,
+                    "composite op planner-payload config referenced an unknown child",
+                ));
+            }
+            expansion_dependencies.insert((source_id, target_id));
+        }
+    }
+
+    let mut child_dependencies: BTreeSet<(String, String)> = BTreeSet::new();
+    for after in spec.order {
+        let from = after.from_child.0.clone();
+        let to = after.to_child.0.clone();
+        if !child_ids.contains(&from) || !child_ids.contains(&to) {
+            return Err(sdk_error(
+                "unknown_child_op",
+                ErrorCategory::ParsingInput,
+                "composite op order edge referenced an unknown child",
+            ));
+        }
+        child_dependencies.insert((from.clone(), to.clone()));
+        expansion_dependencies.insert((from, to));
+    }
+
+    let expansion_order = stable_topological_order(
+        children_by_id.keys().cloned().collect::<Vec<_>>(),
+        &expansion_dependencies,
+        "composite_cycle",
+        "composite op dependency graph contained a cycle",
+    )?;
+
     let mut expanded_children: BTreeMap<
         String,
         (OpPath, OpId, String, PlannedOp, Option<serde_json::Value>),
     > = BTreeMap::new();
-    for (child_id, child) in &children_by_id {
+    for child_id in &expansion_order {
+        let child = children_by_id.get(child_id).expect("child exists");
         let child_op = env.registry.resolve(&child.op_id, &child.op_version)?;
         let child_op_path = child_op_path(planned_op.op_path, child_id.clone())?;
-        let planned = child_op.expand(child_op_path.clone(), &child.op_config, env.run_config)?;
+        let resolved_op_config =
+            resolve_child_op_config(child, &expanded_children, planned_op.op_path)?;
+        canonical_json_bytes(&resolved_op_config).map_err(|e| match e {
+            CanonicalJsonError::FloatNotAllowed => sdk_error(
+                "op_config_not_canonical",
+                ErrorCategory::ParsingInput,
+                "op_config is not canonical-json-hashable (floats are forbidden)",
+            ),
+            CanonicalJsonError::SecretsNotAllowed => sdk_error(
+                "secrets_detected",
+                ErrorCategory::ParsingInput,
+                "op_config contained secrets (policy forbids persisting secrets)",
+            ),
+        })?;
+        let planned =
+            child_op.expand(child_op_path.clone(), &resolved_op_config, env.run_config)?;
         let child_planner_payload =
-            child_op.planner_payload(child_op_path.clone(), &child.op_config, env.run_config)?;
+            child_op.planner_payload(child_op_path.clone(), &resolved_op_config, env.run_config)?;
         validate_op_interface(&planned.interface)?;
         expanded_children.insert(
             child_id.clone(),
@@ -712,7 +772,6 @@ fn flatten_composite_op(
     }
 
     let mut bindings_by_child: BTreeMap<String, BTreeMap<String, PortSource>> = BTreeMap::new();
-    let child_ids: BTreeSet<String> = children_by_id.keys().cloned().collect();
     for binding in spec.bindings {
         let child_id = binding.to_child.0.clone();
         if !child_ids.contains(&child_id) {
@@ -732,20 +791,6 @@ fn flatten_composite_op(
                 "composite op bound the same child import more than once",
             ));
         }
-    }
-
-    let mut child_dependencies: BTreeSet<(String, String)> = BTreeSet::new();
-    for after in spec.order {
-        let from = after.from_child.0.clone();
-        let to = after.to_child.0.clone();
-        if !child_ids.contains(&from) || !child_ids.contains(&to) {
-            return Err(sdk_error(
-                "unknown_child_op",
-                ErrorCategory::ParsingInput,
-                "composite op order edge referenced an unknown child",
-            ));
-        }
-        child_dependencies.insert((from, to));
     }
 
     for (child_id, (_child_path, _child_op_id, _child_op_version, planned, _planner_payload)) in
@@ -1053,6 +1098,52 @@ fn flatten_composite_op(
         state_lineage,
         planner_payloads,
     })
+}
+
+fn resolve_child_op_config(
+    child: &crate::op::ChildOpInstance,
+    expanded_children: &BTreeMap<
+        String,
+        (OpPath, OpId, String, PlannedOp, Option<serde_json::Value>),
+    >,
+    _parent_op_path: &OpPath,
+) -> Result<serde_json::Value, SdkError> {
+    let Some(source) = &child.op_config_from_planner_payload else {
+        return Ok(child.op_config.clone());
+    };
+
+    let Some((_path, _op_id, _op_version, _planned, planner_payload)) =
+        expanded_children.get(&source.child.0)
+    else {
+        return Err(sdk_error(
+            "unsatisfied_child_planner_payload_config",
+            ErrorCategory::ParsingInput,
+            "composite op child config referenced a planner payload that was not available",
+        ));
+    };
+
+    let Some(planner_payload) = planner_payload else {
+        return Err(sdk_error(
+            "missing_child_planner_payload",
+            ErrorCategory::ParsingInput,
+            "composite op child config referenced a child without planner payload",
+        ));
+    };
+
+    if source.pointer.is_empty() {
+        return Ok(planner_payload.clone());
+    }
+
+    planner_payload
+        .pointer(&source.pointer)
+        .cloned()
+        .ok_or_else(|| {
+            sdk_error(
+                "missing_child_planner_payload_pointer",
+                ErrorCategory::ParsingInput,
+                "composite op child config pointer was missing in planner payload",
+            )
+        })
 }
 
 fn flatten_planned_op(

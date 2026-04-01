@@ -498,25 +498,10 @@ fn expand_uses_canonical_multi_network_graph() {
         .map(|child| child.child_op_local_id.0.clone())
         .collect();
     assert!(child_ids.contains(&PORTFOLIO_TRACKER_BUILD_CHILD_ID.to_string()));
-    assert!(child_ids.contains(&PREPARE_EXECUTION_SOURCES_CHILD_ID.to_string()));
-    assert!(child_ids.contains(&RESOLVE_SUBJECTS_CHILD_ID.to_string()));
-    assert!(child_ids.contains(&PIN_EXECUTION_VIEWS_CHILD_ID.to_string()));
-    assert!(child_ids.contains(&RESOLVE_VALUATION_INPUTS_CHILD_ID.to_string()));
-    assert!(child_ids.contains(&MERGE_OBSERVATIONS_CHILD_ID.to_string()));
-    assert!(child_ids.contains(&ASSEMBLE_SNAPSHOT_CHILD_ID.to_string()));
-    assert!(child_ids.contains(&PROJECT_REPORT_CHILD_ID.to_string()));
-    let semantic_spec = compile_portfolio_plan(&parse_config(&canonical_op_config()).expect("cfg"))
-        .expect("semantic spec");
-    assert_eq!(
-        child_ids
-            .iter()
-            .filter(|child_id| child_id.starts_with("observe_"))
-            .count(),
-        semantic_spec.observation_batches.len()
-    );
+    assert!(child_ids.contains(&PORTFOLIO_TRACKER_EXECUTE_CHILD_ID.to_string()));
     assert!(composite.order.iter().any(|edge| {
         edge.from_child.0 == PORTFOLIO_TRACKER_BUILD_CHILD_ID
-            && edge.to_child.0 == PREPARE_EXECUTION_SOURCES_CHILD_ID
+            && edge.to_child.0 == PORTFOLIO_TRACKER_EXECUTE_CHILD_ID
     }));
 
     let build_child = composite
@@ -530,6 +515,23 @@ fn expand_uses_canonical_multi_network_graph() {
     let expected_canonical: PortfolioSnapshotCanonicalConfig =
         serde_json::from_value(canonical_op_config()).expect("expected canonical config");
     assert_eq!(build_canonical, expected_canonical);
+
+    let execute_child = composite
+        .children
+        .iter()
+        .find(|child| child.child_op_local_id.0 == PORTFOLIO_TRACKER_EXECUTE_CHILD_ID)
+        .expect("execute child");
+    assert_eq!(execute_child.op_id.as_str(), PORTFOLIO_EXECUTE_OP_ID);
+    assert_eq!(execute_child.op_config, serde_json::json!({}));
+    let planner_payload_source = execute_child
+        .op_config_from_planner_payload
+        .as_ref()
+        .expect("planner payload source");
+    assert_eq!(
+        planner_payload_source.child.0,
+        PORTFOLIO_TRACKER_BUILD_CHILD_ID
+    );
+    assert_eq!(planner_payload_source.pointer, "/built_config");
 
     assert!(composite
         .re_exports
@@ -757,6 +759,11 @@ fn expand_uses_semantic_state_ids_without_protocol_fragments() {
             );
             continue;
         }
+
+        let execute_prefix = format!("{PORTFOLIO_TRACKER_EXECUTE_CHILD_ID}__");
+        let suffix = suffix
+            .strip_prefix(execute_prefix.as_str())
+            .unwrap_or(suffix);
 
         if suffix.starts_with("observe_") {
             assert!(

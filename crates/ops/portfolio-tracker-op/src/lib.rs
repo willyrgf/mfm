@@ -42,7 +42,7 @@ use mfm_sdk::errors::SdkError;
 use mfm_sdk::ids::{ChildOpLocalId, PortKey};
 use mfm_sdk::op::{
     AfterEdge, ChildOpInstance, CompositeOpSpec, DynOperation, ImportBinding, OpInterface,
-    Operation, PlannedOp, PlannedOpKind, PortSource, ReExportBinding,
+    Operation, PlannedOp, PlannedOpKind, PlannerPayloadConfigSource, PortSource, ReExportBinding,
 };
 use mfm_state_common::errors as op_errors;
 use mfm_state_portfolio::plan::{PortfolioExecutionSpec, PORTFOLIO_EXECUTION_SPEC_KEY};
@@ -80,11 +80,12 @@ pub const PORTFOLIO_PUBLIC_OP_VERSION: &str = "v1";
 const PORTFOLIO_TRACKER_MAIN_OP_PATH: &str = "portfolio_tracker.main";
 const PORTFOLIO_EXECUTE_MAIN_OP_PATH: &str = "portfolio_execute.main";
 const PORTFOLIO_TRACKER_BUILD_CHILD_ID: &str = "b";
+const PORTFOLIO_TRACKER_EXECUTE_CHILD_ID: &str = "e";
 
 /// Returns the context key that stores the canonical portfolio snapshot JSON.
 pub fn portfolio_snapshot_context_key() -> ContextKey {
     ContextKey(format!(
-        "{PORTFOLIO_TRACKER_MAIN_OP_PATH}.{ASSEMBLE_SNAPSHOT_CHILD_ID}.out.{PORT_SNAPSHOT}"
+        "{PORTFOLIO_TRACKER_MAIN_OP_PATH}.{PORTFOLIO_TRACKER_EXECUTE_CHILD_ID}.out.{PORT_SNAPSHOT}"
     ))
 }
 
@@ -99,7 +100,7 @@ pub fn portfolio_execute_snapshot_context_key() -> ContextKey {
 /// Returns the context key that stores the canonical portfolio snapshot artifact id.
 pub fn portfolio_snapshot_artifact_id_context_key() -> ContextKey {
     ContextKey(format!(
-        "{PORTFOLIO_TRACKER_MAIN_OP_PATH}.{ASSEMBLE_SNAPSHOT_CHILD_ID}.out.{PORT_SNAPSHOT_ARTIFACT_ID}"
+        "{PORTFOLIO_TRACKER_MAIN_OP_PATH}.{PORTFOLIO_TRACKER_EXECUTE_CHILD_ID}.out.{PORT_SNAPSHOT_ARTIFACT_ID}"
     ))
 }
 
@@ -114,7 +115,7 @@ pub fn portfolio_execute_snapshot_artifact_id_context_key() -> ContextKey {
 /// Returns the context key that stores the canonical portfolio report JSON.
 pub fn portfolio_snapshot_report_context_key() -> ContextKey {
     ContextKey(format!(
-        "{PORTFOLIO_TRACKER_MAIN_OP_PATH}.{PROJECT_REPORT_CHILD_ID}.out.{PORT_REPORT}"
+        "{PORTFOLIO_TRACKER_MAIN_OP_PATH}.{PORTFOLIO_TRACKER_EXECUTE_CHILD_ID}.out.{PORT_REPORT}"
     ))
 }
 
@@ -218,13 +219,24 @@ fn re_export_binding(export: &str, source: PortSource) -> ReExportBinding {
     }
 }
 
+fn portfolio_execute_interface() -> OpInterface {
+    OpInterface {
+        imports: Vec::new(),
+        exports: vec![
+            PortKey(PORT_SNAPSHOT.to_string()),
+            PortKey(PORT_SNAPSHOT_ARTIFACT_ID.to_string()),
+            PortKey(PORT_REPORT.to_string()),
+        ],
+    }
+}
+
 fn observe_child_local_id(index: usize, batch_id: &str) -> String {
     let prefix = format!("observe_{index}_");
     let sanitized = sanitize_child_local_id(batch_id);
-    // The lowered runtime state id appends `__run` to the child segment, so the child-local-id
-    // must stay within the remaining identifier budget for the flat `<machine>.<step>.<state>`
-    // contract.
-    let suffix_len = 58usize.saturating_sub(prefix.len());
+    // The compatibility root now adds one extra wrapper child (`e`) before the semantic runtime.
+    // Keep observe child ids short enough that both the built root and the compatibility root
+    // still satisfy the flat `<machine>.<step>.<state>` contract after lowering.
+    let suffix_len = 55usize.saturating_sub(prefix.len());
     let suffix: String = sanitized.chars().take(suffix_len).collect();
     format!("{prefix}{suffix}")
 }
@@ -372,24 +384,28 @@ fn expand_portfolio_execution(
             op_id: OpId::must_new(PREPARE_EXECUTION_SOURCES_OP_ID.to_string()),
             op_version: plan_ops::INTERNAL_OP_VERSION.to_string(),
             op_config: prepare_sources_config(&spec)?,
+            op_config_from_planner_payload: None,
         },
         ChildOpInstance {
             child_op_local_id: ChildOpLocalId(RESOLVE_SUBJECTS_CHILD_ID.to_string()),
             op_id: OpId::must_new(RESOLVE_SUBJECTS_OP_ID.to_string()),
             op_version: plan_ops::INTERNAL_OP_VERSION.to_string(),
             op_config: resolve_subjects_config(&spec)?,
+            op_config_from_planner_payload: None,
         },
         ChildOpInstance {
             child_op_local_id: ChildOpLocalId(PIN_EXECUTION_VIEWS_CHILD_ID.to_string()),
             op_id: OpId::must_new(PIN_EXECUTION_VIEWS_OP_ID.to_string()),
             op_version: plan_ops::INTERNAL_OP_VERSION.to_string(),
             op_config: pin_execution_views_config(&spec)?,
+            op_config_from_planner_payload: None,
         },
         ChildOpInstance {
             child_op_local_id: ChildOpLocalId(RESOLVE_VALUATION_INPUTS_CHILD_ID.to_string()),
             op_id: OpId::must_new(RESOLVE_VALUATION_INPUTS_OP_ID.to_string()),
             op_version: plan_ops::INTERNAL_OP_VERSION.to_string(),
             op_config: resolve_valuations_config(&spec)?,
+            op_config_from_planner_payload: None,
         },
     ];
     let mut bindings = vec![
@@ -428,6 +444,7 @@ fn expand_portfolio_execution(
             op_id: OpId::must_new(OBSERVE_COMPILED_BATCH_OP_ID.to_string()),
             op_version: plan_ops::INTERNAL_OP_VERSION.to_string(),
             op_config: observe_batch_config(batch)?,
+            op_config_from_planner_payload: None,
         });
         bindings.push(import_binding(
             child_id.as_str(),
@@ -458,18 +475,21 @@ fn expand_portfolio_execution(
         op_id: OpId::must_new(MERGE_OBSERVATIONS_OP_ID.to_string()),
         op_version: plan_ops::INTERNAL_OP_VERSION.to_string(),
         op_config: merge_observations_config(merge_input_ports)?,
+        op_config_from_planner_payload: None,
     });
     children.push(ChildOpInstance {
         child_op_local_id: ChildOpLocalId(ASSEMBLE_SNAPSHOT_CHILD_ID.to_string()),
         op_id: OpId::must_new(ASSEMBLE_SNAPSHOT_OP_ID.to_string()),
         op_version: plan_ops::INTERNAL_OP_VERSION.to_string(),
         op_config: assemble_snapshot_config(&cfg.canonical.portfolio, output_fact_key(&op_path))?,
+        op_config_from_planner_payload: None,
     });
     children.push(ChildOpInstance {
         child_op_local_id: ChildOpLocalId(PROJECT_REPORT_CHILD_ID.to_string()),
         op_id: OpId::must_new(PROJECT_REPORT_OP_ID.to_string()),
         op_version: plan_ops::INTERNAL_OP_VERSION.to_string(),
         op_config: serde_json::json!({}),
+        op_config_from_planner_payload: None,
     });
 
     bindings.push(import_binding(
@@ -525,42 +545,52 @@ fn expand_portfolio_execution(
 }
 
 fn expand_portfolio_tracker_from_canonical(
-    op_path: OpPath,
+    _op_path: OpPath,
     canonical: PortfolioSnapshotCanonicalConfig,
 ) -> Result<PlannedOp, SdkError> {
-    let outcome = build_portfolio_snapshot_outcome(canonical.clone())
-        .map_err(|err| sdk_input_error("invalid_portfolio_execution_config", err.to_string()))?;
-    let execution = expand_portfolio_execution(op_path, &outcome.built)?;
-    let interface = execution.interface;
-    let mut spec = match execution.kind {
-        PlannedOpKind::Composite(spec) => spec,
-        PlannedOpKind::Leaf(_) => {
-            return Err(sdk_input_error(
-                "invalid_portfolio_execution_plan",
-                "portfolio execution root unexpectedly lowered to a leaf graph",
-            ));
-        }
-    };
-
-    spec.children.insert(
-        0,
-        ChildOpInstance {
-            child_op_local_id: ChildOpLocalId(PORTFOLIO_TRACKER_BUILD_CHILD_ID.to_string()),
-            op_id: OpId::must_new(PORTFOLIO_CONFIG_BUILD_OP_ID.to_string()),
-            op_version: PORTFOLIO_PUBLIC_OP_VERSION.to_string(),
-            op_config: serde_json::to_value(&canonical).map_err(|err| {
-                sdk_input_error("invalid_portfolio_execution_config", err.to_string())
-            })?,
-        },
-    );
-    spec.order.push(AfterEdge {
-        from_child: ChildOpLocalId(PORTFOLIO_TRACKER_BUILD_CHILD_ID.to_string()),
-        to_child: ChildOpLocalId(PREPARE_EXECUTION_SOURCES_CHILD_ID.to_string()),
-    });
-
     Ok(PlannedOp {
-        interface,
-        kind: PlannedOpKind::Composite(spec),
+        interface: portfolio_execute_interface(),
+        kind: PlannedOpKind::Composite(CompositeOpSpec {
+            children: vec![
+                ChildOpInstance {
+                    child_op_local_id: ChildOpLocalId(PORTFOLIO_TRACKER_BUILD_CHILD_ID.to_string()),
+                    op_id: OpId::must_new(PORTFOLIO_CONFIG_BUILD_OP_ID.to_string()),
+                    op_version: PORTFOLIO_PUBLIC_OP_VERSION.to_string(),
+                    op_config: serde_json::to_value(&canonical).map_err(|err| {
+                        sdk_input_error("invalid_portfolio_execution_config", err.to_string())
+                    })?,
+                    op_config_from_planner_payload: None,
+                },
+                ChildOpInstance {
+                    child_op_local_id: ChildOpLocalId(
+                        PORTFOLIO_TRACKER_EXECUTE_CHILD_ID.to_string(),
+                    ),
+                    op_id: OpId::must_new(PORTFOLIO_EXECUTE_OP_ID.to_string()),
+                    op_version: PORTFOLIO_PUBLIC_OP_VERSION.to_string(),
+                    op_config: serde_json::json!({}),
+                    op_config_from_planner_payload: Some(PlannerPayloadConfigSource {
+                        child: ChildOpLocalId(PORTFOLIO_TRACKER_BUILD_CHILD_ID.to_string()),
+                        pointer: "/built_config".to_string(),
+                    }),
+                },
+            ],
+            bindings: Vec::new(),
+            order: vec![AfterEdge {
+                from_child: ChildOpLocalId(PORTFOLIO_TRACKER_BUILD_CHILD_ID.to_string()),
+                to_child: ChildOpLocalId(PORTFOLIO_TRACKER_EXECUTE_CHILD_ID.to_string()),
+            }],
+            re_exports: portfolio_execute_interface()
+                .exports
+                .iter()
+                .map(|export| ReExportBinding {
+                    export: export.clone(),
+                    source: PortSource::ChildExport {
+                        child: ChildOpLocalId(PORTFOLIO_TRACKER_EXECUTE_CHILD_ID.to_string()),
+                        export: export.clone(),
+                    },
+                })
+                .collect(),
+        }),
     })
 }
 

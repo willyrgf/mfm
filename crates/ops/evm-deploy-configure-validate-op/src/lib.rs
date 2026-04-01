@@ -29,7 +29,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use mfm_evm_deploy_configure_validate_config::{
-    build_deploy_configure_validate_outcome, decode_deploy_configure_validate_built_config,
+    decode_deploy_configure_validate_built_config,
     decode_deploy_configure_validate_canonical_config, DeployConfigureValidateBuiltConfig,
     DeployConfigureValidateCanonicalConfig, DeployConfigureValidateExecutionConfig,
 };
@@ -42,7 +42,7 @@ use mfm_sdk::errors::SdkError;
 use mfm_sdk::ids::{ChildOpLocalId, PortKey};
 use mfm_sdk::op::{
     child_op_path, CompositeOpSpec, DynOperation, LeafOpSpec, LeafStateNode, OpInterface,
-    Operation, PlannedOp, PlannedOpKind, PortSource, ReExportBinding,
+    Operation, PlannedOp, PlannedOpKind, PlannerPayloadConfigSource, PortSource, ReExportBinding,
 };
 use mfm_state_common::errors as op_errors;
 use serde::Serialize;
@@ -72,8 +72,8 @@ const CONFIGURE_EXPORT: &str = "configure_receipts";
 const CONTRACT_ADDRESS_EXPORT: &str = "contract_address";
 #[cfg(test)]
 const DEPLOY_TX_HASH_EXPORT: &str = "deploy_tx_hash";
-const EXECUTE_CHILD_ID: &str = "execute";
-const TRACKER_BUILD_CHILD_ID: &str = "build";
+const EXECUTE_CHILD_ID: &str = "e";
+const TRACKER_BUILD_CHILD_ID: &str = "b";
 #[cfg(test)]
 const VALIDATED_EXPORT: &str = "validated";
 
@@ -125,6 +125,22 @@ fn re_export_binding(export: &PortKey) -> ReExportBinding {
     }
 }
 
+fn execution_interface() -> OpInterface {
+    OpInterface {
+        imports: Vec::new(),
+        exports: vec![
+            PortKey("contract_address".to_string()),
+            PortKey("deploy_tx_hash".to_string()),
+            PortKey("deploy_receipt".to_string()),
+            PortKey("configure_tx_hashes".to_string()),
+            PortKey("configure_receipts".to_string()),
+            PortKey("validated".to_string()),
+            PortKey("chain_id".to_string()),
+            PortKey("client_version".to_string()),
+        ],
+    }
+}
+
 fn serialize_execution_phase<T: Serialize>(
     phase: &T,
     phase_name: &'static str,
@@ -138,9 +154,9 @@ fn serialize_execution_phase<T: Serialize>(
 }
 
 fn expand_from_canonical(
-    op_path: OpPath,
+    _op_path: OpPath,
     canonical: DeployConfigureValidateCanonicalConfig,
-    run_config: &RunConfig,
+    _run_config: &RunConfig,
 ) -> Result<PlannedOp, SdkError> {
     let canonical_json = serde_json::to_value(&canonical).map_err(|err| {
         sdk_input_error(
@@ -148,26 +164,11 @@ fn expand_from_canonical(
             err.to_string(),
         )
     })?;
-    let outcome = build_deploy_configure_validate_outcome(canonical).map_err(|err| {
-        sdk_input_error(
-            "invalid_evm_deploy_configure_validate_execution_config",
-            err.to_string(),
-        )
-    })?;
-    let built_json = serde_json::to_value(&outcome.built).map_err(|err| {
-        sdk_input_error(
-            "invalid_evm_deploy_configure_validate_execution_config",
-            err.to_string(),
-        )
-    })?;
-    let execute_path = child_op_path(&op_path, EXECUTE_CHILD_ID)?;
-    let (interface, _) = plan_execution_leaf(execute_path, &outcome.built.execution, run_config)?;
+
+    let interface = execution_interface();
 
     Ok(PlannedOp {
-        interface: OpInterface {
-            imports: Vec::new(),
-            exports: interface.exports.clone(),
-        },
+        interface: interface.clone(),
         kind: PlannedOpKind::Composite(CompositeOpSpec {
             children: vec![
                 mfm_sdk::op::ChildOpInstance {
@@ -177,12 +178,17 @@ fn expand_from_canonical(
                     ),
                     op_version: EVM_DEPLOY_CONFIGURE_VALIDATE_PUBLIC_OP_VERSION.to_string(),
                     op_config: canonical_json,
+                    op_config_from_planner_payload: None,
                 },
                 mfm_sdk::op::ChildOpInstance {
                     child_op_local_id: ChildOpLocalId(EXECUTE_CHILD_ID.to_string()),
                     op_id: OpId::must_new(EVM_DEPLOY_CONFIGURE_VALIDATE_EXECUTE_OP_ID.to_string()),
                     op_version: EVM_DEPLOY_CONFIGURE_VALIDATE_PUBLIC_OP_VERSION.to_string(),
-                    op_config: built_json,
+                    op_config: serde_json::json!({}),
+                    op_config_from_planner_payload: Some(PlannerPayloadConfigSource {
+                        child: ChildOpLocalId(TRACKER_BUILD_CHILD_ID.to_string()),
+                        pointer: "/built_config".to_string(),
+                    }),
                 },
             ],
             bindings: Vec::new(),
