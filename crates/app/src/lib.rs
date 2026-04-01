@@ -99,10 +99,9 @@ use mfm_portfolio_config::{
     AuthoredConfigFormat as PortfolioAuthoredConfigFormat, PortfolioSnapshotBuildReport,
     PortfolioSnapshotBuiltConfig, PortfolioSnapshotConfigError,
 };
-use mfm_sdk::ids::{MachineId, StepId};
 use mfm_sdk::launcher::{LaunchPipeline, RunLauncher};
 use mfm_sdk::op::OperationRegistry;
-use mfm_sdk::pipeline::{Pipeline, PipelinePlanner, PipelineStep};
+use mfm_sdk::pipeline::{Pipeline, PipelinePlanner};
 use mfm_sdk::unstable::{
     decode_context_value_with_slot_fallback, load_context_snapshot_json, single_op_pipeline,
     ContextSnapshotLoadError, DefaultPipelinePlanner, DefaultRunLauncher, HashMapOperationRegistry,
@@ -745,7 +744,7 @@ impl AppServices {
                     single_op_pipeline(op_id, req.op_version, req.op_config).map_err(|e| {
                         AppError::new(ErrorClass::BadRequest, e.info.code.0, e.info.message)
                     })?;
-                (pipeline, serde_json::json!({}), default_run_config())
+                (pipeline, req.input, default_run_config())
             }
             RunsStartRequest::Pipeline(req) => {
                 tracing::Span::current().record("request_kind", "pipeline");
@@ -969,21 +968,25 @@ impl AppServices {
         get_artifact_from_store(Arc::clone(&self.artifacts), artifact_id).await
     }
 
-    /// Starts the standard deploy-configure-validate pipeline template.
+    /// Starts the standard deploy-configure-validate workflow through the public root op family.
     pub async fn start_deploy_configure_validate(
         &self,
         spec: DeployConfigureValidateSpec,
     ) -> Result<RunStartResponse, AppError> {
-        let pipeline = pipeline_from_deploy_configure_validate_spec(spec.clone());
-        self.start_run(RunsStartRequest::Pipeline(PipelineStartRequest {
-            pipeline,
-            input: spec.input,
-            run_config: Some(default_run_config()),
+        let input = spec.input.clone();
+        let op_config = serde_json::to_value(&spec).map_err(|_| {
+            AppError::invalid_request("failed to encode deploy-configure-validate request")
+        })?;
+        self.start_run(RunsStartRequest::Single(SingleOpStartRequest {
+            op_id: EVM_DEPLOY_CONFIGURE_VALIDATE_OP_ID.to_string(),
+            op_version: EVM_DEPLOY_CONFIGURE_VALIDATE_PUBLIC_OP_VERSION.to_string(),
+            op_config,
+            input,
         }))
         .await
     }
 
-    /// Starts the deploy-configure-validate template from raw JSON or a JSON/TOML file.
+    /// Starts the deploy-configure-validate workflow from raw JSON or a JSON/TOML file.
     #[allow(clippy::disallowed_methods)]
     pub async fn start_deploy_configure_validate_from_spec_input(
         &self,
@@ -1008,6 +1011,7 @@ impl AppServices {
                 op_id: PORTFOLIO_CONFIG_BUILD_OP_ID.to_string(),
                 op_version: PORTFOLIO_PUBLIC_OP_VERSION.to_string(),
                 op_config,
+                input: serde_json::json!({}),
             }))
             .await?;
 
@@ -1079,6 +1083,7 @@ impl AppServices {
                 op_id: PORTFOLIO_TRACKER_OP_ID.to_string(),
                 op_version: PORTFOLIO_PUBLIC_OP_VERSION.to_string(),
                 op_config,
+                input: serde_json::json!({}),
             }))
             .await?;
 
@@ -1329,6 +1334,10 @@ pub struct SingleOpStartRequest {
     /// Canonical JSON config passed to the operation.
     #[serde(default = "default_empty_object")]
     pub op_config: serde_json::Value,
+
+    /// Canonical JSON input embedded in the manifest for the wrapped single-op run.
+    #[serde(default = "default_empty_object")]
+    pub input: serde_json::Value,
 }
 
 /// Request payload for starting an explicit pipeline run.
@@ -1497,26 +1506,8 @@ pub enum ArtifactBody {
     },
 }
 
-/// Input payload for the standard deploy-configure-validate pipeline feature.
+/// Input payload for the standard deploy-configure-validate workflow feature.
 pub use mfm_evm_deploy_configure_validate_config::DeployConfigureValidateCanonicalConfig as DeployConfigureValidateSpec;
-
-/// Converts a deploy-configure-validate spec into the canonical single-step pipeline template.
-pub fn pipeline_from_deploy_configure_validate_spec(spec: DeployConfigureValidateSpec) -> Pipeline {
-    Pipeline {
-        machine_id: MachineId(spec.machine_id),
-        pipeline_version: spec.pipeline_version,
-        steps: vec![PipelineStep {
-            step_id: StepId("main".to_string()),
-            op_id: OpId::must_new(EVM_DEPLOY_CONFIGURE_VALIDATE_OP_ID.to_string()),
-            op_version: EVM_DEPLOY_CONFIGURE_VALIDATE_PUBLIC_OP_VERSION.to_string(),
-            op_config: serde_json::json!({
-                "deploy": spec.deploy,
-                "configure": spec.configure,
-                "validate": spec.validate,
-            }),
-        }],
-    }
-}
 
 fn default_op_id() -> String {
     "proof".to_string()
@@ -1658,7 +1649,8 @@ impl FeatureCatalog {
                             "properties": {
                                 "op_id": {"type": "string"},
                                 "op_version": {"type": "string"},
-                                "op_config": {"type": "object"}
+                                "op_config": {"type": "object"},
+                                "input": {"type": "object"}
                             }
                         },
                         {
@@ -1772,7 +1764,7 @@ impl FeatureCatalog {
                 id: "pipeline.deploy_configure_validate.start".to_string(),
                 version: "v1".to_string(),
                 kind: FeatureKind::PipelineTemplate,
-                description: "Start the standard deploy->configure->validate pipeline template"
+                description: "Start the standard deploy->configure->validate workflow"
                     .to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
@@ -2026,9 +2018,11 @@ mod tests {
     };
     use mfm_op_portfolio_tracker::portfolio_tracker_internal_op_ids;
     use mfm_sdk::errors::SdkError;
+    use mfm_sdk::ids::{MachineId, StepId};
     use mfm_sdk::op::{
         leaf_state_node, LeafOpSpec, OpInterface, Operation, PlannedOp, PlannedOpKind,
     };
+    use mfm_sdk::pipeline::PipelineStep;
     use mfm_sdk::unstable::HashMapOperationRegistry;
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -2389,6 +2383,7 @@ mod tests {
                 op_id: "plugin_single_op".to_string(),
                 op_version: "v1".to_string(),
                 op_config: serde_json::json!({}),
+                input: serde_json::json!({}),
             }))
             .await
             .expect("plugin-registered root op should be startable");
@@ -2493,6 +2488,7 @@ mod tests {
                     op_id: (*op_id).to_string(),
                     op_version: "v1".to_string(),
                     op_config: serde_json::json!({}),
+                    input: serde_json::json!({}),
                 }))
                 .await
                 .expect_err("planner-internal op must not be publicly startable");
@@ -2570,6 +2566,7 @@ mod tests {
                     op_id: (*op_id).to_string(),
                     op_version: "v1-internal".to_string(),
                     op_config: serde_json::json!({}),
+                    input: serde_json::json!({}),
                 }))
                 .await
                 .expect_err("planner-internal op must not be publicly startable");

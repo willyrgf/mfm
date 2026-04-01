@@ -30,6 +30,8 @@ const NETWORK_ID: &str = "ethereum-mainnet";
 const CONTROL_SCOPE: &str = "parity.evm_reth_pipeline";
 const PARITY_RUN_MAX_ATTEMPTS: u32 = 3;
 const PARITY_RUN_RETRY_DELAY_MS: u64 = 250;
+const EVM_DEPLOY_CONFIGURE_VALIDATE_OP_ID: &str = "evm_deploy_configure_validate";
+const EVM_DEPLOY_CONFIGURE_VALIDATE_PUBLIC_OP_VERSION: &str = "v1";
 
 #[derive(Default)]
 struct MapContext {
@@ -126,6 +128,56 @@ fn contract_artifact_program_path() -> String {
         "mfm-contract-artifact-configurable-counter must be in PATH"
     );
     String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+fn deploy_configure_validate_canonical_config(
+    from: &str,
+    control_scope: &str,
+    signing_key_env: &str,
+    expected_chain_id: u64,
+) -> serde_json::Value {
+    serde_json::json!({
+        "machine_id": "evm_reth_root_dcv",
+        "pipeline_version": "v1",
+        "input": {
+            "scenario": "parity_reth_root_dcv"
+        },
+        "deploy": {
+            "artifact_port": "contract_artifact",
+            "network_id": NETWORK_ID,
+            "control_scope": control_scope,
+            "from": from,
+            "signing_key_env": signing_key_env,
+            "constructor_args": [1],
+            "poll_interval_ms": 200,
+            "max_receipt_polls": 120,
+        },
+        "configure": {
+            "artifact_port": "contract_artifact",
+            "network_id": NETWORK_ID,
+            "control_scope": control_scope,
+            "from": from,
+            "signing_key_env": signing_key_env,
+            "calls": [
+                {"function": "setValue", "args": [7]}
+            ],
+            "poll_interval_ms": 200,
+            "max_receipt_polls": 120,
+        },
+        "validate": {
+            "artifact_port": "contract_artifact",
+            "network_id": NETWORK_ID,
+            "control_scope": control_scope,
+            "expected_chain_id": expected_chain_id,
+            "require_client_substring": "reth",
+            "read_assertions": [
+                {"function": "getValue", "args": [], "expected": 7}
+            ],
+            "event_assertions": [
+                {"event": "ValueSet", "min_count": 2}
+            ],
+        },
+    })
 }
 
 async fn rpc_call(
@@ -449,4 +501,178 @@ async fn parity_reth_pipeline_contract_from_nix() {
     assert!(!stream.is_empty());
 
     write_parity_evm_run_id(&run.run_id);
+}
+
+#[tokio::test]
+async fn parity_reth_deploy_configure_validate_root_op() {
+    init_test_observability();
+
+    let pg = connect_postgres_with_retry(20, 250).await;
+    let streams: Arc<dyn StreamStore> = Arc::new(pg);
+
+    let s3 = S3ArtifactStore::from_env().expect("s3 config");
+    s3.ensure_bucket_exists().await.expect("bucket exists");
+    let artifacts: Arc<dyn ArtifactStore> = Arc::new(s3);
+
+    let rpc_sources = rpc_control::required_bootstrap_sources_from_env_for_network(NETWORK_ID);
+    let control_scope = format!("{CONTROL_SCOPE}.root.{}", uuid::Uuid::new_v4().simple());
+    let bootstrap_control_scope = format!("{control_scope}.bootstrap");
+
+    let accounts = rpc_call(
+        &rpc_sources,
+        &bootstrap_control_scope,
+        Arc::clone(&streams),
+        Arc::clone(&artifacts),
+        "eth_accounts",
+        serde_json::json!([]),
+    )
+    .await;
+    let from = accounts
+        .as_array()
+        .and_then(|arr| arr.first())
+        .and_then(|v| v.as_str())
+        .expect("eth_accounts first address")
+        .to_string();
+    let signing_key_env = "MFM_EVM_PARITY_DEPLOY_SIGNING_KEY";
+    std::env::set_var(signing_key_env, RETH_DEV_ACCOUNT0_PRIVATE_KEY);
+
+    let chain_id_hex = rpc_call(
+        &rpc_sources,
+        &bootstrap_control_scope,
+        Arc::clone(&streams),
+        Arc::clone(&artifacts),
+        "eth_chainId",
+        serde_json::json!([]),
+    )
+    .await;
+    let expected_chain_id = chain_id_hex
+        .as_str()
+        .map(parse_u64_hex)
+        .expect("eth_chainId hex");
+
+    let contract_program_path = contract_artifact_program_path();
+    let pipeline = Pipeline {
+        machine_id: MachineId("evm_reth_root_dcv_pipeline".to_string()),
+        pipeline_version: "v1".to_string(),
+        steps: vec![
+            PipelineStep {
+                step_id: StepId("fetch".to_string()),
+                op_id: OpId::must_new("nix_app".to_string()),
+                op_version: "v1".to_string(),
+                op_config: serde_json::json!({
+                    "program_path": contract_program_path,
+                    "stdin_json": {},
+                    "timeout_ms": 300000,
+                    "write_result_to": "result",
+                }),
+            },
+            PipelineStep {
+                step_id: StepId("adapt".to_string()),
+                op_id: OpId::must_new("evm_contract_from_nix".to_string()),
+                op_version: "v1".to_string(),
+                op_config: serde_json::json!({
+                    "result_pointer": "/artifact"
+                }),
+            },
+            PipelineStep {
+                step_id: StepId("dcv".to_string()),
+                op_id: OpId::must_new(EVM_DEPLOY_CONFIGURE_VALIDATE_OP_ID.to_string()),
+                op_version: EVM_DEPLOY_CONFIGURE_VALIDATE_PUBLIC_OP_VERSION.to_string(),
+                op_config: deploy_configure_validate_canonical_config(
+                    &from,
+                    &control_scope,
+                    signing_key_env,
+                    expected_chain_id,
+                ),
+            },
+        ],
+    };
+
+    let run_config = run_config_with_allowlist(mfm_machine::config::default_nix_flake_allowlist());
+
+    let bundle = mfm_rest_api::make_engine_bundle();
+    let launcher = DefaultRunLauncher;
+    let run = launcher
+        .start_pipeline(
+            Arc::clone(&bundle.engine),
+            Stores {
+                streams: Arc::clone(&streams),
+                artifacts: Arc::clone(&artifacts),
+            },
+            Arc::clone(&bundle.registry),
+            Arc::clone(&bundle.planner),
+            LaunchPipeline {
+                pipeline,
+                input: serde_json::json!({}),
+                run_config,
+                build: BuildProvenance {
+                    git_commit: None,
+                    cargo_lock_hash: None,
+                    flake_lock_hash: None,
+                    rustc_version: None,
+                    target_triple: None,
+                    env_allowlist: Vec::new(),
+                },
+                initial_context: Box::new(MapContext::default()),
+            },
+        )
+        .await
+        .expect("start root-op pipeline");
+
+    if run.phase != RunPhase::Completed {
+        let diagnostics = run_failure_diagnostics(Arc::clone(&streams), run.run_id).await;
+        panic!(
+            "root-op deploy-configure-validate expected Completed, got {:?}; {}",
+            run.phase, diagnostics
+        );
+    }
+    let final_snapshot_id = run.final_snapshot_id.expect("final snapshot");
+
+    let snapshot_bytes = artifacts
+        .get(&final_snapshot_id)
+        .await
+        .expect("read final snapshot");
+    let snapshot: serde_json::Value =
+        serde_json::from_slice(&snapshot_bytes).expect("decode snapshot json");
+
+    let build_report =
+        required_snapshot_value(&snapshot, "evm_reth_root_dcv_pipeline.dcv.build.report");
+    assert_eq!(build_report["machine_id"], "evm_reth_root_dcv");
+    assert_eq!(build_report["phase_count"], 3);
+
+    let contract_address =
+        required_snapshot_value(&snapshot, "evm_reth_root_dcv_pipeline.dcv.contract_address")
+            .as_str()
+            .expect("contract address");
+    assert!(contract_address.starts_with("0x"));
+
+    let deploy_tx_hash =
+        required_snapshot_value(&snapshot, "evm_reth_root_dcv_pipeline.dcv.deploy_tx_hash")
+            .as_str()
+            .expect("deploy tx hash");
+    assert!(deploy_tx_hash.starts_with("0x"));
+
+    let configure_receipts = required_snapshot_value(
+        &snapshot,
+        "evm_reth_root_dcv_pipeline.dcv.configure_receipts",
+    )
+    .as_array()
+    .expect("configure receipts");
+    assert!(!configure_receipts.is_empty());
+
+    assert_eq!(
+        required_snapshot_value(&snapshot, "evm_reth_root_dcv_pipeline.dcv.validated"),
+        &serde_json::json!(true)
+    );
+
+    let chain_id = required_snapshot_value(&snapshot, "evm_reth_root_dcv_pipeline.dcv.chain_id")
+        .as_u64()
+        .expect("validate chain id");
+    assert_eq!(chain_id, expected_chain_id);
+
+    let client_version =
+        required_snapshot_value(&snapshot, "evm_reth_root_dcv_pipeline.dcv.client_version")
+            .as_str()
+            .expect("validate client version");
+    assert!(client_version.to_ascii_lowercase().contains("reth"));
 }

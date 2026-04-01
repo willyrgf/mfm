@@ -53,6 +53,7 @@ async fn execute_internal_with_services(
             op_id: args.op_id.clone(),
             op_version: args.op_version.clone(),
             op_config,
+            input: serde_json::json!({}),
         }))
         .await
         .map_err(command_error_from_app_error)?;

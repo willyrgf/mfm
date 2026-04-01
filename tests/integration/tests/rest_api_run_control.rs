@@ -603,6 +603,9 @@ async fn features_list_exposes_builtin_catalog() {
     assert!(features.iter().any(|f| f["id"] == "run.status"));
     assert!(features.iter().any(|f| f["id"] == "run.stream"));
     assert!(features.iter().any(|f| f["id"] == "artifact.get"));
+    assert!(features
+        .iter()
+        .any(|f| f["id"] == "pipeline.deploy_configure_validate.start"));
     assert!(features.iter().any(|f| f["id"] == "portfolio.config.build"));
     assert!(features.iter().any(|f| f["id"] == "portfolio.snapshot"));
 }
