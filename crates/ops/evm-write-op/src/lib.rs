@@ -805,14 +805,14 @@ impl Operation for EvmDeployOp {
             state_id: state_id.clone(),
             cfg: SharedDeployStateConfig {
                 artifact: cfg.artifact.map(|a| shared_dcv::ContractArtifactConfig {
-                    abi: a.abi,
-                    bytecode: a.bytecode,
+                    abi: a.abi.into(),
+                    bytecode: a.bytecode.into(),
                 }),
                 artifact_port: cfg.artifact_port,
                 network_id: cfg.network_id,
                 control_scope: cfg.control_scope,
                 from,
-                constructor_args: cfg.constructor_args,
+                constructor_args: cfg.constructor_args.into_iter().map(Into::into).collect(),
                 value_hex,
                 signing_key_env: cfg.signing_key_env,
                 poll_interval_ms: cfg.poll_interval_ms,
@@ -952,8 +952,8 @@ impl Operation for EvmConfigureOp {
             state_id: state_id.clone(),
             cfg: SharedConfigureStateConfig {
                 artifact: cfg.artifact.map(|a| shared_dcv::ContractArtifactConfig {
-                    abi: a.abi,
-                    bytecode: a.bytecode,
+                    abi: a.abi.into(),
+                    bytecode: a.bytecode.into(),
                 }),
                 artifact_port: cfg.artifact_port,
                 network_id: cfg.network_id,
@@ -965,7 +965,7 @@ impl Operation for EvmConfigureOp {
                     .into_iter()
                     .map(|c| SharedConfigureRuntimeCall {
                         function: c.function,
-                        args: c.args,
+                        args: c.args.into_iter().map(Into::into).collect(),
                         value_hex: c.value_hex,
                     })
                     .collect(),
@@ -1070,8 +1070,8 @@ impl Operation for EvmValidateOp {
             state_id: state_id.clone(),
             cfg: SharedValidateStateConfig {
                 artifact: cfg.artifact.map(|a| shared_dcv::ContractArtifactConfig {
-                    abi: a.abi,
-                    bytecode: a.bytecode,
+                    abi: a.abi.into(),
+                    bytecode: a.bytecode.into(),
                 }),
                 artifact_port: cfg.artifact_port,
                 network_id: cfg.network_id,

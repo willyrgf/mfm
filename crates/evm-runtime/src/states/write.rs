@@ -94,7 +94,7 @@ async fn prepare_managed_sources(
 ///     artifact: None,
 ///     artifact_port: "contract_artifact".to_string(),
 ///     from: "0x0000000000000000000000000000000000000001".to_string(),
-///     constructor_args: vec![serde_json::json!(42)],
+///     constructor_args: vec![serde_json::json!(42).into()],
 ///     value_hex: Some("0x0".to_string()),
 ///     signing_key_env: Some("MFM_DEPLOYER_KEY".to_string()),
 ///     poll_interval_ms: 1_000,
@@ -117,7 +117,7 @@ pub struct EvmDeployStateConfig {
     /// Deployer address or sender address.
     pub from: String,
     /// Constructor arguments passed during deployment.
-    pub constructor_args: Vec<serde_json::Value>,
+    pub constructor_args: Vec<shared_dcv::AbiArgumentValue>,
     /// Optional deployment value expressed as a hex quantity.
     pub value_hex: Option<String>,
     /// Optional environment variable name used for local signing.
@@ -134,7 +134,7 @@ pub struct EvmConfigureRuntimeCall {
     /// Function name to invoke.
     pub function: String,
     /// Positional arguments passed to the function call.
-    pub args: Vec<serde_json::Value>,
+    pub args: Vec<shared_dcv::AbiArgumentValue>,
     /// Optional call value expressed as a hex quantity.
     pub value_hex: Option<String>,
 }
@@ -895,7 +895,7 @@ mod tests {
                 contract_address: None,
                 calls: vec![EvmConfigureRuntimeCall {
                     function: "setValue".to_string(),
-                    args: vec![serde_json::json!(1)],
+                    args: vec![serde_json::json!(1).into()],
                     value_hex: None,
                 }],
                 tx_hashes_export_key: "configure_tx_hashes".to_string(),

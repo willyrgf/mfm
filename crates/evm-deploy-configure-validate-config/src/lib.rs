@@ -52,7 +52,8 @@ use std::path::Path;
 use mfm_authored_config::parse_authored_config_with_hint;
 pub use mfm_authored_config::AuthoredConfigFormat;
 use mfm_evm_runtime::dcv::{
-    ConfigureCallConfig, ContractArtifactConfig, EventAssertionConfig, ReadAssertionConfig,
+    AbiArgumentValue, ConfigureCallConfig, ContractArtifactConfig, EventAssertionConfig,
+    ReadAssertionConfig,
 };
 use mfm_machine::hashing::{artifact_id_for_json, CanonicalJsonError};
 use mfm_machine::ids::ArtifactId;
@@ -98,7 +99,7 @@ pub struct DeployConfigureValidateDeployConfig {
     pub from: String,
     /// Constructor arguments passed during deployment.
     #[serde(default)]
-    pub constructor_args: Vec<Value>,
+    pub constructor_args: Vec<AbiArgumentValue>,
     /// Optional deployment value expressed in wei.
     #[serde(default)]
     pub value_wei: Option<String>,
@@ -555,6 +556,62 @@ mod tests {
         assert_eq!(canonical.machine_id, "evm_deploy_configure_validate");
         assert_eq!(canonical.pipeline_version, "v1");
         assert_eq!(canonical.input, serde_json::json!({}));
+    }
+
+    #[test]
+    fn decode_json_payload_preserves_typed_artifact_and_args() {
+        let canonical = decode_deploy_configure_validate_canonical_config(&serde_json::json!({
+            "deploy": {
+                "artifact": {
+                    "abi": [
+                        {
+                            "type": "constructor",
+                            "inputs": [{"name": "owner", "type": "address"}]
+                        }
+                    ],
+                    "bytecode": {"object": "0x60006000"}
+                },
+                "network_id": "ethereum-mainnet",
+                "from": "0x000000000000000000000000000000000000dead",
+                "constructor_args": ["0x0000000000000000000000000000000000000001"]
+            },
+            "configure": {
+                "network_id": "ethereum-mainnet",
+                "from": "0x000000000000000000000000000000000000dead",
+                "calls": [{
+                    "function": "setOwner",
+                    "args": ["0x0000000000000000000000000000000000000002"]
+                }]
+            },
+            "validate": {
+                "network_id": "ethereum-mainnet",
+                "expected_chain_id": 1
+            }
+        }))
+        .expect("decode");
+
+        let deploy_artifact = canonical.deploy.artifact.as_ref().expect("deploy artifact");
+        assert_eq!(
+            deploy_artifact.abi.as_json(),
+            &serde_json::json!([
+                {
+                    "type": "constructor",
+                    "inputs": [{"name": "owner", "type": "address"}]
+                }
+            ])
+        );
+        assert_eq!(
+            deploy_artifact.bytecode.as_json(),
+            &serde_json::json!({"object": "0x60006000"})
+        );
+        assert_eq!(
+            canonical.deploy.constructor_args,
+            vec![serde_json::json!("0x0000000000000000000000000000000000000001").into()]
+        );
+        assert_eq!(
+            canonical.configure.calls[0].args,
+            vec![serde_json::json!("0x0000000000000000000000000000000000000002").into()]
+        );
     }
 
     #[test]

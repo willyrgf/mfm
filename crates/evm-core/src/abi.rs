@@ -24,6 +24,8 @@
 //! # Ok::<(), mfm_evm_core::util_error::UtilError>(())
 //! ```
 
+use std::borrow::Borrow;
+
 use alloy_primitives::keccak256;
 use serde::Deserialize;
 
@@ -376,7 +378,10 @@ fn encode_static_value(t: &str, v: &serde_json::Value) -> Result<[u8; 32], UtilE
 ///
 /// Supported dynamic types are `bytes` and `string`. Supported static types include `address`,
 /// integer types, `bool`, and `bytesM`.
-pub fn encode_params(types: &[String], args: &[serde_json::Value]) -> Result<Vec<u8>, UtilError> {
+pub fn encode_params<T>(types: &[String], args: &[T]) -> Result<Vec<u8>, UtilError>
+where
+    T: Borrow<serde_json::Value>,
+{
     if types.len() != args.len() {
         return Err(UtilError::new(
             "argument_count_mismatch",
@@ -393,6 +398,7 @@ pub fn encode_params(types: &[String], args: &[serde_json::Value]) -> Result<Vec
     let mut tail = Vec::<u8>::new();
 
     for (t, a) in types.iter().zip(args.iter()) {
+        let a = a.borrow();
         if is_dynamic_type(t) {
             let off = head_size
                 .checked_add(tail.len())
@@ -427,11 +433,14 @@ pub fn encode_params(types: &[String], args: &[serde_json::Value]) -> Result<Vec
 /// Resolves an overloaded function name against the provided arguments and returns calldata.
 ///
 /// The returned tuple contains the complete calldata and the resolved output type list.
-pub fn resolve_function_call(
+pub fn resolve_function_call<T>(
     abi: &ParsedAbi,
     function: &str,
-    args: &[serde_json::Value],
-) -> Result<(Vec<u8>, Vec<String>), UtilError> {
+    args: &[T],
+) -> Result<(Vec<u8>, Vec<String>), UtilError>
+where
+    T: Borrow<serde_json::Value>,
+{
     let mut winners: Vec<(Vec<u8>, Vec<String>)> = Vec::new();
 
     for f in abi
@@ -462,11 +471,14 @@ pub fn resolve_function_call(
 }
 
 /// Appends ABI-encoded constructor arguments to contract bytecode.
-pub fn constructor_data(
+pub fn constructor_data<T>(
     abi: &ParsedAbi,
     bytecode: &[u8],
-    args: &[serde_json::Value],
-) -> Result<Vec<u8>, UtilError> {
+    args: &[T],
+) -> Result<Vec<u8>, UtilError>
+where
+    T: Borrow<serde_json::Value>,
+{
     let enc = encode_params(&abi.constructor_inputs, args)?;
     let mut out = Vec::with_capacity(bytecode.len() + enc.len());
     out.extend_from_slice(bytecode);

@@ -21,7 +21,7 @@ Last updated: 2026-04-02
 - The current app-layer and wrapper-layer procedural glue should be reduced by moving config build, artifact emission, and result extraction behind internal MFM ops and reusable states.
 - Current repo status:
   - portfolio now has explicit authored/canonical/built execution boundaries, build/report publication, a strict execute root, CLI-owned transport parsing, and feature-layer-owned envelope shaping
-  - deploy/configure/validate now has authored/canonical/built config crates plus config-build and execute roots, the public root family is the primary app/CLI/parity path, and transport parsing is owned at the CLI edge, but the workflow-family typing remains shallow
+  - deploy/configure/validate now has authored/canonical/built config crates plus config-build and execute roots, the public root family is the primary app/CLI/parity path, transport parsing is owned at the CLI edge, and typed wrappers now cover contract artifacts plus deploy/configure call arguments, but validation read assertions still retain raw JSON seams
   - `publish-docs` now uses shared authored/canonical ingress and intentionally stops there
   - wrapper-heavy Aave-origin phase-A orchestration is now internal MFM composition through `aave_v3_origin_stack`, while intentionally retaining the current Nix/Foundry compatibility backend
   - the previous compatibility-root follow-up is now closed in code: the SDK supports planner-payload-sourced child op config, so canonical-input compatibility roots can compose build then execute with the build child authoritative for execute-child input materialization
@@ -787,7 +787,8 @@ Change:
   - deploy/configure/validate:
     - authored/canonical/built config crate plus config-build and execute roots are landed
     - the public root family is now the primary app/CLI surface and direct parity coverage exercises it
-    - the workflow-family config remains only partially typed because deploy/configure/validate payloads still include raw JSON ABI, arg, and assertion seams that should be strengthened
+    - typed wrappers now cover contract artifacts plus deploy/configure constructor/configure call arguments
+    - the remaining typing gap is in validation read assertion args and expected values, which still retain raw JSON seams that should be strengthened
   - publish-docs:
     - authored/canonical ingress is landed
     - no built-config split is intended at this stage because the current tool does not have a reusable execution-ready compiled spec distinct from its typed plan/output surfaces
@@ -814,14 +815,7 @@ Ship independently:
 ### Remaining Work Before This RFC Should Be Considered Fully Complete
 
 - Finish deploy/configure/validate adoption:
-  - strengthen workflow-family typing beyond raw JSON ABI, arg, and assertion seams
-
-- Retire stale compatibility-root follow-up prose:
-  - this RFC no longer treats planner-authoritative build-child handoff as remaining work
-  - the remaining task is to update workflow docs and inventories that still describe the pre-SDK compatibility seam
-
-- Keep workflow docs synchronized with the landed code:
-  - update workflow-specific docs when parity entrypoints or migration status change so the code remains the authority and the docs remain trustworthy summaries
+  - strengthen workflow-family typing beyond the remaining raw JSON validation read-arg and expected-value seams
 
 ### Completion Checklist
 
@@ -831,10 +825,10 @@ Ship independently:
 - [x] Portfolio, deploy/configure/validate, and Aave-origin compatibility roots now source execute-child config from build-child planner payloads.
 - [x] Shared artifact/report/export publication plumbing is reusable shared state, not duplicated per adopter.
 - [x] Publish-docs uses authored/canonical ingress and intentionally stops before a built/execute split.
-- [ ] Strengthen deploy/configure/validate typing beyond raw JSON ABI, arg, and assertion seams.
+- [ ] Strengthen deploy/configure/validate typing beyond the remaining raw JSON validation read-arg and expected-value seams.
 - [x] Thin the remaining portfolio CLI/app parsing and feature-envelope glue.
 - [x] Thin the remaining deploy/configure/validate app/CLI transport parsing glue.
-- [ ] Update stale workflow docs and inventories that still describe the old compatibility-root seam or outdated adopter status.
+- [x] Update stale workflow docs and inventories that still describe the old compatibility-root seam or outdated adopter status.
 
 ## 16. Open Questions and Risks
 

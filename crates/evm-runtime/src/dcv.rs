@@ -52,8 +52,11 @@
 //! assert!(events[0].topic0_hex.starts_with("0x"));
 //! ```
 
+use std::borrow::Borrow;
+
 use alloy_primitives::keccak256;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use mfm_evm_core::abi as common_abi;
 use mfm_evm_core::encoding;
@@ -61,13 +64,100 @@ use mfm_evm_core::hex as common_hex;
 
 pub use common_abi::{AbiEvent, AbiFunction, ParsedAbi};
 
+/// Typed wrapper for contract ABI JSON payloads.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct AbiJson(Value);
+
+impl AbiJson {
+    /// Returns the underlying JSON value.
+    pub fn as_json(&self) -> &Value {
+        &self.0
+    }
+
+    /// Consumes the wrapper and returns the underlying JSON value.
+    pub fn into_json(self) -> Value {
+        self.0
+    }
+}
+
+impl Borrow<Value> for AbiJson {
+    fn borrow(&self) -> &Value {
+        self.as_json()
+    }
+}
+
+impl From<Value> for AbiJson {
+    fn from(value: Value) -> Self {
+        Self(value)
+    }
+}
+
+/// Typed wrapper for contract bytecode JSON payloads.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct BytecodeJson(Value);
+
+impl BytecodeJson {
+    /// Returns the underlying JSON value.
+    pub fn as_json(&self) -> &Value {
+        &self.0
+    }
+
+    /// Consumes the wrapper and returns the underlying JSON value.
+    pub fn into_json(self) -> Value {
+        self.0
+    }
+}
+
+impl Borrow<Value> for BytecodeJson {
+    fn borrow(&self) -> &Value {
+        self.as_json()
+    }
+}
+
+impl From<Value> for BytecodeJson {
+    fn from(value: Value) -> Self {
+        Self(value)
+    }
+}
+
+/// Typed wrapper for ABI-encoded function and constructor arguments.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct AbiArgumentValue(Value);
+
+impl AbiArgumentValue {
+    /// Returns the underlying JSON value.
+    pub fn as_json(&self) -> &Value {
+        &self.0
+    }
+
+    /// Consumes the wrapper and returns the underlying JSON value.
+    pub fn into_json(self) -> Value {
+        self.0
+    }
+}
+
+impl Borrow<Value> for AbiArgumentValue {
+    fn borrow(&self) -> &Value {
+        self.as_json()
+    }
+}
+
+impl From<Value> for AbiArgumentValue {
+    fn from(value: Value) -> Self {
+        Self(value)
+    }
+}
+
 /// JSON contract artifact used by deploy/configure/validate flows.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ContractArtifactConfig {
     /// Contract ABI JSON payload.
-    pub abi: serde_json::Value,
+    pub abi: AbiJson,
     /// Contract bytecode JSON payload.
-    pub bytecode: serde_json::Value,
+    pub bytecode: BytecodeJson,
 }
 
 /// Runtime configuration for a single on-chain function call.
@@ -78,7 +168,7 @@ pub struct ConfigureCallConfig {
 
     #[serde(default)]
     /// Positional arguments passed to the function call.
-    pub args: Vec<serde_json::Value>,
+    pub args: Vec<AbiArgumentValue>,
 
     #[serde(default)]
     /// Optional call value expressed in wei.
@@ -161,8 +251,11 @@ pub struct PreparedEventAssertion {
 }
 
 /// Parses an ABI JSON value into the shared ABI representation.
-pub fn parse_abi(abi: &serde_json::Value) -> Result<ParsedAbi, String> {
-    common_abi::parse_abi(abi).map_err(|e| e.message)
+pub fn parse_abi<T>(abi: &T) -> Result<ParsedAbi, String>
+where
+    T: Borrow<Value>,
+{
+    common_abi::parse_abi(abi.borrow()).map_err(|e| e.message)
 }
 
 /// Normalizes a hex string to lowercase `0x`-prefixed form.
@@ -181,27 +274,33 @@ pub fn bytes_to_hex_prefixed(bytes: &[u8]) -> String {
 }
 
 /// Resolves and encodes a function call from ABI name plus JSON arguments.
-pub fn resolve_function_call(
+pub fn resolve_function_call<T>(
     abi: &ParsedAbi,
     function_name: &str,
-    args: &[serde_json::Value],
-) -> Result<(Vec<u8>, Vec<String>), String> {
+    args: &[T],
+) -> Result<(Vec<u8>, Vec<String>), String>
+where
+    T: Borrow<Value>,
+{
     common_abi::resolve_function_call(abi, function_name, args).map_err(|e| e.message)
 }
 
 /// Encodes constructor bytecode plus constructor arguments.
-pub fn constructor_data(
+pub fn constructor_data<T>(
     abi: &ParsedAbi,
     bytecode: &[u8],
-    constructor_args: &[serde_json::Value],
-) -> Result<Vec<u8>, String> {
+    constructor_args: &[T],
+) -> Result<Vec<u8>, String>
+where
+    T: Borrow<Value>,
+{
     common_abi::constructor_data(abi, bytecode, constructor_args).map_err(|e| e.message)
 }
 
 /// Parses a contract artifact into validated ABI and bytecode components.
 pub fn parse_artifact(cfg: &ContractArtifactConfig) -> Result<(ParsedAbi, Vec<u8>), String> {
     let abi = parse_abi(&cfg.abi)?;
-    let bytecode = common_abi::parse_bytecode(&cfg.bytecode).map_err(|e| e.message)?;
+    let bytecode = common_abi::parse_bytecode(cfg.bytecode.borrow()).map_err(|e| e.message)?;
     Ok((abi, bytecode))
 }
 
