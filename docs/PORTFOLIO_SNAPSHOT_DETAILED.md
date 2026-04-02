@@ -604,12 +604,11 @@ same while moving the canonical-to-built handoff into the op layer.
 78. `DefaultRunLauncher::start_pipeline()` asks the planner to build planned execution.
 79. The planner validates the pipeline, resolves the root op from the registry, and calls
     `PortfolioTrackerOp::expand()`.
-80. For canonical input, `PortfolioTrackerOp::expand()` builds the deterministic built config in
-    the planner, inserts `portfolio_config_build` as the first child workflow, and then lowers the
-    same built config into the semantic execution child ops.
-    This is the remaining compatibility seam in the portfolio flow today: the build child still
-    publishes the authoritative artifacts and report, but the execute child input is not yet
-    materialized from child output because child op configs are still static at planning time.
+80. For canonical input, `PortfolioTrackerOp::expand()` inserts `portfolio_config_build` as the
+    first child workflow and wires `portfolio_execute` from the build child's `/built_config`
+    planner payload.
+    The compatibility seam described in the RFC is now closed: the build child is authoritative for
+    artifact/report publication and for execute-child input materialization.
 81. For built input, `PortfolioTrackerOp::expand()` skips the build child and lowers directly into
     the semantic execution child ops.
 82. The execution portion of that graph lowers the semantic spec into child ops:

@@ -22,25 +22,25 @@ Use `docs/design.md` for normative semantics and invariants.
 
 Current snapshot:
 
-- Built-in public root ops: `16`
-- Planner-internal registered child ops: `8` (`portfolio_tracker` semantic lowering only)
+- Built-in public root ops: `21`
+- Planner-internal registered child ops: `10` (`portfolio_tracker` semantic lowering plus Aave publication/report helpers)
 - Shared production `State` impls: `39`
-- Intentional op-local production `State` impls: `1`
+- Intentional op-local production `State` impls: `2`
 
 Planning model note:
 
 - This inventory is intentionally focused on built-in/public root ops registered in the default app
   bundle and on production runtime states.
-- The default app registry also keeps planner-internal portfolio semantic child ops available so
-  recursive flattening can resolve them, but public `run.start` entrypoints reject those internal
-  ids.
+- The default app registry also keeps planner-internal portfolio semantic child ops and Aave helper
+  child ops available so recursive flattening can resolve them, but public `run.start` entrypoints
+  reject those internal ids.
 - Runtime execution units remain states only; internal recursive op expansion must flatten before
   runtime starts.
 - Current canonical-input compatibility roots for portfolio, deploy/configure/validate, and
-  `aave_v3_origin_stack` still precompute built config in the parent planner before wiring the
-  execute child.
-  The build child is authoritative for artifact/report publication and ordering, but execute-child
-  config handoff is still static until the SDK can route child outputs into child op config.
+  `aave_v3_origin_stack` now compose build then execute with the execute child sourcing its config
+  from the build child's planner payload.
+  The build child is authoritative for artifact/report publication, ordering, and execute-child
+  input materialization.
 - This document does not attempt to enumerate every future internal composite planning boundary.
 
 ## Built-In Ops
@@ -117,6 +117,7 @@ assemble domain-specific outputs rather than reusable execution primitives.
 | Owner | State type | Why still local |
 |---|---|---|
 | `crates/ops/proof-op` | `WriteOutputState` | Domain-specific output artifact for the proof acceptance workflow |
+| `crates/ops/aave-v3-origin-op` | `ProjectExecutionReportState` | Domain-specific execution-report projection for the Aave Origin compatibility backend |
 
 ## Update Policy
 

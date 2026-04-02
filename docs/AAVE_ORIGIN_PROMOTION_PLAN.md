@@ -133,9 +133,10 @@ Planned public/internal root ops:
 
 Current implementation note:
 
-- the compatibility root still precomputes built config in the parent planner before wiring the
-  execute child; the build child remains authoritative for publication/report artifacts, but not
-  yet for execute-child input materialization
+- the compatibility root now wires `aave_v3_origin_stack_execute` from the build child's
+  `/built_config` planner payload
+- the build child is authoritative for publication/report artifacts and for execute-child input
+  materialization
 
 Keep `aave_v3_origin_adapt_deploy` as a narrow helper op during migration.
 
