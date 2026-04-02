@@ -42,7 +42,6 @@ Generated from `docs/repo-index.json`.
 - `crates/ops/evm-read-op/Cargo.toml` (rust-cargo)
 - `crates/ops/evm-write-op/Cargo.toml` (rust-cargo)
 - `crates/ops/keystore-admin-op/Cargo.toml` (rust-cargo)
-- `crates/ops/keystore-op/Cargo.toml` (rust-cargo)
 - `crates/ops/keystore-tx-op/Cargo.toml` (rust-cargo)
 - `crates/ops/nix-app-op/Cargo.toml` (rust-cargo)
 - `crates/ops/portfolio-tracker-op/Cargo.toml` (rust-cargo)

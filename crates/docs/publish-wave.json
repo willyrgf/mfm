@@ -68,12 +68,6 @@
       "docs_rs": "https://docs.rs/mfm-transports-local-evm"
     },
     {
-      "name": "mfm-op-keystore-shim",
-      "group": "dependents",
-      "workspace_path": "crates/ops/keystore-op",
-      "docs_rs": "https://docs.rs/mfm-op-keystore-shim"
-    },
-    {
       "name": "mfm-state-common",
       "group": "shared-state-base",
       "workspace_path": "crates/states/common",

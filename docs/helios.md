@@ -87,8 +87,8 @@ Runtime bootstrap inside `task.mfm.portfolio.snapshot`:
   - `MFM_EVM_RPC_PREFERRED_ORDER=helios_local`
 
 `mfm_cli` is no longer launched via `cargo run` from the snapshot path. It is
-packaged once through `conf.packages."mfm-cli"` and reused by both
-`nix run .#mfm_cli` and `task.mfm.portfolio.snapshot`.
+packaged once through `conf.packages."mfm-cli"` and reused by the snapshot
+task and other packaged-binary flows.
 
 ## Project Wiring
 

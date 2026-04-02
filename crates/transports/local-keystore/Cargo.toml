@@ -16,6 +16,5 @@ regex = "1.0"
 
 mfm-machine = { path = "../../machine" }
 mfm-collectors-local-keystore = { path = "../../collectors/local-keystore" }
-mfm-op-keystore = { package = "mfm-op-keystore-shim", path = "../../ops/keystore-op" }
 mfm-state-keystore = { path = "../../states/keystore" }
 mfm_core = { path = "../../core" }

@@ -8,8 +8,7 @@
 //! - `evm_deploy_configure_validate_config_build`: canonical config -> built config plus explicit
 //!   config artifacts
 //! - `evm_deploy_configure_validate_execute`: strict built-config execution root
-//! - `evm_deploy_configure_validate`: legacy compatibility root that still accepts
-//!   canonical-or-built config
+//! - `evm_deploy_configure_validate`: canonical public root that composes build then execute
 //!
 //! All three remain thin planners. Typed authored/canonical/built config lives in
 //! `mfm-evm-deploy-configure-validate-config`, and runtime execution stays in the shared EVM
@@ -58,7 +57,7 @@ pub use config_build::{
     EvmDeployConfigureValidateConfigBuildOp, EVM_DEPLOY_CONFIGURE_VALIDATE_CONFIG_BUILD_OP_ID,
 };
 
-/// Legacy public root op id that preserves the canonical-or-built compatibility path.
+/// Canonical public root op id that composes build then execute.
 pub const EVM_DEPLOY_CONFIGURE_VALIDATE_OP_ID: &str = "evm_deploy_configure_validate";
 /// Strict built-config execution root op id used by thin transport adapters.
 pub const EVM_DEPLOY_CONFIGURE_VALIDATE_EXECUTE_OP_ID: &str =
@@ -76,9 +75,6 @@ const EXECUTE_CHILD_ID: &str = "e";
 const TRACKER_BUILD_CHILD_ID: &str = "b";
 #[cfg(test)]
 const VALIDATED_EXPORT: &str = "validated";
-
-/// Compatibility alias for the execution payload shape historically accepted by the legacy root.
-pub type EvmDeployConfigureValidateOpConfig = DeployConfigureValidateExecutionConfig;
 
 fn sdk_input_error(code: &'static str, message: impl Into<String>) -> SdkError {
     op_errors::sdk_error(code, ErrorCategory::ParsingInput, false, message)
@@ -311,8 +307,7 @@ fn sink_state_ids(graph: &LeafOpSpec) -> Vec<StateId> {
         .collect()
 }
 
-/// Thin planner op that accepts canonical-or-built config and composes the build/execute
-/// workflow.
+/// Thin planner op that accepts canonical config and composes the build/execute workflow.
 #[derive(Clone, Default)]
 pub struct EvmDeployConfigureValidateOp;
 
@@ -353,10 +348,6 @@ impl Operation for EvmDeployConfigureValidateOp {
         op_config: &serde_json::Value,
         run_config: &RunConfig,
     ) -> Result<PlannedOp, SdkError> {
-        if let Ok(cfg) = decode_deploy_configure_validate_built_config(op_config) {
-            return expand_execution(op_path, &cfg, run_config);
-        }
-
         let canonical =
             decode_deploy_configure_validate_canonical_config(op_config).map_err(|err| {
                 sdk_input_error(
@@ -501,31 +492,21 @@ mod tests {
     }
 
     #[test]
-    fn expand_built_input_skips_build_child_and_keeps_leaf_execution() {
+    fn root_rejects_built_input() {
         let op = EvmDeployConfigureValidateOp;
-        let (_, graph) = into_leaf_spec(
-            op.expand(
+        let err = op
+            .expand(
                 OpPath("evm_deploy_configure_validate.main".to_string()),
                 &serde_json::to_value(built_config()).expect("built json"),
                 &op_test_support::run_config_live(),
             )
-            .expect("expand built config"),
-        );
+            .err()
+            .expect("built config must not decode for public root");
 
-        assert_eq!(graph.states.len(), 3);
-        assert_eq!(graph.edges.len(), 2);
-        assert!(graph
-            .states
-            .iter()
-            .any(|s| s.state_id.as_str() == "evm_deploy_configure_validate.main.deploy__deploy"));
-        assert!(graph
-            .states
-            .iter()
-            .any(|s| s.state_id.as_str()
-                == "evm_deploy_configure_validate.main.configure__configure"));
-        assert!(graph.states.iter().any(
-            |s| s.state_id.as_str() == "evm_deploy_configure_validate.main.validate__validate"
-        ));
+        assert_eq!(
+            err.info.code.0,
+            "invalid_evm_deploy_configure_validate_execution_config"
+        );
     }
 
     #[test]

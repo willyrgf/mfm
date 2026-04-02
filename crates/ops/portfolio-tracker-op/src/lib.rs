@@ -11,7 +11,7 @@
 //!
 //! - `portfolio_config_build`: canonical config -> built config plus explicit config artifacts
 //! - `portfolio_execute`: built config -> canonical snapshot/runtime report
-//! - `portfolio_tracker`: legacy compatibility root that still accepts canonical-or-built config
+//! - `portfolio_tracker`: canonical public root that composes build then execute
 //!
 //! All three remain thin planners. Pure semantic compilation stays in `mfm-portfolio-config`, and
 //! runtime execution stays in the reusable shared portfolio states.
@@ -32,10 +32,9 @@ use std::sync::Arc;
 use mfm_machine::config::RunConfig;
 use mfm_machine::errors::ErrorCategory;
 use mfm_machine::ids::{ContextKey, FactKey, OpId, OpPath};
-#[cfg(test)]
-use mfm_portfolio_config::decode_portfolio_snapshot_execution_config;
 use mfm_portfolio_config::{
     build_portfolio_snapshot_outcome, decode_portfolio_snapshot_built_config,
+    decode_portfolio_snapshot_canonical_config,
     PortfolioSnapshotBuiltConfig, PortfolioSnapshotCanonicalConfig,
 };
 use mfm_sdk::errors::SdkError;
@@ -70,7 +69,7 @@ use plan_ops::{
     RESOLVE_VALUATION_INPUTS_OP_ID,
 };
 
-/// Legacy public root op id that preserves the canonical-or-built compatibility path.
+/// Canonical public root op id that composes build then execute.
 pub const PORTFOLIO_TRACKER_OP_ID: &str = "portfolio_tracker";
 /// Built-config public root op id used by thin transport adapters.
 pub const PORTFOLIO_EXECUTE_OP_ID: &str = "portfolio_execute";
@@ -128,28 +127,24 @@ pub fn portfolio_execute_report_context_key() -> ContextKey {
 
 type PortfolioTrackerConfig = PortfolioSnapshotBuiltConfig;
 
-enum PortfolioTrackerInput {
-    Canonical(PortfolioSnapshotCanonicalConfig),
-    Built(PortfolioSnapshotBuiltConfig),
-}
-
 fn sdk_input_error(code: &'static str, message: impl Into<String>) -> SdkError {
     op_errors::sdk_error(code, ErrorCategory::ParsingInput, false, message)
 }
 
 #[cfg(test)]
 fn parse_config(op_config: &Value) -> Result<PortfolioTrackerConfig, SdkError> {
-    decode_portfolio_snapshot_execution_config(op_config)
+    if let Ok(cfg) = parse_built_config(op_config) {
+        return Ok(cfg);
+    }
+
+    let canonical = parse_canonical_config(op_config)?;
+    build_portfolio_snapshot_outcome(canonical)
+        .map(|outcome| outcome.built)
         .map_err(|err| sdk_input_error("invalid_portfolio_execution_config", err.to_string()))
 }
 
-fn parse_tracker_input(op_config: &Value) -> Result<PortfolioTrackerInput, SdkError> {
-    if let Ok(cfg) = decode_portfolio_snapshot_built_config(op_config) {
-        return Ok(PortfolioTrackerInput::Built(cfg));
-    }
-
-    serde_json::from_value::<PortfolioSnapshotCanonicalConfig>(op_config.clone())
-        .map(PortfolioTrackerInput::Canonical)
+fn parse_canonical_config(op_config: &Value) -> Result<PortfolioSnapshotCanonicalConfig, SdkError> {
+    decode_portfolio_snapshot_canonical_config(op_config)
         .map_err(|err| sdk_input_error("invalid_portfolio_execution_config", err.to_string()))
 }
 
@@ -180,16 +175,10 @@ fn planner_payload_from_config(
 }
 
 fn planner_payload_from_tracker_input(op_config: &Value) -> Result<Option<Value>, SdkError> {
-    let cfg = match parse_tracker_input(op_config)? {
-        PortfolioTrackerInput::Canonical(canonical) => {
-            build_portfolio_snapshot_outcome(canonical)
-                .map_err(|err| {
-                    sdk_input_error("invalid_portfolio_execution_config", err.to_string())
-                })?
-                .built
-        }
-        PortfolioTrackerInput::Built(cfg) => cfg,
-    };
+    let canonical = parse_canonical_config(op_config)?;
+    let cfg = build_portfolio_snapshot_outcome(canonical)
+        .map_err(|err| sdk_input_error("invalid_portfolio_execution_config", err.to_string()))?
+        .built;
 
     let spec = compile_portfolio_plan(&cfg)?;
     Ok(Some(serde_json::json!({
@@ -252,7 +241,7 @@ fn sanitize_child_local_id(value: &str) -> String {
         .collect()
 }
 
-/// Thin planner op that accepts canonical-or-built config and composes the build/execute workflow.
+/// Thin planner op that accepts canonical config and composes the build/execute workflow.
 #[derive(Clone, Default)]
 pub struct PortfolioTrackerOp;
 
@@ -326,12 +315,8 @@ impl Operation for PortfolioTrackerOp {
         op_config: &Value,
         _run_config: &RunConfig,
     ) -> Result<PlannedOp, SdkError> {
-        match parse_tracker_input(op_config)? {
-            PortfolioTrackerInput::Canonical(canonical) => {
-                expand_portfolio_tracker_from_canonical(op_path, canonical)
-            }
-            PortfolioTrackerInput::Built(cfg) => expand_portfolio_execution(op_path, &cfg),
-        }
+        let canonical = parse_canonical_config(op_config)?;
+        expand_portfolio_tracker_from_canonical(op_path, canonical)
     }
 
     fn planner_payload(

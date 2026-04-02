@@ -7,7 +7,7 @@
 //!
 //! - `aave_v3_origin_stack_config_build`: canonical config -> built config plus explicit config artifacts
 //! - `aave_v3_origin_stack_execute`: strict built-config execution root
-//! - `aave_v3_origin_stack`: legacy compatibility root that still accepts canonical-or-built config
+//! - `aave_v3_origin_stack`: canonical public root that composes build then execute
 //!
 //! The execute op keeps the current external Nix/Foundry tools as the backend, but the typed
 //! authored/canonical/built boundary is now explicit and reusable inside MFM.
@@ -57,7 +57,7 @@ pub use config_build::{
     AAVE_V3_ORIGIN_STACK_CONFIG_BUILD_OP_ID,
 };
 
-/// Legacy public root op id that preserves the canonical-or-built compatibility path.
+/// Canonical public root op id that composes build then execute.
 pub const AAVE_V3_ORIGIN_STACK_OP_ID: &str = "aave_v3_origin_stack";
 /// Strict built-config execution root op id.
 pub const AAVE_V3_ORIGIN_STACK_EXECUTE_OP_ID: &str = "aave_v3_origin_stack_execute";
@@ -155,11 +155,6 @@ impl AaveV3OriginStackExecutionReport {
     pub const SCHEMA_VERSION: u32 = 1;
 }
 
-enum CompatibilityInput {
-    Canonical(Box<AaveV3OriginStackCanonicalConfig>),
-    Built(Box<AaveV3OriginStackBuiltConfig>),
-}
-
 #[derive(Clone, Debug, Deserialize)]
 struct PublishArtifactConfig {
     input_port: String,
@@ -179,7 +174,7 @@ struct ProjectReportConfig {
     report_output_key: String,
 }
 
-/// Thin planner op that accepts canonical-or-built config and composes the build/execute workflow.
+/// Thin planner op that accepts canonical config and composes the build/execute workflow.
 #[derive(Clone, Default)]
 pub struct AaveV3OriginStackOp;
 
@@ -198,7 +193,7 @@ struct ProjectExecutionReportState {
     cfg: ProjectReportConfig,
 }
 
-/// Returns the built-in legacy public `aave_v3_origin_stack` root op.
+/// Returns the built-in public `aave_v3_origin_stack` root op.
 pub fn aave_v3_origin_stack_public_ops() -> Vec<DynOperation> {
     vec![Arc::new(AaveV3OriginStackOp) as DynOperation]
 }
@@ -242,14 +237,10 @@ pub fn aave_v3_origin_internal_op_ids() -> &'static [&'static str] {
     IDS
 }
 
-fn parse_compatibility_input(op_config: &Value) -> Result<CompatibilityInput, SdkError> {
-    if let Ok(cfg) = decode_aave_v3_origin_stack_built_config(op_config) {
-        return Ok(CompatibilityInput::Built(Box::new(cfg)));
-    }
-
+fn parse_canonical_config(op_config: &Value) -> Result<AaveV3OriginStackCanonicalConfig, SdkError> {
     decode_aave_v3_origin_stack_canonical_config(op_config)
         .map(Box::new)
-        .map(CompatibilityInput::Canonical)
+        .map(|canonical| *canonical)
         .map_err(|err| sdk_input_error("invalid_aave_v3_origin_stack_config", err.to_string()))
 }
 
@@ -630,12 +621,8 @@ impl Operation for AaveV3OriginStackOp {
         op_config: &Value,
         run_config: &RunConfig,
     ) -> Result<PlannedOp, SdkError> {
-        match parse_compatibility_input(op_config)? {
-            CompatibilityInput::Canonical(canonical) => {
-                expand_from_canonical(op_path, *canonical, run_config)
-            }
-            CompatibilityInput::Built(built) => expand_execution(op_path, &built, run_config),
-        }
+        let canonical = parse_canonical_config(op_config)?;
+        expand_from_canonical(op_path, canonical, run_config)
     }
 }
 

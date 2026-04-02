@@ -19,7 +19,7 @@ url = { workspace = true }
 
 mfm-machine = { path = "../../machine", version = "0.1.0" }
 mfm-sdk = { path = "../../sdk", version = "0.1.0" }
-mfm-op-keystore = { package = "mfm-op-keystore-shim", path = "../../ops/keystore-op", version = "0.1.0" }
+mfm_core = { path = "../../core", version = "0.1.29" }
 mfm-state-common = { path = "../common", version = "0.1.0" }
 mfm-collectors-local-keystore = { path = "../../collectors/local-keystore", version = "0.1.0" }
 mfm-evm-core = { path = "../../evm-core", version = "0.1.0" }

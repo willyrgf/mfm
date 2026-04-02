@@ -51,7 +51,6 @@
 //!   name: Ethereum
 //! wallet:
 //!   address: "0x0000000000000000000000000000000000000000"
-//!   private_key_path: /tmp/example.key
 //! dex:
 //!   provider: uniswap
 //! "#;
@@ -62,7 +61,6 @@
 //! ```
 
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
 
 /// Authentication-method configuration entries.
@@ -125,15 +123,6 @@ fn default_rpc_url() -> String {
 pub struct WalletConfig {
     /// Expected wallet address for the selected signer.
     pub address: Address,
-    ///
-    /// # Security
-    ///
-    /// This path points to secret-bearing material. The path itself is safe to serialize, but the
-    /// file contents must never be logged or persisted outside the keystore/config loading flow.
-    ///
-    /// Filesystem path to a plaintext private key used by legacy flows.
-    #[serde(skip_serializing)]
-    pub private_key_path: PathBuf,
 }
 
 /// Runtime DEX selection.
@@ -170,17 +159,6 @@ impl SecureWallet {
     pub fn get_private_key(&self) -> &str {
         &self.private_key
     }
-}
-
-fn expand_path(path: &Path) -> PathBuf {
-    if let Some(path_str) = path.to_str() {
-        if path_str.starts_with('~') {
-            if let Some(home) = std::env::var_os("HOME") {
-                return PathBuf::from(home).join(&path_str[2..]);
-            }
-        }
-    }
-    path.to_path_buf()
 }
 
 impl Config {
@@ -228,7 +206,6 @@ impl Config {
     ///   name: Ethereum
     /// wallet:
     ///   address: "0x0000000000000000000000000000000000000000"
-    ///   private_key_path: /tmp/example.key
     /// dex:
     ///   provider: missing
     /// "#;
@@ -278,12 +255,10 @@ impl Config {
         }
     }
 
-    /// Loads wallet material using configured authentication methods, falling back to the legacy
-    /// plaintext wallet path when necessary.
+    /// Loads wallet material using configured authentication methods.
     ///
-    /// Runtime callers should prefer `auth_methods` because it makes the loading strategy explicit
-    /// in configuration. The fallback path exists for older configs that still rely on
-    /// [`WalletConfig::private_key_path`].
+    /// Runtime callers must configure wallet loading through `auth_methods`, which makes the
+    /// loading strategy explicit in configuration.
     ///
     /// # Security
     ///
@@ -297,7 +272,6 @@ impl Config {
         &self,
         password: Option<&str>,
     ) -> Result<SecureWallet, Box<dyn std::error::Error>> {
-        // First try to get the wallet from auth_methods
         for method in self.auth_methods.get_methods() {
             if let authentication::Method::Wallet(wallet) = method {
                 let private_key = wallet.read_private_key(password)?;
@@ -305,9 +279,6 @@ impl Config {
             }
         }
 
-        // Fallback to the old wallet config
-        let expanded_path = expand_path(&self.wallet.private_key_path);
-        let private_key = std::fs::read_to_string(expanded_path)?;
-        Ok(SecureWallet::new(private_key.trim().to_string()))
+        Err("no wallet authentication method configured".into())
     }
 }

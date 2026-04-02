@@ -49,7 +49,6 @@ States are the core execution unit. Ops are planners (`expand` builds determinis
 Start here:
 
 - Design contract (source of truth): [`docs/design.md`](docs/design.md)
-- Canonical rename note: `docs/redesign.md` is now a compatibility pointer to [`docs/design.md`](docs/design.md).
 - One-page overview + invariants: [`docs/architecture.md`](docs/architecture.md)
 - Current ops/states inventory: [`docs/ops-and-states.md`](docs/ops-and-states.md)
 - Contribution rules / CI parity: [`AGENTS.md`](AGENTS.md)
@@ -66,7 +65,6 @@ Crate docs:
 - Proc macros: [`crates/machine-derive/README.md`](crates/machine-derive/README.md)
 - SDK (orchestration helpers): [`crates/sdk/README.md`](crates/sdk/README.md)
 - Ops (proof op): [`crates/ops/proof-op/README.md`](crates/ops/proof-op/README.md)
-- Ops (keystore op): [`crates/ops/keystore-op/README.md`](crates/ops/keystore-op/README.md)
 - Storage (StreamStore, mem): [`crates/storages/stream-store-mem/README.md`](crates/storages/stream-store-mem/README.md)
 - Storage (StreamStore, Postgres): [`crates/storages/stream-store-postgres/README.md`](crates/storages/stream-store-postgres/README.md)
 - Storage (ArtifactStore, fs): [`crates/storages/artifact-store-fs/README.md`](crates/storages/artifact-store-fs/README.md)
@@ -104,7 +102,6 @@ nix run .#ci -- --mode <mode> --summary
 
 - Framework service hooks and model-level service tasks share the same launcher/runtime policy path, but this repo does not currently expose public `service::*::start` apps.
 - Local supervisor wrappers in `nixfied/local/default.nix` (`up`, `down`, `svc-*`) are intentional prod-only overrides.
-- `mfm_cli` is the compatibility passthrough wrapper over the packaged `mfm-cli` binary; `mfm_rest_api`/`svc-*` now use strict typed contracts.
 - `mfm::portfolio::snapshot` is a strict json app that owns process/bootstrap orchestration, stdout envelope
   validation, and readiness mediation via `SVC_*` hooks while forwarding validated `mfm_cli` payloads unchanged.
 - `nix run .#help` lists exposed core apps; invoke `mfm::portfolio::snapshot` directly by name.
@@ -118,7 +115,6 @@ nix run .#ci -- --mode <mode> --summary
   - `typed` for strict text commands (`check`, `test`, `build`, `mfm_rest_api`, `svc-*`)
   - `json` for machine-output workflows (`mfm::portfolio::snapshot`, and other machine-output apps)
   - `batch-runner` for `ci`
-  - `passthrough` retained for compatibility on `mfm_cli`
 - Unknown args are rejected at the shell-contract boundary for typed/json commands before domain execution.
 - `mfm::portfolio::snapshot` preserves `mfm_cli` as the output-contract authority and returns the validated
   `mfm_cli` payload unchanged.
@@ -150,7 +146,8 @@ nix run .#ci -- --mode <mode> --summary
 ### Run binaries:
 
 ```bash
-nix run .#mfm_cli -- --help
+nix build .#mfm-cli
+./result/bin/mfm_cli --help
 nix run .#mfm_rest_api
 nix run .#mfm::portfolio::snapshot -- <ADDRESS>
 ```

@@ -59,7 +59,6 @@ Ops stay thin and focus on graph composition and config validation. Most are sti
 | `mfm-op-evm-read` | EVM read planner. | `crates/ops/evm-read-op` |
 | `mfm-op-evm-write` | EVM write planner. | `crates/ops/evm-write-op` |
 | `mfm-op-keystore-admin` | Keystore admin planner. | `crates/ops/keystore-admin-op` |
-| `mfm-op-keystore-shim` | Keystore compatibility shim types shared with state crates. | `crates/ops/keystore-op` |
 | `mfm-op-keystore-tx` | Keystore transaction planner. | `crates/ops/keystore-tx-op` |
 | `mfm-op-nix-app` | Nix app execution planner. | `crates/ops/nix-app-op` |
 | `mfm-op-portfolio-tracker` | Portfolio tracking planner. | `crates/ops/portfolio-tracker-op` |

@@ -184,11 +184,8 @@ let
     "LOG_LEVEL"
     "OUTPUT_MODE"
     "RUST_LOG"
-    "MFM_LOG"
     "LOG_FORMAT"
-    "MFM_LOG_FORMAT"
     "LOG_SPAN_EVENTS"
-    "MFM_LOG_SPAN_EVENTS"
     "HELIOS_NETWORK"
     "HELIOS_BIN"
     "HELIOS_EXECUTION_RPC_URL"
@@ -1148,33 +1145,6 @@ in
           '';
         };
 
-        mfm_cli = mkCommandTask {
-          id = "task.mfm_cli";
-          summary = "Run the mfm_cli compatibility wrapper";
-          description = ''
-            Passthrough entrypoint that forwards all CLI arguments to mfm_cli.
-          '';
-          tags = [
-            "cli"
-            "compat"
-          ];
-          usage = [
-            "nix run .#mfm_cli -- --help"
-            "nix run .#mfm_cli -- keystore list"
-          ];
-          runtimeInputs = leanRuntimeInputs ++ [ conf.packages."mfm-cli" ];
-          argParser = "passthrough";
-          allowUnknownArgs = true;
-          command = ''
-            set -euo pipefail
-            ${resolvePackagedMfmCliShell}
-
-            mfm_cli_bin="$(resolve_packaged_mfm_cli_binary)" || exit 1
-
-            exec "$mfm_cli_bin" "$@"
-          '';
-        };
-
         mfm_rest_api = mkCommandTask {
           id = "task.mfm_rest_api";
           summary = "Run the mfm_rest_api server";
@@ -1256,21 +1226,21 @@ in
             The tool resolves local versions from `cargo metadata`, checks exact crates.io package
             versions, emits sanitized run artifacts under `.mfm/publish-docs/runs/`, and either
             plans or applies publish actions. By default this performs a real `cargo publish`;
-            pass `--dry-run` to build a plan without uploading crates.
+            use `plan` to build a plan without uploading crates.
           '';
           tags = [
             "release"
             "docs"
           ];
           usage = [
-            "nix run .#publish-docs -- --dry-run"
+            "nix run .#publish-docs -- plan"
             "nix run .#publish-docs -- plan --json"
             "nix run .#publish-docs -- --from mfm-state-common"
             "nix run .#publish-docs -- --only mfm-docs"
             "nix run .#publish-docs"
           ];
           examples = [
-            "nix run .#publish-docs -- --dry-run"
+            "nix run .#publish-docs -- plan"
             "nix run .#publish-docs -- apply --json"
             "nix run .#publish-docs -- --from mfm-evm-runtime"
           ];
@@ -1350,18 +1320,6 @@ in
               long = "--mode";
               type = "string";
               description = "CI mode to run (resolved from workflow.ci.* in the compiled model).";
-            }
-            {
-              name = "bg";
-              kind = "flag";
-              long = "--bg";
-              description = "Compatibility flag; currently runs foreground only.";
-            }
-            {
-              name = "background";
-              kind = "flag";
-              long = "--background";
-              description = "Compatibility alias for --bg.";
             }
           ];
         };
@@ -1507,7 +1465,6 @@ in
                 fi
               }
 
-              require_app "mfm_cli"
               require_app "mfm::portfolio::snapshot"
               require_app "mfm_rest_api"
               require_app "dev"
@@ -1526,7 +1483,6 @@ in
               require_task "task.ci.sccache-contracts"
               require_task "task.ci.workflow-basic"
               require_task "task.ci.workflow-parity"
-              require_task "task.mfm_cli"
               require_task "task.mfm.portfolio.snapshot"
               require_task "task.mfm_rest_api"
 
@@ -2261,16 +2217,6 @@ in
           ownerFile = "nixfied/project/module.nix";
         };
 
-        mfm_cli = mkTaskApp {
-          taskId = "task.mfm_cli";
-          appId = "mfm_cli";
-          usage = [
-            "nix run .#mfm_cli -- --help"
-            "nix run .#mfm_cli -- keystore list"
-          ];
-          ownerFile = "nixfied/project/module.nix";
-        };
-
         mfm_rest_api = mkTaskApp {
           taskId = "task.mfm_rest_api";
           appId = "mfm_rest_api";
@@ -2296,14 +2242,14 @@ in
           taskId = "task.publish-docs";
           appId = "publish-docs";
           usage = [
-            "nix run .#publish-docs -- --dry-run"
+            "nix run .#publish-docs -- plan"
             "nix run .#publish-docs -- plan --json"
             "nix run .#publish-docs -- --from mfm-state-common"
             "nix run .#publish-docs -- --only mfm-docs"
             "nix run .#publish-docs"
           ];
           examples = [
-            "nix run .#publish-docs -- --dry-run"
+            "nix run .#publish-docs -- plan"
             "nix run .#publish-docs -- apply --json"
             "nix run .#publish-docs -- --from mfm-evm-runtime"
           ];

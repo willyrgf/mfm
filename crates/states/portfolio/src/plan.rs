@@ -59,7 +59,7 @@ impl std::fmt::Display for VenueId {
 ///
 /// The RFC pseudocode prescribed a multi-field struct (`capability: CapabilityKind`,
 /// `family: NetworkFamily`, `implementation: String`). The string convention carries
-/// the same information and is the intentional v1 contract. Use [`AdapterId::parts()`]
+/// the same information and is the intentional v1 contract. Use [`AdapterId::parse_parts`]
 /// for structured access.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -124,21 +124,6 @@ impl AdapterId {
             Some(AdapterIdParts::TwoSegment { capability, family })
         } else {
             None
-        }
-    }
-
-    /// Split into a tuple for legacy call sites.
-    ///
-    /// Prefer [`Self::parse_parts`] for typed pattern matching.
-    pub fn parts(&self) -> (&str, &str, Option<&str>) {
-        match self.parse_parts() {
-            Some(AdapterIdParts::TwoSegment { capability, family }) => (capability, family, None),
-            Some(AdapterIdParts::ThreeSegment {
-                capability,
-                family,
-                implementation,
-            }) => (capability, family, Some(implementation)),
-            None => ("", "", None),
         }
     }
 }
@@ -1219,10 +1204,6 @@ mod tests {
     fn adapter_id_parts_three_segments() {
         let id = AdapterId("observe_position/evm/native_balance".to_string());
         assert_eq!(
-            id.parts(),
-            ("observe_position", "evm", Some("native_balance"))
-        );
-        assert_eq!(
             id.parse_parts(),
             Some(AdapterIdParts::ThreeSegment {
                 capability: "observe_position",
@@ -1235,7 +1216,6 @@ mod tests {
     #[test]
     fn adapter_id_parts_two_segments() {
         let id = AdapterId("resolve_subject/evm_address".to_string());
-        assert_eq!(id.parts(), ("resolve_subject", "evm_address", None));
         assert_eq!(
             id.parse_parts(),
             Some(AdapterIdParts::TwoSegment {
@@ -1248,13 +1228,13 @@ mod tests {
     #[test]
     fn adapter_id_parts_rejects_bad_shapes() {
         let dotted = AdapterId("observe_position/evm/native/balance".to_string());
-        assert_eq!(dotted.parts(), ("", "", None));
+        assert_eq!(dotted.parse_parts(), None);
 
         let bad_capability = AdapterId("1resolve_subject/evm".to_string());
-        assert_eq!(bad_capability.parts(), ("", "", None));
+        assert_eq!(bad_capability.parse_parts(), None);
 
         let bad_char = AdapterId("observe-position/evm".to_string());
-        assert_eq!(bad_char.parts(), ("", "", None));
+        assert_eq!(bad_char.parse_parts(), None);
     }
 
     fn sample_plan_config() -> PortfolioPlanConfig {

@@ -122,6 +122,21 @@ fn aave_origin_execute_rejects_canonical_config() {
 }
 
 #[test]
+fn aave_origin_root_rejects_built_config() {
+    let op = AaveV3OriginStackOp;
+    let err = op
+        .expand(
+            OpPath("aave_v3_origin_stack.main".to_string()),
+            &built_op_config(),
+            &op_test_support::run_config_live(),
+        )
+        .err()
+        .expect("built config must fail");
+
+    assert_eq!(err.info.code.0, "invalid_aave_v3_origin_stack_config");
+}
+
+#[test]
 fn aave_origin_execute_built_input_reexports_phase_a_outputs() {
     let op = AaveV3OriginStackExecuteOp;
     let planned = op

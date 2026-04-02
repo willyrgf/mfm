@@ -654,14 +654,13 @@ fn ensure_apply_can_continue_after_auto_sync(
 }
 
 fn resolved_mode(cli: &Cli) -> Mode {
-    match (&cli.command, cli.dry_run) {
-        (Some(Command::Plan(_)), _) => Mode::Plan,
-        (Some(Command::Apply(_)), _) => Mode::Apply,
-        (Some(Command::Resume(_)), _) => Mode::Resume,
-        (Some(Command::SyncUmbrella(_)), _) => Mode::SyncUmbrella,
-        (Some(Command::Yank(_)), _) => Mode::Yank,
-        (None, true) => Mode::Plan,
-        (None, false) => Mode::Apply,
+    match &cli.command {
+        Some(Command::Plan(_)) => Mode::Plan,
+        Some(Command::Apply(_)) => Mode::Apply,
+        Some(Command::Resume(_)) => Mode::Resume,
+        Some(Command::SyncUmbrella(_)) => Mode::SyncUmbrella,
+        Some(Command::Yank(_)) => Mode::Yank,
+        None => Mode::Apply,
     }
 }
 

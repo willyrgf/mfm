@@ -50,7 +50,7 @@ pub(crate) struct ImportArgs {
 #[derive(clap::ValueEnum, Clone)]
 pub(crate) enum ImportType {
     /// Import a raw private key.
-    #[value(name = "privatekey", alias = "private-key")]
+    #[value(name = "privatekey")]
     PrivateKey,
     /// Import a BIP-39 mnemonic phrase.
     #[value(name = "mnemonic")]

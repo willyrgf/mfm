@@ -2,7 +2,7 @@
 //!
 //! The CLI and REST API use this module to resolve environment-driven tracing configuration while
 //! preserving the repository-wide logging contract: logs on stderr, stable payloads on stdout, and
-//! compatibility support for both canonical and legacy environment variables.
+//! canonical environment variables plus the standard `RUST_LOG` fallback.
 
 use std::io::IsTerminal;
 
@@ -13,12 +13,6 @@ use tracing_subscriber::EnvFilter;
 
 use crate::{AppError, ErrorClass};
 
-/// Legacy component-specific log filter override.
-pub const ENV_MFM_LOG: &str = "MFM_LOG";
-/// Legacy component-specific log format override.
-pub const ENV_MFM_LOG_FORMAT: &str = "MFM_LOG_FORMAT";
-/// Legacy component-specific span-event override.
-pub const ENV_MFM_LOG_SPAN_EVENTS: &str = "MFM_LOG_SPAN_EVENTS";
 /// Canonical baseline log filter override.
 pub const ENV_LOG_LEVEL: &str = "LOG_LEVEL";
 /// Canonical log format selector.
@@ -78,7 +72,7 @@ fn resolve_log_filter<F>(default_filter: &str, mut lookup: F) -> String
 where
     F: FnMut(&str) -> Option<String>,
 {
-    for key in [ENV_MFM_LOG, ENV_LOG_LEVEL, ENV_RUST_LOG] {
+    for key in [ENV_LOG_LEVEL, ENV_RUST_LOG] {
         if let Some(value) = lookup(key) {
             return value;
         }
@@ -90,10 +84,8 @@ fn resolve_log_format<F>(mut lookup: F) -> LogFormat
 where
     F: FnMut(&str) -> Option<String>,
 {
-    for key in [ENV_MFM_LOG_FORMAT, ENV_LOG_FORMAT] {
-        if let Some(raw) = lookup(key) {
-            return parse_format(&raw);
-        }
+    if let Some(raw) = lookup(ENV_LOG_FORMAT) {
+        return parse_format(&raw);
     }
     LogFormat::Text
 }
@@ -102,10 +94,8 @@ fn resolve_log_span_events<F>(mut lookup: F) -> FmtSpan
 where
     F: FnMut(&str) -> Option<String>,
 {
-    for key in [ENV_MFM_LOG_SPAN_EVENTS, ENV_LOG_SPAN_EVENTS] {
-        if let Some(raw) = lookup(key) {
-            return parse_span_events(&raw);
-        }
+    if let Some(raw) = lookup(ENV_LOG_SPAN_EVENTS) {
+        return parse_span_events(&raw);
     }
     FmtSpan::NONE
 }
@@ -146,8 +136,8 @@ pub fn init_observability(config: ObservabilityConfig) -> Result<(), AppError> {
             ErrorClass::BadRequest,
             "InvalidLogFilter",
             format!(
-                "invalid log filter value (supported env vars: {}, {}, {})",
-                ENV_MFM_LOG, ENV_LOG_LEVEL, ENV_RUST_LOG
+                "invalid log filter value (supported env vars: {}, {})",
+                ENV_LOG_LEVEL, ENV_RUST_LOG
             ),
         )
     })?;
@@ -199,20 +189,6 @@ mod tests {
     }
 
     #[test]
-    fn filter_resolution_prefers_component_overrides_before_global_level() {
-        let filter = resolve_log_filter(
-            "warn,mfm=info",
-            lookup_from(&[
-                (ENV_LOG_LEVEL, "warn"),
-                (ENV_RUST_LOG, "debug"),
-                (ENV_MFM_LOG, "trace,mfm=trace"),
-            ]),
-        );
-
-        assert_eq!(filter, "trace,mfm=trace");
-    }
-
-    #[test]
     fn filter_resolution_uses_log_level_before_rust_log() {
         let filter = resolve_log_filter(
             "warn,mfm=info",
@@ -235,26 +211,8 @@ mod tests {
     }
 
     #[test]
-    fn format_resolution_prefers_legacy_override() {
-        let format = resolve_log_format(lookup_from(&[
-            (ENV_LOG_FORMAT, "text"),
-            (ENV_MFM_LOG_FORMAT, "json"),
-        ]));
-        assert_eq!(format, LogFormat::Json);
-    }
-
-    #[test]
     fn span_event_resolution_supports_global_alias() {
         let span_events = resolve_log_span_events(lookup_from(&[(ENV_LOG_SPAN_EVENTS, "active")]));
         assert_eq!(span_events, FmtSpan::ACTIVE);
-    }
-
-    #[test]
-    fn span_event_resolution_prefers_legacy_override() {
-        let span_events = resolve_log_span_events(lookup_from(&[
-            (ENV_LOG_SPAN_EVENTS, "new"),
-            (ENV_MFM_LOG_SPAN_EVENTS, "close"),
-        ]));
-        assert_eq!(span_events, FmtSpan::CLOSE);
     }
 }

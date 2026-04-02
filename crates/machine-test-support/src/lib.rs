@@ -37,9 +37,6 @@ where
     if let Some(filter) = lookup("MFM_TEST_LOG_FILTER") {
         return filter;
     }
-    if let Some(filter) = lookup("MFM_LOG") {
-        return filter;
-    }
     if let Some(filter) = lookup("LOG_LEVEL") {
         return filter;
     }
@@ -57,7 +54,7 @@ where
 /// Initializes a process-wide tracing subscriber for integration and contract tests.
 ///
 /// The filter resolution order matches the repository test contract:
-/// `MFM_TEST_LOG_FILTER`, `MFM_LOG`, `LOG_LEVEL`, `RUST_LOG`, then `MFM_TEST_LOG`.
+/// `MFM_TEST_LOG_FILTER`, `LOG_LEVEL`, `RUST_LOG`, then `MFM_TEST_LOG`.
 /// Repeated calls are harmless and only the first invocation installs the subscriber.
 pub fn init_test_observability() {
     static INIT: Once = Once::new();
@@ -301,26 +298,17 @@ mod tests {
     fn test_filter_prefers_test_specific_override() {
         let filter = resolve_test_filter(lookup_from(&[
             ("MFM_TEST_LOG_FILTER", "trace"),
-            ("MFM_LOG", "warn"),
             ("LOG_LEVEL", "info"),
         ]));
         assert_eq!(filter, "trace");
     }
 
     #[test]
-    fn test_filter_prefers_component_override_before_global_level() {
+    fn test_filter_uses_global_level_before_rust_log() {
         let filter = resolve_test_filter(lookup_from(&[
-            ("MFM_LOG", "debug,mfm=trace"),
-            ("LOG_LEVEL", "info"),
+            ("LOG_LEVEL", "debug"),
             ("RUST_LOG", "warn"),
         ]));
-        assert_eq!(filter, "debug,mfm=trace");
-    }
-
-    #[test]
-    fn test_filter_uses_global_level_before_rust_log() {
-        let filter =
-            resolve_test_filter(lookup_from(&[("LOG_LEVEL", "debug"), ("RUST_LOG", "warn")]));
         assert_eq!(filter, "debug");
     }
 

@@ -413,12 +413,9 @@ fn test_artifact_root(path: &Path) -> PathBuf {
 
 fn sanitize_machine_readable_cli_env(cmd: &mut Command) -> &mut Command {
     // Keep JSON response channels deterministic for parity tests even when the parent
-    // environment enables tracing (e.g. LOG_LEVEL/RUST_LOG/MFM_LOG in CI debug runs).
-    cmd.env_remove("MFM_LOG")
-        .env_remove("LOG_LEVEL")
+    // environment enables tracing (e.g. LOG_LEVEL/RUST_LOG in CI debug runs).
+    cmd.env_remove("LOG_LEVEL")
         .env_remove("RUST_LOG")
-        .env_remove("MFM_LOG_FORMAT")
         .env_remove("LOG_FORMAT")
-        .env_remove("MFM_LOG_SPAN_EVENTS")
         .env_remove("LOG_SPAN_EVENTS")
 }

@@ -232,13 +232,6 @@ pub struct PortfolioSnapshotBuildOutcome {
     pub report: PortfolioSnapshotBuildReport,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(untagged)]
-enum PortfolioSnapshotExecutionConfigInput {
-    Built(PortfolioSnapshotBuiltConfig),
-    Canonical(PortfolioSnapshotCanonicalConfig),
-}
-
 /// Errors returned while parsing or canonicalizing portfolio snapshot config.
 #[derive(Debug, Error)]
 pub enum PortfolioSnapshotConfigError {
@@ -439,31 +432,12 @@ pub fn build_portfolio_snapshot_outcome(
     })
 }
 
-/// Decodes an execution op config into the normalized built representation.
-///
-/// This preserves compatibility with the current canonical request shape while allowing internal
-/// callers to pass pre-built config and avoid recompiling the semantic execution spec.
-pub fn decode_portfolio_snapshot_execution_config(
+/// Decodes canonical portfolio snapshot config.
+pub fn decode_portfolio_snapshot_canonical_config(
     value: &Value,
-) -> Result<PortfolioSnapshotBuiltConfig, PortfolioSnapshotExecutionConfigError> {
-    match serde_json::from_value::<PortfolioSnapshotExecutionConfigInput>(value.clone())
-        .map_err(|source| PortfolioSnapshotExecutionConfigError::Decode { source })?
-    {
-        PortfolioSnapshotExecutionConfigInput::Canonical(canonical) => {
-            build_portfolio_snapshot_config(canonical).map_err(Into::into)
-        }
-        PortfolioSnapshotExecutionConfigInput::Built(built) => {
-            let built = built.normalized();
-            validate_portfolio_bundle(
-                &built.canonical.portfolio,
-                &built.canonical.valuation_source_registry,
-            )?;
-            built.execution_spec.validate().map_err(|source| {
-                PortfolioSnapshotExecutionConfigError::InvalidExecutionSpec { source }
-            })?;
-            Ok(built)
-        }
-    }
+) -> Result<PortfolioSnapshotCanonicalConfig, PortfolioSnapshotExecutionConfigError> {
+    serde_json::from_value::<PortfolioSnapshotCanonicalConfig>(value.clone())
+        .map_err(|source| PortfolioSnapshotExecutionConfigError::Decode { source })
 }
 
 /// Decodes a built execution op config into the normalized built representation.
@@ -608,22 +582,15 @@ mod tests {
     }
 
     #[test]
-    fn decode_execution_config_accepts_legacy_canonical_and_built_shapes() {
+    fn decode_canonical_config_accepts_canonical_shape() {
         let canonical = canonicalize_portfolio_snapshot_authored_config(sample_authored_config())
             .expect("canonical");
-        let built = build_portfolio_snapshot_config(canonical.clone()).expect("built");
-
-        let decoded_from_canonical = decode_portfolio_snapshot_execution_config(
+        let decoded = decode_portfolio_snapshot_canonical_config(
             &serde_json::to_value(&canonical).expect("canonical json"),
         )
         .expect("decode canonical");
-        let decoded_from_built = decode_portfolio_snapshot_execution_config(
-            &serde_json::to_value(&built).expect("built json"),
-        )
-        .expect("decode built");
 
-        assert_eq!(decoded_from_canonical, built);
-        assert_eq!(decoded_from_built, built);
+        assert_eq!(decoded, canonical);
     }
 
     #[test]

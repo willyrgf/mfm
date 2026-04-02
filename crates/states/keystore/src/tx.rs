@@ -15,13 +15,13 @@
 //! ```
 
 use alloy_primitives::{keccak256, Address, PrimitiveSignature, B256};
+use mfm_core::keystore::Keystore;
 use mfm_evm_core::rlp::{
     rlp_encode_bytes, rlp_encode_list_preencoded, trim_leading_zero_bytes, u128_to_min_be,
     u64_to_min_be,
 };
 use mfm_machine::errors::{ErrorCategory, StateError};
 use mfm_machine::ids::{ContextKey, StateId};
-use mfm_op_keystore::Keystore;
 use mfm_state_common::errors::state_error_with_state;
 use url::Url;
 use uuid::Uuid;

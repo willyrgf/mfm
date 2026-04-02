@@ -9,13 +9,13 @@ For Nixfied automation, prefer strict app wrappers when possible:
 - `nix run .#mfm::keystore::tx-sign -- --to ...`
 - `nix run .#mfm::run::status -- <RUN_ID>`
 
-The `nix run .#mfm_cli -- ...` entrypoint remains available as a compatibility passthrough wrapper.
+Build the packaged binary with `nix build .#mfm-cli` when you need the raw CLI under Nix.
 
 ## Design Philosophy
 
 - **User-Centric**: Commands are designed to be intuitive and easy to remember.
 - **Scriptable**: Supports non-interactive modes, input from `stdin`, and configuration via environment variables, making it suitable for automation and scripting.
-- **Secure by Default**: Uses the security-hardened keystore implementation (via `mfm-op-keystore`, which wraps `crates/core`) so key operations share the same security invariants.
+- **Secure by Default**: Uses the security-hardened keystore implementation from `crates/core` so key operations share the same security invariants.
 - **AI-Friendly Output**: Provides machine-readable JSON output via a global `--output-format` flag, making it ideal for AI agents and automation, while preserving human-readable text output by default.
 - **Minimalism**: Focuses on essential commands, avoiding feature bloat to maintain a clean and simple interface.
 
@@ -489,25 +489,6 @@ The CLI's behavior can be modified using environment variables, which is ideal f
 - Managed `rpc.control` bootstrap requires `network_id` on every configured source.
 - Canonical managed requests require an explicit `network_id`; `control_scope` defaults to
   `shared` unless an op config overrides it.
-
-- Direct-executor compatibility knobs:
-  These still affect the internal `namespace="evm"` executor and direct executor tests. Canonical
-  `rpc.control` reads and writes should not rely on them for routing authority.
-  - **`MFM_EVM_RPC_STRATEGY`**: optional executor strategy (`failover` or `hedged_light`; default `hedged_light`).
-  - **`MFM_EVM_RPC_HEDGE_DELAY_MS`**: optional hedge delay (milliseconds) used by `hedged_light`.
-  - **`MFM_EVM_RPC_UNHEALTHY_COOLDOWN_CALLS`**: optional executor unhealthy cooldown in logical call-count units.
-  - **`MFM_EVM_RPC_LOGS_MAX_BLOCK_SPAN`**: optional initial max block span for `eth_getLogs` chunking.
-  - **`MFM_EVM_RPC_LOGS_MIN_BLOCK_SPAN`**: optional minimum block span for `eth_getLogs` adaptive split.
-  - **`MFM_EVM_RPC_LOGS_MAX_CHUNKS_PER_CALL`**: optional chunk/retry budget for a single `eth_getLogs` request.
-  ```sh
-  export MFM_EVM_RPC_LOGS_MAX_BLOCK_SPAN="2000"
-  ```
-  ```sh
-  export MFM_EVM_RPC_LOGS_MIN_BLOCK_SPAN="64"
-  ```
-  ```sh
-  export MFM_EVM_RPC_LOGS_MAX_CHUNKS_PER_CALL="256"
-  ```
 
 - Managed RPC note: per-request `rpc_url` override is not supported. Canonical routing enters through `rpc.control`.
 - Managed RPC runbook: [`../../docs/evm-rpc-routing.md`](../../docs/evm-rpc-routing.md)

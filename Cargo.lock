@@ -1887,7 +1887,6 @@ dependencies = [
  "mfm-evm-deploy-configure-validate-config",
  "mfm-machine",
  "mfm-op-keystore-admin",
- "mfm-op-keystore-shim",
  "mfm-op-keystore-tx",
  "mfm-op-portfolio-tracker",
  "mfm-portfolio-config",
@@ -1896,6 +1895,7 @@ dependencies = [
  "mfm-state-symbol",
  "mfm-stream-store-mem",
  "mfm-stream-store-postgres",
+ "mfm_core",
  "predicates",
  "rand 0.9.1",
  "serde",
@@ -2309,13 +2309,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mfm-op-keystore-shim"
-version = "0.1.0"
-dependencies = [
- "mfm_core",
-]
-
-[[package]]
 name = "mfm-op-keystore-tx"
 version = "0.1.0"
 dependencies = [
@@ -2497,9 +2490,9 @@ dependencies = [
  "mfm-collectors-local-keystore",
  "mfm-evm-core",
  "mfm-machine",
- "mfm-op-keystore-shim",
  "mfm-sdk",
  "mfm-state-common",
+ "mfm_core",
  "serde",
  "serde_json",
  "url",
@@ -2606,7 +2599,6 @@ dependencies = [
  "hex",
  "mfm-collectors-local-keystore",
  "mfm-machine",
- "mfm-op-keystore-shim",
  "mfm-state-keystore",
  "mfm_core",
  "regex",

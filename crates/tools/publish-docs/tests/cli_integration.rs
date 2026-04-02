@@ -16,7 +16,7 @@ fn help_output_shows_output_format_and_env_var() {
         .success()
         .stdout(predicate::str::contains("--output-format"))
         .stdout(predicate::str::contains("MFM_OUTPUT_FORMAT"))
-        .stdout(predicate::str::contains("MFM_LOG"))
+        .stdout(predicate::str::contains("LOG_LEVEL"))
         .stdout(predicate::str::contains("plan"))
         .stdout(predicate::str::contains("apply"))
         .stdout(predicate::str::contains("resume"))
@@ -32,7 +32,7 @@ fn unknown_package_renders_json_error_envelope() {
         .args([
             "--output-format",
             "json",
-            "--dry-run",
+            "plan",
             "--allow-dirty",
             "--only",
             "not-a-package",
@@ -57,7 +57,7 @@ fn output_flag_overrides_json_env_var() {
         .args([
             "--output-format",
             "text",
-            "--dry-run",
+            "plan",
             "--allow-dirty",
             "--only",
             "not-a-package",
@@ -114,11 +114,11 @@ fn json_output_stays_on_stdout_when_logs_are_enabled() {
     let mut cmd = Command::cargo_bin("mfm-publish-docs").expect("binary");
     let output = cmd
         .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .env("MFM_LOG", "info")
+        .env("LOG_LEVEL", "info")
         .args([
             "--output-format",
             "json",
-            "--dry-run",
+            "plan",
             "--allow-dirty",
             "--only",
             "not-a-package",

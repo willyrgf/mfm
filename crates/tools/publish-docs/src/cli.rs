@@ -7,7 +7,7 @@ use crate::model::OutputFormat;
 #[command(name = "mfm-publish-docs")]
 #[command(about = "Planner, reconciler, and lifecycle tool for the docs.rs publish wave")]
 #[command(
-    after_help = "Logging: use MFM_LOG (or LOG_LEVEL / RUST_LOG) to set the filter. Use MFM_LOG_FORMAT / LOG_FORMAT for text or json logs."
+    after_help = "Logging: use LOG_LEVEL or RUST_LOG to set the filter. Use LOG_FORMAT for text or json logs."
 )]
 #[command(version)]
 pub(crate) struct Cli {
@@ -23,10 +23,6 @@ pub(crate) struct Cli {
     /// Top-level command to execute.
     #[command(subcommand)]
     pub command: Option<Command>,
-
-    /// Compatibility alias for `plan`.
-    #[arg(long)]
-    pub dry_run: bool,
 
     /// Allow dirty working trees and forward `--allow-dirty` to `cargo publish`.
     #[arg(long)]

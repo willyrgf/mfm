@@ -548,33 +548,18 @@ fn expand_uses_canonical_multi_network_graph() {
 }
 
 #[test]
-fn portfolio_tracker_built_input_keeps_the_semantic_runtime_without_build_publication() {
+fn portfolio_tracker_rejects_built_input() {
     let op = PortfolioTrackerOp;
-    let planned = op
+    let err = op
         .expand(
             OpPath("portfolio_tracker.main".to_string()),
             &built_op_config(),
             &op_test_support::run_config_live(),
         )
-        .expect("expand");
-    let composite = into_composite(planned);
+        .err()
+        .expect("built config must not decode for portfolio_tracker");
 
-    assert!(composite.bindings.iter().any(|binding| {
-        binding.to_child.0 == RESOLVE_SUBJECTS_CHILD_ID && binding.import.0 == PORT_PREPARED_SOURCES
-    }));
-    assert!(composite.order.is_empty());
-    assert!(composite
-        .children
-        .iter()
-        .all(|child| child.child_op_local_id.0 != PORTFOLIO_TRACKER_BUILD_CHILD_ID));
-    assert!(composite
-        .children
-        .iter()
-        .any(|child| child.child_op_local_id.0 == PREPARE_EXECUTION_SOURCES_CHILD_ID));
-    assert!(composite
-        .children
-        .iter()
-        .any(|child| child.child_op_local_id.0 == PROJECT_REPORT_CHILD_ID));
+    assert_eq!(err.info.code.0, "invalid_portfolio_execution_config");
 }
 
 #[test]

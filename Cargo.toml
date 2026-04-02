@@ -49,7 +49,6 @@ members = [
 	"crates/transports/local-keystore",
 	"crates/transports/proof",
 	"crates/transports/rpc-control",
-	"crates/ops/keystore-op",
 	"crates/ops/keystore-tx-op",
 	"crates/ops/keystore-admin-op",
 	"crates/ops/evm-read-op",

@@ -290,7 +290,7 @@ Runtime wiring rules:
 ### Semantic adapter system (portfolio domain)
 The portfolio domain (`crates/states/portfolio/`) uses a semantic adapter architecture:
 - `SemanticCatalog` — deterministic adapter registry with exactly-one-match selection for observation, subject, view, and valuation planning.
-- `AdapterId` — transparent string newtype using the slash convention `"capability/family/implementation"` (canonical v1 contract). Use `AdapterId::parts()` for structured access.
+- `AdapterId` — transparent string newtype using the slash convention `"capability/family/implementation"` (canonical v1 contract). Use `AdapterId::parse_parts()` for structured access.
 - `VenueId` — transparent string newtype. Venue metadata lives on the separate `Venue` struct.
 - Fixed semantic state family — 8 states (PrepareExecutionSources through ProjectReport) form the runtime topology; variation enters through adapters, not state branching.
 - Multi-network support — the same semantic pipeline handles EVM and Bitcoin wallet observations.
@@ -315,13 +315,13 @@ Anti-patterns:
 - Logs go to stderr; contract payloads stay on stdout.
 - Runtime log env contract:
   - canonical baseline: `LOG_LEVEL`
-  - component overrides: `MFM_LOG` (and `RUST_LOG` compatibility fallback)
-  - format aliases: `LOG_FORMAT` / `MFM_LOG_FORMAT`
-  - span-event aliases: `LOG_SPAN_EVENTS` / `MFM_LOG_SPAN_EVENTS`
+  - fallback filter syntax: `RUST_LOG`
+  - output format: `LOG_FORMAT`
+  - span-event mode: `LOG_SPAN_EVENTS`
 - CI/service diagnostics env contract:
   - canonical diagnostics level: `LOG_LEVEL`
   - canonical diagnostics output routing: `OUTPUT_MODE` (`stdout|logs|both`)
-  - shell runtime enforces strict `LOG_LEVEL` enum values (`error|warn|info|debug|trace`); use `RUST_LOG`/`MFM_LOG` for target-specific composite filters
+  - shell runtime enforces strict `LOG_LEVEL` enum values (`error|warn|info|debug|trace`); use `RUST_LOG` for target-specific composite filters
   - compatibility aliases are supported: `NIXFIED_LOG_LEVEL` and `NIXFIED_OUTPUT_MODE`
   - project CI setup rejects legacy CI env vars: `CI_LOG_LEVEL`, `CI_VERBOSE`, `NIXFIED_VERBOSE`, `NIXFIED_DEBUG`
   - if `OUTPUT_MODE` is unset and `LOG_LEVEL=debug`, CI defaults to `OUTPUT_MODE=both`

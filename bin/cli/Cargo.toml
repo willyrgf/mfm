@@ -25,7 +25,7 @@ uuid = { version = "1.0", features = ["v4"] }
 hex = "0.4"
 
 [dev-dependencies]
-mfm-op-keystore = { package = "mfm-op-keystore-shim", path = "../../crates/ops/keystore-op" }
+mfm_core = { path = "../../crates/core" }
 mfm-state-portfolio = { path = "../../crates/states/portfolio" }
 mfm-state-symbol = { path = "../../crates/states/symbol" }
 mfm-op-portfolio-tracker = { path = "../../crates/ops/portfolio-tracker-op" }

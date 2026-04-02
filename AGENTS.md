@@ -104,7 +104,7 @@ Nixfied is vendored under `nixfied/`. Vendoring boundaries (canonical doc: `nixf
 Prefer editing `nixfied/project/` and `nixfied/local/` (not `flake.nix` or framework code under `nixfied/framework/`) for workflow changes:
 
 - `nixfied/project/conf.nix`: project identity, env vars, envs/ports, service defaults, slot behavior.
-- `nixfied/project/module.nix`: `nix run .#dev`, `nix run .#mfm_cli`, `nix run .#mfm_rest_api`, `nix run .#build`, `nix run .#check`, `nix run .#test`, and `nix run .#ci` task/workflow wiring including `mfm::portfolio::snapshot`.
+- `nixfied/project/module.nix`: `nix run .#dev`, `nix run .#mfm_rest_api`, `nix run .#build`, `nix run .#check`, `nix run .#test`, and `nix run .#ci` task/workflow wiring including `mfm::portfolio::snapshot`.
 - `nixfied/project/ci-runtime.nix`: CI runtime environment helpers and command assembly used by the CI task/workflow layer.
 - Framework introspection surfaces such as `.#introspect`, `.#schema`, `.#features`, and package outputs like `.#introspectionBundle`: compiled model surfaces that project CI checks should consume directly.
 - `nixfied/project/default.nix`: merges project files; update it if you add a new `nixfied/project/*.nix` part.
@@ -210,8 +210,8 @@ The CLI is designed to be scriptable and AI-friendly.
 Run locally:
 
 ```bash
-nix run .#mfm_cli -- --help
-nix run .#mfm_cli -- keystore list
+nix build .#mfm-cli
+./result/bin/mfm_cli --help
 ```
 
 ### State Machine (`crates/machine/`)

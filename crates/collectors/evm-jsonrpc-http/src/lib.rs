@@ -73,17 +73,9 @@ const CODE_EVM_CONFIG_INVALID: &str = "evm_config_invalid";
 const CODE_EVM_LOGS_CHUNKING_INVALID_RANGE: &str = "evm_logs_chunking_invalid_range";
 const CODE_EVM_LOGS_CHUNKING_EXHAUSTED: &str = "evm_logs_chunking_exhausted";
 const METHOD_EVM_ROUTING_ANALYSIS: &str = "mfm_debugRoutingAnalysis";
-const ENV_EVM_RPC_URL: &str = "MFM_EVM_RPC_URL";
-const ENV_EVM_RPC_AUTHORIZATION: &str = "MFM_EVM_RPC_AUTHORIZATION";
 const ENV_EVM_RPC_SOURCES_JSON: &str = "MFM_EVM_RPC_SOURCES_JSON";
 const ENV_EVM_RPC_PREFERRED_ORDER: &str = "MFM_EVM_RPC_PREFERRED_ORDER";
-const ENV_EVM_RPC_STRATEGY: &str = "MFM_EVM_RPC_STRATEGY";
-const ENV_EVM_RPC_HEDGE_DELAY_MS: &str = "MFM_EVM_RPC_HEDGE_DELAY_MS";
-const ENV_EVM_RPC_UNHEALTHY_COOLDOWN_CALLS: &str = "MFM_EVM_RPC_UNHEALTHY_COOLDOWN_CALLS";
 const ENV_EVM_RPC_REQUIRE_GET_PROOF_IDS: &str = "MFM_EVM_RPC_REQUIRE_GET_PROOF_IDS";
-const ENV_EVM_RPC_LOGS_MAX_BLOCK_SPAN: &str = "MFM_EVM_RPC_LOGS_MAX_BLOCK_SPAN";
-const ENV_EVM_RPC_LOGS_MIN_BLOCK_SPAN: &str = "MFM_EVM_RPC_LOGS_MIN_BLOCK_SPAN";
-const ENV_EVM_RPC_LOGS_MAX_CHUNKS_PER_CALL: &str = "MFM_EVM_RPC_LOGS_MAX_CHUNKS_PER_CALL";
 
 const MAX_DIAGNOSTIC_MESSAGE_LEN: usize = 240;
 
@@ -382,23 +374,6 @@ impl CsvValues {
     }
 }
 
-fn parse_u64_env(var_name: &str) -> Option<u64> {
-    let Ok(raw) = std::env::var(var_name) else {
-        return None;
-    };
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    match trimmed.parse::<u64>() {
-        Ok(v) => Some(v),
-        Err(_) => {
-            warn!(env_var = var_name, "ignoring invalid numeric env var");
-            None
-        }
-    }
-}
-
 fn parse_source_kind(raw: Option<&str>) -> EvmSourceKind {
     let normalized = raw.unwrap_or("remote_public").trim().to_ascii_lowercase();
     match normalized.as_str() {
@@ -433,45 +408,13 @@ pub fn resolve_evm_rpc_sources_from_env() -> Vec<EvmJsonRpcSource> {
                     return out;
                 }
                 Err(_) => {
-                    warn!("failed to parse MFM_EVM_RPC_SOURCES_JSON; falling back to legacy env");
+                    warn!("failed to parse MFM_EVM_RPC_SOURCES_JSON");
                 }
             }
         }
     }
 
-    let rpc_url = std::env::var(ENV_EVM_RPC_URL)
-        .ok()
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty());
-    let Some(rpc_url) = rpc_url else {
-        return Vec::new();
-    };
-
-    vec![EvmJsonRpcSource {
-        id: "user_primary".to_string(),
-        rpc_url,
-        authorization: std::env::var(ENV_EVM_RPC_AUTHORIZATION).ok(),
-        kind: EvmSourceKind::RemoteUser,
-        require_get_proof_probe: false,
-    }]
-}
-
-fn resolve_evm_routing_strategy_from_env() -> EvmRoutingStrategy {
-    let Some(raw) = std::env::var(ENV_EVM_RPC_STRATEGY).ok() else {
-        return EvmRoutingStrategy::HedgedLight;
-    };
-
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "failover" => EvmRoutingStrategy::Failover,
-        "hedged_light" | "hedged" => EvmRoutingStrategy::HedgedLight,
-        _ => {
-            warn!(
-                env_var = ENV_EVM_RPC_STRATEGY,
-                "unknown evm routing strategy; using hedged_light"
-            );
-            EvmRoutingStrategy::HedgedLight
-        }
-    }
+    Vec::new()
 }
 
 fn resolve_evm_rpc_config_from_env() -> EvmJsonRpcHttpConfig {
@@ -490,27 +433,11 @@ fn resolve_evm_rpc_config_from_env() -> EvmJsonRpcHttpConfig {
         preferred_order = sources.iter().map(|s| s.id.clone()).collect();
     }
 
-    let mut cfg = EvmJsonRpcHttpConfig {
+    let cfg = EvmJsonRpcHttpConfig {
         sources,
         preferred_order,
         ..EvmJsonRpcHttpConfig::default()
     };
-    cfg.strategy = resolve_evm_routing_strategy_from_env();
-    if let Some(hedge_delay_ms) = parse_u64_env(ENV_EVM_RPC_HEDGE_DELAY_MS) {
-        cfg.hedge_delay = Duration::from_millis(hedge_delay_ms);
-    }
-    if let Some(cooldown_calls) = parse_u64_env(ENV_EVM_RPC_UNHEALTHY_COOLDOWN_CALLS) {
-        cfg.unhealthy_cooldown_calls = cooldown_calls;
-    }
-    if let Some(max_span) = parse_u64_env(ENV_EVM_RPC_LOGS_MAX_BLOCK_SPAN) {
-        cfg.logs_max_block_span = max_span;
-    }
-    if let Some(min_span) = parse_u64_env(ENV_EVM_RPC_LOGS_MIN_BLOCK_SPAN) {
-        cfg.logs_min_block_span = min_span;
-    }
-    if let Some(max_chunks) = parse_u64_env(ENV_EVM_RPC_LOGS_MAX_CHUNKS_PER_CALL) {
-        cfg.logs_max_chunks_per_call = max_chunks;
-    }
     cfg
 }
 

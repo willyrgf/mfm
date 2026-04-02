@@ -81,7 +81,7 @@ The relationship is important:
 
 Also note:
 
-- the snapshot task does not call `nix run .#mfm_cli`
+- the snapshot task does not call a flake app passthrough wrapper
 - it does not use `cargo run`
 - it resolves the packaged binary path `${conf.packages."mfm-cli"}/bin/mfm_cli`
 

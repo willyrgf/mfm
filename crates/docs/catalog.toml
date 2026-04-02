@@ -92,15 +92,6 @@ docs_policy = "docs-rs"
 umbrella_policy = "when-published"
 
 [[packages]]
-name = "mfm-op-keystore-shim"
-workspace_path = "crates/ops/keystore-op"
-visibility = "public"
-section = "ops"
-summary = "Keystore compatibility shim types shared with state crates."
-docs_policy = "repo-only"
-umbrella_policy = "always"
-
-[[packages]]
 name = "mfm-op-keystore-admin"
 workspace_path = "crates/ops/keystore-admin-op"
 visibility = "public"
