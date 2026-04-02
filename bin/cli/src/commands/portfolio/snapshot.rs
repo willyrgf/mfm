@@ -3,8 +3,12 @@ use std::path::PathBuf;
 
 use clap::Args;
 use mfm_app::{
-    parse_portfolio_snapshot_request_input, AppError, FeatureCatalog, FeatureExecutionResult,
-    FeatureRequest, PortfolioSnapshotRequest,
+    AppError, FeatureCatalog, FeatureExecutionResult, FeatureRequest, PortfolioSnapshotRequest,
+};
+use mfm_portfolio_config::{
+    canonicalize_portfolio_snapshot_authored_config, parse_portfolio_snapshot_authored_config,
+    parse_portfolio_snapshot_authored_config_with_hint, AuthoredConfigFormat,
+    PortfolioSnapshotConfigError,
 };
 
 use crate::commands::result::{CommandError, CommandOutput, CommandResult};
@@ -59,8 +63,35 @@ where
 }
 
 fn parse_request(args: &SnapshotArgs) -> Result<PortfolioSnapshotRequest, CommandError> {
-    parse_portfolio_snapshot_request_input(args.request_json.clone(), args.request_file.clone())
-        .map_err(command_error_from_snapshot_parse_error)
+    match (&args.request_json, &args.request_file) {
+        (Some(_), Some(_)) => Err(CommandError::new(
+            "InvalidArguments",
+            "Pass only one of --request-json or --request-file",
+        )),
+        (None, None) => Err(CommandError::new(
+            "MissingArgument",
+            "Pass one of --request-json or --request-file",
+        )),
+        (Some(raw), None) => {
+            let authored =
+                parse_portfolio_snapshot_authored_config(raw, AuthoredConfigFormat::Json)
+                    .map_err(|err| command_error_from_snapshot_config_error(err, Some("JSON")))?;
+            canonicalize_portfolio_snapshot_authored_config(authored)
+                .map_err(|err| command_error_from_snapshot_config_error(err, None))
+        }
+        (None, Some(path)) => {
+            let raw = std::fs::read_to_string(path).map_err(|_| {
+                CommandError::new(
+                    "InvalidRequestFile",
+                    "Failed to read --request-file contents",
+                )
+            })?;
+            let authored = parse_portfolio_snapshot_authored_config_with_hint(&raw, Some(path))
+                .map_err(|err| command_error_from_snapshot_config_error(err, None))?;
+            canonicalize_portfolio_snapshot_authored_config(authored)
+                .map_err(|err| command_error_from_snapshot_config_error(err, None))
+        }
+    }
 }
 
 async fn execute_request_with_executor<F, Fut>(
@@ -82,11 +113,22 @@ where
     Ok(CommandOutput::new(result))
 }
 
-fn command_error_from_snapshot_parse_error(err: AppError) -> CommandError {
-    match err.code.as_str() {
-        "InvalidJson" => CommandError::new("InvalidJson", "Failed to parse request body as JSON"),
-        "InvalidToml" => CommandError::new("InvalidToml", "Failed to parse request body as TOML"),
-        _ => command_error_from_app_error(err),
+fn command_error_from_snapshot_config_error(
+    err: PortfolioSnapshotConfigError,
+    _format_name: Option<&str>,
+) -> CommandError {
+    match err {
+        PortfolioSnapshotConfigError::InvalidJson { .. } => {
+            CommandError::new("InvalidJson", "Failed to parse request body as JSON")
+        }
+        PortfolioSnapshotConfigError::InvalidToml { .. } => {
+            CommandError::new("InvalidToml", "Failed to parse request body as TOML")
+        }
+        PortfolioSnapshotConfigError::InvalidBundle(_)
+        | PortfolioSnapshotConfigError::Serialize { .. }
+        | PortfolioSnapshotConfigError::CanonicalJson { .. } => {
+            CommandError::new("InvalidRequest", err.to_string())
+        }
     }
 }
 
@@ -160,7 +202,9 @@ mod tests {
                     }),
                 },
             )
-            .map_err(|err| AppError::new(ErrorClass::Internal, "SerializationError", err.to_string()))
+            .map_err(|err| {
+                AppError::new(ErrorClass::Internal, "SerializationError", err.to_string())
+            })
         })
         .await
         .expect("successful command output");

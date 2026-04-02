@@ -93,12 +93,7 @@ use mfm_op_portfolio_tracker::{
     PORTFOLIO_TRACKER_OP_ID,
 };
 use mfm_op_proof::ProofOp;
-use mfm_portfolio_config::{
-    canonicalize_portfolio_snapshot_authored_config, parse_portfolio_snapshot_authored_config,
-    parse_portfolio_snapshot_authored_config_with_hint,
-    AuthoredConfigFormat as PortfolioAuthoredConfigFormat, PortfolioSnapshotBuildReport,
-    PortfolioSnapshotBuiltConfig, PortfolioSnapshotConfigError,
-};
+use mfm_portfolio_config::{PortfolioSnapshotBuildReport, PortfolioSnapshotBuiltConfig};
 use mfm_sdk::launcher::{LaunchPipeline, RunLauncher};
 use mfm_sdk::op::OperationRegistry;
 use mfm_sdk::pipeline::{Pipeline, PipelinePlanner};
@@ -1127,56 +1122,6 @@ impl AppServices {
             report,
         })
     }
-
-    /// Starts a portfolio snapshot run from either an inline JSON payload or a JSON/TOML file.
-    pub async fn start_portfolio_snapshot_from_request_input(
-        &self,
-        request_json: Option<String>,
-        request_file: Option<PathBuf>,
-    ) -> Result<PortfolioSnapshotResponse, AppError> {
-        let request = parse_portfolio_snapshot_request_input(request_json, request_file)?;
-        self.start_portfolio_snapshot(request).await
-    }
-}
-
-/// Parses a portfolio snapshot request from either an inline JSON payload or a JSON/TOML file.
-pub fn parse_portfolio_snapshot_request_input(
-    request_json: Option<String>,
-    request_file: Option<PathBuf>,
-) -> Result<PortfolioSnapshotRequest, AppError> {
-    match (request_json, request_file) {
-        (Some(_), Some(_)) => Err(AppError::new(
-            ErrorClass::BadRequest,
-            "InvalidArguments",
-            "Pass only one of --request-json or --request-file",
-        )),
-        (None, None) => Err(AppError::new(
-            ErrorClass::BadRequest,
-            "MissingArgument",
-            "Pass one of --request-json or --request-file",
-        )),
-        (Some(raw), None) => {
-            let authored =
-                parse_portfolio_snapshot_authored_config(&raw, PortfolioAuthoredConfigFormat::Json)
-                    .map_err(|err| app_error_from_portfolio_config_error(err, Some("JSON")))?;
-            canonicalize_portfolio_snapshot_authored_config(authored)
-                .map_err(|err| app_error_from_portfolio_config_error(err, None))
-        }
-        (None, Some(path)) => {
-            let raw = std::fs::read_to_string(&path).map_err(|_| {
-                AppError::new(
-                    ErrorClass::BadRequest,
-                    "InvalidRequestFile",
-                    "Failed to read --request-file contents",
-                )
-            })?;
-            let authored =
-                parse_portfolio_snapshot_authored_config_with_hint(&raw, Some(path.as_path()))
-                    .map_err(|err| app_error_from_portfolio_config_error(err, None))?;
-            canonicalize_portfolio_snapshot_authored_config(authored)
-                .map_err(|err| app_error_from_portfolio_config_error(err, None))
-        }
-    }
 }
 
 /// Parses a deploy/configure/validate spec from either an inline JSON payload or a JSON/TOML file.
@@ -1252,35 +1197,6 @@ fn app_error_from_deploy_configure_validate_config_error(
             "DeployConfigureValidateConfigError",
             err.to_string(),
         ),
-    }
-}
-
-fn app_error_from_portfolio_config_error(
-    err: PortfolioSnapshotConfigError,
-    format_name: Option<&str>,
-) -> AppError {
-    match err {
-        PortfolioSnapshotConfigError::InvalidJson { .. } => {
-            if let Some(format_name) = format_name {
-                AppError::new(
-                    ErrorClass::BadRequest,
-                    "InvalidJson",
-                    format!("Failed to parse portfolio snapshot {format_name}"),
-                )
-            } else {
-                AppError::invalid_json()
-            }
-        }
-        PortfolioSnapshotConfigError::InvalidToml { .. } => AppError::new(
-            ErrorClass::BadRequest,
-            "InvalidToml",
-            "Failed to parse portfolio snapshot TOML",
-        ),
-        PortfolioSnapshotConfigError::InvalidBundle(_)
-        | PortfolioSnapshotConfigError::Serialize { .. }
-        | PortfolioSnapshotConfigError::CanonicalJson { .. } => {
-            AppError::new(ErrorClass::BadRequest, "InvalidRequest", err.to_string())
-        }
     }
 }
 

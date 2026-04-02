@@ -20,7 +20,7 @@ Last updated: 2026-04-02
 - The first concrete refactor should be to split portfolio into `portfolio.config.build` and `portfolio.execute`, while extracting shared primitives that other workflow families can reuse.
 - The current app-layer and wrapper-layer procedural glue should be reduced by moving config build, artifact emission, and result extraction behind internal MFM ops and reusable states.
 - Current repo status:
-  - portfolio now has explicit authored/canonical/built execution boundaries, build/report publication, and a strict execute root, but some CLI/app compatibility glue still duplicates transport parsing and feature shaping
+  - portfolio now has explicit authored/canonical/built execution boundaries, build/report publication, a strict execute root, CLI-owned transport parsing, and feature-layer-owned envelope shaping
   - deploy/configure/validate now has authored/canonical/built config crates plus config-build and execute roots, and the public root family is the primary app/CLI/parity path, but transport parsing still sits at the app edge and the workflow-family typing remains shallow
   - `publish-docs` now uses shared authored/canonical ingress and intentionally stops there
   - wrapper-heavy Aave-origin phase-A orchestration is now internal MFM composition through `aave_v3_origin_stack`, while intentionally retaining the current Nix/Foundry compatibility backend
@@ -783,7 +783,7 @@ Change:
   - portfolio:
     - explicit authored/canonical/built types, config-build, execute, and compatibility roots are landed
     - shared canonical/built artifact publication and stable build-report plumbing are landed
-    - residual work remains to thin CLI/app request parsing and feature-envelope glue
+    - CLI-owned transport parsing and feature-layer-owned envelope shaping are landed
   - deploy/configure/validate:
     - authored/canonical/built config crate plus config-build and execute roots are landed
     - the public root family is now the primary app/CLI surface and direct parity coverage exercises it
@@ -818,10 +818,6 @@ Ship independently:
   - strengthen workflow-family typing beyond raw JSON ABI, arg, and assertion seams
   - thin the remaining transport parsing edge in the app/CLI ingress path
 
-- Thin the remaining portfolio transport edges:
-  - reduce duplicated request parsing/canonicalization glue between the CLI and app service entrypoints
-  - remove duplicate feature-envelope shaping where the app feature layer can own it directly
-
 - Retire stale compatibility-root follow-up prose:
   - this RFC no longer treats planner-authoritative build-child handoff as remaining work
   - the remaining task is to update workflow docs and inventories that still describe the pre-SDK compatibility seam
@@ -838,7 +834,7 @@ Ship independently:
 - [x] Shared artifact/report/export publication plumbing is reusable shared state, not duplicated per adopter.
 - [x] Publish-docs uses authored/canonical ingress and intentionally stops before a built/execute split.
 - [ ] Strengthen deploy/configure/validate typing beyond raw JSON ABI, arg, and assertion seams.
-- [ ] Thin the remaining portfolio CLI/app parsing and feature-envelope glue.
+- [x] Thin the remaining portfolio CLI/app parsing and feature-envelope glue.
 - [ ] Thin the remaining deploy/configure/validate app/CLI transport parsing glue.
 - [ ] Update stale workflow docs and inventories that still describe the old compatibility-root seam or outdated adopter status.
 
