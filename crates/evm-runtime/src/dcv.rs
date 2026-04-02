@@ -36,7 +36,7 @@
 //!     &[ReadAssertionConfig {
 //!         function: "owner".to_string(),
 //!         args: vec![],
-//!         expected: serde_json::json!("0x0000000000000000000000000000000000000000"),
+//!         expected: serde_json::json!("0x0000000000000000000000000000000000000000").into(),
 //!     }],
 //!     &[EventAssertionConfig {
 //!         event: "Configured".to_string(),
@@ -151,6 +151,35 @@ impl From<Value> for AbiArgumentValue {
     }
 }
 
+/// Typed wrapper for validation assertion expected values.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ExpectedValue(Value);
+
+impl ExpectedValue {
+    /// Returns the underlying JSON value.
+    pub fn as_json(&self) -> &Value {
+        &self.0
+    }
+
+    /// Consumes the wrapper and returns the underlying JSON value.
+    pub fn into_json(self) -> Value {
+        self.0
+    }
+}
+
+impl Borrow<Value> for ExpectedValue {
+    fn borrow(&self) -> &Value {
+        self.as_json()
+    }
+}
+
+impl From<Value> for ExpectedValue {
+    fn from(value: Value) -> Self {
+        Self(value)
+    }
+}
+
 /// JSON contract artifact used by deploy/configure/validate flows.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ContractArtifactConfig {
@@ -199,10 +228,10 @@ pub struct ReadAssertionConfig {
 
     #[serde(default)]
     /// Positional arguments passed to the function call.
-    pub args: Vec<serde_json::Value>,
+    pub args: Vec<AbiArgumentValue>,
 
     /// Expected decoded value.
-    pub expected: serde_json::Value,
+    pub expected: ExpectedValue,
 }
 
 /// Event assertion to evaluate with `eth_getLogs`.
@@ -230,7 +259,7 @@ pub struct PreparedReadAssertion {
     /// Encoded calldata for the asserted function call.
     pub data_hex: String,
     /// Expected decoded value.
-    pub expected: serde_json::Value,
+    pub expected: ExpectedValue,
     /// ABI output types used during decoding.
     pub outputs: Vec<String>,
 }
@@ -407,13 +436,20 @@ pub fn decode_single_output_to_json(
 }
 
 /// Returns whether `actual` satisfies the configured expected value.
-pub fn expected_matches(actual: &serde_json::Value, expected: &serde_json::Value) -> bool {
+pub fn expected_matches<T, U>(actual: &T, expected: &U) -> bool
+where
+    T: Borrow<Value>,
+    U: Borrow<Value>,
+{
+    let actual = actual.borrow();
+    let expected = expected.borrow();
+
     if expected == actual {
         return true;
     }
 
     match (actual, expected) {
-        (serde_json::Value::String(a), serde_json::Value::String(e)) => {
+        (Value::String(a), Value::String(e)) => {
             if a.starts_with("0x") && e.starts_with("0x") {
                 normalize_hex_str(a).ok() == normalize_hex_str(e).ok()
             } else {
@@ -421,5 +457,51 @@ pub fn expected_matches(actual: &serde_json::Value, expected: &serde_json::Value
             }
         }
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn expected_matches_normalizes_hex_wrappers() {
+        assert!(expected_matches(
+            &serde_json::json!("0xAA"),
+            &ExpectedValue::from(serde_json::json!("0xaa"))
+        ));
+    }
+
+    #[test]
+    fn prepare_validate_assertions_preserves_typed_expected_values() {
+        let abi = parse_abi(&serde_json::json!([
+            {
+                "type": "function",
+                "name": "owner",
+                "inputs": [],
+                "outputs": [{ "name": "", "type": "address" }],
+                "stateMutability": "view"
+            }
+        ]))
+        .expect("abi");
+
+        let (reads, events) = prepare_validate_assertions(
+            &abi,
+            &[ReadAssertionConfig {
+                function: "owner".to_string(),
+                args: vec![],
+                expected: serde_json::json!("0x0000000000000000000000000000000000000000").into(),
+            }],
+            &[],
+        )
+        .expect("prepare");
+
+        assert_eq!(events.len(), 0);
+        assert_eq!(
+            reads[0].expected,
+            ExpectedValue::from(serde_json::json!(
+                "0x0000000000000000000000000000000000000000"
+            ))
+        );
     }
 }

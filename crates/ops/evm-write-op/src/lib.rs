@@ -1084,8 +1084,8 @@ impl Operation for EvmValidateOp {
                     .into_iter()
                     .map(|a| shared_dcv::ReadAssertionConfig {
                         function: a.function,
-                        args: a.args,
-                        expected: a.expected,
+                        args: a.args.into_iter().map(Into::into).collect(),
+                        expected: a.expected.into(),
                     })
                     .collect(),
                 event_assertions: cfg

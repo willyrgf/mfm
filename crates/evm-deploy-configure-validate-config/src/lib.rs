@@ -615,6 +615,41 @@ mod tests {
     }
 
     #[test]
+    fn decode_json_payload_preserves_typed_validate_assertions() {
+        let canonical = decode_deploy_configure_validate_canonical_config(&serde_json::json!({
+            "deploy": {
+                "network_id": "ethereum-mainnet",
+                "from": "0x000000000000000000000000000000000000dead"
+            },
+            "configure": {
+                "network_id": "ethereum-mainnet",
+                "from": "0x000000000000000000000000000000000000dead",
+                "calls": []
+            },
+            "validate": {
+                "network_id": "ethereum-mainnet",
+                "expected_chain_id": 1,
+                "read_assertions": [{
+                    "function": "owner",
+                    "args": [],
+                    "expected": "0x0000000000000000000000000000000000000001"
+                }]
+            }
+        }))
+        .expect("decode");
+
+        assert_eq!(canonical.validate.read_assertions.len(), 1);
+        assert_eq!(
+            canonical.validate.read_assertions[0].args,
+            Vec::<AbiArgumentValue>::new()
+        );
+        assert_eq!(
+            canonical.validate.read_assertions[0].expected.as_json(),
+            &serde_json::json!("0x0000000000000000000000000000000000000001")
+        );
+    }
+
+    #[test]
     fn json_and_toml_authoring_normalize_to_same_built_outcome() {
         let json = build_deploy_configure_validate_outcome(
             canonicalize_deploy_configure_validate_authored_config(
