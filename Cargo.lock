@@ -1884,6 +1884,7 @@ dependencies = [
  "hex",
  "mfm-app",
  "mfm-artifact-store-fs",
+ "mfm-evm-deploy-configure-validate-config",
  "mfm-machine",
  "mfm-op-keystore-admin",
  "mfm-op-keystore-shim",

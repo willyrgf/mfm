@@ -21,7 +21,7 @@ Last updated: 2026-04-02
 - The current app-layer and wrapper-layer procedural glue should be reduced by moving config build, artifact emission, and result extraction behind internal MFM ops and reusable states.
 - Current repo status:
   - portfolio now has explicit authored/canonical/built execution boundaries, build/report publication, a strict execute root, CLI-owned transport parsing, and feature-layer-owned envelope shaping
-  - deploy/configure/validate now has authored/canonical/built config crates plus config-build and execute roots, and the public root family is the primary app/CLI/parity path, but transport parsing still sits at the app edge and the workflow-family typing remains shallow
+  - deploy/configure/validate now has authored/canonical/built config crates plus config-build and execute roots, the public root family is the primary app/CLI/parity path, and transport parsing is owned at the CLI edge, but the workflow-family typing remains shallow
   - `publish-docs` now uses shared authored/canonical ingress and intentionally stops there
   - wrapper-heavy Aave-origin phase-A orchestration is now internal MFM composition through `aave_v3_origin_stack`, while intentionally retaining the current Nix/Foundry compatibility backend
   - the previous compatibility-root follow-up is now closed in code: the SDK supports planner-payload-sourced child op config, so canonical-input compatibility roots can compose build then execute with the build child authoritative for execute-child input materialization
@@ -787,7 +787,6 @@ Change:
   - deploy/configure/validate:
     - authored/canonical/built config crate plus config-build and execute roots are landed
     - the public root family is now the primary app/CLI surface and direct parity coverage exercises it
-    - residual work remains to thin transport parsing at the app/CLI edge
     - the workflow-family config remains only partially typed because deploy/configure/validate payloads still include raw JSON ABI, arg, and assertion seams that should be strengthened
   - publish-docs:
     - authored/canonical ingress is landed
@@ -816,7 +815,6 @@ Ship independently:
 
 - Finish deploy/configure/validate adoption:
   - strengthen workflow-family typing beyond raw JSON ABI, arg, and assertion seams
-  - thin the remaining transport parsing edge in the app/CLI ingress path
 
 - Retire stale compatibility-root follow-up prose:
   - this RFC no longer treats planner-authoritative build-child handoff as remaining work
@@ -835,7 +833,7 @@ Ship independently:
 - [x] Publish-docs uses authored/canonical ingress and intentionally stops before a built/execute split.
 - [ ] Strengthen deploy/configure/validate typing beyond raw JSON ABI, arg, and assertion seams.
 - [x] Thin the remaining portfolio CLI/app parsing and feature-envelope glue.
-- [ ] Thin the remaining deploy/configure/validate app/CLI transport parsing glue.
+- [x] Thin the remaining deploy/configure/validate app/CLI transport parsing glue.
 - [ ] Update stale workflow docs and inventories that still describe the old compatibility-root seam or outdated adopter status.
 
 ## 16. Open Questions and Risks

@@ -11,6 +11,7 @@ tokio = { workspace = true }
 mfm-machine = { path = "../../crates/machine" }
 mfm-sdk = { path = "../../crates/sdk" }
 mfm-app = { path = "../../crates/app" }
+mfm-evm-deploy-configure-validate-config = { path = "../../crates/evm-deploy-configure-validate-config" }
 mfm-portfolio-config = { path = "../../crates/portfolio-config" }
 mfm-op-keystore-tx = { path = "../../crates/ops/keystore-tx-op" }
 mfm-op-keystore-admin = { path = "../../crates/ops/keystore-admin-op" }

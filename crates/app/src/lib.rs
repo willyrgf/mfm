@@ -35,11 +35,7 @@ use mfm_artifact_store_fs::FsArtifactStore;
 use mfm_artifact_store_s3::S3ArtifactStore;
 use mfm_collectors_nix_exec::NixFlakeTransportFactory;
 use mfm_evm_deploy_configure_validate_config::{
-    canonicalize_deploy_configure_validate_authored_config,
-    decode_deploy_configure_validate_canonical_config,
-    parse_deploy_configure_validate_authored_config,
-    parse_deploy_configure_validate_authored_config_with_hint,
-    AuthoredConfigFormat as DcvAuthoredConfigFormat, DeployConfigureValidateConfigError,
+    decode_deploy_configure_validate_canonical_config, DeployConfigureValidateConfigError,
 };
 use mfm_machine::config::{
     BackoffPolicy, BuildProvenance, ContextCheckpointing, EventProfile, ExecutionMode, IoMode,
@@ -981,17 +977,6 @@ impl AppServices {
         .await
     }
 
-    /// Starts the deploy-configure-validate workflow from raw JSON or a JSON/TOML file.
-    #[allow(clippy::disallowed_methods)]
-    pub async fn start_deploy_configure_validate_from_spec_input(
-        &self,
-        spec_json: Option<String>,
-        spec_file: Option<PathBuf>,
-    ) -> Result<RunStartResponse, AppError> {
-        let spec = parse_deploy_configure_validate_spec_input(spec_json, spec_file)?;
-        self.start_deploy_configure_validate(spec).await
-    }
-
     /// Starts a portfolio config-build run and extracts the built config outputs when available.
     pub async fn start_portfolio_config_build(
         &self,
@@ -1121,52 +1106,6 @@ impl AppServices {
             snapshot_artifact_id,
             report,
         })
-    }
-}
-
-/// Parses a deploy/configure/validate spec from either an inline JSON payload or a JSON/TOML file.
-pub fn parse_deploy_configure_validate_spec_input(
-    spec_json: Option<String>,
-    spec_file: Option<PathBuf>,
-) -> Result<DeployConfigureValidateSpec, AppError> {
-    match (spec_json, spec_file) {
-        (Some(_), Some(_)) => Err(AppError::new(
-            ErrorClass::BadRequest,
-            "InvalidArguments",
-            "Pass only one of --spec-json or --spec-file",
-        )),
-        (None, None) => Err(AppError::new(
-            ErrorClass::BadRequest,
-            "MissingArgument",
-            "Pass one of --spec-json or --spec-file",
-        )),
-        (Some(raw), None) => {
-            let authored = parse_deploy_configure_validate_authored_config(
-                &raw,
-                DcvAuthoredConfigFormat::Json,
-            )
-            .map_err(|err| {
-                app_error_from_deploy_configure_validate_config_error(err, Some("JSON"))
-            })?;
-            canonicalize_deploy_configure_validate_authored_config(authored)
-                .map_err(|err| app_error_from_deploy_configure_validate_config_error(err, None))
-        }
-        (None, Some(path)) => {
-            let raw = std::fs::read_to_string(&path).map_err(|_| {
-                AppError::new(
-                    ErrorClass::BadRequest,
-                    "InvalidSpecFile",
-                    "Failed to read --spec-file contents",
-                )
-            })?;
-            let authored = parse_deploy_configure_validate_authored_config_with_hint(
-                &raw,
-                Some(path.as_path()),
-            )
-            .map_err(|err| app_error_from_deploy_configure_validate_config_error(err, None))?;
-            canonicalize_deploy_configure_validate_authored_config(authored)
-                .map_err(|err| app_error_from_deploy_configure_validate_config_error(err, None))
-        }
     }
 }
 
@@ -2078,67 +2017,6 @@ mod tests {
             Arc::new(NoopStreamStore),
             Arc::new(NoopArtifactStore),
         )
-    }
-
-    #[test]
-    fn parse_deploy_configure_validate_spec_input_materializes_defaults_from_json() {
-        let parsed = parse_deploy_configure_validate_spec_input(
-            Some(
-                serde_json::json!({
-                    "deploy": {
-                        "network_id": "ethereum-mainnet",
-                        "from": "0x000000000000000000000000000000000000dead"
-                    },
-                    "configure": {
-                        "network_id": "ethereum-mainnet",
-                        "from": "0x000000000000000000000000000000000000dead",
-                        "calls": []
-                    },
-                    "validate": {
-                        "network_id": "ethereum-mainnet",
-                        "expected_chain_id": 1
-                    }
-                })
-                .to_string(),
-            ),
-            None,
-        )
-        .expect("parse spec");
-
-        assert_eq!(parsed.machine_id, "evm_deploy_configure_validate");
-        assert_eq!(parsed.pipeline_version, "v1");
-        assert_eq!(parsed.input, serde_json::json!({}));
-    }
-
-    #[test]
-    fn parse_deploy_configure_validate_spec_input_accepts_toml_file() {
-        let path = std::env::temp_dir().join(format!("mfm-dcv-{}.toml", uuid::Uuid::new_v4()));
-        std::fs::write(
-            &path,
-            r#"
-                [deploy]
-                network_id = "ethereum-mainnet"
-                from = "0x000000000000000000000000000000000000dead"
-
-                [configure]
-                network_id = "ethereum-mainnet"
-                from = "0x000000000000000000000000000000000000dead"
-                calls = []
-
-                [validate]
-                network_id = "ethereum-mainnet"
-                expected_chain_id = 1
-            "#,
-        )
-        .expect("write temp spec");
-
-        let parsed = parse_deploy_configure_validate_spec_input(None, Some(path.clone()))
-            .expect("parse spec");
-        let _ = std::fs::remove_file(path);
-
-        assert_eq!(parsed.machine_id, "evm_deploy_configure_validate");
-        assert_eq!(parsed.pipeline_version, "v1");
-        assert_eq!(parsed.input, serde_json::json!({}));
     }
 
     #[test]
