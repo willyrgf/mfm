@@ -16,6 +16,7 @@ pub(crate) struct Cli {
         long = "output-format",
         value_enum,
         env = "MFM_OUTPUT_FORMAT",
+        global = true,
         default_value_t = OutputFormat::Text
     )]
     pub output_format: OutputFormat,
@@ -25,15 +26,15 @@ pub(crate) struct Cli {
     pub command: Option<Command>,
 
     /// Allow dirty working trees and forward `--allow-dirty` to `cargo publish`.
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub allow_dirty: bool,
 
     /// Start processing from the named package in the wave.
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub from: Option<String>,
 
     /// Process exactly one package from the wave.
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub only: Option<String>,
 }
 

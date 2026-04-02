@@ -109,14 +109,12 @@ impl Operation for EvmDeployConfigureValidateConfigBuildOp {
         // Validate the lowered execution payload during the build step so invalid child-op config
         // fails before execution roots consume the built contract.
         let validation_path = child_op_path(&op_path, "validate_built")?;
-        super::plan_execution_leaf(validation_path, &outcome.built.execution, run_config).map_err(
-            |err| {
-                super::sdk_input_error(
-                    "invalid_evm_deploy_configure_validate_build_config",
-                    err.info.message,
-                )
-            },
-        )?;
+        super::expand_execution(validation_path, &outcome.built, run_config).map_err(|err| {
+            super::sdk_input_error(
+                "invalid_evm_deploy_configure_validate_build_config",
+                err.info.message,
+            )
+        })?;
 
         let write_built_sid = leaf_state_id(&op_path, "write_built_config")?;
         let write_canonical_sid = leaf_state_id(&op_path, "write_canonical_artifact_input")?;

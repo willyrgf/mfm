@@ -433,12 +433,11 @@ fn resolve_evm_rpc_config_from_env() -> EvmJsonRpcHttpConfig {
         preferred_order = sources.iter().map(|s| s.id.clone()).collect();
     }
 
-    let cfg = EvmJsonRpcHttpConfig {
+    EvmJsonRpcHttpConfig {
         sources,
         preferred_order,
         ..EvmJsonRpcHttpConfig::default()
-    };
-    cfg
+    }
 }
 
 impl EvmJsonRpcHttpTransportFactory {

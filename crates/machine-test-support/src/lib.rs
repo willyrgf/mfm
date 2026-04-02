@@ -305,10 +305,8 @@ mod tests {
 
     #[test]
     fn test_filter_uses_global_level_before_rust_log() {
-        let filter = resolve_test_filter(lookup_from(&[
-            ("LOG_LEVEL", "debug"),
-            ("RUST_LOG", "warn"),
-        ]));
+        let filter =
+            resolve_test_filter(lookup_from(&[("LOG_LEVEL", "debug"), ("RUST_LOG", "warn")]));
         assert_eq!(filter, "debug");
     }
 

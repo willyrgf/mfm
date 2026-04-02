@@ -22,7 +22,7 @@ use mfm_machine_test_support::init_test_observability;
 use mfm_sdk::ids::{MachineId, StepId};
 use mfm_sdk::launcher::{LaunchPipeline, RunLauncher};
 use mfm_sdk::pipeline::{Pipeline, PipelineStep};
-use mfm_sdk::unstable::DefaultRunLauncher;
+use mfm_sdk::unstable::{context_value_with_slot_fallback, DefaultRunLauncher};
 use mfm_stream_store_postgres::PostgresStreamStore;
 use mfm_transports_rpc_control::RpcControlBootstrapSource;
 
@@ -635,44 +635,59 @@ async fn parity_reth_deploy_configure_validate_root_op() {
     let snapshot: serde_json::Value =
         serde_json::from_slice(&snapshot_bytes).expect("decode snapshot json");
 
-    let build_report =
-        required_snapshot_value(&snapshot, "evm_reth_root_dcv_pipeline.dcv.build.report");
+    let build_report = context_value_with_slot_fallback(
+        &snapshot,
+        &ContextKey("evm_reth_root_dcv_pipeline.dcv.b.out.report".to_string()),
+    )
+    .expect("build report");
     assert_eq!(build_report["machine_id"], "evm_reth_root_dcv");
     assert_eq!(build_report["phase_count"], 3);
 
-    let contract_address =
-        required_snapshot_value(&snapshot, "evm_reth_root_dcv_pipeline.dcv.contract_address")
-            .as_str()
-            .expect("contract address");
+    let contract_address = required_snapshot_value(
+        &snapshot,
+        "evm_reth_root_dcv_pipeline.dcv.e.deploy.contract_address",
+    )
+    .as_str()
+    .expect("contract address");
     assert!(contract_address.starts_with("0x"));
 
-    let deploy_tx_hash =
-        required_snapshot_value(&snapshot, "evm_reth_root_dcv_pipeline.dcv.deploy_tx_hash")
-            .as_str()
-            .expect("deploy tx hash");
+    let deploy_tx_hash = required_snapshot_value(
+        &snapshot,
+        "evm_reth_root_dcv_pipeline.dcv.e.deploy.deploy_tx_hash",
+    )
+    .as_str()
+    .expect("deploy tx hash");
     assert!(deploy_tx_hash.starts_with("0x"));
 
     let configure_receipts = required_snapshot_value(
         &snapshot,
-        "evm_reth_root_dcv_pipeline.dcv.configure_receipts",
+        "evm_reth_root_dcv_pipeline.dcv.e.configure.configure_receipts",
     )
     .as_array()
     .expect("configure receipts");
     assert!(!configure_receipts.is_empty());
 
     assert_eq!(
-        required_snapshot_value(&snapshot, "evm_reth_root_dcv_pipeline.dcv.validated"),
+        required_snapshot_value(
+            &snapshot,
+            "evm_reth_root_dcv_pipeline.dcv.e.validate.validated"
+        ),
         &serde_json::json!(true)
     );
 
-    let chain_id = required_snapshot_value(&snapshot, "evm_reth_root_dcv_pipeline.dcv.chain_id")
-        .as_u64()
-        .expect("validate chain id");
+    let chain_id = required_snapshot_value(
+        &snapshot,
+        "evm_reth_root_dcv_pipeline.dcv.e.validate.chain_id",
+    )
+    .as_u64()
+    .expect("validate chain id");
     assert_eq!(chain_id, expected_chain_id);
 
-    let client_version =
-        required_snapshot_value(&snapshot, "evm_reth_root_dcv_pipeline.dcv.client_version")
-            .as_str()
-            .expect("validate client version");
+    let client_version = required_snapshot_value(
+        &snapshot,
+        "evm_reth_root_dcv_pipeline.dcv.e.validate.client_version",
+    )
+    .as_str()
+    .expect("validate client version");
     assert!(client_version.to_ascii_lowercase().contains("reth"));
 }

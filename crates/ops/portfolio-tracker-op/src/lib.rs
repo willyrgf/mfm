@@ -34,8 +34,8 @@ use mfm_machine::errors::ErrorCategory;
 use mfm_machine::ids::{ContextKey, FactKey, OpId, OpPath};
 use mfm_portfolio_config::{
     build_portfolio_snapshot_outcome, decode_portfolio_snapshot_built_config,
-    decode_portfolio_snapshot_canonical_config,
-    PortfolioSnapshotBuiltConfig, PortfolioSnapshotCanonicalConfig,
+    decode_portfolio_snapshot_canonical_config, PortfolioSnapshotBuiltConfig,
+    PortfolioSnapshotCanonicalConfig,
 };
 use mfm_sdk::errors::SdkError;
 use mfm_sdk::ids::{ChildOpLocalId, PortKey};

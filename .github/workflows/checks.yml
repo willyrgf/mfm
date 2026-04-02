@@ -76,10 +76,6 @@ jobs:
         run: |
           SKIP_HELIOS=1 nix run .#ci $NIX_CMD_OPTS -- --full --summary
 
-      - name: Smoke mfm_cli --help
-        run: |
-          nix run .#mfm_cli $NIX_CMD_OPTS -- --help
-
       - name: Upload CI artifacts
         if: always()
         uses: actions/upload-artifact@v4

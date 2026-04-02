@@ -1202,7 +1202,7 @@ async fn parity_aave_v3_reth_scenario_pipeline() {
     assert_eq!(
         snapshot_kind(
             &phase_a_snapshot,
-            "aave_v3_reth_pipeline.deploy_origin_stack.execute.adapt_origin_deploy.deploy_manifest",
+            "aave_v3_reth_pipeline.deploy_origin_stack.e.adapt_origin_deploy.deploy_manifest",
         )
         .as_deref(),
         Some(DEPLOY_MANIFEST_KIND)
@@ -1210,7 +1210,7 @@ async fn parity_aave_v3_reth_scenario_pipeline() {
     assert_eq!(
         snapshot_kind(
             &phase_a_snapshot,
-            "aave_v3_reth_pipeline.deploy_origin_stack.execute.fetch_origin.fetch_origin_result"
+            "aave_v3_reth_pipeline.deploy_origin_stack.e.fetch_origin.fetch_origin_result"
         )
         .as_deref(),
         Some("aave_v3_origin_source_v1")
@@ -1218,7 +1218,7 @@ async fn parity_aave_v3_reth_scenario_pipeline() {
     assert_eq!(
         snapshot_kind(
             &phase_a_snapshot,
-            "aave_v3_reth_pipeline.deploy_origin_stack.execute.compile_origin.compile_origin_result"
+            "aave_v3_reth_pipeline.deploy_origin_stack.e.compile_origin.compile_origin_result"
         )
         .as_deref(),
         Some("aave_v3_origin_compile_manifest_v1")
@@ -1226,7 +1226,7 @@ async fn parity_aave_v3_reth_scenario_pipeline() {
     assert_eq!(
         snapshot_kind(
             &phase_a_snapshot,
-            "aave_v3_reth_pipeline.deploy_origin_stack.execute.deploy_origin_stack.deploy_origin_result"
+            "aave_v3_reth_pipeline.deploy_origin_stack.e.deploy_origin_stack.deploy_origin_result"
         )
         .as_deref(),
         Some("aave_v3_origin_deploy_output_v1")
@@ -1234,7 +1234,7 @@ async fn parity_aave_v3_reth_scenario_pipeline() {
 
     let deploy_manifest = snapshot_value(
         &phase_a_snapshot,
-        "aave_v3_reth_pipeline.deploy_origin_stack.execute.adapt_origin_deploy.deploy_manifest",
+        "aave_v3_reth_pipeline.deploy_origin_stack.e.adapt_origin_deploy.deploy_manifest",
     )
     .cloned()
     .expect("deploy manifest in phase A snapshot");

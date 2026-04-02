@@ -24,24 +24,26 @@
 //! assert_eq!(op.op_id().as_str(), "evm_deploy_configure_validate");
 //! ```
 
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 
 use mfm_evm_deploy_configure_validate_config::{
-    decode_deploy_configure_validate_built_config,
+    build_deploy_configure_validate_outcome, decode_deploy_configure_validate_built_config,
     decode_deploy_configure_validate_canonical_config, DeployConfigureValidateBuiltConfig,
     DeployConfigureValidateCanonicalConfig, DeployConfigureValidateExecutionConfig,
 };
 use mfm_machine::config::RunConfig;
 use mfm_machine::errors::ErrorCategory;
-use mfm_machine::ids::{OpId, OpPath, StateId};
-use mfm_machine::plan::DependencyEdge;
+use mfm_machine::ids::OpId;
+use mfm_machine::ids::OpPath;
 use mfm_op_evm_write::{EvmConfigureOp, EvmDeployOp, EvmValidateOp};
 use mfm_sdk::errors::SdkError;
 use mfm_sdk::ids::{ChildOpLocalId, PortKey};
 use mfm_sdk::op::{
-    child_op_path, CompositeOpSpec, DynOperation, LeafOpSpec, LeafStateNode, OpInterface,
-    Operation, PlannedOp, PlannedOpKind, PlannerPayloadConfigSource, PortSource, ReExportBinding,
+    child_op_path, AfterEdge, ChildOpInstance, CompositeOpSpec, DynOperation, ImportBinding,
+    OpInterface, Operation, PlannedOp, PlannedOpKind, PlannerPayloadConfigSource, PortSource,
+    ReExportBinding,
 };
 use mfm_state_common::errors as op_errors;
 use serde::Serialize;
@@ -71,10 +73,13 @@ const CONFIGURE_EXPORT: &str = "configure_receipts";
 const CONTRACT_ADDRESS_EXPORT: &str = "contract_address";
 #[cfg(test)]
 const DEPLOY_TX_HASH_EXPORT: &str = "deploy_tx_hash";
+const CONFIGURE_CHILD_ID: &str = "configure";
+const DEPLOY_CHILD_ID: &str = "deploy";
 const EXECUTE_CHILD_ID: &str = "e";
 const TRACKER_BUILD_CHILD_ID: &str = "b";
 #[cfg(test)]
 const VALIDATED_EXPORT: &str = "validated";
+const VALIDATE_CHILD_ID: &str = "validate";
 
 fn sdk_input_error(code: &'static str, message: impl Into<String>) -> SdkError {
     op_errors::sdk_error(code, ErrorCategory::ParsingInput, false, message)
@@ -99,19 +104,11 @@ fn re_export_binding(export: &PortKey) -> ReExportBinding {
     }
 }
 
-fn execution_interface() -> OpInterface {
-    OpInterface {
-        imports: Vec::new(),
-        exports: vec![
-            PortKey("contract_address".to_string()),
-            PortKey("deploy_tx_hash".to_string()),
-            PortKey("deploy_receipt".to_string()),
-            PortKey("configure_tx_hashes".to_string()),
-            PortKey("configure_receipts".to_string()),
-            PortKey("validated".to_string()),
-            PortKey("chain_id".to_string()),
-            PortKey("client_version".to_string()),
-        ],
+fn child_import_binding(import: &PortKey) -> ImportBinding {
+    ImportBinding {
+        to_child: ChildOpLocalId(EXECUTE_CHILD_ID.to_string()),
+        import: import.clone(),
+        source: PortSource::ParentImport(import.clone()),
     }
 }
 
@@ -127,10 +124,173 @@ fn serialize_execution_phase<T: Serialize>(
     })
 }
 
+struct ExecutionChildPlan {
+    child_op_local_id: ChildOpLocalId,
+    op_id: OpId,
+    op_version: String,
+    op_config: Value,
+    interface: OpInterface,
+}
+
+fn plan_execution_child(
+    op_path: &OpPath,
+    child_id: &'static str,
+    op_id: OpId,
+    op_version: String,
+    op_config: Value,
+    run_config: &RunConfig,
+    op: impl Operation,
+) -> Result<ExecutionChildPlan, SdkError> {
+    let interface = op
+        .expand(child_op_path(op_path, child_id)?, &op_config, run_config)?
+        .interface;
+
+    Ok(ExecutionChildPlan {
+        child_op_local_id: ChildOpLocalId(child_id.to_string()),
+        op_id,
+        op_version,
+        op_config,
+        interface,
+    })
+}
+
+fn plan_execution_children(
+    op_path: &OpPath,
+    cfg: &DeployConfigureValidateExecutionConfig,
+    run_config: &RunConfig,
+) -> Result<Vec<ExecutionChildPlan>, SdkError> {
+    let deploy_config = serialize_execution_phase(&cfg.deploy, "deploy")?;
+    let configure_config = serialize_execution_phase(&cfg.configure, "configure")?;
+    let validate_config = serialize_execution_phase(&cfg.validate, "validate")?;
+
+    let deploy_op = EvmDeployOp;
+    let configure_op = EvmConfigureOp;
+    let validate_op = EvmValidateOp;
+
+    Ok(vec![
+        plan_execution_child(
+            op_path,
+            DEPLOY_CHILD_ID,
+            deploy_op.op_id(),
+            deploy_op.op_version(),
+            deploy_config,
+            run_config,
+            deploy_op,
+        )?,
+        plan_execution_child(
+            op_path,
+            CONFIGURE_CHILD_ID,
+            configure_op.op_id(),
+            configure_op.op_version(),
+            configure_config,
+            run_config,
+            configure_op,
+        )?,
+        plan_execution_child(
+            op_path,
+            VALIDATE_CHILD_ID,
+            validate_op.op_id(),
+            validate_op.op_version(),
+            validate_config,
+            run_config,
+            validate_op,
+        )?,
+    ])
+}
+
+fn execution_composite(
+    op_path: &OpPath,
+    cfg: &DeployConfigureValidateExecutionConfig,
+    run_config: &RunConfig,
+) -> Result<(OpInterface, CompositeOpSpec), SdkError> {
+    let children = plan_execution_children(op_path, cfg, run_config)?;
+    let mut export_producers: HashMap<String, ChildOpLocalId> = HashMap::new();
+    let mut seen_parent_imports: HashSet<String> = HashSet::new();
+    let mut parent_imports = Vec::new();
+    let mut bindings = Vec::new();
+
+    for child in &children {
+        for import in &child.interface.imports {
+            let source = match export_producers.get(&import.0) {
+                Some(source_child) => PortSource::ChildExport {
+                    child: source_child.clone(),
+                    export: import.clone(),
+                },
+                None => {
+                    if seen_parent_imports.insert(import.0.clone()) {
+                        parent_imports.push(import.clone());
+                    }
+                    PortSource::ParentImport(import.clone())
+                }
+            };
+            bindings.push(ImportBinding {
+                to_child: child.child_op_local_id.clone(),
+                import: import.clone(),
+                source,
+            });
+        }
+
+        for export in &child.interface.exports {
+            export_producers
+                .entry(export.0.clone())
+                .or_insert_with(|| child.child_op_local_id.clone());
+        }
+    }
+
+    let mut seen_parent_exports: HashSet<String> = HashSet::new();
+    let mut parent_exports = Vec::new();
+    let mut re_exports = Vec::new();
+    for child in &children {
+        for export in &child.interface.exports {
+            if seen_parent_exports.insert(export.0.clone()) {
+                parent_exports.push(export.clone());
+                re_exports.push(ReExportBinding {
+                    export: export.clone(),
+                    source: PortSource::ChildExport {
+                        child: child.child_op_local_id.clone(),
+                        export: export.clone(),
+                    },
+                });
+            }
+        }
+    }
+
+    let child_instances = children
+        .iter()
+        .map(|child| ChildOpInstance {
+            child_op_local_id: child.child_op_local_id.clone(),
+            op_id: child.op_id.clone(),
+            op_version: child.op_version.clone(),
+            op_config: child.op_config.clone(),
+            op_config_from_planner_payload: None,
+        })
+        .collect();
+    let order = children
+        .windows(2)
+        .map(|pair| AfterEdge {
+            from_child: pair[0].child_op_local_id.clone(),
+            to_child: pair[1].child_op_local_id.clone(),
+        })
+        .collect();
+
+    Ok((
+        OpInterface {
+            imports: parent_imports,
+            exports: parent_exports,
+        },
+        CompositeOpSpec {
+            children: child_instances,
+            bindings,
+            order,
+            re_exports,
+        },
+    ))
+}
+
 fn expand_from_canonical(
-    _op_path: OpPath,
+    op_path: OpPath,
     canonical: DeployConfigureValidateCanonicalConfig,
-    _run_config: &RunConfig,
+    run_config: &RunConfig,
 ) -> Result<PlannedOp, SdkError> {
     let canonical_json = serde_json::to_value(&canonical).map_err(|err| {
         sdk_input_error(
@@ -139,10 +299,24 @@ fn expand_from_canonical(
         )
     })?;
 
-    let interface = execution_interface();
+    let execute_interface = build_deploy_configure_validate_outcome(canonical.clone())
+        .map_err(|err| {
+            sdk_input_error(
+                "invalid_evm_deploy_configure_validate_execution_config",
+                err.to_string(),
+            )
+        })
+        .and_then(|outcome| {
+            expand_execution(
+                child_op_path(&op_path, EXECUTE_CHILD_ID)?,
+                &outcome.built,
+                run_config,
+            )
+            .map(|planned| planned.interface)
+        })?;
 
     Ok(PlannedOp {
-        interface: interface.clone(),
+        interface: execute_interface.clone(),
         kind: PlannedOpKind::Composite(CompositeOpSpec {
             children: vec![
                 mfm_sdk::op::ChildOpInstance {
@@ -165,70 +339,22 @@ fn expand_from_canonical(
                     }),
                 },
             ],
-            bindings: Vec::new(),
+            bindings: execute_interface
+                .imports
+                .iter()
+                .map(child_import_binding)
+                .collect(),
             order: vec![mfm_sdk::op::AfterEdge {
                 from_child: ChildOpLocalId(TRACKER_BUILD_CHILD_ID.to_string()),
                 to_child: ChildOpLocalId(EXECUTE_CHILD_ID.to_string()),
             }],
-            re_exports: interface.exports.iter().map(re_export_binding).collect(),
+            re_exports: execute_interface
+                .exports
+                .iter()
+                .map(re_export_binding)
+                .collect(),
         }),
     })
-}
-
-fn plan_execution_leaf(
-    op_path: OpPath,
-    cfg: &DeployConfigureValidateExecutionConfig,
-    run_config: &RunConfig,
-) -> Result<(OpInterface, LeafOpSpec), SdkError> {
-    let deploy_config = serialize_execution_phase(&cfg.deploy, "deploy")?;
-    let configure_config = serialize_execution_phase(&cfg.configure, "configure")?;
-    let validate_config = serialize_execution_phase(&cfg.validate, "validate")?;
-    let (deploy_interface, deploy_graph) = into_leaf(EvmDeployOp.expand(
-        child_op_path(&op_path, "deploy")?,
-        &deploy_config,
-        run_config,
-    )?)?;
-    let (configure_interface, configure_graph) = into_leaf(EvmConfigureOp.expand(
-        child_op_path(&op_path, "configure")?,
-        &configure_config,
-        run_config,
-    )?)?;
-    let (validate_interface, validate_graph) = into_leaf(EvmValidateOp.expand(
-        child_op_path(&op_path, "validate")?,
-        &validate_config,
-        run_config,
-    )?)?;
-
-    let mut states: Vec<LeafStateNode> = Vec::new();
-    let mut edges: Vec<DependencyEdge> = Vec::new();
-
-    connect_graphs(&mut edges, &deploy_graph, &configure_graph);
-    connect_graphs(&mut edges, &configure_graph, &validate_graph);
-
-    append_graph(&mut states, &mut edges, deploy_graph);
-    append_graph(&mut states, &mut edges, configure_graph);
-    append_graph(&mut states, &mut edges, validate_graph);
-
-    let mut seen_exports: HashSet<String> = HashSet::new();
-    let mut exports = Vec::new();
-    for export in deploy_interface
-        .exports
-        .iter()
-        .chain(configure_interface.exports.iter())
-        .chain(validate_interface.exports.iter())
-    {
-        if seen_exports.insert(export.0.clone()) {
-            exports.push(export.clone());
-        }
-    }
-
-    Ok((
-        OpInterface {
-            imports: deploy_interface.imports,
-            exports,
-        },
-        LeafOpSpec { states, edges },
-    ))
 }
 
 fn expand_execution(
@@ -236,75 +362,11 @@ fn expand_execution(
     cfg: &DeployConfigureValidateBuiltConfig,
     run_config: &RunConfig,
 ) -> Result<PlannedOp, SdkError> {
-    let (interface, spec) = plan_execution_leaf(op_path, &cfg.execution, run_config)?;
+    let (interface, spec) = execution_composite(&op_path, &cfg.execution, run_config)?;
     Ok(PlannedOp {
         interface,
-        kind: PlannedOpKind::Leaf(spec),
+        kind: PlannedOpKind::Composite(spec),
     })
-}
-
-fn into_leaf(planned: PlannedOp) -> Result<(OpInterface, LeafOpSpec), SdkError> {
-    let interface = planned.interface;
-    match planned.kind {
-        PlannedOpKind::Leaf(spec) => Ok((interface, spec)),
-        PlannedOpKind::Composite(CompositeOpSpec { .. }) => Err(op_errors::sdk_error(
-            "unsupported_child_composite_op",
-            ErrorCategory::ParsingInput,
-            false,
-            "child composite planned ops are not supported in this compatibility leaf planner",
-        )),
-    }
-}
-
-fn append_graph(
-    states: &mut Vec<LeafStateNode>,
-    edges: &mut Vec<DependencyEdge>,
-    graph: LeafOpSpec,
-) {
-    states.extend(graph.states);
-    edges.extend(graph.edges);
-}
-
-fn connect_graphs(edges: &mut Vec<DependencyEdge>, left: &LeafOpSpec, right: &LeafOpSpec) {
-    let left_sinks = sink_state_ids(left);
-    let right_sources = source_state_ids(right);
-
-    for from in &left_sinks {
-        for to in &right_sources {
-            edges.push(DependencyEdge {
-                from: from.clone(),
-                to: to.clone(),
-            });
-        }
-    }
-}
-
-fn source_state_ids(graph: &LeafOpSpec) -> Vec<StateId> {
-    let mut incoming: HashSet<String> = HashSet::new();
-    for edge in &graph.edges {
-        incoming.insert(edge.to.as_str().to_string());
-    }
-
-    graph
-        .states
-        .iter()
-        .filter(|node| !incoming.contains(node.state_id.as_str()))
-        .map(|node| node.state_id.clone())
-        .collect()
-}
-
-fn sink_state_ids(graph: &LeafOpSpec) -> Vec<StateId> {
-    let mut outgoing: HashSet<String> = HashSet::new();
-    for edge in &graph.edges {
-        outgoing.insert(edge.from.as_str().to_string());
-    }
-
-    graph
-        .states
-        .iter()
-        .filter(|node| !outgoing.contains(node.state_id.as_str()))
-        .map(|node| node.state_id.clone())
-        .collect()
 }
 
 /// Thin planner op that accepts canonical config and composes the build/execute workflow.
@@ -394,15 +456,6 @@ mod tests {
     };
     use mfm_state_common::test_support as op_test_support;
 
-    fn into_leaf_spec(planned: PlannedOp) -> (OpInterface, LeafOpSpec) {
-        let interface = planned.interface;
-        let spec = match planned.kind {
-            PlannedOpKind::Leaf(spec) => spec,
-            PlannedOpKind::Composite(_) => panic!("expected leaf planned op"),
-        };
-        (interface, spec)
-    }
-
     fn into_composite(planned: PlannedOp) -> CompositeOpSpec {
         match planned.kind {
             PlannedOpKind::Composite(spec) => spec,
@@ -465,6 +518,11 @@ mod tests {
                 &op_test_support::run_config_live(),
             )
             .expect("expand canonical config");
+        assert!(planned
+            .interface
+            .imports
+            .iter()
+            .any(|port| port.0 == "contract_artifact"));
         let composite = into_composite(planned);
 
         assert_eq!(composite.children.len(), 2);
@@ -480,6 +538,11 @@ mod tests {
                 && child.op_id.as_str() == EVM_DEPLOY_CONFIGURE_VALIDATE_EXECUTE_OP_ID));
         assert!(composite.order.iter().any(|edge| {
             edge.from_child.0 == TRACKER_BUILD_CHILD_ID && edge.to_child.0 == EXECUTE_CHILD_ID
+        }));
+        assert!(composite.bindings.iter().any(|binding| {
+            binding.to_child.0 == EXECUTE_CHILD_ID
+                && binding.import.0 == "contract_artifact"
+                && matches!(binding.source, PortSource::ParentImport(ref import) if import.0 == "contract_artifact")
         }));
         assert!(composite
             .re_exports
@@ -510,24 +573,43 @@ mod tests {
     }
 
     #[test]
-    fn execute_root_uses_built_leaf_graph() {
+    fn execute_root_uses_built_execute_graph() {
         let op = EvmDeployConfigureValidateExecuteOp;
         assert_eq!(
             op.op_version(),
             EVM_DEPLOY_CONFIGURE_VALIDATE_PUBLIC_OP_VERSION
         );
 
-        let (io, graph) = into_leaf_spec(
-            op.expand(
+        let planned = op
+            .expand(
                 OpPath("evm_deploy_configure_validate_execute.main".to_string()),
                 &serde_json::to_value(built_config()).expect("built json"),
                 &op_test_support::run_config_live(),
             )
-            .expect("expand built config"),
-        );
+            .expect("expand built config");
+        let io = planned.interface.clone();
+        let graph = into_composite(planned);
 
-        assert_eq!(graph.states.len(), 3);
-        assert_eq!(graph.edges.len(), 2);
+        assert_eq!(graph.children.len(), 3);
+        assert_eq!(graph.order.len(), 2);
+        assert!(graph
+            .bindings
+            .iter()
+            .any(|binding| binding.to_child.0 == DEPLOY_CHILD_ID
+                && binding.import.0 == "contract_artifact"
+                && matches!(binding.source, PortSource::ParentImport(ref import) if import.0 == "contract_artifact")));
+        assert!(graph
+            .bindings
+            .iter()
+            .any(|binding| binding.to_child.0 == CONFIGURE_CHILD_ID
+                && binding.import.0 == "contract_address"
+                && matches!(binding.source, PortSource::ChildExport { ref child, ref export } if child.0 == DEPLOY_CHILD_ID && export.0 == "contract_address")));
+        assert!(graph
+            .bindings
+            .iter()
+            .any(|binding| binding.to_child.0 == VALIDATE_CHILD_ID
+                && binding.import.0 == "contract_address"
+                && matches!(binding.source, PortSource::ChildExport { ref child, ref export } if child.0 == DEPLOY_CHILD_ID && export.0 == "contract_address")));
         assert!(io.exports.iter().any(|p| p.0 == CONTRACT_ADDRESS_EXPORT));
         assert!(io.exports.iter().any(|p| p.0 == DEPLOY_TX_HASH_EXPORT));
         assert!(io.exports.iter().any(|p| p.0 == CONFIGURE_EXPORT));

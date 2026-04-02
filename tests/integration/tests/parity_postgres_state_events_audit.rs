@@ -23,13 +23,13 @@ const EVM_REQUIRED_STATES: &[&str] = &[
 ];
 
 const AAVE_PHASE_A_REQUIRED_STATES: &[&str] = &[
-    "aave_v3_reth_pipeline.deploy_origin_stack.build__write_built_config",
-    "aave_v3_reth_pipeline.deploy_origin_stack.build__write_canonical_artifact_input",
-    "aave_v3_reth_pipeline.deploy_origin_stack.execute__fetch_origin__run",
-    "aave_v3_reth_pipeline.deploy_origin_stack.execute__compile_origin__run",
-    "aave_v3_reth_pipeline.deploy_origin_stack.execute__deploy_origin_stack__run",
-    "aave_v3_reth_pipeline.deploy_origin_stack.execute__adapt_origin_deploy__adapt_origin_deploy",
-    "aave_v3_reth_pipeline.deploy_origin_stack.execute__project_report__project_report",
+    "aave_v3_reth_pipeline.deploy_origin_stack.b__write_built_config",
+    "aave_v3_reth_pipeline.deploy_origin_stack.b__write_canonical_artifact_input",
+    "aave_v3_reth_pipeline.deploy_origin_stack.e__fetch_origin__run",
+    "aave_v3_reth_pipeline.deploy_origin_stack.e__compile_origin__run",
+    "aave_v3_reth_pipeline.deploy_origin_stack.e__deploy_origin_stack__run",
+    "aave_v3_reth_pipeline.deploy_origin_stack.e__adapt_origin_deploy__adapt_origin_deploy",
+    "aave_v3_reth_pipeline.deploy_origin_stack.e__project_report__project_report",
 ];
 
 const AAVE_PHASE_B_REQUIRED_STATES: &[&str] = &[
