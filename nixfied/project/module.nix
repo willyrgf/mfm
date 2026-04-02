@@ -363,15 +363,23 @@ let
     export SCCACHE_DIR="''${SCCACHE_DIR:-${defaultSccacheDirExpr}}"
     mkdir -p "$SCCACHE_DIR"
 
-    # Ephemeral runs keep the compiler cache on the host, but must not reuse a
-    # daemon started under an older ephemeral TMPDIR.
+    # Keep the compiler cache on the host, but reset any inherited daemon so
+    # the current runtime scope owns the socket/tmpdir selection.
+    runtime_env="''${${project.envVar}:-dev}"
+    runtime_slot="''${${project.slotVar}:-0}"
+    runtime_tmpdir="''${TMPDIR:-/tmp}"
+    sccache_tmpdir="/tmp/${project.id}-tmp-$runtime_env-$runtime_slot-p$$"
+    rm -f "$sccache_tmpdir"
+    ln -sfn "$runtime_tmpdir" "$sccache_tmpdir"
+    export TMPDIR="$sccache_tmpdir"
+
     project_ephemeral_root_var="${projectEphemeralRootEnvVar}"
     project_ephemeral_root="''${!project_ephemeral_root_var:-}"
-    if [ -n "$project_ephemeral_root" ]; then
-      ${sccacheBinary} --stop-server >/dev/null 2>&1 || true
-    fi
+    ${sccacheBinary} --stop-server >/dev/null 2>&1 || true
     if [ -n "$project_ephemeral_root" ] && [ -z "''${SCCACHE_SERVER_UDS_PATH:-}" ]; then
       export SCCACHE_SERVER_UDS_PATH="$project_ephemeral_root/tmp/sccache.sock"
+    elif [ -z "''${SCCACHE_SERVER_UDS_PATH:-}" ]; then
+      export SCCACHE_SERVER_UDS_PATH="/tmp/${project.id}-sccache-$runtime_env-$runtime_slot.sock"
     fi
 
     if [ -n "''${SCCACHE_SERVER_UDS_PATH:-}" ]; then
@@ -1217,11 +1225,24 @@ in
             set -euo pipefail
             ${cargoWorkspaceTargetPreamble}
 
+            artifacts_dir="''${CI_ARTIFACTS_DIR:-${ciArtifactsRoot}}"
+            mkdir -p "$artifacts_dir"
+            fmt_log="$artifacts_dir/check-fmt.log"
+            clippy_log="$artifacts_dir/check-clippy.log"
+
+            run_with_log() {
+              local logfile="$1"
+              shift
+              "$@" 2>&1 | tee "$logfile"
+            }
+
             echo "INFO: running formatting checks"
-            ${cargoFmtCheckCmd}
+            echo "INFO: command=${cargoFmtCheckCmd} log=$fmt_log"
+            run_with_log "$fmt_log" ${cargoFmtCheckCmd}
 
             echo "INFO: running clippy"
-            ${cargoClippyCmd}
+            echo "INFO: command=${cargoClippyCmd} log=$clippy_log"
+            run_with_log "$clippy_log" ${cargoClippyCmd}
 
             echo "OK: quality checks completed"
           '';
