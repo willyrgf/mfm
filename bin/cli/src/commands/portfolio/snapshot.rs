@@ -3,8 +3,8 @@ use std::path::PathBuf;
 
 use clap::Args;
 use mfm_app::{
-    parse_portfolio_snapshot_request_input, AppError, FeatureExecutionResult,
-    PortfolioSnapshotRequest, PortfolioSnapshotResponse,
+    parse_portfolio_snapshot_request_input, AppError, FeatureCatalog, FeatureExecutionResult,
+    FeatureRequest, PortfolioSnapshotRequest,
 };
 
 use crate::commands::result::{CommandError, CommandOutput, CommandResult};
@@ -38,23 +38,24 @@ pub(crate) async fn execute(ctx: &CommandContext, args: &SnapshotArgs) -> ! {
 async fn execute_internal(args: &SnapshotArgs) -> CommandResult<FeatureExecutionResult> {
     let request = parse_request(args)?;
     let services = make_app_services_from_args(&args.stores).await?;
-    execute_request_with_starter(request, |request| async move {
-        services.start_portfolio_snapshot(request).await
+    let catalog = FeatureCatalog::with_builtins();
+    execute_request_with_executor(request, |feature_request| async move {
+        catalog.execute(&services, feature_request).await
     })
     .await
 }
 
 #[cfg(test)]
-async fn execute_with_starter<F, Fut>(
+async fn execute_with_executor<F, Fut>(
     args: &SnapshotArgs,
-    start: F,
+    execute: F,
 ) -> CommandResult<FeatureExecutionResult>
 where
-    F: FnOnce(PortfolioSnapshotRequest) -> Fut,
-    Fut: Future<Output = Result<PortfolioSnapshotResponse, AppError>>,
+    F: FnOnce(FeatureRequest) -> Fut,
+    Fut: Future<Output = Result<FeatureExecutionResult, AppError>>,
 {
     let request = parse_request(args)?;
-    execute_request_with_starter(request, start).await
+    execute_request_with_executor(request, execute).await
 }
 
 fn parse_request(args: &SnapshotArgs) -> Result<PortfolioSnapshotRequest, CommandError> {
@@ -62,17 +63,22 @@ fn parse_request(args: &SnapshotArgs) -> Result<PortfolioSnapshotRequest, Comman
         .map_err(command_error_from_snapshot_parse_error)
 }
 
-async fn execute_request_with_starter<F, Fut>(
+async fn execute_request_with_executor<F, Fut>(
     request: PortfolioSnapshotRequest,
-    start: F,
+    execute: F,
 ) -> CommandResult<FeatureExecutionResult>
 where
-    F: FnOnce(PortfolioSnapshotRequest) -> Fut,
-    Fut: Future<Output = Result<PortfolioSnapshotResponse, AppError>>,
+    F: FnOnce(FeatureRequest) -> Fut,
+    Fut: Future<Output = Result<FeatureExecutionResult, AppError>>,
 {
-    let response = start(request).await.map_err(command_error_from_app_error)?;
-    let result = FeatureExecutionResult::from_serializable("portfolio.snapshot", response)
-        .map_err(|_| CommandError::new("SerializationError", "Failed to serialize result"))?;
+    let feature_request = FeatureRequest {
+        feature_id: "portfolio.snapshot".to_string(),
+        payload: serde_json::to_value(&request)
+            .map_err(|_| CommandError::new("SerializationError", "Failed to serialize request"))?,
+    };
+    let result = execute(feature_request)
+        .await
+        .map_err(command_error_from_app_error)?;
     Ok(CommandOutput::new(result))
 }
 
@@ -88,6 +94,7 @@ fn command_error_from_snapshot_parse_error(err: AppError) -> CommandError {
 mod tests {
     use super::*;
 
+    use mfm_app::{ErrorClass, PortfolioSnapshotResponse};
     use mfm_state_portfolio::model::{
         ExecutionAnchor, NetworkPin, PortfolioQuoteTotal, PortfolioReport, WalletReport,
     };
@@ -106,27 +113,41 @@ mod tests {
             },
         };
 
-        let output = execute_with_starter(&args, |request| async move {
+        let output = execute_with_executor(&args, |feature_request| async move {
+            assert_eq!(feature_request.feature_id, "portfolio.snapshot");
+            let request: PortfolioSnapshotRequest =
+                serde_json::from_value(feature_request.payload).expect("typed feature payload");
             assert_eq!(request.portfolio.portfolio_id, "portfolio_main");
-            Ok(PortfolioSnapshotResponse {
-                run_id: "run_123".to_string(),
-                phase: "completed".to_string(),
-                final_snapshot_id: Some("snapshot_ctx_123".to_string()),
-                snapshot_artifact_id: Some("artifact_123".to_string()),
-                report: Some(PortfolioReport {
-                    schema_version: 2,
-                    portfolio_id: request.portfolio.portfolio_id,
-                    generated_at_ms: 1234,
-                    network_pins: vec![NetworkPin {
-                        network_id: "ethereum-mainnet".to_string(),
-                        anchor: ExecutionAnchor::Evm {
-                            chain_id: 1,
-                            block_number: 100,
-                        },
-                    }],
-                    wallet_summaries: vec![WalletReport {
-                        wallet_id: "wallet_main".to_string(),
-                        network_id: "ethereum-mainnet".to_string(),
+            FeatureExecutionResult::from_serializable(
+                "portfolio.snapshot",
+                PortfolioSnapshotResponse {
+                    run_id: "run_123".to_string(),
+                    phase: "completed".to_string(),
+                    final_snapshot_id: Some("snapshot_ctx_123".to_string()),
+                    snapshot_artifact_id: Some("artifact_123".to_string()),
+                    report: Some(PortfolioReport {
+                        schema_version: 2,
+                        portfolio_id: request.portfolio.portfolio_id,
+                        generated_at_ms: 1234,
+                        network_pins: vec![NetworkPin {
+                            network_id: "ethereum-mainnet".to_string(),
+                            anchor: ExecutionAnchor::Evm {
+                                chain_id: 1,
+                                block_number: 100,
+                            },
+                        }],
+                        wallet_summaries: vec![WalletReport {
+                            wallet_id: "wallet_main".to_string(),
+                            network_id: "ethereum-mainnet".to_string(),
+                            totals_by_quote: vec![PortfolioQuoteTotal {
+                                quote: QuoteCode::Usd,
+                                assets_value_dec: "12.50".to_string(),
+                                collateral_value_dec: "0".to_string(),
+                                debt_value_dec: "0".to_string(),
+                                staked_value_dec: "0".to_string(),
+                                net_value_dec: "12.50".to_string(),
+                            }],
+                        }],
                         totals_by_quote: vec![PortfolioQuoteTotal {
                             quote: QuoteCode::Usd,
                             assets_value_dec: "12.50".to_string(),
@@ -135,18 +156,11 @@ mod tests {
                             staked_value_dec: "0".to_string(),
                             net_value_dec: "12.50".to_string(),
                         }],
-                    }],
-                    totals_by_quote: vec![PortfolioQuoteTotal {
-                        quote: QuoteCode::Usd,
-                        assets_value_dec: "12.50".to_string(),
-                        collateral_value_dec: "0".to_string(),
-                        debt_value_dec: "0".to_string(),
-                        staked_value_dec: "0".to_string(),
-                        net_value_dec: "12.50".to_string(),
-                    }],
-                    error_count: 0,
-                }),
-            })
+                        error_count: 0,
+                    }),
+                },
+            )
+            .map_err(|err| AppError::new(ErrorClass::Internal, "SerializationError", err.to_string()))
         })
         .await
         .expect("successful command output");
@@ -180,7 +194,7 @@ mod tests {
             },
         };
 
-        let err = execute_with_starter(&args, |_| async move {
+        let err = execute_with_executor(&args, |_| async move {
             panic!("starter should not run when request parsing fails")
         })
         .await
@@ -204,7 +218,7 @@ mod tests {
             },
         };
 
-        let err = execute_with_starter(&args, |_| async move {
+        let err = execute_with_executor(&args, |_| async move {
             panic!("starter should not run when request parsing fails")
         })
         .await
