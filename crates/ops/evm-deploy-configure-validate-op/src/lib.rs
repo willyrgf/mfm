@@ -80,30 +80,8 @@ const VALIDATED_EXPORT: &str = "validated";
 /// Compatibility alias for the execution payload shape historically accepted by the legacy root.
 pub type EvmDeployConfigureValidateOpConfig = DeployConfigureValidateExecutionConfig;
 
-enum EvmDeployConfigureValidateInput {
-    Canonical(DeployConfigureValidateCanonicalConfig),
-    Built(DeployConfigureValidateBuiltConfig),
-}
-
 fn sdk_input_error(code: &'static str, message: impl Into<String>) -> SdkError {
     op_errors::sdk_error(code, ErrorCategory::ParsingInput, false, message)
-}
-
-fn parse_compatibility_input(
-    op_config: &Value,
-) -> Result<EvmDeployConfigureValidateInput, SdkError> {
-    if let Ok(cfg) = decode_deploy_configure_validate_built_config(op_config) {
-        return Ok(EvmDeployConfigureValidateInput::Built(cfg));
-    }
-
-    decode_deploy_configure_validate_canonical_config(op_config)
-        .map(EvmDeployConfigureValidateInput::Canonical)
-        .map_err(|err| {
-            sdk_input_error(
-                "invalid_evm_deploy_configure_validate_execution_config",
-                err.to_string(),
-            )
-        })
 }
 
 fn parse_built_config(op_config: &Value) -> Result<DeployConfigureValidateBuiltConfig, SdkError> {
@@ -375,14 +353,18 @@ impl Operation for EvmDeployConfigureValidateOp {
         op_config: &serde_json::Value,
         run_config: &RunConfig,
     ) -> Result<PlannedOp, SdkError> {
-        match parse_compatibility_input(op_config)? {
-            EvmDeployConfigureValidateInput::Canonical(canonical) => {
-                expand_from_canonical(op_path, canonical, run_config)
-            }
-            EvmDeployConfigureValidateInput::Built(cfg) => {
-                expand_execution(op_path, &cfg, run_config)
-            }
+        if let Ok(cfg) = decode_deploy_configure_validate_built_config(op_config) {
+            return expand_execution(op_path, &cfg, run_config);
         }
+
+        let canonical =
+            decode_deploy_configure_validate_canonical_config(op_config).map_err(|err| {
+                sdk_input_error(
+                    "invalid_evm_deploy_configure_validate_execution_config",
+                    err.to_string(),
+                )
+            })?;
+        expand_from_canonical(op_path, canonical, run_config)
     }
 }
 
