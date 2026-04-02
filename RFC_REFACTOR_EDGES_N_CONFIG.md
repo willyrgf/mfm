@@ -2,7 +2,7 @@
 
 Status: Mostly landed; follow-up remaining
 
-Last updated: 2026-03-31
+Last updated: 2026-04-02
 
 ## 1. Executive Summary
 
@@ -21,9 +21,10 @@ Last updated: 2026-03-31
 - The current app-layer and wrapper-layer procedural glue should be reduced by moving config build, artifact emission, and result extraction behind internal MFM ops and reusable states.
 - Current repo status:
   - portfolio now has explicit authored/canonical/built execution boundaries, build/report publication, and a strict execute root, but some CLI/app compatibility glue still duplicates transport parsing and feature shaping
-  - deploy/configure/validate now has authored/canonical/built config crates plus config-build and execute roots, but final adopter work is still incomplete in app/CLI/parity surfaces and the workflow-family typing remains shallow
+  - deploy/configure/validate now has authored/canonical/built config crates plus config-build and execute roots, and the public root family is the primary app/CLI/parity path, but transport parsing still sits at the app edge and the workflow-family typing remains shallow
   - `publish-docs` now uses shared authored/canonical ingress and intentionally stops there
   - wrapper-heavy Aave-origin phase-A orchestration is now internal MFM composition through `aave_v3_origin_stack`, while intentionally retaining the current Nix/Foundry compatibility backend
+  - the previous compatibility-root follow-up is now closed in code: the SDK supports planner-payload-sourced child op config, so canonical-input compatibility roots can compose build then execute with the build child authoritative for execute-child input materialization
 
 ## 2. Problem Statement
 
@@ -145,7 +146,7 @@ As a result:
    - The app layer currently owns raw request-file semantics for portfolio.
    - This is the wrong place to grow `config.toml` support or broader authored-config logic.
 
-3. `bin/cli/src/commands/portfolio/snapshot.rs`, `execute_internal` and `build_feature_execution_result`
+3. `bin/cli/src/commands/portfolio/snapshot.rs`, `execute_internal` and `execute_request_with_starter`
    - The CLI manually rebuilds a feature envelope instead of consistently using the feature catalog path.
    - This duplicates request parsing and output shaping.
 
@@ -167,7 +168,7 @@ As a result:
 
 - `bin/cli/src/commands/portfolio/snapshot.rs`
   - `execute_internal` reads raw request JSON or file input and manually constructs a feature result envelope.
-  - `build_feature_execution_result` duplicates output shaping that already has a home in the feature layer.
+  - `execute_request_with_starter` duplicates output shaping that already has a home in the feature layer.
 
 - `crates/app/src/lib.rs`
   - `start_portfolio_snapshot` is the primary app-layer fat edge.
@@ -199,12 +200,13 @@ As a result:
   - The app layer owns raw spec-file reading and JSON parsing for deploy/configure/validate.
   - This matches the same anti-pattern seen in portfolio config ingestion.
 
-- `crates/app/src/lib.rs`, `pipeline_from_deploy_configure_validate_spec`
-  - The pipeline shape is clean, but the spec ingestion path remains transport-driven rather than authored-config-framework-driven.
+- `crates/app/src/lib.rs`, `start_deploy_configure_validate` and feature `pipeline.deploy_configure_validate.start`
+  - The public root-op handoff is now clean, but the spec ingestion path remains transport-driven rather than authored-config-framework-driven.
 
 - `crates/ops/evm-deploy-configure-validate-op/src/lib.rs`, `EvmDeployConfigureValidateOp::expand`
   - This op is thin and correctly placed.
-  - It is a good target consumer for a future `BuiltConfig` if deploy/configure/validate grows a dedicated config build step.
+  - It now composes the dedicated config-build and execute roots correctly.
+  - The remaining gap is not op layering; it is the still-shallow typing at the ABI/args/assertion boundary.
 
 - `crates/tools/publish-docs/src/catalog.rs`, `load_desired_catalog`
   - This tool already consumes TOML and normalizes it into typed structures.
@@ -784,14 +786,18 @@ Change:
     - residual work remains to thin CLI/app request parsing and feature-envelope glue
   - deploy/configure/validate:
     - authored/canonical/built config crate plus config-build and execute roots are landed
-    - final adopter work is still open in the app/CLI/parity layer, which still primarily exposes the legacy pipeline-template path
-    - the workflow-family config remains only partially typed because deploy/configure/validate payloads are still mostly opaque JSON blobs
+    - the public root family is now the primary app/CLI surface and direct parity coverage exercises it
+    - residual work remains to thin transport parsing at the app/CLI edge
+    - the workflow-family config remains only partially typed because deploy/configure/validate payloads still include raw JSON ABI, arg, and assertion seams that should be strengthened
   - publish-docs:
     - authored/canonical ingress is landed
     - no built-config split is intended at this stage because the current tool does not have a reusable execution-ready compiled spec distinct from its typed plan/output surfaces
   - wrapper-heavy Aave-origin tooling:
     - explicit authored/canonical/built/execute boundaries are landed through `aave_v3_origin_stack`
     - the backend intentionally still uses the current Nix/Foundry compatibility wrappers rather than a full Rust reimplementation
+  - compatibility-root follow-up:
+    - the previous migration seam is now closed
+    - the SDK supports planner-payload-sourced child op config, and portfolio, deploy/configure/validate, and Aave-origin compatibility roots now wire execute-child config from the build child's planner payload instead of precomputing built config in the parent planner for execute-child handoff
 
 Contract risk:
 
@@ -809,27 +815,38 @@ Ship independently:
 ### Remaining Work Before This RFC Should Be Considered Fully Complete
 
 - Finish deploy/configure/validate adoption:
-  - make the new public root-op family the primary app/CLI path instead of continuing to privilege the legacy pipeline-template helper
-  - add integration/parity coverage that exercises the new deploy/configure/validate root family directly
-  - either strengthen workflow-family typing beyond opaque JSON blobs or explicitly document that shallow typing is the intended long-term boundary
+  - strengthen workflow-family typing beyond raw JSON ABI, arg, and assertion seams
+  - thin the remaining transport parsing edge in the app/CLI ingress path
 
 - Thin the remaining portfolio transport edges:
   - reduce duplicated request parsing/canonicalization glue between the CLI and app service entrypoints
   - remove duplicate feature-envelope shaping where the app feature layer can own it directly
 
-- Make the build boundary more authoritative in compatibility roots:
-  - portfolio, deploy/configure/validate, and Aave-origin compatibility roots still precompute built config in the parent planner and then insert a config-build child mainly for publication/compatibility ordering
-  - if the SDK evolves to support it cleanly, the canonical-input compatibility path should compose build then execute without duplicating canonical-to-built compilation in the parent root
-  - until then, treat this as an acceptable migration seam rather than as the desired end state
+- Retire stale compatibility-root follow-up prose:
+  - this RFC no longer treats planner-authoritative build-child handoff as remaining work
+  - the remaining task is to update workflow docs and inventories that still describe the pre-SDK compatibility seam
 
 - Keep workflow docs synchronized with the landed code:
   - update workflow-specific docs when parity entrypoints or migration status change so the code remains the authority and the docs remain trustworthy summaries
+
+### Completion Checklist
+
+- [x] Portfolio authored/canonical/built boundaries are landed behind config-build, execute, and compatibility roots.
+- [x] Deploy/configure/validate authored/canonical/built boundaries are landed behind config-build, execute, and compatibility roots.
+- [x] The public deploy/configure/validate root family is the primary app/CLI/parity path.
+- [x] Portfolio, deploy/configure/validate, and Aave-origin compatibility roots now source execute-child config from build-child planner payloads.
+- [x] Shared artifact/report/export publication plumbing is reusable shared state, not duplicated per adopter.
+- [x] Publish-docs uses authored/canonical ingress and intentionally stops before a built/execute split.
+- [ ] Strengthen deploy/configure/validate typing beyond raw JSON ABI, arg, and assertion seams.
+- [ ] Thin the remaining portfolio CLI/app parsing and feature-envelope glue.
+- [ ] Thin the remaining deploy/configure/validate app/CLI transport parsing glue.
+- [ ] Update stale workflow docs and inventories that still describe the old compatibility-root seam or outdated adopter status.
 
 ## 16. Open Questions and Risks
 
 - Should `BuiltConfig` always be the authoritative runtime input, or are there workflow families where execution should still consume `CanonicalConfig` directly?
 - How much shared framework surface is enough before the abstraction becomes too generic and hard to reason about?
-- The current planner model separates `expand()` and `planner_payload()`. Eliminating duplicated compilation in some ops may require SDK evolution, not just local refactoring.
+- The current planner model still separates `expand()` and `planner_payload()`. Some duplicate compile/report work may remain in individual ops, but the specific child-config handoff seam is no longer blocked on SDK evolution.
 - If raw authored TOML is persisted as an audit artifact, what retention and secrecy rules should apply to avoid leaking sensitive but non-secret authoring context?
 - Which workflow families are worth bringing fully under the run model versus leaving as standalone tools?
 - Doc drift remains a risk as adopter status evolves. For example, workflow-specific migration docs can lag the code and parity tests unless they are updated as part of the same change.
@@ -841,7 +858,7 @@ Ship independently:
 1. `crates/app/src/lib.rs`, `AppServices::start_portfolio_snapshot`
 2. `crates/app/src/lib.rs`, `parse_portfolio_snapshot_request_input`
 3. `bin/cli/src/commands/portfolio/snapshot.rs`, `execute_internal`
-4. `bin/cli/src/commands/portfolio/snapshot.rs`, `build_feature_execution_result`
+4. `bin/cli/src/commands/portfolio/snapshot.rs`, `execute_request_with_starter`
 5. `crates/ops/portfolio-tracker-op/src/lib.rs`, `parse_config`, `expand`, and `planner_payload`
 
 ### Which are best solved by a config compiler op, config normalization states, or reusable artifact-building states?
