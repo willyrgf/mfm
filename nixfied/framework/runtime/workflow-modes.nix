@@ -158,6 +158,7 @@ let
       hermetic = taskRuntime.hermetic;
       runtimeInputs = (taskRuntime.runtimeInputs or [ ]) ++ (hook.runtimeInputs or [ ]);
       passThroughEnv = (taskRuntime.passThroughEnv or [ ]) ++ (hook.passThroughEnv or [ ]);
+      passThroughRuntimeEnv = taskRuntime.passThroughRuntimeEnv or [ ];
       allowSensitivePassThrough = taskRuntime.allowSensitivePassThrough or false;
       env = (taskRuntime.env or { }) // (hook.env or { });
       umask = taskRuntime.umask or "022";
@@ -185,6 +186,7 @@ let
         map (name: "${name}\t${valueToString env.${name}}") envNames
       );
       passThroughEnvTsv = builtins.concatStringsSep "\n" (runtime.passThroughEnv or [ ]);
+      passThroughRuntimeEnvTsv = builtins.concatStringsSep "\n" (runtime.passThroughRuntimeEnv or [ ]);
     in
     builtins.concatStringsSep "\n" [
       "runtime_inputs_path=${
@@ -204,6 +206,7 @@ let
       "task_output_mode_default=${lib.escapeShellArg (runtime.logging.outputDefault or "")}"
       "runtime_env_tsv=${lib.escapeShellArg runtimeEnvTsv}"
       "pass_through_env_tsv=${lib.escapeShellArg passThroughEnvTsv}"
+      "pass_through_runtime_env_tsv=${lib.escapeShellArg passThroughRuntimeEnvTsv}"
       "runtime_log_level_set=${lib.escapeShellArg (if env ? LOG_LEVEL then "1" else "0")}"
       "runtime_log_level_alias_set=${lib.escapeShellArg (if env ? NIXFIED_LOG_LEVEL then "1" else "0")}"
       "runtime_log_level_value=${

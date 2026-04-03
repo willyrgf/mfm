@@ -208,6 +208,19 @@ in
       esac
     }
 
+    is_allowed_pass_through_runtime_env_name() {
+      local env_name="$1"
+
+      case "$env_name" in
+        HOME|TMPDIR|XDG_DATA_HOME|XDG_STATE_HOME|XDG_CACHE_HOME)
+          return 0
+          ;;
+        *)
+          return 1
+          ;;
+      esac
+    }
+
     ensure_runtime_dir() {
       local path="$1"
       if [ -n "$path" ]; then
@@ -252,6 +265,7 @@ in
       local host_developer_dir=""
       local host_sdkroot=""
       local pass_through_env_tsv=""
+      local pass_through_runtime_env_tsv=""
       local runtime_env_tsv=""
 
       local slot_var
@@ -461,6 +475,39 @@ in
       ensure_runtime_dir "$registry_root_value"
       ensure_runtime_dir "$artifacts_dir_value"
       ensure_runtime_dir "$services_root"
+
+      while IFS= read -r pass_runtime_name || [ -n "$pass_runtime_name" ]; do
+        if [ -z "$pass_runtime_name" ]; then
+          continue
+        fi
+
+        if ! is_allowed_pass_through_runtime_env_name "$pass_runtime_name"; then
+          echo "ERROR: runtime-owned runtime env passthrough blocked name=$pass_runtime_name"
+          return 3
+        fi
+
+        if [ -z "''${!pass_runtime_name+x}" ]; then
+          continue
+        fi
+
+        case "$pass_runtime_name" in
+          HOME)
+            home_value="''${!pass_runtime_name}"
+            ;;
+          TMPDIR)
+            tmp_value="''${!pass_runtime_name}"
+            ;;
+          XDG_DATA_HOME)
+            xdg_data_value="''${!pass_runtime_name}"
+            ;;
+          XDG_STATE_HOME)
+            xdg_state_value="''${!pass_runtime_name}"
+            ;;
+          XDG_CACHE_HOME)
+            xdg_cache_value="''${!pass_runtime_name}"
+            ;;
+        esac
+      done <<< "$pass_through_runtime_env_tsv"
 
       case "$workdir_kind" in
         projectRoot)

@@ -332,6 +332,10 @@ in
                 type = t.listOf t.str;
                 default = [ ];
               };
+              passThroughRuntimeEnv = lib.mkOption {
+                type = t.listOf t.str;
+                default = [ ];
+              };
               references = {
                 taskIds = lib.mkOption {
                   type = t.listOf t.str;

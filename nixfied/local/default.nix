@@ -1,6 +1,13 @@
 { pkgs, ... }:
 let
   aaveTools = import ../project/aave-origin-tools.nix { inherit pkgs; };
+  runtimeOwnedDirEnv = [
+    "HOME"
+    "TMPDIR"
+    "XDG_DATA_HOME"
+    "XDG_STATE_HOME"
+    "XDG_CACHE_HOME"
+  ];
 
   mkBinaryTask =
     {
@@ -11,6 +18,7 @@ let
       description,
       effects ? [ "none" ],
       passThroughEnv ? [ ],
+      passThroughRuntimeEnv ? [ ],
       allowSensitivePassThrough ? false,
     }:
     {
@@ -66,7 +74,7 @@ let
         workdir = "projectRoot";
         hermetic = true;
         runtimeInputs = [ package ];
-        inherit passThroughEnv allowSensitivePassThrough;
+        inherit passThroughEnv passThroughRuntimeEnv allowSensitivePassThrough;
         env = { };
         umask = "022";
         locale = "C.UTF-8";
@@ -122,6 +130,7 @@ in
           "MFM_AAVE_V3_ORIGIN_EXPECTED_REPO_URL"
           "MFM_AAVE_V3_ORIGIN_EXPECTED_COMMIT_SHA"
         ];
+        passThroughRuntimeEnv = runtimeOwnedDirEnv;
       };
 
       aave-v3-origin-compile = mkBinaryTask {
@@ -134,6 +143,7 @@ in
           "MFM_AAVE_V3_ORIGIN_EXPECTED_REPO_URL"
           "MFM_AAVE_V3_ORIGIN_EXPECTED_COMMIT_SHA"
         ];
+        passThroughRuntimeEnv = runtimeOwnedDirEnv;
       };
 
       aave-v3-origin-deploy = mkBinaryTask {
@@ -158,6 +168,7 @@ in
           "MFM_AAVE_V3_ORIGIN_USDC_SUPPLY_AMOUNT"
           "MFM_AAVE_V3_ORIGIN_WBTC_COLLATERAL_AMOUNT"
         ];
+        passThroughRuntimeEnv = runtimeOwnedDirEnv;
       };
     };
 

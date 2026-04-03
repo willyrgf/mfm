@@ -17,6 +17,43 @@ let
       frameworkTestMaxParallelShardsRaw
     else
       throw "ERROR: frameworkTest.maxParallelShards must be \"auto\" or a positive integer";
+  runtimeOwnedDirEnv = [
+    "HOME"
+    "TMPDIR"
+    "XDG_DATA_HOME"
+    "XDG_STATE_HOME"
+    "XDG_CACHE_HOME"
+  ];
+  runtimeEnvReportCommand = ''
+    set -euo pipefail
+    printf 'NIXFIED_RUNTIME_DIR_SCOPE=%s\n' "''${NIXFIED_RUNTIME_DIR_SCOPE:-}"
+    printf 'HOME=%s\n' "''${HOME:-}"
+    printf 'TMPDIR=%s\n' "''${TMPDIR:-}"
+    printf 'XDG_DATA_HOME=%s\n' "''${XDG_DATA_HOME:-}"
+    printf 'XDG_STATE_HOME=%s\n' "''${XDG_STATE_HOME:-}"
+    printf 'XDG_CACHE_HOME=%s\n' "''${XDG_CACHE_HOME:-}"
+  '';
+  mkRuntimeEnvReportTask =
+    {
+      id,
+      summary,
+      description ? summary,
+      passThroughEnv ? [ ],
+      passThroughRuntimeEnv ? [ ],
+    }:
+    mkCommandTask {
+      inherit
+        id
+        summary
+        description
+        passThroughEnv
+        passThroughRuntimeEnv
+        ownerFile
+        ;
+      kind = "utility";
+      runtimeInputs = [ pkgs.coreutils ];
+      command = runtimeEnvReportCommand;
+    };
 in
 {
   tasks = {
@@ -700,6 +737,33 @@ in
       '';
       inherit ownerFile;
     };
+
+    framework-runtime-env-default = mkRuntimeEnvReportTask {
+      id = "task.framework.runtime-env-default";
+      summary = "Report sandbox-generated runtime directory env";
+      description = "Emits the effective runtime directory environment without caller-runtime passthrough.";
+    };
+
+    framework-runtime-env-opt-in = mkRuntimeEnvReportTask {
+      id = "task.framework.runtime-env-opt-in";
+      summary = "Report caller runtime directory env when explicitly opted in";
+      description = "Emits the effective runtime directory environment with allowlisted caller-runtime passthrough.";
+      passThroughRuntimeEnv = runtimeOwnedDirEnv;
+    };
+
+    framework-runtime-env-invalid = mkRuntimeEnvReportTask {
+      id = "task.framework.runtime-env-invalid";
+      summary = "Reject invalid caller runtime directory passthrough names";
+      description = "Intentionally requests a disallowed runtime-owned env name to validate sandbox rejection.";
+      passThroughRuntimeEnv = [ "REGISTRY_ROOT" ];
+    };
+
+    framework-runtime-env-pass-through-blocked = mkRuntimeEnvReportTask {
+      id = "task.framework.runtime-env-pass-through-blocked";
+      summary = "Reject runtime-owned names on ordinary passThroughEnv";
+      description = "Intentionally requests TMPDIR through passThroughEnv to validate existing sandbox rejection.";
+      passThroughEnv = [ "TMPDIR" ];
+    };
   };
 
   apps = {
@@ -720,6 +784,42 @@ in
         "nix run .#framework::test -- --shard isolation"
         "nix run .#framework::test -- --shard self-host"
       ];
+      inherit ownerFile;
+    };
+
+    "framework::runtime-env-default" = mkTaskApp {
+      taskId = "task.framework.runtime-env-default";
+      appId = "framework::runtime-env-default";
+      category = "framework";
+      usage = [ "nix run .#framework::runtime-env-default" ];
+      examples = [ "HOME=/tmp/home TMPDIR=/tmp/tmp nix run .#framework::runtime-env-default" ];
+      inherit ownerFile;
+    };
+
+    "framework::runtime-env-opt-in" = mkTaskApp {
+      taskId = "task.framework.runtime-env-opt-in";
+      appId = "framework::runtime-env-opt-in";
+      category = "framework";
+      usage = [ "nix run .#framework::runtime-env-opt-in" ];
+      examples = [ "HOME=/tmp/home TMPDIR=/tmp/tmp nix run .#framework::runtime-env-opt-in" ];
+      inherit ownerFile;
+    };
+
+    "framework::runtime-env-invalid" = mkTaskApp {
+      taskId = "task.framework.runtime-env-invalid";
+      appId = "framework::runtime-env-invalid";
+      category = "framework";
+      usage = [ "nix run .#framework::runtime-env-invalid" ];
+      examples = [ "nix run .#framework::runtime-env-invalid" ];
+      inherit ownerFile;
+    };
+
+    "framework::runtime-env-pass-through-blocked" = mkTaskApp {
+      taskId = "task.framework.runtime-env-pass-through-blocked";
+      appId = "framework::runtime-env-pass-through-blocked";
+      category = "framework";
+      usage = [ "nix run .#framework::runtime-env-pass-through-blocked" ];
+      examples = [ "nix run .#framework::runtime-env-pass-through-blocked" ];
       inherit ownerFile;
     };
   };

@@ -533,6 +533,7 @@ let
         services = [ ];
       },
       passThroughEnv ? sharedPassThroughEnv,
+      passThroughRuntimeEnv ? [ ],
       allowSensitivePassThrough ? true,
       env ? { },
     }:
@@ -597,6 +598,7 @@ let
         hermetic = true;
         runtimeInputs = runtimeInputs;
         passThroughEnv = passThroughEnv;
+        passThroughRuntimeEnv = passThroughRuntimeEnv;
         allowSensitivePassThrough = allowSensitivePassThrough;
         inherit env;
         umask = "022";
@@ -1474,6 +1476,10 @@ in
               require_app "format"
               require_app "test"
               require_app "ci"
+              require_app "framework::runtime-env-default"
+              require_app "framework::runtime-env-opt-in"
+              require_app "framework::runtime-env-invalid"
+              require_app "framework::runtime-env-pass-through-blocked"
               require_app "svcset::ci-parity::start"
               require_app "svcset::ci-parity::stop"
               require_app "svcset::ci-parity::export"
@@ -1483,6 +1489,10 @@ in
               require_task "task.ci.sccache-contracts"
               require_task "task.ci.workflow-basic"
               require_task "task.ci.workflow-parity"
+              require_task "task.framework.runtime-env-default"
+              require_task "task.framework.runtime-env-opt-in"
+              require_task "task.framework.runtime-env-invalid"
+              require_task "task.framework.runtime-env-pass-through-blocked"
               require_task "task.mfm.portfolio.snapshot"
               require_task "task.mfm_rest_api"
 
@@ -1536,6 +1546,135 @@ in
 
               if grep -R -n "[.]framework/" "$ROOT/nixfied/project" --include="*.nix" >/dev/null; then
                 echo "ERROR: project layer references framework-private paths"
+                exit 1
+              fi
+
+              read_report_value() {
+                local key="$1"
+                local output_file="$2"
+                local line=""
+                line="$(grep -m1 "^$key=" "$output_file" || true)"
+                if [ -z "$line" ]; then
+                  echo "ERROR: missing runtime-env report key=$key file=$output_file"
+                  cat "$output_file"
+                  exit 1
+                fi
+                printf "%s" "''${line#*=}"
+              }
+
+              expect_report_value() {
+                local output_file="$1"
+                local key="$2"
+                local expected="$3"
+                local actual=""
+                actual="$(read_report_value "$key" "$output_file")"
+                if [ "$actual" != "$expected" ]; then
+                  echo "ERROR: unexpected runtime-env value key=$key expected=$expected actual=$actual file=$output_file"
+                  cat "$output_file"
+                  exit 1
+                fi
+              }
+
+              run_report_command() {
+                local output_file="$1"
+                shift
+                if "$@" >"$output_file" 2>&1; then
+                  :
+                else
+                  local rc=$?
+                  echo "ERROR: runtime-env probe failed rc=$rc output=$output_file"
+                  cat "$output_file"
+                  exit "$rc"
+                fi
+              }
+
+              run_report_command_expect_failure() {
+                local output_file="$1"
+                shift
+                if "$@" >"$output_file" 2>&1; then
+                  echo "ERROR: runtime-env probe unexpectedly passed output=$output_file"
+                  cat "$output_file"
+                  exit 1
+                fi
+              }
+
+              runtime_env_fixture_root="$(mktemp -d "''${TMPDIR:-/tmp}/shell-app-contracts.runtime-env.XXXXXX")"
+              trap "rm -rf \"$runtime_env_fixture_root\"" EXIT
+              caller_home="$runtime_env_fixture_root/h"
+              caller_tmp="$runtime_env_fixture_root/t"
+              caller_xdg_data="$runtime_env_fixture_root/d"
+              caller_xdg_state="$runtime_env_fixture_root/s"
+              caller_xdg_cache="$runtime_env_fixture_root/c"
+              mkdir -p "$caller_home" "$caller_tmp" "$caller_xdg_data" "$caller_xdg_state" "$caller_xdg_cache"
+
+              default_report="$runtime_env_fixture_root/default.report"
+              opt_in_report="$runtime_env_fixture_root/opt-in.report"
+              fallback_report="$runtime_env_fixture_root/fallback.report"
+              invalid_report="$runtime_env_fixture_root/invalid.report"
+              blocked_report="$runtime_env_fixture_root/blocked.report"
+
+              run_report_command \
+                "$default_report" \
+                env \
+                HOME="$caller_home" \
+                TMPDIR="$caller_tmp" \
+                XDG_DATA_HOME="$caller_xdg_data" \
+                XDG_STATE_HOME="$caller_xdg_state" \
+                XDG_CACHE_HOME="$caller_xdg_cache" \
+                nix run ".#framework::runtime-env-default"
+              default_scope="$(read_report_value "NIXFIED_RUNTIME_DIR_SCOPE" "$default_report")"
+              expect_report_value "$default_report" "HOME" "$default_scope/home"
+              expect_report_value "$default_report" "TMPDIR" "$default_scope/tmp"
+              expect_report_value "$default_report" "XDG_DATA_HOME" "$default_scope/xdg/data"
+              expect_report_value "$default_report" "XDG_STATE_HOME" "$default_scope/xdg/state"
+              expect_report_value "$default_report" "XDG_CACHE_HOME" "$default_scope/xdg/cache"
+
+              run_report_command \
+                "$opt_in_report" \
+                env \
+                HOME="$caller_home" \
+                TMPDIR="$caller_tmp" \
+                XDG_DATA_HOME="$caller_xdg_data" \
+                XDG_STATE_HOME="$caller_xdg_state" \
+                XDG_CACHE_HOME="$caller_xdg_cache" \
+                nix run ".#framework::runtime-env-opt-in"
+              expect_report_value "$opt_in_report" "HOME" "$caller_home"
+              expect_report_value "$opt_in_report" "TMPDIR" "$caller_tmp"
+              expect_report_value "$opt_in_report" "XDG_DATA_HOME" "$caller_xdg_data"
+              expect_report_value "$opt_in_report" "XDG_STATE_HOME" "$caller_xdg_state"
+              expect_report_value "$opt_in_report" "XDG_CACHE_HOME" "$caller_xdg_cache"
+
+              run_report_command \
+                "$fallback_report" \
+                env \
+                -u XDG_DATA_HOME \
+                -u XDG_STATE_HOME \
+                -u XDG_CACHE_HOME \
+                HOME="$caller_home" \
+                TMPDIR="$caller_tmp" \
+                nix run ".#framework::runtime-env-opt-in"
+              fallback_scope="$(read_report_value "NIXFIED_RUNTIME_DIR_SCOPE" "$fallback_report")"
+              expect_report_value "$fallback_report" "HOME" "$caller_home"
+              expect_report_value "$fallback_report" "TMPDIR" "$caller_tmp"
+              expect_report_value "$fallback_report" "XDG_DATA_HOME" "$fallback_scope/xdg/data"
+              expect_report_value "$fallback_report" "XDG_STATE_HOME" "$fallback_scope/xdg/state"
+              expect_report_value "$fallback_report" "XDG_CACHE_HOME" "$fallback_scope/xdg/cache"
+
+              run_report_command_expect_failure \
+                "$invalid_report" \
+                nix run ".#framework::runtime-env-invalid"
+              if ! grep -F "runtime-owned runtime env passthrough blocked name=REGISTRY_ROOT" "$invalid_report" >/dev/null; then
+                echo "ERROR: invalid runtime-env passthrough failure missing expected message"
+                cat "$invalid_report"
+                exit 1
+              fi
+
+              run_report_command_expect_failure \
+                "$blocked_report" \
+                nix run ".#framework::runtime-env-pass-through-blocked"
+              if ! grep -F "runtime-owned passthrough env blocked name=TMPDIR" "$blocked_report" >/dev/null; then
+                echo "ERROR: ordinary passThroughEnv failure missing expected message"
+                cat "$blocked_report"
                 exit 1
               fi
             '

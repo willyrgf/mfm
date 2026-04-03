@@ -68,6 +68,7 @@ let
           map builtins.toString raw.runtime.runtimeInputs ++ globalRuntimeInputs
         );
         passThroughEnv = raw.runtime.passThroughEnv;
+        passThroughRuntimeEnv = raw.runtime.passThroughRuntimeEnv;
         references = {
           taskIds = raw.runtime.references.taskIds or [ ];
           workflowIds = raw.runtime.references.workflowIds or [ ];
