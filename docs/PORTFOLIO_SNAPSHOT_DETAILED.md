@@ -966,7 +966,6 @@ same while moving the canonical-to-built handoff into the op layer.
   - `AppServices`
   - `start_run`
   - `start_portfolio_snapshot`
-  - `parse_portfolio_snapshot_request_input`
   - `FeatureCatalog`
 
 - [`crates/portfolio-config/src/lib.rs`](../crates/portfolio-config/src/lib.rs)
@@ -1350,8 +1349,6 @@ There are several genuinely strong design choices here:
 
 A few parts are worth calling out:
 
-- The direct CLI command returns a feature-shaped envelope but does not actually dispatch through
-  `FeatureCatalog`. It manually rebuilds the same shape.
 - The outer wrapper validates only a shallow `jq` shape, not the full output schema.
 - `final_snapshot_id` sounds like the portfolio snapshot artifact, but it is actually the final
   machine context snapshot id.
@@ -1371,10 +1368,10 @@ Clean boundaries:
 
 ### Where responsibilities are somewhat blurred
 
-The main blurred boundary is output shaping:
+The main blurred boundary is wrapper-level output validation:
 
-- `FeatureCatalog` exists as the app-level built-in feature dispatch layer
-- `portfolio snapshot` CLI does not use it directly
+- `FeatureCatalog` is the app-level built-in feature dispatch layer
+- `portfolio snapshot` CLI now dispatches through it directly
 - the shell wrapper knows enough about the inner CLI JSON structure to validate `feature_id`
 
 That is workable, but it creates more than one place where the same contract is represented.
@@ -1383,13 +1380,9 @@ That is workable, but it creates more than one place where the same contract is 
 
 If I were changing this area, my first refactors would be:
 
-1. Finish making `mfm_cli portfolio snapshot` dispatch through the same `FeatureCatalog` path used
-   by `portfolio.snapshot`.
-   Request parsing already goes through the shared app helper; the remaining duplicated boundary is
-   the CLI-owned `FeatureExecutionResult` envelope construction.
-2. Make the outer wrapper validate against a stronger schema-aware contract instead of only checking
+1. Make the outer wrapper validate against a stronger schema-aware contract instead of only checking
    three `jq` predicates.
-3. Consider naming the machine checkpoint id more explicitly in user-facing results, for example
+2. Consider naming the machine checkpoint id more explicitly in user-facing results, for example
    `final_context_snapshot_id`, to reduce confusion with `snapshot_artifact_id`.
 
 ## Mental model

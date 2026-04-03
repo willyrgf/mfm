@@ -25,7 +25,7 @@ It owns process/bootstrap and envelope validation and then:
 The public task remains the stdout envelope authority. It enforces:
 
 - exactly one positional request-file argument
-- a readable canonical portfolio snapshot request JSON file
+- a readable portfolio snapshot request file in authored JSON or TOML
 - defaults `HELIOS_NETWORK` to `mainnet` and rejects non-mainnet values
 - Postgres lifecycle orchestration with `SERVICE_*` policy envs
 - optional Helios lifecycle orchestration when hooks are available

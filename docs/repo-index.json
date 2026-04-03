@@ -74,8 +74,23 @@
       "kind": "rust-cargo"
     },
     {
+      "name": "aave-v3-origin-config",
+      "path": "crates/aave-v3-origin-config/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
       "name": "app",
       "path": "crates/app/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "authored-config",
+      "path": "crates/authored-config/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "btc-jsonrpc-http",
+      "path": "crates/collectors/btc-jsonrpc-http/Cargo.toml",
       "kind": "rust-cargo"
     },
     {
@@ -119,6 +134,11 @@
       "kind": "rust-cargo"
     },
     {
+      "name": "rpc-control",
+      "path": "crates/collectors/rpc-control/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
       "name": "core",
       "path": "crates/core/Cargo.toml",
       "kind": "rust-cargo"
@@ -131,6 +151,11 @@
     {
       "name": "evm-core",
       "path": "crates/evm-core/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "evm-deploy-configure-validate-config",
+      "path": "crates/evm-deploy-configure-validate-config/Cargo.toml",
       "kind": "rust-cargo"
     },
     {
@@ -156,6 +181,11 @@
     {
       "name": "aave-v3-origin-adapt-op",
       "path": "crates/ops/aave-v3-origin-adapt-op/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "aave-v3-origin-op",
+      "path": "crates/ops/aave-v3-origin-op/Cargo.toml",
       "kind": "rust-cargo"
     },
     {
@@ -196,6 +226,16 @@
     {
       "name": "proof-op",
       "path": "crates/ops/proof-op/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "portfolio-config",
+      "path": "crates/portfolio-config/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "publish-docs-config",
+      "path": "crates/publish-docs-config/Cargo.toml",
       "kind": "rust-cargo"
     },
     {
@@ -291,6 +331,11 @@
     {
       "name": "proof",
       "path": "crates/transports/proof/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "rpc-control",
+      "path": "crates/transports/rpc-control/Cargo.toml",
       "kind": "rust-cargo"
     },
     {

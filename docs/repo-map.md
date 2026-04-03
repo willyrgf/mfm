@@ -12,13 +12,15 @@ Generated from `docs/repo-index.json`.
 - `docs/architecture.md` - Project documentation.
 - `docs/ops-and-states.md` - Project documentation.
 - `docs/design.md` - Project documentation.
-- `docs/AAVE_ORIGIN_PROMOTION_PLAN.md` - Aave-origin wrapper promotion implementation notes and final migration shape.
 
 ## Components
 - `Cargo.toml` (rust-cargo)
 - `bin/cli/Cargo.toml` (rust-cargo)
 - `bin/rest-api/Cargo.toml` (rust-cargo)
+- `crates/aave-v3-origin-config/Cargo.toml` (rust-cargo)
 - `crates/app/Cargo.toml` (rust-cargo)
+- `crates/authored-config/Cargo.toml` (rust-cargo)
+- `crates/collectors/btc-jsonrpc-http/Cargo.toml` (rust-cargo)
 - `crates/collectors/evm-jsonrpc-http/Cargo.toml` (rust-cargo)
 - `crates/collectors/evm/Cargo.toml` (rust-cargo)
 - `crates/collectors/exec/Cargo.toml` (rust-cargo)
@@ -27,17 +29,17 @@ Generated from `docs/repo-index.json`.
 - `crates/collectors/nix-exec/Cargo.toml` (rust-cargo)
 - `crates/collectors/nix/Cargo.toml` (rust-cargo)
 - `crates/collectors/proof/Cargo.toml` (rust-cargo)
+- `crates/collectors/rpc-control/Cargo.toml` (rust-cargo)
 - `crates/core/Cargo.toml` (rust-cargo)
 - `crates/docs/Cargo.toml` (rust-cargo)
-- `crates/authored-config/Cargo.toml` (rust-cargo)
-- `crates/evm-deploy-configure-validate-config/Cargo.toml` (rust-cargo)
-- `crates/publish-docs-config/Cargo.toml` (rust-cargo)
 - `crates/evm-core/Cargo.toml` (rust-cargo)
+- `crates/evm-deploy-configure-validate-config/Cargo.toml` (rust-cargo)
 - `crates/evm-runtime/Cargo.toml` (rust-cargo)
 - `crates/machine-derive/Cargo.toml` (rust-cargo)
 - `crates/machine-test-support/Cargo.toml` (rust-cargo)
 - `crates/machine/Cargo.toml` (rust-cargo)
 - `crates/ops/aave-v3-origin-adapt-op/Cargo.toml` (rust-cargo)
+- `crates/ops/aave-v3-origin-op/Cargo.toml` (rust-cargo)
 - `crates/ops/evm-deploy-configure-validate-op/Cargo.toml` (rust-cargo)
 - `crates/ops/evm-read-op/Cargo.toml` (rust-cargo)
 - `crates/ops/evm-write-op/Cargo.toml` (rust-cargo)
@@ -46,6 +48,8 @@ Generated from `docs/repo-index.json`.
 - `crates/ops/nix-app-op/Cargo.toml` (rust-cargo)
 - `crates/ops/portfolio-tracker-op/Cargo.toml` (rust-cargo)
 - `crates/ops/proof-op/Cargo.toml` (rust-cargo)
+- `crates/portfolio-config/Cargo.toml` (rust-cargo)
+- `crates/publish-docs-config/Cargo.toml` (rust-cargo)
 - `crates/sdk/Cargo.toml` (rust-cargo)
 - `crates/states/aave-v3/Cargo.toml` (rust-cargo)
 - `crates/states/common/Cargo.toml` (rust-cargo)
@@ -65,6 +69,7 @@ Generated from `docs/repo-index.json`.
 - `crates/transports/local-fs/Cargo.toml` (rust-cargo)
 - `crates/transports/local-keystore/Cargo.toml` (rust-cargo)
 - `crates/transports/proof/Cargo.toml` (rust-cargo)
+- `crates/transports/rpc-control/Cargo.toml` (rust-cargo)
 - `flake.nix` (nix-flake)
 - `tests/integration/Cargo.toml` (rust-cargo)
 
@@ -82,7 +87,7 @@ Generated from `docs/repo-index.json`.
 - `stop-run -- <run-id>` from `nixfied/framework/runtime/dispatcher.nix`
 - `stop-all-runs` from `nixfied/framework/runtime/dispatcher.nix`
 - `features` from `nixfied/framework/runtime/dispatcher.nix`
-- `model`, `stateHash`, `tasks`, `services`, `task::<id>`, `schema` from `nixfied/framework/core/mkNixfied.nix`
+- `introspect`, `stateHash`, `schema` from `nixfied/framework/core/mkNixfied.nix`
 
 ## Sensitive Zones
 - `crates/core/src/keystore` - Security-sensitive key handling, tamper detection, and persisted keystore compatibility. (checks: nix run .#check, nix run .#test, nix run .#ci -- --audit --summary)
