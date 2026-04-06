@@ -908,15 +908,15 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
         filtered_args=()
 
         extract_logging_override_args "$@" || return $?
-        filtered_args=("''${LOGGING_FILTERED_ARGS[@]}")
-        extract_machine_output_args "''${filtered_args[@]}" || return $?
-        filtered_args=("''${MACHINE_FILTERED_ARGS[@]}")
+        filtered_args=("''${LOGGING_FILTERED_ARGS[@]+"''${LOGGING_FILTERED_ARGS[@]}"}")
+        extract_machine_output_args "''${filtered_args[@]+"''${filtered_args[@]}"}" || return $?
+        filtered_args=("''${MACHINE_FILTERED_ARGS[@]+"''${MACHINE_FILTERED_ARGS[@]}"}")
 
         if ! task_descriptor_exists "$task_id"; then
           echo "ERROR: unknown task '$task_id'"
           return "$NIXFIED_EXIT_USAGE"
         fi
-        if task_help_requested "''${filtered_args[@]}"; then
+        if task_help_requested "''${filtered_args[@]+"''${filtered_args[@]}"}"; then
           if ! task_print_help "$task_id"; then
             echo "ERROR: unknown task '$task_id'"
             return "$NIXFIED_EXIT_USAGE"
@@ -936,7 +936,7 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
           RUN_SUFFIX_REASON="''${NIXFIED_ORCHESTRATOR_RUN_SUFFIX_REASON:-orchestrator}"
           managed_by_orchestrator=1
         else
-          run_id="$(compute_run_id "task" "" "$task_id" "''${filtered_args[@]}")"
+          run_id="$(compute_run_id "task" "" "$task_id" "''${filtered_args[@]+"''${filtered_args[@]}"}")"
           attempt_id="$(compute_attempt_id)"
           activate_run "$run_id"
           trap "deactivate_run '$run_id'" EXIT
@@ -1052,7 +1052,7 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
         }
 
         set +e
-        run_task_with_deps "$task_id" "''${filtered_args[@]}"
+        run_task_with_deps "$task_id" "''${filtered_args[@]+"''${filtered_args[@]}"}"
         status="$?"
         set -e
 
@@ -1258,7 +1258,7 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
 
           unit_selected_services_csv="$(workflow_unit_selected_services_csv "$unit_json")"
           if [ "''${#passthrough_args[@]}" -gt 0 ]; then
-            if NIXFIED_SELECTED_SERVICES_CSV_OVERRIDE="$unit_selected_services_csv" execute_task "$run_id" "$workflow_id" "$unit_task" "''${passthrough_args[@]}"; then
+            if NIXFIED_SELECTED_SERVICES_CSV_OVERRIDE="$unit_selected_services_csv" execute_task "$run_id" "$workflow_id" "$unit_task" "''${passthrough_args[@]+"''${passthrough_args[@]}"}"; then
               status=0
             else
               status="$?"
@@ -1362,7 +1362,7 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
         cancel_pending_units() {
           local reason="$1"
           local unit_name
-          for unit_name in "''${unit_names[@]}"; do
+          for unit_name in "''${unit_names[@]+"''${unit_names[@]}"}"; do
             mark_unit_canceled "$unit_name" "$reason"
           done
         }
@@ -1400,7 +1400,7 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
 
         next_ready_unit() {
           local unit_name
-          for unit_name in "''${unit_names[@]}"; do
+          for unit_name in "''${unit_names[@]+"''${unit_names[@]}"}"; do
             if [ "''${UNIT_STATE[$unit_name]:-pending}" != "ready" ]; then
               continue
             fi
@@ -1428,7 +1428,7 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
 
           if [ "''${#passthrough_args[@]}" -gt 0 ]; then
             (
-              NIXFIED_TASK_ID="$unit_task" NIXFIED_PARENT_WORKFLOW_ID="$workflow_id" NIXFIED_SELECTED_SERVICES_CSV="$unit_selected_services_csv" execute_task_body "$unit_task" "''${passthrough_args[@]}"
+              NIXFIED_TASK_ID="$unit_task" NIXFIED_PARENT_WORKFLOW_ID="$workflow_id" NIXFIED_SELECTED_SERVICES_CSV="$unit_selected_services_csv" execute_task_body "$unit_task" "''${passthrough_args[@]+"''${passthrough_args[@]}"}"
             ) &
           else
             (
@@ -1449,7 +1449,7 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
           local pid
           local unit_name
 
-          for pid in "''${!PID_UNIT[@]}"; do
+          for pid in "''${!PID_UNIT[@]+"''${!PID_UNIT[@]}"}"; do
             unit_name="''${PID_UNIT[$pid]:-}"
             if [ -z "$unit_name" ]; then
               continue
@@ -1459,7 +1459,7 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
           done
 
           sleep "$NIXFIED_RETRY_INTERVAL_DEFAULT"
-          for pid in "''${!PID_UNIT[@]}"; do
+          for pid in "''${!PID_UNIT[@]+"''${!PID_UNIT[@]}"}"; do
             if kill -0 "$pid" 2>/dev/null; then
               kill -KILL "$pid" 2>/dev/null || true
             fi
@@ -1502,7 +1502,7 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
         fi
 
         local unit_name
-        for unit_name in "''${unit_names[@]}"; do
+        for unit_name in "''${unit_names[@]+"''${unit_names[@]}"}"; do
           while IFS= read -r dependency; do
             if [ -n "$dependency" ]; then
               UNIT_DEPENDENTS[$dependency]="''${UNIT_DEPENDENTS[$dependency]:-} $unit_name"
@@ -1510,7 +1510,7 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
           done < <(workflow_unit_dependencies "''${UNIT_JSON[$unit_name]}")
         done
 
-        for unit_name in "''${unit_names[@]}"; do
+        for unit_name in "''${unit_names[@]+"''${unit_names[@]}"}"; do
           local unit_json
           local unit_task
           local missing=""
@@ -1671,7 +1671,7 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
 
           if [ "$phase_task" = "task.ops.ready" ] || [ "$phase_task" = "task.ops.health" ]; then
             if [ "''${#passthrough_args[@]}" -gt 0 ]; then
-              if NIXFIED_SELECTED_SERVICES_CSV_OVERRIDE="$phase_task_selected_services_csv" execute_task "$run_id" "$workflow_id" "$phase_task" "''${passthrough_args[@]}"; then
+              if NIXFIED_SELECTED_SERVICES_CSV_OVERRIDE="$phase_task_selected_services_csv" execute_task "$run_id" "$workflow_id" "$phase_task" "''${passthrough_args[@]+"''${passthrough_args[@]}"}"; then
                 phase_status=0
               else
                 phase_status="$?"
@@ -1683,7 +1683,7 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
               phase_status="$?"
               break
             fi
-          elif [ "''${#passthrough_args[@]}" -gt 0 ] && execute_task "$run_id" "$workflow_id" "$phase_task" "''${passthrough_args[@]}"; then
+          elif [ "''${#passthrough_args[@]}" -gt 0 ] && execute_task "$run_id" "$workflow_id" "$phase_task" "''${passthrough_args[@]+"''${passthrough_args[@]}"}"; then
             phase_status=0
           elif execute_task "$run_id" "$workflow_id" "$phase_task"; then
             phase_status=0
@@ -1754,12 +1754,12 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
 
         if [ "$phase_key" = "preRun" ]; then
           if run_workflow_phase_service_sets "$run_id" "$workflow_id" "$phase_key"; then
-            run_workflow_phase_tasks "$run_id" "$workflow_id" "$phase_key" "''${passthrough_args[@]}"
+            run_workflow_phase_tasks "$run_id" "$workflow_id" "$phase_key" "''${passthrough_args[@]+"''${passthrough_args[@]}"}"
           else
             return "$?"
           fi
         else
-          if run_workflow_phase_tasks "$run_id" "$workflow_id" "$phase_key" "''${passthrough_args[@]}"; then
+          if run_workflow_phase_tasks "$run_id" "$workflow_id" "$phase_key" "''${passthrough_args[@]+"''${passthrough_args[@]}"}"; then
             run_workflow_phase_service_sets "$run_id" "$workflow_id" "$phase_key"
           else
             return "$?"
@@ -2567,10 +2567,10 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
         local shorthand_mode
 
         extract_logging_override_args "$@" || return $?
-        input_args=("''${LOGGING_FILTERED_ARGS[@]}")
-        extract_machine_output_args "''${input_args[@]}" || return $?
-        input_args=("''${MACHINE_FILTERED_ARGS[@]}")
-        set -- "''${input_args[@]}"
+        input_args=("''${LOGGING_FILTERED_ARGS[@]+"''${LOGGING_FILTERED_ARGS[@]}"}")
+        extract_machine_output_args "''${input_args[@]+"''${input_args[@]}"}" || return $?
+        input_args=("''${MACHINE_FILTERED_ARGS[@]+"''${MACHINE_FILTERED_ARGS[@]}"}")
+        set -- "''${input_args[@]+"''${input_args[@]}"}"
 
         while [ "$#" -gt 0 ]; do
           arg="$1"
@@ -2657,7 +2657,7 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
           RUN_SUFFIX_REASON="''${NIXFIED_ORCHESTRATOR_RUN_SUFFIX_REASON:-orchestrator}"
           managed_by_orchestrator=1
         else
-          run_id="$(compute_run_id "workflow" "$workflow_id" "" "''${passthrough_args[@]}")"
+          run_id="$(compute_run_id "workflow" "$workflow_id" "" "''${passthrough_args[@]+"''${passthrough_args[@]}"}")"
           attempt_id="$(compute_attempt_id)"
           activate_run "$run_id"
           trap "deactivate_run '$run_id'" EXIT
@@ -2687,7 +2687,7 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
           fi
         fi
 
-        if run_workflow_phase "$run_id" "$workflow_id" "preRun" "''${passthrough_args[@]}"; then
+        if run_workflow_phase "$run_id" "$workflow_id" "preRun" "''${passthrough_args[@]+"''${passthrough_args[@]}"}"; then
           status=0
         else
           status="$?"
@@ -2695,13 +2695,13 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
 
         if [ "$status" -eq 0 ]; then
           if [ "$run_parallel" = "1" ]; then
-            if run_workflow_parallel_impl "$run_id" "$workflow_id" "$fail_fast" "''${passthrough_args[@]}"; then
+            if run_workflow_parallel_impl "$run_id" "$workflow_id" "$fail_fast" "''${passthrough_args[@]+"''${passthrough_args[@]}"}"; then
               status=0
             else
               status="$?"
             fi
           else
-            if run_workflow_serial_impl "$run_id" "$workflow_id" "$fail_fast" "''${passthrough_args[@]}"; then
+            if run_workflow_serial_impl "$run_id" "$workflow_id" "$fail_fast" "''${passthrough_args[@]+"''${passthrough_args[@]}"}"; then
               status=0
             else
               status="$?"
@@ -2711,7 +2711,7 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
 
         post_always="$(workflow_post_run_always "$workflow_id")"
         if [ "$post_always" = "true" ] || [ "$status" -eq 0 ]; then
-          if run_workflow_phase "$run_id" "$workflow_id" "postRun" "''${passthrough_args[@]}"; then
+          if run_workflow_phase "$run_id" "$workflow_id" "postRun" "''${passthrough_args[@]+"''${passthrough_args[@]}"}"; then
             post_status=0
           else
             post_status="$?"

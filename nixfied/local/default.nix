@@ -1,6 +1,7 @@
 { pkgs, ... }:
 let
   aaveTools = import ../project/aave-origin-tools.nix { inherit pkgs; };
+  conf = import ../project/conf.nix { inherit pkgs; };
   runtimeOwnedDirEnv = [
     "HOME"
     "TMPDIR"
@@ -19,6 +20,7 @@ let
       effects ? [ "none" ],
       passThroughEnv ? [ ],
       passThroughRuntimeEnv ? [ ],
+      runtimeInputsExtra ? [ ],
       allowSensitivePassThrough ? false,
     }:
     {
@@ -73,7 +75,7 @@ let
         slotEnv = "disabled";
         workdir = "projectRoot";
         hermetic = true;
-        runtimeInputs = [ package ];
+        runtimeInputs = [ package ] ++ runtimeInputsExtra;
         inherit passThroughEnv passThroughRuntimeEnv allowSensitivePassThrough;
         env = { };
         umask = "022";
@@ -135,10 +137,15 @@ in
 
       aave-v3-origin-compile = mkBinaryTask {
         id = "task.aave.origin.compile";
-        package = aaveTools.aaveV3OriginCompileTool;
+        package = conf.packages."mfm-aave-origin-compile";
         binary = "mfm-aave-v3-origin-compile";
         summary = "Compile Aave V3 origin metadata";
-        description = "Compiles fetched Aave V3 origin inputs into MFM-ready outputs.";
+        description = "Compiles fetched Aave V3 origin inputs into a generic EVM contract-set manifest.";
+        runtimeInputsExtra = [
+          pkgs.coreutils
+          pkgs.foundry
+          pkgs.solc
+        ];
         passThroughEnv = [
           "MFM_AAVE_V3_ORIGIN_EXPECTED_REPO_URL"
           "MFM_AAVE_V3_ORIGIN_EXPECTED_COMMIT_SHA"
@@ -150,25 +157,23 @@ in
         id = "task.aave.origin.deploy";
         package = aaveTools.aaveV3OriginDeployTool;
         binary = "mfm-aave-v3-origin-deploy";
-        summary = "Deploy Aave V3 origin outputs";
-        description = "Publishes compiled Aave V3 origin outputs to the configured destination.";
-        effects = [
-          "writes-state"
-          "network"
+        summary = "Deploy an Aave V3 origin parity market";
+        description = "Deploys the pinned Aave V3 origin parity market and emits a generic deployed contract-set manifest.";
+        runtimeInputsExtra = [
+          pkgs.coreutils
+          pkgs.foundry
+          pkgs.solc
         ];
         passThroughEnv = [
-          "MFM_AAVE_V3_ORIGIN_EXPECTED_REPO_URL"
-          "MFM_AAVE_V3_ORIGIN_EXPECTED_COMMIT_SHA"
-          "MFM_AAVE_V3_ORIGIN_DEPLOY_SIGNING_KEY_ENV"
-          "MFM_AAVE_V3_ORIGIN_RPC_URL_ENV"
-          "MFM_AAVE_V3_ORIGIN_DEPLOY_SIGNER_VALUE"
-          "MFM_AAVE_V3_ORIGIN_RPC_URL"
+          "MFM_AAVE_V3_PARITY_DEPLOY_SIGNING_KEY"
           "MFM_AAVE_V3_ORIGIN_SUPPLIER"
           "MFM_AAVE_V3_ORIGIN_BORROWER"
           "MFM_AAVE_V3_ORIGIN_USDC_SUPPLY_AMOUNT"
           "MFM_AAVE_V3_ORIGIN_WBTC_COLLATERAL_AMOUNT"
+          "MFM_EVM_RPC_URL"
         ];
         passThroughRuntimeEnv = runtimeOwnedDirEnv;
+        allowSensitivePassThrough = true;
       };
     };
 

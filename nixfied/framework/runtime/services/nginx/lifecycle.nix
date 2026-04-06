@@ -127,6 +127,10 @@ let
       loggingPrelude
       runtimePrelude
       ;
+    preflightPorts = [
+      "$HTTP_PORT"
+      "$HTTPS_PORT"
+    ];
     initBody = ''
       mkdir -p "$SERVICE_DIR/conf/sites-available"
       mkdir -p "$SERVICE_DIR/conf/sites-enabled"

@@ -136,6 +136,7 @@ let
       loggingPrelude
       runtimePrelude
       ;
+    preflightPorts = [ "$HELIOS_RPC_PORT" ];
     initBody = ''
       mkdir -p "$SERVICE_DIR/data"
       mkdir -p "$SERVICE_DIR/config"

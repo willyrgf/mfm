@@ -44,7 +44,7 @@ The live runtime inventory still lives in the repository docs:
 | Package | Role | docs.rs | Workspace Path |
 | --- | --- | --- | --- |
 | `mfm-evm-runtime` | Shared EVM read and write runtime states. | pending | `crates/evm-runtime` |
-| `mfm-state-aave-v3` | Shared Aave V3 deploy and configure states. | pending | `crates/states/aave-v3` |
+| `mfm-state-aave-v3` | Shared Aave V3 portfolio-position types and runtime adapters. | pending | `crates/states/aave-v3` |
 | `mfm-state-common` | Cross-domain reusable execution states. | pending | `crates/states/common` |
 | `mfm-state-keystore` | Shared keystore administration and local signing states. | pending | `crates/states/keystore` |
 
@@ -54,7 +54,6 @@ Ops stay thin and focus on graph composition and config validation. Most are sti
 
 | Package | Role | Workspace Path |
 | --- | --- | --- |
-| `mfm-op-aave-v3-origin-adapt` | Aave origin adaptation planner. | `crates/ops/aave-v3-origin-adapt-op` |
 | `mfm-op-evm-deploy-configure-validate` | EVM deploy/configure/validate planner. | `crates/ops/evm-deploy-configure-validate-op` |
 | `mfm-op-evm-read` | EVM read planner. | `crates/ops/evm-read-op` |
 | `mfm-op-evm-write` | EVM write planner. | `crates/ops/evm-write-op` |

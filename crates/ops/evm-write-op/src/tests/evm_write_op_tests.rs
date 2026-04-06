@@ -204,6 +204,29 @@ fn contract_from_nix_io_imports_result_and_exports_artifact() {
 }
 
 #[test]
+fn deploy_contract_set_io_imports_contract_set_and_exports_manifest() {
+    let op = EvmDeployContractSetOp;
+    let io = planned_interface(
+        op.expand(
+            OpPath("m.main".to_string()),
+            &serde_json::json!({
+                "contract_set_port": "compile_origin_result",
+                "network_id": "ethereum-mainnet",
+                "signing_key_env": "MFM_DEPLOYER_KEY"
+            }),
+            &op_test_support::run_config_live(),
+        )
+        .expect("expand"),
+    );
+
+    assert!(io
+        .imports
+        .iter()
+        .any(|k| k.0.as_str() == "compile_origin_result"));
+    assert!(io.exports.iter().any(|k| k.0.as_str() == "deploy_manifest"));
+}
+
+#[test]
 fn validate_expand_builds_read_and_event_assertions() {
     let op = EvmValidateOp;
     let plan = into_leaf(

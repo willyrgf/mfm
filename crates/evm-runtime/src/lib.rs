@@ -13,6 +13,8 @@
 //!
 //! let _tag = BlockTag::Tag("latest".to_string());
 //! ```
+/// Generic compiled/deployed contract-set manifests.
+pub mod contract_set;
 /// Shared deploy/configure/validate helpers and manifest adapters.
 pub mod dcv;
 /// JSON-RPC helpers used by reusable EVM states.

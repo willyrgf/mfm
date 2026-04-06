@@ -235,7 +235,7 @@ pkgs.writeShellScriptBin "nixfied-orchestrator" ''
       esac
     done
 
-    printf '%s\n' "''${filtered_args[@]}"
+    printf '%s\n' "''${filtered_args[@]+"''${filtered_args[@]}"}"
   }
 
   run_id_pass_through_env_json() {
@@ -966,17 +966,18 @@ pkgs.writeShellScriptBin "nixfied-orchestrator" ''
     local signal_file
     local janitor_pid
     local interrupted_signal=""
+    local stdin_dup_fd=""
 
     cmd=("$@")
 
     if [ "$process_mode" = "bg" ]; then
       log_file="$RUN_LOG_DIR/$run_id.log"
       if [ -n "$SETSID_BIN" ] && [ -x "$SETSID_BIN" ]; then
-        "$SETSID_BIN" "''${cmd[@]}" >> "$log_file" 2>&1 < /dev/null &
+        "$SETSID_BIN" "''${cmd[@]+"''${cmd[@]}"}" >> "$log_file" 2>&1 < /dev/null &
       elif command -v setsid >/dev/null 2>&1; then
-        setsid "''${cmd[@]}" >> "$log_file" 2>&1 < /dev/null &
+        setsid "''${cmd[@]+"''${cmd[@]}"}" >> "$log_file" 2>&1 < /dev/null &
       else
-        "''${cmd[@]}" >> "$log_file" 2>&1 < /dev/null &
+        "''${cmd[@]+"''${cmd[@]}"}" >> "$log_file" 2>&1 < /dev/null &
       fi
       pid="$!"
       pgid="$(pgid_of_pid "$pid")"
@@ -985,15 +986,29 @@ pkgs.writeShellScriptBin "nixfied-orchestrator" ''
       return 0
     fi
 
+    # Bash redirects stdin for asynchronous commands in non-interactive shells.
+    # Duplicate fd 0 first so foreground task launches can still consume caller stdin.
+    if [ ! -t 0 ]; then
+      exec {stdin_dup_fd}<&0
+    fi
+
     trap 'handle_foreground_signal INT' INT
     trap 'handle_foreground_signal TERM' TERM
 
-    if [ -n "$SETSID_BIN" ] && [ -x "$SETSID_BIN" ]; then
-      "$SETSID_BIN" "''${cmd[@]}" &
+    if [ -n "$stdin_dup_fd" ]; then
+      if [ -n "$SETSID_BIN" ] && [ -x "$SETSID_BIN" ]; then
+        "$SETSID_BIN" "''${cmd[@]+"''${cmd[@]}"}" <&$stdin_dup_fd &
+      elif command -v setsid >/dev/null 2>&1; then
+        setsid "''${cmd[@]+"''${cmd[@]}"}" <&$stdin_dup_fd &
+      else
+        "''${cmd[@]+"''${cmd[@]}"}" <&$stdin_dup_fd &
+      fi
+    elif [ -n "$SETSID_BIN" ] && [ -x "$SETSID_BIN" ]; then
+      "$SETSID_BIN" "''${cmd[@]+"''${cmd[@]}"}" &
     elif command -v setsid >/dev/null 2>&1; then
-      setsid "''${cmd[@]}" &
+      setsid "''${cmd[@]+"''${cmd[@]}"}" &
     else
-      "''${cmd[@]}" &
+      "''${cmd[@]+"''${cmd[@]}"}" &
     fi
 
     pid="$!"
@@ -1026,6 +1041,9 @@ pkgs.writeShellScriptBin "nixfied-orchestrator" ''
     rm -f "$control_file" "$signal_file"
     wait "$janitor_pid" 2>/dev/null || true
     rmdir "$janitor_dir" 2>/dev/null || true
+    if [ -n "$stdin_dup_fd" ]; then
+      exec {stdin_dup_fd}<&-
+    fi
     clear_foreground_run_context
 
     run_file="$(run_file_for "$run_id")"

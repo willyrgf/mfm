@@ -289,11 +289,7 @@ Current built-in public root ops for `run start` are:
 - `portfolio_config_build`
 - `portfolio_execute`
 - `portfolio_tracker`
-- `aave_v3_origin_stack_config_build`
-- `aave_v3_origin_stack_execute`
-- `aave_v3_origin_stack`
 - `nix_app`
-- `aave_v3_origin_adapt_deploy`
 
 ### `run pipeline start`
 

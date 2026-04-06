@@ -5,12 +5,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::body::Body;
-use axum::http::{Request, StatusCode};
-use mfm_aave_v3_origin_config::{
-    AaveV3OriginSourceConfig, AaveV3OriginStackCanonicalConfig, AAVE_V3_ORIGIN_BACKEND_COMMIT_SHA,
-    AAVE_V3_ORIGIN_BACKEND_REPO_URL,
-};
 use mfm_artifact_store_s3::S3ArtifactStore;
 use mfm_integration_tests::parity_run_ids::write_parity_aave_run_ids;
 use mfm_integration_tests::rpc_control;
@@ -32,7 +26,6 @@ use mfm_sdk::unstable::DefaultRunLauncher;
 use mfm_stream_store_postgres::PostgresStreamStore;
 use mfm_transports_rpc_control::RpcControlBootstrapSource;
 use serde::{Deserialize, Serialize};
-use tower::ServiceExt;
 
 const RETH_DEV_ACCOUNT0_PRIVATE_KEY: &str =
     "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
@@ -42,7 +35,12 @@ const RETH_DEV_ACCOUNT2_PRIVATE_KEY: &str =
     "0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a";
 
 const SCENARIO_REPORT_KIND: &str = "aave_v3_reth_scenario_report_v1";
-const DEPLOY_MANIFEST_KIND: &str = "aave_v3_deploy_manifest_v1";
+const FETCH_RESULT_KIND: &str = "aave_v3_origin_source_v1";
+const COMPILE_MANIFEST_KIND: &str = "evm_contract_set_compile_manifest_v1";
+const DEPLOY_MANIFEST_KIND: &str = "evm_contract_set_deploy_manifest_v1";
+const FETCH_APP_REF: &str = "path:.#aave-v3-origin-fetch";
+const COMPILE_APP_REF: &str = "path:.#aave-v3-origin-compile";
+const DEPLOY_APP_REF: &str = "path:.#aave-v3-origin-deploy";
 
 const CONTRACT_USDC: &str = "usdc";
 const CONTRACT_WBTC: &str = "wbtc";
@@ -231,370 +229,6 @@ fn snapshot_value<'a>(snapshot: &'a serde_json::Value, key: &str) -> Option<&'a 
                 .get(&candidate)
                 .or_else(|| nested_snapshot_value(snapshot, &candidate))
         })
-}
-
-fn json_post(uri: &str, body: serde_json::Value) -> Request<Body> {
-    let s = serde_json::to_string(&body).expect("json request must serialize");
-    Request::builder()
-        .method("POST")
-        .uri(uri)
-        .header("content-type", "application/json")
-        .body(Body::from(s))
-        .expect("request")
-}
-
-async fn response_json(resp: axum::response::Response) -> serde_json::Value {
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
-        .await
-        .expect("body bytes");
-    serde_json::from_slice(&bytes).expect("json response")
-}
-
-fn aave_portfolio_snapshot_payload(
-    chain_id: u64,
-    deploy_manifest: &AaveDeployManifest,
-    actors: &ScenarioActors,
-    control_scope: &str,
-) -> serde_json::Value {
-    let pool = contract_from_manifest(deploy_manifest, CONTRACT_POOL);
-    let usdc = contract_from_manifest(deploy_manifest, CONTRACT_USDC);
-    let wbtc = contract_from_manifest(deploy_manifest, CONTRACT_WBTC);
-    let usdc_a_token = contract_from_manifest(deploy_manifest, CONTRACT_USDC_A_TOKEN);
-    let wbtc_a_token = contract_from_manifest(deploy_manifest, CONTRACT_WBTC_A_TOKEN);
-    let usdc_variable_debt =
-        contract_from_manifest(deploy_manifest, CONTRACT_USDC_VARIABLE_DEBT_TOKEN);
-    let supplier_address = normalize_address_lower(&actors.supplier);
-    let borrower_address = normalize_address_lower(&actors.borrower);
-    let pool_address = normalize_address_lower(&pool.address);
-    let usdc_address = normalize_address_lower(&usdc.address);
-    let wbtc_address = normalize_address_lower(&wbtc.address);
-    let usdc_a_token_address = normalize_address_lower(&usdc_a_token.address);
-    let wbtc_a_token_address = normalize_address_lower(&wbtc_a_token.address);
-    let usdc_variable_debt_address = normalize_address_lower(&usdc_variable_debt.address);
-
-    serde_json::json!({
-        "portfolio": {
-            "portfolio_id": "aave-v3-reth-portfolio",
-            "quote_codes": ["USD"],
-            "networks": [
-                {
-                    "network_id": "reth-local",
-                    "chain_id": chain_id,
-                    "control_scope": control_scope,
-                    "metadata": {}
-                }
-            ],
-            "wallets": [
-                {
-                    "wallet_id": "wallet_supplier",
-                    "address": supplier_address,
-                    "network_id": "reth-local",
-                    "implementation": { "kind": "address_only" },
-                    "symbol_ids": ["aave_v3.usdc.asset.reth-local"],
-                    "metadata": {}
-                },
-                {
-                    "wallet_id": "wallet_borrower",
-                    "address": borrower_address,
-                    "network_id": "reth-local",
-                    "implementation": { "kind": "address_only" },
-                    "symbol_ids": [
-                        "aave_v3.wbtc.collateral.reth-local",
-                        "aave_v3.usdc.debt.reth-local"
-                    ],
-                    "metadata": {}
-                }
-            ],
-            "symbol_configs": [
-                {
-                    "symbol_id": "usdc.wallet.reth-local",
-                    "display_symbol": "USDC",
-                    "kind": "erc20_balance",
-                    "role": "asset",
-                    "network_id": "reth-local",
-                    "protocol": null,
-                    "balance_reader": {
-                        "kind": "erc20_balance",
-                        "token_address": usdc_address
-                    },
-                    "valuation": {
-                        "quotes": [{
-                            "quote": "USD",
-                            "priced_symbol_id": "usdc.wallet.reth-local",
-                            "reader": {
-                                "kind": "fixed_unit_price",
-                                "unit_price_dec": "1.00"
-                            }
-                        }]
-                    },
-                    "decimals": 6,
-                    "underlying_symbol_id": null,
-                    "metadata": {}
-                },
-                {
-                    "symbol_id": "wbtc.wallet.reth-local",
-                    "display_symbol": "WBTC",
-                    "kind": "erc20_balance",
-                    "role": "asset",
-                    "network_id": "reth-local",
-                    "protocol": null,
-                    "balance_reader": {
-                        "kind": "erc20_balance",
-                        "token_address": wbtc_address
-                    },
-                    "valuation": {
-                        "quotes": [{
-                            "quote": "USD",
-                            "priced_symbol_id": "wbtc.wallet.reth-local",
-                            "reader": {
-                                "kind": "fixed_unit_price",
-                                "unit_price_dec": "70000.00"
-                            }
-                        }]
-                    },
-                    "decimals": 8,
-                    "underlying_symbol_id": null,
-                    "metadata": {}
-                },
-                {
-                    "symbol_id": "aave_v3.usdc.asset.reth-local",
-                    "display_symbol": "USDC",
-                    "kind": "protocol_position",
-                    "role": "asset",
-                    "network_id": "reth-local",
-                    "protocol": "aave_v3",
-                    "balance_reader": {
-                        "kind": "protocol_position",
-                        "protocol": "aave_v3",
-                        "reader": "reserve_position",
-                        "config": {
-                            "market": {
-                                "market_id": "aave-v3-reth",
-                                "network_id": "reth-local",
-                                "chain_id": chain_id,
-                                "pool_address": pool_address,
-                                "reserves": [
-                                    {
-                                        "reserve_id": "usdc",
-                                        "reserve_index": 0,
-                                        "underlying_token_address": usdc_address,
-                                        "a_token_address": usdc_a_token_address,
-                                        "variable_debt_token_address": usdc_variable_debt_address,
-                                        "stable_debt_token_address": null,
-                                        "metadata": {}
-                                    },
-                                    {
-                                        "reserve_id": "wbtc",
-                                        "reserve_index": 1,
-                                        "underlying_token_address": wbtc_address,
-                                        "a_token_address": wbtc_a_token_address,
-                                        "variable_debt_token_address": null,
-                                        "stable_debt_token_address": null,
-                                        "metadata": {}
-                                    }
-                                ],
-                                "metadata": {}
-                            },
-                            "reserve_id": "usdc"
-                        }
-                    },
-                    "valuation": {
-                        "quotes": [{
-                            "quote": "USD",
-                            "priced_symbol_id": "usdc.wallet.reth-local",
-                            "reader": {
-                                "kind": "fixed_unit_price",
-                                "unit_price_dec": "1.00"
-                            }
-                        }]
-                    },
-                    "decimals": null,
-                    "underlying_symbol_id": "usdc.wallet.reth-local",
-                    "metadata": {}
-                },
-                {
-                    "symbol_id": "aave_v3.wbtc.collateral.reth-local",
-                    "display_symbol": "WBTC",
-                    "kind": "protocol_position",
-                    "role": "collateral",
-                    "network_id": "reth-local",
-                    "protocol": "aave_v3",
-                    "balance_reader": {
-                        "kind": "protocol_position",
-                        "protocol": "aave_v3",
-                        "reader": "reserve_position",
-                        "config": {
-                            "market": {
-                                "market_id": "aave-v3-reth",
-                                "network_id": "reth-local",
-                                "chain_id": chain_id,
-                                "pool_address": pool_address,
-                                "reserves": [
-                                    {
-                                        "reserve_id": "usdc",
-                                        "reserve_index": 0,
-                                        "underlying_token_address": usdc_address,
-                                        "a_token_address": usdc_a_token_address,
-                                        "variable_debt_token_address": usdc_variable_debt_address,
-                                        "stable_debt_token_address": null,
-                                        "metadata": {}
-                                    },
-                                    {
-                                        "reserve_id": "wbtc",
-                                        "reserve_index": 1,
-                                        "underlying_token_address": wbtc_address,
-                                        "a_token_address": wbtc_a_token_address,
-                                        "variable_debt_token_address": null,
-                                        "stable_debt_token_address": null,
-                                        "metadata": {}
-                                    }
-                                ],
-                                "metadata": {}
-                            },
-                            "reserve_id": "wbtc"
-                        }
-                    },
-                    "valuation": {
-                        "quotes": [{
-                            "quote": "USD",
-                            "priced_symbol_id": "wbtc.wallet.reth-local",
-                            "reader": {
-                                "kind": "fixed_unit_price",
-                                "unit_price_dec": "70000.00"
-                            }
-                        }]
-                    },
-                    "decimals": null,
-                    "underlying_symbol_id": "wbtc.wallet.reth-local",
-                    "metadata": {}
-                },
-                {
-                    "symbol_id": "aave_v3.usdc.debt.reth-local",
-                    "display_symbol": "USDC",
-                    "kind": "protocol_position",
-                    "role": "debt",
-                    "network_id": "reth-local",
-                    "protocol": "aave_v3",
-                    "balance_reader": {
-                        "kind": "protocol_position",
-                        "protocol": "aave_v3",
-                        "reader": "debt_position",
-                        "config": {
-                            "market": {
-                                "market_id": "aave-v3-reth",
-                                "network_id": "reth-local",
-                                "chain_id": chain_id,
-                                "pool_address": pool_address,
-                                "reserves": [
-                                    {
-                                        "reserve_id": "usdc",
-                                        "reserve_index": 0,
-                                        "underlying_token_address": usdc_address,
-                                        "a_token_address": usdc_a_token_address,
-                                        "variable_debt_token_address": usdc_variable_debt_address,
-                                        "stable_debt_token_address": null,
-                                        "metadata": {}
-                                    },
-                                    {
-                                        "reserve_id": "wbtc",
-                                        "reserve_index": 1,
-                                        "underlying_token_address": wbtc_address,
-                                        "a_token_address": wbtc_a_token_address,
-                                        "variable_debt_token_address": null,
-                                        "stable_debt_token_address": null,
-                                        "metadata": {}
-                                    }
-                                ],
-                                "metadata": {}
-                            },
-                            "reserve_id": "usdc",
-                            "debt_kind": "variable"
-                        }
-                    },
-                    "valuation": {
-                        "quotes": [{
-                            "quote": "USD",
-                            "priced_symbol_id": "usdc.wallet.reth-local",
-                            "reader": {
-                                "kind": "fixed_unit_price",
-                                "unit_price_dec": "1.00"
-                            }
-                        }]
-                    },
-                    "decimals": null,
-                    "underlying_symbol_id": "usdc.wallet.reth-local",
-                    "metadata": {}
-                }
-            ],
-            "metadata": {}
-        },
-        "valuation_source_registry": {
-            "sources": []
-        }
-    })
-}
-
-fn normalize_address_lower(s: &str) -> String {
-    let s = s.trim();
-    let rest = s
-        .strip_prefix("0x")
-        .or_else(|| s.strip_prefix("0X"))
-        .expect("0x");
-    assert_eq!(rest.len(), 40, "address must be 20 bytes hex");
-    assert!(
-        rest.chars().all(|c| c.is_ascii_hexdigit()),
-        "address must be hex"
-    );
-    format!("0x{}", rest.to_ascii_lowercase())
-}
-
-fn find_wallet<'a>(snapshot: &'a serde_json::Value, wallet_id: &str) -> &'a serde_json::Value {
-    snapshot["wallets"]
-        .as_array()
-        .expect("wallets array")
-        .iter()
-        .find(|wallet| wallet["wallet_id"] == wallet_id)
-        .unwrap_or_else(|| panic!("wallet not found: {wallet_id}"))
-}
-
-fn find_wallet_summary<'a>(
-    report: &'a serde_json::Value,
-    wallet_id: &str,
-) -> &'a serde_json::Value {
-    report["wallet_summaries"]
-        .as_array()
-        .expect("wallet_summaries array")
-        .iter()
-        .find(|wallet| wallet["wallet_id"] == wallet_id)
-        .unwrap_or_else(|| panic!("wallet summary not found: {wallet_id}"))
-}
-
-fn find_observation<'a>(wallet: &'a serde_json::Value, symbol_id: &str) -> &'a serde_json::Value {
-    wallet["observations"]
-        .as_array()
-        .expect("observations array")
-        .iter()
-        .find(|observation| observation["symbol_id"] == symbol_id)
-        .unwrap_or_else(|| panic!("observation not found: {symbol_id}"))
-}
-
-fn find_quote_total<'a>(totals: &'a serde_json::Value, quote: &str) -> &'a serde_json::Value {
-    totals
-        .as_array()
-        .expect("quote totals array")
-        .iter()
-        .find(|total| total["quote"] == quote)
-        .unwrap_or_else(|| panic!("quote total not found: {quote}"))
-}
-
-fn required_program_path(program: &str) -> String {
-    let out = std::process::Command::new("sh")
-        .arg("-c")
-        .arg(format!("command -v {program}"))
-        .output()
-        .unwrap_or_else(|_| panic!("resolve {program} path"));
-    assert!(out.status.success(), "{program} must be in PATH");
-    String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
 fn contract_from_manifest<'a>(
@@ -815,95 +449,45 @@ async fn run_failure_diagnostics(streams: Arc<dyn StreamStore>, run_id: RunId) -
     parts.join("; ")
 }
 
-fn raw_phase_a_pipeline() -> Pipeline {
-    let fetch_origin_program = required_program_path("mfm-aave-v3-origin-fetch");
-    let compile_origin_program = required_program_path("mfm-aave-v3-origin-compile");
-    let deploy_origin_program = required_program_path("mfm-aave-v3-origin-deploy");
-
+fn phase_a_pipeline() -> Pipeline {
     Pipeline {
         machine_id: MachineId("aave_v3_reth_pipeline".to_string()),
         pipeline_version: "v1".to_string(),
         steps: vec![
             PipelineStep {
-                step_id: StepId("fetch_origin".to_string()),
+                step_id: StepId("fetch_origin_source".to_string()),
                 op_id: OpId::must_new("nix_app".to_string()),
                 op_version: "v1".to_string(),
                 op_config: serde_json::json!({
-                    "program_path": fetch_origin_program,
+                    "app": FETCH_APP_REF,
                     "stdin_json": {},
                     "timeout_ms": 300000,
                     "write_result_to": "fetch_origin_result",
                 }),
             },
             PipelineStep {
-                step_id: StepId("compile_origin".to_string()),
+                step_id: StepId("compile_origin_contracts".to_string()),
                 op_id: OpId::must_new("nix_app".to_string()),
                 op_version: "v1".to_string(),
                 op_config: serde_json::json!({
-                    "program_path": compile_origin_program,
-                    "stdin_json": {},
+                    "app": COMPILE_APP_REF,
+                    "stdin_json_port": "fetch_origin_result",
                     "timeout_ms": 600000,
                     "write_result_to": "compile_origin_result",
                 }),
             },
             PipelineStep {
-                step_id: StepId("deploy_origin_stack".to_string()),
+                step_id: StepId("deploy_origin_contracts".to_string()),
                 op_id: OpId::must_new("nix_app".to_string()),
                 op_version: "v1".to_string(),
                 op_config: serde_json::json!({
-                    "program_path": deploy_origin_program,
-                    "stdin_json": {},
+                    "app": DEPLOY_APP_REF,
+                    "stdin_json_port": "compile_origin_result",
                     "timeout_ms": 600000,
-                    "write_result_to": "deploy_origin_result",
-                }),
-            },
-            PipelineStep {
-                step_id: StepId("adapt_origin_deploy".to_string()),
-                op_id: OpId::must_new("aave_v3_origin_adapt_deploy".to_string()),
-                op_version: "v1".to_string(),
-                op_config: serde_json::json!({
-                    "origin_deploy_port": "deploy_origin_result",
-                    "deploy_manifest_export_key": "deploy_manifest",
+                    "write_result_to": "deploy_manifest",
                 }),
             },
         ],
-    }
-}
-
-fn phase_a_canonical_config(
-    actors: &ScenarioActors,
-    control_scope: &str,
-) -> AaveV3OriginStackCanonicalConfig {
-    AaveV3OriginStackCanonicalConfig {
-        source: AaveV3OriginSourceConfig {
-            repo_url: AAVE_V3_ORIGIN_BACKEND_REPO_URL.to_string(),
-            commit_sha: AAVE_V3_ORIGIN_BACKEND_COMMIT_SHA.to_string(),
-        },
-        network_id: NETWORK_ID.to_string(),
-        control_scope: control_scope.to_string(),
-        deploy_signing_key_env: "MFM_AAVE_V3_PARITY_DEPLOY_SIGNING_KEY".to_string(),
-        rpc_url_env: "MFM_EVM_RPC_URL".to_string(),
-        supplier: actors.supplier.clone(),
-        borrower: actors.borrower.clone(),
-        usdc_supply_amount: USDC_SUPPLY_AMOUNT,
-        wbtc_collateral_amount: WBTC_COLLATERAL_AMOUNT,
-        fetch_timeout_ms: 300_000,
-        compile_timeout_ms: 600_000,
-        deploy_timeout_ms: 600_000,
-    }
-}
-
-fn phase_a_pipeline(actors: &ScenarioActors, control_scope: &str) -> Pipeline {
-    Pipeline {
-        machine_id: MachineId("aave_v3_reth_pipeline".to_string()),
-        pipeline_version: "v1".to_string(),
-        steps: vec![PipelineStep {
-            step_id: StepId("deploy_origin_stack".to_string()),
-            op_id: OpId::must_new("aave_v3_origin_stack".to_string()),
-            op_version: "v1".to_string(),
-            op_config: serde_json::to_value(phase_a_canonical_config(actors, control_scope))
-                .expect("serialize canonical phase A config"),
-        }],
     }
 }
 
@@ -1165,7 +749,7 @@ async fn parity_aave_v3_reth_scenario_pipeline() {
             Arc::clone(&bundle.registry),
             Arc::clone(&bundle.planner),
             LaunchPipeline {
-                pipeline: phase_a_pipeline(&actors, &control_scope),
+                pipeline: phase_a_pipeline(),
                 input: serde_json::json!({}),
                 run_config: run_config_phase_a,
                 build: BuildProvenance {
@@ -1202,7 +786,7 @@ async fn parity_aave_v3_reth_scenario_pipeline() {
     assert_eq!(
         snapshot_kind(
             &phase_a_snapshot,
-            "aave_v3_reth_pipeline.deploy_origin_stack.e.adapt_origin_deploy.deploy_manifest",
+            "aave_v3_reth_pipeline.deploy_origin_contracts.deploy_manifest",
         )
         .as_deref(),
         Some(DEPLOY_MANIFEST_KIND)
@@ -1210,31 +794,23 @@ async fn parity_aave_v3_reth_scenario_pipeline() {
     assert_eq!(
         snapshot_kind(
             &phase_a_snapshot,
-            "aave_v3_reth_pipeline.deploy_origin_stack.e.fetch_origin.fetch_origin_result"
+            "aave_v3_reth_pipeline.fetch_origin_source.fetch_origin_result"
         )
         .as_deref(),
-        Some("aave_v3_origin_source_v1")
+        Some(FETCH_RESULT_KIND)
     );
     assert_eq!(
         snapshot_kind(
             &phase_a_snapshot,
-            "aave_v3_reth_pipeline.deploy_origin_stack.e.compile_origin.compile_origin_result"
+            "aave_v3_reth_pipeline.compile_origin_contracts.compile_origin_result"
         )
         .as_deref(),
-        Some("aave_v3_origin_compile_manifest_v1")
-    );
-    assert_eq!(
-        snapshot_kind(
-            &phase_a_snapshot,
-            "aave_v3_reth_pipeline.deploy_origin_stack.e.deploy_origin_stack.deploy_origin_result"
-        )
-        .as_deref(),
-        Some("aave_v3_origin_deploy_output_v1")
+        Some(COMPILE_MANIFEST_KIND)
     );
 
     let deploy_manifest = snapshot_value(
         &phase_a_snapshot,
-        "aave_v3_reth_pipeline.deploy_origin_stack.e.adapt_origin_deploy.deploy_manifest",
+        "aave_v3_reth_pipeline.deploy_origin_contracts.deploy_manifest",
     )
     .cloned()
     .expect("deploy manifest in phase A snapshot");
@@ -1391,249 +967,5 @@ async fn parity_aave_v3_reth_scenario_pipeline() {
         Some(SCENARIO_REPORT_KIND)
     );
 
-    let app = mfm_rest_api::make_app(mfm_rest_api::AppState {
-        bundle: mfm_rest_api::make_engine_bundle(),
-        streams: Arc::clone(&streams),
-        artifacts: Arc::clone(&artifacts),
-    });
-    let resp = app
-        .clone()
-        .oneshot(json_post(
-            "/v1/features/portfolio.snapshot/execute",
-            serde_json::json!({
-                "payload": aave_portfolio_snapshot_payload(
-                    expected_chain_id,
-                    &deploy_manifest,
-                    &actors,
-                    &control_scope
-                )
-            }),
-        ))
-        .await
-        .expect("portfolio snapshot feature response");
-
-    assert_eq!(resp.status(), StatusCode::OK);
-    let feature = response_json(resp).await;
-    assert_eq!(feature["status"], "success");
-    assert_eq!(feature["data"]["feature_id"], "portfolio.snapshot");
-    assert_eq!(feature["data"]["result"]["phase"], "completed");
-    assert_eq!(
-        feature["data"]["result"]["report"]["portfolio_id"],
-        "aave-v3-reth-portfolio"
-    );
-    assert_eq!(feature["data"]["result"]["report"]["error_count"], 0);
-    let report = &feature["data"]["result"]["report"];
-    let supplier_report_usd = find_quote_total(
-        &find_wallet_summary(report, "wallet_supplier")["totals_by_quote"],
-        "USD",
-    );
-    assert_eq!(supplier_report_usd["collateral_value_dec"], "0");
-    assert_eq!(supplier_report_usd["debt_value_dec"], "0");
-    assert_eq!(supplier_report_usd["staked_value_dec"], "0");
-
-    let snapshot_artifact_id = feature["data"]["result"]["snapshot_artifact_id"]
-        .as_str()
-        .expect("snapshot_artifact_id")
-        .to_string();
-    let artifact_resp = app
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri(format!("/v1/artifacts/{snapshot_artifact_id}"))
-                .body(Body::empty())
-                .expect("artifact request"),
-        )
-        .await
-        .expect("artifact response");
-    assert_eq!(artifact_resp.status(), StatusCode::OK);
-
-    let snapshot_response = response_json(artifact_resp).await;
-    let snapshot = snapshot_response["data"]["value"].clone();
-    assert_eq!(snapshot["portfolio_id"], "aave-v3-reth-portfolio");
-    assert_eq!(
-        snapshot["network_pins"][0]["anchor"]["chain_id"],
-        expected_chain_id
-    );
-
-    let supplier_wallet = find_wallet(&snapshot, "wallet_supplier");
-    let supplier_usdc = find_observation(supplier_wallet, "aave_v3.usdc.asset.reth-local");
-    let supplier_usdc_raw: u64 = supplier_usdc["quantity"]["raw_dec"]
-        .as_str()
-        .expect("supplier raw_dec")
-        .parse()
-        .expect("supplier raw quantity");
-    assert!(supplier_usdc_raw >= USDC_SUPPLY_AMOUNT);
-    assert_eq!(
-        supplier_usdc["source"]["balance_reader_kind"],
-        "protocol_position:aave_v3:reserve_position"
-    );
-    assert_eq!(
-        supplier_usdc["values"][0]["priced_symbol_id"],
-        "usdc.wallet.reth-local"
-    );
-    assert_eq!(
-        supplier_report_usd["assets_value_dec"],
-        supplier_usdc["values"][0]["value_dec"]
-    );
-    assert_eq!(
-        supplier_report_usd["net_value_dec"],
-        supplier_usdc["values"][0]["value_dec"]
-    );
-
-    let borrower_wallet = find_wallet(&snapshot, "wallet_borrower");
-    let borrower_collateral =
-        find_observation(borrower_wallet, "aave_v3.wbtc.collateral.reth-local");
-    let borrower_collateral_raw: u64 = borrower_collateral["quantity"]["raw_dec"]
-        .as_str()
-        .expect("collateral raw_dec")
-        .parse()
-        .expect("collateral raw quantity");
-    assert!(borrower_collateral_raw >= WBTC_COLLATERAL_AMOUNT);
-    assert_eq!(borrower_collateral["role"], "collateral");
-    assert_eq!(
-        borrower_collateral["values"][0]["priced_symbol_id"],
-        "wbtc.wallet.reth-local"
-    );
-
-    let borrower_debt = find_observation(borrower_wallet, "aave_v3.usdc.debt.reth-local");
-    let borrower_debt_raw: u64 = borrower_debt["quantity"]["raw_dec"]
-        .as_str()
-        .expect("debt raw_dec")
-        .parse()
-        .expect("debt raw quantity");
-    assert!(borrower_debt_raw >= USDC_BORROW_AMOUNT);
-    assert_eq!(borrower_debt["role"], "debt");
-    assert_eq!(
-        borrower_debt["source"]["balance_reader_kind"],
-        "protocol_position:aave_v3:debt_position"
-    );
-    assert_eq!(borrower_debt["metadata"]["debt_kind"], "variable");
-    assert_eq!(
-        borrower_debt["values"][0]["priced_symbol_id"],
-        "usdc.wallet.reth-local"
-    );
-
-    let borrower_report_usd = find_quote_total(
-        &find_wallet_summary(report, "wallet_borrower")["totals_by_quote"],
-        "USD",
-    );
-    assert_eq!(
-        borrower_report_usd["collateral_value_dec"],
-        borrower_collateral["values"][0]["value_dec"]
-    );
-    assert_eq!(
-        borrower_report_usd["debt_value_dec"],
-        borrower_debt["values"][0]["value_dec"]
-    );
-    assert_eq!(borrower_report_usd["assets_value_dec"], "0");
-    assert_eq!(borrower_report_usd["staked_value_dec"], "0");
-    assert!(borrower_report_usd["net_value_dec"]
-        .as_str()
-        .is_some_and(|value| !value.is_empty()));
-    let portfolio_report_usd = find_quote_total(
-        &feature["data"]["result"]["report"]["totals_by_quote"],
-        "USD",
-    );
-    assert!(portfolio_report_usd["net_value_dec"]
-        .as_str()
-        .is_some_and(|value| !value.is_empty()));
-
     write_parity_aave_run_ids(&phase_a_run.run_id, &phase_b_run.run_id);
-}
-
-#[tokio::test]
-async fn parity_aave_v3_reth_phase_a_raw_wrapper_pipeline() {
-    init_test_observability();
-
-    let pg = connect_postgres_with_retry(20, 250).await;
-    let streams: Arc<dyn StreamStore> = Arc::new(pg);
-
-    let s3 = S3ArtifactStore::from_env().expect("s3 config");
-    s3.ensure_bucket_exists().await.expect("bucket exists");
-    let artifacts: Arc<dyn ArtifactStore> = Arc::new(s3);
-
-    std::env::set_var(
-        "MFM_AAVE_V3_PARITY_DEPLOY_SIGNING_KEY",
-        RETH_DEV_ACCOUNT0_PRIVATE_KEY,
-    );
-
-    let bundle = mfm_rest_api::make_engine_bundle();
-    let launcher = DefaultRunLauncher;
-    let run = launcher
-        .start_pipeline(
-            Arc::clone(&bundle.engine),
-            Stores {
-                streams: Arc::clone(&streams),
-                artifacts: Arc::clone(&artifacts),
-            },
-            Arc::clone(&bundle.registry),
-            Arc::clone(&bundle.planner),
-            LaunchPipeline {
-                pipeline: raw_phase_a_pipeline(),
-                input: serde_json::json!({}),
-                run_config: run_config_with_allowlist(
-                    mfm_machine::config::default_nix_flake_allowlist(),
-                ),
-                build: BuildProvenance {
-                    git_commit: None,
-                    cargo_lock_hash: None,
-                    flake_lock_hash: None,
-                    rustc_version: None,
-                    target_triple: None,
-                    env_allowlist: Vec::new(),
-                },
-                initial_context: Box::new(MapContext::default()),
-            },
-        )
-        .await
-        .expect("start raw phase A pipeline");
-
-    if run.phase != RunPhase::Completed {
-        let diagnostics = run_failure_diagnostics(Arc::clone(&streams), run.run_id).await;
-        panic!(
-            "raw phase A expected Completed, got {:?}; {}",
-            run.phase, diagnostics
-        );
-    }
-
-    let snapshot_id = run.final_snapshot_id.expect("raw phase A final snapshot");
-    let snapshot_bytes = artifacts
-        .get(&snapshot_id)
-        .await
-        .expect("read raw phase A final snapshot");
-    let snapshot: serde_json::Value =
-        serde_json::from_slice(&snapshot_bytes).expect("decode raw phase A snapshot json");
-
-    assert_eq!(
-        snapshot_kind(
-            &snapshot,
-            "aave_v3_reth_pipeline.fetch_origin.fetch_origin_result"
-        )
-        .as_deref(),
-        Some("aave_v3_origin_source_v1")
-    );
-    assert_eq!(
-        snapshot_kind(
-            &snapshot,
-            "aave_v3_reth_pipeline.compile_origin.compile_origin_result"
-        )
-        .as_deref(),
-        Some("aave_v3_origin_compile_manifest_v1")
-    );
-    assert_eq!(
-        snapshot_kind(
-            &snapshot,
-            "aave_v3_reth_pipeline.deploy_origin_stack.deploy_origin_result"
-        )
-        .as_deref(),
-        Some("aave_v3_origin_deploy_output_v1")
-    );
-    assert_eq!(
-        snapshot_kind(
-            &snapshot,
-            "aave_v3_reth_pipeline.adapt_origin_deploy.deploy_manifest",
-        )
-        .as_deref(),
-        Some(DEPLOY_MANIFEST_KIND)
-    );
 }

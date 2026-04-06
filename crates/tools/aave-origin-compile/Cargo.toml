@@ -1,0 +1,16 @@
+[package]
+name = "mfm-aave-origin-compile"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "mfm-aave-v3-origin-compile"
+path = "src/main.rs"
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tempfile = "3.17"
+thiserror = { workspace = true }
+
+mfm-evm-runtime = { path = "../../evm-runtime", version = "0.1.0" }

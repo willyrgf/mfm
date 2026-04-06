@@ -1,11 +1,11 @@
 # mfm-state-aave-v3
 
-Reusable Aave V3 deploy/configure and portfolio-position states for MFM workflows.
+Reusable Aave V3 portfolio-position types and runtime adapters for MFM workflows.
 
-This crate holds shared execution states used by Aave-focused ops and integrations.
+This crate holds the shared Aave domain surface used by the generic portfolio tracker.
 
 Current reusable surfaces:
 
-- deploy/configure/adaptation flow states under `src/states.rs`
 - canonical `protocol_position` portfolio config validation under `src/portfolio/model.rs`
-- canonical Aave reserve/debt observation collection under `src/portfolio/states.rs`
+- canonical Aave reserve/debt observation payloads under `src/portfolio/plan_payloads.rs`
+- canonical Aave reserve/debt runtime adapters under `src/portfolio/plan_adapters.rs`

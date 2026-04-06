@@ -101,6 +101,10 @@ let
       loggingPrelude
       runtimePrelude
       ;
+    preflightPorts = [
+      "$MINIO_API_PORT"
+      "$MINIO_CONSOLE_PORT"
+    ];
     initBody = ''
       mkdir -p "$SERVICE_DIR/data"
       mkdir -p "$SERVICE_DIR/config"

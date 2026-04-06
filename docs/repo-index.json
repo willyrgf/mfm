@@ -74,11 +74,6 @@
       "kind": "rust-cargo"
     },
     {
-      "name": "aave-v3-origin-config",
-      "path": "crates/aave-v3-origin-config/Cargo.toml",
-      "kind": "rust-cargo"
-    },
-    {
       "name": "app",
       "path": "crates/app/Cargo.toml",
       "kind": "rust-cargo"
@@ -176,16 +171,6 @@
     {
       "name": "machine",
       "path": "crates/machine/Cargo.toml",
-      "kind": "rust-cargo"
-    },
-    {
-      "name": "aave-v3-origin-adapt-op",
-      "path": "crates/ops/aave-v3-origin-adapt-op/Cargo.toml",
-      "kind": "rust-cargo"
-    },
-    {
-      "name": "aave-v3-origin-op",
-      "path": "crates/ops/aave-v3-origin-op/Cargo.toml",
       "kind": "rust-cargo"
     },
     {
@@ -306,6 +291,11 @@
     {
       "name": "stream-store-postgres",
       "path": "crates/storages/stream-store-postgres/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "aave-origin-compile",
+      "path": "crates/tools/aave-origin-compile/Cargo.toml",
       "kind": "rust-cargo"
     },
     {

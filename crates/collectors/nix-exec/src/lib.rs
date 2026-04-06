@@ -743,8 +743,8 @@ impl LiveIoTransport for NixFlakeTransport {
                 let resolved_app = ensure_flake_app_allowed(&policy, &req.app)?;
                 let (flake_url, fragment) = split_flake_app_ref(&resolved_app)?;
                 let system = nix_system();
-                let attr = attr_path_for_program(&system, fragment);
-                let target = flake_installable_target(flake_url, &attr);
+                let program_attr = attr_path_for_program(&system, fragment);
+                let target = flake_installable_target(flake_url, &program_attr);
 
                 let mut eval = Command::new("nix");
                 eval.arg("eval")
@@ -803,14 +803,21 @@ impl LiveIoTransport for NixFlakeTransport {
                 }
 
                 if !Path::new(&program_path).exists() {
-                    let build_target =
-                        store_root_from_program_path(&program_path).ok_or_else(|| {
-                            IoError::Other(info(
-                                CODE_NIX_REQUEST_INVALID,
+                    let build_target = flake_installable_target(
+                        flake_url,
+                        &store_root_from_program_path(&program_path).ok_or_else(|| {
+                            IoError::Transport(info_with_details(
+                                CODE_NIX_MANIFEST_INVALID,
                                 ErrorCategory::ParsingInput,
-                                "resolved program path was not a valid nix store path",
+                                "resolved flake app program path did not map to a store root",
+                                serde_json::json!({
+                                    "command": "nix eval",
+                                    "target": target,
+                                    "program_path": program_path,
+                                }),
                             ))
-                        })?;
+                        })?,
+                    );
                     let mut build = Command::new("nix");
                     build
                         .arg("build")

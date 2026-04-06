@@ -811,6 +811,7 @@ let
 
                 requested_excluded_services=()
                 forwarded_args=()
+                launcher_stdin_fd=""
 
                 while [ "$#" -gt 0 ]; do
                   case "$1" in
@@ -855,15 +856,15 @@ let
                 done
 
                 excluded_services_csv="$(build_excluded_services_csv)"
-                selected_services_csv="$(launcher_selected_services_csv "''${forwarded_args[@]}")"
+                selected_services_csv="$(launcher_selected_services_csv "''${forwarded_args[@]+"''${forwarded_args[@]}"}")"
 
                 if [ -n ${lib.escapeShellArg dispatcherHelpFile} ] \
-                  && forwarded_args_only_help_flag "''${forwarded_args[@]}"; then
+                  && forwarded_args_only_help_flag "''${forwarded_args[@]+"''${forwarded_args[@]}"}"; then
                   cat ${lib.escapeShellArg dispatcherHelpFile}
                   exit 0
                 fi
 
-                if forwarded_args_request_help "''${forwarded_args[@]}"; then
+                if forwarded_args_request_help "''${forwarded_args[@]+"''${forwarded_args[@]}"}"; then
                   if [ -n ${lib.escapeShellArg viewHelpFile} ]; then
                     cat ${lib.escapeShellArg viewHelpFile}
                     exit 0
@@ -876,6 +877,10 @@ let
                 fi
 
                 flake_root="$(find_flake_root)"
+
+                if [ ! -t 0 ]; then
+                  exec {launcher_stdin_fd}<&0
+                fi
 
         selection_cmd=(
           "${pkgs.nix}/bin/nix-build"
@@ -916,7 +921,7 @@ let
           ${lib.escapeShellArg localOverrideSpecsJson}
         )
 
-        selected_launcher="$("''${selection_cmd[@]}")"
+        selected_launcher="$("''${selection_cmd[@]}" < /dev/null)"
         shopt -s nullglob
         selected_programs=("$selected_launcher"/bin/*)
         shopt -u nullglob
@@ -926,7 +931,11 @@ let
           exit 3
         fi
 
-        exec "''${selected_programs[0]}" "''${forwarded_args[@]}"
+        if [ -n "$launcher_stdin_fd" ]; then
+          exec "''${selected_programs[0]}" <&$launcher_stdin_fd "''${forwarded_args[@]+"''${forwarded_args[@]}"}"
+        fi
+
+        exec "''${selected_programs[0]}" "''${forwarded_args[@]+"''${forwarded_args[@]}"}"
       '';
     };
 
@@ -950,7 +959,12 @@ let
           exit 3
         }
 
+        launcher_stdin_fd=""
         flake_root="$(find_flake_root)"
+
+        if [ ! -t 0 ]; then
+          exec {launcher_stdin_fd}<&0
+        fi
 
         runtime_cmd=(
           "${pkgs.nix}/bin/nix-build"
@@ -985,7 +999,7 @@ let
           ${lib.escapeShellArg localOverrideSpecsJson}
         )
 
-        selected_launcher="$("''${runtime_cmd[@]}")"
+        selected_launcher="$("''${runtime_cmd[@]}" < /dev/null)"
         shopt -s nullglob
         selected_programs=("$selected_launcher"/bin/*)
         shopt -u nullglob
@@ -993,6 +1007,10 @@ let
         if [ "''${#selected_programs[@]}" -ne 1 ]; then
           echo "ERROR: expected exactly one selected launcher binary for app ${appName}" >&2
           exit 3
+        fi
+
+        if [ -n "$launcher_stdin_fd" ]; then
+          exec "''${selected_programs[0]}" <&$launcher_stdin_fd "$@"
         fi
 
         exec "''${selected_programs[0]}" "$@"

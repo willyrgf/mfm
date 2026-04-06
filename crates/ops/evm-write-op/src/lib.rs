@@ -3,11 +3,12 @@
 #![warn(missing_docs)]
 //! EVM write/validation operations.
 //!
-//! This crate provides four operations that can be composed as a pipeline:
+//! This crate provides reusable EVM operations that can be composed as a pipeline:
 //! - `evm_deploy`   : deploy a contract from an artifact
 //! - `evm_configure`: execute post-deploy contract calls
 //! - `evm_validate` : enforce chain/client/read/event assertions
 //! - `evm_contract_from_nix`: adapt `nix_app` output into an EVM artifact export
+//! - `evm_deploy_contract_set`: deploy a compiled contract-set manifest through generic runtime states
 //!
 //! Notes:
 //! - All network interaction flows through `namespace = "evm"` IO.
@@ -35,6 +36,12 @@ use zeroize::Zeroizing;
 
 use alloy_primitives::keccak256;
 use mfm_evm_runtime::dcv as shared_dcv;
+use mfm_evm_runtime::states::contract_set::{
+    validate_deploy_contract_set_config, CollectDeployedContractSetState,
+    DeployContractSetState as SharedDeployContractSetState,
+    EvmDeployContractSetStateConfig as SharedDeployContractSetStateConfig,
+    LoadCompiledContractSetState, WaitForContractSetReceiptsState, WriteDeployedContractSetState,
+};
 use mfm_evm_runtime::states::write::{
     EvmConfigureRuntimeCall as SharedConfigureRuntimeCall,
     EvmConfigureState as SharedConfigureState,
@@ -56,6 +63,7 @@ use mfm_sdk::op::{
 };
 
 const OP_ID_CONTRACT_FROM_NIX: &str = "evm_contract_from_nix";
+const OP_ID_DEPLOY_CONTRACT_SET: &str = "evm_deploy_contract_set";
 const OP_ID_DEPLOY: &str = "evm_deploy";
 const OP_ID_CONFIGURE: &str = "evm_configure";
 const OP_ID_VALIDATE: &str = "evm_validate";
@@ -63,6 +71,7 @@ const OP_VERSION: &str = "v1";
 
 const KEY_NIX_RESULT: &str = "result";
 const KEY_CONTRACT_ARTIFACT: &str = "contract_artifact";
+const KEY_CONTRACT_SET: &str = "contract_set";
 const KEY_CONTRACT_ADDRESS: &str = "contract_address";
 const KEY_DEPLOY_TX_HASH: &str = "deploy_tx_hash";
 const KEY_DEPLOY_RECEIPT: &str = "deploy_receipt";
@@ -98,6 +107,10 @@ fn default_artifact_port() -> String {
     KEY_CONTRACT_ARTIFACT.to_string()
 }
 
+fn default_contract_set_port() -> String {
+    KEY_CONTRACT_SET.to_string()
+}
+
 fn default_control_scope() -> String {
     "shared".to_string()
 }
@@ -108,6 +121,10 @@ fn default_configure_tx_hashes_export_key() -> String {
 
 fn default_configure_receipts_export_key() -> String {
     KEY_CONFIGURE_RECEIPTS.to_string()
+}
+
+fn default_deploy_manifest_export_key() -> String {
+    "deploy_manifest".to_string()
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -151,6 +168,32 @@ struct EvmDeployConfig {
 
     #[serde(default = "default_max_receipt_polls")]
     max_receipt_polls: u64,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct EvmDeployContractSetConfig {
+    #[serde(default = "default_contract_set_port")]
+    contract_set_port: String,
+
+    network_id: String,
+
+    #[serde(default = "default_control_scope")]
+    control_scope: String,
+
+    #[serde(default)]
+    deployer_account_index: usize,
+
+    #[serde(default)]
+    signing_key_env: Option<String>,
+
+    #[serde(default = "default_poll_interval_ms")]
+    poll_interval_ms: u64,
+
+    #[serde(default = "default_max_receipt_polls")]
+    max_receipt_polls: u64,
+
+    #[serde(default = "default_deploy_manifest_export_key")]
+    deploy_manifest_export_key: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -746,6 +789,151 @@ impl Operation for EvmContractFromNixOp {
             kind: PlannedOpKind::Leaf(LeafOpSpec {
                 states: vec![leaf_state_node(&op_path, "adapt", state)?],
                 edges: Vec::new(),
+            }),
+        })
+    }
+}
+
+/// Planner that deploys a compiled EVM contract-set manifest.
+#[derive(Clone, Default)]
+pub struct EvmDeployContractSetOp;
+
+impl Operation for EvmDeployContractSetOp {
+    fn op_id(&self) -> OpId {
+        OpId::must_new(OP_ID_DEPLOY_CONTRACT_SET.to_string())
+    }
+
+    fn op_version(&self) -> String {
+        OP_VERSION.to_string()
+    }
+
+    fn expand(
+        &self,
+        op_path: OpPath,
+        op_config: &serde_json::Value,
+        _run_config: &RunConfig,
+    ) -> Result<PlannedOp, SdkError> {
+        let cfg: EvmDeployContractSetConfig =
+            serde_json::from_value(op_config.clone()).map_err(|_| {
+                op_errors::sdk_parse_error(
+                    "invalid_op_config",
+                    "invalid evm_deploy_contract_set op_config",
+                )
+            })?;
+
+        validate_deploy_contract_set_config(&SharedDeployContractSetStateConfig {
+            network_id: cfg.network_id.clone(),
+            control_scope: cfg.control_scope.clone(),
+            contract_set_port: cfg.contract_set_port.clone(),
+            deployer_account_index: cfg.deployer_account_index,
+            signing_key_env: cfg.signing_key_env.clone(),
+            poll_interval_ms: cfg.poll_interval_ms,
+            max_receipt_polls: cfg.max_receipt_polls,
+            deploy_manifest_export_key: cfg.deploy_manifest_export_key.clone(),
+        })
+        .map_err(|msg| {
+            op_errors::sdk_error(
+                "invalid_op_config",
+                mfm_machine::errors::ErrorCategory::ParsingInput,
+                false,
+                msg,
+            )
+        })?;
+        if let Some(env_name) = cfg.signing_key_env.as_deref() {
+            ensure_nonempty_env_name(env_name).map_err(|_| {
+                op_errors::sdk_parse_error("invalid_op_config", "signing_key_env must be non-empty")
+            })?;
+        }
+        let contract_set_port = cfg.contract_set_port.clone();
+        let network_id = cfg.network_id.clone();
+        let control_scope = cfg.control_scope.clone();
+        let poll_interval_ms = cfg.poll_interval_ms;
+        let max_receipt_polls = cfg.max_receipt_polls;
+        let deploy_manifest_export_key = cfg.deploy_manifest_export_key.clone();
+
+        let load_state_id = leaf_state_id(&op_path, "load_contract_set")?;
+        let deploy_state_id = leaf_state_id(&op_path, "deploy_contract_set")?;
+        let wait_state_id = leaf_state_id(&op_path, "wait_for_receipts")?;
+        let collect_state_id = leaf_state_id(&op_path, "collect_deploy_manifest")?;
+        let write_state_id = leaf_state_id(&op_path, "write_deploy_manifest")?;
+
+        Ok(PlannedOp {
+            interface: OpInterface {
+                imports: vec![PortKey(contract_set_port.clone())],
+                exports: vec![PortKey(deploy_manifest_export_key.clone())],
+            },
+            kind: PlannedOpKind::Leaf(LeafOpSpec {
+                states: vec![
+                    leaf_state_node(
+                        &op_path,
+                        "load_contract_set",
+                        Arc::new(LoadCompiledContractSetState {
+                            state_id: load_state_id.clone(),
+                            contract_set_port,
+                        }),
+                    )?,
+                    leaf_state_node(
+                        &op_path,
+                        "deploy_contract_set",
+                        Arc::new(SharedDeployContractSetState {
+                            state_id: deploy_state_id.clone(),
+                            cfg: SharedDeployContractSetStateConfig {
+                                network_id,
+                                control_scope: control_scope.clone(),
+                                contract_set_port: cfg.contract_set_port,
+                                deployer_account_index: cfg.deployer_account_index,
+                                signing_key_env: cfg.signing_key_env,
+                                poll_interval_ms,
+                                max_receipt_polls,
+                                deploy_manifest_export_key: deploy_manifest_export_key.clone(),
+                            },
+                        }),
+                    )?,
+                    leaf_state_node(
+                        &op_path,
+                        "wait_for_receipts",
+                        Arc::new(WaitForContractSetReceiptsState {
+                            state_id: wait_state_id.clone(),
+                            network_id: cfg.network_id,
+                            control_scope,
+                            poll_interval_ms,
+                            max_receipt_polls,
+                        }),
+                    )?,
+                    leaf_state_node(
+                        &op_path,
+                        "collect_deploy_manifest",
+                        Arc::new(CollectDeployedContractSetState {
+                            state_id: collect_state_id.clone(),
+                        }),
+                    )?,
+                    leaf_state_node(
+                        &op_path,
+                        "write_deploy_manifest",
+                        Arc::new(WriteDeployedContractSetState {
+                            state_id: write_state_id.clone(),
+                            deploy_manifest_export_key,
+                        }),
+                    )?,
+                ],
+                edges: vec![
+                    mfm_machine::plan::DependencyEdge {
+                        from: load_state_id,
+                        to: deploy_state_id.clone(),
+                    },
+                    mfm_machine::plan::DependencyEdge {
+                        from: deploy_state_id,
+                        to: wait_state_id.clone(),
+                    },
+                    mfm_machine::plan::DependencyEdge {
+                        from: wait_state_id,
+                        to: collect_state_id.clone(),
+                    },
+                    mfm_machine::plan::DependencyEdge {
+                        from: collect_state_id,
+                        to: write_state_id,
+                    },
+                ],
             }),
         })
     }

@@ -2,7 +2,7 @@
 name = "mfm-state-aave-v3"
 version = "0.1.0"
 edition = "2021"
-description = "Reusable Aave V3 deploy and configure states for MFM"
+description = "Reusable Aave V3 portfolio-position types and runtime adapters for MFM"
 repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
 readme = "README.md"

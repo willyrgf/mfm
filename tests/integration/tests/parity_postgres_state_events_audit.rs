@@ -23,13 +23,9 @@ const EVM_REQUIRED_STATES: &[&str] = &[
 ];
 
 const AAVE_PHASE_A_REQUIRED_STATES: &[&str] = &[
-    "aave_v3_reth_pipeline.deploy_origin_stack.b__write_built_config",
-    "aave_v3_reth_pipeline.deploy_origin_stack.b__write_canonical_artifact_input",
-    "aave_v3_reth_pipeline.deploy_origin_stack.e__fetch_origin__run",
-    "aave_v3_reth_pipeline.deploy_origin_stack.e__compile_origin__run",
-    "aave_v3_reth_pipeline.deploy_origin_stack.e__deploy_origin_stack__run",
-    "aave_v3_reth_pipeline.deploy_origin_stack.e__adapt_origin_deploy__adapt_origin_deploy",
-    "aave_v3_reth_pipeline.deploy_origin_stack.e__project_report__project_report",
+    "aave_v3_reth_pipeline.fetch_origin_source.run",
+    "aave_v3_reth_pipeline.compile_origin_contracts.run",
+    "aave_v3_reth_pipeline.deploy_origin_contracts.run",
 ];
 
 const AAVE_PHASE_B_REQUIRED_STATES: &[&str] = &[
@@ -235,7 +231,7 @@ async fn parity_postgres_state_events_audit_for_multi_state_pipelines() {
         aave_phase_a_run_id,
         "aave_v3_reth_pipeline",
         AAVE_PHASE_A_REQUIRED_STATES,
-        12,
+        3,
     )
     .await;
     audit_run_events(

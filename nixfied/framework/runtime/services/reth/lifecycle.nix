@@ -132,6 +132,12 @@ let
       loggingPrelude
       runtimePrelude
       ;
+    preflightPorts = [
+      "$RETH_HTTP_PORT"
+      "$RETH_WS_PORT"
+      "$RETH_AUTH_PORT"
+      "$RETH_P2P_PORT"
+    ];
     initBody = ''
       mkdir -p "$SERVICE_DIR/data"
       mkdir -p "$SERVICE_DIR/config"

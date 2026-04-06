@@ -321,30 +321,30 @@ in
           help_out="$(mktemp)"
 
           nix build --no-link \
-            .#checks.${pkgs.system}.launcher-surface-contract \
-            .#checks.${pkgs.system}.framework-utility-launcher-contract \
-            .#checks.${pkgs.system}.service-surface-catalog-contract \
-            .#checks.${pkgs.system}.service-api-surface-contract \
-            .#checks.${pkgs.system}.framework-install-no-caller-compile-smoke \
-            .#checks.${pkgs.system}.framework-test-no-caller-compile-smoke \
-            .#checks.${pkgs.system}.framework-upgrade-no-caller-compile-smoke \
-            .#checks.${pkgs.system}.runtime-control-launcher-contract \
-            .#checks.${pkgs.system}.runtime-controls-no-service-materialization-smoke \
-            .#checks.${pkgs.system}.flake-show-no-service-materialization-smoke \
-            .#checks.${pkgs.system}.run-id-noise-stability-smoke \
-            .#checks.${pkgs.system}.run-id-semantic-inputs-contract \
-            .#checks.${pkgs.system}.run-id-active-collision-suffix-smoke \
-            .#checks.${pkgs.system}.unselected-service-no-package-resolution-smoke \
-            .#checks.${pkgs.system}.unselected-service-public-launcher-smoke \
-            .#checks.${pkgs.system}.selected-source-only-resolution-smoke \
-            .#checks.${pkgs.system}.disabled-service-no-package-resolution-smoke \
-            .#checks.${pkgs.system}.disabled-service-runtime-surface-smoke \
-            .#checks.${pkgs.system}.launcher-skip-service-pruning-smoke \
-            .#checks.${pkgs.system}.launcher-help-fast-path-smoke \
-            .#checks.${pkgs.system}.dispatcher-help-fast-path-smoke \
-            .#checks.${pkgs.system}.orchestrator-arg-forwarding-smoke \
-            .#checks.${pkgs.system}.service-hook-env-smoke \
-            .#checks.${pkgs.system}.runtime-service-selection-contract
+            .#checks.${pkgs.stdenv.hostPlatform.system}.launcher-surface-contract \
+            .#checks.${pkgs.stdenv.hostPlatform.system}.framework-utility-launcher-contract \
+            .#checks.${pkgs.stdenv.hostPlatform.system}.service-surface-catalog-contract \
+            .#checks.${pkgs.stdenv.hostPlatform.system}.service-api-surface-contract \
+            .#checks.${pkgs.stdenv.hostPlatform.system}.framework-install-no-caller-compile-smoke \
+            .#checks.${pkgs.stdenv.hostPlatform.system}.framework-test-no-caller-compile-smoke \
+            .#checks.${pkgs.stdenv.hostPlatform.system}.framework-upgrade-no-caller-compile-smoke \
+            .#checks.${pkgs.stdenv.hostPlatform.system}.runtime-control-launcher-contract \
+            .#checks.${pkgs.stdenv.hostPlatform.system}.runtime-controls-no-service-materialization-smoke \
+            .#checks.${pkgs.stdenv.hostPlatform.system}.flake-show-no-service-materialization-smoke \
+            .#checks.${pkgs.stdenv.hostPlatform.system}.run-id-noise-stability-smoke \
+            .#checks.${pkgs.stdenv.hostPlatform.system}.run-id-semantic-inputs-contract \
+            .#checks.${pkgs.stdenv.hostPlatform.system}.run-id-active-collision-suffix-smoke \
+            .#checks.${pkgs.stdenv.hostPlatform.system}.unselected-service-no-package-resolution-smoke \
+            .#checks.${pkgs.stdenv.hostPlatform.system}.unselected-service-public-launcher-smoke \
+            .#checks.${pkgs.stdenv.hostPlatform.system}.selected-source-only-resolution-smoke \
+            .#checks.${pkgs.stdenv.hostPlatform.system}.disabled-service-no-package-resolution-smoke \
+            .#checks.${pkgs.stdenv.hostPlatform.system}.disabled-service-runtime-surface-smoke \
+            .#checks.${pkgs.stdenv.hostPlatform.system}.launcher-skip-service-pruning-smoke \
+            .#checks.${pkgs.stdenv.hostPlatform.system}.launcher-help-fast-path-smoke \
+            .#checks.${pkgs.stdenv.hostPlatform.system}.dispatcher-help-fast-path-smoke \
+            .#checks.${pkgs.stdenv.hostPlatform.system}.orchestrator-arg-forwarding-smoke \
+            .#checks.${pkgs.stdenv.hostPlatform.system}.service-hook-env-smoke \
+            .#checks.${pkgs.stdenv.hostPlatform.system}.runtime-service-selection-contract
           verify_public_launcher_help "$help_out" nix run .#ci -- --help
           verify_public_launcher_help "$help_out" env SKIP_HELIOS=1 nix run .#ci -- --help
           rm -f "$help_out"
@@ -371,13 +371,13 @@ in
 
         shard_services() {
           nix build --no-link \
-            .#checks.${pkgs.system}.managed-service-lifecycle-contract \
-            .#checks.${pkgs.system}.service-lifecycle-matrix-smoke \
-            .#checks.${pkgs.system}.ready-health-matrix-smoke \
-            .#checks.${pkgs.system}.ready-health-shutdown-smoke \
-            .#checks.${pkgs.system}.ready-helios-sync-gate-smoke \
-            .#checks.${pkgs.system}.supervisor-lifecycle-smoke \
-            .#checks.${pkgs.system}.supervisor-runtime-contract
+            .#checks.${pkgs.stdenv.hostPlatform.system}.managed-service-lifecycle-contract \
+            .#checks.${pkgs.stdenv.hostPlatform.system}.service-lifecycle-matrix-smoke \
+            .#checks.${pkgs.stdenv.hostPlatform.system}.ready-health-matrix-smoke \
+            .#checks.${pkgs.stdenv.hostPlatform.system}.ready-health-shutdown-smoke \
+            .#checks.${pkgs.stdenv.hostPlatform.system}.ready-helios-sync-gate-smoke \
+            .#checks.${pkgs.stdenv.hostPlatform.system}.supervisor-lifecycle-smoke \
+            .#checks.${pkgs.stdenv.hostPlatform.system}.supervisor-runtime-contract
         }
 
         shard_isolation() {

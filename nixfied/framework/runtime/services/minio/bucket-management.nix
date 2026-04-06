@@ -58,7 +58,22 @@ let
     ${requireBucketArg "minio-bucket-ensure"}
     ${bucketRuntimePrelude}
     ${mcAliasSetup}
-    ${mc}/bin/mc mb --ignore-existing "local/$BUCKET" >/dev/null
+
+    ensure_bucket_once() {
+      ${mc}/bin/mc mb --ignore-existing "local/$BUCKET" >/dev/null 2>&1 && return 0
+      ${mc}/bin/mc ls "local/$BUCKET" >/dev/null 2>&1 && return 0
+      return 1
+    }
+
+    attempt=1
+    max_attempts=5
+    while ! ensure_bucket_once; do
+      if [ "$attempt" -ge "$max_attempts" ]; then
+        ${mc}/bin/mc mb --ignore-existing "local/$BUCKET" >/dev/null
+      fi
+      sleep 1
+      attempt=$((attempt + 1))
+    done
 
     log_ok "minio bucket ensured bucket=$BUCKET"
   '';

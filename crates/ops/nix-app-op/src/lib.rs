@@ -69,10 +69,16 @@ impl Operation for NixAppOp {
             state_id: sid.clone(),
             cfg,
         });
+        let imports = state
+            .cfg
+            .stdin_json_port
+            .as_ref()
+            .map(|port| vec![PortKey(port.clone())])
+            .unwrap_or_default();
 
         Ok(PlannedOp {
             interface: OpInterface {
-                imports: Vec::new(),
+                imports,
                 exports: vec![PortKey(export_key)],
             },
             kind: PlannedOpKind::Leaf(LeafOpSpec {

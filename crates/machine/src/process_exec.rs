@@ -268,12 +268,18 @@ mod tests {
 
     #[tokio::test]
     async fn stream_overflow_is_detected_without_unbounded_growth() {
-        let program = write_test_program("head -c 16384 /dev/zero");
+        let program = write_test_program(
+            "i=0
+while [ \"$i\" -lt 2048 ]; do
+  printf '12345678'
+  i=$((i + 1))
+done",
+        );
         let cmd = Command::new(&program);
         let out = run_command(
             cmd,
             None,
-            Duration::from_secs(2),
+            Duration::from_secs(5),
             StreamLimit {
                 max_stdout_bytes: 1024,
                 max_stderr_bytes: 1024,

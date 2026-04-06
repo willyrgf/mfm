@@ -264,6 +264,7 @@ let
       initBody,
       checkConfigBody,
       startPreflightBody ? "",
+      preflightPorts ? [ ],
       startPrepareBody ? "",
       startCommand,
       startAlreadyRunningBody,
@@ -318,6 +319,64 @@ let
       fullStartTestLeafBody ? null,
     }:
     let
+      preflightPortsBody =
+        if preflightPorts == [ ] then
+          ""
+        else
+          ''
+            service_running_via_pid_file=0
+            if [ -f "$SERVICE_PID_FILE" ]; then
+              PID=$(cat "$SERVICE_PID_FILE" 2>/dev/null || true)
+              if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
+                service_running_via_pid_file=1
+              fi
+            fi
+
+            if [ "$service_running_via_pid_file" != "1" ]; then
+              cleanup_conflicts=0
+              case "$ENV" in
+                test|ci)
+                  cleanup_conflicts=1
+                  ;;
+              esac
+
+              PORTS=(${pkgs.lib.concatStringsSep " " (map (expr: "\"${expr}\"") preflightPorts)})
+              for PORT in "''${PORTS[@]}"; do
+                if [ -z "$PORT" ]; then
+                  continue
+                fi
+
+                if command -v lsof >/dev/null 2>&1; then
+                  OCCUPANTS=$(lsof -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null || lsof -ti:"$PORT" 2>/dev/null || true)
+                else
+                  OCCUPANTS=""
+                fi
+
+                if [ -z "$OCCUPANTS" ]; then
+                  continue
+                fi
+
+                if [ "$cleanup_conflicts" != "1" ]; then
+                  nixfied_exit_precondition "${service} port already in use port=$PORT pids=$OCCUPANTS"
+                fi
+
+                log_warn "cleaning conflicting listeners for ${service} port=$PORT pids=$OCCUPANTS"
+                echo "$OCCUPANTS" | xargs kill -TERM 2>/dev/null || true
+                sleep 1
+
+                if command -v lsof >/dev/null 2>&1; then
+                  REMAINING=$(lsof -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null || lsof -ti:"$PORT" 2>/dev/null || true)
+                else
+                  REMAINING=""
+                fi
+
+                if [ -n "$REMAINING" ]; then
+                  log_warn "force killing conflicting listeners for ${service} port=$PORT pids=$REMAINING"
+                  echo "$REMAINING" | xargs kill -KILL 2>/dev/null || true
+                fi
+              done
+            fi
+          '';
       init = mkWrappedScript {
         name = "${service}-init";
         inherit
@@ -333,7 +392,14 @@ let
           loggingPrelude
           runtimePrelude
           ;
-        body = if startPreflightBody == "" then ":" else startPreflightBody;
+        body =
+          if preflightPortsBody == "" && startPreflightBody == "" then
+            ":"
+          else
+            ''
+              ${preflightPortsBody}
+              ${startPreflightBody}
+            '';
       };
 
       startLeaf = mkWrappedScript {
@@ -500,7 +566,8 @@ let
       };
 
       defaultFullStartBody = ''
-        NIXFIED_START_RETURN_AFTER_READY=1 exec ${startLeaf}
+        NIXFIED_START_RETURN_AFTER_READY=1 ${startLeaf}
+        exec ${ready}
       '';
 
       fullStartLeaf = pkgs.writeShellScript "${service}-full-start-leaf" ''

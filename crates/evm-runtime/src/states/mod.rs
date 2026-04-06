@@ -4,6 +4,8 @@
 //! [`write`] for contract deployment, post-deploy configuration, and validation flows that depend
 //! on prepared artifacts and assertions from [`crate::dcv`].
 
+/// Reusable EVM contract-set deployment states.
+pub mod contract_set;
 /// Reusable EVM oracle and valuation-source helpers.
 pub mod price;
 /// Reusable EVM read/query states.

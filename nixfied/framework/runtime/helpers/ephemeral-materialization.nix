@@ -182,10 +182,10 @@ in
         log_warn "Git file manifest is empty; source copy may be incomplete"
       fi
 
-      dry_run_stats="$(${pkgs.rsync}/bin/rsync -an --stats --from0 --files-from="$manifest" "$SOURCE_DIR/" "$DEST_DIR/")"
+      dry_run_stats="$(${pkgs.rsync}/bin/rsync -an --ignore-missing-args --stats --from0 --files-from="$manifest" "$SOURCE_DIR/" "$DEST_DIR/")"
       copy_bytes="$(extract_total_file_size_bytes "$dry_run_stats")"
       enforce_copy_budget "$copy_bytes"
-      ${pkgs.rsync}/bin/rsync -a --from0 --files-from="$manifest" "$SOURCE_DIR/" "$DEST_DIR/"
+      ${pkgs.rsync}/bin/rsync -a --ignore-missing-args --from0 --files-from="$manifest" "$SOURCE_DIR/" "$DEST_DIR/"
       rm -f "$manifest"
     }
 

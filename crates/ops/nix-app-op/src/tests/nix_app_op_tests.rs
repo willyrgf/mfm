@@ -75,6 +75,28 @@ fn expand_exports_configured_write_result_port() {
 }
 
 #[test]
+fn expand_imports_configured_stdin_json_port() {
+    let op = NixAppOp;
+    let cfg = op_test_support::run_config_live();
+    let planned = mfm_sdk::op::Operation::expand(
+        &op,
+        OpPath("machine.main".to_string()),
+        &serde_json::json!({
+            "app": "github:willyrgf/mfm#jq_fmt_example",
+            "stdin_json_port": "fetch_origin_result"
+        }),
+        &cfg,
+    )
+    .expect("expand");
+
+    assert!(planned
+        .interface
+        .imports
+        .iter()
+        .any(|port| port.0 == "fetch_origin_result"));
+}
+
+#[test]
 fn expand_rejects_both_program_path_and_app() {
     let op = NixAppOp;
     let cfg = op_test_support::run_config_live();

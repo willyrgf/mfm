@@ -22,23 +22,23 @@ Use `docs/design.md` for normative semantics and invariants.
 
 Current snapshot:
 
-- Built-in public root ops: `21`
-- Planner-internal registered child ops: `10` (`portfolio_tracker` semantic lowering plus Aave publication/report helpers)
-- Shared production `State` impls: `39`
-- Intentional op-local production `State` impls: `2`
+- Built-in public root ops: `18`
+- Planner-internal registered child ops: `8` (`portfolio_tracker` semantic lowering)
+- Shared production `State` impls: `28`
+- Intentional op-local production `State` impls: `1`
 
 Planning model note:
 
 - This inventory is intentionally focused on built-in/public root ops registered in the default app
   bundle and on production runtime states.
-- The default app registry also keeps planner-internal portfolio semantic child ops and Aave helper
-  child ops available so recursive flattening can resolve them, but public `run.start` entrypoints
-  reject those internal ids.
+- The default app registry also keeps planner-internal portfolio semantic child ops available so
+  recursive flattening can resolve them, but public `run.start` entrypoints reject those internal
+  ids.
 - Runtime execution units remain states only; internal recursive op expansion must flatten before
   runtime starts.
-- Current canonical-input compatibility roots for portfolio, deploy/configure/validate, and
-  `aave_v3_origin_stack` now compose build then execute with the execute child sourcing its config
-  from the build child's planner payload.
+- Current canonical-input compatibility roots for portfolio and deploy/configure/validate now
+  compose build then execute with the execute child sourcing its config from the build child's
+  planner payload.
   The build child is authoritative for artifact/report publication, ordering, and execute-child
   input materialization.
 - This document does not attempt to enumerate every future internal composite planning boundary.
@@ -59,6 +59,7 @@ API.
 | `keystore_tx_sign` | `v1` | `crates/ops/keystore-tx-op` | Sign an EIP-1559 transaction via the keystore | `KeystoreTxSignState` | `mfm keystore tx-sign`, feature `run.start` |
 | `evm_read` | `v1` | `crates/ops/evm-read-op` | Low-level chain read op backed by the reusable `rpc.control` read states | EVM read state family | `mfm run start`, feature `run.start` |
 | `evm_contract_from_nix` | `v1` | `crates/ops/evm-write-op` | Adapt nix output into a contract artifact export | `NixArtifactToEvmContractState` | `mfm run start`, feature `run.start` |
+| `evm_deploy_contract_set` | `v1` | `crates/ops/evm-write-op` | Deploy a compiled contract-set manifest through generic runtime states and emit a deployed manifest | `LoadCompiledContractSetState`, `DeployContractSetState`, `WaitForContractSetReceiptsState`, `CollectDeployedContractSetState`, `WriteDeployedContractSetState` | `mfm run start`, feature `run.start` |
 | `evm_deploy` | `v1` | `crates/ops/evm-write-op` | Deploy a contract artifact to EVM | `EvmDeployState` | `mfm run start`, feature `run.start` |
 | `evm_configure` | `v1` | `crates/ops/evm-write-op` | Execute post-deploy runtime calls | `EvmConfigureState` | `mfm run start`, feature `run.start` |
 | `evm_validate` | `v1` | `crates/ops/evm-write-op` | Enforce read/event/client assertions | `EvmValidateState` | `mfm run start`, feature `run.start` |
@@ -68,11 +69,7 @@ API.
 | `portfolio_config_build` | `v1` | `crates/ops/portfolio-tracker-op` | Build canonical portfolio config into built execution config, publish canonical/built config artifacts, and emit a stable build report | `WriteJsonValueState`, `WriteContextValueArtifactState` | feature `portfolio.config.build`, feature `run.start` |
 | `portfolio_execute` | `v1` | `crates/ops/portfolio-tracker-op` | Execute pre-built portfolio config and produce a canonical replayable multi-network portfolio snapshot and typed report through the fixed semantic runtime | `PrepareExecutionSourcesState`, `ResolveSubjectsState`, `PinExecutionViewsState`, `ResolveValuationInputsState`, `ObserveCompiledBatchState`, `MergeObservationsState`, `AssembleSnapshotState`, `ProjectReportState` | feature `run.start` |
 | `portfolio_tracker` | `v1` | `crates/ops/portfolio-tracker-op` | Canonical public root that composes `portfolio_config_build` before the fixed semantic runtime | Child build workflow plus `PrepareExecutionSourcesState`, `ResolveSubjectsState`, `PinExecutionViewsState`, `ResolveValuationInputsState`, `ObserveCompiledBatchState`, `MergeObservationsState`, `AssembleSnapshotState`, `ProjectReportState` | `mfm portfolio snapshot`, feature `portfolio.snapshot`, feature `run.start` |
-| `aave_v3_origin_stack_config_build` | `v1` | `crates/ops/aave-v3-origin-op` | Build canonical Aave V3 Origin stack config into built execution config, publish canonical/built config artifacts, and emit a stable build report | `WriteJsonValueState`, `WriteContextValueArtifactState` | feature `run.start` |
-| `aave_v3_origin_stack_execute` | `v1` | `crates/ops/aave-v3-origin-op` | Execute pre-built Aave V3 Origin phase-A config through the current Nix/Foundry compatibility backend and emit typed execution report plus raw artifact ids | Child ops `nix_app`, `aave_v3_origin_adapt_deploy`, internal publication/report helper ops | feature `run.start` |
-| `aave_v3_origin_stack` | `v1` | `crates/ops/aave-v3-origin-op` | Canonical public root that composes `aave_v3_origin_stack_config_build` before `aave_v3_origin_stack_execute` | Child build workflow plus `nix_app`, `aave_v3_origin_adapt_deploy`, internal publication/report helper ops | feature `run.start` |
 | `nix_app` | `v1` | `crates/ops/nix-app-op` | Run a nix-resolved program via the exec namespace | `NixExecState` | `mfm run start`, feature `run.start` |
-| `aave_v3_origin_adapt_deploy` | `v1` | `crates/ops/aave-v3-origin-adapt-op` | Adapt Origin deploy output into an Aave V3 deploy manifest | `AdaptOriginDeployOutputState` | `mfm run start`, feature `run.start` |
 
 Notes:
 
@@ -96,8 +93,8 @@ flattening.
 
 | Module | State types | Purpose | Used by built-in ops |
 |---|---|---|---|
-| `crates/states/common/src/states/nix.rs` | `NixExecState` | Execute a nix-resolved or pre-resolved program through the exec namespace, with optional non-secret environment overrides for compatibility backends | `nix_app`, `aave_v3_origin_stack_execute` |
-| `crates/states/common/src/states/publish.rs` | `WriteJsonValueState`, `WriteContextValueArtifactState` | Deterministic JSON publication and context-to-artifact emission for thin workflow boundaries | `evm_deploy_configure_validate_config_build`, `portfolio_config_build`, `aave_v3_origin_stack_config_build`, `aave_v3_origin_stack_execute`, `portfolio_tracker` (canonical input path) |
+| `crates/states/common/src/states/nix.rs` | `NixExecState` | Execute a nix-resolved or pre-resolved program through the exec namespace, with optional runtime stdin handoff and non-secret environment overrides for compatibility backends | `nix_app` |
+| `crates/states/common/src/states/publish.rs` | `WriteJsonValueState`, `WriteContextValueArtifactState` | Deterministic JSON publication and context-to-artifact emission for thin workflow boundaries | `evm_deploy_configure_validate_config_build`, `portfolio_config_build`, `portfolio_tracker` (canonical input path) |
 | `crates/states/common/src/states/proof.rs` | `ProofReadState`, `ProofApplySideEffectState` | Typed proof read and side-effect states that avoid raw proof namespace strings | `proof` |
 | `crates/states/keystore/src/states/admin.rs` | `KeystoreImportState`, `KeystoreListState`, `KeystoreDeleteState` | Reusable keystore administration flows | `keystore_import`, `keystore_list`, `keystore_delete` |
 | `crates/states/keystore/src/states/tx.rs` | `KeystoreTxSignState` | Reusable local keystore signing flow | `keystore_tx_sign` |
@@ -105,8 +102,8 @@ flattening.
 | `crates/evm-runtime/src/states/rpc_control.rs` | `PrepareSourcesState` | Reusable `rpc.control` source preparation and responsiveness preflight | none directly; shared contract used by semantic and EVM write runtimes |
 | `crates/evm-runtime/src/states/price.rs` | `read_evm_oracle_unit_price` | Reusable control-plane-backed EVM oracle price reads for valuation source execution | `portfolio_execute`, `portfolio_tracker` |
 | `crates/states/portfolio/src/execution_states.rs` | `PrepareExecutionSourcesState`, `ResolveSubjectsState`, `PinExecutionViewsState`, `ResolveValuationInputsState`, `ObserveCompiledBatchState`, `MergeObservationsState`, `AssembleSnapshotState`, `ProjectReportState` | Fixed semantic runtime states for source preparation, subject/view resolution, valuation resolution, batch observation, merge, and snapshot/report projection | `portfolio_execute`, `portfolio_tracker` |
+| `crates/evm-runtime/src/states/contract_set.rs` | `LoadCompiledContractSetState`, `DeployContractSetState`, `WaitForContractSetReceiptsState`, `CollectDeployedContractSetState`, `WriteDeployedContractSetState` | Reusable generic contract-set deployment states that bridge a compiled manifest into a deployed manifest through `rpc.control` | `evm_deploy_contract_set` |
 | `crates/evm-runtime/src/states/write.rs` | `NixArtifactToEvmContractState`, `EvmDeployState`, `EvmConfigureState`, `EvmValidateState` | Reusable contract artifact adaptation and deploy/configure/validate states routed through `rpc.control`, with managed-source preflight before write/validate calls | `evm_contract_from_nix`, `evm_deploy`, `evm_configure`, `evm_validate` |
-| `crates/states/aave-v3/src/states.rs` | `LoadCompileManifestState`, `DeployContractState`, `WaitForReceiptState`, `CollectDeployOutputsState`, `WriteDeployManifestState`, `AdaptOriginDeployOutputState`, `LoadDeployManifestState`, `ConfigureRuntimeCallState`, `WaitForConfigReceiptState`, `CollectConfigOutputsState`, `WriteConfigReportState` | Reusable Aave V3 deploy/configure/adaptation flow states | Direct built-in use today: `aave_v3_origin_adapt_deploy` and `aave_v3_origin_stack_execute` (via the adaptation helper); the remaining states are reusable flow building blocks not yet registered as standalone built-in ops |
 
 ## Intentional Op-Local Production States
 
@@ -116,7 +113,6 @@ assemble domain-specific outputs rather than reusable execution primitives.
 | Owner | State type | Why still local |
 |---|---|---|
 | `crates/ops/proof-op` | `WriteOutputState` | Domain-specific output artifact for the proof acceptance workflow |
-| `crates/ops/aave-v3-origin-op` | `ProjectExecutionReportState` | Domain-specific execution-report projection for the Aave Origin compatibility backend |
 
 ## Update Policy
 

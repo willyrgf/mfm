@@ -423,6 +423,36 @@ in
       esac
     }
 
+    workflow_unit_skip_if_missing_env() {
+      local unit_json="$1"
+      case "$unit_json" in
+  ${renderCasePrintLines (entry: entry.value.skipIfMissingEnv) workflowUnitEntries}
+        *)
+          :
+          ;;
+      esac
+    }
+
+    workflow_unit_when_env_present() {
+      local unit_json="$1"
+      case "$unit_json" in
+  ${renderCasePrintLines (entry: entry.value.whenEnvPresent) workflowUnitEntries}
+        *)
+          :
+          ;;
+      esac
+    }
+
+    workflow_unit_when_env_equals_lines() {
+      local unit_json="$1"
+      case "$unit_json" in
+  ${renderCasePrintLines (entry: entry.value.whenEnvEquals) workflowUnitEntries}
+        *)
+          :
+          ;;
+      esac
+    }
+
     workflow_unit_missing_env_csv() {
       local unit_json="$1"
       local missing=""
@@ -436,14 +466,7 @@ in
             missing="$missing,$required_env"
           fi
         fi
-      done < <(
-        case "$unit_json" in
-  ${renderCasePrintLines (entry: entry.value.skipIfMissingEnv) workflowUnitEntries}
-          *)
-            :
-            ;;
-        esac
-      )
+      done < <(workflow_unit_skip_if_missing_env "$unit_json")
 
       printf '%s' "$missing"
     }
@@ -459,14 +482,7 @@ in
         if [ -n "$required_env" ] && [ -z "''${!required_env:-}" ]; then
           return 1
         fi
-      done < <(
-        case "$unit_json" in
-  ${renderCasePrintLines (entry: entry.value.whenEnvPresent) workflowUnitEntries}
-          *)
-            :
-            ;;
-        esac
-      )
+      done < <(workflow_unit_when_env_present "$unit_json")
 
       while IFS=$'\t' read -r env_name expected_value; do
         if [ -z "$env_name" ]; then
@@ -476,14 +492,7 @@ in
         if [ "$actual_value" != "$expected_value" ]; then
           return 1
         fi
-      done < <(
-        case "$unit_json" in
-  ${renderCasePrintLines (entry: entry.value.whenEnvEquals) workflowUnitEntries}
-          *)
-            :
-            ;;
-        esac
-      )
+      done < <(workflow_unit_when_env_equals_lines "$unit_json")
 
       return 0
     }
