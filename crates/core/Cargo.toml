@@ -30,7 +30,7 @@ k256 = { version = "0.13.0", features = ["ecdsa"] }
 uuid = { version = "1.8.0", features = ["serde", "v4"] }
 zeroize = { version = "1.7.0", features = ["zeroize_derive"] }
 chrono = { version = "0.4.38", features = ["serde"] }
-rand = "0.9.1"
+rand = "0.9.3"
 alloy-primitives = { workspace = true, features = ["serde"] }
 hex = "0.4.3"
 thiserror = "2.0.12"
