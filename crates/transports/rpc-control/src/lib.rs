@@ -1951,10 +1951,8 @@ impl RpcControlTransport {
             ));
         }
 
-        let sats = (result.total_amount * 100_000_000.0).round() as u64;
-
         Ok(serde_json::json!({
-            "amount_sats": sats.to_string(),
+            "amount_sats": result.total_amount_sats.to_string(),
         }))
     }
 }
@@ -2706,6 +2704,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bitcoin_scan_utxos_returns_exact_sats_from_rpc_amount() {
+        let expected_height = 840_000_u64;
+        let expected_hash = "0000000000000000000320283a032748cef8227873ff4872689bf23f1cda83a5";
+        let server = start_stub_btc_server(vec![
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "chain": "main",
+                    "blocks": expected_height,
+                    "bestblockhash": expected_hash,
+                }
+            }),
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "success": true,
+                    "height": expected_height,
+                    "bestblock": expected_hash,
+                    "total_amount": "0.05000000",
+                    "unspents": [],
+                }
+            }),
+        ])
+        .await;
+
+        let client = BtcJsonRpcClient::new(BtcJsonRpcConfig {
+            rpc_url: server.url.clone(),
+            rpc_user: None,
+            rpc_password: None,
+        })
+        .expect("test config should create client");
+
+        let mut transport = RpcControlTransport {
+            executor: None,
+            btc_client: Some(Ok(client)),
+            control_plane_store: ControlPlaneStore::PostgresEnv { store: None },
+            catalog: BootstrapCatalog {
+                sources: Vec::new(),
+                preferred_order: Vec::new(),
+            },
+            config_error: None,
+        };
+
+        let result = transport
+            .handle_bitcoin_scan_utxos(
+                "bitcoin-mainnet",
+                "bc1qqqexample",
+                expected_height,
+                expected_hash,
+            )
+            .await
+            .expect("scan should succeed");
+
+        assert_eq!(result["amount_sats"], "5000000");
+    }
+
+    #[tokio::test]
     async fn bitcoin_scan_utxos_rejects_anchor_mismatch_after_scan() {
         let expected_height = 840_000_u64;
         let expected_hash = "0000000000000000000320283a032748cef8227873ff4872689bf23f1cda83a5";
@@ -2726,7 +2783,7 @@ mod tests {
                     "success": true,
                     "height": expected_height + 1,
                     "bestblock": "000000000000000000000000000000000000000000000000000000000000000000",
-                    "total_amount": 0.0,
+                    "total_amount": "0",
                 }
             }),
         ])

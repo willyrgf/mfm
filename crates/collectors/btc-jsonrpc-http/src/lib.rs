@@ -22,8 +22,11 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
+use serde::{de, Deserialize, Deserializer, Serialize};
+use serde_json::value::RawValue;
 use tracing::debug;
+
+const SATOSHIS_PER_BTC: u64 = 100_000_000;
 
 /// Configuration for a Bitcoin Core JSON-RPC connection.
 #[derive(Clone, Debug)]
@@ -84,6 +87,39 @@ impl std::fmt::Display for BtcRpcError {
 
 impl std::error::Error for BtcRpcError {}
 
+/// Error returned when a Bitcoin BTC-denominated JSON amount cannot be represented exactly.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BtcAmountParseError {
+    /// The amount token or string was empty.
+    Empty,
+    /// The amount was negative.
+    Negative,
+    /// The amount was not a plain base-10 integer or decimal.
+    Invalid,
+    /// The amount had more than eight decimal places.
+    TooPrecise,
+    /// The amount exceeded `u64` satoshi range.
+    Overflow,
+}
+
+impl std::fmt::Display for BtcAmountParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BtcAmountParseError::Empty => write!(f, "bitcoin amount was empty"),
+            BtcAmountParseError::Negative => write!(f, "bitcoin amount must not be negative"),
+            BtcAmountParseError::Invalid => {
+                write!(f, "bitcoin amount must be a base-10 integer or decimal")
+            }
+            BtcAmountParseError::TooPrecise => {
+                write!(f, "bitcoin amount must not have more than 8 decimal places")
+            }
+            BtcAmountParseError::Overflow => write!(f, "bitcoin amount overflowed satoshi range"),
+        }
+    }
+}
+
+impl std::error::Error for BtcAmountParseError {}
+
 /// Response from `getblockchaininfo`.
 #[derive(Clone, Debug, Deserialize)]
 pub struct BlockchainInfo {
@@ -96,34 +132,86 @@ pub struct BlockchainInfo {
 }
 
 /// One unspent output returned by `scantxoutset`.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug)]
 pub struct ScannedUtxo {
     /// Transaction ID.
     pub txid: String,
     /// Output index.
     pub vout: u32,
-    /// Value in BTC (floating point from Bitcoin Core).
-    pub amount: f64,
+    /// Value in satoshis.
+    pub amount_sats: u64,
     /// Block height where this output was confirmed.
     pub height: u64,
 }
 
 /// Response from `scantxoutset`.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug)]
 pub struct ScanTxOutSetResult {
     /// Whether the scan completed successfully.
     pub success: bool,
     /// Block height of the scanned UTXO set.
-    #[serde(default)]
     pub height: u64,
     /// Best block hash of the scanned UTXO set.
-    #[serde(default)]
     pub bestblock: String,
-    /// Total amount in BTC across all matching UTXOs.
-    pub total_amount: f64,
+    /// Total amount in satoshis across all matching UTXOs.
+    pub total_amount_sats: u64,
     /// Individual unspent outputs.
-    #[serde(default)]
     pub unspents: Vec<ScannedUtxo>,
+}
+
+#[derive(Deserialize)]
+struct ScannedUtxoWire<'a> {
+    txid: String,
+    vout: u32,
+    #[serde(borrow)]
+    amount: &'a RawValue,
+    height: u64,
+}
+
+#[derive(Deserialize)]
+struct ScanTxOutSetResultWire<'a> {
+    success: bool,
+    #[serde(default)]
+    height: u64,
+    #[serde(default)]
+    bestblock: String,
+    #[serde(borrow)]
+    total_amount: &'a RawValue,
+    #[serde(default, borrow)]
+    unspents: Vec<ScannedUtxoWire<'a>>,
+}
+
+impl<'de> Deserialize<'de> for ScanTxOutSetResult {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = ScanTxOutSetResultWire::deserialize(deserializer)?;
+        let total_amount_sats =
+            btc_amount_json_to_sats(wire.total_amount.get()).map_err(de::Error::custom)?;
+        let unspents = wire
+            .unspents
+            .into_iter()
+            .map(|utxo| {
+                let amount_sats =
+                    btc_amount_json_to_sats(utxo.amount.get()).map_err(de::Error::custom)?;
+                Ok(ScannedUtxo {
+                    txid: utxo.txid,
+                    vout: utxo.vout,
+                    amount_sats,
+                    height: utxo.height,
+                })
+            })
+            .collect::<Result<Vec<_>, D::Error>>()?;
+
+        Ok(Self {
+            success: wire.success,
+            height: wire.height,
+            bestblock: wire.bestblock,
+            total_amount_sats,
+            unspents,
+        })
+    }
 }
 
 /// JSON-RPC 2.0 request envelope.
@@ -142,11 +230,97 @@ struct JsonRpcResponse {
     error: Option<JsonRpcErrorObj>,
 }
 
+#[derive(Deserialize)]
+struct JsonRpcRawResponse<'a> {
+    #[serde(borrow)]
+    result: Option<&'a RawValue>,
+    error: Option<JsonRpcErrorObj>,
+}
+
 /// JSON-RPC 2.0 error object.
 #[derive(Deserialize)]
 struct JsonRpcErrorObj {
     code: i64,
     message: String,
+}
+
+/// Parses a Bitcoin BTC-denominated JSON amount into exact satoshis.
+///
+/// The input must be the raw JSON token for an integer, decimal number, or string containing
+/// a plain decimal amount. Exponents, negative values, and fractional precision above eight
+/// places are rejected.
+pub fn btc_amount_json_to_sats(raw_json: &str) -> Result<u64, BtcAmountParseError> {
+    let raw = raw_json.trim();
+    if raw.is_empty() {
+        return Err(BtcAmountParseError::Empty);
+    }
+
+    let amount = if raw.starts_with('"') {
+        serde_json::from_str::<String>(raw).map_err(|_| BtcAmountParseError::Invalid)?
+    } else {
+        raw.to_string()
+    };
+    parse_btc_decimal_to_sats(amount.trim())
+}
+
+fn parse_btc_decimal_to_sats(amount: &str) -> Result<u64, BtcAmountParseError> {
+    if amount.is_empty() {
+        return Err(BtcAmountParseError::Empty);
+    }
+    if amount.starts_with('-') {
+        return Err(BtcAmountParseError::Negative);
+    }
+    if amount.starts_with('+') {
+        return Err(BtcAmountParseError::Invalid);
+    }
+
+    let mut parts = amount.split('.');
+    let whole = parts.next().ok_or(BtcAmountParseError::Invalid)?;
+    let fractional = parts.next();
+    if parts.next().is_some() || whole.is_empty() {
+        return Err(BtcAmountParseError::Invalid);
+    }
+    if !whole.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(BtcAmountParseError::Invalid);
+    }
+
+    let whole_btc = whole
+        .parse::<u64>()
+        .map_err(|_| BtcAmountParseError::Overflow)?;
+    let whole_sats = whole_btc
+        .checked_mul(SATOSHIS_PER_BTC)
+        .ok_or(BtcAmountParseError::Overflow)?;
+
+    let fractional_sats = match fractional {
+        None => 0,
+        Some("") => return Err(BtcAmountParseError::Invalid),
+        Some(frac) => parse_fractional_sats(frac)?,
+    };
+
+    whole_sats
+        .checked_add(fractional_sats)
+        .ok_or(BtcAmountParseError::Overflow)
+}
+
+fn parse_fractional_sats(fractional: &str) -> Result<u64, BtcAmountParseError> {
+    if fractional.len() > 8 {
+        return Err(BtcAmountParseError::TooPrecise);
+    }
+    if !fractional.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(BtcAmountParseError::Invalid);
+    }
+
+    let mut value = 0_u64;
+    for byte in fractional.bytes() {
+        value = value
+            .checked_mul(10)
+            .and_then(|current| current.checked_add(u64::from(byte - b'0')))
+            .ok_or(BtcAmountParseError::Overflow)?;
+    }
+    for _ in fractional.len()..8 {
+        value = value.checked_mul(10).ok_or(BtcAmountParseError::Overflow)?;
+    }
+    Ok(value)
 }
 
 impl BtcJsonRpcClient {
@@ -171,6 +345,45 @@ impl BtcJsonRpcClient {
         method: &str,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, BtcRpcError> {
+        let text = self.rpc_call_text(method, params).await?;
+        let rpc_resp: JsonRpcResponse =
+            serde_json::from_str(&text).map_err(|e| BtcRpcError::InvalidJson(e.to_string()))?;
+
+        if let Some(err) = rpc_resp.error {
+            return Err(BtcRpcError::JsonRpcError {
+                code: err.code,
+                message: err.message,
+            });
+        }
+
+        rpc_resp.result.ok_or(BtcRpcError::MissingResult)
+    }
+
+    async fn rpc_call_raw_scan_result(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<ScanTxOutSetResult, BtcRpcError> {
+        let text = self.rpc_call_text(method, params).await?;
+        let rpc_resp: JsonRpcRawResponse =
+            serde_json::from_str(&text).map_err(|e| BtcRpcError::InvalidJson(e.to_string()))?;
+
+        if let Some(err) = rpc_resp.error {
+            return Err(BtcRpcError::JsonRpcError {
+                code: err.code,
+                message: err.message,
+            });
+        }
+
+        let result = rpc_resp.result.ok_or(BtcRpcError::MissingResult)?;
+        serde_json::from_str(result.get()).map_err(|e| BtcRpcError::InvalidJson(e.to_string()))
+    }
+
+    async fn rpc_call_text(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<String, BtcRpcError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let body = JsonRpcRequest {
             jsonrpc: "2.0",
@@ -203,17 +416,7 @@ impl BtcJsonRpcClient {
             .text()
             .await
             .map_err(|e| BtcRpcError::BodyRead(e.to_string()))?;
-        let rpc_resp: JsonRpcResponse =
-            serde_json::from_str(&text).map_err(|e| BtcRpcError::InvalidJson(e.to_string()))?;
-
-        if let Some(err) = rpc_resp.error {
-            return Err(BtcRpcError::JsonRpcError {
-                code: err.code,
-                message: err.message,
-            });
-        }
-
-        rpc_resp.result.ok_or(BtcRpcError::MissingResult)
+        Ok(text)
     }
 
     /// Calls `getblockchaininfo` and returns the current chain state.
@@ -232,8 +435,7 @@ impl BtcJsonRpcClient {
             "start",
             [{ "desc": format!("addr({address})") }]
         ]);
-        let result = self.rpc_call("scantxoutset", params).await?;
-        serde_json::from_value(result).map_err(|e| BtcRpcError::InvalidJson(e.to_string()))
+        self.rpc_call_raw_scan_result("scantxoutset", params).await
     }
 
     /// Returns the total balance in satoshis for a single address.
@@ -242,8 +444,7 @@ impl BtcJsonRpcClient {
     /// the BTC amount to satoshis.
     pub async fn address_balance_sats(&self, address: &str) -> Result<u64, BtcRpcError> {
         let result = self.scan_tx_out_set(address).await?;
-        // Bitcoin Core returns BTC as f64; convert to satoshis with rounding.
-        Ok((result.total_amount * 100_000_000.0).round() as u64)
+        Ok(result.total_amount_sats)
     }
 }
 
@@ -289,7 +490,7 @@ mod tests {
 
     #[test]
     fn scan_tx_out_set_result_deserializes() {
-        let json = serde_json::json!({
+        let json = r#"{
             "success": true,
             "txouts": 120000000,
             "height": 840000,
@@ -300,35 +501,59 @@ mod tests {
                     "vout": 0,
                     "scriptPubKey": "76a914...",
                     "desc": "addr(1BoatSLRHtKNngkdXEeobR76b53LETtpyT)#...",
-                    "amount": 0.05,
+                    "amount": 0.00000001,
                     "height": 839999
                 }
             ],
-            "total_amount": 0.05
-        });
-        let result: ScanTxOutSetResult = serde_json::from_value(json).expect("deserialize");
+            "total_amount": 0.05000000
+        }"#;
+        let result: ScanTxOutSetResult = serde_json::from_str(json).expect("deserialize");
         assert!(result.success);
         assert_eq!(result.unspents.len(), 1);
         assert_eq!(result.unspents[0].txid, "abc123");
-        assert_eq!(
-            (result.total_amount * 100_000_000.0).round() as u64,
-            5_000_000
-        );
+        assert_eq!(result.unspents[0].amount_sats, 1);
+        assert_eq!(result.total_amount_sats, 5_000_000);
     }
 
     #[test]
     fn empty_scan_result_deserializes() {
-        let json = serde_json::json!({
+        let json = r#"{
             "success": true,
             "txouts": 120000000,
             "height": 840000,
             "bestblock": "0000000000000000000320283a032748cef8227873ff4872689bf23f1cda83a5",
             "unspents": [],
-            "total_amount": 0.0
-        });
-        let result: ScanTxOutSetResult = serde_json::from_value(json).expect("deserialize");
+            "total_amount": 0
+        }"#;
+        let result: ScanTxOutSetResult = serde_json::from_str(json).expect("deserialize");
         assert!(result.success);
         assert!(result.unspents.is_empty());
-        assert_eq!((result.total_amount * 100_000_000.0).round() as u64, 0);
+        assert_eq!(result.total_amount_sats, 0);
+    }
+
+    #[test]
+    fn btc_amount_json_to_sats_parses_exact_satoshis() {
+        assert_eq!(btc_amount_json_to_sats("0.00000001").unwrap(), 1);
+        assert_eq!(btc_amount_json_to_sats("0.05000000").unwrap(), 5_000_000);
+        assert_eq!(
+            btc_amount_json_to_sats("\"1.23000000\"").unwrap(),
+            123_000_000
+        );
+    }
+
+    #[test]
+    fn btc_amount_json_to_sats_rejects_invalid_amounts() {
+        assert_eq!(
+            btc_amount_json_to_sats("0.000000001").unwrap_err(),
+            BtcAmountParseError::TooPrecise
+        );
+        assert_eq!(
+            btc_amount_json_to_sats("-0.00000001").unwrap_err(),
+            BtcAmountParseError::Negative
+        );
+        assert_eq!(
+            btc_amount_json_to_sats("18446744073709551615").unwrap_err(),
+            BtcAmountParseError::Overflow
+        );
     }
 }
