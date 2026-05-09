@@ -74,6 +74,14 @@ fn env() -> LiveIoEnv {
     }
 }
 
+fn collected(bytes: &[u8], total_bytes: usize, overflowed: bool) -> CollectedStream {
+    CollectedStream {
+        bytes: bytes.to_vec(),
+        total_bytes,
+        overflowed,
+    }
+}
+
 fn run_config_with_allowlist(prefixes: Vec<String>) -> RunConfig {
     RunConfig {
         io_mode: IoMode::Live,
@@ -332,45 +340,124 @@ fn inject_host_env_bindings_rejects_missing_source_env() {
 }
 
 #[test]
-fn command_failure_details_include_exit_code_and_stderr() {
-    let details = command_failure_details(
-        "nix build",
-        "path:/repo#apps.x86_64-linux.app.program",
-        Some(100),
-        b"",
-        b"error: failed to fetch\n",
+fn command_failure_metadata_for_nix_run_redacts_stdout_and_stderr() {
+    let details = command_failure_metadata(
+        "nix run",
+        "path:/repo#secret-leaking-app",
+        Some(23),
+        &collected(b"stdout secret=super-secret-token", 32, false),
+        &collected(b"stderr password=hunter2", 23, false),
     );
+    let encoded = serde_json::to_string(&details).expect("details json");
+
     assert_eq!(
         details.get("command").and_then(|v| v.as_str()),
-        Some("nix build")
+        Some("nix run")
+    );
+    assert_eq!(details.get("exit_code").and_then(|v| v.as_i64()), Some(23));
+    assert_eq!(
+        details.get("stdout_bytes").and_then(|v| v.as_u64()),
+        Some(32)
     );
     assert_eq!(
-        details.get("target").and_then(|v| v.as_str()),
-        Some("path:/repo#apps.x86_64-linux.app.program")
+        details.get("stderr_bytes").and_then(|v| v.as_u64()),
+        Some(23)
     );
-    assert_eq!(details.get("exit_code").and_then(|v| v.as_i64()), Some(100));
-    assert!(details
-        .get("stderr")
-        .and_then(|v| v.as_str())
-        .expect("stderr")
-        .contains("failed to fetch"));
+    assert_eq!(
+        details.get("stdout_overflowed").and_then(|v| v.as_bool()),
+        Some(false)
+    );
+    assert_eq!(
+        details.get("stderr_overflowed").and_then(|v| v.as_bool()),
+        Some(false)
+    );
+    assert!(details.get("stdout_sha256").is_some());
+    assert!(details.get("stderr_sha256").is_some());
+    assert!(details.get("stdout").is_none());
+    assert!(details.get("stderr").is_none());
+    assert!(!encoded.contains("super-secret-token"));
+    assert!(!encoded.contains("hunter2"));
 }
 
 #[test]
-fn command_failure_details_truncate_large_stderr() {
-    let huge = "x".repeat(MAX_STDERR_DETAIL_BYTES + 32);
-    let details = command_failure_details(
+fn command_failure_metadata_for_eval_and_build_include_safe_status_counts() {
+    let eval = command_failure_metadata(
+        "nix eval",
+        "path:/repo#apps.x86_64-linux.app.program",
+        Some(100),
+        &collected(b"", 0, false),
+        &collected(b"error: failed to fetch\n", 23, false),
+    );
+    assert_eq!(
+        eval.get("command").and_then(|v| v.as_str()),
+        Some("nix eval")
+    );
+    assert_eq!(eval.get("exit_code").and_then(|v| v.as_i64()), Some(100));
+    assert_eq!(eval.get("stdout_bytes").and_then(|v| v.as_u64()), Some(0));
+    assert_eq!(eval.get("stderr_bytes").and_then(|v| v.as_u64()), Some(23));
+    assert!(eval.get("stderr_sha256").is_some());
+    assert!(eval.get("stderr").is_none());
+
+    let build = command_failure_metadata(
+        "nix build",
+        "path:/repo#apps.x86_64-linux.app.program",
+        Some(42),
+        &collected(b"build output", 12, false),
+        &collected(b"", 0, false),
+    );
+    assert_eq!(
+        build.get("command").and_then(|v| v.as_str()),
+        Some("nix build")
+    );
+    assert_eq!(
+        build.get("target").and_then(|v| v.as_str()),
+        Some("path:/repo#apps.x86_64-linux.app.program")
+    );
+    assert_eq!(build.get("exit_code").and_then(|v| v.as_i64()), Some(42));
+    assert_eq!(build.get("stdout_bytes").and_then(|v| v.as_u64()), Some(12));
+    assert_eq!(build.get("stderr_bytes").and_then(|v| v.as_u64()), Some(0));
+    assert!(build.get("stdout_sha256").is_some());
+    assert!(build.get("stdout").is_none());
+}
+
+#[test]
+fn command_failure_metadata_records_overflow_without_raw_excerpt() {
+    let details = command_failure_metadata(
         "nix eval",
         "path:/repo#apps.x86_64-linux.app.program",
         Some(1),
-        b"",
-        huge.as_bytes(),
+        &collected(b"", 0, false),
+        &collected(b"secret suffix", MAX_NIX_STDERR_BYTES + 32, true),
     );
-    let stderr = details
-        .get("stderr")
-        .and_then(|v| v.as_str())
-        .expect("stderr");
-    assert!(stderr.starts_with("...[truncated]"));
+    let encoded = serde_json::to_string(&details).expect("details json");
+
+    assert_eq!(
+        details.get("stderr_bytes").and_then(|v| v.as_u64()),
+        Some((MAX_NIX_STDERR_BYTES + 32) as u64)
+    );
+    assert_eq!(
+        details.get("stderr_overflowed").and_then(|v| v.as_bool()),
+        Some(true)
+    );
+    assert!(details.get("stderr_sha256").is_none());
+    assert!(details.get("stderr").is_none());
+    assert!(!encoded.contains("secret suffix"));
+}
+
+#[test]
+fn invalid_json_stdout_error_omits_stdout_body() {
+    let err = parse_nix_run_stdout(&collected(b"{\"secret\":\"stdout-token\"", 24, false))
+        .expect_err("invalid json must fail");
+    let encoded = format!("{err:?}");
+
+    match err {
+        IoError::Other(info) => {
+            assert_eq!(info.code.0, CODE_NIX_STDOUT_INVALID_JSON);
+            assert!(info.details.is_none());
+        }
+        other => panic!("expected Other, got: {other:?}"),
+    }
+    assert!(!encoded.contains("stdout-token"));
 }
 
 #[tokio::test]

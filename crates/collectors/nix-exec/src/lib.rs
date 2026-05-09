@@ -39,7 +39,9 @@ use mfm_machine::events::{Event, KernelEvent};
 use mfm_machine::ids::ErrorCode;
 use mfm_machine::io::IoCall;
 use mfm_machine::live_io::{LiveIoEnv, LiveIoTransport, LiveIoTransportFactory};
-use mfm_machine::process_exec::{run_command, ProcessRunError, ProcessRunResult, StreamLimit};
+use mfm_machine::process_exec::{
+    run_command, CollectedStream, ProcessRunError, ProcessRunResult, StreamLimit,
+};
 use mfm_machine::stores::{ArtifactStore, StreamId, StreamStore};
 
 /// Namespace group handled by the Nix flake transport factory.
@@ -58,8 +60,6 @@ const CODE_NIX_STDOUT_TOO_LARGE: &str = "nix_stdout_too_large";
 const CODE_NIX_STDERR_TOO_LARGE: &str = "nix_stderr_too_large";
 const CODE_NIX_STDOUT_INVALID_JSON: &str = "nix_stdout_invalid_json";
 const CODE_NIX_STDIN_WRITE_FAILED: &str = "nix_stdin_write_failed";
-const MAX_STDERR_DETAIL_BYTES: usize = 4096;
-const MAX_STDOUT_DETAIL_BYTES: usize = 1024;
 const MAX_NIX_STDOUT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_NIX_STDERR_BYTES: usize = 4 * 1024 * 1024;
 
@@ -308,33 +308,12 @@ impl<'a> FlakeAppRef<'a> {
     }
 }
 
-fn trim_command_output(bytes: &[u8], max_bytes: usize) -> Option<String> {
-    if bytes.is_empty() {
-        return None;
-    }
-
-    let (slice, truncated) = if bytes.len() > max_bytes {
-        (&bytes[bytes.len() - max_bytes..], true)
-    } else {
-        (bytes, false)
-    };
-    let text = String::from_utf8_lossy(slice).trim().to_string();
-    if text.is_empty() {
-        return None;
-    }
-    if truncated {
-        Some(format!("...[truncated]\n{text}"))
-    } else {
-        Some(text)
-    }
-}
-
-fn command_failure_details(
+fn command_failure_metadata(
     command: &str,
     target: &str,
     status_code: Option<i32>,
-    stdout: &[u8],
-    stderr: &[u8],
+    stdout: &CollectedStream,
+    stderr: &CollectedStream,
 ) -> serde_json::Value {
     let mut details = serde_json::Map::new();
     details.insert(
@@ -351,19 +330,34 @@ fn command_failure_details(
             .map(|code| serde_json::Value::Number(code.into()))
             .unwrap_or(serde_json::Value::Null),
     );
-    if let Some(stderr_excerpt) = trim_command_output(stderr, MAX_STDERR_DETAIL_BYTES) {
-        details.insert(
-            "stderr".to_string(),
-            serde_json::Value::String(stderr_excerpt),
-        );
-    }
-    if let Some(stdout_excerpt) = trim_command_output(stdout, MAX_STDOUT_DETAIL_BYTES) {
-        details.insert(
-            "stdout".to_string(),
-            serde_json::Value::String(stdout_excerpt),
-        );
-    }
+
+    insert_stream_metadata(&mut details, "stdout", stdout);
+    insert_stream_metadata(&mut details, "stderr", stderr);
+
     serde_json::Value::Object(details)
+}
+
+fn insert_stream_metadata(
+    details: &mut serde_json::Map<String, serde_json::Value>,
+    stream_name: &str,
+    stream: &CollectedStream,
+) {
+    details.insert(
+        format!("{stream_name}_bytes"),
+        serde_json::Value::Number(stream.total_bytes.into()),
+    );
+    details.insert(
+        format!("{stream_name}_overflowed"),
+        serde_json::Value::Bool(stream.overflowed),
+    );
+
+    if stream.total_bytes > 0 && !stream.overflowed {
+        let digest = mfm_machine::hashing::artifact_id_for_bytes(&stream.bytes);
+        details.insert(
+            format!("{stream_name}_sha256"),
+            serde_json::Value::String(digest.as_str().to_string()),
+        );
+    }
 }
 
 fn parse_resolve_request(call: &IoCall) -> Result<ResolveFlakeAppV1, IoError> {
@@ -721,6 +715,16 @@ fn ensure_flake_app_allowed(policy: &NixFlakePolicy, app: &str) -> Result<String
     rewrite_repo_local_flake_ref(app)
 }
 
+fn parse_nix_run_stdout(stdout: &CollectedStream) -> Result<serde_json::Value, IoError> {
+    serde_json::from_slice::<serde_json::Value>(&stdout.bytes).map_err(|_| {
+        IoError::Other(info(
+            CODE_NIX_STDOUT_INVALID_JSON,
+            ErrorCategory::ParsingInput,
+            "nix run stdout was not valid JSON",
+        ))
+    })
+}
+
 #[async_trait]
 impl LiveIoTransport for NixFlakeTransport {
     async fn call(&mut self, call: IoCall) -> Result<serde_json::Value, IoError> {
@@ -774,12 +778,12 @@ impl LiveIoTransport for NixFlakeTransport {
                         CODE_NIX_EVAL_FAILED,
                         ErrorCategory::Unknown,
                         "nix eval failed",
-                        command_failure_details(
+                        command_failure_metadata(
                             "nix eval",
                             &target,
                             out.status.code(),
-                            &out.stdout.bytes,
-                            &out.stderr.bytes,
+                            &out.stdout,
+                            &out.stderr,
                         ),
                     )));
                 }
@@ -842,12 +846,12 @@ impl LiveIoTransport for NixFlakeTransport {
                             CODE_NIX_BUILD_FAILED,
                             ErrorCategory::Unknown,
                             "nix build failed",
-                            command_failure_details(
+                            command_failure_metadata(
                                 "nix build",
                                 &build_target,
                                 out.status.code(),
-                                &out.stdout.bytes,
-                                &out.stderr.bytes,
+                                &out.stdout,
+                                &out.stderr,
                             ),
                         )));
                     }
@@ -937,26 +941,17 @@ impl LiveIoTransport for NixFlakeTransport {
                         CODE_NIX_RUN_FAILED,
                         ErrorCategory::Unknown,
                         "nix run failed",
-                        command_failure_details(
+                        command_failure_metadata(
                             "nix run",
                             &resolved_app,
                             out.status.code(),
-                            &out.stdout.bytes,
-                            &out.stderr.bytes,
+                            &out.stdout,
+                            &out.stderr,
                         ),
                     )));
                 }
 
-                let response = serde_json::from_slice::<serde_json::Value>(&out.stdout.bytes)
-                    .map_err(|_| {
-                        IoError::Other(info(
-                            CODE_NIX_STDOUT_INVALID_JSON,
-                            ErrorCategory::ParsingInput,
-                            "nix run stdout was not valid JSON",
-                        ))
-                    })?;
-
-                Ok(response)
+                parse_nix_run_stdout(&out.stdout)
             }
             _ => Err(IoError::Other(info(
                 CODE_NIX_REQUEST_INVALID,
