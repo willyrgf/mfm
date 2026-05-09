@@ -195,6 +195,8 @@ The keystore file is JSON with this structure:
 3. **Secure backup**: Store keystore files securely
 4. **Limited exposure**: Don't keep keystore unlocked longer than necessary
 5. **Regular rotation**: Consider rotating important keys periodically
+6. **Diagnostics**: `Debug` output is intentionally redacted and never includes live keys,
+   verification MACs, encrypted entry payloads, mnemonics, passphrases, or aliases.
 
 ## Performance Characteristics
 

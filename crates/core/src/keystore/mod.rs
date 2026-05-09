@@ -181,7 +181,7 @@ impl KeyType {
 }
 
 /// Key entry stored in keystore
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct KeyEntry {
     /// Stable identifier for the stored key entry.
     pub id: Uuid,
@@ -299,7 +299,7 @@ struct ArgonParams {
     parallelism: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct MnemonicPayload {
     version: u8,
     mnemonic: String,
@@ -391,7 +391,6 @@ impl SecureKey {
 impl ZeroizeOnDrop for SecureKey {}
 
 /// Minimal secure keystore for Ethereum keys and mnemonics
-#[derive(Debug)]
 pub struct Keystore {
     path: PathBuf,
     config: KeystoreConfig,
@@ -405,6 +404,23 @@ pub struct Keystore {
     file_integrity_mac: Option<[u8; 32]>,
     // Thread safety marker - prevents Send + Sync
     _not_thread_safe: *const (),
+}
+
+impl std::fmt::Debug for Keystore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Keystore")
+            .field("path", &self.path)
+            .field("config", &self.config)
+            .field(
+                "unlocked",
+                &(self.master_key.is_some() && !self.has_unlock_expired()),
+            )
+            .field("auto_lock_timeout", &self.auto_lock_timeout)
+            .field("entry_count", &self.entries.len())
+            .field("audit_log_count", &self.audit_log.len())
+            .field("kdf_params_loaded", &self.kdf_params.is_some())
+            .finish()
+    }
 }
 
 struct MutationLockGuard {
