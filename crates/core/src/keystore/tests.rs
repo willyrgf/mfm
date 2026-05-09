@@ -94,6 +94,10 @@ fn write_keystore_json(path: &Path, value: &serde_json::Value) {
     std::fs::write(path, serde_json::to_vec(value).unwrap()).unwrap();
 }
 
+fn persisted_audit_log(path: &Path) -> Vec<AuditLogEntry> {
+    serde_json::from_value(read_keystore_json(path)["audit_log"].clone()).unwrap()
+}
+
 fn rewrite_keystore_json_with_valid_mac(
     keystore: &Keystore,
     path: &Path,
@@ -368,6 +372,145 @@ fn test_change_password_reencrypts_entries() {
     assert!(keystore2.get_private_key(mnemonic_id).is_ok());
 }
 
+#[test]
+fn test_import_write_failure_rolls_back_memory_and_audit() {
+    let temp_dir = tempdir().unwrap();
+    let keystore_path = temp_dir.path().join("import_write_failure.keystore");
+    let mut keystore =
+        Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
+    keystore.unlock("strong_password_123").unwrap();
+
+    let previous_entries = keystore.entries.len();
+    let previous_audit = keystore.audit_log.len();
+    let previous_mac = keystore.file_integrity_mac;
+    keystore.fail_next_write_for_test();
+
+    let err = keystore
+        .import_private_key(
+            Some("failed-import".to_string()),
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        )
+        .unwrap_err();
+
+    assert!(matches!(err, KeystoreError::FileError(_)));
+    assert_eq!(keystore.entries.len(), previous_entries);
+    assert_eq!(keystore.audit_log.len(), previous_audit);
+    assert_eq!(keystore.file_integrity_mac, previous_mac);
+    assert!(!std::fs::read_to_string(&keystore_path)
+        .unwrap()
+        .contains("failed-import"));
+}
+
+#[test]
+fn test_delete_write_failure_rolls_back_memory_and_disk() {
+    let temp_dir = tempdir().unwrap();
+    let keystore_path = temp_dir.path().join("delete_write_failure.keystore");
+    let mut keystore =
+        Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
+    keystore.unlock("strong_password_123").unwrap();
+    let key_id = keystore
+        .import_private_key(
+            Some("delete-rollback".to_string()),
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        )
+        .unwrap();
+
+    let previous_entries = keystore.entries.clone();
+    let previous_audit = keystore.audit_log.len();
+    keystore.fail_next_write_for_test();
+    let err = keystore.delete_key(key_id).unwrap_err();
+
+    assert!(matches!(err, KeystoreError::FileError(_)));
+    assert_eq!(keystore.entries.len(), previous_entries.len());
+    assert!(keystore.entries.iter().any(|entry| entry.id == key_id));
+    assert_eq!(keystore.audit_log.len(), previous_audit);
+    assert!(std::fs::read_to_string(&keystore_path)
+        .unwrap()
+        .contains("delete-rollback"));
+}
+
+#[test]
+fn test_get_private_key_write_failure_returns_error_without_audit() {
+    let temp_dir = tempdir().unwrap();
+    let keystore_path = temp_dir.path().join("get_key_write_failure.keystore");
+    let mut keystore =
+        Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
+    keystore.unlock("strong_password_123").unwrap();
+    let key_id = keystore
+        .import_private_key(
+            Some("signing-key".to_string()),
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        )
+        .unwrap();
+
+    let previous_audit = keystore.audit_log.len();
+    keystore.fail_next_write_for_test();
+    let err = match keystore.get_private_key(key_id) {
+        Ok(_) => panic!("get_private_key must fail closed when audit persistence fails"),
+        Err(err) => err,
+    };
+
+    assert!(matches!(err, KeystoreError::FileError(_)));
+    assert_eq!(keystore.audit_log.len(), previous_audit);
+    let persisted = persisted_audit_log(&keystore_path);
+    assert!(!persisted
+        .iter()
+        .any(|entry| matches!(entry.event, AuditEvent::GetPrivateKey { id } if id == key_id)));
+}
+
+#[test]
+fn test_successful_mutations_persist_exactly_one_audit_record() {
+    let temp_dir = tempdir().unwrap();
+    let keystore_path = temp_dir.path().join("atomic_success_audit.keystore");
+    let mut keystore =
+        Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
+    keystore.unlock("strong_password_123").unwrap();
+
+    let key_id = keystore
+        .import_private_key(
+            Some("audited".to_string()),
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        )
+        .unwrap();
+    assert_eq!(
+        persisted_audit_log(&keystore_path)
+            .iter()
+            .filter(
+                |entry| matches!(entry.event, AuditEvent::ImportPrivateKey { id } if id == key_id)
+                    && entry.success
+            )
+            .count(),
+        1
+    );
+
+    keystore.delete_key(key_id).unwrap();
+    assert_eq!(
+        persisted_audit_log(&keystore_path)
+            .iter()
+            .filter(
+                |entry| matches!(entry.event, AuditEvent::DeleteKey { id } if id == key_id)
+                    && entry.success
+            )
+            .count(),
+        1
+    );
+
+    keystore
+        .change_password("strong_password_123", "new_password_123")
+        .unwrap();
+    assert_eq!(
+        persisted_audit_log(&keystore_path)
+            .iter()
+            .filter(|entry| matches!(entry.event, AuditEvent::ChangePassword) && entry.success)
+            .count(),
+        1
+    );
+
+    let mut reopened =
+        Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
+    reopened.unlock("new_password_123").unwrap();
+}
+
 #[cfg(feature = "dangerous-secret-export")]
 #[test]
 fn test_audit_log_entries_created_for_operations() {
@@ -424,14 +567,12 @@ fn test_audit_log_entries_created_for_operations() {
         AuditEvent::Lock
     ));
 
-    // change_password failure logs (locked).
+    // Locked failures cannot be durably authenticated in the single-file format.
+    let previous_audit_len = keystore.audit_log().len();
     assert!(keystore
         .change_password("old_password", "new_password")
         .is_err());
-    assert!(keystore
-        .audit_log()
-        .iter()
-        .any(|e| matches!(e.event, AuditEvent::ChangePassword) && !e.success));
+    assert_eq!(keystore.audit_log().len(), previous_audit_len);
 }
 
 #[cfg(feature = "dangerous-secret-export")]

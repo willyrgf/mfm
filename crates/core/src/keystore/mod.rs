@@ -73,6 +73,8 @@ use k256::{ecdsa::SigningKey, SecretKey};
 use rand::rngs::OsRng;
 use rand::TryRngCore;
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
+use std::cell::Cell;
 use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -429,6 +431,8 @@ pub struct Keystore {
     kdf_params: Option<ArgonParams>,
     master_key_verification: Option<[u8; 32]>,
     file_integrity_mac: Option<[u8; 32]>,
+    #[cfg(test)]
+    fail_next_write: Cell<bool>,
     // Thread safety marker - prevents Send + Sync
     _not_thread_safe: *const (),
 }
@@ -484,6 +488,8 @@ impl Keystore {
             kdf_params: None,
             master_key_verification: None,
             file_integrity_mac: None,
+            #[cfg(test)]
+            fail_next_write: Cell::new(false),
             _not_thread_safe: std::ptr::null(),
         };
 
@@ -532,6 +538,11 @@ impl Keystore {
     /// Returns the persisted audit log for this keystore instance.
     pub fn audit_log(&self) -> &[AuditLogEntry] {
         &self.audit_log
+    }
+
+    #[cfg(test)]
+    fn fail_next_write_for_test(&self) {
+        self.fail_next_write.set(true);
     }
 
     fn log_audit(&mut self, event: AuditEvent, success: bool) {
@@ -604,16 +615,21 @@ impl Keystore {
                 created_at: Utc::now(),
             };
 
+            let previous_entry_len = self.entries.len();
+            let previous_audit_len = self.audit_log.len();
             self.entries.push(entry);
-            self.save_to_disk()?;
+            self.log_audit(AuditEvent::ImportPrivateKey { id }, true);
+            if let Err(err) = self.save_to_disk() {
+                self.entries.truncate(previous_entry_len);
+                self.audit_log.truncate(previous_audit_len);
+                key_array.zeroize();
+                return Err(err);
+            }
 
-            // Zeroize the key array
+            // Zeroize the key array only after the durable write has consumed it.
             key_array.zeroize();
-
             Ok(id)
         })();
-
-        self.log_audit(AuditEvent::ImportPrivateKey { id }, result.is_ok());
         result
     }
 
@@ -675,13 +691,18 @@ impl Keystore {
                 created_at: Utc::now(),
             };
 
+            let previous_entry_len = self.entries.len();
+            let previous_audit_len = self.audit_log.len();
             self.entries.push(entry);
-            self.save_to_disk()?;
+            self.log_audit(AuditEvent::ImportMnemonic { id }, true);
+            if let Err(err) = self.save_to_disk() {
+                self.entries.truncate(previous_entry_len);
+                self.audit_log.truncate(previous_audit_len);
+                return Err(err);
+            }
 
             Ok(id)
         })();
-
-        self.log_audit(AuditEvent::ImportMnemonic { id }, result.is_ok());
         result
     }
 
@@ -739,26 +760,16 @@ impl Keystore {
 
         match result {
             Ok(secure_key) => {
+                let previous_audit_len = self.audit_log.len();
                 self.log_audit(AuditEvent::GetPrivateKey { id }, true);
-
                 if let Err(err) = self.save_to_disk() {
-                    // If we can't persist the audit entry, treat the overall operation as failed
-                    // (the key must not be returned without a durable audit trail).
-                    if let Some(last) = self.audit_log.last_mut() {
-                        if matches!(last.event, AuditEvent::GetPrivateKey { id: eid } if eid == id)
-                        {
-                            last.success = false;
-                        }
-                    }
+                    self.audit_log.truncate(previous_audit_len);
                     return Err(err);
                 }
 
                 Ok(secure_key)
             }
-            Err(err) => {
-                self.log_audit(AuditEvent::GetPrivateKey { id }, false);
-                Err(err)
-            }
+            Err(err) => Err(err),
         }
     }
 
@@ -820,24 +831,23 @@ impl Keystore {
 
         match result {
             Ok(private_key_hex) => {
+                let previous_audit_len = self.audit_log.len();
                 self.log_audit(AuditEvent::ExportPrivateKey { id }, true);
-
                 if let Err(err) = self.save_to_disk() {
-                    if let Some(last) = self.audit_log.last_mut() {
-                        if matches!(
-                            last.event,
-                            AuditEvent::ExportPrivateKey { id: eid } if eid == id
-                        ) {
-                            last.success = false;
-                        }
-                    }
+                    self.audit_log.truncate(previous_audit_len);
                     return Err(err);
                 }
 
                 Ok(private_key_hex)
             }
             Err(err) => {
-                self.log_audit(AuditEvent::ExportPrivateKey { id }, false);
+                if self.master_key.is_some() && !self.has_unlock_expired() {
+                    let previous_audit_len = self.audit_log.len();
+                    self.log_audit(AuditEvent::ExportPrivateKey { id }, false);
+                    if self.save_to_disk().is_err() {
+                        self.audit_log.truncate(previous_audit_len);
+                    }
+                }
                 Err(err)
             }
         }
@@ -870,22 +880,23 @@ impl Keystore {
 
         match result {
             Ok(mnemonic) => {
+                let previous_audit_len = self.audit_log.len();
                 self.log_audit(AuditEvent::ExportMnemonic { id }, true);
-
                 if let Err(err) = self.save_to_disk() {
-                    if let Some(last) = self.audit_log.last_mut() {
-                        if matches!(last.event, AuditEvent::ExportMnemonic { id: eid } if eid == id)
-                        {
-                            last.success = false;
-                        }
-                    }
+                    self.audit_log.truncate(previous_audit_len);
                     return Err(err);
                 }
 
                 Ok(mnemonic)
             }
             Err(err) => {
-                self.log_audit(AuditEvent::ExportMnemonic { id }, false);
+                if self.master_key.is_some() && !self.has_unlock_expired() {
+                    let previous_audit_len = self.audit_log.len();
+                    self.log_audit(AuditEvent::ExportMnemonic { id }, false);
+                    if self.save_to_disk().is_err() {
+                        self.audit_log.truncate(previous_audit_len);
+                    }
+                }
                 Err(err)
             }
         }
@@ -902,18 +913,23 @@ impl Keystore {
         let result: Result<(), KeystoreError> = (|| {
             self.ensure_master_key_available()?;
 
-            let initial_len = self.entries.len();
+            let previous_entries = self.entries.clone();
+            let previous_audit_len = self.audit_log.len();
+            let initial_len = previous_entries.len();
             self.entries.retain(|entry| entry.id != id);
 
             if self.entries.len() == initial_len {
                 return Err(KeystoreError::KeyNotFound(id));
             }
 
-            self.save_to_disk()?;
+            self.log_audit(AuditEvent::DeleteKey { id }, true);
+            if let Err(err) = self.save_to_disk() {
+                self.entries = previous_entries;
+                self.audit_log.truncate(previous_audit_len);
+                return Err(err);
+            }
             Ok(())
         })();
-
-        self.log_audit(AuditEvent::DeleteKey { id }, result.is_ok());
         result
     }
 
@@ -926,6 +942,13 @@ impl Keystore {
         let result: Result<(), KeystoreError> = (|| {
             self.ensure_master_key_available()?;
             self.validate_password_policy(new_password)?;
+            let previous_entries = self.entries.clone();
+            let previous_audit_len = self.audit_log.len();
+            let previous_kdf_params = self.kdf_params.clone();
+            let previous_master_key_verification = self.master_key_verification;
+            let previous_master_key = self.master_key.clone();
+            let previous_unlocked_at = self.unlocked_at;
+            let previous_file_integrity_mac = self.file_integrity_mac;
 
             let kdf_params = self
                 .kdf_params
@@ -988,12 +1011,20 @@ impl Keystore {
             self.master_key_verification = Some(new_verification);
             self.master_key = Some(new_master_key);
             self.unlocked_at = Some(Instant::now());
+            self.log_audit(AuditEvent::ChangePassword, true);
 
-            self.save_to_disk()?;
+            if let Err(err) = self.save_to_disk() {
+                self.entries = previous_entries;
+                self.audit_log.truncate(previous_audit_len);
+                self.kdf_params = previous_kdf_params;
+                self.master_key_verification = previous_master_key_verification;
+                self.master_key = previous_master_key;
+                self.unlocked_at = previous_unlocked_at;
+                self.file_integrity_mac = previous_file_integrity_mac;
+                return Err(err);
+            }
             Ok(())
         })();
-
-        self.log_audit(AuditEvent::ChangePassword, result.is_ok());
         result
     }
 
@@ -1600,6 +1631,13 @@ impl Keystore {
     fn atomic_write_keystore_file(&self, parent: &Path, data: &[u8]) -> Result<(), KeystoreError> {
         if self.path.exists() {
             self.ensure_target_path_is_safe()?;
+        }
+
+        #[cfg(test)]
+        if self.fail_next_write.replace(false) {
+            return Err(KeystoreError::FileError(
+                "injected keystore write failure".to_string(),
+            ));
         }
 
         let file_name = self
