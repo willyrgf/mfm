@@ -1,10 +1,11 @@
-/// Comprehensive tests for keystore_v2 public API
+/// Comprehensive tests for keystore_v3 public API
 ///
 /// These tests validate all public methods and ensure the API works correctly
 /// for external consumers using only public interfaces.
 use super::*;
 use k256::elliptic_curve::sec1::ToEncodedPoint;
 use static_assertions::assert_not_impl_any;
+use std::path::Path;
 use std::sync::Once;
 use tempfile::tempdir;
 use tracing::{info, warn};
@@ -83,6 +84,30 @@ fn test_keystore() -> (tempfile::TempDir, Keystore) {
     let keystore =
         Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
     (temp_dir, keystore)
+}
+
+fn read_keystore_json(path: &Path) -> serde_json::Value {
+    serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+}
+
+fn write_keystore_json(path: &Path, value: &serde_json::Value) {
+    std::fs::write(path, serde_json::to_vec(value).unwrap()).unwrap();
+}
+
+fn rewrite_keystore_json_with_valid_mac(
+    keystore: &Keystore,
+    path: &Path,
+    mutate: impl FnOnce(&mut serde_json::Value),
+) {
+    let mut value = read_keystore_json(path);
+    mutate(&mut value);
+    let master_key = keystore.master_key.as_ref().unwrap();
+    let preimage = Keystore::canonical_file_mac_preimage_from_value(value.clone()).unwrap();
+    let mac = keystore
+        .compute_file_integrity_mac(master_key, &preimage)
+        .unwrap();
+    value["file_integrity_mac"] = serde_json::to_value(mac).unwrap();
+    write_keystore_json(path, &value);
 }
 
 #[cfg(feature = "dangerous-secret-export")]
@@ -334,7 +359,7 @@ fn test_change_password_reencrypts_entries() {
         Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
     assert!(matches!(
         keystore2.unlock("old_password"),
-        Err(KeystoreError::InvalidPassword)
+        Err(KeystoreError::InvalidInput(_))
     ));
 
     // New password should succeed and keys should still be accessible.
@@ -549,10 +574,14 @@ fn test_wrong_password() {
     let result = keystore2.unlock("wrong_password");
 
     assert!(result.is_err());
-    assert!(matches!(
-        result.unwrap_err(),
-        KeystoreError::InvalidPassword
-    ));
+    match result.unwrap_err() {
+        KeystoreError::InvalidInput(msg) => {
+            assert!(msg.contains("integrity verification failed"));
+            assert!(!msg.contains("correct_password"));
+            assert!(!msg.contains("wrong_password"));
+        }
+        other => panic!("expected safe authentication failure, got: {other:?}"),
+    }
 }
 
 #[test]
@@ -1038,6 +1067,165 @@ fn test_keystore_version_handling() {
 }
 
 #[test]
+fn test_strict_loading_rejects_unknown_top_level_field() {
+    let temp_dir = tempdir().unwrap();
+    let keystore_path = temp_dir.path().join("unknown_top_level.keystore");
+
+    {
+        let mut keystore =
+            Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
+        keystore.unlock("strong_password_123").unwrap();
+    }
+
+    let mut json = read_keystore_json(&keystore_path);
+    json["unexpected"] = serde_json::json!(true);
+    write_keystore_json(&keystore_path, &json);
+
+    let err = Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap_err();
+    match err {
+        KeystoreError::InvalidInput(msg) => assert!(msg.contains("Unknown keystore file field")),
+        other => panic!("expected unknown top-level field rejection, got: {other:?}"),
+    }
+}
+
+#[test]
+fn test_strict_loading_rejects_unknown_kdf_field() {
+    let temp_dir = tempdir().unwrap();
+    let keystore_path = temp_dir.path().join("unknown_kdf.keystore");
+
+    {
+        let mut keystore =
+            Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
+        keystore.unlock("strong_password_123").unwrap();
+    }
+
+    let mut json = read_keystore_json(&keystore_path);
+    json["kdf_params"]["unexpected"] = serde_json::json!(true);
+    write_keystore_json(&keystore_path, &json);
+
+    let err = Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap_err();
+    match err {
+        KeystoreError::InvalidInput(msg) => assert!(msg.contains("Malformed keystore header")),
+        other => panic!("expected unknown KDF field rejection, got: {other:?}"),
+    }
+}
+
+#[test]
+fn test_strict_loading_rejects_unknown_entry_field_after_authentication() {
+    let temp_dir = tempdir().unwrap();
+    let keystore_path = temp_dir.path().join("unknown_entry.keystore");
+
+    let mut keystore =
+        Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
+    keystore.unlock("strong_password_123").unwrap();
+    keystore
+        .import_private_key(
+            Some("entry".to_string()),
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        )
+        .unwrap();
+
+    rewrite_keystore_json_with_valid_mac(&keystore, &keystore_path, |json| {
+        json["entries"][0]["unexpected"] = serde_json::json!(true);
+    });
+
+    let mut loaded =
+        Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
+    let err = loaded.unlock("strong_password_123").unwrap_err();
+    match err {
+        KeystoreError::InvalidInput(msg) => {
+            assert!(msg.contains("Malformed authenticated keystore payload"))
+        }
+        other => panic!("expected strict authenticated entry rejection, got: {other:?}"),
+    }
+}
+
+#[test]
+fn test_kdf_memory_above_configured_max_rejected_before_unlock() {
+    let temp_dir = tempdir().unwrap();
+    let keystore_path = temp_dir.path().join("kdf_too_large.keystore");
+
+    {
+        let mut keystore =
+            Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
+        keystore.unlock("strong_password_123").unwrap();
+    }
+
+    let mut json = read_keystore_json(&keystore_path);
+    json["kdf_params"]["memory_kb"] =
+        serde_json::json!(KeystoreConfig::development().argon2_memory_kb + 1);
+    write_keystore_json(&keystore_path, &json);
+
+    let err = Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap_err();
+    match err {
+        KeystoreError::InvalidInput(msg) => assert!(msg.contains("KDF memory cost out of bounds")),
+        other => panic!("expected KDF bound rejection, got: {other:?}"),
+    }
+}
+
+#[test]
+fn test_tampered_kdf_param_with_unchanged_mac_fails_integrity() {
+    let temp_dir = tempdir().unwrap();
+    let keystore_path = temp_dir.path().join("tampered_kdf.keystore");
+
+    {
+        let mut keystore =
+            Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
+        keystore.unlock("strong_password_123").unwrap();
+    }
+
+    let mut json = read_keystore_json(&keystore_path);
+    json["kdf_params"]["iterations"] = serde_json::json!(1);
+    write_keystore_json(&keystore_path, &json);
+
+    let mut loaded =
+        Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
+    let err = loaded.unlock("strong_password_123").unwrap_err();
+    match err {
+        KeystoreError::InvalidInput(msg) => assert!(msg.contains("integrity verification failed")),
+        other => panic!("expected KDF tamper integrity failure, got: {other:?}"),
+    }
+}
+
+#[test]
+fn test_tampered_audit_log_and_mac_fail_integrity() {
+    let temp_dir = tempdir().unwrap();
+    let audit_path = temp_dir.path().join("tampered_audit.keystore");
+    let mac_path = temp_dir.path().join("tampered_mac.keystore");
+
+    for path in [&audit_path, &mac_path] {
+        let mut keystore = Keystore::new_with_config(path, KeystoreConfig::development()).unwrap();
+        keystore.unlock("strong_password_123").unwrap();
+        keystore
+            .import_private_key(
+                Some("persist-audit".to_string()),
+                "0000000000000000000000000000000000000000000000000000000000000001",
+            )
+            .unwrap();
+    }
+
+    let mut audit_json = read_keystore_json(&audit_path);
+    audit_json["audit_log"][0]["success"] = serde_json::json!(false);
+    write_keystore_json(&audit_path, &audit_json);
+    let mut loaded_audit =
+        Keystore::new_with_config(&audit_path, KeystoreConfig::development()).unwrap();
+    assert!(matches!(
+        loaded_audit.unlock("strong_password_123"),
+        Err(KeystoreError::InvalidInput(_))
+    ));
+
+    let mut mac_json = read_keystore_json(&mac_path);
+    mac_json["file_integrity_mac"][0] = serde_json::json!(1);
+    write_keystore_json(&mac_path, &mac_json);
+    let mut loaded_mac =
+        Keystore::new_with_config(&mac_path, KeystoreConfig::development()).unwrap();
+    assert!(matches!(
+        loaded_mac.unlock("strong_password_123"),
+        Err(KeystoreError::InvalidInput(_))
+    ));
+}
+
+#[test]
 fn test_file_integrity_protection() {
     let temp_dir = tempdir().unwrap();
     let keystore_path = temp_dir.path().join("integrity_test.keystore");
@@ -1354,8 +1542,12 @@ fn test_duplicate_entry_ids_rejected() {
     json["entries"].as_array_mut().unwrap().push(first_entry);
     std::fs::write(&keystore_path, serde_json::to_vec_pretty(&json).unwrap()).unwrap();
 
-    let result = Keystore::new_with_config(&keystore_path, KeystoreConfig::development());
-    assert!(matches!(result, Err(KeystoreError::InvalidInput(_))));
+    let mut loaded = Keystore::new_with_config(&keystore_path, KeystoreConfig::development())
+        .expect("unauthenticated load must not hydrate tampered entries");
+    assert!(matches!(
+        loaded.unlock("strong_password_123"),
+        Err(KeystoreError::InvalidInput(_))
+    ));
 }
 
 #[test]
@@ -1384,8 +1576,12 @@ fn test_oversized_audit_log_rejected() {
     json["audit_log"] = serde_json::Value::Array(audit_entries);
     std::fs::write(&keystore_path, serde_json::to_vec_pretty(&json).unwrap()).unwrap();
 
-    let result = Keystore::new_with_config(&keystore_path, KeystoreConfig::development());
-    assert!(matches!(result, Err(KeystoreError::InvalidInput(_))));
+    let mut loaded = Keystore::new_with_config(&keystore_path, KeystoreConfig::development())
+        .expect("unauthenticated load must not hydrate tampered audit records");
+    assert!(matches!(
+        loaded.unlock("strong_password_123"),
+        Err(KeystoreError::InvalidInput(_))
+    ));
 }
 
 #[test]

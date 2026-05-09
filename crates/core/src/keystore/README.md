@@ -152,26 +152,36 @@ match keystore.unlock("wrong_password") {
 
 ## File Format
 
-The keystore file is JSON with this structure:
+The keystore file is strict JSON format version 3. Unknown fields are rejected at every level.
+The file MAC authenticates the canonical file payload, including KDF params, entries, and audit
+records, with only the MAC slot zeroed for the MAC preimage.
+Byte arrays below are shortened for readability.
 
 ```json
 {
-  "version": 1,
-  "keystore_id": "uuid-v4",
-  "salt": "base64-encoded-salt",
-  "verification_hash": "base64-encoded-hash",
+  "version": 3,
+  "kdf_params": {
+    "salt": [0],
+    "memory_kb": 1048576,
+    "iterations": 8,
+    "parallelism": 1
+  },
+  "master_key_verification": [0],
+  "audit_log": [],
   "entries": [
     {
       "id": "uuid-v4",
-      "label": "optional-human-readable-label",
+      "alias": "optional-human-readable-alias",
+      "address": "ethereum-address",
       "key_type": {
         "PrivateKey": null
       },
-      "encrypted_data": "base64-encoded-ciphertext",
-      "nonce": "base64-encoded-nonce",
+      "encrypted_data": [0],
+      "nonce": [0],
       "created_at": "2024-01-15T10:30:00Z"
     }
-  ]
+  ],
+  "file_integrity_mac": [0]
 }
 ```
 

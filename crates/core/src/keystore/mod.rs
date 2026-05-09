@@ -86,16 +86,27 @@ use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 pub use error::KeystoreError;
 
-const KEYSTORE_FILE_VERSION: u8 = 2;
+const KEYSTORE_FILE_VERSION: u8 = 3;
 const FILE_INTEGRITY_CONTEXT: &[u8] = b"mfm_keystore_file_integrity_v1";
 const MNEMONIC_PAYLOAD_VERSION: u8 = 1;
 const DEFAULT_AUTO_LOCK_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+const MIN_KDF_MEMORY_KB: u32 = 64;
+const MIN_KDF_ITERATIONS: u32 = 1;
+const MIN_KDF_PARALLELISM: u32 = 1;
 const MIN_PASSWORD_LEN: usize = 12;
 const MAX_KEYSTORE_SIZE: usize = 10 * 1024 * 1024; // 10MB
 const MIN_KEYSTORE_SIZE: usize = 100; // Minimum JSON structure
 const MAX_ENTRIES: usize = 10_000;
 const MAX_ENTRY_DATA: usize = 1024 * 1024; // 1MiB
 const MAX_AUDIT_LOG_ENTRIES: usize = 4_096;
+const KEYSTORE_FILE_FIELDS: &[&str] = &[
+    "version",
+    "kdf_params",
+    "master_key_verification",
+    "audit_log",
+    "entries",
+    "file_integrity_mac",
+];
 const PASSWORD_REJECT_LIST: &[&str] = &[
     "password",
     "password123",
@@ -164,6 +175,7 @@ impl KeystoreConfig {
 
 /// Key type for different storage formats
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum KeyType {
     /// Raw secp256k1 private key material.
     PrivateKey,
@@ -182,6 +194,7 @@ impl KeyType {
 
 /// Key entry stored in keystore
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct KeyEntry {
     /// Stable identifier for the stored key entry.
     pub id: Uuid,
@@ -229,6 +242,7 @@ impl From<&KeyEntry> for KeyInfo {
 /// Audit events appended to the in-memory and persisted keystore audit log.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 pub enum AuditEvent {
     /// An unlock attempt occurred.
     Unlock,
@@ -270,6 +284,7 @@ pub enum AuditEvent {
 
 /// One persisted audit-log record.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct AuditLogEntry {
     /// UTC timestamp when the event was recorded.
     pub timestamp: DateTime<Utc>,
@@ -281,6 +296,7 @@ pub struct AuditLogEntry {
 
 /// On-disk keystore file format
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct KeystoreFile {
     version: u8,
     kdf_params: ArgonParams,
@@ -292,6 +308,7 @@ struct KeystoreFile {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ArgonParams {
     salt: [u8; 32],
     memory_kb: u32,
@@ -300,11 +317,21 @@ struct ArgonParams {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct MnemonicPayload {
     version: u8,
     mnemonic: String,
     #[serde(default)]
     passphrase: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct KeystoreHeader {
+    version: u8,
+    kdf_params: ArgonParams,
+    master_key_verification: [u8; 32],
+    file_integrity_mac: [u8; 32],
 }
 
 impl MnemonicPayload {
@@ -1055,16 +1082,15 @@ impl Keystore {
 
         // Derive master key with stored parameters
         let master_key = self.derive_master_key(password, kdf_params)?;
+        let verified_file = self.verify_file_integrity(&master_key)?;
 
-        // Verify password by checking stored verification hash
         let computed_verification = self.create_verification_hash(&master_key)?;
-        let stored_verification = self
-            .master_key_verification
-            .ok_or(KeystoreError::InvalidPassword)?;
-
-        if computed_verification.ct_eq(&stored_verification).into() {
-            let verified_file = self.verify_file_integrity(&master_key)?;
-
+        if computed_verification
+            .ct_ne(&verified_file.master_key_verification)
+            .into()
+        {
+            Err(KeystoreError::InvalidPassword)
+        } else {
             self.entries = verified_file.entries;
             self.audit_log = verified_file.audit_log;
             self.kdf_params = Some(verified_file.kdf_params);
@@ -1073,8 +1099,6 @@ impl Keystore {
             self.master_key = Some(master_key);
             self.unlocked_at = Some(Instant::now());
             Ok(())
-        } else {
-            Err(KeystoreError::InvalidPassword)
         }
     }
 
@@ -1083,6 +1107,7 @@ impl Keystore {
         password: &str,
         params: &ArgonParams,
     ) -> Result<Zeroizing<[u8; 32]>, KeystoreError> {
+        self.validate_kdf_params(params)?;
         let argon2_params = Params::new(
             params.memory_kb,
             params.iterations,
@@ -1200,13 +1225,12 @@ impl Keystore {
             entries: self.entries.clone(),
             file_integrity_mac: [0u8; 32], // Placeholder MAC
         };
+        self.validate_keystore_shape(&keystore_file_without_mac)?;
 
-        // Serialize to get canonical byte representation
-        let json_data_without_mac = serde_json::to_string_pretty(&keystore_file_without_mac)?;
+        let mac_preimage = Self::canonical_file_mac_preimage_from_file(&keystore_file_without_mac)?;
 
-        // Compute MAC over the canonical serialized data (excluding the placeholder MAC)
-        let file_integrity_mac =
-            self.compute_file_integrity_mac(master_key, json_data_without_mac.as_bytes())?;
+        // Compute MAC over the canonical serialized data with the MAC slot zeroed.
+        let file_integrity_mac = self.compute_file_integrity_mac(master_key, &mac_preimage)?;
 
         // Create final keystore file with the computed MAC
         let keystore_file = KeystoreFile {
@@ -1219,7 +1243,7 @@ impl Keystore {
         };
         self.validate_keystore_shape(&keystore_file)?;
 
-        let json_data = serde_json::to_vec_pretty(&keystore_file)?;
+        let json_data = serde_json::to_vec(&keystore_file)?;
         self.atomic_write_keystore_file(&parent, &json_data)?;
         self.file_integrity_mac = Some(file_integrity_mac);
 
@@ -1231,20 +1255,12 @@ impl Keystore {
         self.ensure_parent_directory_safe()?;
         self.early_file_validation()?;
 
-        let data = fs::read(&self.path)?;
-        let keystore_file: KeystoreFile = serde_json::from_slice(&data)?;
+        let value = self.read_keystore_file_value()?;
+        let header = self.parse_bounded_header(&value)?;
 
-        if keystore_file.version != KEYSTORE_FILE_VERSION {
-            return Err(KeystoreError::InvalidInput(format!(
-                "Unsupported keystore version: {}",
-                keystore_file.version
-            )));
-        }
-        self.validate_keystore_shape(&keystore_file)?;
-
-        self.kdf_params = Some(keystore_file.kdf_params);
-        self.master_key_verification = Some(keystore_file.master_key_verification);
-        self.file_integrity_mac = Some(keystore_file.file_integrity_mac);
+        self.kdf_params = Some(header.kdf_params);
+        self.master_key_verification = Some(header.master_key_verification);
+        self.file_integrity_mac = Some(header.file_integrity_mac);
         self.entries.clear();
         self.audit_log.clear();
         self.master_key = None;
@@ -1263,9 +1279,55 @@ impl Keystore {
         self.ensure_target_path_is_safe()?;
         self.ensure_parent_directory_safe()?;
 
+        let value = self.read_keystore_file_value()?;
+        self.parse_bounded_header(&value)?;
+
+        Ok(())
+    }
+
+    fn verify_file_integrity(&self, master_key: &[u8; 32]) -> Result<KeystoreFile, KeystoreError> {
+        self.ensure_target_path_is_safe()?;
+        self.ensure_parent_directory_safe()?;
+
+        let value = self.read_keystore_file_value()?;
+        let header = self.parse_bounded_header(&value)?;
+
+        if let Some(expected_mac) = self.file_integrity_mac {
+            if expected_mac.ct_ne(&header.file_integrity_mac).into() {
+                return Err(KeystoreError::InvalidInput(
+                    "Concurrent modification detected while unlocking keystore".to_string(),
+                ));
+            }
+        }
+        let stored_mac = header.file_integrity_mac;
+        let mac_preimage = Self::canonical_file_mac_preimage_from_value(value.clone())?;
+        let computed_mac = self.compute_file_integrity_mac(master_key, &mac_preimage)?;
+
+        // Constant-time comparison to prevent timing attacks
+        if computed_mac.ct_ne(&stored_mac).into() {
+            return Err(KeystoreError::InvalidInput(
+                "File integrity verification failed - keystore may have been tampered with"
+                    .to_string(),
+            ));
+        }
+
+        let keystore_file: KeystoreFile = serde_json::from_value(value).map_err(|_| {
+            KeystoreError::InvalidInput(
+                "Malformed authenticated keystore payload - likely corrupted".to_string(),
+            )
+        })?;
+        self.validate_keystore_shape(&keystore_file)?;
+
+        Ok(keystore_file)
+    }
+
+    fn read_keystore_file_value(&self) -> Result<serde_json::Value, KeystoreError> {
         let data = fs::read(&self.path)
             .map_err(|_| KeystoreError::InvalidInput("Cannot read keystore file".to_string()))?;
+        Self::parse_keystore_file_value(&data)
+    }
 
+    fn parse_keystore_file_value(data: &[u8]) -> Result<serde_json::Value, KeystoreError> {
         if data.len() > MAX_KEYSTORE_SIZE {
             return Err(KeystoreError::InvalidInput(
                 "Keystore file too large - possible DoS attempt".to_string(),
@@ -1278,72 +1340,113 @@ impl Keystore {
             ));
         }
 
-        // Parse JSON structure to ensure it's valid
-        let keystore_file: KeystoreFile = serde_json::from_slice(&data).map_err(|_| {
+        let value: serde_json::Value = serde_json::from_slice(data).map_err(|_| {
             KeystoreError::InvalidInput("Malformed keystore file - invalid JSON".to_string())
         })?;
+        Self::validate_top_level_file_shape(&value)?;
+        Ok(value)
+    }
 
-        // Basic structure validation
-        if keystore_file.version != KEYSTORE_FILE_VERSION {
+    fn validate_top_level_file_shape(
+        value: &serde_json::Value,
+    ) -> Result<&serde_json::Map<String, serde_json::Value>, KeystoreError> {
+        let object = value.as_object().ok_or_else(|| {
+            KeystoreError::InvalidInput("Keystore file must be a JSON object".to_string())
+        })?;
+
+        for key in object.keys() {
+            if !KEYSTORE_FILE_FIELDS.contains(&key.as_str()) {
+                return Err(KeystoreError::InvalidInput(format!(
+                    "Unknown keystore file field: {key}"
+                )));
+            }
+        }
+
+        for key in KEYSTORE_FILE_FIELDS {
+            if !object.contains_key(*key) {
+                return Err(KeystoreError::InvalidInput(format!(
+                    "Missing keystore file field: {key}"
+                )));
+            }
+        }
+
+        Ok(object)
+    }
+
+    fn parse_bounded_header(
+        &self,
+        value: &serde_json::Value,
+    ) -> Result<KeystoreHeader, KeystoreError> {
+        let object = Self::validate_top_level_file_shape(value)?;
+        let header_value = serde_json::json!({
+            "version": object.get("version").cloned().unwrap_or(serde_json::Value::Null),
+            "kdf_params": object.get("kdf_params").cloned().unwrap_or(serde_json::Value::Null),
+            "master_key_verification": object
+                .get("master_key_verification")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+            "file_integrity_mac": object
+                .get("file_integrity_mac")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+        });
+        let header: KeystoreHeader = serde_json::from_value(header_value).map_err(|_| {
+            KeystoreError::InvalidInput(
+                "Malformed keystore header - invalid KDF or MAC fields".to_string(),
+            )
+        })?;
+
+        if header.version != KEYSTORE_FILE_VERSION {
             return Err(KeystoreError::InvalidInput(format!(
                 "Unsupported keystore version: {}",
-                keystore_file.version
+                header.version
             )));
         }
-        self.validate_keystore_shape(&keystore_file)?;
+        self.validate_kdf_params(&header.kdf_params)?;
+        Ok(header)
+    }
 
+    fn validate_kdf_params(&self, params: &ArgonParams) -> Result<(), KeystoreError> {
+        if params.memory_kb < MIN_KDF_MEMORY_KB || params.memory_kb > self.config.argon2_memory_kb {
+            return Err(KeystoreError::InvalidInput(
+                "KDF memory cost out of bounds".to_string(),
+            ));
+        }
+        if params.iterations < MIN_KDF_ITERATIONS
+            || params.iterations > self.config.argon2_iterations
+        {
+            return Err(KeystoreError::InvalidInput(
+                "KDF iteration count out of bounds".to_string(),
+            ));
+        }
+        if params.parallelism < MIN_KDF_PARALLELISM
+            || params.parallelism > self.config.argon2_parallelism
+        {
+            return Err(KeystoreError::InvalidInput(
+                "KDF parallelism out of bounds".to_string(),
+            ));
+        }
         Ok(())
     }
 
-    fn verify_file_integrity(&self, master_key: &[u8; 32]) -> Result<KeystoreFile, KeystoreError> {
-        self.ensure_target_path_is_safe()?;
-        self.ensure_parent_directory_safe()?;
+    fn canonical_file_mac_preimage_from_file(
+        keystore_file: &KeystoreFile,
+    ) -> Result<Vec<u8>, KeystoreError> {
+        let value = serde_json::to_value(keystore_file)?;
+        Self::canonical_file_mac_preimage_from_value(value)
+    }
 
-        // Read the file again for verification
-        let data = fs::read(&self.path)?;
-
-        // Parse to extract the data without the MAC for verification
-        let keystore_file: KeystoreFile = serde_json::from_slice(&data)?;
-        if keystore_file.version != KEYSTORE_FILE_VERSION {
-            return Err(KeystoreError::InvalidInput(format!(
-                "Unsupported keystore version: {}",
-                keystore_file.version
-            )));
-        }
-        self.validate_keystore_shape(&keystore_file)?;
-
-        if let Some(expected_mac) = self.file_integrity_mac {
-            if expected_mac.ct_ne(&keystore_file.file_integrity_mac).into() {
-                return Err(KeystoreError::InvalidInput(
-                    "Concurrent modification detected while unlocking keystore".to_string(),
-                ));
-            }
-        }
-        let stored_mac = keystore_file.file_integrity_mac;
-
-        // Create the same structure used during save (with placeholder MAC)
-        let keystore_file_without_mac = KeystoreFile {
-            version: keystore_file.version,
-            kdf_params: keystore_file.kdf_params.clone(),
-            master_key_verification: keystore_file.master_key_verification,
-            audit_log: keystore_file.audit_log.clone(),
-            entries: keystore_file.entries.clone(),
-            file_integrity_mac: [0u8; 32], // Same placeholder used during save
-        };
-
-        let json_data_without_mac = serde_json::to_string_pretty(&keystore_file_without_mac)?;
-        let computed_mac =
-            self.compute_file_integrity_mac(master_key, json_data_without_mac.as_bytes())?;
-
-        // Constant-time comparison to prevent timing attacks
-        if computed_mac.ct_ne(&stored_mac).into() {
-            return Err(KeystoreError::InvalidInput(
-                "File integrity verification failed - keystore may have been tampered with"
-                    .to_string(),
-            ));
-        }
-
-        Ok(keystore_file)
+    fn canonical_file_mac_preimage_from_value(
+        mut value: serde_json::Value,
+    ) -> Result<Vec<u8>, KeystoreError> {
+        let object = value.as_object_mut().ok_or_else(|| {
+            KeystoreError::InvalidInput("Keystore file must be a JSON object".to_string())
+        })?;
+        object.insert(
+            "file_integrity_mac".to_string(),
+            serde_json::to_value([0u8; 32])?,
+        );
+        serde_json::to_vec(&value).map_err(KeystoreError::from)
     }
 
     fn ensure_target_path_is_safe(&self) -> Result<(), KeystoreError> {
