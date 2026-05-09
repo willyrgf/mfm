@@ -86,6 +86,10 @@ impl IoProvider for FixedIo {
     async fn random_bytes(&mut self, n: usize) -> Result<Vec<u8>, IoError> {
         Ok(vec![0u8; n])
     }
+
+    async fn sleep_ms(&mut self, _duration_ms: u64) -> Result<(), IoError> {
+        Ok(())
+    }
 }
 
 struct NoopRecorder;

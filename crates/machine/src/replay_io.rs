@@ -194,6 +194,10 @@ impl IoProvider for ReplayIo {
         }
         Ok(bytes)
     }
+
+    async fn sleep_ms(&mut self, _duration_ms: u64) -> Result<(), IoError> {
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -293,5 +297,23 @@ mod tests {
             IoError::MissingFact { info, .. } => assert!(info.retryable),
             other => panic!("expected MissingFact, got: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn replay_sleep_is_a_noop_without_fact_lookup() {
+        let artifacts = Arc::new(MemArtifactStore::default());
+        let facts = FactIndex::default();
+        let mut io = ReplayIo::new(
+            RunId(uuid::Uuid::new_v4()),
+            StateId::must_new("machine.main.sleep".to_string()),
+            0,
+            artifacts,
+            facts,
+            true,
+        );
+
+        io.sleep_ms(60_000)
+            .await
+            .expect("replay sleep should not require recorded facts");
     }
 }

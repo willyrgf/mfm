@@ -245,6 +245,13 @@ impl IoProvider for AttemptIo {
             AttemptIo::Replay(io) => io.random_bytes(n).await,
         }
     }
+
+    async fn sleep_ms(&mut self, duration_ms: u64) -> Result<(), IoError> {
+        match self {
+            AttemptIo::Live(io) => io.sleep_ms(duration_ms).await,
+            AttemptIo::Replay(io) => io.sleep_ms(duration_ms).await,
+        }
+    }
 }
 
 enum HandlerResult {

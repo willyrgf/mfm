@@ -243,6 +243,10 @@ mod tests {
         async fn random_bytes(&mut self, _n: usize) -> Result<Vec<u8>, IoError> {
             Ok(Vec::new())
         }
+
+        async fn sleep_ms(&mut self, _duration_ms: u64) -> Result<(), IoError> {
+            Ok(())
+        }
     }
 
     #[test]

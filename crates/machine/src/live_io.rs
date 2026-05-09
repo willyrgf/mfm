@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use rand::TryRngCore;
@@ -427,6 +427,11 @@ impl IoProvider for LiveIo {
         let key = self.derived_fact_key("random_bytes");
         let (got, _payload_id) = self.record_fact_bytes(key, bytes).await?;
         Ok(got)
+    }
+
+    async fn sleep_ms(&mut self, duration_ms: u64) -> Result<(), IoError> {
+        tokio::time::sleep(Duration::from_millis(duration_ms)).await;
+        Ok(())
     }
 }
 

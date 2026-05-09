@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use mfm_collectors_rpc_control::{EvmIoClient, JsonRpcCall, DEFAULT_CONTROL_SCOPE};
 use mfm_machine::errors::{ErrorCategory, StateError};
 use mfm_machine::ids::{FactKey, StateId};
@@ -653,32 +651,36 @@ pub async fn wait_for_receipt_for_network(
     } else {
         control_scope
     };
-    let mut client = EvmIoClient::new(state_id.clone(), io)
-        .with_default_control_scope(effective_scope.to_string());
 
     for poll_index in 0..max_receipt_polls {
-        let res = client
-            .call_with_fact_key(
-                managed_call(
-                    network_id,
-                    effective_scope,
-                    "eth_getTransactionReceipt",
-                    serde_json::json!([normalized_tx.clone()]),
-                ),
-                receipt_poll_fact_key(
-                    state_id,
-                    effective_scope,
-                    network_id,
-                    poll_index,
-                    &normalized_tx,
-                ),
-            )
-            .await
-            .map_err(op_errors::state_from_io)?;
+        let res = {
+            let mut client = EvmIoClient::new(state_id.clone(), io)
+                .with_default_control_scope(effective_scope.to_string());
+            client
+                .call_with_fact_key(
+                    managed_call(
+                        network_id,
+                        effective_scope,
+                        "eth_getTransactionReceipt",
+                        serde_json::json!([normalized_tx.clone()]),
+                    ),
+                    receipt_poll_fact_key(
+                        state_id,
+                        effective_scope,
+                        network_id,
+                        poll_index,
+                        &normalized_tx,
+                    ),
+                )
+                .await
+                .map_err(op_errors::state_from_io)?
+        };
         if !res.response.is_null() {
             return Ok(res.response);
         }
-        tokio::time::sleep(Duration::from_millis(poll_interval_ms)).await;
+        io.sleep_ms(poll_interval_ms)
+            .await
+            .map_err(op_errors::state_from_io)?;
     }
 
     Err(op_errors::state_unknown(
@@ -888,6 +890,7 @@ mod tests {
     struct FixedIo {
         calls: Vec<IoCall>,
         responses: Vec<Value>,
+        slept_ms: Vec<u64>,
     }
 
     #[async_trait]
@@ -927,6 +930,11 @@ mod tests {
         async fn random_bytes(&mut self, n: usize) -> Result<Vec<u8>, IoError> {
             Ok(vec![0_u8; n])
         }
+
+        async fn sleep_ms(&mut self, duration_ms: u64) -> Result<(), IoError> {
+            self.slept_ms.push(duration_ms);
+            Ok(())
+        }
     }
 
     #[test]
@@ -949,6 +957,7 @@ mod tests {
         let mut io = FixedIo {
             calls: Vec::new(),
             responses: vec![Value::Null, serde_json::json!({ "status": "0x1" })],
+            slept_ms: Vec::new(),
         };
 
         let receipt = wait_for_receipt_for_network(
@@ -957,7 +966,7 @@ mod tests {
             "ethereum-mainnet",
             "",
             "0x1234",
-            0,
+            25,
             2,
         )
         .await
@@ -995,5 +1004,6 @@ mod tests {
                 "0x1234",
             ))
         );
+        assert_eq!(io.slept_ms, vec![25]);
     }
 }

@@ -1416,6 +1416,12 @@ pub mod io {
 
         /// Random bytes. If used in reproducible paths, implementations MUST record as facts.
         async fn random_bytes(&mut self, n: usize) -> Result<Vec<u8>, IoError>;
+
+        /// Delay state execution by the requested number of milliseconds.
+        ///
+        /// Live providers may sleep. Replay providers MUST return without delaying so replay does
+        /// not depend on wall-clock time.
+        async fn sleep_ms(&mut self, duration_ms: u64) -> Result<(), IoError>;
     }
 }
 
