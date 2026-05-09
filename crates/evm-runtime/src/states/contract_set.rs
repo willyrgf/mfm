@@ -119,6 +119,15 @@ pub fn validate_deploy_contract_set_config(
     if cfg.max_receipt_polls == 0 {
         return Err("max_receipt_polls must be > 0".to_string());
     }
+    if cfg
+        .signing_key_env
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or("")
+        .is_empty()
+    {
+        return Err("signing_key_env is required for signed contract-set deploys".to_string());
+    }
     Ok(())
 }
 
@@ -224,30 +233,29 @@ impl State for DeployContractSetState {
         _rec: &mut dyn EventRecorder,
     ) -> Result<StateOutcome, StateError> {
         let manifest = read_compiled_contract_set(ctx)?;
-        let signing_key_env = self.cfg.signing_key_env.as_deref();
+        let signing_key_env = self.cfg.signing_key_env.as_deref().ok_or_else(|| {
+            op_errors::state_unknown(
+                "evm_signed_transaction_required",
+                "contract-set deploy requires signing_key_env for durable signed transaction intent recording",
+            )
+        })?;
         let deployer = evm_rpc::resolve_deployer_address_for_network(
             io,
             &self.state_id,
             &self.cfg.network_id,
             &self.cfg.control_scope,
             self.cfg.deployer_account_index,
-            signing_key_env,
+            Some(signing_key_env),
         )
         .await?;
-        let mut next_nonce = if signing_key_env.is_some() {
-            Some(
-                evm_rpc::pending_nonce_u128_for_network(
-                    io,
-                    &self.state_id,
-                    &self.cfg.network_id,
-                    &self.cfg.control_scope,
-                    &deployer,
-                )
-                .await?,
-            )
-        } else {
-            None
-        };
+        let mut next_nonce = evm_rpc::pending_nonce_u128_for_network(
+            io,
+            &self.state_id,
+            &self.cfg.network_id,
+            &self.cfg.control_scope,
+            &deployer,
+        )
+        .await?;
 
         let mut pending = Vec::with_capacity(manifest.contracts.len());
         for contract in manifest.contracts {
@@ -266,44 +274,36 @@ impl State for DeployContractSetState {
                         )
                     },
                 )?;
-            let tx_hash = if let Some(env_name) = signing_key_env {
-                let nonce = next_nonce.as_mut().expect("nonce initialized");
-                let nonce_hex = format!("0x{:x}", *nonce);
+            let contract_id = contract.id;
+            let nonce_hex = format!("0x{next_nonce:x}");
+            let logical_tx_id = format!("contract_set:{contract_id}");
+            let intent = {
                 let mut client = EvmIoClient::new(self.state_id.clone(), io);
-                let tx_hash = evm_rpc::send_signed_create_transaction_with_nonce_for_network(
+                evm_rpc::prepare_signed_create_intent_for_network(
                     &mut client,
                     &self.cfg.network_id,
                     &self.cfg.control_scope,
-                    env_name,
+                    &logical_tx_id,
+                    signing_key_env,
                     &deployer,
                     &nonce_hex,
                     &constructor_payload,
                     None,
                 )
-                .await?;
-                *nonce = nonce.checked_add(1).ok_or_else(|| {
-                    op_errors::state_unknown(
-                        "evm_response_invalid",
-                        "nonce overflow while preparing signed deployment transactions",
-                    )
-                })?;
-                tx_hash
-            } else {
-                let mut client = EvmIoClient::new(self.state_id.clone(), io);
-                evm_rpc::send_transaction_for_network(
-                    &mut client,
-                    &self.cfg.network_id,
-                    &self.cfg.control_scope,
-                    serde_json::json!({
-                        "from": deployer,
-                        "data": shared_dcv::bytes_to_hex_prefixed(&constructor_payload),
-                    }),
-                )
                 .await?
             };
+            evm_rpc::record_tx_intent(io, &self.state_id, &intent).await?;
+            let tx_hash =
+                evm_rpc::broadcast_recorded_tx_intent(io, &self.state_id, &intent).await?;
+            next_nonce = next_nonce.checked_add(1).ok_or_else(|| {
+                op_errors::state_unknown(
+                    "evm_response_invalid",
+                    "nonce overflow while preparing signed deployment transactions",
+                )
+            })?;
 
             pending.push(PendingDeployment {
-                id: contract.id,
+                id: contract_id,
                 tx_hash,
                 artifact: contract.artifact,
             });
@@ -468,6 +468,259 @@ impl State for WriteDeployedContractSetState {
         Ok(StateOutcome {
             snapshot: SnapshotPolicy::OnSuccess,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use mfm_machine::errors::{ErrorCategory, ErrorInfo, IoError};
+    use mfm_machine::ids::{ArtifactId, ErrorCode, FactKey};
+    use mfm_machine::io::{IoCall, IoResult};
+    use mfm_state_common::test_support::MapContext;
+
+    use crate::contract_set::CompiledContractSetEntry;
+
+    fn info(code: &'static str, message: impl Into<String>) -> ErrorInfo {
+        ErrorInfo {
+            code: ErrorCode(code.to_string()),
+            category: ErrorCategory::Unknown,
+            retryable: false,
+            message: message.into(),
+            details: None,
+        }
+    }
+
+    #[derive(Default)]
+    struct TestIo {
+        calls: Vec<IoCall>,
+        recorded_values: Vec<(FactKey, serde_json::Value)>,
+        broadcast_count: usize,
+        fail_on_broadcast_number: Option<usize>,
+    }
+
+    #[async_trait]
+    impl IoProvider for TestIo {
+        async fn call(&mut self, call: IoCall) -> Result<IoResult, IoError> {
+            self.calls.push(call.clone());
+
+            if call.namespace == "local.evm.signer_address" {
+                return Ok(IoResult {
+                    response: serde_json::json!({
+                        "address": "0x1111111111111111111111111111111111111111",
+                    }),
+                    recorded_payload_id: None,
+                });
+            }
+            if call.namespace == "local.evm.sign_legacy_create" {
+                let raw_tx_hex = match call
+                    .request
+                    .get("nonce_hex")
+                    .and_then(serde_json::Value::as_str)
+                {
+                    Some("0x0") => "0x01",
+                    Some("0x1") => "0x02",
+                    _ => "0x03",
+                };
+                return Ok(IoResult {
+                    response: serde_json::json!({ "raw_tx_hex": raw_tx_hex }),
+                    recorded_payload_id: None,
+                });
+            }
+
+            match call.request.get("kind").and_then(serde_json::Value::as_str) {
+                Some("evm_call") => {
+                    let method = call
+                        .request
+                        .get("method")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default();
+                    let response = match method {
+                        "eth_getTransactionCount" => serde_json::json!("0x0"),
+                        "eth_estimateGas" => serde_json::json!("0x5208"),
+                        "eth_gasPrice" => serde_json::json!("0x1"),
+                        "eth_chainId" => serde_json::json!("0x1"),
+                        other => {
+                            return Err(IoError::Other(info(
+                                "unexpected_method",
+                                format!("unexpected method `{other}`"),
+                            )))
+                        }
+                    };
+                    Ok(IoResult {
+                        response,
+                        recorded_payload_id: None,
+                    })
+                }
+                Some("evm_broadcast_raw_transaction") => {
+                    self.broadcast_count += 1;
+                    if self.fail_on_broadcast_number == Some(self.broadcast_count) {
+                        return Err(IoError::Other(info(
+                            "simulated_broadcast_crash",
+                            "simulated crash after prior contract broadcast",
+                        )));
+                    }
+                    Ok(IoResult {
+                        response: serde_json::json!({
+                            "tx_hash": call.request.get("expected_tx_hash").cloned().unwrap_or(serde_json::Value::Null),
+                        }),
+                        recorded_payload_id: None,
+                    })
+                }
+                other => Err(IoError::Other(info(
+                    "unexpected_call_kind",
+                    format!("unexpected call kind `{other:?}`"),
+                ))),
+            }
+        }
+
+        async fn record_value(
+            &mut self,
+            key: FactKey,
+            value: serde_json::Value,
+        ) -> Result<ArtifactId, IoError> {
+            self.recorded_values.push((key, value));
+            Ok(ArtifactId::must_new("0".repeat(64)))
+        }
+
+        async fn get_recorded_fact(
+            &mut self,
+            _key: &FactKey,
+        ) -> Result<Option<ArtifactId>, IoError> {
+            Ok(None)
+        }
+
+        async fn now_millis(&mut self) -> Result<u64, IoError> {
+            Ok(0)
+        }
+
+        async fn random_bytes(&mut self, n: usize) -> Result<Vec<u8>, IoError> {
+            Ok(vec![0; n])
+        }
+
+        async fn sleep_ms(&mut self, _duration_ms: u64) -> Result<(), IoError> {
+            Ok(())
+        }
+    }
+
+    struct NoopRecorder;
+
+    #[async_trait]
+    impl EventRecorder for NoopRecorder {
+        async fn emit(
+            &mut self,
+            _event: mfm_machine::events::DomainEvent,
+        ) -> Result<(), mfm_machine::errors::RunError> {
+            Ok(())
+        }
+
+        async fn emit_many(
+            &mut self,
+            _events: Vec<mfm_machine::events::DomainEvent>,
+        ) -> Result<(), mfm_machine::errors::RunError> {
+            Ok(())
+        }
+    }
+
+    fn artifact() -> shared_dcv::ContractArtifactConfig {
+        serde_json::from_value(serde_json::json!({
+            "abi": [],
+            "bytecode": {
+                "object": "0x6000"
+            }
+        }))
+        .expect("artifact")
+    }
+
+    fn compiled_manifest() -> CompiledContractSetManifest {
+        CompiledContractSetManifest {
+            kind: crate::contract_set::COMPILED_CONTRACT_SET_KIND.to_string(),
+            contracts: vec![
+                CompiledContractSetEntry {
+                    id: "first".to_string(),
+                    artifact: artifact(),
+                    constructor_args: Vec::new(),
+                },
+                CompiledContractSetEntry {
+                    id: "second".to_string(),
+                    artifact: artifact(),
+                    constructor_args: Vec::new(),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn contract_set_deploy_config_requires_signing_key_env() {
+        let err = validate_deploy_contract_set_config(&EvmDeployContractSetStateConfig {
+            network_id: "ethereum-mainnet".to_string(),
+            control_scope: "shared".to_string(),
+            contract_set_port: "contract_set".to_string(),
+            deployer_account_index: 0,
+            signing_key_env: None,
+            poll_interval_ms: 0,
+            max_receipt_polls: 1,
+            deploy_manifest_export_key: "deploy_manifest".to_string(),
+        })
+        .expect_err("unsigned contract-set deploy must be rejected");
+
+        assert!(err.contains("signing_key_env"));
+    }
+
+    #[tokio::test]
+    async fn contract_set_retry_after_first_broadcast_keeps_first_tx_intent_stable() {
+        let mut ctx = MapContext::default();
+        op_ctx::write_json(
+            &mut ctx,
+            ContextKey(KEY_COMPILED_CONTRACT_SET.to_string()),
+            serde_json::to_value(compiled_manifest()).expect("manifest json"),
+        )
+        .expect("write compiled manifest");
+        let state = DeployContractSetState {
+            state_id: StateId::must_new("evm.contract_set.deploy".to_string()),
+            cfg: EvmDeployContractSetStateConfig {
+                network_id: "ethereum-mainnet".to_string(),
+                control_scope: "shared".to_string(),
+                contract_set_port: "contract_set".to_string(),
+                deployer_account_index: 0,
+                signing_key_env: Some("MFM_DEPLOYER_KEY".to_string()),
+                poll_interval_ms: 0,
+                max_receipt_polls: 1,
+                deploy_manifest_export_key: "deploy_manifest".to_string(),
+            },
+        };
+        let mut io = TestIo {
+            fail_on_broadcast_number: Some(2),
+            ..TestIo::default()
+        };
+        let mut rec = NoopRecorder;
+
+        let err = state
+            .handle(&mut ctx, &mut io, &mut rec)
+            .await
+            .expect_err("second broadcast simulates a crash");
+        assert_eq!(err.info.code.0, "simulated_broadcast_crash");
+        let first_attempt_first_intent = io
+            .recorded_values
+            .first()
+            .expect("first intent recorded")
+            .1
+            .clone();
+
+        io.fail_on_broadcast_number = None;
+        state
+            .handle(&mut ctx, &mut io, &mut rec)
+            .await
+            .expect("retry should complete");
+        let retry_first_intent = io
+            .recorded_values
+            .get(2)
+            .expect("first retry intent recorded")
+            .1
+            .clone();
+
+        assert_eq!(first_attempt_first_intent, retry_first_intent);
     }
 }
 

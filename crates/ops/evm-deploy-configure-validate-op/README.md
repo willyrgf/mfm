@@ -16,3 +16,7 @@ the existing `evm_deploy`, `evm_configure`, and `evm_validate` child graphs.
 
 `evm_deploy_configure_validate` accepts canonical config and composes the config-build step before
 the strict execute root.
+
+Deploy and configure phases require `signing_key_env`. The execution graph rejects node-managed
+unsigned transaction submission because write states must record durable signed transaction intents
+before broadcasting.

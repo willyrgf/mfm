@@ -21,3 +21,5 @@ pub mod dcv;
 pub mod rpc;
 /// Reusable EVM read and write state implementations.
 pub mod states;
+/// Durable EVM transaction intent records.
+pub mod tx_intent;

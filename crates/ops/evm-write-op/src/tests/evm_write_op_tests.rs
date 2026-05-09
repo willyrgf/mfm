@@ -97,7 +97,8 @@ fn deploy_io_exports_contract_address() {
             &serde_json::json!({
             "artifact": sample_artifact(),
             "network_id": "ethereum-mainnet",
-            "from": "0x1111111111111111111111111111111111111111"
+            "from": "0x1111111111111111111111111111111111111111",
+            "signing_key_env": "MFM_DEPLOYER_KEY"
             }),
             &op_test_support::run_config_live(),
         )
@@ -118,7 +119,8 @@ fn deploy_io_imports_artifact_port_when_artifact_is_unset() {
             &serde_json::json!({
             "artifact_port": "contract_artifact",
             "network_id": "ethereum-mainnet",
-            "from": "0x1111111111111111111111111111111111111111"
+            "from": "0x1111111111111111111111111111111111111111",
+            "signing_key_env": "MFM_DEPLOYER_KEY"
             }),
             &op_test_support::run_config_live(),
         )
@@ -140,6 +142,7 @@ fn configure_io_imports_contract_address_when_unset() {
             "artifact": sample_artifact(),
             "network_id": "ethereum-mainnet",
             "from": "0x1111111111111111111111111111111111111111",
+            "signing_key_env": "MFM_DEPLOYER_KEY",
             "calls": [{"function":"setValue","args":[1]}]
             }),
             &op_test_support::run_config_live(),
@@ -163,6 +166,7 @@ fn configure_io_exports_custom_keys_when_overridden() {
                 "artifact": sample_artifact(),
                 "network_id": "ethereum-mainnet",
                 "from": "0x1111111111111111111111111111111111111111",
+                "signing_key_env": "MFM_DEPLOYER_KEY",
                 "calls": [{"function":"setValue","args":[1]}],
                 "tx_hashes_export_key": "approve_tx_hashes",
                 "receipts_export_key": "approve_receipts"
@@ -180,6 +184,47 @@ fn configure_io_exports_custom_keys_when_overridden() {
         .exports
         .iter()
         .any(|k| k.0.as_str() == "approve_receipts"));
+}
+
+#[test]
+fn deploy_rejects_node_managed_unsigned_config() {
+    let op = EvmDeployOp;
+    let err = match op.expand(
+        OpPath("m.main".to_string()),
+        &serde_json::json!({
+            "artifact": sample_artifact(),
+            "network_id": "ethereum-mainnet",
+            "from": "0x1111111111111111111111111111111111111111"
+        }),
+        &op_test_support::run_config_live(),
+    ) {
+        Ok(_) => panic!("unsigned deploy config must be rejected"),
+        Err(err) => err,
+    };
+
+    assert_eq!(err.info.code.0, "invalid_op_config");
+    assert!(err.info.message.contains("signing_key_env is required"));
+}
+
+#[test]
+fn configure_rejects_node_managed_unsigned_config() {
+    let op = EvmConfigureOp;
+    let err = match op.expand(
+        OpPath("m.main".to_string()),
+        &serde_json::json!({
+            "artifact": sample_artifact(),
+            "network_id": "ethereum-mainnet",
+            "from": "0x1111111111111111111111111111111111111111",
+            "calls": [{"function":"setValue","args":[1]}]
+        }),
+        &op_test_support::run_config_live(),
+    ) {
+        Ok(_) => panic!("unsigned configure config must be rejected"),
+        Err(err) => err,
+    };
+
+    assert_eq!(err.info.code.0, "invalid_op_config");
+    assert!(err.info.message.contains("signing_key_env is required"));
 }
 
 #[test]

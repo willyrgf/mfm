@@ -467,11 +467,13 @@ mod tests {
         serde_json::json!({
             "deploy": {
                 "network_id": "ethereum-mainnet",
-                "from": "0x000000000000000000000000000000000000dead"
+                "from": "0x000000000000000000000000000000000000dead",
+                "signing_key_env": "MFM_DEPLOYER_KEY"
             },
             "configure": {
                 "network_id": "ethereum-mainnet",
                 "from": "0x000000000000000000000000000000000000dead",
+                "signing_key_env": "MFM_DEPLOYER_KEY",
                 "calls": [
                     {"function": "noop", "args": []}
                 ]

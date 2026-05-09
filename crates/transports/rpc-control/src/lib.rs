@@ -30,8 +30,8 @@ use mfm_collectors_evm_jsonrpc_http::{
     EvmSourceKind,
 };
 use mfm_collectors_rpc_control::{
-    parse_u64_hex_value, PrepareSourcesResponse, PreparedSourceSummary, RpcControlRequest,
-    NAMESPACE_RPC_CONTROL,
+    parse_u64_hex_value, EvmBroadcastRawTransactionResponse, PrepareSourcesResponse,
+    PreparedSourceSummary, RpcControlRequest, NAMESPACE_RPC_CONTROL,
 };
 use mfm_control_plane_postgres::{
     rebuild_rpc_source_state, rebuild_source_pool_state, ControlPlanePostgresStore,
@@ -187,6 +187,66 @@ fn io_error_code(err: &IoError) -> String {
         | IoError::Other(info) => info.code.0.clone(),
         IoError::MissingFact { info, .. } => info.code.0.clone(),
     }
+}
+
+fn io_error_details(err: &IoError) -> Option<&serde_json::Value> {
+    match err {
+        IoError::MissingFactKey(info)
+        | IoError::Transport(info)
+        | IoError::RateLimited(info)
+        | IoError::Other(info) => info.details.as_ref(),
+        IoError::MissingFact { info, .. } => info.details.as_ref(),
+    }
+}
+
+fn jsonrpc_error_message(err: &IoError) -> Option<String> {
+    io_error_details(err)?
+        .get("jsonrpc_error_message")
+        .and_then(|value| value.as_str())
+        .map(|value| value.to_ascii_lowercase())
+}
+
+fn normalize_tx_hash(raw: &str) -> Result<String, IoError> {
+    let trimmed = raw.trim();
+    let Some(rest) = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+    else {
+        return Err(io_transport(
+            "evm_tx_hash_invalid",
+            ErrorCategory::ParsingInput,
+            false,
+            "transaction hash must be 0x-prefixed hex",
+        ));
+    };
+    if rest.len() != 64 || !rest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(io_transport(
+            "evm_tx_hash_invalid",
+            ErrorCategory::ParsingInput,
+            false,
+            "transaction hash must be exactly 32 bytes",
+        ));
+    }
+    Ok(format!("0x{}", rest.to_ascii_lowercase()))
+}
+
+fn is_already_known_error(err: &IoError) -> bool {
+    let Some(message) = jsonrpc_error_message(err) else {
+        return false;
+    };
+    message.contains("already known")
+        || message.contains("already imported")
+        || message.contains("known transaction")
+        || message.contains("transaction already")
+}
+
+fn is_nonce_too_low_error(err: &IoError) -> bool {
+    let Some(message) = jsonrpc_error_message(err) else {
+        return false;
+    };
+    message.contains("nonce too low")
+        || message.contains("nonce has already been used")
+        || message.contains("already used")
 }
 
 fn now_ms() -> Result<u64, IoError> {
@@ -1542,6 +1602,17 @@ impl RpcControlTransport {
         &mut self,
         managed_call: mfm_collectors_rpc_control::JsonRpcCall,
     ) -> Result<serde_json::Value, IoError> {
+        if matches!(
+            managed_call.method.as_str(),
+            "eth_sendTransaction" | "eth_sendRawTransaction"
+        ) {
+            return Err(io_transport(
+                "evm_tx_intent_required",
+                ErrorCategory::Rpc,
+                false,
+                "EVM write methods require a typed signed transaction intent broadcast",
+            ));
+        }
         let requested_network_id = managed_call.network_id.as_deref();
         let network_scope = self.resolve_network_scope(requested_network_id)?;
         let source_id = self
@@ -1582,6 +1653,181 @@ impl RpcControlTransport {
                 Err(err)
             }
         }
+    }
+
+    async fn execute_inner_observed(
+        &mut self,
+        control_scope: &str,
+        network_scope: &str,
+        source_id: &str,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, IoError> {
+        let start = Instant::now();
+        let result = self.execute_inner(source_id, method, params).await;
+        let latency_ms = start.elapsed().as_millis() as u64;
+        match &result {
+            Ok(response) => {
+                self.append_runtime_observation(
+                    control_scope,
+                    network_scope,
+                    source_id,
+                    method,
+                    Ok((response, latency_ms)),
+                )
+                .await;
+            }
+            Err(err) => {
+                self.append_runtime_observation(
+                    control_scope,
+                    network_scope,
+                    source_id,
+                    method,
+                    Err((err, latency_ms)),
+                )
+                .await;
+            }
+        }
+        result
+    }
+
+    async fn expected_tx_has_receipt(
+        &mut self,
+        control_scope: &str,
+        network_scope: &str,
+        source_id: &str,
+        expected_tx_hash: &str,
+    ) -> Result<bool, IoError> {
+        let receipt = self
+            .execute_inner_observed(
+                control_scope,
+                network_scope,
+                source_id,
+                "eth_getTransactionReceipt",
+                serde_json::json!([expected_tx_hash]),
+            )
+            .await?;
+        Ok(!receipt.is_null())
+    }
+
+    async fn expected_tx_is_pending_or_mined(
+        &mut self,
+        control_scope: &str,
+        network_scope: &str,
+        source_id: &str,
+        expected_tx_hash: &str,
+    ) -> Result<bool, IoError> {
+        if self
+            .expected_tx_has_receipt(control_scope, network_scope, source_id, expected_tx_hash)
+            .await?
+        {
+            return Ok(true);
+        }
+
+        let tx = self
+            .execute_inner_observed(
+                control_scope,
+                network_scope,
+                source_id,
+                "eth_getTransactionByHash",
+                serde_json::json!([expected_tx_hash]),
+            )
+            .await?;
+        Ok(!tx.is_null())
+    }
+
+    async fn handle_evm_broadcast_raw_transaction(
+        &mut self,
+        control_scope: &str,
+        network_id: &str,
+        raw_tx_hex: &str,
+        expected_tx_hash: &str,
+    ) -> Result<serde_json::Value, IoError> {
+        let network_scope = self.resolve_network_scope(Some(network_id))?;
+        let expected_tx_hash = normalize_tx_hash(expected_tx_hash)?;
+        let source_id = self
+            .select_managed_source(control_scope, &network_scope)
+            .await?;
+
+        match self
+            .execute_inner_observed(
+                control_scope,
+                &network_scope,
+                &source_id,
+                "eth_sendRawTransaction",
+                serde_json::json!([raw_tx_hex]),
+            )
+            .await
+        {
+            Ok(response) => {
+                let observed = response.as_str().ok_or_else(|| {
+                    io_transport(
+                        "evm_broadcast_response_invalid",
+                        ErrorCategory::ParsingInput,
+                        false,
+                        "eth_sendRawTransaction returned non-string tx hash",
+                    )
+                })?;
+                let observed = normalize_tx_hash(observed)?;
+                if observed != expected_tx_hash {
+                    return Err(io_transport(
+                        "evm_broadcast_hash_mismatch",
+                        ErrorCategory::Rpc,
+                        false,
+                        "eth_sendRawTransaction returned a different transaction hash",
+                    ));
+                }
+            }
+            Err(err) if is_already_known_error(&err) => {
+                if !self
+                    .expected_tx_is_pending_or_mined(
+                        control_scope,
+                        &network_scope,
+                        &source_id,
+                        &expected_tx_hash,
+                    )
+                    .await?
+                {
+                    return Err(io_transport(
+                        "evm_broadcast_duplicate_unverified",
+                        ErrorCategory::Rpc,
+                        true,
+                        "duplicate transaction response could not be verified against expected hash",
+                    ));
+                }
+            }
+            Err(err) if is_nonce_too_low_error(&err) => {
+                if !self
+                    .expected_tx_has_receipt(
+                        control_scope,
+                        &network_scope,
+                        &source_id,
+                        &expected_tx_hash,
+                    )
+                    .await?
+                {
+                    return Err(io_transport(
+                        "evm_broadcast_nonce_too_low_unverified",
+                        ErrorCategory::Rpc,
+                        false,
+                        "nonce-too-low response did not have a receipt for the expected hash",
+                    ));
+                }
+            }
+            Err(err) => return Err(err),
+        }
+
+        serde_json::to_value(EvmBroadcastRawTransactionResponse {
+            tx_hash: expected_tx_hash,
+        })
+        .map_err(|_| {
+            io_transport(
+                "rpc_control_response_invalid",
+                ErrorCategory::ParsingInput,
+                false,
+                "failed to encode raw transaction broadcast response",
+            )
+        })
     }
 
     fn ensure_btc_client(&mut self) -> Result<&mut BtcJsonRpcClient, IoError> {
@@ -1736,6 +1982,20 @@ impl LiveIoTransport for RpcControlTransport {
 
         match request {
             RpcControlRequest::EvmCall { call } => self.handle_evm_call(call).await,
+            RpcControlRequest::EvmBroadcastRawTransaction {
+                control_scope,
+                network_id,
+                raw_tx_hex,
+                expected_tx_hash,
+            } => {
+                self.handle_evm_broadcast_raw_transaction(
+                    &control_scope,
+                    &network_id,
+                    &raw_tx_hex,
+                    &expected_tx_hash,
+                )
+                .await
+            }
             RpcControlRequest::PrepareSources {
                 control_scope,
                 network_id,
@@ -1765,6 +2025,7 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::Mutex as StdMutex;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
     use tokio::sync::oneshot;
@@ -1784,6 +2045,77 @@ mod tests {
             match method {
                 "eth_blockNumber" => Ok(serde_json::json!("0x1")),
                 "eth_getProof" => Ok(serde_json::json!({"accountProof": []})),
+                other => Err(io_transport(
+                    "stub_executor_unsupported",
+                    ErrorCategory::Unknown,
+                    false,
+                    format!("stub executor does not support `{other}`"),
+                )),
+            }
+        }
+    }
+
+    enum BroadcastMode {
+        AlreadyKnownPending,
+        NonceTooLowWithReceipt,
+        NonceTooLowWithoutReceipt,
+    }
+
+    struct BroadcastExecutor {
+        mode: BroadcastMode,
+        expected_hash: String,
+        calls: Arc<StdMutex<Vec<String>>>,
+    }
+
+    fn jsonrpc_transport_error(message: &'static str) -> IoError {
+        IoError::Transport(ErrorInfo {
+            code: ErrorCode("evm_jsonrpc_error".to_string()),
+            category: ErrorCategory::Rpc,
+            retryable: true,
+            message: "evm jsonrpc returned an error".to_string(),
+            details: Some(serde_json::json!({
+                "source_id": "source-1",
+                "jsonrpc_error_code": -32000,
+                "jsonrpc_error_message": message,
+            })),
+        })
+    }
+
+    #[async_trait]
+    impl LiveIoTransport for BroadcastExecutor {
+        async fn call(&mut self, call: IoCall) -> Result<serde_json::Value, IoError> {
+            let method = call
+                .request
+                .get("method")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .to_string();
+            self.calls.lock().expect("calls lock").push(method.clone());
+
+            match method.as_str() {
+                "eth_blockNumber" => Ok(serde_json::json!("0x1")),
+                "eth_getProof" => Ok(serde_json::json!({"accountProof": []})),
+                "eth_sendRawTransaction" => match self.mode {
+                    BroadcastMode::AlreadyKnownPending => {
+                        Err(jsonrpc_transport_error("already known"))
+                    }
+                    BroadcastMode::NonceTooLowWithReceipt
+                    | BroadcastMode::NonceTooLowWithoutReceipt => {
+                        Err(jsonrpc_transport_error("nonce too low"))
+                    }
+                },
+                "eth_getTransactionReceipt" => match self.mode {
+                    BroadcastMode::NonceTooLowWithReceipt => {
+                        Ok(serde_json::json!({"status": "0x1"}))
+                    }
+                    _ => Ok(serde_json::Value::Null),
+                },
+                "eth_getTransactionByHash" => match self.mode {
+                    BroadcastMode::AlreadyKnownPending => {
+                        Ok(serde_json::json!({"hash": self.expected_hash}))
+                    }
+                    _ => Ok(serde_json::Value::Null),
+                },
                 other => Err(io_transport(
                     "stub_executor_unsupported",
                     ErrorCategory::Unknown,
@@ -1831,6 +2163,26 @@ mod tests {
         let preferred_order = sources.iter().map(|source| source.id.clone()).collect();
         RpcControlTransport {
             executor: Some(Box::new(StubExecutor)),
+            btc_client: None,
+            control_plane_store: ControlPlaneStore::StreamBacked(
+                StreamBackedControlPlaneStore::new(streams),
+            ),
+            catalog: BootstrapCatalog {
+                sources,
+                preferred_order,
+            },
+            config_error: None,
+        }
+    }
+
+    fn stream_backed_transport_with_executor(
+        streams: Arc<MemStreamStore>,
+        sources: Vec<RpcControlBootstrapSource>,
+        executor: Box<dyn LiveIoTransport>,
+    ) -> RpcControlTransport {
+        let preferred_order = sources.iter().map(|source| source.id.clone()).collect();
+        RpcControlTransport {
+            executor: Some(executor),
             btc_client: None,
             control_plane_store: ControlPlaneStore::StreamBacked(
                 StreamBackedControlPlaneStore::new(streams),
@@ -2245,6 +2597,112 @@ mod tests {
             prepared.available_source_ids,
             vec!["arb_primary".to_string()]
         );
+    }
+
+    async fn broadcast_with_mode(
+        mode: BroadcastMode,
+    ) -> (Result<serde_json::Value, IoError>, Vec<String>) {
+        let expected_hash = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let calls = Arc::new(StdMutex::new(Vec::new()));
+        let executor = BroadcastExecutor {
+            mode,
+            expected_hash: expected_hash.to_string(),
+            calls: Arc::clone(&calls),
+        };
+        let mut transport = stream_backed_transport_with_executor(
+            Arc::new(MemStreamStore::new()),
+            vec![source(
+                "source-1",
+                Some("ethereum-mainnet"),
+                EvmSourceKind::Local,
+                false,
+            )],
+            Box::new(executor),
+        );
+
+        let result = transport
+            .handle_evm_broadcast_raw_transaction(
+                "shared",
+                "ethereum-mainnet",
+                "0x01",
+                expected_hash,
+            )
+            .await;
+        let calls = calls.lock().expect("calls lock").clone();
+        (result, calls)
+    }
+
+    #[tokio::test]
+    async fn broadcast_treats_already_known_as_success_only_when_expected_hash_is_pending() {
+        let (result, calls) = broadcast_with_mode(BroadcastMode::AlreadyKnownPending).await;
+        let response = result.expect("already-known pending tx should be accepted");
+
+        assert_eq!(
+            response,
+            serde_json::json!({
+                "tx_hash": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            })
+        );
+        assert!(calls
+            .iter()
+            .any(|method| method == "eth_sendRawTransaction"));
+        assert!(calls
+            .iter()
+            .any(|method| method == "eth_getTransactionByHash"));
+    }
+
+    #[tokio::test]
+    async fn broadcast_treats_nonce_too_low_as_success_only_with_expected_receipt() {
+        let (result, calls) = broadcast_with_mode(BroadcastMode::NonceTooLowWithReceipt).await;
+        result.expect("nonce-too-low with expected receipt should be accepted");
+
+        assert!(calls
+            .iter()
+            .any(|method| method == "eth_sendRawTransaction"));
+        assert!(calls
+            .iter()
+            .any(|method| method == "eth_getTransactionReceipt"));
+        assert!(!calls
+            .iter()
+            .any(|method| method == "eth_getTransactionByHash"));
+    }
+
+    #[tokio::test]
+    async fn broadcast_rejects_nonce_too_low_without_expected_receipt() {
+        let (result, _calls) = broadcast_with_mode(BroadcastMode::NonceTooLowWithoutReceipt).await;
+        let err = result.expect_err("nonce-too-low without expected receipt is ambiguous");
+
+        assert_eq!(
+            io_error_code(&err),
+            "evm_broadcast_nonce_too_low_unverified"
+        );
+    }
+
+    #[tokio::test]
+    async fn generic_evm_call_rejects_write_methods() {
+        let mut transport = stream_backed_transport_for_tests(
+            Arc::new(MemStreamStore::new()),
+            vec![source(
+                "source-1",
+                Some("ethereum-mainnet"),
+                EvmSourceKind::Local,
+                false,
+            )],
+        );
+
+        let err = transport
+            .handle_evm_call(
+                mfm_collectors_rpc_control::JsonRpcCall::for_scope_and_network(
+                    "shared",
+                    "ethereum-mainnet",
+                    "eth_sendRawTransaction",
+                    serde_json::json!(["0x01"]),
+                ),
+            )
+            .await
+            .expect_err("generic write method must be rejected");
+
+        assert_eq!(io_error_code(&err), "evm_tx_intent_required");
     }
 
     #[tokio::test]

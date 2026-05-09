@@ -212,24 +212,6 @@ impl LiveIo {
         key: FactKey,
         value: serde_json::Value,
     ) -> Result<(serde_json::Value, ArtifactId), IoError> {
-        if let Some(payload_id) = self.facts.get(&key).await {
-            let bytes = self.artifacts.get(&payload_id).await.map_err(|_| {
-                io_other(
-                    "fact_payload_get_failed",
-                    ErrorCategory::Storage,
-                    "failed to read fact payload",
-                )
-            })?;
-            let v = serde_json::from_slice::<serde_json::Value>(&bytes).map_err(|_| {
-                io_other(
-                    "fact_payload_decode_failed",
-                    ErrorCategory::ParsingInput,
-                    "failed to decode fact payload",
-                )
-            })?;
-            return Ok((v, payload_id));
-        }
-
         let bytes = canonical_json_bytes(&value).map_err(|e| match e {
             CanonicalJsonError::FloatNotAllowed => io_other(
                 "fact_payload_not_canonical",
@@ -243,6 +225,32 @@ impl LiveIo {
             ),
         })?;
 
+        if let Some(payload_id) = self.facts.get(&key).await {
+            let existing = self.artifacts.get(&payload_id).await.map_err(|_| {
+                io_other(
+                    "fact_payload_get_failed",
+                    ErrorCategory::Storage,
+                    "failed to read fact payload",
+                )
+            })?;
+            if existing != bytes {
+                return Err(io_other(
+                    "fact_payload_conflict",
+                    ErrorCategory::Storage,
+                    "fact key was already bound to a different payload",
+                ));
+            }
+            let v = serde_json::from_slice::<serde_json::Value>(&existing).map_err(|_| {
+                io_other(
+                    "fact_payload_decode_failed",
+                    ErrorCategory::ParsingInput,
+                    "failed to decode fact payload",
+                )
+            })?;
+            return Ok((v, payload_id));
+        }
+
+        let expected_bytes = bytes.clone();
         let payload_id =
             put_artifact_verified(self.artifacts.as_ref(), ArtifactKind::FactPayload, bytes)
                 .await
@@ -267,15 +275,21 @@ impl LiveIo {
             }
             Ok((value, bound_id))
         } else {
-            // Single-assignment: ignore this value and reuse the existing one.
-            let bytes = self.artifacts.get(&bound_id).await.map_err(|_| {
+            let existing = self.artifacts.get(&bound_id).await.map_err(|_| {
                 io_other(
                     "fact_payload_get_failed",
                     ErrorCategory::Storage,
                     "failed to read fact payload",
                 )
             })?;
-            let v = serde_json::from_slice::<serde_json::Value>(&bytes).map_err(|_| {
+            if existing != expected_bytes {
+                return Err(io_other(
+                    "fact_payload_conflict",
+                    ErrorCategory::Storage,
+                    "fact key was already bound to a different payload",
+                ));
+            }
+            let v = serde_json::from_slice::<serde_json::Value>(&existing).map_err(|_| {
                 io_other(
                     "fact_payload_decode_failed",
                     ErrorCategory::ParsingInput,
@@ -467,7 +481,40 @@ impl FactRecorder for NoopFactRecorder {
 mod tests {
     use super::*;
     use crate::errors::StorageError;
+    use crate::hashing::artifact_id_for_bytes;
     use async_trait::async_trait;
+
+    #[derive(Default)]
+    struct MemArtifactStore {
+        inner: Mutex<HashMap<ArtifactId, Vec<u8>>>,
+    }
+
+    #[async_trait]
+    impl ArtifactStore for MemArtifactStore {
+        async fn put(
+            &self,
+            _kind: ArtifactKind,
+            bytes: Vec<u8>,
+        ) -> Result<ArtifactId, StorageError> {
+            let id = artifact_id_for_bytes(&bytes);
+            self.inner.lock().await.insert(id.clone(), bytes);
+            Ok(id)
+        }
+
+        async fn get(&self, id: &ArtifactId) -> Result<Vec<u8>, StorageError> {
+            self.inner.lock().await.get(id).cloned().ok_or_else(|| {
+                StorageError::NotFound(info(
+                    "not_found",
+                    ErrorCategory::Storage,
+                    "artifact not found",
+                ))
+            })
+        }
+
+        async fn exists(&self, id: &ArtifactId) -> Result<bool, StorageError> {
+            Ok(self.inner.lock().await.contains_key(id))
+        }
+    }
 
     struct WrongIdArtifactStore;
 
@@ -518,6 +565,33 @@ mod tests {
 
         match err {
             IoError::Other(info) => assert_eq!(info.code.0, "fact_payload_put_failed"),
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn record_value_rejects_conflicting_payload_for_existing_fact_key() {
+        let mut io = LiveIo::new(
+            RunId(uuid::Uuid::new_v4()),
+            StateId::must_new("machine.main.state"),
+            1,
+            Arc::new(MemArtifactStore::default()),
+            FactIndex::default(),
+            Arc::new(NoopFactRecorder),
+            Box::new(UnusedTransport),
+        );
+        let key = FactKey("fact:key".to_string());
+
+        io.record_value(key.clone(), serde_json::json!({"a": 1}))
+            .await
+            .expect("first fact write");
+        let err = io
+            .record_value(key, serde_json::json!({"a": 2}))
+            .await
+            .expect_err("conflicting fact payload must fail");
+
+        match err {
+            IoError::Other(info) => assert_eq!(info.code.0, "fact_payload_conflict"),
             other => panic!("unexpected error: {other:?}"),
         }
     }

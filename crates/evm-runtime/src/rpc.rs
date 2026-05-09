@@ -1,6 +1,6 @@
 use mfm_collectors_rpc_control::{EvmIoClient, JsonRpcCall, DEFAULT_CONTROL_SCOPE};
 use mfm_machine::errors::{ErrorCategory, StateError};
-use mfm_machine::ids::{FactKey, StateId};
+use mfm_machine::ids::{ArtifactId, FactKey, StateId};
 use mfm_machine::io::IoProvider;
 use mfm_state_common::errors as op_errors;
 use mfm_state_common::rpc as op_rpc;
@@ -9,6 +9,7 @@ use mfm_transports_local_evm::{
 };
 
 use crate::dcv as shared_dcv;
+use crate::tx_intent::TxIntentV1;
 
 /// Normalizes an RPC hex quantity into canonical lowercase `0x` form.
 pub fn normalize_quantity_hex(raw: &str, message: &'static str) -> Result<String, StateError> {
@@ -94,39 +95,15 @@ pub async fn send_transaction(
 /// Submits a transaction through `eth_sendTransaction` for the supplied managed network and scope.
 pub async fn send_transaction_for_network(
     client: &mut EvmIoClient<'_>,
-    network_id: &str,
-    control_scope: &str,
-    mut tx_obj: serde_json::Value,
+    _network_id: &str,
+    _control_scope: &str,
+    _tx_obj: serde_json::Value,
 ) -> Result<String, StateError> {
-    if tx_obj.get("gas").is_none() {
-        let gas = estimate_gas_hex_for_network(client, network_id, control_scope, &tx_obj).await?;
-        tx_obj["gas"] = serde_json::json!(gas);
-    }
-    if tx_obj.get("gasPrice").is_none() && tx_obj.get("maxFeePerGas").is_none() {
-        let gas_price = gas_price_hex_for_network(client, network_id, control_scope).await?;
-        tx_obj["gasPrice"] = serde_json::json!(gas_price);
-    }
-
-    let res = client
-        .call(managed_call(
-            network_id,
-            control_scope,
-            "eth_sendTransaction",
-            serde_json::json!([tx_obj]),
-        ))
-        .await
-        .map_err(op_errors::state_from_io)?;
-    let tx_hash = op_rpc::expect_string(
-        &res.response,
-        "evm_response_invalid",
-        "eth_sendTransaction returned non-string tx hash",
-    )?;
-    shared_dcv::normalize_hex_str(&tx_hash).map_err(|_| {
-        op_errors::state_unknown(
-            "evm_response_invalid",
-            "eth_sendTransaction returned invalid tx hash",
-        )
-    })
+    let _ = client;
+    Err(op_errors::state_unknown(
+        "evm_tx_intent_required",
+        "node-managed eth_sendTransaction is disabled; use signed transaction intent helpers",
+    ))
 }
 
 /// Submits a raw signed transaction through `eth_sendRawTransaction`.
@@ -141,31 +118,48 @@ pub async fn send_raw_transaction(
 /// Submits a raw signed transaction through `eth_sendRawTransaction` for the supplied managed network and scope.
 pub async fn send_raw_transaction_for_network(
     client: &mut EvmIoClient<'_>,
+    _network_id: &str,
+    _control_scope: &str,
+    _raw_tx_hex: &str,
+) -> Result<String, StateError> {
+    let _ = client;
+    Err(op_errors::state_unknown(
+        "evm_tx_intent_required",
+        "raw transaction broadcast requires a recorded transaction intent",
+    ))
+}
+
+fn normalize_chain_id(chain_id: &serde_json::Value) -> Result<u64, StateError> {
+    let chain_id = op_rpc::expect_string(
+        chain_id,
+        "evm_response_invalid",
+        "eth_chainId returned non-string chain id",
+    )?;
+    let chain_id = normalize_quantity_hex(&chain_id, "eth_chainId returned invalid chain id")?;
+    u64::from_str_radix(
+        chain_id
+            .strip_prefix("0x")
+            .expect("normalized quantity must have prefix"),
+        16,
+    )
+    .map_err(|_| op_errors::state_unknown("evm_response_invalid", "eth_chainId overflowed u64"))
+}
+
+async fn chain_id_for_network(
+    client: &mut EvmIoClient<'_>,
     network_id: &str,
     control_scope: &str,
-    raw_tx_hex: &str,
-) -> Result<String, StateError> {
-    let res = client
+) -> Result<u64, StateError> {
+    let chain_id = client
         .call(managed_call(
             network_id,
             control_scope,
-            "eth_sendRawTransaction",
-            serde_json::json!([raw_tx_hex]),
+            "eth_chainId",
+            serde_json::json!([]),
         ))
         .await
         .map_err(op_errors::state_from_io)?;
-
-    let tx_hash = op_rpc::expect_string(
-        &res.response,
-        "evm_response_invalid",
-        "eth_sendRawTransaction returned non-string tx hash",
-    )?;
-    shared_dcv::normalize_hex_str(&tx_hash).map_err(|_| {
-        op_errors::state_unknown(
-            "evm_response_invalid",
-            "eth_sendRawTransaction returned invalid tx hash",
-        )
-    })
+    normalize_chain_id(&chain_id.response)
 }
 
 /// Estimates gas for the supplied transaction object and returns a canonical hex quantity.
@@ -399,26 +393,18 @@ pub async fn send_signed_create_transaction(
 /// Signs and submits a contract-creation transaction for the supplied managed network and scope using the next pending nonce.
 pub async fn send_signed_create_transaction_for_network(
     client: &mut EvmIoClient<'_>,
-    network_id: &str,
-    control_scope: &str,
-    signing_key_env: &str,
-    from: &str,
-    constructor_payload: &[u8],
-    value_hex: Option<&str>,
+    _network_id: &str,
+    _control_scope: &str,
+    _signing_key_env: &str,
+    _from: &str,
+    _constructor_payload: &[u8],
+    _value_hex: Option<&str>,
 ) -> Result<String, StateError> {
-    let nonce_hex =
-        transaction_count_hex_for_network(client, network_id, control_scope, from).await?;
-    send_signed_create_transaction_with_nonce_for_network(
-        client,
-        network_id,
-        control_scope,
-        signing_key_env,
-        from,
-        &nonce_hex,
-        constructor_payload,
-        value_hex,
-    )
-    .await
+    let _ = client;
+    Err(op_errors::state_unknown(
+        "evm_tx_intent_required",
+        "signed transaction broadcast requires a recorded transaction intent",
+    ))
 }
 
 /// Signs and submits a contract-creation transaction using the supplied nonce.
@@ -440,14 +426,73 @@ pub async fn send_signed_create_transaction_with_nonce(
 #[allow(clippy::too_many_arguments)]
 pub async fn send_signed_create_transaction_with_nonce_for_network(
     client: &mut EvmIoClient<'_>,
+    _network_id: &str,
+    _control_scope: &str,
+    _signing_key_env: &str,
+    _from: &str,
+    _nonce_hex: &str,
+    _constructor_payload: &[u8],
+    _value_hex: Option<&str>,
+) -> Result<String, StateError> {
+    let _ = client;
+    Err(op_errors::state_unknown(
+        "evm_tx_intent_required",
+        "signed transaction broadcast requires a recorded transaction intent",
+    ))
+}
+
+/// Signs and submits a contract call transaction for the supplied managed network and scope using the next pending nonce.
+#[allow(clippy::too_many_arguments)]
+pub async fn send_signed_call_transaction_for_network(
+    client: &mut EvmIoClient<'_>,
+    _network_id: &str,
+    _control_scope: &str,
+    _signing_key_env: &str,
+    _from: &str,
+    _to: &str,
+    _call_payload: &[u8],
+    _value_hex: Option<&str>,
+) -> Result<String, StateError> {
+    let _ = client;
+    Err(op_errors::state_unknown(
+        "evm_tx_intent_required",
+        "signed transaction broadcast requires a recorded transaction intent",
+    ))
+}
+
+/// Signs and submits a contract call transaction for the supplied managed network, scope, and nonce.
+#[allow(clippy::too_many_arguments)]
+pub async fn send_signed_call_transaction_with_nonce_for_network(
+    client: &mut EvmIoClient<'_>,
+    _network_id: &str,
+    _control_scope: &str,
+    _signing_key_env: &str,
+    _from: &str,
+    _to: &str,
+    _nonce_hex: &str,
+    _call_payload: &[u8],
+    _value_hex: Option<&str>,
+) -> Result<String, StateError> {
+    let _ = client;
+    Err(op_errors::state_unknown(
+        "evm_tx_intent_required",
+        "signed transaction broadcast requires a recorded transaction intent",
+    ))
+}
+
+/// Prepares a signed contract-creation transaction intent without broadcasting it.
+#[allow(clippy::too_many_arguments)]
+pub async fn prepare_signed_create_intent_for_network(
+    client: &mut EvmIoClient<'_>,
     network_id: &str,
     control_scope: &str,
+    logical_tx_id: &str,
     signing_key_env: &str,
     from: &str,
     nonce_hex: &str,
     constructor_payload: &[u8],
     value_hex: Option<&str>,
-) -> Result<String, StateError> {
+) -> Result<TxIntentV1, StateError> {
     let configured_from = shared_dcv::normalize_address(from).map_err(|_| {
         op_errors::state_unknown("invalid_from_address", "from address was invalid")
     })?;
@@ -455,43 +500,22 @@ pub async fn send_signed_create_transaction_with_nonce_for_network(
         nonce_hex,
         "signed deploy nonce must be a valid hex quantity",
     )?;
+    let value_hex = value_hex.unwrap_or("0x0");
 
     let tx_obj = {
         let mut tx = serde_json::json!({
             "from": configured_from,
             "data": shared_dcv::bytes_to_hex_prefixed(constructor_payload),
         });
-        if let Some(v) = value_hex {
-            tx["value"] = serde_json::json!(v);
+        if value_hex != "0x0" {
+            tx["value"] = serde_json::json!(value_hex);
         }
         tx
     };
 
     let gas_hex = estimate_gas_hex_for_network(client, network_id, control_scope, &tx_obj).await?;
     let gas_price_hex = gas_price_hex_for_network(client, network_id, control_scope).await?;
-    let chain_id = client
-        .call(managed_call(
-            network_id,
-            control_scope,
-            "eth_chainId",
-            serde_json::json!([]),
-        ))
-        .await
-        .map_err(op_errors::state_from_io)?;
-    let chain_id = op_rpc::expect_string(
-        &chain_id.response,
-        "evm_response_invalid",
-        "eth_chainId returned non-string chain id",
-    )?;
-    let chain_id = normalize_quantity_hex(&chain_id, "eth_chainId returned invalid chain id")?;
-    let chain_id = u64::from_str_radix(
-        chain_id
-            .strip_prefix("0x")
-            .expect("normalized quantity must have prefix"),
-        16,
-    )
-    .map_err(|_| op_errors::state_unknown("evm_response_invalid", "eth_chainId overflowed u64"))?;
-
+    let chain_id = chain_id_for_network(client, network_id, control_scope).await?;
     let raw_tx_hex = local_sign_legacy_create_raw_tx(
         client,
         LegacyCreateTxSigningRequest {
@@ -501,56 +525,41 @@ pub async fn send_signed_create_transaction_with_nonce_for_network(
             nonce_hex: &nonce_hex,
             gas_price_hex: &gas_price_hex,
             gas_limit_hex: &gas_hex,
-            value_hex: value_hex.unwrap_or("0x0"),
+            value_hex,
             constructor_payload,
         },
     )
     .await?;
 
-    send_raw_transaction_for_network(client, network_id, control_scope, &raw_tx_hex).await
-}
-
-/// Signs and submits a contract call transaction for the supplied managed network and scope using the next pending nonce.
-#[allow(clippy::too_many_arguments)]
-pub async fn send_signed_call_transaction_for_network(
-    client: &mut EvmIoClient<'_>,
-    network_id: &str,
-    control_scope: &str,
-    signing_key_env: &str,
-    from: &str,
-    to: &str,
-    call_payload: &[u8],
-    value_hex: Option<&str>,
-) -> Result<String, StateError> {
-    let nonce_hex =
-        transaction_count_hex_for_network(client, network_id, control_scope, from).await?;
-    send_signed_call_transaction_with_nonce_for_network(
-        client,
+    TxIntentV1::signed_legacy_create(
         network_id,
         control_scope,
-        signing_key_env,
-        from,
-        to,
-        &nonce_hex,
-        call_payload,
+        logical_tx_id,
+        &configured_from,
         value_hex,
+        constructor_payload,
+        &gas_hex,
+        &gas_price_hex,
+        &nonce_hex,
+        chain_id,
+        &raw_tx_hex,
     )
-    .await
 }
 
-/// Signs and submits a contract call transaction for the supplied managed network, scope, and nonce.
+/// Prepares a signed contract-call transaction intent without broadcasting it.
 #[allow(clippy::too_many_arguments)]
-pub async fn send_signed_call_transaction_with_nonce_for_network(
+pub async fn prepare_signed_call_intent_for_network(
     client: &mut EvmIoClient<'_>,
     network_id: &str,
     control_scope: &str,
+    logical_tx_id: &str,
     signing_key_env: &str,
     from: &str,
     to: &str,
     nonce_hex: &str,
     call_payload: &[u8],
     value_hex: Option<&str>,
-) -> Result<String, StateError> {
+) -> Result<TxIntentV1, StateError> {
     let configured_from = shared_dcv::normalize_address(from).map_err(|_| {
         op_errors::state_unknown("invalid_from_address", "from address was invalid")
     })?;
@@ -558,6 +567,7 @@ pub async fn send_signed_call_transaction_with_nonce_for_network(
         .map_err(|_| op_errors::state_unknown("invalid_to_address", "to address was invalid"))?;
     let nonce_hex =
         normalize_quantity_hex(nonce_hex, "signed call nonce must be a valid hex quantity")?;
+    let value_hex = value_hex.unwrap_or("0x0");
 
     let tx_obj = {
         let mut tx = serde_json::json!({
@@ -565,37 +575,15 @@ pub async fn send_signed_call_transaction_with_nonce_for_network(
             "to": configured_to,
             "data": shared_dcv::bytes_to_hex_prefixed(call_payload),
         });
-        if let Some(v) = value_hex {
-            tx["value"] = serde_json::json!(v);
+        if value_hex != "0x0" {
+            tx["value"] = serde_json::json!(value_hex);
         }
         tx
     };
 
     let gas_hex = estimate_gas_hex_for_network(client, network_id, control_scope, &tx_obj).await?;
     let gas_price_hex = gas_price_hex_for_network(client, network_id, control_scope).await?;
-    let chain_id = client
-        .call(managed_call(
-            network_id,
-            control_scope,
-            "eth_chainId",
-            serde_json::json!([]),
-        ))
-        .await
-        .map_err(op_errors::state_from_io)?;
-    let chain_id = op_rpc::expect_string(
-        &chain_id.response,
-        "evm_response_invalid",
-        "eth_chainId returned non-string chain id",
-    )?;
-    let chain_id = normalize_quantity_hex(&chain_id, "eth_chainId returned invalid chain id")?;
-    let chain_id = u64::from_str_radix(
-        chain_id
-            .strip_prefix("0x")
-            .expect("normalized quantity must have prefix"),
-        16,
-    )
-    .map_err(|_| op_errors::state_unknown("evm_response_invalid", "eth_chainId overflowed u64"))?;
-
+    let chain_id = chain_id_for_network(client, network_id, control_scope).await?;
     let raw_tx_hex = local_sign_legacy_call_raw_tx(
         client,
         LegacyCallTxSigningRequest {
@@ -606,13 +594,83 @@ pub async fn send_signed_call_transaction_with_nonce_for_network(
             nonce_hex: &nonce_hex,
             gas_price_hex: &gas_price_hex,
             gas_limit_hex: &gas_hex,
-            value_hex: value_hex.unwrap_or("0x0"),
+            value_hex,
             call_payload,
         },
     )
     .await?;
 
-    send_raw_transaction_for_network(client, network_id, control_scope, &raw_tx_hex).await
+    TxIntentV1::signed_legacy_call(
+        network_id,
+        control_scope,
+        logical_tx_id,
+        &configured_from,
+        &configured_to,
+        value_hex,
+        call_payload,
+        &gas_hex,
+        &gas_price_hex,
+        &nonce_hex,
+        chain_id,
+        &raw_tx_hex,
+    )
+}
+
+/// Records a transaction intent under its attempt-independent fact key.
+pub async fn record_tx_intent(
+    io: &mut dyn IoProvider,
+    state_id: &StateId,
+    intent: &TxIntentV1,
+) -> Result<ArtifactId, StateError> {
+    let value = serde_json::to_value(intent).map_err(|_| {
+        op_errors::state_unknown(
+            "serialize_tx_intent_failed",
+            "failed to serialize EVM transaction intent",
+        )
+    })?;
+    io.record_value(intent.fact_key(state_id), value)
+        .await
+        .map_err(op_errors::state_from_io)
+}
+
+/// Broadcasts a previously recorded transaction intent through `rpc.control`.
+pub async fn broadcast_recorded_tx_intent(
+    io: &mut dyn IoProvider,
+    state_id: &StateId,
+    intent: &TxIntentV1,
+) -> Result<String, StateError> {
+    let mut client = EvmIoClient::new(state_id.clone(), io)
+        .with_default_control_scope(intent.control_scope.clone());
+    let response = client
+        .broadcast_raw_transaction(
+            intent.network_id.clone(),
+            intent.control_scope.clone(),
+            intent.raw_tx_hex.clone(),
+            intent.raw_tx_hash.clone(),
+        )
+        .await
+        .map_err(op_errors::state_from_io)?;
+    Ok(response.tx_hash)
+}
+
+/// Waits for the receipt of the expected transaction hash recorded in an intent.
+pub async fn wait_for_expected_receipt(
+    state_id: &StateId,
+    io: &mut dyn IoProvider,
+    intent: &TxIntentV1,
+    poll_interval_ms: u64,
+    max_receipt_polls: u64,
+) -> Result<serde_json::Value, StateError> {
+    wait_for_receipt_for_network(
+        state_id,
+        io,
+        &intent.network_id,
+        &intent.control_scope,
+        &intent.raw_tx_hash,
+        poll_interval_ms,
+        max_receipt_polls,
+    )
+    .await
 }
 
 /// Polls until a transaction receipt is available or the poll budget is exhausted.
@@ -1005,5 +1063,23 @@ mod tests {
             ))
         );
         assert_eq!(io.slept_ms, vec![25]);
+    }
+
+    #[tokio::test]
+    async fn legacy_direct_send_helpers_require_recorded_intent() {
+        let state_id = StateId::must_new("rpc.legacy.send".to_string());
+        let mut io = FixedIo::default();
+        let mut client = EvmIoClient::new(state_id, &mut io);
+
+        let err = send_transaction_for_network(
+            &mut client,
+            "ethereum-mainnet",
+            "shared",
+            serde_json::json!({ "from": "0x1111111111111111111111111111111111111111" }),
+        )
+        .await
+        .expect_err("legacy node-managed send must be rejected");
+
+        assert_eq!(err.info.code.0, "evm_tx_intent_required");
     }
 }

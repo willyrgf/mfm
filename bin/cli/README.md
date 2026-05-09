@@ -332,6 +332,10 @@ values for `machine_id`, `pipeline_version`, and `input`. The generated pipeline
 legacy `evm_deploy_configure_validate` root so existing CLI behavior stays stable while canonical
 input is internally lowered through the new config-build and strict execute boundaries.
 
+EVM write phases (`evm_deploy`, `evm_configure`, and contract-set deploys) require
+`signing_key_env`. Node-managed unsigned transaction submission is rejected so the runtime can record
+a durable signed transaction intent before broadcast.
+
 ### `run resume`
 
 Resumes an existing run by id (executes any remaining states).

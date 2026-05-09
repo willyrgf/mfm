@@ -839,11 +839,15 @@ impl Operation for EvmDeployContractSetOp {
                 msg,
             )
         })?;
-        if let Some(env_name) = cfg.signing_key_env.as_deref() {
-            ensure_nonempty_env_name(env_name).map_err(|_| {
-                op_errors::sdk_parse_error("invalid_op_config", "signing_key_env must be non-empty")
-            })?;
-        }
+        let Some(env_name) = cfg.signing_key_env.as_deref() else {
+            return Err(op_errors::sdk_parse_error(
+                "invalid_op_config",
+                "signing_key_env is required for evm_deploy_contract_set",
+            ));
+        };
+        ensure_nonempty_env_name(env_name).map_err(|_| {
+            op_errors::sdk_parse_error("invalid_op_config", "signing_key_env must be non-empty")
+        })?;
         let contract_set_port = cfg.contract_set_port.clone();
         let network_id = cfg.network_id.clone();
         let control_scope = cfg.control_scope.clone();
@@ -965,11 +969,15 @@ impl Operation for EvmDeployOp {
         shared_dcv::ensure_nonempty_artifact_port(&cfg.artifact_port).map_err(|_| {
             op_errors::sdk_parse_error("invalid_op_config", "artifact_port must be non-empty")
         })?;
-        if let Some(env_name) = cfg.signing_key_env.as_deref() {
-            ensure_nonempty_env_name(env_name).map_err(|_| {
-                op_errors::sdk_parse_error("invalid_op_config", "signing_key_env must be non-empty")
-            })?;
-        }
+        let Some(env_name) = cfg.signing_key_env.as_deref() else {
+            return Err(op_errors::sdk_parse_error(
+                "invalid_op_config",
+                "signing_key_env is required for evm_deploy",
+            ));
+        };
+        ensure_nonempty_env_name(env_name).map_err(|_| {
+            op_errors::sdk_parse_error("invalid_op_config", "signing_key_env must be non-empty")
+        })?;
         if let Some(artifact) = &cfg.artifact {
             parse_artifact(artifact).map_err(|_| {
                 op_errors::sdk_parse_error("invalid_op_config", "invalid contract artifact")
@@ -1058,11 +1066,15 @@ impl Operation for EvmConfigureOp {
             op_errors::sdk_parse_error("invalid_op_config", "artifact_port must be non-empty")
         })?;
 
-        if let Some(env_name) = cfg.signing_key_env.as_deref() {
-            ensure_nonempty_env_name(env_name).map_err(|_| {
-                op_errors::sdk_parse_error("invalid_op_config", "signing_key_env must be non-empty")
-            })?;
-        }
+        let Some(env_name) = cfg.signing_key_env.as_deref() else {
+            return Err(op_errors::sdk_parse_error(
+                "invalid_op_config",
+                "signing_key_env is required for evm_configure",
+            ));
+        };
+        ensure_nonempty_env_name(env_name).map_err(|_| {
+            op_errors::sdk_parse_error("invalid_op_config", "signing_key_env must be non-empty")
+        })?;
 
         if cfg.calls.is_empty() {
             return Err(op_errors::sdk_parse_error(

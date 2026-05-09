@@ -129,6 +129,9 @@ Supported public root `op_id` values for `/v1/runs/start` and feature `run.start
 - `portfolio_tracker`
 - `nix_app`
 
+EVM write operation configs must provide `signing_key_env`; node-managed unsigned transaction
+submission is rejected so signed transaction intents are durable before broadcast.
+
 Notes:
 - `evm_read` executes through the shared `rpc.control`-backed EVM read states.
 - Planner-internal semantic ids such as `portfolio_prepare_execution_sources` and

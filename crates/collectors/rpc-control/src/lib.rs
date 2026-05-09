@@ -113,6 +113,18 @@ pub enum RpcControlRequest {
         #[serde(flatten)]
         call: JsonRpcCall,
     },
+    /// Idempotent signed raw transaction broadcast with an expected transaction hash.
+    EvmBroadcastRawTransaction {
+        /// Stable control-plane scope used to isolate managed source state.
+        #[serde(default = "default_control_scope")]
+        control_scope: String,
+        /// Stable network identifier.
+        network_id: String,
+        /// Signed raw transaction bytes encoded as `0x` hex.
+        raw_tx_hex: String,
+        /// Expected transaction hash derived before broadcast.
+        expected_tx_hash: String,
+    },
     /// Idempotent source setup/probe/rank preflight for one network.
     PrepareSources {
         /// Stable control-plane scope used to isolate managed source state.
@@ -144,6 +156,13 @@ pub enum RpcControlRequest {
         /// Block hash at which to anchor the scan.
         block_hash: String,
     },
+}
+
+/// Response returned for an idempotent raw transaction broadcast.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvmBroadcastRawTransactionResponse {
+    /// Expected and observed transaction hash.
+    pub tx_hash: String,
 }
 
 /// Summary returned for one prepared source.
@@ -489,6 +508,53 @@ impl<'a> EvmIoClient<'a> {
             )
         })
     }
+
+    /// Broadcasts a signed raw transaction idempotently, verified against the expected hash.
+    pub async fn broadcast_raw_transaction(
+        &mut self,
+        network_id: impl Into<String>,
+        control_scope: impl Into<String>,
+        raw_tx_hex: impl Into<String>,
+        expected_tx_hash: impl Into<String>,
+    ) -> Result<EvmBroadcastRawTransactionResponse, IoError> {
+        let network_id = network_id.into();
+        let control_scope = control_scope.into();
+        if network_id.trim().is_empty() {
+            return Err(missing_network_id_error());
+        }
+        let request = RpcControlRequest::EvmBroadcastRawTransaction {
+            control_scope: if control_scope.trim().is_empty() {
+                self.default_control_scope.clone()
+            } else {
+                control_scope
+            },
+            network_id,
+            raw_tx_hex: raw_tx_hex.into(),
+            expected_tx_hash: expected_tx_hash.into(),
+        };
+        let key = fact_key_for_request(&self.state_id, &request).map_err(|err| match err {
+            FactKeyDerivationError::NotCanonical(CanonicalJsonError::FloatNotAllowed) => io_other(
+                "rpc_control_request_not_canonical",
+                ErrorCategory::ParsingInput,
+                "rpc.control request was not canonical-json-hashable (floats are forbidden)",
+            ),
+            FactKeyDerivationError::NotCanonical(CanonicalJsonError::SecretsNotAllowed) => {
+                io_other(
+                    "secrets_detected",
+                    ErrorCategory::Unknown,
+                    "rpc.control request contained secrets (policy forbids persisting secrets)",
+                )
+            }
+        })?;
+        let result = self.io.call(rpc_control_io_call(request, key)).await?;
+        serde_json::from_value(result.response).map_err(|_| {
+            io_other(
+                "rpc_control_response_invalid",
+                ErrorCategory::ParsingInput,
+                "rpc.control raw transaction broadcast response was invalid",
+            )
+        })
+    }
 }
 
 #[cfg(test)]
@@ -578,6 +644,29 @@ mod tests {
                 "network_id": "reth-local",
                 "method": "eth_sendRawTransaction",
                 "params": ["0x01"],
+            })
+        );
+    }
+
+    #[test]
+    fn broadcast_raw_transaction_request_serializes() {
+        let request = serde_json::to_value(RpcControlRequest::EvmBroadcastRawTransaction {
+            control_scope: "shared".to_string(),
+            network_id: "ethereum-mainnet".to_string(),
+            raw_tx_hex: "0x01".to_string(),
+            expected_tx_hash: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .to_string(),
+        })
+        .expect("request json");
+
+        assert_eq!(
+            request,
+            serde_json::json!({
+                "kind": "evm_broadcast_raw_transaction",
+                "control_scope": "shared",
+                "network_id": "ethereum-mainnet",
+                "raw_tx_hex": "0x01",
+                "expected_tx_hash": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             })
         );
     }

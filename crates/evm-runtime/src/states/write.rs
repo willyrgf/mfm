@@ -323,44 +323,43 @@ impl State for EvmDeployState {
         )
         .await?;
 
-        let mut client = EvmIoClient::new(self.state_id.clone(), io);
-
-        let mut tx = serde_json::json!({
-            "from": self.cfg.from,
-            "data": shared_dcv::bytes_to_hex_prefixed(&constructor_payload),
-        });
-        if let Some(v) = &self.cfg.value_hex {
-            tx["value"] = serde_json::json!(v);
-        }
-
-        let tx_hash = if let Some(env_name) = self.cfg.signing_key_env.as_deref() {
-            evm_rpc::send_signed_create_transaction_for_network(
+        let Some(env_name) = self.cfg.signing_key_env.as_deref() else {
+            return Err(op_errors::state_unknown(
+                "evm_signed_transaction_required",
+                "EVM deploy requires signing_key_env for durable signed transaction intent recording",
+            ));
+        };
+        let nonce = evm_rpc::pending_nonce_u128_for_network(
+            io,
+            &self.state_id,
+            &self.cfg.network_id,
+            &control_scope,
+            &self.cfg.from,
+        )
+        .await?;
+        let nonce_hex = format!("0x{nonce:x}");
+        let intent = {
+            let mut client = EvmIoClient::new(self.state_id.clone(), io);
+            evm_rpc::prepare_signed_create_intent_for_network(
                 &mut client,
                 &self.cfg.network_id,
                 &control_scope,
+                "deploy",
                 env_name,
                 &self.cfg.from,
+                &nonce_hex,
                 &constructor_payload,
                 self.cfg.value_hex.as_deref(),
             )
             .await?
-        } else {
-            evm_rpc::send_transaction_for_network(
-                &mut client,
-                &self.cfg.network_id,
-                &control_scope,
-                tx,
-            )
-            .await?
         };
-        drop(client);
+        evm_rpc::record_tx_intent(io, &self.state_id, &intent).await?;
+        let tx_hash = evm_rpc::broadcast_recorded_tx_intent(io, &self.state_id, &intent).await?;
 
-        let receipt = evm_rpc::wait_for_receipt_for_network(
+        let receipt = evm_rpc::wait_for_expected_receipt(
             &self.state_id,
             io,
-            &self.cfg.network_id,
-            &control_scope,
-            &tx_hash,
+            &intent,
             self.cfg.poll_interval_ms,
             self.cfg.max_receipt_polls,
         )
@@ -411,10 +410,24 @@ impl State for EvmConfigureState {
         )
         .await?;
 
+        let Some(env_name) = self.cfg.signing_key_env.as_deref() else {
+            return Err(op_errors::state_unknown(
+                "evm_signed_transaction_required",
+                "EVM configure requires signing_key_env for durable signed transaction intent recording",
+            ));
+        };
+        let mut next_nonce = evm_rpc::pending_nonce_u128_for_network(
+            io,
+            &self.state_id,
+            &self.cfg.network_id,
+            &control_scope,
+            &self.cfg.from,
+        )
+        .await?;
         let mut tx_hashes: Vec<serde_json::Value> = Vec::new();
         let mut receipts: Vec<serde_json::Value> = Vec::new();
 
-        for call in &self.cfg.calls {
+        for (idx, call) in self.cfg.calls.iter().enumerate() {
             let (calldata, _outputs) = shared_dcv::resolve_function_call(
                 &abi,
                 &call.function,
@@ -424,44 +437,37 @@ impl State for EvmConfigureState {
                 op_errors::state_unknown("invalid_op_config", "configure call did not match ABI")
             })?;
 
-            let mut tx = serde_json::json!({
-                "from": self.cfg.from,
-                "to": to,
-                "data": shared_dcv::bytes_to_hex_prefixed(&calldata),
-            });
-            if let Some(v) = &call.value_hex {
-                tx["value"] = serde_json::json!(v);
-            }
-
-            let mut client = EvmIoClient::new(self.state_id.clone(), io);
-            let tx_hash = if let Some(env_name) = self.cfg.signing_key_env.as_deref() {
-                evm_rpc::send_signed_call_transaction_for_network(
+            let nonce_hex = format!("0x{next_nonce:x}");
+            let logical_tx_id = format!("configure:{idx}");
+            let intent = {
+                let mut client = EvmIoClient::new(self.state_id.clone(), io);
+                evm_rpc::prepare_signed_call_intent_for_network(
                     &mut client,
                     &self.cfg.network_id,
                     &control_scope,
+                    &logical_tx_id,
                     env_name,
                     &self.cfg.from,
                     &to,
+                    &nonce_hex,
                     &calldata,
                     call.value_hex.as_deref(),
                 )
                 .await?
-            } else {
-                evm_rpc::send_transaction_for_network(
-                    &mut client,
-                    &self.cfg.network_id,
-                    &control_scope,
-                    tx,
-                )
-                .await?
             };
-            drop(client);
-            let receipt = evm_rpc::wait_for_receipt_for_network(
+            evm_rpc::record_tx_intent(io, &self.state_id, &intent).await?;
+            let tx_hash =
+                evm_rpc::broadcast_recorded_tx_intent(io, &self.state_id, &intent).await?;
+            next_nonce = next_nonce.checked_add(1).ok_or_else(|| {
+                op_errors::state_unknown(
+                    "evm_response_invalid",
+                    "nonce overflow while preparing signed configure transactions",
+                )
+            })?;
+            let receipt = evm_rpc::wait_for_expected_receipt(
                 &self.state_id,
                 io,
-                &self.cfg.network_id,
-                &control_scope,
-                &tx_hash,
+                &intent,
                 self.cfg.poll_interval_ms,
                 self.cfg.max_receipt_polls,
             )
@@ -757,6 +763,8 @@ mod tests {
     struct TrackingIo {
         calls: Vec<IoCall>,
         prepare_sources_healthy: bool,
+        recorded_values: Vec<(FactKey, serde_json::Value)>,
+        fail_broadcast_once: bool,
     }
 
     fn io_info(code: &'static str, message: impl Into<String>) -> ErrorInfo {
@@ -773,6 +781,15 @@ mod tests {
     impl IoProvider for TrackingIo {
         async fn call(&mut self, call: IoCall) -> Result<IoResult, IoError> {
             self.calls.push(call.clone());
+
+            if call.namespace == "local.evm.sign_legacy_create"
+                || call.namespace == "local.evm.sign_legacy_call"
+            {
+                return Ok(IoResult {
+                    response: serde_json::json!({ "raw_tx_hex": "0x01" }),
+                    recorded_payload_id: None,
+                });
+            }
 
             let kind = call
                 .request
@@ -803,9 +820,7 @@ mod tests {
                     let response = match method {
                         "eth_estimateGas" => serde_json::json!("0x5208"),
                         "eth_gasPrice" => serde_json::json!("0x1"),
-                        "eth_sendTransaction" => serde_json::json!(
-                            "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                        ),
+                        "eth_getTransactionCount" => serde_json::json!("0x0"),
                         "eth_getTransactionReceipt" => serde_json::json!({ "status": "0x1" }),
                         "web3_clientVersion" => serde_json::json!("reth/v1.0.0"),
                         "eth_chainId" => serde_json::json!("0x1"),
@@ -821,6 +836,21 @@ mod tests {
                         recorded_payload_id: None,
                     })
                 }
+                "evm_broadcast_raw_transaction" => {
+                    if self.fail_broadcast_once {
+                        self.fail_broadcast_once = false;
+                        return Err(IoError::Other(io_info(
+                            "simulated_broadcast_crash",
+                            "simulated crash after intent recording",
+                        )));
+                    }
+                    Ok(IoResult {
+                        response: serde_json::json!({
+                            "tx_hash": call.request.get("expected_tx_hash").cloned().unwrap_or(Value::Null),
+                        }),
+                        recorded_payload_id: None,
+                    })
+                }
                 _ => Err(IoError::Other(io_info(
                     "unexpected_call_kind",
                     "unexpected call kind",
@@ -830,9 +860,10 @@ mod tests {
 
         async fn record_value(
             &mut self,
-            _key: FactKey,
-            _value: serde_json::Value,
+            key: FactKey,
+            value: serde_json::Value,
         ) -> Result<ArtifactId, IoError> {
+            self.recorded_values.push((key, value));
             Ok(ArtifactId::must_new("0".repeat(64)))
         }
 
@@ -884,6 +915,8 @@ mod tests {
         let mut io = TrackingIo {
             calls: Vec::new(),
             prepare_sources_healthy: true,
+            recorded_values: Vec::new(),
+            fail_broadcast_once: false,
         };
         let mut rec = NoopRecorder;
 
@@ -895,7 +928,7 @@ mod tests {
                 network_id: "ethereum-mainnet".to_string(),
                 control_scope: "".to_string(),
                 from: "0x1111111111111111111111111111111111111111".to_string(),
-                signing_key_env: None,
+                signing_key_env: Some("MFM_DEPLOYER_KEY".to_string()),
                 contract_address: None,
                 calls: vec![EvmConfigureRuntimeCall {
                     function: "setValue".to_string(),
@@ -925,8 +958,12 @@ mod tests {
         );
         assert_eq!(
             io.calls[1].request.get("method").and_then(Value::as_str),
-            Some("eth_estimateGas")
+            Some("eth_getTransactionCount")
         );
+        assert!(io
+            .recorded_values
+            .iter()
+            .any(|(key, _)| key.0.contains("mfm:evm.tx_intent")));
     }
 
     #[tokio::test]
@@ -940,6 +977,8 @@ mod tests {
         let mut io = TrackingIo {
             calls: Vec::new(),
             prepare_sources_healthy: true,
+            recorded_values: Vec::new(),
+            fail_broadcast_once: false,
         };
         let mut rec = NoopRecorder;
 
@@ -972,11 +1011,128 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn configure_rejects_node_managed_unsigned_writes() {
+        let mut ctx = MapContext::default();
+        ctx.write(
+            ContextKey(KEY_CONTRACT_ADDRESS.to_string()),
+            serde_json::json!("0x1111111111111111111111111111111111111111"),
+        )
+        .expect("write contract address");
+        let mut io = TrackingIo {
+            calls: Vec::new(),
+            prepare_sources_healthy: true,
+            recorded_values: Vec::new(),
+            fail_broadcast_once: false,
+        };
+        let mut rec = NoopRecorder;
+
+        let err = EvmConfigureState {
+            state_id: StateId::must_new("evm.write.configure".to_string()),
+            cfg: EvmConfigureStateConfig {
+                artifact: Some(sample_artifact_config()),
+                artifact_port: KEY_CONTRACT_ARTIFACT.to_string(),
+                network_id: "ethereum-mainnet".to_string(),
+                control_scope: "shared".to_string(),
+                from: "0x1111111111111111111111111111111111111111".to_string(),
+                signing_key_env: None,
+                contract_address: None,
+                calls: vec![EvmConfigureRuntimeCall {
+                    function: "setValue".to_string(),
+                    args: vec![serde_json::json!(1).into()],
+                    value_hex: None,
+                }],
+                tx_hashes_export_key: "configure_tx_hashes".to_string(),
+                receipts_export_key: "configure_receipts".to_string(),
+                poll_interval_ms: 0,
+                max_receipt_polls: 1,
+            },
+        }
+        .handle(&mut ctx, &mut io, &mut rec)
+        .await
+        .expect_err("unsigned configure must be rejected");
+
+        assert_eq!(err.info.code.0, "evm_signed_transaction_required");
+        assert!(!io.calls.iter().any(|call| {
+            call.request.get("method").and_then(Value::as_str) == Some("eth_sendTransaction")
+        }));
+    }
+
+    #[tokio::test]
+    async fn configure_resume_after_intent_recording_reuses_same_intent() {
+        let mut ctx = MapContext::default();
+        ctx.write(
+            ContextKey(KEY_CONTRACT_ADDRESS.to_string()),
+            serde_json::json!("0x1111111111111111111111111111111111111111"),
+        )
+        .expect("write contract address");
+        let state = EvmConfigureState {
+            state_id: StateId::must_new("evm.write.configure".to_string()),
+            cfg: EvmConfigureStateConfig {
+                artifact: Some(sample_artifact_config()),
+                artifact_port: KEY_CONTRACT_ARTIFACT.to_string(),
+                network_id: "ethereum-mainnet".to_string(),
+                control_scope: "shared".to_string(),
+                from: "0x1111111111111111111111111111111111111111".to_string(),
+                signing_key_env: Some("MFM_DEPLOYER_KEY".to_string()),
+                contract_address: None,
+                calls: vec![EvmConfigureRuntimeCall {
+                    function: "setValue".to_string(),
+                    args: vec![serde_json::json!(1).into()],
+                    value_hex: None,
+                }],
+                tx_hashes_export_key: "configure_tx_hashes".to_string(),
+                receipts_export_key: "configure_receipts".to_string(),
+                poll_interval_ms: 0,
+                max_receipt_polls: 1,
+            },
+        };
+        let mut io = TrackingIo {
+            calls: Vec::new(),
+            prepare_sources_healthy: true,
+            recorded_values: Vec::new(),
+            fail_broadcast_once: true,
+        };
+        let mut rec = NoopRecorder;
+
+        let err = state
+            .handle(&mut ctx, &mut io, &mut rec)
+            .await
+            .expect_err("first broadcast is interrupted after intent recording");
+        assert_eq!(err.info.code.0, "simulated_broadcast_crash");
+        let first_intent = io
+            .recorded_values
+            .first()
+            .expect("intent recorded before broadcast")
+            .1
+            .clone();
+
+        state
+            .handle(&mut ctx, &mut io, &mut rec)
+            .await
+            .expect("resume should broadcast the same logical intent");
+        let second_intent = io
+            .recorded_values
+            .get(1)
+            .expect("intent recorded again on retry")
+            .1
+            .clone();
+
+        assert_eq!(first_intent, second_intent);
+        assert!(io.calls.iter().any(|call| {
+            call.request.get("kind").and_then(Value::as_str)
+                == Some("evm_broadcast_raw_transaction")
+                && call.request.get("expected_tx_hash") == first_intent.get("raw_tx_hash")
+        }));
+    }
+
+    #[tokio::test]
     async fn deploy_fails_fast_when_no_managed_sources_are_healthy() {
         let mut ctx = MapContext::default();
         let mut io = TrackingIo {
             calls: Vec::new(),
             prepare_sources_healthy: false,
+            recorded_values: Vec::new(),
+            fail_broadcast_once: false,
         };
         let mut rec = NoopRecorder;
 
