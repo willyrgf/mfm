@@ -833,7 +833,7 @@ mod tests {
             _key: FactKey,
             _value: serde_json::Value,
         ) -> Result<ArtifactId, IoError> {
-            Ok(ArtifactId("0".repeat(64)))
+            Ok(ArtifactId::must_new("0".repeat(64)))
         }
 
         async fn get_recorded_fact(

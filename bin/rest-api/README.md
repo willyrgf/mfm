@@ -52,7 +52,7 @@ Endpoints:
 - `POST /v1/runs/:run_id/resume`
 - `GET /v1/runs/:run_id/status`
 - `GET /v1/runs/:run_id/stream?from_seq=1&to_seq=<optional>`
-- `GET /v1/artifacts/:artifact_id`
+- `GET /v1/artifacts/:artifact_id` (artifact ids must be 64 lowercase hex characters)
 
 `rpc.control` routing notes:
 

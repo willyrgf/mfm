@@ -43,8 +43,8 @@ impl FsArtifactStore {
     }
 
     fn path_for(&self, id: &ArtifactId) -> PathBuf {
-        let prefix = id.0.get(0..2).unwrap_or("xx");
-        self.root.join(prefix).join(&id.0)
+        let prefix = id.as_str().get(0..2).unwrap_or("xx");
+        self.root.join(prefix).join(id.as_str())
     }
 
     fn info(code: &'static str, message: impl Into<String>) -> ErrorInfo {

@@ -4,7 +4,7 @@ use crate::presentation::output::handle_command_result;
 use crate::support::app_services::command_error_from_app_error;
 use crate::support::run_stores::{make_artifact_store, RunStoresArgs};
 use clap::{Args, Subcommand};
-use mfm_app::{get_artifact_from_store, ArtifactGetResponse};
+use mfm_app::{get_artifact_from_store, parse_artifact_id, ArtifactGetResponse};
 
 /// Subcommands under `mfm run artifacts`.
 #[derive(Subcommand)]
@@ -44,7 +44,8 @@ async fn execute_get(ctx: &CommandContext, args: &GetArgs) -> ! {
 
 async fn execute_get_internal(args: &GetArgs) -> CommandResult<ArtifactGetResponse> {
     let artifacts = make_artifact_store(args.stores.artifact_root.clone());
-    let response = get_artifact_from_store(artifacts, &args.artifact_id)
+    let artifact_id = parse_artifact_id(&args.artifact_id).map_err(command_error_from_app_error)?;
+    let response = get_artifact_from_store(artifacts, &artifact_id)
         .await
         .map_err(command_error_from_app_error)?;
 

@@ -304,7 +304,7 @@ fn test_run_artifacts_get_json_success_for_json_payload() {
             "run",
             "artifacts",
             "get",
-            &id.0,
+            id.as_str(),
             "--artifact-root",
             temp.path().to_str().unwrap(),
         ])
@@ -314,7 +314,7 @@ fn test_run_artifacts_get_json_success_for_json_payload() {
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
     let data = verify_success_response(&stdout);
-    assert_eq!(data["artifact_id"], id.0);
+    assert_eq!(data["artifact_id"], id.as_str());
     assert_eq!(data["encoding"], "json");
     assert_eq!(data["value"]["a"], 1);
 }
@@ -341,7 +341,7 @@ fn test_run_artifacts_get_json_success_for_binary_payload() {
             "run",
             "artifacts",
             "get",
-            &id.0,
+            id.as_str(),
             "--artifact-root",
             temp.path().to_str().unwrap(),
         ])
@@ -351,9 +351,35 @@ fn test_run_artifacts_get_json_success_for_binary_payload() {
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
     let data = verify_success_response(&stdout);
-    assert_eq!(data["artifact_id"], id.0);
+    assert_eq!(data["artifact_id"], id.as_str());
     assert_eq!(data["encoding"], "hex");
     assert_eq!(data["hex"], "68656c6c6f");
+}
+
+#[test]
+fn test_run_artifacts_get_json_rejects_invalid_artifact_id() {
+    let temp = TempDir::new().unwrap();
+
+    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
+    let output = cmd
+        .env_remove("DATABASE_URL")
+        .args([
+            "--output-format",
+            "json",
+            "run",
+            "artifacts",
+            "get",
+            "artifact_123",
+            "--artifact-root",
+            temp.path().to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to execute command");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    let err = verify_error_response(&stderr);
+    assert_eq!(err.error.code, "InvalidArtifactId");
 }
 
 #[test]

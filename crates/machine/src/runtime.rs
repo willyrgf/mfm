@@ -529,7 +529,7 @@ async fn run_states(
                     info!(
                         state_id = %state_id,
                         attempt,
-                        snapshot_id = %current_snapshot_id.0,
+                        snapshot_id = %current_snapshot_id,
                         "state execution completed"
                     );
                     break;
@@ -600,7 +600,7 @@ async fn run_states(
     .await?;
     info!(
         phase = ?phase,
-        final_snapshot_id = final_snapshot_id.as_ref().map(|id| id.0.as_str()),
+        final_snapshot_id = final_snapshot_id.as_ref().map(|id| id.as_str()),
         "run completed and finalized"
     );
 
@@ -633,7 +633,7 @@ impl ExecutionEngine for DefaultExecutionEngine {
                 "manifest artifact was not found",
             )));
         }
-        info!(manifest_id = %run.manifest_id.0, "starting run");
+        info!(manifest_id = %run.manifest_id, "starting run");
 
         let run_id = RunId(uuid::Uuid::new_v4());
 
@@ -660,7 +660,7 @@ impl ExecutionEngine for DefaultExecutionEngine {
             .map_err(RunError::Storage)?;
         info!(
             run_id = %run_id.0,
-            initial_snapshot_id = %initial_snapshot_id.0,
+            initial_snapshot_id = %initial_snapshot_id,
             "run started event appended"
         );
 
@@ -707,7 +707,7 @@ impl ExecutionEngine for DefaultExecutionEngine {
         if let Some((status, final_snapshot_id)) = &history.run_completed {
             info!(
                 status = ?status,
-                final_snapshot_id = final_snapshot_id.as_ref().map(|id| id.0.as_str()),
+                final_snapshot_id = final_snapshot_id.as_ref().map(|id| id.as_str()),
                 "run already completed; resume returns existing terminal state"
             );
             return Ok(RunResult {
@@ -833,7 +833,7 @@ impl ExecutionEngine for DefaultExecutionEngine {
             info!(
                 state_id = %next_state_id,
                 next_attempt = next,
-                base_snapshot_id = %base_snapshot.0,
+                base_snapshot_id = %base_snapshot,
                 "resuming from failed state with retry"
             );
             let start = (next_state_id.clone(), next, base_snapshot.clone());
@@ -861,7 +861,7 @@ impl ExecutionEngine for DefaultExecutionEngine {
         info!(
             state_id = %next_state_id,
             attempt = start.1,
-            base_snapshot_id = %history.last_checkpoint.0,
+            base_snapshot_id = %history.last_checkpoint,
             "resuming run at next state"
         );
         run_states(

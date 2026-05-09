@@ -52,7 +52,7 @@ struct NoopArtifactStore;
 #[async_trait]
 impl ArtifactStore for NoopArtifactStore {
     async fn put(&self, _kind: ArtifactKind, _bytes: Vec<u8>) -> Result<ArtifactId, StorageError> {
-        Ok(ArtifactId("0".repeat(64)))
+        Ok(ArtifactId::must_new("0".repeat(64)))
     }
     async fn get(&self, _id: &ArtifactId) -> Result<Vec<u8>, StorageError> {
         Ok(Vec::new())
@@ -177,8 +177,8 @@ impl ArtifactStore for FixedArtifactStore {
 
 async fn env_with_manifest_allowlist(prefixes: Vec<String>) -> LiveIoEnv {
     let run_id = RunId(uuid::Uuid::new_v4());
-    let manifest_id = ArtifactId("1".repeat(64));
-    let initial_snapshot_id = ArtifactId("2".repeat(64));
+    let manifest_id = ArtifactId::must_new("1".repeat(64));
+    let initial_snapshot_id = ArtifactId::must_new("2".repeat(64));
 
     let manifest = RunManifest {
         op_id: OpId::must_new("nix_app".to_string()),

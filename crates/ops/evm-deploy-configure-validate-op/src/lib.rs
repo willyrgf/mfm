@@ -701,12 +701,12 @@ mod tests {
 
         let canonical_bytes = stores
             .artifacts
-            .get(&ArtifactId(canonical_artifact_id))
+            .get(&ArtifactId::must_new(canonical_artifact_id.as_str()))
             .await
             .expect("canonical artifact");
         let built_bytes = stores
             .artifacts
-            .get(&ArtifactId(built_artifact_id))
+            .get(&ArtifactId::must_new(built_artifact_id.as_str()))
             .await
             .expect("built artifact");
         let canonical_from_artifact: DeployConfigureValidateCanonicalConfig =

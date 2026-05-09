@@ -21,6 +21,7 @@ mfm-app = { path = "../../crates/app" }
 parity-tests = []
 
 [dev-dependencies]
+async-trait = { workspace = true }
 
 [[bin]]
 name = "mfm_rest_api"

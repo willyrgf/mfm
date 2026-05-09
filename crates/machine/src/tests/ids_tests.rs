@@ -57,6 +57,29 @@ fn serde_rejects_invalid_op_and_state_ids() {
 }
 
 #[test]
+fn artifact_id_constructor_enforces_sha256_lowercase_hex() {
+    assert!(ArtifactId::new("0".repeat(64)).is_ok());
+    assert!(ArtifactId::new("a".repeat(64)).is_ok());
+    assert!(ArtifactId::new("A".repeat(64)).is_err());
+    assert!(ArtifactId::new("g".repeat(64)).is_err());
+    assert!(ArtifactId::new("0".repeat(63)).is_err());
+    assert!(ArtifactId::new("0".repeat(65)).is_err());
+}
+
+#[test]
+fn artifact_id_serde_rejects_invalid_values() {
+    let parsed: ArtifactId = serde_json::from_str(&format!("\"{}\"", "f".repeat(64)))
+        .expect("valid lowercase sha256 hex should deserialize");
+    assert_eq!(parsed.as_str(), "f".repeat(64));
+
+    let bad_uppercase = serde_json::from_str::<ArtifactId>(&format!("\"{}\"", "F".repeat(64)));
+    assert!(bad_uppercase.is_err());
+
+    let bad_shape = serde_json::from_str::<ArtifactId>("\"artifact_123\"");
+    assert!(bad_shape.is_err());
+}
+
+#[test]
 fn op_path_parts_are_directly_addressable() {
     let op_path = OpPath::must_new("portfolio_snapshot.fetch_balances.reporting");
     assert_eq!(op_path.machine_and_step(), ("portfolio_snapshot", "fetch_balances"));

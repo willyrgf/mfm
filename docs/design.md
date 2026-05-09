@@ -590,10 +590,11 @@ pub mod ids {
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
     pub struct RunId(pub uuid::Uuid);
 
-    /// Content-addressed identifier (hash) for an artifact.
-    /// Invariant: lowercase hex digest string (algorithm defined by policy; default SHA-256).
+    /// Content-addressed identifier (SHA-256 hash) for an artifact.
+    /// Invariant: exactly 64 lowercase hexadecimal characters.
     #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-    pub struct ArtifactId(pub String);
+    #[serde(try_from = "String", into = "String")]
+    pub struct ArtifactId(String);
 
     /// Namespaced key for recorded facts (external inputs).
     #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]

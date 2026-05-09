@@ -984,7 +984,7 @@ async fn call_rpc_control_raw(
         fact_key: Some(FactKey(format!(
             "mfm:rpc.control|state:{}|req:{}",
             state_id.as_str(),
-            request_id.0
+            request_id.as_str()
         ))),
     })
     .await
@@ -1287,7 +1287,7 @@ mod tests {
             value: serde_json::Value,
         ) -> Result<ArtifactId, IoError> {
             self.artifacts.insert(key.0.clone(), value);
-            Ok(ArtifactId(format!("artifact:{}", key.0)))
+            Ok(mfm_machine::hashing::artifact_id_for_bytes(key.0.as_bytes()))
         }
 
         async fn get_recorded_fact(
@@ -1297,7 +1297,7 @@ mod tests {
             Ok(self
                 .artifacts
                 .contains_key(&key.0)
-                .then(|| ArtifactId(format!("artifact:{}", key.0))))
+                .then(|| mfm_machine::hashing::artifact_id_for_bytes(key.0.as_bytes())))
         }
 
         async fn now_millis(&mut self) -> Result<u64, IoError> {

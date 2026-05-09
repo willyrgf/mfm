@@ -1877,12 +1877,12 @@ async fn launcher_persists_compiled_execution_spec_artifact() {
     let snapshot = serde_json::from_slice::<serde_json::Value>(&snapshot_bytes).expect("snapshot");
     assert_eq!(
         snapshot.get("mfm.compiled_execution_spec_artifact_id"),
-        Some(&serde_json::json!(spec_id.0))
+        Some(&serde_json::json!(spec_id.as_str()))
     );
 
     let stored_bytes = stores
         .artifacts
-        .get(&ArtifactId(spec_id.0.clone()))
+        .get(&ArtifactId::must_new(spec_id.as_str()))
         .await
         .expect("compiled execution spec artifact");
     let stored_spec =

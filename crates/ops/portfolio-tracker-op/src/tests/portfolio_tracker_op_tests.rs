@@ -411,7 +411,7 @@ async fn load_snapshot_artifact(
     .expect("artifact id");
     let bytes = stores
         .artifacts
-        .get(&ArtifactId(artifact_id))
+        .get(&ArtifactId::must_new(artifact_id.as_str()))
         .await
         .expect("portfolio snapshot artifact");
     serde_json::from_slice(&bytes).expect("portfolio snapshot artifact json")
@@ -672,12 +672,12 @@ async fn portfolio_config_build_emits_built_config_artifacts_and_report() {
 
     let canonical_bytes = stores
         .artifacts
-        .get(&ArtifactId(canonical_artifact_id))
+        .get(&ArtifactId::must_new(canonical_artifact_id.as_str()))
         .await
         .expect("canonical artifact");
     let built_bytes = stores
         .artifacts
-        .get(&ArtifactId(built_artifact_id))
+        .get(&ArtifactId::must_new(built_artifact_id.as_str()))
         .await
         .expect("built artifact");
     let canonical_from_artifact: PortfolioSnapshotCanonicalConfig =

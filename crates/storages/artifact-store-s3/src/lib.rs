@@ -100,12 +100,12 @@ impl S3ArtifactStore {
 
     fn object_path(&self, id: &ArtifactId) -> String {
         let prefix = self.prefix.trim_matches('/');
-        let id_prefix = id.0.get(0..2).unwrap_or("xx");
+        let id_prefix = id.as_str().get(0..2).unwrap_or("xx");
 
         if prefix.is_empty() {
-            format!("/{id_prefix}/{}", id.0)
+            format!("/{id_prefix}/{}", id.as_str())
         } else {
-            format!("/{prefix}/{id_prefix}/{}", id.0)
+            format!("/{prefix}/{id_prefix}/{}", id.as_str())
         }
     }
 

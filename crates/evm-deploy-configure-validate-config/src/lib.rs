@@ -398,8 +398,8 @@ pub fn build_deploy_configure_validate_outcome(
     canonical: DeployConfigureValidateCanonicalConfig,
 ) -> Result<DeployConfigureValidateBuildOutcome, DeployConfigureValidateConfigError> {
     let built = build_deploy_configure_validate_config(canonical)?;
-    let canonical_config_artifact_id = built.canonical.artifact_id()?.0;
-    let built_config_artifact_id = built.artifact_id()?.0;
+    let canonical_config_artifact_id = built.canonical.artifact_id()?.into_string();
+    let built_config_artifact_id = built.artifact_id()?.into_string();
     let report = DeployConfigureValidateBuildReport {
         machine_id: built.canonical.machine_id.clone(),
         pipeline_version: built.canonical.pipeline_version.clone(),
@@ -705,7 +705,10 @@ mod tests {
         );
         assert_eq!(
             json.report.built_config_artifact_id,
-            json.built.artifact_id().expect("json artifact").0
+            json.built
+                .artifact_id()
+                .expect("json artifact")
+                .into_string()
         );
     }
 

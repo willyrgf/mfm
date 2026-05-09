@@ -705,7 +705,7 @@ mod tests {
             _key: FactKey,
             _value: Value,
         ) -> Result<ArtifactId, IoError> {
-            Ok(ArtifactId("artifact".to_string()))
+            Ok(ArtifactId::must_new("0".repeat(64)))
         }
 
         async fn get_recorded_fact(

@@ -73,7 +73,7 @@ pub fn idempotency_key_for_value(v: &serde_json::Value) -> Result<String, StateE
             "value was not canonical-json-hashable",
         )
     })?;
-    Ok(id.0)
+    Ok(id.into_string())
 }
 
 #[cfg(test)]

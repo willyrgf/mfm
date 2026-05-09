@@ -70,7 +70,7 @@ pub fn fact_key_for_request(
     Ok(FactKey(format!(
         "mfm:local|state:{}|purpose:{purpose}|req:{}",
         state_id.as_str(),
-        req_id.0
+        req_id.as_str()
     )))
 }
 

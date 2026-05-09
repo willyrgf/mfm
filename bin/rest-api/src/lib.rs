@@ -255,7 +255,7 @@ async fn ready(State(state): State<RouterState>) -> Result<Json<serde_json::Valu
 
     // Usability probe for the artifact store.
     let probe_artifact_id =
-        ArtifactId("0000000000000000000000000000000000000000000000000000000000000000".to_string());
+        ArtifactId::must_new("0000000000000000000000000000000000000000000000000000000000000000");
     state
         .app
         .artifacts
@@ -400,8 +400,61 @@ async fn features_execute(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
+    use mfm_machine::errors::StorageError;
+    use mfm_machine::stores::{AppendBatchResult, ArtifactKind, StreamAppend, StreamRecord};
 
     struct FailingSerialize;
+
+    struct UnusedStreamStore;
+
+    #[async_trait]
+    impl StreamStore for UnusedStreamStore {
+        async fn head_seq(&self, _stream_id: &StreamId) -> Result<u64, StorageError> {
+            panic!("invalid artifact id should be rejected before stream storage")
+        }
+
+        async fn append(&self, _append: StreamAppend) -> Result<u64, StorageError> {
+            panic!("invalid artifact id should be rejected before stream storage")
+        }
+
+        async fn append_batch(
+            &self,
+            _appends: Vec<StreamAppend>,
+        ) -> Result<AppendBatchResult, StorageError> {
+            panic!("invalid artifact id should be rejected before stream storage")
+        }
+
+        async fn read_range(
+            &self,
+            _stream_id: &StreamId,
+            _from_seq: u64,
+            _to_seq: Option<u64>,
+        ) -> Result<Vec<StreamRecord>, StorageError> {
+            panic!("invalid artifact id should be rejected before stream storage")
+        }
+    }
+
+    struct UnusedArtifactStore;
+
+    #[async_trait]
+    impl ArtifactStore for UnusedArtifactStore {
+        async fn put(
+            &self,
+            _kind: ArtifactKind,
+            _bytes: Vec<u8>,
+        ) -> Result<ArtifactId, StorageError> {
+            panic!("invalid artifact id should be rejected before artifact storage")
+        }
+
+        async fn get(&self, _id: &ArtifactId) -> Result<Vec<u8>, StorageError> {
+            panic!("invalid artifact id should be rejected before artifact storage")
+        }
+
+        async fn exists(&self, _id: &ArtifactId) -> Result<bool, StorageError> {
+            panic!("invalid artifact id should be rejected before artifact storage")
+        }
+    }
 
     impl Serialize for FailingSerialize {
         fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
@@ -420,5 +473,24 @@ mod tests {
         assert_eq!(err.status, StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(err.code, "SerializationError");
         assert_eq!(err.message, "Failed to serialize response payload");
+    }
+
+    #[tokio::test]
+    async fn artifacts_get_rejects_invalid_artifact_id_with_bad_request() {
+        let state = RouterState {
+            app: AppState {
+                bundle: make_engine_bundle(),
+                streams: Arc::new(UnusedStreamStore),
+                artifacts: Arc::new(UnusedArtifactStore),
+            },
+            catalog: Arc::new(FeatureCatalog::default()),
+        };
+
+        let err = artifacts_get(State(state), Path("artifact_123".to_string()))
+            .await
+            .expect_err("invalid artifact id should return an API error");
+
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert_eq!(err.code, "InvalidArtifactId");
     }
 }

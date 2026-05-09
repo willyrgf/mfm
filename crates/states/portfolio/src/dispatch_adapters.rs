@@ -1096,7 +1096,7 @@ async fn call_rpc_control_raw(
         fact_key: Some(FactKey(format!(
             "mfm:rpc.control|state:{}|req:{}",
             state_id.as_str(),
-            request_id.0
+            request_id.as_str()
         ))),
     })
     .await
@@ -1297,7 +1297,7 @@ mod tests {
             _key: FactKey,
             _value: serde_json::Value,
         ) -> Result<ArtifactId, IoError> {
-            Ok(ArtifactId("artifact".to_string()))
+            Ok(ArtifactId::must_new("0".repeat(64)))
         }
 
         async fn get_recorded_fact(

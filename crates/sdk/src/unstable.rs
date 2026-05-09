@@ -126,7 +126,7 @@ fn validate_segment(code: &'static str, s: &str, message: &'static str) -> Resul
 fn validate_machine_id(id: &MachineId) -> Result<(), SdkError> {
     validate_segment(
         "invalid_machine_id",
-        &id.0,
+        id.0.as_str(),
         "machine_id must match ^[a-z][a-z0-9_]{0,62}$",
     )
 }
@@ -134,7 +134,7 @@ fn validate_machine_id(id: &MachineId) -> Result<(), SdkError> {
 fn validate_step_id(id: &StepId) -> Result<(), SdkError> {
     validate_segment(
         "invalid_step_id",
-        &id.0,
+        id.0.as_str(),
         "step_id must match ^[a-z][a-z0-9_]{0,62}$",
     )
 }
@@ -1637,7 +1637,7 @@ impl RunLauncher for DefaultRunLauncher {
             initial_context
                 .write(
                     ContextKey(COMPILED_EXECUTION_SPEC_ARTIFACT_ID_CONTEXT_KEY.to_string()),
-                    serde_json::json!(stored_spec_id.0),
+                    serde_json::json!(stored_spec_id.as_str()),
                 )
                 .map_err(RunError::Context)?;
         }

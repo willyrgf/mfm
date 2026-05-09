@@ -32,7 +32,7 @@ pub async fn write_output_artifact(
         .await
         .map_err(|_| state_unknown("output_record_failed", "output record failed"))?;
 
-    write_json(ctx, output_ctx_key, serde_json::json!(payload_id.0.clone()))?;
+    write_json(ctx, output_ctx_key, serde_json::json!(payload_id.as_str()))?;
 
     if !existed {
         let payload = serde_json::to_value(ArtifactWritten {

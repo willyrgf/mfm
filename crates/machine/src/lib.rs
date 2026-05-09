@@ -142,10 +142,12 @@ pub mod ids {
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
     pub struct RunId(pub uuid::Uuid);
 
-    /// Content-addressed identifier (hash) for an artifact.
-    /// Invariant: lowercase hex digest string (algorithm defined by policy; default SHA-256).
+    /// Content-addressed identifier (SHA-256 hash) for an artifact.
+    ///
+    /// Invariant: exactly 64 lowercase hexadecimal characters.
     #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-    pub struct ArtifactId(pub String);
+    #[serde(try_from = "String", into = "String")]
+    pub struct ArtifactId(String);
 
     /// Namespaced key for recorded facts (external inputs).
     #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -384,6 +386,77 @@ pub mod ids {
     }
 
     impl fmt::Display for OpPath {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "{}", self.0)
+        }
+    }
+
+    fn validate_artifact_id(value: &str) -> bool {
+        value.len() == 64
+            && value
+                .bytes()
+                .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    }
+
+    impl ArtifactId {
+        /// Creates an artifact identifier after validating the SHA-256 lowercase-hex contract.
+        ///
+        /// # Examples
+        ///
+        /// ```rust
+        /// use mfm_machine::ids::ArtifactId;
+        ///
+        /// let id = ArtifactId::new("0".repeat(64))?;
+        /// assert_eq!(id.as_str().len(), 64);
+        /// # Ok::<(), mfm_machine::ids::IdValidationError>(())
+        /// ```
+        pub fn new(value: impl Into<String>) -> Result<Self, IdValidationError> {
+            let value = value.into();
+            if !validate_artifact_id(&value) {
+                return Err(IdValidationError::new("artifact_id", value));
+            }
+            Ok(Self(value))
+        }
+
+        /// Creates an [`ArtifactId`] and panics if the value is invalid.
+        pub fn must_new(value: impl Into<String>) -> Self {
+            Self::new(value).expect("artifact id must be 64 lowercase hex characters")
+        }
+
+        /// Returns the validated identifier as a borrowed string slice.
+        pub fn as_str(&self) -> &str {
+            &self.0
+        }
+
+        /// Consumes this identifier and returns the underlying string.
+        pub fn into_string(self) -> String {
+            self.0
+        }
+    }
+
+    impl TryFrom<String> for ArtifactId {
+        type Error = IdValidationError;
+
+        fn try_from(value: String) -> Result<Self, Self::Error> {
+            Self::new(value)
+        }
+    }
+
+    impl TryFrom<&str> for ArtifactId {
+        type Error = IdValidationError;
+
+        fn try_from(value: &str) -> Result<Self, Self::Error> {
+            Self::new(value)
+        }
+    }
+
+    impl From<ArtifactId> for String {
+        fn from(value: ArtifactId) -> Self {
+            value.0
+        }
+    }
+
+    impl fmt::Display for ArtifactId {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             write!(f, "{}", self.0)
         }
@@ -1273,7 +1346,7 @@ pub mod events {
             let v = serde_json::to_value(ChildRunSpawned {
                 parent_run_id: RunId(uuid::Uuid::new_v4()),
                 child_run_id: RunId(uuid::Uuid::new_v4()),
-                child_manifest_id: ArtifactId("0".repeat(64)),
+                child_manifest_id: ArtifactId::must_new("0".repeat(64)),
             })
             .expect("serialize");
             artifact_id_for_json(&v).expect("canonical-json-hashable");
@@ -1282,7 +1355,7 @@ pub mod events {
             let v = serde_json::to_value(ChildRunCompleted {
                 child_run_id: RunId(uuid::Uuid::new_v4()),
                 status: RunStatus::Completed,
-                final_snapshot_id: Some(ArtifactId("1".repeat(64))),
+                final_snapshot_id: Some(ArtifactId::must_new("1".repeat(64))),
             })
             .expect("serialize");
             artifact_id_for_json(&v).expect("canonical-json-hashable");

@@ -144,8 +144,8 @@ mod tests {
             1,
             Event::Kernel(KernelEvent::RunStarted {
                 op_id: OpId::must_new("op".to_string()),
-                manifest_id: ArtifactId("0".repeat(64)),
-                initial_snapshot_id: ArtifactId("1".repeat(64)),
+                manifest_id: ArtifactId::must_new("0".repeat(64)),
+                initial_snapshot_id: ArtifactId::must_new("1".repeat(64)),
             }),
         );
 
@@ -155,7 +155,7 @@ mod tests {
             Event::Kernel(KernelEvent::StateEntered {
                 state_id: StateId::must_new("machine.main.s1".to_string()),
                 attempt: 0,
-                base_snapshot_id: ArtifactId("2".repeat(64)),
+                base_snapshot_id: ArtifactId::must_new("2".repeat(64)),
             }),
         );
 
@@ -174,7 +174,7 @@ mod tests {
             4,
             Event::Kernel(KernelEvent::StateCompleted {
                 state_id: StateId::must_new("machine.main.s1".to_string()),
-                context_snapshot_id: ArtifactId("3".repeat(64)),
+                context_snapshot_id: ArtifactId::must_new("3".repeat(64)),
             }),
         );
 
@@ -203,7 +203,7 @@ mod tests {
                 3,
                 Event::Kernel(KernelEvent::StateCompleted {
                     state_id: StateId::must_new("machine.main.s1".to_string()),
-                    context_snapshot_id: ArtifactId("3".repeat(64)),
+                    context_snapshot_id: ArtifactId::must_new("3".repeat(64)),
                 }),
             ),
             env(
@@ -218,11 +218,11 @@ mod tests {
 
         assert_eq!(
             last_checkpoint_snapshot_id(&with_domain).expect("analysis"),
-            Some(ArtifactId("3".repeat(64)))
+            Some(ArtifactId::must_new("3".repeat(64)))
         );
         assert_eq!(
             last_checkpoint_snapshot_id(&without_domain).expect("analysis"),
-            Some(ArtifactId("3".repeat(64)))
+            Some(ArtifactId::must_new("3".repeat(64)))
         );
     }
 
@@ -236,7 +236,7 @@ mod tests {
             Event::Kernel(KernelEvent::StateEntered {
                 state_id: StateId::must_new("machine.main.s1".to_string()),
                 attempt: 7,
-                base_snapshot_id: ArtifactId("2".repeat(64)),
+                base_snapshot_id: ArtifactId::must_new("2".repeat(64)),
             }),
         )];
 
@@ -255,7 +255,7 @@ mod tests {
             1,
             Event::Kernel(KernelEvent::StateCompleted {
                 state_id: StateId::must_new("machine.main.s1".to_string()),
-                context_snapshot_id: ArtifactId("2".repeat(64)),
+                context_snapshot_id: ArtifactId::must_new("2".repeat(64)),
             }),
         )];
 

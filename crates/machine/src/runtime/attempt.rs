@@ -439,7 +439,7 @@ pub(super) async fn execute_attempt(ctx: &mut AttemptCtx<'_>) -> Result<AttemptE
         run_id = %ctx.run_id.0,
         state_id = %ctx.state_id,
         attempt = ctx.attempt,
-        base_snapshot_id = %ctx.base_snapshot_id.0,
+        base_snapshot_id = %ctx.base_snapshot_id,
         "state attempt started"
     );
     super::append_kernel(
@@ -495,7 +495,7 @@ pub(super) async fn execute_attempt(ctx: &mut AttemptCtx<'_>) -> Result<AttemptE
                 run_id = %ctx.run_id.0,
                 state_id = %ctx.state_id,
                 attempt = ctx.attempt,
-                snapshot_id = %snapshot_id.0,
+                snapshot_id = %snapshot_id,
                 "state attempt completed"
             );
             super::append_kernel(

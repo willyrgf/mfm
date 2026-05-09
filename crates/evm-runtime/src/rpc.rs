@@ -901,7 +901,7 @@ mod tests {
             };
             Ok(IoResult {
                 response,
-                recorded_payload_id: Some(ArtifactId("1".repeat(64))),
+                recorded_payload_id: Some(ArtifactId::must_new("1".repeat(64))),
             })
         }
 
@@ -910,7 +910,7 @@ mod tests {
             _key: FactKey,
             _value: Value,
         ) -> Result<ArtifactId, IoError> {
-            Ok(ArtifactId("2".repeat(64)))
+            Ok(ArtifactId::must_new("2".repeat(64)))
         }
 
         async fn get_recorded_fact(

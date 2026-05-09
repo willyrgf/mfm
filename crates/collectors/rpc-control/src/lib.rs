@@ -237,7 +237,7 @@ pub fn fact_key_for_request(
     Ok(FactKey(format!(
         "mfm:rpc.control|state:{}|req:{}",
         state_id.as_str(),
-        req_id.0
+        req_id.as_str()
     )))
 }
 
@@ -685,7 +685,7 @@ mod tests {
             };
             Ok(IoResult {
                 response,
-                recorded_payload_id: Some(ArtifactId("1".repeat(64))),
+                recorded_payload_id: Some(ArtifactId::must_new("1".repeat(64))),
             })
         }
 
@@ -694,7 +694,7 @@ mod tests {
             _key: FactKey,
             _value: serde_json::Value,
         ) -> Result<ArtifactId, IoError> {
-            Ok(ArtifactId("2".repeat(64)))
+            Ok(ArtifactId::must_new("2".repeat(64)))
         }
 
         async fn get_recorded_fact(

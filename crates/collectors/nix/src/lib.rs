@@ -127,7 +127,7 @@ pub fn fact_key_for_resolve_flake_app(
     Ok(FactKey(format!(
         "mfm:nix:preflight|state:{}|req:{}",
         state_id.as_str(),
-        req_id.0
+        req_id.as_str()
     )))
 }
 
@@ -149,7 +149,7 @@ pub fn fact_key_for_run_flake_app(
     Ok(FactKey(format!(
         "mfm:nix:run|state:{}|req:{}",
         state_id.as_str(),
-        req_id.0
+        req_id.as_str()
     )))
 }
 

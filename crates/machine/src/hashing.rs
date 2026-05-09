@@ -52,7 +52,7 @@ pub fn canonical_json_bytes(value: &serde_json::Value) -> Result<Vec<u8>, Canoni
 /// Compute the content-addressed `ArtifactId` for raw bytes (SHA-256 lowercase hex).
 pub fn artifact_id_for_bytes(bytes: &[u8]) -> ArtifactId {
     let digest = ring::digest::digest(&ring::digest::SHA256, bytes);
-    ArtifactId(hex::encode(digest.as_ref()))
+    ArtifactId::must_new(hex::encode(digest.as_ref()))
 }
 
 /// Compute the content-addressed `ArtifactId` for structured JSON (canonical JSON bytes + SHA-256).
@@ -164,12 +164,12 @@ mod tests {
         // SHA-256("hello") = 2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824
         let id = artifact_id_for_bytes(b"hello");
         assert_eq!(
-            id.0,
+            id.as_str(),
             "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
         );
-        assert_eq!(id.0.len(), 64);
+        assert_eq!(id.as_str().len(), 64);
         assert!(id
-            .0
+            .as_str()
             .chars()
             .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
     }

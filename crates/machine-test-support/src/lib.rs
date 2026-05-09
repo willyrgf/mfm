@@ -134,7 +134,7 @@ async fn content_addressed(store: &dyn ArtifactStore) {
 }
 
 async fn exists_and_not_found(store: &dyn ArtifactStore) {
-    let missing = ArtifactId("0".repeat(64));
+    let missing = ArtifactId::must_new("0".repeat(64));
     assert!(!store.exists(&missing).await.expect("exists must succeed"));
 
     match store.get(&missing).await {

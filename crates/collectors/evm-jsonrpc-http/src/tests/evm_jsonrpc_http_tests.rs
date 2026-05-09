@@ -53,7 +53,7 @@ struct NoopArtifactStore;
 #[async_trait]
 impl ArtifactStore for NoopArtifactStore {
     async fn put(&self, _kind: ArtifactKind, _bytes: Vec<u8>) -> Result<ArtifactId, StorageError> {
-        Ok(ArtifactId("0".repeat(64)))
+        Ok(ArtifactId::must_new("0".repeat(64)))
     }
 
     async fn get(&self, _id: &ArtifactId) -> Result<Vec<u8>, StorageError> {

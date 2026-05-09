@@ -761,7 +761,7 @@ impl AppServices {
         Ok(RunStartResponse {
             run_id: run.run_id.0.to_string(),
             phase: phase_str(&run.phase).to_string(),
-            final_snapshot_id: run.final_snapshot_id.map(|id| id.0),
+            final_snapshot_id: run.final_snapshot_id.map(|id| id.into_string()),
         })
     }
 
@@ -816,7 +816,7 @@ impl AppServices {
         Ok(RunResumeResponse {
             run_id: run.run_id.0.to_string(),
             phase: phase_str(&run.phase).to_string(),
-            final_snapshot_id: run.final_snapshot_id.map(|id| id.0),
+            final_snapshot_id: run.final_snapshot_id.map(|id| id.into_string()),
         })
     }
 
@@ -853,7 +853,7 @@ impl AppServices {
                     initial_snapshot_id: _,
                 } => {
                     op_id = Some(oid.to_string());
-                    manifest_id = Some(mid.0.clone());
+                    manifest_id = Some(mid.as_str().to_string());
                 }
                 KernelEvent::RunCompleted {
                     status,
@@ -861,7 +861,7 @@ impl AppServices {
                 } => {
                     completed = Some((
                         status.clone(),
-                        final_snapshot_id.as_ref().map(|id| id.0.clone()),
+                        final_snapshot_id.as_ref().map(|id| id.as_str().to_string()),
                     ));
                 }
                 _ => {}
@@ -932,7 +932,8 @@ impl AppServices {
     #[instrument(level = "debug", skip(self), fields(artifact_id = artifact_id))]
     /// Loads an artifact by content address and returns a transport-friendly body.
     pub async fn artifact_get(&self, artifact_id: &str) -> Result<ArtifactGetResponse, AppError> {
-        get_artifact_from_store(Arc::clone(&self.artifacts), artifact_id).await
+        let id = parse_artifact_id(artifact_id)?;
+        get_artifact_from_store(Arc::clone(&self.artifacts), &id).await
     }
 
     /// Starts the standard deploy-configure-validate workflow through the public root op family.
@@ -983,7 +984,7 @@ impl AppServices {
         if let Some(final_snapshot_id) = &run.final_snapshot_id {
             let snapshot = load_context_snapshot_json(
                 self.artifacts.as_ref(),
-                &ArtifactId(final_snapshot_id.clone()),
+                &parse_artifact_id(final_snapshot_id)?,
             )
             .await
             .map_err(app_error_from_context_snapshot_load_error)?;
@@ -1055,7 +1056,7 @@ impl AppServices {
             let snapshot_artifact_id_key = portfolio_snapshot_artifact_id_context_key();
             let snapshot = load_context_snapshot_json(
                 self.artifacts.as_ref(),
-                &ArtifactId(final_snapshot_id.clone()),
+                &parse_artifact_id(final_snapshot_id)?,
             )
             .await
             .map_err(app_error_from_context_snapshot_load_error)?;
@@ -1118,13 +1119,12 @@ fn app_error_from_deploy_configure_validate_config_error(
 /// Loads an artifact from the supplied store and returns a JSON-or-hex response body.
 pub async fn get_artifact_from_store(
     artifacts: Arc<dyn ArtifactStore>,
-    artifact_id: &str,
+    id: &ArtifactId,
 ) -> Result<ArtifactGetResponse, AppError> {
-    let id = ArtifactId(artifact_id.to_string());
-    debug!(artifact_id = %id.0, "loading artifact from store");
+    debug!(artifact_id = %id, "loading artifact from store");
 
     let bytes = artifacts
-        .get(&id)
+        .get(id)
         .await
         .map_err(app_error_from_storage_error)?;
 
@@ -1136,8 +1136,19 @@ pub async fn get_artifact_from_store(
     };
 
     Ok(ArtifactGetResponse {
-        artifact_id: id.0,
+        artifact_id: id.as_str().to_string(),
         body,
+    })
+}
+
+/// Parses a caller-supplied artifact id before any storage lookup.
+pub fn parse_artifact_id(artifact_id: &str) -> Result<ArtifactId, AppError> {
+    ArtifactId::new(artifact_id).map_err(|_| {
+        AppError::new(
+            ErrorClass::BadRequest,
+            "InvalidArtifactId",
+            "artifact id must be 64 lowercase hex characters",
+        )
     })
 }
 
@@ -1579,7 +1590,12 @@ impl FeatureCatalog {
                 description: "Fetch an artifact by id".to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
-                    "properties": {"artifact_id": {"type": "string"}},
+                    "properties": {
+                        "artifact_id": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{64}$"
+                        }
+                    },
                     "required": ["artifact_id"]
                 }),
                 output_schema: serde_json::json!({
@@ -1728,7 +1744,10 @@ impl FeatureCatalog {
             BuiltinFeature::ArtifactGet => {
                 let parsed: ArtifactIdInput =
                     serde_json::from_value(req.payload).map_err(|_| AppError::invalid_json())?;
-                serde_json::to_value(services.artifact_get(&parsed.artifact_id).await?)
+                serde_json::to_value(
+                    get_artifact_from_store(Arc::clone(&services.artifacts), &parsed.artifact_id)
+                        .await?,
+                )
             }
             BuiltinFeature::PipelineDeployConfigureValidateStart => {
                 let parsed = decode_deploy_configure_validate_canonical_config(&req.payload)
@@ -1773,7 +1792,7 @@ struct RunIdInput {
 
 #[derive(Clone, Debug, Deserialize)]
 struct ArtifactIdInput {
-    artifact_id: String,
+    artifact_id: ArtifactId,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -1937,7 +1956,7 @@ mod tests {
             _kind: ArtifactKind,
             _bytes: Vec<u8>,
         ) -> Result<ArtifactId, StorageError> {
-            Ok(ArtifactId("0".repeat(64)))
+            Ok(ArtifactId::must_new("0".repeat(64)))
         }
 
         async fn get(&self, _id: &ArtifactId) -> Result<Vec<u8>, StorageError> {
@@ -2079,6 +2098,19 @@ mod tests {
             .await
             .expect_err("invalid child-run payload should fail at wrapper boundary");
         assert_io_error_code(err, "child_run_request_invalid");
+    }
+
+    #[tokio::test]
+    async fn artifact_get_rejects_invalid_artifact_id_before_storage_lookup() {
+        let services = test_services(make_engine_bundle());
+
+        let err = services
+            .artifact_get("artifact_123")
+            .await
+            .expect_err("invalid artifact ids must be rejected at the app boundary");
+
+        assert_eq!(err.class, ErrorClass::BadRequest);
+        assert_eq!(err.code, "InvalidArtifactId");
     }
 
     #[tokio::test]

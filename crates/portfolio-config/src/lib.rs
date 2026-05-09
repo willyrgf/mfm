@@ -422,8 +422,8 @@ pub fn build_portfolio_snapshot_outcome(
         report: PortfolioSnapshotBuildReport {
             schema_version: PortfolioSnapshotBuildReport::SCHEMA_VERSION,
             portfolio_id: built.canonical.portfolio.portfolio_id.clone(),
-            canonical_config_artifact_id: canonical_artifact_id.0,
-            built_config_artifact_id: built_artifact_id.0,
+            canonical_config_artifact_id: canonical_artifact_id.into_string(),
+            built_config_artifact_id: built_artifact_id.into_string(),
             network_count: built.canonical.portfolio.networks.len() as u64,
             wallet_count: built.canonical.portfolio.wallets.len() as u64,
             observation_batch_count: built.execution_spec.observation_batches.len() as u64,
@@ -624,11 +624,14 @@ mod tests {
                 .canonical
                 .artifact_id()
                 .expect("canonical artifact id")
-                .0
+                .into_string()
         );
         assert_eq!(
             left.report.built_config_artifact_id,
-            left.built.artifact_id().expect("built artifact id").0
+            left.built
+                .artifact_id()
+                .expect("built artifact id")
+                .into_string()
         );
     }
 }

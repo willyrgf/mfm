@@ -107,7 +107,7 @@ pub fn fact_key_for_run_program(
     Ok(FactKey(format!(
         "mfm:exec|state:{}|req:{}",
         state_id.as_str(),
-        req_id.0
+        req_id.as_str()
     )))
 }
 

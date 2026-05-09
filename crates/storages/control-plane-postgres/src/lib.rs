@@ -863,7 +863,7 @@ impl SourcePoolCatalogSnapshot {
     pub fn fingerprint(&self) -> Result<String, CanonicalJsonError> {
         let value = serde_json::to_value(self)
             .expect("SourcePoolCatalogSnapshot should always serialize to JSON");
-        Ok(artifact_id_for_json(&value)?.0)
+        Ok(artifact_id_for_json(&value)?.into_string())
     }
 }
 

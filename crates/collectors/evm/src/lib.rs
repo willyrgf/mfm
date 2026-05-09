@@ -111,7 +111,7 @@ pub fn fact_key_for_jsonrpc_call(
     Ok(FactKey(format!(
         "mfm:evm|state:{}|req:{}",
         state_id.as_str(),
-        req_id.0
+        req_id.as_str()
     )))
 }
 
@@ -344,7 +344,7 @@ mod tests {
             _key: FactKey,
             _value: serde_json::Value,
         ) -> Result<ArtifactId, IoError> {
-            Ok(ArtifactId("0".repeat(64)))
+            Ok(ArtifactId::must_new("0".repeat(64)))
         }
 
         async fn get_recorded_fact(

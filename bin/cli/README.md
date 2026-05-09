@@ -371,7 +371,8 @@ mfm_cli run stream <RUN_ID> [OPTIONS]
 
 ### `run artifacts get`
 
-Fetches an artifact by id from the artifact store.
+Fetches an artifact by id from the artifact store. The id must be a valid SHA-256 content address:
+exactly 64 lowercase hexadecimal characters.
 
 Note: this command does not require Postgres; it only uses the filesystem artifact store.
 
