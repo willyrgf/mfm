@@ -1,7 +1,5 @@
 use clap::{Args, Subcommand};
-use mfm_app::{
-    DeployConfigureValidateSpec, PipelineStartRequest, RunStartResponse, RunsStartRequest,
-};
+use mfm_app::{DeployConfigureValidateSpec, RunStartResponse, RunsStartRequest};
 use mfm_evm_deploy_configure_validate_config::{
     canonicalize_deploy_configure_validate_authored_config,
     parse_deploy_configure_validate_authored_config,
@@ -102,11 +100,11 @@ async fn execute_start_internal(args: &PipelineStartArgs) -> CommandResult<RunSt
     let services = make_app_services_from_args(&args.stores).await?;
 
     let response = services
-        .start_run(RunsStartRequest::Pipeline(PipelineStartRequest {
+        .start_run(RunsStartRequest::Pipeline {
             pipeline,
             input,
             run_config: Some(mfm_app::default_run_config()),
-        }))
+        })
         .await
         .map_err(command_error_from_app_error)?;
 

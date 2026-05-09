@@ -72,7 +72,7 @@ Start a run:
 ```bash
 curl -s "http://127.0.0.1:3001/v1/runs/start" \
   -H "content-type: application/json" \
-  -d '{"op_id":"proof","op_version":"v1","op_config":{}}'
+  -d '{"kind":"single_op_start_v1","op_id":"proof","op_version":"v1","op_config":{}}'
 ```
 
 Generic feature execution:
@@ -80,8 +80,12 @@ Generic feature execution:
 ```bash
 curl -s "http://127.0.0.1:3001/v1/features/run.start/execute" \
   -H "content-type: application/json" \
-  -d '{"payload":{"op_id":"proof","op_version":"v1","op_config":{}}}'
+  -d '{"payload":{"kind":"single_op_start_v1","op_id":"proof","op_version":"v1","op_config":{}}}'
 ```
+
+`/v1/runs/start` and feature `run.start` require an explicit request tag. Use
+`kind: "single_op_start_v1"` with `op_id` and `op_version`, or `kind: "pipeline_start_v1"` with
+`pipeline`. Unknown top-level fields are rejected.
 
 Portfolio snapshot feature:
 
@@ -111,7 +115,7 @@ network.
 
 Supported public root `op_id` values for `/v1/runs/start` and feature `run.start` (current):
 
-- `proof` (default)
+- `proof`
 - `keystore_import`
 - `keystore_list`
 - `keystore_delete`

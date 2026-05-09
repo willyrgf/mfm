@@ -692,31 +692,35 @@ impl AppServices {
     /// Starts a new run from either a single-op request or a full pipeline request.
     pub async fn start_run(&self, req: RunsStartRequest) -> Result<RunStartResponse, AppError> {
         let (pipeline, input, run_config) = match req {
-            RunsStartRequest::Single(req) => {
+            RunsStartRequest::SingleOp {
+                op_id,
+                op_version,
+                op_config,
+                input,
+            } => {
                 tracing::Span::current().record("request_kind", "single");
-                tracing::Span::current().record("op_id", req.op_id.as_str());
-                let op_id = OpId::new(req.op_id).map_err(|_| {
+                tracing::Span::current().record("op_id", op_id.as_str());
+                let op_id = OpId::new(op_id).map_err(|_| {
                     AppError::new(
                         ErrorClass::BadRequest,
                         "invalid_op_id",
                         "op_id must match ^[a-z][a-z0-9_]{0,62}$",
                     )
                 })?;
-                ensure_single_start_op(
-                    self.bundle.registry.as_ref(),
-                    &op_id,
-                    req.op_version.as_str(),
-                )?;
-                let pipeline =
-                    single_op_pipeline(op_id, req.op_version, req.op_config).map_err(|e| {
-                        AppError::new(ErrorClass::BadRequest, e.info.code.0, e.info.message)
-                    })?;
-                (pipeline, req.input, default_run_config())
+                ensure_single_start_op(self.bundle.registry.as_ref(), &op_id, op_version.as_str())?;
+                let pipeline = single_op_pipeline(op_id, op_version, op_config).map_err(|e| {
+                    AppError::new(ErrorClass::BadRequest, e.info.code.0, e.info.message)
+                })?;
+                (pipeline, input, default_run_config())
             }
-            RunsStartRequest::Pipeline(req) => {
+            RunsStartRequest::Pipeline {
+                pipeline,
+                input,
+                run_config,
+            } => {
                 tracing::Span::current().record("request_kind", "pipeline");
-                tracing::Span::current().record("machine_id", req.pipeline.machine_id.0.as_str());
-                for step in &req.pipeline.steps {
+                tracing::Span::current().record("machine_id", pipeline.machine_id.0.as_str());
+                for step in &pipeline.steps {
                     ensure_single_start_op(
                         self.bundle.registry.as_ref(),
                         &step.op_id,
@@ -724,9 +728,9 @@ impl AppServices {
                     )?;
                 }
                 (
-                    req.pipeline,
-                    req.input,
-                    req.run_config.unwrap_or_else(default_run_config),
+                    pipeline,
+                    input,
+                    run_config.unwrap_or_else(default_run_config),
                 )
             }
         };
@@ -945,12 +949,12 @@ impl AppServices {
         let op_config = serde_json::to_value(&spec).map_err(|_| {
             AppError::invalid_request("failed to encode deploy-configure-validate request")
         })?;
-        self.start_run(RunsStartRequest::Single(SingleOpStartRequest {
+        self.start_run(RunsStartRequest::SingleOp {
             op_id: EVM_DEPLOY_CONFIGURE_VALIDATE_OP_ID.to_string(),
             op_version: EVM_DEPLOY_CONFIGURE_VALIDATE_PUBLIC_OP_VERSION.to_string(),
             op_config,
             input,
-        }))
+        })
         .await
     }
 
@@ -964,12 +968,12 @@ impl AppServices {
         })?;
 
         let run = self
-            .start_run(RunsStartRequest::Single(SingleOpStartRequest {
+            .start_run(RunsStartRequest::SingleOp {
                 op_id: PORTFOLIO_CONFIG_BUILD_OP_ID.to_string(),
                 op_version: PORTFOLIO_PUBLIC_OP_VERSION.to_string(),
                 op_config,
                 input: serde_json::json!({}),
-            }))
+            })
             .await?;
 
         if run.phase == "failed" {
@@ -1036,12 +1040,12 @@ impl AppServices {
         })?;
 
         let run = self
-            .start_run(RunsStartRequest::Single(SingleOpStartRequest {
+            .start_run(RunsStartRequest::SingleOp {
                 op_id: PORTFOLIO_TRACKER_OP_ID.to_string(),
                 op_version: PORTFOLIO_PUBLIC_OP_VERSION.to_string(),
                 op_config,
                 input: serde_json::json!({}),
-            }))
+            })
             .await?;
 
         if run.phase == "failed" {
@@ -1152,49 +1156,36 @@ pub fn parse_artifact_id(artifact_id: &str) -> Result<ArtifactId, AppError> {
     })
 }
 
-#[derive(Clone, Debug, Deserialize)]
-#[serde(untagged)]
 /// Start-run request accepted by app-facing transports.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(tag = "kind", deny_unknown_fields)]
 pub enum RunsStartRequest {
     /// Starts a run by wrapping a single operation into the one-step pipeline convention.
-    Single(SingleOpStartRequest),
+    #[serde(rename = "single_op_start_v1")]
+    SingleOp {
+        /// Operation identifier supplied by the caller.
+        op_id: String,
+        /// Operation version supplied by the caller.
+        op_version: String,
+        /// Canonical JSON config passed to the operation.
+        #[serde(default = "default_empty_object")]
+        op_config: serde_json::Value,
+        /// Canonical JSON input embedded in the manifest for the wrapped single-op run.
+        #[serde(default = "default_empty_object")]
+        input: serde_json::Value,
+    },
     /// Starts a run from an explicit pipeline payload.
-    Pipeline(PipelineStartRequest),
-}
-
-/// Request payload for starting a single operation run.
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct SingleOpStartRequest {
-    /// Operation identifier, defaulting to `proof`.
-    #[serde(default = "default_op_id")]
-    pub op_id: String,
-
-    /// Operation version, defaulting to `v1`.
-    #[serde(default = "default_op_version")]
-    pub op_version: String,
-
-    /// Canonical JSON config passed to the operation.
-    #[serde(default = "default_empty_object")]
-    pub op_config: serde_json::Value,
-
-    /// Canonical JSON input embedded in the manifest for the wrapped single-op run.
-    #[serde(default = "default_empty_object")]
-    pub input: serde_json::Value,
-}
-
-/// Request payload for starting an explicit pipeline run.
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct PipelineStartRequest {
-    /// Pipeline template to launch.
-    pub pipeline: Pipeline,
-
-    /// Canonical JSON input embedded in the manifest.
-    #[serde(default = "default_empty_object")]
-    pub input: serde_json::Value,
-
-    /// Optional run configuration override.
-    #[serde(default)]
-    pub run_config: Option<RunConfig>,
+    #[serde(rename = "pipeline_start_v1")]
+    Pipeline {
+        /// Pipeline template to launch.
+        pipeline: Pipeline,
+        /// Canonical JSON input embedded in the manifest.
+        #[serde(default = "default_empty_object")]
+        input: serde_json::Value,
+        /// Optional run configuration override.
+        #[serde(default)]
+        run_config: Option<RunConfig>,
+    },
 }
 
 /// Response returned after starting a new run.
@@ -1351,14 +1342,6 @@ pub enum ArtifactBody {
 /// Input payload for the standard deploy-configure-validate workflow feature.
 pub use mfm_evm_deploy_configure_validate_config::DeployConfigureValidateCanonicalConfig as DeployConfigureValidateSpec;
 
-fn default_op_id() -> String {
-    "proof".to_string()
-}
-
-fn default_op_version() -> String {
-    "v1".to_string()
-}
-
 fn default_empty_object() -> serde_json::Value {
     serde_json::json!({})
 }
@@ -1488,21 +1471,26 @@ impl FeatureCatalog {
                     "oneOf": [
                         {
                             "type": "object",
+                            "additionalProperties": false,
                             "properties": {
+                                "kind": {"const": "single_op_start_v1"},
                                 "op_id": {"type": "string"},
                                 "op_version": {"type": "string"},
                                 "op_config": {"type": "object"},
                                 "input": {"type": "object"}
-                            }
+                            },
+                            "required": ["kind", "op_id", "op_version"]
                         },
                         {
                             "type": "object",
+                            "additionalProperties": false,
                             "properties": {
+                                "kind": {"const": "pipeline_start_v1"},
                                 "pipeline": {"type": "object"},
                                 "input": {"type": "object"},
                                 "run_config": {"type": "object"}
                             },
-                            "required": ["pipeline"]
+                            "required": ["kind", "pipeline"]
                         }
                     ]
                 }),
@@ -2006,6 +1994,100 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct TestPluginSingleState;
+
+    #[async_trait]
+    impl State for TestPluginSingleState {
+        fn meta(&self) -> StateMeta {
+            StateMeta {
+                tags: Vec::new(),
+                depends_on: Vec::new(),
+                depends_on_strategy: DependencyStrategy::Latest,
+                side_effects: SideEffectKind::Pure,
+                idempotency: Idempotency::None,
+            }
+        }
+
+        async fn handle(
+            &self,
+            _ctx: &mut dyn DynContext,
+            _io: &mut dyn IoProvider,
+            _rec: &mut dyn EventRecorder,
+        ) -> Result<StateOutcome, StateError> {
+            Ok(StateOutcome {
+                snapshot: SnapshotPolicy::Never,
+            })
+        }
+    }
+
+    struct TestPluginSingleOp;
+
+    impl Operation for TestPluginSingleOp {
+        fn op_id(&self) -> OpId {
+            OpId::must_new("plugin_single_op")
+        }
+
+        fn op_version(&self) -> String {
+            "v1".to_string()
+        }
+
+        fn expand(
+            &self,
+            op_path: OpPath,
+            _op_config: &serde_json::Value,
+            _run_config: &RunConfig,
+        ) -> Result<PlannedOp, SdkError> {
+            Ok(PlannedOp {
+                interface: OpInterface {
+                    imports: Vec::new(),
+                    exports: Vec::new(),
+                },
+                kind: PlannedOpKind::Leaf(LeafOpSpec {
+                    states: vec![leaf_state_node(
+                        &op_path,
+                        "done",
+                        Arc::new(TestPluginSingleState),
+                    )?],
+                    edges: Vec::new(),
+                }),
+            })
+        }
+    }
+
+    struct TestPlugin;
+
+    impl OperationPlugin for TestPlugin {
+        fn register_operations(&self, registry: &mut HashMapOperationRegistry) {
+            registry.register(Arc::new(TestPluginSingleOp));
+        }
+    }
+
+    fn test_plugin_single_services() -> AppServices {
+        let bundle = AppBuilder::new()
+            .with_operation_plugin(Arc::new(TestPlugin))
+            .build()
+            .expect("builder should include plugin-registered root op");
+        AppServices::new(
+            bundle,
+            Arc::new(NoopStreamStore),
+            Arc::new(InMemoryArtifactStore::default()),
+        )
+    }
+
+    fn plugin_single_pipeline() -> Pipeline {
+        Pipeline {
+            machine_id: MachineId("plugin_single_op".to_string()),
+            pipeline_version: "v1".to_string(),
+            steps: vec![PipelineStep {
+                step_id: StepId("main".to_string()),
+                op_id: OpId::must_new("plugin_single_op".to_string()),
+                op_version: "v1".to_string(),
+                op_config: serde_json::json!({}),
+            }],
+        }
+    }
+
     fn test_services(bundle: EngineBundle) -> AppServices {
         AppServices::new(
             bundle,
@@ -2113,96 +2195,105 @@ mod tests {
         assert_eq!(err.code, "InvalidArtifactId");
     }
 
+    #[test]
+    fn run_start_rejects_untagged_pipeline_shape() {
+        let payload = serde_json::json!({
+            "pipeline": plugin_single_pipeline(),
+            "input": {}
+        });
+
+        let err = serde_json::from_value::<RunsStartRequest>(payload)
+            .expect_err("run.start payloads must include an explicit kind tag");
+
+        assert!(
+            err.to_string().contains("kind"),
+            "unexpected serde error: {err}"
+        );
+    }
+
+    #[test]
+    fn run_start_rejects_pipeline_missing_kind() {
+        let payload = serde_json::json!({
+            "pipeline": plugin_single_pipeline()
+        });
+
+        assert!(
+            serde_json::from_value::<RunsStartRequest>(payload).is_err(),
+            "pipeline payloads without kind must not match a default single-op request"
+        );
+    }
+
+    #[test]
+    fn run_start_rejects_unknown_fields() {
+        let payload = serde_json::json!({
+            "kind": "single_op_start_v1",
+            "op_id": "proof",
+            "op_version": "v1",
+            "op_config": {},
+            "unexpected": true
+        });
+
+        let err = serde_json::from_value::<RunsStartRequest>(payload)
+            .expect_err("run.start must reject unknown envelope fields");
+
+        assert!(
+            err.to_string().contains("unexpected"),
+            "unexpected serde error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn feature_run_start_rejects_malformed_kind_as_invalid_json() {
+        let services = test_services(make_engine_bundle());
+        let catalog = FeatureCatalog::with_builtins();
+
+        let err = catalog
+            .execute(
+                &services,
+                FeatureRequest {
+                    feature_id: "run.start".to_string(),
+                    payload: serde_json::json!({
+                        "kind": "pipeline",
+                        "pipeline": plugin_single_pipeline()
+                    }),
+                },
+            )
+            .await
+            .expect_err("malformed run.start kind must fail before run planning");
+
+        assert_eq!(err.class, ErrorClass::BadRequest);
+        assert_eq!(err.code, "InvalidJson");
+    }
+
     #[tokio::test]
     async fn start_run_allows_plugin_registered_root_op() {
-        #[derive(Clone)]
-        struct TestPluginSingleState;
-
-        #[async_trait]
-        impl State for TestPluginSingleState {
-            fn meta(&self) -> StateMeta {
-                StateMeta {
-                    tags: Vec::new(),
-                    depends_on: Vec::new(),
-                    depends_on_strategy: DependencyStrategy::Latest,
-                    side_effects: SideEffectKind::Pure,
-                    idempotency: Idempotency::None,
-                }
-            }
-
-            async fn handle(
-                &self,
-                _ctx: &mut dyn DynContext,
-                _io: &mut dyn IoProvider,
-                _rec: &mut dyn EventRecorder,
-            ) -> Result<StateOutcome, StateError> {
-                Ok(StateOutcome {
-                    snapshot: SnapshotPolicy::Never,
-                })
-            }
-        }
-
-        struct TestPluginSingleOp;
-
-        impl Operation for TestPluginSingleOp {
-            fn op_id(&self) -> OpId {
-                OpId::must_new("plugin_single_op")
-            }
-
-            fn op_version(&self) -> String {
-                "v1".to_string()
-            }
-
-            fn expand(
-                &self,
-                op_path: OpPath,
-                _op_config: &serde_json::Value,
-                _run_config: &RunConfig,
-            ) -> Result<PlannedOp, SdkError> {
-                Ok(PlannedOp {
-                    interface: OpInterface {
-                        imports: Vec::new(),
-                        exports: Vec::new(),
-                    },
-                    kind: PlannedOpKind::Leaf(LeafOpSpec {
-                        states: vec![leaf_state_node(
-                            &op_path,
-                            "done",
-                            Arc::new(TestPluginSingleState),
-                        )?],
-                        edges: Vec::new(),
-                    }),
-                })
-            }
-        }
-
-        struct TestPlugin;
-
-        impl OperationPlugin for TestPlugin {
-            fn register_operations(&self, registry: &mut HashMapOperationRegistry) {
-                registry.register(Arc::new(TestPluginSingleOp));
-            }
-        }
-
-        let bundle = AppBuilder::new()
-            .with_operation_plugin(Arc::new(TestPlugin))
-            .build()
-            .expect("builder should include plugin-registered root op");
-        let services = AppServices::new(
-            bundle,
-            Arc::new(NoopStreamStore),
-            Arc::new(InMemoryArtifactStore::default()),
-        );
+        let services = test_plugin_single_services();
 
         let response = services
-            .start_run(RunsStartRequest::Single(SingleOpStartRequest {
+            .start_run(RunsStartRequest::SingleOp {
                 op_id: "plugin_single_op".to_string(),
                 op_version: "v1".to_string(),
                 op_config: serde_json::json!({}),
                 input: serde_json::json!({}),
-            }))
+            })
             .await
             .expect("plugin-registered root op should be startable");
+
+        assert_ne!(response.phase, "failed");
+    }
+
+    #[tokio::test]
+    async fn tagged_pipeline_start_uses_requested_pipeline() {
+        let services = test_plugin_single_services();
+
+        let response = services
+            .start_run(RunsStartRequest::Pipeline {
+                pipeline: plugin_single_pipeline(),
+                input: serde_json::json!({"source": "tagged_pipeline_test"}),
+                run_config: None,
+            })
+            .await
+            .expect("tagged pipeline payload should be startable");
 
         assert_ne!(response.phase, "failed");
     }
@@ -2300,12 +2391,12 @@ mod tests {
 
         for op_id in portfolio_tracker_internal_op_ids() {
             let err = services
-                .start_run(RunsStartRequest::Single(SingleOpStartRequest {
+                .start_run(RunsStartRequest::SingleOp {
                     op_id: (*op_id).to_string(),
                     op_version: "v1".to_string(),
                     op_config: serde_json::json!({}),
                     input: serde_json::json!({}),
-                }))
+                })
                 .await
                 .expect_err("planner-internal op must not be publicly startable");
 
@@ -2433,11 +2524,11 @@ mod tests {
                 }],
             };
             let err = services
-                .start_run(RunsStartRequest::Pipeline(PipelineStartRequest {
+                .start_run(RunsStartRequest::Pipeline {
                     pipeline,
                     input: serde_json::json!({}),
                     run_config: None,
-                }))
+                })
                 .await
                 .expect_err("internal pipeline step should be rejected");
 

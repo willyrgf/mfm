@@ -236,6 +236,8 @@ These commands are intended for parity/integration testing and early workflows. 
 - a filesystem artifact store (defaults to `$MFM_ARTIFACT_ROOT` or `~/.mfm/run_artifacts`, or use `--artifact-root`)
 
 Run commands and REST API run endpoints are backed by the same shared feature catalog/runtime layer (`mfm-app`) to keep both entrypoints behaviorally aligned.
+The CLI applies its `proof`/`v1` defaults before calling the app layer; REST and generic feature
+payloads must use the explicit tagged `run.start` envelope documented in `bin/rest-api/README.md`.
 
 Keystore tx commands are also run-backed and use the same shared op registry; they intentionally keep domain execution out of `bin/cli`. They use ephemeral in-memory stream storage (no `DATABASE_URL` requirement) plus filesystem artifacts.
 

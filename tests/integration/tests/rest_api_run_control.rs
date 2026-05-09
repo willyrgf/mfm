@@ -332,7 +332,12 @@ async fn start_status_resume_happy_path() {
         .clone()
         .oneshot(json_post(
             "/v1/runs/start",
-            serde_json::json!({"op_id":"proof","op_version":"v1","op_config":{}}),
+            serde_json::json!({
+                "kind": "single_op_start_v1",
+                "op_id": "proof",
+                "op_version": "v1",
+                "op_config": {}
+            }),
         ))
         .await
         .expect("start response");
@@ -451,6 +456,7 @@ async fn start_pipeline_payload_happy_path() {
         .oneshot(json_post(
             "/v1/runs/start",
             serde_json::json!({
+                "kind": "pipeline_start_v1",
                 "pipeline": {
                     "machine_id": "proof",
                     "pipeline_version": "v1",
@@ -668,7 +674,12 @@ async fn feature_execute_run_start_happy_path() {
         .oneshot(json_post(
             "/v1/features/run.start/execute",
             serde_json::json!({
-                "payload": {"op_id":"proof","op_version":"v1","op_config":{}}
+                "payload": {
+                    "kind": "single_op_start_v1",
+                    "op_id": "proof",
+                    "op_version": "v1",
+                    "op_config": {}
+                }
             }),
         ))
         .await
@@ -702,7 +713,12 @@ async fn feature_execute_run_start_rejects_portfolio_internal_child_ops() {
             .oneshot(json_post(
                 "/v1/features/run.start/execute",
                 serde_json::json!({
-                    "payload": {"op_id": op_id, "op_version": "v1", "op_config": {}}
+                    "payload": {
+                        "kind": "single_op_start_v1",
+                        "op_id": op_id,
+                        "op_version": "v1",
+                        "op_config": {}
+                    }
                 }),
             ))
             .await
@@ -735,6 +751,7 @@ async fn run_start_rejects_portfolio_internal_child_ops() {
             .oneshot(json_post(
                 "/v1/runs/start",
                 serde_json::json!({
+                    "kind": "single_op_start_v1",
                     "op_id": op_id,
                     "op_version": "v1",
                     "op_config": {}

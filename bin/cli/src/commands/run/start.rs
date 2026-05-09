@@ -6,7 +6,7 @@ use crate::support::app_services::{command_error_from_app_error, make_app_servic
 use crate::support::run_stores::make_ephemeral_stores;
 use crate::support::run_stores::RunStoresArgs;
 use clap::Args;
-use mfm_app::{AppServices, RunStartResponse, RunsStartRequest, SingleOpStartRequest};
+use mfm_app::{AppServices, RunStartResponse, RunsStartRequest};
 
 /// Arguments for `mfm run start`.
 #[derive(Args)]
@@ -49,12 +49,12 @@ async fn execute_internal_with_services(
         })?;
 
     let response = services
-        .start_run(RunsStartRequest::Single(SingleOpStartRequest {
+        .start_run(RunsStartRequest::SingleOp {
             op_id: args.op_id.clone(),
             op_version: args.op_version.clone(),
             op_config,
             input: serde_json::json!({}),
-        }))
+        })
         .await
         .map_err(command_error_from_app_error)?;
 

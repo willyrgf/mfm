@@ -49,6 +49,8 @@ The built-in app bundle registers these public root ops in
 `DefaultOperationPlugin::register_operations`. Public single-op entrypoints such as CLI `run start`
 and REST `/v1/runs/start` accept only these root ops; planner-internal semantic ids are not public
 API.
+REST `/v1/runs/start` and feature `run.start` require tagged request envelopes
+(`single_op_start_v1` or `pipeline_start_v1`) and reject unknown top-level fields.
 
 | Op ID | Version | Owner | Purpose | Primary states | Entry points |
 |---|---|---|---|---|---|
