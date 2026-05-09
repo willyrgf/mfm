@@ -139,6 +139,21 @@ impl S3ArtifactStore {
         };
         ("mfm-kind", v)
     }
+
+    async fn verify_existing_bytes(
+        &self,
+        id: &ArtifactId,
+        expected: &[u8],
+    ) -> Result<ArtifactId, StorageError> {
+        let existing = self.get(id).await?;
+        if existing != expected {
+            return Err(StorageError::Corruption(Self::info(
+                "artifact_corruption",
+                "existing s3 artifact bytes do not match attempted write",
+            )));
+        }
+        Ok(id.clone())
+    }
 }
 
 #[async_trait]
@@ -148,10 +163,16 @@ impl ArtifactStore for S3ArtifactStore {
         let path = self.object_path(&id);
         let (k, v) = Self::kind_to_meta(&kind);
 
+        if self.exists(&id).await? {
+            return self.verify_existing_bytes(&id, &bytes).await;
+        }
+
         let resp = self
             .bucket
             .put_object_builder(&path, &bytes)
             .with_metadata(k, v)
+            .map_err(|e| StorageError::Other(Self::info("s3_put_failed", e.to_string())))?
+            .with_header("If-None-Match", "*")
             .map_err(|e| StorageError::Other(Self::info("s3_put_failed", e.to_string())))?
             .execute()
             .await
@@ -159,6 +180,9 @@ impl ArtifactStore for S3ArtifactStore {
 
         // rust-s3 does not fail on non-2xx by default; it returns a ResponseData with status_code.
         let status = resp.status_code();
+        if matches!(status, 409 | 412) {
+            return self.verify_existing_bytes(&id, &bytes).await;
+        }
         if !(200..300).contains(&status) {
             return Err(StorageError::Other(Self::info(
                 "s3_put_failed",

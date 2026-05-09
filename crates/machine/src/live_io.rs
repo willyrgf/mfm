@@ -14,7 +14,7 @@ use tokio::sync::Mutex;
 use crate::engine::Stores;
 use crate::errors::{ErrorCategory, ErrorInfo, IoError};
 use crate::events::{Event, EventEnvelope, FactRecorded, DOMAIN_EVENT_FACT_RECORDED};
-use crate::hashing::{canonical_json_bytes, CanonicalJsonError};
+use crate::hashing::{canonical_json_bytes, put_artifact_verified, CanonicalJsonError};
 use crate::ids::{ArtifactId, ErrorCode, FactKey, RunId, StateId};
 use crate::io::{IoCall, IoProvider, IoResult};
 use crate::stores::{ArtifactKind, ArtifactStore};
@@ -243,17 +243,16 @@ impl LiveIo {
             ),
         })?;
 
-        let payload_id = self
-            .artifacts
-            .put(ArtifactKind::FactPayload, bytes)
-            .await
-            .map_err(|_| {
-                io_other(
-                    "fact_payload_put_failed",
-                    ErrorCategory::Storage,
-                    "failed to store fact payload",
-                )
-            })?;
+        let payload_id =
+            put_artifact_verified(self.artifacts.as_ref(), ArtifactKind::FactPayload, bytes)
+                .await
+                .map_err(|_| {
+                    io_other(
+                        "fact_payload_put_failed",
+                        ErrorCategory::Storage,
+                        "failed to store fact payload",
+                    )
+                })?;
 
         let (bound_id, inserted) = self.facts.bind_if_unset(key.clone(), payload_id).await;
         if inserted {
@@ -303,17 +302,19 @@ impl LiveIo {
             return Ok((got, payload_id));
         }
 
-        let payload_id = self
-            .artifacts
-            .put(ArtifactKind::FactPayload, bytes.clone())
-            .await
-            .map_err(|_| {
-                io_other(
-                    "fact_payload_put_failed",
-                    ErrorCategory::Storage,
-                    "failed to store fact payload",
-                )
-            })?;
+        let payload_id = put_artifact_verified(
+            self.artifacts.as_ref(),
+            ArtifactKind::FactPayload,
+            bytes.clone(),
+        )
+        .await
+        .map_err(|_| {
+            io_other(
+                "fact_payload_put_failed",
+                ErrorCategory::Storage,
+                "failed to store fact payload",
+            )
+        })?;
 
         let (bound_id, inserted) = self.facts.bind_if_unset(key.clone(), payload_id).await;
         if inserted {
@@ -454,5 +455,65 @@ impl FactRecorder for NoopFactRecorder {
         _payload_id: ArtifactId,
     ) -> Result<(), IoError> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::errors::StorageError;
+    use async_trait::async_trait;
+
+    struct WrongIdArtifactStore;
+
+    #[async_trait]
+    impl ArtifactStore for WrongIdArtifactStore {
+        async fn put(
+            &self,
+            _kind: ArtifactKind,
+            _bytes: Vec<u8>,
+        ) -> Result<ArtifactId, StorageError> {
+            Ok(ArtifactId::must_new("f".repeat(64)))
+        }
+
+        async fn get(&self, _id: &ArtifactId) -> Result<Vec<u8>, StorageError> {
+            unreachable!("record_value should fail during put verification")
+        }
+
+        async fn exists(&self, _id: &ArtifactId) -> Result<bool, StorageError> {
+            unreachable!("record_value should not query existence")
+        }
+    }
+
+    struct UnusedTransport;
+
+    #[async_trait]
+    impl LiveIoTransport for UnusedTransport {
+        async fn call(&mut self, _call: IoCall) -> Result<serde_json::Value, IoError> {
+            unreachable!("record_value should not call live transport")
+        }
+    }
+
+    #[tokio::test]
+    async fn record_value_rejects_store_returned_wrong_artifact_id() {
+        let mut io = LiveIo::new(
+            RunId(uuid::Uuid::new_v4()),
+            StateId::must_new("machine.main.state"),
+            1,
+            Arc::new(WrongIdArtifactStore),
+            FactIndex::default(),
+            Arc::new(NoopFactRecorder),
+            Box::new(UnusedTransport),
+        );
+
+        let err = io
+            .record_value(FactKey("fact:key".to_string()), serde_json::json!({"a": 1}))
+            .await
+            .expect_err("wrong store-returned id must fail fact recording");
+
+        match err {
+            IoError::Other(info) => assert_eq!(info.code.0, "fact_payload_put_failed"),
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 }

@@ -164,12 +164,52 @@ impl ArtifactStore for FsArtifactStore {
                 ));
             }
             Err(e) if e.kind() == io::ErrorKind::Unsupported => {
-                if let Err(rename_err) = tokio::fs::rename(&temp_path, &path).await {
+                let mut dest = match tokio::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&path)
+                    .await
+                {
+                    Ok(f) => f,
+                    Err(create_err) if create_err.kind() == io::ErrorKind::AlreadyExists => {
+                        let _ = tokio::fs::remove_file(&temp_path).await;
+                        if let Some(existing) = Self::read_existing(&path).await? {
+                            let existing_id = artifact_id_for_bytes(&existing);
+                            if existing_id != id {
+                                return Err(Self::corruption(
+                                    "artifact exists on disk but its contents do not match its id",
+                                ));
+                            }
+                            return Ok(id);
+                        }
+                        return Err(Self::other(
+                            "artifact appeared as existing, then disappeared during put",
+                        ));
+                    }
+                    Err(create_err) => {
+                        let _ = tokio::fs::remove_file(&temp_path).await;
+                        return Err(Self::other(format!(
+                            "failed to materialize artifact after hard-link fallback: {create_err}"
+                        )));
+                    }
+                };
+
+                if let Err(write_err) = dest.write_all(&bytes).await {
                     let _ = tokio::fs::remove_file(&temp_path).await;
+                    let _ = tokio::fs::remove_file(&path).await;
                     return Err(Self::other(format!(
-                        "failed to materialize artifact after hard-link fallback: {rename_err}"
+                        "failed to write artifact after hard-link fallback: {write_err}"
                     )));
                 }
+                if let Err(sync_err) = dest.sync_all().await {
+                    let _ = tokio::fs::remove_file(&temp_path).await;
+                    let _ = tokio::fs::remove_file(&path).await;
+                    return Err(Self::other(format!(
+                        "failed to sync artifact after hard-link fallback: {sync_err}"
+                    )));
+                }
+                drop(dest);
+                let _ = tokio::fs::remove_file(&temp_path).await;
             }
             Err(e) => {
                 let _ = tokio::fs::remove_file(&temp_path).await;

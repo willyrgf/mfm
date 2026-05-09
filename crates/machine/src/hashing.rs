@@ -4,7 +4,10 @@
 //! - Structured data MUST be hashed as canonical JSON bytes (RFC 8785 / JCS-style).
 //! - Hashed JSON MUST NOT contain floats (fractional numbers); use integer-scaled values or strings instead.
 
+use crate::errors::{ErrorCategory, ErrorInfo, StorageError};
 use crate::ids::ArtifactId;
+use crate::ids::ErrorCode;
+use crate::stores::{ArtifactKind, ArtifactStore};
 
 /// Errors returned when a JSON value cannot participate in canonical hashing.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -58,6 +61,45 @@ pub fn artifact_id_for_bytes(bytes: &[u8]) -> ArtifactId {
 /// Compute the content-addressed `ArtifactId` for structured JSON (canonical JSON bytes + SHA-256).
 pub fn artifact_id_for_json(value: &serde_json::Value) -> Result<ArtifactId, CanonicalJsonError> {
     Ok(artifact_id_for_bytes(&canonical_json_bytes(value)?))
+}
+
+fn storage_corruption(code: &'static str, message: &'static str) -> StorageError {
+    StorageError::Corruption(ErrorInfo {
+        code: ErrorCode(code.to_string()),
+        category: ErrorCategory::Storage,
+        retryable: false,
+        message: message.to_string(),
+        details: None,
+    })
+}
+
+/// Verifies bytes returned for an artifact id still match the content address.
+pub fn verify_artifact_bytes(id: &ArtifactId, bytes: &[u8]) -> Result<(), StorageError> {
+    let actual = artifact_id_for_bytes(bytes);
+    if &actual != id {
+        return Err(storage_corruption(
+            "artifact_content_address_mismatch",
+            "artifact bytes did not match requested content address",
+        ));
+    }
+    Ok(())
+}
+
+/// Stores an immutable content-addressed artifact and verifies the store-returned id.
+pub async fn put_artifact_verified(
+    store: &dyn ArtifactStore,
+    kind: ArtifactKind,
+    bytes: Vec<u8>,
+) -> Result<ArtifactId, StorageError> {
+    let expected = artifact_id_for_bytes(&bytes);
+    let actual = store.put(kind, bytes).await?;
+    if actual != expected {
+        return Err(storage_corruption(
+            "artifact_put_id_mismatch",
+            "artifact store returned an id that did not match the stored bytes",
+        ));
+    }
+    Ok(actual)
 }
 
 fn write_canonical_json(
@@ -119,6 +161,7 @@ fn write_canonical_json(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
 
     #[test]
     fn canonical_json_vectors_basic() {
@@ -172,5 +215,56 @@ mod tests {
             .as_str()
             .chars()
             .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+    }
+
+    struct WrongIdStore;
+
+    #[async_trait]
+    impl ArtifactStore for WrongIdStore {
+        async fn put(
+            &self,
+            _kind: ArtifactKind,
+            _bytes: Vec<u8>,
+        ) -> Result<ArtifactId, StorageError> {
+            Ok(ArtifactId::must_new("f".repeat(64)))
+        }
+
+        async fn get(&self, _id: &ArtifactId) -> Result<Vec<u8>, StorageError> {
+            unreachable!("put_artifact_verified does not read artifacts")
+        }
+
+        async fn exists(&self, _id: &ArtifactId) -> Result<bool, StorageError> {
+            unreachable!("put_artifact_verified does not query existence")
+        }
+    }
+
+    #[tokio::test]
+    async fn verified_put_rejects_store_returned_wrong_id() {
+        let err = put_artifact_verified(
+            &WrongIdStore,
+            ArtifactKind::Other("test".to_string()),
+            b"payload".to_vec(),
+        )
+        .await
+        .expect_err("wrong store-returned id must fail");
+
+        match err {
+            StorageError::Corruption(info) => assert_eq!(info.code.0, "artifact_put_id_mismatch"),
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn verify_artifact_bytes_rejects_mismatched_content() {
+        let id = artifact_id_for_bytes(b"expected");
+        let err = verify_artifact_bytes(&id, b"different")
+            .expect_err("wrong bytes must not satisfy content address");
+
+        match err {
+            StorageError::Corruption(info) => {
+                assert_eq!(info.code.0, "artifact_content_address_mismatch")
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 }

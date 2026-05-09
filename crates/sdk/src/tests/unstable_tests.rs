@@ -182,7 +182,7 @@ impl ArtifactStore for MemArtifactStore {
         _kind: ArtifactKind,
         bytes: Vec<u8>,
     ) -> Result<ArtifactId, mfm_machine::errors::StorageError> {
-        let id = artifact_id_for_bytes(&bytes);
+        let id = mfm_machine::hashing::artifact_id_for_bytes(&bytes);
         self.inner.lock().await.insert(id.clone(), bytes);
         Ok(id)
     }
@@ -201,6 +201,28 @@ impl ArtifactStore for MemArtifactStore {
 
     async fn exists(&self, id: &ArtifactId) -> Result<bool, mfm_machine::errors::StorageError> {
         Ok(self.inner.lock().await.contains_key(id))
+    }
+}
+
+#[derive(Clone, Default)]
+struct WrongIdArtifactStore;
+
+#[async_trait]
+impl ArtifactStore for WrongIdArtifactStore {
+    async fn put(
+        &self,
+        _kind: ArtifactKind,
+        _bytes: Vec<u8>,
+    ) -> Result<ArtifactId, mfm_machine::errors::StorageError> {
+        Ok(ArtifactId::must_new("f".repeat(64)))
+    }
+
+    async fn get(&self, _id: &ArtifactId) -> Result<Vec<u8>, mfm_machine::errors::StorageError> {
+        unreachable!("manifest write should fail before artifact reads")
+    }
+
+    async fn exists(&self, _id: &ArtifactId) -> Result<bool, mfm_machine::errors::StorageError> {
+        unreachable!("manifest write should not query artifact existence")
     }
 }
 
@@ -1330,6 +1352,86 @@ async fn launcher_rejects_secrets_in_manifest_input() {
 
     match err {
         RunError::InvalidPlan(info) => assert_eq!(info.code.0, "secrets_detected"),
+        other => panic!("unexpected error: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn launcher_rejects_store_returned_wrong_manifest_id() {
+    let mut reg = HashMapOperationRegistry::default();
+    reg.register(Arc::new(TestOp::new_write(
+        "op1",
+        "v1",
+        "m.step1.s1",
+        "k",
+        serde_json::json!("v1"),
+        OpInterface {
+            imports: Vec::new(),
+            exports: Vec::new(),
+        },
+    )));
+
+    let planner: Arc<dyn PipelinePlanner> = Arc::new(DefaultPipelinePlanner);
+    let launcher: Arc<dyn RunLauncher> = Arc::new(DefaultRunLauncher);
+
+    struct NeverResolver;
+    impl mfm_machine::runtime::PlanResolver for NeverResolver {
+        fn resolve(&self, _manifest: &RunManifest) -> Result<ExecutionPlan, RunError> {
+            Err(RunError::InvalidPlan(info(
+                "resolver_unavailable",
+                ErrorCategory::Unknown,
+                false,
+                "resolver unavailable",
+            )))
+        }
+    }
+
+    let engine: Arc<dyn ExecutionEngine> =
+        Arc::new(DefaultExecutionEngine::new(Arc::new(NeverResolver)));
+    let stores = Stores {
+        streams: Arc::new(MemStreamStore::default()),
+        artifacts: Arc::new(WrongIdArtifactStore),
+    };
+
+    let pipeline = Pipeline {
+        machine_id: MachineId("m".to_string()),
+        pipeline_version: "v".to_string(),
+        steps: vec![PipelineStep {
+            step_id: StepId("step1".to_string()),
+            op_id: OpId::must_new("op1".to_string()),
+            op_version: "v1".to_string(),
+            op_config: serde_json::json!({}),
+        }],
+    };
+
+    let err = launcher
+        .start_pipeline(
+            engine,
+            stores,
+            Arc::new(reg),
+            planner,
+            LaunchPipeline {
+                pipeline,
+                input: serde_json::json!({}),
+                run_config: run_config_live(),
+                build: mfm_machine::config::BuildProvenance {
+                    git_commit: None,
+                    cargo_lock_hash: None,
+                    flake_lock_hash: None,
+                    rustc_version: None,
+                    target_triple: None,
+                    env_allowlist: Vec::new(),
+                },
+                initial_context: Box::new(MapContext::default()),
+            },
+        )
+        .await
+        .expect_err("wrong store-returned manifest id must fail launch");
+
+    match err {
+        RunError::Storage(mfm_machine::errors::StorageError::Corruption(info)) => {
+            assert_eq!(info.code.0, "artifact_put_id_mismatch");
+        }
         other => panic!("unexpected error: {other:?}"),
     }
 }

@@ -8,7 +8,9 @@ use std::collections::BTreeMap;
 
 use crate::context::DynContext;
 use crate::errors::{ContextError, ErrorCategory, ErrorInfo, RunError};
-use crate::hashing::{canonical_json_bytes, CanonicalJsonError};
+use crate::hashing::{
+    canonical_json_bytes, put_artifact_verified, verify_artifact_bytes, CanonicalJsonError,
+};
 use crate::ids::{ArtifactId, ContextKey, ErrorCode};
 use crate::stores::{ArtifactKind, ArtifactStore};
 
@@ -177,8 +179,7 @@ pub(crate) async fn write_full_snapshot_value(
         ))),
     })?;
 
-    artifacts
-        .put(ArtifactKind::ContextSnapshot, bytes)
+    put_artifact_verified(artifacts, ArtifactKind::ContextSnapshot, bytes)
         .await
         .map_err(RunError::Storage)
 }
@@ -191,6 +192,7 @@ pub(crate) async fn read_full_snapshot_value(
         .get(snapshot_id)
         .await
         .map_err(RunError::Storage)?;
+    verify_artifact_bytes(snapshot_id, &bytes).map_err(RunError::Storage)?;
     serde_json::from_slice::<serde_json::Value>(&bytes).map_err(|_| {
         RunError::Context(ContextError::Serialization(info(
             "context_snapshot_decode_failed",
@@ -253,6 +255,50 @@ mod tests {
         }
     }
 
+    struct WrongIdArtifactStore;
+
+    #[async_trait]
+    impl ArtifactStore for WrongIdArtifactStore {
+        async fn put(
+            &self,
+            _kind: ArtifactKind,
+            _bytes: Vec<u8>,
+        ) -> Result<ArtifactId, StorageError> {
+            Ok(ArtifactId::must_new("f".repeat(64)))
+        }
+
+        async fn get(&self, _id: &ArtifactId) -> Result<Vec<u8>, StorageError> {
+            unreachable!("snapshot write should not read artifacts")
+        }
+
+        async fn exists(&self, _id: &ArtifactId) -> Result<bool, StorageError> {
+            unreachable!("snapshot write should not query existence")
+        }
+    }
+
+    struct WrongBytesArtifactStore {
+        bytes: Vec<u8>,
+    }
+
+    #[async_trait]
+    impl ArtifactStore for WrongBytesArtifactStore {
+        async fn put(
+            &self,
+            _kind: ArtifactKind,
+            _bytes: Vec<u8>,
+        ) -> Result<ArtifactId, StorageError> {
+            unreachable!("snapshot read should not write artifacts")
+        }
+
+        async fn get(&self, _id: &ArtifactId) -> Result<Vec<u8>, StorageError> {
+            Ok(self.bytes.clone())
+        }
+
+        async fn exists(&self, _id: &ArtifactId) -> Result<bool, StorageError> {
+            Ok(true)
+        }
+    }
+
     #[tokio::test]
     async fn full_snapshot_ids_are_deterministic_for_same_logical_context() {
         let store = MemArtifactStore::default();
@@ -272,6 +318,43 @@ mod tests {
         let id_b = write_full_snapshot(&store, &b).await.unwrap();
 
         assert_eq!(id_a, id_b);
+    }
+
+    #[tokio::test]
+    async fn full_snapshot_write_rejects_store_returned_wrong_id() {
+        let mut ctx = JsonContext::new();
+        ctx.write(ContextKey("a".to_string()), serde_json::json!(1))
+            .unwrap();
+
+        let err = write_full_snapshot(&WrongIdArtifactStore, &ctx)
+            .await
+            .expect_err("wrong store-returned id must fail snapshot write");
+
+        match err {
+            RunError::Storage(StorageError::Corruption(info)) => {
+                assert_eq!(info.code.0, "artifact_put_id_mismatch")
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn full_snapshot_read_rejects_bytes_that_do_not_match_id() {
+        let expected_id = artifact_id_for_bytes(br#"{"a":1}"#);
+        let store = WrongBytesArtifactStore {
+            bytes: br#"{"a":2}"#.to_vec(),
+        };
+
+        let err = read_full_snapshot_value(&store, &expected_id)
+            .await
+            .expect_err("wrong bytes must fail snapshot read");
+
+        match err {
+            RunError::Storage(StorageError::Corruption(info)) => {
+                assert_eq!(info.code.0, "artifact_content_address_mismatch")
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     #[test]

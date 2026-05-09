@@ -52,9 +52,7 @@ use mfm_machine::errors::{
     ContextError, ErrorCategory, ErrorInfo, IoError, RunError, StorageError,
 };
 use mfm_machine::events::{event_envelopes_from_stream_records, Event, KernelEvent};
-use mfm_machine::hashing::{
-    artifact_id_for_bytes, artifact_id_for_json, canonical_json_bytes, CanonicalJsonError,
-};
+use mfm_machine::hashing::{canonical_json_bytes, put_artifact_verified, CanonicalJsonError};
 use mfm_machine::ids::{
     ArtifactId, ContextKey, ContextSlot, ErrorCode, OpId, OpPath, RunId, StateId,
 };
@@ -1559,38 +1557,10 @@ impl RunLauncher for DefaultRunLauncher {
                 "run manifest contained secrets (policy forbids persisting secrets)",
             )),
         })?;
-        let computed_id = artifact_id_for_bytes(&bytes);
-        let computed_from_value = artifact_id_for_json(&value).map_err(|e| match e {
-            CanonicalJsonError::FloatNotAllowed => RunError::InvalidPlan(info(
-                "manifest_not_canonical",
-                ErrorCategory::ParsingInput,
-                false,
-                "run manifest is not canonical-json-hashable (floats are forbidden)",
-            )),
-            CanonicalJsonError::SecretsNotAllowed => RunError::InvalidPlan(info(
-                "secrets_detected",
-                ErrorCategory::ParsingInput,
-                false,
-                "run manifest contained secrets (policy forbids persisting secrets)",
-            )),
-        })?;
-        debug_assert_eq!(computed_id, computed_from_value);
-
-        let stored_id = stores
-            .artifacts
-            .put(ArtifactKind::Manifest, bytes)
-            .await
-            .map_err(RunError::Storage)?;
-        if stored_id != computed_id {
-            return Err(RunError::Storage(
-                mfm_machine::errors::StorageError::Corruption(info(
-                    "manifest_id_mismatch",
-                    ErrorCategory::Storage,
-                    false,
-                    "artifact store returned unexpected manifest id",
-                )),
-            ));
-        }
+        let stored_id =
+            put_artifact_verified(stores.artifacts.as_ref(), ArtifactKind::Manifest, bytes)
+                .await
+                .map_err(RunError::Storage)?;
 
         if let Some(spec) = compiled_execution_spec {
             let spec_value = serde_json::to_value(&spec).map_err(|_| {
@@ -1615,25 +1585,13 @@ impl RunLauncher for DefaultRunLauncher {
                     "compiled execution spec contained secrets (policy forbids persisting secrets)",
                 )),
             })?;
-            let computed_spec_id = artifact_id_for_bytes(&spec_bytes);
-            let stored_spec_id = stores
-                .artifacts
-                .put(
-                    ArtifactKind::Other(COMPILED_EXECUTION_SPEC_ARTIFACT_KIND.to_string()),
-                    spec_bytes,
-                )
-                .await
-                .map_err(RunError::Storage)?;
-            if stored_spec_id != computed_spec_id {
-                return Err(RunError::Storage(
-                    mfm_machine::errors::StorageError::Corruption(info(
-                        "compiled_execution_spec_id_mismatch",
-                        ErrorCategory::Storage,
-                        false,
-                        "artifact store returned unexpected compiled execution spec id",
-                    )),
-                ));
-            }
+            let stored_spec_id = put_artifact_verified(
+                stores.artifacts.as_ref(),
+                ArtifactKind::Other(COMPILED_EXECUTION_SPEC_ARTIFACT_KIND.to_string()),
+                spec_bytes,
+            )
+            .await
+            .map_err(RunError::Storage)?;
             initial_context
                 .write(
                     ContextKey(COMPILED_EXECUTION_SPEC_ARTIFACT_ID_CONTEXT_KEY.to_string()),

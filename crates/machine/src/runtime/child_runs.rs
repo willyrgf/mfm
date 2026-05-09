@@ -532,28 +532,19 @@ impl ChildRunLiveIoTransport {
                 "child run manifest is not canonical-json-hashable",
             )
         })?;
-        let computed_id = crate::hashing::artifact_id_for_bytes(&bytes);
-
-        let stored_id = self
-            .env
-            .stores
-            .artifacts
-            .put(ArtifactKind::Manifest, bytes)
-            .await
-            .map_err(|_| {
-                child_io_error(
-                    CODE_CHILD_RUN_ENGINE_FAILED,
-                    ErrorCategory::Storage,
-                    "failed to store child run manifest",
-                )
-            })?;
-        if stored_id != computed_id {
-            return Err(child_io_error(
-                "child_run_manifest_id_mismatch",
+        let stored_id = crate::hashing::put_artifact_verified(
+            self.env.stores.artifacts.as_ref(),
+            ArtifactKind::Manifest,
+            bytes,
+        )
+        .await
+        .map_err(|_| {
+            child_io_error(
+                CODE_CHILD_RUN_ENGINE_FAILED,
                 ErrorCategory::Storage,
-                "artifact store returned unexpected manifest id",
-            ));
-        }
+                "failed to store child run manifest",
+            )
+        })?;
 
         let head = self
             .env
