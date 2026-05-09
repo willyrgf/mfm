@@ -9,6 +9,7 @@ use mfm_machine::errors::{IoError, RunError};
 use mfm_machine::events::{
     event_envelopes_from_stream_records, ChildRunCompleted, ChildRunSpawned, Event, EventEnvelope,
     KernelEvent, DOMAIN_EVENT_CHILD_RUN_COMPLETED, DOMAIN_EVENT_CHILD_RUN_SPAWNED,
+    DOMAIN_EVENT_FACT_RECORDED,
 };
 use mfm_machine::hashing::artifact_id_for_json;
 use mfm_machine::ids::{ArtifactId, RunId, StateId};
@@ -333,6 +334,7 @@ impl State for SpawnChildrenState {
                 "i": i,
                 "child_run_id": rr.child_run_id,
                 "child_manifest_id": rr.child_manifest_id,
+                "child_initial_snapshot_id": rr.child_initial_snapshot_id,
             }));
         }
 
@@ -883,14 +885,67 @@ async fn at10_child_runs_crash_resume_spawned_but_not_completed() {
     let parent_stream = read_run_stream(&stores, first.run_id).await;
     let spawned = child_run_spawned(&parent_stream);
     assert_eq!(spawned.len(), 2);
+    let mut spawn_response_by_child = HashMap::new();
+    for event in &parent_stream {
+        let Event::Domain(domain) = &event.event else {
+            continue;
+        };
+        if domain.name != DOMAIN_EVENT_FACT_RECORDED {
+            continue;
+        }
+        let fact =
+            serde_json::from_value::<mfm_machine::events::FactRecorded>(domain.payload.clone())
+                .expect("fact_recorded payload");
+        if !fact.key.0.starts_with("child_parent:spawn|") {
+            continue;
+        }
+        let bytes = stores
+            .artifacts
+            .get(&fact.payload_id)
+            .await
+            .expect("spawn response fact payload");
+        let response =
+            serde_json::from_slice::<serde_json::Value>(&bytes).expect("spawn response json");
+        let child_run_id = serde_json::from_value::<RunId>(
+            response
+                .get("child_run_id")
+                .cloned()
+                .expect("child_run_id in spawn response"),
+        )
+        .expect("valid child_run_id");
+        spawn_response_by_child.insert(child_run_id, response);
+    }
+    assert_eq!(spawn_response_by_child.len(), 2);
 
     for s in &spawned {
+        let response = spawn_response_by_child
+            .get(&s.child_run_id)
+            .expect("spawn response for child");
         let child_stream = stores
             .streams
             .read_range(&StreamId::run(s.child_run_id), 1, None)
             .await
             .and_then(|records| event_envelopes_from_stream_records(s.child_run_id, records))
             .expect("read child stream");
+        let (manifest_id, child_initial_snapshot_id) = op_test_support::run_started(&child_stream);
+        assert_eq!(manifest_id, s.child_manifest_id);
+        let response_initial_snapshot_id = serde_json::from_value::<ArtifactId>(
+            response
+                .get("child_initial_snapshot_id")
+                .cloned()
+                .expect("child_initial_snapshot_id in spawn response"),
+        )
+        .expect("valid child_initial_snapshot_id");
+        assert_eq!(response_initial_snapshot_id, child_initial_snapshot_id);
+        let initial_bytes = stores
+            .artifacts
+            .get(&child_initial_snapshot_id)
+            .await
+            .expect("child initial snapshot exists");
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&initial_bytes).expect("initial json"),
+            serde_json::json!({})
+        );
         assert!(op_test_support::run_completed_snapshot_id(&child_stream).is_none());
     }
 

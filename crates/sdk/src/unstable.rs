@@ -2191,6 +2191,8 @@ pub mod child_runs {
         pub child_run_id: RunId,
         /// Child run manifest artifact identifier.
         pub child_manifest_id: ArtifactId,
+        /// Child run initial context snapshot artifact identifier.
+        pub child_initial_snapshot_id: ArtifactId,
     }
 
     #[derive(Clone, Debug, Serialize)]
@@ -2210,6 +2212,7 @@ pub mod child_runs {
         parent_run_id: RunId,
         child_run_id: RunId,
         child_manifest_id: ArtifactId,
+        child_initial_snapshot_id: ArtifactId,
     }
 
     /// Spawns a child run via the configured IO transport and emits the linkage event once.
@@ -2289,6 +2292,7 @@ pub mod child_runs {
             parent_run_id: parsed.parent_run_id,
             child_run_id: parsed.child_run_id,
             child_manifest_id: parsed.child_manifest_id,
+            child_initial_snapshot_id: parsed.child_initial_snapshot_id,
         })
     }
 

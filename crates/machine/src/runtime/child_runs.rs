@@ -3,7 +3,7 @@
 //! This module wraps a live IO transport factory with two extra namespaces that let
 //! a parent run spawn and await child runs through the same runtime invariants.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -15,7 +15,7 @@ use crate::config::{RunConfig, RunManifest};
 use crate::context_runtime::write_full_snapshot_value;
 use crate::engine::{RunPhase, RunResult, StartRun, Stores};
 use crate::errors::{ErrorCategory, ErrorInfo, IoError, RunError, StorageError};
-use crate::events::RunStatus;
+use crate::events::{KernelEvent, RunStatus};
 use crate::ids::{ArtifactId, ErrorCode, OpId, RunId};
 use crate::io::IoCall;
 use crate::live_io::{FactIndex, LiveIoEnv, LiveIoTransport, LiveIoTransportFactory};
@@ -68,13 +68,20 @@ struct ChildRunEngine {
     failpoints: Option<EngineFailpoints>,
 }
 
+#[derive(Clone, Debug)]
+struct InitializedChildRun {
+    run_id: RunId,
+    manifest_id: ArtifactId,
+    initial_snapshot_id: ArtifactId,
+}
+
 impl ChildRunEngine {
-    async fn start_with_id(
+    async fn initialize_with_id(
         &self,
         stores: Stores,
         run: StartRun,
         run_id: RunId,
-    ) -> Result<RunResult, RunError> {
+    ) -> Result<InitializedChildRun, RunError> {
         validate_execution_mode(&run.run_config)?;
         validate_start_run_contract(&run)?;
 
@@ -92,11 +99,20 @@ impl ChildRunEngine {
 
         let head = run_stream_head(&stores, run_id).await?;
         if head != 0 {
-            return Err(RunError::Storage(StorageError::Concurrency(super::info(
-                "run_already_exists",
-                ErrorCategory::Storage,
-                "run already exists",
-            ))));
+            let stream = read_run_stream(&stores, run_id).await?;
+            let history = read_run_history(run_id, &stream)?;
+            if history.started.manifest_id != run.manifest_id {
+                return Err(RunError::Storage(StorageError::Concurrency(super::info(
+                    "run_already_exists",
+                    ErrorCategory::Storage,
+                    "run already exists with a different manifest",
+                ))));
+            }
+            return Ok(InitializedChildRun {
+                run_id,
+                manifest_id: history.started.manifest_id,
+                initial_snapshot_id: history.started.initial_snapshot_id,
+            });
         }
 
         let initial_snapshot = run.initial_context.dump().map_err(RunError::Context)?;
@@ -112,7 +128,7 @@ impl ChildRunEngine {
         writer
             .lock()
             .await
-            .append_kernel(crate::events::KernelEvent::RunStarted {
+            .append_kernel(KernelEvent::RunStarted {
                 op_id: run.plan.op_id.clone(),
                 manifest_id: run.manifest_id.clone(),
                 initial_snapshot_id: initial_snapshot_id.clone(),
@@ -120,20 +136,19 @@ impl ChildRunEngine {
             .await
             .map_err(RunError::Storage)?;
 
-        run_states(
-            &stores,
-            &run.plan,
-            &run.run_config,
+        Ok(InitializedChildRun {
             run_id,
-            writer,
+            manifest_id: run.manifest_id,
             initial_snapshot_id,
-            &HashSet::new(),
-            None,
-            FactIndex::default(),
-            Arc::clone(&self.live_transport_factory),
-            self.failpoints.clone(),
-        )
-        .await
+        })
+    }
+
+    async fn continue_initialized(
+        &self,
+        stores: Stores,
+        initialized: InitializedChildRun,
+    ) -> Result<RunResult, RunError> {
+        self.resume(stores, initialized.run_id).await
     }
 
     async fn resume(&self, stores: Stores, run_id: RunId) -> Result<RunResult, RunError> {
@@ -362,6 +377,7 @@ struct ChildRunSpawnResponseV1 {
     parent_run_id: RunId,
     child_run_id: RunId,
     child_manifest_id: ArtifactId,
+    child_initial_snapshot_id: ArtifactId,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -562,7 +578,7 @@ impl ChildRunLiveIoTransport {
                 )
             })?;
 
-        if head == 0 {
+        let initialized = if head == 0 {
             let plan = self.child_engine.resolver.resolve(&manifest).map_err(|_| {
                 child_io_error(
                     CODE_CHILD_RUN_ENGINE_FAILED,
@@ -595,14 +611,29 @@ impl ChildRunLiveIoTransport {
 
             let engine = self.child_engine.clone();
             let stores = self.env.stores.clone();
+            let initialized = self
+                .child_engine
+                .initialize_with_id(stores.clone(), start, child_run_id)
+                .await
+                .map_err(|_| {
+                    child_io_error(
+                        CODE_CHILD_RUN_ENGINE_FAILED,
+                        ErrorCategory::Storage,
+                        "failed to initialize child run",
+                    )
+                })?;
+            let initialized_for_task = initialized.clone();
             let _ = self
                 .supervisor
                 .spawn_if_absent(child_run_id, move || {
-                    tokio::spawn(
-                        async move { engine.start_with_id(stores, start, child_run_id).await },
-                    )
+                    tokio::spawn(async move {
+                        engine
+                            .continue_initialized(stores, initialized_for_task)
+                            .await
+                    })
                 })
                 .await;
+            initialized
         } else {
             let records = self
                 .env
@@ -640,6 +671,12 @@ impl ChildRunLiveIoTransport {
                 ));
             }
 
+            let initialized = InitializedChildRun {
+                run_id: child_run_id,
+                manifest_id: history.started.manifest_id.clone(),
+                initial_snapshot_id: history.started.initial_snapshot_id.clone(),
+            };
+
             if history.run_completed.is_none() {
                 let engine = self.child_engine.clone();
                 let stores = self.env.stores.clone();
@@ -650,12 +687,14 @@ impl ChildRunLiveIoTransport {
                     })
                     .await;
             }
-        }
+            initialized
+        };
 
         let resp = ChildRunSpawnResponseV1 {
             parent_run_id: self.env.run_id,
             child_run_id,
-            child_manifest_id: stored_id,
+            child_manifest_id: initialized.manifest_id,
+            child_initial_snapshot_id: initialized.initial_snapshot_id,
         };
         serde_json::to_value(resp).map_err(|_| {
             child_io_error(
@@ -673,6 +712,57 @@ impl ChildRunLiveIoTransport {
         let req = Self::parse_await_request(&call)?;
 
         let stores = self.env.stores.clone();
+        let head = stores
+            .streams
+            .head_seq(&StreamId::run(req.child_run_id))
+            .await
+            .map_err(|_| {
+                child_io_error(
+                    CODE_CHILD_RUN_ENGINE_FAILED,
+                    ErrorCategory::Storage,
+                    "failed to query child run status",
+                )
+            })?;
+        if head == 0 {
+            return Err(child_io_error(
+                "child_run_missing_after_spawn",
+                ErrorCategory::Storage,
+                "child run was missing after spawn response",
+            ));
+        }
+        let records = stores
+            .streams
+            .read_range(&StreamId::run(req.child_run_id), 1, None)
+            .await
+            .map_err(|_| {
+                child_io_error(
+                    CODE_CHILD_RUN_ENGINE_FAILED,
+                    ErrorCategory::Storage,
+                    "failed to read child run stream",
+                )
+            })?;
+        let stream = crate::events::event_envelopes_from_stream_records(req.child_run_id, records)
+            .map_err(|_| {
+                child_io_error(
+                    CODE_CHILD_RUN_ENGINE_FAILED,
+                    ErrorCategory::Storage,
+                    "invalid child run stream",
+                )
+            })?;
+        let history = read_run_history(req.child_run_id, &stream).map_err(|_| {
+            child_io_error(
+                CODE_CHILD_RUN_ENGINE_FAILED,
+                ErrorCategory::Storage,
+                "invalid child run stream",
+            )
+        })?;
+        if history.started.manifest_id != req.child_manifest_id {
+            return Err(child_io_error(
+                "child_run_conflict",
+                ErrorCategory::Unknown,
+                "child run id exists with a different manifest id",
+            ));
+        }
 
         let rr = if let Some(handle) = self.supervisor.take(req.child_run_id).await {
             match handle.await {
@@ -701,41 +791,11 @@ impl ChildRunLiveIoTransport {
                 Err(RunError::Storage(StorageError::NotFound(info)))
                     if info.code.0 == "run_not_found" =>
                 {
-                    let manifest = read_manifest(stores.artifacts.as_ref(), &req.child_manifest_id)
-                        .await
-                        .map_err(|_| {
-                            child_io_error(
-                                CODE_CHILD_RUN_ENGINE_FAILED,
-                                ErrorCategory::Storage,
-                                "failed to read child run manifest",
-                            )
-                        })?;
-                    let plan = self.child_engine.resolver.resolve(&manifest).map_err(|_| {
-                        child_io_error(
-                            CODE_CHILD_RUN_ENGINE_FAILED,
-                            ErrorCategory::Unknown,
-                            "failed to resolve child run plan",
-                        )
-                    })?;
-
-                    let run_config = manifest.run_config.clone();
-                    let start = StartRun {
-                        manifest,
-                        manifest_id: req.child_manifest_id.clone(),
-                        plan,
-                        run_config,
-                        initial_context: Box::new(crate::context_runtime::JsonContext::new()),
-                    };
-                    self.child_engine
-                        .start_with_id(stores.clone(), start, req.child_run_id)
-                        .await
-                        .map_err(|_| {
-                            child_io_error(
-                                CODE_CHILD_RUN_ENGINE_FAILED,
-                                ErrorCategory::Unknown,
-                                "failed to start missing child run",
-                            )
-                        })?
+                    return Err(child_io_error(
+                        "child_run_missing_after_spawn",
+                        ErrorCategory::Storage,
+                        "child run was missing after spawn response",
+                    ));
                 }
                 Err(_) => {
                     return Err(child_io_error(
