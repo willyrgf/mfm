@@ -247,6 +247,66 @@ mod tests {
     }
 
     #[test]
+    fn recovered_orphan_attempt_sequence_is_valid() {
+        let run_id = RunId(uuid::Uuid::new_v4());
+        let state_id = StateId::must_new("machine.main.s1".to_string());
+
+        let stream = vec![
+            env(
+                run_id,
+                1,
+                Event::Kernel(KernelEvent::StateEntered {
+                    state_id: state_id.clone(),
+                    attempt: 0,
+                    base_snapshot_id: ArtifactId::must_new("2".repeat(64)),
+                }),
+            ),
+            env(
+                run_id,
+                2,
+                Event::Kernel(KernelEvent::StateFailed {
+                    state_id: state_id.clone(),
+                    error: crate::errors::StateError {
+                        state_id: Some(state_id.clone()),
+                        info: crate::errors::ErrorInfo {
+                            code: crate::ids::ErrorCode("orphan_attempt_recovered".to_string()),
+                            category: crate::errors::ErrorCategory::Unknown,
+                            retryable: true,
+                            message: "orphaned state attempt recovered during resume".to_string(),
+                            details: None,
+                        },
+                    },
+                    failure_snapshot_id: None,
+                }),
+            ),
+            env(
+                run_id,
+                3,
+                Event::Kernel(KernelEvent::StateEntered {
+                    state_id: state_id.clone(),
+                    attempt: 1,
+                    base_snapshot_id: ArtifactId::must_new("2".repeat(64)),
+                }),
+            ),
+            env(
+                run_id,
+                4,
+                Event::Kernel(KernelEvent::StateCompleted {
+                    state_id,
+                    context_snapshot_id: ArtifactId::must_new("3".repeat(64)),
+                }),
+            ),
+        ];
+
+        let analysis = analyze_kernel_events(&stream).expect("recovered sequence");
+        assert_eq!(analysis.orphan_attempt, None);
+        assert_eq!(
+            analysis.last_checkpoint_snapshot,
+            Some(ArtifactId::must_new("3".repeat(64)))
+        );
+    }
+
+    #[test]
     fn rejects_terminal_without_entered() {
         let run_id = RunId(uuid::Uuid::new_v4());
 

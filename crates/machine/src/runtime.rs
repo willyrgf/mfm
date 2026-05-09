@@ -15,7 +15,7 @@ use crate::attempt_envelope::{analyze_kernel_events, OrphanAttempt};
 use crate::config::{BackoffPolicy, ExecutionMode, RunConfig, RunManifest};
 use crate::context_runtime::write_full_snapshot_value;
 use crate::engine::{ExecutionEngine, RunPhase, RunResult, StartRun, Stores};
-use crate::errors::{ContextError, ErrorCategory, ErrorInfo, RunError, StorageError};
+use crate::errors::{ContextError, ErrorCategory, ErrorInfo, RunError, StateError, StorageError};
 use crate::events::{
     event_envelopes_from_stream_records, Event, EventEnvelope, KernelEvent, RunStatus,
 };
@@ -438,6 +438,36 @@ fn next_attempt(last_attempt_by_state: &HashMap<StateId, u32>, state_id: &StateI
         .unwrap_or(0)
 }
 
+pub(in crate::runtime) async fn close_orphan_attempt_for_recovery(
+    writer: &SharedEventWriter,
+    orphan: &OrphanAttempt,
+) -> Result<(), RunError> {
+    warn!(
+        state_id = %orphan.state_id,
+        attempt = orphan.attempt,
+        entered_seq = orphan.entered_seq,
+        "closing orphaned state attempt before retry"
+    );
+    append_kernel(
+        writer,
+        KernelEvent::StateFailed {
+            state_id: orphan.state_id.clone(),
+            error: StateError {
+                state_id: Some(orphan.state_id.clone()),
+                info: ErrorInfo {
+                    code: ErrorCode("orphan_attempt_recovered".to_string()),
+                    category: ErrorCategory::Unknown,
+                    retryable: true,
+                    message: "orphaned state attempt recovered during resume".to_string(),
+                    details: None,
+                },
+            },
+            failure_snapshot_id: None,
+        },
+    )
+    .await
+}
+
 #[allow(clippy::too_many_arguments)]
 #[instrument(
     level = "info",
@@ -754,6 +784,7 @@ impl ExecutionEngine for DefaultExecutionEngine {
                 previous_attempt = orphan.attempt,
                 "retrying orphan attempt from base snapshot"
             );
+            close_orphan_attempt_for_recovery(&writer, orphan).await?;
             let start = (
                 orphan.state_id.clone(),
                 orphan.attempt + 1,

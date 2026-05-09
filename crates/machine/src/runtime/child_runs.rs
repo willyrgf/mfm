@@ -22,9 +22,10 @@ use crate::live_io::{FactIndex, LiveIoEnv, LiveIoTransport, LiveIoTransportFacto
 use crate::stores::{ArtifactKind, StreamId};
 
 use super::{
-    invalid_plan, next_attempt, read_manifest, read_run_history, read_run_stream, run_states,
-    run_stream_head, storage_not_found, topological_order, validate_execution_mode,
-    validate_start_run_contract, EngineFailpoints, EventWriter, PlanResolver, SharedEventWriter,
+    close_orphan_attempt_for_recovery, invalid_plan, next_attempt, read_manifest, read_run_history,
+    read_run_stream, run_states, run_stream_head, storage_not_found, topological_order,
+    validate_execution_mode, validate_start_run_contract, EngineFailpoints, EventWriter,
+    PlanResolver, SharedEventWriter,
 };
 
 const NAMESPACE_CHILD_RUN_SPAWN: &str = "machine.child_run.spawn";
@@ -187,6 +188,7 @@ impl ChildRunEngine {
         ));
 
         if let Some(orphan) = &history.orphan_attempt {
+            close_orphan_attempt_for_recovery(&writer, orphan).await?;
             let start = (
                 orphan.state_id.clone(),
                 orphan.attempt + 1,

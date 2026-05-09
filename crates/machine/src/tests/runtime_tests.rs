@@ -896,6 +896,12 @@ async fn start_then_resume_retries_orphan_attempt_from_base_snapshot() {
     assert_eq!(r2.phase, RunPhase::Completed);
     let final_snapshot_id = r2.final_snapshot_id.expect("final snapshot");
 
+    let r3 = engine
+        .resume(stores(), r1.run_id)
+        .await
+        .expect("second resume");
+    assert_eq!(r3.phase, RunPhase::Completed);
+
     let snapshot =
         crate::context_runtime::read_full_snapshot_value(artifacts.as_ref(), &final_snapshot_id)
             .await
@@ -918,6 +924,22 @@ async fn start_then_resume_retries_orphan_attempt_from_base_snapshot() {
         })
         .collect();
     assert_eq!(entered, vec![0, 1]);
+
+    let failed: Vec<(String, Option<ArtifactId>)> = stream
+        .iter()
+        .filter_map(|e| match &e.event {
+            Event::Kernel(KernelEvent::StateFailed {
+                state_id: sid,
+                error,
+                failure_snapshot_id,
+            }) if *sid == state_id => {
+                assert_eq!(error.state_id.as_ref(), Some(&state_id));
+                Some((error.info.code.0.clone(), failure_snapshot_id.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(failed, vec![("orphan_attempt_recovered".to_string(), None)]);
 }
 
 #[derive(Clone)]
@@ -1318,6 +1340,18 @@ async fn crash_resume_orphan_attempt_reuses_facts() {
         })
         .collect();
     assert_eq!(entered, vec![0, 1]);
+
+    let recovered_orphan_failures = stream
+        .iter()
+        .filter(|e| matches!(
+            &e.event,
+            Event::Kernel(KernelEvent::StateFailed { state_id: sid, error, failure_snapshot_id })
+                if *sid == state_id
+                    && error.info.code.0 == "orphan_attempt_recovered"
+                    && failure_snapshot_id.is_none()
+        ))
+        .count();
+    assert_eq!(recovered_orphan_failures, 1);
 
     let facts: Vec<FactRecorded> = stream
         .iter()
