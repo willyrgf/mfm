@@ -197,6 +197,91 @@ fn test_help_output_shows_json_format_option() {
 }
 
 #[test]
+fn test_cli_parse_error_json_output_for_unknown_command_flag_equals() {
+    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
+    let output = cmd
+        .args(["--output-format=json", "unknown-command"])
+        .output()
+        .expect("Failed to execute command");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    let parsed = verify_error_response(&stderr);
+    assert_eq!(parsed.error.code, "CliParseError");
+    assert!(parsed.error.message.contains("unknown-command"));
+    assert!(!parsed.error.message.contains('\u{1b}'));
+}
+
+#[test]
+fn test_cli_parse_error_json_output_for_unknown_command_env() {
+    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
+    let output = cmd
+        .env("MFM_OUTPUT_FORMAT", "json")
+        .arg("unknown-command")
+        .output()
+        .expect("Failed to execute command");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    let parsed = verify_error_response(&stderr);
+    assert_eq!(parsed.error.code, "CliParseError");
+    assert!(parsed.error.message.contains("unknown-command"));
+}
+
+#[test]
+fn test_cli_parse_error_json_output_for_missing_required_argument() {
+    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
+    let output = cmd
+        .args(["--output-format", "json", "keystore", "import", "--stdin"])
+        .output()
+        .expect("Failed to execute command");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    let parsed = verify_error_response(&stderr);
+    assert_eq!(parsed.error.code, "CliParseError");
+    assert!(parsed.error.message.contains("--import-type"));
+}
+
+#[test]
+fn test_cli_parse_error_json_output_for_invalid_value() {
+    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
+    let output = cmd
+        .args([
+            "--output-format",
+            "json",
+            "keystore",
+            "import",
+            "--import-type",
+            "not-a-type",
+            "--stdin",
+        ])
+        .output()
+        .expect("Failed to execute command");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    let parsed = verify_error_response(&stderr);
+    assert_eq!(parsed.error.code, "CliParseError");
+    assert!(parsed.error.message.contains("not-a-type"));
+}
+
+#[test]
+fn test_cli_parse_error_text_mode_uses_clap_rendering() {
+    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
+    cmd.arg("unknown-command")
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("error:"))
+        .stderr(predicate::str::contains("unknown-command"))
+        .stderr(predicate::str::contains("\"status\"").not());
+}
+
+#[test]
 fn test_environment_variable_precedence() {
     // Test that command line flag takes precedence over environment variable
     let temp_dir = setup_temp_keystore();

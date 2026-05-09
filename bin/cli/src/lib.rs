@@ -32,6 +32,15 @@ pub async fn run() -> ! {
         std::process::exit(1);
     }
 
-    let cli = commands::Cli::parse();
+    let cli = match commands::Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(err) => {
+            let format = commands::detect_requested_output_format_for_parse_error(
+                std::env::args_os(),
+                std::env::var_os("MFM_OUTPUT_FORMAT").as_deref(),
+            );
+            presentation::output::handle_cli_parse_error(err, &format);
+        }
+    };
     cli.execute().await;
 }

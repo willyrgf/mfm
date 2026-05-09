@@ -68,7 +68,9 @@ MFM_OUTPUT_FORMAT=json mfm_cli --output-format text keystore list
 
 ## JSON Output Format
 
-When `--output-format json` is used, all commands return structured JSON responses:
+When `--output-format json` or `MFM_OUTPUT_FORMAT=json` is used, commands and CLI argument parser
+failures return structured JSON responses. Parser failures use the stable error code
+`CliParseError` and preserve clap's exit code.
 
 **Success Response:**
 ```json

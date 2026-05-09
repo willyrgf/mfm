@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand, ValueEnum};
+use std::ffi::OsStr;
 
 /// Keystore-oriented CLI commands.
 mod keystore;
@@ -17,6 +18,71 @@ pub(crate) enum OutputFormat {
     Text,
     /// Machine-readable JSON output
     Json,
+}
+
+/// Detects the caller's requested output format when clap parsing itself failed.
+pub(crate) fn detect_requested_output_format_for_parse_error<I, S>(
+    args: I,
+    env_output_format: Option<&OsStr>,
+) -> OutputFormat
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let env_requests_json = env_output_format
+        .and_then(OsStr::to_str)
+        .map(|value| value.eq_ignore_ascii_case("json"))
+        .unwrap_or(false);
+    let mut iter = args.into_iter();
+
+    while let Some(arg) = iter.next() {
+        let Some(arg) = arg.as_ref().to_str() else {
+            continue;
+        };
+        if arg == "--" {
+            break;
+        }
+
+        if let Some(value) = arg.strip_prefix("--output-format=") {
+            return output_format_from_parse_value(value).unwrap_or_else(|| {
+                if env_requests_json {
+                    OutputFormat::Json
+                } else {
+                    OutputFormat::Text
+                }
+            });
+        }
+
+        if arg == "--output-format" {
+            let value = iter.next().and_then(|next| {
+                next.as_ref()
+                    .to_str()
+                    .map(output_format_from_parse_value)
+                    .unwrap_or(None)
+            });
+            return value.unwrap_or_else(|| {
+                if env_requests_json {
+                    OutputFormat::Json
+                } else {
+                    OutputFormat::Text
+                }
+            });
+        }
+    }
+
+    if env_requests_json {
+        OutputFormat::Json
+    } else {
+        OutputFormat::Text
+    }
+}
+
+fn output_format_from_parse_value(value: &str) -> Option<OutputFormat> {
+    match value {
+        value if value.eq_ignore_ascii_case("json") => Some(OutputFormat::Json),
+        value if value.eq_ignore_ascii_case("text") => Some(OutputFormat::Text),
+        _ => None,
+    }
 }
 
 /// Context passed to CLI commands containing shared output settings.

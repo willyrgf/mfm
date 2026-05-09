@@ -127,6 +127,43 @@ pub(crate) fn print_error(code: &str, message: &str, format: &OutputFormat) {
     }
 }
 
+/// Renders a clap parse error using the requested output format and exits with clap's code.
+pub(crate) fn handle_cli_parse_error(error: clap::Error, format: &OutputFormat) -> ! {
+    match format {
+        OutputFormat::Text => error.exit(),
+        OutputFormat::Json => {
+            let exit_code = error.exit_code();
+            let message = sanitize_clap_error_message(&error.to_string());
+            print_error("CliParseError", &message, format);
+            std::process::exit(exit_code);
+        }
+    }
+}
+
+fn sanitize_clap_error_message(message: &str) -> String {
+    strip_ansi_escape_sequences(message).trim().to_string()
+}
+
+fn strip_ansi_escape_sequences(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' && chars.peek() == Some(&'[') {
+            chars.next();
+            for next in chars.by_ref() {
+                if ('@'..='~').contains(&next) {
+                    break;
+                }
+            }
+            continue;
+        }
+        output.push(ch);
+    }
+
+    output
+}
+
 /// Formats a keystore list response as an ASCII table for text output.
 pub fn format_keys_table(keys: &[KeyDisplay], show_addresses: bool) -> String {
     if show_addresses {
