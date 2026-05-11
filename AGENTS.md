@@ -276,7 +276,7 @@ When changing CLI/REST behavior, update the relevant docs in the same change:
 
 - Backtraces: set `RUST_BACKTRACE=1` (CI already does).
 - CLI logging: use `tracing::{debug, info, warn, error}` with a clear target.
-- CI summaries: `nix run .#ci -- --summary` writes `summary.json` to the artifacts dir (see `nixfied/project/ci.nix`).
+- CI summaries: `nix run .#ci -- --summary` writes `summary.json` to the artifacts dir (see `nixfied/project/module.nix`).
 
 
 ## Commenting Guidelines (Keep Future Readers in Mind)

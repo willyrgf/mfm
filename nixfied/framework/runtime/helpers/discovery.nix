@@ -127,7 +127,7 @@ let
   riskAreaLines = builtins.concatStringsSep "\n" (
     builtins.sort builtins.lessThan (
       map (
-        area: "${area.path}\t${area.risk}\t${builtins.concatStringsSep "," (area.required_checks or [ ])}"
+        area: "${area.path}\t${area.risk}\t${builtins.toJSON (area.required_checks or [ ])}"
       ) riskAreas
     )
   );
@@ -323,28 +323,19 @@ let
           local risk_tsv="$1"
           local path=""
           local risk=""
-          local checks_csv=""
-          local first=1
-          local check=""
           local checks_json=""
-          local checks_first=1
+          local first=1
 
           printf '['
-          while IFS=$'\t' read -r path risk checks_csv; do
+          while IFS=$'\t' read -r path risk checks_json; do
             [ -n "$path" ] || continue
-            checks_json="["
-            checks_first=1
-            if [ -n "$checks_csv" ]; then
-              while IFS= read -r check; do
-                [ -n "$check" ] || continue
-                if [ "$checks_first" -eq 0 ]; then
-                  checks_json="$checks_json,"
-                fi
-                checks_json="$checks_json$(json_quote_string "$check")"
-                checks_first=0
-              done < <(printf '%s' "$checks_csv" | ${pkgs.gnused}/bin/sed 's/,/\n/g')
+            if [ -z "$checks_json" ]; then
+              checks_json="[]"
             fi
-            checks_json="$checks_json]"
+            if ! printf '%s' "$checks_json" | ${pkgs.jq}/bin/jq -e 'type == "array" and all(.[]; type == "string")' >/dev/null; then
+              log_error "discovery risk area required_checks must be a json string array path=$path"
+              return 1
+            fi
             if [ "$first" -eq 0 ]; then
               printf ','
             fi
@@ -357,6 +348,82 @@ let
           done < "$risk_tsv"
           printf ']'
         }
+
+        validate_index_path_list() {
+          local index_path="$1"
+          local field="$2"
+          local jq_filter="$3"
+          local expected_kind="$4"
+          local rel_path=""
+          local abs_path=""
+          local rc=0
+
+          while IFS= read -r rel_path; do
+            [ -n "$rel_path" ] || continue
+            abs_path="$ROOT/$rel_path"
+            case "$expected_kind" in
+              file)
+                if [ ! -f "$abs_path" ]; then
+                  log_error "discovery index path does not exist field=$field path=$rel_path"
+                  rc=1
+                fi
+                ;;
+              any)
+                if [ ! -e "$abs_path" ]; then
+                  log_error "discovery index path does not exist field=$field path=$rel_path"
+                  rc=1
+                fi
+                ;;
+              *)
+                log_error "internal discovery validator expected_kind is invalid: $expected_kind"
+                rc=1
+                ;;
+            esac
+          done < <(${pkgs.jq}/bin/jq -r "$jq_filter" "$index_path")
+
+          return "$rc"
+        }
+
+        validate_index_paths() {
+          local index_path="$1"
+          local rc=0
+
+          if [ ! -f "$index_path" ]; then
+            return 0
+          fi
+
+          if ! ${pkgs.jq}/bin/jq -e "." "$index_path" >/dev/null; then
+            log_error "discovery index is not valid json path=''${index_path#"$ROOT"/}"
+            return 1
+          fi
+
+          validate_index_path_list \
+            "$index_path" \
+            "docs.path" \
+            ".docs[]? | select((.exists // true) != false) | .path // empty" \
+            "file" || rc=1
+          validate_index_path_list \
+            "$index_path" \
+            "components.path" \
+            ".components[]? | .path // empty" \
+            "file" || rc=1
+          validate_index_path_list \
+            "$index_path" \
+            "risk_areas.path" \
+            ".risk_areas[]? | .path // empty" \
+            "any" || rc=1
+          validate_index_path_list \
+            "$index_path" \
+            "command_surfaces.owner_file" \
+            ".command_surfaces[]? | .owner_file // empty" \
+            "file" || rc=1
+
+          return "$rc"
+        }
+
+        if [ "$MODE" = "verify" ]; then
+          validate_index_paths "$INDEX_PATH" || exit 1
+        fi
 
         doc_purpose() {
           case "$1" in
@@ -522,6 +589,11 @@ let
           printf ',"features":%s' "$FEATURES_JSON"
           printf '}\n'
         } > "$TMP_INDEX"
+        TMP_INDEX_PRETTY="$TMP_DIR/repo-index.pretty.json"
+        ${pkgs.jq}/bin/jq "." "$TMP_INDEX" > "$TMP_INDEX_PRETTY"
+        mv "$TMP_INDEX_PRETTY" "$TMP_INDEX"
+
+        validate_index_paths "$TMP_INDEX" || exit 1
 
         {
           echo "# Repository Map"
@@ -584,8 +656,12 @@ let
           echo ""
           echo "## Sensitive Zones"
           if [ -s "$RISK_TSV" ]; then
-            while IFS=$'\t' read -r risk_path risk_text risk_checks; do
+            while IFS=$'\t' read -r risk_path risk_text risk_checks_json; do
               [ -n "$risk_path" ] || continue
+              risk_checks=""
+              if [ -n "$risk_checks_json" ]; then
+                risk_checks=$(printf '%s' "$risk_checks_json" | ${pkgs.jq}/bin/jq -r 'join(", ")')
+              fi
               if [ -n "$risk_checks" ]; then
                 echo "- \`$risk_path\` - $risk_text (checks: $risk_checks)"
               else

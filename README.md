@@ -105,7 +105,7 @@ nix run .#ci -- --mode <mode> --summary
 - `mfm::portfolio::snapshot` is a strict json app that owns process/bootstrap orchestration, stdout envelope
   validation, and readiness mediation via `SVC_*` hooks while forwarding validated `mfm_cli` payloads unchanged.
 - `nix run .#help` lists exposed core apps; invoke `mfm::portfolio::snapshot` directly by name.
-- CI help/docs metadata comes from `nixfied/project/ci.nix` at `commands.ci.api`, and is mirrored into `apps.<system>.ci.meta.nixfied.api`.
+- CI help/docs metadata comes from task/app metadata in `nixfied/project/module.nix`, and is mirrored into `apps.<system>.ci.meta.nixfied.api`.
 - Project scripts should prefer framework policy helpers and `task.ops.ready`/`task.ops.health` surfaces over duplicating service policy or readiness logic.
 - `nix run .#dev` intentionally uses `start_service ... --cleanup` for deterministic teardown.
 

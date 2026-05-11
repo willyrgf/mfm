@@ -45,13 +45,13 @@
       "exists": true
     },
     {
-      "path": "docs/ops-and-states.md",
+      "path": "docs/design.md",
       "purpose": "Project documentation.",
       "priority": 20,
       "exists": true
     },
     {
-      "path": "docs/design.md",
+      "path": "docs/ops-and-states.md",
       "purpose": "Project documentation.",
       "priority": 20,
       "exists": true
@@ -366,13 +366,6 @@
       ]
     },
     {
-      "path": "nixfied/project/ci.nix",
-      "risk": "CI pipeline behavior and release gates.",
-      "required_checks": [
-        "nix run .#ci -- --summary"
-      ]
-    },
-    {
       "path": "nixfied/project/conf.nix",
       "risk": "Project identity, environment names, and port contract.",
       "required_checks": [
@@ -381,17 +374,18 @@
       ]
     },
     {
-      "path": "nixfied/project/quality.nix",
-      "risk": "Quality checks and discovery drift enforcement.",
+      "path": "nixfied/project/module.nix",
+      "risk": "Modeled tasks, workflows, CI pipeline behavior, quality checks, and discovery drift enforcement.",
       "required_checks": [
-        "nix run .#check"
+        "nix run .#check",
+        "nix run .#ci -- --summary"
       ]
     }
   ],
   "command_surfaces": [
     {
       "name": "ci",
-      "owner_file": "nixfied/project/ci.nix"
+      "owner_file": "nixfied/project/module.nix"
     }
   ],
   "features": []

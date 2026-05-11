@@ -34,6 +34,12 @@ let
     set -euo pipefail
     exec ${pkgs.python3}/bin/python3 ${./workspace-inventory-check.py} "$@"
   '';
+  loggingRuntime = import ../framework/runtime/helpers/logging-runtime.nix { inherit pkgs; };
+  discovery = import ../framework/runtime/helpers/discovery.nix {
+    inherit pkgs;
+    project = conf;
+    loggingPrelude = loggingRuntime.loggingPrelude;
+  };
 
   opensslBuildPackage = if pkgs.stdenv.isDarwin then pkgs.libressl else pkgs.openssl;
   opensslLibPackage = lib.getLib opensslBuildPackage;
@@ -111,6 +117,7 @@ let
     configurableCounterArtifactProgram
     mockErc20ArtifactProgram
     workspaceInventoryCheck
+    discovery.tool
   ];
   leanRuntimeInputs = coreRuntimeInputs;
   configuredServices = conf.services or { };
@@ -329,6 +336,7 @@ let
   cargoFmtCheckCmd = "cargo fmt --all -- --check";
   cargoClippyCmd = "cargo clippy --workspace --lib --examples --tests --benches --all-features -- -D warnings";
   cargoWorkspaceInventoryCheckCmd = "mfm-verify-workspace-manifest --root . --metadata --expect-member-once crates/collectors/rpc-control";
+  discoveryCheckCmd = "nixfied-discovery-index --verify --root .";
   # Keep CI linting on the same Cargo profile as nextest to avoid profile drift
   # within .#ci. Clippy still uses its own driver, so reuse remains partial.
   cargoCiClippyCmd = "cargo clippy --profile ci --workspace --lib --examples --tests --benches --all-features -- -D warnings";
@@ -1207,6 +1215,7 @@ in
             artifacts_dir="''${CI_ARTIFACTS_DIR:-${ciArtifactsRoot}}"
             mkdir -p "$artifacts_dir"
             workspace_log="$artifacts_dir/check-workspace-inventory.log"
+            discovery_log="$artifacts_dir/check-discovery.log"
             fmt_log="$artifacts_dir/check-fmt.log"
             clippy_log="$artifacts_dir/check-clippy.log"
 
@@ -1219,6 +1228,10 @@ in
             echo "INFO: validating Cargo workspace inventory"
             echo "INFO: command=${cargoWorkspaceInventoryCheckCmd} log=$workspace_log"
             run_with_log "$workspace_log" ${cargoWorkspaceInventoryCheckCmd}
+
+            echo "INFO: verifying discovery artifacts"
+            echo "INFO: command=${discoveryCheckCmd} log=$discovery_log"
+            run_with_log "$discovery_log" ${discoveryCheckCmd}
 
             echo "INFO: running formatting checks"
             echo "INFO: command=${cargoFmtCheckCmd} log=$fmt_log"
@@ -1445,6 +1458,7 @@ in
               }
 
               mfm-verify-workspace-manifest --root "$ROOT" --metadata --expect-member-once crates/collectors/rpc-control
+              nixfied-discovery-index --verify --root "$ROOT"
 
               workspace_inventory_fixture="$(mktemp -d "''${TMPDIR:-/tmp}/workspace-inventory.XXXXXX")"
               mkdir -p "$workspace_inventory_fixture/a"
@@ -1463,6 +1477,39 @@ EOF
               if ! grep -F "duplicate Cargo workspace members: a" "$workspace_inventory_fixture/out" >/dev/null; then
                 echo "ERROR: duplicate Cargo workspace member fixture missing expected diagnostic"
                 cat "$workspace_inventory_fixture/out"
+                exit 1
+              fi
+
+              discovery_fixture="$(mktemp -d "''${TMPDIR:-/tmp}/discovery-index.XXXXXX")"
+              mkdir -p "$discovery_fixture/docs"
+              cat >"$discovery_fixture/docs/repo-index.json" <<'"'"'EOF'"'"'
+{
+  "schema_version": 1,
+  "generated_by": "nixfied-discovery-index",
+  "docs": [],
+  "components": [],
+  "risk_areas": [
+    {
+      "path": "missing/path",
+      "risk": "fixture",
+      "required_checks": []
+    }
+  ],
+  "command_surfaces": [],
+  "features": []
+}
+EOF
+              cat >"$discovery_fixture/docs/repo-map.md" <<'"'"'EOF'"'"'
+# Fixture
+EOF
+              if nixfied-discovery-index --verify --root "$discovery_fixture" >"$discovery_fixture/out" 2>&1; then
+                echo "ERROR: nonexistent discovery path fixture unexpectedly passed"
+                cat "$discovery_fixture/out"
+                exit 1
+              fi
+              if ! grep -F "discovery index path does not exist field=risk_areas.path path=missing/path" "$discovery_fixture/out" >/dev/null; then
+                echo "ERROR: nonexistent discovery path fixture missing expected diagnostic"
+                cat "$discovery_fixture/out"
                 exit 1
               fi
 

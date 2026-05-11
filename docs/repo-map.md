@@ -10,8 +10,8 @@ Generated from `docs/repo-index.json`.
 - `docs/UPGRADE.md` - Downstream upgrade notes for behavioral and path contract changes.
 - `AGENTS.md` - Agent instructions and collaboration constraints.
 - `docs/architecture.md` - Project documentation.
-- `docs/ops-and-states.md` - Project documentation.
 - `docs/design.md` - Project documentation.
+- `docs/ops-and-states.md` - Project documentation.
 
 ## Components
 - `Cargo.toml` (rust-cargo)
@@ -72,7 +72,7 @@ Generated from `docs/repo-index.json`.
 - `tests/integration/Cargo.toml` (rust-cargo)
 
 ## Command Surfaces
-- `ci` from `nixfied/project/ci.nix`
+- `ci` from `nixfied/project/module.nix`
 
 ## Features
 - (none detected)
@@ -91,9 +91,8 @@ Generated from `docs/repo-index.json`.
 - `crates/core/src/keystore` - Security-sensitive key handling, tamper detection, and persisted keystore compatibility. (checks: nix run .#check, nix run .#test, nix run .#ci -- --audit --summary)
 - `crates/machine` - Recovery, replay, and deterministic state-machine runtime semantics. (checks: nix run .#check, nix run .#test, nix run .#ci -- --parity --summary)
 - `nixfied/framework` - Framework internals; avoid direct edits in installed repos. (checks: nix run .#help)
-- `nixfied/project/ci.nix` - CI pipeline behavior and release gates. (checks: nix run .#ci -- --summary)
 - `nixfied/project/conf.nix` - Project identity, environment names, and port contract. (checks: nix run .#check, nix run .#ci -- --summary)
-- `nixfied/project/quality.nix` - Quality checks and discovery drift enforcement. (checks: nix run .#check)
+- `nixfied/project/module.nix` - Modeled tasks, workflows, CI pipeline behavior, quality checks, and discovery drift enforcement. (checks: nix run .#check, nix run .#ci -- --summary)
 
 ## Canonical Commands
 - `nix run .#help`

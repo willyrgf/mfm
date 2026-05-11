@@ -202,6 +202,55 @@ rec {
     enable = true;
     strict = true;
     refreshArg = "--refresh-discovery";
+    commandSurfaces = [
+      {
+        name = "ci";
+        ownerFile = "nixfied/project/module.nix";
+      }
+    ];
+    riskAreas = [
+      {
+        path = "crates/core/src/keystore";
+        risk = "Security-sensitive key handling, tamper detection, and persisted keystore compatibility.";
+        required_checks = [
+          "nix run .#check"
+          "nix run .#test"
+          "nix run .#ci -- --audit --summary"
+        ];
+      }
+      {
+        path = "crates/machine";
+        risk = "Recovery, replay, and deterministic state-machine runtime semantics.";
+        required_checks = [
+          "nix run .#check"
+          "nix run .#test"
+          "nix run .#ci -- --parity --summary"
+        ];
+      }
+      {
+        path = "nixfied/framework";
+        risk = "Framework internals; avoid direct edits in installed repos.";
+        required_checks = [
+          "nix run .#help"
+        ];
+      }
+      {
+        path = "nixfied/project/conf.nix";
+        risk = "Project identity, environment names, and port contract.";
+        required_checks = [
+          "nix run .#check"
+          "nix run .#ci -- --summary"
+        ];
+      }
+      {
+        path = "nixfied/project/module.nix";
+        risk = "Modeled tasks, workflows, CI pipeline behavior, quality checks, and discovery drift enforcement.";
+        required_checks = [
+          "nix run .#check"
+          "nix run .#ci -- --summary"
+        ];
+      }
+    ];
     requiredDocs = [
       "README.md"
       "AGENTS.md"
