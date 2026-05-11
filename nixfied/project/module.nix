@@ -30,6 +30,11 @@ let
     pkgs.nix
   ];
 
+  workspaceInventoryCheck = pkgs.writeShellScriptBin "mfm-verify-workspace-manifest" ''
+    set -euo pipefail
+    exec ${pkgs.python3}/bin/python3 ${./workspace-inventory-check.py} "$@"
+  '';
+
   opensslBuildPackage = if pkgs.stdenv.isDarwin then pkgs.libressl else pkgs.openssl;
   opensslLibPackage = lib.getLib opensslBuildPackage;
   opensslDevPackage = lib.getDev opensslBuildPackage;
@@ -105,6 +110,7 @@ let
   rustRuntimeInputs = commonRuntimeInputs ++ [
     configurableCounterArtifactProgram
     mockErc20ArtifactProgram
+    workspaceInventoryCheck
   ];
   leanRuntimeInputs = coreRuntimeInputs;
   configuredServices = conf.services or { };
@@ -322,6 +328,7 @@ let
 
   cargoFmtCheckCmd = "cargo fmt --all -- --check";
   cargoClippyCmd = "cargo clippy --workspace --lib --examples --tests --benches --all-features -- -D warnings";
+  cargoWorkspaceInventoryCheckCmd = "mfm-verify-workspace-manifest --root . --metadata --expect-member-once crates/collectors/rpc-control";
   # Keep CI linting on the same Cargo profile as nextest to avoid profile drift
   # within .#ci. Clippy still uses its own driver, so reuse remains partial.
   cargoCiClippyCmd = "cargo clippy --profile ci --workspace --lib --examples --tests --benches --all-features -- -D warnings";
@@ -1199,6 +1206,7 @@ in
 
             artifacts_dir="''${CI_ARTIFACTS_DIR:-${ciArtifactsRoot}}"
             mkdir -p "$artifacts_dir"
+            workspace_log="$artifacts_dir/check-workspace-inventory.log"
             fmt_log="$artifacts_dir/check-fmt.log"
             clippy_log="$artifacts_dir/check-clippy.log"
 
@@ -1207,6 +1215,10 @@ in
               shift
               "$@" 2>&1 | tee "$logfile"
             }
+
+            echo "INFO: validating Cargo workspace inventory"
+            echo "INFO: command=${cargoWorkspaceInventoryCheckCmd} log=$workspace_log"
+            run_with_log "$workspace_log" ${cargoWorkspaceInventoryCheckCmd}
 
             echo "INFO: running formatting checks"
             echo "INFO: command=${cargoFmtCheckCmd} log=$fmt_log"
@@ -1431,6 +1443,28 @@ in
 
                 printf "%s" "$output"
               }
+
+              mfm-verify-workspace-manifest --root "$ROOT" --metadata --expect-member-once crates/collectors/rpc-control
+
+              workspace_inventory_fixture="$(mktemp -d "''${TMPDIR:-/tmp}/workspace-inventory.XXXXXX")"
+              mkdir -p "$workspace_inventory_fixture/a"
+              cat >"$workspace_inventory_fixture/Cargo.toml" <<'"'"'EOF'"'"'
+[workspace]
+members = [
+  "a",
+  "a",
+]
+EOF
+              if mfm-verify-workspace-manifest --manifest "$workspace_inventory_fixture/Cargo.toml" >"$workspace_inventory_fixture/out" 2>&1; then
+                echo "ERROR: duplicate Cargo workspace member fixture unexpectedly passed"
+                cat "$workspace_inventory_fixture/out"
+                exit 1
+              fi
+              if ! grep -F "duplicate Cargo workspace members: a" "$workspace_inventory_fixture/out" >/dev/null; then
+                echo "ERROR: duplicate Cargo workspace member fixture missing expected diagnostic"
+                cat "$workspace_inventory_fixture/out"
+                exit 1
+              fi
 
               INTROSPECTION_BUNDLE_PATH="$(build_output_with_timeout "path:$ROOT#introspectionBundle" "introspection bundle")"
 
