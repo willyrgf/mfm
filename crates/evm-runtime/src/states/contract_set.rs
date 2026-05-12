@@ -471,6 +471,18 @@ impl State for WriteDeployedContractSetState {
     }
 }
 
+fn read_compiled_contract_set(
+    ctx: &dyn DynContext,
+) -> Result<CompiledContractSetManifest, StateError> {
+    let value = op_ctx::read_json_required(
+        ctx,
+        &ContextKey(KEY_COMPILED_CONTRACT_SET.to_string()),
+        "missing_compiled_contract_set",
+        "missing compiled contract-set manifest in context",
+    )?;
+    decode_compiled_contract_set_manifest(&value)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -722,16 +734,4 @@ mod tests {
 
         assert_eq!(first_attempt_first_intent, retry_first_intent);
     }
-}
-
-fn read_compiled_contract_set(
-    ctx: &dyn DynContext,
-) -> Result<CompiledContractSetManifest, StateError> {
-    let value = op_ctx::read_json_required(
-        ctx,
-        &ContextKey(KEY_COMPILED_CONTRACT_SET.to_string()),
-        "missing_compiled_contract_set",
-        "missing compiled contract-set manifest in context",
-    )?;
-    decode_compiled_contract_set_manifest(&value)
 }
