@@ -1288,7 +1288,9 @@ mod tests {
             value: serde_json::Value,
         ) -> Result<ArtifactId, IoError> {
             self.artifacts.insert(key.0.clone(), value);
-            Ok(mfm_machine::hashing::artifact_id_for_bytes(key.0.as_bytes()))
+            Ok(mfm_machine::hashing::artifact_id_for_bytes(
+                key.0.as_bytes(),
+            ))
         }
 
         async fn get_recorded_fact(
