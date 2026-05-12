@@ -279,6 +279,11 @@ fn topological_order(plan: &ExecutionPlan) -> Result<Vec<StateNode>, PlanValidat
     Ok(out)
 }
 
+fn validate_plan(plan: &ExecutionPlan) -> Result<Vec<StateNode>, RunError> {
+    topological_order(plan)
+        .map_err(|_| invalid_plan("invalid_plan", "execution plan failed validation"))
+}
+
 #[derive(Clone, Debug)]
 struct RunStartedInfo {
     op_id: OpId,
@@ -398,6 +403,48 @@ fn read_run_history(run_id: RunId, stream: &[EventEnvelope]) -> Result<RunHistor
     })
 }
 
+fn validate_recovery_history(history: &RunHistory, ordered: &[StateNode]) -> Result<(), RunError> {
+    let plan_states: HashSet<StateId> = ordered.iter().map(|node| node.id.clone()).collect();
+
+    for state_id in &history.completed_states {
+        if !plan_states.contains(state_id) {
+            return Err(invalid_plan(
+                "recovery_state_not_in_plan",
+                "completed state from run history was not present in resolved plan",
+            ));
+        }
+    }
+
+    for state_id in history.last_failure_by_state.keys() {
+        if !plan_states.contains(state_id) {
+            return Err(invalid_plan(
+                "recovery_state_not_in_plan",
+                "failed state from run history was not present in resolved plan",
+            ));
+        }
+    }
+
+    for state_id in history.last_attempt_by_state.keys() {
+        if !plan_states.contains(state_id) {
+            return Err(invalid_plan(
+                "recovery_state_not_in_plan",
+                "attempted state from run history was not present in resolved plan",
+            ));
+        }
+    }
+
+    if let Some(orphan) = &history.orphan_attempt {
+        if !plan_states.contains(&orphan.state_id) {
+            return Err(invalid_plan(
+                "recovery_state_not_in_plan",
+                "orphan attempt state from run history was not present in resolved plan",
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 async fn read_manifest(
     artifacts: &dyn ArtifactStore,
     manifest_id: &ArtifactId,
@@ -483,12 +530,26 @@ async fn run_states(
     validate_execution_mode(run_config)?;
     debug!(execution_mode = ?run_config.execution_mode, "running execution plan");
 
-    let ordered = topological_order(plan)
-        .map_err(|_| invalid_plan("invalid_plan", "execution plan failed validation"))?;
+    let ordered = validate_plan(plan)?;
     debug!(
         state_count = ordered.len(),
         "execution plan resolved to topological order"
     );
+
+    if let Some((state_id, _, _)) = &start_at_state {
+        if !ordered.iter().any(|node| &node.id == state_id) {
+            return Err(invalid_plan(
+                "start_state_not_in_plan",
+                "start_at_state was not present in execution plan",
+            ));
+        }
+        if completed_states.contains(state_id) {
+            return Err(invalid_plan(
+                "start_state_already_completed",
+                "start_at_state was already completed in run history",
+            ));
+        }
+    }
 
     let mut found_start = start_at_state.is_none();
     let mut phase = RunPhase::Running;
@@ -634,6 +695,7 @@ impl ExecutionEngine for DefaultExecutionEngine {
     async fn start(&self, stores: Stores, run: StartRun) -> Result<RunResult, RunError> {
         validate_execution_mode(&run.run_config)?;
         validate_start_run_contract(&run)?;
+        validate_plan(&run.plan)?;
 
         let exists = stores
             .artifacts
@@ -717,23 +779,6 @@ impl ExecutionEngine for DefaultExecutionEngine {
             "loaded run history for resume"
         );
 
-        if let Some((status, final_snapshot_id)) = &history.run_completed {
-            info!(
-                status = ?status,
-                final_snapshot_id = final_snapshot_id.as_ref().map(|id| id.as_str()),
-                "run already completed; resume returns existing terminal state"
-            );
-            return Ok(RunResult {
-                run_id,
-                phase: match status {
-                    RunStatus::Completed => RunPhase::Completed,
-                    RunStatus::Failed => RunPhase::Failed,
-                    RunStatus::Cancelled => RunPhase::Cancelled,
-                },
-                final_snapshot_id: final_snapshot_id.clone(),
-            });
-        }
-
         let manifest =
             read_manifest(stores.artifacts.as_ref(), &history.started.manifest_id).await?;
         validate_execution_mode(&manifest.run_config)?;
@@ -752,6 +797,25 @@ impl ExecutionEngine for DefaultExecutionEngine {
                 "plan_op_id_mismatch",
                 "resolved plan.op_id did not match manifest.op_id",
             ));
+        }
+        let ordered = validate_plan(&plan)?;
+        validate_recovery_history(&history, &ordered)?;
+
+        if let Some((status, final_snapshot_id)) = &history.run_completed {
+            info!(
+                status = ?status,
+                final_snapshot_id = final_snapshot_id.as_ref().map(|id| id.as_str()),
+                "run already completed; resume returns existing terminal state"
+            );
+            return Ok(RunResult {
+                run_id,
+                phase: match status {
+                    RunStatus::Completed => RunPhase::Completed,
+                    RunStatus::Failed => RunPhase::Failed,
+                    RunStatus::Cancelled => RunPhase::Cancelled,
+                },
+                final_snapshot_id: final_snapshot_id.clone(),
+            });
         }
 
         let writer: SharedEventWriter = Arc::new(Mutex::new(
@@ -790,8 +854,6 @@ impl ExecutionEngine for DefaultExecutionEngine {
         }
 
         // If all states are done, finalize run.
-        let ordered = topological_order(&plan)
-            .map_err(|_| invalid_plan("invalid_plan", "execution plan failed validation"))?;
         let next_state = ordered
             .iter()
             .find(|n| !history.completed_states.contains(&n.id))

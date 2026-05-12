@@ -9,3 +9,5 @@ must be canonical-json-hashable, must not contain floats, and must not contain s
 values. Concrete stream stores should call the machine validation helpers as defense in depth.
 Resume also revalidates structured artifacts such as manifests and context snapshots: bytes must
 match their content address and be the exact canonical JSON encoding of the parsed value.
+Runtime start validates plan topology before `RunStarted` is persisted. Runtime resume validates
+the resolved plan against historical state IDs before orphan recovery or terminal status handling.

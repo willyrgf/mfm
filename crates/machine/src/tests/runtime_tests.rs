@@ -406,6 +406,13 @@ fn assert_storage_corruption_code(err: RunError, code: &str) {
     }
 }
 
+fn assert_invalid_plan_code(err: RunError, code: &str) {
+    match err {
+        RunError::InvalidPlan(info) => assert_eq!(info.code.0, code),
+        other => panic!("unexpected error: {other:?}"),
+    }
+}
+
 async fn append_run_started(
     streams: &MemStreamStore,
     run_id: RunId,
@@ -661,6 +668,205 @@ async fn resume_rejects_corrupted_fact_stream_before_state_execution() {
     assert!(!stream
         .iter()
         .any(|event| matches!(event.event, Event::Kernel(KernelEvent::StateEntered { .. }))));
+}
+
+#[tokio::test]
+async fn invalid_plan_fails_before_run_started_is_persisted() {
+    let streams = Arc::new(MemStreamStore::default());
+    let artifacts = Arc::new(MemArtifactStore::default());
+    let stores = Stores {
+        streams: streams.clone(),
+        artifacts: artifacts.clone(),
+    };
+
+    let run_config = base_run_config();
+    let manifest = manifest_for(run_config.clone());
+    let manifest_id = store_manifest(artifacts.as_ref(), &manifest).await;
+    let plan = ExecutionPlan {
+        op_id: manifest.op_id.clone(),
+        graph: StateGraph {
+            states: Vec::new(),
+            edges: Vec::new(),
+        },
+    };
+    let resolver = Arc::new(FixedResolver { plan: plan.clone() });
+    let engine = DefaultExecutionEngine::new(resolver);
+
+    let err = engine
+        .start(
+            stores,
+            StartRun {
+                manifest,
+                manifest_id,
+                plan,
+                run_config,
+                initial_context: Box::new(JsonContext::new()),
+            },
+        )
+        .await
+        .expect_err("invalid plan must fail start");
+
+    assert_invalid_plan_code(err, "invalid_plan");
+    assert!(streams.inner.lock().await.is_empty());
+    assert!(artifacts.inner.lock().await.len() == 1);
+}
+
+#[tokio::test]
+async fn orphan_state_absent_from_resolved_plan_fails_without_run_completed() {
+    let streams = Arc::new(MemStreamStore::default());
+    let artifacts = Arc::new(MemArtifactStore::default());
+    let stores = || Stores {
+        streams: streams.clone(),
+        artifacts: artifacts.clone(),
+    };
+
+    let run_config = base_run_config();
+    let manifest = manifest_for(run_config);
+    let manifest_id = store_manifest(artifacts.as_ref(), &manifest).await;
+    let initial_snapshot_id = write_full_snapshot_value(artifacts.as_ref(), serde_json::json!({}))
+        .await
+        .expect("initial snapshot");
+    let run_id = RunId(uuid::Uuid::new_v4());
+    let missing_state = StateId::must_new("machine.main.missing".to_string());
+    streams
+        .append_run_events(
+            run_id,
+            0,
+            vec![
+                EventEnvelope {
+                    run_id,
+                    seq: 1,
+                    ts_millis: None,
+                    event: Event::Kernel(KernelEvent::RunStarted {
+                        op_id: manifest.op_id.clone(),
+                        manifest_id,
+                        initial_snapshot_id: initial_snapshot_id.clone(),
+                    }),
+                },
+                EventEnvelope {
+                    run_id,
+                    seq: 2,
+                    ts_millis: None,
+                    event: Event::Kernel(KernelEvent::StateEntered {
+                        state_id: missing_state,
+                        attempt: 0,
+                        base_snapshot_id: initial_snapshot_id,
+                    }),
+                },
+            ],
+        )
+        .await
+        .expect("seed orphan run");
+
+    let resolver = Arc::new(FixedResolver {
+        plan: set_key_plan(&manifest.op_id),
+    });
+    let engine = DefaultExecutionEngine::new(resolver);
+
+    let err = engine
+        .resume(stores(), run_id)
+        .await
+        .expect_err("unknown orphan state must fail resume");
+
+    assert_invalid_plan_code(err, "recovery_state_not_in_plan");
+    let stream = streams
+        .read_run_stream(run_id, 1, None)
+        .await
+        .expect("read stream");
+    assert_eq!(stream.len(), 2);
+    assert!(!stream.iter().any(|event| {
+        matches!(
+            event.event,
+            Event::Kernel(KernelEvent::StateFailed { .. } | KernelEvent::RunCompleted { .. })
+        )
+    }));
+}
+
+#[tokio::test]
+async fn completed_state_absent_from_resolved_plan_fails_terminal_resume() {
+    let streams = Arc::new(MemStreamStore::default());
+    let artifacts = Arc::new(MemArtifactStore::default());
+    let stores = || Stores {
+        streams: streams.clone(),
+        artifacts: artifacts.clone(),
+    };
+
+    let run_config = base_run_config();
+    let manifest = manifest_for(run_config);
+    let manifest_id = store_manifest(artifacts.as_ref(), &manifest).await;
+    let initial_snapshot_id = write_full_snapshot_value(artifacts.as_ref(), serde_json::json!({}))
+        .await
+        .expect("initial snapshot");
+    let completed_snapshot_id =
+        write_full_snapshot_value(artifacts.as_ref(), serde_json::json!({"done": true}))
+            .await
+            .expect("completed snapshot");
+    let run_id = RunId(uuid::Uuid::new_v4());
+    let missing_state = StateId::must_new("machine.main.missing".to_string());
+    streams
+        .append_run_events(
+            run_id,
+            0,
+            vec![
+                EventEnvelope {
+                    run_id,
+                    seq: 1,
+                    ts_millis: None,
+                    event: Event::Kernel(KernelEvent::RunStarted {
+                        op_id: manifest.op_id.clone(),
+                        manifest_id,
+                        initial_snapshot_id: initial_snapshot_id.clone(),
+                    }),
+                },
+                EventEnvelope {
+                    run_id,
+                    seq: 2,
+                    ts_millis: None,
+                    event: Event::Kernel(KernelEvent::StateEntered {
+                        state_id: missing_state.clone(),
+                        attempt: 0,
+                        base_snapshot_id: initial_snapshot_id,
+                    }),
+                },
+                EventEnvelope {
+                    run_id,
+                    seq: 3,
+                    ts_millis: None,
+                    event: Event::Kernel(KernelEvent::StateCompleted {
+                        state_id: missing_state,
+                        context_snapshot_id: completed_snapshot_id.clone(),
+                    }),
+                },
+                EventEnvelope {
+                    run_id,
+                    seq: 4,
+                    ts_millis: None,
+                    event: Event::Kernel(KernelEvent::RunCompleted {
+                        status: RunStatus::Completed,
+                        final_snapshot_id: Some(completed_snapshot_id),
+                    }),
+                },
+            ],
+        )
+        .await
+        .expect("seed terminal run");
+
+    let resolver = Arc::new(FixedResolver {
+        plan: set_key_plan(&manifest.op_id),
+    });
+    let engine = DefaultExecutionEngine::new(resolver);
+
+    let err = engine
+        .resume(stores(), run_id)
+        .await
+        .expect_err("terminal run with unknown completed state must fail");
+
+    assert_invalid_plan_code(err, "recovery_state_not_in_plan");
+    let stream = streams
+        .read_run_stream(run_id, 1, None)
+        .await
+        .expect("read stream");
+    assert_eq!(stream.len(), 4);
 }
 
 const SECRET_MNEMONIC: &str =

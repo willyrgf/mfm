@@ -305,6 +305,9 @@ Runtime-critical rule:
 - Trailing `StateEntered` without terminal kernel event is treated as in-flight/orphaned attempt.
 - Resume retries from `base_snapshot_id`.
 - Facts recorded during orphaned attempts remain valid for replay/dedupe.
+- Runtime start validates plan topology before persisting `RunStarted`.
+- Runtime resume validates the resolved plan before recovery and rejects run history whose
+  attempted, failed, orphaned, or completed state IDs are absent from that plan.
 
 ### 7.5 Checkpointing
 Checkpointing policy:

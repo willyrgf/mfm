@@ -23,9 +23,9 @@ use crate::stores::{ArtifactKind, StreamId};
 
 use super::{
     close_orphan_attempt_for_recovery, invalid_plan, next_attempt, read_manifest, read_run_history,
-    read_run_stream, run_states, run_stream_head, storage_not_found, topological_order,
-    validate_execution_mode, validate_start_run_contract, EngineFailpoints, EventWriter,
-    PlanResolver, SharedEventWriter,
+    read_run_stream, run_states, run_stream_head, storage_not_found, validate_execution_mode,
+    validate_plan, validate_recovery_history, validate_start_run_contract, EngineFailpoints,
+    EventWriter, PlanResolver, SharedEventWriter,
 };
 
 const NAMESPACE_CHILD_RUN_SPAWN: &str = "machine.child_run.spawn";
@@ -84,6 +84,7 @@ impl ChildRunEngine {
     ) -> Result<InitializedChildRun, RunError> {
         validate_execution_mode(&run.run_config)?;
         validate_start_run_contract(&run)?;
+        validate_plan(&run.plan)?;
 
         let exists = stores
             .artifacts
@@ -165,18 +166,6 @@ impl ChildRunEngine {
         let facts = FactIndex::from_event_stream(&stream)?;
         let history = read_run_history(run_id, &stream)?;
 
-        if let Some((status, final_snapshot_id)) = &history.run_completed {
-            return Ok(RunResult {
-                run_id,
-                phase: match status {
-                    RunStatus::Completed => RunPhase::Completed,
-                    RunStatus::Failed => RunPhase::Failed,
-                    RunStatus::Cancelled => RunPhase::Cancelled,
-                },
-                final_snapshot_id: final_snapshot_id.clone(),
-            });
-        }
-
         let manifest =
             read_manifest(stores.artifacts.as_ref(), &history.started.manifest_id).await?;
         validate_execution_mode(&manifest.run_config)?;
@@ -194,6 +183,20 @@ impl ChildRunEngine {
                 "plan_op_id_mismatch",
                 "resolved plan.op_id did not match manifest.op_id",
             ));
+        }
+        let ordered = validate_plan(&plan)?;
+        validate_recovery_history(&history, &ordered)?;
+
+        if let Some((status, final_snapshot_id)) = &history.run_completed {
+            return Ok(RunResult {
+                run_id,
+                phase: match status {
+                    RunStatus::Completed => RunPhase::Completed,
+                    RunStatus::Failed => RunPhase::Failed,
+                    RunStatus::Cancelled => RunPhase::Cancelled,
+                },
+                final_snapshot_id: final_snapshot_id.clone(),
+            });
         }
 
         let writer: SharedEventWriter = Arc::new(Mutex::new(
@@ -225,8 +228,6 @@ impl ChildRunEngine {
             .await;
         }
 
-        let ordered = topological_order(&plan)
-            .map_err(|_| invalid_plan("invalid_plan", "execution plan failed validation"))?;
         let next_state = ordered
             .iter()
             .find(|n| !history.completed_states.contains(&n.id))
