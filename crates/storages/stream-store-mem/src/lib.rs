@@ -18,7 +18,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use mfm_machine::errors::{ErrorCategory, ErrorInfo, StorageError};
 use mfm_machine::ids::ErrorCode;
-use mfm_machine::stores::{AppendBatchResult, StreamAppend, StreamId, StreamRecord, StreamStore};
+use mfm_machine::stores::{
+    validate_stream_append_records, AppendBatchResult, StreamAppend, StreamId, StreamRecord,
+    StreamStore,
+};
 use tokio::sync::Mutex;
 
 /// In-memory append-only stream store keyed by [`StreamId`].
@@ -52,12 +55,7 @@ impl MemStreamStore {
     }
 
     fn validate_append(append: &StreamAppend) -> Result<(), StorageError> {
-        for record in &append.records {
-            if record.kind.is_empty() {
-                return Err(Self::other("stream record kind must not be empty"));
-            }
-        }
-        Ok(())
+        validate_stream_append_records(append)
     }
 
     fn validate_batch(appends: &[StreamAppend]) -> Result<(), StorageError> {
@@ -151,5 +149,53 @@ impl StreamStore for MemStreamStore {
             .filter(|e| e.seq >= from && e.seq <= to)
             .cloned()
             .collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mfm_machine::stores::NewStreamRecord;
+
+    fn append(stream_id: StreamId, payload: serde_json::Value) -> StreamAppend {
+        StreamAppend::new(
+            stream_id,
+            0,
+            vec![NewStreamRecord {
+                ts_millis: None,
+                kind: "domain_event".to_string(),
+                payload,
+            }],
+        )
+    }
+
+    #[tokio::test]
+    async fn rejects_float_payloads_before_append() {
+        let store = MemStreamStore::new();
+        let stream_id = StreamId::must_new("test:float");
+        let err = store
+            .append(append(
+                stream_id.clone(),
+                serde_json::json!({ "value": 1.5 }),
+            ))
+            .await
+            .expect_err("float payload must fail");
+        assert!(matches!(err, StorageError::Other(_)));
+        assert_eq!(store.head_seq(&stream_id).await.expect("head"), 0);
+    }
+
+    #[tokio::test]
+    async fn rejects_secret_shaped_payloads_before_append() {
+        let store = MemStreamStore::new();
+        let stream_id = StreamId::must_new("test:secret");
+        let err = store
+            .append(append(
+                stream_id.clone(),
+                serde_json::json!({ "private_key": "do-not-persist" }),
+            ))
+            .await
+            .expect_err("secret-shaped payload must fail");
+        assert!(matches!(err, StorageError::Other(_)));
+        assert_eq!(store.head_seq(&stream_id).await.expect("head"), 0);
     }
 }

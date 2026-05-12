@@ -10,3 +10,4 @@ tokio = { workspace = true }
 
 [dev-dependencies]
 mfm-machine-test-support = { path = "../../machine-test-support" }
+serde_json = { workspace = true }

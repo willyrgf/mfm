@@ -35,7 +35,7 @@ use tracing::{debug, info};
 use mfm_machine::errors::{ErrorCategory, ErrorInfo, StorageError};
 use mfm_machine::hashing::{artifact_id_for_json, CanonicalJsonError};
 use mfm_machine::ids::ErrorCode;
-use mfm_machine::stores::{NewStreamRecord, StreamId, StreamRecord};
+use mfm_machine::stores::{validate_new_stream_record, NewStreamRecord, StreamId, StreamRecord};
 
 /// Stream family used for source-quality and probe history.
 pub const RPC_SOURCE_STREAM_FAMILY: &str = "rpc_source";
@@ -470,11 +470,13 @@ impl RpcSourceRecord {
             )
         })?;
 
-        Ok(NewStreamRecord {
+        let record = NewStreamRecord {
             ts_millis: Some(self.recorded_at_ms()),
             kind: self.kind().to_string(),
             payload,
-        })
+        };
+        validate_new_stream_record(&record)?;
+        Ok(record)
     }
 
     fn from_stream_record(record: &StreamRecord) -> Result<Self, RpcSourceProjectionError> {
@@ -951,11 +953,13 @@ impl SourcePoolRecord {
             )
         })?;
 
-        Ok(NewStreamRecord {
+        let record = NewStreamRecord {
             ts_millis: Some(self.recorded_at_ms()),
             kind: self.kind().to_string(),
             payload,
-        })
+        };
+        validate_new_stream_record(&record)?;
+        Ok(record)
     }
 
     fn from_stream_record(record: &StreamRecord) -> Result<Self, SourcePoolProjectionError> {

@@ -26,7 +26,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use mfm_machine::errors::{ErrorCategory, ErrorInfo, StorageError};
 use mfm_machine::ids::ErrorCode;
-use mfm_machine::stores::{AppendBatchResult, StreamAppend, StreamId, StreamRecord, StreamStore};
+use mfm_machine::stores::{
+    validate_stream_append_records, AppendBatchResult, StreamAppend, StreamId, StreamRecord,
+    StreamStore,
+};
 use tokio::sync::Mutex;
 use tokio_postgres::{Client, NoTls, Transaction};
 use tracing::{debug, info, warn};
@@ -184,15 +187,7 @@ COMMIT;
 
     fn validate_append(append: &StreamAppend) -> Result<(), StorageError> {
         Self::u64_to_i64(append.expected_seq, "expected_seq")?;
-        for record in &append.records {
-            if record.kind.is_empty() {
-                return Err(Self::other(
-                    "pg_append_invalid",
-                    "stream record kind must not be empty",
-                ));
-            }
-        }
-        Ok(())
+        validate_stream_append_records(append)
     }
 
     fn validate_batch(appends: &[StreamAppend]) -> Result<(), StorageError> {
@@ -739,6 +734,52 @@ CREATE TABLE mfm_stream_records (
             assert_eq!(records[0].ts_millis, Some(42));
             assert_eq!(records[0].kind, "test");
             assert_eq!(records[0].payload, serde_json::json!({ "ok": true }));
+
+            drop_schema(&store, &schema).await;
+        }
+
+        #[tokio::test]
+        async fn rejects_float_payloads_before_append() {
+            let (store, schema) = test_store(true).await;
+            let stream_id = StreamId::must_new(format!("p5:{schema}_float"));
+
+            let err = store
+                .append(StreamAppend::new(
+                    stream_id.clone(),
+                    0,
+                    vec![mfm_machine::stores::NewStreamRecord {
+                        ts_millis: None,
+                        kind: "domain_event".to_string(),
+                        payload: serde_json::json!({ "value": 1.5 }),
+                    }],
+                ))
+                .await
+                .expect_err("float payload must fail");
+            assert!(matches!(err, StorageError::Other(_)));
+            assert_eq!(store.head_seq(&stream_id).await.expect("head"), 0);
+
+            drop_schema(&store, &schema).await;
+        }
+
+        #[tokio::test]
+        async fn rejects_secret_shaped_payloads_before_append() {
+            let (store, schema) = test_store(true).await;
+            let stream_id = StreamId::must_new(format!("p5:{schema}_secret"));
+
+            let err = store
+                .append(StreamAppend::new(
+                    stream_id.clone(),
+                    0,
+                    vec![mfm_machine::stores::NewStreamRecord {
+                        ts_millis: None,
+                        kind: "domain_event".to_string(),
+                        payload: serde_json::json!({ "private_key": "do-not-persist" }),
+                    }],
+                ))
+                .await
+                .expect_err("secret-shaped payload must fail");
+            assert!(matches!(err, StorageError::Other(_)));
+            assert_eq!(store.head_seq(&stream_id).await.expect("head"), 0);
 
             drop_schema(&store, &schema).await;
         }

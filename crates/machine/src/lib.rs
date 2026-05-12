@@ -1225,11 +1225,38 @@ pub mod events {
         })
     }
 
+    /// Validates a domain event before it can be encoded or appended.
+    ///
+    /// Domain event names and payloads are persisted surfaces: names must not look secret-bearing
+    /// and payloads must satisfy the canonical JSON/no-floats/no-secrets contract.
+    pub fn validate_domain_event(event: &DomainEvent) -> Result<(), StorageError> {
+        if crate::secrets::string_contains_secrets(&event.name) {
+            return Err(stream_encode_error(
+                "secrets_detected",
+                "domain event name contained secrets (policy forbids persisting secrets)",
+            ));
+        }
+        crate::hashing::canonical_json_bytes(&event.payload).map_err(|err| match err {
+            crate::hashing::CanonicalJsonError::FloatNotAllowed => stream_encode_error(
+                "domain_event_not_canonical",
+                "domain event payload is not canonical-json-hashable (floats are forbidden)",
+            ),
+            crate::hashing::CanonicalJsonError::SecretsNotAllowed => stream_encode_error(
+                "secrets_detected",
+                "domain event payload contained secrets (policy forbids persisting secrets)",
+            ),
+        })?;
+        Ok(())
+    }
+
     /// Encodes a machine event into a generic stream record for `run:*` streams.
     pub fn new_stream_record_for_event(
         event: Event,
         ts_millis: Option<u64>,
     ) -> Result<NewStreamRecord, StorageError> {
+        if let Event::Domain(event) = &event {
+            validate_domain_event(event)?;
+        }
         let payload = serde_json::to_value(event).map_err(|_| {
             stream_encode_error(
                 "machine_event_encode_failed",
@@ -1237,11 +1264,13 @@ pub mod events {
             )
         })?;
 
-        Ok(NewStreamRecord {
+        let record = NewStreamRecord {
             ts_millis,
             kind: STREAM_RECORD_KIND_MACHINE_EVENT.to_string(),
             payload,
-        })
+        };
+        crate::stores::validate_new_stream_record(&record)?;
+        Ok(record)
     }
 
     /// Decodes one generic stream record from a `run:*` stream into an [`EventEnvelope`].
@@ -1340,6 +1369,62 @@ pub mod events {
         use super::*;
 
         use crate::hashing::artifact_id_for_json;
+
+        #[test]
+        fn domain_event_with_float_is_rejected_before_stream_record_append() {
+            let event = DomainEvent {
+                name: "float_payload".to_string(),
+                payload: serde_json::json!({ "value": 1.5 }),
+                payload_ref: None,
+            };
+
+            assert!(validate_domain_event(&event).is_err());
+            assert!(new_stream_record_for_event(Event::Domain(event), None).is_err());
+        }
+
+        #[test]
+        fn domain_event_with_secret_shape_is_rejected_before_stream_record_append() {
+            let event = DomainEvent {
+                name: "secret_payload".to_string(),
+                payload: serde_json::json!({ "private_key": "do-not-persist" }),
+                payload_ref: None,
+            };
+
+            assert!(validate_domain_event(&event).is_err());
+            assert!(new_stream_record_for_event(Event::Domain(event), None).is_err());
+        }
+
+        #[test]
+        fn standard_fact_and_artifact_events_are_canonical() {
+            let fact_payload = serde_json::to_value(FactRecorded {
+                key: crate::ids::FactKey("fact/key".to_string()),
+                payload_id: ArtifactId::must_new("0".repeat(64)),
+                meta: serde_json::json!({}),
+            })
+            .expect("fact payload");
+            let fact_event = DomainEvent {
+                name: DOMAIN_EVENT_FACT_RECORDED.to_string(),
+                payload: fact_payload,
+                payload_ref: None,
+            };
+            validate_domain_event(&fact_event).expect("fact event canonical");
+            new_stream_record_for_event(Event::Domain(fact_event), None).expect("stream record");
+
+            let artifact_payload = serde_json::to_value(ArtifactWritten {
+                artifact_id: ArtifactId::must_new("1".repeat(64)),
+                kind: crate::stores::ArtifactKind::Output,
+                meta: serde_json::json!({}),
+            })
+            .expect("artifact payload");
+            let artifact_event = DomainEvent {
+                name: DOMAIN_EVENT_ARTIFACT_WRITTEN.to_string(),
+                payload: artifact_payload,
+                payload_ref: None,
+            };
+            validate_domain_event(&artifact_event).expect("artifact event canonical");
+            new_stream_record_for_event(Event::Domain(artifact_event), None)
+                .expect("stream record");
+        }
 
         #[test]
         fn child_run_payloads_are_canonical_and_non_secret() {
@@ -1590,7 +1675,7 @@ pub mod plan {
 /// Storage traits for append-only events and immutable artifacts.
 pub mod stores {
     use super::*;
-    use crate::errors::StorageError;
+    use crate::errors::{ErrorCategory, ErrorInfo, StorageError};
     use crate::ids::{is_valid_id_segment, ArtifactId, RunId};
     use std::fmt;
 
@@ -1740,6 +1825,61 @@ pub mod stores {
         pub payload: serde_json::Value,
     }
 
+    fn stream_record_validation_error(
+        code: &'static str,
+        message: impl Into<String>,
+    ) -> StorageError {
+        StorageError::Other(ErrorInfo {
+            code: crate::ids::ErrorCode(code.to_string()),
+            category: ErrorCategory::Storage,
+            retryable: false,
+            message: message.into(),
+            details: None,
+        })
+    }
+
+    /// Validates a stream record before append.
+    ///
+    /// The stream store boundary persists JSON for every stream family. Record kinds must be
+    /// non-empty and non-secret, and payloads must satisfy canonical JSON/no-floats/no-secrets
+    /// rules. Future non-JSON stream families must define a separate storage contract instead of
+    /// bypassing this helper.
+    pub fn validate_new_stream_record(record: &NewStreamRecord) -> Result<(), StorageError> {
+        if record.kind.is_empty() {
+            return Err(stream_record_validation_error(
+                "stream_record_invalid",
+                "stream record kind must not be empty",
+            ));
+        }
+        if crate::secrets::string_contains_secrets(&record.kind) {
+            return Err(stream_record_validation_error(
+                "secrets_detected",
+                "stream record kind contained secrets (policy forbids persisting secrets)",
+            ));
+        }
+        crate::hashing::canonical_json_bytes(&record.payload).map_err(|err| match err {
+            crate::hashing::CanonicalJsonError::FloatNotAllowed => stream_record_validation_error(
+                "stream_payload_not_canonical",
+                "stream record payload is not canonical-json-hashable (floats are forbidden)",
+            ),
+            crate::hashing::CanonicalJsonError::SecretsNotAllowed => {
+                stream_record_validation_error(
+                    "secrets_detected",
+                    "stream record payload contained secrets (policy forbids persisting secrets)",
+                )
+            }
+        })?;
+        Ok(())
+    }
+
+    /// Validates every record in an append request.
+    pub fn validate_stream_append_records(append: &StreamAppend) -> Result<(), StorageError> {
+        for record in &append.records {
+            validate_new_stream_record(record)?;
+        }
+        Ok(())
+    }
+
     /// Atomic compare-and-append request for one stream.
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub struct StreamAppend {
@@ -1759,6 +1899,31 @@ pub mod stores {
                 expected_seq,
                 records,
             }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn validates_stream_record_payload_policy() {
+            let mut record = NewStreamRecord {
+                ts_millis: None,
+                kind: "domain_event".to_string(),
+                payload: serde_json::json!({ "ok": true }),
+            };
+            validate_new_stream_record(&record).expect("valid record");
+
+            record.payload = serde_json::json!({ "value": 1.5 });
+            assert!(validate_new_stream_record(&record).is_err());
+
+            record.payload = serde_json::json!({ "private_key": "do-not-persist" });
+            assert!(validate_new_stream_record(&record).is_err());
+
+            record.payload = serde_json::json!({ "ok": true });
+            record.kind = "secret_key".to_string();
+            assert!(validate_new_stream_record(&record).is_err());
         }
     }
 

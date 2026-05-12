@@ -141,6 +141,9 @@ Manifests, snapshots, facts, and outputs are immutable artifacts addressed by di
 - Structured data participating in hashing uses canonical JSON semantics (RFC 8785/JCS-style target).
 - NaN/Infinity are invalid.
 - Floats (fractional JSON numbers) in hashed structures are forbidden.
+- Persisted JSON stream record payloads use the same canonical/no-float/no-secret validation at
+  append boundaries for every stream family. A future non-JSON stream family must define an
+  explicit storage contract instead of bypassing this rule implicitly.
 
 ### 4.7 No ambient IO in state logic
 - Handlers use the IO provider abstraction (`LiveIo` / `ReplayIo`).
@@ -284,6 +287,9 @@ Domain events are optional for planner correctness, but must obey:
 - no secrets
 - canonical JSON compatible payloads
 - large payloads referenced by artifact ID
+
+Runtime event recorders and stream stores both validate domain events and encoded stream payloads
+before append. Invalid event payloads fail closed instead of being persisted for later replay.
 
 Runtime-critical rule:
 - When runtime records replayable facts, the `FactKey -> payload_id` mapping must be durably emitted as `fact_recorded` regardless of configured domain event profile.

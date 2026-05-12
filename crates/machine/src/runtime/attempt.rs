@@ -13,7 +13,10 @@ use crate::context::DynContext;
 use crate::context_runtime::{read_json_context, write_full_snapshot_value, StagedContext};
 use crate::engine::Stores;
 use crate::errors::{ErrorCategory, IoError, RunError};
-use crate::events::{DomainEvent, Event, FactRecorded, KernelEvent, DOMAIN_EVENT_FACT_RECORDED};
+use crate::events::{
+    validate_domain_event, DomainEvent, Event, FactRecorded, KernelEvent,
+    DOMAIN_EVENT_FACT_RECORDED,
+};
 use crate::ids::{ArtifactId, RunId, StateId};
 use crate::io::{IoCall, IoProvider, IoResult};
 use crate::live_io::{FactIndex, FactRecorder, LiveIo, LiveIoEnv, LiveIoTransportFactory};
@@ -83,6 +86,7 @@ impl<'a> AttemptCtx<'a> {
 
 const CODE_FACT_BINDING_APPEND_FAILED: &str = "fact_binding_append_failed";
 const CODE_FACT_BINDING_PAYLOAD_INVALID: &str = "fact_binding_payload_invalid";
+const CODE_DOMAIN_EVENT_INVALID: &str = "domain_event_invalid";
 
 #[derive(Clone)]
 struct RuntimeFactRecorder {
@@ -130,6 +134,15 @@ impl FactRecorder for RuntimeFactRecorder {
             payload,
             payload_ref: None,
         };
+        validate_domain_event(&event).map_err(|err| {
+            let info = match err {
+                crate::errors::StorageError::Other(info)
+                | crate::errors::StorageError::Corruption(info)
+                | crate::errors::StorageError::Concurrency(info)
+                | crate::errors::StorageError::NotFound(info) => info,
+            };
+            IoError::Other(info)
+        })?;
 
         self.writer
             .lock()
@@ -155,15 +168,13 @@ struct AppendEventRecorder {
 #[async_trait]
 impl EventRecorder for AppendEventRecorder {
     async fn emit(&mut self, event: DomainEvent) -> Result<(), RunError> {
-        if crate::secrets::string_contains_secrets(&event.name)
-            || crate::secrets::json_contains_secrets(&event.payload)
-        {
-            return Err(RunError::Other(super::info(
-                "secrets_detected",
-                ErrorCategory::Unknown,
-                "domain event contained secrets (policy forbids persisting secrets)",
-            )));
-        }
+        validate_domain_event(&event).map_err(|_| {
+            RunError::Other(super::info(
+                CODE_DOMAIN_EVENT_INVALID,
+                ErrorCategory::ParsingInput,
+                "domain event failed canonical/no-secret validation",
+            ))
+        })?;
 
         self.writer
             .lock()
@@ -176,15 +187,13 @@ impl EventRecorder for AppendEventRecorder {
 
     async fn emit_many(&mut self, events: Vec<DomainEvent>) -> Result<(), RunError> {
         for e in &events {
-            if crate::secrets::string_contains_secrets(&e.name)
-                || crate::secrets::json_contains_secrets(&e.payload)
-            {
-                return Err(RunError::Other(super::info(
-                    "secrets_detected",
-                    ErrorCategory::Unknown,
-                    "domain event contained secrets (policy forbids persisting secrets)",
-                )));
-            }
+            validate_domain_event(e).map_err(|_| {
+                RunError::Other(super::info(
+                    CODE_DOMAIN_EVENT_INVALID,
+                    ErrorCategory::ParsingInput,
+                    "domain event failed canonical/no-secret validation",
+                ))
+            })?;
         }
 
         self.writer

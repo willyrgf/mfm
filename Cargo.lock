@@ -2514,6 +2514,7 @@ dependencies = [
  "async-trait",
  "mfm-machine",
  "mfm-machine-test-support",
+ "serde_json",
  "tokio",
 ]
 
