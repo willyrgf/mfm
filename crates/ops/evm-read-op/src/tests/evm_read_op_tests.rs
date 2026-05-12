@@ -167,7 +167,7 @@ async fn at_live_then_replay_determinism() {
         .await
         .and_then(|records| event_envelopes_from_stream_records(res.run_id, records))
         .expect("read_range");
-    let facts = FactIndex::from_event_stream(&stream);
+    let facts = FactIndex::from_event_stream(&stream).expect("fact index");
     let (_manifest_id, initial_snapshot_id) = op_test_support::run_started(&stream);
 
     let bytes = stores

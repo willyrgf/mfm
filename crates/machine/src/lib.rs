@@ -1313,6 +1313,7 @@ pub mod events {
 
     /// Recommended standard domain event payloads (not required by engine).
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
     pub struct FactRecorded {
         /// Fact key that was recorded.
         pub key: crate::ids::FactKey,

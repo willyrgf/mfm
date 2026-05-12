@@ -337,6 +337,9 @@ Recommended fields:
 Within a run:
 - first durable `FactRecorded { key, payload_id }` binds the key
 - key binding is immutable for replay consistency
+- rebuilding fact bindings from `fact_recorded` events is fallible; malformed payloads or duplicate
+  bindings to a different payload are persisted stream corruption and MUST fail resume instead of
+  being skipped
 
 ## 9. IO and Replay Determinism
 

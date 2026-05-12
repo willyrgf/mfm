@@ -162,7 +162,7 @@ impl ChildRunEngine {
 
         let stream = read_run_stream(&stores, run_id).await?;
 
-        let facts = FactIndex::from_event_stream(&stream);
+        let facts = FactIndex::from_event_stream(&stream)?;
         let history = read_run_history(run_id, &stream)?;
 
         if let Some((status, final_snapshot_id)) = &history.run_completed {

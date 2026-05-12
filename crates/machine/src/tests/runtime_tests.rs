@@ -601,6 +601,68 @@ async fn resume_rejects_secret_shaped_snapshot_artifact() {
     assert_storage_corruption_code(err, "secrets_detected");
 }
 
+#[tokio::test]
+async fn resume_rejects_corrupted_fact_stream_before_state_execution() {
+    let streams = Arc::new(MemStreamStore::default());
+    let artifacts = Arc::new(MemArtifactStore::default());
+    let stores = || Stores {
+        streams: streams.clone(),
+        artifacts: artifacts.clone(),
+    };
+
+    let run_config = base_run_config();
+    let manifest = manifest_for(run_config);
+    let manifest_id = store_manifest(artifacts.as_ref(), &manifest).await;
+    let initial_snapshot_id = write_full_snapshot_value(artifacts.as_ref(), serde_json::json!({}))
+        .await
+        .expect("initial snapshot");
+    let run_id = RunId(uuid::Uuid::new_v4());
+    append_run_started(
+        streams.as_ref(),
+        run_id,
+        manifest.op_id.clone(),
+        manifest_id,
+        initial_snapshot_id,
+    )
+    .await;
+    streams
+        .append_run_events(
+            run_id,
+            1,
+            vec![EventEnvelope {
+                run_id,
+                seq: 2,
+                ts_millis: None,
+                event: Event::Domain(DomainEvent {
+                    name: DOMAIN_EVENT_FACT_RECORDED.to_string(),
+                    payload: serde_json::json!({ "bad": true }),
+                    payload_ref: None,
+                }),
+            }],
+        )
+        .await
+        .expect("seed corrupted fact event");
+
+    let resolver = Arc::new(FixedResolver {
+        plan: set_key_plan(&manifest.op_id),
+    });
+    let engine = DefaultExecutionEngine::new(resolver);
+
+    let err = engine
+        .resume(stores(), run_id)
+        .await
+        .expect_err("corrupted fact stream must fail resume");
+
+    assert_storage_corruption_code(err, "fact_recorded_malformed");
+    let stream = streams
+        .read_run_stream(run_id, 1, None)
+        .await
+        .expect("read stream");
+    assert!(!stream
+        .iter()
+        .any(|event| matches!(event.event, Event::Kernel(KernelEvent::StateEntered { .. }))));
+}
+
 const SECRET_MNEMONIC: &str =
     "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
 const SECRET_PASSWORD: &str = "hunter2";

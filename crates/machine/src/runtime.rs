@@ -710,7 +710,7 @@ impl ExecutionEngine for DefaultExecutionEngine {
 
         let stream = read_run_stream(&stores, run_id).await?;
 
-        let facts = FactIndex::from_event_stream(&stream);
+        let facts = FactIndex::from_event_stream(&stream)?;
         let history = read_run_history(run_id, &stream)?;
         debug!(
             completed_state_count = history.completed_states.len(),

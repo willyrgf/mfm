@@ -12,7 +12,7 @@ use rand::TryRngCore;
 use tokio::sync::Mutex;
 
 use crate::engine::Stores;
-use crate::errors::{ErrorCategory, ErrorInfo, IoError};
+use crate::errors::{ErrorCategory, ErrorInfo, IoError, RunError, StorageError};
 use crate::events::{Event, EventEnvelope, FactRecorded, DOMAIN_EVENT_FACT_RECORDED};
 use crate::hashing::{canonical_json_bytes, put_artifact_verified, CanonicalJsonError};
 use crate::ids::{ArtifactId, ErrorCode, FactKey, RunId, StateId};
@@ -33,6 +33,36 @@ fn io_other(code: &'static str, category: ErrorCategory, message: &'static str) 
     IoError::Other(info(code, category, message))
 }
 
+fn fact_index_corruption(
+    code: &'static str,
+    message: &'static str,
+    details: Option<serde_json::Value>,
+) -> RunError {
+    RunError::Storage(StorageError::Corruption(ErrorInfo {
+        code: ErrorCode(code.to_string()),
+        category: ErrorCategory::Storage,
+        retryable: false,
+        message: message.to_string(),
+        details,
+    }))
+}
+
+fn fact_index_error_details(seq: u64, key: Option<&FactKey>) -> Option<serde_json::Value> {
+    let mut details = serde_json::Map::new();
+    details.insert("seq".to_string(), serde_json::json!(seq));
+    if let Some(key) = key {
+        if !crate::secrets::string_contains_secrets(&key.0) {
+            details.insert("key".to_string(), serde_json::json!(&key.0));
+        }
+    }
+    let details = serde_json::Value::Object(details);
+    if crate::secrets::json_contains_secrets(&details) {
+        None
+    } else {
+        Some(details)
+    }
+}
+
 /// In-memory index of durable `FactKey -> ArtifactId` bindings.
 ///
 /// The engine rebuilds this index from prior domain events before executing a run.
@@ -44,9 +74,9 @@ pub struct FactIndex {
 impl FactIndex {
     /// Rebuilds the durable fact bindings recorded in an event stream.
     ///
-    /// Only the first durable binding for a given key is kept, matching the
-    /// single-assignment contract used by live/replay IO.
-    pub fn from_event_stream(stream: &[EventEnvelope]) -> Self {
+    /// Duplicate bindings to the same payload are accepted idempotently. Malformed bindings or
+    /// duplicate bindings to different payloads are treated as stream corruption.
+    pub fn from_event_stream(stream: &[EventEnvelope]) -> Result<Self, RunError> {
         let mut m = HashMap::new();
         for e in stream {
             let Event::Domain(de) = &e.event else {
@@ -56,17 +86,32 @@ impl FactIndex {
                 continue;
             }
 
-            let Ok(fr) = serde_json::from_value::<FactRecorded>(de.payload.clone()) else {
-                continue;
-            };
+            let fr = serde_json::from_value::<FactRecorded>(de.payload.clone()).map_err(|_| {
+                fact_index_corruption(
+                    "fact_recorded_malformed",
+                    "fact_recorded event payload was malformed",
+                    fact_index_error_details(e.seq, None),
+                )
+            })?;
 
-            // Single-assignment: first durable binding wins.
-            m.entry(fr.key).or_insert(fr.payload_id);
+            match m.get(&fr.key) {
+                Some(existing) if existing == &fr.payload_id => {}
+                Some(_) => {
+                    return Err(fact_index_corruption(
+                        "fact_recorded_conflict",
+                        "fact_recorded event attempted to rebind a fact key",
+                        fact_index_error_details(e.seq, Some(&fr.key)),
+                    ));
+                }
+                None => {
+                    m.insert(fr.key, fr.payload_id);
+                }
+            }
         }
 
-        Self {
+        Ok(Self {
             inner: Arc::new(Mutex::new(m)),
-        }
+        })
     }
 
     /// Returns the currently bound payload id for `key`, if one exists.
@@ -544,6 +589,115 @@ mod tests {
         async fn call(&mut self, _call: IoCall) -> Result<serde_json::Value, IoError> {
             unreachable!("record_value should not call live transport")
         }
+    }
+
+    fn fact_recorded_event(seq: u64, payload: serde_json::Value) -> EventEnvelope {
+        EventEnvelope {
+            run_id: RunId(uuid::Uuid::nil()),
+            seq,
+            ts_millis: None,
+            event: Event::Domain(crate::events::DomainEvent {
+                name: DOMAIN_EVENT_FACT_RECORDED.to_string(),
+                payload,
+                payload_ref: None,
+            }),
+        }
+    }
+
+    fn fact_payload(key: &str, payload_id: &ArtifactId) -> serde_json::Value {
+        serde_json::to_value(FactRecorded {
+            key: FactKey(key.to_string()),
+            payload_id: payload_id.clone(),
+            meta: serde_json::json!({}),
+        })
+        .expect("fact payload")
+    }
+
+    fn assert_fact_index_corruption(err: RunError, code: &str) -> ErrorInfo {
+        match err {
+            RunError::Storage(StorageError::Corruption(info)) => {
+                assert_eq!(info.code.0, code);
+                info
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    fn expect_fact_index_err(result: Result<FactIndex, RunError>, message: &str) -> RunError {
+        match result {
+            Ok(_) => panic!("{message}"),
+            Err(err) => err,
+        }
+    }
+
+    #[test]
+    fn fact_index_rejects_malformed_fact_recorded_payload() {
+        let err = expect_fact_index_err(
+            FactIndex::from_event_stream(&[fact_recorded_event(
+                7,
+                serde_json::json!({ "bad": true }),
+            )]),
+            "malformed fact_recorded payload must fail",
+        );
+
+        let info = assert_fact_index_corruption(err, "fact_recorded_malformed");
+        assert_eq!(info.details, Some(serde_json::json!({ "seq": 7 })));
+    }
+
+    #[tokio::test]
+    async fn fact_index_accepts_duplicate_same_binding() {
+        let payload_id = artifact_id_for_bytes(b"payload");
+        let payload = fact_payload("fact:key", &payload_id);
+
+        let facts = FactIndex::from_event_stream(&[
+            fact_recorded_event(2, payload.clone()),
+            fact_recorded_event(3, payload),
+        ])
+        .expect("duplicate same binding is idempotent");
+
+        assert_eq!(
+            facts.get(&FactKey("fact:key".to_string())).await,
+            Some(payload_id)
+        );
+    }
+
+    #[test]
+    fn fact_index_rejects_duplicate_different_binding() {
+        let first = artifact_id_for_bytes(b"first");
+        let second = artifact_id_for_bytes(b"second");
+
+        let err = expect_fact_index_err(
+            FactIndex::from_event_stream(&[
+                fact_recorded_event(2, fact_payload("fact:key", &first)),
+                fact_recorded_event(3, fact_payload("fact:key", &second)),
+            ]),
+            "conflicting binding must fail",
+        );
+
+        let info = assert_fact_index_corruption(err, "fact_recorded_conflict");
+        assert_eq!(
+            info.details,
+            Some(serde_json::json!({ "seq": 3, "key": "fact:key" }))
+        );
+    }
+
+    #[test]
+    fn fact_index_error_details_do_not_include_payload_contents() {
+        let err = expect_fact_index_err(
+            FactIndex::from_event_stream(&[fact_recorded_event(
+                5,
+                serde_json::json!({
+                    "key": "fact:key",
+                    "payload": { "private_key": "do-not-persist" }
+                }),
+            )]),
+            "malformed secret-shaped payload must fail",
+        );
+
+        let info = assert_fact_index_corruption(err, "fact_recorded_malformed");
+        let rendered = serde_json::to_string(&info).expect("error info json");
+        assert!(!rendered.contains("private_key"));
+        assert!(!rendered.contains("do-not-persist"));
     }
 
     #[tokio::test]

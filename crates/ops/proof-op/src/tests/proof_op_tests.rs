@@ -478,7 +478,7 @@ async fn at06_live_then_replay_determinism() {
 
     // Manual replay using ReplayIo + recorded facts must reproduce the final snapshot id.
     let stream = read_run_stream(&stores, res.run_id).await;
-    let facts = FactIndex::from_event_stream(&stream);
+    let facts = FactIndex::from_event_stream(&stream).expect("fact index");
     let (_manifest_id, initial_snapshot_id) = op_test_support::run_started(&stream);
 
     let bytes = stores
@@ -672,7 +672,7 @@ async fn at09_child_runs_live_then_replay_determinism_across_tree() {
     );
 
     // Parent replay determinism: manual replay using ReplayIo reproduces the final snapshot id.
-    let parent_facts = FactIndex::from_event_stream(&parent_stream);
+    let parent_facts = FactIndex::from_event_stream(&parent_stream).expect("parent fact index");
     let (_manifest_id, initial_snapshot_id) = op_test_support::run_started(&parent_stream);
 
     let bytes = stores
@@ -725,7 +725,7 @@ async fn at09_child_runs_live_then_replay_determinism_across_tree() {
         ));
 
         let child_stream = read_run_stream(&stores, s.child_run_id).await;
-        let child_facts = FactIndex::from_event_stream(&child_stream);
+        let child_facts = FactIndex::from_event_stream(&child_stream).expect("child fact index");
 
         let (manifest_id, child_initial_snapshot_id) = op_test_support::run_started(&child_stream);
         assert_eq!(manifest_id, s.child_manifest_id);
@@ -1068,7 +1068,7 @@ async fn at11_child_runs_crash_resume_completed_but_parent_did_not_record_join()
 
     // Manual replay of the parent run must still match the final snapshot id.
     let final_snapshot_id = resumed.final_snapshot_id.clone().expect("final snapshot");
-    let parent_facts = FactIndex::from_event_stream(&parent_stream);
+    let parent_facts = FactIndex::from_event_stream(&parent_stream).expect("parent fact index");
     let (_manifest_id, initial_snapshot_id) = op_test_support::run_started(&parent_stream);
 
     let bytes = stores
