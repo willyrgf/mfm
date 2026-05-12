@@ -94,6 +94,14 @@ fn write_keystore_json(path: &Path, value: &serde_json::Value) {
     std::fs::write(path, serde_json::to_vec(value).unwrap()).unwrap();
 }
 
+fn mutate_keystore_json_retaining_mac(path: &Path, mutate: impl FnOnce(&mut serde_json::Value)) {
+    let mut value = read_keystore_json(path);
+    let original_mac = value["file_integrity_mac"].clone();
+    mutate(&mut value);
+    value["file_integrity_mac"] = original_mac;
+    write_keystore_json(path, &value);
+}
+
 fn persisted_audit_log(path: &Path) -> Vec<AuditLogEntry> {
     serde_json::from_value(read_keystore_json(path)["audit_log"].clone()).unwrap()
 }
@@ -112,6 +120,43 @@ fn rewrite_keystore_json_with_valid_mac(
         .unwrap();
     value["file_integrity_mac"] = serde_json::to_value(mac).unwrap();
     write_keystore_json(path, &value);
+}
+
+fn assert_concurrent_write_rejected<T>(result: Result<T, KeystoreError>) {
+    match result {
+        Err(KeystoreError::InvalidInput(msg)) => {
+            assert!(msg.contains("Concurrent modification detected while writing keystore"))
+        }
+        Err(other) => panic!("expected concurrent modification rejection, got: {other:?}"),
+        Ok(_) => panic!("expected concurrent modification rejection"),
+    }
+}
+
+fn unlocked_keystore_with_one_key(path: &Path, alias: &str) -> (Keystore, Uuid) {
+    let mut keystore = Keystore::new_with_config(path, KeystoreConfig::development()).unwrap();
+    keystore.unlock("strong_password_123").unwrap();
+    let key_id = keystore
+        .import_private_key(
+            Some(alias.to_string()),
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        )
+        .unwrap();
+    (keystore, key_id)
+}
+
+fn assert_import_after_tamper_fails_without_rewrite(mutate: impl FnOnce(&mut serde_json::Value)) {
+    let temp_dir = tempdir().unwrap();
+    let keystore_path = temp_dir.path().join("import_after_tamper.keystore");
+    let (mut keystore, _) = unlocked_keystore_with_one_key(&keystore_path, "original");
+
+    mutate_keystore_json_retaining_mac(&keystore_path, mutate);
+    let tampered_bytes = std::fs::read(&keystore_path).unwrap();
+
+    assert_concurrent_write_rejected(keystore.import_private_key(
+        Some("new-key".to_string()),
+        "0000000000000000000000000000000000000000000000000000000000000002",
+    ));
+    assert_eq!(std::fs::read(&keystore_path).unwrap(), tampered_bytes);
 }
 
 #[cfg(feature = "dangerous-secret-export")]
@@ -1364,6 +1409,100 @@ fn test_tampered_audit_log_and_mac_fail_integrity() {
         loaded_mac.unlock("strong_password_123"),
         Err(KeystoreError::InvalidInput(_))
     ));
+}
+
+#[test]
+fn test_save_time_mac_helper_recomputes_current_body() {
+    let temp_dir = tempdir().unwrap();
+    let keystore_path = temp_dir.path().join("save_time_mac_helper.keystore");
+    let (keystore, _) = unlocked_keystore_with_one_key(&keystore_path, "authenticated");
+
+    let master_key = keystore.master_key.as_ref().unwrap();
+    keystore
+        .verify_current_file_matches_memory_mac(master_key)
+        .unwrap();
+
+    mutate_keystore_json_retaining_mac(&keystore_path, |value| {
+        value["entries"][0]["alias"] = serde_json::json!("tampered");
+    });
+
+    assert_concurrent_write_rejected(keystore.verify_current_file_matches_memory_mac(master_key));
+}
+
+#[test]
+fn test_import_after_retained_mac_body_tamper_fails_without_rewrite() {
+    assert_import_after_tamper_fails_without_rewrite(|value| {
+        value["entries"][0]["alias"] = serde_json::json!("old-mac-body-tamper");
+    });
+}
+
+#[test]
+fn test_get_after_external_tamper_fails_without_rewrite() {
+    let temp_dir = tempdir().unwrap();
+    let keystore_path = temp_dir.path().join("get_after_tamper.keystore");
+    let (mut keystore, key_id) = unlocked_keystore_with_one_key(&keystore_path, "read-target");
+
+    mutate_keystore_json_retaining_mac(&keystore_path, |value| {
+        value["audit_log"][0]["success"] = serde_json::json!(false);
+    });
+    let tampered_bytes = std::fs::read(&keystore_path).unwrap();
+
+    assert_concurrent_write_rejected(keystore.get_private_key(key_id));
+    assert_eq!(std::fs::read(&keystore_path).unwrap(), tampered_bytes);
+}
+
+#[test]
+fn test_delete_after_external_tamper_fails_without_rewrite() {
+    let temp_dir = tempdir().unwrap();
+    let keystore_path = temp_dir.path().join("delete_after_tamper.keystore");
+    let (mut keystore, key_id) = unlocked_keystore_with_one_key(&keystore_path, "delete-target");
+
+    mutate_keystore_json_retaining_mac(&keystore_path, |value| {
+        value["entries"][0]["alias"] = serde_json::json!("tampered-delete-target");
+    });
+    let tampered_bytes = std::fs::read(&keystore_path).unwrap();
+
+    assert_concurrent_write_rejected(keystore.delete_key(key_id));
+    assert_eq!(std::fs::read(&keystore_path).unwrap(), tampered_bytes);
+}
+
+#[test]
+fn test_change_password_after_external_tamper_fails_without_rewrite() {
+    let temp_dir = tempdir().unwrap();
+    let keystore_path = temp_dir
+        .path()
+        .join("change_password_after_tamper.keystore");
+    let (mut keystore, _) = unlocked_keystore_with_one_key(&keystore_path, "rekey-target");
+
+    mutate_keystore_json_retaining_mac(&keystore_path, |value| {
+        let salt = value["kdf_params"]["salt"].as_array_mut().unwrap();
+        let first = salt[0].as_u64().unwrap();
+        salt[0] = serde_json::json!((first + 1) % 256);
+    });
+    let tampered_bytes = std::fs::read(&keystore_path).unwrap();
+
+    assert_concurrent_write_rejected(
+        keystore.change_password("strong_password_123", "new_password_123"),
+    );
+    assert_eq!(std::fs::read(&keystore_path).unwrap(), tampered_bytes);
+}
+
+#[test]
+fn test_save_time_validation_rejects_authenticated_regions_and_unknown_fields() {
+    assert_import_after_tamper_fails_without_rewrite(|value| {
+        value["entries"][0]["alias"] = serde_json::json!("tampered-entry");
+    });
+    assert_import_after_tamper_fails_without_rewrite(|value| {
+        value["audit_log"][0]["success"] = serde_json::json!(false);
+    });
+    assert_import_after_tamper_fails_without_rewrite(|value| {
+        let salt = value["kdf_params"]["salt"].as_array_mut().unwrap();
+        let first = salt[0].as_u64().unwrap();
+        salt[0] = serde_json::json!((first + 1) % 256);
+    });
+    assert_import_after_tamper_fails_without_rewrite(|value| {
+        value["unexpected"] = serde_json::json!(true);
+    });
 }
 
 #[test]

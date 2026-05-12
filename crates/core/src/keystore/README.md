@@ -155,6 +155,9 @@ match keystore.unlock("wrong_password") {
 The keystore file is strict JSON format version 3. Unknown fields are rejected at every level.
 The file MAC authenticates the canonical file payload, including KDF params, entries, and audit
 records, with only the MAC slot zeroed for the MAC preimage.
+Every unlocked mutation re-reads the current bounded file body under the mutation lock, validates
+its strict shape, recomputes the MAC over that body, and fails closed if the stored MAC, recomputed
+MAC, and in-memory MAC do not all match.
 Byte arrays below are shortened for readability.
 
 ```json

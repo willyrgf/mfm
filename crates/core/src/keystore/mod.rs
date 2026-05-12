@@ -1013,7 +1013,7 @@ impl Keystore {
             self.unlocked_at = Some(Instant::now());
             self.log_audit(AuditEvent::ChangePassword, true);
 
-            if let Err(err) = self.save_to_disk() {
+            if let Err(err) = self.save_to_disk_after_rekey(&old_master_key) {
                 self.entries = previous_entries;
                 self.audit_log.truncate(previous_audit_len);
                 self.kdf_params = previous_kdf_params;
@@ -1231,15 +1231,41 @@ impl Keystore {
         self.ensure_target_path_is_safe()?;
         let parent = self.ensure_parent_directory_safe()?;
         let _lock = self.acquire_mutation_lock(&parent)?;
-        self.verify_no_external_modification()?;
         self.ensure_master_key_available()?;
+        let master_key = self.master_key.as_ref().ok_or(KeystoreError::Locked)?;
+        self.verify_current_file_matches_memory_mac(master_key)?;
+        let file_integrity_mac = self.write_current_keystore_file_locked(&parent, master_key)?;
+        self.file_integrity_mac = Some(file_integrity_mac);
 
+        Ok(())
+    }
+
+    fn save_to_disk_after_rekey(
+        &mut self,
+        current_file_master_key: &[u8; 32],
+    ) -> Result<(), KeystoreError> {
+        self.ensure_target_path_is_safe()?;
+        let parent = self.ensure_parent_directory_safe()?;
+        let _lock = self.acquire_mutation_lock(&parent)?;
+        self.verify_current_file_matches_memory_mac(current_file_master_key)?;
+        self.ensure_master_key_available()?;
+        let new_master_key = self.master_key.as_ref().ok_or(KeystoreError::Locked)?;
+        let file_integrity_mac =
+            self.write_current_keystore_file_locked(&parent, new_master_key)?;
+        self.file_integrity_mac = Some(file_integrity_mac);
+
+        Ok(())
+    }
+
+    fn write_current_keystore_file_locked(
+        &self,
+        parent: &Path,
+        master_key: &[u8; 32],
+    ) -> Result<[u8; 32], KeystoreError> {
         let kdf_params = self
             .kdf_params
             .as_ref()
             .ok_or(KeystoreError::InvalidInput("No KDF parameters".to_string()))?;
-
-        let master_key = self.master_key.as_ref().ok_or(KeystoreError::Locked)?;
 
         let master_key_verification =
             self.master_key_verification
@@ -1275,10 +1301,9 @@ impl Keystore {
         self.validate_keystore_shape(&keystore_file)?;
 
         let json_data = serde_json::to_vec(&keystore_file)?;
-        self.atomic_write_keystore_file(&parent, &json_data)?;
-        self.file_integrity_mac = Some(file_integrity_mac);
+        self.atomic_write_keystore_file(parent, &json_data)?;
 
-        Ok(())
+        Ok(file_integrity_mac)
     }
 
     fn load_from_disk(&mut self) -> Result<(), KeystoreError> {
@@ -1593,36 +1618,50 @@ impl Keystore {
         Ok(MutationLockGuard { file })
     }
 
-    fn verify_no_external_modification(&self) -> Result<(), KeystoreError> {
+    fn concurrent_modification_error() -> KeystoreError {
+        KeystoreError::InvalidInput(
+            "Concurrent modification detected while writing keystore".to_string(),
+        )
+    }
+
+    fn verify_current_file_matches_memory_mac(
+        &self,
+        master_key: &[u8; 32],
+    ) -> Result<(), KeystoreError> {
         if !self.path.exists() {
             if self.file_integrity_mac.is_some() {
-                return Err(KeystoreError::InvalidInput(
-                    "Concurrent modification detected while writing keystore".to_string(),
-                ));
+                return Err(Self::concurrent_modification_error());
             }
             return Ok(());
         }
 
-        let expected_mac = self.file_integrity_mac.ok_or(KeystoreError::InvalidInput(
-            "Refusing to overwrite existing keystore without integrity state".to_string(),
-        ))?;
+        let expected_mac = self
+            .file_integrity_mac
+            .ok_or_else(Self::concurrent_modification_error)?;
 
-        let data = fs::read(&self.path)?;
-        if data.len() < MIN_KEYSTORE_SIZE || data.len() > MAX_KEYSTORE_SIZE {
-            return Err(KeystoreError::InvalidInput(
-                "Concurrent modification detected while writing keystore".to_string(),
-            ));
-        }
-        let current_file: KeystoreFile = serde_json::from_slice(&data).map_err(|_| {
-            KeystoreError::InvalidInput(
-                "Concurrent modification detected while writing keystore".to_string(),
-            )
-        })?;
+        let data = fs::read(&self.path).map_err(|_| Self::concurrent_modification_error())?;
+        let value = Self::parse_keystore_file_value(&data)
+            .map_err(|_| Self::concurrent_modification_error())?;
+        let header = self
+            .parse_bounded_header(&value)
+            .map_err(|_| Self::concurrent_modification_error())?;
+        let current_file: KeystoreFile = serde_json::from_value(value.clone())
+            .map_err(|_| Self::concurrent_modification_error())?;
+        self.validate_keystore_shape(&current_file)
+            .map_err(|_| Self::concurrent_modification_error())?;
 
-        if current_file.file_integrity_mac.ct_ne(&expected_mac).into() {
-            return Err(KeystoreError::InvalidInput(
-                "Concurrent modification detected while writing keystore".to_string(),
-            ));
+        let stored_mac = header.file_integrity_mac;
+        let mac_preimage = Self::canonical_file_mac_preimage_from_value(value)
+            .map_err(|_| Self::concurrent_modification_error())?;
+        let computed_mac = self
+            .compute_file_integrity_mac(master_key, &mac_preimage)
+            .map_err(|_| Self::concurrent_modification_error())?;
+
+        let authenticated_match = computed_mac.ct_eq(&stored_mac)
+            & computed_mac.ct_eq(&expected_mac)
+            & stored_mac.ct_eq(&expected_mac);
+        if !bool::from(authenticated_match) {
+            return Err(Self::concurrent_modification_error());
         }
 
         Ok(())
