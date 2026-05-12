@@ -9,6 +9,7 @@
 //! - deterministic facts recording in live mode
 //! - replay determinism
 //! - crash/resume determinism (orphan attempt reuse)
+//! - an explicit export contract matching the enabled read states
 //!
 //! # Examples
 //!
@@ -40,6 +41,8 @@ use mfm_state_common::errors;
 
 const OP_ID: &str = "evm_read";
 const OP_VERSION: &str = "v1";
+const KEY_CHAIN_ID: &str = "chain_id";
+const KEY_BLOCK_NUMBER: &str = "block_number";
 
 fn sdk_err(code: &'static str, message: &'static str) -> SdkError {
     errors::sdk_error(code, ErrorCategory::Unknown, false, message)
@@ -115,6 +118,7 @@ impl Operation for EvmReadOp {
 
         let mut states: Vec<LeafStateNode> = Vec::new();
         let mut edges: Vec<DependencyEdge> = Vec::new();
+        let mut exports: Vec<PortKey> = Vec::new();
 
         let mut last: Option<StateId> = None;
 
@@ -126,11 +130,12 @@ impl Operation for EvmReadOp {
                     cfg.network_id.clone(),
                     "eth_chainId",
                     serde_json::json!([]),
-                    ctx_key("chain_id"),
+                    ctx_key(KEY_CHAIN_ID),
                 )
                 .with_control_scope(cfg.control_scope.clone()),
             );
             states.push(leaf_state_node(&op_path, "chain_id", st)?);
+            exports.push(PortKey(KEY_CHAIN_ID.to_string()));
             last = Some(id);
         }
 
@@ -142,7 +147,7 @@ impl Operation for EvmReadOp {
                     cfg.network_id.clone(),
                     "eth_blockNumber",
                     serde_json::json!([]),
-                    ctx_key("block_number"),
+                    ctx_key(KEY_BLOCK_NUMBER),
                 )
                 .with_control_scope(cfg.control_scope.clone()),
             );
@@ -153,15 +158,13 @@ impl Operation for EvmReadOp {
                 });
             }
             states.push(leaf_state_node(&op_path, "block_number", st)?);
+            exports.push(PortKey(KEY_BLOCK_NUMBER.to_string()));
         }
 
         Ok(PlannedOp {
             interface: OpInterface {
                 imports: Vec::new(),
-                exports: vec![
-                    PortKey("chain_id".to_string()),
-                    PortKey("block_number".to_string()),
-                ],
+                exports,
             },
             kind: PlannedOpKind::Leaf(LeafOpSpec { states, edges }),
         })

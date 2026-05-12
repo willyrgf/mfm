@@ -5,17 +5,21 @@ use std::collections::HashMap;
 use async_trait::async_trait;
 use mfm_machine::context::DynContext;
 use mfm_machine::engine::{ExecutionEngine, RunPhase};
-use mfm_machine::errors::{ErrorCategory, ErrorInfo};
+use mfm_machine::errors::{ErrorCategory, ErrorInfo, StateError};
 use mfm_machine::events::event_envelopes_from_stream_records;
 use mfm_machine::hashing::artifact_id_for_json;
 use mfm_machine::ids::{ErrorCode, StateId};
-use mfm_machine::io::IoCall;
+use mfm_machine::io::{IoCall, IoProvider};
 use mfm_machine::live_io::{FactIndex, LiveIoTransport, LiveIoTransportFactory};
+use mfm_machine::meta::{DependencyStrategy, Idempotency, SideEffectKind, StateMeta};
 use mfm_machine::plan::{StateGraph, StateNode};
 use mfm_machine::recorder::EventRecorder;
 use mfm_machine::replay_io::ReplayIo;
 use mfm_machine::runtime::{DefaultExecutionEngine, EngineFailpoints};
+use mfm_machine::state::{SnapshotPolicy, State, StateOutcome};
 use mfm_machine::stores::StreamId;
+use mfm_sdk::ids::{MachineId, PortKey, StepId};
+use mfm_sdk::pipeline::{Pipeline, PipelineStep};
 use mfm_sdk::unstable::SdkPlanResolver;
 use mfm_state_common::test_support as op_test_support;
 use tokio::sync::Mutex;
@@ -119,6 +123,203 @@ fn topo(graph: &StateGraph) -> Vec<&StateNode> {
         }
     }
     out
+}
+
+fn expand_leaf(op_config: serde_json::Value) -> (OpInterface, LeafOpSpec) {
+    let op = EvmReadOp;
+    let planned = op
+        .expand(
+            OpPath("evm_read.main".to_string()),
+            &op_config,
+            &op_test_support::run_config_live(),
+        )
+        .expect("expand");
+    let interface = planned.interface.clone();
+    let leaf = match planned.kind {
+        PlannedOpKind::Leaf(leaf) => leaf,
+        PlannedOpKind::Composite(_) => panic!("expected leaf op"),
+    };
+    (interface, leaf)
+}
+
+fn export_names(interface: &OpInterface) -> Vec<String> {
+    interface
+        .exports
+        .iter()
+        .map(|port| port.0.clone())
+        .collect()
+}
+
+fn assert_read_exports(op_config: serde_json::Value, expected: &[&str], state_count: usize) {
+    let (interface, leaf) = expand_leaf(op_config);
+    assert_eq!(
+        export_names(&interface),
+        expected
+            .iter()
+            .map(|port| (*port).to_string())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(leaf.states.len(), state_count);
+    assert_eq!(leaf.edges.len(), state_count.saturating_sub(1));
+}
+
+#[test]
+fn interface_exports_both_ports_by_default() {
+    assert_read_exports(
+        serde_json::json!({
+            "network_id": NETWORK_ID,
+        }),
+        &[KEY_CHAIN_ID, KEY_BLOCK_NUMBER],
+        2,
+    );
+}
+
+#[test]
+fn interface_exports_only_chain_id_when_block_number_is_disabled() {
+    assert_read_exports(
+        serde_json::json!({
+            "network_id": NETWORK_ID,
+            "include_block_number": false
+        }),
+        &[KEY_CHAIN_ID],
+        1,
+    );
+}
+
+#[test]
+fn interface_exports_only_block_number_when_chain_id_is_disabled() {
+    assert_read_exports(
+        serde_json::json!({
+            "network_id": NETWORK_ID,
+            "include_chain_id": false
+        }),
+        &[KEY_BLOCK_NUMBER],
+        1,
+    );
+}
+
+#[test]
+fn interface_rejects_all_queries_disabled() {
+    let op = EvmReadOp;
+    let err = match op.expand(
+        OpPath("evm_read.main".to_string()),
+        &serde_json::json!({
+            "network_id": NETWORK_ID,
+            "include_chain_id": false,
+            "include_block_number": false
+        }),
+        &op_test_support::run_config_live(),
+    ) {
+        Ok(_) => panic!("all queries disabled should be rejected"),
+        Err(err) => err,
+    };
+
+    assert_eq!(err.info.code.0, "invalid_op_config");
+    assert!(err.info.message.contains("at least one query"));
+}
+
+#[derive(Clone)]
+struct ImportConsumerOp {
+    op_id: &'static str,
+    import: &'static str,
+}
+
+impl Operation for ImportConsumerOp {
+    fn op_id(&self) -> OpId {
+        OpId::must_new(self.op_id.to_string())
+    }
+
+    fn op_version(&self) -> String {
+        OP_VERSION.to_string()
+    }
+
+    fn expand(
+        &self,
+        op_path: OpPath,
+        _op_config: &serde_json::Value,
+        _run_config: &RunConfig,
+    ) -> Result<PlannedOp, SdkError> {
+        Ok(PlannedOp {
+            interface: OpInterface {
+                imports: vec![PortKey(self.import.to_string())],
+                exports: Vec::new(),
+            },
+            kind: PlannedOpKind::Leaf(LeafOpSpec {
+                states: vec![leaf_state_node(&op_path, "consume", Arc::new(NoopState))?],
+                edges: Vec::new(),
+            }),
+        })
+    }
+}
+
+#[derive(Clone)]
+struct NoopState;
+
+#[async_trait]
+impl State for NoopState {
+    fn meta(&self) -> StateMeta {
+        StateMeta {
+            tags: Vec::new(),
+            depends_on: Vec::new(),
+            depends_on_strategy: DependencyStrategy::Latest,
+            side_effects: SideEffectKind::Pure,
+            idempotency: Idempotency::None,
+        }
+    }
+
+    async fn handle(
+        &self,
+        _ctx: &mut dyn DynContext,
+        _io: &mut dyn IoProvider,
+        _rec: &mut dyn EventRecorder,
+    ) -> Result<StateOutcome, StateError> {
+        Ok(StateOutcome {
+            snapshot: SnapshotPolicy::Never,
+        })
+    }
+}
+
+#[test]
+fn pipeline_importing_disabled_export_is_rejected() {
+    let registry = op_test_support::registry_with_ops([
+        Arc::new(EvmReadOp) as mfm_sdk::op::DynOperation,
+        Arc::new(ImportConsumerOp {
+            op_id: "import_block_number",
+            import: KEY_BLOCK_NUMBER,
+        }) as mfm_sdk::op::DynOperation,
+    ]);
+    let planner = op_test_support::default_pipeline_planner();
+    let pipeline = Pipeline {
+        machine_id: MachineId("evm_read_disabled_export".to_string()),
+        pipeline_version: OP_VERSION.to_string(),
+        steps: vec![
+            PipelineStep {
+                step_id: StepId("read".to_string()),
+                op_id: OpId::must_new(OP_ID.to_string()),
+                op_version: OP_VERSION.to_string(),
+                op_config: serde_json::json!({
+                    "network_id": NETWORK_ID,
+                    "include_block_number": false
+                }),
+            },
+            PipelineStep {
+                step_id: StepId("consume".to_string()),
+                op_id: OpId::must_new("import_block_number".to_string()),
+                op_version: OP_VERSION.to_string(),
+                op_config: serde_json::json!({}),
+            },
+        ],
+    };
+
+    let err = match planner.build_execution_plan(
+        registry,
+        &pipeline,
+        &op_test_support::run_config_live(),
+    ) {
+        Ok(_) => panic!("disabled block_number export should not satisfy downstream import"),
+        Err(err) => err,
+    };
+    assert_eq!(err.info.code.0, "unsatisfied_import");
 }
 
 #[tokio::test]
