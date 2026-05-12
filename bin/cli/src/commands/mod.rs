@@ -44,7 +44,7 @@ where
         }
 
         if let Some(value) = arg.strip_prefix("--output-format=") {
-            return output_format_from_parse_value(value).unwrap_or_else(|| {
+            return output_format_from_parse_value(value).unwrap_or({
                 if env_requests_json {
                     OutputFormat::Json
                 } else {
@@ -60,7 +60,7 @@ where
                     .map(output_format_from_parse_value)
                     .unwrap_or(None)
             });
-            return value.unwrap_or_else(|| {
+            return value.unwrap_or({
                 if env_requests_json {
                     OutputFormat::Json
                 } else {
