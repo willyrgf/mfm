@@ -172,6 +172,108 @@ fn test_e2e_mnemonic_workflow() {
 }
 
 #[test]
+fn test_e2e_mnemonic_passphrase_file_workflow() {
+    let (temp_dir, keystore_path) = create_test_env();
+    let keystore_str = keystore_path.to_str().unwrap();
+    let extra_path = temp_dir.path().join("bip39-extra");
+    fs::write(&extra_path, "test extra input\n").expect("write BIP-39 extra input file");
+    let extra_str = extra_path.to_str().unwrap();
+    let mnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+
+    let mut import_with_extra = cli_with_password();
+    import_with_extra.args(&[
+        "--output-format",
+        "json",
+        "keystore",
+        "import",
+        "--import-type",
+        "mnemonic",
+        "--label",
+        "hd-wallet-extra",
+        "--keystore",
+        keystore_str,
+        "--passphrase-file",
+        extra_str,
+        "--stdin",
+    ]);
+    import_with_extra.write_stdin(mnemonic);
+    let with_extra_output = import_with_extra
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let with_extra_json: serde_json::Value =
+        serde_json::from_slice(&with_extra_output).expect("import output should be json");
+    let with_extra_addr = with_extra_json["data"]["address"]
+        .as_str()
+        .expect("import output should include address")
+        .to_string();
+
+    let mut import_without_extra = cli_with_password();
+    import_without_extra.args(&[
+        "--output-format",
+        "json",
+        "keystore",
+        "import",
+        "--import-type",
+        "mnemonic",
+        "--label",
+        "hd-wallet-no-extra",
+        "--keystore",
+        keystore_str,
+        "--stdin",
+    ]);
+    import_without_extra.write_stdin(mnemonic);
+    let without_extra_output = import_without_extra
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let without_extra_json: serde_json::Value =
+        serde_json::from_slice(&without_extra_output).expect("import output should be json");
+    let without_extra_addr = without_extra_json["data"]["address"]
+        .as_str()
+        .expect("import output should include address");
+
+    assert_ne!(
+        with_extra_addr, without_extra_addr,
+        "file-sourced BIP-39 extra input should affect derived key"
+    );
+}
+
+#[test]
+fn test_e2e_mnemonic_stdin_rejects_two_field_protocol() {
+    let (_temp_dir, keystore_path) = create_test_env();
+    let keystore_str = keystore_path.to_str().unwrap();
+
+    let mut import_cmd = cli_with_password();
+    import_cmd.args(&[
+        "keystore",
+        "import",
+        "--import-type",
+        "mnemonic",
+        "--label",
+        "hd-wallet",
+        "--keystore",
+        keystore_str,
+        "--stdin",
+    ]);
+    import_cmd.write_stdin(
+        "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about\nsecond-field\n",
+    );
+
+    import_cmd
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "stdin secret material must contain exactly one line",
+        ))
+        .stderr(predicate::str::contains("second-field").not());
+}
+
+#[test]
 fn test_e2e_delete_workflow() {
     let (_temp_dir, keystore_path) = create_test_env();
     let keystore_str = keystore_path.to_str().unwrap();

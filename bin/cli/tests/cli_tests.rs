@@ -43,8 +43,32 @@ fn test_import_help() {
         .success()
         .stdout(predicate::str::contains("Import a private key or mnemonic"))
         .stdout(predicate::str::contains("--import-type"))
+        .stdout(predicate::str::contains("--passphrase-file"))
+        .stdout(predicate::str::contains("--passphrase-prompt"))
         .stdout(predicate::str::contains("privatekey"))
         .stdout(predicate::str::contains("mnemonic"));
+}
+
+#[test]
+fn test_import_rejects_legacy_passphrase_flag() {
+    let (_temp_dir, keystore_path) = create_test_keystore();
+
+    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
+    cmd.args(&[
+        "keystore",
+        "import",
+        "--import-type",
+        "mnemonic",
+        "--keystore",
+        keystore_path.to_str().unwrap(),
+        "--passphrase",
+        "do-not-accept",
+        "--stdin",
+    ]);
+
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("--passphrase"));
 }
 
 #[test]

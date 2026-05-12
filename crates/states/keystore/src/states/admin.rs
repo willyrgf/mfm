@@ -11,7 +11,9 @@
 //! ```rust
 //! use std::path::PathBuf;
 //!
-//! use mfm_state_keystore::states::admin::{KeystoreImportStateConfig, KeystoreImportType};
+//! use mfm_state_keystore::states::admin::{
+//!     Bip39ExtraSource, KeystoreImportStateConfig, KeystoreImportType,
+//! };
 //!
 //! let cfg = KeystoreImportStateConfig {
 //!     import_type: KeystoreImportType::PrivateKey,
@@ -19,6 +21,7 @@
 //!     derivation_path: "m/44'/60'/0'/0/0".to_string(),
 //!     keystore_path: PathBuf::from("/tmp/keystore"),
 //!     stdin: true,
+//!     bip39_extra: Bip39ExtraSource::None,
 //! };
 //!
 //! assert_eq!(cfg.label.as_deref(), Some("deploy"));
@@ -66,6 +69,7 @@ impl KeystoreAdminError {
     }
 }
 
+pub use mfm_collectors_local_keystore::Bip39ExtraSource;
 pub use mfm_collectors_local_keystore::KeystoreImportType;
 
 /// Report written after a successful keystore import.
@@ -134,6 +138,8 @@ pub struct KeystoreImportStateConfig {
     pub keystore_path: PathBuf,
     /// Whether the secret material should be read from stdin.
     pub stdin: bool,
+    /// Optional BIP-39 passphrase source metadata for mnemonic imports.
+    pub bip39_extra: Bip39ExtraSource,
 }
 
 /// Runtime configuration for the keystore list state.
@@ -228,6 +234,7 @@ impl State for KeystoreImportState {
                         self.cfg.keystore_path.to_string_lossy().as_ref(),
                     )),
                     stdin_mode: self.cfg.stdin,
+                    bip39_extra: self.cfg.bip39_extra.clone(),
                 },
             )
             .await

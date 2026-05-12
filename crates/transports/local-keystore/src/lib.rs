@@ -4,6 +4,9 @@
 //! The transport bridges keystore-specific local side effects into the generic Live IO interface.
 //! It intentionally keeps secrets in local process memory and avoids emitting secret-bearing
 //! values in transport responses.
+//! Mnemonic BIP-39 passphrases are sourced only through explicit request metadata: no passphrase,
+//! hidden local prompt, or a hex-encoded UTF-8 file/FIFO path. File and FIFO reads strip trailing
+//! `\n` and `\r\n` line endings; all other bytes are preserved as the passphrase.
 //!
 //! # Examples
 //!
@@ -16,7 +19,7 @@
 //! ```
 #![warn(missing_docs)]
 
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -24,10 +27,10 @@ use std::path::{Path, PathBuf};
 use async_trait::async_trait;
 use chrono::Utc;
 use mfm_collectors_local_keystore::{
-    KeystoreDeleteRequest, KeystoreImportRequest, KeystoreImportType, KeystoreListRequest,
-    KeystoreListSortBy, KeystoreTxSignRequest, NAMESPACE_LOCAL_KEYSTORE_DELETE,
-    NAMESPACE_LOCAL_KEYSTORE_IMPORT, NAMESPACE_LOCAL_KEYSTORE_LIST,
-    NAMESPACE_LOCAL_KEYSTORE_TX_SIGN,
+    Bip39ExtraSource, KeystoreDeleteRequest, KeystoreImportRequest, KeystoreImportType,
+    KeystoreListRequest, KeystoreListSortBy, KeystoreTxSignRequest,
+    NAMESPACE_LOCAL_KEYSTORE_DELETE, NAMESPACE_LOCAL_KEYSTORE_IMPORT,
+    NAMESPACE_LOCAL_KEYSTORE_LIST, NAMESPACE_LOCAL_KEYSTORE_TX_SIGN,
 };
 use mfm_core::keystore::{KeyType, Keystore, KeystoreConfig, KeystoreError};
 use mfm_machine::errors::{ErrorCategory, ErrorInfo, IoError};
@@ -48,7 +51,6 @@ use zeroize::Zeroizing;
 const ENV_KEYSTORE_PASSWORD_FILE: &str = "MFM_KEYSTORE_PASSWORD_FILE";
 const ENV_KEYSTORE_PASSWORD: &str = "MFM_KEYSTORE_PASSWORD";
 const ENV_INTEGRATION_TEST: &str = "MFM_INTEGRATION_TEST";
-const ENV_IMPORT_MNEMONIC_EXTRA: &str = "MFM_KEYSTORE_IMPORT_BIP39_EXTRA";
 
 /// Transport factory for the `local.keystore` namespace group.
 #[derive(Clone, Default)]
@@ -69,21 +71,33 @@ struct LocalKeystoreIoTransport;
 #[async_trait]
 impl LiveIoTransport for LocalKeystoreIoTransport {
     async fn call(&mut self, call: IoCall) -> Result<serde_json::Value, IoError> {
-        match call.namespace.as_str() {
-            NAMESPACE_LOCAL_KEYSTORE_IMPORT => handle_keystore_import(call.request),
-            NAMESPACE_LOCAL_KEYSTORE_LIST => handle_keystore_list(call.request),
-            NAMESPACE_LOCAL_KEYSTORE_DELETE => handle_keystore_delete(call.request),
-            NAMESPACE_LOCAL_KEYSTORE_TX_SIGN => handle_keystore_tx_sign(call.request),
-            _ => Err(io_other(
-                "unknown_namespace",
-                ErrorCategory::Unknown,
-                "unknown local keystore io namespace",
-            )),
-        }
+        tokio::task::spawn_blocking(move || dispatch_local_keystore_call(call))
+            .await
+            .map_err(|_| {
+                io_other(
+                    "local_transport_join_failed",
+                    ErrorCategory::Unknown,
+                    "local keystore transport worker failed",
+                )
+            })?
     }
 }
 
 type LocalError = LocalTransportError;
+
+fn dispatch_local_keystore_call(call: IoCall) -> Result<serde_json::Value, IoError> {
+    match call.namespace.as_str() {
+        NAMESPACE_LOCAL_KEYSTORE_IMPORT => handle_keystore_import(call.request),
+        NAMESPACE_LOCAL_KEYSTORE_LIST => handle_keystore_list(call.request),
+        NAMESPACE_LOCAL_KEYSTORE_DELETE => handle_keystore_delete(call.request),
+        NAMESPACE_LOCAL_KEYSTORE_TX_SIGN => handle_keystore_tx_sign(call.request),
+        _ => Err(io_other(
+            "unknown_namespace",
+            ErrorCategory::Unknown,
+            "unknown local keystore io namespace",
+        )),
+    }
+}
 
 fn handle_keystore_import(request: serde_json::Value) -> Result<serde_json::Value, IoError> {
     let req: KeystoreImportRequest = parse_request(request)?;
@@ -110,6 +124,7 @@ fn handle_keystore_tx_sign(request: serde_json::Value) -> Result<serde_json::Val
 }
 
 fn keystore_import(req: KeystoreImportRequest) -> Result<KeystoreImportReport, LocalError> {
+    validate_import_request(&req)?;
     let path = PathBuf::from(decode_required_utf8(
         req.store_path,
         req.store_path_hex,
@@ -159,9 +174,7 @@ fn keystore_import(req: KeystoreImportRequest) -> Result<KeystoreImportReport, L
             let mut ks = create_keystore_if_needed(&path)?;
             let label = label
                 .unwrap_or_else(|| format!("imported-hd-{}", Utc::now().format("%Y%m%d-%H%M%S")));
-            let extra = std::env::var(ENV_IMPORT_MNEMONIC_EXTRA)
-                .ok()
-                .map(Zeroizing::new);
+            let extra = read_bip39_extra(req.bip39_extra)?;
             let key_id = ks
                 .import_mnemonic(
                     Some(label),
@@ -178,6 +191,38 @@ fn keystore_import(req: KeystoreImportRequest) -> Result<KeystoreImportReport, L
                 address: format!("{:?}", key_info.address),
                 created_at: key_info.created_at.to_rfc3339(),
             })
+        }
+    }
+}
+
+fn validate_import_request(req: &KeystoreImportRequest) -> Result<(), LocalError> {
+    if !req.bip39_extra.is_none() && req.kind != KeystoreImportType::Mnemonic {
+        return Err(LocalError::new(
+            "InvalidImportConfig",
+            ErrorCategory::ParsingInput,
+            "BIP-39 extra input is only supported for mnemonic imports",
+        ));
+    }
+
+    if req.stdin_mode && matches!(req.bip39_extra, Bip39ExtraSource::Prompt) {
+        return Err(LocalError::new(
+            "InvalidImportConfig",
+            ErrorCategory::ParsingInput,
+            "BIP-39 prompt input cannot be combined with stdin material",
+        ));
+    }
+
+    Ok(())
+}
+
+fn read_bip39_extra(source: Bip39ExtraSource) -> Result<Option<Zeroizing<String>>, LocalError> {
+    match source {
+        Bip39ExtraSource::None => Ok(None),
+        Bip39ExtraSource::Prompt => read_password("Enter BIP-39 passphrase: ").map(Some),
+        Bip39ExtraSource::FilePathHex(path_hex) => {
+            let path =
+                decode_hex_utf8(&path_hex, "InvalidPathConfig", "bip39_extra.file_path_hex")?;
+            read_secret_file(&path).map(Some)
         }
     }
 }
@@ -537,28 +582,32 @@ fn read_password(prompt: &str) -> Result<Zeroizing<String>, LocalError> {
 }
 
 fn read_password_file(path: &str) -> Result<Zeroizing<String>, LocalError> {
-    let raw =
+    read_secret_file(path)
+}
+
+fn read_secret_file(path: &str) -> Result<Zeroizing<String>, LocalError> {
+    let mut raw =
         Zeroizing::new(std::fs::read_to_string(path).map_err(|e| {
             LocalError::new("KeystoreError", ErrorCategory::Unknown, e.to_string())
         })?);
-    let trimmed = raw.trim_end_matches(['\r', '\n']);
-    if trimmed.is_empty() {
+    trim_line_endings(&mut raw);
+    if raw.is_empty() {
         return Err(LocalError::new(
             "KeystoreError",
             ErrorCategory::Unknown,
-            format!("credential file at '{path}' was empty"),
+            "credential file was empty",
         ));
     }
-    Ok(Zeroizing::new(trimmed.to_string()))
+    Ok(raw)
 }
 
 fn read_input(prompt: &str, from_stdin: bool) -> Result<Zeroizing<String>, LocalError> {
     if from_stdin {
         let mut input = Zeroizing::new(String::new());
         io::stdin()
-            .read_line(&mut input)
+            .read_to_string(&mut input)
             .map_err(|e| LocalError::new("InputError", ErrorCategory::Unknown, e.to_string()))?;
-        trim_line_endings(&mut input);
+        finalize_stdin_secret_material(&mut input)?;
         return Ok(input);
     }
 
@@ -572,6 +621,18 @@ fn read_input(prompt: &str, from_stdin: bool) -> Result<Zeroizing<String>, Local
         .map_err(|e| LocalError::new("InputError", ErrorCategory::Unknown, e.to_string()))?;
     trim_line_endings(&mut input);
     Ok(input)
+}
+
+fn finalize_stdin_secret_material(input: &mut String) -> Result<(), LocalError> {
+    trim_line_endings(input);
+    if input.contains(['\r', '\n']) {
+        return Err(LocalError::new(
+            "InputError",
+            ErrorCategory::ParsingInput,
+            "stdin secret material must contain exactly one line",
+        ));
+    }
+    Ok(())
 }
 
 fn trim_line_endings(input: &mut String) {
@@ -787,4 +848,50 @@ fn decode_required_utf8(
             format!("{field} is required"),
         )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn import_request_rejects_legacy_passphrase_field() {
+        let request = serde_json::json!({
+            "kind": "mn",
+            "derive_path": "m/44'/60'/0'/0/0",
+            "store_path_hex": hex::encode("/tmp/keystore"),
+            "stdin_mode": true,
+            "passphrase": "do-not-accept"
+        });
+
+        let err = parse_request::<KeystoreImportRequest>(request)
+            .expect_err("legacy secret-bearing request field must be rejected");
+
+        match err {
+            IoError::Other(info) => assert_eq!(info.code.0, "invalid_local_request"),
+            other => panic!("unexpected io error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stdin_secret_material_rejects_two_field_protocol() {
+        let mut input = "field-one\nfield-two\n".to_string();
+
+        let err = finalize_stdin_secret_material(&mut input)
+            .expect_err("stdin import must not accept a second field");
+
+        assert_eq!(err.code, "InputError");
+        assert!(!err.message.contains("field-one"));
+        assert!(!err.message.contains("field-two"));
+    }
+
+    #[test]
+    fn stdin_secret_material_allows_single_trailing_newline() {
+        let mut input = "abc123\r\n".to_string();
+
+        finalize_stdin_secret_material(&mut input)
+            .expect("single trailing line ending should be accepted");
+
+        assert_eq!(input, "abc123");
+    }
 }

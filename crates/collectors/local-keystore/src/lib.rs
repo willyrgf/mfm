@@ -34,6 +34,26 @@ pub enum KeystoreImportType {
     Mnemonic,
 }
 
+/// Non-secret source metadata for the optional BIP-39 passphrase used during mnemonic import.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "source", content = "file_path_hex", rename_all = "snake_case")]
+pub enum Bip39ExtraSource {
+    /// Do not use a BIP-39 passphrase.
+    #[default]
+    None,
+    /// Prompt for the BIP-39 passphrase inside the local keystore transport.
+    Prompt,
+    /// Read the BIP-39 passphrase from this hex-encoded UTF-8 file or FIFO path.
+    FilePathHex(String),
+}
+
+impl Bip39ExtraSource {
+    /// Returns true when no BIP-39 passphrase source was requested.
+    pub fn is_none(&self) -> bool {
+        matches!(self, Self::None)
+    }
+}
+
 /// Sort order supported by the keystore list flow.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -48,6 +68,7 @@ pub enum KeystoreListSortBy {
 
 /// Typed request for `local.keystore.import`.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct KeystoreImportRequest {
     /// Input kind to import.
     pub kind: KeystoreImportType,
@@ -67,6 +88,9 @@ pub struct KeystoreImportRequest {
     pub store_path_hex: Option<String>,
     /// Whether to read secret material from stdin.
     pub stdin_mode: bool,
+    /// Optional BIP-39 passphrase source metadata for mnemonic imports.
+    #[serde(default, skip_serializing_if = "Bip39ExtraSource::is_none")]
+    pub bip39_extra: Bip39ExtraSource,
 }
 
 /// Typed request for `local.keystore.list`.
@@ -414,6 +438,65 @@ mod tests {
 
         match err {
             IoError::Other(info) => assert_eq!(info.code.0, "local_request_serialize_failed"),
+            other => panic!("unexpected io error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn import_request_bip39_extra_metadata_is_fact_key_safe() {
+        let request = KeystoreImportRequest {
+            kind: KeystoreImportType::Mnemonic,
+            label: None,
+            label_hex: Some("77616c6c6574".to_string()),
+            derive_path: "m/44'/60'/0'/0/0".to_string(),
+            store_path: None,
+            store_path_hex: Some("2f746d702f6b657973746f7265".to_string()),
+            stdin_mode: true,
+            bip39_extra: Bip39ExtraSource::FilePathHex(
+                "2f746d702f62697033392d6578747261".to_string(),
+            ),
+        };
+
+        let value = request_to_value(&request).expect("request should serialize to json");
+        let rendered = value.to_string();
+        assert!(rendered.contains("bip39_extra"));
+        assert!(!rendered.contains("passphrase"));
+
+        fact_key_for_request_value(
+            &StateId::must_new("local_keystore.tests.import".to_string()),
+            "local.keystore.import",
+            &value,
+        )
+        .expect("non-secret source metadata should be fact-key safe");
+    }
+
+    #[tokio::test]
+    async fn local_keystore_client_rejects_secret_shaped_import_request() {
+        let mut io = PanicIo;
+        let mut client = LocalKeystoreIoClient::new(
+            StateId::must_new("local_keystore.tests.client".to_string()),
+            &mut io,
+        );
+
+        let request = serde_json::json!({
+            "kind": "mn",
+            "derive_path": "m/44'/60'/0'/0/0",
+            "store_path_hex": "2f746d702f6b657973746f7265",
+            "stdin_mode": true,
+            "passphrase": "do-not-serialize"
+        });
+
+        let err = client
+            .call::<serde_json::Value, _>(
+                NAMESPACE_LOCAL_KEYSTORE_IMPORT,
+                "local.keystore.import",
+                request,
+            )
+            .await
+            .expect_err("secret-shaped request should fail before io");
+
+        match err {
+            IoError::Other(info) => assert_eq!(info.code.0, "secrets_detected"),
             other => panic!("unexpected io error: {other:?}"),
         }
     }

@@ -1,18 +1,16 @@
-use crate::commands::result::{CommandOutput, CommandResult};
+use crate::commands::result::{CommandError, CommandOutput, CommandResult};
 use crate::commands::CommandContext;
 use crate::presentation::output::handle_command_result;
 use crate::support::{app_services, command_defaults, run_stores};
 use clap::Args;
 use mfm_op_keystore_admin::{
-    keystore_import_report_context_key, KeystoreImportOpConfig, KeystoreImportReport,
-    KeystoreImportType, KEYSTORE_ADMIN_OP_VERSION, KEYSTORE_IMPORT_OP_ID,
+    keystore_import_report_context_key, Bip39ExtraSource, KeystoreImportOpConfig,
+    KeystoreImportReport, KeystoreImportType, KEYSTORE_ADMIN_OP_VERSION, KEYSTORE_IMPORT_OP_ID,
 };
 use mfm_sdk::unstable::{execute_single_op_report, SingleOpReportRequest};
 use serde::Serialize;
 use std::fmt;
 use std::path::PathBuf;
-
-const ENV_IMPORT_PASSPHRASE: &str = "MFM_KEYSTORE_IMPORT_BIP39_EXTRA";
 
 /// Arguments for `mfm keystore import`.
 #[derive(Args)]
@@ -29,9 +27,13 @@ pub(crate) struct ImportArgs {
     #[arg(short = 'p', long, default_value = "m/44'/60'/0'/0/0")]
     pub derivation_path: String,
 
-    /// Optional mnemonic passphrase (BIP39). Note: providing it via CLI may expose it in shell history.
-    #[arg(long)]
-    pub passphrase: Option<String>,
+    /// Prompt for an optional BIP-39 passphrase during mnemonic import.
+    #[arg(long, conflicts_with = "passphrase_file")]
+    pub passphrase_prompt: bool,
+
+    /// Read an optional BIP-39 passphrase from a local file or FIFO.
+    #[arg(long, value_name = "PATH", conflicts_with = "passphrase_prompt")]
+    pub passphrase_file: Option<PathBuf>,
 
     /// Keystore file path
     #[arg(long)]
@@ -84,11 +86,8 @@ pub(crate) async fn execute(ctx: &CommandContext, args: &ImportArgs) -> ! {
 }
 
 async fn execute_internal(args: &ImportArgs) -> CommandResult<ImportResponse> {
-    let _passphrase_guard = args
-        .passphrase
-        .as_ref()
-        .map(|passphrase| ScopedEnvVar::set(ENV_IMPORT_PASSPHRASE, passphrase));
     let keystore_path = command_defaults::resolve_keystore_path(args.keystore.as_ref());
+    let bip39_extra = resolve_bip39_extra(args)?;
 
     let op_config = KeystoreImportOpConfig {
         import_type: match args.import_type {
@@ -104,6 +103,7 @@ async fn execute_internal(args: &ImportArgs) -> CommandResult<ImportResponse> {
         keystore_path: None,
         keystore_path_hex: Some(hex::encode(keystore_path.to_string_lossy().as_bytes())),
         stdin: args.stdin,
+        bip39_extra,
     };
 
     let report_key = keystore_import_report_context_key();
@@ -138,29 +138,34 @@ async fn execute_internal(args: &ImportArgs) -> CommandResult<ImportResponse> {
     }))
 }
 
-struct ScopedEnvVar {
-    key: String,
-    previous: Option<String>,
-}
-
-impl ScopedEnvVar {
-    #[allow(clippy::disallowed_methods)]
-    fn set(key: &str, value: &str) -> Self {
-        let previous = std::env::var(key).ok();
-        std::env::set_var(key, value);
-        Self {
-            key: key.to_string(),
-            previous,
+fn resolve_bip39_extra(args: &ImportArgs) -> Result<Bip39ExtraSource, CommandError> {
+    let source = match (args.passphrase_prompt, args.passphrase_file.as_ref()) {
+        (true, None) => Bip39ExtraSource::Prompt,
+        (false, Some(path)) => {
+            Bip39ExtraSource::FilePathHex(hex::encode(path.to_string_lossy().as_bytes()))
         }
-    }
-}
-
-impl Drop for ScopedEnvVar {
-    fn drop(&mut self) {
-        if let Some(previous) = self.previous.as_ref() {
-            std::env::set_var(&self.key, previous);
-        } else {
-            std::env::remove_var(&self.key);
+        (false, None) => Bip39ExtraSource::None,
+        (true, Some(_)) => {
+            return Err(CommandError::new(
+                "InvalidArgument",
+                "choose only one BIP-39 extra input source",
+            ));
         }
+    };
+
+    if !source.is_none() && !matches!(args.import_type, ImportType::Mnemonic) {
+        return Err(CommandError::new(
+            "InvalidArgument",
+            "BIP-39 extra input is only valid for mnemonic imports",
+        ));
     }
+
+    if args.stdin && matches!(source, Bip39ExtraSource::Prompt) {
+        return Err(CommandError::new(
+            "InvalidArgument",
+            "BIP-39 prompt input cannot be combined with stdin material",
+        ));
+    }
+
+    Ok(source)
 }

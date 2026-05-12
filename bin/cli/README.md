@@ -122,6 +122,8 @@ mfm_cli keystore import [OPTIONS]
 - `--label <LABEL>`: A human-readable alias for the key. If omitted, a default label is generated.
 - `--derivation-path <PATH>`: For mnemonics, the BIP32 derivation path. Defaults to `m/44'/60'/0'/0/0`.
 - `--stdin`: Reads the key material (private key or mnemonic) from standard input instead of an interactive prompt.
+- `--passphrase-prompt`: For mnemonic imports, prompts for the optional BIP-39 passphrase inside the local keystore transport. Cannot be combined with `--stdin`.
+- `--passphrase-file <PATH>`: For mnemonic imports, reads the optional BIP-39 passphrase from a local UTF-8 file or FIFO. Trailing `\n` and `\r\n` line endings are stripped; other bytes are used as-is.
 - `--keystore <PATH>`: Specifies a custom path to the keystore file.
 
 **Examples:**
@@ -134,6 +136,11 @@ mfm_cli keystore import [OPTIONS]
 - **Import a mnemonic from `stdin` with a custom derivation path:**
   ```sh
   echo "word1 word2 ..." | mfm_cli keystore import --import-type mnemonic --label "my-hd-wallet" --derivation-path "m/44'/60'/0'/0/1" --stdin
+  ```
+
+- **Import a mnemonic from `stdin` with a BIP-39 passphrase file:**
+  ```sh
+  mfm_cli keystore import --import-type mnemonic --label "my-hd-wallet" --passphrase-file ./bip39-extra.txt --stdin < mnemonic.txt
   ```
 
 ### `keystore list`

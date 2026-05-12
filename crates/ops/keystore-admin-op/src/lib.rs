@@ -40,8 +40,8 @@ use mfm_state_keystore::tx::output_context_key;
 
 /// Re-exported keystore admin report and enum types used by callers.
 pub use mfm_state_keystore::states::admin::{
-    KeystoreDeleteReport, KeystoreImportReport, KeystoreImportType, KeystoreListKey,
-    KeystoreListReport, KeystoreListSortBy,
+    Bip39ExtraSource, KeystoreDeleteReport, KeystoreImportReport, KeystoreImportType,
+    KeystoreListKey, KeystoreListReport, KeystoreListSortBy,
 };
 
 /// Stable version string for keystore admin operations.
@@ -55,6 +55,7 @@ pub const KEYSTORE_DELETE_OP_ID: &str = "keystore_delete";
 
 /// Planning input for the keystore import operation.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct KeystoreImportOpConfig {
     /// Import mode to execute.
     pub import_type: KeystoreImportType,
@@ -75,6 +76,9 @@ pub struct KeystoreImportOpConfig {
     /// Whether secret material should be read from stdin.
     #[serde(default)]
     pub stdin: bool,
+    /// Optional BIP-39 passphrase source metadata for mnemonic imports.
+    #[serde(default, skip_serializing_if = "Bip39ExtraSource::is_none")]
+    pub bip39_extra: Bip39ExtraSource,
 }
 
 fn default_derivation_path() -> String {
@@ -180,6 +184,7 @@ impl Operation for KeystoreImportOp {
                 .map_err(sdk_error_from_helper)?;
         let label = decode_optional_hex_string(cfg.label, cfg.label_hex, "label")
             .map_err(sdk_error_from_helper)?;
+        validate_import_bip39_extra(&cfg.import_type, cfg.stdin, &cfg.bip39_extra)?;
 
         let state_id = leaf_state_id(&op_path, "import")?;
         let state = KeystoreImportState::new(
@@ -194,6 +199,7 @@ impl Operation for KeystoreImportOp {
                 keystore_path: require_keystore_path(keystore_path)
                     .map_err(sdk_error_from_helper)?,
                 stdin: cfg.stdin,
+                bip39_extra: cfg.bip39_extra,
             },
         );
 
@@ -208,6 +214,28 @@ impl Operation for KeystoreImportOp {
             }),
         })
     }
+}
+
+fn validate_import_bip39_extra(
+    import_type: &KeystoreImportType,
+    stdin: bool,
+    bip39_extra: &Bip39ExtraSource,
+) -> Result<(), SdkError> {
+    if !bip39_extra.is_none() && import_type != &KeystoreImportType::Mnemonic {
+        return Err(op_errors::sdk_parse_error(
+            "invalid_op_config",
+            "BIP-39 extra input is only supported for mnemonic imports",
+        ));
+    }
+
+    if stdin && matches!(bip39_extra, Bip39ExtraSource::Prompt) {
+        return Err(op_errors::sdk_parse_error(
+            "invalid_op_config",
+            "BIP-39 prompt input cannot be combined with stdin material",
+        ));
+    }
+
+    Ok(())
 }
 
 /// Planner for keystore list runs.
@@ -349,4 +377,52 @@ fn require_keystore_path(configured: Option<String>) -> Result<PathBuf, Keystore
     };
 
     Ok(PathBuf::from(value))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn import_config_rejects_legacy_passphrase_field() {
+        let err = serde_json::from_value::<KeystoreImportOpConfig>(serde_json::json!({
+            "import_type": "mn",
+            "derivation_path": "m/44'/60'/0'/0/0",
+            "keystore_path_hex": "2f746d702f6b657973746f7265",
+            "stdin": true,
+            "passphrase": "do-not-accept"
+        }))
+        .expect_err("legacy secret-bearing field must be rejected");
+
+        assert!(err.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn import_config_accepts_file_path_hex_metadata() {
+        let cfg = serde_json::from_value::<KeystoreImportOpConfig>(serde_json::json!({
+            "import_type": "mn",
+            "derivation_path": "m/44'/60'/0'/0/0",
+            "keystore_path_hex": "2f746d702f6b657973746f7265",
+            "stdin": true,
+            "bip39_extra": {
+                "source": "file_path_hex",
+                "file_path_hex": "2f746d702f62697033392d6578747261"
+            }
+        }))
+        .expect("non-secret source metadata should deserialize");
+
+        assert!(matches!(cfg.bip39_extra, Bip39ExtraSource::FilePathHex(_)));
+    }
+
+    #[test]
+    fn import_config_rejects_prompt_with_stdin() {
+        let err = validate_import_bip39_extra(
+            &KeystoreImportType::Mnemonic,
+            true,
+            &Bip39ExtraSource::Prompt,
+        )
+        .expect_err("prompt source must be interactive-only");
+
+        assert_eq!(err.info.code.0, "invalid_op_config");
+    }
 }
