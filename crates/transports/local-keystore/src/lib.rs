@@ -9,6 +9,8 @@
 //! `\n` and `\r\n` line endings; all other bytes are preserved as the passphrase.
 //! Interactive private-key, mnemonic, password, and passphrase prompts use hidden terminal input;
 //! `stdin` imports are reserved for controlled pipes and files.
+//! Blocking filesystem, terminal, and keystore work is isolated on Tokio's blocking pool before
+//! returning sanitized IO errors to the async state-machine runtime.
 //!
 //! # Examples
 //!
@@ -73,19 +75,24 @@ struct LocalKeystoreIoTransport;
 #[async_trait]
 impl LiveIoTransport for LocalKeystoreIoTransport {
     async fn call(&mut self, call: IoCall) -> Result<serde_json::Value, IoError> {
-        tokio::task::spawn_blocking(move || dispatch_local_keystore_call(call))
-            .await
-            .map_err(|_| {
-                io_other(
-                    "local_transport_join_failed",
-                    ErrorCategory::Unknown,
-                    "local keystore transport worker failed",
-                )
-            })?
+        run_blocking_local_keystore(move || dispatch_local_keystore_call(call)).await
     }
 }
 
 type LocalError = LocalTransportError;
+
+async fn run_blocking_local_keystore<F>(f: F) -> Result<serde_json::Value, IoError>
+where
+    F: FnOnce() -> Result<serde_json::Value, IoError> + Send + 'static,
+{
+    tokio::task::spawn_blocking(f).await.map_err(|_| {
+        io_other(
+            "local_transport_join_failed",
+            ErrorCategory::Unknown,
+            "local keystore transport worker failed",
+        )
+    })?
+}
 
 fn dispatch_local_keystore_call(call: IoCall) -> Result<serde_json::Value, IoError> {
     match call.namespace.as_str() {
@@ -1100,6 +1107,11 @@ mod tests {
     use super::*;
 
     use std::collections::VecDeque;
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+    use std::time::Duration;
 
     const TEST_PASSWORD: &str = "CorrectHorseBatteryStaple123!";
     const TEST_PRIVATE_KEY: &str =
@@ -1235,6 +1247,47 @@ mod tests {
             IoError::Other(info) => assert_eq!(info.code.0, "invalid_local_request"),
             other => panic!("unexpected io error: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn join_failure_maps_to_sanitized_io_error() {
+        let err = run_blocking_local_keystore(|| panic!("secret panic payload"))
+            .await
+            .expect_err("panic should map to io error");
+
+        match err {
+            IoError::Other(info) => {
+                assert_eq!(info.code.0, "local_transport_join_failed");
+                assert!(!info.message.contains("secret panic payload"));
+                assert!(info.details.is_none());
+            }
+            other => panic!("unexpected io error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn current_thread_runtime_progresses_while_local_keystore_work_is_blocking() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let progressed = Arc::new(AtomicBool::new(false));
+            let progressed_task = Arc::clone(&progressed);
+            let blocking = run_blocking_local_keystore(|| {
+                std::thread::sleep(Duration::from_millis(75));
+                Ok(serde_json::json!({"ok": true}))
+            });
+            let progress = async move {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                progressed_task.store(true, Ordering::SeqCst);
+            };
+
+            let (blocking_result, ()) = tokio::join!(blocking, progress);
+
+            blocking_result.expect("blocking work should finish");
+            assert!(progressed.load(Ordering::SeqCst));
+        });
     }
 
     #[test]

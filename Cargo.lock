@@ -2555,6 +2555,7 @@ dependencies = [
  "mfm-machine",
  "serde",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]

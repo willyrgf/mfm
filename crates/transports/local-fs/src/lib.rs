@@ -3,6 +3,8 @@
 //!
 //! This transport is intentionally narrow and currently exposes only `local.fs.read_text`, which
 //! allows state logic to read files through the Live IO abstraction rather than ambient file IO.
+//! Blocking filesystem work is isolated on Tokio's blocking pool before returning sanitized IO
+//! errors to the async state-machine runtime.
 //!
 //! # Examples
 //!
@@ -42,14 +44,31 @@ struct LocalFsIoTransport;
 #[async_trait]
 impl LiveIoTransport for LocalFsIoTransport {
     async fn call(&mut self, call: IoCall) -> Result<serde_json::Value, IoError> {
-        match call.namespace.as_str() {
-            NAMESPACE_LOCAL_FS_READ_TEXT => handle_read_text(call.request),
-            _ => Err(io_other(
-                "unknown_namespace",
-                ErrorCategory::Unknown,
-                "unknown local fs io namespace",
-            )),
-        }
+        run_blocking_local_fs(move || dispatch_local_fs_call(call)).await
+    }
+}
+
+async fn run_blocking_local_fs<F>(f: F) -> Result<serde_json::Value, IoError>
+where
+    F: FnOnce() -> Result<serde_json::Value, IoError> + Send + 'static,
+{
+    tokio::task::spawn_blocking(f).await.map_err(|_| {
+        io_other(
+            "local_transport_join_failed",
+            ErrorCategory::Unknown,
+            "local fs transport worker failed",
+        )
+    })?
+}
+
+fn dispatch_local_fs_call(call: IoCall) -> Result<serde_json::Value, IoError> {
+    match call.namespace.as_str() {
+        NAMESPACE_LOCAL_FS_READ_TEXT => handle_read_text(call.request),
+        _ => Err(io_other(
+            "unknown_namespace",
+            ErrorCategory::Unknown,
+            "unknown local fs io namespace",
+        )),
     }
 }
 
@@ -170,4 +189,85 @@ fn decode_required_utf8(
             format!("{field} is required"),
         )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    fn unique_path(name: &str) -> std::path::PathBuf {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        std::env::temp_dir().join(format!("mfm-local-fs-{name}-{suffix}"))
+    }
+
+    #[tokio::test]
+    async fn join_failure_maps_to_sanitized_io_error() {
+        let err = run_blocking_local_fs(|| panic!("secret panic payload"))
+            .await
+            .expect_err("panic should map to io error");
+
+        match err {
+            IoError::Other(info) => {
+                assert_eq!(info.code.0, "local_transport_join_failed");
+                assert!(!info.message.contains("secret panic payload"));
+                assert!(info.details.is_none());
+            }
+            other => panic!("unexpected io error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn current_thread_runtime_progresses_while_local_fs_work_is_blocking() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let progressed = Arc::new(AtomicBool::new(false));
+            let progressed_task = Arc::clone(&progressed);
+            let blocking = run_blocking_local_fs(|| {
+                std::thread::sleep(Duration::from_millis(75));
+                Ok(serde_json::json!({"ok": true}))
+            });
+            let progress = async move {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                progressed_task.store(true, Ordering::SeqCst);
+            };
+
+            let (blocking_result, ()) = tokio::join!(blocking, progress);
+
+            blocking_result.expect("blocking work should finish");
+            assert!(progressed.load(Ordering::SeqCst));
+        });
+    }
+
+    #[tokio::test]
+    async fn read_text_response_is_unchanged() {
+        let path = unique_path("read-text.txt");
+        std::fs::write(&path, "hello local fs").expect("write test file");
+
+        let mut transport = LocalFsIoTransport;
+        let response = transport
+            .call(IoCall {
+                namespace: NAMESPACE_LOCAL_FS_READ_TEXT.to_string(),
+                request: serde_json::json!({
+                    "path_hex": hex::encode(path.to_string_lossy().as_bytes())
+                }),
+                fact_key: None,
+            })
+            .await
+            .expect("read text");
+
+        assert_eq!(response["text"].as_str(), Some("hello local fs"));
+        let _ = std::fs::remove_file(path);
+    }
 }
