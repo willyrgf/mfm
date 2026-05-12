@@ -158,6 +158,9 @@ records, with only the MAC slot zeroed for the MAC preimage.
 Every unlocked mutation re-reads the current bounded file body under the mutation lock, validates
 its strict shape, recomputes the MAC over that body, and fails closed if the stored MAC, recomputed
 MAC, and in-memory MAC do not all match.
+The audit log is a bounded recent log. When it reaches the retention limit, the oldest records are
+compacted into an explicit `audit_log_compacted` summary entry before the newest event is appended.
+Externally oversized audit logs remain invalid and are rejected during authenticated load.
 Byte arrays below are shortened for readability.
 
 ```json

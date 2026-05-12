@@ -106,6 +106,14 @@ fn persisted_audit_log(path: &Path) -> Vec<AuditLogEntry> {
     serde_json::from_value(read_keystore_json(path)["audit_log"].clone()).unwrap()
 }
 
+fn audit_test_entry(event: AuditEvent) -> AuditLogEntry {
+    AuditLogEntry {
+        timestamp: chrono::Utc::now(),
+        event,
+        success: true,
+    }
+}
+
 fn rewrite_keystore_json_with_valid_mac(
     keystore: &Keystore,
     path: &Path,
@@ -554,6 +562,80 @@ fn test_successful_mutations_persist_exactly_one_audit_record() {
     let mut reopened =
         Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
     reopened.unlock("new_password_123").unwrap();
+}
+
+#[test]
+fn test_audit_append_at_boundary_compacts_oldest_entries() {
+    let (_temp_dir, mut keystore) = test_keystore();
+    keystore.audit_log = (0..MAX_AUDIT_LOG_ENTRIES)
+        .map(|_| audit_test_entry(AuditEvent::Unlock))
+        .collect();
+
+    let first_event_id = Uuid::new_v4();
+    keystore.append_audit_event(AuditEvent::GetPrivateKey { id: first_event_id }, true);
+
+    assert_eq!(keystore.audit_log().len(), MAX_AUDIT_LOG_ENTRIES);
+    assert!(matches!(
+        keystore.audit_log().first().unwrap().event,
+        AuditEvent::AuditLogCompacted { dropped_entries: 2 }
+    ));
+    assert!(matches!(
+        keystore.audit_log().last().unwrap().event,
+        AuditEvent::GetPrivateKey { id } if id == first_event_id
+    ));
+
+    let second_event_id = Uuid::new_v4();
+    keystore.append_audit_event(
+        AuditEvent::DeleteKey {
+            id: second_event_id,
+        },
+        false,
+    );
+
+    assert_eq!(keystore.audit_log().len(), MAX_AUDIT_LOG_ENTRIES);
+    assert!(matches!(
+        keystore.audit_log().first().unwrap().event,
+        AuditEvent::AuditLogCompacted { dropped_entries: 3 }
+    ));
+    assert!(matches!(
+        keystore.audit_log().last().unwrap().event,
+        AuditEvent::DeleteKey { id } if id == second_event_id
+    ));
+}
+
+#[test]
+fn test_get_private_key_past_audit_limit_compacts_and_persists() {
+    let temp_dir = tempdir().unwrap();
+    let keystore_path = temp_dir.path().join("audit_compaction.keystore");
+    let (keystore, key_id) = unlocked_keystore_with_one_key(&keystore_path, "audit-target");
+
+    rewrite_keystore_json_with_valid_mac(&keystore, &keystore_path, |json| {
+        json["audit_log"] = serde_json::Value::Array(
+            (0..MAX_AUDIT_LOG_ENTRIES)
+                .map(|_| serde_json::to_value(audit_test_entry(AuditEvent::Unlock)).unwrap())
+                .collect(),
+        );
+    });
+    drop(keystore);
+
+    let mut reopened =
+        Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
+    reopened.unlock("strong_password_123").unwrap();
+    for _ in 0..4 {
+        reopened.get_private_key(key_id).unwrap();
+        assert!(reopened.audit_log().len() <= MAX_AUDIT_LOG_ENTRIES);
+    }
+
+    let persisted = persisted_audit_log(&keystore_path);
+    assert_eq!(persisted.len(), MAX_AUDIT_LOG_ENTRIES);
+    assert!(matches!(
+        persisted.first().unwrap().event,
+        AuditEvent::AuditLogCompacted { dropped_entries } if dropped_entries >= 6
+    ));
+    assert!(matches!(
+        persisted.last().unwrap().event,
+        AuditEvent::GetPrivateKey { id } if id == key_id
+    ));
 }
 
 #[cfg(feature = "dangerous-secret-export")]
@@ -1835,26 +1917,17 @@ fn test_oversized_audit_log_rejected() {
     let temp_dir = tempdir().unwrap();
     let keystore_path = temp_dir.path().join("large_audit.keystore");
 
-    {
-        let mut keystore =
-            Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
-        keystore.unlock("strong_password_123").unwrap();
-    }
-
-    let mut json: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&keystore_path).unwrap()).unwrap();
-    let timestamp = chrono::Utc::now().to_rfc3339();
-    let audit_entries = (0..4_097)
-        .map(|_| {
-            serde_json::json!({
-                "timestamp": timestamp,
-                "event": "unlock",
-                "success": true
-            })
-        })
-        .collect::<Vec<_>>();
-    json["audit_log"] = serde_json::Value::Array(audit_entries);
-    std::fs::write(&keystore_path, serde_json::to_vec_pretty(&json).unwrap()).unwrap();
+    let mut keystore =
+        Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
+    keystore.unlock("strong_password_123").unwrap();
+    rewrite_keystore_json_with_valid_mac(&keystore, &keystore_path, |json| {
+        json["audit_log"] = serde_json::Value::Array(
+            (0..=MAX_AUDIT_LOG_ENTRIES)
+                .map(|_| serde_json::to_value(audit_test_entry(AuditEvent::Unlock)).unwrap())
+                .collect(),
+        );
+    });
+    drop(keystore);
 
     let mut loaded = Keystore::new_with_config(&keystore_path, KeystoreConfig::development())
         .expect("unauthenticated load must not hydrate tampered audit records");
@@ -2021,29 +2094,22 @@ fn test_audit_log_limit_boundary_is_accepted() {
     let temp_dir = tempdir().unwrap();
     let keystore_path = temp_dir.path().join("audit_boundary.keystore");
 
-    {
-        let mut keystore =
-            Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
-        keystore.unlock("strong_password_123").unwrap();
-    }
+    let mut keystore =
+        Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
+    keystore.unlock("strong_password_123").unwrap();
+    rewrite_keystore_json_with_valid_mac(&keystore, &keystore_path, |json| {
+        json["audit_log"] = serde_json::Value::Array(
+            (0..MAX_AUDIT_LOG_ENTRIES)
+                .map(|_| serde_json::to_value(audit_test_entry(AuditEvent::Unlock)).unwrap())
+                .collect(),
+        );
+    });
+    drop(keystore);
 
-    let mut json: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&keystore_path).unwrap()).unwrap();
-    let timestamp = chrono::Utc::now().to_rfc3339();
-    let audit_entries = (0..4_096)
-        .map(|_| {
-            serde_json::json!({
-                "timestamp": timestamp,
-                "event": "unlock",
-                "success": true
-            })
-        })
-        .collect::<Vec<_>>();
-    json["audit_log"] = serde_json::Value::Array(audit_entries);
-    std::fs::write(&keystore_path, serde_json::to_vec_pretty(&json).unwrap()).unwrap();
-
-    let result = Keystore::new_with_config(&keystore_path, KeystoreConfig::development());
-    assert!(result.is_ok());
+    let mut loaded =
+        Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
+    loaded.unlock("strong_password_123").unwrap();
+    assert_eq!(loaded.audit_log().len(), MAX_AUDIT_LOG_ENTRIES);
 }
 
 #[cfg(unix)]
