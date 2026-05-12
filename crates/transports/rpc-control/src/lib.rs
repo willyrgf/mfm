@@ -13,8 +13,10 @@
 //! The inner `evm` transport is treated as an executor only. Every managed EVM call is pinned to
 //! one concrete source before dispatch, so route choice and cooldown authority stay here.
 //! Bitcoin calls are dispatched directly to the configured Bitcoin Core endpoint.
+//! Debug output redacts RPC URL credentials, query strings, and authorization headers.
 
 use std::collections::{BTreeSet, HashMap};
+use std::fmt;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -53,6 +55,7 @@ const ENV_EVM_RPC_REQUIRE_GET_PROOF_IDS: &str = "MFM_EVM_RPC_REQUIRE_GET_PROOF_I
 const ENV_BTC_RPC_URL: &str = "MFM_BTC_RPC_URL";
 const ENV_BTC_RPC_USER: &str = "MFM_BTC_RPC_USER";
 const ENV_BTC_RPC_PASSWORD: &str = "MFM_BTC_RPC_PASSWORD";
+const REDACTED_SECRET: &str = "<redacted>";
 
 const DEFAULT_POOL_KIND: &str = "default";
 const PROBE_REFRESH_INTERVAL_MS: u64 = 15_000;
@@ -315,8 +318,35 @@ fn normalize_optional_field(raw: Option<String>) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+fn redacted_optional_secret(value: &Option<String>) -> &'static str {
+    if value.is_some() {
+        REDACTED_SECRET
+    } else {
+        "<unset>"
+    }
+}
+
+fn redacted_rpc_url(raw: &str) -> String {
+    let Ok(parsed) = url::Url::parse(raw) else {
+        return "<invalid-url>".to_string();
+    };
+    let Some(host_raw) = parsed.host_str() else {
+        return "<invalid-url>".to_string();
+    };
+    let host = if host_raw.contains(':') && !host_raw.starts_with('[') {
+        format!("[{host_raw}]")
+    } else {
+        host_raw.to_string()
+    };
+
+    match parsed.port_or_known_default() {
+        Some(port) => format!("{}://{}:{}", parsed.scheme(), host, port),
+        None => format!("{}://{}", parsed.scheme(), host),
+    }
+}
+
 /// Bootstrap source definition used by the `rpc.control` transport.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct RpcControlBootstrapSource {
     /// Stable source identifier.
     pub id: String,
@@ -330,6 +360,22 @@ pub struct RpcControlBootstrapSource {
     pub kind: EvmSourceKind,
     /// Whether the source must pass an `eth_getProof` capability probe before normal selection.
     pub require_get_proof_probe: bool,
+}
+
+impl fmt::Debug for RpcControlBootstrapSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RpcControlBootstrapSource")
+            .field("id", &self.id)
+            .field("network_id", &self.network_id)
+            .field("rpc_url", &redacted_rpc_url(&self.rpc_url))
+            .field(
+                "authorization",
+                &redacted_optional_secret(&self.authorization),
+            )
+            .field("kind", &self.kind)
+            .field("require_get_proof_probe", &self.require_get_proof_probe)
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -634,7 +680,7 @@ impl std::fmt::Display for RpcControlConfigError {
 
 impl std::error::Error for RpcControlConfigError {}
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 struct EnvBootstrapSource {
     id: String,
     #[serde(default)]
@@ -2138,6 +2184,66 @@ mod tests {
             kind,
             require_get_proof_probe,
         }
+    }
+
+    #[test]
+    fn bootstrap_source_debug_redacts_rpc_url_and_authorization() {
+        let source = RpcControlBootstrapSource {
+            id: "primary".to_string(),
+            network_id: Some("ethereum-mainnet".to_string()),
+            rpc_url:
+                "https://url_user:url_password@example.com:8545/rpc?api_key=query_secret&token=query_token#frag"
+                    .to_string(),
+            authorization: Some("Bearer authorization_secret".to_string()),
+            kind: EvmSourceKind::RemoteUser,
+            require_get_proof_probe: true,
+        };
+
+        let rendered = format!("{source:?}");
+
+        assert!(rendered.contains("RpcControlBootstrapSource"));
+        assert!(rendered.contains("https://example.com:8545"));
+        assert!(!rendered.contains("url_user"));
+        assert!(!rendered.contains("url_password"));
+        assert!(!rendered.contains("api_key"));
+        assert!(!rendered.contains("query_secret"));
+        assert!(!rendered.contains("query_token"));
+        assert!(!rendered.contains("authorization_secret"));
+    }
+
+    #[test]
+    fn btc_error_surface_through_transport_omits_http_body_credentials() {
+        let omitted_body =
+            "Authorization: Bearer body_token password=body_password token=body_secret";
+        let mut transport = RpcControlTransport {
+            executor: None,
+            btc_client: Some(Err(BtcRpcError::HttpStatus {
+                status: 500,
+                body_len: Some(omitted_body.len()),
+                content_type: Some("text/plain".to_string()),
+            })),
+            control_plane_store: ControlPlaneStore::PostgresEnv { store: None },
+            catalog: BootstrapCatalog {
+                sources: Vec::new(),
+                preferred_order: Vec::new(),
+            },
+            config_error: None,
+        };
+
+        let err = match transport.ensure_btc_client() {
+            Ok(_) => panic!("client init failure should surface through transport"),
+            Err(err) => err,
+        };
+        let message = match err {
+            IoError::Transport(info) => info.message,
+            other => panic!("expected transport error, got {other:?}"),
+        };
+
+        assert!(message.contains("btc rpc http status 500"));
+        assert!(message.contains("body_len="));
+        assert!(!message.contains("body_token"));
+        assert!(!message.contains("body_password"));
+        assert!(!message.contains("body_secret"));
     }
 
     fn transport_for_tests(sources: Vec<RpcControlBootstrapSource>) -> RpcControlTransport {

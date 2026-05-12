@@ -6,6 +6,8 @@
 //! - `scantxoutset` — UTXO balance for a given address (observation)
 //!
 //! The client speaks plain JSON-RPC 2.0 over HTTP with optional Basic auth, using `reqwest`.
+//! Debug output and errors redact RPC URL credentials, query strings, passwords, and raw response
+//! bodies.
 //!
 //! # Examples
 //!
@@ -19,17 +21,22 @@
 //! };
 //! ```
 
+use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use reqwest::header::CONTENT_TYPE;
 use serde::{de, Deserialize, Deserializer, Serialize};
 use serde_json::value::RawValue;
 use tracing::debug;
 
 const SATOSHIS_PER_BTC: u64 = 100_000_000;
+const MAX_DIAGNOSTIC_MESSAGE_LEN: usize = 240;
+const REDACTED_SECRET: &str = "<redacted>";
+const REDACTED_DIAGNOSTIC: &str = "<redacted diagnostic message>";
 
 /// Configuration for a Bitcoin Core JSON-RPC connection.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct BtcJsonRpcConfig {
     /// Bitcoin Core RPC URL (e.g. `http://127.0.0.1:8332`).
     pub rpc_url: String,
@@ -37,6 +44,19 @@ pub struct BtcJsonRpcConfig {
     pub rpc_user: Option<String>,
     /// Optional RPC password for Basic auth.
     pub rpc_password: Option<String>,
+}
+
+impl fmt::Debug for BtcJsonRpcConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BtcJsonRpcConfig")
+            .field("rpc_url", &redacted_rpc_url(&self.rpc_url))
+            .field("rpc_user", &redacted_optional_secret(&self.rpc_user))
+            .field(
+                "rpc_password",
+                &redacted_optional_secret(&self.rpc_password),
+            )
+            .finish()
+    }
 }
 
 /// Bitcoin Core JSON-RPC client.
@@ -52,7 +72,14 @@ pub enum BtcRpcError {
     /// HTTP transport failure.
     Http(String),
     /// Non-2xx HTTP status.
-    HttpStatus(u16, String),
+    HttpStatus {
+        /// HTTP status code returned by the RPC endpoint.
+        status: u16,
+        /// Length in bytes of the omitted response body, when it could be read.
+        body_len: Option<usize>,
+        /// Sanitized `content-type` header value, when present.
+        content_type: Option<String>,
+    },
     /// Response body could not be read.
     BodyRead(String),
     /// Response was not valid JSON.
@@ -72,8 +99,23 @@ impl std::fmt::Display for BtcRpcError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             BtcRpcError::Http(e) => write!(f, "btc rpc http error: {e}"),
-            BtcRpcError::HttpStatus(code, body) => {
-                write!(f, "btc rpc http status {code}: {body}")
+            BtcRpcError::HttpStatus {
+                status,
+                body_len,
+                content_type,
+            } => {
+                write!(f, "btc rpc http status {status}")?;
+                if let Some(body_len) = body_len {
+                    write!(f, " (body_len={body_len}")?;
+                    if let Some(content_type) = content_type {
+                        write!(f, ", content_type={content_type}")?;
+                    }
+                    write!(f, ")")
+                } else if let Some(content_type) = content_type {
+                    write!(f, " (content_type={content_type})")
+                } else {
+                    Ok(())
+                }
             }
             BtcRpcError::BodyRead(e) => write!(f, "btc rpc body read error: {e}"),
             BtcRpcError::InvalidJson(e) => write!(f, "btc rpc invalid json: {e}"),
@@ -86,6 +128,121 @@ impl std::fmt::Display for BtcRpcError {
 }
 
 impl std::error::Error for BtcRpcError {}
+
+fn redacted_optional_secret(value: &Option<String>) -> &'static str {
+    if value.is_some() {
+        REDACTED_SECRET
+    } else {
+        "<unset>"
+    }
+}
+
+fn redacted_rpc_url(raw: &str) -> String {
+    let Ok(parsed) = reqwest::Url::parse(raw) else {
+        return "<invalid-url>".to_string();
+    };
+    let Some(host_raw) = parsed.host_str() else {
+        return "<invalid-url>".to_string();
+    };
+    let host = if host_raw.contains(':') && !host_raw.starts_with('[') {
+        format!("[{host_raw}]")
+    } else {
+        host_raw.to_string()
+    };
+
+    match parsed.port() {
+        Some(port) => format!("{}://{}:{}", parsed.scheme(), host, port),
+        None => format!("{}://{}", parsed.scheme(), host),
+    }
+}
+
+fn diagnostic_message(raw: &str) -> String {
+    if contains_secret_marker(raw) || contains_secret_bearing_url(raw) {
+        return REDACTED_DIAGNOSTIC.to_string();
+    }
+    truncate_diagnostic(raw)
+}
+
+fn contains_secret_bearing_url(raw: &str) -> bool {
+    raw.split_ascii_whitespace().any(|part| {
+        match reqwest::Url::parse(part.trim_matches(|c: char| {
+            matches!(
+                c,
+                '"' | '\'' | '(' | ')' | '[' | ']' | '{' | '}' | ',' | ';'
+            )
+        })) {
+            Ok(url) => {
+                !url.username().is_empty() || url.password().is_some() || url.query().is_some()
+            }
+            Err(_) => false,
+        }
+    })
+}
+
+fn contains_secret_marker(raw: &str) -> bool {
+    let lowered = raw.to_ascii_lowercase();
+    [
+        "authorization",
+        "api_key",
+        "apikey",
+        "access_token",
+        "token",
+        "password",
+        "passwd",
+        "secret",
+        "bearer ",
+        "basic ",
+    ]
+    .iter()
+    .any(|marker| lowered.contains(marker))
+}
+
+fn truncate_diagnostic(raw: &str) -> String {
+    if raw.len() <= MAX_DIAGNOSTIC_MESSAGE_LEN {
+        raw.to_string()
+    } else {
+        raw.chars().take(MAX_DIAGNOSTIC_MESSAGE_LEN).collect()
+    }
+}
+
+fn sanitized_content_type(headers: &reqwest::header::HeaderMap) -> Option<String> {
+    let raw = headers.get(CONTENT_TYPE)?.to_str().ok()?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    if contains_secret_marker(raw) || contains_secret_bearing_url(raw) {
+        return Some(REDACTED_SECRET.to_string());
+    }
+    Some(
+        raw.chars()
+            .filter(|ch| {
+                ch.is_ascii_alphanumeric()
+                    || matches!(
+                        ch,
+                        '!' | '#'
+                            | '$'
+                            | '%'
+                            | '&'
+                            | '\''
+                            | '*'
+                            | '+'
+                            | '-'
+                            | '.'
+                            | '^'
+                            | '_'
+                            | '`'
+                            | '|'
+                            | '~'
+                            | '/'
+                            | ';'
+                            | '='
+                            | ' '
+                    )
+            })
+            .take(120)
+            .collect(),
+    )
+}
 
 /// Error returned when a Bitcoin BTC-denominated JSON amount cannot be represented exactly.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -330,7 +487,10 @@ impl BtcJsonRpcClient {
             .timeout(Duration::from_secs(30))
             .build()
             .map_err(|err| {
-                BtcRpcError::Http(format!("failed to build bitcoin rpc client: {err}"))
+                BtcRpcError::Http(format!(
+                    "failed to build bitcoin rpc client: {}",
+                    diagnostic_message(&err.to_string())
+                ))
             })?;
         Ok(Self {
             config,
@@ -352,7 +512,7 @@ impl BtcJsonRpcClient {
         if let Some(err) = rpc_resp.error {
             return Err(BtcRpcError::JsonRpcError {
                 code: err.code,
-                message: err.message,
+                message: diagnostic_message(&err.message),
             });
         }
 
@@ -371,7 +531,7 @@ impl BtcJsonRpcClient {
         if let Some(err) = rpc_resp.error {
             return Err(BtcRpcError::JsonRpcError {
                 code: err.code,
-                message: err.message,
+                message: diagnostic_message(&err.message),
             });
         }
 
@@ -402,20 +562,22 @@ impl BtcJsonRpcClient {
         let resp = req
             .send()
             .await
-            .map_err(|e| BtcRpcError::Http(e.to_string()))?;
+            .map_err(|e| BtcRpcError::Http(diagnostic_message(&e.to_string())))?;
         let status = resp.status().as_u16();
         if !(200..300).contains(&status) {
-            let body = resp
-                .text()
-                .await
-                .unwrap_or_else(|_| "<unreadable>".to_string());
-            return Err(BtcRpcError::HttpStatus(status, body));
+            let content_type = sanitized_content_type(resp.headers());
+            let body_len = resp.bytes().await.ok().map(|bytes| bytes.len());
+            return Err(BtcRpcError::HttpStatus {
+                status,
+                body_len,
+                content_type,
+            });
         }
 
         let text = resp
             .text()
             .await
-            .map_err(|e| BtcRpcError::BodyRead(e.to_string()))?;
+            .map_err(|e| BtcRpcError::BodyRead(diagnostic_message(&e.to_string())))?;
         Ok(text)
     }
 
@@ -460,6 +622,80 @@ mod tests {
             rpc_password: None,
         };
         let _ = BtcJsonRpcClient::new(config).expect("constructor should not fail");
+    }
+
+    #[test]
+    fn config_debug_redacts_secret_bearing_fields() {
+        let config = BtcJsonRpcConfig {
+            rpc_url: "http://url_user:url_password@example.com:8332/rpc?api_key=query_secret&token=query_token#frag".to_string(),
+            rpc_user: Some("rpc_user_secret".to_string()),
+            rpc_password: Some("rpc_password_secret".to_string()),
+        };
+
+        let rendered = format!("{config:?}");
+
+        assert!(rendered.contains("BtcJsonRpcConfig"));
+        assert!(rendered.contains("http://example.com:8332"));
+        assert!(!rendered.contains("url_user"));
+        assert!(!rendered.contains("url_password"));
+        assert!(!rendered.contains("api_key"));
+        assert!(!rendered.contains("query_secret"));
+        assert!(!rendered.contains("query_token"));
+        assert!(!rendered.contains("rpc_user_secret"));
+        assert!(!rendered.contains("rpc_password_secret"));
+    }
+
+    #[test]
+    fn http_status_error_omits_raw_response_body() {
+        let err = BtcRpcError::HttpStatus {
+            status: 500,
+            body_len: Some(
+                "Authorization: Bearer body_token password=body_password token=body_secret".len(),
+            ),
+            content_type: Some("text/plain".to_string()),
+        };
+
+        let rendered = format!("{err}");
+        let debug = format!("{err:?}");
+
+        assert!(rendered.contains("btc rpc http status 500"));
+        assert!(rendered.contains("body_len="));
+        assert!(!rendered.contains("body_token"));
+        assert!(!rendered.contains("body_password"));
+        assert!(!rendered.contains("body_secret"));
+        assert!(!debug.contains("body_token"));
+        assert!(!debug.contains("body_password"));
+        assert!(!debug.contains("body_secret"));
+    }
+
+    #[test]
+    fn diagnostic_message_redacts_secret_patterns() {
+        let rendered = BtcRpcError::JsonRpcError {
+            code: -32603,
+            message: diagnostic_message(
+                "Authorization: Bearer auth_token api_key=query_secret password=rpc_password",
+            ),
+        }
+        .to_string();
+
+        assert!(rendered.contains(REDACTED_DIAGNOSTIC));
+        assert!(!rendered.contains("auth_token"));
+        assert!(!rendered.contains("query_secret"));
+        assert!(!rendered.contains("rpc_password"));
+    }
+
+    #[test]
+    fn content_type_metadata_redacts_secret_markers() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            CONTENT_TYPE,
+            reqwest::header::HeaderValue::from_static("text/plain; token=header_secret"),
+        );
+
+        let rendered = sanitized_content_type(&headers).expect("content type should parse");
+
+        assert_eq!(rendered, REDACTED_SECRET);
+        assert!(!rendered.contains("header_secret"));
     }
 
     #[test]

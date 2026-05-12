@@ -412,6 +412,53 @@ fn rpc_endpoint_name_sanitizes_to_scheme_host_port() {
 }
 
 #[test]
+fn source_debug_redacts_url_query_userinfo_and_authorization() {
+    let source = EvmJsonRpcSource {
+        id: "primary".to_string(),
+        rpc_url: "https://url_user:url_password@example.com:8545/path?api_key=query_secret&token=query_token#frag".to_string(),
+        authorization: Some("Bearer authorization_secret".to_string()),
+        kind: EvmSourceKind::RemoteUser,
+        require_get_proof_probe: true,
+    };
+
+    let rendered = format!("{source:?}");
+
+    assert!(rendered.contains("EvmJsonRpcSource"));
+    assert!(rendered.contains("https://example.com:8545"));
+    assert!(!rendered.contains("url_user"));
+    assert!(!rendered.contains("url_password"));
+    assert!(!rendered.contains("api_key"));
+    assert!(!rendered.contains("query_secret"));
+    assert!(!rendered.contains("query_token"));
+    assert!(!rendered.contains("authorization_secret"));
+}
+
+#[test]
+fn config_debug_redacts_source_secrets() {
+    let cfg = config_with_sources(
+        vec![EvmJsonRpcSource {
+            id: "primary".to_string(),
+            rpc_url: "https://url_user:url_password@example.com:8545/path?api_key=query_secret&token=query_token#frag".to_string(),
+            authorization: Some("Bearer authorization_secret".to_string()),
+            kind: EvmSourceKind::RemoteUser,
+            require_get_proof_probe: false,
+        }],
+        EvmRoutingStrategy::Failover,
+    );
+
+    let rendered = format!("{cfg:?}");
+
+    assert!(rendered.contains("EvmJsonRpcHttpConfig"));
+    assert!(rendered.contains("https://example.com:8545"));
+    assert!(!rendered.contains("url_user"));
+    assert!(!rendered.contains("url_password"));
+    assert!(!rendered.contains("api_key"));
+    assert!(!rendered.contains("query_secret"));
+    assert!(!rendered.contains("query_token"));
+    assert!(!rendered.contains("authorization_secret"));
+}
+
+#[test]
 fn classifier_write_methods_are_write_or_side_effect() {
     let cfg = EvmJsonRpcHttpConfig::default();
     assert_eq!(
@@ -1055,6 +1102,24 @@ async fn source_failures_do_not_leak_url_query_or_auth_secrets() {
     assert!(!detail_text.contains("topsecret"));
     assert!(!detail_text.contains("api_key"));
     assert!(detail_text.contains("primary"));
+}
+
+#[test]
+fn jsonrpc_error_message_redacts_secret_markers() {
+    let details = jsonrpc_error_details(
+        "primary",
+        &json!({
+            "code": -32000,
+            "message": "Authorization: Bearer auth_token api_key=query_secret password=rpc_password",
+        }),
+    )
+    .expect("error details should be produced");
+    let detail_text = details.to_string();
+
+    assert!(detail_text.contains(REDACTED_DIAGNOSTIC));
+    assert!(!detail_text.contains("auth_token"));
+    assert!(!detail_text.contains("query_secret"));
+    assert!(!detail_text.contains("rpc_password"));
 }
 
 #[tokio::test]

@@ -7,6 +7,7 @@
 //! Security notes:
 //! - RPC URLs and authorization headers are runtime configuration and MUST NOT be persisted.
 //! - Errors MUST NOT include request payloads, response bodies, or authorization values.
+//! - Debug output redacts URL userinfo, query strings, and authorization headers.
 //!
 //! # Examples
 //!
@@ -43,6 +44,7 @@
 
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::fmt;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -78,6 +80,8 @@ const ENV_EVM_RPC_PREFERRED_ORDER: &str = "MFM_EVM_RPC_PREFERRED_ORDER";
 const ENV_EVM_RPC_REQUIRE_GET_PROOF_IDS: &str = "MFM_EVM_RPC_REQUIRE_GET_PROOF_IDS";
 
 const MAX_DIAGNOSTIC_MESSAGE_LEN: usize = 240;
+const REDACTED_SECRET: &str = "<redacted>";
+const REDACTED_DIAGNOSTIC: &str = "<redacted diagnostic message>";
 
 fn info(
     code: &'static str,
@@ -118,6 +122,48 @@ fn truncate_message(raw: &str) -> String {
     }
 }
 
+fn diagnostic_message(raw: &str) -> String {
+    if contains_secret_marker(raw) || contains_secret_bearing_url(raw) {
+        return REDACTED_DIAGNOSTIC.to_string();
+    }
+    truncate_message(raw)
+}
+
+fn contains_secret_marker(raw: &str) -> bool {
+    let lowered = raw.to_ascii_lowercase();
+    [
+        "authorization",
+        "api_key",
+        "apikey",
+        "access_token",
+        "token",
+        "password",
+        "passwd",
+        "secret",
+        "bearer ",
+        "basic ",
+    ]
+    .iter()
+    .any(|marker| lowered.contains(marker))
+}
+
+fn contains_secret_bearing_url(raw: &str) -> bool {
+    raw.split_ascii_whitespace().any(|part| {
+        let token = part.trim_matches(|ch: char| {
+            matches!(
+                ch,
+                '"' | '\'' | '(' | ')' | '[' | ']' | '{' | '}' | ',' | ';'
+            )
+        });
+        match reqwest::Url::parse(token) {
+            Ok(url) => {
+                !url.username().is_empty() || url.password().is_some() || url.query().is_some()
+            }
+            Err(_) => false,
+        }
+    })
+}
+
 fn source_error_details(
     source_id: &str,
     extra: Option<serde_json::Value>,
@@ -143,7 +189,7 @@ fn jsonrpc_error_details(
     let message = error
         .get("message")
         .and_then(|v| v.as_str())
-        .map(truncate_message);
+        .map(diagnostic_message);
 
     if code.is_none() && message.is_none() {
         return source_error_details(source_id, None);
@@ -180,7 +226,7 @@ impl EvmSourceKind {
 }
 
 /// Single RPC endpoint entry used by the HTTP transport.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct EvmJsonRpcSource {
     /// Stable source identifier used for routing hints and diagnostics.
     pub id: String,
@@ -192,6 +238,21 @@ pub struct EvmJsonRpcSource {
     pub kind: EvmSourceKind,
     /// Whether the source must pass an `eth_getProof` capability probe before use.
     pub require_get_proof_probe: bool,
+}
+
+impl fmt::Debug for EvmJsonRpcSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EvmJsonRpcSource")
+            .field("id", &self.id)
+            .field("rpc_url", &rpc_endpoint_name(&self.rpc_url))
+            .field(
+                "authorization",
+                &redacted_optional_secret(&self.authorization),
+            )
+            .field("kind", &self.kind)
+            .field("require_get_proof_probe", &self.require_get_proof_probe)
+            .finish()
+    }
 }
 
 /// High-level routing strategy for read-only RPC calls.
@@ -226,6 +287,26 @@ pub struct EvmJsonRpcHttpConfig {
     pub logs_min_block_span: u64,
     /// Maximum number of `eth_getLogs` chunks attempted for one logical call.
     pub logs_max_chunks_per_call: u64,
+}
+
+impl fmt::Debug for EvmJsonRpcHttpConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EvmJsonRpcHttpConfig")
+            .field("sources", &self.sources)
+            .field("preferred_order", &self.preferred_order)
+            .field("strategy", &self.strategy)
+            .field("hedge_delay", &self.hedge_delay)
+            .field("timeout", &self.timeout)
+            .field("unhealthy_cooldown_calls", &self.unhealthy_cooldown_calls)
+            .field(
+                "hedge_max_eth_call_params_bytes",
+                &self.hedge_max_eth_call_params_bytes,
+            )
+            .field("logs_max_block_span", &self.logs_max_block_span)
+            .field("logs_min_block_span", &self.logs_min_block_span)
+            .field("logs_max_chunks_per_call", &self.logs_max_chunks_per_call)
+            .finish()
+    }
 }
 
 impl Default for EvmJsonRpcHttpConfig {
@@ -341,7 +422,7 @@ pub struct EvmJsonRpcHttpTransportFactory {
     config_error: Option<EvmJsonRpcHttpConfigError>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 struct EnvEvmRpcSource {
     id: String,
     rpc_url: String,
@@ -603,6 +684,14 @@ fn routing_strategy_name(strategy: EvmRoutingStrategy) -> &'static str {
     match strategy {
         EvmRoutingStrategy::Failover => "failover",
         EvmRoutingStrategy::HedgedLight => "hedged_light",
+    }
+}
+
+fn redacted_optional_secret(value: &Option<String>) -> &'static str {
+    if value.is_some() {
+        REDACTED_SECRET
+    } else {
+        "<unset>"
     }
 }
 
@@ -1820,7 +1909,7 @@ impl EvmJsonRpcHttpTransport {
             } else {
                 "transport"
             };
-            let err_message = truncate_message(&err.to_string());
+            let err_message = diagnostic_message(&err.to_string());
             debug!(
                 source_id = %source_id,
                 source_kind = source_kind,
@@ -1902,7 +1991,7 @@ impl EvmJsonRpcHttpTransport {
                 rpc_endpoint = %rpc_endpoint,
                 rpc_method = %rpc_method,
                 rpc_request_id = ?rpc_request_id,
-                error = %err,
+                error = %diagnostic_message(&err.to_string()),
                 "evm jsonrpc response body read failed"
             );
             IoError::Transport(info_with_details(
