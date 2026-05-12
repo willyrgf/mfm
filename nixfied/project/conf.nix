@@ -26,13 +26,35 @@ let
       ];
 
   aaveOriginTools = if pkgs == null then null else import ./aave-origin-tools.nix { inherit pkgs; };
+  projectSource =
+    if pkgs == null then
+      null
+    else
+      pkgs.lib.cleanSourceWith {
+        name = "mfm-source";
+        src = ../..;
+        filter =
+          path: _type:
+          let
+            name = baseNameOf path;
+          in
+          !(
+            name == ".codex"
+            || name == ".git"
+            || name == ".mfm"
+            || name == "node_modules"
+            || name == "target"
+            || name == "result"
+            || pkgs.lib.hasPrefix "result-" name
+          );
+      };
   aaveOriginCompileRawPackage =
     if pkgs != null then
       pkgs.rustPlatform.buildRustPackage rec {
         pname = "mfm-aave-origin-compile";
         version = "0.1.0";
 
-        src = ../..;
+        src = projectSource;
         cargoLock.lockFile = ../../Cargo.lock;
 
         cargoBuildFlags = [
@@ -402,7 +424,7 @@ rec {
           pname = "mfm-cli";
           version = "0.1.29";
 
-          src = ../..;
+          src = projectSource;
           cargoLock.lockFile = ../../Cargo.lock;
 
           cargoBuildFlags = [
