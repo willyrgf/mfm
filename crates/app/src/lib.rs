@@ -96,7 +96,7 @@ use mfm_transports_local_evm::LocalEvmIoTransportFactory;
 use mfm_transports_local_fs::LocalFsIoTransportFactory;
 use mfm_transports_local_keystore::LocalKeystoreIoTransportFactory;
 use mfm_transports_proof::ProofIoTransportFactory;
-use mfm_transports_rpc_control::RpcControlTransportFactory;
+use mfm_transports_rpc_control::{RpcControlConfigError, RpcControlTransportFactory};
 
 const ENV_ARTIFACT_BACKEND: &str = "MFM_ARTIFACT_BACKEND";
 const ENV_ARTIFACT_ROOT: &str = "MFM_ARTIFACT_ROOT";
@@ -540,7 +540,9 @@ impl TransportPlugin for DefaultTransportPlugin {
         register_transport_factory(registry, Arc::new(LocalFsIoTransportFactory))?;
         register_transport_factory(registry, Arc::new(LocalEvmIoTransportFactory))?;
         register_transport_factory(registry, Arc::new(LocalKeystoreIoTransportFactory))?;
-        register_transport_factory(registry, Arc::new(RpcControlTransportFactory::from_env()))?;
+        let rpc_control_factory = RpcControlTransportFactory::from_env()
+            .map_err(app_error_from_rpc_control_config_error)?;
+        register_transport_factory(registry, Arc::new(rpc_control_factory))?;
         Ok(())
     }
 }
@@ -556,6 +558,14 @@ fn register_transport_factory(
             err.to_string(),
         )
     })
+}
+
+fn app_error_from_rpc_control_config_error(err: RpcControlConfigError) -> AppError {
+    AppError::new(
+        ErrorClass::Internal,
+        "RpcControlTransportConfigInvalid",
+        err.to_string(),
+    )
 }
 
 /// Builder for the default application engine bundle.

@@ -107,6 +107,10 @@ fn config_with_sources(
     }
 }
 
+fn transport_factory(cfg: EvmJsonRpcHttpConfig) -> EvmJsonRpcHttpTransportFactory {
+    EvmJsonRpcHttpTransportFactory::try_new(cfg).expect("valid config")
+}
+
 async fn call_transport(
     transport: &mut dyn LiveIoTransport,
     request: serde_json::Value,
@@ -386,6 +390,33 @@ fn transport_creation_fails_fast_when_source_registry_is_empty() {
 }
 
 #[test]
+fn transport_creation_errors_do_not_include_source_url_credentials() {
+    let mut cfg = config_with_sources(
+        vec![EvmJsonRpcSource {
+            id: "primary".to_string(),
+            rpc_url: "https://url_user:url_password@example.com:8545/path?api_key=query_secret&token=query_token#frag".to_string(),
+            authorization: Some("Bearer authorization_secret".to_string()),
+            kind: EvmSourceKind::RemoteUser,
+            require_get_proof_probe: false,
+        }],
+        EvmRoutingStrategy::Failover,
+    );
+    cfg.preferred_order = vec!["missing".to_string()];
+
+    let err = match EvmJsonRpcHttpTransportFactory::try_new(cfg) {
+        Ok(_) => panic!("unknown preferred source should fail construction"),
+        Err(err) => err.to_string(),
+    };
+
+    assert!(!err.contains("url_user"));
+    assert!(!err.contains("url_password"));
+    assert!(!err.contains("api_key"));
+    assert!(!err.contains("query_secret"));
+    assert!(!err.contains("query_token"));
+    assert!(!err.contains("authorization_secret"));
+}
+
+#[test]
 fn transport_creation_accepts_multiple_sources() {
     let cfg = config_with_sources(
         vec![
@@ -564,7 +595,7 @@ async fn routing_analysis_operation_returns_order_without_network_calls() {
         ],
         EvmRoutingStrategy::HedgedLight,
     );
-    let factory = EvmJsonRpcHttpTransportFactory::new(cfg);
+    let factory = transport_factory(cfg);
     let mut t = factory.make(env());
 
     let response = call_transport(
@@ -621,7 +652,7 @@ async fn routing_analysis_operation_reports_unknown_route_without_failing() {
         vec![source("primary", &primary.url)],
         EvmRoutingStrategy::Failover,
     );
-    let factory = EvmJsonRpcHttpTransportFactory::new(cfg);
+    let factory = transport_factory(cfg);
     let mut t = factory.make(env());
 
     let response = call_transport(
@@ -661,7 +692,7 @@ async fn failover_uses_secondary_on_primary_http_failure() {
         ],
         EvmRoutingStrategy::Failover,
     );
-    let factory = EvmJsonRpcHttpTransportFactory::new(cfg);
+    let factory = transport_factory(cfg);
     let mut t = factory.make(env());
 
     let response = call_transport(
@@ -702,7 +733,7 @@ async fn logs_chunking_splits_large_ranges_and_merges_results() {
     cfg.logs_max_block_span = 64;
     cfg.logs_min_block_span = 8;
     cfg.logs_max_chunks_per_call = 64;
-    let factory = EvmJsonRpcHttpTransportFactory::new(cfg);
+    let factory = transport_factory(cfg);
     let mut t = factory.make(env());
 
     let response = call_transport(
@@ -761,7 +792,7 @@ async fn logs_chunking_exhausts_when_retryable_failures_persist() {
     cfg.logs_max_block_span = 16;
     cfg.logs_min_block_span = 8;
     cfg.logs_max_chunks_per_call = 10;
-    let factory = EvmJsonRpcHttpTransportFactory::new(cfg);
+    let factory = transport_factory(cfg);
     let mut t = factory.make(env());
 
     let err = call_transport(
@@ -797,7 +828,7 @@ async fn failover_uses_secondary_on_primary_rate_limit() {
         ],
         EvmRoutingStrategy::Failover,
     );
-    let factory = EvmJsonRpcHttpTransportFactory::new(cfg);
+    let factory = transport_factory(cfg);
     let mut t = factory.make(env());
 
     let response = call_transport(
@@ -825,7 +856,7 @@ async fn failover_returns_stable_pool_error_when_all_sources_fail() {
         ],
         EvmRoutingStrategy::Failover,
     );
-    let factory = EvmJsonRpcHttpTransportFactory::new(cfg);
+    let factory = transport_factory(cfg);
     let mut t = factory.make(env());
 
     let err = call_transport(
@@ -859,7 +890,7 @@ async fn write_methods_use_primary_only_single_dispatch() {
         ],
         EvmRoutingStrategy::HedgedLight,
     );
-    let factory = EvmJsonRpcHttpTransportFactory::new(cfg);
+    let factory = transport_factory(cfg);
     let mut t = factory.make(env());
 
     let err = call_transport(
@@ -896,7 +927,7 @@ async fn hedging_returns_secondary_winner_when_primary_is_slow() {
         EvmRoutingStrategy::HedgedLight,
     );
     cfg.hedge_delay = Duration::from_millis(20);
-    let factory = EvmJsonRpcHttpTransportFactory::new(cfg);
+    let factory = transport_factory(cfg);
     let mut t = factory.make(env());
 
     let response = call_transport(
@@ -925,7 +956,7 @@ async fn hedging_falls_back_when_primary_probe_fails() {
         ],
         EvmRoutingStrategy::HedgedLight,
     );
-    let factory = EvmJsonRpcHttpTransportFactory::new(cfg);
+    let factory = transport_factory(cfg);
     let mut t = factory.make(env());
 
     let response = call_transport(
@@ -956,7 +987,7 @@ async fn hedging_does_not_start_secondary_when_primary_finishes_before_delay() {
         EvmRoutingStrategy::HedgedLight,
     );
     cfg.hedge_delay = Duration::from_millis(250);
-    let factory = EvmJsonRpcHttpTransportFactory::new(cfg);
+    let factory = transport_factory(cfg);
     let mut t = factory.make(env());
 
     let response = call_transport(
@@ -987,7 +1018,7 @@ async fn hedging_returns_stable_error_when_primary_and_secondary_fail() {
     );
     cfg.hedge_delay = Duration::from_millis(20);
 
-    let factory = EvmJsonRpcHttpTransportFactory::new(cfg);
+    let factory = transport_factory(cfg);
     let mut t = factory.make(env());
 
     let err = call_transport(
@@ -1020,7 +1051,7 @@ async fn read_requests_reject_per_request_rpc_url_override() {
         vec![source("primary", &primary.url)],
         EvmRoutingStrategy::Failover,
     );
-    let factory = EvmJsonRpcHttpTransportFactory::new(cfg);
+    let factory = transport_factory(cfg);
     let mut t = factory.make(env());
 
     let err = call_transport(
@@ -1047,7 +1078,7 @@ async fn write_requests_reject_per_request_rpc_url_override() {
         vec![source("primary", &primary.url)],
         EvmRoutingStrategy::Failover,
     );
-    let factory = EvmJsonRpcHttpTransportFactory::new(cfg);
+    let factory = transport_factory(cfg);
     let mut t = factory.make(env());
 
     let err = call_transport(
@@ -1079,7 +1110,7 @@ async fn source_failures_do_not_leak_url_query_or_auth_secrets() {
         }],
         EvmRoutingStrategy::Failover,
     );
-    let factory = EvmJsonRpcHttpTransportFactory::new(cfg);
+    let factory = transport_factory(cfg);
     let mut t = factory.make(env());
 
     let err = call_transport(
@@ -1136,7 +1167,7 @@ async fn unhealthy_source_is_skipped_until_recovery_window() {
     );
     cfg.unhealthy_cooldown_calls = 2;
 
-    let factory = EvmJsonRpcHttpTransportFactory::new(cfg);
+    let factory = transport_factory(cfg);
     let mut t = factory.make(env());
 
     let r1 = call_transport(t.as_mut(), json!({ "method": "eth_getLogs", "params": [] }))
@@ -1191,7 +1222,7 @@ async fn healthy_local_source_is_preferred_over_equal_score_remote_source() {
         ..EvmJsonRpcHttpConfig::default()
     };
 
-    let factory = EvmJsonRpcHttpTransportFactory::new(cfg);
+    let factory = transport_factory(cfg);
     let mut t = factory.make(env());
 
     let response = call_transport(
@@ -1216,7 +1247,7 @@ async fn route_source_id_must_exist() {
         vec![source("primary", &primary.url)],
         EvmRoutingStrategy::Failover,
     );
-    let factory = EvmJsonRpcHttpTransportFactory::new(cfg);
+    let factory = transport_factory(cfg);
     let mut t = factory.make(env());
 
     let err = call_transport(

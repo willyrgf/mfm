@@ -19,7 +19,11 @@
 //!     EvmSourceKind,
 //! };
 //!
-//! let factory = EvmJsonRpcHttpTransportFactory::new(EvmJsonRpcHttpConfig {
+//! # fn build_factory() -> Result<
+//! #     EvmJsonRpcHttpTransportFactory,
+//! #     mfm_collectors_evm_jsonrpc_http::EvmJsonRpcHttpConfigError,
+//! # > {
+//! let factory = EvmJsonRpcHttpTransportFactory::try_new(EvmJsonRpcHttpConfig {
 //!     sources: vec![EvmJsonRpcSource {
 //!         id: "primary".to_string(),
 //!         rpc_url: "http://127.0.0.1:8545".to_string(),
@@ -36,9 +40,10 @@
 //!     logs_max_block_span: 512,
 //!     logs_min_block_span: 64,
 //!     logs_max_chunks_per_call: 16,
-//! });
+//! })?;
 //!
-//! let _ = factory;
+//! Ok(factory)
+//! # }
 //! ```
 #![warn(missing_docs)]
 
@@ -71,7 +76,6 @@ const CODE_EVM_SOURCE_UNHEALTHY: &str = "evm_source_unhealthy";
 const CODE_EVM_NO_HEALTHY_SOURCE: &str = "evm_no_healthy_source";
 const CODE_EVM_HEDGE_EXHAUSTED: &str = "evm_hedge_exhausted";
 const CODE_EVM_ROUTE_SOURCE_UNKNOWN: &str = "evm_route_source_unknown";
-const CODE_EVM_CONFIG_INVALID: &str = "evm_config_invalid";
 const CODE_EVM_LOGS_CHUNKING_INVALID_RANGE: &str = "evm_logs_chunking_invalid_range";
 const CODE_EVM_LOGS_CHUNKING_EXHAUSTED: &str = "evm_logs_chunking_exhausted";
 const METHOD_EVM_ROUTING_ANALYSIS: &str = "mfm_debugRoutingAnalysis";
@@ -341,6 +345,8 @@ pub enum EvmJsonRpcHttpConfigError {
     InvalidLogsChunkingRange,
     /// `eth_getLogs` chunk count limit was zero.
     InvalidLogsChunkingChunkLimit,
+    /// The HTTP client could not be constructed.
+    HttpClientBuild(String),
 }
 
 impl std::fmt::Display for EvmJsonRpcHttpConfigError {
@@ -369,6 +375,9 @@ impl std::fmt::Display for EvmJsonRpcHttpConfigError {
                     f,
                     "logs chunking config is invalid: max chunks per call must be > 0"
                 )
+            }
+            EvmJsonRpcHttpConfigError::HttpClientBuild(reason) => {
+                write!(f, "failed to build evm jsonrpc http client: {reason}")
             }
         }
     }
@@ -419,7 +428,6 @@ fn validate_config(cfg: &EvmJsonRpcHttpConfig) -> Result<(), EvmJsonRpcHttpConfi
 pub struct EvmJsonRpcHttpTransportFactory {
     cfg: EvmJsonRpcHttpConfig,
     client: reqwest::Client,
-    config_error: Option<EvmJsonRpcHttpConfigError>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -522,38 +530,26 @@ fn resolve_evm_rpc_config_from_env() -> EvmJsonRpcHttpConfig {
 }
 
 impl EvmJsonRpcHttpTransportFactory {
-    /// Creates a new transport factory and stores any config validation error for later use.
-    pub fn new(cfg: EvmJsonRpcHttpConfig) -> Self {
-        let client = reqwest::Client::builder()
-            .timeout(cfg.timeout)
-            .build()
-            .expect("reqwest client must build");
-        let config_error = validate_config(&cfg).err();
-        Self {
-            cfg,
-            client,
-            config_error,
-        }
-    }
-
     /// Validates the configuration and constructs a transport factory.
     pub fn try_new(cfg: EvmJsonRpcHttpConfig) -> Result<Self, EvmJsonRpcHttpConfigError> {
         validate_config(&cfg)?;
-        let client = reqwest::Client::builder()
-            .timeout(cfg.timeout)
-            .build()
-            .expect("reqwest client must build");
-        Ok(Self {
-            cfg,
-            client,
-            config_error: None,
-        })
+        let client = build_http_client(cfg.timeout)?;
+        Ok(Self { cfg, client })
     }
 
     /// Builds a transport factory from environment-derived configuration.
     pub fn from_env() -> Result<Self, EvmJsonRpcHttpConfigError> {
-        Ok(Self::new(resolve_evm_rpc_config_from_env()))
+        Self::try_new(resolve_evm_rpc_config_from_env())
     }
+}
+
+fn build_http_client(timeout: Duration) -> Result<reqwest::Client, EvmJsonRpcHttpConfigError> {
+    reqwest::Client::builder()
+        .timeout(timeout)
+        .build()
+        .map_err(|err| {
+            EvmJsonRpcHttpConfigError::HttpClientBuild(diagnostic_message(&err.to_string()))
+        })
 }
 
 impl LiveIoTransportFactory for EvmJsonRpcHttpTransportFactory {
@@ -584,7 +580,6 @@ impl LiveIoTransportFactory for EvmJsonRpcHttpTransportFactory {
             call_ordinal: 0,
             source_states,
             base_order,
-            config_error: self.config_error.clone(),
         })
     }
 }
@@ -604,7 +599,6 @@ struct EvmJsonRpcHttpTransport {
     call_ordinal: u64,
     source_states: HashMap<String, SourceRuntimeState>,
     base_order: HashMap<String, usize>,
-    config_error: Option<EvmJsonRpcHttpConfigError>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -886,18 +880,6 @@ impl EvmJsonRpcHttpTransport {
             "id": id,
             "method": req.method,
             "params": req.params,
-        })
-    }
-
-    fn config_error_info(&self) -> Option<ErrorInfo> {
-        self.config_error.as_ref().map(|err| {
-            info_with_details(
-                CODE_EVM_CONFIG_INVALID,
-                ErrorCategory::ParsingInput,
-                false,
-                "evm transport configuration is invalid",
-                Some(json!({ "reason": err.to_string() })),
-            )
         })
     }
 
@@ -2093,10 +2075,6 @@ impl EvmJsonRpcHttpTransport {
 #[async_trait]
 impl LiveIoTransport for EvmJsonRpcHttpTransport {
     async fn call(&mut self, call: IoCall) -> Result<serde_json::Value, IoError> {
-        if let Some(info) = self.config_error_info() {
-            return Err(IoError::Other(info));
-        }
-
         let req: EvmTransportRequest =
             serde_json::from_value(call.request).map_err(|_| self.invalid_request_error())?;
 

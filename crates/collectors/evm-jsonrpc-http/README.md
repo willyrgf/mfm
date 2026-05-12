@@ -5,6 +5,8 @@ HTTP live transport for the `namespace = "evm"` IO surface (EVM JSON-RPC).
 ## Current Behavior
 
 - Source-id based runtime routing (`EvmJsonRpcHttpConfig.sources` + `preferred_order`)
+- Fallible factory construction via `EvmJsonRpcHttpTransportFactory::try_new`, with config and
+  HTTP-client build errors returned before a transport can be registered.
 - Method classification:
   - `read_light`: optional hedging (`hedged_light`)
   - `read_heavy`: sequential failover

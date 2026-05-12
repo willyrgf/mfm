@@ -651,6 +651,8 @@ pub enum RpcControlConfigError {
     UnknownPreferredSourceId(String),
     /// A configured source omitted `network_id`.
     MissingNetworkId(String),
+    /// The inner EVM executor factory could not be constructed.
+    ExecutorConfig(String),
 }
 
 impl std::fmt::Display for RpcControlConfigError {
@@ -672,6 +674,12 @@ impl std::fmt::Display for RpcControlConfigError {
                 write!(
                     f,
                     "rpc.control source `{source_id}` must declare network_id"
+                )
+            }
+            RpcControlConfigError::ExecutorConfig(reason) => {
+                write!(
+                    f,
+                    "rpc.control evm executor configuration invalid: {reason}"
                 )
             }
         }
@@ -850,15 +858,17 @@ impl RpcControlTransportFactory {
     }
 
     /// Builds a transport factory from environment-derived bootstrap config.
-    pub fn from_env() -> Self {
+    pub fn from_env() -> Result<Self, RpcControlConfigError> {
         let catalog = resolve_bootstrap_catalog_from_env();
         let config_error = validate_catalog(&catalog).err();
-        Self {
+        let factory = Self {
             catalog,
             config_error,
             control_plane_storage_mode: RpcControlPlaneStorageMode::default(),
             executor_tuning: RpcControlExecutorTuning::default(),
-        }
+        };
+        factory.validate_inner_executor_factory()?;
+        Ok(factory)
     }
 
     /// Returns a copy of the factory configured to use `mode` for control-plane persistence.
@@ -877,11 +887,17 @@ impl RpcControlTransportFactory {
     pub fn config_error(&self) -> Option<&RpcControlConfigError> {
         self.config_error.as_ref()
     }
-}
 
-impl Default for RpcControlTransportFactory {
-    fn default() -> Self {
-        Self::from_env()
+    fn validate_inner_executor_factory(&self) -> Result<(), RpcControlConfigError> {
+        if self.config_error.is_some() {
+            return Ok(());
+        }
+        EvmJsonRpcHttpTransportFactory::try_new(inner_executor_config(
+            &self.catalog,
+            self.executor_tuning,
+        ))
+        .map(|_| ())
+        .map_err(|err| RpcControlConfigError::ExecutorConfig(err.to_string()))
     }
 }
 
@@ -895,16 +911,16 @@ impl LiveIoTransportFactory for RpcControlTransportFactory {
             self.control_plane_storage_mode,
             Arc::clone(&env.stores.streams),
         );
-        let executor = if self.config_error.is_none() {
-            Some(
-                EvmJsonRpcHttpTransportFactory::new(inner_executor_config(
-                    &self.catalog,
-                    self.executor_tuning,
-                ))
-                .make(env),
-            )
+        let (executor, executor_error) = if self.config_error.is_none() {
+            match EvmJsonRpcHttpTransportFactory::try_new(inner_executor_config(
+                &self.catalog,
+                self.executor_tuning,
+            )) {
+                Ok(factory) => (Some(factory.make(env)), None),
+                Err(err) => (None, Some(err.to_string())),
+            }
         } else {
-            None
+            (None, None)
         };
 
         let btc_client = std::env::var(ENV_BTC_RPC_URL).ok().map(|rpc_url| {
@@ -917,6 +933,7 @@ impl LiveIoTransportFactory for RpcControlTransportFactory {
 
         Box::new(RpcControlTransport {
             executor,
+            executor_error,
             btc_client,
             control_plane_store,
             catalog: self.catalog.clone(),
@@ -927,6 +944,7 @@ impl LiveIoTransportFactory for RpcControlTransportFactory {
 
 struct RpcControlTransport {
     executor: Option<Box<dyn LiveIoTransport>>,
+    executor_error: Option<String>,
     btc_client: Option<Result<BtcJsonRpcClient, BtcRpcError>>,
     control_plane_store: ControlPlaneStore,
     catalog: BootstrapCatalog,
@@ -948,6 +966,15 @@ impl RpcControlTransport {
                 ErrorCategory::ParsingInput,
                 false,
                 err.to_string(),
+            )),
+            None if self.executor_error.is_some() => Err(io_transport(
+                "rpc_control_executor_config_invalid",
+                ErrorCategory::ParsingInput,
+                false,
+                format!(
+                    "rpc.control evm executor configuration invalid: {}",
+                    self.executor_error.as_deref().unwrap_or("unknown error")
+                ),
             )),
             None => match self.executor.as_mut() {
                 Some(executor) => Ok(executor.as_mut()),
@@ -2076,6 +2103,42 @@ mod tests {
 
     use mfm_stream_store_mem::MemStreamStore;
 
+    struct NoopArtifactStore;
+
+    #[async_trait]
+    impl mfm_machine::stores::ArtifactStore for NoopArtifactStore {
+        async fn put(
+            &self,
+            _kind: mfm_machine::stores::ArtifactKind,
+            _bytes: Vec<u8>,
+        ) -> Result<mfm_machine::ids::ArtifactId, StorageError> {
+            Ok(mfm_machine::ids::ArtifactId::must_new("0".repeat(64)))
+        }
+
+        async fn get(&self, _id: &mfm_machine::ids::ArtifactId) -> Result<Vec<u8>, StorageError> {
+            Ok(Vec::new())
+        }
+
+        async fn exists(&self, _id: &mfm_machine::ids::ArtifactId) -> Result<bool, StorageError> {
+            Ok(false)
+        }
+    }
+
+    fn live_env_for_tests() -> LiveIoEnv {
+        LiveIoEnv {
+            stores: mfm_machine::engine::Stores {
+                streams: Arc::new(MemStreamStore::new()),
+                artifacts: Arc::new(NoopArtifactStore),
+            },
+            run_id: serde_json::from_str::<mfm_machine::ids::RunId>(
+                "\"00000000-0000-0000-0000-000000000000\"",
+            )
+            .expect("valid RunId"),
+            state_id: mfm_machine::ids::StateId::must_new("rpc_control.test.s1".to_string()),
+            attempt: 0,
+        }
+    }
+
     struct StubExecutor;
 
     #[async_trait]
@@ -2217,6 +2280,7 @@ mod tests {
             "Authorization: Bearer body_token password=body_password token=body_secret";
         let mut transport = RpcControlTransport {
             executor: None,
+            executor_error: None,
             btc_client: Some(Err(BtcRpcError::HttpStatus {
                 status: 500,
                 body_len: Some(omitted_body.len()),
@@ -2246,10 +2310,60 @@ mod tests {
         assert!(!message.contains("body_secret"));
     }
 
+    #[tokio::test]
+    async fn inner_executor_construction_error_surfaces_without_rpc_credentials() {
+        let factory = RpcControlTransportFactory::new(vec![RpcControlBootstrapSource {
+            id: "primary".to_string(),
+            network_id: Some("ethereum-mainnet".to_string()),
+            rpc_url:
+                "https://url_user:url_password@example.com:8545/rpc?api_key=query_secret&token=query_token#frag"
+                    .to_string(),
+            authorization: Some("Bearer authorization_secret".to_string()),
+            kind: EvmSourceKind::RemoteUser,
+            require_get_proof_probe: false,
+        }])
+        .with_control_plane_storage_mode(RpcControlPlaneStorageMode::StreamStore)
+        .with_executor_tuning(RpcControlExecutorTuning::new(32, 64, 1));
+        let mut transport = factory.make(live_env_for_tests());
+        let request = serde_json::to_value(RpcControlRequest::EvmCall {
+            call: mfm_collectors_rpc_control::JsonRpcCall::for_network(
+                "ethereum-mainnet",
+                "eth_blockNumber",
+                serde_json::json!([]),
+            ),
+        })
+        .expect("request should serialize");
+
+        let err = transport
+            .call(IoCall {
+                namespace: NAMESPACE_RPC_CONTROL.to_string(),
+                request,
+                fact_key: None,
+            })
+            .await
+            .expect_err("invalid inner executor config should fail before dispatch");
+        let message = match err {
+            IoError::Transport(info) => {
+                assert_eq!(info.code.0, "rpc_control_executor_config_invalid");
+                info.message
+            }
+            other => panic!("expected transport error, got {other:?}"),
+        };
+
+        assert!(message.contains("logs chunking config is invalid"));
+        assert!(!message.contains("url_user"));
+        assert!(!message.contains("url_password"));
+        assert!(!message.contains("api_key"));
+        assert!(!message.contains("query_secret"));
+        assert!(!message.contains("query_token"));
+        assert!(!message.contains("authorization_secret"));
+    }
+
     fn transport_for_tests(sources: Vec<RpcControlBootstrapSource>) -> RpcControlTransport {
         let preferred_order = sources.iter().map(|source| source.id.clone()).collect();
         RpcControlTransport {
             executor: None,
+            executor_error: None,
             btc_client: None,
             control_plane_store: ControlPlaneStore::PostgresEnv { store: None },
             catalog: BootstrapCatalog {
@@ -2267,6 +2381,7 @@ mod tests {
         let preferred_order = sources.iter().map(|source| source.id.clone()).collect();
         RpcControlTransport {
             executor: Some(Box::new(StubExecutor)),
+            executor_error: None,
             btc_client: None,
             control_plane_store: ControlPlaneStore::StreamBacked(
                 StreamBackedControlPlaneStore::new(streams),
@@ -2287,6 +2402,7 @@ mod tests {
         let preferred_order = sources.iter().map(|source| source.id.clone()).collect();
         RpcControlTransport {
             executor: Some(executor),
+            executor_error: None,
             btc_client: None,
             control_plane_store: ControlPlaneStore::StreamBacked(
                 StreamBackedControlPlaneStore::new(streams),
@@ -2846,6 +2962,7 @@ mod tests {
 
         let mut transport = RpcControlTransport {
             executor: None,
+            executor_error: None,
             btc_client: Some(Ok(client)),
             control_plane_store: ControlPlaneStore::PostgresEnv { store: None },
             catalog: BootstrapCatalog {
@@ -2904,6 +3021,7 @@ mod tests {
 
         let mut transport = RpcControlTransport {
             executor: None,
+            executor_error: None,
             btc_client: Some(Ok(client)),
             control_plane_store: ControlPlaneStore::PostgresEnv { store: None },
             catalog: BootstrapCatalog {
