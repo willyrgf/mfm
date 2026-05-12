@@ -489,6 +489,7 @@ async fn parity_portfolio_tracker_snapshot_with_mock_erc20_mint() {
                     "network_id": NETWORK_ID,
                     "control_scope": control_scope.as_str(),
                     "from": from_norm,
+                    "signing_key_env": signing_key_env,
                     "calls": [
                         {"function": "mint", "args": [from_norm, 1000000]}
                     ],
