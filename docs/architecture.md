@@ -189,7 +189,10 @@ Practical dispatch split:
   stop at canonical config plus typed plan artifacts when there is no reusable execution-ready
   compiled spec distinct from the live planner result
 - current built-config workflow families are portfolio and deploy/configure/validate;
-  `publish-docs` intentionally stops at canonical config plus typed plan artifacts today
+  `publish-docs` is separate release tooling, not an MFM op/state runtime family. Its `plan`,
+  `sync-umbrella`, `apply`, `resume`, and `yank` modes write release-tool artifacts under
+  `.mfm/publish-docs/`; `apply` and the default command can run `cargo publish`. Those
+  `publish-docs` plan files are release-tool artifacts, not MFM `ExecutionPlan` artifacts.
 
 ### Flattened pipelines
 - Multiple ops are flattened into one execution plan and one run.

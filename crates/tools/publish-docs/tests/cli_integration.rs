@@ -1,6 +1,7 @@
 use assert_cmd::Command;
 use predicates::prelude::*;
 use serde_json::Value;
+use std::path::Path;
 
 fn verify_error_response(output: &str) -> Value {
     let parsed: Value = serde_json::from_str(output).expect("valid json");
@@ -19,9 +20,28 @@ fn help_output_shows_output_format_and_env_var() {
         .stdout(predicate::str::contains("LOG_LEVEL"))
         .stdout(predicate::str::contains("plan"))
         .stdout(predicate::str::contains("apply"))
+        .stdout(predicate::str::contains("cargo publish"))
+        .stdout(predicate::str::contains(
+            "omitting the subcommand defaults to apply",
+        ))
         .stdout(predicate::str::contains("resume"))
         .stdout(predicate::str::contains("sync-umbrella"))
         .stdout(predicate::str::contains("yank"));
+}
+
+#[test]
+fn architecture_docs_do_not_describe_publish_docs_as_plan_only() {
+    let docs_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../docs/architecture.md");
+    let docs = std::fs::read_to_string(docs_path).expect("architecture docs");
+
+    assert!(
+        !docs.contains(
+            "publish-docs` intentionally stops at canonical config plus typed plan artifacts"
+        ),
+        "architecture docs must not describe publish-docs as plan-only"
+    );
+    assert!(docs.contains("`publish-docs` is separate release tooling"));
+    assert!(docs.contains("`apply` and the default command can run `cargo publish`"));
 }
 
 #[test]

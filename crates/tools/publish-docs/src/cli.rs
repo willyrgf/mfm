@@ -5,9 +5,9 @@ use crate::model::OutputFormat;
 /// CLI parser for the `mfm-publish-docs` binary.
 #[derive(Debug, Parser)]
 #[command(name = "mfm-publish-docs")]
-#[command(about = "Planner, reconciler, and lifecycle tool for the docs.rs publish wave")]
+#[command(about = "Planner, reconciler, and cargo publish executor for the docs.rs publish wave")]
 #[command(
-    after_help = "Logging: use LOG_LEVEL or RUST_LOG to set the filter. Use LOG_FORMAT for text or json logs."
+    after_help = "Release side effects: omitting the subcommand defaults to apply; apply and resume can run cargo publish. Logging: use LOG_LEVEL or RUST_LOG to set the filter. Use LOG_FORMAT for text or json logs."
 )]
 #[command(version)]
 pub(crate) struct Cli {
@@ -43,9 +43,9 @@ pub(crate) struct Cli {
 pub(crate) enum Command {
     /// Build a plan without publishing crates.
     Plan(CommandArgs),
-    /// Execute publishable actions.
+    /// Execute publishable actions with real cargo publish uploads.
     Apply(CommandArgs),
-    /// Resume a previous apply attempt by reusing its stored selection.
+    /// Resume a previous apply attempt and continue real publish actions.
     Resume(ResumeArgs),
     /// Regenerate `crates/docs/README.md` from the desired-state catalog.
     SyncUmbrella(SyncUmbrellaArgs),
