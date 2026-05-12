@@ -1171,11 +1171,17 @@ mod tests {
     }
 
     fn test_keystore_path(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("mfm-{name}-{}.keystore", Uuid::new_v4()))
+        std::env::temp_dir()
+            .canonicalize()
+            .expect("canonical temp dir")
+            .join(format!("mfm-{name}-{}.keystore", Uuid::new_v4()))
     }
 
     fn test_dir(name: &str) -> PathBuf {
-        let path = std::env::temp_dir().join(format!("mfm-{name}-{}", Uuid::new_v4()));
+        let path = std::env::temp_dir()
+            .canonicalize()
+            .expect("canonical temp dir")
+            .join(format!("mfm-{name}-{}", Uuid::new_v4()));
         std::fs::create_dir(&path).expect("create test directory");
         path
     }
