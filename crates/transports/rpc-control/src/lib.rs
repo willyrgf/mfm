@@ -290,7 +290,7 @@ impl CsvValues {
 fn parse_source_kind(raw: Option<&str>) -> EvmSourceKind {
     let normalized = raw.unwrap_or("remote_public").trim().to_ascii_lowercase();
     match normalized.as_str() {
-        "local" | "local_helios" | "local_reth" => EvmSourceKind::Local,
+        "local" | "local_reth" => EvmSourceKind::Local,
         "remote_user" | "user" => EvmSourceKind::RemoteUser,
         "remote_public" | "public" => EvmSourceKind::RemotePublic,
         _ => EvmSourceKind::RemotePublic,

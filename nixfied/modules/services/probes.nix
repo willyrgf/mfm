@@ -28,7 +28,6 @@ let
           "jsonrpc"
           "postgres-pg-isready"
           "postgres-query"
-          "helios-ready"
           "exec"
         ];
       };

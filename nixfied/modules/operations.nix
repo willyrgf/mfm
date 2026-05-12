@@ -575,7 +575,7 @@ in
         description = ''
           Runs health checks for selected enabled services:
           postgres, nginx (http+https), minio (api+console),
-          reth (http+ws+auth), and helios (rpc+execution).
+          and reth (http+ws+auth).
           Optional selectors: --service <name|all> and --source <key>.
           One service selector is accepted per invocation.
         '';
@@ -590,11 +590,11 @@ in
         usage = [
           "nix run .#health"
           "nix run .#health -- --service postgres"
-          "nix run .#health -- --service helios --source real"
+          "nix run .#health -- --service reth"
         ];
         examples = [
           "nix run .#health -- --service postgres"
-          "nix run .#health -- --service helios --source real"
+          "nix run .#health -- --service reth"
         ];
       };
     })
@@ -606,7 +606,7 @@ in
         description = ''
           Runs readiness checks for selected enabled services:
           postgres, nginx (http+https), minio (api+console),
-          reth (http+ws+auth), and helios (rpc+execution).
+          and reth (http+ws+auth).
           Optional selectors: --service <name|all> and --source <key>.
           One service selector is accepted per invocation.
         '';
@@ -621,11 +621,11 @@ in
         usage = [
           "nix run .#ready"
           "nix run .#ready -- --service postgres"
-          "nix run .#ready -- --service helios --source real"
+          "nix run .#ready -- --service reth"
         ];
         examples = [
           "nix run .#ready -- --service postgres"
-          "nix run .#ready -- --service helios --source real"
+          "nix run .#ready -- --service reth"
         ];
       };
     })

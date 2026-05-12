@@ -83,11 +83,6 @@ let
   minioLocalPackage = if pkgs != null then pkgs.minio else null;
   minioLocalClientPackage = if pkgs != null then pkgs.minio-client else null;
   rethLocalPackage = if pkgs != null then pkgs.reth else null;
-  heliosLocalPackage =
-    if pkgs != null then
-      pkgs.callPackage ../framework/runtime/services/helios/package.nix { }
-    else
-      null;
 in
 rec {
   project = {
@@ -138,7 +133,6 @@ rec {
     rethWs = 8546;
     rethAuth = 8551;
     rethP2p = 30303;
-    heliosRpc = 8547;
   };
 
   # Base data directory for per-slot/per-env state
@@ -396,27 +390,6 @@ rec {
       };
       defaultSource = "local";
     };
-
-    helios = {
-      enable = true;
-      portKeyRpc = "heliosRpc";
-      executionRpcPortKey = "rethHttp";
-      dataDirName = "helios";
-      network = "local";
-      # Mainnet default for workflows that do not set HELIOS_EXECUTION_RPC_URL explicitly.
-      executionRpcUrl = "https://ethereum-rpc.publicnode.com";
-      # Mainnet default consensus endpoint used by Helios snapshot workflows.
-      consensusRpcUrl = "https://lodestar-mainnet.chainsafe.io";
-      defaultConsensusRpcUrl = "https://lodestar-mainnet.chainsafe.io";
-      checkpoint = "";
-      extraArgs = [ ];
-      sources.local = {
-        package = heliosLocalPackage;
-      };
-      defaultSource = "local";
-      sourceKinds.local = "real";
-      readiness.profile = "strict";
-    };
   };
 
   packages =
@@ -424,7 +397,6 @@ rec {
       { }
     else
       {
-        helios = (((services.helios.sources or { }).local or { }).package or null);
         "mfm-aave-origin-compile" = aaveOriginCompilePackage;
         "mfm-cli" = pkgs.rustPlatform.buildRustPackage rec {
           pname = "mfm-cli";

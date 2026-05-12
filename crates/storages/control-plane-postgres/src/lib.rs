@@ -2463,7 +2463,7 @@ mod tests {
                     require_get_proof_probe: false,
                 },
                 SourcePoolCatalogSource {
-                    id: "helios_local".to_string(),
+                    id: "local_rpc".to_string(),
                     kind: "local".to_string(),
                     require_get_proof_probe: false,
                 },
@@ -2478,7 +2478,7 @@ mod tests {
                     require_get_proof_probe: false,
                 },
             ],
-            preferred_source_ids: vec!["reth_local".to_string(), "helios_local".to_string()],
+            preferred_source_ids: vec!["reth_local".to_string(), "local_rpc".to_string()],
         }
     }
 
@@ -2731,7 +2731,7 @@ mod tests {
                 kind: RECORD_KIND_POOL_MEMBERSHIP_DECLARED.to_string(),
                 payload: serde_json::json!({
                     "declared_at_ms": 100_u64,
-                    "member_source_ids": ["reth_local", "helios_local", "archive_local"],
+                    "member_source_ids": ["reth_local", "local_rpc", "archive_local"],
                 }),
             },
             StreamRecord {
@@ -2741,7 +2741,7 @@ mod tests {
                 kind: RECORD_KIND_POOL_RANKED.to_string(),
                 payload: serde_json::json!({
                     "ranked_at_ms": 110_u64,
-                    "ranked_source_ids": ["helios_local", "reth_local"],
+                    "ranked_source_ids": ["local_rpc", "reth_local"],
                 }),
             },
             StreamRecord {
@@ -2751,7 +2751,7 @@ mod tests {
                 kind: RECORD_KIND_POOL_MEMBERSHIP_DECLARED.to_string(),
                 payload: serde_json::json!({
                     "declared_at_ms": 120_u64,
-                    "member_source_ids": ["reth_local", "helios_local", "archive_local"],
+                    "member_source_ids": ["reth_local", "local_rpc", "archive_local"],
                 }),
             },
         ];
@@ -2771,18 +2771,18 @@ mod tests {
             state.member_source_ids,
             vec![
                 "reth_local".to_string(),
-                "helios_local".to_string(),
+                "local_rpc".to_string(),
                 "archive_local".to_string()
             ]
         );
         assert_eq!(
             state.ranked_source_ids,
-            vec!["helios_local".to_string(), "reth_local".to_string()]
+            vec!["local_rpc".to_string(), "reth_local".to_string()]
         );
         assert_eq!(
             state.ordered_source_ids(),
             vec![
-                "helios_local".to_string(),
+                "local_rpc".to_string(),
                 "reth_local".to_string(),
                 "archive_local".to_string()
             ]
@@ -2792,7 +2792,7 @@ mod tests {
                 .ordered_source_refs()
                 .expect("ordered source refs should be valid"),
             vec![
-                RpcSourceRef::new("shared", "eth-mainnet", "helios_local").expect("valid"),
+                RpcSourceRef::new("shared", "eth-mainnet", "local_rpc").expect("valid"),
                 RpcSourceRef::new("shared", "eth-mainnet", "reth_local").expect("valid"),
                 RpcSourceRef::new("shared", "eth-mainnet", "archive_local").expect("valid"),
             ]

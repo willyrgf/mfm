@@ -125,12 +125,10 @@ let
   nginxService = configuredServices.nginx or { };
   minioService = configuredServices.minio or { };
   rethService = configuredServices.reth or { };
-  heliosService = configuredServices.helios or { };
   postgresSources = postgresService.sources or { };
   nginxSources = nginxService.sources or { };
   minioSources = minioService.sources or { };
   rethSources = rethService.sources or { };
-  heliosSources = heliosService.sources or { };
   postgresLocalSource = postgresSources.local or { };
   minioLocalSource = minioSources.local or { };
   rethLocalSource = rethSources.local or { };
@@ -142,12 +140,6 @@ let
   postgresTestDatabase = postgresService.testDatabase or "${postgresDatabase}_test";
   minioRootUser = minioService.rootUser or "minio";
   minioRootPassword = minioService.rootPassword or "minio123456";
-  heliosConfiguredNetwork = heliosService.network or "local";
-  heliosConfiguredExecutionRpcUrl = heliosService.executionRpcUrl or "";
-  heliosConfiguredConsensusRpcUrl = heliosService.consensusRpcUrl or "";
-  heliosConfiguredDefaultConsensusRpcUrl =
-    heliosService.defaultConsensusRpcUrl or heliosConfiguredConsensusRpcUrl;
-  heliosConfiguredCheckpoint = heliosService.checkpoint or "";
 
   serviceSkipEnvVarName =
     serviceName:
@@ -199,22 +191,12 @@ let
     "RUST_LOG"
     "LOG_FORMAT"
     "LOG_SPAN_EVENTS"
-    "HELIOS_NETWORK"
-    "HELIOS_BIN"
-    "HELIOS_EXECUTION_RPC_URL"
-    "HELIOS_CONSENSUS_RPC_URL"
-    "HELIOS_CHECKPOINT"
-    "HELIOS_READY_TIMEOUT_SECS"
-    "HELIOS_HEALTH_TIMEOUT_SECS"
-    "HELIOS_READY_INTERVAL_SECS"
-    "HELIOS_HEALTH_INTERVAL_SECS"
     "SERVICE_OWNER_SCOPE"
     "SERVICE_DISCOVERY_SCOPE"
     "MFM_SNAPSHOT_REQUEST_FILE"
     "MFM_SNAPSHOT_HANDOFF_FILE"
     "MFM_SNAPSHOT_RESULT_FILE"
     "MFM_CI_ENABLE_PARITY"
-    "MFM_CI_ENABLE_MAINNET"
     "DATABASE_URL"
     "MFM_EVM_RPC_SOURCES_JSON"
     "MFM_EVM_RPC_PREFERRED_ORDER"
@@ -489,12 +471,6 @@ let
     export AWS_REGION="''${AWS_REGION:-''${MFM_S3_REGION}}"
     export AWS_DEFAULT_REGION="''${AWS_DEFAULT_REGION:-''${MFM_S3_REGION}}"
     export AWS_EC2_METADATA_DISABLED="''${AWS_EC2_METADATA_DISABLED:-true}"
-    # Parity always uses the local Helios<->Reth pair; clear explicit mainnet
-    # overrides that may be auto-loaded from `.env` for snapshot workflows.
-    export HELIOS_NETWORK="local"
-    export HELIOS_EXECUTION_RPC_URL=""
-    export HELIOS_CONSENSUS_RPC_URL=""
-    export HELIOS_CHECKPOINT=""
   '';
   parityNextestArchiveShell = ''
     parity_nextest_archive_file="''${MFM_CI_PARITY_NEXTEST_ARCHIVE_FILE:-$artifacts_dir/${parityNextestArchiveFileName}}"
@@ -777,7 +753,7 @@ in
         devShellHook = conf.tooling.devShellHook;
       };
 
-      packages = lib.removeAttrs conf.packages [ "helios" ];
+      packages = conf.packages;
 
       services = {
         postgres = {
@@ -832,29 +808,6 @@ in
           sourceKeys = rethService.sourceKeys or builtins.attrNames rethSources;
           defaultSource = rethService.defaultSource or "local";
         };
-
-        helios =
-          let
-            heliosNetwork = heliosConfiguredNetwork;
-            useRemoteHeliosDefaults = heliosNetwork != "local";
-          in
-          {
-            enable = heliosService.enable or false;
-            portKeyRpc = heliosService.portKeyRpc or "heliosRpc";
-            executionRpcPortKey = heliosService.executionRpcPortKey or "rethHttp";
-            dataDirName = heliosService.dataDirName or "helios";
-            network = heliosNetwork;
-            executionRpcUrl = if useRemoteHeliosDefaults then heliosConfiguredExecutionRpcUrl else "";
-            consensusRpcUrl = if useRemoteHeliosDefaults then heliosConfiguredConsensusRpcUrl else "";
-            defaultConsensusRpcUrl = heliosConfiguredDefaultConsensusRpcUrl;
-            checkpoint = heliosConfiguredCheckpoint;
-            extraArgs = heliosService.extraArgs or [ ];
-            sources = heliosSources;
-            sourceKeys = heliosService.sourceKeys or builtins.attrNames heliosSources;
-            defaultSource = heliosService.defaultSource or "local";
-            sourceKinds = heliosService.sourceKinds or { };
-            readiness = heliosService.readiness or { };
-          };
       };
 
       operations = {
@@ -934,10 +887,10 @@ in
 
         mfm-portfolio-snapshot = mkCommandTask {
           id = "task.mfm.portfolio.snapshot";
-          summary = "Snapshot a portfolio request with Helios-backed mainnet RPC";
+          summary = "Snapshot a portfolio request with configured mainnet RPC";
           description = ''
-            Starts/reuses Postgres + Helios, waits for Helios RPC health checks,
-            then runs `mfm_cli --output-format json portfolio snapshot --request-file`.
+            Starts/reuses Postgres, configures an EVM RPC source if needed, then runs
+            `mfm_cli --output-format json portfolio snapshot --request-file`.
           '';
           tags = [
             "mfm"
@@ -946,7 +899,7 @@ in
           ];
           usage = [ "nix run .#mfm::portfolio::snapshot -- <REQUEST_FILE>" ];
           examples = [
-            "MFM_ENV=dev HELIOS_NETWORK=mainnet SERVICE_OWNER_SCOPE=persistent SERVICE_DISCOVERY_SCOPE=global nix run .#mfm::portfolio::snapshot -- ./portfolio-request.json"
+            "MFM_ENV=dev SERVICE_OWNER_SCOPE=persistent SERVICE_DISCOVERY_SCOPE=global nix run .#mfm::portfolio::snapshot -- ./portfolio-request.json"
           ];
           runtimeInputs = leanRuntimeInputs;
           passThroughEnv = sharedPassThroughEnv ++ [
@@ -1032,7 +985,6 @@ in
             fi
 
             postgres_owned=0
-            helios_owned=0
             result_file="$(mktemp "''${TMPDIR:-/tmp}/mfm-portfolio-snapshot.XXXXXX.json")"
             owner_scope="''${SERVICE_OWNER_SCOPE:-}"
             discovery_scope="''${SERVICE_DISCOVERY_SCOPE:-}"
@@ -1072,9 +1024,6 @@ in
             cleanup() {
               local rc=$?
               if [ "$cleanup_required" = "1" ]; then
-                if [ "$helios_owned" = "1" ] && [ -n "''${SVC_HELIOS_STOP:-}" ]; then
-                  "$SVC_HELIOS_STOP" >/dev/null 2>&1 || true
-                fi
                 if [ "$postgres_owned" = "1" ]; then
                   "$SVC_POSTGRES_STOP" >/dev/null 2>&1 || true
                 fi
@@ -1101,45 +1050,11 @@ in
             echo "INFO: ensuring postgres database=$snapshot_database" >&2
             PGDATABASE="$snapshot_database" "$SVC_POSTGRES_SETUP_DB" >&2
 
-            helios_available=0
-            if ! is_service_skipped helios && [ -n "''${SVC_HELIOS_FULL_START:-}" ] && [ -n "''${SVC_HELIOS_READY:-}" ]; then
-              helios_available=1
+            if [ -z "''${MFM_EVM_RPC_SOURCES_JSON:-}" ]; then
+              export MFM_EVM_RPC_SOURCES_JSON='[{"id":"publicnode_ethereum_mainnet","network_id":"ethereum-mainnet","rpc_url":"https://ethereum-rpc.publicnode.com","kind":"remote_public"}]'
             fi
-
-            if [ "$helios_available" = "1" ]; then
-              if [ -z "''${HELIOSRPC_PORT:-}" ]; then
-                echo "ERROR: HELIOSRPC_PORT is not set for snapshot" >&2
-                exit 1
-              fi
-              export HELIOS_NETWORK="''${HELIOS_NETWORK:-mainnet}"
-              if [ "$HELIOS_NETWORK" != "mainnet" ]; then
-                echo "ERROR: HELIOS_NETWORK must be 'mainnet' for mfm::portfolio::snapshot" >&2
-                exit 1
-              fi
-              export HELIOS_EXECUTION_RPC_URL="''${HELIOS_EXECUTION_RPC_URL:-${heliosConfiguredExecutionRpcUrl}}"
-              export HELIOS_CONSENSUS_RPC_URL="''${HELIOS_CONSENSUS_RPC_URL:-${heliosConfiguredConsensusRpcUrl}}"
-              export HELIOS_CHECKPOINT="''${HELIOS_CHECKPOINT:-${heliosConfiguredCheckpoint}}"
-
-              if "$SVC_HELIOS_READY" >/dev/null 2>&1; then
-                echo "INFO: reusing helios on port=$HELIOSRPC_PORT" >&2
-              else
-                helios_owned=1
-                echo "INFO: starting helios on port=$HELIOSRPC_PORT network=$HELIOS_NETWORK" >&2
-                "$SVC_HELIOS_FULL_START" >&2
-                HELIOS_READY_TIMEOUT_SECS="''${HELIOS_READY_TIMEOUT_SECS:-300}" \
-                  HELIOS_READY_INTERVAL_SECS="''${HELIOS_READY_INTERVAL_SECS:-1}" \
-                  "$SVC_HELIOS_READY" >&2
-              fi
-
-              if [ -z "''${MFM_EVM_RPC_SOURCES_JSON:-}" ]; then
-                export MFM_EVM_RPC_SOURCES_JSON="[{\"id\":\"helios_local\",\"network_id\":\"ethereum-mainnet\",\"rpc_url\":\"http://127.0.0.1:$HELIOSRPC_PORT\",\"kind\":\"local\"}]"
-              fi
-              if [ -z "''${MFM_EVM_RPC_PREFERRED_ORDER:-}" ]; then
-                export MFM_EVM_RPC_PREFERRED_ORDER="helios_local"
-              fi
-            elif [ -z "''${MFM_EVM_RPC_SOURCES_JSON:-}" ]; then
-              echo "ERROR: MFM_EVM_RPC_SOURCES_JSON is required when Helios is unavailable or skipped" >&2
-              exit 1
+            if [ -z "''${MFM_EVM_RPC_PREFERRED_ORDER:-}" ]; then
+              export MFM_EVM_RPC_PREFERRED_ORDER="publicnode_ethereum_mainnet"
             fi
 
             export DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$POSTGRES_PORT/$snapshot_database"
@@ -1329,7 +1244,6 @@ in
             "nix run .#ci -- --mode audit --summary"
             "nix run .#ci -- --mode parity --summary"
             "nix run .#ci -- --mode full --summary"
-            "nix run .#ci -- --mode mainnet --summary"
           ];
           runtimeInputs = rustRuntimeInputs;
           env = ciCargoRustEnv;
@@ -2066,101 +1980,6 @@ EOF
           '';
         };
 
-        ci-parity-evm-helios-smoke = mkCommandTask {
-          id = "task.ci.parity-evm-helios-smoke";
-          kind = "ci-step";
-          summary = "CI parity helios smoke tests";
-          tags = [
-            "ci"
-            "parity"
-          ];
-          runtimeInputs = rustRuntimeInputs;
-          env = ciCargoRustEnv;
-          requirements = {
-            services = [ "helios" ];
-          };
-          command = ''
-            set -euo pipefail
-            ${ciStepPreamble}
-            ${ciParityServiceEnv}
-
-            has_service_hook() {
-              local hook_var="$1"
-              if [ -z "$hook_var" ]; then
-                return 1
-              fi
-              [ -n "''${!hook_var:-}" ]
-            }
-
-            run_service_hook() {
-              local hook_var="$1"
-              shift || true
-
-              local hook_cmd="''${!hook_var:-}"
-              if [ -z "$hook_cmd" ]; then
-                echo "ERROR: hook command is not available: $hook_var"
-                return 1
-              fi
-
-              "$hook_cmd" "$@"
-            }
-
-            require_hook() {
-              local hook_var="$1"
-              if ! has_service_hook "$hook_var"; then
-                local available_hooks
-                available_hooks="$(env | grep '^SVC_' | cut -d= -f1 | tr '\n' ',')"
-                echo "ERROR: required hook missing: $hook_var services=''${NIXFIED_SELECTED_SERVICES_CSV:-} hooks=''${available_hooks:-<none>}"
-                exit 1
-              fi
-            }
-
-            run_logged_hook() {
-              local step_name="$1"
-              local log_file="$2"
-              shift 2
-
-              echo "INFO: running ci bootstrap step=$step_name"
-              if run_with_log "$log_file" "$@"; then
-                echo "OK: ci bootstrap step passed step=$step_name log=$log_file"
-              else
-                local rc=$?
-                echo "ERROR: ci bootstrap step failed step=$step_name log=$log_file rc=$rc" >&2
-                exit "$rc"
-              fi
-            }
-
-            smoke_log_file="$artifacts_dir/parity-evm-helios-smoke.log"
-            response_file="$artifacts_dir/parity-evm-helios-smoke.response.json"
-
-            echo "INFO: running ci step=parity-evm-helios-smoke"
-
-            require_hook "SVC_HELIOS_FULL_START_TEST"
-            require_hook "SVC_HELIOS_READY"
-            export HELIOS_EXECUTION_RPC_URL="http://127.0.0.1:$RETH_HTTP_PORT"
-
-            if run_service_hook SVC_HELIOS_READY >/dev/null 2>&1; then
-              echo "INFO: reusing helios rpc_port=$HELIOS_RPC_PORT"
-            else
-              run_logged_hook "helios-full-start-test" "$artifacts_dir/helios-full-start.log" run_service_hook SVC_HELIOS_FULL_START_TEST
-            fi
-
-            helios_rpc_url="http://127.0.0.1:$HELIOS_RPC_PORT"
-            run_with_log "$smoke_log_file" bash -euo pipefail -c '
-              response_file="$1"
-              rpc_url="$2"
-              curl -fsS \
-                -H "content-type: application/json" \
-                --data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_chainId\",\"params\":[]}" \
-                "$rpc_url" \
-                | tee "$response_file"
-            ' _ "$response_file" "$helios_rpc_url"
-
-            jq -e '.result | strings' "$response_file" >/dev/null
-            echo "OK: ci step passed step=parity-evm-helios-smoke log=$smoke_log_file"
-          '';
-        };
-
         ci-parity-evm-reth = mkCommandTask {
           id = "task.ci.parity-evm-reth";
           kind = "ci-step";
@@ -2239,178 +2058,6 @@ EOF
           '';
         };
 
-        ci-mainnet-portfolio-snapshot-helios = mkCommandTask {
-          id = "task.ci.mainnet-portfolio-snapshot-helios";
-          kind = "ci-step";
-          summary = "CI mainnet portfolio snapshot validation";
-          tags = [
-            "ci"
-            "mainnet"
-          ];
-          runtimeInputs = leanRuntimeInputs ++ [ conf.packages."mfm-cli" ];
-          requirements = {
-            services = [ "helios" ];
-          };
-          command = ''
-            set -euo pipefail
-            ${ciStepPreamble}
-            ${resolvePackagedMfmCliShell}
-
-            address="''${MFM_CI_MAINNET_ADDRESS:-0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045}"
-            log_file="$artifacts_dir/mainnet-portfolio-snapshot.log"
-            out_file="$artifacts_dir/mainnet-portfolio-snapshot.json"
-            request_file="$artifacts_dir/mainnet-portfolio-snapshot-request.json"
-
-            export HELIOS_NETWORK="''${HELIOS_NETWORK:-mainnet}"
-            export HELIOS_EXECUTION_RPC_URL="''${HELIOS_EXECUTION_RPC_URL:-${
-              if heliosConfiguredExecutionRpcUrl != "" then
-                heliosConfiguredExecutionRpcUrl
-              else
-                "https://ethereum-rpc.publicnode.com"
-            }}"
-            export HELIOS_CONSENSUS_RPC_URL="''${HELIOS_CONSENSUS_RPC_URL:-${
-              if heliosConfiguredConsensusRpcUrl != "" then
-                heliosConfiguredConsensusRpcUrl
-              else
-                "https://lodestar-mainnet.chainsafe.io"
-            }}"
-
-            echo "INFO: running ci step=mainnet-portfolio-snapshot-helios address=$address"
-
-            cat >"$request_file" <<EOF
-            {
-              "portfolio": {
-                "portfolio_id": "ci-mainnet-portfolio",
-                "quote_codes": ["USD", "BTC"],
-                "networks": [
-                  {
-                    "network_id": "ethereum-mainnet",
-                    "chain_id": 1,
-                    "metadata": {}
-                  }
-                ],
-                "wallets": [
-                  {
-                    "wallet_id": "wallet_mainnet",
-                    "address": "$address",
-                    "network_id": "ethereum-mainnet",
-                    "implementation": { "kind": "address_only" },
-                    "symbol_ids": ["eth.native.ethereum-mainnet"],
-                    "metadata": {}
-                  }
-                ],
-                "symbol_configs": [
-                  {
-                    "symbol_id": "eth.native.ethereum-mainnet",
-                    "display_symbol": "ETH",
-                    "kind": "native_balance",
-                    "role": "native",
-                    "network_id": "ethereum-mainnet",
-                    "protocol": null,
-                    "balance_reader": { "kind": "native_balance" },
-                    "valuation": {
-                      "quotes": [
-                        {
-                          "quote": "USD",
-                          "priced_symbol_id": "eth.native.ethereum-mainnet",
-                          "reader": {
-                            "kind": "direct_price",
-                            "source": {
-                              "source_id": "chainlink_eth_usd_mainnet",
-                              "network_id": "ethereum-mainnet",
-                              "base_symbol_id": "eth.native.ethereum-mainnet",
-                              "quote": "USD"
-                            }
-                          }
-                        },
-                        {
-                          "quote": "BTC",
-                          "priced_symbol_id": "eth.native.ethereum-mainnet",
-                          "reader": {
-                            "kind": "derived_unit_price",
-                            "numerator": {
-                              "source_id": "chainlink_eth_usd_mainnet",
-                              "network_id": "ethereum-mainnet",
-                              "base_symbol_id": "eth.native.ethereum-mainnet",
-                              "quote": "USD"
-                            },
-                            "denominator": {
-                              "source_id": "chainlink_btc_usd_mainnet",
-                              "network_id": "ethereum-mainnet",
-                              "base_symbol_id": "btc.native.ethereum-mainnet",
-                              "quote": "USD"
-                            }
-                          }
-                        }
-                      ]
-                    },
-                    "decimals": 18,
-                    "underlying_symbol_id": null,
-                    "metadata": {}
-                  }
-                ],
-                "metadata": {}
-              },
-              "valuation_source_registry": {
-                "sources": [
-                  {
-                    "source_id": "chainlink_eth_usd_mainnet",
-                    "network_id": "ethereum-mainnet",
-                    "base_symbol_id": "eth.native.ethereum-mainnet",
-                    "quote": "USD",
-                    "reader": {
-                      "kind": "evm_oracle",
-                      "oracle_kind": "chainlink_aggregator_v3",
-                      "config": {
-                        "contract_address": "0x5f4ec3df9cbd43714fe2740f5e3616155c5b8419"
-                      }
-                    },
-                    "metadata": {}
-                  },
-                  {
-                    "source_id": "chainlink_btc_usd_mainnet",
-                    "network_id": "ethereum-mainnet",
-                    "base_symbol_id": "btc.native.ethereum-mainnet",
-                    "quote": "USD",
-                    "reader": {
-                      "kind": "evm_oracle",
-                      "oracle_kind": "chainlink_aggregator_v3",
-                      "config": {
-                        "contract_address": "0xf4030086522a5beea4988f8ca5b36dbc97bee88c"
-                      }
-                    },
-                    "metadata": {}
-                  }
-                ]
-              }
-            }
-            EOF
-
-            run_packaged_mfm_cli_snapshot() {
-              local mfm_cli_bin=""
-              mfm_cli_bin="$(resolve_packaged_mfm_cli_binary)" || return 1
-              "$mfm_cli_bin" --output-format json portfolio snapshot --request-file "$request_file"
-            }
-
-            mode="$(printf '%s' "''${OUTPUT_MODE:-stdout}" | tr '[:upper:]' '[:lower:]')"
-            case "$mode" in
-              logs)
-                run_packaged_mfm_cli_snapshot >"$out_file" 2>"$log_file"
-                ;;
-              stdout|both|"")
-                run_packaged_mfm_cli_snapshot > >(tee "$out_file") 2> >(tee "$log_file" >&2)
-                ;;
-              *)
-                run_packaged_mfm_cli_snapshot >"$out_file" 2>"$log_file"
-                ;;
-            esac
-
-            jq -e '.status == "success"' "$out_file" >/dev/null
-            jq -e '.data.result.phase == "completed"' "$out_file" >/dev/null
-            echo "OK: ci step passed step=mainnet-portfolio-snapshot-helios log=$log_file"
-          '';
-        };
-
       }
       // frameworkInstallPreset.tasks
       // frameworkTestPreset.tasks
@@ -2432,7 +2079,7 @@ EOF
           appId = "mfm::portfolio::snapshot";
           usage = [ "nix run .#mfm::portfolio::snapshot -- <REQUEST_FILE>" ];
           examples = [
-            "MFM_ENV=dev HELIOS_NETWORK=mainnet SERVICE_OWNER_SCOPE=persistent SERVICE_DISCOVERY_SCOPE=global nix run .#mfm::portfolio::snapshot -- ./portfolio-request.json"
+            "MFM_ENV=dev SERVICE_OWNER_SCOPE=persistent SERVICE_DISCOVERY_SCOPE=global nix run .#mfm::portfolio::snapshot -- ./portfolio-request.json"
           ];
           ownerFile = "nixfied/project/module.nix";
         };
@@ -2498,7 +2145,6 @@ EOF
             "nix run .#ci -- --mode audit --summary"
             "nix run .#ci -- --mode parity --summary"
             "nix run .#ci -- --mode full --summary"
-            "nix run .#ci -- --mode mainnet --summary"
           ];
           ownerFile = "nixfied/project/module.nix";
         };
@@ -2608,11 +2254,6 @@ EOF
               needs = [ "parity-compile" ];
             };
 
-            parity-evm-helios-smoke = mkWorkflowUnit {
-              taskId = "task.ci.parity-evm-helios-smoke";
-              needs = [ "parity-compile" ];
-            };
-
             parity-evm-reth = mkWorkflowUnit {
               taskId = "task.ci.parity-evm-reth";
               needs = [ "parity-rest-api-smoke" ];
@@ -2701,37 +2342,6 @@ EOF
           };
         };
 
-        ci-mainnet = {
-          id = "workflow.ci.mainnet";
-          summary = "Mainnet CI workflow";
-          description = "Runs mainnet Helios-backed portfolio snapshot checks.";
-          mode = "ci";
-          maxWorkers = 1;
-          units = {
-            mainnet-portfolio-snapshot-helios = mkWorkflowUnit {
-              taskId = "task.ci.mainnet-portfolio-snapshot-helios";
-              skipIfMissingEnv = [ "MFM_CI_ENABLE_MAINNET" ];
-            };
-          };
-          stages = [ ];
-          preRun.tasks = [ ];
-          postRun = {
-            tasks = [ ];
-            alwaysRun = true;
-          };
-          artifacts = {
-            root = ciArtifactsRoot;
-            keepOnSuccess = false;
-            keepOnFailure = true;
-            writeSummary = true;
-          };
-          execution = {
-            parallel = true;
-            failFast = true;
-            lockPolicy = "exclusive";
-            emitRegistryEvents = true;
-          };
-        };
       }
       // frameworkSelfhostPreset.workflows;
     };

@@ -198,7 +198,7 @@ let
     "## Runtime Conventions"
     ""
     "- Generic runtime port env names are derived from normalized model keys."
-    "- Example: heliosRpc becomes HELIOSRPC_PORT in generic task execution."
+    "- Example: rethHttp becomes RETHHTTP_PORT in generic task execution."
     ""
     "## Exposed Apps"
   ]

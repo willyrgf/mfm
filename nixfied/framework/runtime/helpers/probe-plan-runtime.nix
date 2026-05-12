@@ -168,85 +168,6 @@ let
       fi
     '';
 
-  mkHeliosReadyBody =
-    {
-      step,
-      portExpr,
-    }:
-    let
-      sourceKindCase = builtins.concatStringsSep "\n" (
-        map (
-          sourceName:
-          "        ${lib.escapeShellArg sourceName}) helios_source_kind_value=${
-                    lib.escapeShellArg (step.sourceKinds.${sourceName} or "unknown")
-                  } ;;"
-        ) (builtins.sort builtins.lessThan (builtins.attrNames (step.sourceKinds or { })))
-      );
-      disallowArgs = builtins.concatStringsSep " " (
-        map lib.escapeShellArg (step.disallowSourceKinds or [ ])
-      );
-    in
-    ''
-            probe_source="''${service_source:-unspecified}"
-            helios_source_kind_value="unknown"
-            case "$probe_source" in
-      ${sourceKindCase}
-              *)
-                helios_source_kind_value="unknown"
-                ;;
-            esac
-            helios_readiness_profile=${lib.escapeShellArg (step.readinessProfile or "fast")}
-            helios_require_not_syncing=${if step.requireNotSyncing or false then "1" else "0"}
-            echo "INFO: checking ${step.serviceLabel} ${step.phaseLabel} port=${portExpr} source=$probe_source source_kind=$helios_source_kind_value profile=$helios_readiness_profile"
-            if source_kind_disallowed "$helios_source_kind_value"${
-              if disallowArgs == "" then "" else " " + disallowArgs
-            }; then
-              echo "ERROR: ${step.serviceLabel} ${step.failureLabel} port=${portExpr} source=$probe_source source_kind=$helios_source_kind_value profile=$helios_readiness_profile (source kind disallowed)"
-              exit 1
-            fi
-
-            helios_block_json="$(${
-              probeCommands.jsonRpcRequestCmd {
-                urlExpr = probeCommands.localHttpUrlExpr portExpr;
-                method = "eth_blockNumber";
-              }
-            })" || true
-            helios_block_number="$(printf '%s' "$helios_block_json" | ${pkgs.jq}/bin/jq -r '.result // empty')" || true
-            if [ -z "$helios_block_number" ] || ! [[ "$helios_block_number" =~ ^0x[0-9a-fA-F]+$ ]]; then
-              if [ "${if step.allowLocalHealthFallback or false then "1" else "0"}" = "1" ] && ${
-                probeCommands.jsonRpcHasResultCmd {
-                  urlExpr = probeCommands.localHttpUrlExpr portExpr;
-                  method = "eth_chainId";
-                }
-              }
-              then
-                echo "OK: ${step.serviceLabel} ${step.successLabel} port=${portExpr} mode=local_chainid_fallback"
-                exit 0
-              fi
-              echo "ERROR: ${step.serviceLabel} ${step.failureLabel} port=${portExpr} source=$probe_source source_kind=$helios_source_kind_value (invalid eth_blockNumber result)"
-              exit 1
-            fi
-            echo "OK: ${step.serviceLabel} ${step.successLabel} port=${portExpr} block_number=$helios_block_number"
-
-            if [ "$helios_require_not_syncing" = "1" ]; then
-              helios_syncing_result="$(${
-                probeCommands.jsonRpcFieldCmd {
-                  urlExpr = probeCommands.localHttpUrlExpr portExpr;
-                  method = "eth_syncing";
-                  fieldExpr = ".result";
-                  raw = false;
-                }
-              })" || true
-              if [ "$helios_syncing_result" != "false" ]; then
-                echo "ERROR: ${step.serviceLabel} ${step.failureLabel} port=${portExpr} source=$probe_source source_kind=$helios_source_kind_value profile=$helios_readiness_profile (eth_syncing=$helios_syncing_result)"
-                exit 1
-              fi
-              echo "OK: ${step.serviceLabel} sync status ready port=${portExpr}"
-            else
-              echo "SKIP: helios sync gate disabled profile=$helios_readiness_profile"
-            fi
-    '';
-
   mkExecProbeBody =
     {
       mode,
@@ -308,10 +229,6 @@ let
       }
     else if step.kind == "postgres-query" then
       mkPostgresQueryBody {
-        inherit step portExpr;
-      }
-    else if step.kind == "helios-ready" then
-      mkHeliosReadyBody {
         inherit step portExpr;
       }
     else if step.kind == "exec" then

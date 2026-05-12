@@ -26,7 +26,7 @@ Environment variables:
   Example:
   ```json
   [
-    {"id":"helios_local","network_id":"ethereum-mainnet","rpc_url":"http://127.0.0.1:8545","kind":"local"},
+    {"id":"reth_local","network_id":"ethereum-mainnet","rpc_url":"http://127.0.0.1:8545","kind":"local"},
     {"id":"drpc_public","network_id":"ethereum-mainnet","rpc_url":"https://eth.drpc.org","kind":"remote_public"}
   ]
   ```

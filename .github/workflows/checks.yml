@@ -70,11 +70,11 @@ jobs:
             ~/.cache/nix
           key: nix-${{ runner.os }}-${{ runner.arch }}-${{ github.ref_name }}-${{ hashFiles('flake.lock', 'flake.nix', 'Cargo.lock', '.github/workflows/checks.yml', 'nixfied/**/*.nix') }}
 
-      - name: Nixfied CI (full) (skip helios)
+      - name: Nixfied CI (full)
         env:
           CI_ARTIFACTS_ROOT: ${{ runner.temp }}/mfm-ci-artifacts
         run: |
-          SKIP_HELIOS=1 nix run .#ci $NIX_CMD_OPTS -- --full --summary
+          nix run .#ci $NIX_CMD_OPTS -- --mode full --summary
 
       - name: Upload CI artifacts
         if: always()

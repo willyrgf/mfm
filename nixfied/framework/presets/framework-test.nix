@@ -346,7 +346,6 @@ in
             .#checks.${pkgs.stdenv.hostPlatform.system}.service-hook-env-smoke \
             .#checks.${pkgs.stdenv.hostPlatform.system}.runtime-service-selection-contract
           verify_public_launcher_help "$help_out" nix run .#ci -- --help
-          verify_public_launcher_help "$help_out" env SKIP_HELIOS=1 nix run .#ci -- --help
           rm -f "$help_out"
         }
 
@@ -375,7 +374,6 @@ in
             .#checks.${pkgs.stdenv.hostPlatform.system}.service-lifecycle-matrix-smoke \
             .#checks.${pkgs.stdenv.hostPlatform.system}.ready-health-matrix-smoke \
             .#checks.${pkgs.stdenv.hostPlatform.system}.ready-health-shutdown-smoke \
-            .#checks.${pkgs.stdenv.hostPlatform.system}.ready-helios-sync-gate-smoke \
             .#checks.${pkgs.stdenv.hostPlatform.system}.supervisor-lifecycle-smoke \
             .#checks.${pkgs.stdenv.hostPlatform.system}.supervisor-runtime-contract
         }

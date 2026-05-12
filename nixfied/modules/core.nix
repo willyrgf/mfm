@@ -16,7 +16,6 @@ in
     ./services/nginx.nix
     ./services/minio.nix
     ./services/reth.nix
-    ./services/helios.nix
   ];
 
   options.nixfied = {

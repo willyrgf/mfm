@@ -14,8 +14,8 @@ This document tracks downstream expectations when the vendored Nixfied framework
 ## Current Local Conventions
 
 - Ephemeral copies are pinned to `git-files` with `includeUntracked = true` in [`nixfied/project/conf.nix`](../nixfied/project/conf.nix) so local `.env` files are not pulled into the framework's new `nix-source` materialization path.
-- Service metadata in [`nixfied/project/conf.nix`](../nixfied/project/conf.nix) uses explicit `sources` entries so the compiled model can describe local Postgres, MinIO, Reth, and Helios backends.
-- Helios declares `sourceKinds.local = "real"` and `readiness.profile = "strict"` so framework readiness checks reject shim-like sources for snapshot flows.
+- Service metadata in [`nixfied/project/conf.nix`](../nixfied/project/conf.nix) uses explicit `sources` entries so the compiled model can describe local Postgres, MinIO, and Reth backends.
+- Portfolio snapshot RPC bootstrap is configured through `MFM_EVM_RPC_SOURCES_JSON`; the wrapper supplies a public Ethereum mainnet fallback only when callers do not provide one.
 
 ## Notes For Future Upgrades
 

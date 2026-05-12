@@ -489,19 +489,19 @@ The CLI's behavior can be modified using environment variables, which is ideal f
 - **`MFM_EVM_RPC_SOURCES_JSON`**: Optional JSON array of source objects used to bootstrap the canonical `rpc.control` source catalog. Runtime-only and never persisted.
   ```sh
   export MFM_EVM_RPC_SOURCES_JSON='[
-    {"id":"helios_local","network_id":"ethereum-mainnet","rpc_url":"http://127.0.0.1:8545","kind":"local"},
+    {"id":"reth_local","network_id":"ethereum-mainnet","rpc_url":"http://127.0.0.1:8545","kind":"local"},
     {"id":"drpc_public","network_id":"ethereum-mainnet","rpc_url":"https://eth.drpc.org","kind":"remote_public"}
   ]'
   ```
 
 - **`MFM_EVM_RPC_PREFERRED_ORDER`**: Optional comma-separated source IDs that seed canonical control-plane ranking order.
   ```sh
-  export MFM_EVM_RPC_PREFERRED_ORDER="helios_local,drpc_public"
+  export MFM_EVM_RPC_PREFERRED_ORDER="reth_local,drpc_public"
   ```
 
 - **`MFM_EVM_RPC_REQUIRE_GET_PROOF_IDS`**: Optional comma-separated source IDs that must pass `eth_getProof` during control-plane bootstrap/probe.
   ```sh
-  export MFM_EVM_RPC_REQUIRE_GET_PROOF_IDS="helios_local"
+  export MFM_EVM_RPC_REQUIRE_GET_PROOF_IDS="reth_local"
   ```
 
 - Managed `rpc.control` bootstrap requires `network_id` on every configured source.

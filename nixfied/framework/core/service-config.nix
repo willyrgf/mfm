@@ -302,24 +302,6 @@ let
         };
         failureSuffix = " (query failed)";
       }
-    else if kind == "helios-ready" then
-      stepBase
-      // {
-        endpoint = requireValue {
-          inherit serviceName mode kind;
-          field = "endpoint";
-          value = step.endpoint or null;
-        };
-        executionEndpoint = requireValue {
-          inherit serviceName mode kind;
-          field = "executionEndpoint";
-          value = step.executionEndpoint or null;
-        };
-        sourceKinds = step.sourceKinds or { };
-        readinessProfile = step.readinessProfile or "fast";
-        requireNotSyncing = step.requireNotSyncing or false;
-        disallowSourceKinds = step.disallowSourceKinds or [ ];
-      }
     else if kind == "exec" then
       stepBase
       // {
@@ -818,146 +800,11 @@ let
       };
     };
 
-  normalizeHelios =
-    discardContext: cfg:
-    let
-      readiness = cfg.readiness or { };
-      cfgWithDefaults = cfg // {
-        portKeyRpc = cfg.portKeyRpc or "heliosRpc";
-        executionRpcPortKey = cfg.executionRpcPortKey or "rethHttp";
-        dataDirName = cfg.dataDirName or "helios";
-        network = cfg.network or "local";
-        executionRpcUrl = cfg.executionRpcUrl or "";
-        consensusRpcUrl = cfg.consensusRpcUrl or "";
-        checkpoint = cfg.checkpoint or "";
-        sourceKinds = cfg.sourceKinds or { };
-        readiness = {
-          profile = readiness.profile or "fast";
-          requireNotSyncing = readiness.requireNotSyncing or false;
-          disallowSourceKinds = readiness.disallowSourceKinds or [ ];
-        };
-      };
-      keys = sourceKeys cfgWithDefaults;
-      selectedSourceName = resolveSelectedSource "helios" keys (cfgWithDefaults.defaultSource or "");
-      normalizedSources = normalizeSelectedSources discardContext "helios" keys selectedSourceName (
-        cfgWithDefaults.sources or { }
-      );
-      selected = sourceValue "helios" cfgWithDefaults normalizedSources;
-      package = selected.value.package or null;
-      defaultHeliosReadyStep = {
-        kind = "helios-ready";
-        endpoint = "rpc";
-        executionEndpoint = "execution";
-        serviceLabel = "helios";
-        phaseLabel = "readiness";
-        successLabel = "ready";
-        failureLabel = "not ready";
-        sourceKinds = cfgWithDefaults.sourceKinds;
-        readinessProfile = cfgWithDefaults.readiness.profile;
-        requireNotSyncing =
-          cfgWithDefaults.readiness.requireNotSyncing || cfgWithDefaults.readiness.profile == "strict";
-        allowLocalHealthFallback = cfgWithDefaults.network == "local";
-        disallowSourceKinds = lib.unique (
-          cfgWithDefaults.readiness.disallowSourceKinds
-          ++ lib.optionals (cfgWithDefaults.readiness.profile == "strict") [
-            "shim"
-            "unknown"
-          ]
-        );
-      };
-      defaultProbePlans = {
-        health = {
-          count = 2;
-          steps = [
-            {
-              kind = "jsonrpc";
-              endpoint = "rpc";
-              serviceLabel = "helios";
-              phaseLabel = "health";
-              successLabel = "healthy";
-              failureLabel = "unhealthy";
-              method = "eth_chainId";
-            }
-            {
-              kind = "jsonrpc";
-              endpoint = "execution";
-              serviceLabel = "helios execution";
-              phaseLabel = "health";
-              successLabel = "healthy";
-              failureLabel = "unhealthy";
-              method = "web3_clientVersion";
-            }
-          ];
-          wait = defaultWait;
-        };
-        ready = {
-          count = 2;
-          steps = [
-            defaultHeliosReadyStep
-            {
-              kind = "jsonrpc";
-              endpoint = "execution";
-              serviceLabel = "helios execution";
-              phaseLabel = "readiness";
-              successLabel = "ready";
-              failureLabel = "not ready";
-              method = "eth_chainId";
-            }
-          ];
-          wait = defaultWait // {
-            enabled = true;
-            timeoutEnvVar = "HELIOS_READY_TIMEOUT_SECS";
-            intervalEnvVar = "HELIOS_READY_INTERVAL_SECS";
-          };
-        };
-      };
-      probePlans = mergeProbePlans "helios" defaultProbePlans (cfgWithDefaults.probes or { });
-    in
-    cfgWithDefaults
-    // {
-      sources = normalizedSources;
-      sourceKeys = keys;
-      package = package;
-      resolved = {
-        sources = normalizedSources;
-        selectedSource = selected.selectedSource;
-        endpoints = {
-          rpc = {
-            protocol = "http";
-            portKey = cfgWithDefaults.portKeyRpc;
-          };
-          execution = {
-            protocol = "http";
-            portKey = cfgWithDefaults.executionRpcPortKey;
-          };
-        };
-        probes = {
-          health = resolveProbeSummary "health" "jsonrpc:eth_chainId" (cfgWithDefaults.probes.health or null);
-          ready = resolveProbeSummary "ready" "jsonrpc:eth_blockNumber" (
-            cfgWithDefaults.probes.ready or null
-          );
-        };
-        probePlans = probePlans;
-        operationProbes = probePlans;
-        paths = {
-          dataDirName = cfgWithDefaults.dataDirName;
-        };
-        runtime = dropNulls {
-          inherit package;
-          network = cfgWithDefaults.network;
-          executionRpcUrl = cfgWithDefaults.executionRpcUrl;
-          consensusRpcUrl = cfgWithDefaults.consensusRpcUrl;
-          checkpoint = cfgWithDefaults.checkpoint;
-        };
-      };
-    };
-
   supportedServiceNames = [
     "postgres"
     "nginx"
     "minio"
     "reth"
-    "helios"
   ];
 
   normalizeByName =
@@ -970,8 +817,6 @@ let
       normalizeMinio discardContext cfg
     else if name == "reth" then
       normalizeReth discardContext cfg
-    else if name == "helios" then
-      normalizeHelios discardContext cfg
     else
       cfg;
 

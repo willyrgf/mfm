@@ -18,7 +18,6 @@ let
   rethHttpPortBase = conf.ports.rethHttp;
   rethWsPortBase = conf.ports.rethWs;
   rethAuthPortBase = conf.ports.rethAuth;
-  heliosRpcPortBase = conf.ports.heliosRpc or 8547;
 in
 {
   inherit envOffsetCase;
@@ -51,7 +50,5 @@ in
         RETH_HTTP_PORT=$(( ${toString rethHttpPortBase} + env_offset + (slot_value * ${toString conf.slots.stride}) ))
         RETH_WS_PORT=$(( ${toString rethWsPortBase} + env_offset + (slot_value * ${toString conf.slots.stride}) ))
         RETH_AUTH_PORT=$(( ${toString rethAuthPortBase} + env_offset + (slot_value * ${toString conf.slots.stride}) ))
-        HELIOS_RPC_PORT=$(( ${toString heliosRpcPortBase} + env_offset + (slot_value * ${toString conf.slots.stride}) ))
-        HELIOSRPC_PORT="$HELIOS_RPC_PORT"
   '';
 }

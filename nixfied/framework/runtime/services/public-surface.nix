@@ -1,19 +1,4 @@
 {
-  helios = {
-    apps = [
-      { opName = "check-config"; }
-      { opName = "full-start"; }
-      { opName = "full-start-test"; }
-      { opName = "health"; }
-      { opName = "init"; }
-      { opName = "ready"; }
-      { opName = "restart"; }
-      { opName = "start"; }
-      { opName = "status"; }
-      { opName = "stop"; }
-    ];
-  };
-
   minio = {
     apps = [
       { opName = "bucket-create"; }

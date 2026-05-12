@@ -178,8 +178,8 @@ nixfied.lib.mkNixfied {
 `mkFlakeOutputs` wraps public task/workflow flake apps in thin selector-aware launchers. The canonical compile-time graph selector is `--exclude-services <csv>`, for example:
 
 ```bash
-nix run .#ci -- --exclude-services helios --mode full --summary
-nix run .#run-task -- --exclude-services helios task.framework.test --summary
+nix run .#ci -- --exclude-services minio --mode basic --summary
+nix run .#run-task -- --exclude-services minio task.framework.test --summary
 ```
 
 Compiled outputs also export service operation surfaces and task-runtime hook env vars for the surviving service graph:

@@ -27,7 +27,7 @@ Transport request payload:
 {
   "method": "eth_chainId",
   "params": [],
-  "route": { "source_id": "helios_local" }
+  "route": { "source_id": "reth_local" }
 }
 ```
 
@@ -46,7 +46,7 @@ For full routing visibility without issuing network requests, call:
   "params": {
     "method": "eth_chainId",
     "params": [],
-    "route": { "source_id": "helios_local" }
+    "route": { "source_id": "reth_local" }
   }
 }
 ```

@@ -34,7 +34,7 @@
           "type": "array",
           "items": {
             "type": "string",
-            "enum": [ "postgres", "nginx", "minio", "reth", "helios" ]
+            "enum": [ "postgres", "nginx", "minio", "reth" ]
           }
         }
       },

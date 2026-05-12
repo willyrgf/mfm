@@ -133,7 +133,7 @@ nix run .#ci -- --mode <mode> --summary
 - Service model surfaces:
   - `nix run .#services`
   - `nix run .#ready -- --service postgres --source local`
-  - `nix run .#ready -- --service helios --source local`
+  - `nix run .#ready -- --service reth --source local`
   - `nix run .#health -- --service all`
 - Policy controls (optional overrides):
   - `SERVICE_OWNER_SCOPE=ephemeral|persistent`

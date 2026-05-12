@@ -12,7 +12,6 @@
     nginx = import ./services/nginx.nix;
     minio = import ./services/minio.nix;
     reth = import ./services/reth.nix;
-    helios = import ./services/helios.nix;
   };
 
   profiles = {

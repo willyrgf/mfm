@@ -24,10 +24,6 @@ let
     inherit project;
     name = "reth";
   };
-  heliosCfg = serviceConfig.getProjectServiceConfig {
-    inherit project;
-    name = "helios";
-  };
   defaultPostgresDatabase = postgresCfg.testDatabase or (postgresCfg.database or "app_test");
 
   portVarFromKey =
@@ -40,7 +36,6 @@ let
   postgresPortVar = portVarFromKey (postgresCfg.portKey or "postgres");
   minioApiPortVar = portVarFromKey (minioCfg.portKeyApi or "minioApi");
   rethHttpPortVar = portVarFromKey (rethCfg.portKeyHttp or "rethHttp");
-  heliosRpcPortVar = portVarFromKey (heliosCfg.portKeyRpc or "heliosRpc");
 
   isEnvName = name: builtins.match "^[A-Za-z_][A-Za-z0-9_]*$" name != null;
 
@@ -215,8 +210,6 @@ let
         mkLocalPostgresUrlExportFromPortVar key postgresPortVar dbName
       else if from == "reth.httpUrl" then
         mkLocalHttpUrlExportFromPortVar key rethHttpPortVar
-      else if from == "helios.rpcUrl" then
-        mkLocalHttpUrlExportFromPortVar key heliosRpcPortVar
       else if from == "minio.endpoint" then
         mkLocalHttpUrlExportFromPortVar key minioApiPortVar
       else if from == "minio.bucket" then
