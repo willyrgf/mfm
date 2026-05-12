@@ -1286,7 +1286,8 @@ impl ControlPlanePostgresStore {
         let ddl = r#"
 CREATE TABLE IF NOT EXISTS mfm_streams (
   stream_id TEXT PRIMARY KEY,
-  head_seq BIGINT NOT NULL
+  head_seq BIGINT NOT NULL,
+  CONSTRAINT mfm_streams_head_seq_nonnegative CHECK (head_seq >= 0)
 );
 
 CREATE TABLE IF NOT EXISTS mfm_stream_records (
@@ -1296,8 +1297,22 @@ CREATE TABLE IF NOT EXISTS mfm_stream_records (
   kind TEXT NOT NULL,
   payload JSONB NOT NULL,
   PRIMARY KEY (stream_id, seq),
+  CONSTRAINT mfm_stream_records_seq_positive CHECK (seq >= 1),
+  CONSTRAINT mfm_stream_records_ts_millis_nonnegative CHECK (ts_millis IS NULL OR ts_millis >= 0),
   CONSTRAINT mfm_stream_records_stream_fk FOREIGN KEY (stream_id) REFERENCES mfm_streams(stream_id) ON DELETE CASCADE
 );
+
+BEGIN;
+ALTER TABLE mfm_streams DROP CONSTRAINT IF EXISTS mfm_streams_head_seq_nonnegative;
+ALTER TABLE mfm_streams
+  ADD CONSTRAINT mfm_streams_head_seq_nonnegative CHECK (head_seq >= 0);
+ALTER TABLE mfm_stream_records DROP CONSTRAINT IF EXISTS mfm_stream_records_seq_positive;
+ALTER TABLE mfm_stream_records
+  ADD CONSTRAINT mfm_stream_records_seq_positive CHECK (seq >= 1);
+ALTER TABLE mfm_stream_records DROP CONSTRAINT IF EXISTS mfm_stream_records_ts_millis_nonnegative;
+ALTER TABLE mfm_stream_records
+  ADD CONSTRAINT mfm_stream_records_ts_millis_nonnegative CHECK (ts_millis IS NULL OR ts_millis >= 0);
+COMMIT;
 
 CREATE TABLE IF NOT EXISTS mfm_rpc_source_state (
   control_scope TEXT NOT NULL,
