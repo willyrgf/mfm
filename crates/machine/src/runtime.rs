@@ -13,7 +13,7 @@ use tracing::{debug, info, instrument, warn};
 
 use crate::attempt_envelope::{analyze_kernel_events, OrphanAttempt};
 use crate::config::{BackoffPolicy, ExecutionMode, RunConfig, RunManifest};
-use crate::context_runtime::write_full_snapshot_value;
+use crate::context_runtime::{read_canonical_json_artifact, write_full_snapshot_value};
 use crate::engine::{ExecutionEngine, RunPhase, RunResult, StartRun, Stores};
 use crate::errors::{ContextError, ErrorCategory, ErrorInfo, RunError, StateError, StorageError};
 use crate::events::{
@@ -23,7 +23,7 @@ use crate::hashing::artifact_id_for_json;
 use crate::ids::{ArtifactId, ErrorCode, OpId, RunId, StateId};
 use crate::live_io::{FactIndex, LiveIoTransportFactory, UnimplementedLiveIoTransportFactory};
 use crate::plan::{DependencyEdge, ExecutionPlan, PlanValidationError, StateNode};
-use crate::stores::{ArtifactStore, StreamId};
+use crate::stores::{ArtifactKind, ArtifactStore, StreamId};
 
 mod attempt;
 mod child_runs;
@@ -402,25 +402,8 @@ async fn read_manifest(
     artifacts: &dyn ArtifactStore,
     manifest_id: &ArtifactId,
 ) -> Result<RunManifest, RunError> {
-    let bytes = artifacts
-        .get(manifest_id)
-        .await
-        .map_err(RunError::Storage)?;
-    let value = serde_json::from_slice::<serde_json::Value>(&bytes).map_err(|_| {
-        RunError::Context(context_err(
-            "manifest_decode_failed",
-            "failed to decode manifest JSON",
-        ))
-    })?;
-
-    // Defense: manifest bytes must match its content hash.
-    let computed = crate::hashing::artifact_id_for_bytes(&bytes);
-    if &computed != manifest_id {
-        return Err(invalid_plan(
-            "manifest_corrupt",
-            "manifest artifact content hash mismatch",
-        ));
-    }
+    let value =
+        read_canonical_json_artifact(artifacts, ArtifactKind::Manifest, manifest_id).await?;
 
     serde_json::from_value::<RunManifest>(value).map_err(|_| {
         RunError::Context(context_err(

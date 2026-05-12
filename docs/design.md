@@ -136,6 +136,8 @@ A state attempt may span multiple appends.
 
 ### 4.5 Content addressing
 Manifests, snapshots, facts, and outputs are immutable artifacts addressed by digest.
+When the runtime reads structured artifacts for resume, the stored bytes MUST both match the
+requested content address and exactly equal the canonical JSON encoding of the parsed value.
 
 ### 4.6 Canonical hashing format
 - Structured data participating in hashing uses canonical JSON semantics (RFC 8785/JCS-style target).
@@ -328,6 +330,8 @@ Recommended fields:
 - Structured payloads: canonical JSON bytes -> hash -> artifact ID.
 - Binary payloads: raw bytes -> hash -> artifact ID.
 - Hash algorithm: SHA-256.
+- Runtime resume MUST reject structured artifacts whose bytes are not exact canonical JSON for the
+  parsed value, even when the raw bytes match the requested content address.
 
 ### 8.3 Facts as single-assignment
 Within a run:

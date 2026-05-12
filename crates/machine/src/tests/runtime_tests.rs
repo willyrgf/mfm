@@ -369,6 +369,238 @@ async fn store_manifest(artifacts: &dyn ArtifactStore, manifest: &RunManifest) -
     artifacts.put(ArtifactKind::Manifest, bytes).await.unwrap()
 }
 
+fn manifest_for(run_config: RunConfig) -> RunManifest {
+    RunManifest {
+        op_id: OpId::must_new("op".to_string()),
+        op_version: "0".to_string(),
+        input_params: serde_json::json!({}),
+        run_config,
+        build: crate::config::BuildProvenance {
+            git_commit: None,
+            cargo_lock_hash: None,
+            flake_lock_hash: None,
+            rustc_version: None,
+            target_triple: None,
+            env_allowlist: Vec::new(),
+        },
+    }
+}
+
+fn set_key_plan(op_id: &OpId) -> ExecutionPlan {
+    ExecutionPlan {
+        op_id: op_id.clone(),
+        graph: StateGraph {
+            states: vec![StateNode {
+                id: StateId::must_new("machine.main.s1".to_string()),
+                state: Arc::new(SetKeyState),
+            }],
+            edges: Vec::new(),
+        },
+    }
+}
+
+fn assert_storage_corruption_code(err: RunError, code: &str) {
+    match err {
+        RunError::Storage(StorageError::Corruption(info)) => assert_eq!(info.code.0, code),
+        other => panic!("unexpected error: {other:?}"),
+    }
+}
+
+async fn append_run_started(
+    streams: &MemStreamStore,
+    run_id: RunId,
+    op_id: OpId,
+    manifest_id: ArtifactId,
+    initial_snapshot_id: ArtifactId,
+) {
+    streams
+        .append_run_events(
+            run_id,
+            0,
+            vec![EventEnvelope {
+                run_id,
+                seq: 1,
+                ts_millis: None,
+                event: Event::Kernel(KernelEvent::RunStarted {
+                    op_id,
+                    manifest_id,
+                    initial_snapshot_id,
+                }),
+            }],
+        )
+        .await
+        .expect("seed run");
+}
+
+#[tokio::test]
+async fn resume_rejects_noncanonical_manifest_artifact() {
+    let streams = Arc::new(MemStreamStore::default());
+    let artifacts = Arc::new(MemArtifactStore::default());
+    let stores = || Stores {
+        streams: streams.clone(),
+        artifacts: artifacts.clone(),
+    };
+
+    let run_config = base_run_config();
+    let manifest = manifest_for(run_config);
+    let manifest_value = serde_json::to_value(&manifest).expect("manifest json");
+    let noncanonical_manifest =
+        serde_json::to_vec_pretty(&manifest_value).expect("noncanonical manifest bytes");
+    let manifest_id = artifacts
+        .put(ArtifactKind::Manifest, noncanonical_manifest)
+        .await
+        .expect("store manifest");
+
+    let initial_snapshot_id = write_full_snapshot_value(artifacts.as_ref(), serde_json::json!({}))
+        .await
+        .expect("initial snapshot");
+    let run_id = RunId(uuid::Uuid::new_v4());
+    append_run_started(
+        streams.as_ref(),
+        run_id,
+        manifest.op_id.clone(),
+        manifest_id,
+        initial_snapshot_id,
+    )
+    .await;
+
+    let resolver = Arc::new(FixedResolver {
+        plan: set_key_plan(&manifest.op_id),
+    });
+    let engine = DefaultExecutionEngine::new(resolver);
+
+    let err = engine
+        .resume(stores(), run_id)
+        .await
+        .expect_err("noncanonical manifest must fail resume");
+
+    assert_storage_corruption_code(err, "artifact_not_canonical");
+}
+
+#[tokio::test]
+async fn resume_rejects_secret_shaped_manifest_artifact() {
+    let streams = Arc::new(MemStreamStore::default());
+    let artifacts = Arc::new(MemArtifactStore::default());
+    let stores = || Stores {
+        streams: streams.clone(),
+        artifacts: artifacts.clone(),
+    };
+
+    let op_id = OpId::must_new("op".to_string());
+    let manifest_id = artifacts
+        .put(
+            ArtifactKind::Manifest,
+            br#"{"private_key":"do-not-persist"}"#.to_vec(),
+        )
+        .await
+        .expect("store manifest");
+    let initial_snapshot_id = write_full_snapshot_value(artifacts.as_ref(), serde_json::json!({}))
+        .await
+        .expect("initial snapshot");
+    let run_id = RunId(uuid::Uuid::new_v4());
+    append_run_started(
+        streams.as_ref(),
+        run_id,
+        op_id.clone(),
+        manifest_id,
+        initial_snapshot_id,
+    )
+    .await;
+
+    let resolver = Arc::new(FixedResolver {
+        plan: set_key_plan(&op_id),
+    });
+    let engine = DefaultExecutionEngine::new(resolver);
+
+    let err = engine
+        .resume(stores(), run_id)
+        .await
+        .expect_err("secret-shaped manifest must fail resume");
+
+    assert_storage_corruption_code(err, "secrets_detected");
+}
+
+#[tokio::test]
+async fn resume_rejects_noncanonical_snapshot_artifact() {
+    let streams = Arc::new(MemStreamStore::default());
+    let artifacts = Arc::new(MemArtifactStore::default());
+    let stores = || Stores {
+        streams: streams.clone(),
+        artifacts: artifacts.clone(),
+    };
+
+    let run_config = base_run_config();
+    let manifest = manifest_for(run_config);
+    let manifest_id = store_manifest(artifacts.as_ref(), &manifest).await;
+    let initial_snapshot_id = artifacts
+        .put(ArtifactKind::ContextSnapshot, br#"{ "a": 1 }"#.to_vec())
+        .await
+        .expect("store snapshot");
+    let run_id = RunId(uuid::Uuid::new_v4());
+    append_run_started(
+        streams.as_ref(),
+        run_id,
+        manifest.op_id.clone(),
+        manifest_id,
+        initial_snapshot_id,
+    )
+    .await;
+
+    let resolver = Arc::new(FixedResolver {
+        plan: set_key_plan(&manifest.op_id),
+    });
+    let engine = DefaultExecutionEngine::new(resolver);
+
+    let err = engine
+        .resume(stores(), run_id)
+        .await
+        .expect_err("noncanonical snapshot must fail resume");
+
+    assert_storage_corruption_code(err, "artifact_not_canonical");
+}
+
+#[tokio::test]
+async fn resume_rejects_secret_shaped_snapshot_artifact() {
+    let streams = Arc::new(MemStreamStore::default());
+    let artifacts = Arc::new(MemArtifactStore::default());
+    let stores = || Stores {
+        streams: streams.clone(),
+        artifacts: artifacts.clone(),
+    };
+
+    let run_config = base_run_config();
+    let manifest = manifest_for(run_config);
+    let manifest_id = store_manifest(artifacts.as_ref(), &manifest).await;
+    let initial_snapshot_id = artifacts
+        .put(
+            ArtifactKind::ContextSnapshot,
+            br#"{"private_key":"do-not-persist"}"#.to_vec(),
+        )
+        .await
+        .expect("store snapshot");
+    let run_id = RunId(uuid::Uuid::new_v4());
+    append_run_started(
+        streams.as_ref(),
+        run_id,
+        manifest.op_id.clone(),
+        manifest_id,
+        initial_snapshot_id,
+    )
+    .await;
+
+    let resolver = Arc::new(FixedResolver {
+        plan: set_key_plan(&manifest.op_id),
+    });
+    let engine = DefaultExecutionEngine::new(resolver);
+
+    let err = engine
+        .resume(stores(), run_id)
+        .await
+        .expect_err("secret-shaped snapshot must fail resume");
+
+    assert_storage_corruption_code(err, "secrets_detected");
+}
+
 const SECRET_MNEMONIC: &str =
     "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
 const SECRET_PASSWORD: &str = "hunter2";

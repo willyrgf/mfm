@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 
 use crate::context::DynContext;
-use crate::errors::{ContextError, ErrorCategory, ErrorInfo, RunError};
+use crate::errors::{ContextError, ErrorCategory, ErrorInfo, RunError, StorageError};
 use crate::hashing::{
     canonical_json_bytes, put_artifact_verified, verify_artifact_bytes, CanonicalJsonError,
 };
@@ -21,6 +21,27 @@ fn info(code: &'static str, message: &'static str) -> ErrorInfo {
         retryable: false,
         message: message.to_string(),
         details: None,
+    }
+}
+
+fn storage_corruption(code: &'static str, message: impl Into<String>) -> RunError {
+    RunError::Storage(StorageError::Corruption(ErrorInfo {
+        code: ErrorCode(code.to_string()),
+        category: ErrorCategory::Storage,
+        retryable: false,
+        message: message.into(),
+        details: None,
+    }))
+}
+
+fn artifact_kind_name(kind: &ArtifactKind) -> &'static str {
+    match kind {
+        ArtifactKind::Manifest => "manifest",
+        ArtifactKind::ContextSnapshot => "context snapshot",
+        ArtifactKind::FactPayload => "fact payload",
+        ArtifactKind::SecretPayload => "secret payload",
+        ArtifactKind::Output => "output",
+        ArtifactKind::Other(_) => "artifact",
     }
 }
 
@@ -188,17 +209,55 @@ pub(crate) async fn read_full_snapshot_value(
     artifacts: &dyn ArtifactStore,
     snapshot_id: &ArtifactId,
 ) -> Result<serde_json::Value, RunError> {
-    let bytes = artifacts
-        .get(snapshot_id)
-        .await
-        .map_err(RunError::Storage)?;
-    verify_artifact_bytes(snapshot_id, &bytes).map_err(RunError::Storage)?;
-    serde_json::from_slice::<serde_json::Value>(&bytes).map_err(|_| {
-        RunError::Context(ContextError::Serialization(info(
-            "context_snapshot_decode_failed",
-            "failed to decode context snapshot JSON",
-        )))
-    })
+    read_canonical_json_artifact(artifacts, ArtifactKind::ContextSnapshot, snapshot_id).await
+}
+
+pub(crate) async fn read_canonical_json_artifact(
+    artifacts: &dyn ArtifactStore,
+    kind: ArtifactKind,
+    id: &ArtifactId,
+) -> Result<serde_json::Value, RunError> {
+    let bytes = artifacts.get(id).await.map_err(RunError::Storage)?;
+    verify_artifact_bytes(id, &bytes).map_err(RunError::Storage)?;
+
+    let value = serde_json::from_slice::<serde_json::Value>(&bytes).map_err(|_| {
+        storage_corruption(
+            "artifact_json_decode_failed",
+            format!(
+                "failed to decode {} artifact as JSON",
+                artifact_kind_name(&kind)
+            ),
+        )
+    })?;
+
+    let canonical = canonical_json_bytes(&value).map_err(|err| match err {
+        CanonicalJsonError::FloatNotAllowed => storage_corruption(
+            "artifact_float_not_allowed",
+            format!(
+                "{} artifact contained a float; structured artifacts must be canonical-json-hashable",
+                artifact_kind_name(&kind)
+            ),
+        ),
+        CanonicalJsonError::SecretsNotAllowed => storage_corruption(
+            "secrets_detected",
+            format!(
+                "{} artifact contained secrets (policy forbids persisting secrets)",
+                artifact_kind_name(&kind)
+            ),
+        ),
+    })?;
+
+    if canonical != bytes {
+        return Err(storage_corruption(
+            "artifact_not_canonical",
+            format!(
+                "{} artifact bytes were not canonical JSON",
+                artifact_kind_name(&kind)
+            ),
+        ));
+    }
+
+    Ok(value)
 }
 
 pub(crate) async fn read_json_context(
@@ -299,6 +358,15 @@ mod tests {
         }
     }
 
+    fn assert_storage_code(err: RunError, code: &str) {
+        match err {
+            RunError::Storage(StorageError::Corruption(info)) => {
+                assert_eq!(info.code.0, code)
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn full_snapshot_ids_are_deterministic_for_same_logical_context() {
         let store = MemArtifactStore::default();
@@ -330,12 +398,7 @@ mod tests {
             .await
             .expect_err("wrong store-returned id must fail snapshot write");
 
-        match err {
-            RunError::Storage(StorageError::Corruption(info)) => {
-                assert_eq!(info.code.0, "artifact_put_id_mismatch")
-            }
-            other => panic!("unexpected error: {other:?}"),
-        }
+        assert_storage_code(err, "artifact_put_id_mismatch");
     }
 
     #[tokio::test]
@@ -349,12 +412,76 @@ mod tests {
             .await
             .expect_err("wrong bytes must fail snapshot read");
 
-        match err {
-            RunError::Storage(StorageError::Corruption(info)) => {
-                assert_eq!(info.code.0, "artifact_content_address_mismatch")
-            }
-            other => panic!("unexpected error: {other:?}"),
-        }
+        assert_storage_code(err, "artifact_content_address_mismatch");
+    }
+
+    #[tokio::test]
+    async fn canonical_json_artifact_reader_accepts_canonical_bytes() {
+        let store = MemArtifactStore::default();
+        let value = serde_json::json!({ "b": 2, "a": 1 });
+        let bytes = canonical_json_bytes(&value).expect("canonical bytes");
+        let id = store
+            .put(ArtifactKind::Manifest, bytes)
+            .await
+            .expect("store artifact");
+
+        let loaded = read_canonical_json_artifact(&store, ArtifactKind::Manifest, &id)
+            .await
+            .expect("canonical artifact should load");
+
+        assert_eq!(loaded, value);
+    }
+
+    #[tokio::test]
+    async fn canonical_json_artifact_reader_rejects_noncanonical_key_order() {
+        let bytes = br#"{"b":2,"a":1}"#.to_vec();
+        let id = artifact_id_for_bytes(&bytes);
+        let store = WrongBytesArtifactStore { bytes };
+
+        let err = read_canonical_json_artifact(&store, ArtifactKind::ContextSnapshot, &id)
+            .await
+            .expect_err("noncanonical key order must fail closed");
+
+        assert_storage_code(err, "artifact_not_canonical");
+    }
+
+    #[tokio::test]
+    async fn canonical_json_artifact_reader_rejects_noncanonical_whitespace() {
+        let bytes = br#"{ "a": 1 }"#.to_vec();
+        let id = artifact_id_for_bytes(&bytes);
+        let store = WrongBytesArtifactStore { bytes };
+
+        let err = read_canonical_json_artifact(&store, ArtifactKind::ContextSnapshot, &id)
+            .await
+            .expect_err("noncanonical whitespace must fail closed");
+
+        assert_storage_code(err, "artifact_not_canonical");
+    }
+
+    #[tokio::test]
+    async fn canonical_json_artifact_reader_rejects_floats() {
+        let bytes = br#"{"a":1.25}"#.to_vec();
+        let id = artifact_id_for_bytes(&bytes);
+        let store = WrongBytesArtifactStore { bytes };
+
+        let err = read_canonical_json_artifact(&store, ArtifactKind::ContextSnapshot, &id)
+            .await
+            .expect_err("floats must fail closed");
+
+        assert_storage_code(err, "artifact_float_not_allowed");
+    }
+
+    #[tokio::test]
+    async fn canonical_json_artifact_reader_rejects_secret_shaped_values() {
+        let bytes = br#"{"private_key":"do-not-persist"}"#.to_vec();
+        let id = artifact_id_for_bytes(&bytes);
+        let store = WrongBytesArtifactStore { bytes };
+
+        let err = read_canonical_json_artifact(&store, ArtifactKind::ContextSnapshot, &id)
+            .await
+            .expect_err("secret-shaped values must fail closed");
+
+        assert_storage_code(err, "secrets_detected");
     }
 
     #[test]
