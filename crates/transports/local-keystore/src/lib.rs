@@ -7,6 +7,8 @@
 //! Mnemonic BIP-39 passphrases are sourced only through explicit request metadata: no passphrase,
 //! hidden local prompt, or a hex-encoded UTF-8 file/FIFO path. File and FIFO reads strip trailing
 //! `\n` and `\r\n` line endings; all other bytes are preserved as the passphrase.
+//! Interactive private-key, mnemonic, password, and passphrase prompts use hidden terminal input;
+//! `stdin` imports are reserved for controlled pipes and files.
 //!
 //! # Examples
 //!
@@ -124,6 +126,14 @@ fn handle_keystore_tx_sign(request: serde_json::Value) -> Result<serde_json::Val
 }
 
 fn keystore_import(req: KeystoreImportRequest) -> Result<KeystoreImportReport, LocalError> {
+    let mut input = ProcessSecretInput;
+    keystore_import_with_input(req, &mut input)
+}
+
+fn keystore_import_with_input(
+    req: KeystoreImportRequest,
+    input: &mut dyn SecretInput,
+) -> Result<KeystoreImportReport, LocalError> {
     validate_import_request(&req)?;
     let path = PathBuf::from(decode_required_utf8(
         req.store_path,
@@ -134,6 +144,7 @@ fn keystore_import(req: KeystoreImportRequest) -> Result<KeystoreImportReport, L
     let label = decode_optional_utf8(req.label, req.label_hex, "InvalidPathConfig", "label")?;
     let material = match req.kind {
         KeystoreImportType::PrivateKey => read_input(
+            input,
             if req.stdin_mode {
                 ""
             } else {
@@ -142,6 +153,7 @@ fn keystore_import(req: KeystoreImportRequest) -> Result<KeystoreImportReport, L
             req.stdin_mode,
         )?,
         KeystoreImportType::Mnemonic => read_input(
+            input,
             if req.stdin_mode {
                 ""
             } else {
@@ -154,7 +166,7 @@ fn keystore_import(req: KeystoreImportRequest) -> Result<KeystoreImportReport, L
     match req.kind {
         KeystoreImportType::PrivateKey => {
             let normalized = normalize_private_key(&material)?;
-            let mut ks = create_keystore_if_needed(&path)?;
+            let mut ks = create_keystore_if_needed_with_input(&path, input)?;
             let label = label
                 .unwrap_or_else(|| format!("imported-key-{}", Utc::now().format("%Y%m%d-%H%M%S")));
             let key_id = ks
@@ -171,10 +183,10 @@ fn keystore_import(req: KeystoreImportRequest) -> Result<KeystoreImportReport, L
         }
         KeystoreImportType::Mnemonic => {
             validate_mnemonic_basic(&material)?;
-            let mut ks = create_keystore_if_needed(&path)?;
+            let mut ks = create_keystore_if_needed_with_input(&path, input)?;
             let label = label
                 .unwrap_or_else(|| format!("imported-hd-{}", Utc::now().format("%Y%m%d-%H%M%S")));
-            let extra = read_bip39_extra(req.bip39_extra)?;
+            let extra = read_bip39_extra(req.bip39_extra, input)?;
             let key_id = ks
                 .import_mnemonic(
                     Some(label),
@@ -215,10 +227,35 @@ fn validate_import_request(req: &KeystoreImportRequest) -> Result<(), LocalError
     Ok(())
 }
 
-fn read_bip39_extra(source: Bip39ExtraSource) -> Result<Option<Zeroizing<String>>, LocalError> {
+trait SecretInput {
+    fn allow_env_password_sources(&self) -> bool {
+        true
+    }
+
+    fn read_stdin_material(&mut self) -> Result<Zeroizing<String>, LocalError>;
+
+    fn read_hidden(&mut self, prompt: &str) -> Result<Zeroizing<String>, LocalError>;
+}
+
+struct ProcessSecretInput;
+
+impl SecretInput for ProcessSecretInput {
+    fn read_stdin_material(&mut self) -> Result<Zeroizing<String>, LocalError> {
+        read_stdin_material()
+    }
+
+    fn read_hidden(&mut self, prompt: &str) -> Result<Zeroizing<String>, LocalError> {
+        read_password(prompt)
+    }
+}
+
+fn read_bip39_extra(
+    source: Bip39ExtraSource,
+    input: &mut dyn SecretInput,
+) -> Result<Option<Zeroizing<String>>, LocalError> {
     match source {
         Bip39ExtraSource::None => Ok(None),
-        Bip39ExtraSource::Prompt => read_password("Enter BIP-39 passphrase: ").map(Some),
+        Bip39ExtraSource::Prompt => input.read_hidden("Enter BIP-39 passphrase: ").map(Some),
         Bip39ExtraSource::FilePathHex(path_hex) => {
             let path =
                 decode_hex_utf8(&path_hex, "InvalidPathConfig", "bip39_extra.file_path_hex")?;
@@ -455,9 +492,12 @@ fn write_raw_transaction_file(path: &Path, raw_tx_hex: &str) -> Result<(), Keyst
     Ok(())
 }
 
-fn create_keystore_if_needed(path: &Path) -> Result<Keystore, LocalError> {
+fn create_keystore_if_needed_with_input(
+    path: &Path,
+    input: &mut dyn SecretInput,
+) -> Result<Keystore, LocalError> {
     if path.exists() {
-        return load_unlocked_keystore(path);
+        return load_unlocked_keystore_with_input(path, input);
     }
 
     if let Some(parent) = path.parent() {
@@ -473,7 +513,7 @@ fn create_keystore_if_needed(path: &Path) -> Result<Keystore, LocalError> {
         })?;
     }
 
-    let password = get_create_password()?;
+    let password = get_create_password_with_input(input)?;
     let cfg = if std::env::var(ENV_INTEGRATION_TEST).is_ok() {
         KeystoreConfig::insecure_integration_test()
     } else {
@@ -498,6 +538,14 @@ fn create_keystore_if_needed(path: &Path) -> Result<Keystore, LocalError> {
 }
 
 fn load_unlocked_keystore(path: &Path) -> Result<Keystore, LocalError> {
+    let mut input = ProcessSecretInput;
+    load_unlocked_keystore_with_input(path, &mut input)
+}
+
+fn load_unlocked_keystore_with_input(
+    path: &Path,
+    input: &mut dyn SecretInput,
+) -> Result<Keystore, LocalError> {
     if !path.exists() {
         return Err(LocalError::new(
             "KeystoreError",
@@ -508,7 +556,7 @@ fn load_unlocked_keystore(path: &Path) -> Result<Keystore, LocalError> {
 
     let mut keystore = Keystore::new(path)
         .map_err(|e| LocalError::new("KeystoreError", ErrorCategory::Unknown, e.to_string()))?;
-    let password = get_unlock_password()?;
+    let password = get_unlock_password_with_input(input)?;
     keystore.unlock(password.as_str()).map_err(|_| {
         LocalError::new(
             "KeystoreError",
@@ -533,19 +581,27 @@ fn load_key_info(
     })
 }
 
-fn get_unlock_password() -> Result<Zeroizing<String>, LocalError> {
-    if let Some(password) = password_from_env_sources()? {
-        return Ok(password);
+fn get_unlock_password_with_input(
+    input: &mut dyn SecretInput,
+) -> Result<Zeroizing<String>, LocalError> {
+    if input.allow_env_password_sources() {
+        if let Some(password) = password_from_env_sources()? {
+            return Ok(password);
+        }
     }
-    read_password("Enter keystore password: ")
+    input.read_hidden("Enter keystore password: ")
 }
 
-fn get_create_password() -> Result<Zeroizing<String>, LocalError> {
-    if let Some(password) = password_from_env_sources()? {
-        return Ok(password);
+fn get_create_password_with_input(
+    input: &mut dyn SecretInput,
+) -> Result<Zeroizing<String>, LocalError> {
+    if input.allow_env_password_sources() {
+        if let Some(password) = password_from_env_sources()? {
+            return Ok(password);
+        }
     }
-    let password = read_password("Enter password for new keystore: ")?;
-    let confirm_password = read_password("Confirm password: ")?;
+    let password = input.read_hidden("Enter password for new keystore: ")?;
+    let confirm_password = input.read_hidden("Confirm password: ")?;
     if password.as_str() != confirm_password.as_str() {
         return Err(LocalError::new(
             "KeystoreError",
@@ -601,25 +657,24 @@ fn read_secret_file(path: &str) -> Result<Zeroizing<String>, LocalError> {
     Ok(raw)
 }
 
-fn read_input(prompt: &str, from_stdin: bool) -> Result<Zeroizing<String>, LocalError> {
+fn read_input(
+    input: &mut dyn SecretInput,
+    prompt: &str,
+    from_stdin: bool,
+) -> Result<Zeroizing<String>, LocalError> {
     if from_stdin {
-        let mut input = Zeroizing::new(String::new());
-        io::stdin()
-            .read_to_string(&mut input)
-            .map_err(|e| LocalError::new("InputError", ErrorCategory::Unknown, e.to_string()))?;
-        finalize_stdin_secret_material(&mut input)?;
-        return Ok(input);
+        return input.read_stdin_material();
     }
 
-    print!("{prompt}");
-    io::stdout()
-        .flush()
-        .map_err(|e| LocalError::new("InputError", ErrorCategory::Unknown, e.to_string()))?;
+    input.read_hidden(prompt)
+}
+
+fn read_stdin_material() -> Result<Zeroizing<String>, LocalError> {
     let mut input = Zeroizing::new(String::new());
     io::stdin()
-        .read_line(&mut input)
+        .read_to_string(&mut input)
         .map_err(|e| LocalError::new("InputError", ErrorCategory::Unknown, e.to_string()))?;
-    trim_line_endings(&mut input);
+    finalize_stdin_secret_material(&mut input)?;
     Ok(input)
 }
 
@@ -854,6 +909,82 @@ fn decode_required_utf8(
 mod tests {
     use super::*;
 
+    use std::collections::VecDeque;
+
+    const TEST_PASSWORD: &str = "CorrectHorseBatteryStaple123!";
+    const TEST_PRIVATE_KEY: &str =
+        "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef";
+    const TEST_MNEMONIC: &str =
+        "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+
+    #[derive(Default)]
+    struct FakeSecretInput {
+        stdin_values: VecDeque<String>,
+        hidden_values: VecDeque<String>,
+        hidden_prompts: Vec<String>,
+        stdin_reads: usize,
+    }
+
+    impl FakeSecretInput {
+        fn with_stdin(mut self, value: impl Into<String>) -> Self {
+            self.stdin_values.push_back(value.into());
+            self
+        }
+
+        fn with_hidden(mut self, value: impl Into<String>) -> Self {
+            self.hidden_values.push_back(value.into());
+            self
+        }
+    }
+
+    impl SecretInput for FakeSecretInput {
+        fn allow_env_password_sources(&self) -> bool {
+            false
+        }
+
+        fn read_stdin_material(&mut self) -> Result<Zeroizing<String>, LocalError> {
+            self.stdin_reads += 1;
+            let mut value = self.stdin_values.pop_front().ok_or_else(|| {
+                LocalError::new(
+                    "InputError",
+                    ErrorCategory::Unknown,
+                    "missing fake stdin input",
+                )
+            })?;
+            finalize_stdin_secret_material(&mut value)?;
+            Ok(Zeroizing::new(value))
+        }
+
+        fn read_hidden(&mut self, prompt: &str) -> Result<Zeroizing<String>, LocalError> {
+            self.hidden_prompts.push(prompt.to_string());
+            let value = self.hidden_values.pop_front().ok_or_else(|| {
+                LocalError::new(
+                    "InputError",
+                    ErrorCategory::Unknown,
+                    "missing fake hidden input",
+                )
+            })?;
+            Ok(Zeroizing::new(value))
+        }
+    }
+
+    fn test_keystore_path(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("mfm-{name}-{}.keystore", Uuid::new_v4()))
+    }
+
+    fn path_hex(path: &Path) -> String {
+        hex::encode(path.to_string_lossy().as_bytes())
+    }
+
+    fn create_test_keystore(path: &Path) {
+        let mut keystore =
+            Keystore::new_with_config(path, KeystoreConfig::insecure_integration_test())
+                .expect("create test keystore");
+        keystore
+            .unlock(TEST_PASSWORD)
+            .expect("unlock test keystore");
+    }
+
     #[test]
     fn import_request_rejects_legacy_passphrase_field() {
         let request = serde_json::json!({
@@ -893,5 +1024,123 @@ mod tests {
             .expect("single trailing line ending should be accepted");
 
         assert_eq!(input, "abc123");
+    }
+
+    #[test]
+    fn read_input_interactive_uses_hidden_reader() {
+        let mut input = FakeSecretInput::default().with_hidden("hidden-value");
+
+        let material = read_input(&mut input, "Enter private key (hex): ", false)
+            .expect("interactive input should use hidden reader");
+
+        assert_eq!(material.as_str(), "hidden-value");
+        assert_eq!(input.hidden_prompts, vec!["Enter private key (hex): "]);
+        assert_eq!(input.stdin_reads, 0);
+    }
+
+    #[test]
+    fn read_input_stdin_uses_noninteractive_reader() {
+        let mut input = FakeSecretInput::default().with_stdin("stdin-value\n");
+
+        let material =
+            read_input(&mut input, "", true).expect("stdin input should use noninteractive reader");
+
+        assert_eq!(material.as_str(), "stdin-value");
+        assert!(input.hidden_prompts.is_empty());
+        assert_eq!(input.stdin_reads, 1);
+    }
+
+    #[test]
+    fn interactive_private_key_import_uses_hidden_reader() {
+        let path = test_keystore_path("interactive-private-key");
+        create_test_keystore(&path);
+        let mut input = FakeSecretInput::default()
+            .with_hidden(TEST_PRIVATE_KEY)
+            .with_hidden(TEST_PASSWORD);
+
+        let report = keystore_import_with_input(
+            KeystoreImportRequest {
+                kind: KeystoreImportType::PrivateKey,
+                label: None,
+                label_hex: Some(hex::encode("interactive-pk")),
+                derive_path: "m/44'/60'/0'/0/0".to_string(),
+                store_path: None,
+                store_path_hex: Some(path_hex(&path)),
+                stdin_mode: false,
+                bip39_extra: Bip39ExtraSource::None,
+            },
+            &mut input,
+        )
+        .expect("interactive private key import should succeed");
+
+        assert_eq!(report.key_type, "raw");
+        assert_eq!(
+            input.hidden_prompts,
+            vec!["Enter private key (hex): ", "Enter keystore password: "]
+        );
+        assert_eq!(input.stdin_reads, 0);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn interactive_mnemonic_import_uses_hidden_reader_for_phrase_and_extra() {
+        let path = test_keystore_path("interactive-mnemonic");
+        create_test_keystore(&path);
+        let mut input = FakeSecretInput::default()
+            .with_hidden(TEST_MNEMONIC)
+            .with_hidden(TEST_PASSWORD)
+            .with_hidden("test extra input");
+
+        let report = keystore_import_with_input(
+            KeystoreImportRequest {
+                kind: KeystoreImportType::Mnemonic,
+                label: None,
+                label_hex: Some(hex::encode("interactive-mn")),
+                derive_path: "m/44'/60'/0'/0/0".to_string(),
+                store_path: None,
+                store_path_hex: Some(path_hex(&path)),
+                stdin_mode: false,
+                bip39_extra: Bip39ExtraSource::Prompt,
+            },
+            &mut input,
+        )
+        .expect("interactive mnemonic import should succeed");
+
+        assert_eq!(report.key_type, "hd_derived");
+        assert_eq!(
+            input.hidden_prompts,
+            vec![
+                "Enter mnemonic phrase: ",
+                "Enter keystore password: ",
+                "Enter BIP-39 passphrase: "
+            ]
+        );
+        assert_eq!(input.stdin_reads, 0);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn invalid_interactive_material_error_does_not_include_entered_secret() {
+        let path = test_keystore_path("invalid-interactive-material");
+        let entered = "not-a-valid-private-key";
+        let mut input = FakeSecretInput::default().with_hidden(entered);
+
+        let err = keystore_import_with_input(
+            KeystoreImportRequest {
+                kind: KeystoreImportType::PrivateKey,
+                label: None,
+                label_hex: None,
+                derive_path: "m/44'/60'/0'/0/0".to_string(),
+                store_path: None,
+                store_path_hex: Some(path_hex(&path)),
+                stdin_mode: false,
+                bip39_extra: Bip39ExtraSource::None,
+            },
+            &mut input,
+        )
+        .expect_err("invalid key material should fail");
+
+        assert!(!err.message.contains(entered));
+        let _ = std::fs::remove_file(path);
     }
 }
