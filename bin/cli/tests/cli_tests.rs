@@ -96,6 +96,17 @@ fn test_delete_help() {
 }
 
 #[test]
+fn test_tx_sign_help() {
+    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
+    cmd.args(&["keystore", "tx-sign", "--help"]);
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("--out"))
+        .stdout(predicate::str::contains("--overwrite"));
+}
+
+#[test]
 fn test_list_empty_keystore() {
     let (_temp_dir, keystore_path) = create_test_keystore();
 

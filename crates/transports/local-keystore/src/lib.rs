@@ -30,7 +30,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use mfm_collectors_local_keystore::{
     Bip39ExtraSource, KeystoreDeleteRequest, KeystoreImportRequest, KeystoreImportType,
-    KeystoreListRequest, KeystoreListSortBy, KeystoreTxSignRequest,
+    KeystoreListRequest, KeystoreListSortBy, KeystoreTxSignRequest, LocalFileWriteMode,
     NAMESPACE_LOCAL_KEYSTORE_DELETE, NAMESPACE_LOCAL_KEYSTORE_IMPORT,
     NAMESPACE_LOCAL_KEYSTORE_LIST, NAMESPACE_LOCAL_KEYSTORE_TX_SIGN,
 };
@@ -399,6 +399,14 @@ fn keystore_delete(req: KeystoreDeleteRequest) -> Result<KeystoreDeleteReport, L
 }
 
 fn keystore_tx_sign(req: KeystoreTxSignRequest) -> Result<serde_json::Value, LocalError> {
+    let mut input = ProcessSecretInput;
+    keystore_tx_sign_with_input(req, &mut input)
+}
+
+fn keystore_tx_sign_with_input(
+    req: KeystoreTxSignRequest,
+    input: &mut dyn SecretInput,
+) -> Result<serde_json::Value, LocalError> {
     let path = PathBuf::from(decode_required_utf8(
         req.store_path,
         req.store_path_hex,
@@ -412,7 +420,8 @@ fn keystore_tx_sign(req: KeystoreTxSignRequest) -> Result<serde_json::Value, Loc
         "InvalidPathConfig",
         "out_path",
     )?);
-    let mut keystore = load_unlocked_keystore(&path)?;
+    let out_write_mode = req.out_write_mode;
+    let mut keystore = load_unlocked_keystore_with_input(&path, input)?;
 
     let key_id = resolve_key_id(&keystore, req.id.as_deref(), label.as_deref())
         .map_err(local_error_from_keystore_tx)?;
@@ -436,7 +445,7 @@ fn keystore_tx_sign(req: KeystoreTxSignRequest) -> Result<serde_json::Value, Loc
 
     let signed = sign_eip1559_transaction(&mut keystore, key_id, &tx)
         .map_err(local_error_from_keystore_tx)?;
-    write_raw_transaction_file(&out_path, &signed.raw_tx_hex)
+    write_raw_transaction_file(&out_path, &signed.raw_tx_hex, out_write_mode)
         .map_err(local_error_from_keystore_tx)?;
 
     Ok(serde_json::json!({
@@ -450,9 +459,132 @@ fn keystore_tx_sign(req: KeystoreTxSignRequest) -> Result<serde_json::Value, Loc
     }))
 }
 
-fn write_raw_transaction_file(path: &Path, raw_tx_hex: &str) -> Result<(), KeystoreTxError> {
+fn write_raw_transaction_file(
+    path: &Path,
+    raw_tx_hex: &str,
+    mode: LocalFileWriteMode,
+) -> Result<(), KeystoreTxError> {
+    let parent = validate_output_parent(path)?;
+    validate_output_target(path, &mode)?;
+    let temp_path = temp_output_path(path, &parent)?;
+
+    let write_result = write_temp_output_file(&temp_path, raw_tx_hex)
+        .and_then(|()| install_temp_output_file(&temp_path, path, mode))
+        .and_then(|()| sync_parent_directory(&parent));
+
+    if write_result.is_err() {
+        let _ = std::fs::remove_file(&temp_path);
+    }
+
+    write_result
+}
+
+fn validate_output_parent(path: &Path) -> Result<PathBuf, KeystoreTxError> {
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let metadata = std::fs::symlink_metadata(parent).map_err(|e| {
+        KeystoreTxError::new(
+            "FileWriteError",
+            format!(
+                "Failed to inspect output parent directory '{}': {e}",
+                parent.display()
+            ),
+        )
+    })?;
+    if metadata.file_type().is_symlink() {
+        return Err(KeystoreTxError::new(
+            "FileWriteError",
+            format!(
+                "Refusing symlinked output parent directory '{}'",
+                parent.display()
+            ),
+        ));
+    }
+    if !metadata.file_type().is_dir() {
+        return Err(KeystoreTxError::new(
+            "FileWriteError",
+            format!(
+                "Output parent path '{}' is not a directory",
+                parent.display()
+            ),
+        ));
+    }
+
+    #[cfg(unix)]
+    {
+        let mode = metadata.permissions().mode();
+        let world_writable = (mode & 0o002) != 0;
+        let sticky = (mode & 0o1000) != 0;
+        if world_writable && !sticky {
+            return Err(KeystoreTxError::new(
+                "FileWriteError",
+                format!(
+                    "Refusing unsafe output parent directory permissions '{}'",
+                    parent.display()
+                ),
+            ));
+        }
+    }
+
+    Ok(parent.to_path_buf())
+}
+
+fn validate_output_target(path: &Path, mode: &LocalFileWriteMode) -> Result<(), KeystoreTxError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() {
+                return Err(KeystoreTxError::new(
+                    "FileWriteError",
+                    format!("Refusing symlinked output file '{}'", path.display()),
+                ));
+            }
+            if !metadata.file_type().is_file() {
+                return Err(KeystoreTxError::new(
+                    "FileWriteError",
+                    format!("Output path '{}' is not a regular file", path.display()),
+                ));
+            }
+            if matches!(mode, LocalFileWriteMode::CreateNew) {
+                return Err(KeystoreTxError::new(
+                    "FileWriteError",
+                    format!(
+                        "Output file '{}' already exists; pass --overwrite to replace it",
+                        path.display()
+                    ),
+                ));
+            }
+        }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+        Err(err) => {
+            return Err(KeystoreTxError::new(
+                "FileWriteError",
+                format!("Failed to inspect output file '{}': {err}", path.display()),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn temp_output_path(path: &Path, parent: &Path) -> Result<PathBuf, KeystoreTxError> {
+    let file_name = path.file_name().ok_or_else(|| {
+        KeystoreTxError::new(
+            "FileWriteError",
+            format!("Output path '{}' must include a file name", path.display()),
+        )
+    })?;
+    Ok(parent.join(format!(
+        ".{}.tmp-{}",
+        file_name.to_string_lossy(),
+        Uuid::new_v4()
+    )))
+}
+
+fn write_temp_output_file(path: &Path, raw_tx_hex: &str) -> Result<(), KeystoreTxError> {
     let mut options = std::fs::OpenOptions::new();
-    options.create(true).truncate(true).write(true);
+    options.create_new(true).write(true);
 
     #[cfg(unix)]
     {
@@ -462,7 +594,10 @@ fn write_raw_transaction_file(path: &Path, raw_tx_hex: &str) -> Result<(), Keyst
     let mut file = options.open(path).map_err(|e| {
         KeystoreTxError::new(
             "FileWriteError",
-            format!("Failed to open output file '{}': {e}", path.display()),
+            format!(
+                "Failed to create temporary output file '{}': {e}",
+                path.display()
+            ),
         )
     })?;
 
@@ -475,20 +610,75 @@ fn write_raw_transaction_file(path: &Path, raw_tx_hex: &str) -> Result<(), Keyst
             ),
         )
     })?;
+    file.sync_all().map_err(|e| {
+        KeystoreTxError::new(
+            "FileWriteError",
+            format!(
+                "Failed to sync temporary output file '{}': {e}",
+                path.display()
+            ),
+        )
+    })?;
 
-    #[cfg(unix)]
-    {
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(|e| {
-            KeystoreTxError::new(
-                "FileWriteError",
-                format!(
-                    "Failed to set output file permissions '{}': {e}",
-                    path.display()
-                ),
-            )
-        })?;
+    Ok(())
+}
+
+fn install_temp_output_file(
+    temp_path: &Path,
+    path: &Path,
+    mode: LocalFileWriteMode,
+) -> Result<(), KeystoreTxError> {
+    match mode {
+        LocalFileWriteMode::CreateNew => {
+            std::fs::hard_link(temp_path, path).map_err(|e| {
+                KeystoreTxError::new(
+                    "FileWriteError",
+                    format!(
+                        "Failed to install new output file '{}': {e}",
+                        path.display()
+                    ),
+                )
+            })?;
+            std::fs::remove_file(temp_path).map_err(|e| {
+                KeystoreTxError::new(
+                    "FileWriteError",
+                    format!(
+                        "Failed to remove temporary output file '{}': {e}",
+                        temp_path.display()
+                    ),
+                )
+            })?;
+        }
+        LocalFileWriteMode::Overwrite => {
+            std::fs::rename(temp_path, path).map_err(|e| {
+                KeystoreTxError::new(
+                    "FileWriteError",
+                    format!("Failed to replace output file '{}': {e}", path.display()),
+                )
+            })?;
+        }
     }
 
+    Ok(())
+}
+
+fn sync_parent_directory(parent: &Path) -> Result<(), KeystoreTxError> {
+    #[cfg(unix)]
+    {
+        std::fs::File::open(parent)
+            .and_then(|dir| dir.sync_all())
+            .map_err(|e| {
+                KeystoreTxError::new(
+                    "FileWriteError",
+                    format!(
+                        "Failed to sync output parent directory '{}': {e}",
+                        parent.display()
+                    ),
+                )
+            })?;
+    }
+
+    let _ = parent;
     Ok(())
 }
 
@@ -972,6 +1162,12 @@ mod tests {
         std::env::temp_dir().join(format!("mfm-{name}-{}.keystore", Uuid::new_v4()))
     }
 
+    fn test_dir(name: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!("mfm-{name}-{}", Uuid::new_v4()));
+        std::fs::create_dir(&path).expect("create test directory");
+        path
+    }
+
     fn path_hex(path: &Path) -> String {
         hex::encode(path.to_string_lossy().as_bytes())
     }
@@ -983,6 +1179,43 @@ mod tests {
         keystore
             .unlock(TEST_PASSWORD)
             .expect("unlock test keystore");
+    }
+
+    fn create_test_keystore_with_private_key(path: &Path, label: &str) {
+        let mut keystore =
+            Keystore::new_with_config(path, KeystoreConfig::insecure_integration_test())
+                .expect("create test keystore");
+        keystore
+            .unlock(TEST_PASSWORD)
+            .expect("unlock test keystore");
+        keystore
+            .import_private_key(Some(label.to_string()), TEST_PRIVATE_KEY)
+            .expect("import test private key");
+    }
+
+    fn tx_sign_request(
+        keystore_path: &Path,
+        out_path: &Path,
+        mode: LocalFileWriteMode,
+    ) -> KeystoreTxSignRequest {
+        KeystoreTxSignRequest {
+            id: None,
+            label: None,
+            label_hex: Some(hex::encode("tx-signer")),
+            store_path: None,
+            store_path_hex: Some(path_hex(keystore_path)),
+            out_path: None,
+            out_path_hex: Some(path_hex(out_path)),
+            out_write_mode: mode,
+            to: "0x1111111111111111111111111111111111111111".to_string(),
+            value_wei: "1".to_string(),
+            chain_id: 1,
+            nonce: 0,
+            max_fee_per_gas: "2000000000".to_string(),
+            max_priority_fee_per_gas: "1000000000".to_string(),
+            gas_limit: 21_000,
+            data_hex: "0x".to_string(),
+        }
     }
 
     #[test]
@@ -1142,5 +1375,151 @@ mod tests {
 
         assert!(!err.message.contains(entered));
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn safe_writer_creates_new_file_with_restrictive_permissions() {
+        let dir = test_dir("safe-writer-new");
+        let path = dir.join("signed.tx");
+
+        write_raw_transaction_file(&path, "0xabc", LocalFileWriteMode::CreateNew)
+            .expect("write raw tx");
+
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read output"),
+            "0xabc"
+        );
+        #[cfg(unix)]
+        {
+            let mode = std::fs::metadata(&path)
+                .expect("metadata")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn safe_writer_rejects_existing_file_without_overwrite() {
+        let dir = test_dir("safe-writer-existing");
+        let path = dir.join("signed.tx");
+        std::fs::write(&path, "old").expect("write old output");
+
+        let err = write_raw_transaction_file(&path, "0xabc", LocalFileWriteMode::CreateNew)
+            .expect_err("existing file should require overwrite");
+
+        assert_eq!(err.code, "FileWriteError");
+        assert_eq!(std::fs::read_to_string(&path).expect("read output"), "old");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn safe_writer_overwrites_existing_regular_file_when_requested() {
+        let dir = test_dir("safe-writer-overwrite");
+        let path = dir.join("signed.tx");
+        std::fs::write(&path, "old").expect("write old output");
+
+        write_raw_transaction_file(&path, "0xabc", LocalFileWriteMode::Overwrite)
+            .expect("overwrite raw tx");
+
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read output"),
+            "0xabc"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn safe_writer_rejects_symlink_target_without_following_it() {
+        let dir = test_dir("safe-writer-symlink-target");
+        let target = dir.join("target.txt");
+        let link = dir.join("signed.tx");
+        std::fs::write(&target, "keep").expect("write target");
+        std::os::unix::fs::symlink(&target, &link).expect("create symlink");
+
+        let err = write_raw_transaction_file(&link, "0xabc", LocalFileWriteMode::Overwrite)
+            .expect_err("symlink output target must be rejected");
+
+        assert_eq!(err.code, "FileWriteError");
+        assert_eq!(
+            std::fs::read_to_string(&target).expect("read target"),
+            "keep"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn safe_writer_rejects_symlink_parent_directory() {
+        let dir = test_dir("safe-writer-symlink-parent");
+        let real_parent = dir.join("real");
+        let linked_parent = dir.join("linked");
+        std::fs::create_dir(&real_parent).expect("create real parent");
+        std::os::unix::fs::symlink(&real_parent, &linked_parent).expect("create parent symlink");
+
+        let err = write_raw_transaction_file(
+            &linked_parent.join("signed.tx"),
+            "0xabc",
+            LocalFileWriteMode::CreateNew,
+        )
+        .expect_err("symlink output parent must be rejected");
+
+        assert_eq!(err.code, "FileWriteError");
+        assert!(!real_parent.join("signed.tx").exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn safe_writer_rejects_world_writable_non_sticky_parent() {
+        let dir = test_dir("safe-writer-unsafe-parent");
+        let parent = dir.join("unsafe");
+        std::fs::create_dir(&parent).expect("create parent");
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o777))
+            .expect("set unsafe permissions");
+
+        let err = write_raw_transaction_file(
+            &parent.join("signed.tx"),
+            "0xabc",
+            LocalFileWriteMode::CreateNew,
+        )
+        .expect_err("unsafe parent permissions must be rejected");
+
+        assert_eq!(err.code, "FileWriteError");
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o700))
+            .expect("restore permissions");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn tx_sign_writes_new_output_with_safe_writer() {
+        let dir = test_dir("tx-sign-safe-writer");
+        let keystore_path = dir.join("signer.keystore");
+        let out_path = dir.join("signed.tx");
+        create_test_keystore_with_private_key(&keystore_path, "tx-signer");
+        let mut input = FakeSecretInput::default().with_hidden(TEST_PASSWORD);
+
+        let report = keystore_tx_sign_with_input(
+            tx_sign_request(&keystore_path, &out_path, LocalFileWriteMode::CreateNew),
+            &mut input,
+        )
+        .expect("tx-sign should write output");
+
+        assert_eq!(report["tx_type"].as_str(), Some("0x2"));
+        let raw_tx = std::fs::read_to_string(&out_path).expect("read signed tx");
+        assert!(raw_tx.starts_with("0x02"));
+        #[cfg(unix)]
+        {
+            let mode = std::fs::metadata(&out_path)
+                .expect("metadata")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

@@ -12,7 +12,7 @@
 //! use std::path::PathBuf;
 //!
 //! use alloy_primitives::Address;
-//! use mfm_state_keystore::states::tx::KeystoreTxSignStateConfig;
+//! use mfm_state_keystore::states::tx::{KeystoreTxSignStateConfig, LocalFileWriteMode};
 //! use mfm_state_keystore::tx::Eip1559TxToSign;
 //!
 //! let cfg = KeystoreTxSignStateConfig {
@@ -29,6 +29,7 @@
 //!         data: Vec::new(),
 //!     },
 //!     out_path: PathBuf::from("/tmp/raw-tx.hex"),
+//!     out_write_mode: LocalFileWriteMode::CreateNew,
 //!     keystore_path: PathBuf::from("/tmp/keystore"),
 //! };
 //!
@@ -55,6 +56,8 @@ use mfm_state_common::states::meta;
 
 use crate::tx::Eip1559TxToSign;
 
+pub use mfm_collectors_local_keystore::LocalFileWriteMode;
+
 /// Runtime configuration for a keystore-backed transaction signing state.
 ///
 /// Exactly one of `id` or `by_label` should be populated by the planner.
@@ -68,6 +71,8 @@ pub struct KeystoreTxSignStateConfig {
     pub tx: Eip1559TxToSign,
     /// Destination path for the signed raw transaction file.
     pub out_path: PathBuf,
+    /// Output write policy for the signed raw transaction file.
+    pub out_write_mode: LocalFileWriteMode,
     /// Filesystem path of the keystore directory.
     pub keystore_path: PathBuf,
 }
@@ -118,6 +123,7 @@ impl State for KeystoreTxSignState {
                     out_path_hex: Some(hex::encode(
                         self.cfg.out_path.display().to_string().as_bytes(),
                     )),
+                    out_write_mode: self.cfg.out_write_mode.clone(),
                     to: format!("{:?}", self.cfg.tx.to),
                     value_wei: self.cfg.tx.value_wei.to_string(),
                     chain_id: self.cfg.tx.chain_id,

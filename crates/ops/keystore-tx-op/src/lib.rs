@@ -35,6 +35,9 @@ use mfm_state_keystore::tx::{
 };
 use serde::{Deserialize, Serialize};
 
+/// Re-exported output write mode used by tx-sign callers.
+pub use mfm_state_keystore::states::tx::LocalFileWriteMode;
+
 /// Stable version string for keystore transaction operations.
 pub const TX_OP_VERSION: &str = "v1";
 
@@ -87,6 +90,9 @@ pub struct TxSignOpConfig {
     pub gas_limit: u64,
     /// Output file for the raw signed transaction.
     pub out_path: String,
+    /// Output write policy. Defaults to `create_new`.
+    #[serde(default)]
+    pub out_write_mode: LocalFileWriteMode,
     /// Hex-encoded calldata.
     #[serde(default = "default_tx_data")]
     pub data: String,
@@ -169,6 +175,7 @@ impl Operation for KeystoreTxSignOp {
                 by_label,
                 tx,
                 out_path: PathBuf::from(cfg.out_path),
+                out_write_mode: cfg.out_write_mode,
                 keystore_path: require_keystore_path(keystore_path)
                     .map_err(sdk_error_from_helper)?,
             },

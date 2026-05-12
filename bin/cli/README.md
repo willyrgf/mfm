@@ -204,6 +204,7 @@ Signs an EIP-1559 transaction payload using a key already stored in the keystore
 Implementation note: this command is a thin wrapper over a run-backed op (`op_id = "keystore_tx_sign"`, `op_version = "v1"`). The CLI maps args to op input and calls `mfm_sdk::unstable::execute_single_op_report` to launch and decode the final report payload.
 
 The command output includes metadata only (`from`, `to`, `nonce`, `chain_id`, `tx_type`, `payload_hash`, `out_path`) and intentionally excludes raw tx hex and signature bytes.
+The output file is created with restrictive permissions and must not already exist unless `--overwrite` is supplied. Symlink outputs and unsafe parent directories are rejected.
 
 **Usage:**
 ```sh
@@ -224,6 +225,7 @@ mfm_cli keystore tx-sign [OPTIONS]
 **Optional options:**
 - `--data <0xHEX>` (default: `0x`)
 - `--keystore <PATH>`
+- `--overwrite`: Replace an existing regular output file. Without this flag, `--out` must be a new path.
 
 **Example:**
 ```sh

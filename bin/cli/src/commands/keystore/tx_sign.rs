@@ -4,7 +4,8 @@ use crate::presentation::output::handle_command_result;
 use crate::support::{app_services, command_defaults, run_stores};
 use clap::Args;
 use mfm_op_keystore_tx::{
-    tx_sign_report_context_key, TxSignOpConfig, TxSignReport, TX_OP_VERSION, TX_SIGN_OP_ID,
+    tx_sign_report_context_key, LocalFileWriteMode, TxSignOpConfig, TxSignReport, TX_OP_VERSION,
+    TX_SIGN_OP_ID,
 };
 use mfm_sdk::unstable::{execute_single_op_report, SingleOpReportRequest};
 use serde::Serialize;
@@ -53,6 +54,10 @@ pub(crate) struct TxSignArgs {
     /// Output file path where the signed raw transaction hex will be written
     #[arg(long)]
     pub out: PathBuf,
+
+    /// Replace an existing regular output file
+    #[arg(long)]
+    pub overwrite: bool,
 
     /// Transaction calldata (0x-prefixed hex), defaults to empty calldata
     #[arg(long, default_value = "0x")]
@@ -108,6 +113,11 @@ async fn execute_internal(args: &TxSignArgs) -> CommandResult<TxSignResponse> {
         max_priority_fee_per_gas: args.max_priority_fee_per_gas.clone(),
         gas_limit: args.gas_limit,
         out_path: args.out.display().to_string(),
+        out_write_mode: if args.overwrite {
+            LocalFileWriteMode::Overwrite
+        } else {
+            LocalFileWriteMode::CreateNew
+        },
         data: args.data.clone(),
         keystore_path: None,
         keystore_path_hex: Some(hex::encode(keystore_path.to_string_lossy().as_bytes())),

@@ -66,6 +66,17 @@ pub enum KeystoreListSortBy {
     Type,
 }
 
+/// Local file write policy for outputs created by local keystore operations.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LocalFileWriteMode {
+    /// Create a new output and fail if the target already exists.
+    #[default]
+    CreateNew,
+    /// Atomically replace an existing regular output file.
+    Overwrite,
+}
+
 /// Typed request for `local.keystore.import`.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -160,6 +171,9 @@ pub struct KeystoreTxSignRequest {
     /// Optional hex-encoded UTF-8 output path.
     #[serde(default)]
     pub out_path_hex: Option<String>,
+    /// Write policy for the output path.
+    #[serde(default)]
+    pub out_write_mode: LocalFileWriteMode,
     /// Recipient address.
     pub to: String,
     /// Transfer value in wei.
