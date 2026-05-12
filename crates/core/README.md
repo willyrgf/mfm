@@ -2,6 +2,10 @@
 
 Security-sensitive primitives for MFM (keystore + config models).
 
+Configuration models never load plaintext private-key files. Import signing keys with
+`mfm_cli keystore import` first, then reference the keystore entry by non-secret id or label from
+runtime code.
+
 Docs:
 
 - Keystore module: [`src/keystore/README.md`](src/keystore/README.md)

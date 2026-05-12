@@ -1257,25 +1257,30 @@ fn planner_validates_unsatisfied_import() {
 
 #[test]
 fn planner_rejects_secrets_in_op_config() {
-    let reg = HashMapOperationRegistry::default();
     let planner: Arc<dyn PipelinePlanner> = Arc::new(DefaultPipelinePlanner);
 
-    let pipeline = Pipeline {
-        machine_id: MachineId("m".to_string()),
-        pipeline_version: "v".to_string(),
-        steps: vec![PipelineStep {
-            step_id: StepId("step1".to_string()),
-            op_id: OpId::must_new("op1".to_string()),
-            op_version: "v1".to_string(),
-            op_config: serde_json::json!({ "password": "x" }),
-        }],
-    };
+    for op_config in [
+        serde_json::json!({ "password": "x" }),
+        serde_json::json!({ "private_key": "0000000000000000000000000000000000000000000000000000000000000001" }),
+    ] {
+        let pipeline = Pipeline {
+            machine_id: MachineId("m".to_string()),
+            pipeline_version: "v".to_string(),
+            steps: vec![PipelineStep {
+                step_id: StepId("step1".to_string()),
+                op_id: OpId::must_new("op1".to_string()),
+                op_version: "v1".to_string(),
+                op_config,
+            }],
+        };
 
-    let err = match planner.build_execution_plan(Arc::new(reg), &pipeline, &run_config_live()) {
-        Ok(_) => panic!("expected error"),
-        Err(e) => e,
-    };
-    assert_eq!(err.info.code.0, "secrets_detected");
+        let reg = HashMapOperationRegistry::default();
+        let err = match planner.build_execution_plan(Arc::new(reg), &pipeline, &run_config_live()) {
+            Ok(_) => panic!("expected error"),
+            Err(e) => e,
+        };
+        assert_eq!(err.info.code.0, "secrets_detected");
+    }
 }
 
 #[tokio::test]

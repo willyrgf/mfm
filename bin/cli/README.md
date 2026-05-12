@@ -109,6 +109,8 @@ All keystore operations are available under the `keystore` subcommand.
 Imports a private key or a mnemonic-derived key into the keystore. Mnemonic phrases are one-time
 inputs: MFM stores only the selected derived private key plus non-secret derivation metadata, so
 users must keep their own seed backup outside MFM.
+Do not put plaintext private-key file paths or key material in config; import into the keystore and
+reference the entry by id or label.
 
 **Usage:**
 ```sh

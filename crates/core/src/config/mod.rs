@@ -2,7 +2,8 @@
 //!
 //! This module groups the static registries (`networks`, `tokens`, `dexes`, and
 //! `auth_methods`) with the runtime selections that higher layers use after configuration is
-//! loaded and validated.
+//! loaded and validated. Authentication config contains only non-secret signer references; private
+//! keys must be imported into the keystore before runtime use.
 //!
 //! # Examples
 //!
@@ -61,8 +62,6 @@
 //! ```
 
 use serde::{Deserialize, Serialize};
-use zeroize::Zeroizing;
-
 /// Authentication-method configuration entries.
 pub mod authentication;
 mod decimal;
@@ -130,35 +129,6 @@ pub struct WalletConfig {
 pub struct DexConfig {
     /// Key of the selected DEX entry in [`Config::dexes`].
     pub provider: String,
-}
-
-/// Zeroizing wallet material loaded from configuration.
-///
-/// # Security
-///
-/// This type owns raw private-key text. Keep its lifetime short and avoid exposing the borrowed
-/// contents in logs, errors, or serialized output.
-pub struct SecureWallet {
-    private_key: Zeroizing<String>,
-}
-
-impl SecureWallet {
-    /// Wraps a private key string in a zeroizing container.
-    pub fn new(private_key: String) -> Self {
-        Self {
-            private_key: Zeroizing::new(private_key),
-        }
-    }
-
-    /// Returns the private key as a borrowed string slice.
-    ///
-    /// # Security
-    ///
-    /// The returned slice still references secret material. Borrow it only for the minimum scope
-    /// needed to hand off to signing or keystore code.
-    pub fn get_private_key(&self) -> &str {
-        &self.private_key
-    }
 }
 
 impl Config {
@@ -253,32 +223,5 @@ impl Config {
         } else {
             Err(errors)
         }
-    }
-
-    /// Loads wallet material using configured authentication methods.
-    ///
-    /// Runtime callers must configure wallet loading through `auth_methods`, which makes the
-    /// loading strategy explicit in configuration.
-    ///
-    /// # Security
-    ///
-    /// This method reads raw private-key text from disk. The returned [`SecureWallet`] zeroizes its
-    /// owned buffer on drop, but callers must still avoid logging or serializing the secret.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if no configured wallet source can be read successfully.
-    pub fn load_wallet(
-        &self,
-        password: Option<&str>,
-    ) -> Result<SecureWallet, Box<dyn std::error::Error>> {
-        for method in self.auth_methods.get_methods() {
-            if let authentication::Method::Wallet(wallet) = method {
-                let private_key = wallet.read_private_key(password)?;
-                return Ok(SecureWallet::new(private_key));
-            }
-        }
-
-        Err("no wallet authentication method configured".into())
     }
 }

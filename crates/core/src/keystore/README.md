@@ -247,6 +247,10 @@ keystore.unlock(&password)?;
 let key_id = keystore.import_private_key(Some("main".to_string()), &private_key)?;
 ```
 
+Configuration files must not point at plaintext private-key files. Import the key into the
+keystore first, then pass only the keystore path plus entry id or label through runtime
+configuration.
+
 ### Mnemonic-Derived Accounts
 ```rust
 let mut keystore = Keystore::new("./hd.keystore", KeystoreConfig::default())?;
