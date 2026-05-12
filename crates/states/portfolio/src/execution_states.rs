@@ -680,7 +680,7 @@ pub struct AssembleSnapshotState {
 #[async_trait]
 impl State for AssembleSnapshotState {
     fn meta(&self) -> StateMeta {
-        meta::pure()
+        meta::read_only_io()
     }
 
     async fn handle(
@@ -863,7 +863,7 @@ pub struct ProjectReportState {
 #[async_trait]
 impl State for ProjectReportState {
     fn meta(&self) -> StateMeta {
-        meta::pure()
+        meta::read_only_io()
     }
 
     async fn handle(
@@ -1174,6 +1174,7 @@ mod tests {
     use mfm_machine::events::DomainEvent;
     use mfm_machine::ids::{ArtifactId, ErrorCode};
     use mfm_machine::io::{IoCall, IoResult};
+    use mfm_machine::meta::SideEffectKind;
     use mfm_state_symbol::model::{
         ObservationQuantity, ObservationSource, ObservationValue, ObservationValueSourceRef,
         QuoteCode, SymbolKind, SymbolRole,
@@ -1475,6 +1476,33 @@ mod tests {
                 metadata: BTreeMap::new(),
             })
         }
+    }
+
+    #[test]
+    fn artifact_and_report_state_metadata_is_read_only_io() {
+        let assemble = AssembleSnapshotState {
+            state_id: StateId::must_new("portfolio.semantic.snapshot".to_string()),
+            portfolio: sample_portfolio(),
+            resolved_subjects_key: ContextKey("work.resolved_subjects".to_string()),
+            pinned_views_key: ContextKey("work.pinned_views".to_string()),
+            observations_key: ContextKey("work.observations".to_string()),
+            fact_key: FactKey("portfolio:semantic_snapshot".to_string()),
+            artifact_id_output_key: ContextKey("out.snapshot_artifact_id".to_string()),
+            snapshot_output_key: ContextKey("out.snapshot".to_string()),
+        };
+        let assemble_meta = assemble.meta();
+        assert_eq!(assemble_meta.side_effects, SideEffectKind::ReadOnlyIo);
+        assert!(assemble_meta.tags.is_empty());
+
+        let report = ProjectReportState {
+            state_id: StateId::must_new("portfolio.semantic.report".to_string()),
+            snapshot_key: ContextKey("out.snapshot".to_string()),
+            output_key: ContextKey("out.report".to_string()),
+            event_name: "portfolio_tracker.completed",
+        };
+        let report_meta = report.meta();
+        assert_eq!(report_meta.side_effects, SideEffectKind::ReadOnlyIo);
+        assert!(report_meta.tags.is_empty());
     }
 
     fn sample_portfolio() -> PortfolioConfig {

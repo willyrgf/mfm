@@ -166,7 +166,7 @@ struct WriteOutputState {
 #[async_trait]
 impl State for WriteOutputState {
     fn meta(&self) -> StateMeta {
-        meta::pure()
+        meta::read_only_io()
     }
 
     async fn handle(

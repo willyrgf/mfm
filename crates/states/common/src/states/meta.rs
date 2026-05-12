@@ -43,6 +43,11 @@ pub fn pure() -> StateMeta {
     mk_meta(Vec::new(), SideEffectKind::Pure, Idempotency::None)
 }
 
+/// Returns metadata for a read-only IO state with no default tags.
+pub fn read_only_io() -> StateMeta {
+    mk_meta(Vec::new(), SideEffectKind::ReadOnlyIo, Idempotency::None)
+}
+
 /// Returns metadata for a pure configuration state.
 pub fn config() -> StateMeta {
     pure_with_tag(tags::CONFIG)
@@ -115,6 +120,14 @@ mod tests {
         let m = pure();
         assert!(m.tags.is_empty());
         assert_eq!(m.side_effects, SideEffectKind::Pure);
+        assert_eq!(m.idempotency, Idempotency::None);
+    }
+
+    #[test]
+    fn read_only_io_meta_is_stable() {
+        let m = read_only_io();
+        assert!(m.tags.is_empty());
+        assert_eq!(m.side_effects, SideEffectKind::ReadOnlyIo);
         assert_eq!(m.idempotency, Idempotency::None);
     }
 

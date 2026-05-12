@@ -762,8 +762,13 @@ pub mod meta {
     /// Side-effect classification (affects replay and retry semantics).
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub enum SideEffectKind {
+        /// Deterministic context-only transform. Pure states do not call IoProvider, emit events,
+        /// read clocks or randomness, perform ambient IO, or persist artifacts.
         Pure,
+        /// Runtime-mediated reads, fact recording, report/artifact publication, or event emission
+        /// that does not mutate external systems.
         ReadOnlyIo,
+        /// Mutates an external system and requires explicit idempotency/retry reasoning.
         ApplySideEffect,
     }
 

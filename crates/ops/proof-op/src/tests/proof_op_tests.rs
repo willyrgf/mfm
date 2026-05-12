@@ -15,6 +15,7 @@ use mfm_machine::hashing::artifact_id_for_json;
 use mfm_machine::ids::{ArtifactId, RunId, StateId};
 use mfm_machine::io::IoCall;
 use mfm_machine::live_io::{FactIndex, LiveIoTransport, LiveIoTransportFactory};
+use mfm_machine::meta::SideEffectKind;
 use mfm_machine::plan::{ExecutionPlan, StateNode};
 use mfm_machine::recorder::EventRecorder;
 use mfm_machine::replay_io::ReplayIo;
@@ -96,6 +97,16 @@ impl EventRecorder for NoopRecorder {
     async fn emit_many(&mut self, _events: Vec<DomainEvent>) -> Result<(), RunError> {
         Ok(())
     }
+}
+
+#[test]
+fn write_output_state_metadata_is_read_only_io() {
+    let state = WriteOutputState {
+        op_path: OpPath::must_new("proof.main".to_string()),
+    };
+    let meta = state.meta();
+    assert_eq!(meta.side_effects, SideEffectKind::ReadOnlyIo);
+    assert!(meta.tags.is_empty());
 }
 
 fn topo(plan: &ExecutionPlan) -> Vec<StateNode> {

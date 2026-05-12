@@ -809,9 +809,14 @@ pub mod meta {
     /// Side-effect classification (affects replay and retry semantics).
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub enum SideEffectKind {
-        /// The state is pure and does not interact with external systems.
+        /// The state is a deterministic context-only transform.
+        ///
+        /// Pure states must not call [`crate::io::IoProvider`], emit events through
+        /// [`crate::recorder::EventRecorder`], read clocks or randomness, perform ambient IO,
+        /// or persist artifacts.
         Pure,
-        /// The state performs read-only IO.
+        /// The state may read through [`crate::io::IoProvider`] or write runtime-managed
+        /// replay/report artifacts and events, but must not mutate external systems.
         ReadOnlyIo,
         /// The state applies a side effect to an external system.
         ApplySideEffect,

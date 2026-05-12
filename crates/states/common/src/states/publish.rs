@@ -42,7 +42,7 @@ impl State for WriteJsonValueState {
     }
 }
 
-/// Pure shared state that persists a JSON value from context as an output artifact.
+/// Shared state that persists a JSON value from context as an output artifact.
 #[derive(Clone)]
 pub struct WriteContextValueArtifactState {
     /// Stable runtime state id.
@@ -62,7 +62,7 @@ pub struct WriteContextValueArtifactState {
 #[async_trait]
 impl State for WriteContextValueArtifactState {
     fn meta(&self) -> StateMeta {
-        meta::pure()
+        meta::read_only_io()
     }
 
     async fn handle(
@@ -89,5 +89,41 @@ impl State for WriteContextValueArtifactState {
         Ok(StateOutcome {
             snapshot: SnapshotPolicy::OnSuccess,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use mfm_machine::meta::SideEffectKind;
+
+    #[test]
+    fn write_json_value_state_is_pure() {
+        let state = WriteJsonValueState {
+            state_id: StateId::must_new("machine.main.write_json".to_string()),
+            output_key: ContextKey("out.value".to_string()),
+            value: serde_json::json!({ "ok": true }),
+        };
+
+        let meta = state.meta();
+        assert_eq!(meta.side_effects, SideEffectKind::Pure);
+        assert!(meta.tags.is_empty());
+    }
+
+    #[test]
+    fn write_context_value_artifact_state_is_read_only_io() {
+        let state = WriteContextValueArtifactState {
+            state_id: StateId::must_new("machine.main.write_artifact".to_string()),
+            input_key: ContextKey("work.value".to_string()),
+            fact_key: FactKey("fact:output".to_string()),
+            output_artifact_id_key: ContextKey("out.artifact".to_string()),
+            missing_input_code: "missing_input",
+            missing_input_message: "missing input",
+        };
+
+        let meta = state.meta();
+        assert_eq!(meta.side_effects, SideEffectKind::ReadOnlyIo);
+        assert!(meta.tags.is_empty());
     }
 }
