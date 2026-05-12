@@ -25,6 +25,7 @@ pub(crate) fn render_readme(
     out.push_str("Umbrella documentation entry point for the MFM workspace.\n\n");
     out.push_str("`docs.rs` publishes crates one at a time and does not provide a workspace landing page. This crate fills that gap by acting as the top-level navigation page for the published MFM surface.\n\n");
     out.push_str("Only crates that are already live on docs.rs are linked below. Remaining workspace crates stay listed by path until their publish window completes.\n\n");
+    out.push_str("`crates/docs/catalog.toml` is authoritative for this README; `sync-umbrella` rewrites the package tables from that catalog.\n\n");
     out.push_str("Use this page to jump between crate families:\n\n");
     out.push_str("- engine and SDK\n");
     out.push_str("- core primitives\n");
@@ -251,6 +252,11 @@ mod tests {
     use semver::Version;
     use tempfile::tempdir;
 
+    use mfm_publish_docs_config::{
+        canonicalize_desired_catalog_authored_config, parse_desired_catalog_authored_config,
+        AuthoredConfigFormat,
+    };
+
     use super::{
         build_sync_state, load_sync_state, render_readme, sync_readme,
         sync_state_matches_workspace, umbrella_sync_state_path, write_sync_state,
@@ -296,6 +302,15 @@ mod tests {
         }
     }
 
+    fn repository_catalog() -> DesiredCatalog {
+        let authored = parse_desired_catalog_authored_config(
+            include_str!("../../../docs/catalog.toml"),
+            AuthoredConfigFormat::Toml,
+        )
+        .expect("parse repository catalog");
+        canonicalize_desired_catalog_authored_config(authored).expect("canonical catalog")
+    }
+
     fn registry_observation(package: &str) -> RegistryObservation {
         RegistryObservation {
             package: package.into(),
@@ -338,6 +353,35 @@ mod tests {
         let rendered = render_readme(&catalog, &registry, &docs);
         assert!(rendered.contains("<https://docs.rs/mfm-machine>"));
         assert!(rendered.contains("| `mfm-sdk` | sdk | pending | `crates/sdk` |"));
+    }
+
+    #[test]
+    fn generated_readme_includes_rpc_control_catalog_entries() {
+        let catalog = repository_catalog();
+        let rendered = render_readme(&catalog, &BTreeMap::new(), &BTreeMap::new());
+
+        assert!(rendered.contains("| `mfm-control-plane-postgres` |"));
+        assert!(rendered.contains("| `mfm-collectors-rpc-control` |"));
+        assert!(rendered.contains("| `mfm-transports-rpc-control` |"));
+    }
+
+    #[test]
+    fn generated_readme_renders_all_cataloged_public_packages() {
+        let catalog = repository_catalog();
+        let rendered = render_readme(&catalog, &BTreeMap::new(), &BTreeMap::new());
+        let missing = catalog
+            .packages
+            .iter()
+            .filter(|package| matches!(package.visibility, Visibility::Public))
+            .filter(|package| !matches!(package.umbrella_policy, UmbrellaPolicy::Never))
+            .filter(|package| !rendered.contains(&format!("| `{}` |", package.name)))
+            .map(|package| package.name.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(
+            missing.is_empty(),
+            "generated README omitted cataloged public packages: {missing:?}"
+        );
     }
 
     #[test]

@@ -212,6 +212,18 @@ fn validate_catalog(
         });
     }
 
+    for local in &workspace.packages {
+        if !seen_names.contains(&local.name) {
+            return Err(PublishDocsError::CommandFailed {
+                message: format!(
+                    "public workspace package missing from docs catalog: {} ({})",
+                    local.name,
+                    local.workspace_path.display()
+                ),
+            });
+        }
+    }
+
     Ok(())
 }
 
@@ -254,21 +266,25 @@ mod tests {
         }
     }
 
+    fn local_package(name: &str, workspace_path: &str) -> LocalPackage {
+        LocalPackage {
+            name: name.into(),
+            version: Version::parse("0.1.0").expect("version"),
+            manifest_path: PathBuf::from(format!("/workspace/{workspace_path}/Cargo.toml")),
+            workspace_path: PathBuf::from(workspace_path),
+            has_docs_target: true,
+            readme: None,
+            repository: None,
+            license: None,
+            publish: None,
+            local_dependencies: Vec::new(),
+        }
+    }
+
     fn workspace() -> WorkspaceState {
         WorkspaceState {
             selected: vec!["mfm-docs".into()],
-            packages: vec![LocalPackage {
-                name: "mfm-docs".into(),
-                version: Version::parse("0.1.0").expect("version"),
-                manifest_path: PathBuf::from("/workspace/crates/docs/Cargo.toml"),
-                workspace_path: PathBuf::from("crates/docs"),
-                has_docs_target: true,
-                readme: None,
-                repository: None,
-                license: None,
-                publish: None,
-                local_dependencies: Vec::new(),
-            }],
+            packages: vec![local_package("mfm-docs", "crates/docs")],
         }
     }
 
@@ -382,6 +398,85 @@ mod tests {
 
         let err = load_desired_catalog(dir.path(), &workspace()).expect_err("ambiguous catalog");
         assert!(err.to_string().contains("ambiguous desired catalog"));
+    }
+
+    #[test]
+    fn load_desired_catalog_rejects_missing_workspace_package() {
+        let dir = tempdir().expect("tempdir");
+        let docs_dir = dir.path().join("crates/docs");
+        fs::create_dir_all(&docs_dir).expect("docs dir");
+        fs::write(
+            docs_dir.join("catalog.toml"),
+            r#"
+                catalog_version = 1
+                umbrella_package = "mfm-docs"
+
+                [[packages]]
+                name = "mfm-docs"
+                workspace_path = "crates/docs"
+                visibility = "public"
+                section = "binaries_tooling"
+                summary = "Umbrella docs surface"
+            "#,
+        )
+        .expect("write catalog");
+        let mut workspace = workspace();
+        workspace
+            .packages
+            .push(local_package("mfm-public-extra", "crates/public-extra"));
+
+        let err = load_desired_catalog(dir.path(), &workspace).expect_err("missing catalog entry");
+
+        assert!(err
+            .to_string()
+            .contains("public workspace package missing from docs catalog: mfm-public-extra"));
+    }
+
+    #[test]
+    fn load_desired_catalog_accepts_explicit_private_hidden_package() {
+        let dir = tempdir().expect("tempdir");
+        let docs_dir = dir.path().join("crates/docs");
+        fs::create_dir_all(&docs_dir).expect("docs dir");
+        fs::write(
+            docs_dir.join("catalog.toml"),
+            r#"
+                catalog_version = 1
+                umbrella_package = "mfm-docs"
+
+                [[packages]]
+                name = "mfm-docs"
+                workspace_path = "crates/docs"
+                visibility = "public"
+                section = "binaries_tooling"
+                summary = "Umbrella docs surface"
+
+                [[packages]]
+                name = "mfm-private-tool"
+                workspace_path = "crates/tools/private-tool"
+                visibility = "private"
+                section = "binaries_tooling"
+                summary = "Internal release helper."
+                docs_policy = "hidden"
+                umbrella_policy = "never"
+            "#,
+        )
+        .expect("write catalog");
+        let mut workspace = workspace();
+        workspace.packages.push(local_package(
+            "mfm-private-tool",
+            "crates/tools/private-tool",
+        ));
+
+        let catalog = load_desired_catalog(dir.path(), &workspace).expect("load catalog");
+
+        let private = catalog
+            .packages
+            .iter()
+            .find(|package| package.name == "mfm-private-tool")
+            .expect("private entry");
+        assert_eq!(private.visibility, Visibility::Private);
+        assert_eq!(private.docs_policy, DocsPolicy::Hidden);
+        assert_eq!(private.umbrella_policy, UmbrellaPolicy::Never);
     }
 
     #[test]

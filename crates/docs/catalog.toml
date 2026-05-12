@@ -38,6 +38,15 @@ docs_policy = "docs-rs"
 umbrella_policy = "when-published"
 
 [[packages]]
+name = "mfm-authored-config"
+workspace_path = "crates/authored-config"
+visibility = "public"
+section = "core"
+summary = "Shared JSON/TOML authored-config ingress helpers."
+docs_policy = "docs-rs"
+umbrella_policy = "when-published"
+
+[[packages]]
 name = "mfm_core"
 workspace_path = "crates/core"
 visibility = "public"
@@ -52,6 +61,24 @@ workspace_path = "crates/evm-core"
 visibility = "public"
 section = "core"
 summary = "EVM ABI, encoding, hex, and transaction support types."
+docs_policy = "docs-rs"
+umbrella_policy = "when-published"
+
+[[packages]]
+name = "mfm-evm-deploy-configure-validate-config"
+workspace_path = "crates/evm-deploy-configure-validate-config"
+visibility = "public"
+section = "core"
+summary = "Shared deploy/configure/validate config pipeline."
+docs_policy = "docs-rs"
+umbrella_policy = "when-published"
+
+[[packages]]
+name = "mfm-portfolio-config"
+workspace_path = "crates/portfolio-config"
+visibility = "public"
+section = "core"
+summary = "Shared portfolio snapshot config pipeline."
 docs_policy = "docs-rs"
 umbrella_policy = "when-published"
 
@@ -88,6 +115,33 @@ workspace_path = "crates/states/aave-v3"
 visibility = "public"
 section = "states"
 summary = "Shared Aave V3 portfolio-position types and runtime adapters."
+docs_policy = "docs-rs"
+umbrella_policy = "when-published"
+
+[[packages]]
+name = "mfm-state-portfolio"
+workspace_path = "crates/states/portfolio"
+visibility = "public"
+section = "states"
+summary = "Reusable portfolio-domain schema and validation for canonical snapshots."
+docs_policy = "docs-rs"
+umbrella_policy = "when-published"
+
+[[packages]]
+name = "mfm-state-symbol"
+workspace_path = "crates/states/symbol"
+visibility = "public"
+section = "states"
+summary = "Reusable symbol-domain schema and validation for canonical snapshots."
+docs_policy = "docs-rs"
+umbrella_policy = "when-published"
+
+[[packages]]
+name = "mfm-state-wallet"
+workspace_path = "crates/states/wallet"
+visibility = "public"
+section = "states"
+summary = "Reusable wallet-domain schema and validation for canonical snapshots."
 docs_policy = "docs-rs"
 umbrella_policy = "when-published"
 
@@ -209,6 +263,15 @@ docs_policy = "repo-only"
 umbrella_policy = "always"
 
 [[packages]]
+name = "mfm-control-plane-postgres"
+workspace_path = "crates/storages/control-plane-postgres"
+visibility = "public"
+section = "storages"
+summary = "Durable RPC control-plane stream/projection storage."
+docs_policy = "repo-only"
+umbrella_policy = "always"
+
+[[packages]]
 name = "mfm-indexer"
 workspace_path = "crates/storages/indexer"
 visibility = "public"
@@ -216,6 +279,15 @@ section = "storages"
 summary = "Projection/indexing support."
 docs_policy = "repo-only"
 umbrella_policy = "always"
+
+[[packages]]
+name = "mfm-collectors-btc-jsonrpc-http"
+workspace_path = "crates/collectors/btc-jsonrpc-http"
+visibility = "public"
+section = "collectors"
+summary = "Bitcoin Core JSON-RPC over HTTP client for managed Bitcoin IO."
+docs_policy = "docs-rs"
+umbrella_policy = "when-published"
 
 [[packages]]
 name = "mfm-collectors-evm"
@@ -245,6 +317,24 @@ docs_policy = "docs-rs"
 umbrella_policy = "when-published"
 
 [[packages]]
+name = "mfm-collectors-local-fs"
+workspace_path = "crates/collectors/local-fs"
+visibility = "public"
+section = "collectors"
+summary = "Local filesystem collector interfaces."
+docs_policy = "docs-rs"
+umbrella_policy = "when-published"
+
+[[packages]]
+name = "mfm-collectors-local-keystore"
+workspace_path = "crates/collectors/local-keystore"
+visibility = "public"
+section = "collectors"
+summary = "Local keystore collector interfaces."
+docs_policy = "docs-rs"
+umbrella_policy = "when-published"
+
+[[packages]]
 name = "mfm-collectors-nix"
 workspace_path = "crates/collectors/nix"
 visibility = "public"
@@ -259,6 +349,24 @@ workspace_path = "crates/collectors/nix-exec"
 visibility = "public"
 section = "collectors"
 summary = "Nix execution collector implementation."
+docs_policy = "docs-rs"
+umbrella_policy = "when-published"
+
+[[packages]]
+name = "mfm-collectors-proof"
+workspace_path = "crates/collectors/proof"
+visibility = "public"
+section = "collectors"
+summary = "Proof collector interfaces and payloads."
+docs_policy = "docs-rs"
+umbrella_policy = "when-published"
+
+[[packages]]
+name = "mfm-collectors-rpc-control"
+workspace_path = "crates/collectors/rpc-control"
+visibility = "public"
+section = "collectors"
+summary = "Typed `rpc.control` adapters for managed EVM RPC calls."
 docs_policy = "docs-rs"
 umbrella_policy = "when-published"
 
@@ -295,6 +403,15 @@ workspace_path = "crates/transports/proof"
 visibility = "public"
 section = "transports"
 summary = "Proof transport helpers."
+docs_policy = "repo-only"
+umbrella_policy = "always"
+
+[[packages]]
+name = "mfm-transports-rpc-control"
+workspace_path = "crates/transports/rpc-control"
+visibility = "public"
+section = "transports"
+summary = "Managed `rpc.control` transport over the internal EVM executor."
 docs_policy = "repo-only"
 umbrella_policy = "always"
 
@@ -340,6 +457,15 @@ workspace_path = "crates/tools/publish-docs"
 visibility = "private"
 section = "binaries_tooling"
 summary = "Typed planner, reconciler, and lifecycle tool for docs crate publishing."
+docs_policy = "hidden"
+umbrella_policy = "never"
+
+[[packages]]
+name = "mfm-publish-docs-config"
+workspace_path = "crates/publish-docs-config"
+visibility = "private"
+section = "binaries_tooling"
+summary = "Shared authored and canonical desired-catalog config pipeline for publish-docs."
 docs_policy = "hidden"
 umbrella_policy = "never"
 
