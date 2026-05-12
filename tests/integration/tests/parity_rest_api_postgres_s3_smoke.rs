@@ -69,7 +69,12 @@ async fn parity_postgres_s3_smoke() {
         .clone()
         .oneshot(json_post(
             "/v1/runs/start",
-            serde_json::json!({"op_id":"proof","op_version":"v1","op_config":{}}),
+            serde_json::json!({
+                "kind": "single_op_start_v1",
+                "op_id": "proof",
+                "op_version": "v1",
+                "op_config": {},
+            }),
         ))
         .await
         .expect("start response");
