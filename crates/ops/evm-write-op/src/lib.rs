@@ -34,6 +34,7 @@ use std::time::Duration;
 #[cfg(test)]
 use zeroize::Zeroizing;
 
+#[cfg(test)]
 use alloy_primitives::keccak256;
 use mfm_evm_runtime::dcv as shared_dcv;
 use mfm_evm_runtime::states::contract_set::{
@@ -50,6 +51,7 @@ use mfm_evm_runtime::states::write::{
     EvmValidateStateConfig as SharedValidateStateConfig, NixArtifactToEvmContractState,
 };
 use mfm_machine::config::RunConfig;
+use mfm_machine::errors::ErrorCategory;
 #[cfg(test)]
 use mfm_machine::errors::StateError;
 use mfm_machine::ids::{OpId, OpPath};
@@ -302,398 +304,48 @@ struct EvmValidateConfig {
     event_assertions: Vec<EventAssertionConfig>,
 }
 
-#[derive(Clone, Debug)]
-struct AbiFunction {
-    name: String,
-    inputs: Vec<String>,
-    outputs: Vec<String>,
-}
-
-#[derive(Clone, Debug)]
-struct AbiEvent {
-    name: String,
-    inputs: Vec<String>,
-    anonymous: bool,
-}
-
-#[derive(Clone, Debug, Default)]
-struct ParsedAbi {
-    constructor_inputs: Vec<String>,
-    functions: Vec<AbiFunction>,
-    events: Vec<AbiEvent>,
-}
-
-#[derive(Clone, Debug)]
-struct ConfigureRuntimeCall {
-    function: String,
-    args: Vec<serde_json::Value>,
-    value_hex: Option<String>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-struct AbiParamJson {
-    #[serde(rename = "type")]
-    typ: String,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-struct AbiItemJson {
-    #[serde(rename = "type")]
-    kind: String,
-
-    #[serde(default)]
-    name: Option<String>,
-
-    #[serde(default)]
-    inputs: Vec<AbiParamJson>,
-
-    #[serde(default)]
-    outputs: Vec<AbiParamJson>,
-
-    #[serde(default)]
-    anonymous: Option<bool>,
-}
-
-fn parse_abi(abi: &serde_json::Value) -> Result<ParsedAbi, String> {
-    let items: Vec<AbiItemJson> = serde_json::from_value(abi.clone())
-        .map_err(|_| "artifact.abi must be a valid JSON ABI array".to_string())?;
-
-    let mut out = ParsedAbi::default();
-
-    for it in items {
-        match it.kind.as_str() {
-            "constructor" => {
-                out.constructor_inputs = it.inputs.into_iter().map(|p| p.typ).collect();
-            }
-            "function" => {
-                let Some(name) = it.name else {
-                    return Err("function ABI item missing name".to_string());
-                };
-                out.functions.push(AbiFunction {
-                    name,
-                    inputs: it.inputs.into_iter().map(|p| p.typ).collect(),
-                    outputs: it.outputs.into_iter().map(|p| p.typ).collect(),
-                });
-            }
-            "event" => {
-                let Some(name) = it.name else {
-                    return Err("event ABI item missing name".to_string());
-                };
-                out.events.push(AbiEvent {
-                    name,
-                    inputs: it.inputs.into_iter().map(|p| p.typ).collect(),
-                    anonymous: it.anonymous.unwrap_or(false),
-                });
-            }
-            _ => {}
-        }
-    }
-
-    Ok(out)
-}
-
-fn normalize_hex_str(s: &str) -> Result<String, String> {
-    let Some(rest) = s.strip_prefix("0x") else {
-        return Err("hex string must start with 0x".to_string());
-    };
-    if rest.is_empty() {
-        return Ok("0x".to_string());
-    }
-    if !rest.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err("hex string contains non-hex characters".to_string());
-    }
-    let even = if rest.len() % 2 == 0 {
-        rest.to_ascii_lowercase()
-    } else {
-        format!("0{}", rest.to_ascii_lowercase())
-    };
-    Ok(format!("0x{even}"))
-}
-
-fn hex_to_bytes(s: &str) -> Result<Vec<u8>, String> {
-    let n = normalize_hex_str(s)?;
-    let rest = n.strip_prefix("0x").expect("prefix");
-    if rest.is_empty() {
-        return Ok(Vec::new());
-    }
-    hex::decode(rest).map_err(|_| "invalid hex".to_string())
-}
-
-#[cfg(test)]
-fn bytes_to_hex_prefixed(bytes: &[u8]) -> String {
-    format!("0x{}", hex::encode(bytes))
-}
-
-fn parse_bytecode(v: &serde_json::Value) -> Result<Vec<u8>, String> {
-    match v {
-        serde_json::Value::String(s) => hex_to_bytes(s),
-        serde_json::Value::Object(m) => {
-            let Some(obj) = m.get("object") else {
-                return Err("artifact.bytecode object missing field `object`".to_string());
-            };
-            let Some(s) = obj.as_str() else {
-                return Err("artifact.bytecode.object must be a string".to_string());
-            };
-            hex_to_bytes(s)
-        }
-        _ => Err("artifact.bytecode must be a string or object with `object`".to_string()),
+fn shared_artifact_config(artifact: &ContractArtifactConfig) -> shared_dcv::ContractArtifactConfig {
+    shared_dcv::ContractArtifactConfig {
+        abi: artifact.abi.clone().into(),
+        bytecode: artifact.bytecode.clone().into(),
     }
 }
 
-fn parse_address_hex(s: &str) -> Result<[u8; 20], String> {
-    let b = hex_to_bytes(s)?;
-    if b.len() != 20 {
-        return Err("address must be 20 bytes".to_string());
-    }
-    let mut out = [0u8; 20];
-    out.copy_from_slice(&b);
-    Ok(out)
-}
-
-fn encode_u64_word(n: u64) -> [u8; 32] {
-    let mut out = [0u8; 32];
-    out[24..32].copy_from_slice(&n.to_be_bytes());
-    out
-}
-
-fn encode_len_word(n: usize) -> Result<[u8; 32], String> {
-    let n64 = u64::try_from(n).map_err(|_| "length overflow".to_string())?;
-    Ok(encode_u64_word(n64))
-}
-
-fn parse_uint_word(v: &serde_json::Value) -> Result<[u8; 32], String> {
-    let mut out = [0u8; 32];
-
-    match v {
-        serde_json::Value::Number(n) => {
-            let Some(u) = n.as_u64() else {
-                return Err("numeric value must fit into u64".to_string());
-            };
-            out[24..32].copy_from_slice(&u.to_be_bytes());
-            Ok(out)
-        }
-        serde_json::Value::String(s) => {
-            if s.starts_with("0x") {
-                let b = hex_to_bytes(s)?;
-                if b.len() > 32 {
-                    return Err("hex integer must fit into 32 bytes".to_string());
-                }
-                out[32 - b.len()..].copy_from_slice(&b);
-                return Ok(out);
-            }
-
-            let parsed = s
-                .parse::<u128>()
-                .map_err(|_| "decimal integer must fit into u128".to_string())?;
-            out[16..32].copy_from_slice(&parsed.to_be_bytes());
-            Ok(out)
-        }
-        _ => Err("integer arg must be a number or string".to_string()),
+fn into_shared_artifact_config(
+    artifact: ContractArtifactConfig,
+) -> shared_dcv::ContractArtifactConfig {
+    shared_dcv::ContractArtifactConfig {
+        abi: artifact.abi.into(),
+        bytecode: artifact.bytecode.into(),
     }
 }
 
-fn parse_bool_word(v: &serde_json::Value) -> Result<[u8; 32], String> {
-    let b = match v {
-        serde_json::Value::Bool(b) => *b,
-        serde_json::Value::Number(n) => match n.as_u64() {
-            Some(0) => false,
-            Some(1) => true,
-            _ => return Err("bool numeric arg must be 0 or 1".to_string()),
-        },
-        serde_json::Value::String(s) => match s.as_str() {
-            "true" | "1" => true,
-            "false" | "0" => false,
-            _ => return Err("bool arg must be true/false/0/1".to_string()),
-        },
-        _ => return Err("bool arg must be bool/number/string".to_string()),
-    };
-
-    let mut out = [0u8; 32];
-    out[31] = if b { 1 } else { 0 };
-    Ok(out)
-}
-
-fn parse_bytes_m_word(m: usize, v: &serde_json::Value) -> Result<[u8; 32], String> {
-    let Some(s) = v.as_str() else {
-        return Err("bytesM arg must be a hex string".to_string());
-    };
-    let b = hex_to_bytes(s)?;
-    if b.len() != m {
-        return Err("bytesM arg length mismatch".to_string());
-    }
-    let mut out = [0u8; 32];
-    out[..m].copy_from_slice(&b);
-    Ok(out)
-}
-
-fn is_dynamic_type(t: &str) -> bool {
-    t == "bytes" || t == "string"
-}
-
-fn pad_to_32(mut b: Vec<u8>) -> Vec<u8> {
-    let r = b.len() % 32;
-    if r != 0 {
-        b.extend(std::iter::repeat_n(0u8, 32 - r));
-    }
-    b
-}
-
-fn encode_dynamic_value(t: &str, v: &serde_json::Value) -> Result<Vec<u8>, String> {
-    let data = match t {
-        "string" => {
-            let Some(s) = v.as_str() else {
-                return Err("string arg must be a string".to_string());
-            };
-            s.as_bytes().to_vec()
-        }
-        "bytes" => {
-            let Some(s) = v.as_str() else {
-                return Err("bytes arg must be a hex string".to_string());
-            };
-            hex_to_bytes(s)?
-        }
-        _ => return Err("unsupported dynamic type".to_string()),
-    };
-
-    let mut out = Vec::new();
-    out.extend_from_slice(&encode_len_word(data.len())?);
-    out.extend_from_slice(&pad_to_32(data));
-    Ok(out)
-}
-
-fn encode_static_value(t: &str, v: &serde_json::Value) -> Result<[u8; 32], String> {
-    if t == "address" {
-        let Some(s) = v.as_str() else {
-            return Err("address arg must be a string".to_string());
-        };
-        let addr = parse_address_hex(s)?;
-        let mut out = [0u8; 32];
-        out[12..32].copy_from_slice(&addr);
-        return Ok(out);
-    }
-
-    if t == "bool" {
-        return parse_bool_word(v);
-    }
-
-    if t.starts_with("uint") || t.starts_with("int") {
-        return parse_uint_word(v);
-    }
-
-    if t == "bytes32" {
-        return parse_bytes_m_word(32, v);
-    }
-
-    if let Some(size_str) = t.strip_prefix("bytes") {
-        let m = size_str
-            .parse::<usize>()
-            .map_err(|_| "invalid bytesM type".to_string())?;
-        if m == 0 || m > 32 {
-            return Err("bytesM size must be in [1,32]".to_string());
-        }
-        return parse_bytes_m_word(m, v);
-    }
-
-    Err("unsupported static ABI type".to_string())
-}
-
-fn encode_params(types: &[String], args: &[serde_json::Value]) -> Result<Vec<u8>, String> {
-    if types.len() != args.len() {
-        return Err("argument count mismatch".to_string());
-    }
-
-    let head_size = types
-        .len()
-        .checked_mul(32)
-        .ok_or_else(|| "head size overflow".to_string())?;
-
-    let mut head = Vec::<[u8; 32]>::with_capacity(types.len());
-    let mut tail = Vec::<u8>::new();
-
-    for (t, a) in types.iter().zip(args.iter()) {
-        if is_dynamic_type(t) {
-            let off = head_size
-                .checked_add(tail.len())
-                .ok_or_else(|| "offset overflow".to_string())?;
-            head.push(encode_len_word(off)?);
-            let dyn_enc = encode_dynamic_value(t, a)?;
-            tail.extend_from_slice(&dyn_enc);
-        } else {
-            head.push(encode_static_value(t, a)?);
-        }
-    }
-
-    let mut out = Vec::with_capacity(head_size + tail.len());
-    for w in head {
-        out.extend_from_slice(&w);
-    }
-    out.extend_from_slice(&tail);
-    Ok(out)
-}
-
-fn selector(name: &str, input_types: &[String]) -> [u8; 4] {
-    let sig = format!("{}({})", name, input_types.join(","));
-    let h = keccak256(sig.as_bytes());
-    [h[0], h[1], h[2], h[3]]
-}
-
-fn resolve_function_call(
-    abi: &ParsedAbi,
-    function: &str,
-    args: &[serde_json::Value],
-) -> Result<(Vec<u8>, Vec<String>), String> {
-    let mut winners: Vec<(Vec<u8>, Vec<String>)> = Vec::new();
-
-    for f in abi
-        .functions
-        .iter()
-        .filter(|f| f.name == function && f.inputs.len() == args.len())
-    {
-        let Ok(mut enc) = encode_params(&f.inputs, args) else {
-            continue;
-        };
-        let mut out = Vec::with_capacity(4 + enc.len());
-        out.extend_from_slice(&selector(&f.name, &f.inputs));
-        out.append(&mut enc);
-        winners.push((out, f.outputs.clone()));
-    }
-
-    match winners.len() {
-        0 => Err("function resolution failed for provided args".to_string()),
-        1 => Ok(winners.remove(0)),
-        _ => Err("ambiguous overloaded function for provided args".to_string()),
+fn shared_block_tag(block: BlockTag) -> shared_dcv::BlockTag {
+    match block {
+        BlockTag::Number(n) => shared_dcv::BlockTag::Number(n),
+        BlockTag::Tag(s) => shared_dcv::BlockTag::Tag(s),
     }
 }
 
-fn parse_artifact(cfg: &ContractArtifactConfig) -> Result<(ParsedAbi, Vec<u8>), String> {
-    let abi = parse_abi(&cfg.abi)?;
-    let bytecode = parse_bytecode(&cfg.bytecode)?;
-    Ok((abi, bytecode))
+fn shared_read_assertion_config(
+    assertion: &ReadAssertionConfig,
+) -> shared_dcv::ReadAssertionConfig {
+    shared_dcv::ReadAssertionConfig {
+        function: assertion.function.clone(),
+        args: assertion.args.iter().cloned().map(Into::into).collect(),
+        expected: assertion.expected.clone().into(),
+    }
 }
 
-fn validate_assertions_match_abi(
-    abi: &ParsedAbi,
-    read_assertions: &[ReadAssertionConfig],
-    event_assertions: &[EventAssertionConfig],
-) -> Result<(), String> {
-    for ra in read_assertions {
-        let _ = resolve_function_call(abi, &ra.function, &ra.args)
-            .map_err(|_| "read assertion did not match ABI".to_string())?;
+fn shared_event_assertion_config(
+    assertion: &EventAssertionConfig,
+) -> shared_dcv::EventAssertionConfig {
+    shared_dcv::EventAssertionConfig {
+        event: assertion.event.clone(),
+        min_count: assertion.min_count,
+        from_block: assertion.from_block.clone().map(shared_block_tag),
+        to_block: assertion.to_block.clone().map(shared_block_tag),
     }
-
-    for ea in event_assertions {
-        let Some(event) = abi.events.iter().find(|e| e.name == ea.event) else {
-            return Err("event assertion referenced unknown event".to_string());
-        };
-
-        if event.anonymous {
-            return Err("anonymous events are not supported for validation".to_string());
-        }
-
-        let _topic0 = keccak256(format!("{}({})", event.name, event.inputs.join(",")).as_bytes());
-    }
-
-    Ok(())
 }
 
 fn ensure_nonempty_env_name(env_name: &str) -> Result<(), String> {
@@ -713,10 +365,10 @@ fn signing_key_from_env(signing_key_env: &str) -> Result<SigningKey, StateError>
         )
     })?);
 
-    let normalized = Zeroizing::new(normalize_hex_str(raw.as_str()).map_err(|_| {
+    let normalized = Zeroizing::new(shared_dcv::normalize_hex_str(raw.as_str()).map_err(|_| {
         op_errors::state_unknown("invalid_signing_key_env", "signing key hex was invalid")
     })?);
-    let bytes = Zeroizing::new(hex_to_bytes(normalized.as_str()).map_err(|_| {
+    let bytes = Zeroizing::new(shared_dcv::hex_to_bytes(normalized.as_str()).map_err(|_| {
         op_errors::state_unknown("invalid_signing_key_env", "signing key hex was invalid")
     })?);
     if bytes.len() != 32 {
@@ -741,7 +393,7 @@ fn signing_key_from_env(signing_key_env: &str) -> Result<SigningKey, StateError>
 fn signer_address_hex(signing_key: &SigningKey) -> String {
     let public_key = signing_key.verifying_key().to_encoded_point(false);
     let hash = keccak256(&public_key.as_bytes()[1..]);
-    bytes_to_hex_prefixed(&hash.as_slice()[12..])
+    shared_dcv::bytes_to_hex_prefixed(&hash.as_slice()[12..])
 }
 
 /// Planner that adapts a `nix_app` result into a contract artifact export.
@@ -979,9 +631,25 @@ impl Operation for EvmDeployOp {
             op_errors::sdk_parse_error("invalid_op_config", "signing_key_env must be non-empty")
         })?;
         if let Some(artifact) = &cfg.artifact {
-            parse_artifact(artifact).map_err(|_| {
-                op_errors::sdk_parse_error("invalid_op_config", "invalid contract artifact")
+            let shared_artifact = shared_artifact_config(artifact);
+            let (abi, bytecode) = shared_dcv::parse_artifact(&shared_artifact).map_err(|err| {
+                op_errors::sdk_error(
+                    "invalid_op_config",
+                    ErrorCategory::ParsingInput,
+                    false,
+                    format!("invalid contract artifact: {err}"),
+                )
             })?;
+            shared_dcv::constructor_data(&abi, &bytecode, &cfg.constructor_args).map_err(
+                |err| {
+                    op_errors::sdk_error(
+                        "invalid_op_config",
+                        ErrorCategory::ParsingInput,
+                        false,
+                        format!("constructor args did not match ABI: {err}"),
+                    )
+                },
+            )?;
         }
 
         let from = shared_dcv::normalize_address(&cfg.from)
@@ -1000,10 +668,7 @@ impl Operation for EvmDeployOp {
         let state = Arc::new(SharedDeployState {
             state_id: state_id.clone(),
             cfg: SharedDeployStateConfig {
-                artifact: cfg.artifact.map(|a| shared_dcv::ContractArtifactConfig {
-                    abi: a.abi.into(),
-                    bytecode: a.bytecode.into(),
-                }),
+                artifact: cfg.artifact.map(into_shared_artifact_config),
                 artifact_port: cfg.artifact_port,
                 network_id: cfg.network_id,
                 control_scope: cfg.control_scope,
@@ -1096,8 +761,14 @@ impl Operation for EvmConfigureOp {
         }
 
         let parsed_abi = if let Some(artifact) = &cfg.artifact {
-            let (abi, _bytecode) = parse_artifact(artifact).map_err(|_| {
-                op_errors::sdk_parse_error("invalid_op_config", "invalid contract artifact")
+            let shared_artifact = shared_artifact_config(artifact);
+            let (abi, _bytecode) = shared_dcv::parse_artifact(&shared_artifact).map_err(|err| {
+                op_errors::sdk_error(
+                    "invalid_op_config",
+                    ErrorCategory::ParsingInput,
+                    false,
+                    format!("invalid contract artifact: {err}"),
+                )
             })?;
             Some(abi)
         } else {
@@ -1126,12 +797,16 @@ impl Operation for EvmConfigureOp {
         let mut calls = Vec::with_capacity(cfg.calls.len());
         for c in &cfg.calls {
             if let Some(abi) = &parsed_abi {
-                let _ = resolve_function_call(abi, &c.function, &c.args).map_err(|_| {
-                    op_errors::sdk_parse_error(
-                        "invalid_op_config",
-                        "configure call did not match ABI",
-                    )
-                })?;
+                let _ = shared_dcv::resolve_function_call(abi, &c.function, &c.args).map_err(
+                    |err| {
+                        op_errors::sdk_error(
+                            "invalid_op_config",
+                            ErrorCategory::ParsingInput,
+                            false,
+                            format!("configure call did not match ABI: {err}"),
+                        )
+                    },
+                )?;
             }
             let value_hex = shared_dcv::parse_value_wei_to_hex(&c.value_wei).map_err(|_| {
                 op_errors::sdk_parse_error(
@@ -1140,9 +815,9 @@ impl Operation for EvmConfigureOp {
                 )
             })?;
 
-            calls.push(ConfigureRuntimeCall {
+            calls.push(SharedConfigureRuntimeCall {
                 function: c.function.clone(),
-                args: c.args.clone(),
+                args: c.args.iter().cloned().map(Into::into).collect(),
                 value_hex,
             });
         }
@@ -1151,24 +826,14 @@ impl Operation for EvmConfigureOp {
         let state = Arc::new(SharedConfigureState {
             state_id: state_id.clone(),
             cfg: SharedConfigureStateConfig {
-                artifact: cfg.artifact.map(|a| shared_dcv::ContractArtifactConfig {
-                    abi: a.abi.into(),
-                    bytecode: a.bytecode.into(),
-                }),
+                artifact: cfg.artifact.map(into_shared_artifact_config),
                 artifact_port: cfg.artifact_port,
                 network_id: cfg.network_id,
                 control_scope: cfg.control_scope,
                 from,
                 signing_key_env: cfg.signing_key_env,
                 contract_address,
-                calls: calls
-                    .into_iter()
-                    .map(|c| SharedConfigureRuntimeCall {
-                        function: c.function,
-                        args: c.args.into_iter().map(Into::into).collect(),
-                        value_hex: c.value_hex,
-                    })
-                    .collect(),
+                calls,
                 tx_hashes_export_key: cfg.tx_hashes_export_key.clone(),
                 receipts_export_key: cfg.receipts_export_key.clone(),
                 poll_interval_ms: cfg.poll_interval_ms,
@@ -1228,8 +893,14 @@ impl Operation for EvmValidateOp {
         })?;
 
         let parsed_abi = if let Some(artifact) = &cfg.artifact {
-            let (abi, _bytecode) = parse_artifact(artifact).map_err(|_| {
-                op_errors::sdk_parse_error("invalid_op_config", "invalid contract artifact")
+            let shared_artifact = shared_artifact_config(artifact);
+            let (abi, _bytecode) = shared_dcv::parse_artifact(&shared_artifact).map_err(|err| {
+                op_errors::sdk_error(
+                    "invalid_op_config",
+                    ErrorCategory::ParsingInput,
+                    false,
+                    format!("invalid contract artifact: {err}"),
+                )
             })?;
             Some(abi)
         } else {
@@ -1253,7 +924,17 @@ impl Operation for EvmValidateOp {
         }
 
         if let Some(abi) = &parsed_abi {
-            validate_assertions_match_abi(abi, &cfg.read_assertions, &cfg.event_assertions)
+            let read_assertions: Vec<_> = cfg
+                .read_assertions
+                .iter()
+                .map(shared_read_assertion_config)
+                .collect();
+            let event_assertions: Vec<_> = cfg
+                .event_assertions
+                .iter()
+                .map(shared_event_assertion_config)
+                .collect();
+            shared_dcv::prepare_validate_assertions(abi, &read_assertions, &event_assertions)
                 .map_err(|err| {
                     op_errors::sdk_parse_error(
                         "invalid_op_config",
@@ -1269,10 +950,7 @@ impl Operation for EvmValidateOp {
         let state = Arc::new(SharedValidateState {
             state_id: state_id.clone(),
             cfg: SharedValidateStateConfig {
-                artifact: cfg.artifact.map(|a| shared_dcv::ContractArtifactConfig {
-                    abi: a.abi.into(),
-                    bytecode: a.bytecode.into(),
-                }),
+                artifact: cfg.artifact.map(into_shared_artifact_config),
                 artifact_port: cfg.artifact_port,
                 network_id: cfg.network_id,
                 control_scope: cfg.control_scope,
@@ -1294,14 +972,8 @@ impl Operation for EvmValidateOp {
                     .map(|a| shared_dcv::EventAssertionConfig {
                         event: a.event,
                         min_count: a.min_count,
-                        from_block: a.from_block.map(|b| match b {
-                            BlockTag::Number(n) => shared_dcv::BlockTag::Number(n),
-                            BlockTag::Tag(s) => shared_dcv::BlockTag::Tag(s),
-                        }),
-                        to_block: a.to_block.map(|b| match b {
-                            BlockTag::Number(n) => shared_dcv::BlockTag::Number(n),
-                            BlockTag::Tag(s) => shared_dcv::BlockTag::Tag(s),
-                        }),
+                        from_block: a.from_block.map(shared_block_tag),
+                        to_block: a.to_block.map(shared_block_tag),
                     })
                     .collect(),
             },

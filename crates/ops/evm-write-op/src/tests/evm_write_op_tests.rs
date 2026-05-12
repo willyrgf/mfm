@@ -46,46 +46,34 @@ fn sample_artifact() -> serde_json::Value {
     })
 }
 
-#[test]
-fn encode_params_uint_address() {
-    let types = vec!["uint256".to_string(), "address".to_string()];
-    let args = vec![
-        serde_json::json!(7),
-        serde_json::json!("0x1111111111111111111111111111111111111111"),
-    ];
-
-    let out = encode_params(&types, &args).expect("encode");
-    assert_eq!(out.len(), 64);
-    assert_eq!(out[31], 7u8);
-    assert_eq!(
-        &out[44..64],
-        &hex_to_bytes("0x1111111111111111111111111111111111111111").unwrap()
-    );
+fn small_uint_artifact() -> serde_json::Value {
+    serde_json::json!({
+        "abi": [
+            {
+                "type": "function",
+                "name": "setSmall",
+                "inputs": [{"name": "x", "type": "uint8"}],
+                "outputs": []
+            }
+        ],
+        "bytecode": {
+            "object": "0x6000"
+        }
+    })
 }
 
-#[test]
-fn encode_dynamic_string() {
-    let types = vec!["string".to_string()];
-    let args = vec![serde_json::json!("hello")];
-
-    let out = encode_params(&types, &args).expect("encode");
-    assert_eq!(out.len(), 96);
-    // offset = 0x20
-    assert_eq!(out[31], 32u8);
-    // len = 5
-    assert_eq!(out[63], 5u8);
-}
-
-#[test]
-fn resolve_function_call_works() {
-    let artifact: ContractArtifactConfig =
-        serde_json::from_value(sample_artifact()).expect("artifact config");
-    let (abi, _bytecode) = parse_artifact(&artifact).expect("parse artifact");
-
-    let (calldata, _outputs) =
-        resolve_function_call(&abi, "setValue", &[serde_json::json!(42)]).expect("call");
-
-    assert!(calldata.len() >= 4 + 32);
+fn small_uint_constructor_artifact() -> serde_json::Value {
+    serde_json::json!({
+        "abi": [
+            {
+                "type": "constructor",
+                "inputs": [{"name": "x", "type": "uint8"}]
+            }
+        ],
+        "bytecode": {
+            "object": "0x6000"
+        }
+    })
 }
 
 #[test]
@@ -98,7 +86,8 @@ fn deploy_io_exports_contract_address() {
             "artifact": sample_artifact(),
             "network_id": "ethereum-mainnet",
             "from": "0x1111111111111111111111111111111111111111",
-            "signing_key_env": "MFM_DEPLOYER_KEY"
+            "signing_key_env": "MFM_DEPLOYER_KEY",
+            "constructor_args": [1]
             }),
             &op_test_support::run_config_live(),
         )
@@ -184,6 +173,103 @@ fn configure_io_exports_custom_keys_when_overridden() {
         .exports
         .iter()
         .any(|k| k.0.as_str() == "approve_receipts"));
+}
+
+#[test]
+fn configure_inline_artifact_validation_uses_shared_abi_helpers() {
+    let artifact: ContractArtifactConfig =
+        serde_json::from_value(small_uint_artifact()).expect("artifact");
+    let shared_artifact = shared_artifact_config(&artifact);
+    let (abi, _bytecode) = shared_dcv::parse_artifact(&shared_artifact).expect("shared artifact");
+    let shared_err = shared_dcv::resolve_function_call(&abi, "setSmall", &[serde_json::json!(256)])
+        .expect_err("shared ABI rejects uint8 overflow");
+
+    let op = EvmConfigureOp;
+    let err = match op.expand(
+        OpPath("m.main".to_string()),
+        &serde_json::json!({
+            "artifact": small_uint_artifact(),
+            "network_id": "ethereum-mainnet",
+            "from": "0x1111111111111111111111111111111111111111",
+            "signing_key_env": "MFM_DEPLOYER_KEY",
+            "calls": [{"function":"setSmall","args":[256]}]
+        }),
+        &op_test_support::run_config_live(),
+    ) {
+        Ok(_) => panic!("uint8 overflow must be rejected during planning"),
+        Err(err) => err,
+    };
+
+    assert_eq!(err.info.code.0, "invalid_op_config");
+    assert!(err.info.message.contains(&shared_err));
+}
+
+#[test]
+fn deploy_inline_constructor_validation_uses_shared_abi_helpers() {
+    let artifact: ContractArtifactConfig =
+        serde_json::from_value(small_uint_constructor_artifact()).expect("artifact");
+    let shared_artifact = shared_artifact_config(&artifact);
+    let (abi, bytecode) = shared_dcv::parse_artifact(&shared_artifact).expect("shared artifact");
+    let shared_err = shared_dcv::constructor_data(&abi, &bytecode, &[serde_json::json!(256)])
+        .expect_err("shared ABI rejects uint8 constructor overflow");
+
+    let op = EvmDeployOp;
+    let err = match op.expand(
+        OpPath("m.main".to_string()),
+        &serde_json::json!({
+            "artifact": small_uint_constructor_artifact(),
+            "network_id": "ethereum-mainnet",
+            "from": "0x1111111111111111111111111111111111111111",
+            "signing_key_env": "MFM_DEPLOYER_KEY",
+            "constructor_args": [256]
+        }),
+        &op_test_support::run_config_live(),
+    ) {
+        Ok(_) => panic!("uint8 constructor overflow must be rejected during planning"),
+        Err(err) => err,
+    };
+
+    assert_eq!(err.info.code.0, "invalid_op_config");
+    assert!(err.info.message.contains(&shared_err));
+}
+
+#[test]
+fn validate_inline_assertion_validation_uses_shared_abi_helpers() {
+    let artifact: ContractArtifactConfig =
+        serde_json::from_value(small_uint_artifact()).expect("artifact");
+    let shared_artifact = shared_artifact_config(&artifact);
+    let (abi, _bytecode) = shared_dcv::parse_artifact(&shared_artifact).expect("shared artifact");
+    let shared_reads = vec![shared_dcv::ReadAssertionConfig {
+        function: "setSmall".to_string(),
+        args: vec![serde_json::json!(256).into()],
+        expected: serde_json::json!(true).into(),
+    }];
+    let shared_err = shared_dcv::prepare_validate_assertions(&abi, &shared_reads, &[])
+        .expect_err("shared validation rejects uint8 overflow");
+
+    let op = EvmValidateOp;
+    let err = match op.expand(
+        OpPath("m.validate".to_string()),
+        &serde_json::json!({
+            "artifact": small_uint_artifact(),
+            "network_id": "ethereum-mainnet",
+            "contract_address": "0x1111111111111111111111111111111111111111",
+            "expected_chain_id": 1337,
+            "read_assertions": [
+                {"function":"setSmall","args":[256],"expected": true}
+            ]
+        }),
+        &op_test_support::run_config_live(),
+    ) {
+        Ok(_) => panic!("invalid read assertion must be rejected during planning"),
+        Err(err) => err,
+    };
+
+    assert_eq!(err.info.code.0, "invalid_op_config");
+    assert_eq!(
+        err.info.message,
+        op_rpc::validation_assertion_error_message(&shared_err)
+    );
 }
 
 #[test]

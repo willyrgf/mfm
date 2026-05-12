@@ -4,6 +4,11 @@
 //! derive selectors, and build common constructor/function call payloads used by higher-level
 //! runtime crates.
 //!
+//! Supported ABI argument types are `address`, `bool`, `bytes1` through `bytes32`, dynamic
+//! `bytes`, `string`, and signed/unsigned integer widths from 8 through 256 bits in 8-bit
+//! increments. The aliases `int` and `uint` are treated as 256-bit integers. Unsupported ABI
+//! types fail explicitly during encoding or function resolution.
+//!
 //! # Examples
 //!
 //! ```rust
@@ -32,6 +37,12 @@ use serde::Deserialize;
 use crate::encoding::{encode_len_word, parse_address_hex};
 use crate::hex::{bytes_to_hex_prefixed, hex_nibble, hex_to_bytes, normalize_hex_str};
 use crate::util_error::UtilError;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AbiIntegerType {
+    Signed(usize),
+    Unsigned(usize),
+}
 
 /// Simplified function entry extracted from a JSON ABI.
 #[derive(Clone, Debug)]
@@ -162,14 +173,101 @@ pub fn parse_bytecode(v: &serde_json::Value) -> Result<Vec<u8>, UtilError> {
 ///
 /// This is the standard Ethereum ABI selector derivation used for function calldata prefixes.
 pub fn function_selector(name: &str, input_types: &[String]) -> [u8; 4] {
-    let sig = format!("{}({})", name, input_types.join(","));
+    let sig = function_signature(name, input_types);
     let h = keccak256(sig.as_bytes());
     [h[0], h[1], h[2], h[3]]
 }
 
-fn parse_uint_word(v: &serde_json::Value) -> Result<[u8; 32], UtilError> {
-    let mut out = [0u8; 32];
+fn function_signature(name: &str, input_types: &[String]) -> String {
+    format!("{}({})", name, input_types.join(","))
+}
 
+fn parse_integer_type(t: &str) -> Option<Result<AbiIntegerType, UtilError>> {
+    if let Some(width) = t.strip_prefix("uint") {
+        return Some(parse_integer_width(width, "uint").map(AbiIntegerType::Unsigned));
+    }
+    if let Some(width) = t.strip_prefix("int") {
+        return Some(parse_integer_width(width, "int").map(AbiIntegerType::Signed));
+    }
+    None
+}
+
+fn parse_integer_width(width: &str, prefix: &'static str) -> Result<usize, UtilError> {
+    let bits = if width.is_empty() {
+        256
+    } else {
+        width.parse::<usize>().map_err(|_| {
+            UtilError::new(
+                "invalid_integer_type",
+                format!("{prefix} ABI width must be a decimal integer"),
+            )
+        })?
+    };
+
+    if !(8..=256).contains(&bits) || bits % 8 != 0 {
+        return Err(UtilError::new(
+            "invalid_integer_type",
+            format!("{prefix} ABI width must be a multiple of 8 in [8,256]"),
+        ));
+    }
+
+    Ok(bits)
+}
+
+fn trim_leading_zero_bytes(bytes: &[u8]) -> &[u8] {
+    let first_nonzero = bytes.iter().position(|b| *b != 0).unwrap_or(bytes.len());
+    &bytes[first_nonzero..]
+}
+
+fn bit_len_be(bytes: &[u8]) -> usize {
+    let bytes = trim_leading_zero_bytes(bytes);
+    let Some(first) = bytes.first() else {
+        return 0;
+    };
+    (bytes.len() - 1) * 8 + (8 - first.leading_zeros() as usize)
+}
+
+fn u128_fits_bits(value: u128, bits: usize) -> bool {
+    if bits >= 128 {
+        true
+    } else {
+        value < (1u128 << bits)
+    }
+}
+
+fn signed_i128_bounds(bits: usize) -> (i128, i128) {
+    if bits >= 128 {
+        return (i128::MIN, i128::MAX);
+    }
+    let max = (1i128 << (bits - 1)) - 1;
+    let min = -(1i128 << (bits - 1));
+    (min, max)
+}
+
+fn encode_u128_word(value: u128) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    out[16..32].copy_from_slice(&value.to_be_bytes());
+    out
+}
+
+fn encode_unsigned_bytes_word(bytes: &[u8]) -> [u8; 32] {
+    let bytes = trim_leading_zero_bytes(bytes);
+    let mut out = [0u8; 32];
+    out[32 - bytes.len()..].copy_from_slice(bytes);
+    out
+}
+
+fn encode_i128_word(value: i128) -> [u8; 32] {
+    let mut out = if value.is_negative() {
+        [0xffu8; 32]
+    } else {
+        [0u8; 32]
+    };
+    out[16..32].copy_from_slice(&value.to_be_bytes());
+    out
+}
+
+fn parse_uint_word(bits: usize, v: &serde_json::Value) -> Result<[u8; 32], UtilError> {
     match v {
         serde_json::Value::Number(n) => {
             let Some(u) = n.as_u64() else {
@@ -178,33 +276,90 @@ fn parse_uint_word(v: &serde_json::Value) -> Result<[u8; 32], UtilError> {
                     "numeric value must fit into u64",
                 ));
             };
-            out[24..32].copy_from_slice(&u.to_be_bytes());
-            Ok(out)
+            let value = u128::from(u);
+            if !u128_fits_bits(value, bits) {
+                return Err(UtilError::new(
+                    "invalid_uint",
+                    format!("uint{bits} argument out of bounds"),
+                ));
+            }
+            Ok(encode_u128_word(value))
         }
         serde_json::Value::String(s) => {
             if s.starts_with("0x") || s.starts_with("0X") {
                 let b = hex_to_bytes(s)?;
-                if b.len() > 32 {
+                let trimmed = trim_leading_zero_bytes(&b);
+                if trimmed.len() > bits / 8 {
                     return Err(UtilError::new(
                         "invalid_uint",
-                        "hex integer must fit into 32 bytes",
+                        format!("uint{bits} hex integer out of bounds"),
                     ));
                 }
-                out[32 - b.len()..].copy_from_slice(&b);
-                return Ok(out);
+                return Ok(encode_unsigned_bytes_word(trimmed));
             }
 
             let parsed = s.parse::<u128>().map_err(|_| {
                 UtilError::new("invalid_uint", "decimal integer must fit into u128")
             })?;
-            out[16..32].copy_from_slice(&parsed.to_be_bytes());
-            Ok(out)
+            if !u128_fits_bits(parsed, bits) {
+                return Err(UtilError::new(
+                    "invalid_uint",
+                    format!("uint{bits} argument out of bounds"),
+                ));
+            }
+            Ok(encode_u128_word(parsed))
         }
         _ => Err(UtilError::new(
             "invalid_uint",
             "integer arg must be a number or string",
         )),
     }
+}
+
+fn parse_int_word(bits: usize, v: &serde_json::Value) -> Result<[u8; 32], UtilError> {
+    match v {
+        serde_json::Value::Number(n) => {
+            let Some(i) = n.as_i64() else {
+                return Err(UtilError::new(
+                    "invalid_int",
+                    "numeric value must fit into i64",
+                ));
+            };
+            encode_i128_with_bounds(bits, i128::from(i))
+        }
+        serde_json::Value::String(s) => {
+            if s.starts_with("0x") || s.starts_with("0X") {
+                let b = hex_to_bytes(s)?;
+                if bit_len_be(&b) > bits.saturating_sub(1) {
+                    return Err(UtilError::new(
+                        "invalid_int",
+                        format!("int{bits} positive hex integer out of bounds"),
+                    ));
+                }
+                return Ok(encode_unsigned_bytes_word(&b));
+            }
+
+            let parsed = s.parse::<i128>().map_err(|_| {
+                UtilError::new("invalid_int", "decimal signed integer must fit into i128")
+            })?;
+            encode_i128_with_bounds(bits, parsed)
+        }
+        _ => Err(UtilError::new(
+            "invalid_int",
+            "integer arg must be a number or string",
+        )),
+    }
+}
+
+fn encode_i128_with_bounds(bits: usize, value: i128) -> Result<[u8; 32], UtilError> {
+    let (min, max) = signed_i128_bounds(bits);
+    if value < min || value > max {
+        return Err(UtilError::new(
+            "invalid_int",
+            format!("int{bits} argument out of bounds"),
+        ));
+    }
+    Ok(encode_i128_word(value))
 }
 
 fn parse_bool_word(v: &serde_json::Value) -> Result<[u8; 32], UtilError> {
@@ -347,8 +502,11 @@ fn encode_static_value(t: &str, v: &serde_json::Value) -> Result<[u8; 32], UtilE
         return parse_bool_word(v);
     }
 
-    if t.starts_with("uint") || t.starts_with("int") {
-        return parse_uint_word(v);
+    if let Some(integer_type) = parse_integer_type(t) {
+        return match integer_type? {
+            AbiIntegerType::Unsigned(bits) => parse_uint_word(bits, v),
+            AbiIntegerType::Signed(bits) => parse_int_word(bits, v),
+        };
     }
 
     if t == "bytes32" {
@@ -377,7 +535,7 @@ fn encode_static_value(t: &str, v: &serde_json::Value) -> Result<[u8; 32], UtilE
 /// ABI-encodes function or constructor arguments.
 ///
 /// Supported dynamic types are `bytes` and `string`. Supported static types include `address`,
-/// integer types, `bool`, and `bytesM`.
+/// signed/unsigned integer widths from 8 through 256 bits, `bool`, and `bytesM`.
 pub fn encode_params<T>(types: &[String], args: &[T]) -> Result<Vec<u8>, UtilError>
 where
     T: Borrow<serde_json::Value>,
@@ -442,25 +600,41 @@ where
     T: Borrow<serde_json::Value>,
 {
     let mut winners: Vec<(Vec<u8>, Vec<String>)> = Vec::new();
+    let mut failures: Vec<String> = Vec::new();
+    let mut candidate_count = 0usize;
 
     for f in abi
         .functions
         .iter()
         .filter(|f| f.name == function && f.inputs.len() == args.len())
     {
-        let Ok(mut enc) = encode_params(&f.inputs, args) else {
-            continue;
-        };
-        let mut out = Vec::with_capacity(4 + enc.len());
-        out.extend_from_slice(&function_selector(&f.name, &f.inputs));
-        out.append(&mut enc);
-        winners.push((out, f.outputs.clone()));
+        candidate_count += 1;
+        match encode_params(&f.inputs, args) {
+            Ok(mut enc) => {
+                let mut out = Vec::with_capacity(4 + enc.len());
+                out.extend_from_slice(&function_selector(&f.name, &f.inputs));
+                out.append(&mut enc);
+                winners.push((out, f.outputs.clone()));
+            }
+            Err(err) => failures.push(format!(
+                "{}: {}",
+                function_signature(&f.name, &f.inputs),
+                err.message
+            )),
+        }
     }
 
     match winners.len() {
-        0 => Err(UtilError::new(
+        0 if candidate_count == 0 => Err(UtilError::new(
             "function_resolution_failed",
             "function resolution failed for provided args",
+        )),
+        0 => Err(UtilError::new(
+            "function_resolution_failed",
+            format!(
+                "function resolution failed for provided args; candidate errors: {}",
+                failures.join("; ")
+            ),
         )),
         1 => Ok(winners.remove(0)),
         _ => Err(UtilError::new(
@@ -542,6 +716,10 @@ pub fn decode_single_output_to_json(
 mod tests {
     use super::*;
 
+    fn encode_one(typ: &str, value: serde_json::Value) -> Result<Vec<u8>, UtilError> {
+        encode_params(&[typ.to_string()], &[value])
+    }
+
     #[test]
     fn encode_dynamic_string() {
         let types = vec!["string".to_string()];
@@ -551,6 +729,121 @@ mod tests {
         assert_eq!(out.len(), 96);
         assert_eq!(out[31], 32u8);
         assert_eq!(out[63], 5u8);
+    }
+
+    #[test]
+    fn encode_dynamic_bytes() {
+        let out = encode_one("bytes", serde_json::json!("0xdeadbeef")).expect("encode");
+        assert_eq!(out.len(), 96);
+        assert_eq!(out[31], 32u8);
+        assert_eq!(out[63], 4u8);
+        assert_eq!(&out[64..68], &[0xde, 0xad, 0xbe, 0xef]);
+    }
+
+    #[test]
+    fn encode_uint_width_bounds() {
+        let max = encode_one("uint8", serde_json::json!(255)).expect("max uint8");
+        assert_eq!(max[31], 0xff);
+
+        let with_leading_zero =
+            encode_one("uint8", serde_json::json!("0x00ff")).expect("trim leading zero");
+        assert_eq!(with_leading_zero[31], 0xff);
+
+        let decimal_err = encode_one("uint8", serde_json::json!(256)).expect_err("overflow");
+        assert_eq!(decimal_err.code, "invalid_uint");
+        assert!(decimal_err.message.contains("uint8 argument out of bounds"));
+
+        let hex_err = encode_one("uint8", serde_json::json!("0x0100")).expect_err("overflow");
+        assert_eq!(hex_err.code, "invalid_uint");
+        assert!(hex_err.message.contains("uint8 hex integer out of bounds"));
+    }
+
+    #[test]
+    fn encode_signed_int_width_bounds() {
+        let negative_one = encode_one("int8", serde_json::json!(-1)).expect("negative one");
+        assert!(negative_one.iter().all(|byte| *byte == 0xff));
+
+        let min = encode_one("int8", serde_json::json!(-128)).expect("min int8");
+        assert_eq!(&min[..31], &[0xff; 31]);
+        assert_eq!(min[31], 0x80);
+
+        let max = encode_one("int8", serde_json::json!(127)).expect("max int8");
+        assert_eq!(&max[..31], &[0u8; 31]);
+        assert_eq!(max[31], 0x7f);
+
+        let low_err = encode_one("int8", serde_json::json!(-129)).expect_err("underflow");
+        assert_eq!(low_err.code, "invalid_int");
+        assert!(low_err.message.contains("int8 argument out of bounds"));
+
+        let high_err = encode_one("int8", serde_json::json!(128)).expect_err("overflow");
+        assert_eq!(high_err.code, "invalid_int");
+        assert!(high_err.message.contains("int8 argument out of bounds"));
+    }
+
+    #[test]
+    fn constructor_data_appends_encoded_args() {
+        let abi = parse_abi(&serde_json::json!([
+            {
+                "type": "constructor",
+                "inputs": [
+                    { "type": "uint8" },
+                    { "type": "string" }
+                ]
+            }
+        ]))
+        .expect("abi");
+        let bytecode = hex_to_bytes("0x6000").expect("bytecode");
+        let args = vec![serde_json::json!(7), serde_json::json!("ready")];
+
+        let out = constructor_data(&abi, &bytecode, &args).expect("constructor data");
+        assert_eq!(&out[..2], &[0x60, 0x00]);
+        assert_eq!(out[33], 7u8);
+        assert_eq!(out[65], 64u8);
+        assert_eq!(out[97], 5u8);
+        assert_eq!(&out[98..103], b"ready");
+    }
+
+    #[test]
+    fn resolve_overload_ambiguity_is_explicit() {
+        let abi = parse_abi(&serde_json::json!([
+            {
+                "type": "function",
+                "name": "set",
+                "inputs": [{ "type": "uint" }],
+                "outputs": []
+            },
+            {
+                "type": "function",
+                "name": "set",
+                "inputs": [{ "type": "uint256" }],
+                "outputs": []
+            }
+        ]))
+        .expect("abi");
+
+        let err = resolve_function_call(&abi, "set", &[serde_json::json!(1)])
+            .expect_err("ambiguous overload");
+        assert_eq!(err.code, "function_resolution_ambiguous");
+    }
+
+    #[test]
+    fn unsupported_overload_candidate_error_is_deterministic() {
+        let abi = parse_abi(&serde_json::json!([
+            {
+                "type": "function",
+                "name": "set",
+                "inputs": [{ "type": "tuple" }],
+                "outputs": []
+            }
+        ]))
+        .expect("abi");
+
+        let err = resolve_function_call(&abi, "set", &[serde_json::json!({"x": 1})])
+            .expect_err("unsupported candidate");
+        assert_eq!(err.code, "function_resolution_failed");
+        assert!(err
+            .message
+            .contains("set(tuple): unsupported static ABI type"));
     }
 
     #[test]
