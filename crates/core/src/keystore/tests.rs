@@ -246,6 +246,10 @@ fn test_mnemonic_import_and_retrieval() {
     let address1 = secure_key.ethereum_address().unwrap();
     let address2 = secure_key.ethereum_address().unwrap();
     assert_eq!(address1, address2);
+    assert_eq!(
+        format!("{address1:?}").to_lowercase(),
+        "0x9858effd232b4033e47d90003d41ec34ecaeda94"
+    );
 }
 
 #[test]
@@ -294,7 +298,7 @@ fn test_export_private_key_for_private_key_entries() {
 
 #[cfg(feature = "dangerous-secret-export")]
 #[test]
-fn test_export_mnemonic_and_derived_private_key() {
+fn test_export_private_key_for_hd_derived_entries() {
     let (_temp_dir, mut keystore) = test_keystore_with_exports();
     keystore.unlock("test_password").unwrap();
 
@@ -310,9 +314,6 @@ fn test_export_mnemonic_and_derived_private_key() {
         )
         .unwrap();
 
-    let exported_mnemonic = keystore.export_mnemonic(mnemonic_id).unwrap();
-    assert_eq!(exported_mnemonic.as_str(), test_mnemonic);
-
     let exported_pk = keystore.export_private_key(mnemonic_id).unwrap();
     let derived_id = keystore
         .import_private_key(Some("derived".to_string()), exported_pk.as_str())
@@ -324,12 +325,6 @@ fn test_export_mnemonic_and_derived_private_key() {
         key_from_mnemonic.ethereum_address().unwrap(),
         key_from_exported.ethereum_address().unwrap()
     );
-
-    // export_mnemonic should fail for private key entries.
-    assert!(matches!(
-        keystore.export_mnemonic(derived_id),
-        Err(KeystoreError::InvalidInput(_))
-    ));
 }
 
 #[cfg(feature = "dangerous-secret-export")]
@@ -361,6 +356,8 @@ fn test_secret_export_feature_is_disabled_by_default() {
 fn test_mnemonic_passphrase_not_persisted_in_plaintext() {
     let temp_dir = tempdir().unwrap();
     let keystore_path = temp_dir.path().join("mnemonic_passphrase_secure.keystore");
+    let mnemonic =
+        "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
 
     let mut keystore =
         Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
@@ -368,15 +365,53 @@ fn test_mnemonic_passphrase_not_persisted_in_plaintext() {
     keystore
         .import_mnemonic(
             Some("mnemonic-secure".to_string()),
-            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+            mnemonic,
             "m/44'/60'/0'/0/0",
             Some("super-secret-passphrase"),
         )
         .unwrap();
 
     let file_content = std::fs::read_to_string(&keystore_path).unwrap();
+    assert!(!file_content.contains(mnemonic));
     assert!(!file_content.contains("super-secret-passphrase"));
+    assert!(!file_content.contains("\"mnemonic\""));
     assert!(!file_content.contains("\"passphrase\""));
+}
+
+#[test]
+fn test_legacy_mnemonic_entry_fails_closed_without_secret_error() {
+    let temp_dir = tempdir().unwrap();
+    let keystore_path = temp_dir.path().join("legacy_mnemonic_entry.keystore");
+    let mnemonic =
+        "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+    let passphrase = "legacy-secret-passphrase";
+
+    let mut keystore =
+        Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
+    keystore.unlock("strong_password_123").unwrap();
+    keystore
+        .import_private_key(
+            Some("legacy".to_string()),
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        )
+        .unwrap();
+
+    rewrite_keystore_json_with_valid_mac(&keystore, &keystore_path, |json| {
+        json["entries"][0]["key_type"] = serde_json::json!({
+            "Mnemonic": {
+                "derivation_path": "m/44'/60'/0'/0/0"
+            }
+        });
+    });
+    drop(keystore);
+
+    let mut loaded =
+        Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
+    let err = loaded.unlock("strong_password_123").unwrap_err();
+    let rendered = err.to_string();
+    assert!(matches!(err, KeystoreError::InvalidInput(_)));
+    assert!(!rendered.contains(mnemonic));
+    assert!(!rendered.contains(passphrase));
 }
 
 #[test]
@@ -674,12 +709,6 @@ fn test_audit_log_entries_created_for_operations() {
         |e| matches!(e.event, AuditEvent::ExportPrivateKey { id } if id == pk_id) && e.success
     ));
 
-    // export_mnemonic failure logs.
-    assert!(keystore.export_mnemonic(pk_id).is_err());
-    assert!(keystore.audit_log().iter().any(|e| {
-        matches!(e.event, AuditEvent::ExportMnemonic { id } if id == pk_id) && !e.success
-    }));
-
     // delete_key logs.
     keystore.delete_key(pk_id).unwrap();
     assert!(keystore
@@ -733,7 +762,7 @@ fn test_audit_log_persisted_for_read_only_access_operations() {
         // These operations should persist their audit entries to disk.
         keystore.get_private_key(pk_id).unwrap();
         keystore.export_private_key(pk_id).unwrap();
-        keystore.export_mnemonic(mnemonic_id).unwrap();
+        keystore.export_private_key(mnemonic_id).unwrap();
 
         (pk_id, mnemonic_id)
     };
@@ -750,7 +779,7 @@ fn test_audit_log_persisted_for_read_only_access_operations() {
         matches!(e.event, AuditEvent::ExportPrivateKey { id } if id == pk_id) && e.success
     }));
     assert!(keystore2.audit_log().iter().any(|e| {
-        matches!(e.event, AuditEvent::ExportMnemonic { id } if id == mnemonic_id) && e.success
+        matches!(e.event, AuditEvent::ExportPrivateKey { id } if id == mnemonic_id) && e.success
     }));
 }
 
@@ -1160,7 +1189,7 @@ fn test_list_keys_comprehensive() {
 
     let key2_info = keys.iter().find(|k| k.id == key_id2).unwrap();
     assert_eq!(key2_info.alias, Some("mnemonic1".to_string()));
-    assert!(matches!(key2_info.key_type, KeyType::Mnemonic { .. }));
+    assert!(matches!(key2_info.key_type, KeyType::HdDerived { .. }));
 
     // list_keys requires an unlocked session.
     keystore.lock();

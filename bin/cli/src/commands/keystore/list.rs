@@ -112,7 +112,7 @@ async fn execute_internal(args: &ListArgs) -> CommandResult<ListResponse> {
             label: key.label,
             key_type: match key.key_type.as_str() {
                 "raw" => "privatekey".to_string(),
-                "hd" => "mnemonic".to_string(),
+                "hd_derived" => "hd_derived".to_string(),
                 other => other.to_string(),
             },
             address: key.address,

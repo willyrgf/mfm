@@ -30,7 +30,7 @@ use mfm_machine::ids::{ArtifactId, ErrorCode};
 use mfm_machine::stores::{ArtifactKind, ArtifactStore};
 use ring::aead;
 use ring::rand::{SecureRandom, SystemRandom};
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroizing;
 
 const CODE_SECRET_KEY_MISSING: &str = "secret_key_missing";
 const CODE_SECRET_KEY_INVALID: &str = "secret_key_invalid";
@@ -112,13 +112,13 @@ impl SecretKey {
 
     /// Reads and parses [`ENV_SECRET_KEY_HEX`].
     pub fn from_env() -> Result<Self, StorageError> {
-        let v = std::env::var(ENV_SECRET_KEY_HEX).map_err(|_| {
+        let v = Zeroizing::new(std::env::var(ENV_SECRET_KEY_HEX).map_err(|_| {
             other(
                 CODE_SECRET_KEY_MISSING,
                 ErrorCategory::ParsingInput,
                 "missing MFM_SECRET_KEY_HEX",
             )
-        })?;
+        })?);
         Self::from_hex(&v)
     }
 }
@@ -185,11 +185,11 @@ impl SecretArtifactStore {
         let key = aead::LessSafeKey::new(unbound);
 
         // Keep plaintext in an owned, zeroizing buffer while sealing in-place.
-        let mut in_out: Vec<u8> = plaintext.to_vec();
+        let mut in_out = Zeroizing::new(plaintext.to_vec());
         key.seal_in_place_append_tag(
             aead::Nonce::assume_unique_for_key(nonce_bytes),
             aead::Aad::from(AAD_V1),
-            &mut in_out,
+            &mut *in_out,
         )
         .map_err(|_| {
             other(
@@ -235,24 +235,26 @@ impl SecretArtifactStore {
             })?;
         let key = aead::LessSafeKey::new(unbound);
 
-        let mut in_out: Vec<u8> = envelope[HEADER_LEN..].to_vec();
-        let pt = key
-            .open_in_place(
-                aead::Nonce::assume_unique_for_key(nonce_bytes),
-                aead::Aad::from(AAD_V1),
-                &mut in_out,
-            )
-            .map_err(|_| {
-                other(
-                    CODE_SECRET_DECRYPT_FAILED,
-                    ErrorCategory::Unknown,
-                    "secret decryption failed",
+        let mut in_out = Zeroizing::new(envelope[HEADER_LEN..].to_vec());
+        let plaintext_len = {
+            let pt = key
+                .open_in_place(
+                    aead::Nonce::assume_unique_for_key(nonce_bytes),
+                    aead::Aad::from(AAD_V1),
+                    &mut in_out,
                 )
-            })?;
+                .map_err(|_| {
+                    other(
+                        CODE_SECRET_DECRYPT_FAILED,
+                        ErrorCategory::Unknown,
+                        "secret decryption failed",
+                    )
+                })?;
+            pt.len()
+        };
 
-        let out = Zeroizing::new(pt.to_vec());
-        in_out.zeroize();
-        Ok(out)
+        in_out.truncate(plaintext_len);
+        Ok(in_out)
     }
 }
 
@@ -292,6 +294,22 @@ mod tests {
 
         let got = store.get_secret_bytes(&id).await.expect("get");
         assert_eq!(&got[..], secret);
+    }
+
+    #[test]
+    fn open_returns_zeroizing_plaintext_buffer() {
+        fn assert_zeroizing_vec(_: &Zeroizing<Vec<u8>>) {}
+
+        let dir = tempfile::tempdir().unwrap();
+        let inner: Arc<dyn ArtifactStore> = Arc::new(FsArtifactStore::new(dir.path()));
+        let store = SecretArtifactStore::new(inner, SecretKey::from_bytes(random_key()));
+        let secret = b"MFM_TEST_SECRET_ZEROIZING_BUFFER";
+
+        let envelope = store.seal_v1(secret).expect("seal");
+        let plaintext = store.open_v1(&envelope).expect("open");
+
+        assert_zeroizing_vec(&plaintext);
+        assert_eq!(&plaintext[..], secret);
     }
 
     #[tokio::test]

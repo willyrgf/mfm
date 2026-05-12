@@ -2,7 +2,9 @@
 
 ## Overview
 
-The MFM keystore is a minimal, secure implementation for storing Ethereum private keys and mnemonics. It prioritizes simplicity and security over feature completeness, following the principle of "secure by default with minimal configuration."
+The MFM keystore is a minimal, secure implementation for storing Ethereum private keys. It accepts
+BIP39 mnemonics only as one-time import inputs for deriving a selected private key; mnemonic phrases
+and BIP39 passphrases are not stored or recoverable from MFM.
 
 ## Design Philosophy
 
@@ -77,11 +79,12 @@ let key_id = keystore.import_private_key(
     "0x1234567890abcdef..."
 )?;
 
-// Import a mnemonic with derivation path
+// Import a mnemonic-derived key with derivation path. Keep your seed backup outside MFM.
 let mnemonic_id = keystore.import_mnemonic(
     Some("hardware-wallet-backup".to_string()),
     "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
-    "m/44'/60'/0'/0/0"
+    "m/44'/60'/0'/0/0",
+    None,
 )?;
 
 // List all stored keys
@@ -144,11 +147,14 @@ match keystore.unlock("wrong_password") {
 - **Validation**: Must be valid secp256k1 private key
 - **Storage**: Encrypted directly as provided
 
-### Mnemonics
+### Mnemonic-Derived Keys
 - **Format**: BIP39 mnemonic phrases (12-24 words)
 - **Derivation**: BIP32/BIP44 compatible derivation paths
-- **Storage**: Mnemonic phrase encrypted, derived keys computed on-demand
+- **Storage**: The selected derived private key is encrypted; the mnemonic phrase and BIP39
+  passphrase are discarded before import returns
 - **Default Path**: `m/44'/60'/0'/0/0` (Ethereum standard)
+- **Backup**: Users must keep their own seed backup outside MFM; MFM cannot export or recover the
+  original mnemonic
 
 ## File Format
 
@@ -230,7 +236,7 @@ Byte arrays below are shortened for readability.
 ### File Size
 - **Empty keystore**: ~500 bytes
 - **Per private key**: ~300-400 bytes
-- **Per mnemonic**: ~400-500 bytes
+- **Per mnemonic-derived key**: ~300-400 bytes
 
 ## Common Usage Patterns
 
@@ -241,25 +247,27 @@ keystore.unlock(&password)?;
 let key_id = keystore.import_private_key(Some("main".to_string()), &private_key)?;
 ```
 
-### HD Wallet from Mnemonic
+### Mnemonic-Derived Accounts
 ```rust
 let mut keystore = Keystore::new("./hd.keystore", KeystoreConfig::default())?;
 keystore.unlock(&password)?;
 
-// Import mnemonic once
+// Import one selected account from the mnemonic. Keep the seed backup outside MFM.
 let mnemonic_id = keystore.import_mnemonic(
     Some("seed".to_string()),
     &mnemonic,
-    "m/44'/60'/0'/0/0"
+    "m/44'/60'/0'/0/0",
+    None,
 )?;
 
-// Derive different accounts from same mnemonic
+// Import additional accounts by providing the mnemonic again for each derivation path.
 for account in 0..5 {
     let path = format!("m/44'/60'/0'/0/{}", account);
     let account_id = keystore.import_mnemonic(
         Some(format!("account-{}", account)),
         &mnemonic,
-        &path
+        &path,
+        None,
     )?;
 }
 ```

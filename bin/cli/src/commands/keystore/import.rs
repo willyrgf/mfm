@@ -125,7 +125,7 @@ async fn execute_internal(args: &ImportArgs) -> CommandResult<ImportResponse> {
 
     let key_type = match report.key_type.as_str() {
         "raw" => "private key",
-        "hd" => "mnemonic",
+        "hd_derived" => "hd_derived",
         other => other,
     };
 

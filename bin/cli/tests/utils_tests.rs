@@ -13,7 +13,7 @@ fn test_key_display_table_formatting() {
         KeyDisplay {
             id: "test-id-2".to_string(),
             label: "test-key-2".to_string(),
-            key_type: "mnemonic".to_string(),
+            key_type: "hd_derived".to_string(),
             address: None,
             created: "2024-01-01 13:00:00".to_string(),
         },
@@ -27,7 +27,7 @@ fn test_key_display_table_formatting() {
     assert!(output.contains("privatekey"));
     assert!(output.contains("test-id-2"));
     assert!(output.contains("test-key-2"));
-    assert!(output.contains("mnemonic"));
+    assert!(output.contains("hd_derived"));
 }
 
 #[test]
@@ -156,7 +156,7 @@ fn test_ascii_table_shape_is_stable() {
         KeyDisplay {
             id: "id-2".to_string(),
             label: "much-longer-label".to_string(),
-            key_type: "mnemonic".to_string(),
+            key_type: "hd_derived".to_string(),
             address: None,
             created: "2024-01-01 13:00:00".to_string(),
         },

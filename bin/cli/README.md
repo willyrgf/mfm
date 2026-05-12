@@ -92,8 +92,8 @@ failures return structured JSON responses. Parser failures use the stable error 
 ```
 
 **Common Error Codes:**
-- `InvalidPrivateKey`: Private key format is invalid
-- `InvalidMnemonic`: Mnemonic phrase is invalid
+- `InvalidKeyMaterial`: Key material format is invalid
+- `InvalidRecoveryPhrase`: Recovery phrase is invalid
 - `KeyNotFound`: Requested key does not exist
 - `InvalidUuid`: Provided UUID format is invalid
 - `AmbiguousLabel`: Multiple keys found with same label
@@ -106,7 +106,9 @@ All keystore operations are available under the `keystore` subcommand.
 
 ### `keystore import`
 
-Imports a private key or a mnemonic phrase into the keystore.
+Imports a private key or a mnemonic-derived key into the keystore. Mnemonic phrases are one-time
+inputs: MFM stores only the selected derived private key plus non-secret derivation metadata, so
+users must keep their own seed backup outside MFM.
 
 **Usage:**
 ```sh

@@ -96,8 +96,8 @@ pub fn state_from_io(err: IoError) -> StateError {
 /// Maps keystore-specific error codes into coarse-grained state error categories.
 pub fn keystore_error_category(code: &str) -> ErrorCategory {
     match code {
-        "InvalidPrivateKey"
-        | "InvalidMnemonic"
+        "InvalidKeyMaterial"
+        | "InvalidRecoveryPhrase"
         | "InvalidDerivationPath"
         | "InvalidUuid"
         | "MissingArgument"

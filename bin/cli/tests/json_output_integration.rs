@@ -113,7 +113,7 @@ fn test_keystore_import_json_error_invalid_key() {
     .write_stdin("invalid_key")
     .assert()
     .failure()
-    .stderr(predicate::str::contains("InvalidPrivateKey"))
+    .stderr(predicate::str::contains("InvalidKeyMaterial"))
     .stderr(predicate::str::contains("status"))
     .stderr(predicate::str::contains("error"));
 }
@@ -138,7 +138,7 @@ fn test_keystore_import_json_error_short_mnemonic() {
     .write_stdin("short mnemonic")
     .assert()
     .failure()
-    .stderr(predicate::str::contains("InvalidMnemonic"))
+    .stderr(predicate::str::contains("InvalidRecoveryPhrase"))
     .stderr(predicate::str::contains("status"))
     .stderr(predicate::str::contains("error"));
 }

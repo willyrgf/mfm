@@ -120,7 +120,7 @@ fn test_e2e_mnemonic_workflow() {
     import_cmd
         .assert()
         .success()
-        .stdout(predicate::str::contains("mnemonic imported successfully"));
+        .stdout(predicate::str::contains("hd_derived imported successfully"));
 
     // Step 2: List keys to verify import
     let mut list_cmd = cli_with_password();
@@ -151,7 +151,7 @@ fn test_e2e_mnemonic_workflow() {
     import_cmd2
         .assert()
         .success()
-        .stdout(predicate::str::contains("mnemonic imported successfully"));
+        .stdout(predicate::str::contains("hd_derived imported successfully"));
 
     // Step 4: List should now show 2 keys
     let mut list_cmd2 = cli_with_password();
@@ -308,7 +308,7 @@ fn test_e2e_mixed_key_types_workflow() {
     import_mn_cmd
         .assert()
         .success()
-        .stdout(predicate::str::contains("mnemonic imported successfully"));
+        .stdout(predicate::str::contains("hd_derived imported successfully"));
 
     // List all keys
     let mut list_cmd = cli_with_password();
@@ -328,7 +328,7 @@ fn test_e2e_mixed_key_types_workflow() {
         .stdout(predicate::str::contains("pk-wallet"))
         .stdout(predicate::str::contains("mn-wallet"))
         .stdout(predicate::str::contains("privatekey"))
-        .stdout(predicate::str::contains("mnemonic"));
+        .stdout(predicate::str::contains("hd_derived"));
 
     // Test filtering by label pattern
     let mut filter_cmd = cli_with_password();

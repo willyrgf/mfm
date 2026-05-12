@@ -174,7 +174,7 @@ fn keystore_import(req: KeystoreImportRequest) -> Result<KeystoreImportReport, L
             Ok(KeystoreImportReport {
                 id: key_info.id.to_string(),
                 label: key_info.alias.unwrap_or_default(),
-                key_type: "hd".to_string(),
+                key_type: "hd_derived".to_string(),
                 address: format!("{:?}", key_info.address),
                 created_at: key_info.created_at.to_rfc3339(),
             })
@@ -554,22 +554,30 @@ fn read_password_file(path: &str) -> Result<Zeroizing<String>, LocalError> {
 
 fn read_input(prompt: &str, from_stdin: bool) -> Result<Zeroizing<String>, LocalError> {
     if from_stdin {
-        let mut input = String::new();
+        let mut input = Zeroizing::new(String::new());
         io::stdin()
             .read_line(&mut input)
             .map_err(|e| LocalError::new("InputError", ErrorCategory::Unknown, e.to_string()))?;
-        return Ok(Zeroizing::new(input.trim().to_string()));
+        trim_line_endings(&mut input);
+        return Ok(input);
     }
 
     print!("{prompt}");
     io::stdout()
         .flush()
         .map_err(|e| LocalError::new("InputError", ErrorCategory::Unknown, e.to_string()))?;
-    let mut input = String::new();
+    let mut input = Zeroizing::new(String::new());
     io::stdin()
         .read_line(&mut input)
         .map_err(|e| LocalError::new("InputError", ErrorCategory::Unknown, e.to_string()))?;
-    Ok(Zeroizing::new(input.trim().to_string()))
+    trim_line_endings(&mut input);
+    Ok(input)
+}
+
+fn trim_line_endings(input: &mut String) {
+    while input.ends_with(['\r', '\n']) {
+        input.pop();
+    }
 }
 
 fn confirm(prompt: &str) -> Result<bool, LocalError> {
@@ -594,30 +602,30 @@ fn confirm(prompt: &str) -> Result<bool, LocalError> {
 }
 
 fn normalize_private_key(input: &str) -> Result<Zeroizing<String>, LocalError> {
-    let normalized = input.strip_prefix("0x").unwrap_or(input).trim().to_string();
+    let normalized = Zeroizing::new(input.strip_prefix("0x").unwrap_or(input).trim().to_string());
     if normalized.len() != 64 {
         return Err(LocalError::new(
-            "InvalidPrivateKey",
+            "InvalidKeyMaterial",
             ErrorCategory::ParsingInput,
-            "Private key must be 64 hex characters",
+            "Key material must be 64 hex characters",
         ));
     }
     if hex::decode(&normalized).is_err() {
         return Err(LocalError::new(
-            "InvalidPrivateKey",
+            "InvalidKeyMaterial",
             ErrorCategory::ParsingInput,
-            "Private key must be valid hexadecimal",
+            "Key material must be valid hexadecimal",
         ));
     }
-    Ok(Zeroizing::new(normalized))
+    Ok(normalized)
 }
 
 fn validate_mnemonic_basic(input: &str) -> Result<(), LocalError> {
     if input.split_whitespace().count() < 12 {
         return Err(LocalError::new(
-            "InvalidMnemonic",
+            "InvalidRecoveryPhrase",
             ErrorCategory::ParsingInput,
-            "Mnemonic must have at least 12 words",
+            "Recovery phrase must have at least 12 words",
         ));
     }
     Ok(())
@@ -626,14 +634,14 @@ fn validate_mnemonic_basic(input: &str) -> Result<(), LocalError> {
 fn admin_error_from_keystore(err: KeystoreError) -> LocalError {
     match err {
         KeystoreError::InvalidPrivateKey => LocalError::new(
-            "InvalidPrivateKey",
+            "InvalidKeyMaterial",
             ErrorCategory::ParsingInput,
-            "Private key format is invalid",
+            "Key material format is invalid",
         ),
         KeystoreError::InvalidMnemonic(_) => LocalError::new(
-            "InvalidMnemonic",
+            "InvalidRecoveryPhrase",
             ErrorCategory::ParsingInput,
-            "Mnemonic phrase is invalid",
+            "Recovery phrase is invalid",
         ),
         KeystoreError::InvalidDerivationPath(_) => LocalError::new(
             "InvalidDerivationPath",
@@ -652,7 +660,7 @@ fn admin_error_from_keystore(err: KeystoreError) -> LocalError {
 fn key_type_code(key_type: &KeyType) -> &'static str {
     match key_type {
         KeyType::PrivateKey => "raw",
-        KeyType::Mnemonic { .. } => "hd",
+        KeyType::HdDerived { .. } => "hd_derived",
     }
 }
 

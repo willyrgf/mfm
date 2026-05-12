@@ -1,9 +1,11 @@
 //! # Keystore Module
 //!
-//! Minimal secure keystore for Ethereum keys and mnemonics.
+//! Minimal secure keystore for Ethereum private keys and one-time mnemonic imports.
 //!
 //! This is a simplified, focused implementation that provides only essential
-//! functionality for storing and retrieving Ethereum private keys and mnemonics.
+//! functionality for storing and retrieving Ethereum private keys. Mnemonics are accepted only as
+//! import inputs for deriving one selected key; the mnemonic phrase and BIP-39 passphrase are not
+//! stored.
 //!
 //! ## Quick Start
 //!
@@ -90,7 +92,6 @@ pub use error::KeystoreError;
 
 const KEYSTORE_FILE_VERSION: u8 = 3;
 const FILE_INTEGRITY_CONTEXT: &[u8] = b"mfm_keystore_file_integrity_v1";
-const MNEMONIC_PAYLOAD_VERSION: u8 = 1;
 const DEFAULT_AUTO_LOCK_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const MIN_KDF_MEMORY_KB: u32 = 64;
 const MIN_KDF_ITERATIONS: u32 = 1;
@@ -128,11 +129,10 @@ pub struct KeystoreConfig {
     pub argon2_iterations: u32,
     /// Argon2 parallelism (default: 1)
     pub argon2_parallelism: u32,
-    /// Whether secret export APIs are enabled.
+    /// Whether private-key export APIs are enabled.
     ///
-    /// Exporting private keys/mnemonics increases exfiltration risk and is disabled by default.
-    /// This flag is only effective when the crate is compiled with
-    /// `dangerous-secret-export`.
+    /// Exporting private keys increases exfiltration risk and is disabled by default. This flag is
+    /// only effective when the crate is compiled with `dangerous-secret-export`.
     pub allow_secret_exports: bool,
 }
 
@@ -181,9 +181,9 @@ impl KeystoreConfig {
 pub enum KeyType {
     /// Raw secp256k1 private key material.
     PrivateKey,
-    /// BIP-39 mnemonic material plus its derivation path.
-    Mnemonic {
-        /// Derivation path used to recover the signing key.
+    /// Private key derived once from BIP-39 input during import.
+    HdDerived {
+        /// Derivation path used for the one-time import derivation.
         derivation_path: String,
     },
 }
@@ -270,11 +270,6 @@ pub enum AuditEvent {
         /// Identifier of the requested entry.
         id: Uuid,
     },
-    /// A mnemonic export was attempted.
-    ExportMnemonic {
-        /// Identifier of the requested entry.
-        id: Uuid,
-    },
     /// A key deletion was attempted.
     DeleteKey {
         /// Identifier of the deleted entry.
@@ -323,15 +318,6 @@ struct ArgonParams {
     parallelism: u32,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct MnemonicPayload {
-    version: u8,
-    mnemonic: String,
-    #[serde(default)]
-    passphrase: Option<String>,
-}
-
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct KeystoreHeader {
@@ -339,32 +325,6 @@ struct KeystoreHeader {
     kdf_params: ArgonParams,
     master_key_verification: [u8; 32],
     file_integrity_mac: [u8; 32],
-}
-
-impl MnemonicPayload {
-    fn new(mnemonic: String, passphrase: Option<String>) -> Self {
-        Self {
-            version: MNEMONIC_PAYLOAD_VERSION,
-            mnemonic,
-            passphrase,
-        }
-    }
-}
-
-impl Zeroize for MnemonicPayload {
-    fn zeroize(&mut self) {
-        self.version = 0;
-        self.mnemonic.zeroize();
-        if let Some(passphrase) = &mut self.passphrase {
-            passphrase.zeroize();
-        }
-        self.passphrase = None;
-    }
-}
-
-struct MnemonicMaterial {
-    mnemonic: Zeroizing<String>,
-    passphrase: Option<Zeroizing<String>>,
 }
 
 /// Secure key wrapper that zeroizes on drop
@@ -397,20 +357,7 @@ impl SecureKey {
 
     /// Get Ethereum address for this key
     pub fn ethereum_address(&self) -> Result<Address, KeystoreError> {
-        let secret_key = SecretKey::from_slice(self.key_bytes.as_ref())
-            .map_err(|_| KeystoreError::InvalidPrivateKey)?;
-        let public_key = secret_key.public_key();
-
-        // Compute Ethereum address from public key
-        use k256::elliptic_curve::sec1::ToEncodedPoint;
-        let uncompressed_pk = public_key.to_encoded_point(false);
-        let mut keccak = Keccak::v256();
-        keccak.update(&uncompressed_pk.as_bytes()[1..]); // Skip 0x04 prefix
-        let mut hash = [0u8; 32];
-        keccak.finalize(&mut hash);
-
-        // Note: SecretKey implements ZeroizeOnDrop and will be zeroized when dropped
-        Ok(Address::from_slice(&hash[12..]))
+        ethereum_address_from_key_bytes(self.key_bytes.as_ref())
     }
 
     /// Get public key
@@ -424,7 +371,24 @@ impl SecureKey {
 
 impl ZeroizeOnDrop for SecureKey {}
 
-/// Minimal secure keystore for Ethereum keys and mnemonics
+fn ethereum_address_from_key_bytes(key_bytes: &[u8]) -> Result<Address, KeystoreError> {
+    let secret_key =
+        SecretKey::from_slice(key_bytes).map_err(|_| KeystoreError::InvalidPrivateKey)?;
+    let public_key = secret_key.public_key();
+
+    // Compute Ethereum address from public key
+    use k256::elliptic_curve::sec1::ToEncodedPoint;
+    let uncompressed_pk = public_key.to_encoded_point(false);
+    let mut keccak = Keccak::v256();
+    keccak.update(&uncompressed_pk.as_bytes()[1..]); // Skip 0x04 prefix
+    let mut hash = [0u8; 32];
+    keccak.finalize(&mut hash);
+
+    // Note: SecretKey implements ZeroizeOnDrop and will be zeroized when dropped
+    Ok(Address::from_slice(&hash[12..]))
+}
+
+/// Minimal secure keystore for Ethereum private keys and one-time mnemonic imports.
 pub struct Keystore {
     path: PathBuf,
     config: KeystoreConfig,
@@ -712,22 +676,15 @@ impl Keystore {
             // Validate derivation path
             let derivation_path_obj = DerivationPath::from_str(derivation_path)?;
 
-            // Derive private key from mnemonic - wrap seed in Zeroizing for automatic cleanup
+            // Derive the selected private key once. The mnemonic and passphrase are import inputs,
+            // not persisted wallet material.
             let seed = Zeroizing::new(mnemonic.to_seed(passphrase.unwrap_or("")));
-
-            // Limit XPrv scope to ensure it's dropped quickly
-            let secure_key = {
+            let derived_key: Zeroizing<[u8; 32]> = {
                 let derived_xprv = XPrv::derive_from_path(*seed, &derivation_path_obj)?;
-                SecureKey::new(derived_xprv.private_key().to_bytes().into())
+                Zeroizing::new(derived_xprv.private_key().to_bytes().into())
             };
 
-            let address = secure_key.ethereum_address()?;
-
-            let payload = Zeroizing::new(MnemonicPayload::new(
-                mnemonic.to_string(),
-                passphrase.map(ToOwned::to_owned),
-            ));
-            let mnemonic_bytes = Zeroizing::new(serde_json::to_vec(&*payload)?);
+            let address = ethereum_address_from_key_bytes(derived_key.as_ref())?;
 
             // Create encrypted entry
             let mut nonce = [0u8; 12];
@@ -736,13 +693,13 @@ impl Keystore {
             })?;
 
             let encrypted_data =
-                self.encrypt_data(master_key, &nonce, &mnemonic_bytes, id.as_bytes())?;
+                self.encrypt_data(master_key, &nonce, &*derived_key, id.as_bytes())?;
 
             let entry = KeyEntry {
                 id,
                 alias,
                 address,
-                key_type: KeyType::Mnemonic {
+                key_type: KeyType::HdDerived {
                     derivation_path: derivation_path.to_string(),
                 },
                 encrypted_data,
@@ -778,7 +735,7 @@ impl Keystore {
                 .ok_or(KeystoreError::KeyNotFound(id))?;
 
             match &entry.key_type {
-                KeyType::PrivateKey => {
+                KeyType::PrivateKey | KeyType::HdDerived { .. } => {
                     let decrypted_data = self.decrypt_data(
                         master_key,
                         &entry.nonce,
@@ -791,28 +748,6 @@ impl Keystore {
                     let mut key_bytes = [0u8; 32];
                     key_bytes.copy_from_slice(&decrypted_data);
                     Ok(SecureKey::new(key_bytes))
-                }
-                KeyType::Mnemonic {
-                    derivation_path, ..
-                } => {
-                    let material = self.decrypt_mnemonic_material(master_key, entry)?;
-                    let mnemonic = Mnemonic::from_str(material.mnemonic.as_str())?;
-                    let derivation_path_obj = DerivationPath::from_str(derivation_path)?;
-
-                    // Derive private key from mnemonic - wrap seed in Zeroizing for automatic cleanup
-                    let passphrase = material
-                        .passphrase
-                        .as_ref()
-                        .map_or("", |passphrase| passphrase.as_str());
-                    let seed = Zeroizing::new(mnemonic.to_seed(passphrase));
-
-                    // Limit XPrv scope to ensure it's dropped quickly
-                    let secure_key = {
-                        let derived_xprv = XPrv::derive_from_path(*seed, &derivation_path_obj)?;
-                        SecureKey::new(derived_xprv.private_key().to_bytes().into())
-                    };
-
-                    Ok(secure_key)
                 }
             }
         })();
@@ -835,7 +770,7 @@ impl Keystore {
     /// Export the private key as a hex string (0x-prefixed).
     ///
     /// - For `KeyType::PrivateKey`, this returns the stored private key.
-    /// - For `KeyType::Mnemonic`, this derives the private key and exports it.
+    /// - For `KeyType::HdDerived`, this returns the one-time derived private key.
     #[cfg(feature = "dangerous-secret-export")]
     pub fn export_private_key(&mut self, id: Uuid) -> Result<Zeroizing<String>, KeystoreError> {
         let result: Result<Zeroizing<String>, KeystoreError> = (|| {
@@ -850,7 +785,7 @@ impl Keystore {
                 .ok_or(KeystoreError::KeyNotFound(id))?;
 
             match &entry.key_type {
-                KeyType::PrivateKey => {
+                KeyType::PrivateKey | KeyType::HdDerived { .. } => {
                     let decrypted_data = self.decrypt_data(
                         master_key,
                         &entry.nonce,
@@ -863,26 +798,6 @@ impl Keystore {
                     Ok(Zeroizing::new(format!(
                         "0x{}",
                         hex::encode(decrypted_data.as_slice())
-                    )))
-                }
-                KeyType::Mnemonic {
-                    derivation_path, ..
-                } => {
-                    let material = self.decrypt_mnemonic_material(master_key, entry)?;
-                    let mnemonic = Mnemonic::from_str(material.mnemonic.as_str())?;
-                    let derivation_path_obj = DerivationPath::from_str(derivation_path)?;
-
-                    let passphrase = material
-                        .passphrase
-                        .as_ref()
-                        .map_or("", |passphrase| passphrase.as_str());
-                    let seed = Zeroizing::new(mnemonic.to_seed(passphrase));
-                    let derived_xprv = XPrv::derive_from_path(*seed, &derivation_path_obj)?;
-
-                    let key_bytes = derived_xprv.private_key().to_bytes();
-                    Ok(Zeroizing::new(format!(
-                        "0x{}",
-                        hex::encode(key_bytes.as_slice())
                     )))
                 }
             }
@@ -903,55 +818,6 @@ impl Keystore {
                 if self.master_key.is_some() && !self.has_unlock_expired() {
                     let previous_audit_log = self.audit_log.clone();
                     self.append_audit_event(AuditEvent::ExportPrivateKey { id }, false);
-                    if self.save_to_disk().is_err() {
-                        self.audit_log = previous_audit_log;
-                    }
-                }
-                Err(err)
-            }
-        }
-    }
-
-    /// Export the mnemonic phrase.
-    #[cfg(feature = "dangerous-secret-export")]
-    pub fn export_mnemonic(&mut self, id: Uuid) -> Result<Zeroizing<String>, KeystoreError> {
-        let result: Result<Zeroizing<String>, KeystoreError> = (|| {
-            self.ensure_secret_exports_enabled()?;
-            self.ensure_master_key_available()?;
-            let master_key = self.master_key.as_ref().ok_or(KeystoreError::Locked)?;
-
-            let entry = self
-                .entries
-                .iter()
-                .find(|e| e.id == id)
-                .ok_or(KeystoreError::KeyNotFound(id))?;
-
-            match &entry.key_type {
-                KeyType::PrivateKey => Err(KeystoreError::InvalidInput(
-                    "export_mnemonic only works for mnemonic keys".to_string(),
-                )),
-                KeyType::Mnemonic { .. } => {
-                    let material = self.decrypt_mnemonic_material(master_key, entry)?;
-                    Ok(material.mnemonic)
-                }
-            }
-        })();
-
-        match result {
-            Ok(mnemonic) => {
-                let previous_audit_log = self.audit_log.clone();
-                self.append_audit_event(AuditEvent::ExportMnemonic { id }, true);
-                if let Err(err) = self.save_to_disk() {
-                    self.audit_log = previous_audit_log;
-                    return Err(err);
-                }
-
-                Ok(mnemonic)
-            }
-            Err(err) => {
-                if self.master_key.is_some() && !self.has_unlock_expired() {
-                    let previous_audit_log = self.audit_log.clone();
-                    self.append_audit_event(AuditEvent::ExportMnemonic { id }, false);
                     if self.save_to_disk().is_err() {
                         self.audit_log = previous_audit_log;
                     }
@@ -1097,37 +963,6 @@ impl Keystore {
 
         Err(KeystoreError::OperationNotPermitted(
             "Secret export operations are disabled by policy".to_string(),
-        ))
-    }
-
-    fn decrypt_mnemonic_material(
-        &self,
-        master_key: &[u8; 32],
-        entry: &KeyEntry,
-    ) -> Result<MnemonicMaterial, KeystoreError> {
-        let decrypted_data = self.decrypt_data(
-            master_key,
-            &entry.nonce,
-            &entry.encrypted_data,
-            entry.id.as_bytes(),
-        )?;
-
-        if let Ok(payload) = serde_json::from_slice::<MnemonicPayload>(decrypted_data.as_ref()) {
-            if payload.version != MNEMONIC_PAYLOAD_VERSION {
-                return Err(KeystoreError::InvalidInput(format!(
-                    "Unsupported mnemonic payload version: {}",
-                    payload.version
-                )));
-            }
-
-            return Ok(MnemonicMaterial {
-                mnemonic: Zeroizing::new(payload.mnemonic),
-                passphrase: payload.passphrase.map(Zeroizing::new),
-            });
-        }
-
-        Err(KeystoreError::InvalidMnemonic(
-            "Unsupported mnemonic payload format".to_string(),
         ))
     }
 
