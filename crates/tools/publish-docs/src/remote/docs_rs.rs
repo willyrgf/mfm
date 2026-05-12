@@ -1,9 +1,12 @@
-use crate::model::{
-    CatalogPackage, DocsPolicy, DocsRsObservation, DocsRsStatus, LocalPackage, RegistryFreshness,
-    RegistryObservation, RegistryStatus,
-};
 use crate::remote::http::{HttpExecutor, HttpExecutorConfig};
 use crate::remote::observer::observe_many_ordered;
+use crate::{
+    error::PublishDocsError,
+    model::{
+        CatalogPackage, DocsPolicy, DocsRsObservation, DocsRsStatus, LocalPackage,
+        RegistryFreshness, RegistryObservation, RegistryStatus,
+    },
+};
 
 const DEFAULT_DOCS_RS_BASE: &str = "https://docs.rs";
 
@@ -38,7 +41,7 @@ impl DocsRsClient {
         local: &LocalPackage,
         catalog: &CatalogPackage,
         registry: &RegistryObservation,
-    ) -> DocsRsObservation {
+    ) -> Result<DocsRsObservation, PublishDocsError> {
         tracing::debug!(
             target: "mfm_publish_docs",
             package = %local.name,
@@ -48,30 +51,30 @@ impl DocsRsClient {
             "observing docs.rs package"
         );
         if !matches!(catalog.docs_policy, DocsPolicy::DocsRs) {
-            return finish_docs_observation(DocsRsObservation {
+            return Ok(finish_docs_observation(DocsRsObservation {
                 package: local.name.clone(),
                 status: DocsRsStatus::NotExpected,
                 latest_available_version: None,
                 exact_version_available: false,
-            });
+            }));
         }
 
         match registry.status {
             RegistryStatus::AuthError | RegistryStatus::InvalidResponse => {
-                return finish_docs_observation(DocsRsObservation {
+                return Ok(finish_docs_observation(DocsRsObservation {
                     package: local.name.clone(),
                     status: DocsRsStatus::TemporaryError,
                     latest_available_version: None,
                     exact_version_available: false,
-                });
+                }));
             }
             RegistryStatus::TemporaryError | RegistryStatus::RateLimited => {
-                return finish_docs_observation(DocsRsObservation {
+                return Ok(finish_docs_observation(DocsRsObservation {
                     package: local.name.clone(),
                     status: DocsRsStatus::TemporaryError,
                     latest_available_version: None,
                     exact_version_available: false,
-                });
+                }));
             }
             RegistryStatus::Absent | RegistryStatus::Present => {}
         }
@@ -80,21 +83,21 @@ impl DocsRsClient {
             registry.freshness,
             RegistryFreshness::Cached | RegistryFreshness::Unavailable
         ) {
-            return finish_docs_observation(DocsRsObservation {
+            return Ok(finish_docs_observation(DocsRsObservation {
                 package: local.name.clone(),
                 status: DocsRsStatus::TemporaryError,
                 latest_available_version: None,
                 exact_version_available: false,
-            });
+            }));
         }
 
         if !registry.exact_version_visible_for_planning() {
-            return finish_docs_observation(DocsRsObservation {
+            return Ok(finish_docs_observation(DocsRsObservation {
                 package: local.name.clone(),
                 status: DocsRsStatus::Absent,
                 latest_available_version: None,
                 exact_version_available: false,
-            });
+            }));
         }
 
         let url = format!(
@@ -107,51 +110,51 @@ impl DocsRsClient {
         let Some(result) = self
             .http
             .execute(&host, || self.http.client().get(url.clone()))
-            .await
+            .await?
         else {
-            return finish_docs_observation(DocsRsObservation {
+            return Ok(finish_docs_observation(DocsRsObservation {
                 package: local.name.clone(),
                 status: DocsRsStatus::TemporaryError,
                 latest_available_version: None,
                 exact_version_available: false,
-            });
+            }));
         };
 
         let status = result.response.status();
         if status == reqwest::StatusCode::NOT_FOUND {
-            return finish_docs_observation(DocsRsObservation {
+            return Ok(finish_docs_observation(DocsRsObservation {
                 package: local.name.clone(),
                 status: DocsRsStatus::Pending,
                 latest_available_version: None,
                 exact_version_available: false,
-            });
+            }));
         }
         if status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            return finish_docs_observation(DocsRsObservation {
+            return Ok(finish_docs_observation(DocsRsObservation {
                 package: local.name.clone(),
                 status: DocsRsStatus::TemporaryError,
                 latest_available_version: None,
                 exact_version_available: false,
-            });
+            }));
         }
         if !status.is_success() {
-            return finish_docs_observation(DocsRsObservation {
+            return Ok(finish_docs_observation(DocsRsObservation {
                 package: local.name.clone(),
                 status: DocsRsStatus::Pending,
                 latest_available_version: None,
                 exact_version_available: false,
-            });
+            }));
         }
 
         let body = match result.response.text().await {
             Ok(body) => body,
             Err(_) => {
-                return finish_docs_observation(DocsRsObservation {
+                return Ok(finish_docs_observation(DocsRsObservation {
                     package: local.name.clone(),
                     status: DocsRsStatus::TemporaryError,
                     latest_available_version: None,
                     exact_version_available: false,
-                });
+                }));
             }
         };
 
@@ -165,19 +168,19 @@ impl DocsRsClient {
             DocsRsStatus::Available
         };
 
-        finish_docs_observation(DocsRsObservation {
+        Ok(finish_docs_observation(DocsRsObservation {
             package: local.name.clone(),
             status: docs_status,
             latest_available_version: Some(local.version.clone()),
             exact_version_available: matches!(docs_status, DocsRsStatus::Available),
-        })
+        }))
     }
 
     /// Observes docs.rs for many packages while preserving input order.
     pub(crate) async fn observe_packages(
         &self,
         inputs: &[(&LocalPackage, &CatalogPackage, &RegistryObservation)],
-    ) -> Vec<DocsRsObservation> {
+    ) -> Result<Vec<DocsRsObservation>, PublishDocsError> {
         let inputs = inputs
             .iter()
             .map(|(local, catalog, registry)| {
@@ -287,7 +290,8 @@ mod tests {
                 &catalog_package(),
                 &fresh_present_registry(),
             )
-            .await;
+            .await
+            .expect("observe package");
         server.join().expect("server");
 
         assert!(matches!(observation.status, DocsRsStatus::Pending));
@@ -300,7 +304,8 @@ mod tests {
         registry.freshness = RegistryFreshness::Cached;
         let observation = client
             .observe_package(&local_package(), &catalog_package(), &registry)
-            .await;
+            .await
+            .expect("observe package");
         assert!(matches!(observation.status, DocsRsStatus::TemporaryError));
     }
 
@@ -329,7 +334,8 @@ mod tests {
                 &catalog_package(),
                 &fresh_present_registry(),
             )
-            .await;
+            .await
+            .expect("observe package");
         server.join().expect("server");
 
         assert!(matches!(observation.status, DocsRsStatus::Available));

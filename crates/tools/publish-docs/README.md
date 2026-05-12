@@ -29,3 +29,8 @@ Omitting the subcommand defaults to `apply`, so `nix run .#publish-docs` can pub
 6. Use `nix run .#publish-docs -- resume <run_id>` only to continue the same reviewed selection.
 
 Do not treat `apply`, the default command, or `resume` as dry runs.
+
+Remote registry/docs observation distinguishes package-level uncertainty from internal scheduler
+failures. Network uncertainty is recorded as package observation status when possible; internal
+task panics, closed concurrency limiters, or poisoned pacing state return a structured
+`RemoteObserverError` before a plan or apply result is emitted.

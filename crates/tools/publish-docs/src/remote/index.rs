@@ -9,12 +9,16 @@ use semver::Version;
 use serde::Deserialize;
 use tokio::{
     sync::{Mutex, Semaphore},
-    task::JoinSet,
     time::{sleep, Instant},
 };
 
-use crate::model::{
-    LocalPackage, RegistryFreshness, RegistryObservation, RegistryObservationSource, RegistryStatus,
+use crate::{
+    error::PublishDocsError,
+    model::{
+        LocalPackage, RegistryFreshness, RegistryObservation, RegistryObservationSource,
+        RegistryStatus,
+    },
+    remote::observer::{observe_many_ordered, remote_observer_error},
 };
 
 const DEFAULT_INDEX_BASE_URL: &str = "https://index.crates.io";
@@ -70,28 +74,26 @@ impl IndexRegistryObserver {
     pub(crate) async fn observe_packages(
         &self,
         packages: &[&LocalPackage],
-    ) -> Vec<RegistryObservation> {
-        let mut tasks = JoinSet::new();
-        for (index, package) in packages.iter().enumerate() {
+    ) -> Result<Vec<RegistryObservation>, PublishDocsError> {
+        let packages = packages
+            .iter()
+            .map(|package| (*package).clone())
+            .collect::<Vec<_>>();
+        observe_many_ordered(packages, MAX_CONCURRENCY, {
             let observer = self.clone();
-            let package = (*package).clone();
-            tasks.spawn(async move { (index, observer.observe_package(&package).await) });
-        }
-
-        let mut observations = vec![None; packages.len()];
-        while let Some(result) = tasks.join_next().await {
-            let (index, observation) = result.expect("index observation task panicked");
-            observations[index] = Some(observation);
-        }
-
-        observations
-            .into_iter()
-            .map(|observation| observation.expect("all observation slots filled"))
-            .collect()
+            move |package| {
+                let observer = observer.clone();
+                async move { observer.observe_package(&package).await }
+            }
+        })
+        .await
     }
 
     /// Observes one package against the sparse index, falling back to cache when possible.
-    pub(crate) async fn observe_package(&self, package: &LocalPackage) -> RegistryObservation {
+    pub(crate) async fn observe_package(
+        &self,
+        package: &LocalPackage,
+    ) -> Result<RegistryObservation, PublishDocsError> {
         let relative_path = sparse_index_relative_path(&package.name);
         let url = format!(
             "{}/{}",
@@ -106,7 +108,7 @@ impl IndexRegistryObserver {
             "observing registry package via sparse index"
         );
 
-        let observation = match self.fetch_index_payload(&url).await {
+        let observation = match self.fetch_index_payload(&url).await? {
             Ok(FetchOutcome::NotFound) => {
                 self.fresh_observation(package, RegistryStatus::Absent, None, false, None)
             }
@@ -166,18 +168,18 @@ impl IndexRegistryObserver {
                 }
             }
         };
-        finish_registry_observation(observation)
+        Ok(finish_registry_observation(observation))
     }
 
     async fn fetch_index_payload(
         &self,
         url: &str,
-    ) -> Result<FetchOutcome, (RegistryStatus, &'static str)> {
+    ) -> Result<Result<FetchOutcome, (RegistryStatus, &'static str)>, PublishDocsError> {
         let _permit = self
             .semaphore
             .acquire()
             .await
-            .expect("index observer semaphore closed");
+            .map_err(|_| remote_observer_error("sparse index observer semaphore closed"))?;
         let mut attempt = 0;
 
         loop {
@@ -201,19 +203,22 @@ impl IndexRegistryObserver {
                         sleep(retry_delay).await;
                         continue;
                     }
-                    return Err((RegistryStatus::TemporaryError, "index-request-failed"));
+                    return Ok(Err((
+                        RegistryStatus::TemporaryError,
+                        "index-request-failed",
+                    )));
                 }
             };
 
             let status = response.status();
             if status == reqwest::StatusCode::NOT_FOUND {
-                return Ok(FetchOutcome::NotFound);
+                return Ok(Ok(FetchOutcome::NotFound));
             }
             if matches!(
                 status,
                 reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
             ) {
-                return Err((RegistryStatus::AuthError, "index-auth-error"));
+                return Ok(Err((RegistryStatus::AuthError, "index-auth-error")));
             }
             if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
                 if attempt < MAX_RETRIES {
@@ -232,7 +237,7 @@ impl IndexRegistryObserver {
                     sleep(retry_delay).await;
                     continue;
                 }
-                return Err((RegistryStatus::RateLimited, "index-rate-limited"));
+                return Ok(Err((RegistryStatus::RateLimited, "index-rate-limited")));
             }
             if status.is_server_error() {
                 if attempt < MAX_RETRIES {
@@ -250,17 +255,20 @@ impl IndexRegistryObserver {
                     sleep(retry_delay).await;
                     continue;
                 }
-                return Err((RegistryStatus::TemporaryError, "index-server-error"));
+                return Ok(Err((RegistryStatus::TemporaryError, "index-server-error")));
             }
             if !status.is_success() {
-                return Err((RegistryStatus::InvalidResponse, "index-unexpected-status"));
+                return Ok(Err((
+                    RegistryStatus::InvalidResponse,
+                    "index-unexpected-status",
+                )));
             }
 
             let bytes = response
                 .bytes()
                 .await
-                .map_err(|_| (RegistryStatus::TemporaryError, "index-body-read-failed"))?;
-            return Ok(FetchOutcome::Body(bytes.to_vec()));
+                .map_err(|_| (RegistryStatus::TemporaryError, "index-body-read-failed"));
+            return Ok(bytes.map(|bytes| FetchOutcome::Body(bytes.to_vec())));
         }
     }
 
@@ -410,6 +418,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{sparse_index_relative_path, IndexRegistryObserver};
+    use crate::error::PublishDocsError;
     use crate::model::{RegistryFreshness, RegistryStatus};
 
     fn local_package(name: &str, version: &str) -> crate::model::LocalPackage {
@@ -465,7 +474,8 @@ mod tests {
 
         let observation = observer
             .observe_package(&local_package("mfm-machine", "0.2.0"))
-            .await;
+            .await
+            .expect("observe package");
         server.join().expect("server");
 
         assert!(matches!(observation.status, RegistryStatus::Present));
@@ -489,10 +499,35 @@ mod tests {
         }
         fs::write(&cache_path, "{\"vers\":\"0.1.0\"}\n").expect("cache");
 
-        let observation = observer.observe_package(&package).await;
+        let observation = observer
+            .observe_package(&package)
+            .await
+            .expect("observe package");
 
         assert!(matches!(observation.freshness, RegistryFreshness::Cached));
         assert!(matches!(observation.status, RegistryStatus::TemporaryError));
         assert!(observation.exact_version_present);
+    }
+
+    #[tokio::test]
+    async fn closed_semaphore_returns_structured_error() {
+        let tempdir = tempdir().expect("tempdir");
+        let observer = IndexRegistryObserver::with_base_url(
+            tempdir.path(),
+            "http://127.0.0.1:1".into(),
+            ".cache".into(),
+        )
+        .expect("observer");
+        observer.semaphore.close();
+
+        let error = observer
+            .observe_package(&local_package("mfm-machine", "0.1.0"))
+            .await
+            .expect_err("closed semaphore should fail structurally");
+
+        assert!(matches!(
+            error,
+            PublishDocsError::RemoteObserver { message } if message == "sparse index observer semaphore closed"
+        ));
     }
 }

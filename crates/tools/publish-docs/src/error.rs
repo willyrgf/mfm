@@ -66,6 +66,13 @@ pub(crate) enum PublishDocsError {
         message: String,
     },
 
+    /// Remote observation failed before a trustworthy package-level observation could be produced.
+    #[error("remote observation failed: {message}")]
+    RemoteObserver {
+        /// High-level sanitized message.
+        message: String,
+    },
+
     /// A generic catch-all error bubbled up from orchestration glue.
     #[error(transparent)]
     Other(#[from] anyhow::Error),

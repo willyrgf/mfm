@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::{error::PublishDocsError, remote::observer::remote_observer_error};
+
 /// Shared HTTP executor configuration for remote observers.
 #[derive(Debug, Clone)]
 pub(crate) struct HttpExecutorConfig {
@@ -90,12 +92,16 @@ impl HttpExecutor {
     }
 
     /// Executes a paced request with limited retries for retryable failures.
-    pub(crate) async fn execute<F>(&self, host: &str, build: F) -> Option<ExecutedRequest>
+    pub(crate) async fn execute<F>(
+        &self,
+        host: &str,
+        build: F,
+    ) -> Result<Option<ExecutedRequest>, PublishDocsError>
     where
         F: Fn() -> reqwest::RequestBuilder,
     {
         for attempt in 1..=self.config.max_attempts.max(1) {
-            self.pace_host(host).await;
+            self.pace_host(host).await?;
             let result = build().send().await;
             match result {
                 Ok(response) if self.should_retry_status(response.status()) => {
@@ -108,7 +114,7 @@ impl HttpExecutor {
                             status = status.as_u16(),
                             "returning final retryable HTTP status without another retry"
                         );
-                        return Some(ExecutedRequest { response });
+                        return Ok(Some(ExecutedRequest { response }));
                     }
                     let retry_delay = self
                         .retry_after(&response)
@@ -132,7 +138,7 @@ impl HttpExecutor {
                         status = response.status().as_u16(),
                         "completed HTTP request"
                     );
-                    return Some(ExecutedRequest { response });
+                    return Ok(Some(ExecutedRequest { response }));
                 }
                 Err(error) if attempt < self.config.max_attempts => {
                     let retry_delay = self.backoff_delay(attempt);
@@ -155,11 +161,11 @@ impl HttpExecutor {
                         error = %error,
                         "HTTP request failed without a response"
                     );
-                    return None;
+                    return Ok(None);
                 }
             }
         }
-        None
+        Ok(None)
     }
 
     fn should_retry_status(&self, status: reqwest::StatusCode) -> bool {
@@ -179,14 +185,14 @@ impl HttpExecutor {
         self.config.retry_base_delay.saturating_mul(factor)
     }
 
-    async fn pace_host(&self, host: &str) {
+    async fn pace_host(&self, host: &str) -> Result<(), PublishDocsError> {
         let now = Instant::now();
         let sleep_for = {
             let mut guard = self
                 .state
                 .next_allowed_by_host
                 .lock()
-                .expect("http pacing lock poisoned");
+                .map_err(|_| remote_observer_error("HTTP pacing lock poisoned"))?;
             let entry = guard.entry(host.to_string()).or_insert(now);
             let scheduled = (*entry).max(now);
             *entry = scheduled + self.config.per_host_min_interval;
@@ -195,12 +201,14 @@ impl HttpExecutor {
         if !sleep_for.is_zero() {
             tokio::time::sleep(sleep_for).await;
         }
+        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{HttpExecutor, HttpExecutorConfig};
+    use crate::error::PublishDocsError;
 
     #[test]
     fn derives_host_labels_from_urls() {
@@ -210,5 +218,34 @@ mod tests {
             "index.crates.io"
         );
         assert_eq!(executor.host_for_url("not-a-url"), "unknown");
+    }
+
+    #[tokio::test]
+    async fn poisoned_pacing_lock_returns_structured_error() {
+        let executor = HttpExecutor::new(HttpExecutorConfig::default()).expect("executor");
+        let state = executor.state.clone();
+        let previous_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let poison_result = std::panic::catch_unwind(move || {
+            let _guard = state
+                .next_allowed_by_host
+                .lock()
+                .expect("initial lock should succeed");
+            panic!("poison pacing lock");
+        });
+        std::panic::set_hook(previous_hook);
+        assert!(poison_result.is_err());
+
+        let error = executor
+            .execute("index.crates.io", || {
+                executor.client().get("http://127.0.0.1:1")
+            })
+            .await
+            .expect_err("poisoned lock should fail structurally");
+
+        assert!(matches!(
+            error,
+            PublishDocsError::RemoteObserver { message } if message == "HTTP pacing lock poisoned"
+        ));
     }
 }

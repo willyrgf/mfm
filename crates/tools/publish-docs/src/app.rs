@@ -732,7 +732,7 @@ async fn observe_selected_registry(
 ) -> Result<Vec<RegistryObservation>, PublishDocsError> {
     let client = IndexRegistryObserver::new(workspace_root)?;
     let packages = selected_packages(workspace)?;
-    Ok(client.observe_packages(&packages).await)
+    client.observe_packages(&packages).await
 }
 
 async fn observe_catalog_registry(
@@ -743,7 +743,7 @@ async fn observe_catalog_registry(
     let client = IndexRegistryObserver::new(workspace_root)?;
     let inputs = observe_catalog_inputs(workspace, catalog)?;
     let packages: Vec<_> = inputs.iter().map(|(local, _)| *local).collect();
-    Ok(client.observe_packages(&packages).await)
+    client.observe_packages(&packages).await
 }
 
 async fn observe_selected_docs(
@@ -764,7 +764,7 @@ async fn observe_selected_docs(
             Some((local, entry, registry))
         })
         .collect::<Vec<_>>();
-    Ok(client.observe_packages(&inputs).await)
+    client.observe_packages(&inputs).await
 }
 
 async fn observe_catalog_docs(
@@ -786,7 +786,7 @@ async fn observe_catalog_docs(
                 .map(|registry| (local, entry, registry))
         })
         .collect::<Vec<_>>();
-    Ok(client.observe_packages(&inputs).await)
+    client.observe_packages(&inputs).await
 }
 
 fn changed_since_release_map(
@@ -1016,6 +1016,11 @@ fn map_error(error: PublishDocsError) -> CommandError {
             message: error.to_string(),
             exit_code: 1,
         },
+        PublishDocsError::RemoteObserver { .. } => CommandError {
+            code: "RemoteObserverError",
+            message: error.to_string(),
+            exit_code: 1,
+        },
         PublishDocsError::Json(_) => CommandError {
             code: "JsonError",
             message: error.to_string(),
@@ -1171,9 +1176,10 @@ mod tests {
     use semver::Version;
 
     use super::{
-        ensure_apply_can_continue_after_auto_sync, plan_has_publish_actions,
+        ensure_apply_can_continue_after_auto_sync, map_error, plan_has_publish_actions,
         plan_requires_umbrella_sync, AUTO_SYNC_ALLOW_DIRTY_MESSAGE,
     };
+    use crate::error::PublishDocsError;
     use crate::model::{Mode, Plan, PlanAction, PlannedPackage};
 
     fn plan_with_actions(actions: &[PlanAction]) -> Plan {
@@ -1226,5 +1232,18 @@ mod tests {
         let error =
             ensure_apply_can_continue_after_auto_sync(&plan, true, false).expect_err("error");
         assert_eq!(error.to_string(), AUTO_SYNC_ALLOW_DIRTY_MESSAGE);
+    }
+
+    #[test]
+    fn remote_observer_errors_have_stable_json_code() {
+        let error = map_error(PublishDocsError::RemoteObserver {
+            message: "remote observation task panicked".into(),
+        });
+
+        assert_eq!(error.code, "RemoteObserverError");
+        assert_eq!(
+            error.message,
+            "remote observation failed: remote observation task panicked"
+        );
     }
 }
