@@ -443,15 +443,6 @@ docs_policy = "repo-only"
 umbrella_policy = "always"
 
 [[packages]]
-name = "mfm-aave-origin-compile"
-workspace_path = "crates/tools/aave-origin-compile"
-visibility = "private"
-section = "binaries_tooling"
-summary = "Thin Rust adapter that compiles pinned Aave Origin sources into a generic contract-set manifest."
-docs_policy = "hidden"
-umbrella_policy = "never"
-
-[[packages]]
 name = "mfm-publish-docs"
 workspace_path = "crates/tools/publish-docs"
 visibility = "private"

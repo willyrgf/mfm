@@ -47,58 +47,6 @@ let
             || pkgs.lib.hasPrefix "result-" name
           );
       };
-  aaveOriginCompileRawPackage =
-    if pkgs != null then
-      pkgs.rustPlatform.buildRustPackage rec {
-        pname = "mfm-aave-origin-compile";
-        version = "0.1.0";
-
-        src = projectSource;
-        cargoLock.lockFile = ../../Cargo.lock;
-
-        cargoBuildFlags = [
-          "-p"
-          "mfm-aave-origin-compile"
-          "--bin"
-          "mfm-aave-v3-origin-compile"
-        ];
-
-        cargoTestFlags = cargoBuildFlags;
-        doCheck = false;
-
-        nativeBuildInputs = [ pkgs.pkg-config ];
-        buildInputs = if pkgs.stdenv.isDarwin then [ pkgs.libiconv ] else [ ];
-
-        meta = with pkgs.lib; {
-          description = "Packaged Aave Origin compile adapter";
-          mainProgram = "mfm-aave-v3-origin-compile";
-          license = licenses.mit;
-          platforms = platforms.unix;
-        };
-      }
-    else
-      null;
-  aaveOriginCompilePackage =
-    if pkgs != null then
-      pkgs.symlinkJoin {
-        name = "mfm-aave-origin-compile";
-        paths = [ aaveOriginCompileRawPackage ];
-        nativeBuildInputs = [ pkgs.makeWrapper ];
-        postBuild = ''
-          wrapProgram $out/bin/mfm-aave-v3-origin-compile \
-            --set-default MFM_AAVE_V3_ORIGIN_SOLC_PATH ${pkgs.solc}/bin/solc \
-            --prefix PATH : ${
-              pkgs.lib.makeBinPath [
-                pkgs.bash
-                pkgs.coreutils
-                pkgs.foundry
-                pkgs.solc
-              ]
-            }
-        '';
-      }
-    else
-      null;
   postgresLocalPackage = if pkgs != null then pkgs.postgresql_16 else null;
   nginxLocalPackage = if pkgs != null then pkgs.nginx else null;
   minioLocalPackage = if pkgs != null then pkgs.minio else null;
@@ -195,10 +143,8 @@ rec {
             pkgs.libiconv
             pkgs.pkg-config
             (if pkgs.stdenv.isDarwin then pkgs.libressl else pkgs.openssl)
-            pkgs.foundry
             pkgs.reth
             pkgs.minio
-            aaveOriginCompilePackage
           ]
       )
       ++ rustToolchainPackages;
@@ -421,7 +367,6 @@ rec {
       { }
     else
       {
-        "mfm-aave-origin-compile" = aaveOriginCompilePackage;
         "mfm-cli" = pkgs.rustPlatform.buildRustPackage rec {
           pname = "mfm-cli";
           version = "0.1.29";

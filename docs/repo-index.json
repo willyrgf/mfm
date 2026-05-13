@@ -294,11 +294,6 @@
       "kind": "rust-cargo"
     },
     {
-      "name": "aave-origin-compile",
-      "path": "crates/tools/aave-origin-compile/Cargo.toml",
-      "kind": "rust-cargo"
-    },
-    {
       "name": "publish-docs",
       "path": "crates/tools/publish-docs/Cargo.toml",
       "kind": "rust-cargo"

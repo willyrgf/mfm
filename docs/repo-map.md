@@ -61,7 +61,6 @@ Generated from `docs/repo-index.json`.
 - `crates/storages/indexer/Cargo.toml` (rust-cargo)
 - `crates/storages/stream-store-mem/Cargo.toml` (rust-cargo)
 - `crates/storages/stream-store-postgres/Cargo.toml` (rust-cargo)
-- `crates/tools/aave-origin-compile/Cargo.toml` (rust-cargo)
 - `crates/tools/publish-docs/Cargo.toml` (rust-cargo)
 - `crates/transports/local-evm/Cargo.toml` (rust-cargo)
 - `crates/transports/local-fs/Cargo.toml` (rust-cargo)

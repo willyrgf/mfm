@@ -55,7 +55,6 @@ members = [
 	"crates/ops/portfolio-tracker-op",
 	"crates/ops/nix-app-op",
 	"crates/ops/proof-op",
-	"crates/tools/aave-origin-compile",
 	"crates/tools/publish-docs",
 ]
 

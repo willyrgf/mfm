@@ -1902,17 +1902,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mfm-aave-origin-compile"
-version = "0.1.0"
-dependencies = [
- "mfm-evm-runtime",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
-]
-
-[[package]]
 name = "mfm-app"
 version = "0.1.0"
 dependencies = [
