@@ -34,6 +34,36 @@ let
     set -euo pipefail
     exec ${pkgs.python3}/bin/python3 ${./workspace-inventory-check.py} "$@"
   '';
+  projectNixFormatRoots = [
+    "nixfied/project"
+    "nixfied/local"
+  ];
+  formatProjectNixSurfaces = pkgs.writeShellScriptBin "mfm-format-project-nix-surfaces" ''
+    set -euo pipefail
+
+    roots=()
+    for root in ${lib.concatMapStringsSep " " lib.escapeShellArg projectNixFormatRoots}; do
+      if [ -d "$root" ]; then
+        roots+=("$root")
+      fi
+    done
+
+    if [ "''${#roots[@]}" -eq 0 ]; then
+      echo "OK: no project-owned nix surfaces found"
+      exit 0
+    fi
+
+    file_list="$(${pkgs.coreutils}/bin/mktemp "''${TMPDIR:-/tmp}/mfm-project-nix-format.XXXXXX")"
+    trap '${pkgs.coreutils}/bin/rm -f "$file_list"' EXIT
+    ${pkgs.findutils}/bin/find "''${roots[@]}" -name '*.nix' -print0 >"$file_list"
+
+    if [ ! -s "$file_list" ]; then
+      echo "OK: no project-owned nix files found"
+      exit 0
+    fi
+
+    ${pkgs.findutils}/bin/xargs -0 ${pkgs.nixfmt}/bin/nixfmt -- <"$file_list"
+  '';
   loggingRuntime = import ../framework/runtime/helpers/logging-runtime.nix { inherit pkgs; };
   discovery = import ../framework/runtime/helpers/discovery.nix {
     inherit pkgs;
@@ -1240,15 +1270,16 @@ in
 
         format = mkCommandTask {
           id = "task.format";
-          summary = "Format Rust and Nix files";
+          summary = "Format Rust and project-owned Nix files";
+          description = "Formats Rust plus Nix files under nixfied/project and nixfied/local. Framework-owned Nix sources are intentionally out of scope for routine project formatting.";
           usage = [ "nix run .#format" ];
-          runtimeInputs = rustRuntimeInputs;
+          runtimeInputs = rustRuntimeInputs ++ [ formatProjectNixSurfaces ];
           command = ''
             set -euo pipefail
 
             cargo fmt --all
-            find . -name '*.nix' -print0 | xargs -0 nixfmt --
-            echo "OK: formatted rust and nix files"
+            mfm-format-project-nix-surfaces
+            echo "OK: formatted rust and project-owned nix files"
           '';
         };
 
@@ -1368,7 +1399,7 @@ in
             "ci"
             "quality"
           ];
-          runtimeInputs = rustRuntimeInputs;
+          runtimeInputs = rustRuntimeInputs ++ [ formatProjectNixSurfaces ];
           env = ciCargoRustEnv;
           command = ''
             set -euo pipefail
@@ -1428,6 +1459,35 @@ in
 
               mfm-verify-workspace-manifest --root "$ROOT" --metadata
               nixfied-discovery-index --verify --root "$ROOT"
+
+              format_scope_fixture="$(mktemp -d "''${TMPDIR:-/tmp}/format-scope.XXXXXX")"
+              mkdir -p "$format_scope_fixture/nixfied/project" "$format_scope_fixture/nixfied/local" "$format_scope_fixture/nixfied/framework"
+              cat >"$format_scope_fixture/nixfied/project/project.nix" <<'"'"'EOF'"'"'
+{lib}:{inherit lib;}
+EOF
+              cat >"$format_scope_fixture/nixfied/local/local.nix" <<'"'"'EOF'"'"'
+{pkgs}:{inherit pkgs;}
+EOF
+              cat >"$format_scope_fixture/nixfied/framework/framework.nix" <<'"'"'EOF'"'"'
+{config}:{inherit config;}
+EOF
+              framework_format_fixture_before="$(cat "$format_scope_fixture/nixfied/framework/framework.nix")"
+              (
+                cd "$format_scope_fixture"
+                mfm-format-project-nix-surfaces
+              )
+              if ! nixfmt --check "$format_scope_fixture/nixfied/project/project.nix" "$format_scope_fixture/nixfied/local/local.nix" >/dev/null; then
+                echo "ERROR: project-owned nix format fixture was not formatted"
+                exit 1
+              fi
+              if [ "$(cat "$format_scope_fixture/nixfied/framework/framework.nix")" != "$framework_format_fixture_before" ]; then
+                echo "ERROR: project nix formatter modified framework-owned fixture"
+                exit 1
+              fi
+              if nixfmt --check "$format_scope_fixture/nixfied/framework/framework.nix" >/dev/null 2>&1; then
+                echo "ERROR: framework fixture was unexpectedly formatted"
+                exit 1
+              fi
 
               workspace_inventory_fixture="$(mktemp -d "''${TMPDIR:-/tmp}/workspace-inventory.XXXXXX")"
               mkdir -p "$workspace_inventory_fixture/crates/a"
