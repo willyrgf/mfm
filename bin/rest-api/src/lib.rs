@@ -33,7 +33,7 @@ use mfm_app::{
 };
 use mfm_machine::ids::{ArtifactId, RunId};
 use mfm_machine::stores::{ArtifactStore, StreamId, StreamStore};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::json;
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::trace::TraceLayer;
@@ -338,29 +338,6 @@ async fn artifacts_get(
     json_ok(data)
 }
 
-#[derive(Clone, Debug, Deserialize)]
-#[serde(untagged)]
-enum FeatureExecuteBody {
-    Wrapped {
-        #[serde(default = "default_empty_object")]
-        payload: serde_json::Value,
-    },
-    Raw(serde_json::Value),
-}
-
-fn default_empty_object() -> serde_json::Value {
-    serde_json::json!({})
-}
-
-impl FeatureExecuteBody {
-    fn into_payload(self) -> serde_json::Value {
-        match self {
-            Self::Wrapped { payload } => payload,
-            Self::Raw(payload) => payload,
-        }
-    }
-}
-
 #[derive(Clone, Debug, Serialize)]
 struct FeaturesListResponse {
     features: Vec<mfm_app::FeatureDescriptor>,
@@ -379,9 +356,9 @@ async fn features_list(
 async fn features_execute(
     State(state): State<RouterState>,
     Path(feature_id): Path<String>,
-    body: Result<Json<FeatureExecuteBody>, axum::extract::rejection::JsonRejection>,
+    body: Result<Json<serde_json::Value>, axum::extract::rejection::JsonRejection>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let Json(body) = body.map_err(|_| ApiError::invalid_json())?;
+    let Json(payload) = body.map_err(|_| ApiError::invalid_json())?;
 
     let result = state
         .catalog
@@ -389,7 +366,7 @@ async fn features_execute(
             &state.services(),
             FeatureRequest {
                 feature_id,
-                payload: body.into_payload(),
+                payload,
             },
         )
         .await?;
@@ -465,6 +442,17 @@ mod tests {
         }
     }
 
+    fn test_router_state() -> RouterState {
+        RouterState {
+            app: AppState {
+                bundle: make_engine_bundle(),
+                streams: Arc::new(UnusedStreamStore),
+                artifacts: Arc::new(UnusedArtifactStore),
+            },
+            catalog: Arc::new(FeatureCatalog::with_builtins()),
+        }
+    }
+
     #[test]
     fn serialize_response_returns_api_error_instead_of_panicking() {
         let err = serialize_response(FailingSerialize)
@@ -477,14 +465,7 @@ mod tests {
 
     #[tokio::test]
     async fn artifacts_get_rejects_invalid_artifact_id_with_bad_request() {
-        let state = RouterState {
-            app: AppState {
-                bundle: make_engine_bundle(),
-                streams: Arc::new(UnusedStreamStore),
-                artifacts: Arc::new(UnusedArtifactStore),
-            },
-            catalog: Arc::new(FeatureCatalog::default()),
-        };
+        let state = test_router_state();
 
         let err = artifacts_get(State(state), Path("artifact_123".to_string()))
             .await
@@ -492,5 +473,53 @@ mod tests {
 
         assert_eq!(err.status, StatusCode::BAD_REQUEST);
         assert_eq!(err.code, "InvalidArtifactId");
+    }
+
+    #[tokio::test]
+    async fn features_execute_uses_raw_object_body_as_payload() {
+        let body = Json::<serde_json::Value>::from_bytes(br#"{"run_id":"not-a-uuid"}"#);
+
+        let err = features_execute(
+            State(test_router_state()),
+            Path("run.status".to_string()),
+            body,
+        )
+        .await
+        .expect_err("raw run.status payload should reach app validation");
+
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert_eq!(err.code, "InvalidUuid");
+    }
+
+    #[tokio::test]
+    async fn features_execute_rejects_invalid_body() {
+        let body = Json::<serde_json::Value>::from_bytes(br#"{"artifact_id":"#);
+
+        let err = features_execute(
+            State(test_router_state()),
+            Path("artifact.get".to_string()),
+            body,
+        )
+        .await
+        .expect_err("invalid JSON body should be rejected");
+
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert_eq!(err.code, "InvalidJson");
+    }
+
+    #[tokio::test]
+    async fn features_execute_rejects_missing_body() {
+        let body = Json::<serde_json::Value>::from_bytes(b"");
+
+        let err = features_execute(
+            State(test_router_state()),
+            Path("artifact.get".to_string()),
+            body,
+        )
+        .await
+        .expect_err("missing JSON body should be rejected");
+
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert_eq!(err.code, "InvalidJson");
     }
 }

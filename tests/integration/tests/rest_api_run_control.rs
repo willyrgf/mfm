@@ -633,9 +633,7 @@ async fn feature_execute_portfolio_config_build_returns_built_config_and_report(
     let resp = app
         .oneshot(json_post(
             "/v1/features/portfolio.config.build/execute",
-            serde_json::json!({
-                "payload": canonical_portfolio_snapshot_payload()
-            }),
+            canonical_portfolio_snapshot_payload(),
         ))
         .await
         .expect("feature execute response");
@@ -674,12 +672,10 @@ async fn feature_execute_run_start_happy_path() {
         .oneshot(json_post(
             "/v1/features/run.start/execute",
             serde_json::json!({
-                "payload": {
-                    "kind": "single_op_start_v1",
-                    "op_id": "proof",
-                    "op_version": "v1",
-                    "op_config": {}
-                }
+                "kind": "single_op_start_v1",
+                "op_id": "proof",
+                "op_version": "v1",
+                "op_config": {}
             }),
         ))
         .await
@@ -713,12 +709,10 @@ async fn feature_execute_run_start_rejects_portfolio_internal_child_ops() {
             .oneshot(json_post(
                 "/v1/features/run.start/execute",
                 serde_json::json!({
-                    "payload": {
-                        "kind": "single_op_start_v1",
-                        "op_id": op_id,
-                        "op_version": "v1",
-                        "op_config": {}
-                    }
+                    "kind": "single_op_start_v1",
+                    "op_id": op_id,
+                    "op_version": "v1",
+                    "op_config": {}
                 }),
             ))
             .await
@@ -790,9 +784,7 @@ async fn feature_execute_portfolio_snapshot_missing_rpc_sources_is_stable_error(
     let resp = app
         .oneshot(json_post(
             "/v1/features/portfolio.snapshot/execute",
-            serde_json::json!({
-                "payload": canonical_portfolio_snapshot_payload()
-            }),
+            canonical_portfolio_snapshot_payload(),
         ))
         .await
         .expect("feature execute response");

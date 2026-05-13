@@ -177,13 +177,7 @@ async fn parity_portfolio_snapshot_feature_against_reth_eth_only() {
         .clone()
         .oneshot(json_post(
             "/v1/features/portfolio.snapshot/execute",
-            serde_json::json!({
-                "payload": canonical_portfolio_snapshot_payload(
-                    wallet_address,
-                    chain_id,
-                    &control_scope
-                )
-            }),
+            canonical_portfolio_snapshot_payload(wallet_address, chain_id, &control_scope),
         ))
         .await
         .expect("feature execute response");

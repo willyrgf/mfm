@@ -80,12 +80,13 @@ Generic feature execution:
 ```bash
 curl -s "http://127.0.0.1:3001/v1/features/run.start/execute" \
   -H "content-type: application/json" \
-  -d '{"payload":{"kind":"single_op_start_v1","op_id":"proof","op_version":"v1","op_config":{}}}'
+  -d '{"kind":"single_op_start_v1","op_id":"proof","op_version":"v1","op_config":{}}'
 ```
 
 `/v1/runs/start` and feature `run.start` require an explicit request tag. Use
 `kind: "single_op_start_v1"` with `op_id` and `op_version`, or `kind: "pipeline_start_v1"` with
-`pipeline`. Unknown top-level fields are rejected.
+`pipeline`. Generic feature execution uses the request body itself as the feature payload; send `{}`
+for features with no inputs. Unknown top-level fields are rejected by features with typed payloads.
 
 Portfolio snapshot feature:
 
@@ -93,13 +94,11 @@ Portfolio snapshot feature:
 curl -s "http://127.0.0.1:3001/v1/features/portfolio.snapshot/execute" \
   -H "content-type: application/json" \
   -d '{
-    "payload": {
-      "portfolio": {
-        "...": "canonical PortfolioConfig"
-      },
-      "valuation_source_registry": {
-        "...": "canonical ValuationSourceRegistry"
-      }
+    "portfolio": {
+      "...": "canonical PortfolioConfig"
+    },
+    "valuation_source_registry": {
+      "...": "canonical ValuationSourceRegistry"
     }
   }'
 ```

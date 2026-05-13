@@ -561,14 +561,12 @@ async fn parity_portfolio_tracker_snapshot_with_mock_erc20_mint() {
         .clone()
         .oneshot(json_post(
             "/v1/features/portfolio.snapshot/execute",
-            serde_json::json!({
-                "payload": canonical_mock_erc20_snapshot_payload(
-                    &from_norm,
-                    chain_id,
-                    &token_address_norm,
-                    &control_scope
-                )
-            }),
+            canonical_mock_erc20_snapshot_payload(
+                &from_norm,
+                chain_id,
+                &token_address_norm,
+                &control_scope,
+            ),
         ))
         .await
         .expect("feature execute response");
