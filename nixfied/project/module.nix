@@ -690,7 +690,6 @@ in
   imports = [
     ../modules/profiles/webapp.nix
     ../framework/presets/state-policies/project-shared.nix
-    ../local/default.nix
   ];
 
   config = {
@@ -1427,7 +1426,7 @@ EOF
                 exit 1
               fi
 
-              INTROSPECTION_BUNDLE_PATH="$(build_output_with_timeout "path:$ROOT#introspectionBundle" "introspection bundle")"
+              INTROSPECTION_BUNDLE_PATH="$(build_output_with_timeout ".#introspectionBundle" "introspection bundle")"
 
               require_app() {
                 local app_name="$1"
@@ -1513,6 +1512,9 @@ EOF
                 fi
               }
 
+              local_default_import="../local/"
+              local_default_import="''${local_default_import}default.nix"
+              require_project_source_omits "$local_default_import"
               require_project_source_contains "\''${parityRestApiSmokeNextestFilterArgs}"
               require_project_source_contains "run_with_log \"\$log_file\" cargo nextest run --archive-file \"\$parity_nextest_archive_file\" --extract-to \"\$extract_dir\" --workspace-remap \"\$MFM_WORKSPACE_ROOT\" --jobs 1 \''${parityRestApiSmokeNextestFilterArgs}"
               require_project_source_contains "binary_id(=mfm-integration-tests::parity_event_store_postgres_contract)"
