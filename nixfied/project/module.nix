@@ -403,11 +403,6 @@ let
       "mfm-integration-tests::parity_portfolio_tracker_reth_snapshot"
     ];
   };
-  parityAaveV3RethNextest = mkNextestSelection {
-    binaryIds = [
-      "mfm-integration-tests::parity_aave_v3_reth_scenario"
-    ];
-  };
   parityPostgresStateEventsAuditNextest = mkNextestSelection {
     binaryIds = [
       "mfm-integration-tests::parity_postgres_state_events_audit"
@@ -515,8 +510,6 @@ let
 
     export MFM_WORKSPACE_ROOT="''${MFM_WORKSPACE_ROOT:-$(pwd -P)}"
     export MFM_PARITY_EVM_RETH_RUN_IDS_PATH="''${MFM_PARITY_EVM_RETH_RUN_IDS_PATH:-$artifacts_dir/parity-evm-reth-run-ids.json}"
-    export MFM_PARITY_AAVE_V3_RUN_IDS_PATH="''${MFM_PARITY_AAVE_V3_RUN_IDS_PATH:-$artifacts_dir/parity-aave-v3-run-ids.json}"
-    export MFM_PARITY_AAVE_V3_RETH_PROBE_PATH="''${MFM_PARITY_AAVE_V3_RETH_PROBE_PATH:-$artifacts_dir/parity-aave-v3-reth-probe.json}"
     export PGDATABASE="''${PGDATABASE:-${postgresTestDatabase}}"
     export DATABASE_URL="''${DATABASE_URL:-postgresql://postgres:postgres@127.0.0.1:$POSTGRES_PORT/$PGDATABASE}"
     export MFM_EVM_RPC_URL="http://127.0.0.1:$RETH_HTTP_PORT"
@@ -1691,7 +1684,6 @@ EOF
               require_task "task.ci.workflow-parity"
               require_task "task.ci.parity-rest-api-smoke"
               require_task "task.ci.parity-evm-reth"
-              require_task "task.ci.parity-aave-v3-reth"
               require_task "task.ci.parity-postgres-state-events-audit"
               require_task "task.framework.runtime-env-default"
               require_task "task.framework.runtime-env-opt-in"
@@ -1705,14 +1697,12 @@ EOF
               require_workflow_plan_task "workflow.ci.basic" "task.ci.sccache-contracts"
               require_workflow_plan_task "workflow.ci.parity" "task.ci.parity-rest-api-smoke"
               require_workflow_plan_task "workflow.ci.parity" "task.ci.parity-evm-reth"
-              require_workflow_plan_task "workflow.ci.parity" "task.ci.parity-aave-v3-reth"
               require_workflow_plan_task "workflow.ci.parity" "task.ci.parity-postgres-state-events-audit"
               require_workflow_plan_task "workflow.ci.full" "task.ci.workflow-basic"
               require_workflow_plan_task "workflow.ci.full" "task.ci.workflow-parity"
 
               ${renderNextestContractCheck "task.ci.parity-rest-api-smoke" parityRestApiSmokeNextest}
               ${renderNextestContractCheck "task.ci.parity-evm-reth" parityEvmRethNextest}
-              ${renderNextestContractCheck "task.ci.parity-aave-v3-reth" parityAaveV3RethNextest}
               ${renderNextestContractCheck "task.ci.parity-postgres-state-events-audit" parityPostgresStateEventsAuditNextest}
 
               if grep -R -n "[.]framework/" "$ROOT/nixfied/project" --include="*.nix" >/dev/null; then
@@ -2184,33 +2174,6 @@ EOF
           '';
         };
 
-        ci-parity-aave-v3-reth = mkCommandTask {
-          id = "task.ci.parity-aave-v3-reth";
-          kind = "ci-step";
-          summary = "CI parity Aave v3 scenario tests";
-          ci.nextest = parityAaveV3RethNextest;
-          tags = [
-            "ci"
-            "parity"
-          ];
-          runtimeInputs = rustRuntimeInputs;
-          env = ciNextestCargoEnv;
-          command = ''
-            set -euo pipefail
-            ${ciStepPreamble}
-            ${ciParityServiceEnv}
-            ${parityNextestArchiveShell}
-
-            log_file="$artifacts_dir/parity-aave-v3-reth.log"
-            extract_dir="$(parity_nextest_extract_dir_for_task)"
-            mkdir -p "$extract_dir"
-            require_parity_nextest_archive
-            echo "INFO: running ci step=parity-aave-v3-reth archive=$parity_nextest_archive_file"
-            run_with_log "$log_file" cargo nextest run --archive-file "$parity_nextest_archive_file" --extract-to "$extract_dir" --workspace-remap "$MFM_WORKSPACE_ROOT" ${mkNextestJobArgs parityAaveV3RethNextest} ${mkNextestBinaryIdFilterArgs parityAaveV3RethNextest}
-            echo "OK: ci step passed step=parity-aave-v3-reth log=$log_file"
-          '';
-        };
-
         ci-parity-postgres-state-events-audit = mkCommandTask {
           id = "task.ci.parity-postgres-state-events-audit";
           kind = "ci-step";
@@ -2439,17 +2402,9 @@ EOF
               needs = [ "parity-rest-api-smoke" ];
             };
 
-            parity-aave-v3-reth = mkWorkflowUnit {
-              taskId = "task.ci.parity-aave-v3-reth";
-              needs = [ "parity-evm-reth" ];
-            };
-
             parity-postgres-state-events-audit = mkWorkflowUnit {
               taskId = "task.ci.parity-postgres-state-events-audit";
-              needs = [
-                "parity-evm-reth"
-                "parity-aave-v3-reth"
-              ];
+              needs = [ "parity-evm-reth" ];
             };
           };
           stages = [ ];

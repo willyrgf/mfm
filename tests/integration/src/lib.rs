@@ -50,23 +50,13 @@ pub mod parity_run_ids {
 
     /// Environment variable that points to the handoff file for EVM parity run ids.
     pub const PARITY_EVM_RUN_IDS_PATH_ENV: &str = "MFM_PARITY_EVM_RETH_RUN_IDS_PATH";
-    /// Environment variable that points to the handoff file for Aave parity run ids.
-    pub const PARITY_AAVE_RUN_IDS_PATH_ENV: &str = "MFM_PARITY_AAVE_V3_RUN_IDS_PATH";
 
     const PARITY_EVM_RUN_IDS_KIND: &str = "parity_evm_reth_run_ids_v1";
-    const PARITY_AAVE_RUN_IDS_KIND: &str = "parity_aave_v3_run_ids_v1";
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     struct ParityEvmRunIds {
         kind: String,
         evm_run_id: String,
-    }
-
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    struct ParityAaveRunIds {
-        kind: String,
-        phase_a_run_id: String,
-        phase_b_run_id: String,
     }
 
     /// Writes a single EVM parity run id to the configured handoff file.
@@ -77,17 +67,6 @@ pub mod parity_run_ids {
             evm_run_id: run_id.0.to_string(),
         };
         write_json_atomic(&path, &payload, "evm parity run ids");
-    }
-
-    /// Writes the phase A and phase B Aave parity run ids to the configured handoff file.
-    pub fn write_parity_aave_run_ids(phase_a_run_id: &RunId, phase_b_run_id: &RunId) {
-        let path = required_env_path(PARITY_AAVE_RUN_IDS_PATH_ENV);
-        let payload = ParityAaveRunIds {
-            kind: PARITY_AAVE_RUN_IDS_KIND.to_string(),
-            phase_a_run_id: phase_a_run_id.0.to_string(),
-            phase_b_run_id: phase_b_run_id.0.to_string(),
-        };
-        write_json_atomic(&path, &payload, "aave parity run ids");
     }
 
     /// Reads the EVM parity run id from the configured handoff file.
@@ -101,21 +80,6 @@ pub mod parity_run_ids {
             path.display()
         );
         parse_run_id("evm_run_id", &payload.evm_run_id)
-    }
-
-    /// Reads the phase A and phase B Aave parity run ids from the configured handoff file.
-    pub fn read_parity_aave_run_ids() -> (RunId, RunId) {
-        let path = required_env_path(PARITY_AAVE_RUN_IDS_PATH_ENV);
-        let payload: ParityAaveRunIds = read_json(&path, "aave parity run ids");
-        assert_eq!(
-            payload.kind,
-            PARITY_AAVE_RUN_IDS_KIND,
-            "unexpected kind for aave parity run ids file `{}`",
-            path.display()
-        );
-        let phase_a_run_id = parse_run_id("phase_a_run_id", &payload.phase_a_run_id);
-        let phase_b_run_id = parse_run_id("phase_b_run_id", &payload.phase_b_run_id);
-        (phase_a_run_id, phase_b_run_id)
     }
 
     #[allow(clippy::disallowed_methods)]

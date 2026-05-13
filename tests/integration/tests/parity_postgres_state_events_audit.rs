@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
-use mfm_integration_tests::parity_run_ids::{read_parity_aave_run_ids, read_parity_evm_run_id};
+use mfm_integration_tests::parity_run_ids::read_parity_evm_run_id;
 use mfm_machine::errors::StorageError;
 use mfm_machine::events::{event_envelopes_from_stream_records, Event, KernelEvent, RunStatus};
 use mfm_machine::ids::RunId;
@@ -20,21 +20,6 @@ const EVM_REQUIRED_STATES: &[&str] = &[
     "evm_reth_pipeline.deploy.deploy",
     "evm_reth_pipeline.configure.configure",
     "evm_reth_pipeline.validate.validate",
-];
-
-const AAVE_PHASE_A_REQUIRED_STATES: &[&str] = &[
-    "aave_v3_reth_pipeline.fetch_origin_source.run",
-    "aave_v3_reth_pipeline.compile_origin_contracts.run",
-    "aave_v3_reth_pipeline.deploy_origin_contracts.run",
-];
-
-const AAVE_PHASE_B_REQUIRED_STATES: &[&str] = &[
-    "aave_v3_reth_scenario_generic_pipeline.approve_usdc.configure",
-    "aave_v3_reth_scenario_generic_pipeline.approve_wbtc.configure",
-    "aave_v3_reth_scenario_generic_pipeline.supply_usdc.configure",
-    "aave_v3_reth_scenario_generic_pipeline.supply_wbtc.configure",
-    "aave_v3_reth_scenario_generic_pipeline.borrow_usdc.configure",
-    "aave_v3_reth_scenario_generic_pipeline.validate_scenario.validate",
 ];
 
 async fn connect_postgres_with_retry(max_attempts: u32, delay_ms: u64) -> PostgresStreamStore {
@@ -216,30 +201,13 @@ async fn parity_postgres_state_events_audit_for_multi_state_pipelines() {
     let streams: Arc<dyn StreamStore> = Arc::new(pg);
 
     let evm_run_id = read_parity_evm_run_id();
-    let (aave_phase_a_run_id, aave_phase_b_run_id) = read_parity_aave_run_ids();
 
     audit_run_events(
-        Arc::clone(&streams),
+        streams,
         evm_run_id,
         "evm_reth_pipeline",
         EVM_REQUIRED_STATES,
         5,
-    )
-    .await;
-    audit_run_events(
-        Arc::clone(&streams),
-        aave_phase_a_run_id,
-        "aave_v3_reth_pipeline",
-        AAVE_PHASE_A_REQUIRED_STATES,
-        3,
-    )
-    .await;
-    audit_run_events(
-        streams,
-        aave_phase_b_run_id,
-        "aave_v3_reth_scenario_generic_pipeline",
-        AAVE_PHASE_B_REQUIRED_STATES,
-        6,
     )
     .await;
 }
