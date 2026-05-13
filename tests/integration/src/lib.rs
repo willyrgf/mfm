@@ -20,7 +20,7 @@ use mfm_collectors_evm_jsonrpc_http::EvmSourceKind;
 use mfm_collectors_rpc_control::{EvmIoClient, JsonRpcCall, DEFAULT_CONTROL_SCOPE};
 use mfm_machine::engine::Stores;
 use mfm_machine::errors::IoError;
-use mfm_machine::ids::{FactKey, RunId, StateId};
+use mfm_machine::ids::{RunId, StateId};
 use mfm_machine::live_io::{
     FactIndex, LiveIo, LiveIoEnv, LiveIoTransportFactory, NoopFactRecorder,
 };
@@ -364,94 +364,6 @@ pub mod rpc_control {
                     method,
                     params.clone(),
                 ))
-                .await
-            {
-                Ok(response) => return response.response,
-                Err(err)
-                    if attempt + 1 < RPC_CONTROL_HELPER_MAX_ATTEMPTS
-                        && io_error_retryable(&err) =>
-                {
-                    std::thread::sleep(Duration::from_millis(RPC_CONTROL_HELPER_RETRY_DELAY_MS));
-                }
-                Err(err) => {
-                    panic!("rpc.control call failed: {err:?}");
-                }
-            }
-        }
-
-        unreachable!("rpc.control retry loop must return or panic")
-    }
-
-    /// Convenience alias for making a control-plane call with an explicit fact key.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn call_with_fact_key(
-        sources: &[RpcControlBootstrapSource],
-        network_id: &str,
-        streams: Arc<dyn StreamStore>,
-        artifacts: Arc<dyn ArtifactStore>,
-        state_id: StateId,
-        fact_key: FactKey,
-        method: &str,
-        params: serde_json::Value,
-    ) -> serde_json::Value {
-        call_with_fact_key_in_scope(
-            sources,
-            network_id,
-            DEFAULT_CONTROL_SCOPE,
-            streams,
-            artifacts,
-            state_id,
-            fact_key,
-            method,
-            params,
-        )
-        .await
-    }
-
-    /// Convenience alias for making a control-plane call with an explicit fact key and scope.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn call_with_fact_key_in_scope(
-        sources: &[RpcControlBootstrapSource],
-        network_id: &str,
-        control_scope: &str,
-        streams: Arc<dyn StreamStore>,
-        artifacts: Arc<dyn ArtifactStore>,
-        state_id: StateId,
-        fact_key: FactKey,
-        method: &str,
-        params: serde_json::Value,
-    ) -> serde_json::Value {
-        for attempt in 0..RPC_CONTROL_HELPER_MAX_ATTEMPTS {
-            let run_id = RunId(uuid::Uuid::new_v4());
-            let stream_store = Arc::clone(&streams);
-            let artifacts_store = Arc::clone(&artifacts);
-            let transport = transport_for_state(
-                stream_store,
-                artifacts_store,
-                run_id,
-                state_id.clone(),
-                sources.to_vec(),
-            );
-            let mut live = LiveIo::new(
-                run_id,
-                state_id.clone(),
-                0,
-                Arc::clone(&artifacts),
-                FactIndex::default(),
-                Arc::new(NoopFactRecorder),
-                transport,
-            );
-            let mut client = EvmIoClient::new(state_id.clone(), &mut live);
-            match client
-                .call_with_fact_key(
-                    JsonRpcCall::for_scope_and_network(
-                        control_scope,
-                        network_id,
-                        method,
-                        params.clone(),
-                    ),
-                    fact_key.clone(),
-                )
                 .await
             {
                 Ok(response) => return response.response,

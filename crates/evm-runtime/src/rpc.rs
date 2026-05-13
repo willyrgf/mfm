@@ -1,6 +1,6 @@
 use mfm_collectors_rpc_control::{EvmIoClient, JsonRpcCall, DEFAULT_CONTROL_SCOPE};
 use mfm_machine::errors::{ErrorCategory, StateError};
-use mfm_machine::ids::{ArtifactId, FactKey, StateId};
+use mfm_machine::ids::{ArtifactId, StateId};
 use mfm_machine::io::IoProvider;
 use mfm_state_common::errors as op_errors;
 use mfm_state_common::rpc as op_rpc;
@@ -56,23 +56,6 @@ fn managed_call(
     JsonRpcCall::new(method, params)
         .with_control_scope(control_scope.to_string())
         .with_network_id(network_id.to_string())
-}
-
-fn receipt_poll_fact_key(
-    state_id: &StateId,
-    control_scope: &str,
-    network_id: &str,
-    poll_index: u64,
-    normalized_tx: &str,
-) -> FactKey {
-    FactKey(format!(
-        "mfm:rpc.control|state:{}|scope:{}|network:{}|receipt_poll:{}|tx:{}",
-        state_id.as_str(),
-        control_scope,
-        network_id,
-        poll_index,
-        normalized_tx
-    ))
 }
 
 fn legacy_network_required_error(helper_name: &'static str) -> StateError {
@@ -738,20 +721,11 @@ pub async fn wait_for_receipt_for_network(
             let mut client = EvmIoClient::new(state_id.clone(), io)
                 .with_default_control_scope(effective_scope.to_string());
             client
-                .call_with_fact_key(
-                    managed_call(
-                        network_id,
-                        effective_scope,
-                        "eth_getTransactionReceipt",
-                        serde_json::json!([normalized_tx.clone()]),
-                    ),
-                    receipt_poll_fact_key(
-                        state_id,
-                        effective_scope,
-                        network_id,
-                        poll_index,
-                        &normalized_tx,
-                    ),
+                .get_transaction_receipt_poll(
+                    network_id,
+                    effective_scope,
+                    normalized_tx.clone(),
+                    poll_index,
                 )
                 .await
                 .map_err(op_errors::state_from_io)?
@@ -963,7 +937,7 @@ mod tests {
     use zeroize::Zeroizing;
 
     use mfm_machine::errors::IoError;
-    use mfm_machine::ids::ArtifactId;
+    use mfm_machine::ids::{ArtifactId, FactKey};
     use mfm_machine::io::{IoCall, IoProvider, IoResult};
 
     use super::*;
@@ -1069,20 +1043,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn receipt_poll_fact_key_differs_across_scope_and_network() {
-        let state_id = StateId::must_new("rpc.receipt.scope".to_string());
-        let tx_hash = "0x1234";
-
-        let shared = receipt_poll_fact_key(&state_id, "shared", "ethereum-mainnet", 0, tx_hash);
-        let isolated = receipt_poll_fact_key(&state_id, "isolated", "ethereum-mainnet", 0, tx_hash);
-        let arbitrum = receipt_poll_fact_key(&state_id, "shared", "arbitrum-mainnet", 0, tx_hash);
-
-        assert_ne!(shared, isolated);
-        assert_ne!(shared, arbitrum);
-        assert_ne!(isolated, arbitrum);
-    }
-
     #[tokio::test]
     async fn wait_for_receipt_for_network_stamps_scope_into_request_and_fact_key() {
         let state_id = StateId::must_new("rpc.receipt.wait".to_string());
@@ -1116,26 +1076,7 @@ mod tests {
                 "params": ["0x1234"],
             })
         );
-        assert_eq!(
-            io.calls[0].fact_key,
-            Some(receipt_poll_fact_key(
-                &state_id,
-                "shared",
-                "ethereum-mainnet",
-                0,
-                "0x1234",
-            ))
-        );
-        assert_eq!(
-            io.calls[1].fact_key,
-            Some(receipt_poll_fact_key(
-                &state_id,
-                "shared",
-                "ethereum-mainnet",
-                1,
-                "0x1234",
-            ))
-        );
+        assert_ne!(io.calls[0].fact_key, io.calls[1].fact_key);
         assert_eq!(io.slept_ms, vec![25]);
     }
 

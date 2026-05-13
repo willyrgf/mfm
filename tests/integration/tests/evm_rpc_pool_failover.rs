@@ -11,7 +11,9 @@ use axum::{Json, Router};
 use serde_json::{json, Value};
 
 use mfm_artifact_store_fs::FsArtifactStore;
-use mfm_collectors_rpc_control::{rpc_control_io_call, JsonRpcCall, RpcControlRequest};
+use mfm_collectors_rpc_control::{
+    fact_key_for_request, EvmIoClient, JsonRpcCall, RpcControlRequest,
+};
 use mfm_integration_tests::rpc_control;
 use mfm_machine::errors::IoError;
 use mfm_machine::ids::{FactKey, RunId, StateId};
@@ -150,6 +152,11 @@ fn new_live_io(
     )
 }
 
+fn fact_key_for_call(state_id: &StateId, call: &JsonRpcCall) -> FactKey {
+    fact_key_for_request(state_id, &RpcControlRequest::EvmCall { call: call.clone() })
+        .expect("rpc.control fact key")
+}
+
 #[tokio::test]
 async fn evm_rpc_pool_failover_live_then_replay_keeps_network_quiet() {
     let primary = start_stub_server(StubBehavior::HttpStatus(500)).await;
@@ -157,7 +164,6 @@ async fn evm_rpc_pool_failover_live_then_replay_keeps_network_quiet() {
 
     let run_id = RunId(uuid::Uuid::new_v4());
     let state_id = StateId::must_new("parity.evm_pool.failover".to_string());
-    let fact_key = FactKey("parity:evm_pool:failover".to_string());
     let facts = FactIndex::default();
 
     let temp = tempfile::tempdir().expect("tempdir");
@@ -175,17 +181,14 @@ async fn evm_rpc_pool_failover_live_then_replay_keeps_network_quiet() {
         "params": [],
     });
 
-    let live_result = live
-        .call(rpc_control_io_call(
-            RpcControlRequest::EvmCall {
-                call: JsonRpcCall::for_network(
-                    NETWORK_ID,
-                    request["method"].as_str().unwrap_or("eth_getLogs"),
-                    request["params"].clone(),
-                ),
-            },
-            fact_key.clone(),
-        ))
+    let call = JsonRpcCall::for_network(
+        NETWORK_ID,
+        request["method"].as_str().unwrap_or("eth_getLogs"),
+        request["params"].clone(),
+    );
+    let fact_key = fact_key_for_call(&state_id, &call);
+    let live_result = EvmIoClient::new(state_id.clone(), &mut live)
+        .call(call.clone())
         .await
         .expect("live call should fail over to secondary and succeed");
     assert_eq!(live_result.response, json!("0x2"));
@@ -200,14 +203,8 @@ async fn evm_rpc_pool_failover_live_then_replay_keeps_network_quiet() {
     let replay_result = replay
         .call(IoCall {
             namespace: "rpc.control".to_string(),
-            request: serde_json::to_value(RpcControlRequest::EvmCall {
-                call: JsonRpcCall::for_network(
-                    NETWORK_ID,
-                    request["method"].as_str().unwrap_or("eth_getLogs"),
-                    request["params"].clone(),
-                ),
-            })
-            .expect("rpc.control request"),
+            request: serde_json::to_value(RpcControlRequest::EvmCall { call })
+                .expect("rpc.control request"),
             fact_key: Some(fact_key),
         })
         .await
@@ -225,7 +222,6 @@ async fn evm_rpc_pool_failover_uses_secondary_when_primary_is_429() {
 
     let run_id = RunId(uuid::Uuid::new_v4());
     let state_id = StateId::must_new("parity.evm_pool.rate_limit".to_string());
-    let fact_key = FactKey("parity:evm_pool:rate_limit".to_string());
     let facts = FactIndex::default();
 
     let temp = tempfile::tempdir().expect("tempdir");
@@ -239,13 +235,9 @@ async fn evm_rpc_pool_failover_uses_secondary_when_primary_is_429() {
         facts,
     );
 
-    let live_result = live
-        .call(rpc_control_io_call(
-            RpcControlRequest::EvmCall {
-                call: JsonRpcCall::for_network(NETWORK_ID, "eth_getLogs", serde_json::json!([])),
-            },
-            fact_key,
-        ))
+    let call = JsonRpcCall::for_network(NETWORK_ID, "eth_getLogs", serde_json::json!([]));
+    let live_result = EvmIoClient::new(state_id, &mut live)
+        .call(call)
         .await
         .expect("live call should fail over to secondary on 429");
 

@@ -11,7 +11,9 @@ use axum::{Json, Router};
 use serde_json::{json, Value};
 
 use mfm_artifact_store_fs::FsArtifactStore;
-use mfm_collectors_rpc_control::{rpc_control_io_call, JsonRpcCall, RpcControlRequest};
+use mfm_collectors_rpc_control::{
+    fact_key_for_request, EvmIoClient, JsonRpcCall, RpcControlRequest,
+};
 use mfm_integration_tests::rpc_control;
 use mfm_machine::engine::Stores;
 use mfm_machine::errors::IoError;
@@ -225,6 +227,11 @@ fn new_live_io(
     )
 }
 
+fn fact_key_for_call(state_id: &StateId, call: &JsonRpcCall) -> FactKey {
+    fact_key_for_request(state_id, &RpcControlRequest::EvmCall { call: call.clone() })
+        .expect("rpc.control fact key")
+}
+
 #[tokio::test]
 async fn evm_getlogs_chunking_succeeds_with_adaptive_split_and_failover() {
     let primary = start_stub_server(StubBehavior::AlwaysStatus(429)).await;
@@ -242,28 +249,24 @@ async fn evm_getlogs_chunking_succeeds_with_adaptive_split_and_failover() {
 
     let mut live = new_live_io(
         run_id,
-        state_id,
+        state_id.clone(),
         build_transport(&primary, &secondary, 64, 8, 64),
         artifacts,
         facts,
     );
 
-    let response = live
-        .call(rpc_control_io_call(
-            RpcControlRequest::EvmCall {
-                call: JsonRpcCall::for_network(
-                    NETWORK_ID,
-                    "eth_getLogs",
-                    serde_json::json!([{
-                        "address": "0x0000000000000000000000000000000000000000",
-                        "fromBlock": "0x1",
-                        "toBlock": "0x80",
-                        "topics": [],
-                    }]),
-                ),
-            },
-            FactKey("parity:evm_logs_chunking:success".to_string()),
-        ))
+    let call = JsonRpcCall::for_network(
+        NETWORK_ID,
+        "eth_getLogs",
+        serde_json::json!([{
+            "address": "0x0000000000000000000000000000000000000000",
+            "fromBlock": "0x1",
+            "toBlock": "0x80",
+            "topics": [],
+        }]),
+    );
+    let response = EvmIoClient::new(state_id, &mut live)
+        .call(call)
         .await
         .expect("chunking should succeed");
 
@@ -302,28 +305,24 @@ async fn evm_getlogs_chunking_returns_exhausted_when_retryable_failures_persist(
 
     let mut live = new_live_io(
         run_id,
-        state_id,
+        state_id.clone(),
         build_transport(&primary, &secondary, 16, 8, 16),
         artifacts,
         facts,
     );
 
-    let err = live
-        .call(rpc_control_io_call(
-            RpcControlRequest::EvmCall {
-                call: JsonRpcCall::for_network(
-                    NETWORK_ID,
-                    "eth_getLogs",
-                    serde_json::json!([{
-                        "address": "0x0000000000000000000000000000000000000000",
-                        "fromBlock": "0x1",
-                        "toBlock": "0x40",
-                        "topics": [],
-                    }]),
-                ),
-            },
-            FactKey("parity:evm_logs_chunking:exhausted".to_string()),
-        ))
+    let call = JsonRpcCall::for_network(
+        NETWORK_ID,
+        "eth_getLogs",
+        serde_json::json!([{
+            "address": "0x0000000000000000000000000000000000000000",
+            "fromBlock": "0x1",
+            "toBlock": "0x40",
+            "topics": [],
+        }]),
+    );
+    let err = EvmIoClient::new(state_id, &mut live)
+        .call(call)
         .await
         .expect_err("chunking should exhaust");
 
@@ -344,7 +343,6 @@ async fn evm_getlogs_chunking_live_then_replay_is_network_quiet() {
 
     let run_id = RunId(uuid::Uuid::new_v4());
     let state_id = StateId::must_new("parity.evm_logs_chunking.replay".to_string());
-    let fact_key = FactKey("parity:evm_logs_chunking:replay".to_string());
     let facts = FactIndex::default();
 
     let temp = tempfile::tempdir().expect("tempdir");
@@ -367,19 +365,14 @@ async fn evm_getlogs_chunking_live_then_replay_is_network_quiet() {
         }],
     });
 
-    let live_result = live
-        .call(rpc_control_io_call(
-            RpcControlRequest::EvmCall {
-                call: JsonRpcCall::for_network(
-                    NETWORK_ID,
-                    "eth_getLogs",
-                    serde_json::Value::Array(
-                        request["params"].as_array().cloned().unwrap_or_default(),
-                    ),
-                ),
-            },
-            fact_key.clone(),
-        ))
+    let call = JsonRpcCall::for_network(
+        NETWORK_ID,
+        "eth_getLogs",
+        serde_json::Value::Array(request["params"].as_array().cloned().unwrap_or_default()),
+    );
+    let fact_key = fact_key_for_call(&state_id, &call);
+    let live_result = EvmIoClient::new(state_id.clone(), &mut live)
+        .call(call.clone())
         .await
         .expect("live chunking call should succeed");
     let live_len = live_result
@@ -396,16 +389,8 @@ async fn evm_getlogs_chunking_live_then_replay_is_network_quiet() {
     let replay_result = replay
         .call(IoCall {
             namespace: "rpc.control".to_string(),
-            request: serde_json::to_value(RpcControlRequest::EvmCall {
-                call: JsonRpcCall::for_network(
-                    NETWORK_ID,
-                    "eth_getLogs",
-                    serde_json::Value::Array(
-                        request["params"].as_array().cloned().unwrap_or_default(),
-                    ),
-                ),
-            })
-            .expect("rpc.control request"),
+            request: serde_json::to_value(RpcControlRequest::EvmCall { call })
+                .expect("rpc.control request"),
             fact_key: Some(fact_key),
         })
         .await

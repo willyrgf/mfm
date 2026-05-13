@@ -246,22 +246,41 @@ fn request_json(request: &RpcControlRequest) -> serde_json::Value {
     serde_json::to_value(request).expect("rpc.control request must serialize")
 }
 
+#[derive(Clone, Copy)]
+enum RequestFactKeyKind {
+    Request,
+    ReceiptPoll { poll_index: u64 },
+}
+
 /// Derives a deterministic fact key for a `rpc.control` request.
 pub fn fact_key_for_request(
     state_id: &StateId,
     request: &RpcControlRequest,
 ) -> Result<FactKey, FactKeyDerivationError> {
+    fact_key_for_request_kind(state_id, request, RequestFactKeyKind::Request)
+}
+
+fn fact_key_for_request_kind(
+    state_id: &StateId,
+    request: &RpcControlRequest,
+    kind: RequestFactKeyKind,
+) -> Result<FactKey, FactKeyDerivationError> {
     let req_id = artifact_id_for_json(&request_json(request))
         .map_err(FactKeyDerivationError::NotCanonical)?;
-    Ok(FactKey(format!(
+    let base = format!(
         "mfm:rpc.control|state:{}|req:{}",
         state_id.as_str(),
         req_id.as_str()
-    )))
+    );
+    match kind {
+        RequestFactKeyKind::Request => Ok(FactKey(base)),
+        RequestFactKeyKind::ReceiptPoll { poll_index } => {
+            Ok(FactKey(format!("{base}|receipt_poll:{poll_index}")))
+        }
+    }
 }
 
-/// Wraps a typed `rpc.control` request in the generic `IoCall` envelope.
-pub fn rpc_control_io_call(request: RpcControlRequest, fact_key: FactKey) -> IoCall {
+fn rpc_control_io_call(request: RpcControlRequest, fact_key: FactKey) -> IoCall {
     IoCall {
         namespace: NAMESPACE_RPC_CONTROL.to_string(),
         request: request_json(&request),
@@ -372,29 +391,12 @@ impl<'a> EvmIoClient<'a> {
         }
     }
 
-    /// Executes a managed JSON-RPC call through the generic IO provider with an
-    /// explicit fact key.
-    pub async fn call_with_fact_key(
-        &mut self,
-        call: JsonRpcCall,
-        fact_key: FactKey,
-    ) -> Result<IoResult, IoError> {
-        let call = self.stamp_control_scope(call);
-        self.validate_call(&call)?;
-        self.io
-            .call(rpc_control_io_call(
-                RpcControlRequest::EvmCall { call },
-                fact_key,
-            ))
-            .await
-    }
-
-    /// Executes a managed JSON-RPC call through the generic IO provider.
-    pub async fn call(&mut self, call: JsonRpcCall) -> Result<IoResult, IoError> {
-        let call = self.stamp_control_scope(call);
-        self.validate_call(&call)?;
-        let request = RpcControlRequest::EvmCall { call: call.clone() };
-        let key = fact_key_for_request(&self.state_id, &request).map_err(|err| match err {
+    fn fact_key_for_request(
+        &self,
+        request: &RpcControlRequest,
+        kind: RequestFactKeyKind,
+    ) -> Result<FactKey, IoError> {
+        fact_key_for_request_kind(&self.state_id, request, kind).map_err(|err| match err {
             FactKeyDerivationError::NotCanonical(CanonicalJsonError::FloatNotAllowed) => io_other(
                 "rpc_control_request_not_canonical",
                 ErrorCategory::ParsingInput,
@@ -407,8 +409,49 @@ impl<'a> EvmIoClient<'a> {
                     "rpc.control request contained secrets (policy forbids persisting secrets)",
                 )
             }
-        })?;
-        self.call_with_fact_key(call, key).await
+        })
+    }
+
+    async fn execute_request(
+        &mut self,
+        request: RpcControlRequest,
+        key_kind: RequestFactKeyKind,
+    ) -> Result<IoResult, IoError> {
+        let key = self.fact_key_for_request(&request, key_kind)?;
+        self.io.call(rpc_control_io_call(request, key)).await
+    }
+
+    /// Executes a managed JSON-RPC call through the generic IO provider.
+    pub async fn call(&mut self, call: JsonRpcCall) -> Result<IoResult, IoError> {
+        let call = self.stamp_control_scope(call);
+        self.validate_call(&call)?;
+        self.execute_request(
+            RpcControlRequest::EvmCall { call },
+            RequestFactKeyKind::Request,
+        )
+        .await
+    }
+
+    /// Polls for a transaction receipt with a fact key derived from the stamped request and poll index.
+    pub async fn get_transaction_receipt_poll(
+        &mut self,
+        network_id: impl Into<String>,
+        control_scope: impl Into<String>,
+        tx_hash: impl Into<String>,
+        poll_index: u64,
+    ) -> Result<IoResult, IoError> {
+        let call = self.stamp_control_scope(JsonRpcCall::for_scope_and_network(
+            control_scope,
+            network_id,
+            "eth_getTransactionReceipt",
+            serde_json::json!([tx_hash.into()]),
+        ));
+        self.validate_call(&call)?;
+        self.execute_request(
+            RpcControlRequest::EvmCall { call },
+            RequestFactKeyKind::ReceiptPoll { poll_index },
+        )
+        .await
     }
 
     /// Executes idempotent source setup/probe/rank preflight for one network.
@@ -439,21 +482,9 @@ impl<'a> EvmIoClient<'a> {
             },
             network_id,
         };
-        let key = fact_key_for_request(&self.state_id, &request).map_err(|err| match err {
-            FactKeyDerivationError::NotCanonical(CanonicalJsonError::FloatNotAllowed) => io_other(
-                "rpc_control_request_not_canonical",
-                ErrorCategory::ParsingInput,
-                "rpc.control request was not canonical-json-hashable (floats are forbidden)",
-            ),
-            FactKeyDerivationError::NotCanonical(CanonicalJsonError::SecretsNotAllowed) => {
-                io_other(
-                    "secrets_detected",
-                    ErrorCategory::Unknown,
-                    "rpc.control request contained secrets (policy forbids persisting secrets)",
-                )
-            }
-        })?;
-        let result = self.io.call(rpc_control_io_call(request, key)).await?;
+        let result = self
+            .execute_request(request, RequestFactKeyKind::Request)
+            .await?;
         serde_json::from_value(result.response).map_err(|_| {
             io_other(
                 "rpc_control_response_invalid",
@@ -532,21 +563,9 @@ impl<'a> EvmIoClient<'a> {
             raw_tx_hex: raw_tx_hex.into(),
             expected_tx_hash: expected_tx_hash.into(),
         };
-        let key = fact_key_for_request(&self.state_id, &request).map_err(|err| match err {
-            FactKeyDerivationError::NotCanonical(CanonicalJsonError::FloatNotAllowed) => io_other(
-                "rpc_control_request_not_canonical",
-                ErrorCategory::ParsingInput,
-                "rpc.control request was not canonical-json-hashable (floats are forbidden)",
-            ),
-            FactKeyDerivationError::NotCanonical(CanonicalJsonError::SecretsNotAllowed) => {
-                io_other(
-                    "secrets_detected",
-                    ErrorCategory::Unknown,
-                    "rpc.control request contained secrets (policy forbids persisting secrets)",
-                )
-            }
-        })?;
-        let result = self.io.call(rpc_control_io_call(request, key)).await?;
+        let result = self
+            .execute_request(request, RequestFactKeyKind::Request)
+            .await?;
         serde_json::from_value(result.response).map_err(|_| {
             io_other(
                 "rpc_control_response_invalid",
@@ -602,6 +621,53 @@ mod tests {
         let left = fact_key_for_request(&sid, &left).expect("left key");
         let right = fact_key_for_request(&sid, &right).expect("right key");
         assert_ne!(left, right);
+    }
+
+    #[test]
+    fn fact_key_differs_across_network_method_and_params() {
+        let sid = StateId::must_new("m.main.rpc".to_string());
+        let base = RpcControlRequest::EvmCall {
+            call: JsonRpcCall::for_scope_and_network(
+                "shared",
+                "ethereum-mainnet",
+                "eth_call",
+                serde_json::json!([{"to": "0x1111111111111111111111111111111111111111"}, "latest"]),
+            ),
+        };
+        let different_network = RpcControlRequest::EvmCall {
+            call: JsonRpcCall::for_scope_and_network(
+                "shared",
+                "arbitrum-mainnet",
+                "eth_call",
+                serde_json::json!([{"to": "0x1111111111111111111111111111111111111111"}, "latest"]),
+            ),
+        };
+        let different_method = RpcControlRequest::EvmCall {
+            call: JsonRpcCall::for_scope_and_network(
+                "shared",
+                "ethereum-mainnet",
+                "eth_getBalance",
+                serde_json::json!(["0x1111111111111111111111111111111111111111", "latest"]),
+            ),
+        };
+        let different_params = RpcControlRequest::EvmCall {
+            call: JsonRpcCall::for_scope_and_network(
+                "shared",
+                "ethereum-mainnet",
+                "eth_call",
+                serde_json::json!([{"to": "0x2222222222222222222222222222222222222222"}, "latest"]),
+            ),
+        };
+
+        let base = fact_key_for_request(&sid, &base).expect("base key");
+        let different_network =
+            fact_key_for_request(&sid, &different_network).expect("network key");
+        let different_method = fact_key_for_request(&sid, &different_method).expect("method key");
+        let different_params = fact_key_for_request(&sid, &different_params).expect("params key");
+
+        assert_ne!(base, different_network);
+        assert_ne!(base, different_method);
+        assert_ne!(base, different_params);
     }
 
     #[test]
@@ -871,6 +937,61 @@ mod tests {
                 "params": [],
             })
         );
+    }
+
+    #[tokio::test]
+    async fn receipt_poll_helper_derives_key_from_stamped_request_and_poll_index() {
+        let state_id = StateId::must_new("m.main.receipt".to_string());
+        let mut io = FixedIo::default();
+        {
+            let mut client = EvmIoClient::new(state_id.clone(), &mut io)
+                .with_default_control_scope("workspace-a");
+
+            client
+                .get_transaction_receipt_poll("ethereum-mainnet", "", "0x1234", 0)
+                .await
+                .expect("first poll");
+            client
+                .get_transaction_receipt_poll("ethereum-mainnet", "", "0x1234", 1)
+                .await
+                .expect("second poll");
+        }
+
+        assert_eq!(io.calls.len(), 2);
+        assert_eq!(
+            io.calls[0].request,
+            serde_json::json!({
+                "kind": "evm_call",
+                "control_scope": "workspace-a",
+                "network_id": "ethereum-mainnet",
+                "method": "eth_getTransactionReceipt",
+                "params": ["0x1234"],
+            })
+        );
+        let request = RpcControlRequest::EvmCall {
+            call: JsonRpcCall::for_scope_and_network(
+                "workspace-a",
+                "ethereum-mainnet",
+                "eth_getTransactionReceipt",
+                serde_json::json!(["0x1234"]),
+            ),
+        };
+        let first_key = fact_key_for_request_kind(
+            &state_id,
+            &request,
+            RequestFactKeyKind::ReceiptPoll { poll_index: 0 },
+        )
+        .expect("first key");
+        let second_key = fact_key_for_request_kind(
+            &state_id,
+            &request,
+            RequestFactKeyKind::ReceiptPoll { poll_index: 1 },
+        )
+        .expect("second key");
+
+        assert_eq!(io.calls[0].fact_key, Some(first_key));
+        assert_eq!(io.calls[1].fact_key, Some(second_key));
+        assert_ne!(io.calls[0].fact_key, io.calls[1].fact_key);
     }
 
     #[tokio::test]
