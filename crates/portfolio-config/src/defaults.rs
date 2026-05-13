@@ -1468,7 +1468,8 @@ mod tests {
                     "symbol_ids": [
                         "eth.native.ethereum-mainnet",
                         "usdc.wallet.ethereum-mainnet",
-                        "aave_v3.usdc.collateral.ethereum-mainnet"
+                        "aave_v3.usdc.collateral.ethereum-mainnet",
+                        "aave_v3.usdc.debt.ethereum-mainnet"
                     ],
                     "metadata": {}
                 }
@@ -1573,12 +1574,68 @@ mod tests {
                                         "reserve_id": "usdc",
                                         "reserve_index": 1,
                                         "underlying_token_address": "0x0000000000000000000000000000000000000001",
-                                        "a_token_address": "0x0000000000000000000000000000000000000003"
+                                        "a_token_address": "0x0000000000000000000000000000000000000003",
+                                        "variable_debt_token_address": "0x0000000000000000000000000000000000000004"
                                     }
                                 ]
                             },
                             "reserve_id": "usdc",
                             "use_as_collateral_required": true
+                        }
+                    },
+                    "valuation": {
+                        "quotes": [
+                            {
+                                "quote": "USD",
+                                "priced_symbol_id": "usdc.wallet.ethereum-mainnet",
+                                "reader": {
+                                    "kind": "fixed_unit_price",
+                                    "unit_price_dec": "1"
+                                }
+                            },
+                            {
+                                "quote": "BTC",
+                                "priced_symbol_id": "usdc.wallet.ethereum-mainnet",
+                                "reader": {
+                                    "kind": "fixed_unit_price",
+                                    "unit_price_dec": "0.00001"
+                                }
+                            }
+                        ]
+                    },
+                    "decimals": 6,
+                    "underlying_symbol_id": "usdc.wallet.ethereum-mainnet",
+                    "metadata": {}
+                },
+                {
+                    "symbol_id": "aave_v3.usdc.debt.ethereum-mainnet",
+                    "display_symbol": "vUSDC",
+                    "kind": "protocol_position",
+                    "role": "debt",
+                    "network_id": "ethereum-mainnet",
+                    "protocol": "aave_v3",
+                    "balance_reader": {
+                        "kind": "protocol_position",
+                        "protocol": "aave_v3",
+                        "reader": "debt_position",
+                        "config": {
+                            "market": {
+                                "market_id": "aave-v3-mainnet",
+                                "network_id": "ethereum-mainnet",
+                                "chain_id": 1u64,
+                                "pool_address": "0x0000000000000000000000000000000000000002",
+                                "reserves": [
+                                    {
+                                        "reserve_id": "usdc",
+                                        "reserve_index": 1,
+                                        "underlying_token_address": "0x0000000000000000000000000000000000000001",
+                                        "a_token_address": "0x0000000000000000000000000000000000000003",
+                                        "variable_debt_token_address": "0x0000000000000000000000000000000000000004"
+                                    }
+                                ]
+                            },
+                            "reserve_id": "usdc",
+                            "debt_kind": "variable"
                         }
                     },
                     "valuation": {
@@ -1659,18 +1716,166 @@ mod tests {
         assert_eq!(spec.subject_tasks.len(), 1);
         assert_eq!(spec.view_tasks.len(), 1);
         assert_eq!(spec.source_tasks.len(), 1);
-        assert_eq!(spec.valuation_tasks.len(), 6);
-        assert_eq!(spec.observation_batches.len(), 3);
+        assert_eq!(spec.valuation_tasks.len(), 8);
+        assert_eq!(spec.observation_batches.len(), 4);
         assert_eq!(
             spec.observation_batches
                 .iter()
                 .map(|batch| batch.adapter.0.as_str())
                 .collect::<Vec<_>>(),
             vec![
+                ADAPTER_OBSERVE_AAVE_DEBT,
                 ADAPTER_OBSERVE_AAVE_RESERVE,
                 ADAPTER_OBSERVE_EVM_ERC20_BALANCE,
                 ADAPTER_OBSERVE_EVM_NATIVE_BALANCE,
             ]
+        );
+    }
+
+    #[test]
+    fn compiler_lowers_aave_symbols_into_typed_observation_payloads() {
+        let catalog = builtin_dispatch_catalog().expect("catalog");
+        let compiler = DefaultPortfolioPlanCompiler;
+        let spec = compiler
+            .compile(&sample_request(), &catalog)
+            .expect("compiled execution spec");
+
+        let reserve = find_observation_binding(
+            &spec,
+            ADAPTER_OBSERVE_AAVE_RESERVE,
+            "binding.wallet_main::aave_v3.usdc.collateral.ethereum-mainnet",
+        );
+        assert_eq!(reserve.observation_key.subject_id, "wallet_main");
+        assert_eq!(
+            reserve.observation_key.instrument_id,
+            "usdc.wallet.ethereum-mainnet"
+        );
+        assert_eq!(
+            reserve.observation_key.position_kind,
+            PositionKind::LendingDeposit
+        );
+        assert_eq!(
+            reserve
+                .observation_key
+                .venue_id
+                .as_ref()
+                .expect("reserve venue")
+                .0,
+            "aave_v3/aave-v3-mainnet/usdc"
+        );
+        assert_eq!(
+            reserve.valuation_ids,
+            vec![
+                "aave_v3.usdc.collateral.ethereum-mainnet.quote.btc",
+                "aave_v3.usdc.collateral.ethereum-mainnet.quote.usd"
+            ]
+        );
+
+        let reserve_payload: AaveReserveObservationPayload = decode_object_map(
+            &AdapterId(ADAPTER_OBSERVE_AAVE_RESERVE.to_string()),
+            "payload",
+            &reserve.payload,
+        )
+        .expect("reserve payload");
+        assert_eq!(
+            reserve_payload.underlying_symbol_id,
+            "usdc.wallet.ethereum-mainnet"
+        );
+        assert_eq!(reserve_payload.route_policy.network_id, "ethereum-mainnet");
+        assert_eq!(reserve_payload.route_policy.chain_id, 1);
+        assert_eq!(reserve_payload.route_policy.control_scope, "rpc.mainnet");
+        assert_eq!(
+            reserve_payload.projection.symbol_id,
+            "aave_v3.usdc.collateral.ethereum-mainnet"
+        );
+        assert_eq!(
+            reserve_payload.projection.role,
+            mfm_state_symbol::model::SymbolRole::Collateral
+        );
+        assert_eq!(reserve_payload.projection.decimals, Some(6));
+        assert_eq!(reserve_payload.config.reserve_id, "usdc");
+        assert_eq!(
+            reserve_payload.config.use_as_collateral_required,
+            Some(true)
+        );
+        assert_eq!(
+            reserve_payload.config.market.pool_address,
+            "0x0000000000000000000000000000000000000002"
+        );
+        assert_eq!(
+            reserve_payload
+                .config
+                .market
+                .reserve("usdc")
+                .expect("usdc reserve")
+                .a_token_address,
+            "0x0000000000000000000000000000000000000003"
+        );
+
+        let debt = find_observation_binding(
+            &spec,
+            ADAPTER_OBSERVE_AAVE_DEBT,
+            "binding.wallet_main::aave_v3.usdc.debt.ethereum-mainnet",
+        );
+        assert_eq!(debt.observation_key.subject_id, "wallet_main");
+        assert_eq!(
+            debt.observation_key.instrument_id,
+            "usdc.wallet.ethereum-mainnet"
+        );
+        assert_eq!(
+            debt.observation_key.position_kind,
+            PositionKind::LendingDebt
+        );
+        assert_eq!(
+            debt.observation_key
+                .venue_id
+                .as_ref()
+                .expect("debt venue")
+                .0,
+            "aave_v3/aave-v3-mainnet/usdc"
+        );
+        assert_eq!(
+            debt.valuation_ids,
+            vec![
+                "aave_v3.usdc.debt.ethereum-mainnet.quote.btc",
+                "aave_v3.usdc.debt.ethereum-mainnet.quote.usd"
+            ]
+        );
+
+        let debt_payload: AaveDebtObservationPayload = decode_object_map(
+            &AdapterId(ADAPTER_OBSERVE_AAVE_DEBT.to_string()),
+            "payload",
+            &debt.payload,
+        )
+        .expect("debt payload");
+        assert_eq!(
+            debt_payload.underlying_symbol_id,
+            "usdc.wallet.ethereum-mainnet"
+        );
+        assert_eq!(debt_payload.route_policy.network_id, "ethereum-mainnet");
+        assert_eq!(debt_payload.route_policy.chain_id, 1);
+        assert_eq!(debt_payload.route_policy.control_scope, "rpc.mainnet");
+        assert_eq!(
+            debt_payload.projection.symbol_id,
+            "aave_v3.usdc.debt.ethereum-mainnet"
+        );
+        assert_eq!(
+            debt_payload.projection.role,
+            mfm_state_symbol::model::SymbolRole::Debt
+        );
+        assert_eq!(
+            debt_payload.config.debt_kind,
+            mfm_state_aave_v3::portfolio::model::AaveDebtKind::Variable
+        );
+        assert_eq!(
+            debt_payload
+                .config
+                .market
+                .reserve("usdc")
+                .expect("usdc reserve")
+                .variable_debt_token_address
+                .as_deref(),
+            Some("0x0000000000000000000000000000000000000004")
         );
     }
 
@@ -1707,5 +1912,22 @@ mod tests {
         assert!(
             matches!(err, PlanningError::Compile { code, .. } if code == "invalid_plan_config")
         );
+    }
+
+    fn find_observation_binding<'a>(
+        spec: &'a PortfolioExecutionSpec,
+        adapter: &str,
+        binding_id: &str,
+    ) -> &'a CompiledObservationBinding {
+        spec.observation_batches
+            .iter()
+            .find(|batch| batch.adapter.0 == adapter)
+            .and_then(|batch| {
+                batch
+                    .bindings
+                    .iter()
+                    .find(|binding| binding.binding_id == binding_id)
+            })
+            .unwrap_or_else(|| panic!("missing `{binding_id}` binding for `{adapter}`"))
     }
 }
