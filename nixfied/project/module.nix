@@ -304,7 +304,7 @@ let
 
   cargoFmtCheckCmd = "cargo fmt --all -- --check";
   cargoClippyCmd = "cargo clippy --workspace --lib --examples --tests --benches --all-features -- -D warnings";
-  cargoWorkspaceInventoryCheckCmd = "mfm-verify-workspace-manifest --root . --metadata --expect-member-once crates/collectors/rpc-control";
+  cargoWorkspaceInventoryCheckCmd = "mfm-verify-workspace-manifest --root . --metadata";
   discoveryCheckCmd = "nixfied-discovery-index --verify --root .";
   # Keep CI linting on the same Cargo profile as nextest to avoid profile drift
   # within .#ci. Clippy still uses its own driver, so reuse remains partial.
@@ -1426,16 +1426,22 @@ in
                 printf "%s" "$output"
               }
 
-              mfm-verify-workspace-manifest --root "$ROOT" --metadata --expect-member-once crates/collectors/rpc-control
+              mfm-verify-workspace-manifest --root "$ROOT" --metadata
               nixfied-discovery-index --verify --root "$ROOT"
 
               workspace_inventory_fixture="$(mktemp -d "''${TMPDIR:-/tmp}/workspace-inventory.XXXXXX")"
-              mkdir -p "$workspace_inventory_fixture/a"
+              mkdir -p "$workspace_inventory_fixture/crates/a"
+              cat >"$workspace_inventory_fixture/crates/a/Cargo.toml" <<'"'"'EOF'"'"'
+[package]
+name = "workspace-inventory-a"
+version = "0.0.0"
+edition = "2021"
+EOF
               cat >"$workspace_inventory_fixture/Cargo.toml" <<'"'"'EOF'"'"'
 [workspace]
 members = [
-  "a",
-  "a",
+  "crates/a",
+  "crates/a",
 ]
 EOF
               if mfm-verify-workspace-manifest --manifest "$workspace_inventory_fixture/Cargo.toml" >"$workspace_inventory_fixture/out" 2>&1; then
@@ -1443,9 +1449,66 @@ EOF
                 cat "$workspace_inventory_fixture/out"
                 exit 1
               fi
-              if ! grep -F "duplicate Cargo workspace members: a" "$workspace_inventory_fixture/out" >/dev/null; then
+              if ! grep -F "duplicate Cargo workspace members: crates/a" "$workspace_inventory_fixture/out" >/dev/null; then
                 echo "ERROR: duplicate Cargo workspace member fixture missing expected diagnostic"
                 cat "$workspace_inventory_fixture/out"
+                exit 1
+              fi
+
+              workspace_missing_fixture="$(mktemp -d "''${TMPDIR:-/tmp}/workspace-inventory-missing.XXXXXX")"
+              mkdir -p "$workspace_missing_fixture/crates/a" "$workspace_missing_fixture/crates/b"
+              cat >"$workspace_missing_fixture/crates/a/Cargo.toml" <<'"'"'EOF'"'"'
+[package]
+name = "workspace-inventory-missing-a"
+version = "0.0.0"
+edition = "2021"
+EOF
+              cat >"$workspace_missing_fixture/crates/b/Cargo.toml" <<'"'"'EOF'"'"'
+[package]
+name = "workspace-inventory-missing-b"
+version = "0.0.0"
+edition = "2021"
+EOF
+              cat >"$workspace_missing_fixture/Cargo.toml" <<'"'"'EOF'"'"'
+[workspace]
+members = [
+  "crates/a",
+]
+EOF
+              if mfm-verify-workspace-manifest --manifest "$workspace_missing_fixture/Cargo.toml" >"$workspace_missing_fixture/out" 2>&1; then
+                echo "ERROR: missing Cargo workspace member fixture unexpectedly passed"
+                cat "$workspace_missing_fixture/out"
+                exit 1
+              fi
+              if ! grep -F "Cargo workspace missing discovered members: crates/b" "$workspace_missing_fixture/out" >/dev/null; then
+                echo "ERROR: missing Cargo workspace member fixture missing expected diagnostic"
+                cat "$workspace_missing_fixture/out"
+                exit 1
+              fi
+
+              workspace_dead_fixture="$(mktemp -d "''${TMPDIR:-/tmp}/workspace-inventory-dead.XXXXXX")"
+              mkdir -p "$workspace_dead_fixture/crates/a"
+              cat >"$workspace_dead_fixture/crates/a/Cargo.toml" <<'"'"'EOF'"'"'
+[package]
+name = "workspace-inventory-dead-a"
+version = "0.0.0"
+edition = "2021"
+EOF
+              cat >"$workspace_dead_fixture/Cargo.toml" <<'"'"'EOF'"'"'
+[workspace]
+members = [
+  "crates/a",
+  "crates/dead",
+]
+EOF
+              if mfm-verify-workspace-manifest --manifest "$workspace_dead_fixture/Cargo.toml" >"$workspace_dead_fixture/out" 2>&1; then
+                echo "ERROR: dead Cargo workspace member fixture unexpectedly passed"
+                cat "$workspace_dead_fixture/out"
+                exit 1
+              fi
+              if ! grep -F "Cargo workspace dead members: crates/dead" "$workspace_dead_fixture/out" >/dev/null; then
+                echo "ERROR: dead Cargo workspace member fixture missing expected diagnostic"
+                cat "$workspace_dead_fixture/out"
                 exit 1
               fi
 
