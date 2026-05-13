@@ -25,7 +25,6 @@ let
         pkgs.clippy
       ];
 
-  aaveOriginTools = if pkgs == null then null else import ./aave-origin-tools.nix { inherit pkgs; };
   projectSource =
     if pkgs == null then
       null
@@ -199,7 +198,6 @@ rec {
             pkgs.foundry
             pkgs.reth
             pkgs.minio
-            aaveOriginTools.aaveV3OriginFetchTool
             aaveOriginCompilePackage
           ]
       )
