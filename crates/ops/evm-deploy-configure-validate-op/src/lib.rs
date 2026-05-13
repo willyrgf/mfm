@@ -132,6 +132,29 @@ struct ExecutionChildPlan {
     interface: OpInterface,
 }
 
+struct ChildExportProducer {
+    child_op_local_id: ChildOpLocalId,
+    op_id: OpId,
+}
+
+fn duplicate_child_export_error(
+    export: &PortKey,
+    first: &ChildExportProducer,
+    duplicate: &ExecutionChildPlan,
+) -> SdkError {
+    sdk_input_error(
+        "duplicate_child_export",
+        format!(
+            "duplicate child export `{}` produced by child `{}` ({}) and child `{}` ({})",
+            export.0,
+            first.child_op_local_id.0,
+            first.op_id.as_str(),
+            duplicate.child_op_local_id.0,
+            duplicate.op_id.as_str()
+        ),
+    )
+}
+
 fn plan_execution_child(
     op_path: &OpPath,
     child_id: &'static str,
@@ -204,7 +227,7 @@ fn execution_composite(
     run_config: &RunConfig,
 ) -> Result<(OpInterface, CompositeOpSpec), SdkError> {
     let children = plan_execution_children(op_path, cfg, run_config)?;
-    let mut export_producers: HashMap<String, ChildOpLocalId> = HashMap::new();
+    let mut export_producers: HashMap<String, ChildExportProducer> = HashMap::new();
     let mut seen_parent_imports: HashSet<String> = HashSet::new();
     let mut parent_imports = Vec::new();
     let mut bindings = Vec::new();
@@ -213,7 +236,7 @@ fn execution_composite(
         for import in &child.interface.imports {
             let source = match export_producers.get(&import.0) {
                 Some(source_child) => PortSource::ChildExport {
-                    child: source_child.clone(),
+                    child: source_child.child_op_local_id.clone(),
                     export: import.clone(),
                 },
                 None => {
@@ -231,9 +254,13 @@ fn execution_composite(
         }
 
         for export in &child.interface.exports {
-            export_producers
-                .entry(export.0.clone())
-                .or_insert_with(|| child.child_op_local_id.clone());
+            let producer = ChildExportProducer {
+                child_op_local_id: child.child_op_local_id.clone(),
+                op_id: child.op_id.clone(),
+            };
+            if let Some(first) = export_producers.insert(export.0.clone(), producer) {
+                return Err(duplicate_child_export_error(export, &first, child));
+            }
         }
     }
 
@@ -616,6 +643,29 @@ mod tests {
         assert!(io.exports.iter().any(|p| p.0 == DEPLOY_TX_HASH_EXPORT));
         assert!(io.exports.iter().any(|p| p.0 == CONFIGURE_EXPORT));
         assert!(io.exports.iter().any(|p| p.0 == VALIDATED_EXPORT));
+    }
+
+    #[test]
+    fn execute_root_rejects_duplicate_child_exports() {
+        let op = EvmDeployConfigureValidateExecuteOp;
+        let mut cfg = built_config();
+        cfg.execution.configure.tx_hashes_export_key = CONTRACT_ADDRESS_EXPORT.to_string();
+
+        let err = op
+            .expand(
+                OpPath("evm_deploy_configure_validate_execute.main".to_string()),
+                &serde_json::to_value(cfg).expect("built json"),
+                &op_test_support::run_config_live(),
+            )
+            .err()
+            .expect("duplicate child exports should fail");
+
+        assert_eq!(err.info.code.as_str(), "duplicate_child_export");
+        assert!(err.info.message.contains(CONTRACT_ADDRESS_EXPORT));
+        assert!(err.info.message.contains(DEPLOY_CHILD_ID));
+        assert!(err.info.message.contains(CONFIGURE_CHILD_ID));
+        assert!(err.info.message.contains("evm_deploy"));
+        assert!(err.info.message.contains("evm_configure"));
     }
 
     #[test]

@@ -79,6 +79,14 @@ fn default_max_receipt_polls() -> u64 {
     120
 }
 
+fn default_configure_tx_hashes_export_key() -> String {
+    "configure_tx_hashes".to_string()
+}
+
+fn default_configure_receipts_export_key() -> String {
+    "configure_receipts".to_string()
+}
+
 fn default_require_client_substring() -> String {
     "reth".to_string()
 }
@@ -141,6 +149,12 @@ pub struct DeployConfigureValidateConfigureConfig {
     /// Calls to execute against the deployed contract.
     #[serde(default)]
     pub calls: Vec<ConfigureCallConfig>,
+    /// Export key used by the configure phase for transaction hashes.
+    #[serde(default = "default_configure_tx_hashes_export_key")]
+    pub tx_hashes_export_key: String,
+    /// Export key used by the configure phase for transaction receipts.
+    #[serde(default = "default_configure_receipts_export_key")]
+    pub receipts_export_key: String,
     /// Delay between receipt polls in milliseconds.
     #[serde(default = "default_poll_interval_ms")]
     pub poll_interval_ms: u64,
@@ -512,6 +526,14 @@ mod tests {
         assert_eq!(canonical.machine_id, "evm_deploy_configure_validate");
         assert_eq!(canonical.pipeline_version, "v1");
         assert_eq!(canonical.input, serde_json::json!({}));
+        assert_eq!(
+            canonical.configure.tx_hashes_export_key,
+            "configure_tx_hashes"
+        );
+        assert_eq!(
+            canonical.configure.receipts_export_key,
+            "configure_receipts"
+        );
     }
 
     #[test]
