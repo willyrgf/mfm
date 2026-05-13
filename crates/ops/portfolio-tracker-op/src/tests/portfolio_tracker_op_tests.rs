@@ -636,6 +636,33 @@ async fn portfolio_config_build_emits_built_config_artifacts_and_report() {
     assert_eq!(run.phase, RunPhase::Completed);
     let final_snapshot_id = run.final_snapshot_id.expect("final snapshot");
     let context_snapshot = load_context_snapshot(&stores, &final_snapshot_id).await;
+    let snapshot_object = context_snapshot
+        .as_object()
+        .expect("context snapshot object");
+    let exported_keys = [
+        portfolio_config_build_built_config_context_key(),
+        portfolio_config_build_canonical_artifact_id_context_key(),
+        portfolio_config_build_built_artifact_id_context_key(),
+        portfolio_config_build_report_context_key(),
+    ];
+    for key in &exported_keys {
+        assert!(
+            snapshot_object.contains_key(&key.0),
+            "declared export `{}` should be present under its exact context key",
+            key.0
+        );
+    }
+    let (op_path, _) = exported_keys[0]
+        .0
+        .rsplit_once(".out.")
+        .expect("export key shape");
+    let leaked_qualified_export_prefix = format!("{op_path}.work.{op_path}.out.");
+    assert!(
+        !snapshot_object
+            .keys()
+            .any(|key| key.starts_with(&leaked_qualified_export_prefix)),
+        "pre-qualified export keys must not be requalified as work slots"
+    );
 
     let built_config: PortfolioSnapshotBuiltConfig =
         serde_json::from_value(read_required_context_value(

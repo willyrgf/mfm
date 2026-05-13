@@ -9,8 +9,8 @@ use mfm_machine::plan::DependencyEdge;
 use mfm_sdk::errors::SdkError;
 use mfm_sdk::ids::PortKey;
 use mfm_sdk::op::{
-    child_op_path, leaf_state_id, leaf_state_node, DynOperation, LeafOpSpec, OpInterface,
-    Operation, PlannedOp, PlannedOpKind,
+    child_op_path, export_context_key, leaf_state_id, leaf_state_node, work_context_key,
+    DynOperation, LeafOpSpec, OpInterface, Operation, PlannedOp, PlannedOpKind,
 };
 use mfm_state_common::states::publish::{WriteContextValueArtifactState, WriteJsonValueState};
 use serde_json::Value;
@@ -32,10 +32,6 @@ fn canonical_output_fact_key(op_path: &OpPath) -> FactKey {
 
 fn built_output_fact_key(op_path: &OpPath) -> FactKey {
     FactKey(format!("evm:dcv:config_build:built|op:{}", op_path.0))
-}
-
-fn output_context_key(op_path: &OpPath, port: &str) -> ContextKey {
-    ContextKey(format!("{}.out.{port}", op_path.0))
 }
 
 /// Returns the context key that stores the built config JSON.
@@ -122,11 +118,11 @@ impl Operation for EvmDeployConfigureValidateConfigBuildOp {
         let write_built_artifact_sid = leaf_state_id(&op_path, "write_built_artifact")?;
         let write_report_sid = leaf_state_id(&op_path, "write_build_report")?;
 
-        let built_config_key = output_context_key(&op_path, PORT_BUILT_CONFIG);
-        let canonical_artifact_id_key = output_context_key(&op_path, PORT_CANONICAL_ARTIFACT_ID);
-        let built_artifact_id_key = output_context_key(&op_path, PORT_BUILT_ARTIFACT_ID);
-        let report_key = output_context_key(&op_path, PORT_BUILD_REPORT);
-        let canonical_config_key = output_context_key(&op_path, PORT_CANONICAL_CONFIG);
+        let built_config_key = export_context_key(PORT_BUILT_CONFIG)?;
+        let canonical_artifact_id_key = export_context_key(PORT_CANONICAL_ARTIFACT_ID)?;
+        let built_artifact_id_key = export_context_key(PORT_BUILT_ARTIFACT_ID)?;
+        let report_key = export_context_key(PORT_BUILD_REPORT)?;
+        let canonical_config_key = work_context_key(PORT_CANONICAL_CONFIG)?;
 
         let states = vec![
             leaf_state_node(

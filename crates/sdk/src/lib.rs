@@ -159,7 +159,7 @@ pub mod op {
     use crate::errors::SdkError;
     use crate::ids::{ChildOpLocalId, PortKey, StateAddr, StateLocalId};
     use mfm_machine::errors::{ErrorCategory, ErrorInfo};
-    use mfm_machine::ids::{ErrorCode, StateId};
+    use mfm_machine::ids::{ContextKey, ErrorCode, StateId};
     use mfm_machine::plan::StateNode;
     use mfm_machine::state::DynState;
 
@@ -191,6 +191,21 @@ pub mod op {
                 "child_op_local_id must match ^[a-z][a-z0-9_]{0,62}$",
             )
         })
+    }
+
+    fn validate_logical_context_slot(slot: &str) -> Result<(), SdkError> {
+        if slot.is_empty()
+            || slot
+                .split('.')
+                .any(|segment| matches!(segment, "in" | "out" | "work"))
+        {
+            return Err(sdk_error(
+                "invalid_context_slot_key",
+                "context slot key must be logical and must not contain reserved in/out/work segments",
+            ));
+        }
+
+        Ok(())
     }
 
     /// Declared operation interface for planner validation and parent-owned bindings.
@@ -391,6 +406,27 @@ pub mod op {
             state_id,
             state,
         })
+    }
+
+    /// Builds a logical context key for a declared operation export.
+    ///
+    /// The returned key intentionally omits the operation path and `out.` prefix. SDK runtime
+    /// context qualification maps it to `<op_path>.out.<export>` only when the operation declares
+    /// the matching export.
+    pub fn export_context_key(export: impl Into<String>) -> Result<ContextKey, SdkError> {
+        let export = export.into();
+        validate_logical_context_slot(&export)?;
+        Ok(ContextKey(export))
+    }
+
+    /// Builds an operation-local work context key.
+    ///
+    /// The returned key uses the explicit `work.` slot but intentionally omits the operation path;
+    /// runtime namespacing maps it to `<op_path>.work.<slot>`.
+    pub fn work_context_key(slot: impl Into<String>) -> Result<ContextKey, SdkError> {
+        let slot = slot.into();
+        validate_logical_context_slot(&slot)?;
+        Ok(ContextKey(format!("work.{slot}")))
     }
 
     /// A reusable operation definition.

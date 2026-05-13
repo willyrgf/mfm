@@ -30,6 +30,22 @@ fn run_config_live() -> RunConfig {
     }
 }
 
+#[test]
+fn context_key_constructors_keep_slot_qualification_at_sdk_boundary() {
+    let export = crate::op::export_context_key("report").expect("export key");
+    let work = crate::op::work_context_key("canonical_config").expect("work key");
+    assert_eq!(export.0, "report");
+    assert_eq!(work.0, "work.canonical_config");
+
+    let err = crate::op::export_context_key("portfolio_config_build.main.out.report")
+        .expect_err("qualified export key should be rejected");
+    assert_eq!(err.info.code.as_str(), "invalid_context_slot_key");
+
+    let err = crate::op::work_context_key("work.canonical_config")
+        .expect_err("pre-slotted work key should be rejected");
+    assert_eq!(err.info.code.as_str(), "invalid_context_slot_key");
+}
+
 #[derive(Default)]
 struct MapContext {
     inner: HashMap<String, serde_json::Value>,
