@@ -148,22 +148,9 @@ let
     in
     "SKIP_${safeServiceName}";
 
-  normalizeSkipEnvValue =
-    value: lib.toLower (builtins.replaceStrings [ " " "\n" "\r" "\t" ] [ "" "" "" "" ] value);
-
-  isTruthySkipEnvValue =
-    value:
-    builtins.elem (normalizeSkipEnvValue value) [
-      "1"
-      "true"
-      "yes"
-      "on"
-    ];
-
+  graphConfig = conf.graph or { };
   excludedServices = builtins.sort builtins.lessThan (
-    builtins.filter (
-      serviceName: isTruthySkipEnvValue (builtins.getEnv (serviceSkipEnvVarName serviceName))
-    ) (builtins.attrNames conf.services)
+    lib.unique (graphConfig.excludedServices or [ ])
   );
   projectEnvToken = lib.toUpper (lib.replaceStrings [ "." "-" ] [ "_" "_" ] project.id);
   projectEphemeralRootEnvVar = "${projectEnvToken}_EPHEMERAL_ROOT";
@@ -1370,6 +1357,26 @@ in
                 printf "%s" "$output"
               }
 
+              build_output_with_skip_env_with_timeout() {
+                local ref="$1"
+                local label="$2"
+                local rc=0
+                local output=""
+
+                output="$(
+                  SKIP_POSTGRES=1 ${pkgs.coreutils}/bin/timeout --signal=TERM --kill-after=10s ${toString ciShellAppContractsTimeoutSec} \
+                    nix build --impure --no-link --print-out-paths "$ref"
+                )" || rc="$?"
+                if [ "$rc" -ne 0 ]; then
+                  if [ "$rc" -eq 124 ]; then
+                    echo "ERROR: $label build timed out after ${toString ciShellAppContractsTimeoutSec}s"
+                  fi
+                  exit "$rc"
+                fi
+
+                printf "%s" "$output"
+              }
+
               mfm-verify-workspace-manifest --root "$ROOT" --metadata --expect-member-once crates/collectors/rpc-control
               nixfied-discovery-index --verify --root "$ROOT"
 
@@ -1427,6 +1434,14 @@ EOF
               fi
 
               INTROSPECTION_BUNDLE_PATH="$(build_output_with_timeout ".#introspectionBundle" "introspection bundle")"
+              INTROSPECTION_BUNDLE_WITH_SKIP_POSTGRES_PATH="$(
+                build_output_with_skip_env_with_timeout ".#introspectionBundle" "introspection bundle with SKIP_POSTGRES"
+              )"
+
+              if ! ${pkgs.diffutils}/bin/cmp -s "$INTROSPECTION_BUNDLE_PATH" "$INTROSPECTION_BUNDLE_WITH_SKIP_POSTGRES_PATH"; then
+                echo "ERROR: introspection bundle changed when SKIP_POSTGRES was set during evaluation"
+                exit 1
+              fi
 
               require_app() {
                 local app_name="$1"

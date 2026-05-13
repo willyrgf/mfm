@@ -115,6 +115,10 @@ rec {
     slotVar = "NIX_ENV";
   };
 
+  graph = {
+    excludedServices = [ ];
+  };
+
   # Environment definitions and port offsets
   envs = {
     prod = {
