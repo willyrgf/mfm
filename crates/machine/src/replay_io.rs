@@ -8,11 +8,14 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use zeroize::Zeroizing;
 
-use crate::errors::{ErrorCategory, ErrorInfo, IoError, CODE_MISSING_FACT_KEY};
+use crate::errors::{
+    ErrorCategory, ErrorInfo, IoError, RunError, StorageError, CODE_MISSING_FACT_KEY,
+};
+use crate::hashing::{artifact_id_for_bytes, canonical_json_bytes, CanonicalJsonError};
 use crate::ids::{ArtifactId, ErrorCode, FactKey, RunId, StateId};
 use crate::io::{IoCall, IoProvider, IoResult};
 use crate::live_io::FactIndex;
-use crate::stores::ArtifactStore;
+use crate::stores::{ArtifactKind, ArtifactStore};
 
 fn info(
     code: &'static str,
@@ -27,6 +30,56 @@ fn info(
         message: message.to_string(),
         details: None,
     }
+}
+
+fn json_payload_read_error(err: RunError) -> IoError {
+    match err {
+        RunError::Storage(StorageError::Corruption(info)) => IoError::Other(info),
+        RunError::Storage(_) => IoError::Other(info(
+            "fact_payload_get_failed",
+            ErrorCategory::Storage,
+            false,
+            "failed to read fact payload",
+        )),
+        _ => IoError::Other(info(
+            "fact_payload_decode_failed",
+            ErrorCategory::ParsingInput,
+            false,
+            "failed to decode fact payload",
+        )),
+    }
+}
+
+fn validate_record_value_bytes(
+    value: &serde_json::Value,
+    payload_id: &ArtifactId,
+) -> Result<(), IoError> {
+    let expected_bytes = canonical_json_bytes(value).map_err(|err| match err {
+        CanonicalJsonError::FloatNotAllowed => IoError::Other(info(
+            "fact_payload_not_canonical",
+            ErrorCategory::ParsingInput,
+            false,
+            "fact payload is not canonical-json-hashable (floats are forbidden)",
+        )),
+        CanonicalJsonError::SecretsNotAllowed => IoError::Other(info(
+            "secrets_detected",
+            ErrorCategory::Unknown,
+            false,
+            "fact payload contained secrets (policy forbids persisting secrets)",
+        )),
+    })?;
+
+    let expected_id = artifact_id_for_bytes(&expected_bytes);
+    if &expected_id != payload_id {
+        return Err(IoError::Other(info(
+            "fact_payload_conflict",
+            ErrorCategory::Storage,
+            false,
+            "fact key was already bound to a different payload",
+        )));
+    }
+
+    Ok(())
 }
 
 /// [`IoProvider`] implementation that replays previously recorded facts instead of performing live IO.
@@ -100,22 +153,13 @@ impl ReplayIo {
         &self,
         payload_id: &ArtifactId,
     ) -> Result<serde_json::Value, IoError> {
-        let bytes = self.artifacts.get(payload_id).await.map_err(|_| {
-            IoError::Other(info(
-                "fact_payload_get_failed",
-                ErrorCategory::Storage,
-                false,
-                "failed to read fact payload",
-            ))
-        })?;
-        serde_json::from_slice::<serde_json::Value>(&bytes).map_err(|_| {
-            IoError::Other(info(
-                "fact_payload_decode_failed",
-                ErrorCategory::ParsingInput,
-                false,
-                "failed to decode fact payload",
-            ))
-        })
+        crate::context_runtime::read_canonical_json_artifact(
+            self.artifacts.as_ref(),
+            ArtifactKind::FactPayload,
+            payload_id,
+        )
+        .await
+        .map_err(json_payload_read_error)
     }
 
     async fn read_bytes_payload(&self, payload_id: &ArtifactId) -> Result<Vec<u8>, IoError> {
@@ -173,11 +217,13 @@ impl IoProvider for ReplayIo {
     async fn record_value(
         &mut self,
         key: FactKey,
-        _value: serde_json::Value,
+        value: serde_json::Value,
     ) -> Result<ArtifactId, IoError> {
         let Some(payload_id) = self.facts.get(&key).await else {
             return Err(self.missing_fact(key));
         };
+        self.read_json_payload(&payload_id).await?;
+        validate_record_value_bytes(&value, &payload_id)?;
         Ok(payload_id)
     }
 
@@ -237,7 +283,7 @@ impl IoProvider for ReplayIo {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::errors::{ErrorCategory, StorageError};
+    use crate::errors::ErrorCategory;
     use crate::hashing::artifact_id_for_bytes;
     use crate::stores::{ArtifactKind, ArtifactStore};
     use std::collections::HashMap;
@@ -303,6 +349,132 @@ mod tests {
             IoError::MissingFactKey(info) => assert_eq!(info.code.0, "missing_fact_key"),
             other => panic!("expected MissingFactKey, got: {other:?}"),
         }
+    }
+
+    fn replay_io(artifacts: Arc<MemArtifactStore>, facts: FactIndex) -> ReplayIo {
+        ReplayIo::new(
+            RunId(uuid::Uuid::new_v4()),
+            StateId::must_new("machine.main.s1".to_string()),
+            0,
+            artifacts,
+            facts,
+            false,
+        )
+    }
+
+    async fn bind_fact_payload(
+        artifacts: &Arc<MemArtifactStore>,
+        facts: &FactIndex,
+        key: &FactKey,
+        bytes: Vec<u8>,
+    ) -> ArtifactId {
+        let id = artifacts
+            .put(ArtifactKind::FactPayload, bytes)
+            .await
+            .expect("put fact payload");
+        facts.bind_if_unset(key.clone(), id.clone()).await;
+        id
+    }
+
+    async fn replay_call_with_payload(bytes: Vec<u8>) -> Result<IoResult, IoError> {
+        let artifacts = Arc::new(MemArtifactStore::default());
+        let facts = FactIndex::default();
+        let key = FactKey("fact:json".to_string());
+        bind_fact_payload(&artifacts, &facts, &key, bytes).await;
+        let mut io = replay_io(artifacts, facts);
+
+        io.call(IoCall {
+            namespace: "test".to_string(),
+            request: serde_json::json!({}),
+            fact_key: Some(key),
+        })
+        .await
+    }
+
+    fn assert_other_code(err: IoError, expected: &str) {
+        match err {
+            IoError::Other(info) => assert_eq!(info.code.0, expected),
+            other => panic!("expected IoError::Other({expected}), got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn replay_call_rejects_noncanonical_json_fact_payload() {
+        let err = replay_call_with_payload(br#"{ "a": 1 }"#.to_vec())
+            .await
+            .expect_err("noncanonical JSON fact payload must fail closed");
+
+        assert_other_code(err, "artifact_not_canonical");
+    }
+
+    #[tokio::test]
+    async fn replay_call_rejects_float_fact_payload() {
+        let err = replay_call_with_payload(br#"{"a":1.5}"#.to_vec())
+            .await
+            .expect_err("float JSON fact payload must fail closed");
+
+        assert_other_code(err, "artifact_float_not_allowed");
+    }
+
+    #[tokio::test]
+    async fn replay_call_rejects_secret_shaped_fact_payload() {
+        let err = replay_call_with_payload(br#"{"password":"not-a-real-secret"}"#.to_vec())
+            .await
+            .expect_err("secret-shaped JSON fact payload must fail closed");
+
+        assert_other_code(err, "secrets_detected");
+    }
+
+    #[tokio::test]
+    async fn replay_call_rejects_fact_payload_content_address_mismatch() {
+        let artifacts = Arc::new(MemArtifactStore::default());
+        let facts = FactIndex::default();
+        let key = FactKey("fact:json".to_string());
+        let bad_id = ArtifactId::must_new("0".repeat(64));
+        artifacts
+            .inner
+            .lock()
+            .await
+            .insert(bad_id.clone(), br#"{"a":1}"#.to_vec());
+        facts.bind_if_unset(key.clone(), bad_id).await;
+        let mut io = replay_io(artifacts, facts);
+
+        let err = io
+            .call(IoCall {
+                namespace: "test".to_string(),
+                request: serde_json::json!({}),
+                fact_key: Some(key),
+            })
+            .await
+            .expect_err("content address mismatch must fail closed");
+
+        assert_other_code(err, "artifact_content_address_mismatch");
+    }
+
+    #[tokio::test]
+    async fn replay_random_bytes_keeps_byte_facts_out_of_json_validation() {
+        let artifacts = Arc::new(MemArtifactStore::default());
+        let facts = FactIndex::default();
+        let key = FactKey(format!(
+            "mfm:random_bytes|run:{}|state:{}|attempt:{}|ord:{}",
+            "00000000-0000-0000-0000-000000000000", "machine.main.s1", 0, 0
+        ));
+        bind_fact_payload(&artifacts, &facts, &key, vec![0, 1, 2, 255]).await;
+        let mut io = ReplayIo::new(
+            RunId(uuid::Uuid::nil()),
+            StateId::must_new("machine.main.s1".to_string()),
+            0,
+            artifacts,
+            facts,
+            false,
+        );
+
+        let bytes = io
+            .random_bytes(4)
+            .await
+            .expect("raw byte facts should not be decoded as JSON");
+
+        assert_eq!(bytes, vec![0, 1, 2, 255]);
     }
 
     #[tokio::test]
