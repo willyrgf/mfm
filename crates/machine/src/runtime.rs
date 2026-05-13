@@ -112,6 +112,10 @@ fn storage_not_found(code: &'static str, message: &'static str) -> StorageError 
     StorageError::NotFound(info(code, ErrorCategory::Storage, message))
 }
 
+fn storage_corruption(code: &'static str, message: &'static str) -> StorageError {
+    StorageError::Corruption(info(code, ErrorCategory::Storage, message))
+}
+
 fn context_err(code: &'static str, message: &'static str) -> ContextError {
     ContextError::Serialization(info(code, ErrorCategory::Context, message))
 }
@@ -706,6 +710,13 @@ impl ExecutionEngine for DefaultExecutionEngine {
             return Err(RunError::Storage(storage_not_found(
                 "manifest_not_found",
                 "manifest artifact was not found",
+            )));
+        }
+        let stored_manifest = read_manifest(stores.artifacts.as_ref(), &run.manifest_id).await?;
+        if stored_manifest != run.manifest {
+            return Err(RunError::Storage(storage_corruption(
+                "manifest_artifact_mismatch",
+                "stored manifest did not match start request manifest",
             )));
         }
         info!(manifest_id = %run.manifest_id, "starting run");

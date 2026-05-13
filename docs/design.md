@@ -136,7 +136,7 @@ A state attempt may span multiple appends.
 
 ### 4.5 Content addressing
 Manifests, snapshots, facts, and outputs are immutable artifacts addressed by digest.
-When the runtime reads structured artifacts for resume, the stored bytes MUST both match the
+When the runtime reads structured artifacts for start or resume, the stored bytes MUST both match the
 requested content address and exactly equal the canonical JSON encoding of the parsed value.
 
 ### 4.6 Canonical hashing format

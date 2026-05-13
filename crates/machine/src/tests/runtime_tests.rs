@@ -8,7 +8,7 @@ use crate::events::{
     event_envelopes_from_stream_records, new_stream_record_for_event, DomainEvent, EventEnvelope,
     FactRecorded, DOMAIN_EVENT_FACT_RECORDED,
 };
-use crate::hashing::artifact_id_for_bytes;
+use crate::hashing::{artifact_id_for_bytes, canonical_json_bytes};
 use crate::ids::ContextKey;
 use crate::ids::ErrorCode;
 use crate::ids::FactKey;
@@ -210,6 +210,30 @@ impl ArtifactStore for MemArtifactStore {
 
     async fn exists(&self, id: &ArtifactId) -> Result<bool, StorageError> {
         Ok(self.inner.lock().await.contains_key(id))
+    }
+}
+
+#[derive(Clone)]
+struct MismatchedManifestArtifactStore {
+    bytes: Arc<Vec<u8>>,
+}
+
+#[async_trait]
+impl ArtifactStore for MismatchedManifestArtifactStore {
+    async fn put(&self, _kind: ArtifactKind, _bytes: Vec<u8>) -> Result<ArtifactId, StorageError> {
+        Err(StorageError::Other(info(
+            "unexpected_artifact_put",
+            ErrorCategory::Storage,
+            "start wrote an artifact before validating stored manifest bytes",
+        )))
+    }
+
+    async fn get(&self, _id: &ArtifactId) -> Result<Vec<u8>, StorageError> {
+        Ok((*self.bytes).clone())
+    }
+
+    async fn exists(&self, _id: &ArtifactId) -> Result<bool, StorageError> {
+        Ok(true)
     }
 }
 
@@ -437,6 +461,45 @@ async fn append_run_started(
         )
         .await
         .expect("seed run");
+}
+
+#[tokio::test]
+async fn start_rejects_manifest_artifact_bytes_that_do_not_match_id() {
+    let streams = Arc::new(MemStreamStore::default());
+    let artifacts = Arc::new(MismatchedManifestArtifactStore {
+        bytes: Arc::new(b"{}".to_vec()),
+    });
+    let stores = || Stores {
+        streams: streams.clone(),
+        artifacts: artifacts.clone(),
+    };
+
+    let run_config = base_run_config();
+    let manifest = manifest_for(run_config.clone());
+    let manifest_value = serde_json::to_value(&manifest).expect("manifest json");
+    let manifest_id = artifact_id_for_bytes(
+        &canonical_json_bytes(&manifest_value).expect("canonical manifest bytes"),
+    );
+    let plan = set_key_plan(&manifest.op_id);
+    let resolver = Arc::new(FixedResolver { plan: plan.clone() });
+    let engine = DefaultExecutionEngine::new(resolver);
+
+    let err = engine
+        .start(
+            stores(),
+            StartRun {
+                manifest,
+                manifest_id,
+                plan,
+                run_config,
+                initial_context: Box::new(JsonContext::new()),
+            },
+        )
+        .await
+        .expect_err("mismatched stored manifest bytes must fail start");
+
+    assert_storage_corruption_code(err, "artifact_content_address_mismatch");
+    assert!(streams.inner.lock().await.is_empty());
 }
 
 #[tokio::test]
