@@ -49,6 +49,7 @@ let
       summary = raw.summary;
       description = raw.description;
       tags = raw.tags;
+      ci = raw.ci;
 
       runner = {
         type = raw.runner.type;

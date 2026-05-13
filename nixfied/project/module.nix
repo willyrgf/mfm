@@ -315,30 +315,74 @@ let
   parityNextestArgs = "-p mfm-integration-tests --features parity-tests -p mfm --features parity-tests";
   parityNextestCmd = "${cargoNextestCiCmd} ${parityNextestArgs}";
   parityNextestArchiveCmd = "${cargoNextestArchiveCiCmd} ${parityNextestArgs}";
+  mkNextestSelection =
+    {
+      binaryIds,
+      jobs ? null,
+      usesArchive ? true,
+      workspaceRemap ? true,
+    }:
+    {
+      inherit
+        binaryIds
+        jobs
+        usesArchive
+        workspaceRemap
+        ;
+    };
   mkNextestBinaryIdFilterArgs =
-    binaryIds:
+    selection:
     lib.concatMapStringsSep " " (
       binaryId: "-E ${lib.escapeShellArg "binary_id(=${binaryId})"}"
-    ) binaryIds;
-  parityRestApiSmokeNextestFilterArgs = mkNextestBinaryIdFilterArgs [
-    "mfm-integration-tests::parity_event_store_postgres_contract"
-    "mfm-integration-tests::parity_artifact_store_s3_contract"
-    "mfm-integration-tests::parity_rest_api_postgres_s3_smoke"
-  ];
-  parityEvmRethNextestFilterArgs = mkNextestBinaryIdFilterArgs [
-    "mfm::parity_keystore_reth_tx_send"
-    "mfm-integration-tests::evm_rpc_pool_failover"
-    "mfm-integration-tests::evm_rpc_getlogs_chunking"
-    "mfm-integration-tests::parity_rest_api_evm_reth_pipeline"
-    "mfm-integration-tests::parity_portfolio_tracker_reth_mock_erc20"
-    "mfm-integration-tests::parity_portfolio_tracker_reth_snapshot"
-  ];
-  parityAaveV3RethNextestFilterArgs = mkNextestBinaryIdFilterArgs [
-    "mfm-integration-tests::parity_aave_v3_reth_scenario"
-  ];
-  parityPostgresStateEventsAuditNextestFilterArgs = mkNextestBinaryIdFilterArgs [
-    "mfm-integration-tests::parity_postgres_state_events_audit"
-  ];
+    ) selection.binaryIds;
+  mkNextestJobArgs =
+    selection: lib.optionalString (selection.jobs != null) "--jobs ${toString selection.jobs}";
+  renderNextestContractCheck =
+    taskId: selection:
+    let
+      expected = builtins.toJSON selection;
+    in
+    ''
+      expected_nextest_json="$(mktemp "''${TMPDIR:-/tmp}/nextest-metadata.XXXXXX")"
+      cat >"$expected_nextest_json" <<'"'"'JSON'"'"'
+      ${expected}
+      JSON
+      if ! jq -e --arg node "task:${taskId}" --slurpfile expected "$expected_nextest_json" ".nodeViews[\$node].jsonByMode.default.resolution.data.ci.nextest == \$expected[0]" "$INTROSPECTION_BUNDLE_PATH" >/dev/null; then
+        echo "ERROR: nextest task metadata mismatch task=${taskId}"
+        rm -f "$expected_nextest_json"
+        exit 1
+      fi
+      rm -f "$expected_nextest_json"
+    '';
+  parityRestApiSmokeNextest = mkNextestSelection {
+    jobs = 1;
+    binaryIds = [
+      "mfm-integration-tests::parity_event_store_postgres_contract"
+      "mfm-integration-tests::parity_artifact_store_s3_contract"
+      "mfm-integration-tests::parity_rest_api_postgres_s3_smoke"
+    ];
+  };
+  parityEvmRethNextest = mkNextestSelection {
+    jobs = 1;
+    binaryIds = [
+      "mfm::parity_keystore_reth_tx_send"
+      "mfm-integration-tests::evm_rpc_pool_failover"
+      "mfm-integration-tests::evm_rpc_getlogs_chunking"
+      "mfm-integration-tests::parity_rest_api_evm_reth_pipeline"
+      "mfm-integration-tests::parity_portfolio_tracker_reth_mock_erc20"
+      "mfm-integration-tests::parity_portfolio_tracker_reth_snapshot"
+    ];
+  };
+  parityAaveV3RethNextest = mkNextestSelection {
+    binaryIds = [
+      "mfm-integration-tests::parity_aave_v3_reth_scenario"
+    ];
+  };
+  parityPostgresStateEventsAuditNextest = mkNextestSelection {
+    binaryIds = [
+      "mfm-integration-tests::parity_postgres_state_events_audit"
+    ];
+  };
 
   cargoSccachePreamble = ''
     export SCCACHE_DIR="''${SCCACHE_DIR:-${defaultSccacheDirExpr}}"
@@ -496,6 +540,7 @@ let
       command ? "",
       kind ? "command",
       tags ? [ ],
+      ci ? { },
       usage ? [ ],
       examples ? [ ],
       runtimeInputs ? commonRuntimeInputs,
@@ -523,6 +568,10 @@ let
         description
         tags
         ;
+
+      ci = {
+        nextest = ci.nextest or null;
+      };
 
       requirements = requirements // {
         services = lib.unique (requirements.services or [ ]);
@@ -1476,6 +1525,22 @@ EOF
                 fi
               }
 
+              require_absent_app() {
+                local app_name="$1"
+                if jq -e --arg node "app:$app_name" ".nodeViews | has(\$node)" "$INTROSPECTION_BUNDLE_PATH" >/dev/null; then
+                  echo "ERROR: unexpected app surface app=$app_name"
+                  exit 1
+                fi
+              }
+
+              require_local_overrides_inactive() {
+                if ! jq -e ".nodeViews[\"app:check\"].jsonByMode.default.diagnostics.localOverridesActive == false and .nodeViews[\"app:check\"].jsonByMode.default.diagnostics.legacyLocalDefault.active == false" "$INTROSPECTION_BUNDLE_PATH" >/dev/null; then
+                  echo "ERROR: default compiled graph has active local overrides"
+                  exit 1
+                fi
+              }
+
+              require_local_overrides_inactive
               require_app "mfm::portfolio::snapshot"
               require_app "mfm_rest_api"
               require_app "dev"
@@ -1492,12 +1557,19 @@ EOF
               require_app "svcset::ci-parity::start"
               require_app "svcset::ci-parity::stop"
               require_app "svcset::ci-parity::export"
+              require_absent_app "aave-v3-origin-fetch"
+              require_absent_app "aave-v3-origin-compile"
+              require_absent_app "aave-v3-origin-deploy"
 
               require_task "task.ci"
               require_task "task.ci.services-start"
               require_task "task.ci.sccache-contracts"
               require_task "task.ci.workflow-basic"
               require_task "task.ci.workflow-parity"
+              require_task "task.ci.parity-rest-api-smoke"
+              require_task "task.ci.parity-evm-reth"
+              require_task "task.ci.parity-aave-v3-reth"
+              require_task "task.ci.parity-postgres-state-events-audit"
               require_task "task.framework.runtime-env-default"
               require_task "task.framework.runtime-env-opt-in"
               require_task "task.framework.runtime-env-invalid"
@@ -1508,53 +1580,17 @@ EOF
               require_workflow "workflow.ci.basic"
               require_workflow "workflow.ci.full"
               require_workflow_plan_task "workflow.ci.basic" "task.ci.sccache-contracts"
+              require_workflow_plan_task "workflow.ci.parity" "task.ci.parity-rest-api-smoke"
+              require_workflow_plan_task "workflow.ci.parity" "task.ci.parity-evm-reth"
+              require_workflow_plan_task "workflow.ci.parity" "task.ci.parity-aave-v3-reth"
+              require_workflow_plan_task "workflow.ci.parity" "task.ci.parity-postgres-state-events-audit"
               require_workflow_plan_task "workflow.ci.full" "task.ci.workflow-basic"
               require_workflow_plan_task "workflow.ci.full" "task.ci.workflow-parity"
 
-              require_project_source_contains() {
-                local fragment="$1"
-                if ! grep -F -- "$fragment" "$ROOT/nixfied/project/module.nix" >/dev/null; then
-                  echo "ERROR: project source missing fragment fragment=$fragment"
-                  exit 1
-                fi
-              }
-
-              require_project_source_omits() {
-                local fragment="$1"
-                if grep -F -- "$fragment" "$ROOT/nixfied/project/module.nix" >/dev/null; then
-                  echo "ERROR: project source includes forbidden fragment fragment=$fragment"
-                  exit 1
-                fi
-              }
-
-              local_default_import="../local/"
-              local_default_import="''${local_default_import}default.nix"
-              require_project_source_omits "$local_default_import"
-              require_project_source_contains "\''${parityRestApiSmokeNextestFilterArgs}"
-              require_project_source_contains "run_with_log \"\$log_file\" cargo nextest run --archive-file \"\$parity_nextest_archive_file\" --extract-to \"\$extract_dir\" --workspace-remap \"\$MFM_WORKSPACE_ROOT\" --jobs 1 \''${parityRestApiSmokeNextestFilterArgs}"
-              require_project_source_contains "binary_id(=mfm-integration-tests::parity_event_store_postgres_contract)"
-              require_project_source_contains "binary_id(=mfm-integration-tests::parity_artifact_store_s3_contract)"
-              require_project_source_contains "binary_id(=mfm-integration-tests::parity_rest_api_postgres_s3_smoke)"
-
-              require_project_source_contains "\''${parityEvmRethNextestFilterArgs}"
-              require_project_source_contains "run_with_log \"\$log_file\" cargo nextest run --archive-file \"\$parity_nextest_archive_file\" --extract-to \"\$extract_dir\" --workspace-remap \"\$MFM_WORKSPACE_ROOT\" --jobs 1 \''${parityEvmRethNextestFilterArgs}"
-              require_project_source_contains "binary_id(=mfm::parity_keystore_reth_tx_send)"
-              require_project_source_contains "binary_id(=mfm-integration-tests::evm_rpc_pool_failover)"
-              require_project_source_contains "binary_id(=mfm-integration-tests::evm_rpc_getlogs_chunking)"
-              require_project_source_contains "binary_id(=mfm-integration-tests::parity_rest_api_evm_reth_pipeline)"
-              require_project_source_contains "binary_id(=mfm-integration-tests::parity_portfolio_tracker_reth_mock_erc20)"
-              require_project_source_contains "binary_id(=mfm-integration-tests::parity_portfolio_tracker_reth_snapshot)"
-
-              require_project_source_contains "\''${parityAaveV3RethNextestFilterArgs}"
-              require_project_source_contains "run_with_log \"\$log_file\" cargo nextest run --archive-file \"\$parity_nextest_archive_file\" --extract-to \"\$extract_dir\" --workspace-remap \"\$MFM_WORKSPACE_ROOT\" \''${parityAaveV3RethNextestFilterArgs}"
-              require_project_source_contains "binary_id(=mfm-integration-tests::parity_aave_v3_reth_scenario)"
-
-              require_project_source_contains "\''${parityPostgresStateEventsAuditNextestFilterArgs}"
-              require_project_source_contains "run_with_log \"\$log_file\" cargo nextest run --archive-file \"\$parity_nextest_archive_file\" --extract-to \"\$extract_dir\" --workspace-remap \"\$MFM_WORKSPACE_ROOT\" \''${parityPostgresStateEventsAuditNextestFilterArgs}"
-              require_project_source_contains "binary_id(=mfm-integration-tests::parity_postgres_state_events_audit)"
-
-              require_project_source_omits "cargo nextest run --archive-file \"\$parity_nextest_archive_file\" --extract-to \"\$extract_dir\" --workspace-remap \"\$MFM_WORKSPACE_ROOT\" --jobs 1 --test"
-              require_project_source_omits "cargo nextest run --archive-file \"\$parity_nextest_archive_file\" --extract-to \"\$extract_dir\" --workspace-remap \"\$MFM_WORKSPACE_ROOT\" --test"
+              ${renderNextestContractCheck "task.ci.parity-rest-api-smoke" parityRestApiSmokeNextest}
+              ${renderNextestContractCheck "task.ci.parity-evm-reth" parityEvmRethNextest}
+              ${renderNextestContractCheck "task.ci.parity-aave-v3-reth" parityAaveV3RethNextest}
+              ${renderNextestContractCheck "task.ci.parity-postgres-state-events-audit" parityPostgresStateEventsAuditNextest}
 
               if grep -R -n "[.]framework/" "$ROOT/nixfied/project" --include="*.nix" >/dev/null; then
                 echo "ERROR: project layer references framework-private paths"
@@ -1975,6 +2011,7 @@ EOF
           id = "task.ci.parity-rest-api-smoke";
           kind = "ci-step";
           summary = "CI parity REST API smoke tests";
+          ci.nextest = parityRestApiSmokeNextest;
           tags = [
             "ci"
             "parity"
@@ -1992,7 +2029,7 @@ EOF
             mkdir -p "$extract_dir"
             require_parity_nextest_archive
             echo "INFO: running ci step=parity-rest-api-smoke archive=$parity_nextest_archive_file"
-            run_with_log "$log_file" cargo nextest run --archive-file "$parity_nextest_archive_file" --extract-to "$extract_dir" --workspace-remap "$MFM_WORKSPACE_ROOT" --jobs 1 ${parityRestApiSmokeNextestFilterArgs}
+            run_with_log "$log_file" cargo nextest run --archive-file "$parity_nextest_archive_file" --extract-to "$extract_dir" --workspace-remap "$MFM_WORKSPACE_ROOT" ${mkNextestJobArgs parityRestApiSmokeNextest} ${mkNextestBinaryIdFilterArgs parityRestApiSmokeNextest}
             echo "OK: ci step passed step=parity-rest-api-smoke log=$log_file"
           '';
         };
@@ -2001,6 +2038,7 @@ EOF
           id = "task.ci.parity-evm-reth";
           kind = "ci-step";
           summary = "CI parity EVM + portfolio tracker tests";
+          ci.nextest = parityEvmRethNextest;
           tags = [
             "ci"
             "parity"
@@ -2018,7 +2056,7 @@ EOF
             mkdir -p "$extract_dir"
             require_parity_nextest_archive
             echo "INFO: running ci step=parity-evm-reth archive=$parity_nextest_archive_file"
-            run_with_log "$log_file" cargo nextest run --archive-file "$parity_nextest_archive_file" --extract-to "$extract_dir" --workspace-remap "$MFM_WORKSPACE_ROOT" --jobs 1 ${parityEvmRethNextestFilterArgs}
+            run_with_log "$log_file" cargo nextest run --archive-file "$parity_nextest_archive_file" --extract-to "$extract_dir" --workspace-remap "$MFM_WORKSPACE_ROOT" ${mkNextestJobArgs parityEvmRethNextest} ${mkNextestBinaryIdFilterArgs parityEvmRethNextest}
             echo "OK: ci step passed step=parity-evm-reth log=$log_file"
           '';
         };
@@ -2027,6 +2065,7 @@ EOF
           id = "task.ci.parity-aave-v3-reth";
           kind = "ci-step";
           summary = "CI parity Aave v3 scenario tests";
+          ci.nextest = parityAaveV3RethNextest;
           tags = [
             "ci"
             "parity"
@@ -2044,7 +2083,7 @@ EOF
             mkdir -p "$extract_dir"
             require_parity_nextest_archive
             echo "INFO: running ci step=parity-aave-v3-reth archive=$parity_nextest_archive_file"
-            run_with_log "$log_file" cargo nextest run --archive-file "$parity_nextest_archive_file" --extract-to "$extract_dir" --workspace-remap "$MFM_WORKSPACE_ROOT" ${parityAaveV3RethNextestFilterArgs}
+            run_with_log "$log_file" cargo nextest run --archive-file "$parity_nextest_archive_file" --extract-to "$extract_dir" --workspace-remap "$MFM_WORKSPACE_ROOT" ${mkNextestJobArgs parityAaveV3RethNextest} ${mkNextestBinaryIdFilterArgs parityAaveV3RethNextest}
             echo "OK: ci step passed step=parity-aave-v3-reth log=$log_file"
           '';
         };
@@ -2053,6 +2092,7 @@ EOF
           id = "task.ci.parity-postgres-state-events-audit";
           kind = "ci-step";
           summary = "CI parity postgres state event audit";
+          ci.nextest = parityPostgresStateEventsAuditNextest;
           tags = [
             "ci"
             "parity"
@@ -2070,7 +2110,7 @@ EOF
             mkdir -p "$extract_dir"
             require_parity_nextest_archive
             echo "INFO: running ci step=parity-postgres-state-events-audit archive=$parity_nextest_archive_file"
-            run_with_log "$log_file" cargo nextest run --archive-file "$parity_nextest_archive_file" --extract-to "$extract_dir" --workspace-remap "$MFM_WORKSPACE_ROOT" ${parityPostgresStateEventsAuditNextestFilterArgs}
+            run_with_log "$log_file" cargo nextest run --archive-file "$parity_nextest_archive_file" --extract-to "$extract_dir" --workspace-remap "$MFM_WORKSPACE_ROOT" ${mkNextestJobArgs parityPostgresStateEventsAuditNextest} ${mkNextestBinaryIdFilterArgs parityPostgresStateEventsAuditNextest}
             echo "OK: ci step passed step=parity-postgres-state-events-audit log=$log_file"
           '';
         };

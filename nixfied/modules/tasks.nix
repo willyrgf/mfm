@@ -147,6 +147,31 @@ let
     };
   };
 
+  nextestSpec = t.submodule {
+    options = {
+      binaryIds = lib.mkOption {
+        type = t.listOf t.str;
+        default = [ ];
+        description = "cargo-nextest binary_id selectors for this CI task.";
+      };
+      jobs = lib.mkOption {
+        type = t.nullOr t.int;
+        default = null;
+        description = "Optional cargo-nextest job limit for this CI task.";
+      };
+      usesArchive = lib.mkOption {
+        type = t.bool;
+        default = false;
+        description = "Whether this CI task runs from a nextest archive.";
+      };
+      workspaceRemap = lib.mkOption {
+        type = t.bool;
+        default = false;
+        description = "Whether this CI task remaps the workspace path for archived tests.";
+      };
+    };
+  };
+
 in
 {
   options.nixfied.tasks = lib.mkOption {
@@ -182,6 +207,14 @@ in
             tags = lib.mkOption {
               type = t.listOf t.str;
               default = [ ];
+            };
+
+            ci = {
+              nextest = lib.mkOption {
+                type = t.nullOr nextestSpec;
+                default = null;
+                description = "Non-secret CI selector metadata exposed through introspection.";
+              };
             };
 
             requirements = {

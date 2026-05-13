@@ -326,6 +326,7 @@ let
         description = task.description;
         ownerFiles = featureOwnerFiles taskId;
         data = {
+          ci = task.ci or { };
           taskKind = task.kind or "command";
           runner = {
             type = task.runner.type or "shell";
