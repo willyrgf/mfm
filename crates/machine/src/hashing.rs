@@ -137,9 +137,10 @@ fn write_canonical_json(
         serde_json::Value::Object(m) => {
             out.push(b'{');
 
-            // RFC 8785 (JCS) requires lexicographic ordering of member names.
+            // RFC 8785 (JCS) orders member names by UTF-16 code units, which differs
+            // from Rust string ordering for supplementary-plane characters.
             let mut keys: Vec<&String> = m.keys().collect();
-            keys.sort();
+            keys.sort_by(|left, right| compare_json_property_names(left, right));
 
             for (idx, key) in keys.iter().enumerate() {
                 if idx != 0 {
@@ -156,6 +157,10 @@ fn write_canonical_json(
     }
 
     Ok(())
+}
+
+fn compare_json_property_names(left: &str, right: &str) -> std::cmp::Ordering {
+    left.encode_utf16().cmp(right.encode_utf16())
 }
 
 #[cfg(test)]
@@ -176,6 +181,50 @@ mod tests {
 
         let v = serde_json::json!({"s": "a\nb"});
         assert_eq!(canonical_json_bytes(&v).unwrap(), br#"{"s":"a\nb"}"#);
+    }
+
+    #[test]
+    fn canonical_json_orders_object_keys_by_utf16_code_units() {
+        let v = serde_json::json!({
+            "\u{e000}": "bmp-private-use",
+            "\u{10000}": "supplementary-plane",
+        });
+
+        assert_eq!(
+            canonical_json_bytes(&v).unwrap(),
+            concat!(
+                "{\"\u{10000}\":\"supplementary-plane\",",
+                "\"\u{e000}\":\"bmp-private-use\"}"
+            )
+            .as_bytes()
+        );
+    }
+
+    #[test]
+    fn canonical_json_matches_jcs_non_ascii_ordering_vector() {
+        let v = serde_json::json!({
+            "\u{20ac}": "Euro Sign",
+            "\r": "Carriage Return",
+            "\u{fb33}": "Hebrew Letter Dalet With Dagesh",
+            "1": "One",
+            "\u{1f600}": "Emoji: Grinning Face",
+            "\u{0080}": "Control",
+            "\u{00f6}": "Latin Small Letter O With Diaeresis",
+        });
+
+        assert_eq!(
+            canonical_json_bytes(&v).unwrap(),
+            concat!(
+                "{\"\\r\":\"Carriage Return\",",
+                "\"1\":\"One\",",
+                "\"\u{0080}\":\"Control\",",
+                "\"\u{00f6}\":\"Latin Small Letter O With Diaeresis\",",
+                "\"\u{20ac}\":\"Euro Sign\",",
+                "\"\u{1f600}\":\"Emoji: Grinning Face\",",
+                "\"\u{fb33}\":\"Hebrew Letter Dalet With Dagesh\"}"
+            )
+            .as_bytes()
+        );
     }
 
     #[test]
