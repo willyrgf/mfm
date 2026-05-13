@@ -24,7 +24,7 @@ pub mod observability;
 
 use std::collections::HashMap;
 use std::fmt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -69,12 +69,12 @@ use mfm_op_evm_write::{
 };
 use mfm_op_keystore_admin::{
     keystore_delete_report_context_key, keystore_import_report_context_key,
-    keystore_list_report_context_key, Bip39ExtraSource as OpBip39ExtraSource, KeystoreDeleteOp,
-    KeystoreDeleteOpConfig, KeystoreDeleteReport as OpKeystoreDeleteReport, KeystoreImportOp,
-    KeystoreImportOpConfig, KeystoreImportReport as OpKeystoreImportReport,
-    KeystoreImportType as OpKeystoreImportType, KeystoreListOp, KeystoreListOpConfig,
-    KeystoreListReport as OpKeystoreListReport, KeystoreListSortBy as OpKeystoreListSortBy,
-    KEYSTORE_ADMIN_OP_VERSION, KEYSTORE_DELETE_OP_ID, KEYSTORE_IMPORT_OP_ID, KEYSTORE_LIST_OP_ID,
+    keystore_list_report_context_key, KeystoreDeleteOp, KeystoreDeleteOpConfig,
+    KeystoreDeleteReport as OpKeystoreDeleteReport, KeystoreImportOp, KeystoreImportOpConfig,
+    KeystoreImportReport as OpKeystoreImportReport, KeystoreImportType as OpKeystoreImportType,
+    KeystoreListOp, KeystoreListOpConfig, KeystoreListReport as OpKeystoreListReport,
+    KeystoreListSortBy as OpKeystoreListSortBy, KEYSTORE_ADMIN_OP_VERSION, KEYSTORE_DELETE_OP_ID,
+    KEYSTORE_IMPORT_OP_ID, KEYSTORE_LIST_OP_ID,
 };
 use mfm_op_keystore_tx::{
     tx_sign_report_context_key, KeystoreTxSignOp, LocalFileWriteMode as OpLocalFileWriteMode,
@@ -106,7 +106,11 @@ use mfm_state_portfolio::model::PortfolioReport;
 use mfm_stream_store_postgres::PostgresStreamStore;
 use mfm_transports_local_evm::LocalEvmIoTransportFactory;
 use mfm_transports_local_fs::LocalFsIoTransportFactory;
-use mfm_transports_local_keystore::LocalKeystoreIoTransportFactory;
+use mfm_transports_local_keystore::{
+    register_local_keystore_resource, LocalKeystoreBip39ExtraSource, LocalKeystoreDeleteResource,
+    LocalKeystoreImportResource, LocalKeystoreIoTransportFactory, LocalKeystoreListResource,
+    LocalKeystoreResource, LocalKeystoreTxSignResource,
+};
 use mfm_transports_proof::ProofIoTransportFactory;
 use mfm_transports_rpc_control::{RpcControlConfigError, RpcControlTransportFactory};
 
@@ -1038,24 +1042,31 @@ impl AppServices {
         &self,
         req: KeystoreImportRequest,
     ) -> Result<KeystoreImportResponse, AppError> {
+        let local_resource_handle = local_keystore_resource_handle();
+        let bip39_extra = match req.bip39_extra {
+            KeystoreBip39ExtraSource::None => LocalKeystoreBip39ExtraSource::None,
+            KeystoreBip39ExtraSource::Prompt => LocalKeystoreBip39ExtraSource::Prompt,
+            KeystoreBip39ExtraSource::FilePath(path) => {
+                LocalKeystoreBip39ExtraSource::FilePath(path)
+            }
+        };
+        register_local_keystore_resource(
+            local_resource_handle.clone(),
+            LocalKeystoreResource::Import(LocalKeystoreImportResource {
+                keystore_path: req.keystore_path,
+                label: req.label,
+                stdin_mode: req.stdin,
+                bip39_extra,
+            }),
+        );
+
         let op_config = KeystoreImportOpConfig {
             import_type: match req.import_type {
                 KeystoreImportType::PrivateKey => OpKeystoreImportType::PrivateKey,
                 KeystoreImportType::Mnemonic => OpKeystoreImportType::Mnemonic,
             },
-            label: None,
-            label_hex: req.label.as_deref().map(hex_string),
             derivation_path: req.derivation_path,
-            keystore_path: None,
-            keystore_path_hex: Some(hex_path(&req.keystore_path)),
-            stdin: req.stdin,
-            bip39_extra: match req.bip39_extra {
-                KeystoreBip39ExtraSource::None => OpBip39ExtraSource::None,
-                KeystoreBip39ExtraSource::Prompt => OpBip39ExtraSource::Prompt,
-                KeystoreBip39ExtraSource::FilePath(path) => {
-                    OpBip39ExtraSource::FilePathHex(hex_path(&path))
-                }
-            },
+            local_resource_handle,
         };
 
         let report: OpKeystoreImportReport = self
@@ -1082,12 +1093,18 @@ impl AppServices {
         &self,
         req: KeystoreListRequest,
     ) -> Result<KeystoreListResponse, AppError> {
+        let local_resource_handle = local_keystore_resource_handle();
+        register_local_keystore_resource(
+            local_resource_handle.clone(),
+            LocalKeystoreResource::List(LocalKeystoreListResource {
+                keystore_path: req.keystore_path,
+                filter_label: req.filter_label,
+            }),
+        );
+
         let op_config = KeystoreListOpConfig {
-            keystore_path: None,
-            keystore_path_hex: Some(hex_path(&req.keystore_path)),
+            local_resource_handle,
             show_addresses: req.show_addresses,
-            filter_label: None,
-            filter_label_hex: req.filter_label.as_deref().map(hex_string),
             sort_by: match req.sort_by {
                 KeystoreListSortBy::Label => OpKeystoreListSortBy::Label,
                 KeystoreListSortBy::Created => OpKeystoreListSortBy::Created,
@@ -1128,13 +1145,19 @@ impl AppServices {
         &self,
         req: KeystoreDeleteRequest,
     ) -> Result<KeystoreDeleteResponse, AppError> {
+        let local_resource_handle = local_keystore_resource_handle();
+        register_local_keystore_resource(
+            local_resource_handle.clone(),
+            LocalKeystoreResource::Delete(LocalKeystoreDeleteResource {
+                keystore_path: req.keystore_path,
+                by_label: req.by_label,
+            }),
+        );
+
         let op_config = KeystoreDeleteOpConfig {
             id: req.id,
-            by_label: None,
-            by_label_hex: req.by_label.as_deref().map(hex_string),
             yes: req.yes,
-            keystore_path: None,
-            keystore_path_hex: Some(hex_path(&req.keystore_path)),
+            local_resource_handle,
         };
 
         let report: OpKeystoreDeleteReport = self
@@ -1158,10 +1181,19 @@ impl AppServices {
         &self,
         req: KeystoreTxSignRequest,
     ) -> Result<KeystoreTxSignResponse, AppError> {
+        let local_resource_handle = local_keystore_resource_handle();
+        register_local_keystore_resource(
+            local_resource_handle.clone(),
+            LocalKeystoreResource::TxSign(LocalKeystoreTxSignResource {
+                keystore_path: req.keystore_path,
+                by_label: req.by_label,
+                out_path: req.out_path,
+            }),
+        );
+
         let op_config = TxSignOpConfig {
             id: req.id,
-            by_label: None,
-            by_label_hex: req.by_label.as_deref().map(hex_string),
+            local_resource_handle,
             to: req.to,
             value_wei: req.value_wei,
             chain_id: req.chain_id,
@@ -1169,14 +1201,11 @@ impl AppServices {
             max_fee_per_gas: req.max_fee_per_gas,
             max_priority_fee_per_gas: req.max_priority_fee_per_gas,
             gas_limit: req.gas_limit,
-            out_path: req.out_path.display().to_string(),
             out_write_mode: match req.out_write_mode {
                 KeystoreTxOutputWriteMode::CreateNew => OpLocalFileWriteMode::CreateNew,
                 KeystoreTxOutputWriteMode::Overwrite => OpLocalFileWriteMode::Overwrite,
             },
             data: req.data,
-            keystore_path: None,
-            keystore_path_hex: Some(hex_path(&req.keystore_path)),
         };
 
         let report: OpTxSignReport = self
@@ -1196,7 +1225,6 @@ impl AppServices {
             chain_id: report.chain_id,
             tx_type: report.tx_type,
             payload_hash: report.payload_hash,
-            out_path: report.out_path,
         })
     }
 
@@ -1782,8 +1810,6 @@ pub struct KeystoreTxSignResponse {
     pub tx_type: String,
     /// Hash of the signed transaction payload.
     pub payload_hash: String,
-    /// Output path where the signed raw transaction was written.
-    pub out_path: String,
 }
 
 /// Input payload for the standard deploy-configure-validate workflow feature.
@@ -1793,12 +1819,8 @@ fn default_empty_object() -> serde_json::Value {
     serde_json::json!({})
 }
 
-fn hex_path(path: &Path) -> String {
-    hex::encode(path.to_string_lossy().as_bytes())
-}
-
-fn hex_string(value: &str) -> String {
-    hex::encode(value.as_bytes())
+fn local_keystore_resource_handle() -> String {
+    format!("local-keystore:{}", uuid::Uuid::new_v4())
 }
 
 fn import_key_type_for_output(raw: &str) -> String {

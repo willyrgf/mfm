@@ -34,26 +34,6 @@ pub enum KeystoreImportType {
     Mnemonic,
 }
 
-/// Non-secret source metadata for the optional BIP-39 passphrase used during mnemonic import.
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "source", content = "file_path_hex", rename_all = "snake_case")]
-pub enum Bip39ExtraSource {
-    /// Do not use a BIP-39 passphrase.
-    #[default]
-    None,
-    /// Prompt for the BIP-39 passphrase inside the local keystore transport.
-    Prompt,
-    /// Read the BIP-39 passphrase from this hex-encoded UTF-8 file or FIFO path.
-    FilePathHex(String),
-}
-
-impl Bip39ExtraSource {
-    /// Returns true when no BIP-39 passphrase source was requested.
-    pub fn is_none(&self) -> bool {
-        matches!(self, Self::None)
-    }
-}
-
 /// Sort order supported by the keystore list flow.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -83,94 +63,46 @@ pub enum LocalFileWriteMode {
 pub struct KeystoreImportRequest {
     /// Input kind to import.
     pub kind: KeystoreImportType,
-    /// Optional UTF-8 label.
-    #[serde(default)]
-    pub label: Option<String>,
-    /// Optional hex-encoded UTF-8 label.
-    #[serde(default)]
-    pub label_hex: Option<String>,
     /// BIP-32 derivation path.
     pub derive_path: String,
-    /// Optional UTF-8 keystore path.
-    #[serde(default)]
-    pub store_path: Option<String>,
-    /// Optional hex-encoded UTF-8 keystore path.
-    #[serde(default)]
-    pub store_path_hex: Option<String>,
-    /// Whether to read secret material from stdin.
-    pub stdin_mode: bool,
-    /// Optional BIP-39 passphrase source metadata for mnemonic imports.
-    #[serde(default, skip_serializing_if = "Bip39ExtraSource::is_none")]
-    pub bip39_extra: Bip39ExtraSource,
+    /// Opaque local binding registered with the live keystore transport.
+    pub local_resource_handle: String,
 }
 
 /// Typed request for `local.keystore.list`.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct KeystoreListRequest {
-    /// Optional UTF-8 keystore path.
-    #[serde(default)]
-    pub store_path: Option<String>,
-    /// Optional hex-encoded UTF-8 keystore path.
-    #[serde(default)]
-    pub store_path_hex: Option<String>,
+    /// Opaque local binding registered with the live keystore transport.
+    pub local_resource_handle: String,
     /// Whether addresses should be included.
     pub show_addrs: bool,
-    /// Optional UTF-8 regex label filter.
-    #[serde(default)]
-    pub filter_label: Option<String>,
-    /// Optional hex-encoded UTF-8 regex label filter.
-    #[serde(default)]
-    pub filter_label_hex: Option<String>,
     /// Sort order for the output.
     pub sort_by: KeystoreListSortBy,
 }
 
 /// Typed request for `local.keystore.delete`.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct KeystoreDeleteRequest {
     /// Optional exact key id.
     #[serde(default)]
     pub id: Option<String>,
-    /// Optional UTF-8 label selector.
-    #[serde(default)]
-    pub label: Option<String>,
-    /// Optional hex-encoded UTF-8 label selector.
-    #[serde(default)]
-    pub label_hex: Option<String>,
     /// Whether confirmation has already been granted.
     pub confirm_yes: bool,
-    /// Optional UTF-8 keystore path.
-    #[serde(default)]
-    pub store_path: Option<String>,
-    /// Optional hex-encoded UTF-8 keystore path.
-    #[serde(default)]
-    pub store_path_hex: Option<String>,
+    /// Opaque local binding registered with the live keystore transport.
+    pub local_resource_handle: String,
 }
 
 /// Typed request for `local.keystore.tx_sign`.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct KeystoreTxSignRequest {
     /// Optional exact key id.
     #[serde(default)]
     pub id: Option<String>,
-    /// Optional UTF-8 label selector.
-    #[serde(default)]
-    pub label: Option<String>,
-    /// Optional hex-encoded UTF-8 label selector.
-    #[serde(default)]
-    pub label_hex: Option<String>,
-    /// Optional UTF-8 keystore path.
-    #[serde(default)]
-    pub store_path: Option<String>,
-    /// Optional hex-encoded UTF-8 keystore path.
-    #[serde(default)]
-    pub store_path_hex: Option<String>,
-    /// Optional UTF-8 output path.
-    #[serde(default)]
-    pub out_path: Option<String>,
-    /// Optional hex-encoded UTF-8 output path.
-    #[serde(default)]
-    pub out_path_hex: Option<String>,
+    /// Opaque local binding registered with the live keystore transport.
+    pub local_resource_handle: String,
     /// Write policy for the output path.
     #[serde(default)]
     pub out_write_mode: LocalFileWriteMode,
@@ -459,23 +391,45 @@ mod tests {
     }
 
     #[test]
-    fn import_request_bip39_extra_metadata_is_fact_key_safe() {
-        let request = KeystoreImportRequest {
-            kind: KeystoreImportType::Mnemonic,
-            label: None,
-            label_hex: Some("77616c6c6574".to_string()),
-            derive_path: "m/44'/60'/0'/0/0".to_string(),
-            store_path: None,
-            store_path_hex: Some("2f746d702f6b657973746f7265".to_string()),
-            stdin_mode: true,
-            bip39_extra: Bip39ExtraSource::FilePathHex(
-                "2f746d702f62697033392d6578747261".to_string(),
-            ),
-        };
+    fn local_keystore_requests_do_not_serialize_local_paths_or_labels() {
+        let request = serde_json::json!({
+            "import": KeystoreImportRequest {
+                kind: KeystoreImportType::Mnemonic,
+                derive_path: "m/44'/60'/0'/0/0".to_string(),
+                local_resource_handle: "local-keystore:test".to_string(),
+            },
+            "list": KeystoreListRequest {
+                local_resource_handle: "local-keystore:test".to_string(),
+                show_addrs: true,
+                sort_by: KeystoreListSortBy::Created,
+            },
+            "delete": KeystoreDeleteRequest {
+                id: Some("550e8400-e29b-41d4-a716-446655440000".to_string()),
+                confirm_yes: true,
+                local_resource_handle: "local-keystore:test".to_string(),
+            },
+            "tx_sign": KeystoreTxSignRequest {
+                id: Some("550e8400-e29b-41d4-a716-446655440000".to_string()),
+                local_resource_handle: "local-keystore:test".to_string(),
+                out_write_mode: LocalFileWriteMode::CreateNew,
+                to: "0x1111111111111111111111111111111111111111".to_string(),
+                value_wei: "1".to_string(),
+                chain_id: 1,
+                nonce: 0,
+                max_fee_per_gas: "2000000000".to_string(),
+                max_priority_fee_per_gas: "1000000000".to_string(),
+                gas_limit: 21_000,
+                data_hex: "0x".to_string(),
+            }
+        });
 
         let value = request_to_value(&request).expect("request should serialize to json");
         let rendered = value.to_string();
-        assert!(rendered.contains("bip39_extra"));
+        assert!(!rendered.contains("/tmp/keystore"));
+        assert!(!rendered.contains("/tmp/bip39-extra"));
+        assert!(!rendered.contains("store_path"));
+        assert!(!rendered.contains("label_hex"));
+        assert!(!rendered.contains("file_path"));
         assert!(!rendered.contains("passphrase"));
 
         fact_key_for_request_value(
@@ -497,8 +451,7 @@ mod tests {
         let request = serde_json::json!({
             "kind": "mn",
             "derive_path": "m/44'/60'/0'/0/0",
-            "store_path_hex": "2f746d702f6b657973746f7265",
-            "stdin_mode": true,
+            "local_resource_handle": "local-keystore:test",
             "passphrase": "do-not-serialize"
         });
 

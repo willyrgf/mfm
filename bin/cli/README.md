@@ -201,9 +201,9 @@ mfm_cli keystore delete [OPTIONS] (<ID> | --by-label <LABEL>)
 
 Signs an EIP-1559 transaction payload using a key already stored in the keystore and writes the signed raw transaction to a file.
 
-Implementation note: this command is a thin wrapper over a run-backed op (`op_id = "keystore_tx_sign"`, `op_version = "v1"`). The CLI maps args to op input and calls `mfm_sdk::unstable::execute_single_op_report` to launch and decode the final report payload.
+Implementation note: this command is a thin wrapper over app-owned keystore services. The CLI maps args to app input and renders the returned response.
 
-The command output includes metadata only (`from`, `to`, `nonce`, `chain_id`, `tx_type`, `payload_hash`, `out_path`) and intentionally excludes raw tx hex and signature bytes.
+The command output includes metadata only (`from`, `to`, `nonce`, `chain_id`, `tx_type`, `payload_hash`) and intentionally excludes local output paths, raw tx hex, and signature bytes.
 The output file is created with restrictive permissions and must not already exist unless `--overwrite` is supplied. Symlink outputs and unsafe parent directories are rejected.
 
 **Usage:**

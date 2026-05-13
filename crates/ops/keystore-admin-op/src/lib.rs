@@ -16,14 +16,11 @@
 //! assert_eq!(op.op_id().as_str(), KEYSTORE_IMPORT_OP_ID);
 //! ```
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
-use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use mfm_machine::config::RunConfig;
-use mfm_machine::errors::ErrorCategory;
 use mfm_machine::ids::{ContextKey, OpId, OpPath};
 use mfm_sdk::errors::SdkError;
 use mfm_sdk::ids::PortKey;
@@ -32,16 +29,15 @@ use mfm_sdk::op::{
 };
 use mfm_state_common::errors as op_errors;
 use mfm_state_keystore::states::admin::{
-    decode_optional_hex_string, sdk_error_from_helper, KeystoreAdminError, KeystoreDeleteState,
-    KeystoreDeleteStateConfig, KeystoreImportState, KeystoreImportStateConfig, KeystoreListState,
-    KeystoreListStateConfig,
+    sdk_error_from_helper, KeystoreAdminError, KeystoreDeleteState, KeystoreDeleteStateConfig,
+    KeystoreImportState, KeystoreImportStateConfig, KeystoreListState, KeystoreListStateConfig,
 };
 use mfm_state_keystore::tx::output_context_key;
 
 /// Re-exported keystore admin report and enum types used by callers.
 pub use mfm_state_keystore::states::admin::{
-    Bip39ExtraSource, KeystoreDeleteReport, KeystoreImportReport, KeystoreImportType,
-    KeystoreListKey, KeystoreListReport, KeystoreListSortBy,
+    KeystoreDeleteReport, KeystoreImportReport, KeystoreImportType, KeystoreListKey,
+    KeystoreListReport, KeystoreListSortBy,
 };
 
 /// Stable version string for keystore admin operations.
@@ -59,26 +55,11 @@ pub const KEYSTORE_DELETE_OP_ID: &str = "keystore_delete";
 pub struct KeystoreImportOpConfig {
     /// Import mode to execute.
     pub import_type: KeystoreImportType,
-    /// Optional UTF-8 label.
-    #[serde(default)]
-    pub label: Option<String>,
-    /// Optional hex-encoded UTF-8 label.
-    #[serde(default)]
-    pub label_hex: Option<String>,
     /// BIP-32 derivation path for imported material.
     #[serde(default = "default_derivation_path")]
     pub derivation_path: String,
-    /// Optional keystore directory path.
-    pub keystore_path: Option<String>,
-    /// Optional hex-encoded keystore directory path.
-    #[serde(default)]
-    pub keystore_path_hex: Option<String>,
-    /// Whether secret material should be read from stdin.
-    #[serde(default)]
-    pub stdin: bool,
-    /// Optional BIP-39 passphrase source metadata for mnemonic imports.
-    #[serde(default, skip_serializing_if = "Bip39ExtraSource::is_none")]
-    pub bip39_extra: Bip39ExtraSource,
+    /// Opaque local binding registered by the app before live execution.
+    pub local_resource_handle: String,
 }
 
 fn default_derivation_path() -> String {
@@ -87,21 +68,13 @@ fn default_derivation_path() -> String {
 
 /// Planning input for the keystore list operation.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct KeystoreListOpConfig {
-    /// Optional keystore directory path.
-    pub keystore_path: Option<String>,
-    /// Optional hex-encoded keystore directory path.
-    #[serde(default)]
-    pub keystore_path_hex: Option<String>,
+    /// Opaque local binding registered by the app before live execution.
+    pub local_resource_handle: String,
     /// Whether addresses should be included in the report.
     #[serde(default = "default_show_addresses")]
     pub show_addresses: bool,
-    /// Optional UTF-8 regex filter applied to labels.
-    #[serde(default)]
-    pub filter_label: Option<String>,
-    /// Optional hex-encoded UTF-8 regex filter applied to labels.
-    #[serde(default)]
-    pub filter_label_hex: Option<String>,
     /// Sort order for the generated report.
     #[serde(default = "default_list_sort_by")]
     pub sort_by: KeystoreListSortBy,
@@ -117,23 +90,15 @@ fn default_list_sort_by() -> KeystoreListSortBy {
 
 /// Planning input for the keystore delete operation.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct KeystoreDeleteOpConfig {
     /// Optional exact key identifier to delete.
     pub id: Option<String>,
-    /// Optional UTF-8 label selector.
-    #[serde(default)]
-    pub by_label: Option<String>,
-    /// Optional hex-encoded UTF-8 label selector.
-    #[serde(default)]
-    pub by_label_hex: Option<String>,
     /// Whether destructive confirmation has already been granted.
     #[serde(default)]
     pub yes: bool,
-    /// Optional keystore directory path.
-    pub keystore_path: Option<String>,
-    /// Optional hex-encoded keystore directory path.
-    #[serde(default)]
-    pub keystore_path_hex: Option<String>,
+    /// Opaque local binding registered by the app before live execution.
+    pub local_resource_handle: String,
 }
 
 fn report_key_for_op_path(_op_path: &OpPath) -> ContextKey {
@@ -179,12 +144,8 @@ impl Operation for KeystoreImportOp {
                 op_errors::sdk_parse_error("invalid_op_config", "invalid keystore_import op_config")
             })?;
 
-        let keystore_path =
-            decode_optional_hex_string(cfg.keystore_path, cfg.keystore_path_hex, "keystore_path")
-                .map_err(sdk_error_from_helper)?;
-        let label = decode_optional_hex_string(cfg.label, cfg.label_hex, "label")
+        let local_resource_handle = require_local_resource_handle(cfg.local_resource_handle)
             .map_err(sdk_error_from_helper)?;
-        validate_import_bip39_extra(&cfg.import_type, cfg.stdin, &cfg.bip39_extra)?;
 
         let state_id = leaf_state_id(&op_path, "import")?;
         let state = KeystoreImportState::new(
@@ -194,12 +155,8 @@ impl Operation for KeystoreImportOp {
             "keystore_import.completed",
             KeystoreImportStateConfig {
                 import_type: cfg.import_type,
-                label,
                 derivation_path: cfg.derivation_path,
-                keystore_path: require_keystore_path(keystore_path)
-                    .map_err(sdk_error_from_helper)?,
-                stdin: cfg.stdin,
-                bip39_extra: cfg.bip39_extra,
+                local_resource_handle,
             },
         );
 
@@ -214,28 +171,6 @@ impl Operation for KeystoreImportOp {
             }),
         })
     }
-}
-
-fn validate_import_bip39_extra(
-    import_type: &KeystoreImportType,
-    stdin: bool,
-    bip39_extra: &Bip39ExtraSource,
-) -> Result<(), SdkError> {
-    if !bip39_extra.is_none() && import_type != &KeystoreImportType::Mnemonic {
-        return Err(op_errors::sdk_parse_error(
-            "invalid_op_config",
-            "BIP-39 extra input is only supported for mnemonic imports",
-        ));
-    }
-
-    if stdin && matches!(bip39_extra, Bip39ExtraSource::Prompt) {
-        return Err(op_errors::sdk_parse_error(
-            "invalid_op_config",
-            "BIP-39 prompt input cannot be combined with stdin material",
-        ));
-    }
-
-    Ok(())
 }
 
 /// Planner for keystore list runs.
@@ -262,24 +197,8 @@ impl Operation for KeystoreListOp {
                 op_errors::sdk_parse_error("invalid_op_config", "invalid keystore_list op_config")
             })?;
 
-        let filter_label =
-            decode_optional_hex_string(cfg.filter_label, cfg.filter_label_hex, "filter_label")
-                .map_err(sdk_error_from_helper)?;
-
-        if let Some(pattern) = filter_label.as_ref() {
-            Regex::new(pattern).map_err(|e| {
-                op_errors::sdk_error(
-                    "InvalidRegex",
-                    ErrorCategory::ParsingInput,
-                    false,
-                    format!("Invalid regex pattern: {e}"),
-                )
-            })?;
-        }
-
-        let keystore_path =
-            decode_optional_hex_string(cfg.keystore_path, cfg.keystore_path_hex, "keystore_path")
-                .map_err(sdk_error_from_helper)?;
+        let local_resource_handle = require_local_resource_handle(cfg.local_resource_handle)
+            .map_err(sdk_error_from_helper)?;
         let state_id = leaf_state_id(&op_path, "list")?;
         let state = KeystoreListState::new(
             state_id.clone(),
@@ -287,10 +206,8 @@ impl Operation for KeystoreListOp {
             report_key_for_op_path(&op_path),
             "keystore_list.completed",
             KeystoreListStateConfig {
-                keystore_path: require_keystore_path(keystore_path)
-                    .map_err(sdk_error_from_helper)?,
+                local_resource_handle,
                 show_addresses: cfg.show_addresses,
-                filter_label,
                 sort_by: cfg.sort_by,
             },
         );
@@ -331,11 +248,8 @@ impl Operation for KeystoreDeleteOp {
             serde_json::from_value(op_config.clone()).map_err(|_| {
                 op_errors::sdk_parse_error("invalid_op_config", "invalid keystore_delete op_config")
             })?;
-        let by_label = decode_optional_hex_string(cfg.by_label, cfg.by_label_hex, "by_label")
+        let local_resource_handle = require_local_resource_handle(cfg.local_resource_handle)
             .map_err(sdk_error_from_helper)?;
-        let keystore_path =
-            decode_optional_hex_string(cfg.keystore_path, cfg.keystore_path_hex, "keystore_path")
-                .map_err(sdk_error_from_helper)?;
 
         let state_id = leaf_state_id(&op_path, "delete")?;
         let state = KeystoreDeleteState::new(
@@ -345,10 +259,8 @@ impl Operation for KeystoreDeleteOp {
             "keystore_delete.completed",
             KeystoreDeleteStateConfig {
                 id: cfg.id,
-                by_label,
                 yes: cfg.yes,
-                keystore_path: require_keystore_path(keystore_path)
-                    .map_err(sdk_error_from_helper)?,
+                local_resource_handle,
             },
         );
 
@@ -365,18 +277,16 @@ impl Operation for KeystoreDeleteOp {
     }
 }
 
-fn require_keystore_path(configured: Option<String>) -> Result<PathBuf, KeystoreAdminError> {
-    let Some(value) = configured
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-    else {
+fn require_local_resource_handle(configured: String) -> Result<String, KeystoreAdminError> {
+    let value = configured.trim();
+    if value.is_empty() {
         return Err(KeystoreAdminError::new(
             "MissingArgument",
-            "Must provide keystore_path or keystore_path_hex",
+            "Must provide local_resource_handle",
         ));
-    };
+    }
 
-    Ok(PathBuf::from(value))
+    Ok(value.to_string())
 }
 
 #[cfg(test)]
@@ -388,8 +298,7 @@ mod tests {
         let err = serde_json::from_value::<KeystoreImportOpConfig>(serde_json::json!({
             "import_type": "mn",
             "derivation_path": "m/44'/60'/0'/0/0",
-            "keystore_path_hex": "2f746d702f6b657973746f7265",
-            "stdin": true,
+            "local_resource_handle": "local-keystore:test",
             "passphrase": "do-not-accept"
         }))
         .expect_err("legacy secret-bearing field must be rejected");
@@ -398,31 +307,56 @@ mod tests {
     }
 
     #[test]
-    fn import_config_accepts_file_path_hex_metadata() {
-        let cfg = serde_json::from_value::<KeystoreImportOpConfig>(serde_json::json!({
+    fn import_config_rejects_legacy_hex_path_metadata() {
+        let err = serde_json::from_value::<KeystoreImportOpConfig>(serde_json::json!({
             "import_type": "mn",
             "derivation_path": "m/44'/60'/0'/0/0",
             "keystore_path_hex": "2f746d702f6b657973746f7265",
-            "stdin": true,
-            "bip39_extra": {
-                "source": "file_path_hex",
-                "file_path_hex": "2f746d702f62697033392d6578747261"
-            }
+            "local_resource_handle": "local-keystore:test"
         }))
-        .expect("non-secret source metadata should deserialize");
+        .expect_err("reversible local path fields must be rejected");
 
-        assert!(matches!(cfg.bip39_extra, Bip39ExtraSource::FilePathHex(_)));
+        assert!(err.to_string().contains("unknown field"));
     }
 
     #[test]
-    fn import_config_rejects_prompt_with_stdin() {
-        let err = validate_import_bip39_extra(
-            &KeystoreImportType::Mnemonic,
-            true,
-            &Bip39ExtraSource::Prompt,
-        )
-        .expect_err("prompt source must be interactive-only");
+    fn serialized_keystore_configs_do_not_contain_local_paths_or_label_fields() {
+        let import_cfg = serde_json::from_value::<KeystoreImportOpConfig>(serde_json::json!({
+            "import_type": "mn",
+            "derivation_path": "m/44'/60'/0'/0/0",
+            "local_resource_handle": "local-keystore:test"
+        }))
+        .expect("handle-only config should deserialize");
+        let list_cfg = KeystoreListOpConfig {
+            local_resource_handle: "local-keystore:test".to_string(),
+            show_addresses: true,
+            sort_by: KeystoreListSortBy::Created,
+        };
+        let delete_cfg = KeystoreDeleteOpConfig {
+            id: Some("550e8400-e29b-41d4-a716-446655440000".to_string()),
+            yes: true,
+            local_resource_handle: "local-keystore:test".to_string(),
+        };
 
-        assert_eq!(err.info.code.as_str(), "invalid_op_config");
+        let rendered = serde_json::to_string(&serde_json::json!({
+            "import": import_cfg,
+            "list": list_cfg,
+            "delete": delete_cfg
+        }))
+        .expect("serialize configs");
+
+        assert!(!rendered.contains("/tmp/keystore"));
+        assert!(!rendered.contains("/tmp/bip39-extra"));
+        assert!(!rendered.contains("keystore_path"));
+        assert!(!rendered.contains("label_hex"));
+        assert!(!rendered.contains("file_path"));
+    }
+
+    #[test]
+    fn import_config_rejects_empty_local_resource_handle() {
+        let err = require_local_resource_handle("  ".to_string())
+            .expect_err("empty local resource handles are invalid");
+
+        assert_eq!(err.code, "MissingArgument");
     }
 }

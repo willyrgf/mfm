@@ -4,8 +4,8 @@
 //! The transport bridges keystore-specific local side effects into the generic Live IO interface.
 //! It intentionally keeps secrets in local process memory and avoids emitting secret-bearing
 //! values in transport responses.
-//! Mnemonic BIP-39 passphrases are sourced only through explicit request metadata: no passphrase,
-//! hidden local prompt, or a hex-encoded UTF-8 file/FIFO path. File and FIFO reads strip trailing
+//! Mnemonic BIP-39 passphrases are sourced only through app-registered local resources: no
+//! passphrase, hidden local prompt, or a local file/FIFO path. File and FIFO reads strip trailing
 //! `\n` and `\r\n` line endings; all other bytes are preserved as the passphrase.
 //! Interactive private-key, mnemonic, password, and passphrase prompts use hidden terminal input;
 //! `stdin` imports are reserved for controlled pipes and files.
@@ -23,18 +23,20 @@
 //! ```
 #![warn(missing_docs)]
 
+use std::collections::HashMap;
 use std::io::{self, Read, Write};
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 use async_trait::async_trait;
 use chrono::Utc;
 use mfm_collectors_local_keystore::{
-    Bip39ExtraSource, KeystoreDeleteRequest, KeystoreImportRequest, KeystoreImportType,
-    KeystoreListRequest, KeystoreListSortBy, KeystoreTxSignRequest, LocalFileWriteMode,
-    NAMESPACE_LOCAL_KEYSTORE_DELETE, NAMESPACE_LOCAL_KEYSTORE_IMPORT,
-    NAMESPACE_LOCAL_KEYSTORE_LIST, NAMESPACE_LOCAL_KEYSTORE_TX_SIGN,
+    KeystoreDeleteRequest, KeystoreImportRequest, KeystoreImportType, KeystoreListRequest,
+    KeystoreListSortBy, KeystoreTxSignRequest, LocalFileWriteMode, NAMESPACE_LOCAL_KEYSTORE_DELETE,
+    NAMESPACE_LOCAL_KEYSTORE_IMPORT, NAMESPACE_LOCAL_KEYSTORE_LIST,
+    NAMESPACE_LOCAL_KEYSTORE_TX_SIGN,
 };
 use mfm_core::keystore::{KeyType, Keystore, KeystoreConfig, KeystoreError};
 use mfm_machine::errors::{ErrorCategory, ErrorInfo, IoError};
@@ -55,6 +57,91 @@ use zeroize::Zeroizing;
 const ENV_KEYSTORE_PASSWORD_FILE: &str = "MFM_KEYSTORE_PASSWORD_FILE";
 const ENV_KEYSTORE_PASSWORD: &str = "MFM_KEYSTORE_PASSWORD";
 const ENV_INTEGRATION_TEST: &str = "MFM_INTEGRATION_TEST";
+
+/// Local BIP-39 passphrase source registered for a mnemonic import.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum LocalKeystoreBip39ExtraSource {
+    /// Do not use a BIP-39 passphrase.
+    #[default]
+    None,
+    /// Prompt for the BIP-39 passphrase inside the local keystore transport.
+    Prompt,
+    /// Read the BIP-39 passphrase from this local file or FIFO path.
+    FilePath(PathBuf),
+}
+
+/// Local runtime inputs for a keystore import.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LocalKeystoreImportResource {
+    /// Filesystem path of the keystore directory.
+    pub keystore_path: PathBuf,
+    /// Optional alias to assign to the imported key.
+    pub label: Option<String>,
+    /// Whether the secret material should be read from stdin.
+    pub stdin_mode: bool,
+    /// Optional BIP-39 passphrase source for mnemonic imports.
+    pub bip39_extra: LocalKeystoreBip39ExtraSource,
+}
+
+/// Local runtime inputs for a keystore list operation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LocalKeystoreListResource {
+    /// Filesystem path of the keystore directory.
+    pub keystore_path: PathBuf,
+    /// Optional regex filter applied to labels before sorting.
+    pub filter_label: Option<String>,
+}
+
+/// Local runtime inputs for a keystore delete operation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LocalKeystoreDeleteResource {
+    /// Filesystem path of the keystore directory.
+    pub keystore_path: PathBuf,
+    /// Optional alias selector for the key to delete.
+    pub by_label: Option<String>,
+}
+
+/// Local runtime inputs for a transaction signing operation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LocalKeystoreTxSignResource {
+    /// Filesystem path of the keystore directory.
+    pub keystore_path: PathBuf,
+    /// Optional alias selector for the signing key.
+    pub by_label: Option<String>,
+    /// Destination path for the signed raw transaction file.
+    pub out_path: PathBuf,
+}
+
+/// Local keystore resource variants registered by app-level entrypoints.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LocalKeystoreResource {
+    /// Local runtime inputs for a keystore import.
+    Import(LocalKeystoreImportResource),
+    /// Local runtime inputs for a keystore list operation.
+    List(LocalKeystoreListResource),
+    /// Local runtime inputs for a keystore delete operation.
+    Delete(LocalKeystoreDeleteResource),
+    /// Local runtime inputs for a transaction signing operation.
+    TxSign(LocalKeystoreTxSignResource),
+}
+
+static LOCAL_KEYSTORE_RESOURCES: OnceLock<Mutex<HashMap<String, LocalKeystoreResource>>> =
+    OnceLock::new();
+
+/// Registers a local keystore resource under an opaque handle for live execution.
+pub fn register_local_keystore_resource(
+    handle: impl Into<String>,
+    resource: LocalKeystoreResource,
+) {
+    local_keystore_resources()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(handle.into(), resource);
+}
+
+fn local_keystore_resources() -> &'static Mutex<HashMap<String, LocalKeystoreResource>> {
+    LOCAL_KEYSTORE_RESOURCES.get_or_init(|| Mutex::new(HashMap::new()))
+}
 
 /// Transport factory for the `local.keystore` namespace group.
 #[derive(Clone, Default)]
@@ -141,32 +228,28 @@ fn keystore_import_with_input(
     req: KeystoreImportRequest,
     input: &mut dyn SecretInput,
 ) -> Result<KeystoreImportReport, LocalError> {
-    validate_import_request(&req)?;
-    let path = PathBuf::from(decode_required_utf8(
-        req.store_path,
-        req.store_path_hex,
-        "invalid_path_config",
-        "store_path",
-    )?);
-    let label = decode_optional_utf8(req.label, req.label_hex, "invalid_path_config", "label")?;
+    let resource = resolve_import_resource(&req.local_resource_handle)?;
+    validate_import_resource(&req, &resource)?;
+    let path = resource.keystore_path;
+    let label = resource.label;
     let material = match req.kind {
         KeystoreImportType::PrivateKey => read_input(
             input,
-            if req.stdin_mode {
+            if resource.stdin_mode {
                 ""
             } else {
                 "Enter private key (hex): "
             },
-            req.stdin_mode,
+            resource.stdin_mode,
         )?,
         KeystoreImportType::Mnemonic => read_input(
             input,
-            if req.stdin_mode {
+            if resource.stdin_mode {
                 ""
             } else {
                 "Enter mnemonic phrase: "
             },
-            req.stdin_mode,
+            resource.stdin_mode,
         )?,
     };
 
@@ -193,7 +276,7 @@ fn keystore_import_with_input(
             let mut ks = create_keystore_if_needed_with_input(&path, input)?;
             let label = label
                 .unwrap_or_else(|| format!("imported-hd-{}", Utc::now().format("%Y%m%d-%H%M%S")));
-            let extra = read_bip39_extra(req.bip39_extra, input)?;
+            let extra = read_bip39_extra(resource.bip39_extra, input)?;
             let key_id = ks
                 .import_mnemonic(
                     Some(label),
@@ -214,8 +297,13 @@ fn keystore_import_with_input(
     }
 }
 
-fn validate_import_request(req: &KeystoreImportRequest) -> Result<(), LocalError> {
-    if !req.bip39_extra.is_none() && req.kind != KeystoreImportType::Mnemonic {
+fn validate_import_resource(
+    req: &KeystoreImportRequest,
+    resource: &LocalKeystoreImportResource,
+) -> Result<(), LocalError> {
+    if !matches!(resource.bip39_extra, LocalKeystoreBip39ExtraSource::None)
+        && req.kind != KeystoreImportType::Mnemonic
+    {
         return Err(LocalError::new(
             "invalid_import_config",
             ErrorCategory::ParsingInput,
@@ -223,7 +311,8 @@ fn validate_import_request(req: &KeystoreImportRequest) -> Result<(), LocalError
         ));
     }
 
-    if req.stdin_mode && matches!(req.bip39_extra, Bip39ExtraSource::Prompt) {
+    if resource.stdin_mode && matches!(resource.bip39_extra, LocalKeystoreBip39ExtraSource::Prompt)
+    {
         return Err(LocalError::new(
             "invalid_import_config",
             ErrorCategory::ParsingInput,
@@ -257,36 +346,22 @@ impl SecretInput for ProcessSecretInput {
 }
 
 fn read_bip39_extra(
-    source: Bip39ExtraSource,
+    source: LocalKeystoreBip39ExtraSource,
     input: &mut dyn SecretInput,
 ) -> Result<Option<Zeroizing<String>>, LocalError> {
     match source {
-        Bip39ExtraSource::None => Ok(None),
-        Bip39ExtraSource::Prompt => input.read_hidden("Enter BIP-39 passphrase: ").map(Some),
-        Bip39ExtraSource::FilePathHex(path_hex) => {
-            let path = decode_hex_utf8(
-                &path_hex,
-                "invalid_path_config",
-                "bip39_extra.file_path_hex",
-            )?;
-            read_secret_file(&path).map(Some)
+        LocalKeystoreBip39ExtraSource::None => Ok(None),
+        LocalKeystoreBip39ExtraSource::Prompt => {
+            input.read_hidden("Enter BIP-39 passphrase: ").map(Some)
         }
+        LocalKeystoreBip39ExtraSource::FilePath(path) => read_secret_file(&path).map(Some),
     }
 }
 
 fn keystore_list(req: KeystoreListRequest) -> Result<KeystoreListReport, LocalError> {
-    let path = PathBuf::from(decode_required_utf8(
-        req.store_path,
-        req.store_path_hex,
-        "invalid_path_config",
-        "store_path",
-    )?);
-    let filter_label = decode_optional_utf8(
-        req.filter_label,
-        req.filter_label_hex,
-        "invalid_path_config",
-        "filter_label",
-    )?;
+    let resource = resolve_list_resource(&req.local_resource_handle)?;
+    let path = resource.keystore_path;
+    let filter_label = resource.filter_label;
     let keystore = load_unlocked_keystore(&path)?;
     let mut keys: Vec<KeystoreListKey> = keystore
         .list_keys()
@@ -306,11 +381,11 @@ fn keystore_list(req: KeystoreListRequest) -> Result<KeystoreListReport, LocalEr
         .collect();
 
     if let Some(pattern) = filter_label.as_ref() {
-        let regex = regex::Regex::new(pattern).map_err(|e| {
+        let regex = regex::Regex::new(pattern).map_err(|_| {
             LocalError::new(
                 "invalid_regex",
                 ErrorCategory::ParsingInput,
-                format!("Invalid regex pattern: {e}"),
+                "Invalid regex pattern",
             )
         })?;
         keys.retain(|k| regex.is_match(&k.label));
@@ -329,13 +404,9 @@ fn keystore_list(req: KeystoreListRequest) -> Result<KeystoreListReport, LocalEr
 }
 
 fn keystore_delete(req: KeystoreDeleteRequest) -> Result<KeystoreDeleteReport, LocalError> {
-    let path = PathBuf::from(decode_required_utf8(
-        req.store_path,
-        req.store_path_hex,
-        "invalid_path_config",
-        "store_path",
-    )?);
-    let label = decode_optional_utf8(req.label, req.label_hex, "invalid_path_config", "label")?;
+    let resource = resolve_delete_resource(&req.local_resource_handle)?;
+    let path = resource.keystore_path;
+    let label = resource.by_label;
     let mut keystore = load_unlocked_keystore(&path)?;
 
     let key_id = if let Some(label) = &label {
@@ -349,7 +420,7 @@ fn keystore_delete(req: KeystoreDeleteRequest) -> Result<KeystoreDeleteReport, L
                 return Err(LocalError::new(
                     "key_not_found",
                     ErrorCategory::ParsingInput,
-                    format!("No key found with label: {label}"),
+                    "No key found with requested label",
                 ))
             }
             1 => matching_keys[0].id,
@@ -357,7 +428,7 @@ fn keystore_delete(req: KeystoreDeleteRequest) -> Result<KeystoreDeleteReport, L
                 return Err(LocalError::new(
                     "ambiguous_label",
                     ErrorCategory::ParsingInput,
-                    format!("Multiple keys found with label: {label}"),
+                    "Multiple keys found with requested label",
                 ))
             }
         }
@@ -421,19 +492,10 @@ fn keystore_tx_sign_with_input(
     req: KeystoreTxSignRequest,
     input: &mut dyn SecretInput,
 ) -> Result<serde_json::Value, LocalError> {
-    let path = PathBuf::from(decode_required_utf8(
-        req.store_path,
-        req.store_path_hex,
-        "invalid_path_config",
-        "store_path",
-    )?);
-    let label = decode_optional_utf8(req.label, req.label_hex, "invalid_selector_label", "label")?;
-    let out_path = PathBuf::from(decode_required_utf8(
-        req.out_path,
-        req.out_path_hex,
-        "invalid_path_config",
-        "out_path",
-    )?);
+    let resource = resolve_tx_sign_resource(&req.local_resource_handle)?;
+    let path = resource.keystore_path;
+    let label = resource.by_label;
+    let out_path = resource.out_path;
     let out_write_mode = req.out_write_mode;
     let mut keystore = load_unlocked_keystore_with_input(&path, input)?;
 
@@ -469,7 +531,6 @@ fn keystore_tx_sign_with_input(
         "chain_id": tx.chain_id,
         "tx_type": "0x2",
         "payload_hash": signed.payload_hash,
-        "out_path": out_path.display().to_string(),
     }))
 }
 
@@ -501,28 +562,19 @@ fn validate_output_parent(path: &Path) -> Result<PathBuf, KeystoreTxError> {
     let metadata = std::fs::symlink_metadata(parent).map_err(|e| {
         KeystoreTxError::new(
             "file_write_error",
-            format!(
-                "Failed to inspect output parent directory '{}': {e}",
-                parent.display()
-            ),
+            format!("Failed to inspect output parent directory: {e}"),
         )
     })?;
     if metadata.file_type().is_symlink() {
         return Err(KeystoreTxError::new(
             "file_write_error",
-            format!(
-                "Refusing symlinked output parent directory '{}'",
-                parent.display()
-            ),
+            "Refusing symlinked output parent directory",
         ));
     }
     if !metadata.file_type().is_dir() {
         return Err(KeystoreTxError::new(
             "file_write_error",
-            format!(
-                "Output parent path '{}' is not a directory",
-                parent.display()
-            ),
+            "Output parent path is not a directory",
         ));
     }
 
@@ -534,10 +586,7 @@ fn validate_output_parent(path: &Path) -> Result<PathBuf, KeystoreTxError> {
         if world_writable && !sticky {
             return Err(KeystoreTxError::new(
                 "file_write_error",
-                format!(
-                    "Refusing unsafe output parent directory permissions '{}'",
-                    parent.display()
-                ),
+                "Refusing unsafe output parent directory permissions",
             ));
         }
     }
@@ -551,22 +600,19 @@ fn validate_output_target(path: &Path, mode: &LocalFileWriteMode) -> Result<(), 
             if metadata.file_type().is_symlink() {
                 return Err(KeystoreTxError::new(
                     "file_write_error",
-                    format!("Refusing symlinked output file '{}'", path.display()),
+                    "Refusing symlinked output file",
                 ));
             }
             if !metadata.file_type().is_file() {
                 return Err(KeystoreTxError::new(
                     "file_write_error",
-                    format!("Output path '{}' is not a regular file", path.display()),
+                    "Output path is not a regular file",
                 ));
             }
             if matches!(mode, LocalFileWriteMode::CreateNew) {
                 return Err(KeystoreTxError::new(
                     "file_write_error",
-                    format!(
-                        "Output file '{}' already exists; pass --overwrite to replace it",
-                        path.display()
-                    ),
+                    "Output file already exists; pass --overwrite to replace it",
                 ));
             }
         }
@@ -574,7 +620,7 @@ fn validate_output_target(path: &Path, mode: &LocalFileWriteMode) -> Result<(), 
         Err(err) => {
             return Err(KeystoreTxError::new(
                 "file_write_error",
-                format!("Failed to inspect output file '{}': {err}", path.display()),
+                format!("Failed to inspect output file: {err}"),
             ));
         }
     }
@@ -584,10 +630,7 @@ fn validate_output_target(path: &Path, mode: &LocalFileWriteMode) -> Result<(), 
 
 fn temp_output_path(path: &Path, parent: &Path) -> Result<PathBuf, KeystoreTxError> {
     let file_name = path.file_name().ok_or_else(|| {
-        KeystoreTxError::new(
-            "file_write_error",
-            format!("Output path '{}' must include a file name", path.display()),
-        )
+        KeystoreTxError::new("file_write_error", "Output path must include a file name")
     })?;
     Ok(parent.join(format!(
         ".{}.tmp-{}",
@@ -608,29 +651,20 @@ fn write_temp_output_file(path: &Path, raw_tx_hex: &str) -> Result<(), KeystoreT
     let mut file = options.open(path).map_err(|e| {
         KeystoreTxError::new(
             "file_write_error",
-            format!(
-                "Failed to create temporary output file '{}': {e}",
-                path.display()
-            ),
+            format!("Failed to create temporary output file: {e}"),
         )
     })?;
 
     file.write_all(raw_tx_hex.as_bytes()).map_err(|e| {
         KeystoreTxError::new(
             "file_write_error",
-            format!(
-                "Failed to write signed transaction file '{}': {e}",
-                path.display()
-            ),
+            format!("Failed to write signed transaction file: {e}"),
         )
     })?;
     file.sync_all().map_err(|e| {
         KeystoreTxError::new(
             "file_write_error",
-            format!(
-                "Failed to sync temporary output file '{}': {e}",
-                path.display()
-            ),
+            format!("Failed to sync temporary output file: {e}"),
         )
     })?;
 
@@ -647,19 +681,13 @@ fn install_temp_output_file(
             std::fs::hard_link(temp_path, path).map_err(|e| {
                 KeystoreTxError::new(
                     "file_write_error",
-                    format!(
-                        "Failed to install new output file '{}': {e}",
-                        path.display()
-                    ),
+                    format!("Failed to install new output file: {e}"),
                 )
             })?;
             std::fs::remove_file(temp_path).map_err(|e| {
                 KeystoreTxError::new(
                     "file_write_error",
-                    format!(
-                        "Failed to remove temporary output file '{}': {e}",
-                        temp_path.display()
-                    ),
+                    format!("Failed to remove temporary output file: {e}"),
                 )
             })?;
         }
@@ -667,7 +695,7 @@ fn install_temp_output_file(
             std::fs::rename(temp_path, path).map_err(|e| {
                 KeystoreTxError::new(
                     "file_write_error",
-                    format!("Failed to replace output file '{}': {e}", path.display()),
+                    format!("Failed to replace output file: {e}"),
                 )
             })?;
         }
@@ -684,10 +712,7 @@ fn sync_parent_directory(parent: &Path) -> Result<(), KeystoreTxError> {
             .map_err(|e| {
                 KeystoreTxError::new(
                     "file_write_error",
-                    format!(
-                        "Failed to sync output parent directory '{}': {e}",
-                        parent.display()
-                    ),
+                    format!("Failed to sync output parent directory: {e}"),
                 )
             })?;
     }
@@ -709,10 +734,7 @@ fn create_keystore_if_needed_with_input(
             LocalError::new(
                 "keystore_error",
                 ErrorCategory::Unknown,
-                format!(
-                    "Failed to create keystore directory '{}': {e}",
-                    parent.display()
-                ),
+                format!("Failed to create keystore directory: {e}"),
             )
         })?;
     }
@@ -754,7 +776,7 @@ fn load_unlocked_keystore_with_input(
         return Err(LocalError::new(
             "keystore_error",
             ErrorCategory::Unknown,
-            format!("Keystore not found at: {}", path.display()),
+            "Keystore not found",
         ));
     }
 
@@ -842,10 +864,10 @@ fn read_password(prompt: &str) -> Result<Zeroizing<String>, LocalError> {
 }
 
 fn read_password_file(path: &str) -> Result<Zeroizing<String>, LocalError> {
-    read_secret_file(path)
+    read_secret_file(Path::new(path))
 }
 
-fn read_secret_file(path: &str) -> Result<Zeroizing<String>, LocalError> {
+fn read_secret_file(path: &Path) -> Result<Zeroizing<String>, LocalError> {
     let mut raw =
         Zeroizing::new(std::fs::read_to_string(path).map_err(|e| {
             LocalError::new("keystore_error", ErrorCategory::Unknown, e.to_string())
@@ -1023,6 +1045,71 @@ fn local_error_from_keystore_tx(err: KeystoreTxError) -> LocalError {
     LocalError::new(code, category, err.message)
 }
 
+fn resolve_resource(handle: &str) -> Result<LocalKeystoreResource, LocalTransportError> {
+    if handle.trim().is_empty() {
+        return Err(LocalTransportError::new(
+            "local_resource_not_found",
+            ErrorCategory::ParsingInput,
+            "local keystore resource handle was not registered",
+        ));
+    }
+
+    local_keystore_resources()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(handle)
+        .cloned()
+        .ok_or_else(|| {
+            LocalTransportError::new(
+                "local_resource_not_found",
+                ErrorCategory::ParsingInput,
+                "local keystore resource handle was not registered",
+            )
+        })
+}
+
+fn resolve_import_resource(
+    handle: &str,
+) -> Result<LocalKeystoreImportResource, LocalTransportError> {
+    match resolve_resource(handle)? {
+        LocalKeystoreResource::Import(resource) => Ok(resource),
+        _ => Err(local_resource_kind_mismatch()),
+    }
+}
+
+fn resolve_list_resource(handle: &str) -> Result<LocalKeystoreListResource, LocalTransportError> {
+    match resolve_resource(handle)? {
+        LocalKeystoreResource::List(resource) => Ok(resource),
+        _ => Err(local_resource_kind_mismatch()),
+    }
+}
+
+fn resolve_delete_resource(
+    handle: &str,
+) -> Result<LocalKeystoreDeleteResource, LocalTransportError> {
+    match resolve_resource(handle)? {
+        LocalKeystoreResource::Delete(resource) => Ok(resource),
+        _ => Err(local_resource_kind_mismatch()),
+    }
+}
+
+fn resolve_tx_sign_resource(
+    handle: &str,
+) -> Result<LocalKeystoreTxSignResource, LocalTransportError> {
+    match resolve_resource(handle)? {
+        LocalKeystoreResource::TxSign(resource) => Ok(resource),
+        _ => Err(local_resource_kind_mismatch()),
+    }
+}
+
+fn local_resource_kind_mismatch() -> LocalTransportError {
+    LocalTransportError::new(
+        "local_resource_kind_mismatch",
+        ErrorCategory::ParsingInput,
+        "local keystore resource handle had the wrong operation type",
+    )
+}
+
 #[derive(Debug, Clone)]
 struct LocalTransportError {
     code: &'static str,
@@ -1070,60 +1157,6 @@ fn encode_response(value: serde_json::Value) -> Result<serde_json::Value, IoErro
             "local_response_serialize_failed",
             ErrorCategory::Unknown,
             "failed to serialize local io response payload",
-        )
-    })
-}
-
-fn decode_hex_utf8(
-    raw: &str,
-    code: &'static str,
-    field: &'static str,
-) -> Result<String, LocalTransportError> {
-    let bytes = hex::decode(raw).map_err(|_| {
-        LocalTransportError::new(
-            code,
-            ErrorCategory::ParsingInput,
-            format!("{field} must be valid hex"),
-        )
-    })?;
-    String::from_utf8(bytes).map_err(|_| {
-        LocalTransportError::new(
-            code,
-            ErrorCategory::ParsingInput,
-            format!("{field} did not decode to utf-8"),
-        )
-    })
-}
-
-fn decode_optional_utf8(
-    raw: Option<String>,
-    raw_hex: Option<String>,
-    code: &'static str,
-    field: &'static str,
-) -> Result<Option<String>, LocalTransportError> {
-    match (raw, raw_hex) {
-        (Some(_), Some(_)) => Err(LocalTransportError::new(
-            code,
-            ErrorCategory::ParsingInput,
-            format!("{field} must use exactly one encoding"),
-        )),
-        (Some(value), None) => Ok(Some(value)),
-        (None, Some(value_hex)) => decode_hex_utf8(&value_hex, code, field).map(Some),
-        (None, None) => Ok(None),
-    }
-}
-
-fn decode_required_utf8(
-    raw: Option<String>,
-    raw_hex: Option<String>,
-    code: &'static str,
-    field: &'static str,
-) -> Result<String, LocalTransportError> {
-    decode_optional_utf8(raw, raw_hex, code, field)?.ok_or_else(|| {
-        LocalTransportError::new(
-            code,
-            ErrorCategory::ParsingInput,
-            format!("{field} is required"),
         )
     })
 }
@@ -1212,10 +1245,6 @@ mod tests {
         path
     }
 
-    fn path_hex(path: &Path) -> String {
-        hex::encode(path.to_string_lossy().as_bytes())
-    }
-
     fn create_test_keystore(path: &Path) {
         let mut keystore =
             Keystore::new_with_config(path, KeystoreConfig::insecure_integration_test())
@@ -1237,19 +1266,27 @@ mod tests {
             .expect("import test private key");
     }
 
+    fn test_handle(name: &str) -> String {
+        format!("local-keystore:test:{name}:{}", Uuid::new_v4())
+    }
+
     fn tx_sign_request(
         keystore_path: &Path,
         out_path: &Path,
         mode: LocalFileWriteMode,
     ) -> KeystoreTxSignRequest {
+        let handle = test_handle("tx-sign");
+        register_local_keystore_resource(
+            handle.clone(),
+            LocalKeystoreResource::TxSign(LocalKeystoreTxSignResource {
+                keystore_path: keystore_path.to_path_buf(),
+                by_label: Some("tx-signer".to_string()),
+                out_path: out_path.to_path_buf(),
+            }),
+        );
         KeystoreTxSignRequest {
             id: None,
-            label: None,
-            label_hex: Some(hex::encode("tx-signer")),
-            store_path: None,
-            store_path_hex: Some(path_hex(keystore_path)),
-            out_path: None,
-            out_path_hex: Some(path_hex(out_path)),
+            local_resource_handle: handle,
             out_write_mode: mode,
             to: "0x1111111111111111111111111111111111111111".to_string(),
             value_wei: "1".to_string(),
@@ -1267,8 +1304,7 @@ mod tests {
         let request = serde_json::json!({
             "kind": "mn",
             "derive_path": "m/44'/60'/0'/0/0",
-            "store_path_hex": hex::encode("/tmp/keystore"),
-            "stdin_mode": true,
+            "local_resource_handle": "local-keystore:test",
             "passphrase": "do-not-accept"
         });
 
@@ -1279,6 +1315,25 @@ mod tests {
             IoError::Other(info) => assert_eq!(info.code.as_str(), "invalid_local_request"),
             other => panic!("unexpected io error: {other:?}"),
         }
+    }
+
+    #[test]
+    fn unregistered_local_resource_handle_returns_sanitized_error() {
+        let mut input = FakeSecretInput::default().with_hidden(TEST_PRIVATE_KEY);
+
+        let err = keystore_import_with_input(
+            KeystoreImportRequest {
+                kind: KeystoreImportType::PrivateKey,
+                derive_path: "m/44'/60'/0'/0/0".to_string(),
+                local_resource_handle: "local-keystore:missing".to_string(),
+            },
+            &mut input,
+        )
+        .expect_err("missing local resource handle should fail before prompting");
+
+        assert_eq!(err.code, "local_resource_not_found");
+        assert!(!err.message.contains("local-keystore:missing"));
+        assert_eq!(input.hidden_prompts.len(), 0);
     }
 
     #[tokio::test]
@@ -1372,6 +1427,16 @@ mod tests {
     fn interactive_private_key_import_uses_hidden_reader() {
         let path = test_keystore_path("interactive-private-key");
         create_test_keystore(&path);
+        let handle = test_handle("interactive-private-key");
+        register_local_keystore_resource(
+            handle.clone(),
+            LocalKeystoreResource::Import(LocalKeystoreImportResource {
+                keystore_path: path.clone(),
+                label: Some("interactive-pk".to_string()),
+                stdin_mode: false,
+                bip39_extra: LocalKeystoreBip39ExtraSource::None,
+            }),
+        );
         let mut input = FakeSecretInput::default()
             .with_hidden(TEST_PRIVATE_KEY)
             .with_hidden(TEST_PASSWORD);
@@ -1379,13 +1444,8 @@ mod tests {
         let report = keystore_import_with_input(
             KeystoreImportRequest {
                 kind: KeystoreImportType::PrivateKey,
-                label: None,
-                label_hex: Some(hex::encode("interactive-pk")),
                 derive_path: "m/44'/60'/0'/0/0".to_string(),
-                store_path: None,
-                store_path_hex: Some(path_hex(&path)),
-                stdin_mode: false,
-                bip39_extra: Bip39ExtraSource::None,
+                local_resource_handle: handle,
             },
             &mut input,
         )
@@ -1404,6 +1464,16 @@ mod tests {
     fn interactive_mnemonic_import_uses_hidden_reader_for_phrase_and_extra() {
         let path = test_keystore_path("interactive-mnemonic");
         create_test_keystore(&path);
+        let handle = test_handle("interactive-mnemonic");
+        register_local_keystore_resource(
+            handle.clone(),
+            LocalKeystoreResource::Import(LocalKeystoreImportResource {
+                keystore_path: path.clone(),
+                label: Some("interactive-mn".to_string()),
+                stdin_mode: false,
+                bip39_extra: LocalKeystoreBip39ExtraSource::Prompt,
+            }),
+        );
         let mut input = FakeSecretInput::default()
             .with_hidden(TEST_MNEMONIC)
             .with_hidden(TEST_PASSWORD)
@@ -1412,13 +1482,8 @@ mod tests {
         let report = keystore_import_with_input(
             KeystoreImportRequest {
                 kind: KeystoreImportType::Mnemonic,
-                label: None,
-                label_hex: Some(hex::encode("interactive-mn")),
                 derive_path: "m/44'/60'/0'/0/0".to_string(),
-                store_path: None,
-                store_path_hex: Some(path_hex(&path)),
-                stdin_mode: false,
-                bip39_extra: Bip39ExtraSource::Prompt,
+                local_resource_handle: handle,
             },
             &mut input,
         )
@@ -1441,18 +1506,23 @@ mod tests {
     fn invalid_interactive_material_error_does_not_include_entered_secret() {
         let path = test_keystore_path("invalid-interactive-material");
         let entered = "not-a-valid-private-key";
+        let handle = test_handle("invalid-interactive-material");
+        register_local_keystore_resource(
+            handle.clone(),
+            LocalKeystoreResource::Import(LocalKeystoreImportResource {
+                keystore_path: path.clone(),
+                label: None,
+                stdin_mode: false,
+                bip39_extra: LocalKeystoreBip39ExtraSource::None,
+            }),
+        );
         let mut input = FakeSecretInput::default().with_hidden(entered);
 
         let err = keystore_import_with_input(
             KeystoreImportRequest {
                 kind: KeystoreImportType::PrivateKey,
-                label: None,
-                label_hex: None,
                 derive_path: "m/44'/60'/0'/0/0".to_string(),
-                store_path: None,
-                store_path_hex: Some(path_hex(&path)),
-                stdin_mode: false,
-                bip39_extra: Bip39ExtraSource::None,
+                local_resource_handle: handle,
             },
             &mut input,
         )
@@ -1496,6 +1566,7 @@ mod tests {
             .expect_err("existing file should require overwrite");
 
         assert_eq!(err.code, "file_write_error");
+        assert!(!err.message.contains(&path.display().to_string()));
         assert_eq!(std::fs::read_to_string(&path).expect("read output"), "old");
         let _ = std::fs::remove_dir_all(dir);
     }

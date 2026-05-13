@@ -73,15 +73,14 @@ pub(crate) struct TxSignResponse {
     chain_id: u64,
     tx_type: String,
     payload_hash: String,
-    out_path: String,
 }
 
 impl fmt::Display for TxSignResponse {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "Signed EIP-1559 tx (type {}) from {} to {} and wrote payload to {}",
-            self.tx_type, self.from, self.to, self.out_path
+            "Signed EIP-1559 tx (type {}) from {} to {} and wrote payload locally",
+            self.tx_type, self.from, self.to
         )
     }
 }
@@ -125,6 +124,5 @@ async fn execute_internal(args: &TxSignArgs) -> CommandResult<TxSignResponse> {
         chain_id: response.chain_id,
         tx_type: response.tx_type,
         payload_hash: response.payload_hash,
-        out_path: response.out_path,
     }))
 }

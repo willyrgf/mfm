@@ -9,32 +9,23 @@
 //! # Examples
 //!
 //! ```rust
-//! use std::path::PathBuf;
-//!
 //! use mfm_state_keystore::states::admin::{
-//!     Bip39ExtraSource, KeystoreImportStateConfig, KeystoreImportType,
+//!     KeystoreImportStateConfig, KeystoreImportType,
 //! };
 //!
 //! let cfg = KeystoreImportStateConfig {
 //!     import_type: KeystoreImportType::PrivateKey,
-//!     label: Some("deploy".to_string()),
 //!     derivation_path: "m/44'/60'/0'/0/0".to_string(),
-//!     keystore_path: PathBuf::from("/tmp/keystore"),
-//!     stdin: true,
-//!     bip39_extra: Bip39ExtraSource::None,
+//!     local_resource_handle: "local-keystore:example".to_string(),
 //! };
 //!
-//! assert_eq!(cfg.label.as_deref(), Some("deploy"));
-//! assert!(cfg.stdin);
+//! assert_eq!(cfg.local_resource_handle, "local-keystore:example");
 //! ```
-
-use std::path::PathBuf;
 
 use async_trait::async_trait;
 use mfm_collectors_local_keystore::{
     KeystoreDeleteRequest, KeystoreImportRequest, KeystoreListRequest, LocalKeystoreIoClient,
 };
-use mfm_evm_core::hex::hex_encode_utf8;
 use mfm_machine::context::DynContext;
 use mfm_machine::errors::{ErrorCategory, StateError};
 use mfm_machine::ids::{ContextKey, StateId};
@@ -69,7 +60,6 @@ impl KeystoreAdminError {
     }
 }
 
-pub use mfm_collectors_local_keystore::Bip39ExtraSource;
 pub use mfm_collectors_local_keystore::KeystoreImportType;
 
 /// Report written after a successful keystore import.
@@ -124,33 +114,25 @@ pub struct KeystoreDeleteReport {
 
 /// Runtime configuration for the keystore import state.
 ///
-/// Secret material itself is never stored here; the state reads it from stdin or a local transport
-/// endpoint at execution time.
+/// Secret material, local filesystem paths, labels, and prompt choices are never stored here; the
+/// live transport resolves them from the local resource handle at execution time.
 #[derive(Clone, Debug)]
 pub struct KeystoreImportStateConfig {
     /// Input kind to import.
     pub import_type: KeystoreImportType,
-    /// Optional alias to assign to the imported key.
-    pub label: Option<String>,
     /// Derivation path used for mnemonic imports.
     pub derivation_path: String,
-    /// Filesystem path of the keystore directory.
-    pub keystore_path: PathBuf,
-    /// Whether the secret material should be read from stdin.
-    pub stdin: bool,
-    /// Optional BIP-39 passphrase source metadata for mnemonic imports.
-    pub bip39_extra: Bip39ExtraSource,
+    /// Opaque local binding registered with the live keystore transport.
+    pub local_resource_handle: String,
 }
 
 /// Runtime configuration for the keystore list state.
 #[derive(Clone, Debug)]
 pub struct KeystoreListStateConfig {
-    /// Filesystem path of the keystore directory.
-    pub keystore_path: PathBuf,
+    /// Opaque local binding registered with the live keystore transport.
+    pub local_resource_handle: String,
     /// Whether derived addresses should be resolved for output.
     pub show_addresses: bool,
-    /// Optional alias filter applied before sorting.
-    pub filter_label: Option<String>,
     /// Sort order for the final report.
     pub sort_by: KeystoreListSortBy,
 }
@@ -162,12 +144,10 @@ pub struct KeystoreListStateConfig {
 pub struct KeystoreDeleteStateConfig {
     /// Optional UUID selector for the key to delete.
     pub id: Option<String>,
-    /// Optional alias selector for the key to delete.
-    pub by_label: Option<String>,
     /// Whether deletion confirmation has already been granted.
     pub yes: bool,
-    /// Filesystem path of the keystore directory.
-    pub keystore_path: PathBuf,
+    /// Opaque local binding registered with the live keystore transport.
+    pub local_resource_handle: String,
 }
 
 /// State that imports a key into the local keystore transport.
@@ -226,15 +206,8 @@ impl State for KeystoreImportState {
                 "keystore_import",
                 KeystoreImportRequest {
                     kind: self.cfg.import_type.clone(),
-                    label: None,
-                    label_hex: self.cfg.label.as_ref().map(|v| hex_encode_utf8(v)),
                     derive_path: self.cfg.derivation_path.clone(),
-                    store_path: None,
-                    store_path_hex: Some(hex_encode_utf8(
-                        self.cfg.keystore_path.to_string_lossy().as_ref(),
-                    )),
-                    stdin_mode: self.cfg.stdin,
-                    bip39_extra: self.cfg.bip39_extra.clone(),
+                    local_resource_handle: self.cfg.local_resource_handle.clone(),
                 },
             )
             .await
@@ -315,13 +288,8 @@ impl State for KeystoreListState {
             .list(
                 "keystore_list",
                 KeystoreListRequest {
-                    store_path: None,
-                    store_path_hex: Some(hex_encode_utf8(
-                        self.cfg.keystore_path.to_string_lossy().as_ref(),
-                    )),
+                    local_resource_handle: self.cfg.local_resource_handle.clone(),
                     show_addrs: self.cfg.show_addresses,
-                    filter_label: None,
-                    filter_label_hex: self.cfg.filter_label.as_ref().map(|v| hex_encode_utf8(v)),
                     sort_by: self.cfg.sort_by.clone(),
                 },
             )
@@ -404,13 +372,8 @@ impl State for KeystoreDeleteState {
                 "keystore_delete",
                 KeystoreDeleteRequest {
                     id: self.cfg.id.clone(),
-                    label: None,
-                    label_hex: self.cfg.by_label.as_ref().map(|v| hex_encode_utf8(v)),
                     confirm_yes: self.cfg.yes,
-                    store_path: None,
-                    store_path_hex: Some(hex_encode_utf8(
-                        self.cfg.keystore_path.to_string_lossy().as_ref(),
-                    )),
+                    local_resource_handle: self.cfg.local_resource_handle.clone(),
                 },
             )
             .await
@@ -433,37 +396,6 @@ impl State for KeystoreDeleteState {
         Ok(StateOutcome {
             snapshot: SnapshotPolicy::OnSuccess,
         })
-    }
-}
-
-/// Decodes a string field supplied in either raw or hex-encoded form.
-pub fn decode_optional_hex_string(
-    raw: Option<String>,
-    raw_hex: Option<String>,
-    field_name: &'static str,
-) -> Result<Option<String>, KeystoreAdminError> {
-    match (raw, raw_hex) {
-        (Some(_), Some(_)) => Err(KeystoreAdminError::new(
-            "InvalidPathConfig",
-            format!("{field_name} must use exactly one encoding"),
-        )),
-        (Some(value), None) => Ok(Some(value)),
-        (None, Some(value_hex)) => {
-            let bytes = hex::decode(value_hex).map_err(|_| {
-                KeystoreAdminError::new(
-                    "InvalidPathConfig",
-                    format!("{field_name} hex must be valid hex"),
-                )
-            })?;
-            let decoded = String::from_utf8(bytes).map_err(|_| {
-                KeystoreAdminError::new(
-                    "InvalidPathConfig",
-                    format!("{field_name} hex did not decode to utf-8"),
-                )
-            })?;
-            Ok(Some(decoded))
-        }
-        (None, None) => Ok(None),
     }
 }
 

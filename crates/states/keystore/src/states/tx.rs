@@ -9,15 +9,12 @@
 //! # Examples
 //!
 //! ```rust
-//! use std::path::PathBuf;
-//!
 //! use alloy_primitives::Address;
 //! use mfm_state_keystore::states::tx::{KeystoreTxSignStateConfig, LocalFileWriteMode};
 //! use mfm_state_keystore::tx::Eip1559TxToSign;
 //!
 //! let cfg = KeystoreTxSignStateConfig {
 //!     id: Some("550e8400-e29b-41d4-a716-446655440000".to_string()),
-//!     by_label: None,
 //!     tx: Eip1559TxToSign {
 //!         to: Address::from([0u8; 20]),
 //!         value_wei: 0,
@@ -28,16 +25,13 @@
 //!         gas_limit: 21_000,
 //!         data: Vec::new(),
 //!     },
-//!     out_path: PathBuf::from("/tmp/raw-tx.hex"),
 //!     out_write_mode: LocalFileWriteMode::CreateNew,
-//!     keystore_path: PathBuf::from("/tmp/keystore"),
+//!     local_resource_handle: "local-keystore:example".to_string(),
 //! };
 //!
 //! assert_eq!(cfg.tx.chain_id, 1);
-//! assert_eq!(cfg.out_path, PathBuf::from("/tmp/raw-tx.hex"));
+//! assert_eq!(cfg.local_resource_handle, "local-keystore:example");
 //! ```
-
-use std::path::PathBuf;
 
 use async_trait::async_trait;
 use mfm_collectors_local_keystore::{KeystoreTxSignRequest, LocalKeystoreIoClient};
@@ -60,21 +54,18 @@ pub use mfm_collectors_local_keystore::LocalFileWriteMode;
 
 /// Runtime configuration for a keystore-backed transaction signing state.
 ///
-/// Exactly one of `id` or `by_label` should be populated by the planner.
+/// Local paths and label selectors are resolved by the live transport through the local resource
+/// handle so they do not enter durable run config or snapshots.
 #[derive(Clone, Debug)]
 pub struct KeystoreTxSignStateConfig {
     /// Optional UUID selector for the signing key.
     pub id: Option<String>,
-    /// Optional alias selector for the signing key.
-    pub by_label: Option<String>,
     /// Transaction payload to sign.
     pub tx: Eip1559TxToSign,
-    /// Destination path for the signed raw transaction file.
-    pub out_path: PathBuf,
     /// Output write policy for the signed raw transaction file.
     pub out_write_mode: LocalFileWriteMode,
-    /// Filesystem path of the keystore directory.
-    pub keystore_path: PathBuf,
+    /// Opaque local binding registered with the live keystore transport.
+    pub local_resource_handle: String,
 }
 /// State that signs an EIP-1559 transaction through the local keystore transport.
 #[derive(Clone, Debug)]
@@ -109,20 +100,7 @@ impl State for KeystoreTxSignState {
                 "tx_sign",
                 KeystoreTxSignRequest {
                     id: self.cfg.id.clone(),
-                    label: None,
-                    label_hex: self
-                        .cfg
-                        .by_label
-                        .as_ref()
-                        .map(|v| hex::encode(v.as_bytes())),
-                    store_path: None,
-                    store_path_hex: Some(hex::encode(
-                        self.cfg.keystore_path.display().to_string().as_bytes(),
-                    )),
-                    out_path: None,
-                    out_path_hex: Some(hex::encode(
-                        self.cfg.out_path.display().to_string().as_bytes(),
-                    )),
+                    local_resource_handle: self.cfg.local_resource_handle.clone(),
                     out_write_mode: self.cfg.out_write_mode.clone(),
                     to: format!("{:?}", self.cfg.tx.to),
                     value_wei: self.cfg.tx.value_wei.to_string(),

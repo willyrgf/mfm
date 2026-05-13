@@ -16,7 +16,6 @@
 //! assert_eq!(op.op_id().as_str(), TX_SIGN_OP_ID);
 //! ```
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use mfm_machine::config::RunConfig;
@@ -59,21 +58,16 @@ pub struct TxSignReport {
     pub tx_type: String,
     /// Hash of the signed transaction payload.
     pub payload_hash: String,
-    /// Output path where the signed raw transaction was written.
-    pub out_path: String,
 }
 
 /// Planning input for the keystore transaction signing operation.
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct TxSignOpConfig {
     /// Optional exact key identifier.
     pub id: Option<String>,
-    /// Optional UTF-8 label selector.
-    #[serde(default)]
-    pub by_label: Option<String>,
-    /// Optional hex-encoded UTF-8 label selector.
-    #[serde(default)]
-    pub by_label_hex: Option<String>,
+    /// Opaque local binding registered by the app before live execution.
+    pub local_resource_handle: String,
     /// Recipient address.
     pub to: String,
     /// Transfer value in wei, encoded as decimal or quantity string supported by helpers.
@@ -88,19 +82,12 @@ pub struct TxSignOpConfig {
     pub max_priority_fee_per_gas: String,
     /// Gas limit for the transaction.
     pub gas_limit: u64,
-    /// Output file for the raw signed transaction.
-    pub out_path: String,
     /// Output write policy. Defaults to `create_new`.
     #[serde(default)]
     pub out_write_mode: LocalFileWriteMode,
     /// Hex-encoded calldata.
     #[serde(default = "default_tx_data")]
     pub data: String,
-    /// Optional keystore directory path.
-    pub keystore_path: Option<String>,
-    /// Optional hex-encoded keystore directory path.
-    #[serde(default)]
-    pub keystore_path_hex: Option<String>,
 }
 
 fn default_tx_data() -> String {
@@ -162,22 +149,16 @@ impl Operation for KeystoreTxSignOp {
         };
 
         let state_id = leaf_state_id(&op_path, "sign_and_write")?;
-        let by_label =
-            decode_selector_label(cfg.by_label, cfg.by_label_hex).map_err(sdk_error_from_helper)?;
-        let keystore_path =
-            decode_optional_hex_string(cfg.keystore_path, cfg.keystore_path_hex, "keystore_path")
-                .map_err(sdk_error_from_helper)?;
+        let local_resource_handle = require_local_resource_handle(cfg.local_resource_handle)
+            .map_err(sdk_error_from_helper)?;
         let state = KeystoreTxSignState {
             state_id: state_id.clone(),
             output_key: tx_sign_report_key_for_op_path(&op_path),
             cfg: KeystoreTxSignStateConfig {
                 id: cfg.id,
-                by_label,
                 tx,
-                out_path: PathBuf::from(cfg.out_path),
                 out_write_mode: cfg.out_write_mode,
-                keystore_path: require_keystore_path(keystore_path)
-                    .map_err(sdk_error_from_helper)?,
+                local_resource_handle,
             },
         };
 
@@ -198,77 +179,16 @@ impl Operation for KeystoreTxSignOp {
     }
 }
 
-fn require_keystore_path(configured: Option<String>) -> Result<PathBuf, KeystoreTxError> {
-    let Some(value) = configured
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-    else {
+fn require_local_resource_handle(configured: String) -> Result<String, KeystoreTxError> {
+    let value = configured.trim();
+    if value.is_empty() {
         return Err(KeystoreTxError::new(
             "MissingArgument",
-            "Must provide keystore_path or keystore_path_hex",
+            "Must provide local_resource_handle",
         ));
-    };
-
-    Ok(PathBuf::from(value))
-}
-
-fn decode_selector_label(
-    by_label: Option<String>,
-    by_label_hex: Option<String>,
-) -> Result<Option<String>, KeystoreTxError> {
-    match (by_label, by_label_hex) {
-        (Some(_), Some(_)) => Err(KeystoreTxError::new(
-            "InvalidSelectorLabel",
-            "selector label must use exactly one input field",
-        )),
-        (Some(label), None) => Ok(Some(label)),
-        (None, Some(raw_hex)) => {
-            let bytes = hex::decode(raw_hex).map_err(|_| {
-                KeystoreTxError::new(
-                    "InvalidSelectorLabel",
-                    "selector label hex must be valid lowercase/uppercase hex",
-                )
-            })?;
-            let decoded = String::from_utf8(bytes).map_err(|_| {
-                KeystoreTxError::new(
-                    "InvalidSelectorLabel",
-                    "selector label hex did not decode to utf-8",
-                )
-            })?;
-            Ok(Some(decoded))
-        }
-        (None, None) => Ok(None),
     }
-}
 
-fn decode_optional_hex_string(
-    raw: Option<String>,
-    raw_hex: Option<String>,
-    field_name: &'static str,
-) -> Result<Option<String>, KeystoreTxError> {
-    match (raw, raw_hex) {
-        (Some(_), Some(_)) => Err(KeystoreTxError::new(
-            "InvalidPathConfig",
-            format!("{field_name} must use exactly one encoding"),
-        )),
-        (Some(value), None) => Ok(Some(value)),
-        (None, Some(value_hex)) => {
-            let bytes = hex::decode(value_hex).map_err(|_| {
-                KeystoreTxError::new(
-                    "InvalidPathConfig",
-                    format!("{field_name} hex must be valid hex"),
-                )
-            })?;
-            let decoded = String::from_utf8(bytes).map_err(|_| {
-                KeystoreTxError::new(
-                    "InvalidPathConfig",
-                    format!("{field_name} hex did not decode to utf-8"),
-                )
-            })?;
-            Ok(Some(decoded))
-        }
-        (None, None) => Ok(None),
-    }
+    Ok(value.to_string())
 }
 
 fn sdk_error_from_helper(err: KeystoreTxError) -> SdkError {
@@ -289,5 +209,60 @@ fn helper_category(code: &str) -> ErrorCategory {
         | "AmbiguousLabel"
         | "KeyNotFound" => ErrorCategory::ParsingInput,
         _ => ErrorCategory::Unknown,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn valid_tx_config() -> serde_json::Value {
+        serde_json::json!({
+            "id": null,
+            "local_resource_handle": "local-keystore:test",
+            "to": "0x1111111111111111111111111111111111111111",
+            "value_wei": "1",
+            "chain_id": 1,
+            "nonce": 0,
+            "max_fee_per_gas": "2000000000",
+            "max_priority_fee_per_gas": "1000000000",
+            "gas_limit": 21000,
+            "out_write_mode": "create_new",
+            "data": "0x"
+        })
+    }
+
+    #[test]
+    fn tx_sign_config_rejects_legacy_hex_path_and_label_fields() {
+        let mut value = valid_tx_config();
+        value["keystore_path_hex"] = serde_json::json!("2f746d702f6b657973746f7265");
+        value["by_label_hex"] = serde_json::json!("7369676e6572");
+
+        let err = serde_json::from_value::<TxSignOpConfig>(value)
+            .expect_err("reversible local fields must be rejected");
+
+        assert!(err.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn serialized_tx_sign_config_contains_no_local_paths_or_labels() {
+        let cfg = serde_json::from_value::<TxSignOpConfig>(valid_tx_config())
+            .expect("handle-only config should deserialize");
+
+        let rendered = serde_json::to_string(&cfg).expect("serialize config");
+
+        assert!(!rendered.contains("/tmp/keystore"));
+        assert!(!rendered.contains("/tmp/signed.tx"));
+        assert!(!rendered.contains("keystore_path"));
+        assert!(!rendered.contains("out_path"));
+        assert!(!rendered.contains("by_label"));
+    }
+
+    #[test]
+    fn tx_sign_config_rejects_empty_local_resource_handle() {
+        let err = require_local_resource_handle("  ".to_string())
+            .expect_err("empty local resource handles are invalid");
+
+        assert_eq!(err.code, "MissingArgument");
     }
 }

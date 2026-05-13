@@ -72,7 +72,12 @@ fn parity_keystore_cli_tx_sign_writes_eip1559_payload() {
     assert!(sign_json["payload_hash"]
         .as_str()
         .is_some_and(|v| v.starts_with("0x")));
+    assert!(
+        sign_json.get("out_path").is_none(),
+        "local output paths must not be emitted"
+    );
     assert!(!stdout_string(&sign_output).contains("raw_tx_hex"));
+    assert!(!stdout_string(&sign_output).contains(&signed_tx_path.display().to_string()));
     assert!(!stdout_string(&sign_output).contains(&private_key));
     assert!(!stderr_string(&sign_output).contains(&private_key));
 
