@@ -220,6 +220,23 @@ COMMIT;
         Self::i64_to_nonnegative_u64(head, "mfm_streams.head_seq")
     }
 
+    async fn read_head(client: &Client, stream_id: &StreamId) -> Result<u64, StorageError> {
+        let row = client
+            .query_opt(
+                "SELECT head_seq FROM mfm_streams WHERE stream_id = $1",
+                &[&stream_id.as_str()],
+            )
+            .await
+            .map_err(|_| Self::other("pg_query_failed", "failed to query head_seq"))?;
+
+        let Some(row) = row else {
+            return Ok(0);
+        };
+
+        let head: i64 = row.get(0);
+        Self::i64_to_nonnegative_u64(head, "mfm_streams.head_seq")
+    }
+
     async fn validate_stream_record_integrity(
         client: &Client,
         stream_id: &StreamId,
@@ -257,30 +274,74 @@ COMMIT;
             "mfm_stream_records contained invalid sequence metadata",
         ))
     }
+
+    fn validate_read_range_contiguity(
+        records: &[StreamRecord],
+        from_seq: u64,
+        to_seq: Option<u64>,
+        head_seq: u64,
+    ) -> Result<(), StorageError> {
+        let from_seq = from_seq.max(1);
+        if to_seq.is_some_and(|to| to < from_seq) || head_seq < from_seq {
+            if records.is_empty() {
+                return Ok(());
+            }
+            return Err(Self::corruption(
+                "pg_stream_corrupt",
+                "mfm_stream_records contained rows outside the requested stream range",
+            ));
+        }
+
+        let expected_end = to_seq.map_or(head_seq, |to| to.min(head_seq));
+        let mut expected_seq = from_seq;
+        for record in records {
+            if record.seq != expected_seq {
+                return Err(Self::corruption(
+                    "pg_stream_corrupt",
+                    "mfm_stream_records contained a sequence gap",
+                ));
+            }
+            if record.seq > expected_end {
+                return Err(Self::corruption(
+                    "pg_stream_corrupt",
+                    "mfm_stream_records contained rows past mfm_streams.head_seq",
+                ));
+            }
+            expected_seq = record.seq.checked_add(1).ok_or_else(|| {
+                Self::corruption(
+                    "pg_stream_corrupt",
+                    "mfm_stream_records sequence exceeded supported range",
+                )
+            })?;
+        }
+
+        let expected_after_end = expected_end.checked_add(1).ok_or_else(|| {
+            Self::corruption(
+                "pg_stream_corrupt",
+                "mfm_streams.head_seq exceeded supported range",
+            )
+        })?;
+        if expected_seq != expected_after_end {
+            return Err(Self::corruption(
+                "pg_stream_corrupt",
+                "mfm_stream_records were missing rows within the requested stream range",
+            ));
+        }
+
+        Ok(())
+    }
 }
 
 #[async_trait]
 impl StreamStore for PostgresStreamStore {
     async fn head_seq(&self, stream_id: &StreamId) -> Result<u64, StorageError> {
-        let row = self
-            .client
-            .lock()
-            .await
-            .query_opt(
-                "SELECT head_seq FROM mfm_streams WHERE stream_id = $1",
-                &[&stream_id.as_str()],
-            )
-            .await
-            .map_err(|_| Self::other("pg_query_failed", "failed to query head_seq"))?;
-
-        let Some(row) = row else {
+        let client = self.client.lock().await;
+        let head_seq = Self::read_head(&client, stream_id).await?;
+        if head_seq == 0 {
             debug!(stream_id = %stream_id, head_seq = 0, "head_seq resolved");
-            return Ok(0);
-        };
-
-        let head: i64 = row.get(0);
-        let head_seq = Self::i64_to_nonnegative_u64(head, "mfm_streams.head_seq")?;
-        debug!(stream_id = %stream_id, head_seq, "head_seq resolved");
+        } else {
+            debug!(stream_id = %stream_id, head_seq, "head_seq resolved");
+        }
         Ok(head_seq)
     }
 
@@ -381,6 +442,7 @@ impl StreamStore for PostgresStreamStore {
         to_seq: Option<u64>,
     ) -> Result<Vec<StreamRecord>, StorageError> {
         let client = self.client.lock().await;
+        let head_seq = Self::read_head(&client, stream_id).await?;
         Self::validate_stream_record_integrity(&client, stream_id).await?;
 
         let from = Self::u64_to_i64(from_seq.max(1), "read_range.from_seq")?;
@@ -420,6 +482,7 @@ impl StreamStore for PostgresStreamStore {
                 payload,
             });
         }
+        Self::validate_read_range_contiguity(&out, from_seq, to_seq, head_seq)?;
         debug!(
             stream_id = %stream_id,
             from_seq,
@@ -447,6 +510,16 @@ mod tests {
         match err {
             StorageError::Other(info) => assert_eq!(info.code.as_str(), "pg_value_out_of_range"),
             other => panic!("expected pg_value_out_of_range, got {other:?}"),
+        }
+    }
+
+    fn test_record(seq: u64) -> StreamRecord {
+        StreamRecord {
+            stream_id: StreamId::must_new("test:stream".to_string()),
+            seq,
+            ts_millis: None,
+            kind: "test".to_string(),
+            payload: serde_json::json!({ "seq": seq }),
         }
     }
 
@@ -483,6 +556,53 @@ mod tests {
             PostgresStreamStore::checked_next_seq(POSTGRES_BIGINT_MAX_U64)
                 .expect_err("next overflow"),
         );
+    }
+
+    #[test]
+    fn read_range_contiguity_accepts_contiguous_requested_slice() {
+        PostgresStreamStore::validate_read_range_contiguity(
+            &[test_record(2), test_record(3)],
+            2,
+            Some(3),
+            5,
+        )
+        .expect("contiguous bounded slice");
+    }
+
+    #[test]
+    fn read_range_contiguity_detects_missing_row() {
+        let err = PostgresStreamStore::validate_read_range_contiguity(
+            &[test_record(1), test_record(3)],
+            1,
+            None,
+            3,
+        )
+        .expect_err("gap must fail");
+        assert_corruption(err);
+    }
+
+    #[test]
+    fn read_range_contiguity_detects_head_ahead_of_records() {
+        let err = PostgresStreamStore::validate_read_range_contiguity(
+            &[test_record(1), test_record(2)],
+            1,
+            None,
+            3,
+        )
+        .expect_err("head drift must fail");
+        assert_corruption(err);
+    }
+
+    #[test]
+    fn read_range_contiguity_detects_records_past_head() {
+        let err = PostgresStreamStore::validate_read_range_contiguity(
+            &[test_record(1), test_record(2), test_record(3)],
+            1,
+            None,
+            2,
+        )
+        .expect_err("records past head must fail");
+        assert_corruption(err);
     }
 
     #[cfg(feature = "parity-tests")]
@@ -569,6 +689,16 @@ CREATE TABLE mfm_stream_records (
         fn assert_check_violation(err: tokio_postgres::Error) {
             let db_error = err.as_db_error().expect("database error");
             assert_eq!(db_error.code(), &SqlState::CHECK_VIOLATION);
+        }
+
+        fn test_records(count: u64) -> Vec<mfm_machine::stores::NewStreamRecord> {
+            (1..=count)
+                .map(|seq| mfm_machine::stores::NewStreamRecord {
+                    ts_millis: None,
+                    kind: "test".to_string(),
+                    payload: serde_json::json!({ "seq": seq }),
+                })
+                .collect()
         }
 
         #[tokio::test]
@@ -701,6 +831,93 @@ CREATE TABLE mfm_stream_records (
                 .read_range(&stream_id, 1, None)
                 .await
                 .expect_err("negative timestamp");
+            assert_corruption(err);
+            drop_schema(&store, &schema).await;
+        }
+
+        #[tokio::test]
+        async fn deleted_record_gap_fails_closed_on_read_range() {
+            let (store, schema) = test_store(true).await;
+            let stream_id = StreamId::must_new(format!("p16:{schema}_gap"));
+
+            store
+                .append(StreamAppend::new(stream_id.clone(), 0, test_records(3)))
+                .await
+                .expect("append records");
+
+            {
+                let client = store.client.lock().await;
+                client
+                    .execute(
+                        "DELETE FROM mfm_stream_records WHERE stream_id = $1 AND seq = $2",
+                        &[&stream_id.as_str(), &2_i64],
+                    )
+                    .await
+                    .expect("delete middle record");
+            }
+
+            let err = store
+                .read_range(&stream_id, 1, None)
+                .await
+                .expect_err("deleted row must fail");
+            assert_corruption(err);
+            drop_schema(&store, &schema).await;
+        }
+
+        #[tokio::test]
+        async fn head_seq_ahead_of_records_fails_closed_on_read_range() {
+            let (store, schema) = test_store(true).await;
+            let stream_id = StreamId::must_new(format!("p16:{schema}_head_ahead"));
+
+            store
+                .append(StreamAppend::new(stream_id.clone(), 0, test_records(2)))
+                .await
+                .expect("append records");
+
+            {
+                let client = store.client.lock().await;
+                client
+                    .execute(
+                        "UPDATE mfm_streams SET head_seq = $2 WHERE stream_id = $1",
+                        &[&stream_id.as_str(), &3_i64],
+                    )
+                    .await
+                    .expect("corrupt head ahead");
+            }
+
+            let err = store
+                .read_range(&stream_id, 1, None)
+                .await
+                .expect_err("head ahead of records must fail");
+            assert_corruption(err);
+            drop_schema(&store, &schema).await;
+        }
+
+        #[tokio::test]
+        async fn records_past_head_seq_fail_closed_on_read_range() {
+            let (store, schema) = test_store(true).await;
+            let stream_id = StreamId::must_new(format!("p16:{schema}_past_head"));
+
+            store
+                .append(StreamAppend::new(stream_id.clone(), 0, test_records(3)))
+                .await
+                .expect("append records");
+
+            {
+                let client = store.client.lock().await;
+                client
+                    .execute(
+                        "UPDATE mfm_streams SET head_seq = $2 WHERE stream_id = $1",
+                        &[&stream_id.as_str(), &2_i64],
+                    )
+                    .await
+                    .expect("corrupt head behind");
+            }
+
+            let err = store
+                .read_range(&stream_id, 1, None)
+                .await
+                .expect_err("records past head must fail");
             assert_corruption(err);
             drop_schema(&store, &schema).await;
         }
