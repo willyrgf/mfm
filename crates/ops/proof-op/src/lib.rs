@@ -33,9 +33,9 @@ use mfm_machine::plan::DependencyEdge;
 use mfm_machine::recorder::EventRecorder;
 use mfm_machine::state::{SnapshotPolicy, State, StateOutcome};
 use mfm_state_common::ctx as op_ctx;
-use mfm_state_common::output as op_output;
 use mfm_state_common::states::meta;
 use mfm_state_common::states::proof::{ProofApplySideEffectState, ProofReadState};
+use mfm_state_common::states::publish::WriteContextValueArtifactState;
 use mfm_state_common::states::side_effect::TriggerOnce;
 
 use mfm_sdk::errors::SdkError;
@@ -57,6 +57,11 @@ use mfm_state_common::idempotency as op_idempotency;
 
 const OP_ID: &str = "proof";
 const OP_VERSION: &str = "v1";
+const PORT_OUTPUT: &str = "output";
+const KEY_READ_FACT: &str = "read_fact";
+const KEY_IDEMPOTENCY: &str = "idempotency_key";
+const KEY_SIDE_EFFECT_RESULT: &str = "side_effect_result";
+const KEY_OUTPUT_PAYLOAD: &str = "output_payload";
 
 // Custom domain event (audit only).
 const DOMAIN_EVENT_IDEMPOTENCY_KEY: &str = "proof_idempotency_key";
@@ -110,39 +115,47 @@ impl Operation for ProofOp {
     ) -> Result<PlannedOp, SdkError> {
         let read_sid = leaf_state_id(&op_path, "read_facts")?;
         let side_sid = leaf_state_id(&op_path, "apply_side_effect")?;
-        let out_sid = leaf_state_id(&op_path, "write_output")?;
+        let assemble_sid = leaf_state_id(&op_path, "assemble_output")?;
+        let publish_sid = leaf_state_id(&op_path, "publish_output")?;
 
         let read = Arc::new(ProofReadState {
             state_id: read_sid.clone(),
             purpose: "proof_read",
-            output_key: ctx_key("read_fact"),
+            output_key: ctx_key(KEY_READ_FACT),
             io_error_code: "read_fact_io_failed",
             io_error_message: "failed to read input fact",
         });
         let side = Arc::new(ProofApplySideEffectState {
             state_id: side_sid.clone(),
             op_id: OP_ID,
-            input_key: ctx_key("read_fact"),
-            idempotency_key_output: ctx_key("idempotency_key"),
-            output_key: ctx_key("side_effect_result"),
+            input_key: ctx_key(KEY_READ_FACT),
+            idempotency_key_output: ctx_key(KEY_IDEMPOTENCY),
+            output_key: ctx_key(KEY_SIDE_EFFECT_RESULT),
             event_name: DOMAIN_EVENT_IDEMPOTENCY_KEY.to_string(),
             purpose: "proof_side_effect",
             orphan_after_side_effect: self.orphan_after_side_effect.clone(),
         });
-        let out = Arc::new(WriteOutputState {
-            op_path: op_path.clone(),
+        let assemble = Arc::new(AssembleOutputState);
+        let publish = Arc::new(WriteContextValueArtifactState {
+            state_id: publish_sid.clone(),
+            input_key: ctx_key(KEY_OUTPUT_PAYLOAD),
+            fact_key: output_fact_key(&op_path),
+            output_artifact_id_key: ctx_key(PORT_OUTPUT),
+            missing_input_code: "missing_proof_output_payload",
+            missing_input_message: "missing assembled proof output payload before publication",
         });
 
         Ok(PlannedOp {
             interface: OpInterface {
                 imports: Vec::new(),
-                exports: vec![PortKey("output".to_string())],
+                exports: vec![PortKey(PORT_OUTPUT.to_string())],
             },
             kind: PlannedOpKind::Leaf(LeafOpSpec {
                 states: vec![
                     leaf_state_node(&op_path, "read_facts", read)?,
                     leaf_state_node(&op_path, "apply_side_effect", side)?,
-                    leaf_state_node(&op_path, "write_output", out)?,
+                    leaf_state_node(&op_path, "assemble_output", assemble)?,
+                    leaf_state_node(&op_path, "publish_output", publish)?,
                 ],
                 edges: vec![
                     DependencyEdge {
@@ -151,7 +164,11 @@ impl Operation for ProofOp {
                     },
                     DependencyEdge {
                         from: side_sid,
-                        to: out_sid,
+                        to: assemble_sid.clone(),
+                    },
+                    DependencyEdge {
+                        from: assemble_sid,
+                        to: publish_sid,
                     },
                 ],
             }),
@@ -159,32 +176,30 @@ impl Operation for ProofOp {
     }
 }
 
-struct WriteOutputState {
-    op_path: OpPath,
-}
+struct AssembleOutputState;
 
 #[async_trait]
-impl State for WriteOutputState {
+impl State for AssembleOutputState {
     fn meta(&self) -> StateMeta {
-        meta::read_only_io()
+        meta::pure()
     }
 
     async fn handle(
         &self,
         ctx: &mut dyn DynContext,
-        io: &mut dyn IoProvider,
-        rec: &mut dyn EventRecorder,
+        _io: &mut dyn IoProvider,
+        _rec: &mut dyn EventRecorder,
     ) -> Result<StateOutcome, StateError> {
         let read_fact = op_ctx::read_json_required(
             ctx,
-            &ctx_key("read_fact"),
+            &ctx_key(KEY_READ_FACT),
             "missing_read_fact",
             "missing read_fact in context",
         )?;
 
         let side_effect = op_ctx::read_json_required(
             ctx,
-            &ctx_key("side_effect_result"),
+            &ctx_key(KEY_SIDE_EFFECT_RESULT),
             "missing_side_effect",
             "missing side_effect_result in context",
         )?;
@@ -194,15 +209,7 @@ impl State for WriteOutputState {
             "side_effect_result": side_effect,
         });
 
-        op_output::write_output_artifact(
-            ctx,
-            io,
-            rec,
-            output_fact_key(&self.op_path),
-            output,
-            ctx_key("output_artifact_id"),
-        )
-        .await?;
+        op_ctx::write_json(ctx, ctx_key(KEY_OUTPUT_PAYLOAD), output)?;
 
         Ok(StateOutcome {
             snapshot: SnapshotPolicy::OnSuccess,

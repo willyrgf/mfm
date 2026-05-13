@@ -100,12 +100,10 @@ impl EventRecorder for NoopRecorder {
 }
 
 #[test]
-fn write_output_state_metadata_is_read_only_io() {
-    let state = WriteOutputState {
-        op_path: OpPath::must_new("proof.main".to_string()),
-    };
+fn assemble_output_state_metadata_is_pure() {
+    let state = AssembleOutputState;
     let meta = state.meta();
-    assert_eq!(meta.side_effects, SideEffectKind::ReadOnlyIo);
+    assert_eq!(meta.side_effects, SideEffectKind::Pure);
     assert!(meta.tags.is_empty());
 }
 
@@ -156,6 +154,15 @@ async fn read_run_stream(stores: &Stores, run_id: RunId) -> Vec<EventEnvelope> {
         .await
         .and_then(|records| event_envelopes_from_stream_records(run_id, records))
         .expect("read run stream")
+}
+
+async fn load_context_snapshot(stores: &Stores, snapshot_id: &ArtifactId) -> serde_json::Value {
+    let bytes = stores
+        .artifacts
+        .get(snapshot_id)
+        .await
+        .expect("context snapshot bytes");
+    serde_json::from_slice(&bytes).expect("context snapshot json")
 }
 
 fn count_state_entered_attempts(stream: &[EventEnvelope], state_id: &str) -> Vec<u32> {
@@ -486,6 +493,29 @@ async fn at06_live_then_replay_determinism() {
 
     assert_eq!(res.phase, RunPhase::Completed);
     let final_snapshot_id = res.final_snapshot_id.clone().expect("final snapshot");
+    let context_snapshot = load_context_snapshot(&stores, &final_snapshot_id).await;
+    let output_artifact_id: String = serde_json::from_value(
+        context_snapshot
+            .get("proof.main.out.output")
+            .cloned()
+            .expect("declared proof output export"),
+    )
+    .expect("proof output artifact id");
+    assert!(
+        context_snapshot
+            .get("proof.main.work.output_artifact_id")
+            .is_none(),
+        "proof output must be published through the declared output export"
+    );
+    let output_bytes = stores
+        .artifacts
+        .get(&ArtifactId::must_new(output_artifact_id.as_str()))
+        .await
+        .expect("proof output artifact");
+    let output: serde_json::Value =
+        serde_json::from_slice(&output_bytes).expect("proof output artifact json");
+    assert_eq!(output["read_fact"], serde_json::json!({"n": 1}));
+    assert!(output.get("side_effect_result").is_some());
 
     // Manual replay using ReplayIo + recorded facts must reproduce the final snapshot id.
     let stream = read_run_stream(&stores, res.run_id).await;
