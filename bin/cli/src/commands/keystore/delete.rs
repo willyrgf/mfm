@@ -1,13 +1,9 @@
 use crate::commands::result::{CommandOutput, CommandResult};
 use crate::commands::CommandContext;
 use crate::presentation::output::handle_command_result;
-use crate::support::{app_services, command_defaults, run_stores};
+use crate::support::{app_services, command_defaults};
 use clap::Args;
-use mfm_op_keystore_admin::{
-    keystore_delete_report_context_key, KeystoreDeleteOpConfig, KeystoreDeleteReport,
-    KEYSTORE_ADMIN_OP_VERSION, KEYSTORE_DELETE_OP_ID,
-};
-use mfm_sdk::unstable::{execute_single_op_report, SingleOpReportRequest};
+use mfm_app::KeystoreDeleteRequest;
 use serde::Serialize;
 use std::fmt;
 use std::path::PathBuf;
@@ -52,37 +48,19 @@ pub(crate) async fn execute(ctx: &CommandContext, args: &DeleteArgs) -> ! {
 
 async fn execute_internal(args: &DeleteArgs) -> CommandResult<DeleteResponse> {
     let keystore_path = command_defaults::resolve_keystore_path(args.keystore.as_ref());
-    let op_config = KeystoreDeleteOpConfig {
-        id: args.id.clone(),
-        by_label: None,
-        by_label_hex: args
-            .by_label
-            .as_ref()
-            .map(|label| hex::encode(label.as_bytes())),
-        yes: args.yes,
-        keystore_path: None,
-        keystore_path_hex: Some(hex::encode(keystore_path.to_string_lossy().as_bytes())),
-    };
-
-    let report_key = keystore_delete_report_context_key();
-    let bundle = app_services::make_engine_bundle();
-    let report: KeystoreDeleteReport = execute_single_op_report(
-        bundle.engine,
-        run_stores::make_ephemeral_stores(None),
-        bundle.registry,
-        bundle.planner,
-        SingleOpReportRequest {
-            op_id: KEYSTORE_DELETE_OP_ID.to_string(),
-            op_version: KEYSTORE_ADMIN_OP_VERSION.to_string(),
-            op_config: app_services::serialize_op_config(&op_config, "keystore delete")?,
-            report_context_key: report_key.0,
-        },
-    )
-    .await
-    .map_err(app_services::command_error_from_single_op_report_error)?;
+    let services = app_services::make_ephemeral_app_services();
+    let response = services
+        .keystore_delete(KeystoreDeleteRequest {
+            id: args.id.clone(),
+            by_label: args.by_label.clone(),
+            yes: args.yes,
+            keystore_path,
+        })
+        .await
+        .map_err(app_services::command_error_from_app_error)?;
 
     Ok(CommandOutput::new(DeleteResponse {
-        id: report.id,
-        label: report.label,
+        id: response.id,
+        label: response.label,
     }))
 }

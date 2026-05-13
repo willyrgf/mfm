@@ -1,13 +1,9 @@
 use crate::commands::result::{CommandOutput, CommandResult};
 use crate::commands::CommandContext;
 use crate::presentation::output::handle_command_result;
-use crate::support::{app_services, command_defaults, run_stores};
+use crate::support::{app_services, command_defaults};
 use clap::Args;
-use mfm_op_keystore_tx::{
-    tx_sign_report_context_key, LocalFileWriteMode, TxSignOpConfig, TxSignReport, TX_OP_VERSION,
-    TX_SIGN_OP_ID,
-};
-use mfm_sdk::unstable::{execute_single_op_report, SingleOpReportRequest};
+use mfm_app::{KeystoreTxOutputWriteMode, KeystoreTxSignRequest};
 use serde::Serialize;
 use std::fmt;
 use std::path::PathBuf;
@@ -98,55 +94,37 @@ pub(crate) async fn execute(ctx: &CommandContext, args: &TxSignArgs) -> ! {
 
 async fn execute_internal(args: &TxSignArgs) -> CommandResult<TxSignResponse> {
     let keystore_path = command_defaults::resolve_keystore_path(args.keystore.as_ref());
-    let op_config = TxSignOpConfig {
-        id: args.id.clone(),
-        by_label: None,
-        by_label_hex: args
-            .by_label
-            .as_ref()
-            .map(|label| hex::encode(label.as_bytes())),
-        to: args.to.clone(),
-        value_wei: args.value_wei.clone(),
-        chain_id: args.chain_id,
-        nonce: args.nonce,
-        max_fee_per_gas: args.max_fee_per_gas.clone(),
-        max_priority_fee_per_gas: args.max_priority_fee_per_gas.clone(),
-        gas_limit: args.gas_limit,
-        out_path: args.out.display().to_string(),
-        out_write_mode: if args.overwrite {
-            LocalFileWriteMode::Overwrite
-        } else {
-            LocalFileWriteMode::CreateNew
-        },
-        data: args.data.clone(),
-        keystore_path: None,
-        keystore_path_hex: Some(hex::encode(keystore_path.to_string_lossy().as_bytes())),
-    };
-
-    let report_key = tx_sign_report_context_key();
-    let bundle = app_services::make_engine_bundle();
-    let report: TxSignReport = execute_single_op_report(
-        bundle.engine,
-        run_stores::make_ephemeral_stores(None),
-        bundle.registry,
-        bundle.planner,
-        SingleOpReportRequest {
-            op_id: TX_SIGN_OP_ID.to_string(),
-            op_version: TX_OP_VERSION.to_string(),
-            op_config: app_services::serialize_op_config(&op_config, "tx sign")?,
-            report_context_key: report_key.0,
-        },
-    )
-    .await
-    .map_err(app_services::command_error_from_single_op_report_error)?;
+    let services = app_services::make_ephemeral_app_services();
+    let response = services
+        .keystore_tx_sign(KeystoreTxSignRequest {
+            id: args.id.clone(),
+            by_label: args.by_label.clone(),
+            to: args.to.clone(),
+            value_wei: args.value_wei.clone(),
+            chain_id: args.chain_id,
+            nonce: args.nonce,
+            max_fee_per_gas: args.max_fee_per_gas.clone(),
+            max_priority_fee_per_gas: args.max_priority_fee_per_gas.clone(),
+            gas_limit: args.gas_limit,
+            out_path: args.out.clone(),
+            out_write_mode: if args.overwrite {
+                KeystoreTxOutputWriteMode::Overwrite
+            } else {
+                KeystoreTxOutputWriteMode::CreateNew
+            },
+            data: args.data.clone(),
+            keystore_path,
+        })
+        .await
+        .map_err(app_services::command_error_from_app_error)?;
 
     Ok(CommandOutput::new(TxSignResponse {
-        from: report.from,
-        to: report.to,
-        nonce: report.nonce,
-        chain_id: report.chain_id,
-        tx_type: report.tx_type,
-        payload_hash: report.payload_hash,
-        out_path: report.out_path,
+        from: response.from,
+        to: response.to,
+        nonce: response.nonce,
+        chain_id: response.chain_id,
+        tx_type: response.tx_type,
+        payload_hash: response.payload_hash,
+        out_path: response.out_path,
     }))
 }

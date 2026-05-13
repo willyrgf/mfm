@@ -24,7 +24,7 @@ pub mod observability;
 
 use std::collections::HashMap;
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -67,8 +67,19 @@ use mfm_op_evm_read::EvmReadOp;
 use mfm_op_evm_write::{
     EvmConfigureOp, EvmContractFromNixOp, EvmDeployContractSetOp, EvmDeployOp, EvmValidateOp,
 };
-use mfm_op_keystore_admin::{KeystoreDeleteOp, KeystoreImportOp, KeystoreListOp};
-use mfm_op_keystore_tx::KeystoreTxSignOp;
+use mfm_op_keystore_admin::{
+    keystore_delete_report_context_key, keystore_import_report_context_key,
+    keystore_list_report_context_key, Bip39ExtraSource as OpBip39ExtraSource, KeystoreDeleteOp,
+    KeystoreDeleteOpConfig, KeystoreDeleteReport as OpKeystoreDeleteReport, KeystoreImportOp,
+    KeystoreImportOpConfig, KeystoreImportReport as OpKeystoreImportReport,
+    KeystoreImportType as OpKeystoreImportType, KeystoreListOp, KeystoreListOpConfig,
+    KeystoreListReport as OpKeystoreListReport, KeystoreListSortBy as OpKeystoreListSortBy,
+    KEYSTORE_ADMIN_OP_VERSION, KEYSTORE_DELETE_OP_ID, KEYSTORE_IMPORT_OP_ID, KEYSTORE_LIST_OP_ID,
+};
+use mfm_op_keystore_tx::{
+    tx_sign_report_context_key, KeystoreTxSignOp, LocalFileWriteMode as OpLocalFileWriteMode,
+    TxSignOpConfig, TxSignReport as OpTxSignReport, TX_OP_VERSION, TX_SIGN_OP_ID,
+};
 use mfm_op_nix_app::NixAppOp;
 #[cfg(test)]
 use mfm_op_portfolio_tracker::PORTFOLIO_EXECUTE_OP_ID;
@@ -87,9 +98,9 @@ use mfm_sdk::launcher::{LaunchPipeline, RunLauncher};
 use mfm_sdk::op::OperationRegistry;
 use mfm_sdk::pipeline::{Pipeline, PipelinePlanner};
 use mfm_sdk::unstable::{
-    decode_context_value_with_slot_fallback, load_context_snapshot_json, single_op_pipeline,
-    ContextSnapshotLoadError, DefaultPipelinePlanner, DefaultRunLauncher, HashMapOperationRegistry,
-    SdkPlanResolver,
+    decode_context_value_with_slot_fallback, execute_single_op_report, load_context_snapshot_json,
+    single_op_pipeline, ContextSnapshotLoadError, DefaultPipelinePlanner, DefaultRunLauncher,
+    HashMapOperationRegistry, SdkPlanResolver, SingleOpReportError, SingleOpReportRequest,
 };
 use mfm_state_portfolio::model::PortfolioReport;
 use mfm_stream_store_postgres::PostgresStreamStore;
@@ -320,6 +331,19 @@ pub fn app_error_from_run_error(err: RunError) -> AppError {
     };
 
     AppError::new(class, info.code.as_str(), info.message)
+}
+
+fn app_error_from_single_op_report_error(err: SingleOpReportError) -> AppError {
+    let class = match err.code.as_str() {
+        "MissingFinalSnapshot"
+        | "MissingReport"
+        | "InvalidReport"
+        | "InvalidSnapshot"
+        | "RunFailed" => ErrorClass::Internal,
+        _ => ErrorClass::BadRequest,
+    };
+
+    AppError::new(class, err.code, err.message)
 }
 
 fn app_error_from_error_info(info: &mfm_machine::errors::ErrorInfo) -> AppError {
@@ -974,6 +998,208 @@ impl AppServices {
         get_artifact_from_store(Arc::clone(&self.artifacts), &id).await
     }
 
+    async fn run_single_op_report<T>(
+        &self,
+        op_id: &'static str,
+        op_version: &'static str,
+        op_name: &'static str,
+        report_key: ContextKey,
+        op_config: impl Serialize,
+    ) -> Result<T, AppError>
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        let op_config = serde_json::to_value(op_config).map_err(|_| {
+            AppError::new(
+                ErrorClass::Internal,
+                "SerializationError",
+                format!("failed to serialize {op_name} op config"),
+            )
+        })?;
+
+        execute_single_op_report(
+            Arc::clone(&self.bundle.engine),
+            self.stores(),
+            Arc::clone(&self.bundle.registry),
+            Arc::clone(&self.bundle.planner),
+            SingleOpReportRequest {
+                op_id: op_id.to_string(),
+                op_version: op_version.to_string(),
+                op_config,
+                report_context_key: report_key.0,
+            },
+        )
+        .await
+        .map_err(app_error_from_single_op_report_error)
+    }
+
+    /// Imports key material through the app-owned keystore operation boundary.
+    pub async fn keystore_import(
+        &self,
+        req: KeystoreImportRequest,
+    ) -> Result<KeystoreImportResponse, AppError> {
+        let op_config = KeystoreImportOpConfig {
+            import_type: match req.import_type {
+                KeystoreImportType::PrivateKey => OpKeystoreImportType::PrivateKey,
+                KeystoreImportType::Mnemonic => OpKeystoreImportType::Mnemonic,
+            },
+            label: None,
+            label_hex: req.label.as_deref().map(hex_string),
+            derivation_path: req.derivation_path,
+            keystore_path: None,
+            keystore_path_hex: Some(hex_path(&req.keystore_path)),
+            stdin: req.stdin,
+            bip39_extra: match req.bip39_extra {
+                KeystoreBip39ExtraSource::None => OpBip39ExtraSource::None,
+                KeystoreBip39ExtraSource::Prompt => OpBip39ExtraSource::Prompt,
+                KeystoreBip39ExtraSource::FilePath(path) => {
+                    OpBip39ExtraSource::FilePathHex(hex_path(&path))
+                }
+            },
+        };
+
+        let report: OpKeystoreImportReport = self
+            .run_single_op_report(
+                KEYSTORE_IMPORT_OP_ID,
+                KEYSTORE_ADMIN_OP_VERSION,
+                "keystore import",
+                keystore_import_report_context_key(),
+                op_config,
+            )
+            .await?;
+
+        Ok(KeystoreImportResponse {
+            id: report.id,
+            label: report.label,
+            key_type: import_key_type_for_output(&report.key_type),
+            address: report.address,
+            created_at: report.created_at,
+        })
+    }
+
+    /// Lists local keystore entries through the app-owned keystore operation boundary.
+    pub async fn keystore_list(
+        &self,
+        req: KeystoreListRequest,
+    ) -> Result<KeystoreListResponse, AppError> {
+        let op_config = KeystoreListOpConfig {
+            keystore_path: None,
+            keystore_path_hex: Some(hex_path(&req.keystore_path)),
+            show_addresses: req.show_addresses,
+            filter_label: None,
+            filter_label_hex: req.filter_label.as_deref().map(hex_string),
+            sort_by: match req.sort_by {
+                KeystoreListSortBy::Label => OpKeystoreListSortBy::Label,
+                KeystoreListSortBy::Created => OpKeystoreListSortBy::Created,
+                KeystoreListSortBy::Type => OpKeystoreListSortBy::Type,
+            },
+        };
+
+        let report: OpKeystoreListReport = self
+            .run_single_op_report(
+                KEYSTORE_LIST_OP_ID,
+                KEYSTORE_ADMIN_OP_VERSION,
+                "keystore list",
+                keystore_list_report_context_key(),
+                op_config,
+            )
+            .await?;
+
+        let keys = report
+            .keys
+            .into_iter()
+            .map(|key| KeystoreListEntry {
+                id: key.id,
+                label: key.label,
+                key_type: list_key_type_for_output(&key.key_type),
+                address: key.address,
+                created: key.created,
+            })
+            .collect();
+
+        Ok(KeystoreListResponse {
+            keys,
+            show_addresses: report.show_addresses,
+        })
+    }
+
+    /// Deletes a key through the app-owned keystore operation boundary.
+    pub async fn keystore_delete(
+        &self,
+        req: KeystoreDeleteRequest,
+    ) -> Result<KeystoreDeleteResponse, AppError> {
+        let op_config = KeystoreDeleteOpConfig {
+            id: req.id,
+            by_label: None,
+            by_label_hex: req.by_label.as_deref().map(hex_string),
+            yes: req.yes,
+            keystore_path: None,
+            keystore_path_hex: Some(hex_path(&req.keystore_path)),
+        };
+
+        let report: OpKeystoreDeleteReport = self
+            .run_single_op_report(
+                KEYSTORE_DELETE_OP_ID,
+                KEYSTORE_ADMIN_OP_VERSION,
+                "keystore delete",
+                keystore_delete_report_context_key(),
+                op_config,
+            )
+            .await?;
+
+        Ok(KeystoreDeleteResponse {
+            id: report.id,
+            label: report.label,
+        })
+    }
+
+    /// Signs an EIP-1559 transaction through the app-owned keystore operation boundary.
+    pub async fn keystore_tx_sign(
+        &self,
+        req: KeystoreTxSignRequest,
+    ) -> Result<KeystoreTxSignResponse, AppError> {
+        let op_config = TxSignOpConfig {
+            id: req.id,
+            by_label: None,
+            by_label_hex: req.by_label.as_deref().map(hex_string),
+            to: req.to,
+            value_wei: req.value_wei,
+            chain_id: req.chain_id,
+            nonce: req.nonce,
+            max_fee_per_gas: req.max_fee_per_gas,
+            max_priority_fee_per_gas: req.max_priority_fee_per_gas,
+            gas_limit: req.gas_limit,
+            out_path: req.out_path.display().to_string(),
+            out_write_mode: match req.out_write_mode {
+                KeystoreTxOutputWriteMode::CreateNew => OpLocalFileWriteMode::CreateNew,
+                KeystoreTxOutputWriteMode::Overwrite => OpLocalFileWriteMode::Overwrite,
+            },
+            data: req.data,
+            keystore_path: None,
+            keystore_path_hex: Some(hex_path(&req.keystore_path)),
+        };
+
+        let report: OpTxSignReport = self
+            .run_single_op_report(
+                TX_SIGN_OP_ID,
+                TX_OP_VERSION,
+                "keystore tx sign",
+                tx_sign_report_context_key(),
+                op_config,
+            )
+            .await?;
+
+        Ok(KeystoreTxSignResponse {
+            from: report.from,
+            to: report.to,
+            nonce: report.nonce,
+            chain_id: report.chain_id,
+            tx_type: report.tx_type,
+            payload_hash: report.payload_hash,
+            out_path: report.out_path,
+        })
+    }
+
     /// Starts the standard deploy-configure-validate workflow through the public root op family.
     pub async fn start_deploy_configure_validate(
         &self,
@@ -1379,11 +1605,216 @@ pub enum ArtifactBody {
     },
 }
 
+/// Import mode accepted by app-level keystore import requests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeystoreImportType {
+    /// Import a raw EVM private key.
+    PrivateKey,
+    /// Import a BIP-39 mnemonic phrase.
+    Mnemonic,
+}
+
+/// Optional BIP-39 extra input source metadata for mnemonic imports.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeystoreBip39ExtraSource {
+    /// No extra BIP-39 passphrase input is requested.
+    None,
+    /// Prompt for the extra passphrase through the local keystore transport.
+    Prompt,
+    /// Read the extra passphrase from a local file or FIFO.
+    FilePath(PathBuf),
+}
+
+/// App-level request for importing key material into a local keystore.
+#[derive(Debug, Clone)]
+pub struct KeystoreImportRequest {
+    /// Import mode to execute.
+    pub import_type: KeystoreImportType,
+    /// Optional human-readable key label.
+    pub label: Option<String>,
+    /// BIP-32 derivation path used for mnemonic imports.
+    pub derivation_path: String,
+    /// Whether secret key material should be read from stdin.
+    pub stdin: bool,
+    /// Local keystore path selected by the transport adapter.
+    pub keystore_path: PathBuf,
+    /// Optional BIP-39 extra input source for mnemonic imports.
+    pub bip39_extra: KeystoreBip39ExtraSource,
+}
+
+/// App-level response returned after importing key material.
+#[derive(Debug, Clone, Serialize)]
+pub struct KeystoreImportResponse {
+    /// Stable key identifier.
+    pub id: String,
+    /// Human-readable key label.
+    pub label: String,
+    /// Normalized key type used by CLI/API output.
+    pub key_type: String,
+    /// Derived EVM address for the imported key.
+    pub address: String,
+    /// Creation timestamp string.
+    pub created_at: String,
+}
+
+/// Sort orders accepted by app-level keystore list requests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeystoreListSortBy {
+    /// Sort keys lexicographically by label.
+    Label,
+    /// Sort keys by creation timestamp.
+    Created,
+    /// Sort keys by stored key type.
+    Type,
+}
+
+/// App-level request for listing local keystore entries.
+#[derive(Debug, Clone)]
+pub struct KeystoreListRequest {
+    /// Local keystore path selected by the transport adapter.
+    pub keystore_path: PathBuf,
+    /// Whether derived addresses should be included in output.
+    pub show_addresses: bool,
+    /// Optional label regex filter.
+    pub filter_label: Option<String>,
+    /// Sort order for the generated report.
+    pub sort_by: KeystoreListSortBy,
+}
+
+/// Public key metadata returned by app-level keystore listing.
+#[derive(Debug, Clone, Serialize)]
+pub struct KeystoreListEntry {
+    /// Stable key identifier.
+    pub id: String,
+    /// Human-readable key label.
+    pub label: String,
+    /// Normalized key type used by CLI/API output.
+    pub key_type: String,
+    /// Optional derived EVM address.
+    pub address: Option<String>,
+    /// Creation timestamp string.
+    pub created: String,
+}
+
+/// App-level response for local keystore listing.
+#[derive(Debug, Clone, Serialize)]
+pub struct KeystoreListResponse {
+    /// Keys matching the request.
+    pub keys: Vec<KeystoreListEntry>,
+    /// Whether derived addresses were included in output.
+    pub show_addresses: bool,
+}
+
+/// App-level request for deleting a key from a local keystore.
+#[derive(Debug, Clone)]
+pub struct KeystoreDeleteRequest {
+    /// Optional exact key identifier to delete.
+    pub id: Option<String>,
+    /// Optional label selector.
+    pub by_label: Option<String>,
+    /// Whether destructive confirmation has already been granted.
+    pub yes: bool,
+    /// Local keystore path selected by the transport adapter.
+    pub keystore_path: PathBuf,
+}
+
+/// App-level response returned after deleting a key.
+#[derive(Debug, Clone, Serialize)]
+pub struct KeystoreDeleteResponse {
+    /// Stable key identifier that was deleted.
+    pub id: String,
+    /// Human-readable key label that was deleted.
+    pub label: String,
+}
+
+/// Output file write policy for app-level keystore transaction signing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeystoreTxOutputWriteMode {
+    /// Create a new output file and reject existing paths.
+    CreateNew,
+    /// Replace an existing regular output file.
+    Overwrite,
+}
+
+/// App-level request for signing an EIP-1559 transaction with a local keystore key.
+#[derive(Debug, Clone)]
+pub struct KeystoreTxSignRequest {
+    /// Optional exact key identifier.
+    pub id: Option<String>,
+    /// Optional key label selector.
+    pub by_label: Option<String>,
+    /// Destination address.
+    pub to: String,
+    /// Transfer value in wei, encoded as decimal or `0x` quantity.
+    pub value_wei: String,
+    /// EVM chain id.
+    pub chain_id: u64,
+    /// Sender nonce.
+    pub nonce: u64,
+    /// Max fee per gas in wei, encoded as decimal or `0x` quantity.
+    pub max_fee_per_gas: String,
+    /// Max priority fee per gas in wei, encoded as decimal or `0x` quantity.
+    pub max_priority_fee_per_gas: String,
+    /// Gas limit.
+    pub gas_limit: u64,
+    /// Output path for the signed raw transaction.
+    pub out_path: PathBuf,
+    /// Output file write policy.
+    pub out_write_mode: KeystoreTxOutputWriteMode,
+    /// Transaction calldata as `0x`-prefixed hex.
+    pub data: String,
+    /// Local keystore path selected by the transport adapter.
+    pub keystore_path: PathBuf,
+}
+
+/// App-level response returned after signing and writing an EIP-1559 transaction.
+#[derive(Debug, Clone, Serialize)]
+pub struct KeystoreTxSignResponse {
+    /// Signer address.
+    pub from: String,
+    /// Destination address.
+    pub to: String,
+    /// Nonce included in the signed transaction.
+    pub nonce: u64,
+    /// Chain id included in the signed transaction.
+    pub chain_id: u64,
+    /// Transaction type label.
+    pub tx_type: String,
+    /// Hash of the signed transaction payload.
+    pub payload_hash: String,
+    /// Output path where the signed raw transaction was written.
+    pub out_path: String,
+}
+
 /// Input payload for the standard deploy-configure-validate workflow feature.
 pub use mfm_evm_deploy_configure_validate_config::DeployConfigureValidateCanonicalConfig as DeployConfigureValidateSpec;
 
 fn default_empty_object() -> serde_json::Value {
     serde_json::json!({})
+}
+
+fn hex_path(path: &Path) -> String {
+    hex::encode(path.to_string_lossy().as_bytes())
+}
+
+fn hex_string(value: &str) -> String {
+    hex::encode(value.as_bytes())
+}
+
+fn import_key_type_for_output(raw: &str) -> String {
+    match raw {
+        "raw" => "private key".to_string(),
+        "hd_derived" => "hd_derived".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn list_key_type_for_output(raw: &str) -> String {
+    match raw {
+        "raw" => "privatekey".to_string(),
+        "hd_derived" => "hd_derived".to_string(),
+        other => other.to_string(),
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

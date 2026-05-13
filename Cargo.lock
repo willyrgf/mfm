@@ -1886,8 +1886,6 @@ dependencies = [
  "mfm-artifact-store-fs",
  "mfm-evm-deploy-configure-validate-config",
  "mfm-machine",
- "mfm-op-keystore-admin",
- "mfm-op-keystore-tx",
  "mfm-op-portfolio-tracker",
  "mfm-portfolio-config",
  "mfm-sdk",

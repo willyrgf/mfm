@@ -1,13 +1,9 @@
 use crate::commands::result::{CommandOutput, CommandResult};
 use crate::commands::CommandContext;
 use crate::presentation::output::{format_keys_table, handle_command_result, KeyDisplay};
-use crate::support::{app_services, command_defaults, run_stores};
+use crate::support::{app_services, command_defaults};
 use clap::Args;
-use mfm_op_keystore_admin::{
-    keystore_list_report_context_key, KeystoreListOpConfig, KeystoreListReport, KeystoreListSortBy,
-    KEYSTORE_ADMIN_OP_VERSION, KEYSTORE_LIST_OP_ID,
-};
-use mfm_sdk::unstable::{execute_single_op_report, SingleOpReportRequest};
+use mfm_app::{KeystoreListRequest, KeystoreListSortBy};
 use serde::Serialize;
 use std::fmt;
 use std::path::PathBuf;
@@ -71,50 +67,28 @@ pub(crate) async fn execute(ctx: &CommandContext, args: &ListArgs) -> ! {
 
 async fn execute_internal(args: &ListArgs) -> CommandResult<ListResponse> {
     let keystore_path = command_defaults::resolve_keystore_path(args.keystore.as_ref());
-    let op_config = KeystoreListOpConfig {
-        keystore_path: None,
-        keystore_path_hex: Some(hex::encode(keystore_path.to_string_lossy().as_bytes())),
-        show_addresses: args.show_addresses,
-        filter_label: None,
-        filter_label_hex: args
-            .filter_label
-            .as_ref()
-            .map(|label| hex::encode(label.as_bytes())),
-        sort_by: match args.sort_by {
-            SortBy::Label => KeystoreListSortBy::Label,
-            SortBy::Created => KeystoreListSortBy::Created,
-            SortBy::Type => KeystoreListSortBy::Type,
-        },
-    };
+    let services = app_services::make_ephemeral_app_services();
+    let response = services
+        .keystore_list(KeystoreListRequest {
+            keystore_path,
+            show_addresses: args.show_addresses,
+            filter_label: args.filter_label.clone(),
+            sort_by: match args.sort_by {
+                SortBy::Label => KeystoreListSortBy::Label,
+                SortBy::Created => KeystoreListSortBy::Created,
+                SortBy::Type => KeystoreListSortBy::Type,
+            },
+        })
+        .await
+        .map_err(app_services::command_error_from_app_error)?;
 
-    let report_key = keystore_list_report_context_key();
-    let bundle = app_services::make_engine_bundle();
-    let report: KeystoreListReport = execute_single_op_report(
-        bundle.engine,
-        run_stores::make_ephemeral_stores(None),
-        bundle.registry,
-        bundle.planner,
-        SingleOpReportRequest {
-            op_id: KEYSTORE_LIST_OP_ID.to_string(),
-            op_version: KEYSTORE_ADMIN_OP_VERSION.to_string(),
-            op_config: app_services::serialize_op_config(&op_config, "keystore list")?,
-            report_context_key: report_key.0,
-        },
-    )
-    .await
-    .map_err(app_services::command_error_from_single_op_report_error)?;
-
-    let keys = report
+    let keys = response
         .keys
         .into_iter()
         .map(|key| KeyDisplay {
             id: key.id,
             label: key.label,
-            key_type: match key.key_type.as_str() {
-                "raw" => "privatekey".to_string(),
-                "hd_derived" => "hd_derived".to_string(),
-                other => other.to_string(),
-            },
+            key_type: key.key_type,
             address: key.address,
             created: key.created,
         })
@@ -122,6 +96,6 @@ async fn execute_internal(args: &ListArgs) -> CommandResult<ListResponse> {
 
     Ok(CommandOutput::new(ListResponse {
         keys,
-        show_addresses: report.show_addresses,
+        show_addresses: response.show_addresses,
     }))
 }
