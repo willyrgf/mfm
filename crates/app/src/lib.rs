@@ -24,7 +24,7 @@ pub mod observability;
 
 use std::collections::HashMap;
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -36,7 +36,12 @@ use mfm_artifact_store_s3::S3ArtifactStore;
 use mfm_artifact_store_secret::{is_secret_payload_envelope, SecretArtifactStore, SecretKey};
 use mfm_collectors_nix_exec::NixFlakeTransportFactory;
 use mfm_evm_deploy_configure_validate_config::{
-    decode_deploy_configure_validate_canonical_config, DeployConfigureValidateConfigError,
+    canonicalize_deploy_configure_validate_authored_config,
+    decode_deploy_configure_validate_canonical_config,
+    parse_deploy_configure_validate_authored_config,
+    parse_deploy_configure_validate_authored_config_with_hint,
+    AuthoredConfigFormat as DeployConfigureValidateAuthoredConfigFormat,
+    DeployConfigureValidateConfigError,
 };
 use mfm_machine::config::{
     BackoffPolicy, BuildProvenance, ContextCheckpointing, EventProfile, ExecutionMode, IoMode,
@@ -93,7 +98,12 @@ use mfm_op_portfolio_tracker::{
     PORTFOLIO_TRACKER_OP_ID,
 };
 use mfm_op_proof::ProofOp;
-use mfm_portfolio_config::{PortfolioSnapshotBuildReport, PortfolioSnapshotBuiltConfig};
+use mfm_portfolio_config::{
+    canonicalize_portfolio_snapshot_authored_config, parse_portfolio_snapshot_authored_config,
+    parse_portfolio_snapshot_authored_config_with_hint,
+    AuthoredConfigFormat as PortfolioAuthoredConfigFormat, PortfolioSnapshotBuildReport,
+    PortfolioSnapshotBuiltConfig, PortfolioSnapshotConfigError,
+};
 use mfm_sdk::launcher::{LaunchPipeline, RunLauncher};
 use mfm_sdk::op::OperationRegistry;
 use mfm_sdk::pipeline::{Pipeline, PipelinePlanner};
@@ -1408,6 +1418,26 @@ fn app_error_from_deploy_configure_validate_config_error(
     }
 }
 
+fn app_error_from_portfolio_snapshot_config_error(err: PortfolioSnapshotConfigError) -> AppError {
+    match err {
+        PortfolioSnapshotConfigError::InvalidJson { .. } => AppError::new(
+            ErrorClass::BadRequest,
+            "InvalidJson",
+            "Failed to parse request body as JSON",
+        ),
+        PortfolioSnapshotConfigError::InvalidToml { .. } => AppError::new(
+            ErrorClass::BadRequest,
+            "InvalidToml",
+            "Failed to parse request body as TOML",
+        ),
+        PortfolioSnapshotConfigError::InvalidBundle(_)
+        | PortfolioSnapshotConfigError::Serialize { .. }
+        | PortfolioSnapshotConfigError::CanonicalJson { .. } => {
+            AppError::new(ErrorClass::BadRequest, "InvalidRequest", err.to_string())
+        }
+    }
+}
+
 /// Loads an artifact from the supplied store and returns a JSON-or-hex response body.
 pub async fn get_artifact_from_store(
     artifacts: Arc<dyn ArtifactStore>,
@@ -1633,6 +1663,60 @@ pub enum ArtifactBody {
     },
 }
 
+/// Format hint for human-authored config bodies accepted by app input adapters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthoredConfigFormatHint {
+    /// Treat the body as JSON.
+    Json,
+    /// Treat the body as TOML.
+    Toml,
+    /// Infer the format from the body contents.
+    Infer,
+}
+
+impl AuthoredConfigFormatHint {
+    /// Returns a format hint from a file extension, falling back to inference.
+    pub fn from_path(path: &Path) -> Self {
+        let extension = path
+            .extension()
+            .and_then(|value| value.to_str())
+            .map(str::to_ascii_lowercase);
+        match extension.as_deref() {
+            Some("json") => Self::Json,
+            Some("toml") => Self::Toml,
+            _ => Self::Infer,
+        }
+    }
+}
+
+/// Raw authored config body plus a non-domain-specific format hint.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthoredConfigInput {
+    /// Format hint selected by the transport adapter.
+    pub format_hint: AuthoredConfigFormatHint,
+    /// Raw config body read by the transport adapter.
+    pub body: String,
+}
+
+impl AuthoredConfigInput {
+    /// Builds an authored config input with an explicit JSON hint.
+    pub fn json(body: impl Into<String>) -> Self {
+        Self {
+            format_hint: AuthoredConfigFormatHint::Json,
+            body: body.into(),
+        }
+    }
+
+    /// Builds an authored config input using a path-derived format hint.
+    pub fn with_path_hint(body: impl Into<String>, path: &Path) -> Self {
+        Self {
+            format_hint: AuthoredConfigFormatHint::from_path(path),
+            body: body.into(),
+        }
+    }
+}
+
 /// Import mode accepted by app-level keystore import requests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeystoreImportType {
@@ -1814,6 +1898,56 @@ pub struct KeystoreTxSignResponse {
 
 /// Input payload for the standard deploy-configure-validate workflow feature.
 pub use mfm_evm_deploy_configure_validate_config::DeployConfigureValidateCanonicalConfig as DeployConfigureValidateSpec;
+
+/// Parses and canonicalizes authored deploy/configure/validate config.
+pub fn canonicalize_deploy_configure_validate_input(
+    input: AuthoredConfigInput,
+) -> Result<DeployConfigureValidateSpec, AppError> {
+    let authored = match input.format_hint {
+        AuthoredConfigFormatHint::Json => parse_deploy_configure_validate_authored_config(
+            &input.body,
+            DeployConfigureValidateAuthoredConfigFormat::Json,
+        )
+        .map_err(|err| app_error_from_deploy_configure_validate_config_error(err, Some("JSON")))?,
+        AuthoredConfigFormatHint::Toml => parse_deploy_configure_validate_authored_config(
+            &input.body,
+            DeployConfigureValidateAuthoredConfigFormat::Toml,
+        )
+        .map_err(|err| app_error_from_deploy_configure_validate_config_error(err, Some("TOML")))?,
+        AuthoredConfigFormatHint::Infer => {
+            parse_deploy_configure_validate_authored_config_with_hint(&input.body, None)
+                .map_err(|err| app_error_from_deploy_configure_validate_config_error(err, None))?
+        }
+    };
+
+    canonicalize_deploy_configure_validate_authored_config(authored)
+        .map_err(|err| app_error_from_deploy_configure_validate_config_error(err, None))
+}
+
+/// Parses and canonicalizes authored portfolio snapshot config.
+pub fn canonicalize_portfolio_snapshot_input(
+    input: AuthoredConfigInput,
+) -> Result<PortfolioSnapshotRequest, AppError> {
+    let authored = match input.format_hint {
+        AuthoredConfigFormatHint::Json => parse_portfolio_snapshot_authored_config(
+            &input.body,
+            PortfolioAuthoredConfigFormat::Json,
+        )
+        .map_err(app_error_from_portfolio_snapshot_config_error)?,
+        AuthoredConfigFormatHint::Toml => parse_portfolio_snapshot_authored_config(
+            &input.body,
+            PortfolioAuthoredConfigFormat::Toml,
+        )
+        .map_err(app_error_from_portfolio_snapshot_config_error)?,
+        AuthoredConfigFormatHint::Infer => {
+            parse_portfolio_snapshot_authored_config_with_hint(&input.body, None)
+                .map_err(app_error_from_portfolio_snapshot_config_error)?
+        }
+    };
+
+    canonicalize_portfolio_snapshot_authored_config(authored)
+        .map_err(app_error_from_portfolio_snapshot_config_error)
+}
 
 fn default_empty_object() -> serde_json::Value {
     serde_json::json!({})
@@ -2357,6 +2491,47 @@ mod tests {
     use mfm_sdk::unstable::HashMapOperationRegistry;
     use std::collections::HashMap;
     use std::sync::Arc;
+
+    #[test]
+    fn app_canonicalizes_deploy_configure_validate_json_and_toml_equally() {
+        let json = canonicalize_deploy_configure_validate_input(AuthoredConfigInput::json(
+            deploy_configure_validate_json().to_string(),
+        ))
+        .expect("json dcv config");
+        let toml = canonicalize_deploy_configure_validate_input(AuthoredConfigInput {
+            format_hint: AuthoredConfigFormatHint::Toml,
+            body: deploy_configure_validate_toml().to_string(),
+        })
+        .expect("toml dcv config");
+
+        assert_eq!(json, toml);
+        assert_eq!(json.machine_id, "evm_deploy_configure_validate");
+        assert_eq!(json.pipeline_version, "v1");
+    }
+
+    #[test]
+    fn app_canonicalizes_portfolio_snapshot_json_and_toml_equally() {
+        let json = canonicalize_portfolio_snapshot_input(AuthoredConfigInput::json(
+            portfolio_snapshot_json().to_string(),
+        ))
+        .expect("json portfolio config");
+        let toml = canonicalize_portfolio_snapshot_input(AuthoredConfigInput {
+            format_hint: AuthoredConfigFormatHint::Toml,
+            body: portfolio_snapshot_toml().to_string(),
+        })
+        .expect("toml portfolio config");
+
+        assert_eq!(json, toml);
+        assert_eq!(json.portfolio.portfolio_id, "portfolio_main");
+    }
+
+    #[test]
+    fn authored_config_input_uses_path_extension_only_as_format_hint() {
+        let input = AuthoredConfigInput::with_path_hint("{}", Path::new("config.toml"));
+
+        assert_eq!(input.format_hint, AuthoredConfigFormatHint::Toml);
+        assert_eq!(input.body, "{}");
+    }
 
     #[derive(Clone)]
     struct NoopStreamStore;
@@ -3047,5 +3222,147 @@ mod tests {
             assert_eq!(err.code, "op_not_public");
             assert!(is_portfolio_tracker_internal_op_id(op_id));
         }
+    }
+
+    fn deploy_configure_validate_json() -> serde_json::Value {
+        serde_json::json!({
+            "deploy": {
+                "network_id": "ethereum-mainnet",
+                "from": "0x000000000000000000000000000000000000dead"
+            },
+            "configure": {
+                "network_id": "ethereum-mainnet",
+                "from": "0x000000000000000000000000000000000000dead",
+                "calls": []
+            },
+            "validate": {
+                "network_id": "ethereum-mainnet",
+                "expected_chain_id": 1
+            }
+        })
+    }
+
+    fn deploy_configure_validate_toml() -> &'static str {
+        r#"
+[deploy]
+network_id = "ethereum-mainnet"
+from = "0x000000000000000000000000000000000000dead"
+
+[configure]
+network_id = "ethereum-mainnet"
+from = "0x000000000000000000000000000000000000dead"
+calls = []
+
+[validate]
+network_id = "ethereum-mainnet"
+expected_chain_id = 1
+"#
+    }
+
+    fn portfolio_snapshot_json() -> serde_json::Value {
+        serde_json::json!({
+            "portfolio": {
+                "portfolio_id": "portfolio_main",
+                "quote_codes": ["USD"],
+                "networks": [
+                    {
+                        "network_id": "ethereum-mainnet",
+                        "chain_id": 1,
+                        "metadata": {}
+                    }
+                ],
+                "wallets": [
+                    {
+                        "wallet_id": "wallet_main",
+                        "address": "0x000000000000000000000000000000000000dead",
+                        "implementation": {
+                            "kind": "address_only"
+                        },
+                        "network_id": "ethereum-mainnet",
+                        "symbol_ids": ["eth.native.ethereum-mainnet"],
+                        "metadata": {}
+                    }
+                ],
+                "symbol_configs": [
+                    {
+                        "symbol_id": "eth.native.ethereum-mainnet",
+                        "display_symbol": "ETH",
+                        "kind": "native_balance",
+                        "role": "native",
+                        "network_id": "ethereum-mainnet",
+                        "protocol": null,
+                        "balance_reader": {
+                            "kind": "native_balance"
+                        },
+                        "valuation": {
+                            "quotes": [
+                                {
+                                    "quote": "USD",
+                                    "priced_symbol_id": "eth.native.ethereum-mainnet",
+                                    "reader": {
+                                        "kind": "fixed_unit_price",
+                                        "unit_price_dec": "1800.00"
+                                    }
+                                }
+                            ]
+                        },
+                        "decimals": 18,
+                        "underlying_symbol_id": null,
+                        "metadata": {}
+                    }
+                ],
+                "metadata": {}
+            },
+            "valuation_source_registry": {
+                "sources": []
+            }
+        })
+    }
+
+    fn portfolio_snapshot_toml() -> &'static str {
+        r#"
+[portfolio]
+portfolio_id = "portfolio_main"
+quote_codes = ["USD"]
+metadata = {}
+
+[[portfolio.networks]]
+network_id = "ethereum-mainnet"
+chain_id = 1
+metadata = {}
+
+[[portfolio.wallets]]
+wallet_id = "wallet_main"
+address = "0x000000000000000000000000000000000000dead"
+network_id = "ethereum-mainnet"
+symbol_ids = ["eth.native.ethereum-mainnet"]
+metadata = {}
+
+[portfolio.wallets.implementation]
+kind = "address_only"
+
+[[portfolio.symbol_configs]]
+symbol_id = "eth.native.ethereum-mainnet"
+display_symbol = "ETH"
+kind = "native_balance"
+role = "native"
+network_id = "ethereum-mainnet"
+decimals = 18
+metadata = {}
+
+[portfolio.symbol_configs.balance_reader]
+kind = "native_balance"
+
+[[portfolio.symbol_configs.valuation.quotes]]
+quote = "USD"
+priced_symbol_id = "eth.native.ethereum-mainnet"
+
+[portfolio.symbol_configs.valuation.quotes.reader]
+kind = "fixed_unit_price"
+unit_price_dec = "1800.00"
+
+[valuation_source_registry]
+sources = []
+"#
     }
 }

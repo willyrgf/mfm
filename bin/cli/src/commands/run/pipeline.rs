@@ -1,10 +1,7 @@
 use clap::{Args, Subcommand};
-use mfm_app::{DeployConfigureValidateSpec, RunStartResponse, RunsStartRequest};
-use mfm_evm_deploy_configure_validate_config::{
-    canonicalize_deploy_configure_validate_authored_config,
-    parse_deploy_configure_validate_authored_config,
-    parse_deploy_configure_validate_authored_config_with_hint, AuthoredConfigFormat,
-    DeployConfigureValidateConfigError,
+use mfm_app::{
+    canonicalize_deploy_configure_validate_input, AuthoredConfigInput, DeployConfigureValidateSpec,
+    RunStartResponse, RunsStartRequest,
 };
 use mfm_sdk::pipeline::Pipeline;
 use std::path::PathBuf;
@@ -137,47 +134,17 @@ fn parse_dcv_spec(
             "Pass one of --spec-json or --spec-file",
         )),
         (Some(raw), None) => {
-            let authored =
-                parse_deploy_configure_validate_authored_config(raw, AuthoredConfigFormat::Json)
-                    .map_err(|err| command_error_from_dcv_config_error(err, Some("JSON")))?;
-            canonicalize_deploy_configure_validate_authored_config(authored)
-                .map_err(|err| command_error_from_dcv_config_error(err, None))
+            canonicalize_deploy_configure_validate_input(AuthoredConfigInput::json(raw.clone()))
+                .map_err(command_error_from_app_error)
         }
         (None, Some(path)) => {
             let raw = std::fs::read_to_string(path).map_err(|_| {
                 CommandError::new("InvalidSpecFile", "Failed to read --spec-file contents")
             })?;
-            let authored =
-                parse_deploy_configure_validate_authored_config_with_hint(&raw, Some(path))
-                    .map_err(|err| command_error_from_dcv_config_error(err, None))?;
-            canonicalize_deploy_configure_validate_authored_config(authored)
-                .map_err(|err| command_error_from_dcv_config_error(err, None))
-        }
-    }
-}
-
-fn command_error_from_dcv_config_error(
-    err: DeployConfigureValidateConfigError,
-    format_name: Option<&str>,
-) -> CommandError {
-    match err {
-        DeployConfigureValidateConfigError::InvalidJson { .. } => {
-            if let Some(format_name) = format_name {
-                CommandError::new(
-                    "InvalidJson",
-                    format!("Failed to parse deploy/configure/validate {format_name}"),
-                )
-            } else {
-                CommandError::new("InvalidJson", "Failed to parse --spec-json as JSON")
-            }
-        }
-        DeployConfigureValidateConfigError::InvalidToml { .. } => CommandError::new(
-            "InvalidToml",
-            "Failed to parse deploy/configure/validate TOML",
-        ),
-        DeployConfigureValidateConfigError::Serialize { .. }
-        | DeployConfigureValidateConfigError::CanonicalJson { .. } => {
-            CommandError::new("DeployConfigureValidateConfigError", err.to_string())
+            canonicalize_deploy_configure_validate_input(AuthoredConfigInput::with_path_hint(
+                raw, path,
+            ))
+            .map_err(command_error_from_app_error)
         }
     }
 }
