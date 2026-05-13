@@ -61,7 +61,9 @@ pub(crate) async fn make_stores(
     artifact_root: Option<PathBuf>,
     database_url: Option<String>,
 ) -> Result<Stores, CommandError> {
-    let artifacts = make_artifact_store(artifact_root);
+    let artifacts =
+        mfm_app::wrap_protected_artifact_store_if_configured(make_artifact_store(artifact_root))
+            .map_err(|err| CommandError::new(err.code, err.message))?;
     let streams = make_stream_store(database_url).await?;
 
     Ok(Stores { streams, artifacts })

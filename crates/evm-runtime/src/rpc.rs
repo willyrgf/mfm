@@ -7,9 +7,10 @@ use mfm_state_common::rpc as op_rpc;
 use mfm_transports_local_evm::{
     LocalEvmIoClient, LocalEvmSignLegacyCallCall, LocalEvmSignLegacyCreateCall,
 };
+use zeroize::Zeroizing;
 
 use crate::dcv as shared_dcv;
-use crate::tx_intent::TxIntentV1;
+use crate::tx_intent::{PreparedTxIntentV1, TxIntentV1};
 
 /// Normalizes an RPC hex quantity into canonical lowercase `0x` form.
 pub fn normalize_quantity_hex(raw: &str, message: &'static str) -> Result<String, StateError> {
@@ -492,7 +493,7 @@ pub async fn prepare_signed_create_intent_for_network(
     nonce_hex: &str,
     constructor_payload: &[u8],
     value_hex: Option<&str>,
-) -> Result<TxIntentV1, StateError> {
+) -> Result<PreparedTxIntentV1, StateError> {
     let configured_from = shared_dcv::normalize_address(from).map_err(|_| {
         op_errors::state_unknown("invalid_from_address", "from address was invalid")
     })?;
@@ -531,7 +532,7 @@ pub async fn prepare_signed_create_intent_for_network(
     )
     .await?;
 
-    TxIntentV1::signed_legacy_create(
+    PreparedTxIntentV1::signed_legacy_create(
         network_id,
         control_scope,
         logical_tx_id,
@@ -559,7 +560,7 @@ pub async fn prepare_signed_call_intent_for_network(
     nonce_hex: &str,
     call_payload: &[u8],
     value_hex: Option<&str>,
-) -> Result<TxIntentV1, StateError> {
+) -> Result<PreparedTxIntentV1, StateError> {
     let configured_from = shared_dcv::normalize_address(from).map_err(|_| {
         op_errors::state_unknown("invalid_from_address", "from address was invalid")
     })?;
@@ -600,7 +601,7 @@ pub async fn prepare_signed_call_intent_for_network(
     )
     .await?;
 
-    TxIntentV1::signed_legacy_call(
+    PreparedTxIntentV1::signed_legacy_call(
         network_id,
         control_scope,
         logical_tx_id,
@@ -620,8 +621,17 @@ pub async fn prepare_signed_call_intent_for_network(
 pub async fn record_tx_intent(
     io: &mut dyn IoProvider,
     state_id: &StateId,
-    intent: &TxIntentV1,
+    prepared: &PreparedTxIntentV1,
 ) -> Result<ArtifactId, StateError> {
+    let intent = &prepared.intent;
+    let capability_key = intent.capability_fact_key(state_id);
+    io.record_protected_bytes(
+        capability_key,
+        Zeroizing::new(prepared.capability.raw_tx_bytes().to_vec()),
+    )
+    .await
+    .map_err(op_errors::state_from_io)?;
+
     let value = serde_json::to_value(intent).map_err(|_| {
         op_errors::state_unknown(
             "serialize_tx_intent_failed",
@@ -639,13 +649,26 @@ pub async fn broadcast_recorded_tx_intent(
     state_id: &StateId,
     intent: &TxIntentV1,
 ) -> Result<String, StateError> {
+    let raw_tx_bytes = io
+        .read_protected_bytes(&intent.capability_fact_key(state_id))
+        .await
+        .map_err(op_errors::state_from_io)?;
+    let raw_tx_hash = crate::tx_intent::raw_transaction_hash_bytes(&raw_tx_bytes)?;
+    if raw_tx_hash != intent.raw_tx_hash {
+        return Err(op_errors::state_unknown(
+            "tx_capability_hash_mismatch",
+            "protected transaction capability did not match recorded intent hash",
+        ));
+    }
+    let raw_tx_hex = shared_dcv::bytes_to_hex_prefixed(&raw_tx_bytes);
+
     let mut client = EvmIoClient::new(state_id.clone(), io)
         .with_default_control_scope(intent.control_scope.clone());
     let response = client
         .broadcast_raw_transaction(
             intent.network_id.clone(),
             intent.control_scope.clone(),
-            intent.raw_tx_hex.clone(),
+            raw_tx_hex,
             intent.raw_tx_hash.clone(),
         )
         .await
@@ -937,6 +960,7 @@ pub async fn resolve_deployer_address_for_network(
 mod tests {
     use async_trait::async_trait;
     use serde_json::Value;
+    use zeroize::Zeroizing;
 
     use mfm_machine::errors::IoError;
     use mfm_machine::ids::ArtifactId;
@@ -991,6 +1015,56 @@ mod tests {
 
         async fn sleep_ms(&mut self, duration_ms: u64) -> Result<(), IoError> {
             self.slept_ms.push(duration_ms);
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingIo {
+        values: Vec<(FactKey, serde_json::Value)>,
+        protected: Vec<(FactKey, Vec<u8>)>,
+    }
+
+    #[async_trait]
+    impl IoProvider for RecordingIo {
+        async fn call(&mut self, _call: IoCall) -> Result<IoResult, IoError> {
+            panic!("recording io does not execute calls")
+        }
+
+        async fn record_value(
+            &mut self,
+            key: FactKey,
+            value: serde_json::Value,
+        ) -> Result<ArtifactId, IoError> {
+            self.values.push((key, value));
+            Ok(ArtifactId::must_new("2".repeat(64)))
+        }
+
+        async fn record_protected_bytes(
+            &mut self,
+            key: FactKey,
+            bytes: Zeroizing<Vec<u8>>,
+        ) -> Result<ArtifactId, IoError> {
+            self.protected.push((key, bytes.to_vec()));
+            Ok(ArtifactId::must_new("3".repeat(64)))
+        }
+
+        async fn get_recorded_fact(
+            &mut self,
+            _key: &FactKey,
+        ) -> Result<Option<ArtifactId>, IoError> {
+            Ok(None)
+        }
+
+        async fn now_millis(&mut self) -> Result<u64, IoError> {
+            Ok(0)
+        }
+
+        async fn random_bytes(&mut self, n: usize) -> Result<Vec<u8>, IoError> {
+            Ok(vec![0_u8; n])
+        }
+
+        async fn sleep_ms(&mut self, _duration_ms: u64) -> Result<(), IoError> {
             Ok(())
         }
     }
@@ -1063,6 +1137,45 @@ mod tests {
             ))
         );
         assert_eq!(io.slept_ms, vec![25]);
+    }
+
+    #[tokio::test]
+    async fn record_tx_intent_splits_public_intent_from_protected_capability() {
+        let state_id = StateId::must_new("evm.intent.record".to_string());
+        let prepared = PreparedTxIntentV1::signed_legacy_call(
+            "ethereum-mainnet",
+            "shared",
+            "configure:0",
+            "0x1111111111111111111111111111111111111111",
+            "0x2222222222222222222222222222222222222222",
+            "0x0",
+            &[0xde, 0xad, 0xbe, 0xef],
+            "0x5208",
+            "0x1",
+            "0x0",
+            1,
+            "0x01",
+        )
+        .expect("prepared intent");
+        let mut io = RecordingIo::default();
+
+        record_tx_intent(&mut io, &state_id, &prepared)
+            .await
+            .expect("record intent");
+
+        assert_eq!(io.protected.len(), 1);
+        assert_eq!(
+            io.protected[0].0,
+            prepared.intent.capability_fact_key(&state_id)
+        );
+        assert_eq!(io.protected[0].1, vec![1_u8]);
+        assert_eq!(io.values.len(), 1);
+        assert_eq!(io.values[0].0, prepared.intent.fact_key(&state_id));
+        assert_eq!(
+            io.values[0].1.get("raw_tx_hash").and_then(Value::as_str),
+            Some(prepared.intent.raw_tx_hash.as_str())
+        );
+        assert!(io.values[0].1.get("raw_tx_hex").is_none());
     }
 
     #[tokio::test]

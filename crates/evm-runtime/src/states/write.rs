@@ -338,7 +338,7 @@ impl State for EvmDeployState {
         )
         .await?;
         let nonce_hex = format!("0x{nonce:x}");
-        let intent = {
+        let prepared = {
             let mut client = EvmIoClient::new(self.state_id.clone(), io);
             evm_rpc::prepare_signed_create_intent_for_network(
                 &mut client,
@@ -353,13 +353,14 @@ impl State for EvmDeployState {
             )
             .await?
         };
-        evm_rpc::record_tx_intent(io, &self.state_id, &intent).await?;
-        let tx_hash = evm_rpc::broadcast_recorded_tx_intent(io, &self.state_id, &intent).await?;
+        evm_rpc::record_tx_intent(io, &self.state_id, &prepared).await?;
+        let tx_hash =
+            evm_rpc::broadcast_recorded_tx_intent(io, &self.state_id, &prepared.intent).await?;
 
         let receipt = evm_rpc::wait_for_expected_receipt(
             &self.state_id,
             io,
-            &intent,
+            &prepared.intent,
             self.cfg.poll_interval_ms,
             self.cfg.max_receipt_polls,
         )
@@ -439,7 +440,7 @@ impl State for EvmConfigureState {
 
             let nonce_hex = format!("0x{next_nonce:x}");
             let logical_tx_id = format!("configure:{idx}");
-            let intent = {
+            let prepared = {
                 let mut client = EvmIoClient::new(self.state_id.clone(), io);
                 evm_rpc::prepare_signed_call_intent_for_network(
                     &mut client,
@@ -455,9 +456,9 @@ impl State for EvmConfigureState {
                 )
                 .await?
             };
-            evm_rpc::record_tx_intent(io, &self.state_id, &intent).await?;
+            evm_rpc::record_tx_intent(io, &self.state_id, &prepared).await?;
             let tx_hash =
-                evm_rpc::broadcast_recorded_tx_intent(io, &self.state_id, &intent).await?;
+                evm_rpc::broadcast_recorded_tx_intent(io, &self.state_id, &prepared.intent).await?;
             next_nonce = next_nonce.checked_add(1).ok_or_else(|| {
                 op_errors::state_unknown(
                     "evm_response_invalid",
@@ -467,7 +468,7 @@ impl State for EvmConfigureState {
             let receipt = evm_rpc::wait_for_expected_receipt(
                 &self.state_id,
                 io,
-                &intent,
+                &prepared.intent,
                 self.cfg.poll_interval_ms,
                 self.cfg.max_receipt_polls,
             )
@@ -715,6 +716,7 @@ mod tests {
     use mfm_machine::ids::{ArtifactId, ErrorCode, FactKey};
     use mfm_machine::io::{IoCall, IoResult};
     use serde_json::Value;
+    use zeroize::Zeroizing;
 
     #[derive(Default)]
     struct MapContext {
@@ -764,6 +766,7 @@ mod tests {
         calls: Vec<IoCall>,
         prepare_sources_healthy: bool,
         recorded_values: Vec<(FactKey, serde_json::Value)>,
+        protected_values: std::collections::HashMap<FactKey, Vec<u8>>,
         fail_broadcast_once: bool,
     }
 
@@ -867,6 +870,26 @@ mod tests {
             Ok(ArtifactId::must_new("0".repeat(64)))
         }
 
+        async fn record_protected_bytes(
+            &mut self,
+            key: FactKey,
+            bytes: Zeroizing<Vec<u8>>,
+        ) -> Result<ArtifactId, IoError> {
+            self.protected_values.insert(key, bytes.to_vec());
+            Ok(ArtifactId::must_new("1".repeat(64)))
+        }
+
+        async fn read_protected_bytes(
+            &mut self,
+            key: &FactKey,
+        ) -> Result<Zeroizing<Vec<u8>>, IoError> {
+            self.protected_values
+                .get(key)
+                .cloned()
+                .map(Zeroizing::new)
+                .ok_or_else(|| IoError::Other(io_info("protected_missing", "protected missing")))
+        }
+
         async fn get_recorded_fact(
             &mut self,
             _key: &FactKey,
@@ -916,6 +939,7 @@ mod tests {
             calls: Vec::new(),
             prepare_sources_healthy: true,
             recorded_values: Vec::new(),
+            protected_values: std::collections::HashMap::new(),
             fail_broadcast_once: false,
         };
         let mut rec = NoopRecorder;
@@ -978,6 +1002,7 @@ mod tests {
             calls: Vec::new(),
             prepare_sources_healthy: true,
             recorded_values: Vec::new(),
+            protected_values: std::collections::HashMap::new(),
             fail_broadcast_once: false,
         };
         let mut rec = NoopRecorder;
@@ -1022,6 +1047,7 @@ mod tests {
             calls: Vec::new(),
             prepare_sources_healthy: true,
             recorded_values: Vec::new(),
+            protected_values: std::collections::HashMap::new(),
             fail_broadcast_once: false,
         };
         let mut rec = NoopRecorder;
@@ -1090,6 +1116,7 @@ mod tests {
             calls: Vec::new(),
             prepare_sources_healthy: true,
             recorded_values: Vec::new(),
+            protected_values: std::collections::HashMap::new(),
             fail_broadcast_once: true,
         };
         let mut rec = NoopRecorder;
@@ -1132,6 +1159,7 @@ mod tests {
             calls: Vec::new(),
             prepare_sources_healthy: false,
             recorded_values: Vec::new(),
+            protected_values: std::collections::HashMap::new(),
             fail_broadcast_once: false,
         };
         let mut rec = NoopRecorder;

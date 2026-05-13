@@ -202,13 +202,12 @@ impl<'a> LocalEvmIoClient<'a> {
             "value_hex": req.value_hex,
             "data_hex": req.data_hex,
         });
-        let fact_key = self.fact_key("deploy_sign_legacy_create", &request)?;
         let result = self
             .io
             .call(IoCall {
                 namespace: "local.evm.sign_legacy_create".to_string(),
                 request,
-                fact_key: Some(fact_key),
+                fact_key: None,
             })
             .await?;
         let raw_tx_hex = result
@@ -248,13 +247,12 @@ impl<'a> LocalEvmIoClient<'a> {
             "value_hex": req.value_hex,
             "data_hex": req.data_hex,
         });
-        let fact_key = self.fact_key("sign_legacy_call", &request)?;
         let result = self
             .io
             .call(IoCall {
                 namespace: "local.evm.sign_legacy_call".to_string(),
                 request,
-                fact_key: Some(fact_key),
+                fact_key: None,
             })
             .await?;
         let raw_tx_hex = result

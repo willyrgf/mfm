@@ -485,7 +485,8 @@ The stream store is one shared physical substrate:
 ### 12.3 Security requirements
 - no persisted secrets in any store-backed surface
 - stream records may store references, never secret plaintext
-- encrypted secret-bearing artifacts are deferred to a future encrypted-artifact layer
+- protected secret/capability artifacts must store only encrypted envelope bytes and must not be
+  returned by generic artifact retrieval surfaces
 
 ## 13. CLI and REST Responsibilities
 

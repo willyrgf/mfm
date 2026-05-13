@@ -25,6 +25,7 @@
 
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use mfm_machine::errors::{ErrorCategory, ErrorInfo, StorageError};
 use mfm_machine::ids::{ArtifactId, ErrorCode};
 use mfm_machine::stores::{ArtifactKind, ArtifactStore};
@@ -37,21 +38,35 @@ const CODE_SECRET_KEY_INVALID: &str = "secret_key_invalid";
 const CODE_SECRET_ENCRYPT_FAILED: &str = "secret_encrypt_failed";
 const CODE_SECRET_CIPHERTEXT_INVALID: &str = "secret_ciphertext_invalid";
 const CODE_SECRET_DECRYPT_FAILED: &str = "secret_decrypt_failed";
+const CODE_SECRET_PAYLOAD_REQUIRES_PROTECTED_PATH: &str = "secret_payload_requires_protected_path";
 
 /// Environment variable that carries the secret-artifact encryption key.
 const ENV_SECRET_KEY_HEX: &str = "MFM_SECRET_KEY_HEX";
 
+/// Public envelope prefix for protected secret/capability artifacts.
+///
+/// Generic artifact download surfaces use this prefix to refuse returning protected ciphertext.
+pub const SECRET_PAYLOAD_ENVELOPE_MAGIC: &[u8] = b"mfm:secret-payload:v1\0";
+
 // Envelope format:
+// - magic: SECRET_PAYLOAD_ENVELOPE_MAGIC
 // - version: u8
 // - nonce: [u8; 12]
 // - ciphertext + tag: bytes
 const ENVELOPE_VERSION_V1: u8 = 1;
 const NONCE_LEN: usize = 12;
 const TAG_LEN: usize = 16;
-const HEADER_LEN: usize = 1 + NONCE_LEN;
+const VERSION_OFFSET: usize = SECRET_PAYLOAD_ENVELOPE_MAGIC.len();
+const NONCE_OFFSET: usize = VERSION_OFFSET + 1;
+const HEADER_LEN: usize = NONCE_OFFSET + NONCE_LEN;
 
 // AAD is constant and binds ciphertext to this specific use.
 const AAD_V1: &[u8] = b"mfm:secret_payload:v1";
+
+/// Returns true when `bytes` is a protected secret/capability artifact envelope.
+pub fn is_secret_payload_envelope(bytes: &[u8]) -> bool {
+    bytes.starts_with(SECRET_PAYLOAD_ENVELOPE_MAGIC)
+}
 
 fn info(code: &'static str, category: ErrorCategory, message: &'static str) -> ErrorInfo {
     ErrorInfo {
@@ -120,6 +135,19 @@ impl SecretKey {
             )
         })?);
         Self::from_hex(&v)
+    }
+
+    /// Reads [`ENV_SECRET_KEY_HEX`] when present, returning `None` when protected storage is unset.
+    pub fn from_optional_env() -> Result<Option<Self>, StorageError> {
+        match std::env::var(ENV_SECRET_KEY_HEX) {
+            Ok(value) => Self::from_hex(&value).map(Some),
+            Err(std::env::VarError::NotPresent) => Ok(None),
+            Err(std::env::VarError::NotUnicode(_)) => Err(other(
+                CODE_SECRET_KEY_INVALID,
+                ErrorCategory::ParsingInput,
+                "invalid secret key environment value",
+            )),
+        }
     }
 }
 
@@ -200,6 +228,7 @@ impl SecretArtifactStore {
         })?;
 
         let mut out = Vec::with_capacity(HEADER_LEN + in_out.len());
+        out.extend_from_slice(SECRET_PAYLOAD_ENVELOPE_MAGIC);
         out.push(ENVELOPE_VERSION_V1);
         out.extend_from_slice(&nonce_bytes);
         out.extend_from_slice(&in_out);
@@ -214,7 +243,14 @@ impl SecretArtifactStore {
                 "invalid secret envelope",
             ));
         }
-        if envelope[0] != ENVELOPE_VERSION_V1 {
+        if !is_secret_payload_envelope(envelope) {
+            return Err(other(
+                CODE_SECRET_CIPHERTEXT_INVALID,
+                ErrorCategory::ParsingInput,
+                "invalid secret envelope magic",
+            ));
+        }
+        if envelope[VERSION_OFFSET] != ENVELOPE_VERSION_V1 {
             return Err(other(
                 CODE_SECRET_CIPHERTEXT_INVALID,
                 ErrorCategory::ParsingInput,
@@ -223,7 +259,7 @@ impl SecretArtifactStore {
         }
 
         let mut nonce_bytes = [0u8; NONCE_LEN];
-        nonce_bytes.copy_from_slice(&envelope[1..HEADER_LEN]);
+        nonce_bytes.copy_from_slice(&envelope[NONCE_OFFSET..HEADER_LEN]);
 
         let unbound =
             aead::UnboundKey::new(&aead::AES_256_GCM, &self.key.bytes[..]).map_err(|_| {
@@ -255,6 +291,43 @@ impl SecretArtifactStore {
 
         in_out.truncate(plaintext_len);
         Ok(in_out)
+    }
+}
+
+#[async_trait]
+impl ArtifactStore for SecretArtifactStore {
+    async fn put(&self, kind: ArtifactKind, bytes: Vec<u8>) -> Result<ArtifactId, StorageError> {
+        if matches!(kind, ArtifactKind::SecretPayload) {
+            return Err(other(
+                CODE_SECRET_PAYLOAD_REQUIRES_PROTECTED_PATH,
+                ErrorCategory::Storage,
+                "secret payloads must be written through put_protected_bytes",
+            ));
+        }
+
+        self.inner.put(kind, bytes).await
+    }
+
+    async fn get(&self, id: &ArtifactId) -> Result<Vec<u8>, StorageError> {
+        self.inner.get(id).await
+    }
+
+    async fn exists(&self, id: &ArtifactId) -> Result<bool, StorageError> {
+        self.inner.exists(id).await
+    }
+
+    async fn put_protected_bytes(
+        &self,
+        bytes: Zeroizing<Vec<u8>>,
+    ) -> Result<ArtifactId, StorageError> {
+        self.put_secret_bytes(&bytes).await
+    }
+
+    async fn get_protected_bytes(
+        &self,
+        id: &ArtifactId,
+    ) -> Result<Zeroizing<Vec<u8>>, StorageError> {
+        self.get_secret_bytes(id).await
     }
 }
 

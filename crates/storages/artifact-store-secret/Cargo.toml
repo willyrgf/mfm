@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+async-trait = { workspace = true }
 mfm-machine = { path = "../../machine" }
 ring = { workspace = true }
 hex = { workspace = true }
@@ -13,4 +14,3 @@ zeroize = "1.7"
 tokio = { workspace = true }
 tempfile = "3.0"
 mfm-artifact-store-fs = { path = "../artifact-store-fs" }
-

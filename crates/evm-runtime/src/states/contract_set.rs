@@ -277,7 +277,7 @@ impl State for DeployContractSetState {
             let contract_id = contract.id;
             let nonce_hex = format!("0x{next_nonce:x}");
             let logical_tx_id = format!("contract_set:{contract_id}");
-            let intent = {
+            let prepared = {
                 let mut client = EvmIoClient::new(self.state_id.clone(), io);
                 evm_rpc::prepare_signed_create_intent_for_network(
                     &mut client,
@@ -292,9 +292,9 @@ impl State for DeployContractSetState {
                 )
                 .await?
             };
-            evm_rpc::record_tx_intent(io, &self.state_id, &intent).await?;
+            evm_rpc::record_tx_intent(io, &self.state_id, &prepared).await?;
             let tx_hash =
-                evm_rpc::broadcast_recorded_tx_intent(io, &self.state_id, &intent).await?;
+                evm_rpc::broadcast_recorded_tx_intent(io, &self.state_id, &prepared.intent).await?;
             next_nonce = next_nonce.checked_add(1).ok_or_else(|| {
                 op_errors::state_unknown(
                     "evm_response_invalid",
@@ -491,6 +491,7 @@ mod tests {
     use mfm_machine::ids::{ArtifactId, ErrorCode, FactKey};
     use mfm_machine::io::{IoCall, IoResult};
     use mfm_state_common::test_support::MapContext;
+    use zeroize::Zeroizing;
 
     use crate::contract_set::CompiledContractSetEntry;
 
@@ -508,6 +509,7 @@ mod tests {
     struct TestIo {
         calls: Vec<IoCall>,
         recorded_values: Vec<(FactKey, serde_json::Value)>,
+        protected_values: std::collections::HashMap<FactKey, Vec<u8>>,
         broadcast_count: usize,
         fail_on_broadcast_number: Option<usize>,
     }
@@ -594,6 +596,26 @@ mod tests {
         ) -> Result<ArtifactId, IoError> {
             self.recorded_values.push((key, value));
             Ok(ArtifactId::must_new("0".repeat(64)))
+        }
+
+        async fn record_protected_bytes(
+            &mut self,
+            key: FactKey,
+            bytes: Zeroizing<Vec<u8>>,
+        ) -> Result<ArtifactId, IoError> {
+            self.protected_values.insert(key, bytes.to_vec());
+            Ok(ArtifactId::must_new("1".repeat(64)))
+        }
+
+        async fn read_protected_bytes(
+            &mut self,
+            key: &FactKey,
+        ) -> Result<Zeroizing<Vec<u8>>, IoError> {
+            self.protected_values
+                .get(key)
+                .cloned()
+                .map(Zeroizing::new)
+                .ok_or_else(|| IoError::Other(info("protected_missing", "protected missing")))
         }
 
         async fn get_recorded_fact(

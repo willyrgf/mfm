@@ -33,6 +33,7 @@ use tracing::{debug, info, instrument, warn};
 
 use mfm_artifact_store_fs::FsArtifactStore;
 use mfm_artifact_store_s3::S3ArtifactStore;
+use mfm_artifact_store_secret::{is_secret_payload_envelope, SecretArtifactStore, SecretKey};
 use mfm_collectors_nix_exec::NixFlakeTransportFactory;
 use mfm_evm_deploy_configure_validate_config::{
     decode_deploy_configure_validate_canonical_config, DeployConfigureValidateConfigError,
@@ -427,11 +428,11 @@ pub fn default_artifact_root() -> PathBuf {
 pub async fn make_default_artifact_store() -> Result<Arc<dyn ArtifactStore>, AppError> {
     let backend = std::env::var(ENV_ARTIFACT_BACKEND).unwrap_or_else(|_| "fs".to_string());
     info!(backend = %backend, "initializing artifact store");
-    match backend.as_str() {
+    let store: Arc<dyn ArtifactStore> = match backend.as_str() {
         "fs" => {
             let root = default_artifact_root();
             info!(artifact_root = %root.display(), "using filesystem artifact store");
-            Ok(Arc::new(FsArtifactStore::new(root)))
+            Arc::new(FsArtifactStore::new(root))
         }
         "s3" => {
             let store = S3ArtifactStore::from_env().map_err(app_error_from_storage_error)?;
@@ -442,13 +443,30 @@ pub async fn make_default_artifact_store() -> Result<Arc<dyn ArtifactStore>, App
                     .await
                     .map_err(app_error_from_storage_error)?;
             }
-            Ok(Arc::new(store))
+            Arc::new(store)
         }
-        other => Err(AppError::new(
-            ErrorClass::Internal,
-            "InvalidArtifactBackend",
-            format!("invalid {ENV_ARTIFACT_BACKEND}: {other}"),
-        )),
+        other => {
+            return Err(AppError::new(
+                ErrorClass::Internal,
+                "InvalidArtifactBackend",
+                format!("invalid {ENV_ARTIFACT_BACKEND}: {other}"),
+            ))
+        }
+    };
+
+    wrap_protected_artifact_store_if_configured(store)
+}
+
+/// Wraps an artifact store with protected secret/capability storage when configured.
+///
+/// If `MFM_SECRET_KEY_HEX` is unset, the original public artifact store is returned unchanged and
+/// protected writes will fail closed through the [`ArtifactStore`] default methods.
+pub fn wrap_protected_artifact_store_if_configured(
+    store: Arc<dyn ArtifactStore>,
+) -> Result<Arc<dyn ArtifactStore>, AppError> {
+    match SecretKey::from_optional_env().map_err(app_error_from_storage_error)? {
+        Some(key) => Ok(Arc::new(SecretArtifactStore::new(store, key))),
+        None => Ok(store),
     }
 }
 
@@ -1141,6 +1159,12 @@ pub async fn get_artifact_from_store(
         .get(id)
         .await
         .map_err(app_error_from_storage_error)?;
+    if is_secret_payload_envelope(&bytes) {
+        return Err(AppError::not_found(
+            "artifact_not_found",
+            "artifact not found",
+        ));
+    }
 
     let body = match serde_json::from_slice::<serde_json::Value>(&bytes) {
         Ok(value) => ArtifactBody::Json { value },
@@ -2203,6 +2227,24 @@ mod tests {
 
         assert_eq!(err.class, ErrorClass::BadRequest);
         assert_eq!(err.code, "InvalidArtifactId");
+    }
+
+    #[tokio::test]
+    async fn artifact_get_rejects_protected_artifact_envelopes() {
+        let inner: Arc<dyn ArtifactStore> = Arc::new(InMemoryArtifactStore::default());
+        let protected = SecretArtifactStore::new(inner, SecretKey::from_bytes([7_u8; 32]));
+        let id = protected
+            .put_secret_bytes(b"raw signed transaction capability")
+            .await
+            .expect("protected artifact");
+        let artifacts: Arc<dyn ArtifactStore> = Arc::new(protected);
+
+        let err = get_artifact_from_store(artifacts, &id)
+            .await
+            .expect_err("generic artifact fetch must reject protected artifacts");
+
+        assert_eq!(err.class, ErrorClass::NotFound);
+        assert_eq!(err.code, "artifact_not_found");
     }
 
     #[test]

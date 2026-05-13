@@ -6,6 +6,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use zeroize::Zeroizing;
 
 use crate::errors::{ErrorCategory, ErrorInfo, IoError, CODE_MISSING_FACT_KEY};
 use crate::ids::{ArtifactId, ErrorCode, FactKey, RunId, StateId};
@@ -127,6 +128,24 @@ impl ReplayIo {
             ))
         })
     }
+
+    async fn read_protected_payload(&self, key: &FactKey) -> Result<Zeroizing<Vec<u8>>, IoError> {
+        let Some(payload_id) = self.facts.get(key).await else {
+            return Err(self.missing_fact(key.clone()));
+        };
+
+        self.artifacts
+            .get_protected_bytes(&payload_id)
+            .await
+            .map_err(|_| {
+                IoError::Other(info(
+                    "protected_artifact_get_failed",
+                    ErrorCategory::Storage,
+                    false,
+                    "failed to read protected artifact",
+                ))
+            })
+    }
 }
 
 #[async_trait]
@@ -160,6 +179,21 @@ impl IoProvider for ReplayIo {
             return Err(self.missing_fact(key));
         };
         Ok(payload_id)
+    }
+
+    async fn record_protected_bytes(
+        &mut self,
+        key: FactKey,
+        _bytes: Zeroizing<Vec<u8>>,
+    ) -> Result<ArtifactId, IoError> {
+        let Some(payload_id) = self.facts.get(&key).await else {
+            return Err(self.missing_fact(key));
+        };
+        Ok(payload_id)
+    }
+
+    async fn read_protected_bytes(&mut self, key: &FactKey) -> Result<Zeroizing<Vec<u8>>, IoError> {
+        self.read_protected_payload(key).await
     }
 
     async fn now_millis(&mut self) -> Result<u64, IoError> {

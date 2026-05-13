@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use tracing::{debug, info, warn};
+use zeroize::Zeroizing;
 
 use crate::config::{IoMode, RunConfig};
 use crate::context::DynContext;
@@ -238,6 +239,27 @@ impl IoProvider for AttemptIo {
         match self {
             AttemptIo::Live(io) => io.record_value(key, value).await,
             AttemptIo::Replay(io) => io.record_value(key, value).await,
+        }
+    }
+
+    async fn record_protected_bytes(
+        &mut self,
+        key: crate::ids::FactKey,
+        bytes: Zeroizing<Vec<u8>>,
+    ) -> Result<ArtifactId, IoError> {
+        match self {
+            AttemptIo::Live(io) => io.record_protected_bytes(key, bytes).await,
+            AttemptIo::Replay(io) => io.record_protected_bytes(key, bytes).await,
+        }
+    }
+
+    async fn read_protected_bytes(
+        &mut self,
+        key: &crate::ids::FactKey,
+    ) -> Result<Zeroizing<Vec<u8>>, IoError> {
+        match self {
+            AttemptIo::Live(io) => io.read_protected_bytes(key).await,
+            AttemptIo::Replay(io) => io.read_protected_bytes(key).await,
         }
     }
 

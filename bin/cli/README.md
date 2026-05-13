@@ -350,8 +350,9 @@ legacy `evm_deploy_configure_validate` root so existing CLI behavior stays stabl
 input is internally lowered through the new config-build and strict execute boundaries.
 
 EVM write phases (`evm_deploy`, `evm_configure`, and contract-set deploys) require
-`signing_key_env`. Node-managed unsigned transaction submission is rejected so the runtime can record
-a durable signed transaction intent before broadcast.
+`signing_key_env` and protected artifact storage via `MFM_SECRET_KEY_HEX`. Node-managed unsigned
+transaction submission is rejected so the runtime can record durable public intent metadata and keep
+signed raw transaction bytes out of normal facts before broadcast.
 
 ### `run resume`
 

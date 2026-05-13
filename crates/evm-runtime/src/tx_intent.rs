@@ -1,7 +1,10 @@
 //! Durable EVM transaction intent records used by write-side runtime states.
 
+use std::fmt;
+
 use alloy_primitives::keccak256;
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
 
 use mfm_machine::ids::{FactKey, StateId};
 use mfm_state_common::errors as op_errors;
@@ -52,10 +55,32 @@ pub struct TxIntentV1 {
     pub nonce_hex: String,
     /// EVM chain id used for signing.
     pub chain_id: u64,
-    /// Expected transaction hash derived from `raw_tx_hex`.
+    /// Expected transaction hash derived from the protected raw transaction capability.
     pub raw_tx_hash: String,
-    /// Signed raw transaction bytes, encoded as normalized `0x` hex.
-    pub raw_tx_hex: String,
+}
+
+/// Protected signed transaction capability for one EVM transaction.
+///
+/// This type intentionally does not implement `Serialize`; raw signed transaction bytes can spend
+/// funds and must only be persisted through the protected artifact path.
+#[derive(Clone)]
+pub struct SignedTxCapabilityV1 {
+    raw_tx_bytes: Zeroizing<Vec<u8>>,
+}
+
+impl fmt::Debug for SignedTxCapabilityV1 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("SignedTxCapabilityV1(REDACTED)")
+    }
+}
+
+/// In-memory result of preparing a signed transaction.
+#[derive(Clone, Debug)]
+pub struct PreparedTxIntentV1 {
+    /// Public deterministic transaction intent metadata.
+    pub intent: TxIntentV1,
+    /// Protected signed transaction capability.
+    pub capability: SignedTxCapabilityV1,
 }
 
 fn normalize_nonempty_component(
@@ -87,18 +112,49 @@ pub fn raw_transaction_hash(raw_tx_hex: &str) -> Result<String, mfm_machine::err
     let bytes = shared_dcv::hex_to_bytes(&normalized).map_err(|_| {
         op_errors::state_unknown("invalid_raw_tx_hex", "raw transaction hex was invalid")
     })?;
+    raw_transaction_hash_bytes(&bytes)
+}
+
+/// Computes the expected EVM transaction hash for signed raw transaction bytes.
+pub fn raw_transaction_hash_bytes(bytes: &[u8]) -> Result<String, mfm_machine::errors::StateError> {
     if bytes.is_empty() {
         return Err(op_errors::state_unknown(
             "invalid_raw_tx_hex",
             "raw transaction hex was empty",
         ));
     }
-    let hash = keccak256(&bytes);
+    let hash = keccak256(bytes);
     Ok(shared_dcv::bytes_to_hex_prefixed(hash.as_slice()))
 }
 
-impl TxIntentV1 {
-    /// Builds a contract-creation intent from a signed raw transaction.
+impl SignedTxCapabilityV1 {
+    /// Builds a protected capability from normalized or normalizable raw transaction hex.
+    pub fn from_raw_tx_hex(raw_tx_hex: &str) -> Result<Self, mfm_machine::errors::StateError> {
+        let normalized = shared_dcv::normalize_hex_str(raw_tx_hex).map_err(|_| {
+            op_errors::state_unknown("invalid_raw_tx_hex", "raw transaction hex was invalid")
+        })?;
+        let bytes = shared_dcv::hex_to_bytes(&normalized).map_err(|_| {
+            op_errors::state_unknown("invalid_raw_tx_hex", "raw transaction hex was invalid")
+        })?;
+        raw_transaction_hash_bytes(&bytes)?;
+        Ok(Self {
+            raw_tx_bytes: Zeroizing::new(bytes),
+        })
+    }
+
+    /// Returns the protected raw transaction bytes.
+    pub(crate) fn raw_tx_bytes(&self) -> &[u8] {
+        &self.raw_tx_bytes
+    }
+
+    /// Computes the transaction hash for this protected capability.
+    pub fn raw_tx_hash(&self) -> Result<String, mfm_machine::errors::StateError> {
+        raw_transaction_hash_bytes(&self.raw_tx_bytes)
+    }
+}
+
+impl PreparedTxIntentV1 {
+    /// Builds a contract-creation intent and protected capability from a signed raw transaction.
     #[allow(clippy::too_many_arguments)]
     pub fn signed_legacy_create(
         network_id: &str,
@@ -130,7 +186,7 @@ impl TxIntentV1 {
         )
     }
 
-    /// Builds a contract-call intent from a signed raw transaction.
+    /// Builds a contract-call intent and protected capability from a signed raw transaction.
     #[allow(clippy::too_many_arguments)]
     pub fn signed_legacy_call(
         network_id: &str,
@@ -179,6 +235,7 @@ impl TxIntentV1 {
         chain_id: u64,
         raw_tx_hex: &str,
     ) -> Result<Self, mfm_machine::errors::StateError> {
+        let capability = SignedTxCapabilityV1::from_raw_tx_hex(raw_tx_hex)?;
         let network_id = normalize_nonempty_component(
             network_id,
             "invalid_network_id",
@@ -208,12 +265,9 @@ impl TxIntentV1 {
         let gas_limit_hex = normalize_quantity_hex(gas_limit_hex, "gas limit was invalid")?;
         let gas_price_hex = normalize_quantity_hex(gas_price_hex, "gas price was invalid")?;
         let nonce_hex = normalize_quantity_hex(nonce_hex, "nonce was invalid")?;
-        let raw_tx_hex = shared_dcv::normalize_hex_str(raw_tx_hex).map_err(|_| {
-            op_errors::state_unknown("invalid_raw_tx_hex", "raw transaction hex was invalid")
-        })?;
-        let raw_tx_hash = raw_transaction_hash(&raw_tx_hex)?;
+        let raw_tx_hash = capability.raw_tx_hash()?;
 
-        Ok(Self {
+        let intent = TxIntentV1 {
             schema_version: TX_INTENT_SCHEMA_VERSION_V1,
             network_id,
             control_scope,
@@ -228,13 +282,26 @@ impl TxIntentV1 {
             nonce_hex,
             chain_id,
             raw_tx_hash,
-            raw_tx_hex,
-        })
-    }
+        };
 
+        Ok(Self { intent, capability })
+    }
+}
+
+impl TxIntentV1 {
     /// Derives the attempt-independent fact key used to record this intent.
     pub fn fact_key(&self, state_id: &StateId) -> FactKey {
         tx_intent_fact_key(
+            state_id,
+            &self.network_id,
+            &self.control_scope,
+            &self.logical_tx_id,
+        )
+    }
+
+    /// Derives the attempt-independent fact key used to record the protected capability.
+    pub fn capability_fact_key(&self, state_id: &StateId) -> FactKey {
+        tx_capability_fact_key(
             state_id,
             &self.network_id,
             &self.control_scope,
@@ -259,6 +326,22 @@ pub fn tx_intent_fact_key(
     ))
 }
 
+/// Derives the attempt-independent fact key for a protected signed transaction capability.
+pub fn tx_capability_fact_key(
+    state_id: &StateId,
+    network_id: &str,
+    control_scope: &str,
+    logical_tx_id: &str,
+) -> FactKey {
+    FactKey(format!(
+        "mfm:evm.tx_capability|state:{}|scope:{}|network:{}|logical_tx:{}",
+        state_id.as_str(),
+        control_scope,
+        network_id,
+        logical_tx_id
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use mfm_machine::hashing::artifact_id_for_json;
@@ -266,7 +349,7 @@ mod tests {
     use super::*;
 
     fn sample_intent() -> TxIntentV1 {
-        TxIntentV1::signed_legacy_call(
+        PreparedTxIntentV1::signed_legacy_call(
             "ethereum-mainnet",
             "shared",
             "configure:0",
@@ -281,6 +364,7 @@ mod tests {
             "0xf86c808252089422222222222222222222222222222222222222228084deadbeef25a0aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         )
         .expect("intent")
+        .intent
     }
 
     #[test]
@@ -311,6 +395,14 @@ mod tests {
     }
 
     #[test]
+    fn tx_intent_public_json_does_not_include_raw_transaction() {
+        let value = serde_json::to_value(sample_intent()).expect("intent json");
+
+        assert!(value.get("raw_tx_hash").is_some());
+        assert!(value.get("raw_tx_hex").is_none());
+    }
+
+    #[test]
     fn tx_intent_fact_key_is_attempt_independent_and_stable() {
         let state_id = StateId::must_new("evm.write.configure".to_string());
         let left = tx_intent_fact_key(&state_id, "ethereum-mainnet", "shared", "configure:0");
@@ -320,5 +412,16 @@ mod tests {
         assert_eq!(left, right);
         assert_ne!(left, other);
         assert!(!left.0.contains("attempt"));
+    }
+
+    #[test]
+    fn tx_capability_fact_key_is_separate_from_public_intent_key() {
+        let state_id = StateId::must_new("evm.write.configure".to_string());
+        let intent = sample_intent();
+
+        assert_ne!(
+            intent.fact_key(&state_id),
+            intent.capability_fact_key(&state_id)
+        );
     }
 }

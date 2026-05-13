@@ -1924,6 +1924,7 @@ dependencies = [
  "hex",
  "mfm-artifact-store-fs",
  "mfm-artifact-store-s3",
+ "mfm-artifact-store-secret",
  "mfm-collectors-nix-exec",
  "mfm-evm-deploy-configure-validate-config",
  "mfm-machine",
@@ -1977,6 +1978,7 @@ dependencies = [
 name = "mfm-artifact-store-secret"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "hex",
  "mfm-artifact-store-fs",
  "mfm-machine",
@@ -2149,6 +2151,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "zeroize",
 ]
 
 [[package]]
@@ -2199,6 +2202,7 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]

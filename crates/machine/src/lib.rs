@@ -1458,8 +1458,9 @@ pub mod events {
 /// IO request and response abstractions used by live and replay providers.
 pub mod io {
     use super::*;
-    use crate::errors::IoError;
-    use crate::ids::{ArtifactId, FactKey};
+    use crate::errors::{ErrorCategory, ErrorInfo, IoError};
+    use crate::ids::{ArtifactId, ErrorCode, FactKey};
+    use zeroize::Zeroizing;
 
     /// Opaque IO call surface; collectors define typed adapters on top.
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1497,6 +1498,38 @@ pub mod io {
             key: FactKey,
             value: serde_json::Value,
         ) -> Result<ArtifactId, IoError>;
+
+        /// Persist deterministic protected bytes through the configured protected artifact path.
+        ///
+        /// The returned artifact identifier may be referenced by durable events, but the plaintext
+        /// bytes MUST NOT be readable through generic artifact retrieval.
+        async fn record_protected_bytes(
+            &mut self,
+            _key: FactKey,
+            _bytes: Zeroizing<Vec<u8>>,
+        ) -> Result<ArtifactId, IoError> {
+            Err(IoError::Other(ErrorInfo {
+                code: ErrorCode("protected_artifact_store_unavailable".to_string()),
+                category: ErrorCategory::Storage,
+                retryable: false,
+                message: "protected artifact store is not configured".to_string(),
+                details: None,
+            }))
+        }
+
+        /// Load protected bytes previously bound to `key`.
+        async fn read_protected_bytes(
+            &mut self,
+            _key: &FactKey,
+        ) -> Result<Zeroizing<Vec<u8>>, IoError> {
+            Err(IoError::Other(ErrorInfo {
+                code: ErrorCode("protected_artifact_store_unavailable".to_string()),
+                category: ErrorCategory::Storage,
+                retryable: false,
+                message: "protected artifact store is not configured".to_string(),
+                details: None,
+            }))
+        }
 
         /// Lookup recorded fact payload by key.
         async fn get_recorded_fact(&mut self, key: &FactKey)
@@ -1684,6 +1717,7 @@ pub mod stores {
     use crate::errors::{ErrorCategory, ErrorInfo, StorageError};
     use crate::ids::{is_valid_id_segment, ArtifactId, RunId};
     use std::fmt;
+    use zeroize::Zeroizing;
 
     /// Artifact classification used for retention, validation, and output handling.
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1989,6 +2023,32 @@ pub mod stores {
         async fn get(&self, id: &ArtifactId) -> Result<Vec<u8>, StorageError>;
         /// Returns whether an artifact exists without loading its bytes.
         async fn exists(&self, id: &ArtifactId) -> Result<bool, StorageError>;
+        /// Stores secret or capability bytes through an implementation-defined protected path.
+        async fn put_protected_bytes(
+            &self,
+            _bytes: Zeroizing<Vec<u8>>,
+        ) -> Result<ArtifactId, StorageError> {
+            Err(StorageError::Other(ErrorInfo {
+                code: crate::ids::ErrorCode("protected_artifact_store_unavailable".to_string()),
+                category: ErrorCategory::Storage,
+                retryable: false,
+                message: "protected artifact store is not configured".to_string(),
+                details: None,
+            }))
+        }
+        /// Loads and decrypts protected bytes by protected artifact identifier.
+        async fn get_protected_bytes(
+            &self,
+            _id: &ArtifactId,
+        ) -> Result<Zeroizing<Vec<u8>>, StorageError> {
+            Err(StorageError::Other(ErrorInfo {
+                code: crate::ids::ErrorCode("protected_artifact_store_unavailable".to_string()),
+                category: ErrorCategory::Storage,
+                retryable: false,
+                message: "protected artifact store is not configured".to_string(),
+                details: None,
+            }))
+        }
     }
 }
 

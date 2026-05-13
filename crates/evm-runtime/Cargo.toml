@@ -13,6 +13,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 alloy-primitives = { workspace = true }
+zeroize = "1.7"
 
 mfm-machine = { path = "../machine", version = "0.1.0" }
 mfm-collectors-rpc-control = { path = "../collectors/rpc-control", version = "0.1.0" }

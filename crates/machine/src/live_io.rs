@@ -10,6 +10,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use rand::TryRngCore;
 use tokio::sync::Mutex;
+use zeroize::Zeroizing;
 
 use crate::engine::Stores;
 use crate::errors::{ErrorCategory, ErrorInfo, IoError, RunError, StorageError};
@@ -390,6 +391,42 @@ impl LiveIo {
 
         Ok((bytes, bound_id))
     }
+
+    async fn record_protected_artifact_bytes(
+        &mut self,
+        key: FactKey,
+        bytes: Zeroizing<Vec<u8>>,
+    ) -> Result<ArtifactId, IoError> {
+        if let Some(payload_id) = self.facts.get(&key).await {
+            return Ok(payload_id);
+        }
+
+        let payload_id = self
+            .artifacts
+            .put_protected_bytes(bytes)
+            .await
+            .map_err(|_| {
+                io_other(
+                    "protected_artifact_put_failed",
+                    ErrorCategory::Storage,
+                    "failed to store protected artifact",
+                )
+            })?;
+
+        let (bound_id, inserted) = self.facts.bind_if_unset(key.clone(), payload_id).await;
+        if inserted {
+            if let Err(e) = self
+                .fact_recorder
+                .record_fact_binding(key.clone(), bound_id.clone())
+                .await
+            {
+                let _ = self.facts.unbind_if_matches(&key, &bound_id).await;
+                return Err(e);
+            }
+        }
+
+        Ok(bound_id)
+    }
 }
 
 #[async_trait]
@@ -443,6 +480,37 @@ impl IoProvider for LiveIo {
     ) -> Result<ArtifactId, IoError> {
         let (_, payload_id) = self.record_fact_json(key, value).await?;
         Ok(payload_id)
+    }
+
+    async fn record_protected_bytes(
+        &mut self,
+        key: FactKey,
+        bytes: Zeroizing<Vec<u8>>,
+    ) -> Result<ArtifactId, IoError> {
+        self.record_protected_artifact_bytes(key, bytes).await
+    }
+
+    async fn read_protected_bytes(&mut self, key: &FactKey) -> Result<Zeroizing<Vec<u8>>, IoError> {
+        let facts = self.facts.clone();
+        let artifacts = Arc::clone(&self.artifacts);
+        let Some(payload_id) = facts.get(key).await else {
+            return Err(io_other(
+                "protected_artifact_missing",
+                ErrorCategory::Storage,
+                "protected artifact fact was not recorded",
+            ));
+        };
+
+        artifacts
+            .get_protected_bytes(&payload_id)
+            .await
+            .map_err(|_| {
+                io_other(
+                    "protected_artifact_get_failed",
+                    ErrorCategory::Storage,
+                    "failed to read protected artifact",
+                )
+            })
     }
 
     async fn now_millis(&mut self) -> Result<u64, IoError> {
