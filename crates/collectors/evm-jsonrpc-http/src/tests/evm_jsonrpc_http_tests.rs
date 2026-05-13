@@ -811,7 +811,9 @@ async fn logs_chunking_exhausts_when_retryable_failures_persist() {
     .expect_err("chunking should eventually exhaust");
 
     match err {
-        IoError::Transport(info) => assert_eq!(info.code.0, CODE_EVM_LOGS_CHUNKING_EXHAUSTED),
+        IoError::Transport(info) => {
+            assert_eq!(info.code.as_str(), CODE_EVM_LOGS_CHUNKING_EXHAUSTED)
+        }
         other => panic!("expected Transport, got {other:?}"),
     }
 }
@@ -871,7 +873,7 @@ async fn failover_returns_stable_pool_error_when_all_sources_fail() {
 
     match err {
         IoError::Transport(info) => {
-            assert_eq!(info.code.0, CODE_EVM_NO_HEALTHY_SOURCE);
+            assert_eq!(info.code.as_str(), CODE_EVM_NO_HEALTHY_SOURCE);
             assert!(info.retryable);
         }
         other => panic!("expected Transport, got {other:?}"),
@@ -904,7 +906,7 @@ async fn write_methods_use_primary_only_single_dispatch() {
     .expect_err("primary should fail");
 
     match err {
-        IoError::Transport(info) => assert_eq!(info.code.0, CODE_EVM_HTTP_STATUS),
+        IoError::Transport(info) => assert_eq!(info.code.as_str(), CODE_EVM_HTTP_STATUS),
         other => panic!("expected Transport, got {other:?}"),
     }
     assert_eq!(secondary.hit_count(), 0);
@@ -1034,9 +1036,9 @@ async fn hedging_returns_stable_error_when_primary_and_secondary_fail() {
     match err {
         IoError::Transport(info) => {
             assert!(
-                info.code.0 == CODE_EVM_HEDGE_EXHAUSTED
-                    || info.code.0 == CODE_EVM_NO_HEALTHY_SOURCE
-                    || info.code.0 == CODE_EVM_SOURCE_UNHEALTHY
+                info.code.as_str() == CODE_EVM_HEDGE_EXHAUSTED
+                    || info.code.as_str() == CODE_EVM_NO_HEALTHY_SOURCE
+                    || info.code.as_str() == CODE_EVM_SOURCE_UNHEALTHY
             );
             assert!(info.retryable);
         }
@@ -1066,7 +1068,7 @@ async fn read_requests_reject_per_request_rpc_url_override() {
     .expect_err("read path should reject rpc_url override");
 
     match err {
-        IoError::Other(info) => assert_eq!(info.code.0, CODE_EVM_REQUEST_INVALID),
+        IoError::Other(info) => assert_eq!(info.code.as_str(), CODE_EVM_REQUEST_INVALID),
         other => panic!("expected Other, got {other:?}"),
     }
 }
@@ -1093,7 +1095,7 @@ async fn write_requests_reject_per_request_rpc_url_override() {
     .expect_err("write path should reject rpc_url override");
 
     match err {
-        IoError::Other(info) => assert_eq!(info.code.0, CODE_EVM_REQUEST_INVALID),
+        IoError::Other(info) => assert_eq!(info.code.as_str(), CODE_EVM_REQUEST_INVALID),
         other => panic!("expected Other, got {other:?}"),
     }
 }
@@ -1263,7 +1265,7 @@ async fn route_source_id_must_exist() {
 
     match err {
         IoError::Other(info) => {
-            assert_eq!(info.code.0, CODE_EVM_ROUTE_SOURCE_UNKNOWN);
+            assert_eq!(info.code.as_str(), CODE_EVM_ROUTE_SOURCE_UNKNOWN);
             let details = info.details.unwrap_or_default().to_string();
             assert!(details.contains("missing"));
             assert!(!details.contains("127.0.0.1"));

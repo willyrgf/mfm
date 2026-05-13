@@ -399,7 +399,7 @@ struct ChildRunAwaitResponseV1 {
 
 fn child_io_error(code: &'static str, category: ErrorCategory, message: &'static str) -> IoError {
     IoError::Other(ErrorInfo {
-        code: ErrorCode(code.to_string()),
+        code: ErrorCode::must_new(code),
         category,
         retryable: false,
         message: message.to_string(),
@@ -410,7 +410,7 @@ fn child_io_error(code: &'static str, category: ErrorCategory, message: &'static
 impl ChildRunLiveIoTransport {
     fn missing_fact_key() -> IoError {
         IoError::MissingFactKey(ErrorInfo {
-            code: ErrorCode(crate::errors::CODE_MISSING_FACT_KEY.to_string()),
+            code: ErrorCode::must_new(crate::errors::CODE_MISSING_FACT_KEY),
             category: ErrorCategory::ParsingInput,
             retryable: false,
             message: "missing fact key for child-run call".to_string(),
@@ -790,7 +790,7 @@ impl ChildRunLiveIoTransport {
             {
                 Ok(rr) => rr,
                 Err(RunError::Storage(StorageError::NotFound(info)))
-                    if info.code.0 == "run_not_found" =>
+                    if info.code.as_str() == "run_not_found" =>
                 {
                     return Err(child_io_error(
                         "child_run_missing_after_spawn",

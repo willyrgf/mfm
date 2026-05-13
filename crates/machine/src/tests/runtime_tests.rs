@@ -249,7 +249,7 @@ impl State for SetKeyState {
             return Err(StateError {
                 state_id: None,
                 info: ErrorInfo {
-                    code: ErrorCode("unexpected_context".to_string()),
+                    code: ErrorCode::must_new("unexpected_context"),
                     category: ErrorCategory::Context,
                     retryable: false,
                     message: "unexpected context value".to_string(),
@@ -401,14 +401,14 @@ fn set_key_plan(op_id: &OpId) -> ExecutionPlan {
 
 fn assert_storage_corruption_code(err: RunError, code: &str) {
     match err {
-        RunError::Storage(StorageError::Corruption(info)) => assert_eq!(info.code.0, code),
+        RunError::Storage(StorageError::Corruption(info)) => assert_eq!(info.code.as_str(), code),
         other => panic!("unexpected error: {other:?}"),
     }
 }
 
 fn assert_invalid_plan_code(err: RunError, code: &str) {
     match err {
-        RunError::InvalidPlan(info) => assert_eq!(info.code.0, code),
+        RunError::InvalidPlan(info) => assert_eq!(info.code.as_str(), code),
         other => panic!("unexpected error: {other:?}"),
     }
 }
@@ -897,7 +897,7 @@ impl State for SecretErrorState {
         Err(StateError {
             state_id: None,
             info: ErrorInfo {
-                code: ErrorCode("secret_error".to_string()),
+                code: ErrorCode::must_new("secret_error"),
                 category: ErrorCategory::Unknown,
                 retryable: false,
                 message: format!("password leaked: {SECRET_PASSWORD}"),
@@ -942,7 +942,7 @@ impl State for EmitSecretDomainEventState {
             return Err(StateError {
                 state_id: None,
                 info: ErrorInfo {
-                    code: ErrorCode("emit_failed".to_string()),
+                    code: ErrorCode::must_new("emit_failed"),
                     category: ErrorCategory::Unknown,
                     retryable: false,
                     message: "emit failed".to_string(),
@@ -987,7 +987,7 @@ impl State for SecretFactIoState {
         .map_err(|_| StateError {
             state_id: None,
             info: ErrorInfo {
-                code: ErrorCode("io_failed".to_string()),
+                code: ErrorCode::must_new("io_failed"),
                 category: ErrorCategory::Unknown,
                 retryable: false,
                 message: "io failed".to_string(),
@@ -1101,7 +1101,7 @@ async fn secrets_in_initial_context_are_rejected_and_not_persisted() {
 
     match err {
         RunError::Context(crate::errors::ContextError::Other(info)) => {
-            assert_eq!(info.code.0, "secrets_detected");
+            assert_eq!(info.code.as_str(), "secrets_detected");
         }
         other => panic!("unexpected error: {other:?}"),
     }
@@ -1434,7 +1434,10 @@ async fn start_then_resume_retries_orphan_attempt_from_base_snapshot() {
                 failure_snapshot_id,
             }) if *sid == state_id => {
                 assert_eq!(error.state_id.as_ref(), Some(&state_id));
-                Some((error.info.code.0.clone(), failure_snapshot_id.clone()))
+                Some((
+                    error.info.code.as_str().to_string(),
+                    failure_snapshot_id.clone(),
+                ))
             }
             _ => None,
         })
@@ -1470,7 +1473,7 @@ impl State for FlakyRetryableState {
             return Err(StateError {
                 state_id: None,
                 info: ErrorInfo {
-                    code: ErrorCode("flaky".to_string()),
+                    code: ErrorCode::must_new("flaky"),
                     category: ErrorCategory::Unknown,
                     retryable: true,
                     message: "flaky".to_string(),
@@ -1616,7 +1619,9 @@ async fn rejects_fanout_join_execution_mode() {
         .expect_err("expected error");
 
     match err {
-        RunError::InvalidPlan(info) => assert_eq!(info.code.0, CODE_UNSUPPORTED_EXECUTION_MODE),
+        RunError::InvalidPlan(info) => {
+            assert_eq!(info.code.as_str(), CODE_UNSUPPORTED_EXECUTION_MODE)
+        }
         other => panic!("expected InvalidPlan, got: {other:?}"),
     }
 }
@@ -1847,7 +1852,7 @@ async fn crash_resume_orphan_attempt_reuses_facts() {
             &e.event,
             Event::Kernel(KernelEvent::StateFailed { state_id: sid, error, failure_snapshot_id })
                 if *sid == state_id
-                    && error.info.code.0 == "orphan_attempt_recovered"
+                    && error.info.code.as_str() == "orphan_attempt_recovered"
                     && failure_snapshot_id.is_none()
         ))
         .count();
@@ -1965,7 +1970,7 @@ impl State for RecordFactThenFailOnce {
             return Err(StateError {
                 state_id: None,
                 info: ErrorInfo {
-                    code: ErrorCode("flaky".to_string()),
+                    code: ErrorCode::must_new("flaky"),
                     category: ErrorCategory::Unknown,
                     retryable: true,
                     message: "flaky".to_string(),

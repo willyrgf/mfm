@@ -133,7 +133,7 @@ fn parity_keystore_tx_sign_fails_with_wrong_password() {
         "tx-sign should fail with wrong password"
     );
     let err = parse_error_json(&output.stderr);
-    assert_eq!(err["code"].as_str(), Some("KeystoreError"));
+    assert_eq!(err["code"].as_str(), Some("keystore_error"));
     let stderr = stderr_string(&output);
     assert!(!stderr.contains(&private_key));
     assert!(!stderr.contains("definitely-wrong-password"));
@@ -175,7 +175,7 @@ fn parity_keystore_tx_sign_fails_with_missing_selector() {
     );
     assert!(!output.status.success());
     let err = parse_error_json(&output.stderr);
-    assert_eq!(err["code"].as_str(), Some("MissingArgument"));
+    assert_eq!(err["code"].as_str(), Some("missing_argument"));
 }
 
 #[test]
@@ -225,7 +225,7 @@ fn parity_keystore_tx_sign_fails_with_ambiguous_label() {
     );
     assert!(!output.status.success());
     let err = parse_error_json(&output.stderr);
-    assert_eq!(err["code"].as_str(), Some("AmbiguousLabel"));
+    assert_eq!(err["code"].as_str(), Some("ambiguous_label"));
 }
 
 fn run_import_private_key(

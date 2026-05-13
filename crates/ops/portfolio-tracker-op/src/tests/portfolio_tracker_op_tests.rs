@@ -51,7 +51,7 @@ struct Harness {
 
 fn info(code: &'static str, category: ErrorCategory, message: &'static str) -> ErrorInfo {
     ErrorInfo {
-        code: ErrorCode(code.to_string()),
+        code: ErrorCode::must_new(code),
         category,
         retryable: false,
         message: message.to_string(),
@@ -559,7 +559,7 @@ fn portfolio_tracker_rejects_built_input() {
         .err()
         .expect("built config must not decode for portfolio_tracker");
 
-    assert_eq!(err.info.code.0, "invalid_portfolio_execution_config");
+    assert_eq!(err.info.code.as_str(), "invalid_portfolio_execution_config");
 }
 
 #[test]
@@ -602,7 +602,7 @@ fn portfolio_execute_rejects_legacy_canonical_config() {
         .err()
         .expect("legacy canonical config should not decode for portfolio_execute");
 
-    assert_eq!(err.info.code.0, "invalid_portfolio_execution_config");
+    assert_eq!(err.info.code.as_str(), "invalid_portfolio_execution_config");
 }
 
 #[tokio::test]

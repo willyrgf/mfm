@@ -772,7 +772,7 @@ mod tests {
 
     fn io_info(code: &'static str, message: impl Into<String>) -> ErrorInfo {
         ErrorInfo {
-            code: ErrorCode(code.to_string()),
+            code: ErrorCode::must_new(code),
             category: ErrorCategory::Unknown,
             retryable: false,
             message: message.into(),
@@ -1077,7 +1077,7 @@ mod tests {
         .await
         .expect_err("unsigned configure must be rejected");
 
-        assert_eq!(err.info.code.0, "evm_signed_transaction_required");
+        assert_eq!(err.info.code.as_str(), "evm_signed_transaction_required");
         assert!(!io.calls.iter().any(|call| {
             call.request.get("method").and_then(Value::as_str) == Some("eth_sendTransaction")
         }));
@@ -1125,7 +1125,7 @@ mod tests {
             .handle(&mut ctx, &mut io, &mut rec)
             .await
             .expect_err("first broadcast is interrupted after intent recording");
-        assert_eq!(err.info.code.0, "simulated_broadcast_crash");
+        assert_eq!(err.info.code.as_str(), "simulated_broadcast_crash");
         let first_intent = io
             .recorded_values
             .first()
@@ -1183,7 +1183,7 @@ mod tests {
         .await
         .expect_err("deploy should fail before issuing write calls");
 
-        assert_eq!(err.info.code.0, "rpc_control_no_healthy_sources");
+        assert_eq!(err.info.code.as_str(), "rpc_control_no_healthy_sources");
         assert!(err.info.retryable);
         assert_eq!(io.calls.len(), 1);
         assert_eq!(

@@ -166,7 +166,7 @@ pub mod op {
     fn sdk_error(code: &'static str, message: &'static str) -> SdkError {
         SdkError {
             info: ErrorInfo {
-                code: ErrorCode(code.to_string()),
+                code: ErrorCode::must_new(code),
                 category: ErrorCategory::ParsingInput,
                 retryable: false,
                 message: message.to_string(),

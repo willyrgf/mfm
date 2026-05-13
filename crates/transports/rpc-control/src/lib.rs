@@ -124,7 +124,7 @@ fn info(
     message: impl Into<String>,
 ) -> ErrorInfo {
     ErrorInfo {
-        code: ErrorCode(code.to_string()),
+        code: ErrorCode::must_new(code),
         category,
         retryable,
         message: message.into(),
@@ -174,7 +174,7 @@ fn io_projection_invalid(
 
 fn io_control_plane_concurrency(info: ErrorInfo) -> IoError {
     IoError::Other(ErrorInfo {
-        code: ErrorCode("control_plane_concurrency".to_string()),
+        code: ErrorCode::must_new("control_plane_concurrency"),
         category: info.category,
         retryable: info.retryable,
         message: info.message,
@@ -187,8 +187,8 @@ fn io_error_code(err: &IoError) -> String {
         IoError::MissingFactKey(info)
         | IoError::Transport(info)
         | IoError::RateLimited(info)
-        | IoError::Other(info) => info.code.0.clone(),
-        IoError::MissingFact { info, .. } => info.code.0.clone(),
+        | IoError::Other(info) => info.code.as_str().to_string(),
+        IoError::MissingFact { info, .. } => info.code.as_str().to_string(),
     }
 }
 
@@ -1182,7 +1182,7 @@ impl RpcControlTransport {
                 .await
             {
                 Ok(state) => return Ok(state),
-                Err(IoError::Other(info)) if info.code.0 == "control_plane_concurrency" => {
+                Err(IoError::Other(info)) if info.code.as_str() == "control_plane_concurrency" => {
                     last_err = Some(IoError::Other(info))
                 }
                 Err(err) => return Err(err),
@@ -1218,7 +1218,7 @@ impl RpcControlTransport {
                 .await
             {
                 Ok(state) => return Ok(state),
-                Err(IoError::Other(info)) if info.code.0 == "control_plane_concurrency" => {
+                Err(IoError::Other(info)) if info.code.as_str() == "control_plane_concurrency" => {
                     last_err = Some(IoError::Other(info))
                 }
                 Err(err) => return Err(err),
@@ -2176,7 +2176,7 @@ mod tests {
 
     fn jsonrpc_transport_error(message: &'static str) -> IoError {
         IoError::Transport(ErrorInfo {
-            code: ErrorCode("evm_jsonrpc_error".to_string()),
+            code: ErrorCode::must_new("evm_jsonrpc_error"),
             category: ErrorCategory::Rpc,
             retryable: true,
             message: "evm jsonrpc returned an error".to_string(),
@@ -2344,7 +2344,7 @@ mod tests {
             .expect_err("invalid inner executor config should fail before dispatch");
         let message = match err {
             IoError::Transport(info) => {
-                assert_eq!(info.code.0, "rpc_control_executor_config_invalid");
+                assert_eq!(info.code.as_str(), "rpc_control_executor_config_invalid");
                 info.message
             }
             other => panic!("expected transport error, got {other:?}"),

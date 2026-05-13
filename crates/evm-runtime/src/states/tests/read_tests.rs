@@ -154,7 +154,7 @@ async fn invalid_hex_response_fails_with_stable_code() {
         .handle(&mut ctx, &mut io, &mut rec)
         .await
         .expect_err("expected parse error");
-    assert_eq!(err.info.code.0, "evm_response_invalid");
+    assert_eq!(err.info.code.as_str(), "evm_response_invalid");
 }
 
 #[tokio::test]
@@ -182,7 +182,7 @@ async fn expectation_mismatch_fails_with_state_scoped_error() {
         .handle(&mut ctx, &mut io, &mut rec)
         .await
         .expect_err("expected mismatch");
-    assert_eq!(err.info.code.0, "chain_id_mismatch");
+    assert_eq!(err.info.code.as_str(), "chain_id_mismatch");
     assert_eq!(
         err.state_id,
         Some(StateId::must_new("m.main.chain_id".to_string()))
@@ -192,14 +192,14 @@ async fn expectation_mismatch_fails_with_state_scoped_error() {
 #[test]
 fn io_error_mapping_preserves_error_info() {
     let io_err = IoError::Other(mfm_machine::errors::ErrorInfo {
-        code: ErrorCode("io_code".to_string()),
+        code: ErrorCode::must_new("io_code"),
         category: ErrorCategory::Rpc,
         retryable: false,
         message: "io message".to_string(),
         details: None,
     });
     let state_err = state_from_io(io_err);
-    assert_eq!(state_err.info.code.0, "io_code");
+    assert_eq!(state_err.info.code.as_str(), "io_code");
     assert_eq!(state_err.info.message, "io message");
 }
 
@@ -254,7 +254,7 @@ async fn read_u256_hex_rejects_overflow() {
         .handle(&mut ctx, &mut io, &mut rec)
         .await
         .expect_err("overflow");
-    assert_eq!(err.info.code.0, "evm_response_invalid");
+    assert_eq!(err.info.code.as_str(), "evm_response_invalid");
 }
 
 #[tokio::test]

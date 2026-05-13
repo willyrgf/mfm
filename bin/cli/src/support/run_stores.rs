@@ -49,7 +49,7 @@ async fn make_stream_store(
             | mfm_machine::errors::StorageError::NotFound(info)
             | mfm_machine::errors::StorageError::Corruption(info)
             | mfm_machine::errors::StorageError::Other(info) => {
-                CommandError::new(info.code.0, info.message)
+                CommandError::new(info.code.as_str(), info.message)
             }
         })?;
 

@@ -29,7 +29,7 @@ use mfm_machine::live_io::{LiveIoEnv, LiveIoTransport, LiveIoTransportFactory};
 
 fn info(code: &'static str, category: ErrorCategory, message: impl Into<String>) -> ErrorInfo {
     ErrorInfo {
-        code: ErrorCode(code.to_string()),
+        code: ErrorCode::must_new(code),
         category,
         retryable: false,
         message: message.into(),

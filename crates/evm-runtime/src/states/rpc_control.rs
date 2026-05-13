@@ -131,7 +131,7 @@ mod tests {
 
     fn info(code: &'static str, category: ErrorCategory, message: &'static str) -> ErrorInfo {
         ErrorInfo {
-            code: ErrorCode(code.to_string()),
+            code: ErrorCode::must_new(code),
             category,
             retryable: false,
             message: message.to_string(),
@@ -349,7 +349,7 @@ mod tests {
             .await
             .expect_err("missing network_id");
 
-        assert_eq!(err.info.code.0, "rpc_control_network_required");
+        assert_eq!(err.info.code.as_str(), "rpc_control_network_required");
         assert_eq!(err.info.category, ErrorCategory::ParsingInput);
     }
 
@@ -372,7 +372,7 @@ mod tests {
             .await
             .expect_err("no healthy source");
 
-        assert_eq!(err.info.code.0, "rpc_control_no_healthy_sources");
+        assert_eq!(err.info.code.as_str(), "rpc_control_no_healthy_sources");
         assert_eq!(err.info.category, ErrorCategory::Rpc);
     }
 }

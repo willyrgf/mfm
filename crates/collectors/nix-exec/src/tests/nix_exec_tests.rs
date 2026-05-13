@@ -240,7 +240,7 @@ async fn env_with_manifest_allowlist(prefixes: Vec<String>) -> LiveIoEnv {
 fn split_flake_app_ref_requires_fragment() {
     let err = split_flake_app_ref("github:willyrgf/mfm").expect_err("expected error");
     match err {
-        IoError::Other(info) => assert_eq!(info.code.0, CODE_NIX_REQUEST_INVALID),
+        IoError::Other(info) => assert_eq!(info.code.as_str(), CODE_NIX_REQUEST_INVALID),
         other => panic!("expected Other, got: {other:?}"),
     }
 }
@@ -334,7 +334,7 @@ fn inject_host_env_bindings_rejects_missing_source_env() {
 
     let err = inject_host_env_bindings(&mut cmd, &bindings).expect_err("missing env must fail");
     match err {
-        IoError::Transport(info) => assert_eq!(info.code.0, CODE_NIX_HOST_ENV_MISSING),
+        IoError::Transport(info) => assert_eq!(info.code.as_str(), CODE_NIX_HOST_ENV_MISSING),
         other => panic!("expected transport error, got: {other:?}"),
     }
 }
@@ -452,7 +452,7 @@ fn invalid_json_stdout_error_omits_stdout_body() {
 
     match err {
         IoError::Other(info) => {
-            assert_eq!(info.code.0, CODE_NIX_STDOUT_INVALID_JSON);
+            assert_eq!(info.code.as_str(), CODE_NIX_STDOUT_INVALID_JSON);
             assert!(info.details.is_none());
         }
         other => panic!("expected Other, got: {other:?}"),
@@ -479,7 +479,7 @@ async fn rejects_disallowed_app_ref_by_default() {
         .expect_err("expected error");
 
     match err {
-        IoError::Other(info) => assert_eq!(info.code.0, CODE_NIX_APP_NOT_ALLOWED),
+        IoError::Other(info) => assert_eq!(info.code.as_str(), CODE_NIX_APP_NOT_ALLOWED),
         other => panic!("expected Other, got: {other:?}"),
     }
 }
@@ -506,7 +506,7 @@ async fn rejects_invalid_request_shape() {
         .expect_err("expected error");
 
     match err {
-        IoError::Other(info) => assert_eq!(info.code.0, CODE_NIX_REQUEST_INVALID),
+        IoError::Other(info) => assert_eq!(info.code.as_str(), CODE_NIX_REQUEST_INVALID),
         other => panic!("expected Other, got: {other:?}"),
     }
 }
@@ -534,10 +534,13 @@ async fn manifest_allowlist_overrides_factory_policy() {
 
     match err {
         IoError::Transport(info) => {
-            assert!(info.code.0 == CODE_NIX_EVAL_FAILED || info.code.0 == CODE_NIX_TIMEOUT)
+            assert!(
+                info.code.as_str() == CODE_NIX_EVAL_FAILED
+                    || info.code.as_str() == CODE_NIX_TIMEOUT
+            )
         }
         IoError::Other(info) => {
-            assert_ne!(info.code.0, CODE_NIX_APP_NOT_ALLOWED)
+            assert_ne!(info.code.as_str(), CODE_NIX_APP_NOT_ALLOWED)
         }
         other => panic!("unexpected error: {other:?}"),
     }

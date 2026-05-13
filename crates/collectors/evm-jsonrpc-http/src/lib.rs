@@ -94,7 +94,7 @@ fn info(
     message: &'static str,
 ) -> ErrorInfo {
     ErrorInfo {
-        code: ErrorCode(code.to_string()),
+        code: ErrorCode::must_new(code),
         category,
         retryable,
         message: message.to_string(),
@@ -110,7 +110,7 @@ fn info_with_details(
     details: Option<serde_json::Value>,
 ) -> ErrorInfo {
     ErrorInfo {
-        code: ErrorCode(code.to_string()),
+        code: ErrorCode::must_new(code),
         category,
         retryable,
         message: message.to_string(),
@@ -834,7 +834,7 @@ fn failure_detail(source_id: &str, err: &IoError) -> serde_json::Value {
     let info = err_info(err);
     let mut obj = serde_json::Map::new();
     obj.insert("source_id".to_string(), json!(source_id));
-    obj.insert("code".to_string(), json!(info.code.0));
+    obj.insert("code".to_string(), json!(info.code.as_str()));
     obj.insert("retryable".to_string(), json!(info.retryable));
     if let Some(details) = &info.details {
         obj.insert("details".to_string(), details.clone());
@@ -845,7 +845,7 @@ fn failure_detail(source_id: &str, err: &IoError) -> serde_json::Value {
 fn io_error_summary(err: &IoError) -> serde_json::Value {
     let info = err_info(err);
     json!({
-        "code": info.code.0,
+        "code": info.code.as_str(),
         "category": info.category,
         "retryable": info.retryable,
         "message": info.message,
@@ -1006,7 +1006,7 @@ impl EvmJsonRpcHttpTransport {
 
     fn score_failure_penalty(err: &IoError, method_class: MethodClass) -> i32 {
         let info = err_info(err);
-        let mut penalty = match info.code.0.as_str() {
+        let mut penalty = match info.code.as_str() {
             CODE_EVM_RATE_LIMITED => 8,
             CODE_EVM_HTTP_REQUEST_FAILED => {
                 let class = info
@@ -1459,7 +1459,7 @@ impl EvmJsonRpcHttpTransport {
                     failures.push(json!({
                         "from_block": format!("0x{from_block:x}"),
                         "to_block": format!("0x{to_block:x}"),
-                        "code": err_info(&err).code.0,
+                        "code": err_info(&err).code.as_str(),
                         "retryable": err_info(&err).retryable,
                     }));
 
@@ -2136,7 +2136,7 @@ impl LiveIoTransport for EvmJsonRpcHttpTransport {
                 debug!(
                     call_ordinal = call_ordinal,
                     rpc_method = %req.method,
-                    error_code = %info.code.0,
+                    error_code = %info.code.as_str(),
                     retryable = info.retryable,
                     "evm jsonrpc call failed"
                 );

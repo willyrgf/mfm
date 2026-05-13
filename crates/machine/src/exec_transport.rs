@@ -45,7 +45,7 @@ const MAX_EXEC_STDERR_BYTES: usize = 1024 * 1024;
 
 fn info(code: &'static str, category: ErrorCategory, message: &'static str) -> ErrorInfo {
     ErrorInfo {
-        code: ErrorCode(code.to_string()),
+        code: ErrorCode::must_new(code),
         category,
         retryable: false,
         message: message.to_string(),
@@ -60,7 +60,7 @@ fn info_with_details(
     details: serde_json::Value,
 ) -> ErrorInfo {
     ErrorInfo {
-        code: ErrorCode(code.to_string()),
+        code: ErrorCode::must_new(code),
         category,
         retryable: false,
         message: message.to_string(),

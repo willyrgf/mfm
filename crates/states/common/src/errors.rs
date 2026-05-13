@@ -10,7 +10,7 @@ pub fn info(
     message: impl Into<String>,
 ) -> ErrorInfo {
     ErrorInfo {
-        code: ErrorCode(code.to_string()),
+        code: ErrorCode::must_new(code),
         category,
         retryable,
         message: message.into(),

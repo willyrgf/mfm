@@ -497,7 +497,7 @@ mod tests {
 
     fn info(code: &'static str, message: impl Into<String>) -> ErrorInfo {
         ErrorInfo {
-            code: ErrorCode(code.to_string()),
+            code: ErrorCode::must_new(code),
             category: ErrorCategory::Unknown,
             retryable: false,
             message: message.into(),
@@ -734,7 +734,7 @@ mod tests {
             .handle(&mut ctx, &mut io, &mut rec)
             .await
             .expect_err("second broadcast simulates a crash");
-        assert_eq!(err.info.code.0, "simulated_broadcast_crash");
+        assert_eq!(err.info.code.as_str(), "simulated_broadcast_crash");
         let first_attempt_first_intent = io
             .recorded_values
             .first()

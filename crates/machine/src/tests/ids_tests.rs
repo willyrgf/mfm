@@ -80,6 +80,25 @@ fn artifact_id_serde_rejects_invalid_values() {
 }
 
 #[test]
+fn error_code_constructor_enforces_persisted_code_shape() {
+    assert!(ErrorCode::new("missing_fact_key").is_ok());
+    assert!(ErrorCode::new("MissingFactKey").is_err());
+    assert!(ErrorCode::new("missing-fact-key").is_err());
+    assert!(ErrorCode::new("0missing_fact_key").is_err());
+    assert!(ErrorCode::new("a".repeat(64)).is_err());
+}
+
+#[test]
+fn error_code_serde_rejects_malformed_values() {
+    let parsed: ErrorCode = serde_json::from_str("\"missing_fact_key\"")
+        .expect("valid error code should deserialize");
+    assert_eq!(parsed.as_str(), "missing_fact_key");
+
+    assert!(serde_json::from_str::<ErrorCode>("\"missing-fact-key\"").is_err());
+    assert!(serde_json::from_str::<ErrorCode>("\"MissingFactKey\"").is_err());
+}
+
+#[test]
 fn op_path_parts_are_directly_addressable() {
     let op_path = OpPath::must_new("portfolio_snapshot.fetch_balances.reporting");
     assert_eq!(op_path.machine_and_step(), ("portfolio_snapshot", "fetch_balances"));

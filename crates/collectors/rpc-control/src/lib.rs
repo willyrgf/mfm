@@ -222,7 +222,7 @@ impl std::error::Error for FactKeyDerivationError {}
 
 fn info(code: &'static str, category: ErrorCategory, message: &'static str) -> ErrorInfo {
     ErrorInfo {
-        code: ErrorCode(code.to_string()),
+        code: ErrorCode::must_new(code),
         category,
         retryable: false,
         message: message.to_string(),
@@ -885,7 +885,7 @@ mod tests {
             .expect_err("missing network should fail");
 
         match err {
-            IoError::Other(info) => assert_eq!(info.code.0, "rpc_control_network_required"),
+            IoError::Other(info) => assert_eq!(info.code.as_str(), "rpc_control_network_required"),
             other => panic!("unexpected error: {other:?}"),
         }
         assert!(io.calls.is_empty());

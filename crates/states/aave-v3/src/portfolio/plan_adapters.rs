@@ -619,7 +619,7 @@ mod tests {
 
     fn info(code: &'static str, message: &'static str) -> ErrorInfo {
         ErrorInfo {
-            code: ErrorCode(code.to_string()),
+            code: ErrorCode::must_new(code),
             category: ErrorCategory::Unknown,
             retryable: false,
             message: message.to_string(),

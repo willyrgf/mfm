@@ -1279,7 +1279,7 @@ mod tests {
             };
             let response = self.responses.get(&key).cloned().ok_or_else(|| {
                 IoError::Other(ErrorInfo {
-                    code: ErrorCode("missing_mock_response".to_string()),
+                    code: ErrorCode::must_new("missing_mock_response"),
                     category: ErrorCategory::Unknown,
                     retryable: false,
                     message: format!("missing mock response for `{key}`"),

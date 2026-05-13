@@ -622,8 +622,10 @@ pub mod ids {
     pub struct ContextKey(pub String);
 
     /// Stable machine-readable error code.
+    /// Invariant: `^[a-z][a-z0-9_]{0,62}$`.
     #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-    pub struct ErrorCode(pub String);
+    #[serde(try_from = "String", into = "String")]
+    pub struct ErrorCode(String);
 }
 
 pub mod canonical {

@@ -84,7 +84,7 @@ fn info(
     message: &'static str,
 ) -> ErrorInfo {
     ErrorInfo {
-        code: ErrorCode(code.to_string()),
+        code: ErrorCode::must_new(code),
         category,
         retryable,
         message: message.to_string(),
@@ -427,7 +427,7 @@ fn validate_leaf_op_spec(
             if !ok {
                 return Err(SdkError {
                     info: ErrorInfo {
-                        code: ErrorCode("missing_idempotency_key".to_string()),
+                        code: ErrorCode::must_new("missing_idempotency_key"),
                         category: ErrorCategory::ParsingInput,
                         retryable: false,
                         message: format!(
@@ -1797,7 +1797,7 @@ impl std::fmt::Display for ContextSnapshotLoadError {
                     | StorageError::Corruption(info)
                     | StorageError::Other(info) => info,
                 };
-                write!(f, "{}: {}", info.code.0, info.message)
+                write!(f, "{}: {}", info.code.as_str(), info.message)
             }
             Self::InvalidSnapshot => f.write_str("context snapshot artifact was not JSON"),
         }
@@ -1813,7 +1813,7 @@ fn single_op_report_error_from_storage(err: StorageError) -> SingleOpReportError
         | StorageError::Corruption(info)
         | StorageError::Other(info) => info,
     };
-    SingleOpReportError::new(info.code.0, info.message)
+    SingleOpReportError::new(info.code.as_str(), info.message)
 }
 
 fn single_op_report_error_from_run(err: RunError) -> SingleOpReportError {
@@ -1841,11 +1841,11 @@ fn single_op_report_error_from_run(err: RunError) -> SingleOpReportError {
         RunError::Other(info) => info,
     };
 
-    SingleOpReportError::new(info.code.0, info.message)
+    SingleOpReportError::new(info.code.as_str(), info.message)
 }
 
 fn single_op_report_error_from_sdk(err: SdkError) -> SingleOpReportError {
-    SingleOpReportError::new(err.info.code.0, err.info.message)
+    SingleOpReportError::new(err.info.code.as_str(), err.info.message)
 }
 
 fn context_snapshot_load_error_from_storage(err: StorageError) -> ContextSnapshotLoadError {
@@ -2032,7 +2032,7 @@ async fn single_op_report_error_from_failed_run(
         };
 
         if let KernelEvent::StateFailed { error, .. } = kernel {
-            return SingleOpReportError::new(error.info.code.0.clone(), error.info.message.clone());
+            return SingleOpReportError::new(error.info.code.as_str(), error.info.message.clone());
         }
     }
 
@@ -2152,7 +2152,7 @@ pub mod child_runs {
 
     fn io_other(code: &'static str, category: ErrorCategory, message: &'static str) -> IoError {
         IoError::Other(ErrorInfo {
-            code: ErrorCode(code.to_string()),
+            code: ErrorCode::must_new(code),
             category,
             retryable: false,
             message: message.to_string(),

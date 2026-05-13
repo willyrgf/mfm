@@ -17,7 +17,7 @@ const CODE_IO_UNKNOWN_NAMESPACE: &str = "io_unknown_namespace";
 
 fn info(code: &'static str, category: ErrorCategory, message: &'static str) -> ErrorInfo {
     ErrorInfo {
-        code: ErrorCode(code.to_string()),
+        code: ErrorCode::must_new(code),
         category,
         retryable: false,
         message: message.to_string(),
@@ -324,7 +324,7 @@ mod tests {
             .expect_err("expected error");
 
         match err {
-            IoError::Other(info) => assert_eq!(info.code.0, CODE_IO_UNKNOWN_NAMESPACE),
+            IoError::Other(info) => assert_eq!(info.code.as_str(), CODE_IO_UNKNOWN_NAMESPACE),
             other => panic!("expected IoError::Other, got: {other:?}"),
         }
     }

@@ -65,7 +65,7 @@ pub fn artifact_id_for_json(value: &serde_json::Value) -> Result<ArtifactId, Can
 
 fn storage_corruption(code: &'static str, message: &'static str) -> StorageError {
     StorageError::Corruption(ErrorInfo {
-        code: ErrorCode(code.to_string()),
+        code: ErrorCode::must_new(code),
         category: ErrorCategory::Storage,
         retryable: false,
         message: message.to_string(),
@@ -249,7 +249,9 @@ mod tests {
         .expect_err("wrong store-returned id must fail");
 
         match err {
-            StorageError::Corruption(info) => assert_eq!(info.code.0, "artifact_put_id_mismatch"),
+            StorageError::Corruption(info) => {
+                assert_eq!(info.code.as_str(), "artifact_put_id_mismatch")
+            }
             other => panic!("unexpected error: {other:?}"),
         }
     }
@@ -262,7 +264,7 @@ mod tests {
 
         match err {
             StorageError::Corruption(info) => {
-                assert_eq!(info.code.0, "artifact_content_address_mismatch")
+                assert_eq!(info.code.as_str(), "artifact_content_address_mismatch")
             }
             other => panic!("unexpected error: {other:?}"),
         }

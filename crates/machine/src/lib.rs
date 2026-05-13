@@ -215,9 +215,83 @@ pub mod ids {
         Work,
     }
 
+    /// Error returned when an error code fails the persisted-code contract.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct ErrorCodeValidationError;
+
+    impl fmt::Display for ErrorCodeValidationError {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("invalid error code")
+        }
+    }
+
+    impl std::error::Error for ErrorCodeValidationError {}
+
     /// Stable machine-readable error code.
+    ///
+    /// Error codes are persisted surfaces. They must remain small, stable, and identifier-like:
+    /// `^[a-z][a-z0-9_]{0,62}$`.
     #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-    pub struct ErrorCode(pub String);
+    #[serde(try_from = "String", into = "String")]
+    pub struct ErrorCode(String);
+
+    impl ErrorCode {
+        /// Canonical replacement for malformed or secret-shaped codes before persistence.
+        pub const REDACTED: &'static str = "redacted_error_code";
+
+        /// Creates a validated error code.
+        pub fn new(value: impl Into<String>) -> Result<Self, ErrorCodeValidationError> {
+            let value = value.into();
+            if !Self::is_valid_str(&value) {
+                return Err(ErrorCodeValidationError);
+            }
+            Ok(Self(value))
+        }
+
+        /// Creates a validated error code, panicking if the value violates the contract.
+        pub fn must_new(value: impl Into<String>) -> Self {
+            Self::new(value).expect("error code must match ^[a-z][a-z0-9_]{0,62}$")
+        }
+
+        /// Returns the borrowed error-code string.
+        pub fn as_str(&self) -> &str {
+            &self.0
+        }
+
+        /// Consumes the code and returns the owned string.
+        pub fn into_string(self) -> String {
+            self.0
+        }
+
+        /// Returns true when `value` satisfies the persisted-code contract.
+        pub fn is_valid_str(value: &str) -> bool {
+            is_valid_id_segment(value)
+        }
+
+        pub(crate) fn redacted() -> Self {
+            Self(Self::REDACTED.to_string())
+        }
+    }
+
+    impl TryFrom<String> for ErrorCode {
+        type Error = ErrorCodeValidationError;
+
+        fn try_from(value: String) -> Result<Self, Self::Error> {
+            Self::new(value)
+        }
+    }
+
+    impl From<ErrorCode> for String {
+        fn from(value: ErrorCode) -> Self {
+            value.0
+        }
+    }
+
+    impl fmt::Display for ErrorCode {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str(self.as_str())
+        }
+    }
 
     #[allow(dead_code)]
     pub(crate) fn is_valid_id_segment(segment: &str) -> bool {
@@ -992,7 +1066,7 @@ pub mod errors {
             assert_eq!(CODE_MISSING_FACT_KEY, "missing_fact_key");
 
             let info = ErrorInfo {
-                code: ErrorCode(CODE_MISSING_FACT_KEY.to_string()),
+                code: ErrorCode::must_new(CODE_MISSING_FACT_KEY),
                 category: ErrorCategory::Rpc,
                 retryable: false,
                 message: "missing fact key".to_string(),
@@ -1001,7 +1075,7 @@ pub mod errors {
 
             let err = IoError::MissingFactKey(info);
             match err {
-                IoError::MissingFactKey(info) => assert_eq!(info.code.0, "missing_fact_key"),
+                IoError::MissingFactKey(info) => assert_eq!(info.code.as_str(), "missing_fact_key"),
                 _ => unreachable!("wrong error variant"),
             }
         }
@@ -1012,7 +1086,7 @@ pub mod errors {
 pub mod context {
     use super::*;
     use crate::errors::ContextError;
-    use crate::ids::ContextKey;
+    use crate::ids::{ContextKey, ErrorCode};
 
     /// Dynamic context interface.
     ///
@@ -1058,7 +1132,7 @@ pub mod context {
 
             serde_json::from_value(value).map(Some).map_err(|_| {
                 ContextError::Serialization(crate::errors::ErrorInfo {
-                    code: crate::ids::ErrorCode("context_deserialize_failed".to_string()),
+                    code: ErrorCode::must_new("context_deserialize_failed"),
                     category: crate::errors::ErrorCategory::Context,
                     retryable: false,
                     message: "context value deserialization failed".to_string(),
@@ -1074,7 +1148,7 @@ pub mod context {
         ) -> Result<(), ContextError> {
             let v = serde_json::to_value(value).map_err(|_| {
                 ContextError::Serialization(crate::errors::ErrorInfo {
-                    code: crate::ids::ErrorCode("context_serialize_failed".to_string()),
+                    code: ErrorCode::must_new("context_serialize_failed"),
                     category: crate::errors::ErrorCategory::Context,
                     retryable: false,
                     message: "context value serialization failed".to_string(),
@@ -1091,7 +1165,7 @@ pub mod context {
 pub mod events {
     use super::*;
     use crate::errors::{ErrorCategory, ErrorInfo, StateError, StorageError};
-    use crate::ids::{ArtifactId, OpId, OpPath, RunId, StateId};
+    use crate::ids::{ArtifactId, ErrorCode, OpId, OpPath, RunId, StateId};
     use crate::stores::{NewStreamRecord, StreamRecord};
 
     /// Recommended stable `DomainEvent.name` values.
@@ -1212,7 +1286,7 @@ pub mod events {
 
     fn stream_decode_error(code: &'static str, message: &'static str) -> StorageError {
         StorageError::Corruption(ErrorInfo {
-            code: crate::ids::ErrorCode(code.to_string()),
+            code: ErrorCode::must_new(code),
             category: ErrorCategory::Storage,
             retryable: false,
             message: message.to_string(),
@@ -1222,7 +1296,7 @@ pub mod events {
 
     fn stream_encode_error(code: &'static str, message: &'static str) -> StorageError {
         StorageError::Other(ErrorInfo {
-            code: crate::ids::ErrorCode(code.to_string()),
+            code: ErrorCode::must_new(code),
             category: ErrorCategory::Storage,
             retryable: false,
             message: message.to_string(),
@@ -1509,7 +1583,7 @@ pub mod io {
             _bytes: Zeroizing<Vec<u8>>,
         ) -> Result<ArtifactId, IoError> {
             Err(IoError::Other(ErrorInfo {
-                code: ErrorCode("protected_artifact_store_unavailable".to_string()),
+                code: ErrorCode::must_new("protected_artifact_store_unavailable"),
                 category: ErrorCategory::Storage,
                 retryable: false,
                 message: "protected artifact store is not configured".to_string(),
@@ -1523,7 +1597,7 @@ pub mod io {
             _key: &FactKey,
         ) -> Result<Zeroizing<Vec<u8>>, IoError> {
             Err(IoError::Other(ErrorInfo {
-                code: ErrorCode("protected_artifact_store_unavailable".to_string()),
+                code: ErrorCode::must_new("protected_artifact_store_unavailable"),
                 category: ErrorCategory::Storage,
                 retryable: false,
                 message: "protected artifact store is not configured".to_string(),
@@ -1715,7 +1789,7 @@ pub mod plan {
 pub mod stores {
     use super::*;
     use crate::errors::{ErrorCategory, ErrorInfo, StorageError};
-    use crate::ids::{is_valid_id_segment, ArtifactId, RunId};
+    use crate::ids::{is_valid_id_segment, ArtifactId, ErrorCode, RunId};
     use std::fmt;
     use zeroize::Zeroizing;
 
@@ -1870,7 +1944,7 @@ pub mod stores {
         message: impl Into<String>,
     ) -> StorageError {
         StorageError::Other(ErrorInfo {
-            code: crate::ids::ErrorCode(code.to_string()),
+            code: ErrorCode::must_new(code),
             category: ErrorCategory::Storage,
             retryable: false,
             message: message.into(),
@@ -2029,7 +2103,7 @@ pub mod stores {
             _bytes: Zeroizing<Vec<u8>>,
         ) -> Result<ArtifactId, StorageError> {
             Err(StorageError::Other(ErrorInfo {
-                code: crate::ids::ErrorCode("protected_artifact_store_unavailable".to_string()),
+                code: ErrorCode::must_new("protected_artifact_store_unavailable"),
                 category: ErrorCategory::Storage,
                 retryable: false,
                 message: "protected artifact store is not configured".to_string(),
@@ -2042,7 +2116,7 @@ pub mod stores {
             _id: &ArtifactId,
         ) -> Result<Zeroizing<Vec<u8>>, StorageError> {
             Err(StorageError::Other(ErrorInfo {
-                code: crate::ids::ErrorCode("protected_artifact_store_unavailable".to_string()),
+                code: ErrorCode::must_new("protected_artifact_store_unavailable"),
                 category: ErrorCategory::Storage,
                 retryable: false,
                 message: "protected artifact store is not configured".to_string(),

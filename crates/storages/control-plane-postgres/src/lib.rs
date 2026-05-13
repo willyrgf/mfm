@@ -53,7 +53,7 @@ pub const SOURCE_POOL_CATALOG_SCHEMA_VERSION: u64 = 1;
 
 fn storage_info(code: &'static str, message: impl Into<String>) -> ErrorInfo {
     ErrorInfo {
-        code: ErrorCode(code.to_string()),
+        code: ErrorCode::must_new(code),
         category: ErrorCategory::Storage,
         retryable: false,
         message: message.into(),

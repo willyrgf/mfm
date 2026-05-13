@@ -116,7 +116,7 @@ COMMIT;
 
     fn info(code: &'static str, message: impl Into<String>) -> ErrorInfo {
         ErrorInfo {
-            code: ErrorCode(code.to_string()),
+            code: ErrorCode::must_new(code),
             category: ErrorCategory::Storage,
             retryable: false,
             message: message.into(),
@@ -445,7 +445,7 @@ mod tests {
 
     fn assert_out_of_range(err: StorageError) {
         match err {
-            StorageError::Other(info) => assert_eq!(info.code.0, "pg_value_out_of_range"),
+            StorageError::Other(info) => assert_eq!(info.code.as_str(), "pg_value_out_of_range"),
             other => panic!("expected pg_value_out_of_range, got {other:?}"),
         }
     }

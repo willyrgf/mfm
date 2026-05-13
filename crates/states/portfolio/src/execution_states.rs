@@ -1267,7 +1267,7 @@ mod tests {
                 .cloned()
                 .ok_or_else(|| {
                     IoError::Other(ErrorInfo {
-                        code: ErrorCode("missing_prepare_sources_response".to_string()),
+                        code: ErrorCode::must_new("missing_prepare_sources_response"),
                         category: ErrorCategory::Unknown,
                         retryable: false,
                         message: format!(
@@ -1819,7 +1819,7 @@ mod tests {
         .await
         .expect_err("must fail");
 
-        assert_eq!(err.info.code.0, "subject_runtime_identity_mismatch");
+        assert_eq!(err.info.code.as_str(), "subject_runtime_identity_mismatch");
     }
 
     #[tokio::test]
@@ -1887,7 +1887,7 @@ mod tests {
         .await
         .expect_err("must fail");
 
-        assert_eq!(err.info.code.0, "duplicate_snapshot_network_pin");
+        assert_eq!(err.info.code.as_str(), "duplicate_snapshot_network_pin");
     }
 
     #[tokio::test]

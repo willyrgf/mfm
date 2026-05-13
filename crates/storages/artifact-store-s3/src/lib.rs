@@ -111,7 +111,7 @@ impl S3ArtifactStore {
 
     fn info(code: &'static str, message: impl Into<String>) -> ErrorInfo {
         ErrorInfo {
-            code: ErrorCode(code.to_string()),
+            code: ErrorCode::must_new(code),
             category: ErrorCategory::Storage,
             retryable: false,
             message: message.into(),

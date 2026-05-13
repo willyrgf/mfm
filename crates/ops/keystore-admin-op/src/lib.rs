@@ -423,6 +423,6 @@ mod tests {
         )
         .expect_err("prompt source must be interactive-only");
 
-        assert_eq!(err.info.code.0, "invalid_op_config");
+        assert_eq!(err.info.code.as_str(), "invalid_op_config");
     }
 }

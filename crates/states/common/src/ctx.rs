@@ -119,7 +119,7 @@ mod tests {
 
     fn context_error() -> ContextError {
         ContextError::Other(ErrorInfo {
-            code: ErrorCode("context_error".to_string()),
+            code: ErrorCode::must_new("context_error"),
             category: ErrorCategory::Context,
             retryable: false,
             message: "ctx failure".to_string(),
@@ -179,7 +179,7 @@ mod tests {
         let ctx = MapContext::default();
         let err = read_u64_required(&ctx, &key, "missing_key", "key was missing")
             .expect_err("expected missing");
-        assert_eq!(err.info.code.0, "missing_key");
+        assert_eq!(err.info.code.as_str(), "missing_key");
         assert_eq!(err.info.message, "key was missing");
     }
 
@@ -189,7 +189,7 @@ mod tests {
         let ctx = MapContext::default();
         let err = read_json_required(&ctx, &key, "missing_json", "json was missing")
             .expect_err("expected missing");
-        assert_eq!(err.info.code.0, "missing_json");
+        assert_eq!(err.info.code.as_str(), "missing_json");
         assert_eq!(err.info.message, "json was missing");
     }
 
@@ -208,7 +208,7 @@ mod tests {
             "not string",
         )
         .expect_err("expected type mismatch");
-        assert_eq!(err.info.code.0, "type_mismatch");
+        assert_eq!(err.info.code.as_str(), "type_mismatch");
         assert_eq!(err.info.message, "not string");
     }
 
@@ -245,11 +245,11 @@ mod tests {
             ..Default::default()
         };
         let err = read_json(&ctx, &key).expect_err("read should fail");
-        assert_eq!(err.info.code.0, "ctx_read_failed");
+        assert_eq!(err.info.code.as_str(), "ctx_read_failed");
 
         ctx.fail_reads = false;
         ctx.fail_writes = true;
         let err = write_json(&mut ctx, key, serde_json::json!(1)).expect_err("write should fail");
-        assert_eq!(err.info.code.0, "ctx_write_failed");
+        assert_eq!(err.info.code.as_str(), "ctx_write_failed");
     }
 }

@@ -216,7 +216,7 @@ impl std::error::Error for FactKeyDerivationError {}
 
 fn info(code: &'static str, category: ErrorCategory, message: &'static str) -> ErrorInfo {
     ErrorInfo {
-        code: ErrorCode(code.to_string()),
+        code: ErrorCode::must_new(code),
         category,
         retryable: false,
         message: message.to_string(),
@@ -451,7 +451,9 @@ mod tests {
             .expect_err("bad json serialization should be surfaced as an io error");
 
         match err {
-            IoError::Other(info) => assert_eq!(info.code.0, "local_request_serialize_failed"),
+            IoError::Other(info) => {
+                assert_eq!(info.code.as_str(), "local_request_serialize_failed")
+            }
             other => panic!("unexpected io error: {other:?}"),
         }
     }
@@ -510,7 +512,7 @@ mod tests {
             .expect_err("secret-shaped request should fail before io");
 
         match err {
-            IoError::Other(info) => assert_eq!(info.code.0, "secrets_detected"),
+            IoError::Other(info) => assert_eq!(info.code.as_str(), "secrets_detected"),
             other => panic!("unexpected io error: {other:?}"),
         }
     }

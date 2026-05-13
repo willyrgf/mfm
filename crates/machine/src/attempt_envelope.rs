@@ -124,7 +124,7 @@ pub(crate) fn orphan_attempt(
 mod tests {
     use super::*;
     use crate::events::{DomainEvent, RunStatus};
-    use crate::ids::{ArtifactId, OpId};
+    use crate::ids::{ArtifactId, ErrorCode, OpId};
 
     fn env(run_id: RunId, seq: u64, event: Event) -> EventEnvelope {
         EventEnvelope {
@@ -269,7 +269,7 @@ mod tests {
                     error: crate::errors::StateError {
                         state_id: Some(state_id.clone()),
                         info: crate::errors::ErrorInfo {
-                            code: crate::ids::ErrorCode("orphan_attempt_recovered".to_string()),
+                            code: ErrorCode::must_new("orphan_attempt_recovered"),
                             category: crate::errors::ErrorCategory::Unknown,
                             retryable: true,
                             message: "orphaned state attempt recovered during resume".to_string(),

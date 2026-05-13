@@ -279,7 +279,7 @@ async fn evm_replay_missing_fact_key_behavior_is_unchanged() {
         .expect_err("replay without fact key should fail");
 
     match err {
-        IoError::MissingFactKey(info) => assert_eq!(info.code.0, "missing_fact_key"),
+        IoError::MissingFactKey(info) => assert_eq!(info.code.as_str(), "missing_fact_key"),
         other => panic!("expected MissingFactKey, got {other:?}"),
     }
 }

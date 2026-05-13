@@ -16,7 +16,7 @@ use crate::stores::{ArtifactKind, ArtifactStore};
 
 fn info(code: &'static str, message: &'static str) -> ErrorInfo {
     ErrorInfo {
-        code: ErrorCode(code.to_string()),
+        code: ErrorCode::must_new(code),
         category: ErrorCategory::Context,
         retryable: false,
         message: message.to_string(),
@@ -26,7 +26,7 @@ fn info(code: &'static str, message: &'static str) -> ErrorInfo {
 
 fn storage_corruption(code: &'static str, message: impl Into<String>) -> RunError {
     RunError::Storage(StorageError::Corruption(ErrorInfo {
-        code: ErrorCode(code.to_string()),
+        code: ErrorCode::must_new(code),
         category: ErrorCategory::Storage,
         retryable: false,
         message: message.into(),
@@ -300,7 +300,7 @@ mod tests {
             let inner = self.inner.lock().await;
             inner.get(id).cloned().ok_or_else(|| {
                 StorageError::NotFound(ErrorInfo {
-                    code: ErrorCode("not_found".to_string()),
+                    code: ErrorCode::must_new("not_found"),
                     category: ErrorCategory::Storage,
                     retryable: false,
                     message: "artifact not found".to_string(),
@@ -361,7 +361,7 @@ mod tests {
     fn assert_storage_code(err: RunError, code: &str) {
         match err {
             RunError::Storage(StorageError::Corruption(info)) => {
-                assert_eq!(info.code.0, code)
+                assert_eq!(info.code.as_str(), code)
             }
             other => panic!("unexpected error: {other:?}"),
         }

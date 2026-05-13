@@ -122,7 +122,13 @@ fn ensure_single_start_op(
 
     registry
         .resolve(op_id, op_version)
-        .map_err(|err| AppError::new(ErrorClass::BadRequest, err.info.code.0, err.info.message))
+        .map_err(|err| {
+            AppError::new(
+                ErrorClass::BadRequest,
+                err.info.code.as_str(),
+                err.info.message,
+            )
+        })
         .map(|_| ())
 }
 
@@ -208,13 +214,13 @@ impl std::error::Error for AppError {}
 pub fn app_error_from_storage_error(err: StorageError) -> AppError {
     match err {
         StorageError::Concurrency(info) => {
-            AppError::new(ErrorClass::Conflict, info.code.0, info.message)
+            AppError::new(ErrorClass::Conflict, info.code.as_str(), info.message)
         }
         StorageError::NotFound(info) => {
-            AppError::new(ErrorClass::NotFound, info.code.0, info.message)
+            AppError::new(ErrorClass::NotFound, info.code.as_str(), info.message)
         }
         StorageError::Corruption(info) | StorageError::Other(info) => {
-            AppError::new(ErrorClass::Internal, info.code.0, info.message)
+            AppError::new(ErrorClass::Internal, info.code.as_str(), info.message)
         }
     }
 }
@@ -299,7 +305,7 @@ pub fn app_error_from_run_error(err: RunError) -> AppError {
         RunError::Other(info) => info,
     };
 
-    let class = if info.code.0.starts_with("rpc_control_") {
+    let class = if info.code.as_str().starts_with("rpc_control_") {
         ErrorClass::BadGateway
     } else {
         match info.category {
@@ -313,11 +319,11 @@ pub fn app_error_from_run_error(err: RunError) -> AppError {
         }
     };
 
-    AppError::new(class, info.code.0, info.message)
+    AppError::new(class, info.code.as_str(), info.message)
 }
 
 fn app_error_from_error_info(info: &mfm_machine::errors::ErrorInfo) -> AppError {
-    let class = if info.code.0.starts_with("rpc_control_") {
+    let class = if info.code.as_str().starts_with("rpc_control_") {
         ErrorClass::BadGateway
     } else {
         match info.category {
@@ -331,7 +337,7 @@ fn app_error_from_error_info(info: &mfm_machine::errors::ErrorInfo) -> AppError 
         }
     };
 
-    AppError::new(class, info.code.0.clone(), info.message.clone())
+    AppError::new(class, info.code.as_str(), info.message.clone())
 }
 
 /// In-memory context implementation used by default request flows.
@@ -737,7 +743,7 @@ impl AppServices {
                 })?;
                 ensure_single_start_op(self.bundle.registry.as_ref(), &op_id, op_version.as_str())?;
                 let pipeline = single_op_pipeline(op_id, op_version, op_config).map_err(|e| {
-                    AppError::new(ErrorClass::BadRequest, e.info.code.0, e.info.message)
+                    AppError::new(ErrorClass::BadRequest, e.info.code.as_str(), e.info.message)
                 })?;
                 (pipeline, input, default_run_config())
             }
@@ -1956,7 +1962,7 @@ mod tests {
             let inner = self.inner.lock().await;
             inner.get(id).cloned().ok_or_else(|| {
                 StorageError::NotFound(mfm_machine::errors::ErrorInfo {
-                    code: ErrorCode("artifact_not_found".to_string()),
+                    code: ErrorCode::must_new("artifact_not_found"),
                     category: ErrorCategory::Storage,
                     retryable: false,
                     message: "artifact not found".to_string(),
@@ -2023,7 +2029,7 @@ mod tests {
 
     fn assert_io_error_code(err: IoError, expected: &str) {
         match err {
-            IoError::Other(info) => assert_eq!(info.code.0, expected),
+            IoError::Other(info) => assert_eq!(info.code.as_str(), expected),
             other => panic!("unexpected io error: {other:?}"),
         }
     }

@@ -120,7 +120,7 @@ async fn rejects_disallowed_program_path_by_default() {
         .expect_err("expected error");
 
     match err {
-        IoError::Other(info) => assert_eq!(info.code.0, CODE_EXEC_PROGRAM_NOT_ALLOWED),
+        IoError::Other(info) => assert_eq!(info.code.as_str(), CODE_EXEC_PROGRAM_NOT_ALLOWED),
         other => panic!("expected Other, got: {other:?}"),
     }
 }
@@ -148,7 +148,7 @@ async fn rejects_missing_program_path_even_if_allowlisted() {
         .expect_err("expected error");
 
     match err {
-        IoError::Other(info) => assert_eq!(info.code.0, CODE_EXEC_PROGRAM_MISSING),
+        IoError::Other(info) => assert_eq!(info.code.as_str(), CODE_EXEC_PROGRAM_MISSING),
         other => panic!("expected Other, got: {other:?}"),
     }
 }
@@ -168,7 +168,7 @@ async fn rejects_invalid_request_shape() {
         .expect_err("expected error");
 
     match err {
-        IoError::Other(info) => assert_eq!(info.code.0, CODE_EXEC_REQUEST_INVALID),
+        IoError::Other(info) => assert_eq!(info.code.as_str(), CODE_EXEC_REQUEST_INVALID),
         other => panic!("expected Other, got: {other:?}"),
     }
 }
@@ -216,7 +216,7 @@ async fn rejects_path_traversal_that_escapes_allow_prefix() {
         .expect_err("expected allowlist rejection");
 
     match err {
-        IoError::Other(info) => assert_eq!(info.code.0, CODE_EXEC_PROGRAM_NOT_ALLOWED),
+        IoError::Other(info) => assert_eq!(info.code.as_str(), CODE_EXEC_PROGRAM_NOT_ALLOWED),
         other => panic!("expected Other, got: {other:?}"),
     }
 
@@ -251,7 +251,7 @@ async fn non_zero_exit_includes_safe_failure_metadata() {
 
     match err {
         IoError::Transport(info) => {
-            assert_eq!(info.code.0, CODE_EXEC_FAILED);
+            assert_eq!(info.code.as_str(), CODE_EXEC_FAILED);
             let details = info.details.expect("details");
             let canonical = std::fs::canonicalize(&program).expect("canonical program path");
             assert_eq!(
@@ -292,7 +292,7 @@ async fn timeout_includes_program_and_timeout_metadata() {
 
     match err {
         IoError::Transport(info) => {
-            assert_eq!(info.code.0, CODE_EXEC_TIMEOUT);
+            assert_eq!(info.code.as_str(), CODE_EXEC_TIMEOUT);
             let details = info.details.expect("details");
             let canonical = std::fs::canonicalize(&program).expect("canonical program path");
             assert_eq!(
@@ -332,7 +332,7 @@ async fn timeout_applies_while_writing_stdin() {
         .expect_err("expected timeout");
 
     match err {
-        IoError::Transport(info) => assert_eq!(info.code.0, CODE_EXEC_TIMEOUT),
+        IoError::Transport(info) => assert_eq!(info.code.as_str(), CODE_EXEC_TIMEOUT),
         other => panic!("expected Transport, got: {other:?}"),
     }
 
@@ -365,7 +365,7 @@ async fn rejects_stdin_payloads_larger_than_limit() {
 
     match err {
         IoError::Transport(info) => {
-            assert_eq!(info.code.0, CODE_EXEC_STDIN_TOO_LARGE);
+            assert_eq!(info.code.as_str(), CODE_EXEC_STDIN_TOO_LARGE);
             let details = info.details.expect("details");
             assert_eq!(
                 details.get("max_stdin_bytes").and_then(|v| v.as_u64()),
@@ -403,7 +403,7 @@ async fn stdout_overflow_reports_bounded_failure_metadata() {
 
     match err {
         IoError::Transport(info) => {
-            assert_eq!(info.code.0, CODE_EXEC_STDOUT_TOO_LARGE);
+            assert_eq!(info.code.as_str(), CODE_EXEC_STDOUT_TOO_LARGE);
             let details = info.details.expect("details");
             assert_eq!(
                 details.get("max_stdout_bytes").and_then(|v| v.as_u64()),

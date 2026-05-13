@@ -1193,6 +1193,6 @@ mod tests {
         .await
         .expect_err("legacy node-managed send must be rejected");
 
-        assert_eq!(err.info.code.0, "evm_tx_intent_required");
+        assert_eq!(err.info.code.as_str(), "evm_tx_intent_required");
     }
 }

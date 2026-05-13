@@ -10,6 +10,7 @@
 //! - redaction for error messages/details before persistence
 
 use crate::errors::ErrorInfo;
+use crate::ids::ErrorCode;
 
 // Keep this list intentionally small and high-signal to avoid false positives.
 const FORBIDDEN_SUBSTRINGS: &[&str] = &[
@@ -73,6 +74,10 @@ pub(crate) fn redact_error_info(info: &mut ErrorInfo) {
     // explicitly modeled as a non-secret reference.
     info.details = None;
 
+    if !ErrorCode::is_valid_str(info.code.as_str()) || string_contains_secrets(info.code.as_str()) {
+        info.code = ErrorCode::redacted();
+    }
+
     if string_contains_secrets(&info.message) {
         info.message = "error details redacted".to_string();
     }
@@ -126,5 +131,20 @@ mod tests {
 
         let v = serde_json::json!({"ok": {"nested": [1, 2]}});
         assert!(!json_contains_secrets(&v));
+    }
+
+    #[test]
+    fn redacts_secret_shaped_error_codes() {
+        let mut info = ErrorInfo {
+            code: ErrorCode::must_new("private_key"),
+            category: crate::errors::ErrorCategory::Unknown,
+            retryable: false,
+            message: "safe message".to_string(),
+            details: None,
+        };
+
+        redact_error_info(&mut info);
+
+        assert_eq!(info.code.as_str(), ErrorCode::REDACTED);
     }
 }

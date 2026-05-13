@@ -113,7 +113,7 @@ fn expand_rejects_both_program_path_and_app() {
         Ok(_) => panic!("expected error"),
         Err(err) => err,
     };
-    assert_eq!(err.info.code.0, "invalid_op_config");
+    assert_eq!(err.info.code.as_str(), "invalid_op_config");
 }
 
 #[test]
@@ -130,7 +130,7 @@ fn expand_rejects_missing_program_path_and_app() {
         Ok(_) => panic!("expected error"),
         Err(err) => err,
     };
-    assert_eq!(err.info.code.0, "invalid_op_config");
+    assert_eq!(err.info.code.as_str(), "invalid_op_config");
 }
 
 #[test]
@@ -189,7 +189,7 @@ fn expand_rejects_non_object_env() {
     .err()
     .expect("invalid env must fail");
 
-    assert_eq!(err.info.code.0, "invalid_op_config");
+    assert_eq!(err.info.code.as_str(), "invalid_op_config");
 }
 
 #[derive(Clone)]

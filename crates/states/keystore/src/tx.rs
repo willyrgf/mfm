@@ -103,7 +103,7 @@ pub struct SignedEip1559Tx {
 pub fn parse_address(raw: &str, field_name: &str) -> Result<Address, KeystoreTxError> {
     raw.parse::<Address>().map_err(|_| {
         KeystoreTxError::new(
-            "InvalidAddress",
+            "invalid_address",
             format!("{field_name} must be a valid 0x-prefixed Ethereum address"),
         )
     })
@@ -114,7 +114,7 @@ pub fn parse_u128_quantity(raw: &str, field_name: &str) -> Result<u128, Keystore
     let value = raw.trim();
     if value.is_empty() {
         return Err(KeystoreTxError::new(
-            "InvalidQuantity",
+            "invalid_quantity",
             format!("{field_name} cannot be empty"),
         ));
     }
@@ -125,13 +125,13 @@ pub fn parse_u128_quantity(raw: &str, field_name: &str) -> Result<u128, Keystore
     {
         if hex.is_empty() {
             return Err(KeystoreTxError::new(
-                "InvalidQuantity",
+                "invalid_quantity",
                 format!("{field_name} hex quantity is empty"),
             ));
         }
         return u128::from_str_radix(hex, 16).map_err(|_| {
             KeystoreTxError::new(
-                "InvalidQuantity",
+                "invalid_quantity",
                 format!("{field_name} must be a valid u128 decimal or hex value"),
             )
         });
@@ -139,7 +139,7 @@ pub fn parse_u128_quantity(raw: &str, field_name: &str) -> Result<u128, Keystore
 
     value.parse::<u128>().map_err(|_| {
         KeystoreTxError::new(
-            "InvalidQuantity",
+            "invalid_quantity",
             format!("{field_name} must be a valid u128 decimal or hex value"),
         )
     })
@@ -151,32 +151,32 @@ pub fn parse_data_hex(raw: &str) -> Result<Vec<u8>, KeystoreTxError> {
     let normalized = value
         .strip_prefix("0x")
         .or_else(|| value.strip_prefix("0X"))
-        .ok_or_else(|| KeystoreTxError::new("InvalidData", "data must be 0x-prefixed hex"))?;
+        .ok_or_else(|| KeystoreTxError::new("invalid_data", "data must be 0x-prefixed hex"))?;
     if normalized.is_empty() {
         return Ok(Vec::new());
     }
     if normalized.len() % 2 != 0 {
         return Err(KeystoreTxError::new(
-            "InvalidData",
+            "invalid_data",
             "data must contain an even number of hex characters",
         ));
     }
 
     hex::decode(normalized)
-        .map_err(|_| KeystoreTxError::new("InvalidData", "data must be valid hex"))
+        .map_err(|_| KeystoreTxError::new("invalid_data", "data must be valid hex"))
 }
 
 /// Parses and validates an RPC URL used for transaction submission.
 pub fn parse_rpc_url(raw: &str) -> Result<Url, KeystoreTxError> {
     let parsed = Url::parse(raw).map_err(|_| {
         KeystoreTxError::new(
-            "InvalidRpcUrl",
+            "invalid_rpc_url",
             "rpc url must be a valid absolute URL (for example: http://127.0.0.1:8545)",
         )
     })?;
     if parsed.host_str().is_none() {
         return Err(KeystoreTxError::new(
-            "InvalidRpcUrl",
+            "invalid_rpc_url",
             "rpc url must include a host",
         ));
     }
@@ -188,19 +188,19 @@ pub fn validate_raw_transaction_hex(raw_tx_hex: &str) -> Result<(), KeystoreTxEr
     let value = raw_tx_hex.trim();
     if !value.starts_with("0x") {
         return Err(KeystoreTxError::new(
-            "InvalidRawTransaction",
+            "invalid_raw_transaction",
             "raw transaction must be 0x-prefixed hex",
         ));
     }
     if value.len() <= 2 || !value.len().is_multiple_of(2) {
         return Err(KeystoreTxError::new(
-            "InvalidRawTransaction",
+            "invalid_raw_transaction",
             "raw transaction must have an even number of hex characters",
         ));
     }
     if !value[2..].chars().all(|c| c.is_ascii_hexdigit()) {
         return Err(KeystoreTxError::new(
-            "InvalidRawTransaction",
+            "invalid_raw_transaction",
             "raw transaction must contain only hex characters",
         ));
     }
@@ -215,19 +215,19 @@ pub fn resolve_key_id(
 ) -> Result<Uuid, KeystoreTxError> {
     match (id, by_label) {
         (Some(_), Some(_)) => Err(KeystoreTxError::new(
-            "MissingArgument",
+            "missing_argument",
             "Specify exactly one key selector: --id or --by-label",
         )),
         (None, None) => Err(KeystoreTxError::new(
-            "MissingArgument",
+            "missing_argument",
             "Must specify one key selector: --id or --by-label",
         )),
         (Some(raw), None) => Uuid::parse_str(raw)
-            .map_err(|_| KeystoreTxError::new("InvalidUuid", "Invalid UUID format")),
+            .map_err(|_| KeystoreTxError::new("invalid_uuid", "Invalid UUID format")),
         (None, Some(label)) => {
             let keys = keystore
                 .list_keys()
-                .map_err(|e| KeystoreTxError::new("KeystoreError", e.to_string()))?;
+                .map_err(|e| KeystoreTxError::new("keystore_error", e.to_string()))?;
             let matching: Vec<_> = keys
                 .iter()
                 .filter(|k| k.alias.as_deref() == Some(label))
@@ -235,12 +235,12 @@ pub fn resolve_key_id(
 
             match matching.len() {
                 0 => Err(KeystoreTxError::new(
-                    "KeyNotFound",
+                    "key_not_found",
                     format!("No key found with label: {label}"),
                 )),
                 1 => Ok(matching[0].id),
                 _ => Err(KeystoreTxError::new(
-                    "AmbiguousLabel",
+                    "ambiguous_label",
                     format!("Multiple keys found with label: {label}"),
                 )),
             }
@@ -256,17 +256,17 @@ pub fn sign_eip1559_transaction(
 ) -> Result<SignedEip1559Tx, KeystoreTxError> {
     if tx.max_priority_fee_per_gas > tx.max_fee_per_gas {
         return Err(KeystoreTxError::new(
-            "InvalidFeeConfig",
+            "invalid_fee_config",
             "max-priority-fee-per-gas must be <= max-fee-per-gas",
         ));
     }
 
     let secure_key = keystore
         .get_private_key(key_id)
-        .map_err(|e| KeystoreTxError::new("KeystoreError", e.to_string()))?;
+        .map_err(|e| KeystoreTxError::new("keystore_error", e.to_string()))?;
     let from_address = secure_key
         .ethereum_address()
-        .map_err(|e| KeystoreTxError::new("SigningError", e.to_string()))?;
+        .map_err(|e| KeystoreTxError::new("signing_error", e.to_string()))?;
 
     let unsigned = encode_eip1559_unsigned_payload(tx);
     let mut preimage = vec![0x02];
@@ -278,7 +278,7 @@ pub fn sign_eip1559_transaction(
 
     let signature = secure_key
         .sign_hash(&hash_bytes)
-        .map_err(|e| KeystoreTxError::new("SigningError", e.to_string()))?;
+        .map_err(|e| KeystoreTxError::new("signing_error", e.to_string()))?;
     let signed_sig = derive_signature_with_matching_recovery_id(&signature, &hash, from_address)?;
 
     let signed = encode_eip1559_signed_payload(tx, signed_sig);
@@ -312,7 +312,7 @@ fn derive_signature_with_matching_recovery_id(
     }
 
     Err(KeystoreTxError::new(
-        "SigningError",
+        "signing_error",
         "Failed to derive recovery id for signed transaction",
     ))
 }
@@ -365,7 +365,7 @@ mod tests {
     #[test]
     fn parse_data_hex_rejects_non_prefixed_input() {
         let err = parse_data_hex("1234").expect_err("missing prefix should fail");
-        assert_eq!(err.code, "InvalidData");
+        assert_eq!(err.code, "invalid_data");
     }
 
     #[test]
@@ -376,13 +376,13 @@ mod tests {
     #[test]
     fn validate_raw_transaction_hex_rejects_non_hex() {
         let err = validate_raw_transaction_hex("0x00zz").expect_err("non-hex should fail");
-        assert_eq!(err.code, "InvalidRawTransaction");
+        assert_eq!(err.code, "invalid_raw_transaction");
     }
 
     #[test]
     fn parse_rpc_url_requires_host() {
         let err = parse_rpc_url("http:///").expect_err("hostless url should fail");
-        assert_eq!(err.code, "InvalidRpcUrl");
+        assert_eq!(err.code, "invalid_rpc_url");
     }
 
     #[test]

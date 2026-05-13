@@ -407,7 +407,7 @@ async fn run_failure_diagnostics(streams: Arc<dyn StreamStore>, run_id: RunId) -
                 last_state_failed = Some((
                     envelope.seq,
                     state_id.to_string(),
-                    error.info.code.0,
+                    error.info.code.as_str().to_string(),
                     error.info.retryable,
                     error.info.message,
                     detail_summary,

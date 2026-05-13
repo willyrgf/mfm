@@ -109,7 +109,7 @@ impl LocalTransportError {
 
 fn io_other(code: &'static str, category: ErrorCategory, message: impl Into<String>) -> IoError {
     IoError::Other(ErrorInfo {
-        code: ErrorCode(code.to_string()),
+        code: ErrorCode::must_new(code),
         category,
         retryable: false,
         message: message.into(),
@@ -217,7 +217,7 @@ mod tests {
 
         match err {
             IoError::Other(info) => {
-                assert_eq!(info.code.0, "local_transport_join_failed");
+                assert_eq!(info.code.as_str(), "local_transport_join_failed");
                 assert!(!info.message.contains("secret panic payload"));
                 assert!(info.details.is_none());
             }

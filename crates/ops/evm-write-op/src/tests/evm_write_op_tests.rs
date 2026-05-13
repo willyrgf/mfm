@@ -200,7 +200,7 @@ fn configure_inline_artifact_validation_uses_shared_abi_helpers() {
         Err(err) => err,
     };
 
-    assert_eq!(err.info.code.0, "invalid_op_config");
+    assert_eq!(err.info.code.as_str(), "invalid_op_config");
     assert!(err.info.message.contains(&shared_err));
 }
 
@@ -229,7 +229,7 @@ fn deploy_inline_constructor_validation_uses_shared_abi_helpers() {
         Err(err) => err,
     };
 
-    assert_eq!(err.info.code.0, "invalid_op_config");
+    assert_eq!(err.info.code.as_str(), "invalid_op_config");
     assert!(err.info.message.contains(&shared_err));
 }
 
@@ -265,7 +265,7 @@ fn validate_inline_assertion_validation_uses_shared_abi_helpers() {
         Err(err) => err,
     };
 
-    assert_eq!(err.info.code.0, "invalid_op_config");
+    assert_eq!(err.info.code.as_str(), "invalid_op_config");
     assert_eq!(
         err.info.message,
         op_rpc::validation_assertion_error_message(&shared_err)
@@ -288,7 +288,7 @@ fn deploy_rejects_node_managed_unsigned_config() {
         Err(err) => err,
     };
 
-    assert_eq!(err.info.code.0, "invalid_op_config");
+    assert_eq!(err.info.code.as_str(), "invalid_op_config");
     assert!(err.info.message.contains("signing_key_env is required"));
 }
 
@@ -309,7 +309,7 @@ fn configure_rejects_node_managed_unsigned_config() {
         Err(err) => err,
     };
 
-    assert_eq!(err.info.code.0, "invalid_op_config");
+    assert_eq!(err.info.code.as_str(), "invalid_op_config");
     assert!(err.info.message.contains("signing_key_env is required"));
 }
 

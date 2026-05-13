@@ -680,7 +680,7 @@ fn child_op_path_rejects_dotted_child_id() {
     let err = crate::op::child_op_path(&parent, "child.with.dot")
         .expect_err("expected dotted child id to be invalid");
 
-    assert_eq!(err.info.code.0, "invalid_child_op_local_id");
+    assert_eq!(err.info.code.as_str(), "invalid_child_op_local_id");
 }
 
 #[test]
@@ -944,7 +944,7 @@ fn planner_rejects_duplicate_pipeline_export_ports() {
         Ok(_) => panic!("duplicate root export should fail"),
         Err(err) => err,
     };
-    assert_eq!(err.info.code.0, "duplicate_export_port");
+    assert_eq!(err.info.code.as_str(), "duplicate_export_port");
 }
 
 #[test]
@@ -1084,7 +1084,7 @@ fn planner_rejects_missing_child_import_binding() {
         Ok(_) => panic!("missing child import binding should fail"),
         Err(err) => err,
     };
-    assert_eq!(err.info.code.0, "missing_child_import_binding");
+    assert_eq!(err.info.code.as_str(), "missing_child_import_binding");
 }
 
 #[test]
@@ -1152,7 +1152,7 @@ fn planner_rejects_lowered_state_id_collisions_across_nested_children() {
         Ok(_) => panic!("lowered state id collision should fail"),
         Err(err) => err,
     };
-    assert_eq!(err.info.code.0, "duplicate_state_id");
+    assert_eq!(err.info.code.as_str(), "duplicate_state_id");
 }
 
 #[test]
@@ -1215,7 +1215,7 @@ fn planner_rejects_apply_side_effect_without_idempotency_key() {
         Ok(_) => panic!("expected planner error"),
         Err(e) => e,
     };
-    assert_eq!(err.info.code.0, "missing_idempotency_key");
+    assert_eq!(err.info.code.as_str(), "missing_idempotency_key");
 }
 
 #[test]
@@ -1252,7 +1252,7 @@ fn planner_validates_unsatisfied_import() {
         Ok(_) => panic!("expected error"),
         Err(e) => e,
     };
-    assert_eq!(err.info.code.0, "unsatisfied_import");
+    assert_eq!(err.info.code.as_str(), "unsatisfied_import");
 }
 
 #[test]
@@ -1279,7 +1279,7 @@ fn planner_rejects_secrets_in_op_config() {
             Ok(_) => panic!("expected error"),
             Err(e) => e,
         };
-        assert_eq!(err.info.code.0, "secrets_detected");
+        assert_eq!(err.info.code.as_str(), "secrets_detected");
     }
 }
 
@@ -1356,7 +1356,7 @@ async fn launcher_rejects_secrets_in_manifest_input() {
         .unwrap_err();
 
     match err {
-        RunError::InvalidPlan(info) => assert_eq!(info.code.0, "secrets_detected"),
+        RunError::InvalidPlan(info) => assert_eq!(info.code.as_str(), "secrets_detected"),
         other => panic!("unexpected error: {other:?}"),
     }
 }
@@ -1435,7 +1435,7 @@ async fn launcher_rejects_store_returned_wrong_manifest_id() {
 
     match err {
         RunError::Storage(mfm_machine::errors::StorageError::Corruption(info)) => {
-            assert_eq!(info.code.0, "artifact_put_id_mismatch");
+            assert_eq!(info.code.as_str(), "artifact_put_id_mismatch");
         }
         other => panic!("unexpected error: {other:?}"),
     }
@@ -2212,7 +2212,7 @@ impl State for FailingState {
         Err(StateError {
             state_id: Some(StateId::must_new("fail_op.main.s1".to_string())),
             info: ErrorInfo {
-                code: ErrorCode(self.code.to_string()),
+                code: ErrorCode::must_new(self.code),
                 category: ErrorCategory::Unknown,
                 retryable: false,
                 message: self.message.to_string(),
@@ -2248,7 +2248,7 @@ impl crate::op::Operation for FailOp {
                 states: vec![test_leaf_state(
                     "fail_op.main.s1",
                     Arc::new(FailingState {
-                        code: "IntentionalFailure",
+                        code: "intentional_failure",
                         message: "intentional test failure",
                     }),
                 )],
@@ -2290,6 +2290,6 @@ async fn single_op_report_maps_failed_run_state_error() {
     .await
     .expect_err("failed run should surface state failure");
 
-    assert_eq!(err.code, "IntentionalFailure");
+    assert_eq!(err.code, "intentional_failure");
     assert_eq!(err.message, "intentional test failure");
 }

@@ -201,7 +201,7 @@ mod tests {
 
     fn info(code: &'static str, message: &'static str) -> ErrorInfo {
         ErrorInfo {
-            code: ErrorCode(code.to_string()),
+            code: ErrorCode::must_new(code),
             category: ErrorCategory::Unknown,
             retryable: false,
             message: message.to_string(),
@@ -347,6 +347,6 @@ mod tests {
         .await
         .expect_err("expected unsupported kind");
 
-        assert_eq!(err.info.code.0, "unsupported_valuation_source_kind");
+        assert_eq!(err.info.code.as_str(), "unsupported_valuation_source_kind");
     }
 }

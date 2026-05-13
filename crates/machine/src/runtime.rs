@@ -96,7 +96,7 @@ impl DefaultExecutionEngine {
 
 fn info(code: &'static str, category: ErrorCategory, message: &'static str) -> ErrorInfo {
     ErrorInfo {
-        code: ErrorCode(code.to_string()),
+        code: ErrorCode::must_new(code),
         category,
         retryable: false,
         message: message.to_string(),
@@ -485,7 +485,7 @@ pub(in crate::runtime) async fn close_orphan_attempt_for_recovery(
             error: StateError {
                 state_id: Some(orphan.state_id.clone()),
                 info: ErrorInfo {
-                    code: ErrorCode("orphan_attempt_recovered".to_string()),
+                    code: ErrorCode::must_new("orphan_attempt_recovered"),
                     category: ErrorCategory::Unknown,
                     retryable: true,
                     message: "orphaned state attempt recovered during resume".to_string(),

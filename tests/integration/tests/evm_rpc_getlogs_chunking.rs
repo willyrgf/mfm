@@ -328,7 +328,7 @@ async fn evm_getlogs_chunking_returns_exhausted_when_retryable_failures_persist(
         .expect_err("chunking should exhaust");
 
     match err {
-        IoError::Transport(info) => assert_eq!(info.code.0, "evm_logs_chunking_exhausted"),
+        IoError::Transport(info) => assert_eq!(info.code.as_str(), "evm_logs_chunking_exhausted"),
         other => panic!("expected Transport, got {other:?}"),
     }
 }

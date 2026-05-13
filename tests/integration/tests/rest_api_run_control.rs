@@ -113,7 +113,7 @@ async fn response_json(resp: axum::response::Response) -> serde_json::Value {
 
 fn storage_other(code: &str, message: &str) -> StorageError {
     StorageError::Other(ErrorInfo {
-        code: ErrorCode(code.to_string()),
+        code: ErrorCode::must_new(code),
         category: ErrorCategory::Storage,
         retryable: false,
         message: message.to_string(),

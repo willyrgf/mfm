@@ -22,7 +22,7 @@ use crate::stores::{ArtifactKind, ArtifactStore};
 
 fn info(code: &'static str, category: ErrorCategory, message: &'static str) -> ErrorInfo {
     ErrorInfo {
-        code: ErrorCode(code.to_string()),
+        code: ErrorCode::must_new(code),
         category,
         retryable: false,
         message: message.to_string(),
@@ -40,7 +40,7 @@ fn fact_index_corruption(
     details: Option<serde_json::Value>,
 ) -> RunError {
     RunError::Storage(StorageError::Corruption(ErrorInfo {
-        code: ErrorCode(code.to_string()),
+        code: ErrorCode::must_new(code),
         category: ErrorCategory::Storage,
         retryable: false,
         message: message.to_string(),
@@ -684,7 +684,7 @@ mod tests {
     fn assert_fact_index_corruption(err: RunError, code: &str) -> ErrorInfo {
         match err {
             RunError::Storage(StorageError::Corruption(info)) => {
-                assert_eq!(info.code.0, code);
+                assert_eq!(info.code.as_str(), code);
                 info
             }
             other => panic!("unexpected error: {other:?}"),
@@ -786,7 +786,7 @@ mod tests {
             .expect_err("wrong store-returned id must fail fact recording");
 
         match err {
-            IoError::Other(info) => assert_eq!(info.code.0, "fact_payload_put_failed"),
+            IoError::Other(info) => assert_eq!(info.code.as_str(), "fact_payload_put_failed"),
             other => panic!("unexpected error: {other:?}"),
         }
     }
@@ -813,7 +813,7 @@ mod tests {
             .expect_err("conflicting fact payload must fail");
 
         match err {
-            IoError::Other(info) => assert_eq!(info.code.0, "fact_payload_conflict"),
+            IoError::Other(info) => assert_eq!(info.code.as_str(), "fact_payload_conflict"),
             other => panic!("unexpected error: {other:?}"),
         }
     }

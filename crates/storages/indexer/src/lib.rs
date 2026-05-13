@@ -18,7 +18,7 @@ use mfm_machine::ids::{ErrorCode, RunId};
 
 fn info(code: &'static str, message: &'static str) -> ErrorInfo {
     ErrorInfo {
-        code: ErrorCode(code.to_string()),
+        code: ErrorCode::must_new(code),
         category: ErrorCategory::Storage,
         retryable: false,
         message: message.to_string(),

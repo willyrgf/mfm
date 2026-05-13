@@ -24,7 +24,7 @@ fn info(
     message: &'static str,
 ) -> ErrorInfo {
     ErrorInfo {
-        code: ErrorCode(code.to_string()),
+        code: ErrorCode::must_new(code),
         category,
         retryable,
         message: message.to_string(),
@@ -346,7 +346,7 @@ mod tests {
             .expect_err("expected error");
 
         match err {
-            IoError::MissingFactKey(info) => assert_eq!(info.code.0, "missing_fact_key"),
+            IoError::MissingFactKey(info) => assert_eq!(info.code.as_str(), "missing_fact_key"),
             other => panic!("expected MissingFactKey, got: {other:?}"),
         }
     }
@@ -393,7 +393,7 @@ mod tests {
 
     fn assert_other_code(err: IoError, expected: &str) {
         match err {
-            IoError::Other(info) => assert_eq!(info.code.0, expected),
+            IoError::Other(info) => assert_eq!(info.code.as_str(), expected),
             other => panic!("expected IoError::Other({expected}), got: {other:?}"),
         }
     }

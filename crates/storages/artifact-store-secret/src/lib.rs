@@ -70,7 +70,7 @@ pub fn is_secret_payload_envelope(bytes: &[u8]) -> bool {
 
 fn info(code: &'static str, category: ErrorCategory, message: &'static str) -> ErrorInfo {
     ErrorInfo {
-        code: ErrorCode(code.to_string()),
+        code: ErrorCode::must_new(code),
         category,
         retryable: false,
         message: message.to_string(),
@@ -403,7 +403,7 @@ mod tests {
             .await
             .expect_err("decrypt should fail");
         match err {
-            StorageError::Other(info) => assert_eq!(info.code.0, CODE_SECRET_DECRYPT_FAILED),
+            StorageError::Other(info) => assert_eq!(info.code.as_str(), CODE_SECRET_DECRYPT_FAILED),
             other => panic!("expected Other, got: {other:?}"),
         }
     }
@@ -412,7 +412,7 @@ mod tests {
     fn key_from_hex_rejects_invalid() {
         let err = SecretKey::from_hex("0x01").expect_err("invalid length");
         match err {
-            StorageError::Other(info) => assert_eq!(info.code.0, CODE_SECRET_KEY_INVALID),
+            StorageError::Other(info) => assert_eq!(info.code.as_str(), CODE_SECRET_KEY_INVALID),
             other => panic!("expected Other, got: {other:?}"),
         }
     }

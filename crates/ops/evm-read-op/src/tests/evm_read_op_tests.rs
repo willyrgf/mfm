@@ -26,7 +26,7 @@ use tokio::sync::Mutex;
 
 fn info(code: &'static str, category: ErrorCategory, message: &'static str) -> ErrorInfo {
     ErrorInfo {
-        code: ErrorCode(code.to_string()),
+        code: ErrorCode::must_new(code),
         category,
         retryable: false,
         message: message.to_string(),
@@ -214,7 +214,7 @@ fn interface_rejects_all_queries_disabled() {
         Err(err) => err,
     };
 
-    assert_eq!(err.info.code.0, "invalid_op_config");
+    assert_eq!(err.info.code.as_str(), "invalid_op_config");
     assert!(err.info.message.contains("at least one query"));
 }
 
@@ -319,7 +319,7 @@ fn pipeline_importing_disabled_export_is_rejected() {
         Ok(_) => panic!("disabled block_number export should not satisfy downstream import"),
         Err(err) => err,
     };
-    assert_eq!(err.info.code.0, "unsatisfied_import");
+    assert_eq!(err.info.code.as_str(), "unsatisfied_import");
 }
 
 #[tokio::test]

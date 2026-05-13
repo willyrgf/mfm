@@ -569,7 +569,7 @@ mod tests {
             .expect("built config must not decode for public root");
 
         assert_eq!(
-            err.info.code.0,
+            err.info.code.as_str(),
             "invalid_evm_deploy_configure_validate_execution_config"
         );
     }
@@ -631,7 +631,7 @@ mod tests {
             .expect("legacy canonical config should not decode for execute root");
 
         assert_eq!(
-            err.info.code.0,
+            err.info.code.as_str(),
             "invalid_evm_deploy_configure_validate_execution_config"
         );
     }

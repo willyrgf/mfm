@@ -175,7 +175,7 @@ pub fn parse_u64_hex_value(v: &serde_json::Value) -> Result<u64, ParseHexError> 
 
 fn info(code: &'static str, category: ErrorCategory, message: &'static str) -> ErrorInfo {
     ErrorInfo {
-        code: ErrorCode(code.to_string()),
+        code: ErrorCode::must_new(code),
         category,
         retryable: false,
         message: message.to_string(),
