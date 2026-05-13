@@ -440,6 +440,92 @@ async fn append_run_started(
 }
 
 #[tokio::test]
+async fn resume_rejects_gapped_run_history_before_checkpoint_reconstruction() {
+    let streams = Arc::new(MemStreamStore::default());
+    let artifacts = Arc::new(MemArtifactStore::default());
+    let stores = || Stores {
+        streams: streams.clone(),
+        artifacts: artifacts.clone(),
+    };
+
+    let run_config = base_run_config();
+    let manifest = manifest_for(run_config);
+    let manifest_id = store_manifest(artifacts.as_ref(), &manifest).await;
+    let initial_snapshot_id = write_full_snapshot_value(artifacts.as_ref(), serde_json::json!({}))
+        .await
+        .expect("initial snapshot");
+    let completed_snapshot_id = write_full_snapshot_value(
+        artifacts.as_ref(),
+        serde_json::json!({"machine.main.s1": {"x": 1}}),
+    )
+    .await
+    .expect("completed snapshot");
+
+    let run_id = RunId(uuid::Uuid::new_v4());
+    let state_id = StateId::must_new("machine.main.s1".to_string());
+    streams
+        .append_run_events(
+            run_id,
+            0,
+            vec![
+                EventEnvelope {
+                    run_id,
+                    seq: 1,
+                    ts_millis: None,
+                    event: Event::Kernel(KernelEvent::RunStarted {
+                        op_id: manifest.op_id.clone(),
+                        manifest_id,
+                        initial_snapshot_id: initial_snapshot_id.clone(),
+                    }),
+                },
+                EventEnvelope {
+                    run_id,
+                    seq: 2,
+                    ts_millis: None,
+                    event: Event::Kernel(KernelEvent::StateEntered {
+                        state_id: state_id.clone(),
+                        attempt: 0,
+                        base_snapshot_id: initial_snapshot_id,
+                    }),
+                },
+                EventEnvelope {
+                    run_id,
+                    seq: 3,
+                    ts_millis: None,
+                    event: Event::Kernel(KernelEvent::StateCompleted {
+                        state_id,
+                        context_snapshot_id: completed_snapshot_id,
+                    }),
+                },
+            ],
+        )
+        .await
+        .expect("seed contiguous run");
+
+    streams
+        .inner
+        .lock()
+        .await
+        .get_mut(&StreamId::run(run_id))
+        .expect("run stream")
+        .last_mut()
+        .expect("completed record")
+        .seq = 4;
+
+    let resolver = Arc::new(FixedResolver {
+        plan: set_key_plan(&manifest.op_id),
+    });
+    let engine = DefaultExecutionEngine::new(resolver);
+
+    let err = engine
+        .resume(stores(), run_id)
+        .await
+        .expect_err("gapped run stream must fail resume");
+
+    assert_invalid_plan_code(err, "invalid_attempt_envelopes");
+}
+
+#[tokio::test]
 async fn resume_rejects_noncanonical_manifest_artifact() {
     let streams = Arc::new(MemStreamStore::default());
     let artifacts = Arc::new(MemArtifactStore::default());

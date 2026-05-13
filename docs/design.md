@@ -299,6 +299,8 @@ Runtime-critical rule:
 ### 7.3 Seq and attempts
 - `seq` is strictly increasing per run.
 - Convention: 1-indexed sequence, empty run head is 0.
+- Runtime recovery treats run stream gaps as corrupted history: sequences read for resume/replay
+  MUST be exactly contiguous from the requested start sequence.
 - `attempt` increments on retry for a state.
 
 ### 7.4 Crash/resume semantics

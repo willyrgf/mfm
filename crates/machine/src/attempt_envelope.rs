@@ -26,6 +26,7 @@ pub(crate) struct KernelAnalysis {
 pub(crate) enum AttemptEnvelopeError {
     RunIdMismatch,
     NonMonotonicSeq,
+    SequenceGap,
     NestedStateEntered,
     TerminalWithoutEntered,
     TerminalStateIdMismatch,
@@ -48,9 +49,13 @@ pub(crate) fn analyze_kernel_events(
             _ => {}
         }
 
-        match last_seq {
-            Some(prev) if e.seq <= prev => return Err(AttemptEnvelopeError::NonMonotonicSeq),
-            _ => {}
+        let Some(expected_seq) = last_seq.map_or(Some(1), |seq: u64| seq.checked_add(1)) else {
+            return Err(AttemptEnvelopeError::SequenceGap);
+        };
+        match e.seq.cmp(&expected_seq) {
+            std::cmp::Ordering::Less => return Err(AttemptEnvelopeError::NonMonotonicSeq),
+            std::cmp::Ordering::Greater => return Err(AttemptEnvelopeError::SequenceGap),
+            std::cmp::Ordering::Equal => {}
         }
         last_seq = Some(e.seq);
 
@@ -304,6 +309,61 @@ mod tests {
             analysis.last_checkpoint_snapshot,
             Some(ArtifactId::must_new("3".repeat(64)))
         );
+    }
+
+    #[test]
+    fn rejects_sequence_gap_between_entered_and_terminal_event() {
+        let run_id = RunId(uuid::Uuid::new_v4());
+        let state_id = StateId::must_new("machine.main.s1".to_string());
+
+        let stream = vec![
+            env(
+                run_id,
+                1,
+                Event::Kernel(KernelEvent::RunStarted {
+                    op_id: OpId::must_new("op".to_string()),
+                    manifest_id: ArtifactId::must_new("0".repeat(64)),
+                    initial_snapshot_id: ArtifactId::must_new("1".repeat(64)),
+                }),
+            ),
+            env(
+                run_id,
+                2,
+                Event::Kernel(KernelEvent::StateEntered {
+                    state_id: state_id.clone(),
+                    attempt: 0,
+                    base_snapshot_id: ArtifactId::must_new("2".repeat(64)),
+                }),
+            ),
+            env(
+                run_id,
+                4,
+                Event::Kernel(KernelEvent::StateCompleted {
+                    state_id,
+                    context_snapshot_id: ArtifactId::must_new("3".repeat(64)),
+                }),
+            ),
+        ];
+
+        let err = analyze_kernel_events(&stream).expect_err("gapped run stream must fail");
+        assert_eq!(err, AttemptEnvelopeError::SequenceGap);
+    }
+
+    #[test]
+    fn rejects_first_sequence_gap() {
+        let run_id = RunId(uuid::Uuid::new_v4());
+        let stream = vec![env(
+            run_id,
+            2,
+            Event::Kernel(KernelEvent::RunStarted {
+                op_id: OpId::must_new("op".to_string()),
+                manifest_id: ArtifactId::must_new("0".repeat(64)),
+                initial_snapshot_id: ArtifactId::must_new("1".repeat(64)),
+            }),
+        )];
+
+        let err = analyze_kernel_events(&stream).expect_err("run stream must start at seq 1");
+        assert_eq!(err, AttemptEnvelopeError::SequenceGap);
     }
 
     #[test]
