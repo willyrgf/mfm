@@ -2035,11 +2035,14 @@ dependencies = [
 name = "mfm-collectors-local-keystore"
 version = "0.1.0"
 dependencies = [
+ "alloy-primitives",
  "async-trait",
+ "hex",
  "mfm-machine",
  "serde",
  "serde_json",
  "tokio",
+ "url",
 ]
 
 [[package]]
@@ -2452,20 +2455,13 @@ dependencies = [
 name = "mfm-state-keystore"
 version = "0.1.0"
 dependencies = [
- "alloy-primitives",
  "async-trait",
  "hex",
- "k256",
  "mfm-collectors-local-keystore",
- "mfm-evm-core",
  "mfm-machine",
  "mfm-sdk",
  "mfm-state-common",
- "mfm_core",
- "serde",
  "serde_json",
- "url",
- "uuid",
 ]
 
 [[package]]
@@ -2556,12 +2552,14 @@ dependencies = [
 name = "mfm-transports-local-keystore"
 version = "0.1.0"
 dependencies = [
+ "alloy-primitives",
  "async-trait",
  "chrono",
  "hex",
+ "k256",
  "mfm-collectors-local-keystore",
+ "mfm-evm-core",
  "mfm-machine",
- "mfm-state-keystore",
  "mfm_core",
  "regex",
  "rpassword",

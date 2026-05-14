@@ -9,14 +9,14 @@
 //! # Examples
 //!
 //! ```rust
-//! use alloy_primitives::Address;
-//! use mfm_state_keystore::states::tx::{KeystoreTxSignStateConfig, LocalFileWriteMode};
-//! use mfm_state_keystore::tx::Eip1559TxToSign;
+//! use mfm_collectors_local_keystore::LocalFileWriteMode;
+//! use mfm_collectors_local_keystore::tx::{parse_address, Eip1559TxToSign};
+//! use mfm_state_keystore::states::tx::KeystoreTxSignStateConfig;
 //!
 //! let cfg = KeystoreTxSignStateConfig {
 //!     id: Some("550e8400-e29b-41d4-a716-446655440000".to_string()),
 //!     tx: Eip1559TxToSign {
-//!         to: Address::from([0u8; 20]),
+//!         to: parse_address("0x0000000000000000000000000000000000000000", "to")?,
 //!         value_wei: 0,
 //!         chain_id: 1,
 //!         nonce: 7,
@@ -31,10 +31,13 @@
 //!
 //! assert_eq!(cfg.tx.chain_id, 1);
 //! assert_eq!(cfg.local_resource_handle, "local-keystore:example");
+//! # Ok::<(), mfm_collectors_local_keystore::tx::KeystoreTxError>(())
 //! ```
 
 use async_trait::async_trait;
-use mfm_collectors_local_keystore::{KeystoreTxSignRequest, LocalKeystoreIoClient};
+use mfm_collectors_local_keystore::{
+    KeystoreTxSignRequest, LocalFileWriteMode, LocalKeystoreIoClient,
+};
 use mfm_machine::context::DynContext;
 use mfm_machine::errors::StateError;
 use mfm_machine::ids::{ContextKey, StateId};
@@ -48,9 +51,7 @@ use mfm_state_common::idempotency as op_idempotency;
 use mfm_state_common::local_io_helpers::{attach_state_id, emit_report_event};
 use mfm_state_common::states::meta;
 
-use crate::tx::Eip1559TxToSign;
-
-pub use mfm_collectors_local_keystore::LocalFileWriteMode;
+use mfm_collectors_local_keystore::tx::Eip1559TxToSign;
 
 /// Runtime configuration for a keystore-backed transaction signing state.
 ///
