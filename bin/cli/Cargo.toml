@@ -22,8 +22,7 @@ hex = "0.4"
 
 [dev-dependencies]
 mfm_core = { path = "../../crates/core" }
-mfm-state-portfolio = { path = "../../crates/states/portfolio" }
-mfm-state-symbol = { path = "../../crates/states/symbol" }
+mfm-portfolio-model = { path = "../../crates/portfolio/model" }
 mfm-op-portfolio-tracker = { path = "../../crates/ops/portfolio-tracker-op" }
 tempfile = "3.0"
 assert_cmd = "2.0"

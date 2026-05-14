@@ -57,8 +57,6 @@ The live runtime inventory still lives in the repository docs:
 | `mfm-state-common` | Cross-domain reusable execution states. | pending | `crates/states/common` |
 | `mfm-state-keystore` | Shared keystore administration and local signing states. | pending | `crates/states/keystore` |
 | `mfm-state-portfolio` | Reusable portfolio-domain runtime states and adapters for canonical snapshots. | pending | `crates/states/portfolio` |
-| `mfm-state-symbol` | Reusable symbol-domain schema and validation for canonical snapshots. | pending | `crates/states/symbol` |
-| `mfm-state-wallet` | Reusable wallet-domain schema and validation for canonical snapshots. | pending | `crates/states/wallet` |
 
 ## Ops
 

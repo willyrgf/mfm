@@ -164,24 +164,6 @@ docs_policy = "docs-rs"
 umbrella_policy = "when-published"
 
 [[packages]]
-name = "mfm-state-symbol"
-workspace_path = "crates/states/symbol"
-visibility = "public"
-section = "states"
-summary = "Reusable symbol-domain schema and validation for canonical snapshots."
-docs_policy = "docs-rs"
-umbrella_policy = "when-published"
-
-[[packages]]
-name = "mfm-state-wallet"
-workspace_path = "crates/states/wallet"
-visibility = "public"
-section = "states"
-summary = "Reusable wallet-domain schema and validation for canonical snapshots."
-docs_policy = "docs-rs"
-umbrella_policy = "when-published"
-
-[[packages]]
 name = "mfm-op-keystore"
 workspace_path = "crates/ops/keystore-op"
 visibility = "public"
