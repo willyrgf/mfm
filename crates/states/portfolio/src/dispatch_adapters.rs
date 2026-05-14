@@ -12,6 +12,11 @@ use mfm_machine::errors::{ErrorCategory, StateError};
 use mfm_machine::hashing::artifact_id_for_json;
 use mfm_machine::ids::{FactKey, StateId};
 use mfm_machine::io::{IoCall, IoProvider};
+use mfm_portfolio_model::symbol::{
+    Observation, ObservationAnchor, ObservationQuantity, ObservationSource, ObservationValue,
+    ObservationValueSourceRef, ValuationSourceReaderConfig,
+};
+use mfm_portfolio_model::wallet::{WalletCapabilities, WalletImplementationConfig};
 use mfm_state_common::decimal::{
     divide_decimal_strings as common_divide_decimal_strings,
     multiply_decimal_strings as common_multiply_decimal_strings, DecimalArithmeticError,
@@ -19,15 +24,10 @@ use mfm_state_common::decimal::{
 use mfm_state_common::errors::{
     state_error_with_state, state_from_io, state_unknown, state_unknown_msg,
 };
-use mfm_state_symbol::model::{
-    Observation, ObservationAnchor, ObservationQuantity, ObservationSource, ObservationValue,
-    ObservationValueSourceRef, ValuationSourceReaderConfig,
-};
-use mfm_state_wallet::model::{WalletCapabilities, WalletImplementationConfig};
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::plan::{
+use mfm_portfolio_plan::{
     AdapterId, BitcoinResolvedSubjectValue, BitcoinRoutePolicy, BitcoinSubjectLocator,
     BitcoinUtxoSetObservationPayload, DerivedUnitPriceValuationPayload, DirectPriceSourcePayload,
     DirectPriceValuationPayload, DispatchObservationRuntimeAdapter, DispatchSubjectRuntimeAdapter,
@@ -497,7 +497,7 @@ impl DispatchObservationRuntimeAdapter for EvmNativeBalanceObservationRuntimeAda
         &self,
         state_id: &StateId,
         io: &mut dyn IoProvider,
-        binding: &crate::plan::CompiledObservationBinding,
+        binding: &mfm_portfolio_plan::CompiledObservationBinding,
         input: ObservationRuntimeInput<'_>,
     ) -> Result<Observation, StateError> {
         let payload: NativeBalanceObservationPayload = decode_object_map(
@@ -569,10 +569,10 @@ impl DispatchObservationRuntimeAdapter for EvmErc20BalanceObservationRuntimeAdap
         &self,
         state_id: &StateId,
         io: &mut dyn IoProvider,
-        binding: &crate::plan::CompiledObservationBinding,
+        binding: &mfm_portfolio_plan::CompiledObservationBinding,
         input: ObservationRuntimeInput<'_>,
     ) -> Result<Observation, StateError> {
-        let payload: crate::plan::Erc20BalanceObservationPayload = decode_object_map(
+        let payload: mfm_portfolio_plan::Erc20BalanceObservationPayload = decode_object_map(
             "compiled_observation_binding",
             &binding.binding_id,
             &binding.payload,
@@ -660,7 +660,7 @@ impl DispatchObservationRuntimeAdapter for BitcoinUtxoSetObservationRuntimeAdapt
         &self,
         state_id: &StateId,
         io: &mut dyn IoProvider,
-        binding: &crate::plan::CompiledObservationBinding,
+        binding: &mfm_portfolio_plan::CompiledObservationBinding,
         input: ObservationRuntimeInput<'_>,
     ) -> Result<Observation, StateError> {
         let payload: BitcoinUtxoSetObservationPayload = decode_object_map(
@@ -786,7 +786,7 @@ async fn resolve_direct_source(
 }
 
 fn resolved_evm_subject_for_binding(
-    binding: &crate::plan::CompiledObservationBinding,
+    binding: &mfm_portfolio_plan::CompiledObservationBinding,
     resolved_subjects: &BTreeMap<String, ResolvedSubject>,
 ) -> Result<EvmResolvedSubjectValue, StateError> {
     let subject = resolved_subjects
@@ -821,7 +821,7 @@ fn resolved_evm_subject_for_binding(
 }
 
 fn resolved_bitcoin_subject_for_binding(
-    binding: &crate::plan::CompiledObservationBinding,
+    binding: &mfm_portfolio_plan::CompiledObservationBinding,
     resolved_subjects: &BTreeMap<String, ResolvedSubject>,
 ) -> Result<BitcoinResolvedSubjectValue, StateError> {
     let subject = resolved_subjects
@@ -856,7 +856,7 @@ fn resolved_bitcoin_subject_for_binding(
 }
 
 fn pinned_evm_view_for_binding<'a>(
-    binding: &crate::plan::CompiledObservationBinding,
+    binding: &mfm_portfolio_plan::CompiledObservationBinding,
     pinned_views: &'a BTreeMap<String, PinnedNetworkView>,
     route_policy: &EvmRoutePolicy,
 ) -> Result<&'a PinnedNetworkView, StateError> {
@@ -908,7 +908,7 @@ fn pinned_evm_view_for_binding<'a>(
 }
 
 fn pinned_bitcoin_view_for_binding<'a>(
-    binding: &crate::plan::CompiledObservationBinding,
+    binding: &mfm_portfolio_plan::CompiledObservationBinding,
     pinned_views: &'a BTreeMap<String, PinnedNetworkView>,
     route_policy: &BitcoinRoutePolicy,
 ) -> Result<&'a PinnedNetworkView, StateError> {
@@ -948,7 +948,7 @@ fn pinned_bitcoin_view_for_binding<'a>(
 }
 
 fn build_observation_values_from_resolved(
-    binding: &crate::plan::CompiledObservationBinding,
+    binding: &mfm_portfolio_plan::CompiledObservationBinding,
     amount_dec: &str,
     input: ObservationRuntimeInput<'_>,
 ) -> Result<Vec<ObservationValue>, StateError> {
@@ -1388,7 +1388,7 @@ mod tests {
                 &ViewPinTask {
                     task_id: "pin.ethereum-mainnet".to_string(),
                     network_view_id: "ethereum-mainnet".to_string(),
-                    family: crate::plan::NetworkFamily::Evm,
+                    family: mfm_portfolio_plan::NetworkFamily::Evm,
                     adapter: AdapterId(ADAPTER_PIN_VIEW_EVM.to_string()),
                     payload: BTreeMap::from([
                         ("network_id".to_string(), json!("ethereum-mainnet")),
@@ -1443,7 +1443,7 @@ mod tests {
             PinnedNetworkView {
                 network_view_id: "ethereum-mainnet".to_string(),
                 network_id: "ethereum-mainnet".to_string(),
-                family: crate::plan::NetworkFamily::Evm,
+                family: mfm_portfolio_plan::NetworkFamily::Evm,
                 anchor: ExecutionAnchor::Evm {
                     chain_id: 1,
                     block_number: 100,
@@ -1458,7 +1458,7 @@ mod tests {
                 &ValuationTask {
                     valuation_id: "eth.quote.usd".to_string(),
                     instrument_id: "eth.native.ethereum-mainnet".to_string(),
-                    quote: mfm_state_symbol::model::QuoteCode::Usd,
+                    quote: mfm_portfolio_model::symbol::QuoteCode::Usd,
                     adapter: AdapterId(ADAPTER_RESOLVE_VALUATION_EVM_ORACLE.to_string()),
                     payload: BTreeMap::from([
                         ("priced_symbol_id".to_string(), json!("eth.native.ethereum-mainnet")),
@@ -1503,7 +1503,7 @@ mod tests {
                 &ValuationTask {
                     valuation_id: "eth.quote.btc".to_string(),
                     instrument_id: "eth.native.ethereum-mainnet".to_string(),
-                    quote: mfm_state_symbol::model::QuoteCode::Btc,
+                    quote: mfm_portfolio_model::symbol::QuoteCode::Btc,
                     adapter: AdapterId(ADAPTER_RESOLVE_VALUATION_DERIVED.to_string()),
                     payload: BTreeMap::from([
                         ("priced_symbol_id".to_string(), json!("eth.native.ethereum-mainnet")),
@@ -1574,13 +1574,13 @@ mod tests {
                 json!("0x0de0b6b3a7640000"),
             )]),
         };
-        let binding = crate::plan::CompiledObservationBinding {
+        let binding = mfm_portfolio_plan::CompiledObservationBinding {
             binding_id: "binding.wallet_main.eth".to_string(),
-            observation_key: crate::plan::ObservationKey {
+            observation_key: mfm_portfolio_plan::ObservationKey {
                 subject_id: "wallet_main".to_string(),
                 network_view_id: "ethereum-mainnet".to_string(),
                 instrument_id: "eth.native.ethereum-mainnet".to_string(),
-                position_kind: crate::plan::PositionKind::SpotBalance,
+                position_kind: mfm_portfolio_plan::PositionKind::SpotBalance,
                 venue_id: None,
                 discriminator: Some("eth.native.ethereum-mainnet".to_string()),
             },
@@ -1638,7 +1638,7 @@ mod tests {
                         PinnedNetworkView {
                             network_view_id: "ethereum-mainnet".to_string(),
                             network_id: "ethereum-mainnet".to_string(),
-                            family: crate::plan::NetworkFamily::Evm,
+                            family: mfm_portfolio_plan::NetworkFamily::Evm,
                             anchor: ExecutionAnchor::Evm {
                                 chain_id: 1,
                                 block_number: 100,
@@ -1651,7 +1651,7 @@ mod tests {
                             valuation_id: "eth.quote.usd".to_string(),
                             instrument_id: "eth.native.ethereum-mainnet".to_string(),
                             priced_symbol_id: "eth.native.ethereum-mainnet".to_string(),
-                            quote: mfm_state_symbol::model::QuoteCode::Usd,
+                            quote: mfm_portfolio_model::symbol::QuoteCode::Usd,
                             unit_price_dec: "2.00".to_string(),
                             valuation_reader_kind: "fixed_unit_price".to_string(),
                             source_refs: Vec::new(),
@@ -1691,13 +1691,13 @@ mod tests {
                 ),
             ]),
         };
-        let binding = crate::plan::CompiledObservationBinding {
+        let binding = mfm_portfolio_plan::CompiledObservationBinding {
             binding_id: "binding.wallet_main.usdc".to_string(),
-            observation_key: crate::plan::ObservationKey {
+            observation_key: mfm_portfolio_plan::ObservationKey {
                 subject_id: "wallet_main".to_string(),
                 network_view_id: "ethereum-mainnet".to_string(),
                 instrument_id: "usdc.wallet.ethereum-mainnet".to_string(),
-                position_kind: crate::plan::PositionKind::SpotBalance,
+                position_kind: mfm_portfolio_plan::PositionKind::SpotBalance,
                 venue_id: None,
                 discriminator: Some("usdc.wallet.ethereum-mainnet".to_string()),
             },
@@ -1759,7 +1759,7 @@ mod tests {
                         PinnedNetworkView {
                             network_view_id: "ethereum-mainnet".to_string(),
                             network_id: "ethereum-mainnet".to_string(),
-                            family: crate::plan::NetworkFamily::Evm,
+                            family: mfm_portfolio_plan::NetworkFamily::Evm,
                             anchor: ExecutionAnchor::Evm {
                                 chain_id: 1,
                                 block_number: 100,
@@ -1772,7 +1772,7 @@ mod tests {
                             valuation_id: "usdc.quote.usd".to_string(),
                             instrument_id: "usdc.wallet.ethereum-mainnet".to_string(),
                             priced_symbol_id: "usdc.wallet.ethereum-mainnet".to_string(),
-                            quote: mfm_state_symbol::model::QuoteCode::Usd,
+                            quote: mfm_portfolio_model::symbol::QuoteCode::Usd,
                             unit_price_dec: "1.00".to_string(),
                             valuation_reader_kind: "fixed_unit_price".to_string(),
                             source_refs: Vec::new(),

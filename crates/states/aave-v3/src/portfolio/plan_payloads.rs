@@ -1,4 +1,4 @@
-use mfm_state_portfolio::plan::{EvmRoutePolicy, ObservationProjection};
+use mfm_portfolio_plan::{EvmRoutePolicy, ObservationProjection};
 use serde::{Deserialize, Serialize};
 
 use crate::portfolio::model::{AaveDebtPositionConfig, AaveReservePositionConfig};

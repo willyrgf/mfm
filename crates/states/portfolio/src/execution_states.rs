@@ -11,6 +11,7 @@ use mfm_machine::io::{IoCall, IoProvider};
 use mfm_machine::meta::StateMeta;
 use mfm_machine::recorder::EventRecorder;
 use mfm_machine::state::{SnapshotPolicy, State, StateOutcome};
+use mfm_portfolio_model::symbol::{Observation, QuoteCode, SymbolRole};
 use mfm_state_common::ctx::{read_typed, write_json};
 use mfm_state_common::decimal::{DecimalArithmeticError, DecimalValue};
 use mfm_state_common::errors::{
@@ -19,21 +20,20 @@ use mfm_state_common::errors::{
 use mfm_state_common::local_io_helpers::emit_report_event;
 use mfm_state_common::output::write_output_artifact;
 use mfm_state_common::states::meta;
-use mfm_state_symbol::model::{Observation, QuoteCode, SymbolRole};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::model::{
+use mfm_portfolio_model::portfolio::{
     ExecutionAnchor as SnapshotExecutionAnchor, NetworkPin, PortfolioConfig, PortfolioQuoteTotal,
     PortfolioReport, PortfolioSnapshot, PortfolioSnapshotError, WalletReport, WalletSnapshot,
 };
-use crate::plan::{
+use mfm_portfolio_model::wallet::WalletSubjectKind;
+use mfm_portfolio_plan::{
     CompiledObservationBatch, DispatchCatalog, ExecutionAnchor, NetworkFamily, ObservationKey,
     ObservationRuntimeInput, PinnedNetworkView, ResolvedSubject, ResolvedUnitPrice,
     SourcePreparationTask, SubjectKind, SubjectResolutionTask, SubjectRuntimeInput,
     ValuationRuntimeInput, ValuationTask, ViewPinTask, ViewRuntimeInput,
 };
-use mfm_state_wallet::model::WalletSubjectKind;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 struct KeyedObservation {
@@ -1175,13 +1175,13 @@ mod tests {
     use mfm_machine::ids::{ArtifactId, ErrorCode};
     use mfm_machine::io::{IoCall, IoResult};
     use mfm_machine::meta::SideEffectKind;
-    use mfm_state_symbol::model::{
+    use mfm_portfolio_model::symbol::{
         ObservationQuantity, ObservationSource, ObservationValue, ObservationValueSourceRef,
         QuoteCode, SymbolKind, SymbolRole,
     };
 
-    use crate::model::{PortfolioQuoteTotal, PortfolioReport};
-    use crate::plan::{
+    use mfm_portfolio_model::portfolio::{PortfolioQuoteTotal, PortfolioReport};
+    use mfm_portfolio_plan::{
         AdapterId, DispatchCatalogParts, DispatchObservationRuntimeAdapter,
         DispatchSubjectRuntimeAdapter, DispatchValuationRuntimeAdapter, DispatchViewRuntimeAdapter,
         ExecutionAnchor, RuntimeAdapter,
@@ -1433,7 +1433,7 @@ mod tests {
             &self,
             _state_id: &StateId,
             _io: &mut dyn IoProvider,
-            binding: &crate::plan::CompiledObservationBinding,
+            binding: &mfm_portfolio_plan::CompiledObservationBinding,
             _input: ObservationRuntimeInput<'_>,
         ) -> Result<Observation, StateError> {
             if let Some(observation) = self.observations_by_binding_id.get(&binding.binding_id) {
@@ -1461,7 +1461,7 @@ mod tests {
                     source_refs: vec![ObservationValueSourceRef {
                         source_id: "source-1".to_string(),
                         network_id: "ethereum-mainnet".to_string(),
-                        anchor: mfm_state_symbol::model::ObservationAnchor::Evm {
+                        anchor: mfm_portfolio_model::symbol::ObservationAnchor::Evm {
                             chain_id: 1,
                             block_number: 100,
                         },
@@ -1470,7 +1470,7 @@ mod tests {
                 source: ObservationSource {
                     balance_reader_kind: "native_balance".to_string(),
                     network_id: "ethereum-mainnet".to_string(),
-                    anchor: mfm_state_symbol::model::ObservationAnchor::Evm {
+                    anchor: mfm_portfolio_model::symbol::ObservationAnchor::Evm {
                         chain_id: 1,
                         block_number: 100,
                     },
@@ -1691,13 +1691,13 @@ mod tests {
                 batch_id: "observe.ethereum-mainnet.native".to_string(),
                 adapter: AdapterId("observe_position/evm/native_balance".to_string()),
                 network_view_id: "ethereum-mainnet".to_string(),
-                bindings: vec![crate::plan::CompiledObservationBinding {
+                bindings: vec![mfm_portfolio_plan::CompiledObservationBinding {
                     binding_id: "binding.wallet_main.eth".to_string(),
-                    observation_key: crate::plan::ObservationKey {
+                    observation_key: mfm_portfolio_plan::ObservationKey {
                         subject_id: "wallet_main".to_string(),
                         network_view_id: "ethereum-mainnet".to_string(),
                         instrument_id: "eth.native.ethereum-mainnet".to_string(),
-                        position_kind: crate::plan::PositionKind::SpotBalance,
+                        position_kind: mfm_portfolio_plan::PositionKind::SpotBalance,
                         venue_id: None,
                         discriminator: Some("eth.native.ethereum-mainnet".to_string()),
                     },
@@ -2034,7 +2034,7 @@ mod tests {
                 adapter: AdapterId("observe_position/evm/native_balance".to_string()),
                 network_view_id: "ethereum-mainnet".to_string(),
                 bindings: vec![
-                    crate::plan::CompiledObservationBinding {
+                    mfm_portfolio_plan::CompiledObservationBinding {
                         binding_id: "binding.ethereum".to_string(),
                         observation_key: observation_key(
                             "wallet_main",
@@ -2045,7 +2045,7 @@ mod tests {
                         valuation_ids: Vec::new(),
                         payload: BTreeMap::new(),
                     },
-                    crate::plan::CompiledObservationBinding {
+                    mfm_portfolio_plan::CompiledObservationBinding {
                         binding_id: "binding.arbitrum".to_string(),
                         observation_key: observation_key(
                             "wallet_main",
@@ -2212,7 +2212,7 @@ mod tests {
             source: ObservationSource {
                 balance_reader_kind: "native_balance".to_string(),
                 network_id: "ethereum-mainnet".to_string(),
-                anchor: mfm_state_symbol::model::ObservationAnchor::Evm {
+                anchor: mfm_portfolio_model::symbol::ObservationAnchor::Evm {
                     chain_id: 1,
                     block_number: 100,
                 },
@@ -2230,7 +2230,7 @@ mod tests {
             subject_id: subject_id.to_string(),
             network_view_id: network_view_id.to_string(),
             instrument_id: instrument_id.to_string(),
-            position_kind: crate::plan::PositionKind::SpotBalance,
+            position_kind: mfm_portfolio_plan::PositionKind::SpotBalance,
             venue_id: None,
             discriminator: None,
         }

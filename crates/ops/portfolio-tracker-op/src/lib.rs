@@ -37,6 +37,7 @@ use mfm_portfolio_config::{
     decode_portfolio_snapshot_canonical_config, PortfolioSnapshotBuiltConfig,
     PortfolioSnapshotCanonicalConfig,
 };
+use mfm_portfolio_plan::{PortfolioExecutionSpec, PORTFOLIO_EXECUTION_SPEC_KEY};
 use mfm_sdk::errors::SdkError;
 use mfm_sdk::ids::{ChildOpLocalId, PortKey};
 use mfm_sdk::op::{
@@ -44,7 +45,6 @@ use mfm_sdk::op::{
     Operation, PlannedOp, PlannedOpKind, PlannerPayloadConfigSource, PortSource, ReExportBinding,
 };
 use mfm_state_common::errors as op_errors;
-use mfm_state_portfolio::plan::{PortfolioExecutionSpec, PORTFOLIO_EXECUTION_SPEC_KEY};
 use serde_json::Value;
 
 mod config_build;

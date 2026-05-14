@@ -1,7 +1,32 @@
+#![cfg_attr(test, allow(clippy::disallowed_methods, clippy::disallowed_types))]
+#![cfg_attr(not(test), deny(clippy::disallowed_methods, clippy::disallowed_types))]
+#![warn(missing_docs)]
+//! Semantic portfolio planning vocabulary and adapter catalog.
+//!
+//! This crate owns the pure plan data structures shared by portfolio config
+//! compilation, thin ops, and reusable runtime states. Concrete runtime adapters
+//! and state execution live outside this crate.
+//!
+//! # Examples
+//!
+//! ```rust
+//! use mfm_portfolio_plan::{AdapterId, AdapterIdParts};
+//!
+//! let adapter = AdapterId("observe_position/evm/native_balance".to_string());
+//! assert_eq!(
+//!     adapter.parse_parts(),
+//!     Some(AdapterIdParts::ThreeSegment {
+//!         capability: "observe_position",
+//!         family: "evm",
+//!         implementation: "native_balance",
+//!     })
+//! );
+//! ```
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use mfm_machine::hashing::{canonical_json_bytes, CanonicalJsonError};
-use mfm_state_symbol::model::QuoteCode;
+use mfm_portfolio_model::symbol::QuoteCode;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use thiserror::Error;
@@ -24,7 +49,7 @@ pub use compiler::{PortfolioPlanCompiler, PortfolioRequest};
 ///
 /// The semantic cutover keeps the existing observation artifact shape so snapshot/report
 /// projections remain stable while planner/runtime internals move to semantic compilation.
-pub use mfm_state_symbol::model::Observation;
+pub use mfm_portfolio_model::symbol::Observation;
 pub use payloads::{
     BitcoinResolvedSubjectValue, BitcoinRoutePolicy, BitcoinSubjectLocator,
     BitcoinUtxoSetObservationPayload, DerivedUnitPriceValuationPayload, DirectPriceSourcePayload,

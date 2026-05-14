@@ -86,14 +86,14 @@ use mfm_authored_config::parse_authored_config_with_hint;
 pub use mfm_authored_config::AuthoredConfigFormat;
 use mfm_machine::hashing::{artifact_id_for_json, CanonicalJsonError};
 use mfm_machine::ids::ArtifactId;
-use mfm_state_portfolio::model::{
+use mfm_portfolio_model::portfolio::{
     validate_portfolio_bundle, PortfolioConfig, PortfolioConfigError,
 };
-use mfm_state_portfolio::plan::{
+use mfm_portfolio_model::symbol::ValuationSourceRegistry;
+use mfm_portfolio_plan::{
     PlanExecutionSpecError, PlanningError, PortfolioExecutionSpec, PortfolioPlanCompiler,
     PortfolioRequest,
 };
-use mfm_state_symbol::model::ValuationSourceRegistry;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
@@ -283,7 +283,7 @@ pub enum PortfolioSnapshotBuildError {
     DispatchCatalog {
         /// Underlying catalog construction error.
         #[source]
-        source: mfm_state_portfolio::plan::DispatchCatalogError,
+        source: mfm_portfolio_plan::DispatchCatalogError,
     },
     /// Semantic execution compilation failed.
     #[error("failed to compile the portfolio execution spec: {source}")]

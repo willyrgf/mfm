@@ -11,18 +11,18 @@ use mfm_evm_core::encoding::{
 use mfm_machine::errors::StateError;
 use mfm_machine::ids::StateId;
 use mfm_machine::io::IoProvider;
-use mfm_state_common::decimal::{
-    multiply_decimal_strings as common_multiply_decimal_strings, DecimalArithmeticError,
+use mfm_portfolio_model::symbol::{
+    ObservationAnchor, ObservationQuantity, ObservationSource, ObservationValue,
 };
-use mfm_state_common::errors::{state_from_io, state_unknown, state_unknown_msg};
-use mfm_state_portfolio::plan::{
+use mfm_portfolio_plan::{
     AdapterId, CompiledObservationBinding, DispatchObservationRuntimeAdapter,
     EvmResolvedSubjectValue, ExecutionAnchor, Observation, ObservationRuntimeInput,
     PinnedNetworkView, ResolvedSubject, RuntimeAdapter,
 };
-use mfm_state_symbol::model::{
-    ObservationAnchor, ObservationQuantity, ObservationSource, ObservationValue,
+use mfm_state_common::decimal::{
+    multiply_decimal_strings as common_multiply_decimal_strings, DecimalArithmeticError,
 };
+use mfm_state_common::errors::{state_from_io, state_unknown, state_unknown_msg};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -354,7 +354,7 @@ fn resolved_evm_subject_for_binding(
 fn pinned_evm_view_for_binding<'a>(
     binding: &CompiledObservationBinding,
     pinned_views: &'a BTreeMap<String, PinnedNetworkView>,
-    route_policy: &mfm_state_portfolio::plan::EvmRoutePolicy,
+    route_policy: &mfm_portfolio_plan::EvmRoutePolicy,
 ) -> Result<&'a PinnedNetworkView, StateError> {
     let pinned = pinned_views
         .get(binding.observation_key.network_view_id.as_str())
@@ -613,8 +613,8 @@ mod tests {
     use mfm_machine::errors::{ErrorCategory, ErrorInfo, IoError};
     use mfm_machine::ids::{ArtifactId, ErrorCode, FactKey};
     use mfm_machine::io::{IoCall, IoResult};
-    use mfm_state_portfolio::plan::{ObservationKey, PositionKind};
-    use mfm_state_symbol::model::QuoteCode;
+    use mfm_portfolio_model::symbol::QuoteCode;
+    use mfm_portfolio_plan::{ObservationKey, PositionKind};
     use serde_json::json;
 
     fn info(code: &'static str, message: &'static str) -> ErrorInfo {
@@ -760,12 +760,12 @@ mod tests {
             "wallet_main".to_string(),
             ResolvedSubject {
                 subject_id: "wallet_main".to_string(),
-                kind: mfm_state_portfolio::plan::SubjectKind::EvmAddress,
+                kind: mfm_portfolio_plan::SubjectKind::EvmAddress,
                 value: serde_json::to_value(EvmResolvedSubjectValue {
                     network_id: "ethereum-mainnet".to_string(),
                     address: "0x000000000000000000000000000000000000beef".to_string(),
                     implementation_kind: "address_only".to_string(),
-                    capabilities: mfm_state_wallet::model::WalletCapabilities {
+                    capabilities: mfm_portfolio_model::wallet::WalletCapabilities {
                         can_resolve_address: true,
                         can_sign: false,
                         can_submit: false,
@@ -782,7 +782,7 @@ mod tests {
             PinnedNetworkView {
                 network_view_id: "ethereum-mainnet".to_string(),
                 network_id: "ethereum-mainnet".to_string(),
-                family: mfm_state_portfolio::plan::NetworkFamily::Evm,
+                family: mfm_portfolio_plan::NetworkFamily::Evm,
                 anchor: ExecutionAnchor::Evm {
                     chain_id: 1,
                     block_number: 100,
@@ -791,10 +791,10 @@ mod tests {
         )])
     }
 
-    fn resolved_valuations() -> BTreeMap<String, mfm_state_portfolio::plan::ResolvedUnitPrice> {
+    fn resolved_valuations() -> BTreeMap<String, mfm_portfolio_plan::ResolvedUnitPrice> {
         BTreeMap::from([(
             "usdc.quote.usd".to_string(),
-            mfm_state_portfolio::plan::ResolvedUnitPrice {
+            mfm_portfolio_plan::ResolvedUnitPrice {
                 valuation_id: "usdc.quote.usd".to_string(),
                 instrument_id: "usdc.wallet.ethereum-mainnet".to_string(),
                 priced_symbol_id: "usdc.wallet.ethereum-mainnet".to_string(),

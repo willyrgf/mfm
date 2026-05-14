@@ -6,7 +6,7 @@ use mfm_machine::errors::StateError;
 use mfm_machine::hashing::{canonical_json_bytes, CanonicalJsonError};
 use mfm_machine::ids::StateId;
 use mfm_machine::io::IoProvider;
-use mfm_state_symbol::model::ObservationValueSourceRef;
+use mfm_portfolio_model::symbol::ObservationValueSourceRef;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;

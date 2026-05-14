@@ -1,23 +1,31 @@
 use std::sync::Arc;
 
 use mfm_machine::ids::{ContextKey, FactKey, OpId, OpPath};
-use mfm_portfolio_config::builtin_dispatch_catalog;
+use mfm_portfolio_model::portfolio::PortfolioConfig;
+use mfm_portfolio_plan::{
+    CompiledObservationBatch, DispatchCatalog, DispatchCatalogParts, PortfolioExecutionSpec,
+    SourcePreparationTask, SubjectResolutionTask, ValuationTask, ViewPinTask,
+};
 use mfm_sdk::errors::SdkError;
 use mfm_sdk::ids::PortKey;
 use mfm_sdk::op::{
     leaf_state_id, leaf_state_node, DynOperation, LeafOpSpec, OpInterface, Operation, PlannedOp,
     PlannedOpKind,
 };
+use mfm_state_aave_v3::portfolio::plan_adapters::{
+    AaveDebtDispatchObservationRuntimeAdapter, AaveReserveDispatchObservationRuntimeAdapter,
+};
 use mfm_state_common::errors as op_errors;
+use mfm_state_portfolio::dispatch_adapters::{
+    BitcoinAddressSubjectRuntimeAdapter, BitcoinUtxoSetObservationRuntimeAdapter,
+    BitcoinViewRuntimeAdapter, DerivedUnitPriceRuntimeAdapter, EvmAddressSubjectRuntimeAdapter,
+    EvmErc20BalanceObservationRuntimeAdapter, EvmNativeBalanceObservationRuntimeAdapter,
+    EvmOracleDirectPriceRuntimeAdapter, EvmViewRuntimeAdapter, FixedUnitPriceRuntimeAdapter,
+};
 use mfm_state_portfolio::execution_states::{
     AssembleSnapshotState, MergeObservationsState, ObserveCompiledBatchState,
     PinExecutionViewsState, PrepareExecutionSourcesState, ProjectReportState, ResolveSubjectsState,
     ResolveValuationInputsState,
-};
-use mfm_state_portfolio::model::PortfolioConfig;
-use mfm_state_portfolio::plan::{
-    CompiledObservationBatch, DispatchCatalog, PortfolioExecutionSpec, SourcePreparationTask,
-    SubjectResolutionTask, ValuationTask, ViewPinTask,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -65,7 +73,34 @@ fn local_slot(prefix: &str, port: &str) -> ContextKey {
 }
 
 fn semantic_catalog() -> Result<Arc<DispatchCatalog>, SdkError> {
-    builtin_dispatch_catalog().map(Arc::new).map_err(|err| {
+    DispatchCatalog::new(DispatchCatalogParts {
+        observation_planners: Vec::new(),
+        valuation_planners: Vec::new(),
+        subject_planners: Vec::new(),
+        view_planners: Vec::new(),
+        subject_runtimes: vec![
+            Arc::new(EvmAddressSubjectRuntimeAdapter),
+            Arc::new(BitcoinAddressSubjectRuntimeAdapter),
+        ],
+        view_runtimes: vec![
+            Arc::new(EvmViewRuntimeAdapter),
+            Arc::new(BitcoinViewRuntimeAdapter),
+        ],
+        valuation_runtimes: vec![
+            Arc::new(FixedUnitPriceRuntimeAdapter),
+            Arc::new(EvmOracleDirectPriceRuntimeAdapter),
+            Arc::new(DerivedUnitPriceRuntimeAdapter),
+        ],
+        observation_runtimes: vec![
+            Arc::new(EvmNativeBalanceObservationRuntimeAdapter),
+            Arc::new(EvmErc20BalanceObservationRuntimeAdapter),
+            Arc::new(BitcoinUtxoSetObservationRuntimeAdapter),
+            Arc::new(AaveReserveDispatchObservationRuntimeAdapter),
+            Arc::new(AaveDebtDispatchObservationRuntimeAdapter),
+        ],
+    })
+    .map(Arc::new)
+    .map_err(|err| {
         sdk_input_error(
             "semantic_catalog_construction_failed",
             format!("failed to construct semantic adapter catalog: {err}"),
