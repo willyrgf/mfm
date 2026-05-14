@@ -409,8 +409,8 @@ mod tests {
     #[test]
     fn signed_tx_capability_debug_redacts_raw_transaction() {
         let raw_tx_hex = "0xdeadbeefcafebabe";
-        let capability = SignedTxCapabilityV1::from_raw_tx_hex(raw_tx_hex)
-            .expect("capability from raw tx");
+        let capability =
+            SignedTxCapabilityV1::from_raw_tx_hex(raw_tx_hex).expect("capability from raw tx");
         let rendered = format!("{capability:?}");
 
         assert!(rendered.contains("REDACTED"));
