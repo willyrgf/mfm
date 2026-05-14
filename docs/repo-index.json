@@ -104,11 +104,6 @@
       "kind": "rust-cargo"
     },
     {
-      "name": "local-fs",
-      "path": "crates/collectors/local-fs/Cargo.toml",
-      "kind": "rust-cargo"
-    },
-    {
       "name": "local-keystore",
       "path": "crates/collectors/local-keystore/Cargo.toml",
       "kind": "rust-cargo"

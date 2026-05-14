@@ -2022,15 +2022,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mfm-collectors-local-fs"
-version = "0.1.0"
-dependencies = [
- "mfm-machine",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "mfm-collectors-local-keystore"
 version = "0.1.0"
 dependencies = [
@@ -2522,7 +2513,6 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "hex",
- "mfm-collectors-local-fs",
  "mfm-machine",
  "serde",
  "serde_json",
