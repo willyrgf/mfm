@@ -17,10 +17,9 @@ hex = { workspace = true }
 
 mfm-machine = { path = "../../machine", version = "0.1.0" }
 mfm-collectors-rpc-control = { path = "../../collectors/rpc-control", version = "0.1.0" }
+mfm-portfolio-model = { path = "../../portfolio/model", version = "0.1.0" }
+mfm-portfolio-plan = { path = "../../portfolio/plan", version = "0.1.0" }
 mfm-state-common = { path = "../common", version = "0.1.0" }
-mfm-state-portfolio = { path = "../portfolio", version = "0.1.0" }
-mfm-state-symbol = { path = "../symbol", version = "0.1.0" }
-mfm-state-wallet = { path = "../wallet", version = "0.1.0" }
 mfm-evm-core = { path = "../../evm-core", version = "0.1.0" }
 mfm-evm-runtime = { path = "../../evm-runtime", version = "0.1.0" }
 

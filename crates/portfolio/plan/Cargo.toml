@@ -1,0 +1,16 @@
+[package]
+name = "mfm-portfolio-plan"
+version = "0.1.0"
+edition = "2021"
+description = "Semantic portfolio planning vocabulary and adapter catalog"
+repository = "https://github.com/willyrgf/mfm"
+license = "MIT"
+
+[dependencies]
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+mfm-machine = { path = "../../machine", version = "0.1.0" }
+mfm-portfolio-model = { path = "../model", version = "0.1.0" }

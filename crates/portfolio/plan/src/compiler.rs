@@ -1,6 +1,5 @@
-use mfm_state_symbol::model::ValuationSourceRegistry;
-
-use crate::model::PortfolioConfig;
+use mfm_portfolio_model::portfolio::PortfolioConfig;
+use mfm_portfolio_model::symbol::ValuationSourceRegistry;
 
 use super::{DispatchCatalog, PlanningError, PortfolioExecutionSpec};
 

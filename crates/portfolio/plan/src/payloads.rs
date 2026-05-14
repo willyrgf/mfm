@@ -1,7 +1,7 @@
-use mfm_state_symbol::model::{
+use mfm_portfolio_model::symbol::{
     PriceSourceRef, SymbolKind, SymbolRole, ValuationSourceReaderConfig,
 };
-use mfm_state_wallet::model::{WalletCapabilities, WalletImplementationConfig};
+use mfm_portfolio_model::wallet::{WalletCapabilities, WalletImplementationConfig};
 use serde::{Deserialize, Serialize};
 
 /// Planner/runtime payload for one EVM subject locator.

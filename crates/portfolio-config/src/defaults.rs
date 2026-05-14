@@ -1,24 +1,15 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
-use mfm_state_aave_v3::portfolio::model::{
-    decode_aave_protocol_position_config, is_aave_protocol_position,
-    validate_aave_portfolio_config, AaveProtocolPositionConfig,
+use mfm_portfolio_model::portfolio::{
+    validate_portfolio_bundle, NetworkConfig, NetworkFamilyConfig,
 };
-use mfm_state_aave_v3::portfolio::plan_adapters::{
-    AaveDebtDispatchObservationRuntimeAdapter, AaveReserveDispatchObservationRuntimeAdapter,
+use mfm_portfolio_model::symbol::{
+    BalanceReaderConfig, PriceSourceRef, QuoteValuationConfig, SymbolConfig, SymbolKind,
+    ValuationReaderConfig, ValuationSourceConfig, ValuationSourceReaderConfig,
 };
-use mfm_state_aave_v3::portfolio::plan_payloads::{
-    AaveDebtObservationPayload, AaveReserveObservationPayload,
-};
-use mfm_state_portfolio::dispatch_adapters::{
-    BitcoinAddressSubjectRuntimeAdapter, BitcoinUtxoSetObservationRuntimeAdapter,
-    BitcoinViewRuntimeAdapter, DerivedUnitPriceRuntimeAdapter, EvmAddressSubjectRuntimeAdapter,
-    EvmErc20BalanceObservationRuntimeAdapter, EvmNativeBalanceObservationRuntimeAdapter,
-    EvmOracleDirectPriceRuntimeAdapter, EvmViewRuntimeAdapter, FixedUnitPriceRuntimeAdapter,
-};
-use mfm_state_portfolio::model::{validate_portfolio_bundle, NetworkConfig, NetworkFamilyConfig};
-use mfm_state_portfolio::plan::{
+use mfm_portfolio_model::wallet::{WalletConfig, WalletSubjectKind};
+use mfm_portfolio_plan::{
     AdapterId, BitcoinRoutePolicy, BitcoinSubjectLocator, BitcoinUtxoSetObservationPayload,
     CompiledObservationBatch, CompiledObservationBinding, DerivedUnitPriceValuationPayload,
     DirectPriceSourcePayload, DirectPriceValuationPayload, DispatchAdapter, DispatchCatalog,
@@ -32,11 +23,13 @@ use mfm_state_portfolio::plan::{
     ValuationPlannerAdapter, ValuationTask, Venue, VenueId, ViewPinTask, ViewPlanRequest,
     ViewPlannerAdapter,
 };
-use mfm_state_symbol::model::{
-    BalanceReaderConfig, PriceSourceRef, QuoteValuationConfig, SymbolConfig, SymbolKind,
-    ValuationReaderConfig, ValuationSourceConfig, ValuationSourceReaderConfig,
+use mfm_state_aave_v3::portfolio::model::{
+    decode_aave_protocol_position_config, is_aave_protocol_position,
+    validate_aave_portfolio_config, AaveProtocolPositionConfig,
 };
-use mfm_state_wallet::model::{WalletConfig, WalletSubjectKind};
+use mfm_state_aave_v3::portfolio::plan_payloads::{
+    AaveDebtObservationPayload, AaveReserveObservationPayload,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -78,30 +71,14 @@ pub fn builtin_dispatch_catalog() -> Result<DispatchCatalog, DispatchCatalogErro
             Arc::new(EvmAddressSubjectPlannerAdapter),
             Arc::new(BitcoinAddressSubjectPlannerAdapter),
         ],
-        subject_runtimes: vec![
-            Arc::new(EvmAddressSubjectRuntimeAdapter),
-            Arc::new(BitcoinAddressSubjectRuntimeAdapter),
-        ],
+        subject_runtimes: Vec::new(),
         view_planners: vec![
             Arc::new(EvmViewPlannerAdapter),
             Arc::new(BitcoinViewPlannerAdapter),
         ],
-        view_runtimes: vec![
-            Arc::new(EvmViewRuntimeAdapter),
-            Arc::new(BitcoinViewRuntimeAdapter),
-        ],
-        valuation_runtimes: vec![
-            Arc::new(FixedUnitPriceRuntimeAdapter),
-            Arc::new(EvmOracleDirectPriceRuntimeAdapter),
-            Arc::new(DerivedUnitPriceRuntimeAdapter),
-        ],
-        observation_runtimes: vec![
-            Arc::new(EvmNativeBalanceObservationRuntimeAdapter),
-            Arc::new(EvmErc20BalanceObservationRuntimeAdapter),
-            Arc::new(BitcoinUtxoSetObservationRuntimeAdapter),
-            Arc::new(AaveReserveDispatchObservationRuntimeAdapter),
-            Arc::new(AaveDebtDispatchObservationRuntimeAdapter),
-        ],
+        view_runtimes: Vec::new(),
+        valuation_runtimes: Vec::new(),
+        observation_runtimes: Vec::new(),
     })
 }
 
@@ -1047,7 +1024,7 @@ fn build_observation_binding(
 ) -> CompiledObservationBinding {
     CompiledObservationBinding {
         binding_id: format!("binding.{}", target.target_id),
-        observation_key: mfm_state_portfolio::plan::ObservationKey {
+        observation_key: mfm_portfolio_plan::ObservationKey {
             subject_id: target.subject_id.clone(),
             network_view_id: target.network_view_id.clone(),
             instrument_id: position.instrument_id.clone(),
@@ -1290,9 +1267,7 @@ impl DispatchAdapter for EvmNativeBalanceObservationPlannerAdapter {
     }
 }
 
-impl mfm_state_portfolio::plan::ObservationPlannerAdapter
-    for EvmNativeBalanceObservationPlannerAdapter
-{
+impl mfm_portfolio_plan::ObservationPlannerAdapter for EvmNativeBalanceObservationPlannerAdapter {
     fn supports(&self, req: &ObservationPlanRequest<'_>) -> bool {
         req.subject.kind == SubjectKind::EvmAddress
             && req.network_view.family == NetworkFamily::Evm
@@ -1323,9 +1298,7 @@ impl DispatchAdapter for EvmErc20BalanceObservationPlannerAdapter {
     }
 }
 
-impl mfm_state_portfolio::plan::ObservationPlannerAdapter
-    for EvmErc20BalanceObservationPlannerAdapter
-{
+impl mfm_portfolio_plan::ObservationPlannerAdapter for EvmErc20BalanceObservationPlannerAdapter {
     fn supports(&self, req: &ObservationPlanRequest<'_>) -> bool {
         req.subject.kind == SubjectKind::EvmAddress
             && req.network_view.family == NetworkFamily::Evm
@@ -1356,9 +1329,7 @@ impl DispatchAdapter for BitcoinUtxoSetObservationPlannerAdapter {
     }
 }
 
-impl mfm_state_portfolio::plan::ObservationPlannerAdapter
-    for BitcoinUtxoSetObservationPlannerAdapter
-{
+impl mfm_portfolio_plan::ObservationPlannerAdapter for BitcoinUtxoSetObservationPlannerAdapter {
     fn supports(&self, req: &ObservationPlanRequest<'_>) -> bool {
         req.subject.kind == SubjectKind::BitcoinAddress
             && req.network_view.family == NetworkFamily::Bitcoin
@@ -1389,7 +1360,7 @@ impl DispatchAdapter for AaveReserveObservationPlannerAdapter {
     }
 }
 
-impl mfm_state_portfolio::plan::ObservationPlannerAdapter for AaveReserveObservationPlannerAdapter {
+impl mfm_portfolio_plan::ObservationPlannerAdapter for AaveReserveObservationPlannerAdapter {
     fn supports(&self, req: &ObservationPlanRequest<'_>) -> bool {
         req.subject.kind == SubjectKind::EvmAddress
             && req.network_view.family == NetworkFamily::Evm
@@ -1420,7 +1391,7 @@ impl DispatchAdapter for AaveDebtObservationPlannerAdapter {
     }
 }
 
-impl mfm_state_portfolio::plan::ObservationPlannerAdapter for AaveDebtObservationPlannerAdapter {
+impl mfm_portfolio_plan::ObservationPlannerAdapter for AaveDebtObservationPlannerAdapter {
     fn supports(&self, req: &ObservationPlanRequest<'_>) -> bool {
         req.subject.kind == SubjectKind::EvmAddress
             && req.network_view.family == NetworkFamily::Evm
@@ -1790,7 +1761,7 @@ mod tests {
         );
         assert_eq!(
             reserve_payload.projection.role,
-            mfm_state_symbol::model::SymbolRole::Collateral
+            mfm_portfolio_model::symbol::SymbolRole::Collateral
         );
         assert_eq!(reserve_payload.projection.decimals, Some(6));
         assert_eq!(reserve_payload.config.reserve_id, "usdc");
@@ -1861,7 +1832,7 @@ mod tests {
         );
         assert_eq!(
             debt_payload.projection.role,
-            mfm_state_symbol::model::SymbolRole::Debt
+            mfm_portfolio_model::symbol::SymbolRole::Debt
         );
         assert_eq!(
             debt_payload.config.debt_kind,

@@ -21,12 +21,12 @@ use mfm_machine::stores::StreamId;
 use mfm_portfolio_config::{
     PortfolioSnapshotBuildReport, PortfolioSnapshotBuiltConfig, PortfolioSnapshotCanonicalConfig,
 };
+use mfm_portfolio_model::portfolio::{
+    ExecutionAnchor, PortfolioQuoteTotal, PortfolioReport, PortfolioSnapshot,
+};
 use mfm_sdk::op::{CompositeOpSpec, PlannedOp, PlannedOpKind};
 use mfm_sdk::unstable::{context_value_with_slot_fallback, SdkPlanResolver};
 use mfm_state_common::test_support as op_test_support;
-use mfm_state_portfolio::model::{
-    ExecutionAnchor, PortfolioQuoteTotal, PortfolioReport, PortfolioSnapshot,
-};
 use tokio::sync::Mutex;
 
 const ERC20_DECIMALS_SELECTOR: &str = "0x313ce567";
@@ -872,13 +872,13 @@ async fn at_live_then_replay_determinism() {
     assert_eq!(report.wallet_summaries.len(), 2);
     let portfolio_usd = find_quote_total(
         &report.totals_by_quote,
-        mfm_state_symbol::model::QuoteCode::Usd,
+        mfm_portfolio_model::symbol::QuoteCode::Usd,
     );
     assert_eq!(portfolio_usd.assets_value_dec, "6010.000000000000000000");
     assert_eq!(portfolio_usd.net_value_dec, "6010.000000000000000000");
     let portfolio_btc = find_quote_total(
         &report.totals_by_quote,
-        mfm_state_symbol::model::QuoteCode::Btc,
+        mfm_portfolio_model::symbol::QuoteCode::Btc,
     );
     assert_eq!(portfolio_btc.assets_value_dec, "0.300500000000000000");
     assert_eq!(portfolio_btc.net_value_dec, "0.300500000000000000");
@@ -1053,7 +1053,7 @@ async fn mixed_evm_and_bitcoin_wallets_share_the_semantic_runtime() {
         .expect("bitcoin wallet");
     assert_eq!(
         btc_wallet.subject_kind,
-        mfm_state_wallet::model::WalletSubjectKind::BitcoinAddress
+        mfm_portfolio_model::wallet::WalletSubjectKind::BitcoinAddress
     );
     assert_eq!(btc_wallet.address, "1BoatSLRHtKNngkdXEeobR76b53LETtpyT");
     assert_eq!(btc_wallet.observations.len(), 1);
@@ -1071,7 +1071,7 @@ async fn mixed_evm_and_bitcoin_wallets_share_the_semantic_runtime() {
         .expect("ethereum wallet");
     assert_eq!(
         eth_wallet.subject_kind,
-        mfm_state_wallet::model::WalletSubjectKind::EvmAddress
+        mfm_portfolio_model::wallet::WalletSubjectKind::EvmAddress
     );
     assert_eq!(eth_wallet.observations.len(), 1);
 
@@ -1172,7 +1172,7 @@ async fn at_crash_resume_orphan_attempt_reuses_pinned_network_facts() {
     assert_eq!(report.error_count, 0);
     let portfolio_usd = find_quote_total(
         &report.totals_by_quote,
-        mfm_state_symbol::model::QuoteCode::Usd,
+        mfm_portfolio_model::symbol::QuoteCode::Usd,
     );
     assert_eq!(portfolio_usd.assets_value_dec, "6010.000000000000000000");
     assert_eq!(portfolio_usd.net_value_dec, "6010.000000000000000000");
@@ -1248,7 +1248,7 @@ async fn collects_aave_protocol_positions_through_the_op_boundary() {
             .find(|wallet| wallet.wallet_id == "wallet_supplier")
             .expect("supplier wallet report")
             .totals_by_quote,
-        mfm_state_symbol::model::QuoteCode::Usd,
+        mfm_portfolio_model::symbol::QuoteCode::Usd,
     );
     assert_eq!(supplier_usd.assets_value_dec, "1.500000");
     assert_eq!(supplier_usd.net_value_dec, "1.500000");
@@ -1259,14 +1259,14 @@ async fn collects_aave_protocol_positions_through_the_op_boundary() {
             .find(|wallet| wallet.wallet_id == "wallet_borrower")
             .expect("borrower wallet report")
             .totals_by_quote,
-        mfm_state_symbol::model::QuoteCode::Usd,
+        mfm_portfolio_model::symbol::QuoteCode::Usd,
     );
     assert_eq!(borrower_usd.collateral_value_dec, "140000.00000000");
     assert_eq!(borrower_usd.debt_value_dec, "0.750000");
     assert_eq!(borrower_usd.net_value_dec, "139999.25000000");
     let portfolio_usd = find_quote_total(
         &report.totals_by_quote,
-        mfm_state_symbol::model::QuoteCode::Usd,
+        mfm_portfolio_model::symbol::QuoteCode::Usd,
     );
     assert_eq!(portfolio_usd.assets_value_dec, "1.500000");
     assert_eq!(portfolio_usd.collateral_value_dec, "140000.00000000");
@@ -1299,7 +1299,7 @@ async fn collects_aave_protocol_positions_through_the_op_boundary() {
         .iter()
         .find(|observation| observation.symbol_id == "aave_v3.usdc.debt.ethereum-mainnet")
         .expect("debt observation");
-    assert_eq!(debt.role, mfm_state_symbol::model::SymbolRole::Debt);
+    assert_eq!(debt.role, mfm_portfolio_model::symbol::SymbolRole::Debt);
     assert_eq!(
         debt.metadata.get("debt_kind"),
         Some(&serde_json::json!("variable"))
@@ -1331,7 +1331,7 @@ async fn collects_aave_protocol_positions_through_the_op_boundary() {
 
 fn find_quote_total(
     totals: &[PortfolioQuoteTotal],
-    quote: mfm_state_symbol::model::QuoteCode,
+    quote: mfm_portfolio_model::symbol::QuoteCode,
 ) -> PortfolioQuoteTotal {
     totals
         .iter()

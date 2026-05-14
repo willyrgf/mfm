@@ -10,12 +10,12 @@ serde_json = { workspace = true }
 
 mfm-machine = { path = "../../machine" }
 mfm-portfolio-config = { path = "../../portfolio-config" }
+mfm-portfolio-model = { path = "../../portfolio/model" }
+mfm-portfolio-plan = { path = "../../portfolio/plan" }
 mfm-sdk = { path = "../../sdk" }
 mfm-state-aave-v3 = { path = "../../states/aave-v3" }
 mfm-state-common = { path = "../../states/common" }
 mfm-state-portfolio = { path = "../../states/portfolio" }
-mfm-state-symbol = { path = "../../states/symbol" }
-mfm-state-wallet = { path = "../../states/wallet" }
 
 [dev-dependencies]
 async-trait = { workspace = true }

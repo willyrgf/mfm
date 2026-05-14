@@ -2,8 +2,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 
 use mfm_evm_core::encoding::normalize_address;
-use mfm_state_portfolio::model::PortfolioConfig;
-use mfm_state_symbol::model::{
+use mfm_portfolio_model::portfolio::PortfolioConfig;
+use mfm_portfolio_model::symbol::{
     BalanceReaderConfig, QuoteCode, SymbolConfig, SymbolKind, SymbolRole,
 };
 use serde::{Deserialize, Serialize};
@@ -589,8 +589,8 @@ fn invalid_market(symbol: &SymbolConfig, reason: impl Into<String>) -> AavePortf
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mfm_state_portfolio::model::PortfolioConfig;
-    use mfm_state_symbol::model::{
+    use mfm_portfolio_model::portfolio::PortfolioConfig;
+    use mfm_portfolio_model::symbol::{
         BalanceReaderConfig, QuoteCode, QuoteValuationConfig, SymbolConfig, SymbolKind, SymbolRole,
         SymbolValuationConfig, ValuationReaderConfig,
     };
