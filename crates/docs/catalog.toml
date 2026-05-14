@@ -15,7 +15,7 @@ name = "mfm-machine-derive"
 workspace_path = "crates/machine-derive"
 visibility = "public"
 section = "engine_sdk"
-summary = "Proc-macro helpers for machine types."
+summary = "Reserved proc-macro boundary for future machine/state helpers."
 docs_policy = "docs-rs"
 umbrella_policy = "when-published"
 

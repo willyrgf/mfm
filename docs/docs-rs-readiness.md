@@ -46,6 +46,8 @@ Current near-term release chain:
 
 Notes:
 
+- `mfm-machine-derive` is intentionally empty today: it reserves the public proc-macro package
+  boundary for future machine/state helpers and should not grow placeholder macro APIs.
 - `cargo publish --dry-run` for a crate with `path + version` dependencies still expects the versioned upstream crate to exist on crates.io. A dry-run failure like `no matching package named 'mfm-machine' found` is expected until the earlier publish step has completed.
 - Use `cargo check -p <crate> --lib` for local compile validation before the upstream versions exist in the registry.
 - Use `cargo package --allow-dirty --list -p <crate>` when you want to inspect the files that would be packaged without requiring the upstream versions to exist in the registry.
