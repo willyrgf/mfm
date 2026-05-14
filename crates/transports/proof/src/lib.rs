@@ -1,8 +1,9 @@
 #![allow(clippy::disallowed_methods, clippy::disallowed_types)]
-//! Minimal proof transport used by proof-oriented examples and tests.
+//! Minimal proof transport used by proof-oriented acceptance examples and tests.
 //!
 //! This transport keeps the `proof` namespace group wired into Live IO without introducing
-//! external dependencies.
+//! external dependencies. The typed request/response contract stays in `mfm-collectors-proof`;
+//! this crate owns only the live deterministic demo behavior.
 //!
 //! # Examples
 //!
