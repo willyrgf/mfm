@@ -2,7 +2,13 @@
 //! Typed local keystore collectors.
 //!
 //! This crate defines typed adapters over the generic `IoCall` surface for local keystore flows.
-//! It intentionally does NOT perform IO itself.
+//! It intentionally does NOT perform IO itself. It owns the stable local-keystore request/report
+//! DTOs plus pure transaction input parsing helpers, while live filesystem, prompt, password,
+//! unlock, and signing behavior stays in `mfm-transports-local-keystore`.
+//!
+//! Requests contain opaque local resource handles instead of local paths, labels, passwords,
+//! private keys, mnemonics, or raw signed transactions. Keep new request/report fields
+//! non-secret and canonical-JSON-safe because they are used for fact-key derivation.
 #![warn(missing_docs)]
 
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
