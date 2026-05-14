@@ -9,8 +9,8 @@ use zeroize::Zeroizing;
 use mfm_machine::ids::{FactKey, StateId};
 use mfm_state_common::errors as op_errors;
 
-use crate::dcv as shared_dcv;
 use crate::rpc::normalize_quantity_hex;
+use mfm_evm_dcv_model as shared_dcv;
 
 /// Schema version for [`TxIntentV1`].
 pub const TX_INTENT_SCHEMA_VERSION_V1: u32 = 1;

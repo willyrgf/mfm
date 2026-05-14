@@ -9,8 +9,8 @@ use mfm_state_common::errors as op_errors;
 use mfm_state_common::rpc as op_rpc;
 use zeroize::Zeroizing;
 
-use crate::dcv as shared_dcv;
 use crate::tx_intent::{PreparedTxIntentV1, TxIntentV1};
+use mfm_evm_dcv_model as shared_dcv;
 
 /// Normalizes an RPC hex quantity into canonical lowercase `0x` form.
 pub fn normalize_quantity_hex(raw: &str, message: &'static str) -> Result<String, StateError> {

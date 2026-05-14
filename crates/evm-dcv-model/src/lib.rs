@@ -1,6 +1,6 @@
-//! Deploy/configure/validate helpers shared by reusable EVM runtime states.
+//! Deploy/configure/validate model and ABI preparation helpers.
 //!
-//! This module owns the pure data-shaping layer behind the EVM write-path states:
+//! This crate owns the pure data-shaping layer behind EVM deploy/configure/validate workflows:
 //!
 //! - contract artifact parsing
 //! - ABI-based calldata encoding
@@ -10,11 +10,11 @@
 //! # Examples
 //!
 //! ```rust
-//! use mfm_evm_runtime::dcv::{
+//! use mfm_evm_dcv_model::{
 //!     prepare_validate_assertions, BlockTag, EventAssertionConfig, ReadAssertionConfig,
 //! };
 //!
-//! let abi = mfm_evm_runtime::dcv::parse_abi(&serde_json::json!([
+//! let abi = mfm_evm_dcv_model::parse_abi(&serde_json::json!([
 //!     {
 //!         "type": "function",
 //!         "name": "owner",

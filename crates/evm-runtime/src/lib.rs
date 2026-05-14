@@ -3,20 +3,18 @@
 #![warn(missing_docs)]
 //! Reusable EVM execution helpers and runtime states.
 //!
-//! This crate holds the shared deploy/configure/validate helpers and runtime-facing EVM states
-//! used by thin operation crates.
+//! This crate holds runtime-facing EVM states used by thin operation crates. Pure
+//! deploy/configure/validate models and ABI preparation helpers live in `mfm-evm-dcv-model`.
 //!
 //! # Examples
 //!
 //! ```rust
-//! use mfm_evm_runtime::dcv::BlockTag;
+//! use mfm_evm_dcv_model::BlockTag;
 //!
 //! let _tag = BlockTag::Tag("latest".to_string());
 //! ```
 /// Generic compiled/deployed contract-set manifests.
 pub mod contract_set;
-/// Shared deploy/configure/validate helpers and manifest adapters.
-pub mod dcv;
 /// JSON-RPC helpers used by reusable EVM states.
 pub mod rpc;
 /// Reusable EVM read and write state implementations.

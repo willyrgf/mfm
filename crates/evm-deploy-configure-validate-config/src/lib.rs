@@ -53,7 +53,7 @@ use std::path::Path;
 
 use mfm_authored_config::parse_authored_config_with_hint;
 pub use mfm_authored_config::AuthoredConfigFormat;
-use mfm_evm_runtime::dcv::{
+use mfm_evm_dcv_model::{
     AbiArgumentValue, ConfigureCallConfig, ContractArtifactConfig, EventAssertionConfig,
     ReadAssertionConfig,
 };

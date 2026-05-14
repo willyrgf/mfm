@@ -24,8 +24,8 @@ use crate::contract_set::{
     CompiledContractSetManifest, DeployedContractSetEntry, DeployedContractSetManifest,
     DEPLOYED_CONTRACT_SET_KIND,
 };
-use crate::dcv as shared_dcv;
 use crate::rpc as evm_rpc;
+use mfm_evm_dcv_model as shared_dcv;
 
 const KEY_COMPILED_CONTRACT_SET: &str = "compiled_contract_set";
 const KEY_PENDING_DEPLOYMENTS: &str = "contract_set_pending_deployments";
