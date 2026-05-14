@@ -95,7 +95,7 @@ Ops stay thin and focus on graph composition and config validation. Most are sti
 | `mfm-collectors-local-keystore` | Local keystore collector interfaces. | pending | `crates/collectors/local-keystore` |
 | `mfm-collectors-nix` | Nix evaluation collector interfaces. | pending | `crates/collectors/nix` |
 | `mfm-collectors-nix-exec` | Nix execution collector implementation. | pending | `crates/collectors/nix-exec` |
-| `mfm-collectors-proof` | Proof collector interfaces and payloads. | pending | `crates/collectors/proof` |
+| `mfm-collectors-proof` | Typed proof collector interfaces and payloads with no live IO. | pending | `crates/collectors/proof` |
 | `mfm-collectors-rpc-control` | Typed `rpc.control` adapters for managed EVM RPC calls. | pending | `crates/collectors/rpc-control` |
 
 ## Transports
@@ -105,7 +105,7 @@ Ops stay thin and focus on graph composition and config validation. Most are sti
 | `mfm-transports-local-evm` | Local EVM signing and transaction transport. | `crates/transports/local-evm` |
 | `mfm-transports-local-fs` | Local filesystem transport helpers. | `crates/transports/local-fs` |
 | `mfm-transports-local-keystore` | Local keystore-backed transport helpers. | `crates/transports/local-keystore` |
-| `mfm-transports-proof` | Proof transport helpers. | `crates/transports/proof` |
+| `mfm-transports-proof` | Acceptance/demo proof live transport helpers. | `crates/transports/proof` |
 | `mfm-transports-rpc-control` | Managed `rpc.control` transport over the internal EVM executor. | `crates/transports/rpc-control` |
 
 ## Binaries And Tooling
