@@ -35,14 +35,14 @@ use mfm_collectors_rpc_control::{
     parse_u64_hex_value, EvmBroadcastRawTransactionResponse, PrepareSourcesResponse,
     PreparedSourceSummary, RpcControlRequest, NAMESPACE_RPC_CONTROL,
 };
-use mfm_control_plane_postgres::{
-    rebuild_rpc_source_state, rebuild_source_pool_state, ControlPlanePostgresStore,
-    RpcSourceObservedRecord, RpcSourceOutcome, RpcSourceProbeKind, RpcSourceProbedRecord,
-    RpcSourceRecord, RpcSourceRef, RpcSourceState, SourcePoolCatalogDeclaredRecord,
-    SourcePoolCatalogSnapshot, SourcePoolCatalogSource, SourcePoolMembershipDeclaredRecord,
-    SourcePoolRankedRecord, SourcePoolRecord, SourcePoolRef, SourcePoolState,
-    SOURCE_POOL_CATALOG_SCHEMA_VERSION,
+use mfm_control_plane_model::{
+    rebuild_rpc_source_state, rebuild_source_pool_state, RpcSourceObservedRecord, RpcSourceOutcome,
+    RpcSourceProbeKind, RpcSourceProbedRecord, RpcSourceRecord, RpcSourceRef, RpcSourceState,
+    SourcePoolCatalogDeclaredRecord, SourcePoolCatalogSnapshot, SourcePoolCatalogSource,
+    SourcePoolMembershipDeclaredRecord, SourcePoolRankedRecord, SourcePoolRecord, SourcePoolRef,
+    SourcePoolState, SOURCE_POOL_CATALOG_SCHEMA_VERSION,
 };
+use mfm_control_plane_postgres::ControlPlanePostgresStore;
 use mfm_machine::errors::{ErrorCategory, ErrorInfo, IoError, StorageError};
 use mfm_machine::ids::ErrorCode;
 use mfm_machine::io::IoCall;

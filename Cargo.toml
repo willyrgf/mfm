@@ -17,6 +17,7 @@ members = [
 	"crates/collectors/nix-exec",
 	"crates/collectors/proof",
 	"crates/collectors/rpc-control",
+	"crates/control-plane/model",
 	"crates/core",
 	"crates/docs",
 	"crates/evm-core",
