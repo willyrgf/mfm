@@ -285,6 +285,19 @@ Owns primitives and security-sensitive keystore/crypto code.
 Owns pure deploy/configure/validate models and ABI preparation helpers. Runtime states, ops,
 transports, storages, and `crates/machine` must not be dependencies of this crate.
 
+### EVM Ownership Map
+EVM code follows a model/runtime/transport split:
+- `crates/evm-core/` owns pure ABI, hex, RLP, and transaction support primitives.
+- `crates/evm-dcv-model/` owns pure deploy/configure/validate models and calldata preparation.
+- `crates/collectors/local-evm/` owns the typed `local.evm.*` signer IO client and request/response
+  contract over `IoProvider`.
+- `crates/transports/local-evm/` owns live local signing, private-key environment handling, and
+  zeroized secret material.
+- `crates/evm-runtime/` owns reusable EVM read/write states, `rpc.control` helpers, signed
+  transaction intent recording, protected raw-transaction capabilities, and managed broadcast/read
+  behavior.
+- EVM op crates own graph assembly only.
+
 ### `bin/cli/` and `bin/rest-api/`
 Own transport adaptation only:
 - parse requests
