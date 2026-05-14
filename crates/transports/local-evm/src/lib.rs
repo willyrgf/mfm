@@ -564,6 +564,29 @@ mod tests {
     }
 
     #[test]
+    fn invalid_signing_key_env_error_omits_env_name_and_value() {
+        let env_name = "MFM_TEST_LOCAL_SIGNING_KEY_SECRET_ERROR";
+        let env_value = "not-a-valid-private-key-secret";
+        std::env::set_var(env_name, env_value);
+
+        let err = signing_key_from_env_name_hex(&hex::encode(env_name.as_bytes()))
+            .expect_err("invalid signing key must fail");
+        assert_eq!(err.code, "invalid_signing_key_env");
+
+        match err.into_io() {
+            IoError::Other(info) => {
+                let rendered = format!("{info:?}");
+                assert!(!rendered.contains(env_name));
+                assert!(!rendered.contains(env_value));
+                assert!(info.details.is_none());
+            }
+            other => panic!("unexpected io error: {other:?}"),
+        }
+
+        std::env::remove_var(env_name);
+    }
+
+    #[test]
     fn evm_signer_address_returns_derived_address() {
         let env_name = "MFM_TEST_LOCAL_SIGNING_KEY_DERIVE_ADDRESS";
         std::env::set_var(
