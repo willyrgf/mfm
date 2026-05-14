@@ -56,6 +56,15 @@ docs_policy = "repo-only"
 umbrella_policy = "always"
 
 [[packages]]
+name = "mfm-evm-dcv-model"
+workspace_path = "crates/evm-dcv-model"
+visibility = "public"
+section = "core"
+summary = "Pure EVM deploy/configure/validate model and ABI preparation helpers."
+docs_policy = "repo-only"
+umbrella_policy = "always"
+
+[[packages]]
 name = "mfm_core"
 workspace_path = "crates/core"
 visibility = "public"

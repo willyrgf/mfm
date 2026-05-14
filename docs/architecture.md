@@ -281,6 +281,10 @@ the generic `StreamStore` trait for v1.
 ### `crates/core/`
 Owns primitives and security-sensitive keystore/crypto code.
 
+### `crates/evm-dcv-model`
+Owns pure deploy/configure/validate models and ABI preparation helpers. Runtime states, ops,
+transports, storages, and `crates/machine` must not be dependencies of this crate.
+
 ### `bin/cli/` and `bin/rest-api/`
 Own transport adaptation only:
 - parse requests

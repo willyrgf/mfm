@@ -5,6 +5,7 @@ edition = "2021"
 description = "Pure deploy/configure/validate model and ABI preparation helpers"
 repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
+readme = "README.md"
 
 [dependencies]
 alloy-primitives = { workspace = true }
