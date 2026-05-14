@@ -507,6 +507,25 @@ impl StreamBackedControlPlaneStore {
             .map(SourcePoolRecord::to_new_stream_record)
             .collect::<Result<Vec<_>, _>>()
             .map_err(io_from_storage)?;
+        let mut validated_state = self
+            .source_pool_state(pool_ref)
+            .await?
+            .unwrap_or_else(|| SourcePoolState::new(pool_ref.clone()));
+        if validated_state.head_seq != expected_seq {
+            return Err(io_other(
+                "control_plane_concurrency",
+                ErrorCategory::Storage,
+                true,
+                "source_pool head seq did not match expected seq",
+            ));
+        }
+        let mut seq = expected_seq;
+        for record in &records {
+            seq = seq.saturating_add(1);
+            validated_state.apply_record(seq, record).map_err(|err| {
+                io_projection_invalid("control_plane_record_invalid", stream_id.as_str(), err)
+            })?;
+        }
         let head_seq = self
             .streams
             .append(StreamAppend::new(
@@ -2249,6 +2268,32 @@ mod tests {
         }
     }
 
+    fn source_pool_ref_for_tests() -> SourcePoolRef {
+        SourcePoolRef::new("shared", "ethereum-mainnet", DEFAULT_POOL_KIND)
+            .expect("valid source pool ref")
+    }
+
+    fn source_pool_catalog_record(pool_ref: &SourcePoolRef) -> SourcePoolRecord {
+        let catalog_snapshot = SourcePoolCatalogSnapshot {
+            schema_version: SOURCE_POOL_CATALOG_SCHEMA_VERSION,
+            control_scope: pool_ref.control_scope().to_string(),
+            network_id: pool_ref.network_id().to_string(),
+            pool_kind: pool_ref.pool_kind().to_string(),
+            sources: vec![SourcePoolCatalogSource {
+                id: "source-1".to_string(),
+                kind: "local".to_string(),
+                require_get_proof_probe: false,
+            }],
+            preferred_source_ids: vec!["source-1".to_string()],
+        };
+        let catalog_fingerprint = catalog_snapshot.fingerprint().expect("catalog fingerprint");
+        SourcePoolRecord::CatalogDeclared(SourcePoolCatalogDeclaredRecord {
+            declared_at_ms: 1,
+            catalog_fingerprint,
+            catalog_snapshot,
+        })
+    }
+
     #[test]
     fn bootstrap_source_debug_redacts_rpc_url_and_authorization() {
         let source = RpcControlBootstrapSource {
@@ -2817,6 +2862,49 @@ mod tests {
             prepared.available_source_ids,
             vec!["arb_primary".to_string()]
         );
+    }
+
+    #[tokio::test]
+    async fn stream_backed_source_pool_rejects_invalid_projection_append_before_durable_write() {
+        let streams = Arc::new(MemStreamStore::new());
+        let store = StreamBackedControlPlaneStore::new(streams.clone());
+        let pool_ref = source_pool_ref_for_tests();
+        let stream_id = pool_ref.stream_id();
+
+        let declared = store
+            .append_source_pool_records(&pool_ref, 0, vec![source_pool_catalog_record(&pool_ref)])
+            .await
+            .expect("catalog declaration append");
+        assert_eq!(declared.head_seq, 1);
+
+        let err = store
+            .append_source_pool_records(
+                &pool_ref,
+                1,
+                vec![SourcePoolRecord::MembershipDeclared(
+                    SourcePoolMembershipDeclaredRecord {
+                        declared_at_ms: 2,
+                        member_source_ids: vec!["missing-source".to_string()],
+                    },
+                )],
+            )
+            .await
+            .expect_err("membership outside catalog must fail before append");
+
+        assert_eq!(io_error_code(&err), "control_plane_record_invalid");
+        assert_eq!(streams.head_seq(&stream_id).await.expect("head seq"), 1);
+        let records = streams
+            .read_range(&stream_id, 1, None)
+            .await
+            .expect("stream records");
+        assert_eq!(records.len(), 1);
+        let state = store
+            .source_pool_state(&pool_ref)
+            .await
+            .expect("source pool state")
+            .expect("declared state");
+        assert_eq!(state.head_seq, 1);
+        assert!(state.member_source_ids.is_empty());
     }
 
     async fn broadcast_with_mode(
