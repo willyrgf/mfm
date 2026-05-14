@@ -54,7 +54,7 @@ REST `/v1/runs/start` and feature `run.start` require tagged request envelopes
 
 | Op ID | Version | Owner | Purpose | Primary states | Entry points |
 |---|---|---|---|---|---|
-| `proof` | `v1` | `crates/ops/proof-op` | Determinism and resume acceptance workflow | `ProofReadState`, `ProofApplySideEffectState`, `WriteOutputState` | `mfm run start`, feature `run.start` |
+| `proof` | `v1` | `crates/ops/proof-op` | Determinism and resume acceptance workflow | `ProofReadState`, `ProofApplySideEffectState`, `AssembleOutputState` | `mfm run start`, feature `run.start` |
 | `keystore_import` | `v1` | `crates/ops/keystore-admin-op` | Import a key into the keystore | `KeystoreImportState` | `mfm keystore import`, feature `run.start` |
 | `keystore_list` | `v1` | `crates/ops/keystore-admin-op` | List keystore entries | `KeystoreListState` | `mfm keystore list`, feature `run.start` |
 | `keystore_delete` | `v1` | `crates/ops/keystore-admin-op` | Delete a keystore entry | `KeystoreDeleteState` | `mfm keystore delete`, feature `run.start` |
@@ -114,7 +114,7 @@ assemble domain-specific outputs rather than reusable execution primitives.
 
 | Owner | State type | Why still local |
 |---|---|---|
-| `crates/ops/proof-op` | `WriteOutputState` | Domain-specific output artifact for the proof acceptance workflow |
+| `crates/ops/proof-op` | `AssembleOutputState` | Domain-specific output artifact for the proof acceptance workflow |
 
 ## Update Policy
 
