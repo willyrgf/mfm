@@ -121,6 +121,7 @@ Supported public root `op_id` values for `/v1/runs/start` and feature `run.start
 - `keystore_tx_sign`
 - `evm_read`
 - `evm_contract_from_nix`
+- `evm_deploy_contract_set`
 - `evm_deploy`
 - `evm_configure`
 - `evm_validate`
