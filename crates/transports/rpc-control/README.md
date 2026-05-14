@@ -5,6 +5,7 @@ Live `rpc.control` transport for managed EVM RPC routing.
 This crate is the runtime bridge between:
 
 - the typed caller-facing `mfm-collectors-rpc-control` client
+- the backend-neutral `mfm-control-plane-model` records and projections
 - the durable Postgres control-plane store
 - the existing `mfm-collectors-evm-jsonrpc-http` executor
 

@@ -265,11 +265,16 @@ Owns external data collection and normalization adapters.
 ### `crates/transports/*`
 Owns local/internal live transport factories that are not external collectors.
 
+### `crates/control-plane/model`
+Owns backend-neutral `rpc_source:*` and `source_pool:*` refs, stream-family records, non-secret
+catalog snapshots, projection state, and rebuild logic.
+
 ### `crates/storages/*`
 Owns stream/artifact persistence implementations only.
-Correctness-critical control-plane coordination uses a sibling Postgres storage crate
-(`crates/storages/control-plane-postgres`) that writes control-plane stream-family records into the
-shared append-only stream tables and updates projection tables in the same SQL transaction.
+Correctness-critical control-plane coordination uses the shared model crate plus a sibling Postgres
+storage crate (`crates/storages/control-plane-postgres`) that writes control-plane stream-family
+records into the shared append-only stream tables and updates projection tables in the same SQL
+transaction.
 This boundary must not push control-plane semantics into `crates/machine`, and it does not widen
 the generic `StreamStore` trait for v1.
 
