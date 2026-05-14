@@ -58,7 +58,6 @@ Generated from `docs/repo-index.json`.
 - `crates/storages/artifact-store-s3/Cargo.toml` (rust-cargo)
 - `crates/storages/artifact-store-secret/Cargo.toml` (rust-cargo)
 - `crates/storages/control-plane-postgres/Cargo.toml` (rust-cargo)
-- `crates/storages/indexer/Cargo.toml` (rust-cargo)
 - `crates/storages/stream-store-mem/Cargo.toml` (rust-cargo)
 - `crates/storages/stream-store-postgres/Cargo.toml` (rust-cargo)
 - `crates/tools/publish-docs/Cargo.toml` (rust-cargo)

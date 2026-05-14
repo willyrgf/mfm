@@ -272,15 +272,6 @@ docs_policy = "repo-only"
 umbrella_policy = "always"
 
 [[packages]]
-name = "mfm-indexer"
-workspace_path = "crates/storages/indexer"
-visibility = "public"
-section = "storages"
-summary = "Projection/indexing support."
-docs_policy = "repo-only"
-umbrella_policy = "always"
-
-[[packages]]
 name = "mfm-collectors-btc-jsonrpc-http"
 workspace_path = "crates/collectors/btc-jsonrpc-http"
 visibility = "public"

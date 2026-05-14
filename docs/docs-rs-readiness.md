@@ -153,7 +153,6 @@ All 6 crates have good crate-level docs but lack item-level documentation.
 | `artifact-store-fs` | Good | `FsArtifactStore`, `new()` |
 | `artifact-store-s3` | Good | `S3ArtifactStore`, `new()`, `from_env()` |
 | `artifact-store-secret` | Good | `SecretKey` (all methods), `SecretArtifactStore` (all methods) |
-| `indexer` | Good | `ProjectionIndexer`, `new()` |
 
 ---
 
