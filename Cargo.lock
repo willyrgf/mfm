@@ -2341,6 +2341,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "mfm-portfolio-model"
+version = "0.1.0"
+dependencies = [
+ "bs58",
+ "mfm-evm-core",
+ "mfm-machine",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "mfm-publish-docs"
 version = "0.1.0"
 dependencies = [

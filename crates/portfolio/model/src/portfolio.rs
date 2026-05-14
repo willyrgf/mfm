@@ -1,18 +1,18 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
-use mfm_collectors_rpc_control::DEFAULT_CONTROL_SCOPE;
 use mfm_machine::hashing::{canonical_json_bytes, CanonicalJsonError};
-use mfm_state_symbol::model::{
-    validate_symbol_config, validate_valuation_source_registry, Observation, PriceSourceRef,
-    QuoteCode, SymbolConfig, SymbolConfigError, ValuationReaderConfig, ValuationSourceRegistry,
-    ValuationSourceRegistryError,
-};
-use mfm_state_wallet::model::{
-    validate_wallet_config, WalletConfig, WalletConfigError, WalletSubjectKind,
-};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
+
+use crate::symbol::{
+    validate_symbol_config, validate_valuation_source_registry, BalanceReaderConfig, Observation,
+    PriceSourceRef, QuoteCode, SymbolConfig, SymbolConfigError, SymbolKind, ValuationReaderConfig,
+    ValuationSourceConfig, ValuationSourceRegistry, ValuationSourceRegistryError,
+};
+use crate::wallet::{validate_wallet_config, WalletConfig, WalletConfigError, WalletSubjectKind};
+
+const DEFAULT_CONTROL_SCOPE: &str = "shared";
 
 fn default_control_scope() -> String {
     DEFAULT_CONTROL_SCOPE.to_string()
@@ -787,8 +787,8 @@ fn validate_symbol_for_network_family(
         && !matches!(
             (&symbol.kind, &symbol.balance_reader),
             (
-                mfm_state_symbol::model::SymbolKind::NativeBalance,
-                mfm_state_symbol::model::BalanceReaderConfig::NativeBalance {}
+                SymbolKind::NativeBalance,
+                BalanceReaderConfig::NativeBalance {}
             )
         )
     {
@@ -876,7 +876,7 @@ fn validate_price_source_registry_match(
     symbol: &SymbolConfig,
     quote: QuoteCode,
     source_ref: &PriceSourceRef,
-    sources_by_id: &BTreeMap<String, &mfm_state_symbol::model::ValuationSourceConfig>,
+    sources_by_id: &BTreeMap<String, &ValuationSourceConfig>,
 ) -> Result<(), PortfolioConfigError> {
     let Some(source_cfg) = sources_by_id.get(&source_ref.source_id) else {
         return Err(PortfolioConfigError::UnknownValuationSource {
@@ -929,14 +929,12 @@ fn json_object_value(map: &BTreeMap<String, Value>) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::symbol::{
+        ObservationAnchor, ObservationQuantity, ObservationSource, ObservationValue,
+        ObservationValueSourceRef, SymbolConfigError, SymbolRole,
+    };
+    use crate::wallet::{WalletConfigError, WalletImplementationConfig};
     use mfm_machine::hashing::CanonicalJsonError;
-    use mfm_state_symbol::model::{
-        BalanceReaderConfig, ObservationQuantity, ObservationSource, ObservationValue,
-        ObservationValueSourceRef, SymbolConfigError,
-    };
-    use mfm_state_wallet::model::{
-        WalletConfigError, WalletImplementationConfig, WalletSubjectKind,
-    };
     use serde_json::json;
 
     #[test]
@@ -1532,8 +1530,8 @@ mod tests {
             wallet_id: wallet_id.to_string(),
             symbol_id: symbol_id.to_string(),
             display_symbol: Some("ETH".to_string()),
-            kind: mfm_state_symbol::model::SymbolKind::NativeBalance,
-            role: mfm_state_symbol::model::SymbolRole::Native,
+            kind: SymbolKind::NativeBalance,
+            role: SymbolRole::Native,
             network_id: if symbol_id.contains("arbitrum") {
                 "arbitrum-mainnet".to_string()
             } else {
@@ -1560,7 +1558,7 @@ mod tests {
                         } else {
                             "ethereum-mainnet".to_string()
                         },
-                        anchor: mfm_state_symbol::model::ObservationAnchor::Evm {
+                        anchor: ObservationAnchor::Evm {
                             chain_id: if symbol_id.contains("arbitrum") {
                                 42161
                             } else {
@@ -1578,7 +1576,7 @@ mod tests {
                 } else {
                     "ethereum-mainnet".to_string()
                 },
-                anchor: mfm_state_symbol::model::ObservationAnchor::Evm {
+                anchor: ObservationAnchor::Evm {
                     chain_id: if symbol_id.contains("arbitrum") {
                         42161
                     } else {
