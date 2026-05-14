@@ -2268,6 +2268,7 @@ dependencies = [
 name = "mfm-op-keystore"
 version = "0.1.0"
 dependencies = [
+ "mfm-collectors-local-keystore",
  "mfm-machine",
  "mfm-sdk",
  "mfm-state-common",

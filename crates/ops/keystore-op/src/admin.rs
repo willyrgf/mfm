@@ -35,7 +35,7 @@ use mfm_state_keystore::states::admin::{
 use mfm_state_keystore::tx::output_context_key;
 
 /// Re-exported keystore admin report and enum types used by callers.
-pub use mfm_state_keystore::states::admin::{
+pub use mfm_collectors_local_keystore::{
     KeystoreDeleteReport, KeystoreImportReport, KeystoreImportType, KeystoreListKey,
     KeystoreListReport, KeystoreListSortBy,
 };
