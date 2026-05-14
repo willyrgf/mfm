@@ -101,6 +101,7 @@ use mfm_portfolio_config::{
     AuthoredConfigFormat as PortfolioAuthoredConfigFormat, PortfolioSnapshotBuildReport,
     PortfolioSnapshotBuiltConfig, PortfolioSnapshotConfigError,
 };
+use mfm_portfolio_model::portfolio::PortfolioReport;
 use mfm_sdk::launcher::{LaunchPipeline, RunLauncher};
 use mfm_sdk::op::OperationRegistry;
 use mfm_sdk::pipeline::{Pipeline, PipelinePlanner};
@@ -109,7 +110,6 @@ use mfm_sdk::unstable::{
     single_op_pipeline, ContextSnapshotLoadError, DefaultPipelinePlanner, DefaultRunLauncher,
     HashMapOperationRegistry, SdkPlanResolver, SingleOpReportError, SingleOpReportRequest,
 };
-use mfm_state_portfolio::model::PortfolioReport;
 use mfm_stream_store_postgres::PostgresStreamStore;
 use mfm_transports_exec::ExecProgramTransportFactory;
 use mfm_transports_local_evm::LocalEvmIoTransportFactory;

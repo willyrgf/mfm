@@ -109,10 +109,10 @@ mod tests {
     use super::*;
 
     use mfm_app::{ErrorClass, PortfolioSnapshotResponse};
-    use mfm_state_portfolio::model::{
+    use mfm_portfolio_model::portfolio::{
         ExecutionAnchor, NetworkPin, PortfolioQuoteTotal, PortfolioReport, WalletReport,
     };
-    use mfm_state_symbol::model::QuoteCode;
+    use mfm_portfolio_model::symbol::QuoteCode;
     use serde_json::json;
     use tempfile::Builder;
 

@@ -1886,9 +1886,8 @@ dependencies = [
  "mfm-artifact-store-fs",
  "mfm-machine",
  "mfm-op-portfolio-tracker",
+ "mfm-portfolio-model",
  "mfm-sdk",
- "mfm-state-portfolio",
- "mfm-state-symbol",
  "mfm-stream-store-mem",
  "mfm-stream-store-postgres",
  "mfm_core",
@@ -1921,9 +1920,8 @@ dependencies = [
  "mfm-op-portfolio-tracker",
  "mfm-op-proof",
  "mfm-portfolio-config",
+ "mfm-portfolio-model",
  "mfm-sdk",
- "mfm-state-portfolio",
- "mfm-state-symbol",
  "mfm-stream-store-postgres",
  "mfm-transports-exec",
  "mfm-transports-local-evm",
@@ -2486,29 +2484,6 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tokio",
-]
-
-[[package]]
-name = "mfm-state-symbol"
-version = "0.1.0"
-dependencies = [
- "mfm-evm-core",
- "mfm-machine",
- "serde",
- "serde_json",
- "thiserror",
-]
-
-[[package]]
-name = "mfm-state-wallet"
-version = "0.1.0"
-dependencies = [
- "bs58",
- "mfm-evm-core",
- "mfm-machine",
- "serde",
- "serde_json",
- "thiserror",
 ]
 
 [[package]]

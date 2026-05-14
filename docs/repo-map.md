@@ -54,8 +54,6 @@ Generated from `docs/repo-index.json`.
 - `crates/states/common/Cargo.toml` (rust-cargo)
 - `crates/states/keystore/Cargo.toml` (rust-cargo)
 - `crates/states/portfolio/Cargo.toml` (rust-cargo)
-- `crates/states/symbol/Cargo.toml` (rust-cargo)
-- `crates/states/wallet/Cargo.toml` (rust-cargo)
 - `crates/storages/artifact-store-fs/Cargo.toml` (rust-cargo)
 - `crates/storages/artifact-store-s3/Cargo.toml` (rust-cargo)
 - `crates/storages/artifact-store-secret/Cargo.toml` (rust-cargo)

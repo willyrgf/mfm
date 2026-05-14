@@ -259,16 +259,6 @@
       "kind": "rust-cargo"
     },
     {
-      "name": "symbol",
-      "path": "crates/states/symbol/Cargo.toml",
-      "kind": "rust-cargo"
-    },
-    {
-      "name": "wallet",
-      "path": "crates/states/wallet/Cargo.toml",
-      "kind": "rust-cargo"
-    },
-    {
       "name": "artifact-store-fs",
       "path": "crates/storages/artifact-store-fs/Cargo.toml",
       "kind": "rust-cargo"
