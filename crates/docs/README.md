@@ -30,7 +30,7 @@ The live runtime inventory still lives in the repository docs:
 | Package | Role | docs.rs | Workspace Path |
 | --- | --- | --- | --- |
 | `mfm-machine` | State-machine runtime, execution plans, events, and recovery contracts. | <https://docs.rs/mfm-machine> | `crates/machine` |
-| `mfm-machine-derive` | Proc-macro helpers for machine types. | <https://docs.rs/mfm-machine-derive> | `crates/machine-derive` |
+| `mfm-machine-derive` | Reserved proc-macro boundary for future machine/state helpers. | <https://docs.rs/mfm-machine-derive> | `crates/machine-derive` |
 | `mfm-machine-test-support` | Contract tests and test observability helpers. | <https://docs.rs/mfm-machine-test-support> | `crates/machine-test-support` |
 | `mfm-sdk` | Run launch, resume, and registry helpers. | <https://docs.rs/mfm-sdk> | `crates/sdk` |
 
