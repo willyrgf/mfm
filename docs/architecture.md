@@ -304,8 +304,15 @@ Runtime wiring rules:
 - Deterministic computed outputs should use `IoProvider::record_value(...)` for fact recording instead of passthrough transport no-ops.
 
 ### Semantic adapter system (portfolio domain)
-The portfolio domain (`crates/states/portfolio/`) uses a semantic adapter architecture:
-- `SemanticCatalog` — deterministic adapter registry with exactly-one-match selection for observation, subject, view, and valuation planning.
+The portfolio domain is split into pure model, pure planning vocabulary, and reusable runtime
+surfaces:
+- `crates/portfolio/model/` (`mfm-portfolio-model`) owns canonical portfolio, symbol, and wallet
+  schema plus validation helpers.
+- `crates/portfolio/plan/` (`mfm-portfolio-plan`) owns semantic plan data structures and
+  `DispatchCatalog`, the deterministic adapter registry with exactly-one-match selection for
+  observation, subject, view, and valuation planning.
+- `crates/states/portfolio/` (`mfm-state-portfolio`) owns only reusable runtime adapters and the
+  production state family used by thin portfolio ops.
 - `AdapterId` — transparent string newtype using the slash convention `"capability/family/implementation"` (canonical v1 contract). Use `AdapterId::parse_parts()` for structured access.
 - `VenueId` — transparent string newtype. Venue metadata lives on the separate `Venue` struct.
 - Fixed semantic state family — 8 states (PrepareExecutionSources through ProjectReport) form the runtime topology; variation enters through adapters, not state branching.

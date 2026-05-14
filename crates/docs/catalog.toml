@@ -101,6 +101,24 @@ docs_policy = "docs-rs"
 umbrella_policy = "when-published"
 
 [[packages]]
+name = "mfm-portfolio-model"
+workspace_path = "crates/portfolio/model"
+visibility = "public"
+section = "core"
+summary = "Pure canonical portfolio, symbol, and wallet models."
+docs_policy = "repo-only"
+umbrella_policy = "always"
+
+[[packages]]
+name = "mfm-portfolio-plan"
+workspace_path = "crates/portfolio/plan"
+visibility = "public"
+section = "core"
+summary = "Pure semantic portfolio planning vocabulary and adapter catalog."
+docs_policy = "repo-only"
+umbrella_policy = "always"
+
+[[packages]]
 name = "mfm-state-common"
 workspace_path = "crates/states/common"
 visibility = "public"
@@ -141,7 +159,7 @@ name = "mfm-state-portfolio"
 workspace_path = "crates/states/portfolio"
 visibility = "public"
 section = "states"
-summary = "Reusable portfolio-domain schema and validation for canonical snapshots."
+summary = "Reusable portfolio-domain runtime states and adapters for canonical snapshots."
 docs_policy = "docs-rs"
 umbrella_policy = "when-published"
 
