@@ -55,10 +55,10 @@ REST `/v1/runs/start` and feature `run.start` require tagged request envelopes
 | Op ID | Version | Owner | Purpose | Primary states | Entry points |
 |---|---|---|---|---|---|
 | `proof` | `v1` | `crates/ops/proof-op` | Determinism and resume acceptance workflow | `ProofReadState`, `ProofApplySideEffectState`, `AssembleOutputState` | `mfm run start`, feature `run.start` |
-| `keystore_import` | `v1` | `crates/ops/keystore-admin-op` | Import a key into the keystore | `KeystoreImportState` | `mfm keystore import`, feature `run.start` |
-| `keystore_list` | `v1` | `crates/ops/keystore-admin-op` | List keystore entries | `KeystoreListState` | `mfm keystore list`, feature `run.start` |
-| `keystore_delete` | `v1` | `crates/ops/keystore-admin-op` | Delete a keystore entry | `KeystoreDeleteState` | `mfm keystore delete`, feature `run.start` |
-| `keystore_tx_sign` | `v1` | `crates/ops/keystore-tx-op` | Sign an EIP-1559 transaction via the keystore | `KeystoreTxSignState` | `mfm keystore tx-sign`, feature `run.start` |
+| `keystore_import` | `v1` | `crates/ops/keystore-op` | Import a key into the keystore | `KeystoreImportState` | `mfm keystore import`, feature `run.start` |
+| `keystore_list` | `v1` | `crates/ops/keystore-op` | List keystore entries | `KeystoreListState` | `mfm keystore list`, feature `run.start` |
+| `keystore_delete` | `v1` | `crates/ops/keystore-op` | Delete a keystore entry | `KeystoreDeleteState` | `mfm keystore delete`, feature `run.start` |
+| `keystore_tx_sign` | `v1` | `crates/ops/keystore-op` | Sign an EIP-1559 transaction via the keystore | `KeystoreTxSignState` | `mfm keystore tx-sign`, feature `run.start` |
 | `evm_read` | `v1` | `crates/ops/evm-read-op` | Low-level chain read op backed by the reusable `rpc.control` read states | EVM read state family | `mfm run start`, feature `run.start` |
 | `evm_contract_from_nix` | `v1` | `crates/ops/evm-write-op` | Adapt nix output into a contract artifact export | `NixArtifactToEvmContractState` | `mfm run start`, feature `run.start` |
 | `evm_deploy_contract_set` | `v1` | `crates/ops/evm-write-op` | Deploy a compiled contract-set manifest through signed raw transaction intents and emit a deployed manifest | `LoadCompiledContractSetState`, `DeployContractSetState`, `WaitForContractSetReceiptsState`, `CollectDeployedContractSetState`, `WriteDeployedContractSetState` | `mfm run start`, feature `run.start` |

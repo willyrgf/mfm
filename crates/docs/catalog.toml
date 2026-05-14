@@ -146,20 +146,11 @@ docs_policy = "docs-rs"
 umbrella_policy = "when-published"
 
 [[packages]]
-name = "mfm-op-keystore-admin"
-workspace_path = "crates/ops/keystore-admin-op"
+name = "mfm-op-keystore"
+workspace_path = "crates/ops/keystore-op"
 visibility = "public"
 section = "ops"
-summary = "Keystore admin planner."
-docs_policy = "repo-only"
-umbrella_policy = "always"
-
-[[packages]]
-name = "mfm-op-keystore-tx"
-workspace_path = "crates/ops/keystore-tx-op"
-visibility = "public"
-section = "ops"
-summary = "Keystore transaction planner."
+summary = "Keystore administration and transaction planners."
 docs_policy = "repo-only"
 umbrella_policy = "always"
 

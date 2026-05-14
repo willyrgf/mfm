@@ -21,7 +21,7 @@ pub mod presentation;
 mod support;
 
 const CLI_DEFAULT_LOG_FILTER: &str =
-    "warn,mfm_machine=error,mfm_app=error,mfm_op_keystore_tx=error,tower_http=error";
+    "warn,mfm_machine=error,mfm_app=error,mfm_op_keystore=error,tower_http=error";
 
 /// Runs the CLI entrypoint with stable observability defaults.
 pub async fn run() -> ! {

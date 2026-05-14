@@ -184,13 +184,8 @@
       "kind": "rust-cargo"
     },
     {
-      "name": "keystore-admin-op",
-      "path": "crates/ops/keystore-admin-op/Cargo.toml",
-      "kind": "rust-cargo"
-    },
-    {
-      "name": "keystore-tx-op",
-      "path": "crates/ops/keystore-tx-op/Cargo.toml",
+      "name": "keystore-op",
+      "path": "crates/ops/keystore-op/Cargo.toml",
       "kind": "rust-cargo"
     },
     {

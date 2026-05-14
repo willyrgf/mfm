@@ -1,12 +1,11 @@
 [package]
-name = "mfm-op-keystore-tx"
+name = "mfm-op-keystore"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
-hex = { workspace = true }
 
 mfm-machine = { path = "../../machine" }
 mfm-sdk = { path = "../../sdk" }

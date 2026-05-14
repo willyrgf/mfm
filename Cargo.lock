@@ -1916,8 +1916,7 @@ dependencies = [
  "mfm-op-evm-deploy-configure-validate",
  "mfm-op-evm-read",
  "mfm-op-evm-write",
- "mfm-op-keystore-admin",
- "mfm-op-keystore-tx",
+ "mfm-op-keystore",
  "mfm-op-nix-app",
  "mfm-op-portfolio-tracker",
  "mfm-op-proof",
@@ -2234,23 +2233,9 @@ dependencies = [
 ]
 
 [[package]]
-name = "mfm-op-keystore-admin"
+name = "mfm-op-keystore"
 version = "0.1.0"
 dependencies = [
- "mfm-machine",
- "mfm-sdk",
- "mfm-state-common",
- "mfm-state-keystore",
- "regex",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "mfm-op-keystore-tx"
-version = "0.1.0"
-dependencies = [
- "hex",
  "mfm-machine",
  "mfm-sdk",
  "mfm-state-common",

@@ -9,7 +9,7 @@
 //! # Examples
 //!
 //! ```rust
-//! use mfm_op_keystore_tx::{KeystoreTxSignOp, TX_SIGN_OP_ID};
+//! use mfm_op_keystore::tx::{KeystoreTxSignOp, TX_SIGN_OP_ID};
 //! use mfm_sdk::op::Operation;
 //!
 //! let op = KeystoreTxSignOp;
