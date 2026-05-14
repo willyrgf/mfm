@@ -1,0 +1,16 @@
+[package]
+name = "mfm-transports-exec"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+async-trait = { workspace = true }
+nix = { version = "0.31.1", features = ["fs"] }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+mfm-collectors-exec = { path = "../../collectors/exec" }
+mfm-machine = { path = "../../machine" }
+mfm-transports-process-exec = { path = "../process-exec" }
+
+[dev-dependencies]
+uuid = { version = "1.8.0", features = ["v4"] }

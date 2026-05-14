@@ -10,7 +10,6 @@ readme = "README.md"
 [dependencies]
 async-trait = { workspace = true }
 hex = { workspace = true }
-nix = { version = "0.31.1", features = ["fs"] }
 rand = { workspace = true }
 ring = { workspace = true }
 serde = { workspace = true }
@@ -19,4 +18,3 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 uuid = { version = "1.8.0", features = ["serde", "v4", "v5"] }
 zeroize = "1.7"
-mfm-transports-process-exec = { path = "../transports/process-exec" }

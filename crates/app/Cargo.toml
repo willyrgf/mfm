@@ -17,6 +17,7 @@ mfm-portfolio-config = { path = "../portfolio-config" }
 mfm-sdk = { path = "../sdk" }
 mfm-collectors-nix-exec = { path = "../collectors/nix-exec" }
 mfm-op-proof = { path = "../ops/proof-op" }
+mfm-transports-exec = { path = "../transports/exec" }
 mfm-transports-local-fs = { path = "../transports/local-fs" }
 mfm-transports-local-evm = { path = "../transports/local-evm" }
 mfm-transports-local-keystore = { path = "../transports/local-keystore" }

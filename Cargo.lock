@@ -1925,6 +1925,7 @@ dependencies = [
  "mfm-state-portfolio",
  "mfm-state-symbol",
  "mfm-stream-store-postgres",
+ "mfm-transports-exec",
  "mfm-transports-local-evm",
  "mfm-transports-local-fs",
  "mfm-transports-local-keystore",
@@ -2164,8 +2165,6 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "hex",
- "mfm-transports-process-exec",
- "nix",
  "rand 0.9.3",
  "ring",
  "serde",
@@ -2255,6 +2254,7 @@ dependencies = [
  "mfm-machine",
  "mfm-sdk",
  "mfm-state-common",
+ "mfm-transports-exec",
  "serde",
  "serde_json",
  "tokio",
@@ -2477,6 +2477,20 @@ dependencies = [
  "tokio",
  "tokio-postgres",
  "tracing",
+]
+
+[[package]]
+name = "mfm-transports-exec"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "mfm-collectors-exec",
+ "mfm-machine",
+ "mfm-transports-process-exec",
+ "nix",
+ "serde_json",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]
