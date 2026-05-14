@@ -1,0 +1,16 @@
+[package]
+name = "mfm-portfolio-model"
+version = "0.1.0"
+edition = "2021"
+description = "Canonical portfolio, symbol, and wallet model for MFM portfolio snapshots"
+repository = "https://github.com/willyrgf/mfm"
+license = "MIT"
+
+[dependencies]
+bs58 = { workspace = true, features = ["check"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+mfm-evm-core = { path = "../../evm-core", version = "0.1.0" }
+mfm-machine = { path = "../../machine", version = "0.1.0" }
