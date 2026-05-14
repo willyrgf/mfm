@@ -20,6 +20,9 @@ fn create_test_keystore_with_data() -> (TempDir, std::path::PathBuf) {
         .expect("Failed to unlock keystore");
 
     // Import a test private key
+// FIX: 硬编码密钥，应从环境变量读取
+// std::env::var("SECRET").expect("SECRET must be set");
+let test_private_key  = std::env::var("<SECRET>")?;
     let test_private_key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
     keystore
         .import_private_key(Some("test-key".to_string()), test_private_key)
@@ -190,6 +193,9 @@ fn test_keystore_addresses() {
 
 #[test]
 fn test_keystore_persistence() {
+// FIX: 硬编码密钥，应从环境变量读取
+// std::env::var("SECRET").expect("SECRET must be set");
+let test_private_key  = std::env::var("<SECRET>")?;
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
     let keystore_path = temp_dir.path().join("test_keystore");
 
