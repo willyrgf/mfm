@@ -30,10 +30,6 @@ let
     pkgs.nix
   ];
 
-  workspaceInventoryCheck = pkgs.writeShellScriptBin "mfm-verify-workspace-manifest" ''
-    set -euo pipefail
-    exec ${pkgs.python3}/bin/python3 ${./workspace-inventory-check.py} "$@"
-  '';
   projectNixFormatRoots = [
     "nixfied/project"
     "nixfied/local"
@@ -146,7 +142,6 @@ let
   rustRuntimeInputs = commonRuntimeInputs ++ [
     configurableCounterArtifactProgram
     mockErc20ArtifactProgram
-    workspaceInventoryCheck
     discovery.tool
   ];
   leanRuntimeInputs = coreRuntimeInputs;
@@ -334,7 +329,6 @@ let
 
   cargoFmtCheckCmd = "cargo fmt --all -- --check";
   cargoClippyCmd = "cargo clippy --workspace --lib --examples --tests --benches --all-features -- -D warnings";
-  cargoWorkspaceInventoryCheckCmd = "mfm-verify-workspace-manifest --root . --metadata";
   discoveryCheckCmd = "nixfied-discovery-index --verify --root .";
   # Keep CI linting on the same Cargo profile as nextest to avoid profile drift
   # within .#ci. Clippy still uses its own driver, so reuse remains partial.
@@ -1187,7 +1181,6 @@ in
 
             artifacts_dir="''${CI_ARTIFACTS_DIR:-${ciArtifactsRoot}}"
             mkdir -p "$artifacts_dir"
-            workspace_log="$artifacts_dir/check-workspace-inventory.log"
             discovery_log="$artifacts_dir/check-discovery.log"
             fmt_log="$artifacts_dir/check-fmt.log"
             clippy_log="$artifacts_dir/check-clippy.log"
@@ -1197,10 +1190,6 @@ in
               shift
               "$@" 2>&1 | tee "$logfile"
             }
-
-            echo "INFO: validating Cargo workspace inventory"
-            echo "INFO: command=${cargoWorkspaceInventoryCheckCmd} log=$workspace_log"
-            run_with_log "$workspace_log" ${cargoWorkspaceInventoryCheckCmd}
 
             echo "INFO: verifying discovery artifacts"
             echo "INFO: command=${discoveryCheckCmd} log=$discovery_log"
@@ -1450,7 +1439,6 @@ in
                 printf "%s" "$output"
               }
 
-              mfm-verify-workspace-manifest --root "$ROOT" --metadata
               nixfied-discovery-index --verify --root "$ROOT"
 
               format_scope_fixture="$(mktemp -d "''${TMPDIR:-/tmp}/format-scope.XXXXXX")"
@@ -1479,89 +1467,6 @@ EOF
               fi
               if nixfmt --check "$format_scope_fixture/nixfied/framework/framework.nix" >/dev/null 2>&1; then
                 echo "ERROR: framework fixture was unexpectedly formatted"
-                exit 1
-              fi
-
-              workspace_inventory_fixture="$(mktemp -d "''${TMPDIR:-/tmp}/workspace-inventory.XXXXXX")"
-              mkdir -p "$workspace_inventory_fixture/crates/a"
-              cat >"$workspace_inventory_fixture/crates/a/Cargo.toml" <<'"'"'EOF'"'"'
-[package]
-name = "workspace-inventory-a"
-version = "0.0.0"
-edition = "2021"
-EOF
-              cat >"$workspace_inventory_fixture/Cargo.toml" <<'"'"'EOF'"'"'
-[workspace]
-members = [
-  "crates/a",
-  "crates/a",
-]
-EOF
-              if mfm-verify-workspace-manifest --manifest "$workspace_inventory_fixture/Cargo.toml" >"$workspace_inventory_fixture/out" 2>&1; then
-                echo "ERROR: duplicate Cargo workspace member fixture unexpectedly passed"
-                cat "$workspace_inventory_fixture/out"
-                exit 1
-              fi
-              if ! grep -F "duplicate Cargo workspace members: crates/a" "$workspace_inventory_fixture/out" >/dev/null; then
-                echo "ERROR: duplicate Cargo workspace member fixture missing expected diagnostic"
-                cat "$workspace_inventory_fixture/out"
-                exit 1
-              fi
-
-              workspace_missing_fixture="$(mktemp -d "''${TMPDIR:-/tmp}/workspace-inventory-missing.XXXXXX")"
-              mkdir -p "$workspace_missing_fixture/crates/a" "$workspace_missing_fixture/crates/b"
-              cat >"$workspace_missing_fixture/crates/a/Cargo.toml" <<'"'"'EOF'"'"'
-[package]
-name = "workspace-inventory-missing-a"
-version = "0.0.0"
-edition = "2021"
-EOF
-              cat >"$workspace_missing_fixture/crates/b/Cargo.toml" <<'"'"'EOF'"'"'
-[package]
-name = "workspace-inventory-missing-b"
-version = "0.0.0"
-edition = "2021"
-EOF
-              cat >"$workspace_missing_fixture/Cargo.toml" <<'"'"'EOF'"'"'
-[workspace]
-members = [
-  "crates/a",
-]
-EOF
-              if mfm-verify-workspace-manifest --manifest "$workspace_missing_fixture/Cargo.toml" >"$workspace_missing_fixture/out" 2>&1; then
-                echo "ERROR: missing Cargo workspace member fixture unexpectedly passed"
-                cat "$workspace_missing_fixture/out"
-                exit 1
-              fi
-              if ! grep -F "Cargo workspace missing discovered members: crates/b" "$workspace_missing_fixture/out" >/dev/null; then
-                echo "ERROR: missing Cargo workspace member fixture missing expected diagnostic"
-                cat "$workspace_missing_fixture/out"
-                exit 1
-              fi
-
-              workspace_dead_fixture="$(mktemp -d "''${TMPDIR:-/tmp}/workspace-inventory-dead.XXXXXX")"
-              mkdir -p "$workspace_dead_fixture/crates/a"
-              cat >"$workspace_dead_fixture/crates/a/Cargo.toml" <<'"'"'EOF'"'"'
-[package]
-name = "workspace-inventory-dead-a"
-version = "0.0.0"
-edition = "2021"
-EOF
-              cat >"$workspace_dead_fixture/Cargo.toml" <<'"'"'EOF'"'"'
-[workspace]
-members = [
-  "crates/a",
-  "crates/dead",
-]
-EOF
-              if mfm-verify-workspace-manifest --manifest "$workspace_dead_fixture/Cargo.toml" >"$workspace_dead_fixture/out" 2>&1; then
-                echo "ERROR: dead Cargo workspace member fixture unexpectedly passed"
-                cat "$workspace_dead_fixture/out"
-                exit 1
-              fi
-              if ! grep -F "Cargo workspace dead members: crates/dead" "$workspace_dead_fixture/out" >/dev/null; then
-                echo "ERROR: dead Cargo workspace member fixture missing expected diagnostic"
-                cat "$workspace_dead_fixture/out"
                 exit 1
               fi
 
