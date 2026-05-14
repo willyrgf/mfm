@@ -279,11 +279,6 @@
       "kind": "rust-cargo"
     },
     {
-      "name": "indexer",
-      "path": "crates/storages/indexer/Cargo.toml",
-      "kind": "rust-cargo"
-    },
-    {
       "name": "stream-store-mem",
       "path": "crates/storages/stream-store-mem/Cargo.toml",
       "kind": "rust-cargo"

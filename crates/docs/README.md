@@ -79,7 +79,6 @@ Ops stay thin and focus on graph composition and config validation. Most are sti
 | `mfm-artifact-store-s3` | S3-backed artifact store. | `crates/storages/artifact-store-s3` |
 | `mfm-artifact-store-secret` | Secret-wrapping artifact store. | `crates/storages/artifact-store-secret` |
 | `mfm-control-plane-postgres` | Durable RPC control-plane stream/projection storage. | `crates/storages/control-plane-postgres` |
-| `mfm-indexer` | Projection/indexing support. | `crates/storages/indexer` |
 | `mfm-stream-store-mem` | In-memory stream store. | `crates/storages/stream-store-mem` |
 | `mfm-stream-store-postgres` | PostgreSQL stream store. | `crates/storages/stream-store-postgres` |
 

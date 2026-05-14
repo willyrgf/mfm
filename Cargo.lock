@@ -2140,13 +2140,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mfm-indexer"
-version = "0.1.0"
-dependencies = [
- "mfm-machine",
-]
-
-[[package]]
 name = "mfm-integration-tests"
 version = "0.1.0"
 dependencies = [
