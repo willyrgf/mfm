@@ -134,6 +134,11 @@
       "kind": "rust-cargo"
     },
     {
+      "name": "model",
+      "path": "crates/control-plane/model/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
       "name": "core",
       "path": "crates/core/Cargo.toml",
       "kind": "rust-cargo"

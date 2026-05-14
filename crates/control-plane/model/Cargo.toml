@@ -5,6 +5,7 @@ edition = "2021"
 description = "Backend-neutral control-plane stream-family model and projections"
 repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
+readme = "README.md"
 
 [dependencies]
 mfm-machine = { path = "../../machine", version = "0.1.0" }

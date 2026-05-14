@@ -1,6 +1,9 @@
 # mfm-control-plane-postgres
 
 PostgreSQL-backed control-plane storage for correctness-critical stream families and projections.
+Backend-neutral stream-family records and projection semantics live in `mfm-control-plane-model`;
+this crate owns only the SQL DDL, transactional appends, projection table updates, and database
+reads/writes.
 
 Current slice:
 - durable `rpc_source:*` stream-family appends

@@ -29,6 +29,7 @@ Generated from `docs/repo-index.json`.
 - `crates/collectors/nix/Cargo.toml` (rust-cargo)
 - `crates/collectors/proof/Cargo.toml` (rust-cargo)
 - `crates/collectors/rpc-control/Cargo.toml` (rust-cargo)
+- `crates/control-plane/model/Cargo.toml` (rust-cargo)
 - `crates/core/Cargo.toml` (rust-cargo)
 - `crates/docs/Cargo.toml` (rust-cargo)
 - `crates/evm-core/Cargo.toml` (rust-cargo)

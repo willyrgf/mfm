@@ -186,10 +186,13 @@ Canonical responsibilities:
 - `crates/core/`: primitives + security-sensitive keystore/crypto
 - `crates/collectors/*`: external data adapters
 - `crates/transports/*`: local/internal live transport factories
+- `crates/control-plane/model`: backend-neutral `rpc_source:*` and `source_pool:*`
+  stream-family records, typed refs, non-secret catalog snapshots, and projection rebuild logic
 - `crates/storages/*`: persistence implementations
-  - correctness-critical control-plane coordination uses a sibling Postgres storage crate
-    (`crates/storages/control-plane-postgres`) that writes control-plane stream families into the
-    shared append-only stream tables and updates its projection tables in the same SQL transaction
+  - correctness-critical control-plane coordination uses the shared model crate plus a sibling
+    Postgres storage crate (`crates/storages/control-plane-postgres`) that writes control-plane
+    stream families into the shared append-only stream tables and updates its projection tables in
+    the same SQL transaction
   - this does not move control-plane semantics into `crates/machine` or extend the generic
     `StreamStore` trait for v1
 - shared-state layer crates:

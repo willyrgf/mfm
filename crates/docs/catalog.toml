@@ -47,6 +47,15 @@ docs_policy = "docs-rs"
 umbrella_policy = "when-published"
 
 [[packages]]
+name = "mfm-control-plane-model"
+workspace_path = "crates/control-plane/model"
+visibility = "public"
+section = "core"
+summary = "Backend-neutral control-plane stream-family model and projections."
+docs_policy = "repo-only"
+umbrella_policy = "always"
+
+[[packages]]
 name = "mfm_core"
 workspace_path = "crates/core"
 visibility = "public"
