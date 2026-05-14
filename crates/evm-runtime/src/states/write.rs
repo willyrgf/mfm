@@ -22,8 +22,8 @@ use mfm_state_common::idempotency as op_idempotency;
 use mfm_state_common::rpc as op_rpc;
 use mfm_state_common::states::meta;
 
-use crate::dcv as shared_dcv;
 use crate::rpc as evm_rpc;
+use mfm_evm_dcv_model as shared_dcv;
 
 const KEY_NIX_RESULT: &str = "result";
 const KEY_CONTRACT_ARTIFACT: &str = "contract_artifact";

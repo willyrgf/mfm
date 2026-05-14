@@ -19,7 +19,7 @@ use mfm_machine::io::IoProvider;
 use mfm_state_common::errors::{state_error_with_state, state_from_io, state_unknown_msg};
 use serde_json::Value;
 
-use crate::dcv::normalize_address;
+use mfm_evm_dcv_model::normalize_address;
 
 /// Runtime output for one successfully resolved direct price source.
 #[derive(Clone, Debug, PartialEq, Eq)]

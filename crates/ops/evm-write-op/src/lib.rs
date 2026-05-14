@@ -36,7 +36,7 @@ use zeroize::Zeroizing;
 
 #[cfg(test)]
 use alloy_primitives::keccak256;
-use mfm_evm_runtime::dcv as shared_dcv;
+use mfm_evm_dcv_model as shared_dcv;
 use mfm_evm_runtime::states::contract_set::{
     validate_deploy_contract_set_config, CollectDeployedContractSetState,
     DeployContractSetState as SharedDeployContractSetState,

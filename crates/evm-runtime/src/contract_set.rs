@@ -10,7 +10,7 @@ use mfm_machine::errors::{ErrorCategory, StateError};
 use mfm_state_common::errors as op_errors;
 use serde::{Deserialize, Serialize};
 
-use crate::dcv::{self as shared_dcv, ContractArtifactConfig};
+use mfm_evm_dcv_model::{self as shared_dcv, ContractArtifactConfig};
 
 /// Kind string for compiled contract-set manifests.
 pub const COMPILED_CONTRACT_SET_KIND: &str = "evm_contract_set_compile_manifest_v1";

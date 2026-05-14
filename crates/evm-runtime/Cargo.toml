@@ -20,3 +20,4 @@ mfm-collectors-local-evm = { path = "../collectors/local-evm", version = "0.1.0"
 mfm-collectors-rpc-control = { path = "../collectors/rpc-control", version = "0.1.0" }
 mfm-state-common = { path = "../states/common", version = "0.1.0" }
 mfm-evm-core = { path = "../evm-core", version = "0.1.0" }
+mfm-evm-dcv-model = { path = "../evm-dcv-model", version = "0.1.0" }

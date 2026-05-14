@@ -2,7 +2,7 @@
 //!
 //! Use [`read`] for deterministic read-only RPC queries that normalize results into context. Use
 //! [`write`] for contract deployment, post-deploy configuration, and validation flows that depend
-//! on prepared artifacts and assertions from [`crate::dcv`].
+//! on prepared artifacts and assertions from `mfm-evm-dcv-model`.
 
 /// Reusable EVM contract-set deployment states.
 pub mod contract_set;
