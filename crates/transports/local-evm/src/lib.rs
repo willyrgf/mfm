@@ -3,42 +3,35 @@
 //!
 //! This crate exposes a `LiveIoTransportFactory` for the `local.evm.*` namespaces used by shared
 //! runtime states. The transport reads signing keys from the local environment and never persists
-//! the secret material itself.
+//! the secret material itself. State-facing typed requests live in `mfm-collectors-local-evm`.
 //!
 //! # Examples
 //!
 //! ```rust
 //! use mfm_machine::live_io::LiveIoTransportFactory;
-//! use mfm_transports_local_evm::{LocalEvmIoTransportFactory, LocalEvmSignLegacyCreateCall};
+//! use mfm_collectors_local_evm::NAMESPACE_LOCAL_EVM;
+//! use mfm_transports_local_evm::LocalEvmIoTransportFactory;
 //!
 //! let factory = LocalEvmIoTransportFactory;
-//! let call = LocalEvmSignLegacyCreateCall {
-//!     signing_key_env: "MFM_SIGNING_KEY".to_string(),
-//!     from: "0x0000000000000000000000000000000000000000".to_string(),
-//!     chain_id: 1,
-//!     nonce_hex: "0x0".to_string(),
-//!     gas_price_hex: "0x1".to_string(),
-//!     gas_limit_hex: "0x5208".to_string(),
-//!     value_hex: "0x0".to_string(),
-//!     data_hex: "0x".to_string(),
-//! };
 //!
-//! assert_eq!(factory.namespace_group(), "local.evm");
-//! assert_eq!(call.chain_id, 1);
+//! assert_eq!(factory.namespace_group(), NAMESPACE_LOCAL_EVM);
 //! ```
 #![warn(missing_docs)]
 
 use alloy_primitives::keccak256;
 use async_trait::async_trait;
 use k256::ecdsa::SigningKey;
+use mfm_collectors_local_evm::{
+    NAMESPACE_LOCAL_EVM, NAMESPACE_LOCAL_EVM_SIGNER_ADDRESS, NAMESPACE_LOCAL_EVM_SIGN_LEGACY_CALL,
+    NAMESPACE_LOCAL_EVM_SIGN_LEGACY_CREATE,
+};
 use mfm_evm_core::hex::{
     bytes_to_hex_prefixed, hex_to_bytes, normalize_hex_str, normalize_nonempty_hex_str,
 };
 use mfm_evm_core::rlp::{rlp_encode_list, trim_leading_zero_bytes, u128_to_min_be};
 use mfm_machine::errors::{ErrorCategory, ErrorInfo, IoError};
-use mfm_machine::hashing::{artifact_id_for_json, CanonicalJsonError};
-use mfm_machine::ids::{ErrorCode, FactKey, StateId};
-use mfm_machine::io::{IoCall, IoProvider};
+use mfm_machine::ids::ErrorCode;
+use mfm_machine::io::IoCall;
 use mfm_machine::live_io::{LiveIoEnv, LiveIoTransport, LiveIoTransportFactory};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
@@ -50,7 +43,7 @@ pub struct LocalEvmIoTransportFactory;
 
 impl LiveIoTransportFactory for LocalEvmIoTransportFactory {
     fn namespace_group(&self) -> &str {
-        "local.evm"
+        NAMESPACE_LOCAL_EVM
     }
 
     fn make(&self, _env: LiveIoEnv) -> Box<dyn LiveIoTransport> {
@@ -64,216 +57,15 @@ struct LocalEvmIoTransport;
 impl LiveIoTransport for LocalEvmIoTransport {
     async fn call(&mut self, call: IoCall) -> Result<serde_json::Value, IoError> {
         match call.namespace.as_str() {
-            "local.evm.signer_address" => handle_evm_signer_address(call.request),
-            "local.evm.sign_legacy_create" => handle_evm_sign_legacy_create(call.request),
-            "local.evm.sign_legacy_call" => handle_evm_sign_legacy_call(call.request),
+            NAMESPACE_LOCAL_EVM_SIGNER_ADDRESS => handle_evm_signer_address(call.request),
+            NAMESPACE_LOCAL_EVM_SIGN_LEGACY_CREATE => handle_evm_sign_legacy_create(call.request),
+            NAMESPACE_LOCAL_EVM_SIGN_LEGACY_CALL => handle_evm_sign_legacy_call(call.request),
             _ => Err(io_other(
                 "unknown_namespace",
                 ErrorCategory::Unknown,
                 "unknown local evm io namespace",
             )),
         }
-    }
-}
-
-/// Request shape for signing a legacy contract-creation transaction locally.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LocalEvmSignLegacyCreateCall {
-    /// Environment variable containing the private key hex.
-    pub signing_key_env: String,
-    /// Expected sender address for the signing key.
-    pub from: String,
-    /// Chain ID used for replay protection.
-    pub chain_id: u64,
-    /// Nonce encoded as a hex quantity.
-    pub nonce_hex: String,
-    /// Gas price encoded as a hex quantity.
-    pub gas_price_hex: String,
-    /// Gas limit encoded as a hex quantity.
-    pub gas_limit_hex: String,
-    /// Value encoded as a hex quantity.
-    pub value_hex: String,
-    /// Deployment calldata encoded as hex.
-    pub data_hex: String,
-}
-
-/// Request shape for signing a legacy contract call transaction locally.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LocalEvmSignLegacyCallCall {
-    /// Environment variable containing the private key hex.
-    pub signing_key_env: String,
-    /// Expected sender address for the signing key.
-    pub from: String,
-    /// Target address for the transaction.
-    pub to: String,
-    /// Chain ID used for replay protection.
-    pub chain_id: u64,
-    /// Nonce encoded as a hex quantity.
-    pub nonce_hex: String,
-    /// Gas price encoded as a hex quantity.
-    pub gas_price_hex: String,
-    /// Gas limit encoded as a hex quantity.
-    pub gas_limit_hex: String,
-    /// Value encoded as a hex quantity.
-    pub value_hex: String,
-    /// Call data encoded as hex.
-    pub data_hex: String,
-}
-
-/// Thin typed client for the `local.evm.*` helper namespaces.
-pub struct LocalEvmIoClient<'a> {
-    state_id: StateId,
-    io: &'a mut dyn IoProvider,
-}
-
-impl<'a> LocalEvmIoClient<'a> {
-    /// Creates a new local EVM client for the given state and IO provider.
-    pub fn new(state_id: StateId, io: &'a mut dyn IoProvider) -> Self {
-        Self { state_id, io }
-    }
-
-    fn fact_key(&self, purpose: &str, request: &serde_json::Value) -> Result<FactKey, IoError> {
-        let req_id = artifact_id_for_json(request).map_err(|e| match e {
-            CanonicalJsonError::FloatNotAllowed => io_other(
-                "local_request_not_canonical",
-                ErrorCategory::ParsingInput,
-                "local io request was not canonical-json-hashable (floats are forbidden)",
-            ),
-            CanonicalJsonError::SecretsNotAllowed => io_other(
-                "secrets_detected",
-                ErrorCategory::Unknown,
-                "local io request contained secrets (policy forbids persisting secrets)",
-            ),
-        })?;
-        Ok(FactKey(format!(
-            "mfm:local|state:{}|purpose:{purpose}|req:{}",
-            self.state_id.as_str(),
-            req_id.as_str()
-        )))
-    }
-
-    /// Resolves the signer address for a configured private-key environment variable.
-    pub async fn signer_address(&mut self, signing_key_env: &str) -> Result<String, IoError> {
-        let request = serde_json::json!({
-            "env_name_hex": hex::encode(signing_key_env.as_bytes()),
-        });
-        let fact_key = self.fact_key("resolve_signing_key_address", &request)?;
-        let result = self
-            .io
-            .call(IoCall {
-                namespace: "local.evm.signer_address".to_string(),
-                request,
-                fact_key: Some(fact_key),
-            })
-            .await?;
-        let address = result
-            .response
-            .get("address")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                io_other(
-                    "evm_response_invalid",
-                    ErrorCategory::ParsingInput,
-                    "local signer returned non-string address",
-                )
-            })?;
-
-        normalize_address(address).map_err(|_| {
-            io_other(
-                "evm_response_invalid",
-                ErrorCategory::ParsingInput,
-                "local signer returned invalid address",
-            )
-        })
-    }
-
-    /// Signs a legacy contract-creation transaction through the local transport.
-    pub async fn sign_legacy_create(
-        &mut self,
-        req: LocalEvmSignLegacyCreateCall,
-    ) -> Result<String, IoError> {
-        let request = serde_json::json!({
-            "env_name_hex": hex::encode(req.signing_key_env.as_bytes()),
-            "from": req.from,
-            "chain_id": req.chain_id,
-            "nonce_hex": req.nonce_hex,
-            "gas_price_hex": req.gas_price_hex,
-            "gas_limit_hex": req.gas_limit_hex,
-            "value_hex": req.value_hex,
-            "data_hex": req.data_hex,
-        });
-        let result = self
-            .io
-            .call(IoCall {
-                namespace: "local.evm.sign_legacy_create".to_string(),
-                request,
-                fact_key: None,
-            })
-            .await?;
-        let raw_tx_hex = result
-            .response
-            .get("raw_tx_hex")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                io_other(
-                    "evm_response_invalid",
-                    ErrorCategory::ParsingInput,
-                    "local signer returned non-string raw transaction",
-                )
-            })?;
-
-        normalize_hex_str(raw_tx_hex).map_err(|_| {
-            io_other(
-                "evm_response_invalid",
-                ErrorCategory::ParsingInput,
-                "local signer returned invalid raw transaction hex",
-            )
-        })
-    }
-
-    /// Signs a legacy contract call transaction through the local transport.
-    pub async fn sign_legacy_call(
-        &mut self,
-        req: LocalEvmSignLegacyCallCall,
-    ) -> Result<String, IoError> {
-        let request = serde_json::json!({
-            "env_name_hex": hex::encode(req.signing_key_env.as_bytes()),
-            "from": req.from,
-            "to": req.to,
-            "chain_id": req.chain_id,
-            "nonce_hex": req.nonce_hex,
-            "gas_price_hex": req.gas_price_hex,
-            "gas_limit_hex": req.gas_limit_hex,
-            "value_hex": req.value_hex,
-            "data_hex": req.data_hex,
-        });
-        let result = self
-            .io
-            .call(IoCall {
-                namespace: "local.evm.sign_legacy_call".to_string(),
-                request,
-                fact_key: None,
-            })
-            .await?;
-        let raw_tx_hex = result
-            .response
-            .get("raw_tx_hex")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                io_other(
-                    "evm_response_invalid",
-                    ErrorCategory::ParsingInput,
-                    "local signer returned non-string raw transaction",
-                )
-            })?;
-
-        normalize_hex_str(raw_tx_hex).map_err(|_| {
-            io_other(
-                "evm_response_invalid",
-                ErrorCategory::ParsingInput,
-                "local signer returned invalid raw transaction hex",
-            )
-        })
     }
 }
 
