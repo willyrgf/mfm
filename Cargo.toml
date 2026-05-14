@@ -28,7 +28,6 @@ members = [
 	"crates/authored-config",
 	"crates/evm-deploy-configure-validate-config",
 	"crates/portfolio-config",
-	"crates/publish-docs-config",
 	"crates/states/common",
 	"crates/states/keystore",
 	"crates/states/aave-v3",

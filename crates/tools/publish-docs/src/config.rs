@@ -1,40 +1,10 @@
-#![cfg_attr(test, allow(clippy::disallowed_methods, clippy::disallowed_types))]
-#![cfg_attr(not(test), deny(clippy::disallowed_methods, clippy::disallowed_types))]
-#![warn(missing_docs)]
-//! Shared authored and canonical config pipeline for `publish-docs`.
+//! Internal authored and canonical config pipeline for `publish-docs`.
 //!
 //! Transport boundaries load authored TOML or JSON into typed authored config and immediately
 //! canonicalize it before workspace-aware validation or plan building happens.
 //!
-//! This crate owns only format parsing and default materialization. Semantic validation against the
+//! This module owns only format parsing and default materialization. Semantic validation against the
 //! local workspace remains with the `mfm-publish-docs` workflow family.
-//!
-//! # Examples
-//!
-//! ```rust
-//! use mfm_authored_config::AuthoredConfigFormat;
-//! use mfm_publish_docs_config::{
-//!     canonicalize_desired_catalog_authored_config, parse_desired_catalog_authored_config,
-//! };
-//!
-//! let authored = parse_desired_catalog_authored_config(
-//!     r#"{
-//!         "catalog_version": 1,
-//!         "umbrella_package": "mfm-docs",
-//!         "packages": [{
-//!             "name": "mfm-docs",
-//!             "workspace_path": "crates/docs",
-//!             "visibility": "public",
-//!             "section": "binaries_tooling",
-//!             "summary": "Umbrella docs surface"
-//!         }]
-//!     }"#,
-//!     AuthoredConfigFormat::Json,
-//! )?;
-//! let canonical = canonicalize_desired_catalog_authored_config(authored)?;
-//! assert_eq!(canonical.packages[0].docs_policy, mfm_publish_docs_config::DocsPolicy::RepoOnly);
-//! # Ok::<(), Box<dyn std::error::Error>>(())
-//! ```
 
 use std::path::Path;
 

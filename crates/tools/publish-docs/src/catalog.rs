@@ -3,7 +3,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use mfm_publish_docs_config::{
+use crate::config::{
     canonicalize_desired_catalog_authored_config, canonicalize_publish_wave_authored_config,
     parse_desired_catalog_authored_config_with_hint, parse_publish_wave_authored_config_with_hint,
 };

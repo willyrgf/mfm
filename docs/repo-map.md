@@ -46,7 +46,6 @@ Generated from `docs/repo-index.json`.
 - `crates/ops/portfolio-tracker-op/Cargo.toml` (rust-cargo)
 - `crates/ops/proof-op/Cargo.toml` (rust-cargo)
 - `crates/portfolio-config/Cargo.toml` (rust-cargo)
-- `crates/publish-docs-config/Cargo.toml` (rust-cargo)
 - `crates/sdk/Cargo.toml` (rust-cargo)
 - `crates/states/aave-v3/Cargo.toml` (rust-cargo)
 - `crates/states/common/Cargo.toml` (rust-cargo)

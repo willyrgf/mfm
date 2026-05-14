@@ -17,7 +17,7 @@ toml = "0.8"
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter", "fmt", "json"] }
 
-mfm-publish-docs-config = { path = "../../publish-docs-config", version = "0.1.0" }
+mfm-authored-config = { path = "../../authored-config", version = "0.1.0" }
 
 [dev-dependencies]
 assert_cmd = "2.0"

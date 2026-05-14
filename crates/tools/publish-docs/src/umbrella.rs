@@ -252,7 +252,7 @@ mod tests {
     use semver::Version;
     use tempfile::tempdir;
 
-    use mfm_publish_docs_config::{
+    use crate::config::{
         canonicalize_desired_catalog_authored_config, parse_desired_catalog_authored_config,
         AuthoredConfigFormat,
     };

@@ -1,7 +1,8 @@
 use std::path::PathBuf;
 
-use mfm_publish_docs_config::{PublishDocsCatalogConfigError, PublishDocsWaveConfigError};
 use thiserror::Error;
+
+use crate::config::{PublishDocsCatalogConfigError, PublishDocsWaveConfigError};
 
 /// Top-level error type for the Phase-1 publish-docs tool.
 #[derive(Debug, Error)]

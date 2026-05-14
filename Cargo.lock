@@ -2336,7 +2336,7 @@ dependencies = [
  "anyhow",
  "assert_cmd",
  "clap",
- "mfm-publish-docs-config",
+ "mfm-authored-config",
  "predicates",
  "reqwest",
  "semver 1.0.26",
@@ -2349,17 +2349,6 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
-]
-
-[[package]]
-name = "mfm-publish-docs-config"
-version = "0.1.0"
-dependencies = [
- "mfm-authored-config",
- "serde",
- "serde_json",
- "thiserror",
- "toml",
 ]
 
 [[package]]
