@@ -279,6 +279,11 @@
       "kind": "rust-cargo"
     },
     {
+      "name": "exec",
+      "path": "crates/transports/exec/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
       "name": "local-evm",
       "path": "crates/transports/local-evm/Cargo.toml",
       "kind": "rust-cargo"
@@ -291,6 +296,11 @@
     {
       "name": "local-keystore",
       "path": "crates/transports/local-keystore/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "process-exec",
+      "path": "crates/transports/process-exec/Cargo.toml",
       "kind": "rust-cargo"
     },
     {

@@ -99,9 +99,11 @@ Ops stay thin and focus on graph composition and config validation. Most are sti
 
 | Package | Role | Workspace Path |
 | --- | --- | --- |
+| `mfm-transports-exec` | Live `exec` namespace transport for bounded local process execution. | `crates/transports/exec` |
 | `mfm-transports-local-evm` | Local EVM signing and transaction transport. | `crates/transports/local-evm` |
 | `mfm-transports-local-fs` | Local filesystem transport helpers. | `crates/transports/local-fs` |
 | `mfm-transports-local-keystore` | Local keystore-backed transport helpers. | `crates/transports/local-keystore` |
+| `mfm-transports-process-exec` | Bounded child-process execution helpers for live transports. | `crates/transports/process-exec` |
 | `mfm-transports-proof` | Acceptance/demo proof live transport helpers. | `crates/transports/proof` |
 | `mfm-transports-rpc-control` | Managed `rpc.control` transport over the internal EVM executor. | `crates/transports/rpc-control` |
 
