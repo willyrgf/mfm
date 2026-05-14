@@ -4,6 +4,15 @@ Reusable EVM runtime states for MFM workflows.
 
 This crate packages shared `State` implementations for on-chain reads and writes so ops can stay planning-only and binaries can stay transport-only.
 
+EVM ownership is split by boundary:
+
+- `mfm-evm-core` owns pure ABI, hex, RLP, and transaction support primitives.
+- `mfm-evm-dcv-model` owns pure deploy/configure/validate models and calldata preparation.
+- `mfm-collectors-local-evm` owns the typed `local.evm.*` signer IO client over `IoProvider`.
+- `mfm-transports-local-evm` owns live local signing, private-key environment handling, and zeroized secret material.
+- `mfm-evm-runtime` owns reusable EVM read/write states, `rpc.control` helpers, signed transaction intent recording, protected raw-transaction capabilities, and managed broadcast/read behavior.
+- EVM op crates own graph assembly only.
+
 Write states use durable signed transaction intents: they record non-secret `TxIntentV1` metadata
 as a normal fact, store the signed raw transaction bytes through the protected artifact path, and
 then broadcast the protected capability through `rpc.control`. Node-managed unsigned transaction

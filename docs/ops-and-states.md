@@ -96,6 +96,11 @@ runtime behavior reused by thin ops.
 Even under recursive op planning, these remain the runtime execution units after planner
 flattening.
 
+For EVM flows, pure primitives live in `crates/evm-core`, deploy/configure/validate schema and
+calldata preparation live in `crates/evm-dcv-model`, typed local signer IO lives in
+`crates/collectors/local-evm`, and live local signing remains in `crates/transports/local-evm`.
+The shared states below keep reusable EVM execution behavior in `crates/evm-runtime`.
+
 | Module | State types | Purpose | Used by built-in ops |
 |---|---|---|---|
 | `crates/states/common/src/states/nix.rs` | `NixExecState` | Execute a nix-resolved or pre-resolved program through the exec namespace, with optional runtime stdin handoff and non-secret environment overrides for compatibility backends | `nix_app` |
