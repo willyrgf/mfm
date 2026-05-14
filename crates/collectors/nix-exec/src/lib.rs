@@ -39,10 +39,10 @@ use mfm_machine::events::{Event, KernelEvent};
 use mfm_machine::ids::ErrorCode;
 use mfm_machine::io::IoCall;
 use mfm_machine::live_io::{LiveIoEnv, LiveIoTransport, LiveIoTransportFactory};
-use mfm_machine::process_exec::{
+use mfm_machine::stores::{ArtifactStore, StreamId, StreamStore};
+use mfm_transports_process_exec::{
     run_command, CollectedStream, ProcessRunError, ProcessRunResult, StreamLimit,
 };
-use mfm_machine::stores::{ArtifactStore, StreamId, StreamStore};
 
 /// Namespace group handled by the Nix flake transport factory.
 pub const NAMESPACE_NIX_EXEC: &str = "nix.exec";

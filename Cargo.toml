@@ -42,6 +42,7 @@ members = [
 	"crates/transports/local-evm",
 	"crates/transports/local-fs",
 	"crates/transports/local-keystore",
+	"crates/transports/process-exec",
 	"crates/transports/proof",
 	"crates/transports/rpc-control",
 	"crates/ops/keystore-op",
