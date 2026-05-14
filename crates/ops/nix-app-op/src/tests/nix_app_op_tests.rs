@@ -7,7 +7,6 @@ use std::collections::HashMap;
 use mfm_machine::context::DynContext;
 use mfm_machine::engine::{ExecutionEngine, RunPhase};
 use mfm_machine::errors::StateError;
-use mfm_machine::exec_transport::{ExecPolicy, ExecProgramTransportFactory};
 use mfm_machine::hashing::artifact_id_for_json;
 use mfm_machine::ids::ContextKey;
 use mfm_machine::io::IoCall;
@@ -23,6 +22,7 @@ use mfm_sdk::op::{leaf_state_node, LeafOpSpec, OpInterface, Operation, PlannedOp
 use mfm_sdk::pipeline::{Pipeline, PipelineStep};
 use mfm_sdk::unstable::SdkPlanResolver;
 use mfm_state_common::test_support as op_test_support;
+use mfm_transports_exec::{ExecPolicy, ExecProgramTransportFactory};
 use tokio::sync::Mutex;
 
 use mfm_collectors_nix_exec::{NixFlakePolicy, NixFlakeTransportFactory, NAMESPACE_NIX_EXEC};

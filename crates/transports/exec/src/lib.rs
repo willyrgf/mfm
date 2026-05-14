@@ -1,11 +1,22 @@
+#![warn(missing_docs)]
 //! Live IO transport for external program execution.
 //!
-//! This transport powers the `exec` namespace. It is NOT part of the stable API contract
-//! (Appendix C.1) and may change.
+//! This transport powers the `exec` namespace. State logic should use typed requests from
+//! `mfm-collectors-exec`; this crate owns only the live local process side effect.
 //!
 //! Security notes:
 //! - Request payloads are not persisted by the runtime, but MUST still be treated as sensitive.
 //! - Errors MUST NOT echo stdout/stderr or request payloads (avoid accidental secret leakage).
+//!
+//! # Examples
+//!
+//! ```rust
+//! use mfm_machine::live_io::LiveIoTransportFactory;
+//! use mfm_transports_exec::{ExecProgramTransportFactory, NAMESPACE_EXEC};
+//!
+//! let factory = ExecProgramTransportFactory::default();
+//! assert_eq!(factory.namespace_group(), NAMESPACE_EXEC);
+//! ```
 
 use std::collections::HashMap;
 #[cfg(unix)]
@@ -17,14 +28,12 @@ use async_trait::async_trait;
 use nix::unistd::{access, AccessFlags};
 use tokio::process::Command;
 
-use crate::errors::{ErrorCategory, ErrorInfo, IoError};
-use crate::ids::ErrorCode;
-use crate::io::IoCall;
-use crate::live_io::{LiveIoEnv, LiveIoTransport, LiveIoTransportFactory};
+pub use mfm_collectors_exec::NAMESPACE_EXEC;
+use mfm_machine::errors::{ErrorCategory, ErrorInfo, IoError};
+use mfm_machine::ids::ErrorCode;
+use mfm_machine::io::IoCall;
+use mfm_machine::live_io::{LiveIoEnv, LiveIoTransport, LiveIoTransportFactory};
 use mfm_transports_process_exec::{run_command, ProcessRunError, StreamLimit};
-
-/// Namespace group handled by the program-execution transport.
-pub const NAMESPACE_EXEC: &str = "exec";
 
 const CODE_EXEC_REQUEST_INVALID: &str = "exec_request_invalid";
 const CODE_EXEC_PROGRAM_NOT_ALLOWED: &str = "exec_program_not_allowed";

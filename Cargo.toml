@@ -39,6 +39,7 @@ members = [
 	"crates/storages/control-plane-postgres",
 	"crates/storages/stream-store-mem",
 	"crates/storages/stream-store-postgres",
+	"crates/transports/exec",
 	"crates/transports/local-evm",
 	"crates/transports/local-fs",
 	"crates/transports/local-keystore",

@@ -14,3 +14,4 @@ async-trait = { workspace = true }
 serde = { workspace = true }
 tokio = { workspace = true }
 mfm-collectors-nix-exec = { path = "../../collectors/nix-exec" }
+mfm-transports-exec = { path = "../../transports/exec" }
