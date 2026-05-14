@@ -16,6 +16,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use mfm_artifact_store_s3::S3ArtifactStore;
+use mfm_artifact_store_secret::{SecretArtifactStore, SecretKey};
 use mfm_collectors_evm_jsonrpc_http::EvmSourceKind;
 use mfm_collectors_rpc_control::{EvmIoClient, JsonRpcCall, DEFAULT_CONTROL_SCOPE};
 use mfm_machine::engine::Stores;
@@ -33,6 +35,29 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 const RPC_CONTROL_HELPER_MAX_ATTEMPTS: usize = 5;
 const RPC_CONTROL_HELPER_RETRY_DELAY_MS: u64 = 200;
+
+/// Shared artifact-store constructors for integration tests.
+pub mod artifact_stores {
+    use super::*;
+
+    const PARITY_PROTECTED_ARTIFACT_KEY_BYTES: [u8; 32] = [0x4d; 32];
+
+    /// Builds the S3 parity artifact store with protected capability storage enabled.
+    ///
+    /// Signed EVM tests record raw signed transactions through the protected artifact path. The
+    /// fixed key material here is non-secret test configuration; it exists only so parity tests can
+    /// exercise the same public-S3 plus protected-envelope composition used by application wiring.
+    pub async fn protected_s3_from_env() -> Arc<dyn ArtifactStore> {
+        let s3 = S3ArtifactStore::from_env().expect("s3 config");
+        s3.ensure_bucket_exists().await.expect("bucket exists");
+
+        let public_artifacts: Arc<dyn ArtifactStore> = Arc::new(s3);
+        Arc::new(SecretArtifactStore::new(
+            public_artifacts,
+            SecretKey::from_bytes(PARITY_PROTECTED_ARTIFACT_KEY_BYTES),
+        ))
+    }
+}
 
 fn io_error_retryable(err: &IoError) -> bool {
     match err {

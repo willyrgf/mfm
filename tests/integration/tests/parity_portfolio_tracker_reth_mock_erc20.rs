@@ -9,7 +9,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
 
-use mfm_artifact_store_s3::S3ArtifactStore;
+use mfm_integration_tests::artifact_stores;
 use mfm_integration_tests::rpc_control;
 use mfm_machine::config::{
     BackoffPolicy, BuildProvenance, ContextCheckpointing, EventProfile, ExecutionMode, IoMode,
@@ -396,9 +396,7 @@ async fn parity_portfolio_tracker_snapshot_with_mock_erc20_mint() {
     let pg = connect_postgres_with_retry(20, 250).await;
     let streams: Arc<dyn StreamStore> = Arc::new(pg);
 
-    let s3 = S3ArtifactStore::from_env().expect("s3 config");
-    s3.ensure_bucket_exists().await.expect("bucket exists");
-    let artifacts: Arc<dyn ArtifactStore> = Arc::new(s3);
+    let artifacts = artifact_stores::protected_s3_from_env().await;
 
     let rpc_sources = rpc_control::required_bootstrap_sources_from_env_for_network(NETWORK_ID);
     let control_scope = format!("{CONTROL_SCOPE}.{}", uuid::Uuid::new_v4().simple());

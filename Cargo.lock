@@ -2154,6 +2154,7 @@ dependencies = [
  "axum",
  "mfm-artifact-store-fs",
  "mfm-artifact-store-s3",
+ "mfm-artifact-store-secret",
  "mfm-collectors-evm-jsonrpc-http",
  "mfm-collectors-rpc-control",
  "mfm-machine",

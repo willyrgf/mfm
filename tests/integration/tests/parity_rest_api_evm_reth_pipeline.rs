@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use mfm_artifact_store_s3::S3ArtifactStore;
+use mfm_integration_tests::artifact_stores;
 use mfm_integration_tests::parity_run_ids::write_parity_evm_run_id;
 use mfm_integration_tests::rpc_control;
 use mfm_machine::config::{
@@ -292,9 +292,7 @@ async fn parity_reth_pipeline_contract_from_nix() {
     let pg = connect_postgres_with_retry(20, 250).await;
     let streams: Arc<dyn StreamStore> = Arc::new(pg);
 
-    let s3 = S3ArtifactStore::from_env().expect("s3 config");
-    s3.ensure_bucket_exists().await.expect("bucket exists");
-    let artifacts: Arc<dyn ArtifactStore> = Arc::new(s3);
+    let artifacts = artifact_stores::protected_s3_from_env().await;
 
     let rpc_sources = rpc_control::required_bootstrap_sources_from_env_for_network(NETWORK_ID);
     let control_scope = format!("{CONTROL_SCOPE}.{}", uuid::Uuid::new_v4().simple());
@@ -510,9 +508,7 @@ async fn parity_reth_deploy_configure_validate_root_op() {
     let pg = connect_postgres_with_retry(20, 250).await;
     let streams: Arc<dyn StreamStore> = Arc::new(pg);
 
-    let s3 = S3ArtifactStore::from_env().expect("s3 config");
-    s3.ensure_bucket_exists().await.expect("bucket exists");
-    let artifacts: Arc<dyn ArtifactStore> = Arc::new(s3);
+    let artifacts = artifact_stores::protected_s3_from_env().await;
 
     let rpc_sources = rpc_control::required_bootstrap_sources_from_env_for_network(NETWORK_ID);
     let control_scope = format!("{CONTROL_SCOPE}.root.{}", uuid::Uuid::new_v4().simple());
