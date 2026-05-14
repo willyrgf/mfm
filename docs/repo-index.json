@@ -219,11 +219,6 @@
       "kind": "rust-cargo"
     },
     {
-      "name": "publish-docs-config",
-      "path": "crates/publish-docs-config/Cargo.toml",
-      "kind": "rust-cargo"
-    },
-    {
       "name": "sdk",
       "path": "crates/sdk/Cargo.toml",
       "kind": "rust-cargo"

@@ -443,15 +443,6 @@ docs_policy = "hidden"
 umbrella_policy = "never"
 
 [[packages]]
-name = "mfm-publish-docs-config"
-workspace_path = "crates/publish-docs-config"
-visibility = "private"
-section = "binaries_tooling"
-summary = "Shared authored and canonical desired-catalog config pipeline for publish-docs."
-docs_policy = "hidden"
-umbrella_policy = "never"
-
-[[packages]]
 name = "mfm-integration-tests"
 workspace_path = "tests/integration"
 visibility = "public"

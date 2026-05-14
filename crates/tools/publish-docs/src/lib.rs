@@ -20,6 +20,8 @@ mod artifacts;
 mod catalog;
 /// CLI parsing and presentation helpers.
 mod cli;
+/// Authored publish-wave and desired-catalog config parsing.
+mod config;
 /// Shared error types.
 mod error;
 /// Release provenance ledger helpers.

@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-pub(crate) use mfm_publish_docs_config::{
+pub(crate) use crate::config::{
     CatalogPackage, CatalogSection, DesiredCatalog, DocsPolicy, PublishWave, UmbrellaPolicy,
     Visibility, WavePackage,
 };
