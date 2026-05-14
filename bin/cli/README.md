@@ -297,6 +297,7 @@ Current built-in public root ops for `run start` are:
 - `keystore_tx_sign`
 - `evm_read`
 - `evm_contract_from_nix`
+- `evm_deploy_contract_set`
 - `evm_deploy`
 - `evm_configure`
 - `evm_validate`
