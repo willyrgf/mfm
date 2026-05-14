@@ -9,7 +9,7 @@
 //! # Examples
 //!
 //! ```rust
-//! use mfm_op_keystore_admin::{KeystoreImportOp, KEYSTORE_IMPORT_OP_ID};
+//! use mfm_op_keystore::admin::{KeystoreImportOp, KEYSTORE_IMPORT_OP_ID};
 //! use mfm_sdk::op::Operation;
 //!
 //! let op = KeystoreImportOp;

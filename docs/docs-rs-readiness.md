@@ -129,7 +129,7 @@ This section tracks planner-crate publish readiness, not the current built-in re
 
 Current publish-wave framing:
 
-- `Wave 1 within ops`: `mfm-op-keystore-admin`, `mfm-op-keystore-tx`, `mfm-op-evm-read`, `mfm-op-evm-write`
+- `Wave 1 within ops`: `mfm-op-keystore`, `mfm-op-evm-read`, `mfm-op-evm-write`
 - `Wave 2`: `mfm-op-portfolio-tracker`, `mfm-op-nix-app`, `mfm-op-evm-deploy-configure-validate`
 - `Later / low priority`: `mfm-op-proof`
 

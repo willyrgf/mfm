@@ -22,8 +22,7 @@ mfm-transports-local-evm = { path = "../transports/local-evm" }
 mfm-transports-local-keystore = { path = "../transports/local-keystore" }
 mfm-transports-proof = { path = "../transports/proof" }
 mfm-transports-rpc-control = { path = "../transports/rpc-control" }
-mfm-op-keystore-tx = { path = "../ops/keystore-tx-op" }
-mfm-op-keystore-admin = { path = "../ops/keystore-admin-op" }
+mfm-op-keystore = { path = "../ops/keystore-op" }
 mfm-op-evm-read = { path = "../ops/evm-read-op" }
 mfm-op-evm-write = { path = "../ops/evm-write-op" }
 mfm-op-evm-deploy-configure-validate = { path = "../ops/evm-deploy-configure-validate-op" }

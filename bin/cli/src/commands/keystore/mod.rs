@@ -71,8 +71,7 @@ mod tests {
             ("tx_sign.rs", include_str!("tx_sign.rs")),
         ];
         let forbidden = [
-            "mfm_op_keystore_admin",
-            "mfm_op_keystore_tx",
+            "mfm_op_keystore",
             "execute_single_op_report",
             "SingleOpReportRequest",
         ];
