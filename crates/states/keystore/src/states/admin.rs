@@ -9,8 +9,9 @@
 //! # Examples
 //!
 //! ```rust
+//! use mfm_collectors_local_keystore::KeystoreImportType;
 //! use mfm_state_keystore::states::admin::{
-//!     KeystoreImportStateConfig, KeystoreImportType,
+//!     KeystoreImportStateConfig,
 //! };
 //!
 //! let cfg = KeystoreImportStateConfig {
@@ -24,7 +25,9 @@
 
 use async_trait::async_trait;
 use mfm_collectors_local_keystore::{
-    KeystoreDeleteRequest, KeystoreImportRequest, KeystoreListRequest, LocalKeystoreIoClient,
+    KeystoreDeleteReport, KeystoreDeleteRequest, KeystoreImportReport, KeystoreImportRequest,
+    KeystoreImportType, KeystoreListReport, KeystoreListRequest, KeystoreListSortBy,
+    LocalKeystoreIoClient,
 };
 use mfm_machine::context::DynContext;
 use mfm_machine::errors::{ErrorCategory, StateError};
@@ -39,7 +42,6 @@ use mfm_state_common::errors as op_errors;
 use mfm_state_common::idempotency as op_idempotency;
 use mfm_state_common::local_io_helpers::{attach_state_id, emit_report_event};
 use mfm_state_common::states::meta;
-use serde::{Deserialize, Serialize};
 
 /// Error returned by keystore administration helpers.
 #[derive(Debug, Clone)]
@@ -58,58 +60,6 @@ impl KeystoreAdminError {
             message: message.into(),
         }
     }
-}
-
-pub use mfm_collectors_local_keystore::KeystoreImportType;
-
-/// Report written after a successful keystore import.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct KeystoreImportReport {
-    /// Identifier of the imported key entry.
-    pub id: String,
-    /// Alias recorded for the key.
-    pub label: String,
-    /// Key type recorded by the keystore.
-    pub key_type: String,
-    /// Derived address for the imported key.
-    pub address: String,
-    /// RFC3339 timestamp captured by the import flow.
-    pub created_at: String,
-}
-
-pub use mfm_collectors_local_keystore::KeystoreListSortBy;
-
-/// Single keystore entry returned by the list flow.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct KeystoreListKey {
-    /// Identifier of the key entry.
-    pub id: String,
-    /// Alias recorded for the key.
-    pub label: String,
-    /// Key type recorded by the keystore.
-    pub key_type: String,
-    /// Optional derived address when address display is enabled.
-    pub address: Option<String>,
-    /// RFC3339 creation timestamp.
-    pub created: String,
-}
-
-/// Report written after listing keystore entries.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct KeystoreListReport {
-    /// Keys included in the report.
-    pub keys: Vec<KeystoreListKey>,
-    /// Whether addresses were requested for display.
-    pub show_addresses: bool,
-}
-
-/// Report written after deleting a keystore entry.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct KeystoreDeleteReport {
-    /// Identifier of the deleted key.
-    pub id: String,
-    /// Alias of the deleted key.
-    pub label: String,
 }
 
 /// Runtime configuration for the keystore import state.

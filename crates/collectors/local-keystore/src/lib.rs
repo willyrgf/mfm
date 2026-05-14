@@ -94,6 +94,54 @@ pub struct KeystoreDeleteRequest {
     pub local_resource_handle: String,
 }
 
+/// Report written after a successful keystore import.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct KeystoreImportReport {
+    /// Identifier of the imported key entry.
+    pub id: String,
+    /// Alias recorded for the key.
+    pub label: String,
+    /// Key type recorded by the keystore.
+    pub key_type: String,
+    /// Derived address for the imported key.
+    pub address: String,
+    /// RFC3339 timestamp captured by the import flow.
+    pub created_at: String,
+}
+
+/// Single keystore entry returned by the list flow.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct KeystoreListKey {
+    /// Identifier of the key entry.
+    pub id: String,
+    /// Alias recorded for the key.
+    pub label: String,
+    /// Key type recorded by the keystore.
+    pub key_type: String,
+    /// Optional derived address when address display is enabled.
+    pub address: Option<String>,
+    /// RFC3339 creation timestamp.
+    pub created: String,
+}
+
+/// Report written after listing keystore entries.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct KeystoreListReport {
+    /// Keys included in the report.
+    pub keys: Vec<KeystoreListKey>,
+    /// Whether addresses were requested for display.
+    pub show_addresses: bool,
+}
+
+/// Report written after deleting a keystore entry.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct KeystoreDeleteReport {
+    /// Identifier of the deleted key.
+    pub id: String,
+    /// Alias of the deleted key.
+    pub label: String,
+}
+
 /// Typed request for `local.keystore.tx_sign`.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -438,6 +486,25 @@ mod tests {
             &value,
         )
         .expect("non-secret source metadata should be fact-key safe");
+    }
+
+    #[test]
+    fn admin_reports_preserve_public_json_shape() {
+        let report = KeystoreListReport {
+            keys: vec![KeystoreListKey {
+                id: "key-1".to_string(),
+                label: "treasury".to_string(),
+                key_type: "pk".to_string(),
+                address: Some("0x1111111111111111111111111111111111111111".to_string()),
+                created: "2026-01-01T00:00:00Z".to_string(),
+            }],
+            show_addresses: true,
+        };
+
+        let value = serde_json::to_value(&report).expect("report should serialize");
+        assert_eq!(value["show_addresses"], true);
+        assert_eq!(value["keys"][0]["label"], "treasury");
+        assert!(serde_json::from_value::<KeystoreListReport>(value).is_ok());
     }
 
     #[tokio::test]

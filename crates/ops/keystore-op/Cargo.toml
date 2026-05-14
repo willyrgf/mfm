@@ -9,5 +9,6 @@ serde_json = { workspace = true }
 
 mfm-machine = { path = "../../machine" }
 mfm-sdk = { path = "../../sdk" }
+mfm-collectors-local-keystore = { path = "../../collectors/local-keystore" }
 mfm-state-common = { path = "../../states/common" }
 mfm-state-keystore = { path = "../../states/keystore" }
