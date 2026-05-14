@@ -44,6 +44,8 @@ The live runtime inventory still lives in the repository docs:
 | `mfm-evm-dcv-model` | Pure EVM deploy/configure/validate model and ABI preparation helpers. | pending | `crates/evm-dcv-model` |
 | `mfm-evm-deploy-configure-validate-config` | Shared deploy/configure/validate config pipeline. | pending | `crates/evm-deploy-configure-validate-config` |
 | `mfm-portfolio-config` | Shared portfolio snapshot config pipeline. | pending | `crates/portfolio-config` |
+| `mfm-portfolio-model` | Pure canonical portfolio, symbol, and wallet models. | pending | `crates/portfolio/model` |
+| `mfm-portfolio-plan` | Pure semantic portfolio planning vocabulary and adapter catalog. | pending | `crates/portfolio/plan` |
 | `mfm_core` | Security-sensitive keystore, config, and primitives. | pending | `crates/core` |
 
 ## Shared States
@@ -54,7 +56,7 @@ The live runtime inventory still lives in the repository docs:
 | `mfm-state-aave-v3` | Shared Aave V3 portfolio-position types and runtime adapters. | pending | `crates/states/aave-v3` |
 | `mfm-state-common` | Cross-domain reusable execution states. | pending | `crates/states/common` |
 | `mfm-state-keystore` | Shared keystore administration and local signing states. | pending | `crates/states/keystore` |
-| `mfm-state-portfolio` | Reusable portfolio-domain schema and validation for canonical snapshots. | pending | `crates/states/portfolio` |
+| `mfm-state-portfolio` | Reusable portfolio-domain runtime states and adapters for canonical snapshots. | pending | `crates/states/portfolio` |
 | `mfm-state-symbol` | Reusable symbol-domain schema and validation for canonical snapshots. | pending | `crates/states/symbol` |
 | `mfm-state-wallet` | Reusable wallet-domain schema and validation for canonical snapshots. | pending | `crates/states/wallet` |
 

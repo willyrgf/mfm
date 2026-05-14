@@ -224,6 +224,16 @@
       "kind": "rust-cargo"
     },
     {
+      "name": "model",
+      "path": "crates/portfolio/model/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "plan",
+      "path": "crates/portfolio/plan/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
       "name": "sdk",
       "path": "crates/sdk/Cargo.toml",
       "kind": "rust-cargo"

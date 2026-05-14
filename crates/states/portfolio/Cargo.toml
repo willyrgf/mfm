@@ -2,7 +2,7 @@
 name = "mfm-state-portfolio"
 version = "0.1.0"
 edition = "2021"
-description = "Reusable portfolio-domain schema and validation for canonical MFM portfolio snapshots"
+description = "Reusable portfolio-domain runtime states and adapters for canonical MFM portfolio snapshots"
 repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
 
