@@ -16,6 +16,11 @@ For the current registered ops and production states, see [`docs/ops-and-states.
 For canonical RPC control-plane routing, bootstrap, and executor-boundary behavior, see
 [`docs/evm-rpc-routing.md`](evm-rpc-routing.md).
 
+Architecture reviews that make claims about `rpc.control`, managed EVM routing,
+`mfm-transports-rpc-control`, or control-plane storage must treat
+[`docs/evm-rpc-routing.md`](evm-rpc-routing.md) as required input alongside this guide and
+[`docs/design.md`](design.md).
+
 If code conflicts with `docs/design.md`, treat that as a contract violation until the contract is intentionally updated.
 
 ## 2. MFM In 5 Minutes
