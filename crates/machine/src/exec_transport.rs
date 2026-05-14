@@ -21,7 +21,7 @@ use crate::errors::{ErrorCategory, ErrorInfo, IoError};
 use crate::ids::ErrorCode;
 use crate::io::IoCall;
 use crate::live_io::{LiveIoEnv, LiveIoTransport, LiveIoTransportFactory};
-use crate::process_exec::{run_command, ProcessRunError, StreamLimit};
+use mfm_transports_process_exec::{run_command, ProcessRunError, StreamLimit};
 
 /// Namespace group handled by the program-execution transport.
 pub const NAMESPACE_EXEC: &str = "exec";

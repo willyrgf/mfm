@@ -1,7 +1,21 @@
+#![warn(missing_docs)]
 //! Shared hardened process execution helpers for live IO transports.
 //!
-//! This module is not part of the stable API contract and may change.
-
+//! This crate contains the bounded child-process runner used by live transport crates that need
+//! local process execution. It intentionally depends only on Tokio and standard library process
+//! types, keeping concrete process behavior out of the state-machine contract crate.
+//!
+//! # Examples
+//!
+//! ```rust
+//! use mfm_transports_process_exec::StreamLimit;
+//!
+//! let limits = StreamLimit {
+//!     max_stdout_bytes: 1024,
+//!     max_stderr_bytes: 1024,
+//! };
+//! assert_eq!(limits.max_stdout_bytes, 1024);
+//! ```
 use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
 

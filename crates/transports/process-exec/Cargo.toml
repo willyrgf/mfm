@@ -1,0 +1,10 @@
+[package]
+name = "mfm-transports-process-exec"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { workspace = true }
+
+[dev-dependencies]
+uuid = { version = "1.8.0", features = ["v4"] }

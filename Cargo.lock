@@ -2046,6 +2046,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "mfm-machine",
+ "mfm-transports-process-exec",
  "serde_json",
  "tokio",
  "uuid",
@@ -2163,6 +2164,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "hex",
+ "mfm-transports-process-exec",
  "nix",
  "rand 0.9.3",
  "ring",
@@ -2522,6 +2524,14 @@ dependencies = [
  "tokio",
  "uuid",
  "zeroize",
+]
+
+[[package]]
+name = "mfm-transports-process-exec"
+version = "0.1.0"
+dependencies = [
+ "tokio",
+ "uuid",
 ]
 
 [[package]]
