@@ -397,9 +397,25 @@ mod tests {
     #[test]
     fn tx_intent_public_json_does_not_include_raw_transaction() {
         let value = serde_json::to_value(sample_intent()).expect("intent json");
+        let rendered = serde_json::to_string(&value).expect("intent string");
 
         assert!(value.get("raw_tx_hash").is_some());
         assert!(value.get("raw_tx_hex").is_none());
+        assert!(value.get("signature").is_none());
+        assert!(!rendered.contains("raw_tx_hex"));
+        assert!(!rendered.contains("signature"));
+    }
+
+    #[test]
+    fn signed_tx_capability_debug_redacts_raw_transaction() {
+        let raw_tx_hex = "0xdeadbeefcafebabe";
+        let capability = SignedTxCapabilityV1::from_raw_tx_hex(raw_tx_hex)
+            .expect("capability from raw tx");
+        let rendered = format!("{capability:?}");
+
+        assert!(rendered.contains("REDACTED"));
+        assert!(!rendered.contains(raw_tx_hex));
+        assert!(!rendered.contains("deadbeefcafebabe"));
     }
 
     #[test]

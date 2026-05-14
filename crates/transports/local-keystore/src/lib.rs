@@ -1840,6 +1840,13 @@ mod tests {
         assert_eq!(report["tx_type"].as_str(), Some("0x2"));
         let raw_tx = std::fs::read_to_string(&out_path).expect("read signed tx");
         assert!(raw_tx.starts_with("0x02"));
+        let rendered_report = serde_json::to_string(&report).expect("serialize report");
+        assert!(report.get("raw_tx_hex").is_none());
+        assert!(report.get("out_path").is_none());
+        assert!(!rendered_report.contains(&raw_tx));
+        assert!(!rendered_report.contains(TEST_PRIVATE_KEY));
+        assert!(!rendered_report.contains(TEST_PASSWORD));
+        assert!(!rendered_report.contains("signature"));
         #[cfg(unix)]
         {
             let mode = std::fs::metadata(&out_path)
