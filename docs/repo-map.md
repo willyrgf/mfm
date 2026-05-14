@@ -33,6 +33,7 @@ Generated from `docs/repo-index.json`.
 - `crates/core/Cargo.toml` (rust-cargo)
 - `crates/docs/Cargo.toml` (rust-cargo)
 - `crates/evm-core/Cargo.toml` (rust-cargo)
+- `crates/evm-dcv-model/Cargo.toml` (rust-cargo)
 - `crates/evm-deploy-configure-validate-config/Cargo.toml` (rust-cargo)
 - `crates/evm-runtime/Cargo.toml` (rust-cargo)
 - `crates/machine-derive/Cargo.toml` (rust-cargo)

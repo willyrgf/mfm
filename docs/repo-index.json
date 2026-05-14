@@ -154,6 +154,11 @@
       "kind": "rust-cargo"
     },
     {
+      "name": "evm-dcv-model",
+      "path": "crates/evm-dcv-model/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
       "name": "evm-deploy-configure-validate-config",
       "path": "crates/evm-deploy-configure-validate-config/Cargo.toml",
       "kind": "rust-cargo"

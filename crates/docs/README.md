@@ -41,6 +41,7 @@ The live runtime inventory still lives in the repository docs:
 | `mfm-authored-config` | Shared JSON/TOML authored-config ingress helpers. | pending | `crates/authored-config` |
 | `mfm-control-plane-model` | Backend-neutral control-plane stream-family model and projections. | pending | `crates/control-plane/model` |
 | `mfm-evm-core` | EVM ABI, encoding, hex, and transaction support types. | <https://docs.rs/mfm-evm-core> | `crates/evm-core` |
+| `mfm-evm-dcv-model` | Pure EVM deploy/configure/validate model and ABI preparation helpers. | pending | `crates/evm-dcv-model` |
 | `mfm-evm-deploy-configure-validate-config` | Shared deploy/configure/validate config pipeline. | pending | `crates/evm-deploy-configure-validate-config` |
 | `mfm-portfolio-config` | Shared portfolio snapshot config pipeline. | pending | `crates/portfolio-config` |
 | `mfm_core` | Security-sensitive keystore, config, and primitives. | pending | `crates/core` |

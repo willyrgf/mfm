@@ -184,6 +184,8 @@ Canonical responsibilities:
 - `crates/machine/`: runtime model + executor + kernel contracts
 - `crates/machine-derive/`: proc-macro ergonomics
 - `crates/core/`: primitives + security-sensitive keystore/crypto
+- `crates/evm-dcv-model`: pure deploy/configure/validate config models and ABI preparation
+  helpers shared by planners, config ingress, and runtime states
 - `crates/collectors/*`: external data adapters
 - `crates/transports/*`: local/internal live transport factories
 - `crates/control-plane/model`: backend-neutral `rpc_source:*` and `source_pool:*`

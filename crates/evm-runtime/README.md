@@ -9,7 +9,7 @@ as a normal fact, store the signed raw transaction bytes through the protected a
 then broadcast the protected capability through `rpc.control`. Node-managed unsigned transaction
 submission is intentionally rejected by production write states.
 
-Deploy/configure/validate ABI handling flows through `mfm_evm_runtime::dcv`, which delegates
+Deploy/configure/validate ABI handling flows through `mfm-evm-dcv-model`, which delegates
 low-level parsing and calldata construction to `mfm-evm-core`. The supported argument surface is
 `address`, `bool`, `bytes1` through `bytes32`, dynamic `bytes`, `string`, and `int`/`uint` widths
 from 8 through 256 bits. Unsupported types return explicit validation errors rather than being
