@@ -12,6 +12,9 @@ use mfm_machine::hashing::{artifact_id_for_json, CanonicalJsonError};
 use mfm_machine::ids::{ErrorCode, FactKey, StateId};
 use mfm_machine::io::{IoCall, IoProvider};
 
+/// Pure local keystore transaction input model and parsing helpers.
+pub mod tx;
+
 /// Canonical namespace group used for local keystore IO calls.
 pub const NAMESPACE_LOCAL_KEYSTORE: &str = "local.keystore";
 /// Namespace used for keystore import.

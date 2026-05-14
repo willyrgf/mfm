@@ -9,17 +9,10 @@ readme = "README.md"
 
 [dependencies]
 async-trait = { workspace = true }
-serde = { workspace = true }
 serde_json = { workspace = true }
 hex = { workspace = true }
-alloy-primitives = { workspace = true, features = ["k256"] }
-k256 = { version = "0.13", features = ["ecdsa"] }
-uuid = { version = "1.0", features = ["v4"] }
-url = { workspace = true }
 
 mfm-machine = { path = "../../machine", version = "0.1.0" }
 mfm-sdk = { path = "../../sdk", version = "0.1.0" }
-mfm_core = { path = "../../core", version = "0.1.29" }
 mfm-state-common = { path = "../common", version = "0.1.0" }
 mfm-collectors-local-keystore = { path = "../../collectors/local-keystore", version = "0.1.0" }
-mfm-evm-core = { path = "../../evm-core", version = "0.1.0" }
