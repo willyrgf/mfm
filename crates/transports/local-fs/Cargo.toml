@@ -10,4 +10,3 @@ serde_json = { workspace = true }
 hex = { workspace = true }
 tokio = { workspace = true }
 mfm-machine = { path = "../../machine" }
-mfm-collectors-local-fs = { path = "../../collectors/local-fs" }

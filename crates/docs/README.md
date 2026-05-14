@@ -90,7 +90,6 @@ Ops stay thin and focus on graph composition and config validation. Most are sti
 | `mfm-collectors-evm` | EVM collector traits and payloads. | <https://docs.rs/mfm-collectors-evm> | `crates/collectors/evm` |
 | `mfm-collectors-evm-jsonrpc-http` | HTTP JSON-RPC collector implementation for EVM. | pending | `crates/collectors/evm-jsonrpc-http` |
 | `mfm-collectors-exec` | Command-execution collector interfaces. | pending | `crates/collectors/exec` |
-| `mfm-collectors-local-fs` | Local filesystem collector interfaces. | pending | `crates/collectors/local-fs` |
 | `mfm-collectors-local-keystore` | Local keystore collector interfaces. | pending | `crates/collectors/local-keystore` |
 | `mfm-collectors-nix` | Nix evaluation collector interfaces. | pending | `crates/collectors/nix` |
 | `mfm-collectors-nix-exec` | Nix execution collector implementation. | pending | `crates/collectors/nix-exec` |

@@ -1,10 +1,10 @@
 #![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 //! Local filesystem transport for reading small text inputs.
 //!
-//! This transport is intentionally narrow and currently exposes only `local.fs.read_text`, which
-//! allows state logic to read files through the Live IO abstraction rather than ambient file IO.
-//! Blocking filesystem work is isolated on Tokio's blocking pool before returning sanitized IO
-//! errors to the async state-machine runtime.
+//! This transport is intentionally narrow and currently exposes only `local.fs.read_text`.
+//! `local.fs` has no reusable state-facing collector today, so request parsing stays local to this
+//! transport. Blocking filesystem work is isolated on Tokio's blocking pool before returning
+//! sanitized IO errors to the async state-machine runtime.
 //!
 //! # Examples
 //!
@@ -18,12 +18,27 @@
 #![warn(missing_docs)]
 
 use async_trait::async_trait;
-use mfm_collectors_local_fs::{ReadTextRequest, ReadTextResponse, NAMESPACE_LOCAL_FS_READ_TEXT};
 use mfm_machine::errors::{ErrorCategory, ErrorInfo, IoError};
 use mfm_machine::ids::ErrorCode;
 use mfm_machine::io::IoCall;
 use mfm_machine::live_io::{LiveIoEnv, LiveIoTransport, LiveIoTransportFactory};
-use serde::de::DeserializeOwned;
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
+
+const NAMESPACE_LOCAL_FS: &str = "local.fs";
+const NAMESPACE_LOCAL_FS_READ_TEXT: &str = "local.fs.read_text";
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+struct ReadTextRequest {
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    path_hex: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+struct ReadTextResponse {
+    text: String,
+}
 
 /// Transport factory for the `local.fs` namespace group.
 #[derive(Clone, Default)]
@@ -31,7 +46,7 @@ pub struct LocalFsIoTransportFactory;
 
 impl LiveIoTransportFactory for LocalFsIoTransportFactory {
     fn namespace_group(&self) -> &str {
-        "local.fs"
+        NAMESPACE_LOCAL_FS
     }
 
     fn make(&self, _env: LiveIoEnv) -> Box<dyn LiveIoTransport> {
@@ -269,5 +284,56 @@ mod tests {
 
         assert_eq!(response["text"].as_str(), Some("hello local fs"));
         let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn read_text_rejects_ambiguous_path_without_echoing_payload() {
+        let mut transport = LocalFsIoTransport;
+        let err = transport
+            .call(IoCall {
+                namespace: NAMESPACE_LOCAL_FS_READ_TEXT.to_string(),
+                request: serde_json::json!({
+                    "path": "secret-name.txt",
+                    "path_hex": hex::encode("secret-name.txt"),
+                }),
+                fact_key: None,
+            })
+            .await
+            .expect_err("ambiguous request should fail");
+
+        match err {
+            IoError::Other(info) => {
+                assert_eq!(info.code.as_str(), "invalid_local_request");
+                assert_eq!(info.message, "path must use exactly one encoding");
+                assert!(!info.message.contains("secret-name"));
+                assert!(info.details.is_none());
+            }
+            other => panic!("unexpected io error: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn read_text_rejects_malformed_request_without_echoing_payload() {
+        let mut transport = LocalFsIoTransport;
+        let err = transport
+            .call(IoCall {
+                namespace: NAMESPACE_LOCAL_FS_READ_TEXT.to_string(),
+                request: serde_json::json!({
+                    "path_hex": 12345,
+                }),
+                fact_key: None,
+            })
+            .await
+            .expect_err("malformed request should fail");
+
+        match err {
+            IoError::Other(info) => {
+                assert_eq!(info.code.as_str(), "invalid_local_request");
+                assert_eq!(info.message, "invalid local io request payload");
+                assert!(!info.message.contains("12345"));
+                assert!(info.details.is_none());
+            }
+            other => panic!("unexpected io error: {other:?}"),
+        }
     }
 }

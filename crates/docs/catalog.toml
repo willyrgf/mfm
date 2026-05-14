@@ -308,15 +308,6 @@ docs_policy = "docs-rs"
 umbrella_policy = "when-published"
 
 [[packages]]
-name = "mfm-collectors-local-fs"
-workspace_path = "crates/collectors/local-fs"
-visibility = "public"
-section = "collectors"
-summary = "Local filesystem collector interfaces."
-docs_policy = "docs-rs"
-umbrella_policy = "when-published"
-
-[[packages]]
 name = "mfm-collectors-local-keystore"
 workspace_path = "crates/collectors/local-keystore"
 visibility = "public"
