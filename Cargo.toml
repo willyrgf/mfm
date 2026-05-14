@@ -11,6 +11,7 @@ members = [
 	"crates/collectors/evm",
 	"crates/collectors/btc-jsonrpc-http",
 	"crates/collectors/evm-jsonrpc-http",
+	"crates/collectors/local-evm",
 	"crates/collectors/local-keystore",
 	"crates/collectors/nix",
 	"crates/collectors/nix-exec",

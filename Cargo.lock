@@ -2022,6 +2022,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "mfm-collectors-local-evm"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "hex",
+ "mfm-evm-core",
+ "mfm-machine",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "mfm-collectors-local-keystore"
 version = "0.1.0"
 dependencies = [
@@ -2120,11 +2132,11 @@ version = "0.1.0"
 dependencies = [
  "alloy-primitives",
  "async-trait",
+ "mfm-collectors-local-evm",
  "mfm-collectors-rpc-control",
  "mfm-evm-core",
  "mfm-machine",
  "mfm-state-common",
- "mfm-transports-local-evm",
  "serde",
  "serde_json",
  "tokio",
@@ -2501,6 +2513,7 @@ dependencies = [
  "async-trait",
  "hex",
  "k256",
+ "mfm-collectors-local-evm",
  "mfm-evm-core",
  "mfm-machine",
  "serde",

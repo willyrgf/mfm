@@ -16,7 +16,7 @@ alloy-primitives = { workspace = true }
 zeroize = "1.7"
 
 mfm-machine = { path = "../machine", version = "0.1.0" }
+mfm-collectors-local-evm = { path = "../collectors/local-evm", version = "0.1.0" }
 mfm-collectors-rpc-control = { path = "../collectors/rpc-control", version = "0.1.0" }
 mfm-state-common = { path = "../states/common", version = "0.1.0" }
 mfm-evm-core = { path = "../evm-core", version = "0.1.0" }
-mfm-transports-local-evm = { path = "../transports/local-evm", version = "0.1.0" }

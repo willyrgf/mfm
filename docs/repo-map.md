@@ -23,6 +23,7 @@ Generated from `docs/repo-index.json`.
 - `crates/collectors/evm-jsonrpc-http/Cargo.toml` (rust-cargo)
 - `crates/collectors/evm/Cargo.toml` (rust-cargo)
 - `crates/collectors/exec/Cargo.toml` (rust-cargo)
+- `crates/collectors/local-evm/Cargo.toml` (rust-cargo)
 - `crates/collectors/local-keystore/Cargo.toml` (rust-cargo)
 - `crates/collectors/nix-exec/Cargo.toml` (rust-cargo)
 - `crates/collectors/nix/Cargo.toml` (rust-cargo)

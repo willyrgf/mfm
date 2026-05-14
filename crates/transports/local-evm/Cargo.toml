@@ -16,3 +16,4 @@ hex = { workspace = true }
 zeroize = "1.7.0"
 mfm-machine = { path = "../../machine", version = "0.1.0" }
 mfm-evm-core = { path = "../../evm-core", version = "0.1.0" }
+mfm-collectors-local-evm = { path = "../../collectors/local-evm", version = "0.1.0" }
