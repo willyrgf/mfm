@@ -2088,11 +2088,20 @@ dependencies = [
 ]
 
 [[package]]
-name = "mfm-control-plane-postgres"
+name = "mfm-control-plane-model"
 version = "0.1.0"
 dependencies = [
  "mfm-machine",
  "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "mfm-control-plane-postgres"
+version = "0.1.0"
+dependencies = [
+ "mfm-control-plane-model",
+ "mfm-machine",
  "serde_json",
  "tokio",
  "tokio-postgres",
@@ -2580,6 +2589,7 @@ dependencies = [
  "mfm-collectors-btc-jsonrpc-http",
  "mfm-collectors-evm-jsonrpc-http",
  "mfm-collectors-rpc-control",
+ "mfm-control-plane-model",
  "mfm-control-plane-postgres",
  "mfm-machine",
  "mfm-stream-store-mem",

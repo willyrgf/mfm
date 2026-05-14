@@ -18,6 +18,7 @@ mfm-machine = { path = "../../machine", version = "0.1.0" }
 mfm-collectors-rpc-control = { path = "../../collectors/rpc-control", version = "0.1.0" }
 mfm-collectors-evm-jsonrpc-http = { path = "../../collectors/evm-jsonrpc-http", version = "0.1.0" }
 mfm-collectors-btc-jsonrpc-http = { path = "../../collectors/btc-jsonrpc-http", version = "0.1.0" }
+mfm-control-plane-model = { path = "../../control-plane/model", version = "0.1.0" }
 mfm-control-plane-postgres = { path = "../../storages/control-plane-postgres", version = "0.1.0" }
 
 [dev-dependencies]
