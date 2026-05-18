@@ -29,5 +29,7 @@ pub mod encoding;
 pub mod hex;
 /// Minimal Recursive Length Prefix (RLP) encoding helpers.
 pub mod rlp;
+/// Transaction models, signing preimages, and raw transaction encoding helpers.
+pub mod tx;
 /// Lightweight error type shared by the utility modules.
 pub mod util_error;
