@@ -68,7 +68,7 @@ impl EthereumPrivateKey {
             return Err(EthereumKeyError::InvalidHex);
         }
 
-        let normalized = Zeroizing::new(if value.len() % 2 == 0 {
+        let normalized = Zeroizing::new(if value.len().is_multiple_of(2) {
             value.to_string()
         } else {
             format!("0{value}")
