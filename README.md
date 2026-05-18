@@ -52,6 +52,7 @@ Start here:
 - One-page overview + invariants: [`docs/architecture.md`](docs/architecture.md)
 - Current ops/states inventory: [`docs/ops-and-states.md`](docs/ops-and-states.md)
 - Contribution rules / CI parity: [`AGENTS.md`](AGENTS.md)
+- Code quality policy: [`docs/code-quality.md`](docs/code-quality.md)
 
 User-facing docs:
 

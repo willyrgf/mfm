@@ -6,6 +6,9 @@ It is inspired by the practices used in large Rust codebases: modular crates, st
 ## Read First (Non-Negotiables)
 
 - Keep changes small and local; prefer 1 logical change per PR/commit.
+- Follow `docs/code-quality.md` for every code, test, documentation, build, and workflow change.
+- Do not introduce hacks, monkey patches, partial workarounds, or fragile compatibility shims.
+- If the requested change needs missing underlying support, add that support properly or report the blocker honestly.
 - Match CI (Nixfied): use `nix run .#check`, `nix run .#test`, and `nix run .#ci -- --mode <mode> --summary`.
 - Default pre-commit gate: run `nix run .#ci -- --mode full` before every commit.
 - Write commit subjects in lower case. Examples: `mfm-core bump to 0.1.30`, `fix nix task wrappers to preserve caller cwd`, `implement phased publish-docs reconciler`, `docs: publish umbrella earlier with live links only`, `docs: point crate metadata at mfm repo`.
@@ -56,6 +59,7 @@ Nixfied is the canonical entrypoint for dev/test/build/check/ci:
 
 - `README.md`: project disclaimer.
 - `docs/repo-map.md`: Repository map
+- `docs/code-quality.md`: mandatory quality policy for all changes.
 - `docs/architecture.md`: one-page architecture overview + invariants.
 - `docs/design.md`: full design contract (authoritative).
 - `docs/ops-and-states.md`: current inventory of registered ops and production state implementations.

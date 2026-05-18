@@ -39,6 +39,12 @@
       "exists": true
     },
     {
+      "path": "docs/code-quality.md",
+      "purpose": "Mandatory quality policy for all repository changes.",
+      "priority": 8,
+      "exists": true
+    },
+    {
       "path": "docs/architecture.md",
       "purpose": "Project documentation.",
       "priority": 20,

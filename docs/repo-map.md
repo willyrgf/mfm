@@ -9,6 +9,7 @@ Generated from `docs/repo-index.json`.
 - `docs/DETAILED.md` - Detailed model architecture and contracts.
 - `docs/UPGRADE.md` - Downstream upgrade notes for behavioral and path contract changes.
 - `AGENTS.md` - Agent instructions and collaboration constraints.
+- `docs/code-quality.md` - Mandatory quality policy for all repository changes.
 - `docs/architecture.md` - Project documentation.
 - `docs/design.md` - Project documentation.
 - `docs/ops-and-states.md` - Project documentation.
