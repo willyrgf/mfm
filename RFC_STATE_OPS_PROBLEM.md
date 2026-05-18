@@ -12,6 +12,31 @@ It intentionally does not propose a solution. Its purpose is to describe the mis
 expected model and the model currently implemented in the repository, so future design work can
 start from a clear shared understanding of the problem.
 
+Correctness, determinism, reproducibility, and traceability are core platform features for MFM, not
+secondary implementation qualities. MFM is intended to produce executions that can be trusted,
+replayed, audited, and explained. For that reason, structural graph validity is not enough. The
+state and operation model must preserve domain intent strongly enough that the compiler can reject
+invalid executable programs before they become run plans.
+
+This is also one of the reasons Rust is a deliberate fit for the platform. The goal is not merely to
+write the runtime in a memory-safe systems language. The goal is to use Rust's type system to encode
+as much of the execution contract as practical, so correctness properties that are knowable before
+execution do not depend on strings, JSON shape, naming conventions, and review discipline.
+
+## Non-Goal
+
+This document does not claim that every semantic property of an MFM execution can or should be
+proven at compile time.
+
+Some errors are inherently runtime concerns: IO failures, external system failures, chain state,
+clock-dependent observations, replay data availability, storage failures, concurrency, and domain
+facts that cannot be known before execution.
+
+The problem is narrower and more actionable: many producer/consumer, transition, lifecycle-stage,
+and terminal-result guarantees that should be represented at the type level are currently
+represented through string identifiers, string ports, JSON context values, planner conventions, and
+runtime validation.
+
 ## Expected Model
 
 The expected model is that MFM states and operations should form a strongly typed executable
@@ -105,6 +130,12 @@ These checks are valuable, but they are not the same as type-level correctness.
 
 They validate values produced by planners. They do not make invalid state programs impossible to
 construct.
+
+They also add implementation weight. Because the current model loses semantic type information
+early, the repository needs more defensive validation, naming rules, context qualification,
+lineage tracking, deserialization checks, metadata checks, regression tests, and review conventions
+to make the platform safe enough in practice. Much of that code exists to compensate for facts the
+compiler cannot currently see.
 
 ## Missing Guarantees
 
@@ -353,6 +384,12 @@ This creates several risks:
 
 The system can be robust in practice, but its robustness is not rooted in a type-level proof of the
 state program.
+
+It also makes the implementation larger and harder to reason about than it should be. The dynamic
+representation requires code to repeatedly recover, validate, qualify, and audit relationships that
+could otherwise be carried by types. A stronger typed state-program model should let the compiler
+handle more of this work directly, reducing the amount of hand-written safety scaffolding and
+lowering the number of places where semantic invariants must be restated.
 
 ## Why This Is A Core Design Problem
 
