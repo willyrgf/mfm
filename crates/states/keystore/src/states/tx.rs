@@ -10,7 +10,7 @@
 //!
 //! ```rust
 //! use mfm_collectors_local_keystore::LocalFileWriteMode;
-//! use mfm_collectors_local_keystore::tx::{parse_address, Eip1559TxToSign};
+//! use mfm_evm_core::tx::{parse_address, Eip1559TxToSign};
 //! use mfm_state_keystore::states::tx::KeystoreTxSignStateConfig;
 //!
 //! let cfg = KeystoreTxSignStateConfig {
@@ -31,7 +31,7 @@
 //!
 //! assert_eq!(cfg.tx.chain_id, 1);
 //! assert_eq!(cfg.local_resource_handle, "local-keystore:example");
-//! # Ok::<(), mfm_collectors_local_keystore::tx::KeystoreTxError>(())
+//! # Ok::<(), mfm_evm_core::util_error::UtilError>(())
 //! ```
 
 use async_trait::async_trait;
@@ -51,7 +51,7 @@ use mfm_state_common::idempotency as op_idempotency;
 use mfm_state_common::local_io_helpers::{attach_state_id, emit_report_event};
 use mfm_state_common::states::meta;
 
-use mfm_collectors_local_keystore::tx::Eip1559TxToSign;
+use mfm_evm_core::tx::Eip1559TxToSign;
 
 /// Runtime configuration for a keystore-backed transaction signing state.
 ///

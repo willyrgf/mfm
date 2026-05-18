@@ -5,13 +5,15 @@
 //!
 //! This crate keeps local keystore execution logic out of binaries and thin op planners by
 //! packaging reusable `State` implementations for key management and transaction signing
-//! workflows. Pure local-keystore IO DTOs and transaction input helpers live in
-//! `mfm-collectors-local-keystore`; live keystore signing stays in `mfm-transports-local-keystore`.
+//! workflows. Pure local-keystore IO DTOs live in `mfm-collectors-local-keystore`; EVM
+//! transaction models live in `mfm-evm-core`; live keystore signing stays in
+//! `mfm-transports-local-keystore`.
 //!
 //! # Examples
 //!
 //! ```rust
-//! use mfm_collectors_local_keystore::tx::{output_context_key, parse_address, Eip1559TxToSign};
+//! use mfm_collectors_local_keystore::tx::output_context_key;
+//! use mfm_evm_core::tx::{parse_address, Eip1559TxToSign};
 //! use mfm_machine::ids::ContextKey;
 //!
 //! let tx = Eip1559TxToSign {
@@ -28,7 +30,7 @@
 //!
 //! assert_eq!(tx.chain_id, 1);
 //! assert_eq!(report_key.0, "keystore_tx.sign.out.report");
-//! # Ok::<(), mfm_collectors_local_keystore::tx::KeystoreTxError>(())
+//! # Ok::<(), mfm_evm_core::util_error::UtilError>(())
 //! ```
 
 /// Local keystore-specific `State` implementations used by op planners.

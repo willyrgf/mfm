@@ -4,12 +4,10 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-alloy-primitives = { workspace = true, features = ["k256"] }
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 hex = { workspace = true }
-k256 = { version = "0.13", features = ["ecdsa"] }
 uuid = { version = "1.0", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 zeroize = "1.7.0"

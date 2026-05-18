@@ -2035,14 +2035,11 @@ dependencies = [
 name = "mfm-collectors-local-keystore"
 version = "0.1.0"
 dependencies = [
- "alloy-primitives",
  "async-trait",
- "hex",
  "mfm-machine",
  "serde",
  "serde_json",
  "tokio",
- "url",
 ]
 
 [[package]]
@@ -2272,6 +2269,7 @@ name = "mfm-op-keystore"
 version = "0.1.0"
 dependencies = [
  "mfm-collectors-local-keystore",
+ "mfm-evm-core",
  "mfm-machine",
  "mfm-sdk",
  "mfm-state-common",
@@ -2458,6 +2456,7 @@ dependencies = [
  "async-trait",
  "hex",
  "mfm-collectors-local-keystore",
+ "mfm-evm-core",
  "mfm-machine",
  "mfm-sdk",
  "mfm-state-common",
@@ -2551,11 +2550,9 @@ dependencies = [
 name = "mfm-transports-local-keystore"
 version = "0.1.0"
 dependencies = [
- "alloy-primitives",
  "async-trait",
  "chrono",
  "hex",
- "k256",
  "mfm-collectors-local-keystore",
  "mfm-evm-core",
  "mfm-machine",

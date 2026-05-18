@@ -30,12 +30,9 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
-use alloy_primitives::{keccak256, Address, PrimitiveSignature, B256};
 use async_trait::async_trait;
 use chrono::Utc;
-use mfm_collectors_local_keystore::tx::{
-    parse_address, parse_data_hex, parse_u128_quantity, Eip1559TxToSign, KeystoreTxError,
-};
+use mfm_collectors_local_keystore::tx::KeystoreTxError;
 use mfm_collectors_local_keystore::{
     KeystoreDeleteReport, KeystoreDeleteRequest, KeystoreImportReport, KeystoreImportRequest,
     KeystoreImportType, KeystoreListKey, KeystoreListReport, KeystoreListRequest,
@@ -44,10 +41,11 @@ use mfm_collectors_local_keystore::{
     NAMESPACE_LOCAL_KEYSTORE_TX_SIGN,
 };
 use mfm_core::keystore::{KeyType, Keystore, KeystoreConfig, KeystoreError};
-use mfm_evm_core::rlp::{
-    rlp_encode_bytes, rlp_encode_list_preencoded, trim_leading_zero_bytes, u128_to_min_be,
-    u64_to_min_be,
+use mfm_evm_core::tx::{
+    eip1559_signing_hash, encode_signed_eip1559_tx_hex, parse_address, parse_data_hex,
+    parse_u128_quantity, Eip1559TxToSign,
 };
+use mfm_evm_core::util_error::UtilError;
 use mfm_machine::errors::{ErrorCategory, ErrorInfo, IoError};
 use mfm_machine::ids::ErrorCode;
 use mfm_machine::io::IoCall;
@@ -505,20 +503,27 @@ fn keystore_tx_sign_with_input(
         .map_err(local_error_from_keystore_tx)?;
 
     let tx = Eip1559TxToSign {
-        to: parse_address(&req.to, "to").map_err(local_error_from_keystore_tx)?,
+        to: parse_address(&req.to, "to")
+            .map_err(keystore_tx_error_from_util)
+            .map_err(local_error_from_keystore_tx)?,
         value_wei: parse_u128_quantity(&req.value_wei, "value-wei")
+            .map_err(keystore_tx_error_from_util)
             .map_err(local_error_from_keystore_tx)?,
         chain_id: req.chain_id,
         nonce: req.nonce,
         max_fee_per_gas: parse_u128_quantity(&req.max_fee_per_gas, "max-fee-per-gas")
+            .map_err(keystore_tx_error_from_util)
             .map_err(local_error_from_keystore_tx)?,
         max_priority_fee_per_gas: parse_u128_quantity(
             &req.max_priority_fee_per_gas,
             "max-priority-fee-per-gas",
         )
+        .map_err(keystore_tx_error_from_util)
         .map_err(local_error_from_keystore_tx)?,
         gas_limit: req.gas_limit,
-        data: parse_data_hex(&req.data_hex).map_err(local_error_from_keystore_tx)?,
+        data: parse_data_hex(&req.data_hex)
+            .map_err(keystore_tx_error_from_util)
+            .map_err(local_error_from_keystore_tx)?,
     };
 
     let signed = sign_eip1559_transaction(&mut keystore, key_id, &tx)
@@ -602,83 +607,19 @@ fn sign_eip1559_transaction(
         .ethereum_address()
         .map_err(|e| KeystoreTxError::new("signing_error", e.to_string()))?;
 
-    let unsigned = encode_eip1559_unsigned_payload(tx);
-    let mut preimage = vec![0x02];
-    preimage.extend_from_slice(&unsigned);
-
-    let hash: B256 = keccak256(&preimage);
+    let hash = eip1559_signing_hash(tx);
     let mut hash_bytes = [0u8; 32];
     hash_bytes.copy_from_slice(hash.as_slice());
 
     let signature = secure_key
-        .sign_hash(&hash_bytes)
+        .sign_hash_recoverable(&hash_bytes)
         .map_err(|e| KeystoreTxError::new("signing_error", e.to_string()))?;
-    let signed_sig = derive_signature_with_matching_recovery_id(&signature, &hash, from_address)?;
-
-    let signed = encode_eip1559_signed_payload(tx, signed_sig);
-    let mut raw = vec![0x02];
-    raw.extend_from_slice(&signed);
 
     Ok(SignedEip1559Tx {
         from: format!("{from_address:?}"),
         payload_hash: format!("0x{}", hex::encode(hash.as_slice())),
-        raw_tx_hex: format!("0x{}", hex::encode(raw)),
+        raw_tx_hex: encode_signed_eip1559_tx_hex(tx, signature),
     })
-}
-
-fn derive_signature_with_matching_recovery_id(
-    signature: &k256::ecdsa::Signature,
-    hash: &B256,
-    expected_from: Address,
-) -> Result<PrimitiveSignature, KeystoreTxError> {
-    for parity in [false, true] {
-        let candidate = PrimitiveSignature::from_signature_and_parity(*signature, parity);
-        if let Ok(recovered) = candidate.recover_address_from_prehash(hash) {
-            if recovered == expected_from {
-                return Ok(candidate);
-            }
-        }
-    }
-
-    Err(KeystoreTxError::new(
-        "signing_error",
-        "Failed to derive recovery id for signed transaction",
-    ))
-}
-
-fn encode_eip1559_unsigned_payload(tx: &Eip1559TxToSign) -> Vec<u8> {
-    rlp_encode_list_preencoded(&[
-        rlp_encode_bytes(&u64_to_min_be(tx.chain_id)),
-        rlp_encode_bytes(&u64_to_min_be(tx.nonce)),
-        rlp_encode_bytes(&u128_to_min_be(tx.max_priority_fee_per_gas)),
-        rlp_encode_bytes(&u128_to_min_be(tx.max_fee_per_gas)),
-        rlp_encode_bytes(&u64_to_min_be(tx.gas_limit)),
-        rlp_encode_bytes(tx.to.as_slice()),
-        rlp_encode_bytes(&u128_to_min_be(tx.value_wei)),
-        rlp_encode_bytes(&tx.data),
-        rlp_encode_list_preencoded(&[]),
-    ])
-}
-
-fn encode_eip1559_signed_payload(tx: &Eip1559TxToSign, sig: PrimitiveSignature) -> Vec<u8> {
-    let y_parity = sig.v();
-    let r = trim_leading_zero_bytes(&sig.r().to_be_bytes::<32>());
-    let s = trim_leading_zero_bytes(&sig.s().to_be_bytes::<32>());
-
-    rlp_encode_list_preencoded(&[
-        rlp_encode_bytes(&u64_to_min_be(tx.chain_id)),
-        rlp_encode_bytes(&u64_to_min_be(tx.nonce)),
-        rlp_encode_bytes(&u128_to_min_be(tx.max_priority_fee_per_gas)),
-        rlp_encode_bytes(&u128_to_min_be(tx.max_fee_per_gas)),
-        rlp_encode_bytes(&u64_to_min_be(tx.gas_limit)),
-        rlp_encode_bytes(tx.to.as_slice()),
-        rlp_encode_bytes(&u128_to_min_be(tx.value_wei)),
-        rlp_encode_bytes(&tx.data),
-        rlp_encode_list_preencoded(&[]),
-        rlp_encode_bytes(&u64_to_min_be(u64::from(y_parity))),
-        rlp_encode_bytes(&r),
-        rlp_encode_bytes(&s),
-    ])
 }
 
 fn write_raw_transaction_file(
@@ -1190,6 +1131,10 @@ fn local_error_from_keystore_tx(err: KeystoreTxError) -> LocalError {
         _ => ErrorCategory::Unknown,
     };
     LocalError::new(code, category, err.message)
+}
+
+fn keystore_tx_error_from_util(err: UtilError) -> KeystoreTxError {
+    KeystoreTxError::new(err.code, err.message)
 }
 
 fn resolve_resource(handle: &str) -> Result<LocalKeystoreResource, LocalTransportError> {
@@ -1795,32 +1740,6 @@ mod tests {
         std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o700))
             .expect("restore permissions");
         let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn encode_eip1559_signed_payload_uses_canonical_zero_y_parity() {
-        let tx = Eip1559TxToSign {
-            to: Address::from([0u8; 20]),
-            value_wei: 1,
-            chain_id: 1,
-            nonce: 0,
-            max_fee_per_gas: 2,
-            max_priority_fee_per_gas: 1,
-            gas_limit: 21_000,
-            data: Vec::new(),
-        };
-        let sig = PrimitiveSignature::from_scalars_and_parity(
-            B256::from([1u8; 32]),
-            B256::from([2u8; 32]),
-            false,
-        );
-
-        let encoded = encode_eip1559_signed_payload(&tx, sig);
-        let y_parity_idx = encoded.len() - 67;
-
-        // Canonical integer RLP uses empty bytes for zero (0x80), not 0x00.
-        assert_eq!(encoded[y_parity_idx], 0x80);
-        assert_eq!(encoded[y_parity_idx + 1], 0xa0);
     }
 
     #[test]

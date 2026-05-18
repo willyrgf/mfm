@@ -18,10 +18,9 @@
 
 use std::sync::Arc;
 
-use mfm_collectors_local_keystore::tx::{
-    output_context_key, parse_address, parse_data_hex, parse_u128_quantity, Eip1559TxToSign,
-    KeystoreTxError,
-};
+use mfm_collectors_local_keystore::tx::{output_context_key, KeystoreTxError};
+use mfm_evm_core::tx::{parse_address, parse_data_hex, parse_u128_quantity, Eip1559TxToSign};
+use mfm_evm_core::util_error::UtilError;
 use mfm_machine::config::RunConfig;
 use mfm_machine::errors::ErrorCategory;
 use mfm_machine::ids::{ContextKey, OpId, OpPath};
@@ -127,15 +126,15 @@ impl Operation for KeystoreTxSignOp {
             op_errors::sdk_parse_error("invalid_op_config", "invalid keystore_tx_sign op_config")
         })?;
 
-        let to = parse_address(&cfg.to, "to").map_err(sdk_error_from_helper)?;
+        let to = parse_address(&cfg.to, "to").map_err(sdk_error_from_util)?;
         let value_wei =
-            parse_u128_quantity(&cfg.value_wei, "value-wei").map_err(sdk_error_from_helper)?;
+            parse_u128_quantity(&cfg.value_wei, "value-wei").map_err(sdk_error_from_util)?;
         let max_fee_per_gas = parse_u128_quantity(&cfg.max_fee_per_gas, "max-fee-per-gas")
-            .map_err(sdk_error_from_helper)?;
+            .map_err(sdk_error_from_util)?;
         let max_priority_fee_per_gas =
             parse_u128_quantity(&cfg.max_priority_fee_per_gas, "max-priority-fee-per-gas")
-                .map_err(sdk_error_from_helper)?;
-        let data = parse_data_hex(&cfg.data).map_err(sdk_error_from_helper)?;
+                .map_err(sdk_error_from_util)?;
+        let data = parse_data_hex(&cfg.data).map_err(sdk_error_from_util)?;
 
         let tx = Eip1559TxToSign {
             to,
@@ -183,7 +182,7 @@ fn require_local_resource_handle(configured: String) -> Result<String, KeystoreT
     let value = configured.trim();
     if value.is_empty() {
         return Err(KeystoreTxError::new(
-            "MissingArgument",
+            "missing_argument",
             "Must provide local_resource_handle",
         ));
     }
@@ -196,18 +195,23 @@ fn sdk_error_from_helper(err: KeystoreTxError) -> SdkError {
     op_errors::sdk_error(err.code, category, false, err.message)
 }
 
+fn sdk_error_from_util(err: UtilError) -> SdkError {
+    let category = helper_category(err.code);
+    op_errors::sdk_error(err.code, category, false, err.message)
+}
+
 fn helper_category(code: &str) -> ErrorCategory {
     match code {
-        "InvalidAddress"
-        | "InvalidQuantity"
-        | "InvalidData"
-        | "InvalidFeeConfig"
-        | "InvalidPathConfig"
-        | "InvalidSelectorLabel"
-        | "InvalidUuid"
-        | "MissingArgument"
-        | "AmbiguousLabel"
-        | "KeyNotFound" => ErrorCategory::ParsingInput,
+        "invalid_address"
+        | "invalid_quantity"
+        | "invalid_data"
+        | "invalid_fee_config"
+        | "invalid_path_config"
+        | "invalid_selector_label"
+        | "invalid_uuid"
+        | "missing_argument"
+        | "ambiguous_label"
+        | "key_not_found" => ErrorCategory::ParsingInput,
         _ => ErrorCategory::Unknown,
     }
 }
@@ -263,6 +267,6 @@ mod tests {
         let err = require_local_resource_handle("  ".to_string())
             .expect_err("empty local resource handles are invalid");
 
-        assert_eq!(err.code, "MissingArgument");
+        assert_eq!(err.code, "missing_argument");
     }
 }
