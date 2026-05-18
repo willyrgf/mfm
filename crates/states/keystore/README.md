@@ -9,11 +9,13 @@ remain thin planners.
 
 Boundary rules:
 
-- typed request, report, and transaction input DTOs live in
-  `mfm-collectors-local-keystore`
+- typed request and report DTOs live in `mfm-collectors-local-keystore`
+- EVM transaction models, signing hashes, and raw transaction encoding live in
+  `mfm-evm-core`
 - live filesystem, prompt, password, keystore unlock, and signing behavior lives
   in `mfm-transports-local-keystore`
-- encrypted keystore primitives remain in `mfm_core`
+- encrypted keystore and Ethereum private-key signing primitives remain in
+  `mfm_core`
 - this crate must not deserialize private keys, mnemonics, passwords, or raw
   signed transaction output into persisted context, artifacts, reports, logs, or
   error details

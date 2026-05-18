@@ -96,9 +96,10 @@ runtime behavior reused by thin ops.
 Even under recursive op planning, these remain the runtime execution units after planner
 flattening.
 
-For EVM flows, pure primitives live in `crates/evm-core`, deploy/configure/validate schema and
-calldata preparation live in `crates/evm-dcv-model`, typed local signer IO lives in
-`crates/collectors/local-evm`, and live local signing remains in `crates/transports/local-evm`.
+For EVM flows, pure primitives, transaction models, signing hashes, and raw transaction encoding
+live in `crates/evm-core`, deploy/configure/validate schema and calldata preparation live in
+`crates/evm-dcv-model`, typed local signer IO lives in `crates/collectors/local-evm`, and live
+local signing remains in `crates/transports/local-evm`.
 The shared states below keep reusable EVM execution behavior in `crates/evm-runtime`.
 
 | Module | State types | Purpose | Used by built-in ops |
@@ -107,7 +108,7 @@ The shared states below keep reusable EVM execution behavior in `crates/evm-runt
 | `crates/states/common/src/states/publish.rs` | `WriteJsonValueState`, `WriteContextValueArtifactState` | Deterministic JSON publication and context-to-artifact emission for thin workflow boundaries | `evm_deploy_configure_validate_config_build`, `portfolio_config_build`, `portfolio_tracker` (canonical input path) |
 | `crates/states/common/src/states/proof.rs` | `ProofReadState`, `ProofApplySideEffectState` | Typed proof read and side-effect states that avoid raw proof namespace strings | `proof` |
 | `crates/states/keystore/src/states/admin.rs` | `KeystoreImportState`, `KeystoreListState`, `KeystoreDeleteState` | Reusable keystore administration flows that route typed `local.keystore.*` requests and persist non-secret reports; live filesystem/prompt/password handling stays in `crates/transports/local-keystore` | `keystore_import`, `keystore_list`, `keystore_delete` |
-| `crates/states/keystore/src/states/tx.rs` | `KeystoreTxSignState` | Reusable transaction-signing state that routes typed local-keystore signing requests and persists only the non-secret signing report; EIP-1559 signing and raw transaction file writes stay in `crates/transports/local-keystore` | `keystore_tx_sign` |
+| `crates/states/keystore/src/states/tx.rs` | `KeystoreTxSignState` | Reusable transaction-signing state that routes typed local-keystore signing requests and persists only the non-secret signing report; EIP-1559 transaction modeling/encoding lives in `crates/evm-core`, key signing in `crates/core`, and raw transaction file writes stay in `crates/transports/local-keystore` | `keystore_tx_sign` |
 | `crates/evm-runtime/src/states/read.rs` | `ReadHexStringState`, `ReadU256HexState`, `EthCallState`, `ReadU64HexState`, `NativeBalanceState`, `TokenBalanceState` | Reusable control-plane-backed chain read/query states | `evm_read`, `portfolio_execute`, `portfolio_tracker` |
 | `crates/evm-runtime/src/states/rpc_control.rs` | `PrepareSourcesState` | Reusable `rpc.control` source preparation and responsiveness preflight | none directly; shared contract used by semantic and EVM write runtimes |
 | `crates/evm-runtime/src/states/price.rs` | `read_evm_oracle_unit_price` | Reusable control-plane-backed EVM oracle price reads for valuation source execution | `portfolio_execute`, `portfolio_tracker` |

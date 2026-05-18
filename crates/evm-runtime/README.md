@@ -6,10 +6,10 @@ This crate packages shared `State` implementations for on-chain reads and writes
 
 EVM ownership is split by boundary:
 
-- `mfm-evm-core` owns pure ABI, hex, RLP, and transaction support primitives.
+- `mfm-evm-core` owns pure ABI, hex, RLP, transaction models, signing hashes, raw transaction hashes, and signed raw transaction encoding.
 - `mfm-evm-dcv-model` owns pure deploy/configure/validate models and calldata preparation.
 - `mfm-collectors-local-evm` owns the typed `local.evm.*` signer IO client over `IoProvider`.
-- `mfm-transports-local-evm` owns live local signing, private-key environment handling, and zeroized secret material.
+- `mfm-transports-local-evm` owns private-key environment handling and live local signing orchestration through `mfm_core` and `mfm-evm-core`.
 - `mfm-evm-runtime` owns reusable EVM read/write states, `rpc.control` helpers, signed transaction intent recording, protected raw-transaction capabilities, and managed broadcast/read behavior.
 - EVM op crates own graph assembly only.
 

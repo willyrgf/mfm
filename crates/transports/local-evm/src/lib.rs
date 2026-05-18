@@ -3,7 +3,9 @@
 //!
 //! This crate exposes a `LiveIoTransportFactory` for the `local.evm.*` namespaces used by shared
 //! runtime states. The transport reads signing keys from the local environment and never persists
-//! the secret material itself. State-facing typed requests live in `mfm-collectors-local-evm`.
+//! the secret material itself. Key parsing and recoverable signing live in `mfm_core`, raw
+//! transaction encoding lives in `mfm-evm-core`, and state-facing typed requests live in
+//! `mfm-collectors-local-evm`.
 //!
 //! # Examples
 //!

@@ -1,9 +1,9 @@
 #![warn(missing_docs)]
-//! Low-level EVM ABI, hex, and RLP helpers used by runtime and collector crates.
+//! Low-level EVM ABI, hex, RLP, and transaction helpers used by runtime and collector crates.
 //!
 //! This crate keeps encoding and decoding concerns separate from transport code so higher layers
-//! can assemble RPC requests, contract calls, and byte-oriented payloads without reimplementing
-//! Ethereum primitives.
+//! can assemble RPC requests, contract calls, transaction signing preimages, and byte-oriented
+//! payloads without reimplementing Ethereum primitives.
 //!
 //! # Examples
 //!

@@ -40,7 +40,7 @@ The live runtime inventory still lives in the repository docs:
 | --- | --- | --- | --- |
 | `mfm-authored-config` | Shared JSON/TOML authored-config ingress helpers. | pending | `crates/authored-config` |
 | `mfm-control-plane-model` | Backend-neutral control-plane stream-family model and projections. | pending | `crates/control-plane/model` |
-| `mfm-evm-core` | EVM ABI, encoding, hex, and transaction support types. | <https://docs.rs/mfm-evm-core> | `crates/evm-core` |
+| `mfm-evm-core` | EVM ABI, encoding, hex, RLP, transaction models, hashes, and raw transaction encoders. | <https://docs.rs/mfm-evm-core> | `crates/evm-core` |
 | `mfm-evm-dcv-model` | Pure EVM deploy/configure/validate model and ABI preparation helpers. | pending | `crates/evm-dcv-model` |
 | `mfm-evm-deploy-configure-validate-config` | Shared deploy/configure/validate config pipeline. | pending | `crates/evm-deploy-configure-validate-config` |
 | `mfm-portfolio-config` | Shared portfolio snapshot config pipeline. | pending | `crates/portfolio-config` |
@@ -103,7 +103,7 @@ Ops stay thin and focus on graph composition and config validation. Most are sti
 | Package | Role | Workspace Path |
 | --- | --- | --- |
 | `mfm-transports-exec` | Live `exec` namespace transport for bounded local process execution. | `crates/transports/exec` |
-| `mfm-transports-local-evm` | Local EVM signing and transaction transport. | `crates/transports/local-evm` |
+| `mfm-transports-local-evm` | Local EVM private-key environment and signing transport. | `crates/transports/local-evm` |
 | `mfm-transports-local-fs` | Local filesystem transport helpers. | `crates/transports/local-fs` |
 | `mfm-transports-local-keystore` | Local keystore-backed transport helpers. | `crates/transports/local-keystore` |
 | `mfm-transports-process-exec` | Bounded child-process execution helpers for live transports. | `crates/transports/process-exec` |

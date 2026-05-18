@@ -10,6 +10,7 @@ use mfm_machine::ids::{FactKey, StateId};
 use mfm_state_common::errors as op_errors;
 
 use crate::rpc::normalize_quantity_hex;
+use mfm_evm_core::tx as evm_tx;
 use mfm_evm_dcv_model as shared_dcv;
 
 /// Schema version for [`TxIntentV1`].
@@ -106,25 +107,16 @@ fn payload_hash_hex(payload: &[u8]) -> String {
 
 /// Computes the expected EVM transaction hash for a signed raw transaction.
 pub fn raw_transaction_hash(raw_tx_hex: &str) -> Result<String, mfm_machine::errors::StateError> {
-    let normalized = shared_dcv::normalize_hex_str(raw_tx_hex).map_err(|_| {
+    evm_tx::raw_transaction_hash(raw_tx_hex).map_err(|_| {
         op_errors::state_unknown("invalid_raw_tx_hex", "raw transaction hex was invalid")
-    })?;
-    let bytes = shared_dcv::hex_to_bytes(&normalized).map_err(|_| {
-        op_errors::state_unknown("invalid_raw_tx_hex", "raw transaction hex was invalid")
-    })?;
-    raw_transaction_hash_bytes(&bytes)
+    })
 }
 
 /// Computes the expected EVM transaction hash for signed raw transaction bytes.
 pub fn raw_transaction_hash_bytes(bytes: &[u8]) -> Result<String, mfm_machine::errors::StateError> {
-    if bytes.is_empty() {
-        return Err(op_errors::state_unknown(
-            "invalid_raw_tx_hex",
-            "raw transaction hex was empty",
-        ));
-    }
-    let hash = keccak256(bytes);
-    Ok(shared_dcv::bytes_to_hex_prefixed(hash.as_slice()))
+    evm_tx::raw_transaction_hash_bytes(bytes).map_err(|_| {
+        op_errors::state_unknown("invalid_raw_tx_hex", "raw transaction hex was invalid")
+    })
 }
 
 impl SignedTxCapabilityV1 {

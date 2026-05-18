@@ -88,6 +88,7 @@ Generated from `docs/repo-index.json`.
 - `introspect`, `stateHash`, `schema` from `nixfied/framework/core/mkNixfied.nix`
 
 ## Sensitive Zones
+- `crates/core/src/crypto.rs` - Security-sensitive Ethereum private-key parsing, address derivation, and recoverable signing. (checks: nix run .#check, nix run .#test, nix run .#ci -- --audit --summary)
 - `crates/core/src/keystore` - Security-sensitive key handling, tamper detection, and persisted keystore compatibility. (checks: nix run .#check, nix run .#test, nix run .#ci -- --audit --summary)
 - `crates/machine` - Recovery, replay, and deterministic state-machine runtime semantics. (checks: nix run .#check, nix run .#test, nix run .#ci -- --parity --summary)
 - `nixfied/framework` - Framework internals; avoid direct edits in installed repos. (checks: nix run .#help)

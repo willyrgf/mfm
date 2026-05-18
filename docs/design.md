@@ -183,7 +183,10 @@ They do not own domain execution logic.
 Canonical responsibilities:
 - `crates/machine/`: runtime model + executor + kernel contracts
 - `crates/machine-derive/`: proc-macro ergonomics
-- `crates/core/`: primitives + security-sensitive keystore/crypto
+- `crates/core/`: primitives + security-sensitive keystore/crypto, including Ethereum private-key
+  parsing, address derivation, and recoverable prehash signing
+- `crates/evm-core`: non-secret EVM ABI, hex, RLP, transaction models, signing hashes, raw
+  transaction hashes, and signed raw transaction encoding
 - `crates/evm-dcv-model`: pure deploy/configure/validate config models and ABI preparation
   helpers shared by planners, config ingress, and runtime states
 - `crates/collectors/*`: external data adapters

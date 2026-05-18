@@ -2251,8 +2251,6 @@ dependencies = [
 name = "mfm-op-evm-write"
 version = "0.1.0"
 dependencies = [
- "alloy-primitives",
- "k256",
  "mfm-collectors-evm",
  "mfm-evm-dcv-model",
  "mfm-evm-runtime",
@@ -2261,7 +2259,6 @@ dependencies = [
  "mfm-state-common",
  "serde",
  "serde_json",
- "zeroize",
 ]
 
 [[package]]

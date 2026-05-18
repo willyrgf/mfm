@@ -6,7 +6,6 @@ edition = "2021"
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
-alloy-primitives = { workspace = true }
 mfm-machine = { path = "../../machine" }
 mfm-sdk = { path = "../../sdk" }
 mfm-state-common = { path = "../../states/common" }
@@ -14,6 +13,4 @@ mfm-evm-dcv-model = { path = "../../evm-dcv-model" }
 mfm-evm-runtime = { path = "../../evm-runtime" }
 
 [dev-dependencies]
-k256 = { version = "0.13", features = ["ecdsa"] }
 mfm-collectors-evm = { path = "../../collectors/evm" }
-zeroize = "1.7.0"

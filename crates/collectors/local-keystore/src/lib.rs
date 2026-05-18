@@ -3,8 +3,8 @@
 //!
 //! This crate defines typed adapters over the generic `IoCall` surface for local keystore flows.
 //! It intentionally does NOT perform IO itself. It owns the stable local-keystore request/report
-//! DTOs plus pure transaction input parsing helpers, while live filesystem, prompt, password,
-//! unlock, and signing behavior stays in `mfm-transports-local-keystore`.
+//! DTOs, while generic EVM transaction models live in `mfm-evm-core` and live filesystem, prompt,
+//! password, unlock, and signing behavior stays in `mfm-transports-local-keystore`.
 //!
 //! Requests contain opaque local resource handles instead of local paths, labels, passwords,
 //! private keys, mnemonics, or raw signed transactions. Keep new request/report fields
@@ -18,7 +18,7 @@ use mfm_machine::hashing::{artifact_id_for_json, CanonicalJsonError};
 use mfm_machine::ids::{ErrorCode, FactKey, StateId};
 use mfm_machine::io::{IoCall, IoProvider};
 
-/// Pure local keystore transaction input model and parsing helpers.
+/// Local keystore transaction-flow helper errors and context keys.
 pub mod tx;
 
 /// Canonical namespace group used for local keystore IO calls.

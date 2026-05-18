@@ -279,17 +279,20 @@ This boundary must not push control-plane semantics into `crates/machine`, and i
 the generic `StreamStore` trait for v1.
 
 ### `crates/core/`
-Owns primitives and security-sensitive keystore/crypto code.
+Owns primitives and security-sensitive keystore/crypto code, including Ethereum private-key
+parsing, address derivation, and recoverable prehash signing.
 
 ### Keystore Ownership Map
 Keystore flows keep typed IO, reusable states, and live secret handling separate:
-- `crates/core/` owns encrypted keystore and crypto primitives.
-- `crates/collectors/local-keystore/` owns typed `local.keystore.*` request/report DTOs and pure
-  transaction input parsing helpers over `IoProvider`.
+- `crates/core/` owns encrypted keystore and Ethereum private-key signing primitives.
+- `crates/evm-core/` owns non-secret EVM transaction models, signing hashes, raw transaction
+  hashes, and signed raw transaction encoding.
+- `crates/collectors/local-keystore/` owns typed `local.keystore.*` request/report DTOs over
+  `IoProvider`.
 - `crates/states/keystore/` owns reusable state handlers that call the typed local-keystore client
   and persist only non-secret reports.
 - `crates/transports/local-keystore/` owns live local filesystem access, hidden prompts, password
-  handling, keystore unlock, EIP-1559 signing, and raw signed transaction file writes.
+  handling, keystore unlock, signing orchestration, and raw signed transaction file writes.
 - Keystore op crates own graph assembly and config validation only.
 
 ### `crates/evm-dcv-model`
@@ -298,12 +301,13 @@ transports, storages, and `crates/machine` must not be dependencies of this crat
 
 ### EVM Ownership Map
 EVM code follows a model/runtime/transport split:
-- `crates/evm-core/` owns pure ABI, hex, RLP, and transaction support primitives.
+- `crates/evm-core/` owns pure ABI, hex, RLP, transaction models, signing hashes, raw transaction
+  hashes, and signed raw transaction encoding.
 - `crates/evm-dcv-model/` owns pure deploy/configure/validate models and calldata preparation.
 - `crates/collectors/local-evm/` owns the typed `local.evm.*` signer IO client and request/response
   contract over `IoProvider`.
-- `crates/transports/local-evm/` owns live local signing, private-key environment handling, and
-  zeroized secret material.
+- `crates/transports/local-evm/` owns private-key environment handling and live local signing
+  orchestration through `crates/core` and `crates/evm-core`.
 - `crates/evm-runtime/` owns reusable EVM read/write states, `rpc.control` helpers, signed
   transaction intent recording, protected raw-transaction capabilities, and managed broadcast/read
   behavior.

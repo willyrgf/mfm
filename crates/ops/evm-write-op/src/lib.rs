@@ -26,16 +26,10 @@
 
 use std::sync::Arc;
 
-#[cfg(test)]
-use k256::ecdsa::SigningKey;
 use serde::Deserialize;
 #[cfg(test)]
 use std::time::Duration;
-#[cfg(test)]
-use zeroize::Zeroizing;
 
-#[cfg(test)]
-use alloy_primitives::keccak256;
 use mfm_evm_dcv_model as shared_dcv;
 use mfm_evm_runtime::states::contract_set::{
     validate_deploy_contract_set_config, CollectDeployedContractSetState,
@@ -52,8 +46,6 @@ use mfm_evm_runtime::states::write::{
 };
 use mfm_machine::config::RunConfig;
 use mfm_machine::errors::ErrorCategory;
-#[cfg(test)]
-use mfm_machine::errors::StateError;
 use mfm_machine::ids::{OpId, OpPath};
 use mfm_state_common::errors as op_errors;
 use mfm_state_common::rpc as op_rpc;
@@ -353,47 +345,6 @@ fn ensure_nonempty_env_name(env_name: &str) -> Result<(), String> {
         return Err("signing_key_env must be non-empty".to_string());
     }
     Ok(())
-}
-
-#[cfg(test)]
-#[allow(clippy::disallowed_methods)]
-fn signing_key_from_env(signing_key_env: &str) -> Result<SigningKey, StateError> {
-    let raw = Zeroizing::new(std::env::var(signing_key_env).map_err(|_| {
-        op_errors::state_unknown(
-            "missing_signing_key_env",
-            "signing_key_env did not exist in process environment",
-        )
-    })?);
-
-    let normalized = Zeroizing::new(shared_dcv::normalize_hex_str(raw.as_str()).map_err(|_| {
-        op_errors::state_unknown("invalid_signing_key_env", "signing key hex was invalid")
-    })?);
-    let bytes = Zeroizing::new(shared_dcv::hex_to_bytes(normalized.as_str()).map_err(|_| {
-        op_errors::state_unknown("invalid_signing_key_env", "signing key hex was invalid")
-    })?);
-    if bytes.len() != 32 {
-        return Err(op_errors::state_unknown(
-            "invalid_signing_key_env",
-            "signing key must be exactly 32 bytes",
-        ));
-    }
-
-    let mut key = Zeroizing::new([0u8; 32]);
-    key.copy_from_slice(bytes.as_slice());
-
-    SigningKey::from_bytes((&*key).into()).map_err(|_| {
-        op_errors::state_unknown(
-            "invalid_signing_key_env",
-            "signing key did not form a valid secp256k1 key",
-        )
-    })
-}
-
-#[cfg(test)]
-fn signer_address_hex(signing_key: &SigningKey) -> String {
-    let public_key = signing_key.verifying_key().to_encoded_point(false);
-    let hash = keccak256(&public_key.as_bytes()[1..]);
-    shared_dcv::bytes_to_hex_prefixed(&hash.as_slice()[12..])
 }
 
 /// Planner that adapts a `nix_app` result into a contract artifact export.
