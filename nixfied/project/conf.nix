@@ -174,6 +174,15 @@ rec {
     ];
     riskAreas = [
       {
+        path = "crates/core/src/crypto.rs";
+        risk = "Security-sensitive Ethereum private-key parsing, address derivation, and recoverable signing.";
+        required_checks = [
+          "nix run .#check"
+          "nix run .#test"
+          "nix run .#ci -- --audit --summary"
+        ];
+      }
+      {
         path = "crates/core/src/keystore";
         risk = "Security-sensitive key handling, tamper detection, and persisted keystore compatibility.";
         required_checks = [
