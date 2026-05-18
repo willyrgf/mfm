@@ -65,7 +65,7 @@ pub mod error;
 
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Key, Nonce};
-use alloy_primitives::Address;
+use alloy_primitives::{Address, PrimitiveSignature};
 use argon2::{Argon2, Params};
 use bip32::{DerivationPath, XPrv};
 use bip39::Mnemonic;
@@ -84,9 +84,10 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::{Duration, Instant};
 use subtle::ConstantTimeEq;
-use tiny_keccak::{Hasher, Keccak};
 use uuid::Uuid;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
+
+use crate::crypto::{EthereumKeyError, EthereumPrivateKey};
 
 pub use error::KeystoreError;
 
@@ -355,6 +356,19 @@ impl SecureKey {
         result
     }
 
+    /// Sign a 32-byte hash and return an Ethereum recoverable signature.
+    pub fn sign_hash_recoverable(
+        &self,
+        hash: &[u8; 32],
+    ) -> Result<PrimitiveSignature, KeystoreError> {
+        let mut key_bytes = [0u8; 32];
+        key_bytes.copy_from_slice(self.key_bytes.as_ref());
+        let key = EthereumPrivateKey::from_secret_bytes(key_bytes)
+            .map_err(keystore_error_from_ethereum_key)?;
+        key.sign_hash_recoverable(hash)
+            .map_err(keystore_error_from_ethereum_key)
+    }
+
     /// Get Ethereum address for this key
     pub fn ethereum_address(&self) -> Result<Address, KeystoreError> {
         ethereum_address_from_key_bytes(self.key_bytes.as_ref())
@@ -372,20 +386,23 @@ impl SecureKey {
 impl ZeroizeOnDrop for SecureKey {}
 
 fn ethereum_address_from_key_bytes(key_bytes: &[u8]) -> Result<Address, KeystoreError> {
-    let secret_key =
-        SecretKey::from_slice(key_bytes).map_err(|_| KeystoreError::InvalidPrivateKey)?;
-    let public_key = secret_key.public_key();
+    let key_bytes: [u8; 32] = key_bytes
+        .try_into()
+        .map_err(|_| KeystoreError::InvalidPrivateKey)?;
+    let key = EthereumPrivateKey::from_secret_bytes(key_bytes)
+        .map_err(keystore_error_from_ethereum_key)?;
+    key.address().map_err(keystore_error_from_ethereum_key)
+}
 
-    // Compute Ethereum address from public key
-    use k256::elliptic_curve::sec1::ToEncodedPoint;
-    let uncompressed_pk = public_key.to_encoded_point(false);
-    let mut keccak = Keccak::v256();
-    keccak.update(&uncompressed_pk.as_bytes()[1..]); // Skip 0x04 prefix
-    let mut hash = [0u8; 32];
-    keccak.finalize(&mut hash);
-
-    // Note: SecretKey implements ZeroizeOnDrop and will be zeroized when dropped
-    Ok(Address::from_slice(&hash[12..]))
+fn keystore_error_from_ethereum_key(err: EthereumKeyError) -> KeystoreError {
+    match err {
+        EthereumKeyError::InvalidHex
+        | EthereumKeyError::InvalidLength
+        | EthereumKeyError::InvalidPrivateKey => KeystoreError::InvalidPrivateKey,
+        EthereumKeyError::SigningFailed => {
+            KeystoreError::CryptoError("failed to sign prehashed payload".to_string())
+        }
+    }
 }
 
 /// Minimal secure keystore for Ethereum private keys and one-time mnemonic imports.

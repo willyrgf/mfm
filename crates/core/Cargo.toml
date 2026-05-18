@@ -31,7 +31,7 @@ uuid = { version = "1.8.0", features = ["serde", "v4"] }
 zeroize = { version = "1.7.0", features = ["zeroize_derive"] }
 chrono = { version = "0.4.38", features = ["serde"] }
 rand = "0.9.3"
-alloy-primitives = { workspace = true, features = ["serde"] }
+alloy-primitives = { workspace = true, features = ["serde", "k256"] }
 hex = "0.4.3"
 thiserror = "2.0.12"
 ring = "0.17.14"

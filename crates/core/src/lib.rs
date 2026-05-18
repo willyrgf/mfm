@@ -20,5 +20,7 @@
 
 /// Typed YAML configuration models shared across the workspace.
 pub mod config;
+/// Security-sensitive Ethereum private-key parsing and signing primitives.
+pub mod crypto;
 /// Security-sensitive Ethereum keystore primitives and errors.
 pub mod keystore;
