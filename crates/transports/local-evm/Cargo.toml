@@ -7,13 +7,12 @@ repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
 
 [dependencies]
-alloy-primitives = { workspace = true, features = ["k256"] }
 async-trait = { workspace = true }
-k256 = { version = "0.13", features = ["ecdsa"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 hex = { workspace = true }
 zeroize = "1.7.0"
 mfm-machine = { path = "../../machine", version = "0.1.0" }
+mfm_core = { path = "../../core", version = "0.1.30" }
 mfm-evm-core = { path = "../../evm-core", version = "0.1.0" }
 mfm-collectors-local-evm = { path = "../../collectors/local-evm", version = "0.1.0" }

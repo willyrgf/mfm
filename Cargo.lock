@@ -2524,13 +2524,12 @@ dependencies = [
 name = "mfm-transports-local-evm"
 version = "0.1.0"
 dependencies = [
- "alloy-primitives",
  "async-trait",
  "hex",
- "k256",
  "mfm-collectors-local-evm",
  "mfm-evm-core",
  "mfm-machine",
+ "mfm_core",
  "serde",
  "serde_json",
  "zeroize",

@@ -7,13 +7,12 @@
 //! # Examples
 //!
 //! ```rust
-//! use mfm_collectors_local_evm::{
-//!     LocalEvmSignLegacyCreateCall, NAMESPACE_LOCAL_EVM_SIGN_LEGACY_CREATE,
-//! };
+//! use mfm_collectors_local_evm::{LocalEvmSignLegacyCall, NAMESPACE_LOCAL_EVM_SIGN_LEGACY};
 //!
-//! let call = LocalEvmSignLegacyCreateCall {
+//! let call = LocalEvmSignLegacyCall {
 //!     signing_key_env: "MFM_SIGNING_KEY".to_string(),
 //!     from: "0x0000000000000000000000000000000000000000".to_string(),
+//!     to: None,
 //!     chain_id: 1,
 //!     nonce_hex: "0x0".to_string(),
 //!     gas_price_hex: "0x1".to_string(),
@@ -22,7 +21,7 @@
 //!     data_hex: "0x".to_string(),
 //! };
 //!
-//! assert_eq!(NAMESPACE_LOCAL_EVM_SIGN_LEGACY_CREATE, "local.evm.sign_legacy_create");
+//! assert_eq!(NAMESPACE_LOCAL_EVM_SIGN_LEGACY, "local.evm.sign_legacy");
 //! assert_eq!(call.chain_id, 1);
 //! ```
 
@@ -36,18 +35,18 @@ use mfm_machine::io::{IoCall, IoProvider};
 pub const NAMESPACE_LOCAL_EVM: &str = "local.evm";
 /// Namespace for resolving the address of a local signer.
 pub const NAMESPACE_LOCAL_EVM_SIGNER_ADDRESS: &str = "local.evm.signer_address";
-/// Namespace for locally signing a legacy contract-creation transaction.
-pub const NAMESPACE_LOCAL_EVM_SIGN_LEGACY_CREATE: &str = "local.evm.sign_legacy_create";
-/// Namespace for locally signing a legacy contract-call transaction.
-pub const NAMESPACE_LOCAL_EVM_SIGN_LEGACY_CALL: &str = "local.evm.sign_legacy_call";
+/// Namespace for locally signing a legacy transaction.
+pub const NAMESPACE_LOCAL_EVM_SIGN_LEGACY: &str = "local.evm.sign_legacy";
 
-/// Request shape for signing a legacy contract-creation transaction locally.
+/// Request shape for signing a legacy transaction locally.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LocalEvmSignLegacyCreateCall {
+pub struct LocalEvmSignLegacyCall {
     /// Environment variable containing the private key hex.
     pub signing_key_env: String,
     /// Expected sender address for the signing key.
     pub from: String,
+    /// Optional target address; `None` signs a contract-creation transaction.
+    pub to: Option<String>,
     /// Chain ID used for replay protection.
     pub chain_id: u64,
     /// Nonce encoded as a hex quantity.
@@ -58,30 +57,7 @@ pub struct LocalEvmSignLegacyCreateCall {
     pub gas_limit_hex: String,
     /// Value encoded as a hex quantity.
     pub value_hex: String,
-    /// Deployment calldata encoded as hex.
-    pub data_hex: String,
-}
-
-/// Request shape for signing a legacy contract call transaction locally.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LocalEvmSignLegacyCallCall {
-    /// Environment variable containing the private key hex.
-    pub signing_key_env: String,
-    /// Expected sender address for the signing key.
-    pub from: String,
-    /// Target address for the transaction.
-    pub to: String,
-    /// Chain ID used for replay protection.
-    pub chain_id: u64,
-    /// Nonce encoded as a hex quantity.
-    pub nonce_hex: String,
-    /// Gas price encoded as a hex quantity.
-    pub gas_price_hex: String,
-    /// Gas limit encoded as a hex quantity.
-    pub gas_limit_hex: String,
-    /// Value encoded as a hex quantity.
-    pub value_hex: String,
-    /// Call data encoded as hex.
+    /// Contract initcode or calldata encoded as hex.
     pub data_hex: String,
 }
 
@@ -152,37 +128,8 @@ impl<'a> LocalEvmIoClient<'a> {
         })
     }
 
-    /// Signs a legacy contract-creation transaction through the local transport.
-    pub async fn sign_legacy_create(
-        &mut self,
-        req: LocalEvmSignLegacyCreateCall,
-    ) -> Result<String, IoError> {
-        let request = serde_json::json!({
-            "env_name_hex": hex::encode(req.signing_key_env.as_bytes()),
-            "from": req.from,
-            "chain_id": req.chain_id,
-            "nonce_hex": req.nonce_hex,
-            "gas_price_hex": req.gas_price_hex,
-            "gas_limit_hex": req.gas_limit_hex,
-            "value_hex": req.value_hex,
-            "data_hex": req.data_hex,
-        });
-        let result = self
-            .io
-            .call(IoCall {
-                namespace: NAMESPACE_LOCAL_EVM_SIGN_LEGACY_CREATE.to_string(),
-                request,
-                fact_key: None,
-            })
-            .await?;
-        raw_tx_hex_from_response(&result.response)
-    }
-
-    /// Signs a legacy contract call transaction through the local transport.
-    pub async fn sign_legacy_call(
-        &mut self,
-        req: LocalEvmSignLegacyCallCall,
-    ) -> Result<String, IoError> {
+    /// Signs a legacy transaction through the local transport.
+    pub async fn sign_legacy(&mut self, req: LocalEvmSignLegacyCall) -> Result<String, IoError> {
         let request = serde_json::json!({
             "env_name_hex": hex::encode(req.signing_key_env.as_bytes()),
             "from": req.from,
@@ -197,7 +144,7 @@ impl<'a> LocalEvmIoClient<'a> {
         let result = self
             .io
             .call(IoCall {
-                namespace: NAMESPACE_LOCAL_EVM_SIGN_LEGACY_CALL.to_string(),
+                namespace: NAMESPACE_LOCAL_EVM_SIGN_LEGACY.to_string(),
                 request,
                 fact_key: None,
             })
@@ -333,9 +280,10 @@ mod tests {
             LocalEvmIoClient::new(StateId::must_new("evm.write.sign".to_string()), &mut io);
 
         let _ = client
-            .sign_legacy_create(LocalEvmSignLegacyCreateCall {
+            .sign_legacy(LocalEvmSignLegacyCall {
                 signing_key_env: "MFM_SIGNING_KEY".to_string(),
                 from: "0x0000000000000000000000000000000000000000".to_string(),
+                to: None,
                 chain_id: 1,
                 nonce_hex: "0x0".to_string(),
                 gas_price_hex: "0x1".to_string(),
@@ -347,7 +295,7 @@ mod tests {
             .expect("sign create");
 
         let call = io.calls.pop().expect("io call");
-        assert_eq!(call.namespace, NAMESPACE_LOCAL_EVM_SIGN_LEGACY_CREATE);
+        assert_eq!(call.namespace, NAMESPACE_LOCAL_EVM_SIGN_LEGACY);
         assert!(call.fact_key.is_none());
     }
 }

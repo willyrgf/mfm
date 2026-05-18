@@ -1,6 +1,4 @@
-use mfm_collectors_local_evm::{
-    LocalEvmIoClient, LocalEvmSignLegacyCallCall, LocalEvmSignLegacyCreateCall,
-};
+use mfm_collectors_local_evm::{LocalEvmIoClient, LocalEvmSignLegacyCall};
 use mfm_collectors_rpc_control::{EvmIoClient, JsonRpcCall, DEFAULT_CONTROL_SCOPE};
 use mfm_machine::errors::{ErrorCategory, StateError};
 use mfm_machine::ids::{ArtifactId, StateId};
@@ -323,9 +321,10 @@ pub async fn local_sign_legacy_create_raw_tx(
     let state_id = client.state_id().clone();
     let mut local = LocalEvmIoClient::new(state_id, client.io_mut());
     local
-        .sign_legacy_create(LocalEvmSignLegacyCreateCall {
+        .sign_legacy(LocalEvmSignLegacyCall {
             signing_key_env: req.signing_key_env.to_string(),
             from: req.from.to_string(),
+            to: None,
             chain_id: req.chain_id,
             nonce_hex: req.nonce_hex.to_string(),
             gas_price_hex: req.gas_price_hex.to_string(),
@@ -345,10 +344,10 @@ pub async fn local_sign_legacy_call_raw_tx(
     let state_id = client.state_id().clone();
     let mut local = LocalEvmIoClient::new(state_id, client.io_mut());
     local
-        .sign_legacy_call(LocalEvmSignLegacyCallCall {
+        .sign_legacy(LocalEvmSignLegacyCall {
             signing_key_env: req.signing_key_env.to_string(),
             from: req.from.to_string(),
-            to: req.to.to_string(),
+            to: Some(req.to.to_string()),
             chain_id: req.chain_id,
             nonce_hex: req.nonce_hex.to_string(),
             gas_price_hex: req.gas_price_hex.to_string(),

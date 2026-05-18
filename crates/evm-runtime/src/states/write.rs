@@ -785,9 +785,7 @@ mod tests {
         async fn call(&mut self, call: IoCall) -> Result<IoResult, IoError> {
             self.calls.push(call.clone());
 
-            if call.namespace == "local.evm.sign_legacy_create"
-                || call.namespace == "local.evm.sign_legacy_call"
-            {
+            if call.namespace == "local.evm.sign_legacy" {
                 return Ok(IoResult {
                     response: serde_json::json!({ "raw_tx_hex": "0x01" }),
                     recorded_payload_id: None,

@@ -527,7 +527,7 @@ mod tests {
                     recorded_payload_id: None,
                 });
             }
-            if call.namespace == "local.evm.sign_legacy_create" {
+            if call.namespace == "local.evm.sign_legacy" {
                 let raw_tx_hex = match call
                     .request
                     .get("nonce_hex")
