@@ -481,10 +481,14 @@ public framework surfaces.
 The proposal is centered on one stricter principle:
 
 ```text
-typed programs are the only semantic authoring surface;
+typed state programs are the only semantic executable surface;
 certified typed execution specs are the only runtime contract;
 erased execution plans are implementation artifacts.
 ```
+
+In this proposal, "state program" means a sequence or graph of states. It does not mean operations.
+Operations may author, plan, and explain a state program, but they are not part of the executable
+program after expansion.
 
 This is not an incremental validation layer over the current dynamic DAG model. The dynamic model is
 the architectural defect this proposal replaces. A compatibility lowering path may exist during
@@ -507,15 +511,15 @@ to:
 ```text
 typed planning config
   -> deterministic typed operation/state expansion
-  -> typed program IR
+  -> typed state program IR
   -> certified typed execution spec
   -> erased runner plan derived from the certified spec
   -> state machine executes states only
 ```
 
 The certified typed execution spec is the authoritative representation. It captures state inputs,
-outputs, effects, capabilities, operation lineage, value provenance, stable node identity, public
-terminal output shape, replay boundaries, and resume rules.
+outputs, effects, capabilities, planning provenance, planning lineage, value provenance, stable node
+identity, public terminal output shape, replay boundaries, and resume rules.
 
 The erased runner plan exists only so the scheduler can execute work. It must be reproducibly
 derivable from the certified spec. It must not carry extra semantics that are absent from the
@@ -992,7 +996,7 @@ The builder derives dependencies from handles. Workflow authors do not manually 
 - state kind and version
 - operation kind and version
 - canonical state config hash
-- operation lineage
+- planning lineage
 - effect and capability declarations
 - idempotency policy
 - scope identity
@@ -1033,8 +1037,8 @@ Stable ids are part of reproducibility. They must be derived, not accidentally p
 
 Node and cell ids should be derived from:
 
-- root operation kind and version
-- operation lineage
+- planning provenance descriptor and version
+- planning lineage
 - scope id
 - stable local node key
 - state kind and version
@@ -1061,20 +1065,48 @@ After typed expansion, MFM produces a certified typed execution spec:
 pub struct TypedExecutionSpec {
     pub spec_version: SpecVersion,
     pub lowering_version: LoweringVersion,
-    pub root_operation: OperationDescriptor,
-    pub planning_config_hash: ContentDigest,
-    pub nodes: Vec<NodeSpec>,
-    pub cells: Vec<CellSpec>,
+    pub planning: PlanningProvenance,
+    pub state_program: StateProgramSpec,
     pub outputs: PublicOutputSpec,
 }
 ```
+
+Planning provenance names what authored the state program. It is not part of the executable state
+program. MFM supports three authoring modes: operation expansion, direct state composition, and a
+mix of operations and directly declared states:
+
+```rust
+pub enum PlanningProvenance {
+    OperationExpansion {
+        operation: OperationDescriptor,
+        config_hash: ContentDigest,
+    },
+    StateComposition {
+        descriptor: StateCompositionDescriptor,
+        config_hash: ContentDigest,
+    },
+    MixedComposition {
+        descriptor: MixedCompositionDescriptor,
+        config_hash: ContentDigest,
+    },
+}
+
+pub struct StateProgramSpec {
+    pub nodes: Vec<NodeSpec>,
+    pub cells: Vec<CellSpec>,
+}
+```
+
+This keeps the state machine model explicit. A workflow built from a single state, a sequence or DAG
+of states, an operation, or a mix of states and operations all reduce to a certified
+`StateProgramSpec`. The runtime executes only the states in that spec.
 
 Each node spec must include:
 
 - node id
 - state kind and version
 - state config hash
-- operation lineage
+- planning lineage
 - scope id
 - input cells
 - input semantic type ids
@@ -1180,7 +1212,7 @@ pub struct TypedValueRef {
     pub producer_node: NodeId,
     pub producer_state_kind: StateKind,
     pub producer_state_version: StateVersion,
-    pub operation_lineage: OperationLineage,
+    pub planning_lineage: PlanningLineage,
     pub scope_id: ScopeId,
     pub config_hash: ContentDigest,
     pub content_digest: ContentDigest,
@@ -1191,7 +1223,7 @@ pub struct TypedValueRef {
 
 The certified spec plus typed value refs must make it possible to audit:
 
-- which operation expansion created a state
+- which planning source created a state
 - which state produced a value
 - which typed inputs a state consumed
 - which artifacts, facts, and outputs belong to a value
@@ -1209,7 +1241,7 @@ On run start, MFM must persist:
 - canonical manifest input
 - certified typed execution spec artifact
 - certified spec hash
-- root operation kind and version
+- planning provenance descriptor
 - lowering version
 - framework version
 - public output schema id
