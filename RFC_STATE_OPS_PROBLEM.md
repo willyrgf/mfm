@@ -51,11 +51,21 @@ In that expected model:
 
 - states are not just dynamically scheduled handlers
 - state transitions are part of the typed program structure
+- operations are planning constructs over states, not runtime execution units
+- operations plus typed configuration can be stacked recursively, but must ultimately expand into a
+  typed state program before execution
+- users can compose a workflow from larger operations, individual states, or a mix of both, with
+  typed configuration injected at the operation or state boundary
 - operation expansion produces a well-typed state program, not merely a value-level graph
 - a state that requires a prior value can only be placed after a state that produces that value
 - a state that consumes a typed artifact, typed context value, or typed domain output can only be
   wired to a producer of the same expected type
 - an operation's declared result shape is guaranteed by its state program
+- the state machine executes states only; after the planning/expansion phase there are no
+  operations left to execute
+- states are pure by default unless explicitly tagged as impure
+- impure states declare the external capabilities/adapters they need, such as EVM, Bitcoin, other
+  blockchain families, HTTP, databases, object storage, clocks, or other external systems
 - invalid sequences are unrepresentable, not merely rejected later by planner/runtime validation
 - runtime errors are reserved primarily for real runtime concerns: IO failures, external system
   failures, replay data availability, storage failures, concurrency, and domain errors that cannot
@@ -69,6 +79,12 @@ For example, a portfolio execution flow should not merely be a graph containing 
 `resolve_valuation_inputs`, `observe`, `assemble_snapshot`, and `project_report`. It should be a
 typed execution program where each step's input requirements are satisfied by prior typed outputs,
 and where impossible arrangements cannot compile.
+
+The expected developer model follows from this. Once the platform core is established, developers
+and users should mostly implement new states and operations while reusing MFM's framework harness:
+typed expansion, deterministic lowering, adapters, effect discipline, artifact/fact handling,
+replay, resume, tracing, and tests. The safety of composed workflows should come primarily from the
+typed framework, not from each operation author manually reconstructing the same conventions.
 
 ## Current Model
 
@@ -85,6 +101,12 @@ The high-level flow is:
 7. Each `DependencyEdge` connects two states by `StateId`.
 8. The runtime topologically orders the graph and executes states.
 9. States communicate through context keys and JSON values.
+
+This superficially matches the desired rule that the state machine executes states only. The
+problem is that the operation expansion phase produces a value-level state graph instead of a typed
+state program. Operations can be stacked and flattened, but their composition is validated through
+names, JSON config, child bindings, and runtime state behavior rather than through the Rust type
+system.
 
 Important current representation boundaries:
 
@@ -146,9 +168,15 @@ The compiler cannot prove that:
 
 - a state only runs after all of its required typed inputs have been produced
 - a state consumes the same type that a producer exports
+- an operation stack fully expands into a typed state program whose state-level inputs and outputs
+  are correct
+- configuration injected at an operation boundary and configuration injected directly at a state
+  boundary have the same typed meaning after expansion
 - a context key points to the expected logical value
 - an operation's imports and exports have stable typed meaning beyond their string names
 - a state's declared metadata is consistent with its actual behavior
+- a state is pure unless it explicitly declares an impure effect
+- an impure state can access only the external adapters/capabilities it declared
 - a side-effecting state is placed only after every required precondition state
 - a report state can only run after a snapshot state that produced the correct snapshot type
 - a validation state can only run after the deployment/configuration state it is meant to validate
@@ -156,6 +184,8 @@ The compiler cannot prove that:
 - the terminal state of an operation produces the operation's declared result shape
 - skipped states cannot invalidate later typed assumptions
 - replay/resume will re-enter a state program at a type-valid boundary
+- third-party states and operations can be safely composed by users without re-implementing the same
+  validation, naming, context, effect, adapter, and replay conventions
 
 These properties may be true for a particular operation because the code was written carefully and
 tested. They are not generally enforced by the type system.
@@ -376,9 +406,15 @@ This creates several risks:
 - two states can agree on a port name but disagree on the value's meaning
 - JSON shape errors are found during execution instead of during compilation
 - operation result correctness is not guaranteed by the operation type
+- operation stacking can look valid as child bindings while still failing to express a well-typed
+  state-level program
 - state ordering mistakes can compile if they still produce valid `StateId` edges
+- purity and adapter access are governed by metadata and implementation discipline rather than by a
+  state capability type
 - future dynamic or plugin operations can bypass intended semantic relationships while satisfying
   current structural checks
+- future developers must learn and repeat framework conventions instead of receiving them as typed
+  guarantees from the platform
 - replay/resume correctness relies on the resolved value-level plan matching past events rather than
   on a typed execution program
 - important invariants live in conventions spread across ops, states, tests, and docs
@@ -420,6 +456,12 @@ context values.
 
 This allows flexible recursive planning and runtime execution, but it prevents Rust's type system
 from proving that operation expansion produces semantically valid state programs.
+
+Operation expansion should be the planning phase for states: operations plus typed configuration
+should recursively reduce to configured states, and the state machine should then execute states
+only. The current model follows that shape operationally, but not semantically: the final plan is
+not a type-checked state program whose inputs, outputs, effects, adapter access, provenance, and
+terminal shape are guaranteed by Rust.
 
 As a result, invalid sequences and invalid transitions are representable. Some are rejected by
 planner or runtime validation. Some are discovered only when a state handler reads or deserializes
