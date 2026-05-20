@@ -985,7 +985,7 @@ State outputs are referenced through typed handles:
 ```rust
 #[derive(Clone, Copy)]
 pub struct Handle<'program, 'scope, T: MfmValue> {
-    cell: OutputCellId,
+    cell: CellId,
     _program: PhantomData<fn(&'program ()) -> &'program ()>,
     _scope: PhantomData<fn(&'scope ()) -> &'scope ()>,
     _value: PhantomData<fn(T) -> T>,
@@ -1000,8 +1000,8 @@ inside expansion code without copying the produced runtime value.
 
 Handle fields and constructors must be private. Handles are minted only by the typed builder when it
 adds a producer node or by explicit framework bridge APIs. Workflow authors must not be able to
-forge a handle from an `OutputCellId`, because forged handles would reintroduce the same semantic
-gap as string context keys.
+forge a handle from a raw `CellId`, because forged handles would reintroduce the same semantic gap
+as string context keys.
 
 The `'program` brand prevents mixing handles from unrelated typed programs. The `'scope` brand
 prevents accidentally mixing values from different semantic workflow instances inside the same
@@ -1121,6 +1121,30 @@ by the framework after all returned handles have explicit import/export bridge e
 child-branded handles from escaping through ordinary return values while still allowing scoped
 composition to produce parent-visible results.
 
+The framework verifies returned values through a sealed bridge evidence API:
+
+```rust
+pub trait BridgeableToParent<'p, 'parent>: sealed::Sealed {
+    fn bridge_refs(&self) -> Vec<BridgeRefV1>;
+}
+
+pub struct BridgeRefV1 {
+    pub source_scope_id: ScopeId,
+    pub target_scope_id: ScopeId,
+    pub source_cell_id: CellId,
+    pub target_cell_id: CellId,
+    pub semantic_type_id: SemanticTypeId,
+    pub schema_id: SchemaId,
+    pub bridge_node_id: NodeId,
+}
+```
+
+The framework implements `BridgeableToParent` only for handles, tuples, derive-backed structs, and
+closed framework wrappers whose handles are already parent-branded or have explicit bridge nodes.
+Domain crates do not manually implement this trait in v1. If the child closure attempts to return a
+child-branded handle without bridge evidence, the code fails to compile or the builder rejects it
+before certification.
+
 V1 bridge policy is same-run, same-value, no-transform:
 
 ```rust
@@ -1129,8 +1153,8 @@ pub struct BridgeNodeSpecV1 {
     pub stable_key: StableNodeKey,
     pub source_scope_id: ScopeId,
     pub target_scope_id: ScopeId,
-    pub source_cell_id: OutputCellId,
-    pub target_cell_id: OutputCellId,
+    pub source_cell_id: CellId,
+    pub target_cell_id: CellId,
     pub semantic_type_id: SemanticTypeId,
     pub schema_id: SchemaId,
     pub bridge_kind: BridgeKindV1,
@@ -2071,6 +2095,26 @@ This is enforced with two layers. Static source checks deny `std::fs`, `std::env
 and missing canonical ordering evidence. The test suite must expand the same config repeatedly in
 one process and across separate processes and compare the certified spec hash.
 
+The deterministic expansion lint should be implemented as a source-boundary check over crate/module
+paths and denied symbol families, then backed by compile-fail fixtures. V1 denied families are:
+
+```text
+std::fs
+std::env
+std::process
+tokio::process
+std::time::SystemTime / chrono::Utc::now / time::OffsetDateTime::now_*
+rand::* and getrandom::*
+network clients and sockets
+database clients
+unscoped process-local counters
+```
+
+Allowed exception zones are `transports/*`, `collectors/*` that are transport/client
+implementations, `crates/app`, binaries, explicit `#[cfg(test)]` modules, and kernel runtime/store
+code that is not used for expansion. Any new exception must name the crate path, denied symbol
+family, reason, and test that proves the symbol cannot influence certified spec construction.
+
 Config-derived fanout cardinality and duplicate generated keys are planning/certification
 concerns, not runtime concerns. If expansion must depend on observed runtime data, that is not
 same-run expansion. It is a new planning boundary and must produce a new certified spec.
@@ -2143,6 +2187,28 @@ The implementation must publish golden test vectors for each identity payload: `
 `config_ref_digest`, and dynamic collection ordering. Reordered maps must produce identical ids,
 duplicate domain keys must reject planning, and changing the lowering version must change node ids
 and the final spec hash.
+
+### V1 Name And Invariant Normalization
+
+V1 should keep identity and digest names narrow:
+
+```text
+ContentDigest  generic digest of canonical bytes or artifact bytes
+SpecHash       digest of canonical TypedExecutionSpecV1 bytes
+CellId         planned/certified cell id in the typed spec
+ArtifactId     storage object identity
+EventId        store-owned event identity
+```
+
+`OutputCellId` is a compatibility alias only if implementation ergonomics require it. Semantically,
+v1 has one kind of typed cell id: `CellId`. A cell is an output of exactly one producer node or a
+root seed, and v1 states produce exactly one output cell. Multiple domain values must be represented
+as one output struct or explicit projection states. Projection states are ordinary states with their
+own node id, input binding, output cell, provenance, and terminal events.
+
+`SpecHash` must not be used for arbitrary content digests. `ContentDigest` must not imply the bytes
+are a certified spec. Public APIs, event payloads, and storage projections should preserve this
+distinction so replay and certification errors can name the violated invariant precisely.
 
 ### Certified Typed Execution Spec
 
@@ -2386,6 +2452,11 @@ The typed scheduler must not accept `PlannedOp`, `PortKey`, public `StateGraph`,
 typed-run semantics. These APIs are deleted or isolated as the typed kernel lands; they are not
 compatibility surfaces for certified typed execution.
 
+The first certified slice must execute on this typed scheduler. The old scheduler may remain in the
+repository for unmigrated workflows, but no old scheduler component may provide semantic authority,
+input materialization, output completion, replay, or public-output rendering for a certified typed
+run.
+
 ### Runtime Execution
 
 The runtime executes states only.
@@ -2418,7 +2489,7 @@ fails.
 pub struct CellProducedV1 {
     pub spec_hash: ContentDigest,
     pub node_id: NodeId,
-    pub cell_id: OutputCellId,
+    pub cell_id: CellId,
     pub scope_id: ScopeId,
     pub attempt_id: AttemptId,
     pub semantic_type_id: SemanticTypeId,
@@ -2432,7 +2503,7 @@ pub struct CellProducedV1 {
 pub struct CellSkippedV1 {
     pub spec_hash: ContentDigest,
     pub node_id: NodeId,
-    pub cell_id: OutputCellId,
+    pub cell_id: CellId,
     pub scope_id: ScopeId,
     pub attempt_id: AttemptId,
     pub semantic_type_id: SemanticTypeId,
@@ -2498,7 +2569,8 @@ sidefx:{ledger_key}:receipt
 sidefx:{ledger_key}:confirmation
 sidefx:{ledger_key}:ambiguous
 public_output:{public_schema_id}
-retention:{run_id}:{manifest_seq}
+retention:{run_id}:refs:{payload_hash}
+retention:{run_id}:manifest:{manifest_seq}
 ```
 
 V1 event payload variants include:
@@ -2526,6 +2598,114 @@ PublicOutputRenderFailedV1  // audit detail only; not an attempt-terminal author
 StateAttemptCompletedV1
 StateAttemptFailedV1
 RunCompletedV2
+RetentionRefsAppendedV1
+RetentionManifestProjectedV1
+```
+
+The event enum is closed in v1:
+
+```rust
+pub enum TypedKernelEventPayloadV1 {
+    RunStarted(RunStartedV2),
+    StateAttemptStarted(StateAttemptStartedV1),
+    FactRecorded(FactRecordedV1),
+    ArtifactReferenced(ArtifactReferencedV1),
+    CellProduced(CellProducedV1),
+    CellSkipped(CellSkippedV1),
+    SideEffectIntentPersisted(SideEffectIntentPersistedV1),
+    SideEffectClaimed(SideEffectClaimedV1),
+    SideEffectInvocationPrepared(SideEffectInvocationPreparedV1),
+    SideEffectInvocationStarted(SideEffectInvocationStartedV1),
+    SideEffectNotSubmittedProven(SideEffectNotSubmittedProvenV1),
+    SideEffectSubmissionObserved(SideEffectSubmissionObservedV1),
+    SideEffectSubmissionUnknown(SideEffectSubmissionUnknownV1),
+    SideEffectReceiptObserved(SideEffectReceiptObservedV1),
+    SideEffectConfirmationObserved(SideEffectConfirmationObservedV1),
+    SideEffectAmbiguous(SideEffectAmbiguousV1),
+    SideEffectFailed(SideEffectFailedV1),
+    PublicOutputProduced(PublicOutputProducedV1),
+    PublicOutputRenderFailed(PublicOutputRenderFailedV1),
+    StateAttemptCompleted(StateAttemptCompletedV1),
+    StateAttemptFailed(StateAttemptFailedV1),
+    RunCompleted(RunCompletedV2),
+    RetentionRefsAppended(RetentionRefsAppendedV1),
+    RetentionManifestProjected(RetentionManifestProjectedV1),
+}
+```
+
+Non-side-effect v1 payloads must include enough typed evidence for projection rebuild and replay:
+
+```rust
+pub struct RunStartedV2 {
+    pub run_id: RunId,
+    pub spec_hash: SpecHash,
+    pub spec_artifact_id: ArtifactId,
+    pub spec_media_type: MediaType,
+    pub spec_version: SpecVersion,
+    pub lowering_version: LoweringVersion,
+    pub public_output_schema_id: SchemaId,
+    pub descriptor_identities: Vec<DescriptorIdentityV1>,
+    pub runner_executables: Vec<ExecutableIdentityV1>,
+    pub adapter_executables: Vec<ExecutableIdentityV1>,
+    pub canonicalizer_identity: CanonicalizerIdentity,
+    pub framework_version: FrameworkVersion,
+    pub source_revision: SourceRevision,
+}
+
+pub struct StateAttemptStartedV1 {
+    pub spec_hash: SpecHash,
+    pub node_id: NodeId,
+    pub attempt_id: AttemptId,
+    pub attempt_no: u32,
+    pub state_kind: StateKind,
+    pub state_version: StateVersion,
+}
+
+pub struct ArtifactReferencedV1 {
+    pub spec_hash: SpecHash,
+    pub node_id: Option<NodeId>,
+    pub attempt_id: Option<AttemptId>,
+    pub artifact_ref: ArtifactRefV1,
+}
+
+pub struct PublicOutputRenderFailedV1 {
+    pub spec_hash: SpecHash,
+    pub node_id: NodeId,
+    pub attempt_id: AttemptId,
+    pub public_schema_id: SchemaId,
+    pub renderer_descriptor_id: DescriptorId,
+    pub error: MfmErrorInfoV1,
+}
+
+pub struct StateAttemptCompletedV1 {
+    pub spec_hash: SpecHash,
+    pub node_id: NodeId,
+    pub attempt_id: AttemptId,
+    pub output_cell_id: CellId,
+}
+
+pub struct StateAttemptFailedV1 {
+    pub spec_hash: SpecHash,
+    pub node_id: NodeId,
+    pub attempt_id: AttemptId,
+    pub retryable: bool,
+    pub error: MfmErrorInfoV1,
+}
+
+pub enum RunCompletionStatusV1 {
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+pub struct RunCompletedV2 {
+    pub run_id: RunId,
+    pub spec_hash: SpecHash,
+    pub status: RunCompletionStatusV1,
+    pub public_output_schema_id: Option<SchemaId>,
+    pub public_output_event_id: Option<EventId>,
+    pub terminal_error: Option<MfmErrorInfoV1>,
+}
 ```
 
 Side-effect event payloads must carry enough typed evidence to resume without guessing. V1 uses the
@@ -2729,13 +2909,51 @@ same side_effect_key + different claim owner/payload -> Corruption
 Artifacts are written before commit events. Orphan artifacts are acceptable and quarantined. Events
 referencing missing or digest-mismatched artifacts are corruption.
 
+### First Certified Persistent Store
+
+The first certified persistent store path should be:
+
+```text
+stream-store-postgres + artifact-store-fs
+```
+
+`stream-store-postgres` is the append-only authority for `run:{run_id}` events, commit keys, and
+derived projections. `artifact-store-fs` stores canonical bytes by digest for local development and
+first-slice replay fixtures. S3 or other artifact stores may be certified later after they implement
+the same artifact existence, digest, byte length, media type, retention, and GC refusal contracts.
+
+The initial migrations must create, at minimum:
+
+```text
+typed_run_events
+typed_commit_keys
+typed_artifacts
+typed_cell_projection
+typed_fact_projection
+typed_side_effect_projection
+typed_public_output_projection
+typed_retention_projection
+typed_retention_manifests
+```
+
+Certification fixtures for the store must prove:
+
+- contiguous sequence enforcement per run stream
+- commit-key idempotency and conflict behavior
+- store-owned envelope fields cannot be forged by callers
+- required artifact preconditions are atomic with event append
+- projections rebuild exactly from `typed_run_events`
+- crash/restart around every side-effect durable boundary resumes correctly
+- retained artifacts cannot be garbage-collected while referenced by a verified retention projection
+- replay from Postgres plus filesystem artifacts does not require live capabilities
+
 ### Traceability And Provenance
 
 Every produced value must have a typed value reference:
 
 ```rust
 pub struct TypedValueRef {
-    pub cell: OutputCellId,
+    pub cell: CellId,
     pub semantic_type: SemanticTypeId,
     pub schema_id: SchemaId,
     pub producer_node: NodeId,
@@ -2783,6 +3001,37 @@ pub struct FactRecordedV1 {
 }
 ```
 
+Read capabilities return recorded facts, not raw values:
+
+```rust
+pub struct RecordedFact<T: MfmValue> {
+    pub fact_key: FactKey,
+    pub request_hash: ContentDigest,
+    pub response: T,
+    pub response_ref: ArtifactRef<T>,
+}
+```
+
+Live read semantics:
+
+1. capability adapter canonicalizes the typed request
+2. adapter computes `(request_schema_id, request_hash, fact_key)`
+3. adapter performs the live read
+4. response bytes are canonicalized, no-secret checked, and written as an artifact
+5. scheduler/store commits `FactRecordedV1`
+6. state receives `RecordedFact<T>` or the typed response derived from it
+
+Failure and retry rules:
+
+- failure before `FactRecordedV1` commits is retryable according to the typed error
+- once `FactRecordedV1` commits, resume must reuse the recorded fact for that attempt
+- if a state fails after recording one or more facts, retry may record additional facts only in a new
+  attempt id; existing facts remain immutable evidence
+- replay with a missing fact fails with `MFM_REPLAY_FACT_MISSING`
+- replay with request hash, schema id, adapter id, spec hash, or artifact digest mismatch fails
+  with a typed replay error
+- replay brokers must never fall back to live IO
+
 Replay brokers answer only from recorded facts matching request hash, schema ids, adapter identity,
 and spec hash. They must not silently fall back to live IO. Receipts and confirmations use analogous
 typed events with intent hash, receipt/confirmation schema ids, artifact ids, and replay verifier
@@ -2805,6 +3054,48 @@ Error payloads are canonical JSON, contain no floats, and contain no secrets. Ex
 responses, environment values, signing material, mnemonics, passwords, private keys, and decrypted
 secret bytes must not enter persisted error details. Storage-layer secret scanning remains a
 backstop, not the primary enforcement mechanism.
+
+Stable typed error codes are part of the public operational contract. V1 error code families are:
+
+```text
+MFM_CERT_*           certification and descriptor/spec rejection
+MFM_REPLAY_*         replay evidence, fact, receipt, verifier, or live-cap violations
+MFM_RESUME_*         resume drift, corrupt history, frontier, or ambiguity rejection
+MFM_SIDEFX_*         side-effect ledger, recovery, idempotency, or ambiguity errors
+MFM_RETENTION_*      retention projection, manifest, executable, or artifact gaps
+MFM_PUBLIC_OUTPUT_*  public-output render, schema, evidence, or completion errors
+MFM_BOUNDARY_*       crate-boundary, deterministic expansion, or forbidden API violations
+MFM_STORE_*          commit, projection, stream, artifact, or corruption errors
+```
+
+Initial required codes include:
+
+```text
+MFM_CERT_DESCRIPTOR_MISMATCH
+MFM_CERT_SPEC_HASH_MISMATCH
+MFM_CERT_UNREGISTERED_STATE
+MFM_CERT_CAPABILITY_ROLE_INVALID
+MFM_REPLAY_FACT_MISSING
+MFM_REPLAY_FACT_MISMATCH
+MFM_REPLAY_LIVE_CAP_REQUESTED
+MFM_REPLAY_EXECUTABLE_IDENTITY_MISMATCH
+MFM_REPLAY_CANONICALIZER_MISMATCH
+MFM_RESUME_SPEC_DRIFT
+MFM_RESUME_CORRUPT_HISTORY
+MFM_SIDEFX_AMBIGUOUS
+MFM_SIDEFX_IDEMPOTENCY_CONFLICT
+MFM_RETENTION_GAP
+MFM_RETENTION_MANIFEST_INCOMPLETE
+MFM_PUBLIC_OUTPUT_RENDER_FAILED
+MFM_PUBLIC_OUTPUT_MISSING_EVIDENCE
+MFM_BOUNDARY_FORBIDDEN_DYNAMIC_API
+MFM_BOUNDARY_NONDETERMINISTIC_EXPANSION_API
+MFM_STORE_COMMIT_CONFLICT
+MFM_STORE_CORRUPTION
+```
+
+Error codes are stable identifiers. Human-readable messages may improve over time, but code meaning
+must not drift without introducing a new code.
 
 ### Replay And Resume
 
@@ -2889,10 +3180,38 @@ pub struct RetentionManifestProjectedV1 {
 `ExecutableIdentityV1` includes the logical factory id plus reproducible code identity: source
 revision, package digest, binary digest, Nix derivation/output hash, or an equivalent build artifact
 identity. `canonicalizer_identity` records the implementation and version used for canonical JSON
-and descriptor hashing. Proof-slice certified persistent stores retain all manifest entries
+and descriptor hashing. First-slice certified persistent stores retain all manifest entries
 indefinitely. In-memory stores are never retention authorities. Local file stores are certified only
 if garbage collection refuses referenced artifacts. Garbage collection may act only from a verified
 complete retention projection rebuilt from the append-only retention history.
+
+The first certified slice uses composite executable identity rather than one chosen field:
+
+```rust
+pub struct ExecutableIdentityV1 {
+    pub factory_id: RunnerFactoryId,
+    pub source_revision: SourceRevision,
+    pub cargo_package_name: PackageName,
+    pub cargo_package_version: PackageVersion,
+    pub cargo_package_digest: ContentDigest,
+    pub binary_digest: ContentDigest,
+    pub nix_derivation_hash: Option<NixDerivationHash>,
+    pub nix_output_hash: Option<NixOutputHash>,
+}
+
+pub struct CanonicalizerIdentity {
+    pub name: CanonicalizerName,
+    pub version: CanonicalizerVersion,
+    pub binary_digest: ContentDigest,
+    pub algorithm: CanonicalizationId,
+}
+```
+
+For the first certified slice, replay requires source revision, package digest, binary digest, and
+Nix output hash when available from the build environment. Canonicalizer identity mismatch is always
+a replay rejection. Executable identity mismatch is a replay rejection unless the descriptor
+lifecycle explicitly records a `ReplayOnly` replacement whose descriptor identity and replay
+verifier contract are unchanged.
 
 Long-term replay rehydrates executable code from reproducible built artifacts that contain the
 versioned states, adapters, connectors, and framework code referenced by the certified spec. The
@@ -3000,6 +3319,32 @@ pub trait PublicOutputs<'p, 's>: sealed::Sealed {
 }
 ```
 
+The persisted public-output spec is hash-defining:
+
+```rust
+pub struct PublicOutputSpecV1 {
+    pub public_schema_id: SchemaId,
+    pub outputs: Vec<PublicOutputCell>,
+    pub renderer_descriptor: RendererDescriptorIdentityV1,
+}
+
+pub struct PublicOutputCell {
+    pub public_field_path: PublicFieldPath,
+    pub cell_id: CellId,
+    pub semantic_type_id: SemanticTypeId,
+    pub schema_id: SchemaId,
+    pub required_terminal: RequiredTerminal,
+}
+
+pub struct RendererDescriptorIdentityV1 {
+    pub descriptor_id: DescriptorId,
+    pub renderer_kind: RendererKind,
+    pub renderer_version: RendererVersion,
+    pub public_schema_id: SchemaId,
+    pub canonicalizer_identity: CanonicalizerIdentity,
+}
+```
+
 CLI and API rendering must load typed terminal cells and render stable JSON from the public output
 schema. The renderer may emit JSON, but it must not discover final results by looking up arbitrary
 context keys.
@@ -3048,6 +3393,19 @@ The public-output render state is an injected `ManagedWriteState` added by certi
 `RootBuilder::bind_public_outputs` succeeds. Users do not hand-author terminal render nodes. The
 injected `RenderPublicOutputs` framework node depends on the declared public cells, emits
 `PublicOutputProducedV1`, and is the only path to `RunCompletedV2(Completed)` for public runs.
+
+Resume behavior for rendering is explicit:
+
+```text
+required public cells incomplete -> render node not runnable
+required public cells complete, no render attempt -> run render node
+render attempt failed -> retry render node with same declared cells and renderer descriptor
+PublicOutputProducedV1 exists, no RunCompletedV2 -> append RunCompletedV2(Completed)
+RunCompletedV2 without PublicOutputProducedV1 -> corrupt certified history
+```
+
+Changing renderer descriptor identity, public schema id, declared cells, or canonicalizer identity
+changes the certified spec hash and is resume drift.
 
 ### Portfolio Example
 
@@ -3127,9 +3485,17 @@ The compiler prevents wiring `PinnedViews` where `ResolvedSubjects` is required.
 prevents assembling a snapshot from values belonging to different portfolio execution instances
 unless an explicit bridge is introduced.
 
-Zero observation batches must be modeled explicitly. If empty observation sets are valid,
-`MergeObservations` should accept `Vec<Handle<ObservationBatchOutput>>`. If not, it should require
-`NonEmptyHandles<ObservationBatchOutput>`.
+Zero observation batches must be modeled explicitly. For the first portfolio port,
+`MergeObservations` should require `NonEmptyHandles<ObservationBatchOutput>` unless the product
+contract deliberately defines an empty snapshot as meaningful. If empty snapshots are later
+supported, they must use a distinct workflow contract with `Vec<Handle<ObservationBatchOutput>>`
+and documented public-output semantics for empty observations.
+
+Portfolio dynamic keys must be typed `StableDomainKey` values, not strings. Required first-port
+domain keys include source key, subject key, view key, valuation key, observation batch key, and
+report key. Duplicate resolved domain keys are planning errors. CLI/API parity for portfolio applies
+only to documented public JSON fields; content ids, spec hashes, event ids, and retained artifact
+ids remain semantic evidence and should not be normalized away in parity fixtures.
 
 ### Proof Example
 
@@ -3173,6 +3539,47 @@ let draft = build_root(ScopeKey::new("proof"), |root| {
 `ApplyProofSideEffect` declares `Effect = ApplySideEffect`, typed intent, typed idempotency input,
 typed receipt, and typed confirmation. `PublishOutput` requires a `ProofOutput`, so it cannot run
 before `AssembleProofOutput` has produced one.
+
+The proof domain contract for every proof implementation is explicit:
+
+```rust
+pub struct ProofFact { /* recorded external observation */ }
+pub struct ProofIntent { /* mutation or proof action to apply */ }
+pub struct ProofIdempotencyInput { /* stable dedupe material */ }
+pub struct ProofReceipt { /* submitted or accepted evidence */ }
+pub struct ProofConfirmation { /* confirmed final evidence */ }
+pub struct ProofOutput { /* terminal domain result */ }
+
+pub struct ProofPublicOutputs<'p, 's> {
+    pub artifact: Handle<'p, 's, ArtifactRef<ProofOutput>>,
+}
+```
+
+The proof replay verifier receives only recorded facts, artifacts, side-effect receipt evidence, and
+confirmation evidence:
+
+```rust
+pub trait ProofReplayVerifier {
+    fn verify_receipt(
+        &self,
+        intent: &ProofIntent,
+        receipt: &ProofReceipt,
+        facts: &RecordedProofFacts,
+    ) -> Result<(), ReplayError>;
+
+    fn verify_confirmation(
+        &self,
+        receipt: &ProofReceipt,
+        confirmation: &ProofConfirmation,
+        facts: &RecordedProofFacts,
+    ) -> Result<(), ReplayError>;
+}
+```
+
+Different proof implementations may provide different adapters and verifier implementations, but
+they must expose equivalent typed contracts: fact, intent, idempotency input, receipt,
+confirmation, output, public outputs, and replay verifier behavior. A proof implementation that
+requires live IO during replay is not conformant.
 
 ### EVM Deploy / Configure / Validate Example
 
@@ -3238,6 +3645,32 @@ Deploy and configure are side-effecting EVM states. They must use typed EVM tran
 idempotency keys, receipts, and confirmations. Validate is normally a read state using typed EVM
 read capabilities.
 
+EVM capability roles are fixed for the first port:
+
+- signer and keystore capabilities are support capabilities
+- EVM read RPC is a read capability
+- EVM transaction submitter is the single external mutation authority for each side-effect state
+- raw protected transactions are managed artifacts only and must not implement `MfmValue`,
+  `PublicOutputs`, or any public-output wrapper trait
+
+EVM side-effect acceptance fixtures must run against a managed local reth service and cover crash or
+restart at these boundaries:
+
+```text
+intent persisted
+claim committed
+invocation prepared
+invocation started before submit
+submission observed
+receipt observed
+confirmation observed
+output cell before RunCompletedV2
+```
+
+Fixtures must prove no duplicate mutation occurs, replay confirms from recorded evidence without
+reapplying, protected raw transaction artifacts remain non-public and redacted, and validation
+before configuration remains a compile-fail typestate error.
+
 ### Plugin And Third-Party Workflows
 
 Rust-authored third-party states and operations can compile against the typed framework and receive
@@ -3295,7 +3728,7 @@ Required compile-fail cases:
 
 - wrong producer type passed to a consumer
 - same Rust type from wrong scope passed without a bridge
-- forged handle construction from an `OutputCellId`
+- forged handle construction from a raw `CellId`
 - pure state attempts to access IO
 - read state attempts to submit a transaction
 - side-effect state lacks idempotency input
@@ -3578,7 +4011,7 @@ Required compile-fail coverage includes:
 - runtime value attempts to become a same-run root seed
 - child handle used in parent without a bridge
 - sibling handles mixed without a parent bridge
-- forged handle construction from `OutputCellId`
+- forged handle construction from a raw `CellId`
 - `serde_json::Value` used as state input
 - wrong state input field type
 - empty vector passed to `NonEmptyHandles<T>`
@@ -3590,6 +4023,15 @@ Required compile-fail coverage includes:
 - secret field derives `MfmValue`
 - float field derives `MfmValue`, `MfmConfig`, or `PublicOutputs`
 - unsupported serde attribute in a persisted type
+
+Every RFC code example that is intended to be real API should become a fixture:
+
+- compile-pass fixtures for happy-path builder examples
+- compile-fail fixtures for wrong handle type, wrong scope, wrong typestate, wrong capability role,
+  missing public outputs, forged ids, and invalid input lifting
+- explicitly marked pseudocode for any example that intentionally omits required boilerplate
+
+The RFC should not contain unmarked examples that cannot be represented by the implemented API.
 
 Required runtime/unit/integration coverage includes:
 
@@ -3729,7 +4171,7 @@ Proposal 1 explicitly rejects:
 - returning handles from generative build/scope closures
 - raw bridge exports without target scope and certified bridge evidence
 - operation inputs that can carry unbranded dynamic values
-- public handle constructors or raw `OutputCellId` to handle conversion
+- public handle constructors or raw `CellId`/`OutputCellId` to handle conversion
 - encoding the whole DAG as nested Rust types
 - multi-output state cells in v1
 - JSON Schema as the descriptor source of truth
