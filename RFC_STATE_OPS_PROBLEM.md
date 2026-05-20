@@ -669,7 +669,7 @@ The intended split is:
 | Cross-scope value mixing | Branded program/scope handles reject accidental mixing | Persisted scope ids and provenance are verified in the certified spec and event stream |
 | Optional or skipped values | `Handle<MaybeValue<T>>` is distinct from `Handle<T>` | Runtime records skip reason, producer node, schema id, and provenance |
 | Runtime value used as same-run topology input | `MfmConfig` and runtime handles are separate types | New planning boundaries and child specs are certified explicitly |
-| Pure/read/write/side-effect capability access | Effect-specific traits expose only allowed capability types | Ambient IO bans are policy/lint; runtime injects only certified capabilities |
+| Pure/read/managed-write/side-effect capability access | Effect-specific traits expose only allowed capability types | Ambient IO bans are policy/lint; runtime injects only certified capabilities |
 | Side-effect intent/idempotency/receipt shape | `SideEffectState` associated types make missing pieces fail to compile | Runtime owns idempotency key stability, ledger ambiguity, receipt validity, and replay verification |
 | Portfolio fanout/fanin wiring | Typed handles guarantee batch input/output types | Planning/certification verify config-derived cardinality, canonical ordering, and duplicate keys |
 | Deploy/configure/validate lifecycle order | Typestate values such as `DeployedContract` and `ConfiguredContract` encode lifecycle transitions | Generic validation of an existing deployment remains a separate explicitly typed workflow |
@@ -1204,7 +1204,7 @@ pub trait StateSpec {
 
 `StateSpec` alone is not enough to enter the typed program. The framework authority traits that turn
 a Rust type into a plannable executable state are framework-owned. Domain crates implement public
-author traits such as `PureState`, `ReadState`, `WriteInternalState`, or `SideEffectState`; the
+author traits such as `PureState`, `ReadState`, `ManagedWriteState`, or `SideEffectState`; the
 framework registry converts those public implementations into a `RegisteredState<S>` only after it
 has validated descriptor evidence, effect class, capability set, and runner shape.
 
@@ -1415,7 +1415,7 @@ States are pure unless they explicitly opt into an effect-specific execution tra
 ```rust
 pub enum Pure {}
 pub enum ReadExternal {}
-pub enum WriteInternal {}
+pub enum ManagedPlatformWrite {}
 pub enum ApplySideEffect {}
 ```
 
@@ -1443,11 +1443,76 @@ pub trait ReadState: StateSpec<Effect = ReadExternal> {
 }
 ```
 
-Internal write states may write runtime-managed artifacts, outputs, facts derived from deterministic
-inputs, or audit records without mutating external systems. They are not pure, because they need
-runtime-managed persistence capabilities, but they are also not external side effects. This category
-prevents artifact publication and output rendering from being mislabeled as either pure computation
-or external mutation.
+Managed platform write states may write through configured MFM-certified persistence and output
+surfaces for the current `run_id`, `spec_hash`, `node_id`, and `attempt_id`. These surfaces may be
+external systems from the platform's point of view, such as Postgres, local filesystems, S3, or an
+artifact service. The distinction is not "inside the process" versus "outside the process"; the
+distinction is MFM-managed platform persistence versus external domain mutation.
+
+Managed platform writes may stage or write content-addressed artifacts, diagnostics, rendered
+public outputs, retention refs, and other framework-owned evidence. They must not mutate external
+domain systems such as chains, user infrastructure, external databases, message queues, or APIs
+outside MFM's certified storage/output authority. They also do not append arbitrary events directly:
+the scheduler and store still own typed commit authority.
+
+```rust
+#[async_trait]
+pub trait ManagedWriteState: StateSpec<Effect = ManagedPlatformWrite> {
+    async fn run(
+        &self,
+        input: Self::Input,
+        caps: &Self::Caps,
+    ) -> Result<Self::Output, StateError>;
+}
+```
+
+The first managed platform capability set should include:
+
+```rust
+pub trait ArtifactWriteCap {
+    async fn write_value_artifact<T: MfmValue>(
+        &self,
+        role: ArtifactRole,
+        value: &T,
+    ) -> Result<StagedArtifactRef<T>, StateError>;
+
+    async fn write_bytes_artifact(
+        &self,
+        role: ArtifactRole,
+        media_type: MediaType,
+        bytes: &[u8],
+    ) -> Result<StagedArtifactRef<OpaqueArtifact>, StateError>;
+}
+
+pub trait PublicOutputRenderCap {
+    async fn write_rendered_public_output(
+        &self,
+        public_schema_id: SchemaId,
+        bytes: CanonicalJsonBytes,
+    ) -> Result<StagedArtifactRef<RenderedPublicOutput>, StateError>;
+}
+
+pub trait RetentionCap {
+    fn retain(&self, refs: Vec<RetentionRefV1>, reason: RetentionReason)
+        -> Result<RetentionRefsAppendedV1, StateError>;
+}
+
+pub trait DiagnosticArtifactCap {
+    async fn write_redacted_diagnostic(
+        &self,
+        diagnostic: RedactedDiagnostic,
+    ) -> Result<StagedArtifactRef<RedactedDiagnostic>, StateError>;
+}
+```
+
+`StagedArtifactRef<T>` is not terminal evidence by itself. The scheduler/store must validate staged
+artifact refs and bind them to typed commit payloads before they affect replay, resume, retention, or
+public completion. This preserves the rule that platform persistence is capability-mediated while
+the typed store remains the event authority.
+
+This category prevents artifact publication, retention projection, and public-output rendering from
+being mislabeled as pure computation or as external domain side effects. It does not mean those
+storage systems are "internal" or ambient; they are still capability-mediated configured systems.
 
 Effects are framework-sealed. Capability descriptor registration is extensible for Rust-authored
 third-party crates, but production token construction remains private:
@@ -1473,7 +1538,7 @@ pub trait CapabilitySetFor<E: EffectSpec>: CapabilitySet {}
 
 pub enum CapabilityRole {
     ReadExternal,
-    WriteInternal,
+    ManagedPlatformWrite,
     Support,
     ExternalMutationAuthority,
 }
@@ -1484,7 +1549,7 @@ The v1 capability rules are:
 - `Pure` receives `NoCaps` only.
 - `ReadExternal` may receive read capabilities and support capabilities that cannot mutate external
   systems.
-- `WriteInternal` may receive framework-owned internal write capabilities only.
+- `ManagedPlatformWrite` may receive MFM-certified platform persistence/output capabilities only.
 - `ApplySideEffect` receives exactly one `ExternalMutationAuthority` plus declared support/read
   capabilities.
 
@@ -2906,12 +2971,12 @@ confirmation_observed, no cell -> derive output and append cell
 ambiguous -> block
 ```
 
-Replay uses the stored spec and replay broker only. It re-executes pure/internal/read states only
-when replay capabilities can answer from recorded facts/artifacts. It verifies produced value
-digests, receipts, confirmations, and public outputs through typed evidence and replay-only verifier
-contracts. Replay fails on missing facts, missing receipts, unsupported adapter versions, unavailable
-runner factories, retention gaps, executable identity mismatch, canonicalizer identity mismatch, or
-any live-cap request.
+Replay uses the stored spec and replay broker only. It re-executes pure, managed-platform-write,
+and read states only when replay capabilities can answer from recorded facts/artifacts and retained
+managed platform outputs. It verifies produced value digests, receipts, confirmations, and public
+outputs through typed evidence and replay-only verifier contracts. Replay fails on missing facts,
+missing receipts, unsupported adapter versions, unavailable runner factories, retention gaps,
+executable identity mismatch, canonicalizer identity mismatch, or any live-cap request.
 
 ### Terminal Outputs And Public API
 
@@ -2979,7 +3044,7 @@ exist but rendering fails, the run is not completed; the render state emits
 resumable from the public-output rendering step. `PublicOutputRenderFailedV1` is not a terminal
 authority and cannot substitute for `PublicOutputProducedV1`.
 
-The public-output render state is injected by certified lowering whenever
+The public-output render state is an injected `ManagedWriteState` added by certified lowering whenever
 `RootBuilder::bind_public_outputs` succeeds. Users do not hand-author terminal render nodes. The
 injected `RenderPublicOutputs` framework node depends on the declared public cells, emits
 `PublicOutputProducedV1`, and is the only path to `RunCompletedV2(Completed)` for public runs.
@@ -3393,17 +3458,21 @@ The typed expansion core should reduce or eliminate several categories of defens
 Some validation remains, but it moves to the correct layers: canonicality, storage integrity,
 external IO behavior, replay availability, idempotency ambiguity, and domain facts.
 
-### Proof-Slice Acceptance Contract
+### Typed Certified Slice Acceptance Contract
 
-The proof slice is accepted only when one CI gate proves:
+The first mandatory CI gate should prove the typed kernel and runtime invariants, not one specific
+proof implementation. The gate is named `typed-certified-slice`. It runs a minimal reference
+certified workflow that exercises typed planning, typed storage, managed platform writes,
+side-effect recovery, public outputs, replay, resume, and retention.
 
 ```text
-typed proof workflow expands through typed API
+reference certified workflow expands through typed API
 root public outputs bind inside build_root
 certified spec hash persists before execution
 RunStartedV2 starts the authoritative run stream
 typed cell completion events exist for produced/skipped cells
 side-effect ledger records intent, claim, invocation, submission/receipt/confirmation
+managed platform outputs are committed through certified store/artifact capabilities
 typed public output evidence exists before RunCompletedV2
 CLI/API rendering reads typed public outputs only
 replay uses replay caps and replay verifiers only
@@ -3413,6 +3482,36 @@ old dynamic authoring APIs are absent from the typed kernel dependency graph
 
 If this gate still depends on semantic JSON context dataflow, generic IO, public erased DAG
 construction, or hand-authored dependency edges, Proposal 1 has not solved the problem.
+
+The `typed-certified-slice` summary must include these boolean keys and fail if any key is missing,
+false, skipped, or marked expected-failure:
+
+```text
+typed_spec_hash_persisted
+run_started_v2_present
+typed_cells_present
+side_effect_ledger_complete
+managed_platform_outputs_committed
+public_output_before_run_completed
+replay_no_live_caps
+resume_drift_rejected
+retention_projection_complete
+typed_boundary_firewall_passed
+```
+
+Proof implementations are validated by a reusable conformance suite rather than by hard-coding a
+single proof backend into the kernel gate:
+
+```text
+proof-implementation-conformance
+  proof_impl:{name}:facts_valid
+  proof_impl:{name}:receipt_valid
+  proof_impl:{name}:confirmation_valid
+  proof_impl:{name}:replay_valid
+```
+
+Each proof implementation must satisfy the same typed proof contracts, but the kernel gate remains
+stable as new proof implementations are added.
 
 ### Test And CI Plan
 
@@ -3435,7 +3534,8 @@ no-secret-no-float-derives
 retention-event-sourcing
 crate-dag
 typed-boundary-firewall
-typed-proof-slice
+typed-certified-slice
+proof-implementation-conformance
 ```
 
 Nixfied mapping:
@@ -3468,7 +3568,8 @@ nix run .#ci -- --mode parity --summary
   typed runtime against managed local services where needed
 
 nix run .#ci -- --mode full --summary
-  full typed-proof-slice acceptance
+  full typed-certified-slice acceptance
+  proof implementation conformance for enabled proof implementations
 ```
 
 Required compile-fail coverage includes:
@@ -3535,7 +3636,7 @@ exit gate: no semantic dependency on old authoring APIs remains
 certification gate: CI proves public behavior, replay/resume, and typed-boundary compliance
 ```
 
-Proof exit:
+Proof implementation exit:
 
 ```text
 typed spec
@@ -3543,6 +3644,7 @@ persisted spec hash
 RunStartedV2
 typed cells
 side-effect ledger
+managed platform outputs
 typed public output before completion
 replay-only caps
 drift rejection
@@ -3666,7 +3768,8 @@ Recommended order:
 6. Add typed kernel events, store-owned event envelopes, typed commit API, value store,
    event-sourced retention, replay/resume validator, and side-effect ledger.
 7. Add the new serial typed scheduler/executor.
-8. Port the proof workflow directly to the typed API and make `typed-proof-slice` mandatory.
+8. Add the reference certified workflow, make `typed-certified-slice` mandatory, and add reusable
+   proof implementation conformance for enabled proof implementations.
 9. Rewrite `docs/design.md` and `docs/architecture.md` to match the implemented typed contracts.
 10. Port portfolio with typed fanout/fanin, stable domain keys, and typed public outputs.
 11. Port EVM deploy/configure/validate with typed lifecycle and side-effect contracts.
@@ -3691,14 +3794,14 @@ The following decisions are intentionally not required for the first implementat
 must remain explicit open design items:
 
 - dynamic third-party plugin certification and loading
-- long-term retention/deprecation policy beyond proof-slice indefinite retention
+- long-term retention/deprecation policy beyond first-slice indefinite retention
 - permanent side-effect ambiguity recovery beyond v1 block-and-surface semantics
 - broad state/operation attribute macro ergonomics
 
-These are deferred because the proof slice can validate the core without finalizing long-term
-platform policy. The proof slice must still define enough version resolution and artifact retention
-to replay and resume the specs it certifies. These decisions must not be resolved by reintroducing
-dynamic erased graphs, string ports, or JSON context dataflow as semantic surfaces.
+These are deferred because the typed certified slice can validate the core without finalizing
+long-term platform policy. The first slice must still define enough version resolution and artifact
+retention to replay and resume the specs it certifies. These decisions must not be resolved by
+reintroducing dynamic erased graphs, string ports, or JSON context dataflow as semantic surfaces.
 
 Future dynamic plugins must either compile as typed Rust extensions or submit declarative typed specs
 that certify against trusted descriptors. Arbitrary erased graph submission, plugin-provided runners
@@ -3745,7 +3848,7 @@ expansion and runtime scheduling.
 
 The smallest proof of the architecture should include:
 
-1. guarantee matrix for the proof slice, with compile-time enforcement identified first
+1. guarantee matrix for the typed certified slice, with compile-time enforcement identified first
 2. kernel crate skeleton for ids, canonicalization, values, effects, capabilities, program, spec,
    certification, events, store, runtime, replay, and test support
 3. `mfm-values` with `MfmValue`, `MfmConfig`, schema descriptors, derived schema ids, canonical
@@ -3761,9 +3864,9 @@ The smallest proof of the architecture should include:
 8. immutable `StateDescriptorV1`, derive-generated descriptor evidence, runner factories, and state
    registry certification
 9. effect classes, side-effect traits, sealed `CapabilitySetFor<E>` token model, one typed read
-   capability, one internal artifact/output capability, and one typed side-effect capability
-10. proof side-effect intent, idempotency input, framework-derived idempotency key, durable ledger,
-   receipt, confirmation, recovery, and replay verifier
+   capability, one managed platform artifact/output capability, and one typed side-effect capability
+10. reference workflow side-effect intent, idempotency input, framework-derived idempotency key,
+    durable ledger, receipt, confirmation, recovery, and replay verifier
 11. `TypedExecutionSpecV1`, spec hash, config artifact refs, descriptor identities, public-output
     spec, and retained executable/canonicalizer identities
 12. typed value store, produced/skipped cell terminal semantics, `MaybeValue<T>` and
@@ -3775,7 +3878,8 @@ The smallest proof of the architecture should include:
 15. `RunStartedV2`, event-sourced retention, append-only manifest projections, replay/resume
     acceptance algorithm, and resume rejection for spec drift or missing/disagreeing typed evidence
 16. new serial typed scheduler/executor
-17. typed proof workflow and mandatory `typed-proof-slice` CI gate
+17. reference certified workflow, mandatory `typed-certified-slice` CI gate, and reusable proof
+    implementation conformance suite
 18. typed-boundary firewall proving the new kernel does not depend on old dynamic machine or SDK APIs
 19. compile-fail, storage, replay/resume, public-output, side-effect, retention, and boundary tests
     described in the Test And CI Plan
