@@ -575,6 +575,11 @@ The architecture should treat compile-time checking as the first correctness lin
 workflows. Certification and runtime checks remain necessary, but they should not compensate for
 semantic authoring mistakes that Rust can reject directly.
 
+Each implementation task should record the guarantee owner in four buckets: compile-time,
+certification-time, runtime/storage-time, and policy/lint-time. The table below names the
+compile-time target first and compresses the remaining buckets only for readability; implementation
+issues should split those remaining checks explicitly.
+
 The intended split is:
 
 | Guarantee | Compile-time target for Rust-authored APIs | Remaining certification/runtime/policy responsibility |
@@ -610,7 +615,7 @@ pub trait MfmValue:
 {
     const SEMANTIC_ID: SemanticTypeId;
 
-    fn schema_descriptor() -> SchemaDescriptor;
+    fn schema_descriptor() -> SchemaDescriptorV1;
 
     fn schema_id() -> SchemaId {
         SchemaId::derive(&Self::schema_descriptor())
@@ -654,10 +659,11 @@ from all persisted evidence weakens auditability. The recommended split is:
 - audit fields: owner crate, Rust type path, derive macro version, and source package/build
   provenance
 
-The schema id is derived from the canonical bytes of that descriptor:
+The schema id is derived from the canonical bytes of the descriptor identity, not from audit-only
+metadata:
 
 ```text
-SchemaId = schema:<algorithm>:<digest(canonical_schema_descriptor)>
+SchemaId = schema:<algorithm>:<digest(canonical_schema_identity)>
 ```
 
 The initial algorithm should be the same canonical JSON digest family used elsewhere in MFM, with
@@ -675,6 +681,61 @@ stable Rust does not provide a general negative trait bound such as "not secret"
 positive allowlist model: framework-known secret wrappers do not implement value/config/output
 traits, derive macros reject fields that are known secret wrappers, and persistence layers continue
 to perform no-secret validation as defense in depth.
+
+The first implementation slice should use a strict `SchemaDescriptorV1` grammar. The descriptor is
+itself an MFM value whose identity portion is hash-defining and whose audit portion is persisted but
+not included in the schema id:
+
+```rust
+pub struct SchemaDescriptorV1 {
+    pub descriptor_version: u32,
+    pub canonicalization: CanonicalizationId,
+    pub identity: SchemaIdentityV1,
+    pub audit: SchemaAuditV1,
+}
+```
+
+```text
+SchemaId = schema:sha256-jcs-v1:<sha256(canonical_json(identity))>
+```
+
+The v1 identity grammar supports:
+
+- unit, bool, string, bytes encoded as base64url without padding, signed/unsigned integers, and
+  decimal strings
+- option, vec, non-empty vec, tuple, named struct, enum, and `BTreeMap<String, V>`
+- generic constructors with argument schema and semantic ids
+
+The v1 grammar rejects floats, `usize`, `isize`, `HashMap`, untagged enums, `serde(flatten)`, skip
+attributes, asymmetric serialize/deserialize renames, custom serde functions, raw secret wrappers,
+and opaque `serde_json::Value`.
+
+Allowed enum tagging is externally tagged, internally tagged for struct-like variants, and
+adjacently tagged. `serde(rename)` and `rename_all` are allowed only after derives resolve them to
+concrete wire names; duplicate resolved names are compile errors. `serde(default)` is allowed only
+when the field type implements `MfmDefault`; custom default functions are rejected in v1 unless a
+future descriptor-producing default provider exists.
+
+Decimal strings must reject `+`, exponent syntax, leading zeroes, trailing decimal points,
+NaN/Infinity, and negative zero. The accepted forms are:
+
+```text
+variable decimal =
+  0
+  | [1-9][0-9]*(\.[0-9]*[1-9])?
+  | -(0\.[0-9]*[1-9]|[1-9][0-9]*(\.[0-9]*[1-9])?)
+
+fixed decimal =
+  (0|[1-9][0-9]*)\.[0-9]{scale}
+  | -<fixed decimal with at least one non-zero digit>
+```
+
+Manual descriptor, value, config, and public-output implementations are not normal extension paths.
+The default policy is derive-only. Manual implementations require an explicit
+`manual-descriptor-impls` feature, an audited allowlist, golden descriptor tests, and certification
+checks that reject descriptor mismatch as a hard error. `unsafe` should be used only for invariants
+that are genuinely memory-safety-like; descriptor integrity should normally be enforced through
+sealed evidence, certification, and tests.
 
 Examples:
 
@@ -750,7 +811,7 @@ The architecture must distinguish planning config from runtime values.
 pub trait MfmConfig:
     serde::Serialize + serde::de::DeserializeOwned + Send + Sync + 'static
 {
-    fn schema_descriptor() -> SchemaDescriptor;
+    fn schema_descriptor() -> SchemaDescriptorV1;
 
     fn schema_id() -> SchemaId {
         SchemaId::derive(&Self::schema_descriptor())
@@ -794,7 +855,7 @@ pub struct Handle<'program, 'scope, T: MfmValue> {
     cell: OutputCellId,
     _program: PhantomData<fn(&'program ()) -> &'program ()>,
     _scope: PhantomData<fn(&'scope ()) -> &'scope ()>,
-    _value: PhantomData<T>,
+    _value: PhantomData<fn(T) -> T>,
 }
 ```
 
@@ -818,6 +879,41 @@ The brand should be invariant, not merely documentary. The concrete branding rep
 change, but the API must include a generative program/scope construction pattern that prevents two
 independently created scopes from being unified accidentally by inference.
 
+The public build API must not return arbitrary handle-bearing values from a generative closure. Root
+public outputs are bound while the program and scope brands are still in scope:
+
+```rust
+pub fn build_root<F>(
+    root_key: ScopeKey,
+    f: F,
+) -> Result<TypedProgramDraft, PlanError>
+where
+    F: for<'p, 'root> FnOnce(
+        &mut RootBuilder<'p, 'root>,
+    ) -> Result<RootBound, PlanError>;
+
+pub struct RootBound {
+    public_output_spec: PublicOutputSpec,
+    // private marker; callers cannot construct this directly
+}
+
+impl<'p, 's> RootBuilder<'p, 's> {
+    pub fn scope(&mut self) -> &mut ScopeBuilder<'p, 's>;
+
+    pub fn bind_public_outputs<P>(
+        &mut self,
+        key: PublicOutputKey,
+        outputs: &P,
+    ) -> Result<RootBound, PlanError>
+    where
+        P: PublicOutputs<'p, 's>;
+}
+```
+
+`build_root` returns an unbranded `TypedProgramDraft`. The closure returns `RootBound`, not a handle
+or operation output struct. This prevents branded handles from escaping into ordinary Rust values
+while still allowing the builder to extract an unbranded `PublicOutputSpec`.
+
 For example, snapshot assembly can require all inputs to belong to the same portfolio execution
 scope:
 
@@ -838,9 +934,56 @@ workflows with the same Rust type in multiple semantic scopes, such as two portf
 one program, two chains producing the same `DeployedContract` type, or staging and production
 deployments with identical schemas.
 
-The precise bridge API is intentionally left for a later design step. The first typed core should
-still brand scopes and reject accidental cross-scope wiring. Explicit cross-scope transfer should be
-added only when real workflows force the exact bridge semantics.
+Child scopes expose certified bridge operations, not raw exported handles:
+
+```rust
+impl<'p, 'parent> ScopeBuilder<'p, 'parent> {
+    pub fn child_scope<R>(
+        &mut self,
+        key: ScopeKey,
+        f: impl for<'child> FnOnce(
+            &mut ChildScopeBuilder<'p, 'parent, 'child>,
+        ) -> Result<R, PlanError>,
+    ) -> Result<R, PlanError>;
+}
+
+impl<'p, 'parent, 'child> ChildScopeBuilder<'p, 'parent, 'child> {
+    pub fn export_to_parent<T: MfmValue>(
+        &mut self,
+        key: StableNodeKey,
+        value: Handle<'p, 'child, T>,
+        policy: BridgePolicy,
+    ) -> Result<Handle<'p, 'parent, T>, PlanError>;
+
+    pub fn import_from_parent<T: MfmValue>(
+        &mut self,
+        key: StableNodeKey,
+        value: Handle<'p, 'parent, T>,
+        policy: BridgePolicy,
+    ) -> Result<Handle<'p, 'child, T>, PlanError>;
+}
+```
+
+V1 bridge policy is same-run, same-value, no-transform:
+
+```rust
+pub struct BridgeNodeSpecV1 {
+    pub node_id: NodeId,
+    pub stable_key: StableNodeKey,
+    pub source_scope_id: ScopeId,
+    pub target_scope_id: ScopeId,
+    pub source_cell_id: OutputCellId,
+    pub target_cell_id: OutputCellId,
+    pub semantic_type_id: SemanticTypeId,
+    pub schema_id: SchemaId,
+    pub bridge_kind: BridgeKindV1,
+    pub policy: BridgePolicyV1,
+    pub provenance: BridgeProvenanceV1,
+}
+```
+
+Transforming bridges are ordinary states. Bridge completion is event-defined like any other typed
+cell completion.
 
 ### Typed Optionality And Skip Cells
 
@@ -880,7 +1023,7 @@ capability set, kind, and version:
 ```rust
 pub trait StateSpec {
     type Config: MfmConfig;
-    type Input;
+    type Input: StateInput;
     type Output: MfmValue;
     type Effect: EffectSpec;
     type Caps: CapabilitySet;
@@ -893,6 +1036,54 @@ pub trait StateSpec {
         Self: Sized;
 }
 ```
+
+Runtime input types are separate from authoring bindings:
+
+```rust
+pub trait StateInput: Send + Sync + 'static {
+    fn input_descriptor() -> InputDescriptor;
+}
+
+pub trait IntoStateInput<'p, 's, I: StateInput> {
+    fn into_binding(self) -> Result<InputBinding<I>, PlanError>;
+}
+
+pub struct InputBinding<I> {
+    descriptor: InputDescriptor,
+    root: InputBindingNode,
+    _input: PhantomData<I>,
+}
+
+pub enum InputBindingNode {
+    Unit,
+    Cell(TypedCellRef),
+    Tuple(Vec<InputBindingNode>),
+    Struct(Vec<NamedInputBinding>),
+    Vec {
+        elements: Vec<InputBindingNode>,
+        ordering: OrderingEvidence,
+    },
+    NonEmptyVec {
+        elements: Vec<InputBindingNode>,
+        ordering: OrderingEvidence,
+    },
+}
+```
+
+`InputBinding<I>` is a canonical tree, not an erased bag. Supported v1 conversions are:
+
+- `()` to `()`
+- `Handle<'p, 's, T>` to `T`
+- tuples of handles to tuples of values, macro-generated to a fixed arity initially 12
+- `Vec<Handle<'p, 's, T>>` to `Vec<T>`, preserving explicit vector order and recording ordering
+  evidence
+- `NonEmptyHandles<'p, 's, T>` to `NonEmpty<T>`
+- `Handle<'p, 's, MaybeValue<T>>` to `MaybeValue<T>`
+- `Handle<'p, 's, ArtifactRef<T>>` to `ArtifactRef<T>`
+- derive-generated domain handle structs to domain runtime input structs
+
+There is no implementation for `serde_json::Value`, context keys, raw `OutputCellId`, or erased
+dynamic input values. Config-derived fanout must use canonical `StableDomainKey` sorting.
 
 `StateSpec` describes the state. Execution must be split by effect class. There must not be one
 universal execution trait that hands every state a context object, IO provider, clock, artifact
@@ -920,14 +1111,9 @@ runtime to rehydrate the exact versioned runner that was certified.
 Every executable state kind must therefore have a registered descriptor:
 
 ```rust
-pub struct StateDescriptor {
-    pub kind: StateKind,
-    pub version: StateVersion,
-    pub config_schema: SchemaId,
-    pub input_types: InputTypeSpec,
-    pub output_type: ValueTypeSpec,
-    pub effect: EffectKind,
-    pub capabilities: CapabilitySpec,
+pub struct StateDescriptorV1 {
+    pub identity: StateDescriptorIdentityV1, // hash-defining
+    pub audit: StateDescriptorAuditV1,       // stored, not hash-defining
 }
 ```
 
@@ -940,6 +1126,30 @@ Certified node specs must reference canonical state config bytes or a content-ad
 artifact, not only a config hash. Hashes prove identity; bytes are required to reconstruct the
 runner, audit the planned behavior, and verify replay. Old state versions must remain resolvable as
 long as runs certified against them may need replay/resume.
+
+Certification compares registry identity against derive-generated descriptor evidence for
+`S::Config`, `S::Input`, `S::Output`, `S::Effect`, `S::Caps`, the side-effect contract where
+applicable, runner ABI version, and state kind/version. Descriptor mismatch is a certification
+error, never a runtime warning.
+
+Runner factory ABI is:
+
+```rust
+pub trait RunnerFactory {
+    fn state_descriptor(&self) -> StateDescriptorIdentityV1;
+
+    fn instantiate(
+        &self,
+        canonical_config: CanonicalJsonBytes,
+        config_schema_id: SchemaId,
+    ) -> Result<Box<dyn ErasedNodeRunner>, RegistryError>;
+}
+```
+
+The factory must reject config bytes whose schema id or canonical digest does not match the
+certified node spec. V1 uses one output cell per state. Multiple logical values are represented as
+one output struct or explicit projection states; projection states are ordinary runtime states that
+preserve source-cell provenance in their node provenance.
 
 ### Effects, Purity, And Capabilities
 
@@ -982,11 +1192,47 @@ runtime-managed persistence capabilities, but they are also not external side ef
 prevents artifact publication and output rendering from being mislabeled as either pure computation
 or external mutation.
 
-Effect and capability traits should be sealed by the framework. A pure state must not be able to
-obtain IO accidentally. A read state must not be able to submit transactions. A state that writes
-internal artifacts must receive only the scoped artifact/output capabilities declared in its
-descriptor. A side-effect state must receive only the specific external mutation capabilities
-declared in its descriptor.
+Effects are framework-sealed. Capability descriptor registration is extensible for Rust-authored
+third-party crates, but production token construction remains private:
+
+```rust
+pub trait EffectSpec: sealed::Sealed {
+    const KIND: EffectKind;
+}
+
+pub trait CapabilitySpec: Send + Sync + 'static {
+    const KIND: CapabilityKind;
+    const VERSION: CapabilityVersion;
+    const ROLE: CapabilityRole;
+
+    fn descriptor() -> CapabilityDescriptor;
+}
+
+pub enum CapabilityRole {
+    ReadExternal,
+    WriteInternal,
+    Support,
+    ExternalMutationAuthority,
+}
+```
+
+The v1 capability rules are:
+
+- `Pure` receives `NoCaps` only.
+- `ReadExternal` may receive read capabilities and support capabilities that cannot mutate external
+  systems.
+- `WriteInternal` may receive framework-owned internal write capabilities only.
+- `ApplySideEffect` receives exactly one `ExternalMutationAuthority` plus declared support/read
+  capabilities.
+
+For example, an EVM transaction side-effect state may declare one EVM transaction submitter as the
+external mutation authority, plus signer, keystore, chain metadata, and RPC read support
+capabilities. Support capabilities must not expose external mutation methods.
+
+Production capability tokens have private fields and are minted only by the live broker from
+certified descriptors. Replay brokers cannot mint mutation authority tokens. Test mocks are
+registered through test-support brokers and adapter registries, not through public token
+constructors.
 
 This is a compile-time guarantee for framework-mediated capabilities: the state method signature
 does not contain a generic context, generic IO provider, generic recorder, or broad capability bag.
@@ -994,7 +1240,9 @@ It is not a complete proof that arbitrary Rust code performs no ambient IO. Stat
 crates must also use lint and crate-boundary policy, such as denying direct filesystem, environment,
 clock, randomness, process, and network APIs outside designated transport/capability crates.
 
-Side-effect states are split into typed intent, application, and confirmation:
+Side-effect states are split into typed intent construction, submission/recovery, and deterministic
+output construction. The side-effect runner owns the durable protocol; state code owns deterministic
+domain transformation:
 
 ```rust
 #[async_trait]
@@ -1004,7 +1252,7 @@ pub trait SideEffectState: StateSpec<Effect = ApplySideEffect> {
     type Receipt: MfmValue;
     type Confirmation: MfmValue;
 
-    fn prepare_intent(&self, input: Self::Input) -> Result<Self::Intent, StateError>;
+    fn prepare_intent(&self, input: &Self::Input) -> Result<Self::Intent, StateError>;
 
     fn idempotency_input(
         &self,
@@ -1012,27 +1260,33 @@ pub trait SideEffectState: StateSpec<Effect = ApplySideEffect> {
         intent: &Self::Intent,
     ) -> Result<Self::IdempotencyInput, StateError>;
 
-    fn idempotency_key(
-        &self,
-        idempotency_input: &Self::IdempotencyInput,
-    ) -> Result<IdempotencyKey<Self::Intent>, StateError>;
-
-    async fn apply(
+    async fn submit(
         &self,
         intent: &Self::Intent,
-        idempotency: &IdempotencyKey<Self::Intent>,
+        key: &IdempotencyKey<Self::Intent>,
         caps: &Self::Caps,
-    ) -> Result<Self::Receipt, StateError>;
+    ) -> Result<SubmissionEvidence<Self::Receipt>, StateError>;
 
-    async fn confirm(
+    async fn recover_submission(
+        &self,
+        intent: &Self::Intent,
+        key: &IdempotencyKey<Self::Intent>,
+        caps: &Self::Caps,
+    ) -> Result<SubmissionRecovery<Self::Receipt, Self::Confirmation>, StateError>;
+
+    async fn recover_receipt(
+        &self,
+        receipt: &Self::Receipt,
+        caps: &Self::Caps,
+    ) -> Result<ReceiptRecovery<Self::Confirmation>, StateError>;
+
+    fn output_from_confirmation(
         &self,
         input: &Self::Input,
         intent: &Self::Intent,
-        idempotency_input: &Self::IdempotencyInput,
-        idempotency: &IdempotencyKey<Self::Intent>,
         receipt: &Self::Receipt,
-        caps: &Self::Caps,
-    ) -> Result<(Self::Confirmation, Self::Output), StateError>;
+        confirmation: &Self::Confirmation,
+    ) -> Result<Self::Output, StateError>;
 }
 ```
 
@@ -1044,6 +1298,34 @@ The associated types make the shape of a side effect compile-time visible: a sid
 cannot omit intent, idempotency input, receipt, or confirmation without failing to implement the
 trait. Runtime still owns the durable protocol: canonical intent hashing, idempotency ledger claims,
 ambiguous recovery, receipt validation, confirmation, and replay verification.
+
+Replay receipt and confirmation checks are explicit no-live-IO verifier calls:
+
+```rust
+pub trait SideEffectReplayVerifier {
+    type Intent: MfmValue;
+    type Receipt: MfmValue;
+    type Confirmation: MfmValue;
+
+    fn verify_receipt(
+        &self,
+        intent: &Self::Intent,
+        receipt: &Self::Receipt,
+        recorded: &RecordedSideEffectFacts,
+    ) -> Result<(), ReplayError>;
+
+    fn verify_confirmation(
+        &self,
+        receipt: &Self::Receipt,
+        confirmation: &Self::Confirmation,
+        recorded: &RecordedSideEffectFacts,
+    ) -> Result<(), ReplayError>;
+}
+```
+
+Verifier implementations receive only recorded facts, artifacts, and typed evidence from the run
+stream. Constructing live capabilities, live transports, or live read clients during replay
+verification is a certification error.
 
 ### Adapters
 
@@ -1151,6 +1433,84 @@ idempotency key. Re-running the same certified side-effect state must either:
 Replay must verify the recorded receipt and confirmation against the certified spec. It must not
 apply the side effect.
 
+The framework-derived idempotency key is:
+
+```text
+idem:v1:digest(
+  spec_hash,
+  node_id,
+  scope_id,
+  state_kind,
+  state_version,
+  adapter_binding,
+  idempotency_input_schema_id,
+  canonical(idempotency_input)
+)
+```
+
+The durable ledger key is:
+
+```text
+sidefx:v1:digest(
+  spec_hash,
+  node_id,
+  scope_id,
+  state_kind/version,
+  capability_kind/version,
+  adapter_kind/version,
+  intent_schema_id,
+  intent_hash,
+  idempotency_input_hash,
+  idempotency_key
+)
+```
+
+Per ledger key, v1 states are:
+
+```text
+absent
+  -> intent_persisted
+  -> claimed
+  -> invocation_prepared
+  -> invocation_started_unknown
+  -> submission_observed
+  -> receipt_observed
+  -> confirmation_observed
+  -> output_cell_produced
+  -> completed
+```
+
+Recovery edges are:
+
+```text
+invocation_started_unknown
+  -> not_submitted_proven
+  -> submission_observed
+  -> receipt_observed
+  -> confirmation_observed
+  -> submission_unknown
+  -> ambiguous
+
+not_submitted_proven -> invocation_prepared  // next invocation_epoch only
+
+submission_unknown
+  -> not_submitted_proven
+  -> submission_observed
+  -> receipt_observed
+  -> confirmation_observed
+  -> ambiguous
+
+submission_observed -> receipt_observed | ambiguous
+receipt_observed -> confirmation_observed | ambiguous
+confirmation_observed -> CellProducedV1 + StateAttemptCompletedV1
+ambiguous -> manual_resolution_required
+```
+
+`SideEffectInvocationStartedV1` is the uncertainty boundary. After it is durable, resume must
+assume the mutation may have happened. Retry is legal only after adapter-proven `not_submitted`
+evidence and must use the next `invocation_epoch`. Permanent ambiguity blocks and surfaces for
+manual resolution in v1.
+
 ### Operations
 
 Operations are typed expansion recipes over states and other operations. They never execute at
@@ -1159,8 +1519,8 @@ runtime.
 ```rust
 pub trait Operation {
     type Config: MfmConfig;
-    type Input;
-    type Output<'p, 's>;
+    type Input<'p, 's>: OperationInput<'p, 's>;
+    type Output<'p, 's>: OperationOutput<'p, 's>;
 
     const KIND: OperationKind;
     const VERSION: OperationVersion;
@@ -1168,9 +1528,13 @@ pub trait Operation {
     fn expand<'p, 's>(
         &self,
         config: Self::Config,
-        input: Self::Input,
+        input: Self::Input<'p, 's>,
         builder: &mut ScopeBuilder<'p, 's>,
     ) -> Result<Self::Output<'p, 's>, PlanError>;
+}
+
+pub trait IntoOperationInput<'p, 's, I: OperationInput<'p, 's>> {
+    fn into_operation_input(self) -> Result<I, PlanError>;
 }
 ```
 
@@ -1192,18 +1556,23 @@ structs that do not implement `PublicOutputs`. Public launch/render surfaces, ho
 the root output type to implement `PublicOutputs<'p, 's>` so user-facing terminal shape is checked
 against actual typed output cells.
 
+`OperationOutput` and `PublicOutputs` are derive-backed by default. Manual implementations are
+audited, feature-gated exceptions. The builder validates that every public cell reference came from
+a private handle minted inside the current typed program. Public output binding must occur through
+`RootBuilder::bind_public_outputs` inside the branded build closure.
+
 States and operations must share a common expansion interface:
 
 ```rust
 pub trait Expandable {
-    type Config;
-    type Input;
+    type Config: MfmConfig;
+    type Input<'p, 's>;
     type Output<'p, 's>;
 
     fn expand<'p, 's>(
         self,
         config: Self::Config,
-        input: Self::Input,
+        input: Self::Input<'p, 's>,
         builder: &mut ScopeBuilder<'p, 's>,
     ) -> Result<Self::Output<'p, 's>, PlanError>;
 }
@@ -1235,7 +1604,7 @@ impl<'p, 's> ScopeBuilder<'p, 's> {
     ) -> Result<Handle<'p, 's, S::Output>, PlanError>
     where
         S: StateSpec,
-        I: IntoStateInput<S::Input, 'p, 's>;
+        I: IntoStateInput<'p, 's, S::Input>;
 
     pub fn call<O, I>(
         &mut self,
@@ -1245,7 +1614,9 @@ impl<'p, 's> ScopeBuilder<'p, 's> {
         input: I,
     ) -> Result<O::Output<'p, 's>, PlanError>
     where
-        O: Operation;
+        O: Operation,
+        I: IntoOperationInput<'p, 's, O::Input<'p, 's>>,
+        O::Output<'p, 's>: OperationOutput<'p, 's>;
 }
 ```
 
@@ -1309,19 +1680,56 @@ same-run expansion. It is a new planning boundary and must produce a new certifi
 
 ### Stable Node And Cell Identity
 
-Stable ids are part of reproducibility. They must be derived, not accidentally produced.
+Stable identities are part of reproducibility. Author-supplied stable keys are local labels; they
+are not the certified identities themselves.
 
-Node and cell ids should be derived from:
+Author key grammar:
 
-- authoring provenance descriptor and version
-- planning lineage
-- scope id
-- stable local node key
-- state kind and version
-- canonical config hash
-- deterministic lowering algorithm version
+```text
+key        = segment *("/" segment)
+segment    = [a-z0-9] *([a-z0-9] | "-" | "_" | ".")
+segment len: 1..64
+full len:   1..256
+reserved prefixes: "mfm.", "sys.", "_"
+```
 
-They must not depend on:
+No Unicode and no escaping are allowed in author keys. Dynamic keys use `StableDomainKey`, not
+string concatenation:
+
+```rust
+pub trait StableDomainKey: MfmValue {
+    fn domain_key_descriptor() -> SchemaDescriptorV1;
+    fn canonical_domain_bytes(&self) -> CanonicalBytes;
+}
+```
+
+Certified ids are derived from canonical evidence:
+
+```text
+ScopeId = scope:sha256-jcs-v1({
+  alg, parent_scope_id, local_scope_key, operation_lineage
+})
+
+OperationInstanceId = op:sha256-jcs-v1({
+  alg, parent_scope_id, operation_key, operation_kind, operation_version,
+  config_digest, input_binding_digest
+})
+
+NodeId = node:sha256-jcs-v1({
+  alg, lowering_version, scope_id, local_node_key,
+  state_kind, state_version, config_digest, input_binding_digest
+})
+
+CellId = cell:sha256-jcs-v1({
+  alg, node_id, output_index: 0, semantic_type_id, schema_id
+})
+```
+
+Duplicate author keys in the same parent namespace are planning errors. Digest collision between
+different identity payloads is fatal certification corruption. Lowering version is included in
+derived ids and in the certified spec hash.
+
+Derived ids must not depend on:
 
 - `HashMap` iteration order
 - allocation order
@@ -1346,6 +1754,32 @@ pub struct TypedExecutionSpec {
     pub outputs: PublicOutputSpec,
 }
 ```
+
+The persisted v1 spec is canonical JSON:
+
+```text
+spec:sha256-jcs-v1:<hex64>
+```
+
+```rust
+pub struct TypedExecutionSpecV1 {
+    pub spec_version: SpecVersion, // "mfm.typed.execution_spec.v1"
+    pub media_type: MediaType,     // application/vnd.mfm.typed-execution-spec+json;version=1
+    pub canonicalization: CanonicalizationId, // sha256-jcs-v1
+    pub lowering_version: LoweringVersion,
+    pub descriptor_identities: DescriptorIdentities,
+    pub descriptor_audit_refs: Vec<DescriptorAuditRef>,
+    pub config_refs: Vec<ConfigRef>,
+    pub nodes: Vec<NodeSpec>,
+    pub cells: Vec<CellSpec>,
+    pub public_outputs: PublicOutputSpec,
+}
+```
+
+Descriptor identities required for certification are embedded and hash-defining. Larger
+audit/provenance material may be referenced but is not needed to validate execution semantics. Node
+config is either inline canonical bytes with schema id and digest, or an artifact ref with artifact
+id, digest, schema id, byte length, and media type. Config refs must be resolvable at run start.
 
 Authoring provenance names what authored the state program. It is non-executable audit metadata:
 the state machine executes the `StateProgramSpec`, not the operations or composition helpers that
@@ -1454,7 +1888,7 @@ pub trait ErasedNodeRunner {
         &self,
         store: &mut dyn TypedValueStore,
         caps: &mut dyn CertifiedRuntimeCaps,
-        events: &mut dyn EventSink,
+        commits: &mut dyn TypedRunCommitSink,
     ) -> Result<(), StateError>;
 }
 ```
@@ -1469,6 +1903,44 @@ certified typed execution spec plus its canonical hash.
 Lowering must use registered state descriptors and runner factories. It must not deserialize a
 spec into arbitrary executable code, and it must not allow unregistered state kinds to run. The
 erased runner is an implementation detail derived from a certified, versioned spec.
+
+### Compatibility Runner Contract
+
+Compatibility lowering is one-way and post-certification:
+
+```text
+TypedExecutionSpecV1
+  -> certification/spec_hash
+  -> CompatibilityLoweringV1
+  -> current scheduler wrappers
+```
+
+If the first implementation slice uses the current scheduler under the typed layer, it must persist
+compatibility lowering evidence:
+
+```text
+spec_hash
+compat_lowering_version
+lowering_algorithm_id
+runner_registry_digest
+node_id -> scheduler-only runtime_state_id
+typed edge -> scheduler edge mapping
+runner_factory_id
+descriptor_identity
+config_digest
+```
+
+Compatibility wrappers must:
+
+- materialize typed inputs from the typed value store
+- validate semantic ids, schema ids, and digests before invoking a runner
+- get capabilities from the typed broker
+- emit typed payloads through `append_typed_run_commit`
+- render public outputs only from typed terminal cells
+
+They must never accept `PlannedOp`, `PortKey`, public `StateGraph`, `DependencyEdge`, or
+`DynContext` as certified-run semantics. The compatibility layer can execute typed specs; it cannot
+define or repair them.
 
 ### Runtime Execution
 
@@ -1494,11 +1966,136 @@ event that binds the cell id, semantic type id, schema id, content digest, produ
 id, attempt id, and certified spec hash. Orphaned artifacts without such events may be garbage
 collected or ignored, but they must not advance resume.
 
+Cell terminal states in v1 are `Pending`, `Produced`, and `Skipped`. There is no terminal
+`CellFailedV1`; failures belong to state attempts. Pending cells remain unavailable if the run
+fails.
+
+```rust
+pub struct CellProducedV1 {
+    pub spec_hash: ContentDigest,
+    pub node_id: NodeId,
+    pub cell_id: OutputCellId,
+    pub scope_id: ScopeId,
+    pub attempt_id: AttemptId,
+    pub semantic_type_id: SemanticTypeId,
+    pub schema_id: SchemaId,
+    pub artifact_id: ArtifactId,
+    pub content_digest: ContentDigest,
+    pub producer_state_kind: StateKind,
+    pub producer_state_version: StateVersion,
+}
+
+pub struct CellSkippedV1 {
+    pub spec_hash: ContentDigest,
+    pub node_id: NodeId,
+    pub cell_id: OutputCellId,
+    pub scope_id: ScopeId,
+    pub attempt_id: AttemptId,
+    pub semantic_type_id: SemanticTypeId,
+    pub schema_id: SchemaId,
+    pub skip_reason: SkipReason,
+}
+```
+
+Produced after skipped, skipped after produced, the same cell with a different digest, a second
+attempt terminally completing an existing cell, missing artifacts, wrong artifact digest/schema/
+semantic id/producer, or `CellSkippedV1` for a non-`MaybeValue` cell are corruption or certified
+history errors. Exact duplicate recovery is idempotent only through the same typed commit key.
+
 Deserialization may still fail if persisted data is corrupt or unavailable. It must not fail because
 the planner wired the wrong producer to the wrong consumer.
 
 The runtime may maintain context snapshots for observability, but states must not read their
 semantic inputs from those snapshots.
+
+### Typed Kernel Event Schema And Commit Authority
+
+Typed kernel events are mandatory. Runtime-critical facts, artifact references, cell completion,
+side-effect ledger state, and public-output evidence must be typed runtime events or commit payloads
+and cannot be suppressed by event profile settings.
+
+Every committed event is wrapped by the store:
+
+```rust
+pub struct KernelEventEnvelopeV1 {
+    pub event_id: EventId,
+    pub event_schema_id: SchemaId,
+    pub run_id: RunId,
+    pub seq: StreamSeq,
+    pub ordinal: CommitOrdinal,
+    pub spec_hash: ContentDigest,
+    pub commit_key: CommitKey,
+    pub logical_key: LogicalEventKey,
+    pub payload_hash: ContentDigest,
+    pub payload: TypedKernelEventPayload,
+    pub audit: KernelEventAudit,
+}
+```
+
+Payloads are MFM values and canonical-json-hashable. `seq` is contiguous per run stream. `ordinal`
+orders events inside one atomic commit. `event_id` is derived from run id, sequence, ordinal, event
+schema id, and payload hash. `payload_hash` covers canonical payload bytes only, not audit fields.
+`logical_key` drives duplicate/conflict checks, such as `cell:{cell_id}:terminal` or
+`sidefx:{ledger_key}:claim`.
+
+V1 event payload variants include:
+
+```text
+RunStartedV2
+StateAttemptStartedV1
+FactRecordedV1
+ArtifactReferencedV1
+CellProducedV1
+CellSkippedV1
+SideEffectIntentPersistedV1
+SideEffectClaimedV1
+SideEffectInvocationPreparedV1
+SideEffectInvocationStartedV1
+SideEffectNotSubmittedProvenV1
+SideEffectSubmissionObservedV1
+SideEffectSubmissionUnknownV1
+SideEffectReceiptObservedV1
+SideEffectConfirmationObservedV1
+SideEffectAmbiguousV1
+SideEffectFailedV1
+PublicOutputProducedV1
+PublicOutputRenderFailedV1  // audit detail only; not an attempt-terminal authority
+StateAttemptCompletedV1
+StateAttemptFailedV1
+RunCompletedV2
+```
+
+The store, not callers, constructs event envelopes. The typed commit API accepts payloads:
+
+```rust
+append_typed_run_commit(
+    run_id,
+    expected_next_seq,
+    commit_key,
+    payloads: Vec<TypedKernelEventPayload>,
+    required_artifacts: Vec<ArtifactRef>,
+    preconditions: CommitPreconditions,
+    index_writes: TypedIndexWrites,
+) -> CommitResult;
+```
+
+The commit is atomic over appending one ordered event batch to `run:{run_id}`, recording the commit
+key, verifying required artifact existence/digest/schema or kind/semantic id/producer, and updating
+cell terminal, side-effect status, and public-output indexes. `side_effect:*` streams, if exposed,
+are projections rebuilt from committed run events plus indexes; they are not a second write
+authority. Stores that cannot provide this contract are not certified for typed side-effect runs.
+
+Idempotence rules are:
+
+```text
+same commit_key + same payload hashes -> AlreadyCommitted
+same commit_key + different payload hashes -> CommitConflict
+same cell terminal key + different terminal payload -> Corruption
+same side_effect_key + different claim owner/payload -> Corruption
+```
+
+Artifacts are written before commit events. Orphan artifacts are acceptable and quarantined. Events
+referencing missing or digest-mismatched artifacts are corruption.
 
 ### Traceability And Provenance
 
@@ -1546,14 +2143,47 @@ On run start, MFM must persist:
 - framework version
 - public output schema id
 
-The run event stream must bind events to the certified spec hash. A `RunStarted` event without a
+The run event stream must bind events to the certified spec hash. A `RunStartedV2` event without a
 spec hash is insufficient for the new architecture.
 
 The new kernel/domain event schema must preserve the existing append-only and attempt-envelope
-invariants while adding typed-spec evidence. At minimum, `RunStarted` must carry the certified spec
+invariants while adding typed-spec evidence. At minimum, `RunStartedV2` must carry the certified spec
 artifact id, certified spec hash, lowering version, framework/build provenance, and public output
 schema id. State completion and output events must carry typed cell references rather than relying
 on a final context snapshot as the semantic terminal contract.
+
+For typed runs, `RunStartedV2` at `run:{run_id}` sequence `1` is mandatory. The spec artifact may be
+written before `RunStartedV2`, but it is an orphan until the event commits. `RunStartedV2` rejects
+missing specs, digest mismatch, unsupported media type, unsupported spec version, or unresolved
+config refs.
+
+Each certified run writes a retention manifest:
+
+```rust
+pub struct RetentionManifestV1 {
+    pub run_id: RunId,
+    pub spec_hash: ContentDigest,
+    pub spec_artifact: ArtifactRef<TypedExecutionSpecV1>,
+    pub config_artifacts: Vec<ConfigArtifactRef>,
+    pub descriptor_identities: Vec<DescriptorIdentity>,
+    pub descriptor_digests: Vec<ContentDigest>,
+    pub runner_executables: Vec<ExecutableIdentityV1>,
+    pub adapter_executables: Vec<ExecutableIdentityV1>,
+    pub canonicalizer_identity: CanonicalizerIdentity,
+    pub event_schema_ids: Vec<SchemaId>,
+    pub value_artifacts: Vec<ArtifactId>,
+    pub receipt_artifacts: Vec<ArtifactId>,
+    pub confirmation_artifacts: Vec<ArtifactId>,
+    pub public_output_artifacts: Vec<ArtifactId>,
+}
+```
+
+`ExecutableIdentityV1` includes the logical factory id plus reproducible code identity: source
+revision, package digest, binary digest, Nix derivation/output hash, or an equivalent build artifact
+identity. `canonicalizer_identity` records the implementation and version used for canonical JSON
+and descriptor hashing. Proof-slice certified persistent stores retain all manifest entries
+indefinitely. In-memory stores are never retention authorities. Local file stores are certified only
+if garbage collection refuses referenced artifacts.
 
 Long-term replay rehydrates executable code from reproducible built artifacts that contain the
 versioned states, adapters, connectors, and framework code referenced by the certified spec. The
@@ -1590,6 +2220,41 @@ adapter/connector version, idempotency policy, or terminal output shape changed.
 Resume must also reject if any completed cell, skipped cell, side-effect record, or public output
 record is missing the certified spec hash or disagrees with the certified node/cell descriptors.
 
+Resume validation reconstructs projections from the authoritative run stream before execution:
+
+1. load `run:{run_id}`
+2. require contiguous sequences and `RunStartedV2` at sequence `1`
+3. load the stored spec artifact and verify hash, media type, and version
+4. require a rebuilt spec hash to equal the stored hash when a rebuilt spec is supplied
+5. validate event envelopes, event schema ids, spec hashes, logical keys, and commit idempotency
+6. verify every cell, side-effect, public-output, receipt, and confirmation event against the
+   certified spec
+7. resolve registry descriptors and runner factories exactly, including executable identity
+8. compute the frontier in topological order: nodes with no terminal output cell and all required
+   predecessor cells satisfied
+9. block on ambiguous side effects, unsupported adapters, missing runners, corrupt cells, or missing
+   public-output evidence for runs that reached the public-output step
+
+Side-effect resume frontier:
+
+```text
+terminal cell exists -> skip
+claim only, no invocation -> continue live execution
+invocation_started_unknown -> recover_submission
+not_submitted_proven -> retry next invocation_epoch
+submission_observed -> recover_receipt
+receipt_observed -> recover_confirmation
+confirmation_observed, no cell -> derive output and append cell
+ambiguous -> block
+```
+
+Replay uses the stored spec and replay broker only. It re-executes pure/internal/read states only
+when replay capabilities can answer from recorded facts/artifacts. It verifies produced value
+digests, receipts, confirmations, and public outputs through typed evidence and replay-only verifier
+contracts. Replay fails on missing facts, missing receipts, unsupported adapter versions, unavailable
+runner factories, retention gaps, executable identity mismatch, canonicalizer identity mismatch, or
+any live-cap request.
+
 ### Terminal Outputs And Public API
 
 Operation outputs must be typed structs of handles. String exports are not sufficient. Internal
@@ -1600,7 +2265,7 @@ The public output contract must be derived from a typed output spec:
 
 ```rust
 pub trait PublicOutputs<'p, 's> {
-    fn public_schema_descriptor() -> SchemaDescriptor;
+    fn public_schema_descriptor() -> SchemaDescriptorV1;
 
     fn public_schema_id() -> SchemaId {
         SchemaId::derive(&Self::public_schema_descriptor())
@@ -1619,9 +2284,39 @@ user-facing API. They require rustdoc and versioning. Public output schema ids u
 schema descriptor mechanism as MFM values and configs. Breaking public output changes require new
 public output schema versions; automatic public-output migration is out of scope for the typed core.
 
-`RunCompleted` must not be the only semantic terminal record. A completed run must have typed public
-output refs bound to the certified spec hash and public schema id. Context snapshots may remain for
-observability and debugging, but they are not the public output contract.
+`RunCompletedV2(Completed)` is invalid without public-output evidence. A completed run must have
+typed public output refs bound to the certified spec hash and public schema id. Context snapshots may
+remain for observability and debugging, but they are not the public output contract.
+
+The terminal public-output record is:
+
+```rust
+pub struct PublicOutputProducedV1 {
+    pub spec_hash: SpecHash,
+    pub public_schema_id: SchemaId,
+    pub output_spec_hash: ContentDigest,
+    pub cells: Vec<NamedTypedCellRef>,
+    pub rendered_digest: ContentDigest,
+    pub rendered_artifact_id: Option<ArtifactId>,
+}
+
+pub struct NamedTypedCellRef {
+    pub public_field_path: PublicFieldPath,
+    pub cell_id: CellId,
+    pub semantic_type_id: SemanticTypeId,
+    pub schema_id: SchemaId,
+    pub producer_node_id: NodeId,
+    pub content_digest: ContentDigest,
+    pub artifact_id: ArtifactId,
+}
+```
+
+Typed terminal cells plus `PublicOutputSpec` are authoritative. Rendered JSON is only a cache for
+CLI/API clients. Public-output rendering is an explicit render state attempt. If the required cells
+exist but rendering fails, the run is not completed; the render state emits
+`StateAttemptFailedV1`, may also emit `PublicOutputRenderFailedV1` as audit detail, and remains
+resumable from the public-output rendering step. `PublicOutputRenderFailedV1` is not a terminal
+authority and cannot substitute for `PublicOutputProducedV1`.
 
 ### Portfolio Example
 
@@ -1710,29 +2405,38 @@ Zero observation batches must be modeled explicitly. If empty observation sets a
 The proof workflow becomes:
 
 ```rust
-let fact = b.state::<ReadProofFact, _>(
-    StableNodeKey::new("read_fact"),
-    cfg.read,
-    (),
-)?;
+let draft = build_root(ScopeKey::new("proof"), |root| {
+    let b = root.scope();
 
-let side_effect = b.state::<ApplyProofSideEffect, _>(
-    StableNodeKey::new("apply_side_effect"),
-    cfg.apply,
-    fact,
-)?;
+    let fact = b.state::<ReadProofFact, _>(
+        StableNodeKey::new("read_fact"),
+        cfg.read,
+        (),
+    )?;
 
-let output = b.state::<AssembleProofOutput, _>(
-    StableNodeKey::new("assemble_output"),
-    cfg.assemble,
-    (fact, side_effect),
-)?;
+    let side_effect = b.state::<ApplyProofSideEffect, _>(
+        StableNodeKey::new("apply_side_effect"),
+        cfg.apply,
+        fact,
+    )?;
 
-let artifact = b.state::<PublishOutput, _>(
-    StableNodeKey::new("publish_output"),
-    cfg.publish,
-    output,
-)?;
+    let output = b.state::<AssembleProofOutput, _>(
+        StableNodeKey::new("assemble_output"),
+        cfg.assemble,
+        (fact, side_effect),
+    )?;
+
+    let artifact = b.state::<PublishOutput, _>(
+        StableNodeKey::new("publish_output"),
+        cfg.publish,
+        output,
+    )?;
+
+    root.bind_public_outputs(
+        PublicOutputKey::new("proof"),
+        &ProofPublicOutputs { artifact },
+    )
+})?;
 ```
 
 `ApplyProofSideEffect` declares `Effect = ApplySideEffect`, typed intent, typed idempotency input,
@@ -1899,51 +2603,69 @@ that truly cannot be known until execution.
 A breaking rewrite should split the core around typed programs:
 
 ```text
-crates/program
-  typed handles, scopes, typed builders, operation expansion, typed IR,
-  certified specs, lowering verification
-
-crates/program-derive or crates/machine-derive
-  derive and attribute macros for values, configs, states, operations,
-  descriptors, schemas, and compile-time registration evidence
-
-crates/values
+mfm-values
   MfmValue, MfmConfig, semantic ids, schema ids, typed artifact refs,
   canonical serialization helpers
 
-crates/effects
-  effect specs, sealed capability traits, idempotency contracts,
-  side-effect intent/receipt/confirmation traits
+mfm-effects -> mfm-values
+  effect specs, side-effect intent/receipt/confirmation traits,
+  idempotency contracts
 
-crates/capabilities
-  state-facing capability traits and typed request/response contracts
+mfm-capabilities -> mfm-values, mfm-effects
+  sealed capability specs, state-facing capability traits, typed
+  request/response contracts
 
-crates/collectors/*
-  typed domain clients and request/response models for external systems
+mfm-io -> mfm-values, mfm-capabilities
+  live/replay IO traits, transport-neutral IO envelopes, replay brokers
 
-crates/transports/*
-  live and replay connector implementations for capabilities/collectors
+mfm-program -> mfm-values, mfm-effects, mfm-capabilities
+  typed handles, scopes, builders, operation expansion, typed IR,
+  certified specs, lowering verification
 
-crates/machine
-  certified spec executor, scheduler, typed value store, event streams,
+mfm-program-derive -> mfm-values, proc-macro deps only
+  derive and attribute macros for values, configs, descriptors, schemas,
+  and compile-time registration evidence
+  forbidden: mfm-program, mfm-machine
+
+mfm-machine -> mfm-values, mfm-effects, mfm-capabilities, mfm-io, mfm-program
+  certified spec executor, scheduler, typed value store, typed run stream,
   replay, resume
 
-crates/states/*
+collectors/* -> mfm-values, mfm-io, domain crates
+  typed domain clients and request/response models for external systems
+
+transports/* -> mfm-io, mfm-capabilities, collectors/*, domain crates
+  live and replay connector implementations
+
+storages/* -> mfm-machine, mfm-values
+  typed stream stores, artifact stores, projections, retention bundles
+
+states/* -> mfm-program, mfm-machine, domain crates
   reusable executable states implemented against typed state/effect traits
 
-crates/ops/*
+ops/* -> mfm-program, states/*, domain/config crates
   typed operation expansion recipes
 
-bin/cli
-  input decoding, launch/resume commands, output rendering
+crates/app + bin/*
+  assembly only: decode input, start/resume runs, render typed public outputs
 
-bin/rest-api
-  transport only
+crates/sdk
+  legacy facade during migration, then typed reexports only or deletion
 ```
 
-This split should avoid creating a new monolithic adapter crate. Capability traits are the
-state-facing contract; collectors and transports can continue to own concrete domain clients and
-live/replay connector behavior where that matches the existing repository shape.
+This split should avoid creating a new monolithic adapter crate. `mfm-io` exists so transports do
+not depend broadly on `mfm-machine`. `mfm-program-derive` must not depend on `mfm-program` or
+`mfm-machine`; otherwise derive macros will create avoidable proc-macro cycles and hide framework
+runtime dependencies inside type/schema derivation.
+
+Capability traits are the state-facing contract. Collectors and transports can continue to own
+concrete domain clients and live/replay connector behavior where that matches the existing
+repository shape.
+
+Executable shared-state crates may depend on `mfm-machine` for `State`, context, IO, recorder, and
+metadata. Pure domain models, semantic payloads, adapter reader payload contracts, and planning
+algorithms stay below runtime state crates. In particular, Aave portfolio/plan contracts must live
+in a pure domain/plan crate, while `crates/states/aave-v3` owns executable runtime adapters only.
 
 The thin-layer principle remains:
 
@@ -2054,6 +2776,237 @@ The typed expansion core should reduce or eliminate several categories of defens
 Some validation remains, but it moves to the correct layers: canonicality, storage integrity,
 external IO behavior, replay availability, idempotency ambiguity, and domain facts.
 
+### Proof-Slice Acceptance Contract
+
+The proof slice is accepted only when one CI gate proves:
+
+```text
+typed proof workflow expands through typed API
+root public outputs bind inside build_root
+certified spec hash persists before execution
+RunStartedV2 starts the authoritative run stream
+typed cell completion events exist for produced/skipped cells
+side-effect ledger records intent, claim, invocation, submission/receipt/confirmation
+typed public output evidence exists before RunCompletedV2
+CLI/API rendering reads typed public outputs only
+replay uses replay caps and replay verifiers only
+resume rejects drift, missing evidence, and ambiguous side effects
+old dynamic authoring APIs are denied outside an explicit legacy allowlist
+```
+
+If this gate still depends on semantic JSON context dataflow, generic IO, public erased DAG
+construction, or hand-authored dependency edges, Proposal 1 has not solved the problem.
+
+### Test And CI Plan
+
+The typed core should add named suites rather than rely on broad integration tests to find semantic
+breakage:
+
+```text
+typed-core-trybuild
+schema-canonicalization
+stable-id-determinism
+descriptor-registry-certification
+lowering-certification
+typed-store-events
+storage-commit-contract
+side-effect-ledger
+adapter-recovery-conformance
+replay-resume
+public-output-terminal
+no-secret-no-float-derives
+retention-compat
+crate-dag
+old-api-denylist
+typed-proof-slice
+```
+
+Nixfied mapping:
+
+```text
+nix run .#check
+  crate-dag
+  old-api-denylist
+  source boundary checks
+
+nix run .#test
+  typed-core-trybuild
+  schema-canonicalization
+  stable-id-determinism
+  descriptor-registry-certification
+  lowering-certification
+  typed-store-events
+  storage-commit-contract
+  side-effect-ledger
+  adapter-recovery-conformance
+  replay-resume
+  public-output-terminal
+  no-secret-no-float-derives
+  retention-compat
+
+nix run .#ci -- --mode parity --summary
+  portfolio parity
+  EVM deterministic lifecycle parity
+
+nix run .#ci -- --mode full --summary
+  full typed-proof-slice acceptance
+```
+
+Required compile-fail coverage includes:
+
+- root closure attempts to return a handle instead of `RootBound`
+- child handle used in parent without a bridge
+- sibling handles mixed without a parent bridge
+- forged handle construction from `OutputCellId`
+- `serde_json::Value` used as state input
+- wrong state input field type
+- empty vector passed to `NonEmptyHandles<T>`
+- operation output without `OperationOutput`
+- root launch output without `PublicOutputs`
+- pure state names capabilities
+- read state receives mutation authority
+- side-effect state has zero or two mutation authorities
+- secret field derives `MfmValue`
+- float field derives `MfmValue`, `MfmConfig`, or `PublicOutputs`
+- unsupported serde attribute in a persisted type
+
+Required runtime/unit/integration coverage includes:
+
+- bridge node spec and completion evidence
+- duplicate scope/node/operation key rejection
+- canonical vector/domain-key ordering
+- schema descriptor golden hashes
+- canonical JSON duplicate-key rejection
+- decimal negative-zero rejection and bytes grammar
+- `RunStartedV2` missing, wrong sequence, or digest mismatch
+- typed commit idempotence and conflict behavior
+- typed commit caller cannot forge sequence, ordinal, or event id
+- typed commit artifact precondition atomicity
+- mandatory fact/artifact/cell/public-output evidence ignores event profiles
+- output artifacts use output role/kind metadata, not fact-payload metadata
+- cell produced/skipped conflicts
+- side-effect ledger legal and illegal transitions
+- crash matrix around intent, claim, invocation, submission, receipt, and confirmation
+- adapter recovery conformance
+- side-effect replay verifier with no live caps
+- replay with no live caps
+- resume ambiguity blocks
+- retained executable/canonicalizer identity mismatch
+- retention manifest completeness
+- portfolio config compilation does not depend on runtime state crates
+- portfolio adapter reader payloads do not live in stable semantic metadata
+- public-output render failure resumes through render state attempt
+- old API denylist
+- compatibility wrapper does not read typed inputs from context
+
+### Workflow Migration Gates
+
+Each workflow has three gates:
+
+```text
+entry gate: typed prerequisites exist; legacy use is explicitly allowlisted
+exit gate: no semantic dependency on old authoring APIs remains
+certification gate: CI proves public behavior, replay/resume, and denylist compliance
+```
+
+Proof exit:
+
+```text
+typed spec
+persisted spec hash
+RunStartedV2
+typed cells
+side-effect ledger
+typed public output before completion
+replay-only caps
+drift rejection
+no old SDK semantic imports
+```
+
+Portfolio exit:
+
+```text
+no PortKey
+no context dataflow
+no hand-authored edges
+no old SDK semantic imports
+deterministic fanout/fanin
+replay/resume tests
+```
+
+EVM exit:
+
+```text
+typed lifecycle only
+signer/keystore are support caps
+one external mutation authority per side-effect state
+replay confirms without reapply
+crash-boundary tests prove no duplicate mutation
+```
+
+### Compatibility Parity
+
+Byte-for-byte parity applies only to documented stable CLI/API JSON fields. Content IDs must not be
+normalized away by default because they are semantic evidence unless a versioned canonicalization
+transition explicitly says otherwise.
+
+Internal events use schema-level parity. Side-effecting workflows require behavioral parity plus
+ledger/replay invariants against deterministic local services.
+
+### Macro Readiness
+
+First-slice macro readiness requires:
+
+```text
+derive diagnostics covered by trybuild
+generated descriptors have golden fixtures
+generated code snapshots or equivalent review surface exist
+no operation/state attribute macros
+no generated runtime scheduling logic
+```
+
+Broad state/operation attribute macros may be reconsidered only after proof and portfolio
+migrations demonstrate stable diagnostics.
+
+### Documentation Gates
+
+Update docs with the change that introduces each contract:
+
+```text
+docs/design.md: typed spec as normative execution contract
+docs/architecture.md: refined crate DAG and typed runtime boundary
+docs/ops-and-states.md: per-workflow typed inventory
+crates/machine/README.md: typed event/replay/resume semantics
+crates/machine-derive/README.md or new derive README: derive surface
+new mfm-values/mfm-program READMEs
+crates/sdk/README.md: legacy status before denylist
+bin/cli/README.md: typed public-output rendering when behavior changes
+migration notes: old API allowlist and shrink plan
+```
+
+### Rejected Alternatives
+
+Proposal 1 explicitly rejects:
+
+- returning handles from generative build/scope closures
+- raw bridge exports without target scope and certified bridge evidence
+- operation inputs that can carry unbranded dynamic values
+- public handle constructors or raw `OutputCellId` to handle conversion
+- encoding the whole DAG as nested Rust types
+- multi-output state cells in v1
+- JSON Schema as the descriptor source of truth
+- context snapshots as terminal output
+- mutable cell tables as authority
+- generic `IoProvider` or untyped capability bags
+- state-authored string idempotency keys
+- `apply_started` as mutation-status evidence
+- apply-then-record side-effect ordering
+- blind retry based only on idempotency keys
+- independent authoritative `run:*` and `side_effect:*` streams
+- permanent `mfm-sdk` compatibility facade
+- byte-for-byte parity for internal event streams
+- broad state/operation attribute macros in the first slice
+
 ### Migration Plan
 
 Backward compatibility is not required, but the migration must avoid cementing the old model as the
@@ -2061,49 +3014,30 @@ new foundation.
 
 Recommended order:
 
-1. Add a guarantee matrix for the proof slice before implementation begins. Each desired guarantee
-   must be assigned to compile-time, certification-time, runtime/storage-time, or policy/lint-time
-   enforcement, with compile-time as the default target for Rust-authored workflow mistakes.
-2. Add the new typed program core behind `crates/program`.
-3. Define `MfmValue`, `MfmConfig`, typed handles, invariant/generative scopes, stable ids, typed IR,
-   and certified spec structs.
-4. Define schema descriptors, derived schema ids, and the manual migration contract for
-   values/configs/public outputs.
-5. Define the secret boundary: secret-bearing types cannot implement value/config/output traits and
-   keystore access crosses only through non-secret typed references and capabilities.
-6. Define immutable state descriptors and a state registry for `(StateKind, StateVersion)` runner
-   rehydration.
-7. Define effect-specific execution traits before porting states. The traits must expose only the
-   inputs and capabilities appropriate to each effect class.
-8. Define sealed typed capability traits and live/replay connector interfaces.
-9. Define certified spec hashing, canonical serialization, config artifact/reference handling, and
-   provenance records.
-10. Define typed value-store and event-stream semantics, including `RunStarted`, typed cell
-    completion events, typed public-output events, skipped-cell events, and side-effect ledger
-    records bound to the certified spec hash.
-11. Add `trybuild` compile-fail tests for the core invalid programs before porting workflows.
-12. Implement certified lowering into a temporary compatibility runner plan.
-13. Port the proof workflow first. Success requires no semantic JSON context dataflow, generic IO
-    provider, public erased DAG construction, or hand-authored dependency edges.
-14. Port proof side effects with typed intent, typed idempotency input, idempotency key, receipt,
-    confirmation, and replay verification.
-15. Port portfolio execution next. Success requires deterministic fanout/fanin, stable dynamic ids,
-    scope branding, typed optionality where applicable, and typed terminal outputs.
-16. Port EVM deploy/configure/validate. Success requires lifecycle typestate and typed EVM
-    side-effect contracts.
-17. Rewrite `mfm-machine` around certified typed specs, typed cells, typed provenance, and event
-    replay/resume rules.
-18. Replace `mfm-sdk` dynamic planning APIs with typed expansion APIs or reduce it to a facade.
-19. Delete `PortKey`-driven semantic data flow, dynamic context wiring, and hand-authored state
-    dependency edges from public authoring APIs.
-20. Update `docs/design.md`, `docs/architecture.md`, and `docs/ops-and-states.md`.
-21. Expand compile-fail tests and replay/resume integration tests for every migrated workflow.
+1. Patch RFC/design docs with the refined typed-core contracts.
+2. Add `mfm-values`, `mfm-effects`, `mfm-capabilities`, `mfm-io`, and `mfm-program`.
+3. Add the old API denylist immediately after typed program crates exist, with an explicit legacy
+   allowlist.
+4. Add schema grammar, descriptor evidence, canonical hashing, and registry certification.
+5. Add typed machine events, typed commit API, value store, replay/resume validator, and
+   side-effect ledger.
+6. Add the compatibility scheduler adapter under certified specs only.
+7. Port proof and make `typed-proof-slice` mandatory.
+8. Shrink the legacy allowlist for proof.
+9. Port portfolio, then shrink the portfolio legacy allowlist.
+10. Port EVM deploy/configure/validate, then shrink the EVM legacy allowlist.
+11. Delete or isolate compatibility APIs as each workflow exit gate permits.
+12. Move `crates/sdk` to typed reexports only or delete it.
+
+The allowlist can shrink but cannot grow without an explicit migration entry that names owner,
+workflow, reason, and expiry.
 
 Temporary compatibility lowering is acceptable only if:
 
 - the certified typed spec remains the authoritative persisted contract
 - no new workflow is authored directly against dynamic `PlannedOp`
 - semantic JSON context is not used by migrated typed states
+- compatibility wrappers materialize inputs from typed cells and emit typed commits only
 - deletion of the compatibility layer is an explicit migration milestone
 
 ### Deferred Design Decisions
@@ -2112,11 +3046,9 @@ The following decisions are intentionally not required for the first implementat
 must remain explicit open design items:
 
 - dynamic third-party plugin certification and loading
-- exact cross-scope bridge API and bridge provenance model
-- full operational retention/deprecation policy for old state, adapter, connector, schema, and
-  public output versions
-- full operational policy for retaining and resolving reproducible built artifacts used by replay
-- macro ergonomics for deriving values, configs, states, operations, and descriptors
+- long-term retention/deprecation policy beyond proof-slice indefinite retention
+- permanent side-effect ambiguity recovery beyond v1 block-and-surface semantics
+- broad state/operation attribute macro ergonomics
 
 These are deferred because the proof slice can validate the core without finalizing long-term
 platform policy. The proof slice must still define enough version resolution and artifact retention
@@ -2159,39 +3091,35 @@ expansion and runtime scheduling.
 The smallest proof of the architecture should include:
 
 1. guarantee matrix for the proof slice, with compile-time enforcement identified first
-2. `MfmValue`
-3. `MfmConfig`
-4. schema descriptors and derived schema ids
-5. derive-first no-float/no-secret checks for values, configs, and public outputs where statically
-   knowable
-6. secret-boundary marker/enforcement sufficient to prevent secret-bearing types from implementing
+2. `mfm-values` with `MfmValue`, `MfmConfig`, schema descriptors, derived schema ids, canonical
+   hashing, and derive-first no-float/no-secret checks
+3. secret-boundary marker/enforcement sufficient to prevent secret-bearing types from implementing
    value/config/output traits
-7. `Handle<'program, 'scope, T>` with private constructors
-8. invariant/generative typed scopes and stable node keys
-9. typed optional/skip cell prototype
-10. `StateSpec`
-11. immutable `StateDescriptor` and state registry for runner rehydration
-12. `PureState`, `ReadState`, `WriteInternalState`, and `SideEffectState`
-13. sealed capability token model with private constructors
-14. one typed read capability with live and replay implementations
-15. one typed internal artifact/output capability
-16. one typed side-effect capability with receipt verification
-17. `Operation`
-18. `ScopeBuilder`
-19. `TypedExecutionSpec`
-20. typed value store and typed cell completion semantics
-21. event schema for `RunStarted`, typed cell output, skipped cells, side-effect ledger records, and
-    public outputs bound to the certified spec hash
-22. certified spec hashing
-23. certified lowering into a temporary erased runner plan
-24. a typed proof workflow
-25. proof side-effect intent/idempotency-input/idempotency-key/receipt/confirmation modeling
-26. typed terminal outputs implementing `PublicOutputs`
-27. replay of the same certified typed spec
-28. resume rejection when the rebuilt certified spec differs
-29. resume rejection when completed cells, skipped cells, side-effect records, or public outputs are
-    missing or disagree with the certified spec descriptors
-30. compile-fail tests showing invalid proof wiring does not compile
+4. `Handle<'program, 'scope, T>` with private constructors, invariant branding, root-bound public
+   outputs, and child-scope bridge evidence
+5. `StateSpec`, `StateInput`, `IntoStateInput`, `InputBinding`, `Operation`, `OperationInput`,
+   `OperationOutput`, and `ScopeBuilder`
+6. stable author keys, stable domain keys, and derived scope/operation/node/cell identities
+7. immutable `StateDescriptorV1`, derive-generated descriptor evidence, runner factories, and state
+   registry certification
+8. effect classes, side-effect traits, sealed capability token model, one typed read capability, one
+   internal artifact/output capability, and one typed side-effect capability
+9. proof side-effect intent, idempotency input, framework-derived idempotency key, durable ledger,
+   receipt, confirmation, recovery, and replay verifier
+10. `TypedExecutionSpecV1`, spec hash, config artifact refs, descriptor identities, public-output
+    spec, and retained executable/canonicalizer identities
+11. typed value store, produced/skipped cell terminal semantics, and one output cell per state
+12. typed kernel event payloads, store-owned event envelopes, and `append_typed_run_commit`
+13. public-output render state, `PublicOutputProducedV1`, render failure resume behavior, and CLI/API
+    rendering from typed public outputs only
+14. `RunStartedV2`, retention manifest, replay/resume acceptance algorithm, and resume rejection for
+    spec drift or missing/disagreeing typed evidence
+15. certified lowering into a temporary compatibility runner plan that reads typed cells and emits
+    typed commits only
+16. typed proof workflow and mandatory `typed-proof-slice` CI gate
+17. old API denylist with a shrinking legacy allowlist
+18. compile-fail, storage, replay/resume, public-output, side-effect, retention, and denylist tests
+    described in the Test And CI Plan
 
 If that slice works without semantic JSON context dataflow, the architecture is viable enough to
 expand to portfolio and EVM workflows. If it still depends on context keys, generic IO, or
