@@ -573,7 +573,12 @@ pub trait MfmValue:
     serde::Serialize + serde::de::DeserializeOwned + Send + Sync + 'static
 {
     const SEMANTIC_ID: SemanticTypeId;
-    const SCHEMA_ID: SchemaId;
+
+    fn schema_descriptor() -> SchemaDescriptor;
+
+    fn schema_id() -> SchemaId {
+        SchemaId::derive(&Self::schema_descriptor())
+    }
 }
 ```
 
@@ -581,16 +586,40 @@ The semantic type id names the meaning of the value. The schema id names its sta
 shape. Two values with the same JSON representation but different domain meaning must be different
 Rust types.
 
-For the first implementation slice, schema ids may be explicit constants rather than automatically
-derived. That is enough to make schema identity visible in specs and events while leaving the full
-schema derivation and migration policy for later design. The minimum rule is:
+### Schema Id Derivation And Manual Migration
 
-- every persisted `MfmValue`, `MfmConfig`, and public output type declares a stable schema id
-- schema ids are manually versioned at first
-- breaking serialized-shape or semantic changes require a new schema id
-- hashed value/config/public-output structures must use canonical serialization and must not contain
-  floats
-- no secret-bearing type may implement `MfmValue`, `MfmConfig`, or public output traits
+Schema ids should be derived from canonical schema descriptors, not hand-written arbitrary strings.
+Every persisted `MfmValue`, `MfmConfig`, and public output type must expose a schema descriptor that
+is itself canonical-json-hashable and secret-free.
+
+At minimum, a schema descriptor should identify:
+
+- schema kind: value, planning config, or public output
+- semantic type id where applicable
+- schema name
+- manually assigned schema version
+- canonical serialized shape
+- canonicalization rules
+- redaction/no-secret policy
+- owner crate and type name for audit/debug
+
+The schema id is derived from the canonical bytes of that descriptor:
+
+```text
+SchemaId = schema:<algorithm>:<digest(canonical_schema_descriptor)>
+```
+
+The initial algorithm should be the same canonical JSON digest family used elsewhere in MFM, with
+an explicit algorithm/version prefix so the derivation itself can evolve later.
+
+Migration policy is manual. A schema change never silently replaces or upgrades an existing schema
+id. Breaking serialized-shape or semantic changes require a new manually assigned schema version,
+which produces a new derived schema id. Existing certified specs continue to reference the old
+schema id and old state/adapter/connector versions. If data must move from an old schema to a new
+schema, that transition must be modeled as an explicit versioned migration state or operation whose
+input and output types make the conversion visible in the certified spec.
+
+No secret-bearing type may implement `MfmValue`, `MfmConfig`, or public output traits.
 
 Examples:
 
@@ -660,7 +689,11 @@ The architecture must distinguish planning config from runtime values.
 pub trait MfmConfig:
     serde::Serialize + serde::de::DeserializeOwned + Send + Sync + 'static
 {
-    const SCHEMA_ID: SchemaId;
+    fn schema_descriptor() -> SchemaDescriptor;
+
+    fn schema_id() -> SchemaId {
+        SchemaId::derive(&Self::schema_descriptor())
+    }
 
     fn validate(&self) -> Result<(), ConfigError>;
 }
@@ -742,9 +775,9 @@ added only when real workflows force the exact bridge semantics.
 ### Typed Optionality And Skip Cells
 
 Optional runtime paths must be represented explicitly in the typed program. A plain missing context
-key or absent JSON value is not enough for audit or replay.
+key, absent JSON value, or raw `Option<T>` boundary is not enough for audit or replay.
 
-The preferred model is a typed optional/skip cell rather than an untracked absence:
+The typed optionality API should be `MaybeValue<T>`:
 
 ```rust
 pub enum MaybeValue<T: MfmValue> {
@@ -758,10 +791,11 @@ pub struct SkipReason {
 }
 ```
 
-The exact API may use `MaybeValue<T>`, `OptionalCell<T>`, `Skipped<T>`, or a wrapper around
-`Option<T>`, but the certified spec and event stream must preserve skip provenance. A skipped value
-must have a typed cell identity, semantic type id, schema id, producer node, and reason. Downstream
-states must declare whether they accept a produced value only or a typed maybe/skip value.
+`MaybeValue<T>` is the state-boundary shape. Internal implementation may use `Option<T>` where
+appropriate, but typed cells and state inputs must expose optionality through `MaybeValue<T>` so the
+certified spec and event stream can preserve skip provenance. A skipped value must have a typed cell
+identity, semantic type id, schema id, producer node, and reason. Downstream states must declare
+whether they accept a produced value only or `MaybeValue<T>`.
 
 ### States
 
@@ -1381,6 +1415,13 @@ On run start, MFM must persist:
 The run event stream must bind events to the certified spec hash. A `RunStarted` event without a
 spec hash is insufficient for the new architecture.
 
+Long-term replay rehydrates executable code from reproducible built artifacts that contain the
+versioned states, adapters, connectors, and framework code referenced by the certified spec. The
+same certified spec in the same reproducible environment must resolve to the same executable
+artifacts. Replay still uses replay adapters and recorded facts/receipts; reproducible executable
+artifacts are the code identity and availability mechanism, not permission to re-query live external
+systems.
+
 Replay must:
 
 1. load the stored certified spec
@@ -1414,7 +1455,11 @@ The public output contract must be derived from a typed output spec:
 
 ```rust
 pub trait PublicOutputs<'p, 's> {
-    const PUBLIC_SCHEMA_ID: SchemaId;
+    fn public_schema_descriptor() -> SchemaDescriptor;
+
+    fn public_schema_id() -> SchemaId {
+        SchemaId::derive(&Self::public_schema_descriptor())
+    }
 
     fn output_cells(&self) -> Vec<PublicOutputCell>;
 }
@@ -1425,7 +1470,9 @@ schema. The renderer may emit JSON, but it must not discover final results by lo
 context keys.
 
 Artifact-bearing outputs must use typed artifact refs. Public output schemas are part of the
-user-facing API. They require rustdoc and versioning.
+user-facing API. They require rustdoc and versioning. Public output schema ids use the same derived
+schema descriptor mechanism as MFM values and configs. Breaking public output changes require new
+public output schema versions; automatic public-output migration is out of scope for the typed core.
 
 ### Portfolio Example
 
@@ -1837,8 +1884,8 @@ Recommended order:
 1. Add the new typed program core behind `crates/program`.
 2. Define `MfmValue`, `MfmConfig`, typed handles, scopes, stable ids, typed IR, and certified spec
    structs.
-3. Define the minimal schema id policy: explicit manually versioned schema ids first, with canonical
-   no-float serialization for hashed values/configs/outputs.
+3. Define schema descriptors, derived schema ids, and the manual migration contract for
+   values/configs/public outputs.
 4. Define the secret boundary: secret-bearing types cannot implement value/config/output traits and
    keystore access crosses only through non-secret typed references and capabilities.
 5. Define immutable state descriptors and a state registry for `(StateKind, StateVersion)` runner
@@ -1874,15 +1921,12 @@ Temporary compatibility lowering is acceptable only if:
 The following decisions are intentionally not required for the first implementation slice, but they
 must remain explicit open design items:
 
-- full schema id derivation and migration policy beyond explicit manually versioned schema ids
 - dynamic third-party plugin certification and loading
 - exact cross-scope bridge API and bridge provenance model
-- final typed optionality API shape (`MaybeValue<T>`, `OptionalCell<T>`, `Skipped<T>`, or another
-  equivalent)
-- long-term policy for keeping old state/adapter/connector versions available for replay, including
-  whether replay may bind to reproducible build artifacts or only in-process registered runners
+- operational retention/deprecation policy for old state, adapter, connector, schema, and public
+  output versions
+- operational policy for retaining and resolving reproducible built artifacts used by replay
 - macro ergonomics for deriving values, configs, states, operations, and descriptors
-- schema evolution policy for public terminal outputs
 
 These are deferred because the proof slice can validate the core without them. They must not be
 resolved by reintroducing dynamic erased graphs, string ports, or JSON context dataflow as semantic
@@ -1917,7 +1961,7 @@ The smallest proof of the architecture should include:
 
 1. `MfmValue`
 2. `MfmConfig`
-3. explicit manually versioned schema ids
+3. schema descriptors and derived schema ids
 4. secret-boundary marker/enforcement sufficient to prevent secret-bearing types from implementing
    value/config/output traits
 5. `Handle<'program, 'scope, T>`
