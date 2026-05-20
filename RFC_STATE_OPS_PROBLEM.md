@@ -518,12 +518,18 @@ typed planning config
 ```
 
 The certified typed execution spec is the authoritative representation. It captures state inputs,
-outputs, effects, capabilities, planning provenance, planning lineage, value provenance, stable node
+outputs, effects, capabilities, authoring provenance, planning lineage, value provenance, stable node
 identity, public terminal output shape, replay boundaries, and resume rules.
 
 The erased runner plan exists only so the scheduler can execute work. It must be reproducibly
 derivable from the certified spec. It must not carry extra semantics that are absent from the
 certified spec.
+
+This proposal is intentionally scoped to a versioned, Rust-authored typed core first. Dynamic
+third-party plugins are required as a future platform capability, but they are not part of the first
+implementation slice and must not weaken the typed core. Until a future plugin certification design
+exists, certified execution should assume states, operations, adapters, and connectors are compiled
+Rust components registered with explicit versions.
 
 ### Design Principles
 
@@ -549,6 +555,9 @@ certified spec.
 - Runtime-produced values cannot change the topology of the already-certified same-run program.
 - Side effects require typed intent, typed idempotency material, typed receipt, and typed replay
   verification.
+- States, adapters, connectors, operation descriptors, value schemas, public output schemas, and the
+  lowering algorithm are versioned contracts. Breaking semantic changes create new versions; old
+  versions remain valid for replay/resume.
 - Resume and replay are allowed only against the exact certified typed execution spec that produced
   the run history.
 - Runtime errors should represent facts that cannot be known before execution. Invalid wiring,
@@ -571,6 +580,17 @@ pub trait MfmValue:
 The semantic type id names the meaning of the value. The schema id names its stable serialized
 shape. Two values with the same JSON representation but different domain meaning must be different
 Rust types.
+
+For the first implementation slice, schema ids may be explicit constants rather than automatically
+derived. That is enough to make schema identity visible in specs and events while leaving the full
+schema derivation and migration policy for later design. The minimum rule is:
+
+- every persisted `MfmValue`, `MfmConfig`, and public output type declares a stable schema id
+- schema ids are manually versioned at first
+- breaking serialized-shape or semantic changes require a new schema id
+- hashed value/config/public-output structures must use canonical serialization and must not contain
+  floats
+- no secret-bearing type may implement `MfmValue`, `MfmConfig`, or public output traits
 
 Examples:
 
@@ -612,6 +632,26 @@ pub struct ArtifactRef<T: MfmValue> {
 JSON still exists at boundaries: CLI/API input, manifests, artifacts, facts, snapshots, and audit
 records. But JSON is the serialization format, not the semantic wiring contract.
 
+### Secret Boundary
+
+Secrets must remain below the state-machine boundary. Keystore secrets, private keys, mnemonics,
+password material, raw signing keys, decrypted bytes, and similar secret-bearing values must not be
+MFM values, typed cells, artifacts, facts, events, public outputs, or error details.
+
+State programs may reference secret-bearing systems only through non-secret typed references and
+capabilities, such as:
+
+```rust
+pub struct WalletRef { /* non-secret wallet label or account id */ }
+pub struct KeyLabel { /* non-secret keystore entry label */ }
+pub struct SignerRef { /* non-secret signing authority reference */ }
+```
+
+The keystore layer should be modeled as a typed adapter/capability boundary. States may ask a
+keystore capability to sign, decrypt, or unlock by using non-secret references and non-secret
+configuration. They must never receive the secret material itself. This makes secret leakage a type
+and boundary violation, not a convention that state authors must remember.
+
 ### Typed Planning Config
 
 The architecture must distinguish planning config from runtime values.
@@ -630,6 +670,10 @@ Typed configs are deterministic planning inputs. They are decoded before expansi
 lowering, canonicalized for hashing, and safe to persist in manifests and certified specs. Hashed
 config structures must use canonical serialization and must not contain floats. Typed configs may
 decide which states are generated.
+
+Certified specs must retain enough config material to recreate every state runner. A node-level
+config hash alone is not sufficient. Each node must carry either canonical config bytes or a
+content-addressed reference to those bytes, plus the config schema id used to decode them.
 
 Runtime values are produced by states and referenced through typed handles. A runtime value cannot
 change the already-certified topology of the same run. If a later state needs data produced by an
@@ -691,6 +735,34 @@ workflows with the same Rust type in multiple semantic scopes, such as two portf
 one program, two chains producing the same `DeployedContract` type, or staging and production
 deployments with identical schemas.
 
+The precise bridge API is intentionally left for a later design step. The first typed core should
+still brand scopes and reject accidental cross-scope wiring. Explicit cross-scope transfer should be
+added only when real workflows force the exact bridge semantics.
+
+### Typed Optionality And Skip Cells
+
+Optional runtime paths must be represented explicitly in the typed program. A plain missing context
+key or absent JSON value is not enough for audit or replay.
+
+The preferred model is a typed optional/skip cell rather than an untracked absence:
+
+```rust
+pub enum MaybeValue<T: MfmValue> {
+    Produced(T),
+    Skipped(SkipReason),
+}
+
+pub struct SkipReason {
+    pub code: SkipCode,
+    pub explanation: String,
+}
+```
+
+The exact API may use `MaybeValue<T>`, `OptionalCell<T>`, `Skipped<T>`, or a wrapper around
+`Option<T>`, but the certified spec and event stream must preserve skip provenance. A skipped value
+must have a typed cell identity, semantic type id, schema id, producer node, and reason. Downstream
+states must declare whether they accept a produced value only or a typed maybe/skip value.
+
 ### States
 
 A state is the only executable unit. Each state declares its configuration, input, output, effect,
@@ -731,6 +803,35 @@ pub struct ObserveBatchInput {
 During typed expansion, inputs are handles. During execution, the runtime materializes those handles
 into typed values from prior output cells.
 
+### Versioned State Descriptors And Runner Rehydration
+
+A certified spec cannot persist Rust trait objects. It must persist enough information for the
+runtime to rehydrate the exact versioned runner that was certified.
+
+Every executable state kind must therefore have a registered descriptor:
+
+```rust
+pub struct StateDescriptor {
+    pub kind: StateKind,
+    pub version: StateVersion,
+    pub config_schema: SchemaId,
+    pub input_types: InputTypeSpec,
+    pub output_type: ValueTypeSpec,
+    pub effect: EffectKind,
+    pub capabilities: CapabilitySpec,
+}
+```
+
+The runtime must resolve `(StateKind, StateVersion)` through a state registry before lowering to an
+erased runner. State descriptors are immutable semantic contracts. If a state's config shape, input
+contract, output contract, effect behavior, capability needs, idempotency behavior, or replay
+semantics changes incompatibly, the state version must change.
+
+Certified node specs must reference canonical state config bytes or a content-addressed config
+artifact, not only a config hash. Hashes prove identity; bytes are required to reconstruct the
+runner, audit the planned behavior, and verify replay. Old state versions must remain resolvable as
+long as runs certified against them may need replay/resume.
+
 ### Effects, Purity, And Capabilities
 
 States are pure unless they explicitly opt into an effect-specific execution trait.
@@ -738,6 +839,7 @@ States are pure unless they explicitly opt into an effect-specific execution tra
 ```rust
 pub enum Pure {}
 pub enum ReadExternal {}
+pub enum WriteInternal {}
 pub enum ApplySideEffect {}
 ```
 
@@ -762,6 +864,18 @@ pub trait ReadState: StateSpec<Effect = ReadExternal> {
     ) -> Result<Self::Output, StateError>;
 }
 ```
+
+Internal write states may write runtime-managed artifacts, outputs, facts derived from deterministic
+inputs, or audit records without mutating external systems. They are not pure, because they need
+runtime-managed persistence capabilities, but they are also not external side effects. This category
+prevents artifact publication and output rendering from being mislabeled as either pure computation
+or external mutation.
+
+Effect and capability traits should be sealed by the framework. A pure state must not be able to
+obtain IO accidentally. A read state must not be able to submit transactions. A state that writes
+internal artifacts must receive only the scoped artifact/output capabilities declared in its
+descriptor. A side-effect state must receive only the specific external mutation capabilities
+declared in its descriptor.
 
 Side-effect states are split into typed intent, application, and confirmation:
 
@@ -811,6 +925,8 @@ IoProvider(namespace: String, request: serde_json::Value) -> serde_json::Value
 
 External systems are represented by typed capabilities. Capabilities define typed requests, typed
 responses, canonical request hashing, fact keys, redaction behavior, and replay behavior.
+Capabilities are the state-facing contract; adapters/connectors are versioned implementations of
+those contracts.
 
 Examples:
 
@@ -848,6 +964,11 @@ Examples:
 States must reuse these adapters rather than reaching into ambient IO. The platform must provide
 live and replay implementations for each capability. Replay implementations must answer only from
 recorded facts or receipts. They must not silently fall back to live IO.
+
+Adapter and connector versions are part of the certified execution contract when they affect
+canonical request formation, fact-key derivation, receipt interpretation, replay verification,
+redaction, or externally visible behavior. Breaking changes create new adapter/connector versions;
+old versions must remain available for replay/resume of specs that reference them.
 
 This creates a stable extension surface: future developers implement new states and operations while
 reusing the MFM harness for adapters, replay, facts, artifacts, idempotency, tracing, and testing.
@@ -995,7 +1116,7 @@ The builder derives dependencies from handles. Workflow authors do not manually 
 - which typed output cell each state produces
 - state kind and version
 - operation kind and version
-- canonical state config hash
+- canonical state config hash and config artifact/reference
 - planning lineage
 - effect and capability declarations
 - idempotency policy
@@ -1037,7 +1158,7 @@ Stable ids are part of reproducibility. They must be derived, not accidentally p
 
 Node and cell ids should be derived from:
 
-- planning provenance descriptor and version
+- authoring provenance descriptor and version
 - planning lineage
 - scope id
 - stable local node key
@@ -1065,18 +1186,19 @@ After typed expansion, MFM produces a certified typed execution spec:
 pub struct TypedExecutionSpec {
     pub spec_version: SpecVersion,
     pub lowering_version: LoweringVersion,
-    pub planning: PlanningProvenance,
+    pub authoring: AuthoringProvenance,
     pub state_program: StateProgramSpec,
     pub outputs: PublicOutputSpec,
 }
 ```
 
-Planning provenance names what authored the state program. It is not part of the executable state
-program. MFM supports three authoring modes: operation expansion, direct state composition, and a
-mix of operations and directly declared states:
+Authoring provenance names what authored the state program. It is non-executable audit metadata:
+the state machine executes the `StateProgramSpec`, not the operations or composition helpers that
+authored it. MFM supports three authoring modes: operation expansion, direct state composition, and
+a mix of operations and directly declared states:
 
 ```rust
-pub enum PlanningProvenance {
+pub enum AuthoringProvenance {
     OperationExpansion {
         operation: OperationDescriptor,
         config_hash: ContentDigest,
@@ -1105,7 +1227,9 @@ Each node spec must include:
 
 - node id
 - state kind and version
+- state descriptor id or `(state kind, state version)`
 - state config hash
+- state config artifact/reference
 - planning lineage
 - scope id
 - input cells
@@ -1116,6 +1240,7 @@ Each node spec must include:
 - output schema id
 - effect kind
 - capability set
+- adapter/connector version references where behaviorally relevant
 - idempotency policy
 - stable node key
 - deterministic predecessor ids
@@ -1135,6 +1260,8 @@ The spec is certified only after a lowerer verifies that:
 
 - every consumed cell has exactly one producer
 - every handle type matches the consumer input type
+- every `(state kind, state version)` resolves to a registered immutable state descriptor
+- every state config reference resolves to canonical bytes with the expected schema id and hash
 - every state has a deterministic id
 - every dependency is derived from typed handles
 - every effect matches the state's execution trait
@@ -1164,7 +1291,7 @@ pub trait ErasedNodeRunner {
     async fn run_erased(
         &self,
         store: &mut dyn TypedValueStore,
-        caps: &mut RuntimeCaps,
+        caps: &mut dyn CertifiedRuntimeCaps,
         events: &mut dyn EventSink,
     ) -> Result<(), StateError>;
 }
@@ -1177,6 +1304,10 @@ implementation concerns, not semantic compromises.
 The erased plan must not be persisted as the authoritative contract. The persisted contract is the
 certified typed execution spec plus its canonical hash.
 
+Lowering must use registered state descriptors and runner factories. It must not deserialize a
+spec into arbitrary executable code, and it must not allow unregistered state kinds to run. The
+erased runner is an implementation detail derived from a certified, versioned spec.
+
 ### Runtime Execution
 
 The runtime executes states only.
@@ -1187,12 +1318,13 @@ For each node, runtime must:
 2. check that predecessor cells are complete
 3. load typed input cells by cell id
 4. verify stored semantic type ids and schema ids against the certified spec
-5. deserialize input cells into the state input type
-6. provide only the capabilities allowed by the certified spec
-7. execute the state through the effect-specific runner
-8. serialize and persist the typed output cell
-9. content-address the output
-10. append provenance-bearing events
+5. resolve the node's registered state descriptor and canonical config reference
+6. deserialize input cells into the state input type
+7. provide only the capabilities allowed by the certified spec
+8. execute the state through the effect-specific runner
+9. serialize and persist the typed output cell
+10. content-address the output
+11. append provenance-bearing events
 
 Deserialization may still fail if persisted data is corrupt or unavailable. It must not fail because
 the planner wired the wrong producer to the wrong consumer.
@@ -1223,7 +1355,7 @@ pub struct TypedValueRef {
 
 The certified spec plus typed value refs must make it possible to audit:
 
-- which planning source created a state
+- which authoring source created a state
 - which state produced a value
 - which typed inputs a state consumed
 - which artifacts, facts, and outputs belong to a value
@@ -1241,7 +1373,7 @@ On run start, MFM must persist:
 - canonical manifest input
 - certified typed execution spec artifact
 - certified spec hash
-- planning provenance descriptor
+- authoring provenance descriptor
 - lowering version
 - framework version
 - public output schema id
@@ -1270,9 +1402,9 @@ Resume must:
 5. reject if any completed node has an output semantic id, schema id, content digest, effect record,
    receipt, or provenance record inconsistent with the spec
 
-Matching state ids is not enough. Resume must reject if state kind, state version, config hash,
-input cells, output type, effect, capability set, idempotency policy, or terminal output shape
-changed.
+Matching state ids is not enough. Resume must reject if state kind, state version, state descriptor,
+config hash, config bytes/artifact reference, input cells, output type, effect, capability set,
+adapter/connector version, idempotency policy, or terminal output shape changed.
 
 ### Terminal Outputs And Public API
 
@@ -1475,14 +1607,23 @@ read capabilities.
 Rust-authored third-party states and operations can compile against the typed framework and receive
 the same compile-time guarantees.
 
+Dynamic third-party plugins are required as a future capability, but the first architecture slice
+does not need to solve them. The typed core must be designed so dynamic plugins can be added later
+without reopening the semantic contract.
+
 Dynamic plugins cannot be allowed to bypass the typed core by submitting arbitrary erased graphs. A
-dynamic plugin must either:
+future dynamic plugin design must either:
 
 - expose Rust types and compile as a typed extension, or
-- submit a declarative typed spec that passes runtime certification with semantic type ids, schema
-  ids, state kinds, effect declarations, capabilities, idempotency contracts, and public outputs.
+- submit a declarative typed spec that passes runtime certification against trusted registered
+  state descriptors, semantic type ids, schema ids, state kinds and versions, effect declarations,
+  capabilities, idempotency contracts, adapter/connector versions, and public outputs.
 
 If a plugin cannot provide that evidence, it cannot participate in certified MFM execution.
+
+Until that future design exists, dynamic plugin execution should remain out of scope for certified
+MFM runs. The typed Rust-authored core should not keep compatibility hooks that allow arbitrary
+dynamic graphs to enter the runner.
 
 ### Compile-Time Guarantees
 
@@ -1501,6 +1642,7 @@ programs:
 - hand-authoring dependency edges that lie about data flow
 - confusing same-shape values with different semantic types
 - mixing values from separate workflow scopes without an explicit bridge
+- treating a skipped value as a produced value without accepting typed optionality
 - exporting terminal results through string context keys
 - using a runtime-produced value to change same-run topology
 
@@ -1518,6 +1660,8 @@ Required compile-fail cases:
 - terminal output lacks a public schema id
 - dynamic state graph bypasses the typed builder
 - runtime value is used where planning config is required
+- secret-bearing type attempts to cross the state-machine boundary as an `MfmValue`
+- produced-only consumer is passed a `MaybeValue<T>` or skipped cell without explicit handling
 
 ### Runtime Responsibilities
 
@@ -1551,12 +1695,17 @@ crates/values
   canonical serialization helpers
 
 crates/effects
-  effect specs, capability traits, idempotency contracts, side-effect
-  intent/receipt/confirmation traits
+  effect specs, sealed capability traits, idempotency contracts,
+  side-effect intent/receipt/confirmation traits
 
-crates/adapters
-  EVM, Bitcoin, HTTP, database, storage, artifact, and clock adapter
-  implementations for live and replay modes
+crates/capabilities
+  state-facing capability traits and typed request/response contracts
+
+crates/collectors/*
+  typed domain clients and request/response models for external systems
+
+crates/transports/*
+  live and replay connector implementations for capabilities/collectors
 
 crates/machine
   certified spec executor, scheduler, typed value store, event streams,
@@ -1575,9 +1724,13 @@ bin/rest-api
   transport only
 ```
 
+This split should avoid creating a new monolithic adapter crate. Capability traits are the
+state-facing contract; collectors and transports can continue to own concrete domain clients and
+live/replay connector behavior where that matches the existing repository shape.
+
 The thin-layer principle remains:
 
-- reusable executable behavior belongs in states and adapters
+- reusable executable behavior belongs in states and typed capabilities/connectors
 - ops assemble typed state programs
 - binaries parse input, start/resume runs, and render typed public outputs only
 
@@ -1684,23 +1837,30 @@ Recommended order:
 1. Add the new typed program core behind `crates/program`.
 2. Define `MfmValue`, `MfmConfig`, typed handles, scopes, stable ids, typed IR, and certified spec
    structs.
-3. Define effect-specific execution traits before porting states.
-4. Define typed capability traits and live/replay adapter interfaces.
-5. Define certified spec hashing, canonical serialization, and provenance records.
-6. Add `trybuild` compile-fail tests for the core invalid programs before porting workflows.
-7. Implement certified lowering into a temporary compatibility runner plan.
-8. Port the proof workflow first. Success requires no semantic JSON context dataflow.
-9. Port proof side effects with typed intent, idempotency, receipt, and replay verification.
-10. Port portfolio execution next. Success requires deterministic fanout/fanin, stable dynamic ids,
+3. Define the minimal schema id policy: explicit manually versioned schema ids first, with canonical
+   no-float serialization for hashed values/configs/outputs.
+4. Define the secret boundary: secret-bearing types cannot implement value/config/output traits and
+   keystore access crosses only through non-secret typed references and capabilities.
+5. Define immutable state descriptors and a state registry for `(StateKind, StateVersion)` runner
+   rehydration.
+6. Define effect-specific execution traits before porting states.
+7. Define sealed typed capability traits and live/replay connector interfaces.
+8. Define certified spec hashing, canonical serialization, config artifact/reference handling, and
+   provenance records.
+9. Add `trybuild` compile-fail tests for the core invalid programs before porting workflows.
+10. Implement certified lowering into a temporary compatibility runner plan.
+11. Port the proof workflow first. Success requires no semantic JSON context dataflow.
+12. Port proof side effects with typed intent, idempotency, receipt, and replay verification.
+13. Port portfolio execution next. Success requires deterministic fanout/fanin, stable dynamic ids,
     scope branding, and typed terminal outputs.
-11. Port EVM deploy/configure/validate. Success requires lifecycle typestate and typed EVM
+14. Port EVM deploy/configure/validate. Success requires lifecycle typestate and typed EVM
     side-effect contracts.
-12. Rewrite `mfm-machine` around certified typed specs, typed cells, and typed provenance.
-13. Replace `mfm-sdk` dynamic planning APIs with typed expansion APIs or reduce it to a facade.
-14. Delete `PortKey`-driven semantic data flow, dynamic context wiring, and hand-authored state
+15. Rewrite `mfm-machine` around certified typed specs, typed cells, and typed provenance.
+16. Replace `mfm-sdk` dynamic planning APIs with typed expansion APIs or reduce it to a facade.
+17. Delete `PortKey`-driven semantic data flow, dynamic context wiring, and hand-authored state
     dependency edges from public authoring APIs.
-15. Update `docs/design.md`, `docs/architecture.md`, and `docs/ops-and-states.md`.
-16. Expand compile-fail tests and replay/resume integration tests for every migrated workflow.
+18. Update `docs/design.md`, `docs/architecture.md`, and `docs/ops-and-states.md`.
+19. Expand compile-fail tests and replay/resume integration tests for every migrated workflow.
 
 Temporary compatibility lowering is acceptable only if:
 
@@ -1708,6 +1868,25 @@ Temporary compatibility lowering is acceptable only if:
 - no new workflow is authored directly against dynamic `PlannedOp`
 - semantic JSON context is not used by migrated typed states
 - deletion of the compatibility layer is an explicit migration milestone
+
+### Deferred Design Decisions
+
+The following decisions are intentionally not required for the first implementation slice, but they
+must remain explicit open design items:
+
+- full schema id derivation and migration policy beyond explicit manually versioned schema ids
+- dynamic third-party plugin certification and loading
+- exact cross-scope bridge API and bridge provenance model
+- final typed optionality API shape (`MaybeValue<T>`, `OptionalCell<T>`, `Skipped<T>`, or another
+  equivalent)
+- long-term policy for keeping old state/adapter/connector versions available for replay, including
+  whether replay may bind to reproducible build artifacts or only in-process registered runners
+- macro ergonomics for deriving values, configs, states, operations, and descriptors
+- schema evolution policy for public terminal outputs
+
+These are deferred because the proof slice can validate the core without them. They must not be
+resolved by reintroducing dynamic erased graphs, string ports, or JSON context dataflow as semantic
+surfaces.
 
 ### Risks And Tradeoffs
 
@@ -1717,8 +1896,9 @@ This design has real costs:
 - Rust error messages may be harder for workflow authors
 - compile times may increase
 - object safety is harder before certified lowering
-- dynamic plugin support must be constrained by certification
+- dynamic plugin support must be deferred until it can be constrained by certification
 - schema evolution must be designed deliberately
+- old state/adapter/connector versions must remain replayable, which creates version-retention costs
 - effect-specific traits require more up-front framework design
 - stable id derivation becomes part of the public correctness contract
 
@@ -1737,22 +1917,29 @@ The smallest proof of the architecture should include:
 
 1. `MfmValue`
 2. `MfmConfig`
-3. `Handle<'program, 'scope, T>`
-4. typed scopes and stable node keys
-5. `StateSpec`
-6. `PureState`, `ReadState`, and `SideEffectState`
-7. one typed capability with live and replay implementations
-8. `Operation`
-9. `ScopeBuilder`
-10. `TypedExecutionSpec`
-11. certified spec hashing
-12. certified lowering into a temporary erased runner plan
-13. a typed proof workflow
-14. proof side-effect intent/idempotency/receipt modeling
-15. typed terminal outputs
-16. replay of the same certified typed spec
-17. resume rejection when the rebuilt certified spec differs
-18. compile-fail tests showing invalid proof wiring does not compile
+3. explicit manually versioned schema ids
+4. secret-boundary marker/enforcement sufficient to prevent secret-bearing types from implementing
+   value/config/output traits
+5. `Handle<'program, 'scope, T>`
+6. typed scopes and stable node keys
+7. typed optional/skip cell prototype
+8. `StateSpec`
+9. immutable `StateDescriptor` and state registry for runner rehydration
+10. `PureState`, `ReadState`, `WriteInternalState`, and `SideEffectState`
+11. one typed read capability with live and replay implementations
+12. one typed internal artifact/output capability
+13. one typed side-effect capability with receipt verification
+14. `Operation`
+15. `ScopeBuilder`
+16. `TypedExecutionSpec`
+17. certified spec hashing and `RunStarted`/event binding to the certified spec hash
+18. certified lowering into a temporary erased runner plan
+19. a typed proof workflow
+20. proof side-effect intent/idempotency/receipt modeling
+21. typed terminal outputs
+22. replay of the same certified typed spec
+23. resume rejection when the rebuilt certified spec differs
+24. compile-fail tests showing invalid proof wiring does not compile
 
 If that slice works without semantic JSON context dataflow, the architecture is viable enough to
 expand to portfolio and EVM workflows. If it still depends on context keys, generic IO, or
