@@ -103,12 +103,12 @@ workflow ports, and deletion or hard isolation of old dynamic semantic APIs.
 
 ### Commit 06: `kernel values add schema descriptors and value traits`
 
-- [ ] Implement `MfmValue`, `MfmConfig`, public-output descriptor primitives, and schema descriptor
+- [x] Implement `MfmValue`, `MfmConfig`, public-output descriptor primitives, and schema descriptor
       identity/audit split in `mfm-values`.
-- [ ] Implement framework-owned generic constructors such as `MaybeValue<T>` and `ArtifactRef<T>`.
-- [ ] Add secret/no-float persisted-surface policy types.
-- [ ] Add descriptor golden tests.
-- [ ] Validation: `nix run .#test`.
+- [x] Implement framework-owned generic constructors such as `MaybeValue<T>` and `ArtifactRef<T>`.
+- [x] Add secret/no-float persisted-surface policy types.
+- [x] Add descriptor golden tests.
+- [x] Validation: `nix run .#test`.
 
 ### Commit 07: `kernel derive add value config output derives`
 

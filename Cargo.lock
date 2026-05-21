@@ -2650,6 +2650,12 @@ dependencies = [
 [[package]]
 name = "mfm-values"
 version = "0.1.0"
+dependencies = [
+ "mfm-canonical",
+ "mfm-ids",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "mfm_core"
