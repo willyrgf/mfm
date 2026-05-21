@@ -223,7 +223,9 @@ gets a category-branded type with private fields:
 
 ```rust
 pub struct Identity<K> {
-    raw: &'static str,
+    canonical_name: &'static str,
+    version: &'static str,
+    algorithm: DigestAlgorithm,
     digest: DigestBytes,
     _kind: PhantomData<fn(K) -> K>,
 }
@@ -243,9 +245,10 @@ pub type AdapterKind = Identity<AdapterKindKind>;
 pub type OperationKind = Identity<OperationKindKind>;
 ```
 
-The raw string exists only as a human-readable canonical name and descriptor input. APIs accept
-category-branded identity types, never bare `&str` or `String`, so a `SchemaId` cannot be passed as
-a `SemanticTypeId` and a `CapabilityKind` cannot be passed as a `StateKind`.
+Canonical names and, where applicable, manually assigned versions exist as human-readable
+descriptor inputs. APIs accept category-branded identity types, never bare `&str` or `String`, so a
+`SchemaId` cannot be passed as a `SemanticTypeId` and a `CapabilityKind` cannot be passed as a
+`StateKind`.
 
 Identity construction is framework-controlled:
 
@@ -256,13 +259,25 @@ Identity construction is framework-controlled:
 - domain crates may name identities through generated constants, but may not construct arbitrary
   identities from strings
 
-The grammar is intentionally stricter than arbitrary UTF-8:
+The grammar is intentionally stricter than arbitrary UTF-8 and category-specific:
 
 ```text
-identity = namespace ":" name ":" version ":" digest
-namespace/name/version use [a-z0-9][a-z0-9._-]*
-digest = hex sha256 digest of the canonical descriptor identity
+SemanticTypeId = semantic:<namespace>:<name>:<version>:<algorithm>:<digest>
+SchemaId       = schema:<schema_name>:<schema_version>:<algorithm>:<digest>
+StateKind      = state:<namespace>:<name>:<algorithm>:<digest>
+CapabilityKind = capability:<namespace>:<name>:<algorithm>:<digest>
+AdapterKind    = adapter:<namespace>:<name>:<algorithm>:<digest>
+OperationKind  = operation:<namespace>:<name>:<algorithm>:<digest>
+DescriptorId   = descriptor:<algorithm>:<digest>
+
+namespace/name/version use [a-z0-9][a-z0-9._/-]*
+algorithm = "sha256-jcs-v1" initially
+digest = hex sha256 digest of the category-specific canonical descriptor identity
 ```
+
+Kinds that have explicit `*Version` fields do not also encode that version into the `*Kind`
+identity. This keeps `StateKind` and `StateVersion`, `CapabilityKind` and `CapabilityVersion`, and
+adapter/operation kind-version pairs independently checkable in specs, events, and policy.
 
 Associated constants such as `MfmValue::SEMANTIC_ID`, `StateSpec::KIND`, and
 `CapabilitySpec::KIND` therefore remain compile-time visible without weakening type safety into
@@ -326,7 +341,7 @@ The schema id is derived from the canonical bytes of the descriptor identity, no
 metadata:
 
 ```text
-SchemaId = schema:<algorithm>:<digest(canonical_schema_identity)>
+SchemaId = schema:<schema_name>:<schema_version>:<algorithm>:<digest(canonical_schema_identity)>
 ```
 
 The initial algorithm should be the same canonical JSON digest family used elsewhere in MFM, with
@@ -359,7 +374,7 @@ pub struct SchemaDescriptorV1 {
 ```
 
 ```text
-SchemaId = schema:sha256-jcs-v1:<sha256(canonical_json(identity))>
+SchemaId = schema:<schema_name>:<schema_version>:sha256-jcs-v1:<sha256(canonical_json(identity))>
 ```
 
 The v1 identity grammar supports:
@@ -648,13 +663,21 @@ impl<'p, 'parent, 'child> ChildScopeBuilder<'p, 'parent, 'child> {
         value: Handle<'p, 'parent, T>,
         policy: BridgePolicy,
     ) -> Result<Handle<'p, 'child, T>, PlanError>;
+
+    pub fn bridge_to_parent<R>(
+        &mut self,
+        value: R,
+    ) -> Result<Bridged<'p, 'parent, R>, PlanError>
+    where
+        R: BridgeableToParent<'p, 'parent>;
 }
 ```
 
 The child closure may return only parent-branded values wrapped in `Bridged`. `Bridged` is produced
-by the framework after all returned handles have explicit import/export bridge evidence. This keeps
-child-branded handles from escaping through ordinary return values while still allowing scoped
-composition to produce parent-visible results.
+only by `ChildScopeBuilder::bridge_to_parent` after all returned handles have explicit import/export
+bridge evidence created by the current child-scope invocation. This keeps child-branded handles from
+escaping through ordinary return values while still allowing scoped composition to produce
+parent-visible results.
 
 The framework verifies returned values through a sealed bridge evidence API:
 
@@ -676,7 +699,10 @@ pub struct BridgeRefV1 {
 
 The framework implements `BridgeableToParent` only for handles, tuples, derive-backed structs, and
 closed framework wrappers whose handles are already parent-branded or have explicit bridge nodes.
-Domain crates do not manually implement this trait in v1. If the child closure attempts to return a
+Domain crates do not manually implement this trait in v1. The transient evidence behind
+`bridge_refs()` is builder-owned and carries a private bridge session token; persisted `BridgeRefV1`
+does not expose that token. `bridge_to_parent` must reject refs whose bridge nodes were not created
+by the active child-scope builder invocation. If the child closure attempts to return a
 child-branded handle without bridge evidence, the code fails to compile or the builder rejects it
 before certification.
 
@@ -699,7 +725,9 @@ pub struct BridgeNodeSpecV1 {
 ```
 
 Transforming bridges are ordinary states. Bridge completion is event-defined like any other typed
-cell completion.
+cell completion. Same-value import/export bridges are framework nodes in `TypedExecutionSpecV1`,
+not erased-plan-only helper edges; their node ids, source and target scopes, source and target
+cells, policy, provenance, and deterministic predecessor edges are part of the certified spec hash.
 
 ### Typed Optionality And Skip Cells
 
@@ -1380,70 +1408,64 @@ V1 defaults to run-scoped dedupe by including `run_id` in the ledger key. Cross-
 external mutation semantics and must be introduced later as an explicit `IdempotencyScope::CrossRun`
 contract, not as an implicit adapter convention.
 
-The scheduler commits side-effect execution in durable groups. Each group is one typed commit whose
-events are ordered by store-assigned ordinal:
+The scheduler commits side-effect execution across multiple durable commits. The uncertainty
+boundary must be durable before the external submit call:
 
-1. attempt start: `StateAttemptStartedV1`
-2. intent and claim: `SideEffectIntentPersistedV1`, `SideEffectClaimedV1`,
-   `SideEffectInvocationPreparedV1`
-3. uncertainty boundary: `SideEffectInvocationStartedV1` before the external submission call
-4. submission result: exactly one of `SideEffectSubmissionObservedV1`,
-   `SideEffectNotSubmittedProvenV1`, `SideEffectSubmissionUnknownV1`, or `SideEffectAmbiguousV1`
-5. receipt: `SideEffectReceiptObservedV1`
-6. confirmation: `SideEffectConfirmationObservedV1`
-7. output: `CellProducedV1`, `StateAttemptCompletedV1`
+| Durable commit | Events in the commit | External action after commit | Resume if crash occurs after commit |
+|---|---|---|---|
+| attempt | `StateAttemptStartedV1` | none | restart attempt or continue to intent |
+| prepare | `SideEffectIntentPersistedV1`, `SideEffectClaimedV1`, `SideEffectInvocationPreparedV1` | none | continue to invocation-started |
+| invocation-started | `SideEffectInvocationStartedV1` | call `submit` exactly after this commit succeeds | enter `recover_submission`; never blindly resubmit |
+| submission-result | exactly one of `SideEffectSubmissionObservedV1`, `SideEffectNotSubmittedProvenV1`, `SideEffectSubmissionUnknownV1`, or `SideEffectAmbiguousV1` | none | follow the recorded state |
+| receipt | `SideEffectReceiptObservedV1` | none | recover confirmation |
+| confirmation | `SideEffectConfirmationObservedV1` | none | derive output |
+| output | `CellProducedV1`, `StateAttemptCompletedV1` | none | node is terminal |
+| failed-attempt | `SideEffectFailedV1`, `StateAttemptFailedV1` | none | retry only if failure phase and retry policy permit |
 
 Artifacts for intent, receipt, confirmation, and output are written before the commit that
-references them. The durable point for external mutation is the configured storage/transport
-capability behind the side-effect state, but the run history must always contain
-`SideEffectInvocationStartedV1` before MFM calls the external submit operation. A crash after
-`SideEffectInvocationStartedV1` means resume must enter recovery; it must not blindly submit again.
+references them. A crash after `SideEffectInvocationStartedV1` means resume must enter recovery; it
+must not blindly submit again.
 
-Per ledger key, v1 states are:
+Per ledger key, v1 uses this normative transition table:
 
-```text
-absent
-  -> intent_persisted
-  -> claimed
-  -> invocation_prepared
-  -> invocation_started_unknown
-  -> submission_observed
-  -> receipt_observed
-  -> confirmation_observed
-  -> output_cell_produced
-  -> completed
-```
-
-Recovery edges are:
-
-```text
-invocation_started_unknown
-  -> not_submitted_proven
-  -> submission_observed
-  -> receipt_observed
-  -> confirmation_observed
-  -> submission_unknown
-  -> ambiguous
-
-not_submitted_proven -> invocation_prepared  // next invocation_epoch only
-
-submission_unknown
-  -> not_submitted_proven
-  -> submission_observed
-  -> receipt_observed
-  -> confirmation_observed
-  -> ambiguous
-
-submission_observed -> receipt_observed | ambiguous
-receipt_observed -> confirmation_observed | ambiguous
-confirmation_observed -> CellProducedV1 + StateAttemptCompletedV1
-ambiguous -> manual_resolution_required
-```
+| From state | Allowed next event/state | Resume behavior |
+|---|---|---|
+| `absent` | `StateAttemptStartedV1` -> `attempt_started` | start attempt |
+| `attempt_started` | `SideEffectIntentPersistedV1` -> `intent_persisted` | recompute/persist intent if missing |
+| `attempt_started` | `SideEffectFailedV1` -> `failed` | fail before any external uncertainty |
+| `intent_persisted` | `SideEffectClaimedV1` -> `claimed` | claim or detect conflicting claim |
+| `intent_persisted` | `SideEffectFailedV1` -> `failed` | fail before any external uncertainty |
+| `claimed` | `SideEffectInvocationPreparedV1` -> `invocation_prepared` | prepare invocation |
+| `claimed` | `SideEffectFailedV1` -> `failed` | fail before any external uncertainty |
+| `invocation_prepared` | `SideEffectInvocationStartedV1` -> `invocation_started_unknown` | commit uncertainty before submit |
+| `invocation_prepared` | `SideEffectFailedV1` -> `failed` | fail before any external uncertainty |
+| `invocation_started_unknown` | `SideEffectNotSubmittedProvenV1` -> `not_submitted_proven` | may retry with next `invocation_epoch` |
+| `invocation_started_unknown` | `SideEffectSubmissionObservedV1` -> `submission_observed` | recover receipt |
+| `invocation_started_unknown` | `SideEffectSubmissionUnknownV1` -> `submission_unknown` | recover submission |
+| `invocation_started_unknown` | `SideEffectAmbiguousV1` -> `ambiguous` | block for manual resolution |
+| `not_submitted_proven` | `SideEffectClaimedV1` with next epoch -> `claimed` | retry safely through the normal claim/prepare path |
+| `not_submitted_proven` | `SideEffectFailedV1` -> `failed` | fail after proof that no external mutation happened |
+| `submission_unknown` | `SideEffectNotSubmittedProvenV1` -> `not_submitted_proven` | retry safely |
+| `submission_unknown` | `SideEffectSubmissionObservedV1` -> `submission_observed` | recover receipt |
+| `submission_unknown` | `SideEffectAmbiguousV1` -> `ambiguous` | block for manual resolution |
+| `submission_observed` | `SideEffectReceiptObservedV1` -> `receipt_observed` | recover receipt |
+| `submission_observed` | `SideEffectAmbiguousV1` -> `ambiguous` | block for manual resolution |
+| `receipt_observed` | `SideEffectConfirmationObservedV1` -> `confirmation_observed` | recover confirmation |
+| `receipt_observed` | `SideEffectAmbiguousV1` -> `ambiguous` | block for manual resolution |
+| `confirmation_observed` | `CellProducedV1` + `StateAttemptCompletedV1` -> `completed` | derive output without external mutation |
+| `failed` | new attempt if retryable | retry starts with a new `attempt_id` |
+| `ambiguous` | none in v1 | manual resolution required |
+| `completed` | none | terminal |
 
 `SideEffectInvocationStartedV1` is the uncertainty boundary. After it is durable, resume must
 assume the mutation may have happened. Retry is legal only after adapter-proven `not_submitted`
 evidence and must use the next `invocation_epoch`. Permanent ambiguity blocks and surfaces for
 manual resolution in v1.
+
+`SideEffectFailedV1` records attempt failure, not proof that an external mutation did or did not
+happen. It is legal before `SideEffectInvocationStartedV1`, or after
+`SideEffectNotSubmittedProvenV1`. After `SideEffectInvocationStartedV1`, failures without
+not-submitted proof must become `SideEffectSubmissionUnknownV1` or `SideEffectAmbiguousV1`.
 
 ### Operations
 
@@ -1697,13 +1719,24 @@ NodeId = node:sha256-jcs-v1({
 })
 
 CellId = cell:sha256-jcs-v1({
-  alg, node_id, output_index: 0, semantic_type_id, schema_id
+  alg,
+  lowering_version,
+  scope_id,
+  producer: { node_id } | { seed_id },
+  output_index: 0,
+  semantic_type_id,
+  schema_id
 })
 ```
 
 Duplicate author keys in the same parent namespace are planning errors. Digest collision between
-different identity payloads is fatal certification corruption. Lowering version is included in
-derived ids and in the certified spec hash.
+different identity payloads is fatal certification corruption. `SeedId` is derived from `{ alg,
+lowering_version, scope_id, seed_key, semantic_type_id, schema_id }`. Seed value digests are not
+part of `SeedId`; `RunStartedV2` is the runtime value-digest authority. `SeedSpecV1` declares the
+planned seed cells in the certified spec, and `RunStartedV2` must bind each seed cell to the actual
+digest and artifact evidence supplied at launch. If `SeedSpecV1.required_digest` is present, the
+run-start digest must match it exactly. Lowering version is included in derived ids and in the
+certified spec hash.
 
 Derived ids must not depend on:
 
@@ -1735,11 +1768,12 @@ ArtifactId     storage object identity
 EventId        store-owned event identity
 ```
 
-`OutputCellId` is a compatibility alias only if implementation ergonomics require it. Semantically,
-v1 has one kind of typed cell id: `CellId`. A cell is an output of exactly one producer node or a
-root seed, and v1 states produce exactly one output cell. Multiple domain values must be represented
-as one output struct or explicit projection states. Projection states are ordinary states with their
-own node id, input binding, output cell, provenance, and terminal events.
+`OutputCellId` must not be a public v1 API type. Semantically, v1 has one kind of typed cell id:
+`CellId`. A private transitional alias is allowed only inside migration modules. A cell is an output
+of exactly one producer node or a root seed, and v1 states produce exactly one output cell. Multiple
+domain values must be represented as one output struct or explicit projection states. Projection
+states are ordinary states with their own node id, input binding, output cell, provenance, and
+terminal events.
 
 `SpecHash` must not be used for arbitrary content digests. `ContentDigest` must not imply the bytes
 are a certified spec. Public APIs, event payloads, and storage projections should preserve this
@@ -1766,17 +1800,31 @@ spec:sha256-jcs-v1:<hex64>
 ```
 
 ```rust
+pub struct CertifiedSpecEnvelopeV1 {
+    pub spec_hash: SpecHash,
+    pub spec: TypedExecutionSpecV1,
+    pub audit: TypedExecutionSpecAuditV1,
+}
+
 pub struct TypedExecutionSpecV1 {
     pub spec_version: SpecVersion, // "mfm.typed.execution_spec.v1"
     pub media_type: MediaType,     // application/vnd.mfm.typed-execution-spec+json;version=1
     pub canonicalization: CanonicalizationId, // sha256-jcs-v1
     pub lowering_version: LoweringVersion,
+    pub authoring: AuthoringProvenanceV1,
+    pub scopes: Vec<ScopeSpecV1>,
+    pub seeds: Vec<SeedSpecV1>,
     pub descriptor_identities: Vec<DescriptorIdentityV1>,
-    pub descriptor_audit_refs: Vec<DescriptorAuditRef>,
     pub config_refs: Vec<ConfigRefV1>,
     pub nodes: Vec<NodeSpecV1>,
     pub cells: Vec<CellSpecV1>,
     pub public_outputs: PublicOutputSpecV1,
+}
+
+pub struct TypedExecutionSpecAuditV1 {
+    pub descriptor_audit_refs: Vec<DescriptorAuditRef>,
+    pub source_package_refs: Vec<SourcePackageRefV1>,
+    pub non_semantic_provenance: Vec<AuditProvenanceRefV1>,
 }
 
 pub struct ConfigRefV1 {
@@ -1785,6 +1833,22 @@ pub struct ConfigRefV1 {
     pub digest: ContentDigest,
     pub byte_len: u64,
     pub media_type: MediaType,
+}
+
+pub struct ScopeSpecV1 {
+    pub scope_id: ScopeId,
+    pub parent_scope_id: Option<ScopeId>,
+    pub stable_key: ScopeKey,
+}
+
+pub struct SeedSpecV1 {
+    pub seed_id: SeedId,
+    pub seed_key: StableSeedKey,
+    pub cell_id: CellId,
+    pub scope_id: ScopeId,
+    pub semantic_type_id: SemanticTypeId,
+    pub schema_id: SchemaId,
+    pub required_digest: Option<ContentDigest>,
 }
 
 pub struct NodeSpecV1 {
@@ -1801,7 +1865,20 @@ pub struct NodeSpecV1 {
     pub capability_bindings: CapabilitySetDescriptorV1,
     pub adapter_bindings: Vec<AdapterBindingV1>,
     pub side_effect: Option<SideEffectContractSpecV1>,
+    pub framework: Option<FrameworkNodeSpecV1>,
     pub deterministic_predecessors: Vec<NodeId>,
+}
+
+pub enum FrameworkNodeSpecV1 {
+    Bridge(BridgeNodeSpecV1),
+    PublicOutputRender(PublicOutputRenderNodeSpecV1),
+}
+
+pub struct PublicOutputRenderNodeSpecV1 {
+    pub public_schema_id: SchemaId,
+    pub output_spec_digest: ContentDigest,
+    pub renderer_descriptor: RendererDescriptorIdentityV1,
+    pub required_cells: Vec<PublicOutputCell>,
 }
 
 pub enum CellProducerV1 {
@@ -1821,11 +1898,18 @@ pub struct CellSpecV1 {
 }
 ```
 
-Descriptor identities required for certification are embedded and hash-defining. Larger
-audit/provenance material may be referenced but is not needed to validate execution semantics. V1
-prefers config artifacts over inline config bytes. Config refs must be resolvable at run start, and
-the run cannot commit `RunStartedV2` until every referenced config artifact exists with the declared
-schema id, digest, byte length, and media type.
+Only `TypedExecutionSpecV1` bytes are hashed into `SpecHash`; `TypedExecutionSpecAuditV1` is carried
+beside the spec in `CertifiedSpecEnvelopeV1` and is not semantic authority. Descriptor identities
+required for certification are embedded in the spec and hash-defining. Larger audit/provenance
+material lives in the envelope audit section. V1 prefers config artifacts over inline config bytes.
+Config refs must be resolvable at run start, and the run cannot commit `RunStartedV2` until every
+referenced config artifact exists with the declared schema id, digest, byte length, and media type.
+
+All semantic framework nodes are also pre-hash spec nodes. Same-value bridges and public-output
+rendering are represented in `NodeSpecV1.framework` before certification. Certified lowering may
+bind those persisted nodes to framework runners, but it must not invent bridge edges, render nodes,
+public-output declarations, dependencies, capability grants, or input bindings after the spec hash
+is fixed.
 
 Authoring provenance names what authored the state program. It is non-executable audit metadata:
 the state machine executes the `StateProgramSpec`, not the operations or composition helpers that
@@ -1920,11 +2004,21 @@ Certified lowering turns the typed execution spec into an erased runner plan:
 ```rust
 pub struct CertifiedPlan<O> {
     pub spec: TypedExecutionSpec,
-    pub spec_hash: ContentDigest,
+    pub spec_hash: SpecHash,
     erased_plan: ErasedExecutionPlan,
     _output: PhantomData<O>,
 }
+
+pub struct ErasedExecutionPlan {
+    pub spec_hash: SpecHash,
+    pub runner_bindings: BTreeMap<NodeId, RegisteredRunnerBinding>,
+}
 ```
+
+The erased execution plan is an implementation binding only. Scheduler runnable-node computation,
+dependencies, cell producers, bridge behavior, public-output rendering, capability grants, adapter
+choices, and input bindings must all come from `TypedExecutionSpecV1`. The erased plan may not carry
+additional semantic edges or hidden framework nodes.
 
 The lowered plan may use erased runners internally:
 
@@ -1979,7 +2073,7 @@ execution plan. The v1 typed scheduler should be deliberately serial and small:
 10. execute through the node's effect-specific runner
 11. write required artifacts first
 12. atomically append typed commit payloads and update derived projections through the store
-13. repeat until the injected public-output render node emits `PublicOutputProducedV1`
+13. repeat until the pre-hash framework public-output render node emits `PublicOutputProducedV1`
 14. append `RunCompletedV2(Completed)` only after public-output evidence exists
 
 Parallel execution is out of scope for v1. Parallelism may be added later only after the typed
@@ -2018,9 +2112,9 @@ Cell completion must be evidence-defined. Writing a cell artifact is not enough 
 complete after a crash. A state-produced cell is complete only when the run stream contains the
 provenance-bearing event that binds the cell id, semantic type id, schema id, content digest,
 producer node id, scope id, attempt id, and certified spec hash. A seed cell is complete only when
-`RunStartedV2` binds the certified spec, manifest seed evidence, cell id, semantic type id, schema
-id, scope id, and digest. Orphaned artifacts without such evidence may be garbage collected or
-ignored, but they must not advance resume.
+`RunStartedV2` binds the certified spec, seed id, cell id, semantic type id, schema id, scope id,
+digest, and launch artifact evidence. Orphaned artifacts without such evidence may be garbage
+collected or ignored, but they must not advance resume.
 
 Cell terminal states in v1 are `Pending`, `Produced`, and `Skipped`. There is no terminal
 `CellFailedV1`; failures belong to state attempts. Pending cells remain unavailable if the run
@@ -2028,7 +2122,7 @@ fails.
 
 ```rust
 pub struct CellProducedV1 {
-    pub spec_hash: ContentDigest,
+    pub spec_hash: SpecHash,
     pub node_id: NodeId,
     pub cell_id: CellId,
     pub scope_id: ScopeId,
@@ -2042,7 +2136,7 @@ pub struct CellProducedV1 {
 }
 
 pub struct CellSkippedV1 {
-    pub spec_hash: ContentDigest,
+    pub spec_hash: SpecHash,
     pub node_id: NodeId,
     pub cell_id: CellId,
     pub scope_id: ScopeId,
@@ -2079,7 +2173,7 @@ pub struct KernelEventEnvelopeV1 {
     pub run_id: RunId,
     pub seq: StreamSeq,
     pub ordinal: CommitOrdinal,
-    pub spec_hash: ContentDigest,
+    pub spec_hash: SpecHash,
     pub commit_key: CommitKey,
     pub logical_key: LogicalEventKey,
     pub payload_hash: ContentDigest,
@@ -2104,15 +2198,22 @@ cell:{cell_id}:terminal           CellProducedV1 / CellSkippedV1
 fact:{node_id}:{attempt_id}:{fact_key}
 artifact:{artifact_id}:ref
 sidefx:{ledger_key}:intent
-sidefx:{ledger_key}:claim
-sidefx:{ledger_key}:invocation:{invocation_epoch}
-sidefx:{ledger_key}:receipt
-sidefx:{ledger_key}:confirmation
+sidefx:{ledger_key}:claim:{invocation_epoch}
+sidefx:{ledger_key}:invocation:{invocation_epoch}:prepared
+sidefx:{ledger_key}:invocation:{invocation_epoch}:started
+sidefx:{ledger_key}:invocation:{invocation_epoch}:submission_result
+sidefx:{ledger_key}:invocation:{invocation_epoch}:receipt
+sidefx:{ledger_key}:invocation:{invocation_epoch}:confirmation
+sidefx:{ledger_key}:invocation:{invocation_epoch}:failure
 sidefx:{ledger_key}:ambiguous
 public_output:{public_schema_id}
 retention:{run_id}:refs:{payload_hash}
 retention:{run_id}:manifest:{manifest_seq}
 ```
+
+`submission_result` is mutually exclusive for observed, not-submitted, unknown, or ambiguous
+evidence for one invocation epoch. The store must reject duplicate or conflicting phase-specific
+keys for the same ledger key.
 
 V1 event payload variants include:
 
@@ -2349,6 +2450,7 @@ pub struct SideEffectReceiptObservedV1 {
     pub node_id: NodeId,
     pub attempt_id: AttemptId,
     pub ledger_key: SideEffectLedgerKey,
+    pub invocation_epoch: u32,
     pub receipt_schema_id: SchemaId,
     pub receipt_hash: ContentDigest,
     pub receipt_artifact_id: ArtifactId,
@@ -2359,6 +2461,7 @@ pub struct SideEffectConfirmationObservedV1 {
     pub node_id: NodeId,
     pub attempt_id: AttemptId,
     pub ledger_key: SideEffectLedgerKey,
+    pub invocation_epoch: u32,
     pub confirmation_schema_id: SchemaId,
     pub confirmation_hash: ContentDigest,
     pub confirmation_artifact_id: ArtifactId,
@@ -2382,8 +2485,15 @@ pub struct SideEffectFailedV1 {
     pub node_id: NodeId,
     pub attempt_id: AttemptId,
     pub ledger_key: SideEffectLedgerKey,
+    pub invocation_epoch: u32,
+    pub failure_phase: SideEffectFailurePhaseV1,
     pub retryable: bool,
     pub error: MfmErrorInfoV1,
+}
+
+pub enum SideEffectFailurePhaseV1 {
+    BeforeInvocationStarted,
+    AfterNotSubmittedProven,
 }
 ```
 
@@ -2693,7 +2803,7 @@ Each certified run appends retention evidence and may materialize a manifest pro
 ```rust
 pub struct RetentionManifestV1 {
     pub run_id: RunId,
-    pub spec_hash: ContentDigest,
+    pub spec_hash: SpecHash,
     pub manifest_seq: u64,
     pub previous_manifest_digest: Option<ContentDigest>,
     pub spec_artifact: ArtifactRef<TypedExecutionSpecV1>,
@@ -2832,13 +2942,18 @@ Resume validation reconstructs projections from the authoritative run stream bef
 Side-effect resume frontier:
 
 ```text
-terminal cell exists -> skip
-claim only, no invocation -> continue live execution
+terminal cell exists and ledger is confirmation_observed/completed -> skip
+terminal cell exists without complete ledger evidence -> corrupt certified history
+claim only, no invocation -> acquire a new claim and continue live execution
 invocation_started_unknown -> recover_submission
-not_submitted_proven -> retry next invocation_epoch
+submission_unknown -> recover_submission
+not_submitted_proven -> claim and prepare next invocation_epoch
 submission_observed -> recover_receipt
 receipt_observed -> recover_confirmation
 confirmation_observed, no cell -> derive output and append cell
+side_effect_failed before invocation and retryable -> retry attempt
+side_effect_failed after not_submitted_proven and retryable -> claim and prepare next invocation_epoch
+side_effect_failed non-retryable -> fail run with typed error
 ambiguous -> block
 ```
 
@@ -2883,6 +2998,8 @@ pub struct PublicOutputSpecV1 {
 pub struct PublicOutputCell {
     pub public_field_path: PublicFieldPath,
     pub cell_id: CellId,
+    pub producer: CellProducerV1,
+    pub scope_id: ScopeId,
     pub semantic_type_id: SemanticTypeId,
     pub schema_id: SchemaId,
     pub required_terminal: RequiredTerminal,
@@ -2915,8 +3032,11 @@ The terminal public-output record is:
 ```rust
 pub struct PublicOutputProducedV1 {
     pub spec_hash: SpecHash,
+    pub node_id: NodeId,
+    pub attempt_id: AttemptId,
+    pub output_cell_id: CellId,
     pub public_schema_id: SchemaId,
-    pub output_spec_hash: ContentDigest,
+    pub output_spec_digest: ContentDigest,
     pub cells: Vec<NamedTypedCellRef>,
     pub rendered_digest: ContentDigest,
     pub rendered_artifact_id: Option<ArtifactId>,
@@ -2926,25 +3046,43 @@ pub struct PublicOutputProducedV1 {
 pub struct NamedTypedCellRef {
     pub public_field_path: PublicFieldPath,
     pub cell_id: CellId,
+    pub producer: CellProducerV1,
+    pub scope_id: ScopeId,
     pub semantic_type_id: SemanticTypeId,
     pub schema_id: SchemaId,
-    pub producer: CellProducerV1,
     pub content_digest: ContentDigest,
     pub artifact_id: ArtifactId,
 }
 ```
 
 Typed terminal cells plus `PublicOutputSpecV1` are authoritative. Rendered JSON is only a cache for
-CLI/API clients. Public-output rendering is an explicit render state attempt. If the required cells
-exist but rendering fails, the run is not completed; the render state emits
+CLI/API clients. Public-output rendering is an explicit render state attempt. The render node is a
+normal typed node whose `NodeSpecV1.output_cell` stores a `PublicOutputReceiptV1` value. Its
+successful terminal commit includes `CellProducedV1` for that receipt cell,
+`PublicOutputProducedV1`, and `StateAttemptCompletedV1` with the same `output_cell_id`. If the
+required cells exist but rendering fails, the run is not completed; the render state emits
 `StateAttemptFailedV1`, may also emit `PublicOutputRenderFailedV1` as audit detail, and remains
 resumable from the public-output rendering step. `PublicOutputRenderFailedV1` is not a terminal
 authority and cannot substitute for `PublicOutputProducedV1`.
 
-The public-output render state is an injected `ManagedWriteState` added by certified lowering whenever
-`RootBuilder::bind_public_outputs` succeeds. Users do not hand-author terminal render nodes. The
-injected `RenderPublicOutputs` framework node depends on the declared public cells, emits
-`PublicOutputProducedV1`, and is the only path to `RunCompletedV2(Completed)` for public runs.
+```rust
+pub struct PublicOutputReceiptV1 {
+    pub public_schema_id: SchemaId,
+    pub output_spec_digest: ContentDigest,
+    pub cells: Vec<NamedTypedCellRef>,
+    pub rendered_digest: ContentDigest,
+    pub rendered_artifact_id: Option<ArtifactId>,
+    pub renderer_descriptor_id: DescriptorId,
+}
+```
+
+The public-output render state is a framework-owned node inserted during typed program finalization
+whenever `RootBuilder::bind_public_outputs` succeeds, before certification and spec hashing. Users
+do not hand-author terminal render nodes. The `RenderPublicOutputs` framework node is persisted in
+`TypedExecutionSpecV1.nodes` through `NodeSpecV1.framework`, depends on the declared public cells,
+records the renderer descriptor and public-output spec digest, emits `PublicOutputProducedV1`, and
+is the only path to `RunCompletedV2(Completed)` for public runs. Certified lowering may only bind
+this persisted node to its framework runner.
 
 Resume behavior for rendering is explicit:
 
@@ -3476,6 +3614,12 @@ typed_spec_hash_persisted
 run_started_v2_present
 typed_cells_present
 side_effect_ledger_complete
+side_effect_invocation_started_before_submit
+side_effect_crash_matrix_passed
+side_effect_no_duplicate_submit
+side_effect_submission_unknown_recovered
+side_effect_failed_semantics_covered
+side_effect_logical_key_conflicts_rejected
 managed_platform_outputs_committed
 public_output_before_run_completed
 replay_no_live_caps
@@ -3852,8 +3996,9 @@ rewrite. It should include:
 4. `StateSpec`, framework-owned executable evidence, `StateInput`, `IntoStateInput`,
    `InputBindingSpecV1`, `Operation`, `OperationOutput`, and `ScopeBuilder`
 5. stable author keys, stable domain keys, derived scope/node/cell identities, and golden vectors
-6. two or three effect paths only: `Pure`, `ReadExternal`, and either `ManagedPlatformWrite` or one
-   minimal `ApplySideEffect` if the reference workflow needs side-effect recovery
+6. four effect paths: `Pure`, `ReadExternal`, `ManagedPlatformWrite`, and one minimal
+   `ApplySideEffect`; the reference workflow must exercise the same side-effect recovery protocol
+   required by `typed-certified-slice`
 7. `TypedExecutionSpecV1`, `SpecHash`, `RunStartedV2`, one-output-per-state cells, and public-output
    evidence before `RunCompletedV2`
 8. Postgres stream store plus filesystem artifact store implementing store-owned typed commits and
@@ -3863,6 +4008,15 @@ rewrite. It should include:
     executable/canonicalizer identity mismatch
 11. `typed-certified-slice` CI gate, typed-boundary firewall, and compile-pass/compile-fail fixtures
     for the reference API
+
+The first-slice `ApplySideEffect` fixture should use a framework-provided deterministic local
+adapter, not a live external service. The fixture must define typed intent, typed idempotency input,
+typed submission evidence, typed receipt, typed confirmation, and typed output. Its crash matrix
+must cover intent persisted, claim committed, invocation prepared, invocation started before submit,
+submission observed, submission unknown then recovered, not-submitted proof then retry with a higher
+invocation epoch, receipt observed, confirmation observed, terminal output, and failed attempts
+before external uncertainty. The receipt contract must prove no duplicate submit for one ledger key
+unless a prior invocation has adapter-proven not-submitted evidence.
 
 If that slice works without semantic JSON context dataflow, the architecture is viable enough to
 expand to portfolio and EVM workflows. If it still depends on context keys, generic IO, or
