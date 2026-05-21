@@ -2,6 +2,72 @@
   "wave": "docs-rs-wave-1",
   "packages": [
     {
+      "name": "mfm-ids",
+      "group": "typed-kernel",
+      "workspace_path": "crates/kernel/ids",
+      "docs_rs": "https://docs.rs/mfm-ids"
+    },
+    {
+      "name": "mfm-canonical",
+      "group": "typed-kernel",
+      "workspace_path": "crates/kernel/canonical",
+      "docs_rs": "https://docs.rs/mfm-canonical"
+    },
+    {
+      "name": "mfm-values",
+      "group": "typed-kernel",
+      "workspace_path": "crates/kernel/values",
+      "docs_rs": "https://docs.rs/mfm-values"
+    },
+    {
+      "name": "mfm-effects",
+      "group": "typed-kernel",
+      "workspace_path": "crates/kernel/effects",
+      "docs_rs": "https://docs.rs/mfm-effects"
+    },
+    {
+      "name": "mfm-capabilities",
+      "group": "typed-kernel",
+      "workspace_path": "crates/kernel/capabilities",
+      "docs_rs": "https://docs.rs/mfm-capabilities"
+    },
+    {
+      "name": "mfm-program",
+      "group": "typed-kernel",
+      "workspace_path": "crates/kernel/program",
+      "docs_rs": "https://docs.rs/mfm-program"
+    },
+    {
+      "name": "mfm-program-derive",
+      "group": "typed-kernel",
+      "workspace_path": "crates/kernel/program-derive",
+      "docs_rs": "https://docs.rs/mfm-program-derive"
+    },
+    {
+      "name": "mfm-spec",
+      "group": "typed-kernel",
+      "workspace_path": "crates/kernel/spec",
+      "docs_rs": "https://docs.rs/mfm-spec"
+    },
+    {
+      "name": "mfm-certify",
+      "group": "typed-kernel",
+      "workspace_path": "crates/kernel/certify",
+      "docs_rs": "https://docs.rs/mfm-certify"
+    },
+    {
+      "name": "mfm-events",
+      "group": "typed-kernel",
+      "workspace_path": "crates/kernel/events",
+      "docs_rs": "https://docs.rs/mfm-events"
+    },
+    {
+      "name": "mfm-kernel-test-support",
+      "group": "typed-kernel",
+      "workspace_path": "crates/kernel/test-support",
+      "docs_rs": "https://docs.rs/mfm-kernel-test-support"
+    },
+    {
       "name": "mfm-machine",
       "group": "foundation",
       "workspace_path": "crates/machine",

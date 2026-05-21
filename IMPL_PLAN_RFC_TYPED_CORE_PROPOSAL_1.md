@@ -83,14 +83,14 @@ workflow ports, and deletion or hard isolation of old dynamic semantic APIs.
 
 ### Commit 04: `kernel ids add strong identity types`
 
-- [ ] Implement category-branded identity primitives in `mfm-ids`.
-- [ ] Add typed ids for semantic types, schemas, states, capabilities, adapters, operations,
+- [x] Implement category-branded identity primitives in `mfm-ids`.
+- [x] Add typed ids for semantic types, schemas, states, capabilities, adapters, operations,
       descriptors, specs, nodes, cells, scopes, seeds, attempts, runs, events, artifacts, and
       content digests.
-- [ ] Keep kind and version fields separate.
-- [ ] Add checked constructors and grammar validation.
-- [ ] Add golden tests for accepted/rejected identity strings.
-- [ ] Validation: `nix run .#test`.
+- [x] Keep kind and version fields separate.
+- [x] Add checked constructors and grammar validation.
+- [x] Add golden tests for accepted/rejected identity strings.
+- [x] Validation: `nix run .#test`.
 
 ### Commit 05: `kernel canonical add canonical json contract`
 

@@ -39,13 +39,24 @@ The live runtime inventory still lives in the repository docs:
 | Package | Role | docs.rs | Workspace Path |
 | --- | --- | --- | --- |
 | `mfm-authored-config` | Shared JSON/TOML authored-config ingress helpers. | pending | `crates/authored-config` |
+| `mfm-canonical` | Canonical JSON bytes and typed content digest primitives. | pending | `crates/kernel/canonical` |
+| `mfm-capabilities` | Typed capability descriptors and role-checked capability sets. | pending | `crates/kernel/capabilities` |
+| `mfm-certify` | Typed execution-spec certification contracts. | pending | `crates/kernel/certify` |
 | `mfm-control-plane-model` | Backend-neutral control-plane stream-family model and projections. | pending | `crates/control-plane/model` |
+| `mfm-effects` | Framework-owned typed effect markers. | pending | `crates/kernel/effects` |
+| `mfm-events` | Typed kernel event schemas and event identity contracts. | pending | `crates/kernel/events` |
 | `mfm-evm-core` | EVM ABI, encoding, hex, RLP, transaction models, hashes, and raw transaction encoders. | <https://docs.rs/mfm-evm-core> | `crates/evm-core` |
 | `mfm-evm-dcv-model` | Pure EVM deploy/configure/validate model and ABI preparation helpers. | pending | `crates/evm-dcv-model` |
 | `mfm-evm-deploy-configure-validate-config` | Shared deploy/configure/validate config pipeline. | pending | `crates/evm-deploy-configure-validate-config` |
+| `mfm-ids` | Strong typed identity primitives for the typed kernel. | pending | `crates/kernel/ids` |
+| `mfm-kernel-test-support` | Shared test support for typed kernel contract fixtures. | pending | `crates/kernel/test-support` |
 | `mfm-portfolio-config` | Shared portfolio snapshot config pipeline. | pending | `crates/portfolio-config` |
 | `mfm-portfolio-model` | Pure canonical portfolio, symbol, and wallet models. | pending | `crates/portfolio/model` |
 | `mfm-portfolio-plan` | Pure semantic portfolio planning vocabulary and adapter catalog. | pending | `crates/portfolio/plan` |
+| `mfm-program` | Typed state-program authoring API and lowering evidence. | pending | `crates/kernel/program` |
+| `mfm-program-derive` | Proc-macro derives for typed kernel value and program contracts. | pending | `crates/kernel/program-derive` |
+| `mfm-spec` | Certified typed execution-spec data model. | pending | `crates/kernel/spec` |
+| `mfm-values` | Typed persisted value, config, and public-output descriptors. | pending | `crates/kernel/values` |
 | `mfm_core` | Security-sensitive keystore, config, and primitives. | pending | `crates/core` |
 
 ## Shared States

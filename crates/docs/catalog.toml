@@ -38,6 +38,105 @@ docs_policy = "docs-rs"
 umbrella_policy = "when-published"
 
 [[packages]]
+name = "mfm-canonical"
+workspace_path = "crates/kernel/canonical"
+visibility = "public"
+section = "core"
+summary = "Canonical JSON bytes and typed content digest primitives."
+docs_policy = "docs-rs"
+umbrella_policy = "when-published"
+
+[[packages]]
+name = "mfm-capabilities"
+workspace_path = "crates/kernel/capabilities"
+visibility = "public"
+section = "core"
+summary = "Typed capability descriptors and role-checked capability sets."
+docs_policy = "docs-rs"
+umbrella_policy = "when-published"
+
+[[packages]]
+name = "mfm-certify"
+workspace_path = "crates/kernel/certify"
+visibility = "public"
+section = "core"
+summary = "Typed execution-spec certification contracts."
+docs_policy = "docs-rs"
+umbrella_policy = "when-published"
+
+[[packages]]
+name = "mfm-effects"
+workspace_path = "crates/kernel/effects"
+visibility = "public"
+section = "core"
+summary = "Framework-owned typed effect markers."
+docs_policy = "docs-rs"
+umbrella_policy = "when-published"
+
+[[packages]]
+name = "mfm-events"
+workspace_path = "crates/kernel/events"
+visibility = "public"
+section = "core"
+summary = "Typed kernel event schemas and event identity contracts."
+docs_policy = "docs-rs"
+umbrella_policy = "when-published"
+
+[[packages]]
+name = "mfm-ids"
+workspace_path = "crates/kernel/ids"
+visibility = "public"
+section = "core"
+summary = "Strong typed identity primitives for the typed kernel."
+docs_policy = "docs-rs"
+umbrella_policy = "when-published"
+
+[[packages]]
+name = "mfm-kernel-test-support"
+workspace_path = "crates/kernel/test-support"
+visibility = "public"
+section = "core"
+summary = "Shared test support for typed kernel contract fixtures."
+docs_policy = "docs-rs"
+umbrella_policy = "when-published"
+
+[[packages]]
+name = "mfm-program"
+workspace_path = "crates/kernel/program"
+visibility = "public"
+section = "core"
+summary = "Typed state-program authoring API and lowering evidence."
+docs_policy = "docs-rs"
+umbrella_policy = "when-published"
+
+[[packages]]
+name = "mfm-program-derive"
+workspace_path = "crates/kernel/program-derive"
+visibility = "public"
+section = "core"
+summary = "Proc-macro derives for typed kernel value and program contracts."
+docs_policy = "docs-rs"
+umbrella_policy = "when-published"
+
+[[packages]]
+name = "mfm-spec"
+workspace_path = "crates/kernel/spec"
+visibility = "public"
+section = "core"
+summary = "Certified typed execution-spec data model."
+docs_policy = "docs-rs"
+umbrella_policy = "when-published"
+
+[[packages]]
+name = "mfm-values"
+workspace_path = "crates/kernel/values"
+visibility = "public"
+section = "core"
+summary = "Typed persisted value, config, and public-output descriptors."
+docs_policy = "docs-rs"
+umbrella_policy = "when-published"
+
+[[packages]]
 name = "mfm-authored-config"
 workspace_path = "crates/authored-config"
 visibility = "public"
