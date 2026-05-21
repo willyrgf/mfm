@@ -1,0 +1,12 @@
+[package]
+name = "mfm-ids"
+version = "0.1.0"
+edition = "2021"
+description = "Strong typed identity primitives for the MFM typed kernel"
+repository = "https://github.com/willyrgf/mfm"
+license = "MIT"
+readme = "README.md"
+
+[lib]
+name = "mfm_ids"
+path = "src/lib.rs"

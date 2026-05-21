@@ -1,0 +1,12 @@
+[package]
+name = "mfm-certify"
+version = "0.1.0"
+edition = "2021"
+description = "Certification contracts for MFM typed execution specs"
+repository = "https://github.com/willyrgf/mfm"
+license = "MIT"
+readme = "README.md"
+
+[lib]
+name = "mfm_certify"
+path = "src/lib.rs"

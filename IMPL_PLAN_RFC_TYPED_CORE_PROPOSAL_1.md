@@ -56,7 +56,7 @@ workflow ports, and deletion or hard isolation of old dynamic semantic APIs.
 
 ### Commit 02: `workspace add typed kernel crate skeleton`
 
-- [ ] Add workspace members:
+- [x] Add workspace members:
       `crates/kernel/ids`,
       `crates/kernel/canonical`,
       `crates/kernel/values`,
@@ -68,10 +68,10 @@ workflow ports, and deletion or hard isolation of old dynamic semantic APIs.
       `crates/kernel/certify`,
       `crates/kernel/events`,
       `crates/kernel/test-support`.
-- [ ] Add `#![warn(missing_docs)]` to library crates.
-- [ ] Keep all crates dependency-minimal and domain-free.
-- [ ] Add placeholder READMEs stating RFC authority and crate ownership.
-- [ ] Validation: `cargo metadata --no-deps`, `nix run .#check`.
+- [x] Add `#![warn(missing_docs)]` to library crates.
+- [x] Keep all crates dependency-minimal and domain-free.
+- [x] Add placeholder READMEs stating RFC authority and crate ownership.
+- [x] Validation: `cargo metadata --no-deps`, `nix run .#check`.
 
 ### Commit 03: `check enforce typed kernel crate dag`
 

@@ -1,0 +1,12 @@
+[package]
+name = "mfm-kernel-test-support"
+version = "0.1.0"
+edition = "2021"
+description = "Test support for MFM typed kernel contracts"
+repository = "https://github.com/willyrgf/mfm"
+license = "MIT"
+readme = "README.md"
+
+[lib]
+name = "mfm_kernel_test_support"
+path = "src/lib.rs"

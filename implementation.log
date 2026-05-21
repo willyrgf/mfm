@@ -6,3 +6,10 @@
 - Tests run and results: `git diff --check` passed.
 - Design decisions: Treat Commit 01 as a verification/update section because the repository head already contains the implementation-plan document (`git log` shows `rfc impl plan` at HEAD). Added a direct RFC-to-plan link for discoverability.
 - Doubts, risks, blockers, or review items: Validator reported P1 findings that the log still marked validation pending and that `implementation.log` must be included in the section diff. Both were addressed. No architectural drift or old dynamic API leakage was reported.
+
+## 2026-05-21T20:56:42Z - commit 02 / workspace add typed kernel crate skeleton
+
+- Summary: Added the initial typed kernel workspace members under `crates/kernel/*`: ids, canonical, values, effects, capabilities, program, program-derive, spec, certify, events, and test-support. Added dependency-free crate manifests, crate-level missing-docs warnings, crate docs, and README ownership/RFC authority notes. Updated discovery docs for the new crates.
+- Tests run and results: `cargo metadata --no-deps` passed with Cargo's format-version warning; `nix run .#check` initially failed because discovery artifacts were stale after adding workspace members; refreshed `docs/repo-index.json` and `docs/repo-map.md`, kept `docs/code-quality.md` in project discovery config, reran `nix run .#check`, and it passed.
+- Design decisions: Kept every new kernel crate dependency-free in the skeleton section. `mfm-program-derive` is a proc-macro crate with no derives yet, so it has no proc-macro helper dependencies until Commit 07 needs them. Updated `nixfied/project/conf.nix` to keep the mandatory code-quality policy in generated discovery artifacts.
+- Doubts, risks, blockers, or review items: Validator reported P1 findings that `crates/kernel/` was still untracked and that this log still said validator review was pending. The log was updated and the new kernel crate tree is staged with the section. No architectural drift, old dynamic API leakage, dependency-boundary issue, or missing-docs issue was reported.

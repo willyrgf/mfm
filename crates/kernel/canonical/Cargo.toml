@@ -1,0 +1,12 @@
+[package]
+name = "mfm-canonical"
+version = "0.1.0"
+edition = "2021"
+description = "Canonicalization contracts for the MFM typed kernel"
+repository = "https://github.com/willyrgf/mfm"
+license = "MIT"
+readme = "README.md"
+
+[lib]
+name = "mfm_canonical"
+path = "src/lib.rs"

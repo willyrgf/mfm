@@ -1,0 +1,12 @@
+[package]
+name = "mfm-effects"
+version = "0.1.0"
+edition = "2021"
+description = "Effect marker contracts for the MFM typed kernel"
+repository = "https://github.com/willyrgf/mfm"
+license = "MIT"
+readme = "README.md"
+
+[lib]
+name = "mfm_effects"
+path = "src/lib.rs"

@@ -1,0 +1,12 @@
+[package]
+name = "mfm-capabilities"
+version = "0.1.0"
+edition = "2021"
+description = "Capability contracts for the MFM typed kernel"
+repository = "https://github.com/willyrgf/mfm"
+license = "MIT"
+readme = "README.md"
+
+[lib]
+name = "mfm_capabilities"
+path = "src/lib.rs"

@@ -1,0 +1,12 @@
+[package]
+name = "mfm-events"
+version = "0.1.0"
+edition = "2021"
+description = "Typed kernel event contracts for MFM"
+repository = "https://github.com/willyrgf/mfm"
+license = "MIT"
+readme = "README.md"
+
+[lib]
+name = "mfm_events"
+path = "src/lib.rs"

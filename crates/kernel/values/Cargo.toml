@@ -1,0 +1,12 @@
+[package]
+name = "mfm-values"
+version = "0.1.0"
+edition = "2021"
+description = "Typed value and descriptor contracts for the MFM typed kernel"
+repository = "https://github.com/willyrgf/mfm"
+license = "MIT"
+readme = "README.md"
+
+[lib]
+name = "mfm_values"
+path = "src/lib.rs"

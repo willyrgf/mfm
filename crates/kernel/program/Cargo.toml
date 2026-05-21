@@ -1,0 +1,12 @@
+[package]
+name = "mfm-program"
+version = "0.1.0"
+edition = "2021"
+description = "Typed state-program authoring contracts for MFM"
+repository = "https://github.com/willyrgf/mfm"
+license = "MIT"
+readme = "README.md"
+
+[lib]
+name = "mfm_program"
+path = "src/lib.rs"

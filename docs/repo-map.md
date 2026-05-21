@@ -9,8 +9,8 @@ Generated from `docs/repo-index.json`.
 - `docs/DETAILED.md` - Detailed model architecture and contracts.
 - `docs/UPGRADE.md` - Downstream upgrade notes for behavioral and path contract changes.
 - `AGENTS.md` - Agent instructions and collaboration constraints.
-- `docs/code-quality.md` - Mandatory quality policy for all repository changes.
 - `docs/architecture.md` - Project documentation.
+- `docs/code-quality.md` - Project documentation.
 - `docs/design.md` - Project documentation.
 - `docs/ops-and-states.md` - Project documentation.
 
@@ -37,6 +37,17 @@ Generated from `docs/repo-index.json`.
 - `crates/evm-dcv-model/Cargo.toml` (rust-cargo)
 - `crates/evm-deploy-configure-validate-config/Cargo.toml` (rust-cargo)
 - `crates/evm-runtime/Cargo.toml` (rust-cargo)
+- `crates/kernel/canonical/Cargo.toml` (rust-cargo)
+- `crates/kernel/capabilities/Cargo.toml` (rust-cargo)
+- `crates/kernel/certify/Cargo.toml` (rust-cargo)
+- `crates/kernel/effects/Cargo.toml` (rust-cargo)
+- `crates/kernel/events/Cargo.toml` (rust-cargo)
+- `crates/kernel/ids/Cargo.toml` (rust-cargo)
+- `crates/kernel/program-derive/Cargo.toml` (rust-cargo)
+- `crates/kernel/program/Cargo.toml` (rust-cargo)
+- `crates/kernel/spec/Cargo.toml` (rust-cargo)
+- `crates/kernel/test-support/Cargo.toml` (rust-cargo)
+- `crates/kernel/values/Cargo.toml` (rust-cargo)
 - `crates/machine-derive/Cargo.toml` (rust-cargo)
 - `crates/machine-test-support/Cargo.toml` (rust-cargo)
 - `crates/machine/Cargo.toml` (rust-cargo)

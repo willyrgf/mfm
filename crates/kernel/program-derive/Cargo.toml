@@ -1,0 +1,13 @@
+[package]
+name = "mfm-program-derive"
+version = "0.1.0"
+edition = "2021"
+description = "Derive macros for MFM typed program contracts"
+repository = "https://github.com/willyrgf/mfm"
+license = "MIT"
+readme = "README.md"
+
+[lib]
+name = "mfm_program_derive"
+path = "src/lib.rs"
+proc-macro = true

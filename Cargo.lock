@@ -1976,6 +1976,18 @@ name = "mfm-authored-config"
 version = "0.1.0"
 
 [[package]]
+name = "mfm-canonical"
+version = "0.1.0"
+
+[[package]]
+name = "mfm-capabilities"
+version = "0.1.0"
+
+[[package]]
+name = "mfm-certify"
+version = "0.1.0"
+
+[[package]]
 name = "mfm-collectors-btc-jsonrpc-http"
 version = "0.1.0"
 dependencies = [
@@ -2111,6 +2123,14 @@ name = "mfm-docs"
 version = "0.1.0"
 
 [[package]]
+name = "mfm-effects"
+version = "0.1.0"
+
+[[package]]
+name = "mfm-events"
+version = "0.1.0"
+
+[[package]]
 name = "mfm-evm-core"
 version = "0.1.0"
 dependencies = [
@@ -2162,6 +2182,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "mfm-ids"
+version = "0.1.0"
+
+[[package]]
 name = "mfm-integration-tests"
 version = "0.1.0"
 dependencies = [
@@ -2188,6 +2212,10 @@ dependencies = [
  "tracing",
  "uuid",
 ]
+
+[[package]]
+name = "mfm-kernel-test-support"
+version = "0.1.0"
 
 [[package]]
 name = "mfm-machine"
@@ -2361,6 +2389,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "mfm-program"
+version = "0.1.0"
+
+[[package]]
+name = "mfm-program-derive"
+version = "0.1.0"
+
+[[package]]
 name = "mfm-publish-docs"
 version = "0.1.0"
 dependencies = [
@@ -2409,6 +2445,10 @@ dependencies = [
  "serde_json",
  "tokio",
 ]
+
+[[package]]
+name = "mfm-spec"
+version = "0.1.0"
 
 [[package]]
 name = "mfm-state-aave-v3"
@@ -2600,6 +2640,10 @@ dependencies = [
  "tracing",
  "url",
 ]
+
+[[package]]
+name = "mfm-values"
+version = "0.1.0"
 
 [[package]]
 name = "mfm_core"

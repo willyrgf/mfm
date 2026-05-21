@@ -1,0 +1,12 @@
+[package]
+name = "mfm-spec"
+version = "0.1.0"
+edition = "2021"
+description = "Certified typed execution spec contracts for MFM"
+repository = "https://github.com/willyrgf/mfm"
+license = "MIT"
+readme = "README.md"
+
+[lib]
+name = "mfm_spec"
+path = "src/lib.rs"

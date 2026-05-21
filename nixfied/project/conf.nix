@@ -228,6 +228,7 @@ rec {
       "README.md"
       "AGENTS.md"
       "docs/architecture.md"
+      "docs/code-quality.md"
       "docs/DETAILED.md"
       "docs/design.md"
       "docs/ops-and-states.md"

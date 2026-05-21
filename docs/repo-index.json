@@ -39,13 +39,13 @@
       "exists": true
     },
     {
-      "path": "docs/code-quality.md",
-      "purpose": "Mandatory quality policy for all repository changes.",
-      "priority": 8,
+      "path": "docs/architecture.md",
+      "purpose": "Project documentation.",
+      "priority": 20,
       "exists": true
     },
     {
-      "path": "docs/architecture.md",
+      "path": "docs/code-quality.md",
       "purpose": "Project documentation.",
       "priority": 20,
       "exists": true
@@ -172,6 +172,61 @@
     {
       "name": "evm-runtime",
       "path": "crates/evm-runtime/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "canonical",
+      "path": "crates/kernel/canonical/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "capabilities",
+      "path": "crates/kernel/capabilities/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "certify",
+      "path": "crates/kernel/certify/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "effects",
+      "path": "crates/kernel/effects/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "events",
+      "path": "crates/kernel/events/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "ids",
+      "path": "crates/kernel/ids/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "program-derive",
+      "path": "crates/kernel/program-derive/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "program",
+      "path": "crates/kernel/program/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "spec",
+      "path": "crates/kernel/spec/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "test-support",
+      "path": "crates/kernel/test-support/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "values",
+      "path": "crates/kernel/values/Cargo.toml",
       "kind": "rust-cargo"
     },
     {
