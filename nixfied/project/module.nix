@@ -576,6 +576,10 @@ let
       passThroughRuntimeEnv ? [ ],
       allowSensitivePassThrough ? true,
       env ? { },
+      produces ? {
+        artifacts = [ ];
+        stateKeys = [ ];
+      },
     }:
     {
       inherit
@@ -663,8 +667,8 @@ let
       };
 
       produces = {
-        artifacts = [ ];
-        stateKeys = [ ];
+        artifacts = produces.artifacts or [ ];
+        stateKeys = produces.stateKeys or [ ];
       };
     };
 
@@ -1170,7 +1174,7 @@ in
 
         check = mkCommandTask {
           id = "task.check";
-          summary = "Run fmt + clippy";
+          summary = "Run crate-dag + fmt + clippy";
           description = "Runs quality checks for the workspace.";
           usage = [ "nix run .#check" ];
           runtimeInputs = rustRuntimeInputs;
@@ -1182,6 +1186,8 @@ in
             artifacts_dir="''${CI_ARTIFACTS_DIR:-${ciArtifactsRoot}}"
             mkdir -p "$artifacts_dir"
             discovery_log="$artifacts_dir/check-discovery.log"
+            crate_dag_log="$artifacts_dir/check-crate-dag.log"
+            typed_kernel_contract_summary="$artifacts_dir/typed-kernel-contract.summary.json"
             fmt_log="$artifacts_dir/check-fmt.log"
             clippy_log="$artifacts_dir/check-clippy.log"
 
@@ -1194,6 +1200,11 @@ in
             echo "INFO: verifying discovery artifacts"
             echo "INFO: command=${discoveryCheckCmd} log=$discovery_log"
             run_with_log "$discovery_log" ${discoveryCheckCmd}
+
+            echo "INFO: running crate-dag checks"
+            echo "INFO: command=bash ${./check-kernel-crate-dag.sh} --root . --self-test --summary-file $typed_kernel_contract_summary log=$crate_dag_log"
+            run_with_log "$crate_dag_log" bash ${./check-kernel-crate-dag.sh} --root . --self-test --summary-file "$typed_kernel_contract_summary"
+            jq -e '.payload.kernel_crates_present == true and .payload.crate_dag_passed == true' "$typed_kernel_contract_summary" >/dev/null
 
             echo "INFO: running formatting checks"
             echo "INFO: command=${cargoFmtCheckCmd} log=$fmt_log"
@@ -1370,6 +1381,34 @@ in
             echo "INFO: running ci step=clippy"
             run_with_log "$log_file" ${cargoCiClippyCmd}
             echo "OK: ci step passed step=clippy log=$log_file"
+          '';
+        };
+
+        ci-kernel-crate-dag = mkCommandTask {
+          id = "task.ci.kernel-crate-dag";
+          kind = "ci-step";
+          summary = "CI typed kernel crate DAG check";
+          tags = [
+            "ci"
+            "quality"
+            "typed-kernel"
+          ];
+          runtimeInputs = rustRuntimeInputs;
+          env = ciCargoRustEnv;
+          produces = {
+            artifacts = [ "typed-kernel-contract.summary.json" ];
+            stateKeys = [ ];
+          };
+          command = ''
+            set -euo pipefail
+            ${ciStepPreamble}
+
+            log_file="$artifacts_dir/kernel-crate-dag.log"
+            typed_kernel_contract_summary="$artifacts_dir/typed-kernel-contract.summary.json"
+            echo "INFO: running ci step=kernel-crate-dag"
+            run_with_log "$log_file" bash ${./check-kernel-crate-dag.sh} --root . --self-test --summary-file "$typed_kernel_contract_summary"
+            jq -e '.payload.kernel_crates_present == true and .payload.crate_dag_passed == true' "$typed_kernel_contract_summary" >/dev/null
+            echo "OK: ci step passed step=kernel-crate-dag log=$log_file summary=$typed_kernel_contract_summary"
           '';
         };
 
@@ -1583,6 +1622,7 @@ EOF
               require_absent_app "aave-v3-origin-deploy"
 
               require_task "task.ci"
+              require_task "task.ci.kernel-crate-dag"
               require_task "task.ci.services-start"
               require_task "task.ci.sccache-contracts"
               require_task "task.ci.workflow-basic"
@@ -1599,6 +1639,7 @@ EOF
 
               require_workflow "workflow.ci.basic"
               require_workflow "workflow.ci.full"
+              require_workflow_plan_task "workflow.ci.basic" "task.ci.kernel-crate-dag"
               require_workflow_plan_task "workflow.ci.basic" "task.ci.sccache-contracts"
               require_workflow_plan_task "workflow.ci.parity" "task.ci.parity-rest-api-smoke"
               require_workflow_plan_task "workflow.ci.parity" "task.ci.parity-evm-reth"
@@ -2217,6 +2258,10 @@ EOF
               taskId = "task.ci.clippy";
             };
 
+            kernel-crate-dag = mkWorkflowUnit {
+              taskId = "task.ci.kernel-crate-dag";
+            };
+
             shell-app-contracts = mkWorkflowUnit {
               taskId = "task.ci.shell-app-contracts";
             };
@@ -2230,6 +2275,7 @@ EOF
               needs = [
                 "fmt"
                 "clippy"
+                "kernel-crate-dag"
                 "shell-app-contracts"
                 "sccache-contracts"
               ];

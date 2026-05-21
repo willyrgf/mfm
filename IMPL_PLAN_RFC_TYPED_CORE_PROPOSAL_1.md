@@ -75,11 +75,11 @@ workflow ports, and deletion or hard isolation of old dynamic semantic APIs.
 
 ### Commit 03: `check enforce typed kernel crate dag`
 
-- [ ] Add or update the `crate-dag` check so `crates/kernel/*` cannot depend on:
+- [x] Add or update the `crate-dag` check so `crates/kernel/*` cannot depend on:
       `crates/machine`, `crates/sdk`, `bin/*`, domain crates, old ops, or old states.
-- [ ] Add denied dependency tests for the new kernel crates.
-- [ ] Add a CI summary key: `kernel_crates_present`.
-- [ ] Validation: `nix run .#check`.
+- [x] Add denied dependency tests for the new kernel crates.
+- [x] Add a CI summary key: `kernel_crates_present`.
+- [x] Validation: `nix run .#check`.
 
 ### Commit 04: `kernel ids add strong identity types`
 
