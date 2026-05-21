@@ -6,6 +6,8 @@ Status: design contract draft for typed-core implementation
 
 Related problem statement: `RFC_STATE_OPS_PROBLEM.md`
 
+Implementation checklist: `IMPL_PLAN_RFC_TYPED_CORE_PROPOSAL_1.md`
+
 This proposal is a candidate architecture for replacing the current dynamic state/operation core.
 It is intentionally breaking. It assumes the platform is still on a development branch and does not
 need to preserve the existing `PlannedOp`, `PortKey`, `DynContext`, or dynamic DAG authoring APIs as

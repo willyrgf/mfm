@@ -50,9 +50,9 @@ workflow ports, and deletion or hard isolation of old dynamic semantic APIs.
 
 ### Commit 01: `docs: add typed core implementation plan`
 
-- [ ] Add this implementation plan.
-- [ ] Link it from the RFC or a planning issue if desired.
-- [ ] Validation: `git diff --check`.
+- [x] Add this implementation plan.
+- [x] Link it from the RFC or a planning issue if desired.
+- [x] Validation: `git diff --check`.
 
 ### Commit 02: `workspace add typed kernel crate skeleton`
 
