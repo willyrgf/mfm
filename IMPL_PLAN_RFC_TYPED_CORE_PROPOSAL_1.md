@@ -94,12 +94,12 @@ workflow ports, and deletion or hard isolation of old dynamic semantic APIs.
 
 ### Commit 05: `kernel canonical add canonical json contract`
 
-- [ ] Implement canonical JSON bytes and digest wrappers in `mfm-canonical`.
-- [ ] Reject floats, duplicate object keys, unsupported number forms, and non-canonical decimal
+- [x] Implement canonical JSON bytes and digest wrappers in `mfm-canonical`.
+- [x] Reject floats, duplicate object keys, unsupported number forms, and non-canonical decimal
       strings.
-- [ ] Add canonical digest test vectors for objects, maps, arrays, bytes, decimals, and rejected
+- [x] Add canonical digest test vectors for objects, maps, arrays, bytes, decimals, and rejected
       values.
-- [ ] Validation: `nix run .#test`.
+- [x] Validation: `nix run .#test`.
 
 ### Commit 06: `kernel values add schema descriptors and value traits`
 

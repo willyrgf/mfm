@@ -1978,6 +1978,12 @@ version = "0.1.0"
 [[package]]
 name = "mfm-canonical"
 version = "0.1.0"
+dependencies = [
+ "mfm-ids",
+ "ring",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "mfm-capabilities"
