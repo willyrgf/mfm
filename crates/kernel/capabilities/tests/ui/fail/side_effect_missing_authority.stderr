@@ -1,0 +1,20 @@
+error[E0277]: the trait bound `mfm_capabilities::private::ZeroMutationAuthorities: mfm_capabilities::private::ExactlyOneMutationAuthorityCount` is not satisfied
+ --> tests/ui/fail/side_effect_missing_authority.rs:7:64
+  |
+7 |     assert_capability_set::<mfm_capabilities::ApplySideEffect, (ReadCap, SupportCap)>();
+  |                                                                ^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
+  |
+  = help: the trait `mfm_capabilities::private::ExactlyOneMutationAuthorityCount` is not implemented for `mfm_capabilities::private::ZeroMutationAuthorities`
+  = help: the trait `mfm_capabilities::private::ExactlyOneMutationAuthorityCount` is implemented for `mfm_capabilities::private::OneMutationAuthority`
+  = note: required for `(ReadExternalRole, SupportRole)` to implement `mfm_capabilities::private::ExactlyOneMutationAuthorityTuple`
+  = note: required for `(ReadExternalRole, SupportRole)` to implement `mfm_capabilities::private::ExactlyOneMutationAuthority`
+  = note: required for `(ReadCap, SupportCap)` to implement `mfm_capabilities::private::CapabilitySetForSealed<mfm_capabilities::ApplySideEffect>`
+  = note: required for `(ReadCap, SupportCap)` to implement `CapabilitySetFor<mfm_capabilities::ApplySideEffect>`
+note: required by a bound in `assert_capability_set`
+ --> tests/ui/fail/../support/caps.rs
+  |
+  | pub fn assert_capability_set<E, C>()
+  |        --------------------- required by a bound in this function
+...
+  |     C: CapabilitySetFor<E>,
+  |        ^^^^^^^^^^^^^^^^^^^ required by this bound in `assert_capability_set`

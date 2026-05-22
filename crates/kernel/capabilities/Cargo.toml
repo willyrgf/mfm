@@ -10,3 +10,10 @@ readme = "README.md"
 [lib]
 name = "mfm_capabilities"
 path = "src/lib.rs"
+
+[dependencies]
+mfm-effects = { path = "../effects" }
+mfm-ids = { path = "../ids" }
+
+[dev-dependencies]
+trybuild = "1.0"

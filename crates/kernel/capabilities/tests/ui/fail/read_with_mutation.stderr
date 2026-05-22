@@ -1,0 +1,19 @@
+error[E0277]: the trait bound `ExternalMutationAuthorityRole: mfm_capabilities::private::ReadEffectRole` is not satisfied
+ --> tests/ui/fail/read_with_mutation.rs:7:61
+  |
+7 |     assert_capability_set::<mfm_capabilities::ReadExternal, (MutationCap,)>();
+  |                                                             ^^^^^^^^^^^^^^ the trait `mfm_capabilities::private::ReadEffectRole` is not implemented for `ExternalMutationAuthorityRole`
+  |
+  = help: the following other types implement trait `mfm_capabilities::private::ReadEffectRole`:
+            ReadExternalRole
+            SupportRole
+  = note: required for `(MutationCap,)` to implement `mfm_capabilities::private::CapabilitySetForSealed<mfm_capabilities::ReadExternal>`
+  = note: required for `(MutationCap,)` to implement `CapabilitySetFor<mfm_capabilities::ReadExternal>`
+note: required by a bound in `assert_capability_set`
+ --> tests/ui/fail/../support/caps.rs
+  |
+  | pub fn assert_capability_set<E, C>()
+  |        --------------------- required by a bound in this function
+...
+  |     C: CapabilitySetFor<E>,
+  |        ^^^^^^^^^^^^^^^^^^^ required by this bound in `assert_capability_set`

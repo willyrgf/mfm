@@ -1,0 +1,11 @@
+#[path = "../support/caps.rs"]
+mod caps;
+
+use caps::{assert_capability_set, ManagedWriteCap, MutationCap};
+
+fn main() {
+    assert_capability_set::<
+        mfm_capabilities::ApplySideEffect,
+        (MutationCap, ManagedWriteCap),
+    >();
+}

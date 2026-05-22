@@ -1994,6 +1994,11 @@ dependencies = [
 [[package]]
 name = "mfm-capabilities"
 version = "0.1.0"
+dependencies = [
+ "mfm-effects",
+ "mfm-ids",
+ "trybuild",
+]
 
 [[package]]
 name = "mfm-certify"

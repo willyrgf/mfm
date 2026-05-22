@@ -137,15 +137,15 @@ workflow ports, and deletion or hard isolation of old dynamic semantic APIs.
 
 ### Commit 10: `kernel capabilities add role checked capability sets`
 
-- [ ] Implement capability descriptors, roles, `CapabilitySpec`, `CapabilitySet`, and
+- [x] Implement capability descriptors, roles, `CapabilitySpec`, `CapabilitySet`, and
       `CapabilitySetFor<E>` in `mfm-capabilities`.
-- [ ] Enforce v1 rules:
+- [x] Enforce v1 rules:
       pure gets no caps,
       read gets read/support only,
       managed-write gets platform persistence/output only,
       side-effect gets exactly one external mutation authority.
-- [ ] Add trybuild failures for invalid capability roles.
-- [ ] Validation: `nix run .#test`.
+- [x] Add trybuild failures for invalid capability roles.
+- [x] Validation: `nix run .#test`.
 
 ### Commit 11: `kernel program add handles roots and seeds`
 

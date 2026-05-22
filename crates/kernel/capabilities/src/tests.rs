@@ -1,0 +1,209 @@
+use super::*;
+use mfm_ids::{DigestAlgorithm, DigestBytes};
+
+struct ReadRpc;
+struct SupportKeystore;
+struct PlatformArtifactWriter;
+struct MutationSubmitter;
+
+impl CapabilitySpec for ReadRpc {
+    type Role = ReadExternalRole;
+
+    fn kind() -> Result<CapabilityKind> {
+        capability_kind("read_rpc", 0x11)
+    }
+
+    fn version() -> Result<CapabilityVersion> {
+        capability_version()
+    }
+
+    fn name() -> &'static str {
+        "read_rpc"
+    }
+}
+
+impl CapabilitySpec for SupportKeystore {
+    type Role = SupportRole;
+
+    fn kind() -> Result<CapabilityKind> {
+        capability_kind("support_keystore", 0x22)
+    }
+
+    fn version() -> Result<CapabilityVersion> {
+        capability_version()
+    }
+
+    fn name() -> &'static str {
+        "support_keystore"
+    }
+}
+
+impl CapabilitySpec for PlatformArtifactWriter {
+    type Role = ManagedPlatformWriteRole;
+
+    fn kind() -> Result<CapabilityKind> {
+        capability_kind("platform_artifact_writer", 0x33)
+    }
+
+    fn version() -> Result<CapabilityVersion> {
+        capability_version()
+    }
+
+    fn name() -> &'static str {
+        "platform_artifact_writer"
+    }
+}
+
+impl CapabilitySpec for MutationSubmitter {
+    type Role = ExternalMutationAuthorityRole;
+
+    fn kind() -> Result<CapabilityKind> {
+        capability_kind("mutation_submitter", 0x44)
+    }
+
+    fn version() -> Result<CapabilityVersion> {
+        capability_version()
+    }
+
+    fn name() -> &'static str {
+        "mutation_submitter"
+    }
+}
+
+fn capability_kind(name: &str, byte: u8) -> Result<CapabilityKind> {
+    CapabilityKind::new(
+        "mfm.test",
+        name,
+        DigestAlgorithm::Sha256JcsV1,
+        DigestBytes::from_array([byte; 32]),
+    )
+    .map_err(|error| CapabilityError::Identity(error.to_string()))
+}
+
+fn capability_version() -> Result<CapabilityVersion> {
+    CapabilityVersion::new("mfm.capability.v1")
+        .map_err(|error| CapabilityError::Identity(error.to_string()))
+}
+
+fn assert_capability_set_for<E, C>()
+where
+    E: EffectSpec,
+    C: CapabilitySetFor<E>,
+{
+}
+
+#[test]
+fn valid_effect_capability_sets_compile_and_describe() {
+    assert_capability_set_for::<Pure, NoCaps>();
+    assert_capability_set_for::<ReadExternal, (ReadRpc,)>();
+    assert_capability_set_for::<ReadExternal, (ReadRpc, SupportKeystore)>();
+    assert_capability_set_for::<ManagedPlatformWrite, (PlatformArtifactWriter,)>();
+    assert_capability_set_for::<ApplySideEffect, (MutationSubmitter,)>();
+    assert_capability_set_for::<ApplySideEffect, (ReadRpc, MutationSubmitter, SupportKeystore)>();
+
+    let read_descriptor =
+        <(ReadRpc, SupportKeystore) as CapabilitySet>::descriptor().expect("read descriptor");
+    assert_eq!(read_descriptor.len(), 2);
+    assert_eq!(
+        read_descriptor.capabilities[0].kind.as_str(),
+        "capability:mfm.test:read_rpc:sha256-jcs-v1:1111111111111111111111111111111111111111111111111111111111111111"
+    );
+    assert_eq!(
+        read_descriptor.capabilities[0].version.as_str(),
+        "mfm.capability.v1"
+    );
+    assert_eq!(
+        read_descriptor.capabilities[0].role,
+        CapabilityRole::ReadExternal
+    );
+    read_descriptor
+        .validate_for_effect::<ReadExternal>()
+        .expect("read roles valid");
+}
+
+#[test]
+fn no_caps_validates_for_pure_only() {
+    let no_caps = NoCaps::descriptor().expect("no caps descriptor");
+    assert!(no_caps.is_empty());
+    no_caps
+        .validate_for_effect::<Pure>()
+        .expect("pure accepts no caps");
+
+    let side_effect_error = no_caps
+        .validate_for_effect::<ApplySideEffect>()
+        .expect_err("side effect needs one mutation authority");
+    assert!(matches!(
+        side_effect_error,
+        CapabilityError::InvalidCapabilitySet { .. }
+    ));
+}
+
+#[test]
+fn descriptor_role_validation_matches_v1_effect_rules() {
+    let read_with_mutation =
+        CapabilitySetDescriptor::new(vec![MutationSubmitter::descriptor().expect("mutation cap")])
+            .expect("descriptor builds");
+    assert!(read_with_mutation
+        .validate_for_effect::<ReadExternal>()
+        .is_err());
+
+    let managed_with_read =
+        CapabilitySetDescriptor::new(vec![ReadRpc::descriptor().expect("read cap")])
+            .expect("descriptor builds");
+    assert!(managed_with_read
+        .validate_for_effect::<ManagedPlatformWrite>()
+        .is_err());
+
+    let two_mutation_authorities = CapabilitySetDescriptor::new(vec![
+        MutationSubmitter::descriptor().expect("mutation cap"),
+        CapabilityDescriptor::new(
+            capability_kind("mutation_submitter_backup", 0x55).expect("backup kind"),
+            capability_version().expect("capability version"),
+            CapabilityRole::ExternalMutationAuthority,
+            "mutation_submitter_backup",
+        )
+        .expect("backup descriptor"),
+    ])
+    .expect("descriptor builds");
+    assert!(two_mutation_authorities
+        .validate_for_effect::<ApplySideEffect>()
+        .is_err());
+}
+
+#[test]
+fn duplicate_capability_descriptors_reject() {
+    let error = <(ReadRpc, ReadRpc) as CapabilitySet>::descriptor()
+        .expect_err("duplicate kind/version must reject");
+
+    assert!(matches!(error, CapabilityError::DuplicateCapability { .. }));
+}
+
+#[test]
+fn descriptor_names_and_role_strings_are_stable() {
+    assert!(CapabilityDescriptor::new(
+        ReadRpc::kind().expect("kind"),
+        ReadRpc::version().expect("version"),
+        CapabilityRole::ReadExternal,
+        "read_rpc",
+    )
+    .is_ok());
+
+    assert!(CapabilityDescriptor::new(
+        ReadRpc::kind().expect("kind"),
+        ReadRpc::version().expect("version"),
+        CapabilityRole::ReadExternal,
+        "ReadRpc",
+    )
+    .is_err());
+
+    assert_eq!(CapabilityRole::ReadExternal.as_str(), "read_external");
+    assert_eq!(
+        CapabilityRole::ManagedPlatformWrite.as_str(),
+        "managed_platform_write"
+    );
+    assert_eq!(CapabilityRole::Support.as_str(), "support");
+    assert_eq!(
+        CapabilityRole::ExternalMutationAuthority.as_str(),
+        "external_mutation_authority"
+    );
+}
