@@ -321,12 +321,12 @@ workflow ports, and deletion or hard isolation of old dynamic semantic APIs.
 
 ### Commit 28: `kernel runtime add public outputs`
 
-- [ ] Implement framework-owned public-output render node.
-- [ ] Produce `PublicOutputReceipt`, `PublicOutputProduced`, and `RunCompleted(Completed)` only after
+- [x] Implement framework-owned public-output render node.
+- [x] Produce `PublicOutputReceipt`, `PublicOutputProduced`, and `RunCompleted(Completed)` only after
       public-output evidence exists.
-- [ ] Make rendered JSON a cache, not authority.
-- [ ] Add render failure/resume tests.
-- [ ] Validation: `nix run .#test`.
+- [x] Make rendered JSON a cache, not authority.
+- [x] Add render failure/resume tests.
+- [x] Validation: `nix run .#test`.
 
 ### Commit 29: `kernel runtime add retention event sourcing`
 

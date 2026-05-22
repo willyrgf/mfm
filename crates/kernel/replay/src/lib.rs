@@ -2075,39 +2075,91 @@ pub mod v1 {
             let fixture = Fixture::new();
             let mut stream = fixture.stream.clone();
             let node = fixture.envelope.spec.nodes[0].clone();
-            append_payload_to_stream(
+            let cell = fixture.envelope.spec.cells[0].clone();
+            let artifact_id = artifact(0xf2);
+            let content_digest = content(0xf3);
+            append_payloads_to_stream(
                 &mut stream,
                 "bad-public-output",
-                KernelEventPayload::PublicOutputProduced(events::PublicOutputProduced {
-                    spec_hash: fixture.envelope.spec_hash.clone(),
-                    node_id: node.node_id,
-                    attempt_id: fixture.attempt_id.clone(),
-                    receipt_cell_id: node.output_cell,
-                    public_schema_id: fixture
-                        .envelope
-                        .spec
-                        .public_outputs
-                        .public_schema_id
-                        .clone(),
-                    output_spec_digest: content(0xf2),
-                    cells: Vec::new(),
-                    rendered_digest: content(0xf3),
-                    rendered_artifact_id: None,
-                    renderer_descriptor_id: fixture
-                        .envelope
-                        .spec
-                        .public_outputs
-                        .renderer_descriptor
-                        .descriptor_id
-                        .clone(),
-                }),
+                vec![
+                    KernelEventPayload::CellProduced(events::CellProduced {
+                        spec_hash: fixture.envelope.spec_hash.clone(),
+                        node_id: node.node_id.clone(),
+                        cell_id: node.output_cell.clone(),
+                        scope_id: cell.scope_id.clone(),
+                        attempt_id: fixture.attempt_id.clone(),
+                        semantic_type_id: cell.semantic_type_id.clone(),
+                        schema_id: cell.schema_id.clone(),
+                        value_lineage: cell.value_lineage.clone(),
+                        artifact_id: artifact_id.clone(),
+                        content_digest: content_digest.clone(),
+                        producer_state_kind: Some(node.state_kind.clone()),
+                        producer_state_version: Some(node.state_version.clone()),
+                    }),
+                    KernelEventPayload::PublicOutputProduced(events::PublicOutputProduced {
+                        spec_hash: fixture.envelope.spec_hash.clone(),
+                        node_id: node.node_id.clone(),
+                        attempt_id: fixture.attempt_id.clone(),
+                        receipt_cell_id: node.output_cell.clone(),
+                        public_schema_id: fixture
+                            .envelope
+                            .spec
+                            .public_outputs
+                            .public_schema_id
+                            .clone(),
+                        output_spec_digest: content(0xf4),
+                        cells: vec![events::NamedTypedCellRef {
+                            public_field_path: fixture.envelope.spec.public_outputs.outputs[0]
+                                .public_field_path
+                                .clone(),
+                            cell_id: cell.cell_id.clone(),
+                            producer: cell.producer.clone(),
+                            scope_id: cell.scope_id.clone(),
+                            semantic_type_id: cell.semantic_type_id.clone(),
+                            schema_id: cell.schema_id.clone(),
+                            value_lineage: cell.value_lineage.clone(),
+                            content_digest: content_digest.clone(),
+                            artifact_id: artifact_id.clone(),
+                        }],
+                        rendered_digest: content(0xf5),
+                        rendered_artifact_id: None,
+                        renderer_descriptor_id: fixture
+                            .envelope
+                            .spec
+                            .public_outputs
+                            .renderer_descriptor
+                            .descriptor_id
+                            .clone(),
+                    }),
+                    KernelEventPayload::StateAttemptCompleted(events::StateAttemptCompleted {
+                        spec_hash: fixture.envelope.spec_hash.clone(),
+                        node_id: node.node_id.clone(),
+                        attempt_id: fixture.attempt_id.clone(),
+                        output_cell_id: node.output_cell.clone(),
+                    }),
+                ],
             );
 
             assert_eq!(
                 ReplayBroker::from_run_stream(
                     fixture.envelope.clone(),
                     &stream,
-                    fixture.authority(),
+                    ReplayAuthority::from_certified_spec(
+                        &fixture.envelope,
+                        vec![fixture.runner.clone()],
+                        vec![fixture.adapter_exec.clone()],
+                        {
+                            let mut artifacts = fixture.artifacts.clone();
+                            artifacts.push(stored_artifact(
+                                artifact_id,
+                                content_digest,
+                                Some(cell.schema_id),
+                                ArtifactRole::StateOutput,
+                                Some(node.node_id.clone()),
+                            ));
+                            artifacts
+                        },
+                    ),
                 )
                 .expect_err("uncertified public output")
                 .kind,
@@ -2834,13 +2886,21 @@ pub mod v1 {
             commit_key: &str,
             payload: KernelEventPayload,
         ) {
+            append_payloads_to_stream(stream, commit_key, vec![payload]);
+        }
+
+        fn append_payloads_to_stream(
+            stream: &mut Vec<KernelEventEnvelope>,
+            commit_key: &str,
+            payloads: Vec<KernelEventPayload>,
+        ) {
             let seq = stream.last().expect("non-empty stream").seq();
             let seq = StreamSeq::new(seq.as_u64() + 1).expect("next sequence");
             let request = TypedCommitRequest {
                 run_id: stream[0].run_id().clone(),
                 expected_next_seq: seq,
                 commit_key: CommitKey::new(commit_key).expect("commit key"),
-                payloads: vec![payload],
+                payloads,
                 required_artifacts: Vec::new(),
                 preconditions: CommitPreconditions::default(),
             };

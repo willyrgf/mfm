@@ -1,10 +1,12 @@
 use mfm_events::v1::{self as events, side_effect, ArtifactRole, KernelEventPayload};
 use mfm_ids::{
     AdapterKind, AdapterVersion, ArtifactId, AttemptId, CapabilityKind, CapabilityVersion, CellId,
-    ContentDigest, DigestAlgorithm, DigestBytes, LoweringVersion, NodeId, RunId, SchemaId, ScopeId,
-    SeedId, SemanticTypeId, SpecHash, SpecVersion, StateKind, StateVersion,
+    ContentDigest, DescriptorId, DigestAlgorithm, DigestBytes, LoweringVersion, NodeId, RunId,
+    SchemaId, ScopeId, SeedId, SemanticTypeId, SpecHash, SpecVersion, StateKind, StateVersion,
 };
-use mfm_spec::v1::{CanonicalizerIdentity, MediaType, ValueLineageRef};
+use mfm_spec::v1::{
+    CanonicalizerIdentity, CellProducer, MediaType, PublicFieldPath, ValueLineageRef,
+};
 use mfm_store::v1::{
     build_committed_batch, ArtifactEvidenceRef, CellTerminalProjection, CommitKey, CommitOutcome,
     CommitPreconditions, InMemoryTypedRunStore, ProjectionSnapshot, RequiredRunState, StoreError,
@@ -39,6 +41,10 @@ fn attempt_id(byte: u8) -> AttemptId {
 
 fn node_id(byte: u8) -> NodeId {
     NodeId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_bytes(byte))
+}
+
+fn descriptor_id(byte: u8) -> DescriptorId {
+    DescriptorId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_bytes(byte))
 }
 
 fn cell_id(byte: u8) -> CellId {
@@ -164,6 +170,33 @@ fn terminal_cell_commit_payloads(
         cell_produced(artifact_id, digest),
         state_attempt_completed(),
     ]
+}
+
+fn public_output_produced(artifact_id: ArtifactId, digest: ContentDigest) -> KernelEventPayload {
+    KernelEventPayload::PublicOutputProduced(events::PublicOutputProduced {
+        spec_hash: spec_hash(1),
+        node_id: node_id(20),
+        attempt_id: attempt_id(23),
+        receipt_cell_id: cell_id(21),
+        public_schema_id: schema_id("mfm.test.public_output", 3),
+        output_spec_digest: content_digest(27),
+        cells: vec![events::NamedTypedCellRef {
+            public_field_path: PublicFieldPath::new("result").expect("field path"),
+            cell_id: cell_id(21),
+            producer: CellProducer::Node(node_id(20)),
+            scope_id: scope_id(22),
+            semantic_type_id: semantic_id("position", 24),
+            schema_id: schema_id("mfm.test.position", 25),
+            value_lineage: ValueLineageRef {
+                lineage_digest: content_digest(26),
+            },
+            content_digest: digest,
+            artifact_id,
+        }],
+        rendered_digest: content_digest(28),
+        rendered_artifact_id: None,
+        renderer_descriptor_id: descriptor_id(29),
+    })
 }
 
 fn event_artifact_ref(
@@ -955,6 +988,55 @@ fn attempt_terminal_and_cell_terminal_must_commit_together() {
         })
         .expect_err("terminal cell without completion rejects");
     assert!(matches!(cell_only, StoreError::ProjectionConflict { .. }));
+}
+
+#[test]
+fn public_output_must_commit_with_render_receipt_terminal() {
+    let run_id = run_id(67);
+    let artifact_id = artifact_id(68);
+    let artifact_digest = content_digest(69);
+    let mut store = InMemoryTypedRunStore::new();
+    store
+        .record_artifact_evidence(store_artifact_ref(
+            artifact_id.clone(),
+            artifact_digest.clone(),
+        ))
+        .expect("record terminal artifact");
+    store
+        .append_typed_run_commit(TypedCommitRequest {
+            run_id: run_id.clone(),
+            expected_next_seq: StreamSeq::FIRST,
+            commit_key: CommitKey::new("attempt-start").expect("commit key"),
+            payloads: vec![state_attempt_started()],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect("append attempt start");
+    store
+        .append_typed_run_commit(TypedCommitRequest {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&run_id),
+            commit_key: CommitKey::new("receipt-terminal").expect("commit key"),
+            payloads: terminal_cell_commit_payloads(artifact_id.clone(), artifact_digest.clone()),
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect("append receipt terminal");
+
+    let split_public_output = store
+        .append_typed_run_commit(TypedCommitRequest {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&run_id),
+            commit_key: CommitKey::new("split-public-output").expect("commit key"),
+            payloads: vec![public_output_produced(artifact_id, artifact_digest)],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect_err("public output split from terminal commit rejects");
+    assert!(matches!(
+        split_public_output,
+        StoreError::ProjectionConflict { .. }
+    ));
 }
 
 #[test]

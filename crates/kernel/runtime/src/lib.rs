@@ -12,7 +12,9 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use mfm_canonical::PlainCanonicalJsonBytes;
-use mfm_capabilities::{CapabilityDescriptor, CapabilitySetDescriptor};
+use mfm_capabilities::{
+    CapabilityDescriptor, CapabilitySetDescriptor, EffectSpec, ManagedPlatformWrite,
+};
 use mfm_events::v1 as events;
 use mfm_ids::{
     AdapterKind, AdapterVersion, ArtifactId, AttemptId, CapabilityKind, CapabilityVersion, CellId,
@@ -191,6 +193,12 @@ impl From<mfm_ids::IdentityError> for RuntimeError {
 impl From<mfm_spec::SpecError> for RuntimeError {
     fn from(error: mfm_spec::SpecError) -> Self {
         Self::SpecHash(error.to_string())
+    }
+}
+
+impl From<mfm_events::EventError> for RuntimeError {
+    fn from(error: mfm_events::EventError) -> Self {
+        Self::Identity(error.to_string())
     }
 }
 
@@ -424,7 +432,83 @@ impl CertifiedRuntimeSpec {
                 )));
             }
         }
+        self.validate_public_output_render_contract()?;
 
+        Ok(())
+    }
+
+    fn validate_public_output_render_contract(&self) -> Result<()> {
+        let public_outputs = &self.spec().public_outputs;
+        let output_spec_digest = public_outputs.digest()?;
+        let render_nodes = self
+            .nodes
+            .values()
+            .filter_map(|node| match &node.framework {
+                Some(spec::FrameworkNodeSpec::PublicOutputRender(render)) => Some((node, render)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if render_nodes.len() != 1 {
+            return Err(RuntimeError::InvalidSpec(format!(
+                "expected exactly one public-output render node, found {}",
+                render_nodes.len()
+            )));
+        }
+        let (node, render) = render_nodes[0];
+        if render.public_schema_id != public_outputs.public_schema_id
+            || render.output_spec_digest != output_spec_digest
+            || render.renderer_descriptor != public_outputs.renderer_descriptor
+            || render.required_cells != public_outputs.outputs
+        {
+            return Err(RuntimeError::InvalidSpec(format!(
+                "public-output render node {} does not match certified public outputs",
+                node.node_id
+            )));
+        }
+        let descriptor = self.state_descriptor_for_node(node)?;
+        let managed_effect = ManagedPlatformWrite::descriptor()
+            .map_err(|error| RuntimeError::InvalidSpec(error.to_string()))?;
+        if descriptor.name != "mfm.framework.render_public_outputs"
+            || descriptor.runner != "managed_platform_write"
+            || descriptor.effect_kind != managed_effect.kind
+            || descriptor.effect_class != managed_effect.class.as_str()
+            || descriptor.effect_name != managed_effect.name
+            || !descriptor.capabilities.capabilities.is_empty()
+        {
+            return Err(RuntimeError::InvalidSpec(format!(
+                "public-output render node {} is not bound to the framework renderer",
+                node.node_id
+            )));
+        }
+        let output_cell = self.cells.get(&node.output_cell).ok_or_else(|| {
+            RuntimeError::InvalidSpec(format!(
+                "public-output render node {} output cell {} is missing",
+                node.node_id, node.output_cell
+            ))
+        })?;
+        let receipt_schema_id = spec::public_output_receipt_schema_id()?;
+        if output_cell.schema_id != receipt_schema_id
+            || output_cell.terminal_policy != spec::CellTerminalPolicy::ProducedOnly
+            || output_cell.storage_policy != spec::StoragePolicy::PublicOutputArtifact
+            || output_cell.redaction_policy != spec::RedactionPolicy::Public
+        {
+            return Err(RuntimeError::InvalidSpec(format!(
+                "public-output render node {} output cell is not a public-output receipt",
+                node.node_id
+            )));
+        }
+        let input_cells = render
+            .required_cells
+            .iter()
+            .map(|cell| cell.cell_id.clone())
+            .collect::<Vec<_>>();
+        let expected_predecessors = self.predecessors_for_input_cells(&input_cells)?;
+        if node.deterministic_predecessors != expected_predecessors {
+            return Err(RuntimeError::InvalidSpec(format!(
+                "public-output render node {} predecessors do not match public cells",
+                node.node_id
+            )));
+        }
         Ok(())
     }
 
@@ -620,7 +704,13 @@ impl ErasedRunnerRegistry {
         &self,
         node: &spec::NodeSpec,
         descriptor: &spec::StateDescriptorIdentity,
-    ) -> Result<&ErasedRunnerBinding> {
+    ) -> Result<ErasedRunnerBinding> {
+        if matches!(
+            node.framework,
+            Some(spec::FrameworkNodeSpec::PublicOutputRender(_))
+        ) {
+            return framework_public_output_binding(node, descriptor);
+        }
         let binding = self.bindings.get(&node.descriptor_id).ok_or_else(|| {
             RuntimeError::RunnerBinding(format!(
                 "missing runner binding for node {} descriptor {}",
@@ -639,7 +729,7 @@ impl ErasedRunnerRegistry {
                 binding.factory_id, descriptor.runner, node.node_id
             )));
         }
-        Ok(binding)
+        Ok(binding.clone())
     }
 
     fn executables_for_spec(
@@ -658,6 +748,242 @@ impl ErasedRunnerRegistry {
             }
         }
         Ok(executables)
+    }
+}
+
+fn framework_public_output_binding(
+    node: &spec::NodeSpec,
+    descriptor: &spec::StateDescriptorIdentity,
+) -> Result<ErasedRunnerBinding> {
+    let Some(spec::FrameworkNodeSpec::PublicOutputRender(_)) = &node.framework else {
+        return Err(RuntimeError::RunnerBinding(format!(
+            "node {} is not a public-output render node",
+            node.node_id
+        )));
+    };
+    if descriptor.name != "mfm.framework.render_public_outputs" {
+        return Err(RuntimeError::RunnerBinding(format!(
+            "public-output render node {} has non-framework descriptor {}",
+            node.node_id, descriptor.name
+        )));
+    }
+    let factory_id = events::RunnerFactoryId::new(descriptor.runner.as_str())?;
+    ErasedRunnerBinding::new(
+        node.descriptor_id.clone(),
+        factory_id.clone(),
+        framework_public_output_executable(factory_id)?,
+        Arc::new(FrameworkPublicOutputRunner),
+    )
+}
+
+fn framework_public_output_executable(
+    factory_id: events::RunnerFactoryId,
+) -> Result<events::ExecutableIdentity> {
+    let package_digest = content_digest_json(serde_json::json!({
+        "crate": "mfm-runtime",
+        "runner": "framework_public_output",
+        "version": env!("CARGO_PKG_VERSION"),
+    }))?;
+    let binary_digest = content_digest_json(serde_json::json!({
+        "crate": "mfm-runtime",
+        "factory_id": factory_id.as_str(),
+        "runner": "framework_public_output",
+        "version": env!("CARGO_PKG_VERSION"),
+    }))?;
+    Ok(events::ExecutableIdentity {
+        factory_id,
+        source_revision: events::SourceRevision::new("mfm-runtime-built-in")?,
+        cargo_package_name: events::PackageName::new("mfm-runtime")?,
+        cargo_package_version: events::PackageVersion::new(env!("CARGO_PKG_VERSION"))?,
+        cargo_package_digest: package_digest,
+        binary_digest,
+        nix_derivation_hash: None,
+        nix_output_hash: None,
+    })
+}
+
+struct FrameworkPublicOutputRunner;
+
+impl ErasedNodeRunner for FrameworkPublicOutputRunner {
+    fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
+        Box::pin(async move { render_public_output(ctx) })
+    }
+}
+
+fn render_public_output(ctx: ErasedRunCtx<'_>) -> Result<ErasedRunnerOutput> {
+    let Some(spec::FrameworkNodeSpec::PublicOutputRender(render)) = &ctx.node.framework else {
+        return Err(RuntimeError::InvalidRunnerOutput(format!(
+            "node {} is not a public-output render node",
+            ctx.node.node_id
+        )));
+    };
+    let mut cells = Vec::with_capacity(render.required_cells.len());
+    for required in &render.required_cells {
+        let Some(store::CellTerminalProjection::Produced {
+            artifact_id,
+            content_digest,
+            ..
+        }) = ctx.projections.cell_terminal(&required.cell_id)
+        else {
+            return Err(RuntimeError::InvalidRunnerOutput(format!(
+                "public-output render node {} required incomplete cell {}",
+                ctx.node.node_id, required.cell_id
+            )));
+        };
+        cells.push(events::NamedTypedCellRef {
+            public_field_path: required.public_field_path.clone(),
+            cell_id: required.cell_id.clone(),
+            producer: required.producer.clone(),
+            scope_id: required.scope_id.clone(),
+            semantic_type_id: required.semantic_type_id.clone(),
+            schema_id: required.schema_id.clone(),
+            value_lineage: required.value_lineage.clone(),
+            content_digest: content_digest.clone(),
+            artifact_id: artifact_id.clone(),
+        });
+    }
+    let rendered_digest = public_output_rendered_digest(render, &cells)?;
+    let rendered_artifact_id = None;
+    let receipt_digest = public_output_receipt_digest(
+        render,
+        &cells,
+        &rendered_digest,
+        rendered_artifact_id.as_ref(),
+    )?;
+    let receipt_artifact_id =
+        ArtifactId::from_digest(receipt_digest.algorithm(), *receipt_digest.digest());
+    let receipt_artifact = store::ArtifactEvidenceRef {
+        artifact_id: receipt_artifact_id.clone(),
+        digest: receipt_digest.clone(),
+        byte_len: public_output_receipt_len(
+            render,
+            &cells,
+            &rendered_digest,
+            rendered_artifact_id.as_ref(),
+        )?,
+        media_type: spec::MediaType::new("application/json")?,
+        schema_id: Some(ctx.output_cell.schema_id.clone()),
+        semantic_type_id: Some(ctx.output_cell.semantic_type_id.clone()),
+        producer_node_id: Some(ctx.node.node_id.clone()),
+        producer_seed_id: None,
+        artifact_role: events::ArtifactRole::StateOutput,
+    };
+    Ok(ErasedRunnerOutput {
+        payloads: vec![
+            events::KernelEventPayload::CellProduced(events::CellProduced {
+                spec_hash: ctx.spec_hash.clone(),
+                node_id: ctx.node.node_id.clone(),
+                cell_id: ctx.node.output_cell.clone(),
+                scope_id: ctx.output_cell.scope_id.clone(),
+                attempt_id: ctx.attempt_id.clone(),
+                semantic_type_id: ctx.output_cell.semantic_type_id.clone(),
+                schema_id: ctx.output_cell.schema_id.clone(),
+                value_lineage: ctx.output_cell.value_lineage.clone(),
+                artifact_id: receipt_artifact_id,
+                content_digest: receipt_digest,
+                producer_state_kind: Some(ctx.node.state_kind.clone()),
+                producer_state_version: Some(ctx.node.state_version.clone()),
+            }),
+            events::KernelEventPayload::PublicOutputProduced(events::PublicOutputProduced {
+                spec_hash: ctx.spec_hash.clone(),
+                node_id: ctx.node.node_id.clone(),
+                attempt_id: ctx.attempt_id.clone(),
+                receipt_cell_id: ctx.node.output_cell.clone(),
+                public_schema_id: render.public_schema_id.clone(),
+                output_spec_digest: render.output_spec_digest.clone(),
+                cells,
+                rendered_digest,
+                rendered_artifact_id,
+                renderer_descriptor_id: render.renderer_descriptor.descriptor_id.clone(),
+            }),
+            events::KernelEventPayload::StateAttemptCompleted(events::StateAttemptCompleted {
+                spec_hash: ctx.spec_hash.clone(),
+                node_id: ctx.node.node_id.clone(),
+                attempt_id: ctx.attempt_id.clone(),
+                output_cell_id: ctx.node.output_cell.clone(),
+            }),
+        ],
+        required_artifacts: vec![receipt_artifact],
+    })
+}
+
+fn public_output_rendered_digest(
+    render: &spec::PublicOutputRenderNodeSpec,
+    cells: &[events::NamedTypedCellRef],
+) -> Result<ContentDigest> {
+    content_digest_json(serde_json::json!({
+        "cells": cells.iter().map(public_output_cell_json).collect::<Vec<_>>(),
+        "output_spec_digest": render.output_spec_digest.as_str(),
+        "public_schema_id": render.public_schema_id.as_str(),
+        "renderer_descriptor_id": render.renderer_descriptor.descriptor_id.as_str(),
+    }))
+}
+
+fn public_output_receipt_digest(
+    render: &spec::PublicOutputRenderNodeSpec,
+    cells: &[events::NamedTypedCellRef],
+    rendered_digest: &ContentDigest,
+    rendered_artifact_id: Option<&ArtifactId>,
+) -> Result<ContentDigest> {
+    Ok(
+        public_output_receipt_json(render, cells, rendered_digest, rendered_artifact_id)?
+            .content_digest(),
+    )
+}
+
+fn public_output_receipt_len(
+    render: &spec::PublicOutputRenderNodeSpec,
+    cells: &[events::NamedTypedCellRef],
+    rendered_digest: &ContentDigest,
+    rendered_artifact_id: Option<&ArtifactId>,
+) -> Result<u64> {
+    let len = public_output_receipt_json(render, cells, rendered_digest, rendered_artifact_id)?
+        .as_bytes()
+        .len();
+    u64::try_from(len)
+        .map_err(|_| RuntimeError::Canonical("public output receipt length overflowed".to_owned()))
+}
+
+fn public_output_receipt_json(
+    render: &spec::PublicOutputRenderNodeSpec,
+    cells: &[events::NamedTypedCellRef],
+    rendered_digest: &ContentDigest,
+    rendered_artifact_id: Option<&ArtifactId>,
+) -> Result<PlainCanonicalJsonBytes> {
+    canonical_json(serde_json::json!({
+        "cells": cells.iter().map(public_output_cell_json).collect::<Vec<_>>(),
+        "output_spec_digest": render.output_spec_digest.as_str(),
+        "public_schema_id": render.public_schema_id.as_str(),
+        "rendered_artifact_id": rendered_artifact_id.map(ArtifactId::as_str),
+        "rendered_digest": rendered_digest.as_str(),
+        "renderer_descriptor_id": render.renderer_descriptor.descriptor_id.as_str(),
+    }))
+}
+
+fn public_output_cell_json(cell: &events::NamedTypedCellRef) -> serde_json::Value {
+    serde_json::json!({
+        "artifact_id": cell.artifact_id.as_str(),
+        "cell_id": cell.cell_id.as_str(),
+        "content_digest": cell.content_digest.as_str(),
+        "producer": cell_producer_json(&cell.producer),
+        "public_field_path": cell.public_field_path.as_str(),
+        "schema_id": cell.schema_id.as_str(),
+        "scope_id": cell.scope_id.as_str(),
+        "semantic_type_id": cell.semantic_type_id.as_str(),
+        "value_lineage": cell.value_lineage.lineage_digest.as_str(),
+    })
+}
+
+fn cell_producer_json(producer: &spec::CellProducer) -> serde_json::Value {
+    match producer {
+        spec::CellProducer::Seed(seed_id) => serde_json::json!({
+            "kind": "seed",
+            "seed_id": seed_id.as_str(),
+        }),
+        spec::CellProducer::Node(node_id) => serde_json::json!({
+            "kind": "node",
+            "node_id": node_id.as_str(),
+        }),
     }
 }
 
@@ -957,11 +1283,12 @@ impl SerialTypedScheduler {
         run_id: &RunId,
     ) -> Result<SchedulerStatus> {
         let view = RuntimeRunView::from_store(runtime_spec, run_id, store)?;
-        if view
-            .projections
-            .public_output(&runtime_spec.spec().public_outputs.public_schema_id)
-            .is_some()
+        if let Some(completion) = public_output_completion_evidence(runtime_spec, &view.projections)
         {
+            if view.projections.run_state(run_id) == store::RunState::Started {
+                self.complete_run(store, runtime_spec, run_id, completion)?;
+                return Ok(SchedulerStatus::Advanced);
+            }
             return Ok(SchedulerStatus::PublicOutputProjected);
         }
         let Some(runnable) = next_runnable_node(runtime_spec, &view)? else {
@@ -1099,6 +1426,58 @@ impl SerialTypedScheduler {
         };
         store.append_typed_run_commit(terminal_request)?;
         Ok(())
+    }
+
+    fn complete_run<S: store::TypedRunEventStore + ?Sized>(
+        &self,
+        store: &mut S,
+        runtime_spec: &CertifiedRuntimeSpec,
+        run_id: &RunId,
+        completion: events::PublicOutputCompletionEvidence,
+    ) -> Result<()> {
+        let public_output_key = store::LogicalEventKey::new(format!(
+            "public_output:{}",
+            completion.public_output_schema_id
+        ))?;
+        let request = store::TypedCommitRequest {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(run_id),
+            commit_key: store::CommitKey::new(format!(
+                "run-completed:{}:{}",
+                completion.public_output_schema_id, completion.public_output_event_id
+            ))?,
+            payloads: vec![events::KernelEventPayload::RunCompleted(
+                events::RunCompleted {
+                    run_id: run_id.clone(),
+                    spec_hash: runtime_spec.spec_hash().clone(),
+                    outcome: events::RunCompletionOutcome::Completed(completion),
+                },
+            )],
+            required_artifacts: Vec::new(),
+            preconditions: store::CommitPreconditions {
+                required_run_state: store::RequiredRunState::NotCompleted,
+                required_present_logical_keys: vec![public_output_key],
+                ..store::CommitPreconditions::default()
+            },
+        };
+        store.append_typed_run_commit(request)?;
+        Ok(())
+    }
+}
+
+fn public_output_completion_evidence(
+    runtime_spec: &CertifiedRuntimeSpec,
+    projections: &store::ProjectionSnapshot,
+) -> Option<events::PublicOutputCompletionEvidence> {
+    let public_schema_id = &runtime_spec.spec().public_outputs.public_schema_id;
+    match projections.public_output(public_schema_id) {
+        Some(store::PublicOutputProjection::Produced { event_id, .. }) => {
+            Some(events::PublicOutputCompletionEvidence {
+                public_output_schema_id: public_schema_id.clone(),
+                public_output_event_id: event_id.clone(),
+            })
+        }
+        Some(store::PublicOutputProjection::RenderFailed { .. }) | None => None,
     }
 }
 
@@ -1908,6 +2287,7 @@ fn validate_historical_run_stream(
     let mut side_effect_ledgers =
         BTreeMap::<events::SideEffectLedgerKey, HistoricalSideEffectLedger>::new();
     let mut seen_run_started = false;
+    let mut produced_public_output = None::<events::PublicOutputCompletionEvidence>;
     for event in stream {
         if !seen_run_started
             && !matches!(event.payload(), events::KernelEventPayload::RunStarted(_))
@@ -1928,8 +2308,14 @@ fn validate_historical_run_stream(
                     available_cells.insert(cell_id);
                 }
             }
-            events::KernelEventPayload::RunCompleted(_)
-            | events::KernelEventPayload::RetentionRefsAppended(_)
+            events::KernelEventPayload::RunCompleted(payload) => {
+                validate_historical_run_completed(
+                    runtime_spec,
+                    payload,
+                    produced_public_output.as_ref(),
+                )?;
+            }
+            events::KernelEventPayload::RetentionRefsAppended(_)
             | events::KernelEventPayload::RetentionManifestProjected(_) => {}
             events::KernelEventPayload::StateAttemptStarted(payload) => {
                 let node = runtime_spec.node(&payload.node_id).ok_or_else(|| {
@@ -2114,6 +2500,10 @@ fn validate_historical_run_stream(
                     node,
                     payload,
                 )?;
+                produced_public_output = Some(events::PublicOutputCompletionEvidence {
+                    public_output_schema_id: payload.public_schema_id.clone(),
+                    public_output_event_id: event.event_id().clone(),
+                });
             }
             events::KernelEventPayload::PublicOutputRenderFailed(payload) => {
                 let node = runtime_spec.node(&payload.node_id).ok_or_else(|| {
@@ -2129,7 +2519,7 @@ fn validate_historical_run_stream(
                     &payload.renderer_descriptor_id,
                 )
                 .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))?;
-                validate_historical_public_output_failed(projections, event, payload)?;
+                validate_historical_public_output_failed(projections, payload)?;
             }
             events::KernelEventPayload::SideEffectIntentPersisted(_)
             | events::KernelEventPayload::SideEffectClaimed(_)
@@ -2405,6 +2795,7 @@ fn validate_atomic_terminal_pairs(
 ) -> Result<()> {
     let mut completions = BTreeSet::new();
     let mut terminal_cells = BTreeSet::new();
+    let mut public_outputs = BTreeSet::new();
     for event in stream {
         match event.payload() {
             events::KernelEventPayload::StateAttemptCompleted(payload) => {
@@ -2452,6 +2843,29 @@ fn validate_atomic_terminal_pairs(
                     payload.cell_id.clone(),
                 ));
             }
+            events::KernelEventPayload::PublicOutputProduced(payload) => {
+                let node = runtime_spec.node(&payload.node_id).ok_or_else(|| {
+                    RuntimeError::InvalidRunStream(format!(
+                        "public output produced by uncertified node {}",
+                        payload.node_id
+                    ))
+                })?;
+                if !matches!(
+                    node.framework,
+                    Some(spec::FrameworkNodeSpec::PublicOutputRender(_))
+                ) {
+                    return Err(RuntimeError::InvalidRunStream(format!(
+                        "public output produced by non-render node {}",
+                        payload.node_id
+                    )));
+                }
+                public_outputs.insert((
+                    event.seq(),
+                    payload.node_id.clone(),
+                    payload.attempt_id.clone(),
+                    payload.receipt_cell_id.clone(),
+                ));
+            }
             _ => {}
         }
     }
@@ -2474,6 +2888,20 @@ fn validate_atomic_terminal_pairs(
             return Err(RuntimeError::InvalidRunStream(format!(
                 "terminal cell {} for node {} lacks StateAttemptCompleted in the same commit",
                 cell_id, node_id
+            )));
+        }
+    }
+    for (seq, node_id, attempt_id, receipt_cell_id) in &public_outputs {
+        let terminal = (
+            *seq,
+            node_id.clone(),
+            attempt_id.clone(),
+            receipt_cell_id.clone(),
+        );
+        if !terminal_cells.contains(&terminal) || !completions.contains(&terminal) {
+            return Err(RuntimeError::InvalidRunStream(format!(
+                "public output for node {} attempt {} was split from receipt terminal cell {}",
+                node_id, attempt_id, receipt_cell_id
             )));
         }
     }
@@ -2769,6 +3197,54 @@ fn validate_historical_public_output_produced(
             }
         }
     }
+    let Some(spec::FrameworkNodeSpec::PublicOutputRender(render)) = &node.framework else {
+        return Err(RuntimeError::InvalidRunStream(format!(
+            "public output for node {} is not backed by a render node",
+            node.node_id
+        )));
+    };
+    let expected_rendered_digest = public_output_rendered_digest(render, &payload.cells)?;
+    if payload.rendered_digest != expected_rendered_digest {
+        return Err(RuntimeError::InvalidRunStream(format!(
+            "public output for node {} carries a rendered digest that does not match certified cells",
+            node.node_id
+        )));
+    }
+    let expected_receipt_digest = public_output_receipt_digest(
+        render,
+        &payload.cells,
+        &expected_rendered_digest,
+        payload.rendered_artifact_id.as_ref(),
+    )?;
+    let expected_receipt_artifact_id = ArtifactId::from_digest(
+        expected_receipt_digest.algorithm(),
+        *expected_receipt_digest.digest(),
+    );
+    let output_cell = runtime_spec.cell(&node.output_cell).ok_or_else(|| {
+        RuntimeError::InvalidRunStream(format!(
+            "public output render node {} output cell {} is missing",
+            node.node_id, node.output_cell
+        ))
+    })?;
+    let receipt_schema_id = spec::public_output_receipt_schema_id()?;
+    match projections.cell_terminal(&node.output_cell) {
+        Some(store::CellTerminalProjection::Produced {
+            schema_id,
+            semantic_type_id,
+            artifact_id,
+            content_digest,
+            ..
+        }) if schema_id == &receipt_schema_id
+            && semantic_type_id == &output_cell.semantic_type_id
+            && artifact_id == &expected_receipt_artifact_id
+            && content_digest == &expected_receipt_digest => {}
+        _ => {
+            return Err(RuntimeError::InvalidRunStream(format!(
+                "public output for node {} has no matching terminal receipt cell",
+                node.node_id
+            )));
+        }
+    }
     match projections.public_output(&payload.public_schema_id) {
         Some(store::PublicOutputProjection::Produced {
             event_id,
@@ -2787,9 +3263,34 @@ fn validate_historical_public_output_produced(
     }
 }
 
+fn validate_historical_run_completed(
+    runtime_spec: &CertifiedRuntimeSpec,
+    payload: &events::RunCompleted,
+    produced_public_output: Option<&events::PublicOutputCompletionEvidence>,
+) -> Result<()> {
+    let events::RunCompletionOutcome::Completed(completion) = &payload.outcome else {
+        return Ok(());
+    };
+    if completion.public_output_schema_id != runtime_spec.spec().public_outputs.public_schema_id {
+        return Err(RuntimeError::InvalidRunStream(format!(
+            "RunCompleted references public schema {} outside certified public outputs",
+            completion.public_output_schema_id
+        )));
+    }
+    match produced_public_output {
+        Some(produced) if produced == completion => Ok(()),
+        Some(_) => Err(RuntimeError::InvalidRunStream(
+            "RunCompleted public-output evidence does not match preceding PublicOutputProduced"
+                .to_owned(),
+        )),
+        None => Err(RuntimeError::InvalidRunStream(
+            "RunCompleted appeared before PublicOutputProduced".to_owned(),
+        )),
+    }
+}
+
 fn validate_historical_public_output_failed(
     projections: &store::ProjectionSnapshot,
-    event: &store::KernelEventEnvelope,
     payload: &events::PublicOutputRenderFailed,
 ) -> Result<()> {
     match require_projected_attempt(
@@ -2807,13 +3308,10 @@ fn validate_historical_public_output_failed(
         }
     }
     match projections.public_output(&payload.public_schema_id) {
-        Some(store::PublicOutputProjection::RenderFailed { event_id, .. })
-            if event_id == event.event_id() =>
-        {
-            Ok(())
-        }
+        Some(store::PublicOutputProjection::Produced { .. })
+        | Some(store::PublicOutputProjection::RenderFailed { .. }) => Ok(()),
         _ => Err(RuntimeError::InvalidRunStream(format!(
-            "public output failure projection for schema {} does not match authoritative event",
+            "public output failure for schema {} is not reflected in public-output projection",
             payload.public_schema_id
         ))),
     }
@@ -3528,6 +4026,10 @@ fn canonical_json(value: serde_json::Value) -> Result<PlainCanonicalJsonBytes> {
         .map_err(|error| RuntimeError::Canonical(error.to_string()))
 }
 
+fn content_digest_json(value: serde_json::Value) -> Result<ContentDigest> {
+    Ok(canonical_json(value)?.content_digest())
+}
+
 fn config_ref_key(config_ref: &spec::ConfigRef) -> String {
     format!("{}:{}", config_ref.schema_id, config_ref.digest)
 }
@@ -3537,8 +4039,8 @@ mod tests {
     use super::*;
     use mfm_capabilities::CapabilityRole;
     use mfm_ids::{
-        DigestBytes, EffectKind, EffectVersion, ScopeId, SeedId, SemanticTypeId, StateKind,
-        StateVersion,
+        DigestBytes, EffectKind, EffectVersion, EventId, ScopeId, SeedId, SemanticTypeId,
+        StateKind, StateVersion,
     };
     use mfm_store::v1::{TypedProjectionRead, TypedRunEventStore};
 
@@ -3566,6 +4068,8 @@ mod tests {
         seed_ref: events::SeedCellRef,
         descriptor_a: DescriptorId,
         descriptor_b: DescriptorId,
+        render_node: NodeId,
+        render_cell: CellId,
         cell_a: CellId,
         cell_b: CellId,
         cap_kind: CapabilityKind,
@@ -3711,6 +4215,135 @@ mod tests {
             .is_some());
     }
 
+    #[tokio::test]
+    async fn scheduler_completes_run_after_public_output_evidence() {
+        let fixture = fixture();
+        let scheduler = SerialTypedScheduler::new(registered_fixture_runners(&fixture));
+        let mut store = store::InMemoryTypedRunStore::new();
+        scheduler
+            .start_run(
+                &mut store,
+                &fixture.runtime_spec,
+                fixture.run_id.clone(),
+                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
+            )
+            .expect("start run");
+
+        assert_eq!(
+            scheduler
+                .drive_until_blocked(&mut store, &fixture.runtime_spec, &fixture.run_id)
+                .await
+                .expect("drive to public output"),
+            SchedulerStatus::PublicOutputProjected
+        );
+        assert_eq!(
+            store.projection_snapshot().run_state(&fixture.run_id),
+            store::RunState::Completed
+        );
+        assert!(store
+            .projection_snapshot()
+            .cell_terminal(&fixture.render_cell)
+            .is_some());
+
+        let stream = store.load_run_stream(&fixture.run_id);
+        let public_output_pos = stream
+            .iter()
+            .position(|event| {
+                matches!(
+                    event.payload(),
+                    events::KernelEventPayload::PublicOutputProduced(_)
+                )
+            })
+            .expect("public output produced");
+        let completed_pos = stream
+            .iter()
+            .position(|event| {
+                matches!(event.payload(), events::KernelEventPayload::RunCompleted(_))
+            })
+            .expect("run completed");
+        assert!(public_output_pos < completed_pos);
+
+        let public_event = &stream[public_output_pos];
+        let public_payload = match public_event.payload() {
+            events::KernelEventPayload::PublicOutputProduced(payload) => payload,
+            _ => unreachable!("checked above"),
+        };
+        assert_eq!(public_payload.node_id, fixture.render_node);
+        assert_eq!(public_payload.receipt_cell_id, fixture.render_cell);
+        assert!(public_payload.rendered_artifact_id.is_none());
+
+        let completed_payload = match stream[completed_pos].payload() {
+            events::KernelEventPayload::RunCompleted(payload) => payload,
+            _ => unreachable!("checked above"),
+        };
+        assert_eq!(
+            completed_payload.outcome,
+            events::RunCompletionOutcome::Completed(events::PublicOutputCompletionEvidence {
+                public_output_schema_id: fixture
+                    .runtime_spec
+                    .spec()
+                    .public_outputs
+                    .public_schema_id
+                    .clone(),
+                public_output_event_id: public_event.event_id().clone(),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn public_output_render_failure_resumes_and_completes() {
+        let fixture = fixture();
+        let scheduler = SerialTypedScheduler::new(registered_fixture_runners(&fixture));
+        let mut store = store::InMemoryTypedRunStore::new();
+        scheduler
+            .start_run(
+                &mut store,
+                &fixture.runtime_spec,
+                fixture.run_id.clone(),
+                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
+            )
+            .expect("start run");
+        scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("drive a");
+        scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("drive b");
+        let render_node = node_by_output(&fixture, &fixture.render_cell);
+        let failed_attempt = append_attempt_start(&mut store, &fixture, render_node, 1);
+        append_public_output_render_failure(&mut store, &fixture, render_node, &failed_attempt);
+        assert!(matches!(
+            store
+                .projection_snapshot()
+                .public_output(&fixture.runtime_spec.spec().public_outputs.public_schema_id),
+            Some(store::PublicOutputProjection::RenderFailed { .. })
+        ));
+
+        assert_eq!(
+            scheduler
+                .drive_until_blocked(&mut store, &fixture.runtime_spec, &fixture.run_id)
+                .await
+                .expect("retry render"),
+            SchedulerStatus::PublicOutputProjected
+        );
+        assert_eq!(
+            attempt_started_count(&store, &fixture.run_id, &fixture.render_node),
+            2
+        );
+        assert_eq!(
+            store.projection_snapshot().run_state(&fixture.run_id),
+            store::RunState::Completed
+        );
+        assert!(matches!(
+            store
+                .projection_snapshot()
+                .public_output(&fixture.runtime_spec.spec().public_outputs.public_schema_id),
+            Some(store::PublicOutputProjection::Produced { .. })
+        ));
+    }
+
     #[test]
     fn certified_runtime_spec_rejects_hash_mismatch() {
         let fixture = fixture();
@@ -3719,6 +4352,81 @@ mod tests {
         assert!(matches!(
             CertifiedRuntimeSpec::new(envelope),
             Err(RuntimeError::SpecHash(_))
+        ));
+    }
+
+    #[test]
+    fn certified_runtime_spec_requires_framework_public_output_render_node() {
+        let fixture = fixture();
+        let mut envelope = fixture.runtime_spec.envelope().clone();
+        envelope.spec.nodes.retain(|node| {
+            !matches!(
+                node.framework,
+                Some(spec::FrameworkNodeSpec::PublicOutputRender(_))
+            )
+        });
+        let envelope =
+            spec::CertifiedSpecEnvelope::new(envelope.spec, envelope.audit).expect("rehash");
+        assert!(matches!(
+            CertifiedRuntimeSpec::new(envelope),
+            Err(RuntimeError::InvalidSpec(message))
+                if message.contains("public-output render node")
+        ));
+    }
+
+    #[tokio::test]
+    async fn replay_rejects_run_completed_without_public_output_evidence() {
+        let fixture = fixture();
+        let scheduler = SerialTypedScheduler::new(registered_fixture_runners(&fixture));
+        let mut store = store::InMemoryTypedRunStore::new();
+        scheduler
+            .start_run(
+                &mut store,
+                &fixture.runtime_spec,
+                fixture.run_id.clone(),
+                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
+            )
+            .expect("start run");
+        store
+            .append_typed_run_commit(store::TypedCommitRequest {
+                run_id: fixture.run_id.clone(),
+                expected_next_seq: store.expected_next_seq(&fixture.run_id),
+                commit_key: store::CommitKey::new("forged-complete-without-public-output")
+                    .expect("commit key"),
+                payloads: vec![events::KernelEventPayload::RunCompleted(
+                    events::RunCompleted {
+                        run_id: fixture.run_id.clone(),
+                        spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                        outcome: events::RunCompletionOutcome::Completed(
+                            events::PublicOutputCompletionEvidence {
+                                public_output_schema_id: fixture
+                                    .runtime_spec
+                                    .spec()
+                                    .public_outputs
+                                    .public_schema_id
+                                    .clone(),
+                                public_output_event_id: EventId::from_digest(
+                                    DigestAlgorithm::Sha256JcsV1,
+                                    D9,
+                                ),
+                            },
+                        ),
+                    },
+                )],
+                required_artifacts: Vec::new(),
+                preconditions: store::CommitPreconditions {
+                    required_run_state: store::RequiredRunState::NotCompleted,
+                    ..store::CommitPreconditions::default()
+                },
+            })
+            .expect("append forged completion");
+
+        assert!(matches!(
+            scheduler
+                .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+                .await,
+            Err(RuntimeError::InvalidRunStream(message))
+                if message.contains("RunCompleted appeared before PublicOutputProduced")
         ));
     }
 
@@ -4069,57 +4777,109 @@ mod tests {
                 artifact_role: events::ArtifactRole::StateOutput,
             })
             .expect("record source artifact");
+        let forged_attempt = append_attempt_start(&mut store, &fixture, &non_render_node, 1);
+        let output_cell = fixture
+            .runtime_spec
+            .cell(&non_render_node.output_cell)
+            .expect("non-render output")
+            .clone();
+        let receipt_artifact = artifact(0xe3);
+        let receipt_digest = content(0xe4);
+        store
+            .record_artifact_evidence(store::ArtifactEvidenceRef {
+                artifact_id: receipt_artifact.clone(),
+                digest: receipt_digest.clone(),
+                byte_len: 10,
+                media_type: spec::MediaType::new("application/json").expect("media"),
+                schema_id: Some(output_cell.schema_id.clone()),
+                semantic_type_id: Some(output_cell.semantic_type_id.clone()),
+                producer_node_id: Some(non_render_node.node_id.clone()),
+                producer_seed_id: None,
+                artifact_role: events::ArtifactRole::StateOutput,
+            })
+            .expect("record forged receipt artifact");
         store
             .append_typed_run_commit(store::TypedCommitRequest {
                 run_id: fixture.run_id.clone(),
                 expected_next_seq: store.expected_next_seq(&fixture.run_id),
                 commit_key: store::CommitKey::new("forged-public-output").expect("commit key"),
-                payloads: vec![events::KernelEventPayload::PublicOutputProduced(
-                    events::PublicOutputProduced {
+                payloads: vec![
+                    events::KernelEventPayload::CellProduced(events::CellProduced {
                         spec_hash: fixture.runtime_spec.spec_hash().clone(),
                         node_id: non_render_node.node_id.clone(),
-                        attempt_id: AttemptId::from_digest(
-                            DigestAlgorithm::Sha256JcsV1,
-                            DigestBytes::from_array([0xe3; 32]),
-                        ),
-                        receipt_cell_id: non_render_node.output_cell.clone(),
-                        public_schema_id: fixture
-                            .runtime_spec
-                            .spec()
-                            .public_outputs
-                            .public_schema_id
-                            .clone(),
-                        output_spec_digest: fixture
-                            .runtime_spec
-                            .spec()
-                            .public_outputs
-                            .digest()
-                            .expect("public digest"),
-                        cells: vec![events::NamedTypedCellRef {
-                            public_field_path: public_cell.public_field_path.clone(),
-                            cell_id: public_cell.cell_id.clone(),
-                            producer: public_cell.producer.clone(),
-                            scope_id: public_cell.scope_id.clone(),
-                            semantic_type_id: public_cell.semantic_type_id.clone(),
-                            schema_id: public_cell.schema_id.clone(),
-                            value_lineage: public_cell.value_lineage.clone(),
-                            content_digest: source_digest,
-                            artifact_id: source_artifact,
-                        }],
-                        rendered_digest: content(0xe4),
-                        rendered_artifact_id: None,
-                        renderer_descriptor_id: fixture
-                            .runtime_spec
-                            .spec()
-                            .public_outputs
-                            .renderer_descriptor
-                            .descriptor_id
-                            .clone(),
-                    },
-                )],
+                        cell_id: non_render_node.output_cell.clone(),
+                        scope_id: output_cell.scope_id.clone(),
+                        attempt_id: forged_attempt.clone(),
+                        semantic_type_id: output_cell.semantic_type_id.clone(),
+                        schema_id: output_cell.schema_id.clone(),
+                        value_lineage: output_cell.value_lineage.clone(),
+                        artifact_id: receipt_artifact,
+                        content_digest: receipt_digest,
+                        producer_state_kind: Some(non_render_node.state_kind.clone()),
+                        producer_state_version: Some(non_render_node.state_version.clone()),
+                    }),
+                    events::KernelEventPayload::PublicOutputProduced(
+                        events::PublicOutputProduced {
+                            spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                            node_id: non_render_node.node_id.clone(),
+                            attempt_id: forged_attempt.clone(),
+                            receipt_cell_id: non_render_node.output_cell.clone(),
+                            public_schema_id: fixture
+                                .runtime_spec
+                                .spec()
+                                .public_outputs
+                                .public_schema_id
+                                .clone(),
+                            output_spec_digest: fixture
+                                .runtime_spec
+                                .spec()
+                                .public_outputs
+                                .digest()
+                                .expect("public digest"),
+                            cells: vec![events::NamedTypedCellRef {
+                                public_field_path: public_cell.public_field_path.clone(),
+                                cell_id: public_cell.cell_id.clone(),
+                                producer: public_cell.producer.clone(),
+                                scope_id: public_cell.scope_id.clone(),
+                                semantic_type_id: public_cell.semantic_type_id.clone(),
+                                schema_id: public_cell.schema_id.clone(),
+                                value_lineage: public_cell.value_lineage.clone(),
+                                content_digest: source_digest,
+                                artifact_id: source_artifact,
+                            }],
+                            rendered_digest: content(0xe5),
+                            rendered_artifact_id: None,
+                            renderer_descriptor_id: fixture
+                                .runtime_spec
+                                .spec()
+                                .public_outputs
+                                .renderer_descriptor
+                                .descriptor_id
+                                .clone(),
+                        },
+                    ),
+                    events::KernelEventPayload::StateAttemptCompleted(
+                        events::StateAttemptCompleted {
+                            spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                            node_id: non_render_node.node_id.clone(),
+                            attempt_id: forged_attempt.clone(),
+                            output_cell_id: non_render_node.output_cell.clone(),
+                        },
+                    ),
+                ],
                 required_artifacts: Vec::new(),
                 preconditions: store::CommitPreconditions {
                     required_run_state: store::RequiredRunState::NotCompleted,
+                    required_present_logical_keys: vec![store::LogicalEventKey::new(format!(
+                        "attempt:{}:{}",
+                        non_render_node.node_id, forged_attempt
+                    ))
+                    .expect("attempt key")],
+                    required_cell_states: vec![store::CellStatePrecondition {
+                        cell_id: non_render_node.output_cell.clone(),
+                        required: store::RequiredCellState::Absent,
+                    }],
+                    required_public_output_absent: true,
                     ..store::CommitPreconditions::default()
                 },
             })
@@ -4129,6 +4889,256 @@ mod tests {
                 .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
                 .await,
             Err(RuntimeError::InvalidRunStream(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn replay_rejects_public_output_with_forged_rendered_digest() {
+        let fixture = fixture();
+        let scheduler = SerialTypedScheduler::new(registered_fixture_runners(&fixture));
+        let mut store = store::InMemoryTypedRunStore::new();
+        scheduler
+            .start_run(
+                &mut store,
+                &fixture.runtime_spec,
+                fixture.run_id.clone(),
+                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
+            )
+            .expect("start run");
+        scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("drive a");
+        scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("drive b");
+
+        let render_node = node_by_output(&fixture, &fixture.render_cell).clone();
+        let attempt_id = append_attempt_start(&mut store, &fixture, &render_node, 1);
+        let output_cell = fixture
+            .runtime_spec
+            .cell(&render_node.output_cell)
+            .expect("render output")
+            .clone();
+        let bad_rendered_digest = content(0xf1);
+        let bad_receipt_digest = content(0xf2);
+        let bad_receipt_artifact =
+            ArtifactId::from_digest(bad_receipt_digest.algorithm(), *bad_receipt_digest.digest());
+        store
+            .record_artifact_evidence(store::ArtifactEvidenceRef {
+                artifact_id: bad_receipt_artifact.clone(),
+                digest: bad_receipt_digest.clone(),
+                byte_len: 17,
+                media_type: spec::MediaType::new("application/json").expect("media"),
+                schema_id: Some(output_cell.schema_id.clone()),
+                semantic_type_id: Some(output_cell.semantic_type_id.clone()),
+                producer_node_id: Some(render_node.node_id.clone()),
+                producer_seed_id: None,
+                artifact_role: events::ArtifactRole::StateOutput,
+            })
+            .expect("record bad receipt");
+        let public_cells = fixture
+            .runtime_spec
+            .spec()
+            .public_outputs
+            .outputs
+            .iter()
+            .map(|public_cell| {
+                let Some(store::CellTerminalProjection::Produced {
+                    artifact_id,
+                    content_digest,
+                    ..
+                }) = store
+                    .projection_snapshot()
+                    .cell_terminal(&public_cell.cell_id)
+                else {
+                    panic!("public cell should be produced");
+                };
+                events::NamedTypedCellRef {
+                    public_field_path: public_cell.public_field_path.clone(),
+                    cell_id: public_cell.cell_id.clone(),
+                    producer: public_cell.producer.clone(),
+                    scope_id: public_cell.scope_id.clone(),
+                    semantic_type_id: public_cell.semantic_type_id.clone(),
+                    schema_id: public_cell.schema_id.clone(),
+                    value_lineage: public_cell.value_lineage.clone(),
+                    content_digest: content_digest.clone(),
+                    artifact_id: artifact_id.clone(),
+                }
+            })
+            .collect::<Vec<_>>();
+        let Some(spec::FrameworkNodeSpec::PublicOutputRender(render)) = &render_node.framework
+        else {
+            panic!("expected render node");
+        };
+        store
+            .append_typed_run_commit(store::TypedCommitRequest {
+                run_id: fixture.run_id.clone(),
+                expected_next_seq: store.expected_next_seq(&fixture.run_id),
+                commit_key: store::CommitKey::new("forged-public-output-rendered-digest")
+                    .expect("commit key"),
+                payloads: vec![
+                    events::KernelEventPayload::CellProduced(events::CellProduced {
+                        spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                        node_id: render_node.node_id.clone(),
+                        cell_id: render_node.output_cell.clone(),
+                        scope_id: output_cell.scope_id.clone(),
+                        attempt_id: attempt_id.clone(),
+                        semantic_type_id: output_cell.semantic_type_id.clone(),
+                        schema_id: output_cell.schema_id.clone(),
+                        value_lineage: output_cell.value_lineage.clone(),
+                        artifact_id: bad_receipt_artifact,
+                        content_digest: bad_receipt_digest,
+                        producer_state_kind: Some(render_node.state_kind.clone()),
+                        producer_state_version: Some(render_node.state_version.clone()),
+                    }),
+                    events::KernelEventPayload::PublicOutputProduced(
+                        events::PublicOutputProduced {
+                            spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                            node_id: render_node.node_id.clone(),
+                            attempt_id: attempt_id.clone(),
+                            receipt_cell_id: render_node.output_cell.clone(),
+                            public_schema_id: render.public_schema_id.clone(),
+                            output_spec_digest: render.output_spec_digest.clone(),
+                            cells: public_cells,
+                            rendered_digest: bad_rendered_digest,
+                            rendered_artifact_id: None,
+                            renderer_descriptor_id: render
+                                .renderer_descriptor
+                                .descriptor_id
+                                .clone(),
+                        },
+                    ),
+                    events::KernelEventPayload::StateAttemptCompleted(
+                        events::StateAttemptCompleted {
+                            spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                            node_id: render_node.node_id.clone(),
+                            attempt_id: attempt_id.clone(),
+                            output_cell_id: render_node.output_cell.clone(),
+                        },
+                    ),
+                ],
+                required_artifacts: Vec::new(),
+                preconditions: store::CommitPreconditions {
+                    required_run_state: store::RequiredRunState::NotCompleted,
+                    required_present_logical_keys: vec![store::LogicalEventKey::new(format!(
+                        "attempt:{}:{}",
+                        render_node.node_id, attempt_id
+                    ))
+                    .expect("attempt key")],
+                    required_cell_states: vec![store::CellStatePrecondition {
+                        cell_id: render_node.output_cell.clone(),
+                        required: store::RequiredCellState::Absent,
+                    }],
+                    required_public_output_absent: true,
+                    ..store::CommitPreconditions::default()
+                },
+            })
+            .expect("append forged public output");
+
+        assert!(matches!(
+            scheduler
+                .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+                .await,
+            Err(RuntimeError::InvalidRunStream(message))
+                if message.contains("rendered digest")
+        ));
+    }
+
+    #[tokio::test]
+    async fn replay_rejects_split_public_output_terminal_commit() {
+        let fixture = fixture();
+        let scheduler = SerialTypedScheduler::new(registered_fixture_runners(&fixture));
+        let mut store = store::InMemoryTypedRunStore::new();
+        scheduler
+            .start_run(
+                &mut store,
+                &fixture.runtime_spec,
+                fixture.run_id.clone(),
+                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
+            )
+            .expect("start run");
+        scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("drive a");
+        scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("drive b");
+        scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("render public output");
+
+        let stream = store.load_run_stream(&fixture.run_id);
+        let render_seq = stream
+            .iter()
+            .find_map(|event| {
+                matches!(
+                    event.payload(),
+                    events::KernelEventPayload::PublicOutputProduced(_)
+                )
+                .then_some(event.seq())
+            })
+            .expect("public output seq");
+        let split_seq = store::StreamSeq::new(render_seq.as_u64() + 1).expect("split seq");
+        let render_commit_key =
+            store::CommitKey::new("corrupt-render-terminal").expect("render commit key");
+        let public_output_commit_key =
+            store::CommitKey::new("corrupt-public-output").expect("public output commit key");
+        let mut corrupt_stream = stream
+            .iter()
+            .map(|event| match event.payload() {
+                events::KernelEventPayload::CellProduced(payload)
+                    if event.seq() == render_seq && payload.cell_id == fixture.render_cell =>
+                {
+                    rewrite_envelope(
+                        event,
+                        render_seq,
+                        store::CommitOrdinal::new(0),
+                        render_commit_key.clone(),
+                    )
+                }
+                events::KernelEventPayload::StateAttemptCompleted(payload)
+                    if event.seq() == render_seq
+                        && payload.output_cell_id == fixture.render_cell =>
+                {
+                    rewrite_envelope(
+                        event,
+                        render_seq,
+                        store::CommitOrdinal::new(1),
+                        render_commit_key.clone(),
+                    )
+                }
+                events::KernelEventPayload::PublicOutputProduced(_)
+                    if event.seq() == render_seq =>
+                {
+                    rewrite_envelope(
+                        event,
+                        split_seq,
+                        store::CommitOrdinal::new(0),
+                        public_output_commit_key.clone(),
+                    )
+                }
+                _ => event.clone(),
+            })
+            .collect::<Vec<_>>();
+        corrupt_stream.sort_by_key(|event| (event.seq(), event.ordinal()));
+        let projection =
+            store::ProjectionSnapshot::rebuild_from_run_stream(&corrupt_stream).expect("rebuild");
+        let mut corrupt_store = ReadOnlyCorruptStore {
+            stream: corrupt_stream,
+            projection,
+        };
+
+        assert!(matches!(
+            scheduler
+                .drive_once(&mut corrupt_store, &fixture.runtime_spec, &fixture.run_id)
+                .await,
+            Err(RuntimeError::InvalidRunStream(message))
+                if message.contains("split from receipt terminal")
         ));
     }
 
@@ -5183,6 +6193,44 @@ mod tests {
         }
     }
 
+    fn rewrite_envelope(
+        event: &store::KernelEventEnvelope,
+        seq: store::StreamSeq,
+        ordinal: store::CommitOrdinal,
+        commit_key: store::CommitKey,
+    ) -> store::KernelEventEnvelope {
+        store::KernelEventEnvelope::from_persisted_record(store::PersistedKernelEventRecord {
+            event_id: event_id_for(event, seq, ordinal),
+            event_schema_id: event.event_schema_id().clone(),
+            run_id: event.run_id().clone(),
+            seq,
+            ordinal,
+            spec_hash: event.spec_hash().clone(),
+            commit_key,
+            logical_key: event.logical_key().clone(),
+            payload_hash: event.payload_hash().clone(),
+            payload: event.payload().clone(),
+            payload_canonical_byte_len: event.audit().payload_canonical_byte_len(),
+        })
+        .expect("rewritten envelope")
+    }
+
+    fn event_id_for(
+        event: &store::KernelEventEnvelope,
+        seq: store::StreamSeq,
+        ordinal: store::CommitOrdinal,
+    ) -> EventId {
+        let canonical = canonical_json(serde_json::json!({
+            "event_schema_id": event.event_schema_id().as_str(),
+            "ordinal": ordinal.as_u32(),
+            "payload_hash": event.payload_hash().as_str(),
+            "run_id": event.run_id().as_str(),
+            "seq": seq.as_u64(),
+        }))
+        .expect("event id canonical");
+        EventId::from_digest(DigestAlgorithm::Sha256JcsV1, canonical.digest_bytes())
+    }
+
     fn run_start_evidence(
         fixture: &Fixture,
         seed_cells: Vec<events::SeedCellRef>,
@@ -5476,6 +6524,66 @@ mod tests {
             .expect("append terminal");
     }
 
+    fn append_public_output_render_failure(
+        store: &mut store::InMemoryTypedRunStore,
+        fixture: &Fixture,
+        node: &spec::NodeSpec,
+        attempt_id: &AttemptId,
+    ) {
+        let Some(spec::FrameworkNodeSpec::PublicOutputRender(render)) = &node.framework else {
+            panic!("expected public-output render node");
+        };
+        let error = public_output_error();
+        store
+            .append_typed_run_commit(store::TypedCommitRequest {
+                run_id: fixture.run_id.clone(),
+                expected_next_seq: store.expected_next_seq(&fixture.run_id),
+                commit_key: store::CommitKey::new(format!(
+                    "manual-public-output-failure:{}:{}",
+                    node.node_id, attempt_id
+                ))
+                .expect("commit key"),
+                payloads: vec![
+                    events::KernelEventPayload::PublicOutputRenderFailed(
+                        events::PublicOutputRenderFailed {
+                            spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                            node_id: node.node_id.clone(),
+                            attempt_id: attempt_id.clone(),
+                            public_schema_id: render.public_schema_id.clone(),
+                            renderer_descriptor_id: render
+                                .renderer_descriptor
+                                .descriptor_id
+                                .clone(),
+                            error: error.clone(),
+                        },
+                    ),
+                    events::KernelEventPayload::StateAttemptFailed(events::StateAttemptFailed {
+                        spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                        node_id: node.node_id.clone(),
+                        attempt_id: attempt_id.clone(),
+                        retryable: true,
+                        error,
+                    }),
+                ],
+                required_artifacts: Vec::new(),
+                preconditions: store::CommitPreconditions {
+                    required_run_state: store::RequiredRunState::NotCompleted,
+                    required_present_logical_keys: vec![store::LogicalEventKey::new(format!(
+                        "attempt:{}:{}",
+                        node.node_id, attempt_id
+                    ))
+                    .expect("attempt logical key")],
+                    required_cell_states: vec![store::CellStatePrecondition {
+                        cell_id: node.output_cell.clone(),
+                        required: store::RequiredCellState::Absent,
+                    }],
+                    required_public_output_absent: true,
+                    ..store::CommitPreconditions::default()
+                },
+            })
+            .expect("append public output failure");
+    }
+
     fn append_not_submitted_proven(
         store: &mut store::InMemoryTypedRunStore,
         fixture: &Fixture,
@@ -5736,6 +6844,61 @@ mod tests {
             canonicalizer_identity: spec::CanonicalizerIdentity::new("sha256-jcs-v1")
                 .expect("canonicalizer"),
         };
+        let public_output_cell = spec::PublicOutputCell {
+            public_field_path: spec::PublicFieldPath::new("result").expect("field"),
+            cell_id: cell_b.clone(),
+            producer: spec::CellProducer::Node(node_b.clone()),
+            scope_id: scope.clone(),
+            semantic_type_id: semantic.clone(),
+            schema_id: value_schema.clone(),
+            value_lineage: lineage_b.clone(),
+            required_terminal: spec::RequiredTerminal::ProducedOnly,
+        };
+        let public_outputs = spec::PublicOutputSpec {
+            public_schema_id: public_schema.clone(),
+            outputs: vec![public_output_cell.clone()],
+            renderer_descriptor: renderer.clone(),
+        };
+        let output_spec_digest = public_outputs.digest().expect("public output digest");
+        let render_node = NodeId::from_digest(DigestAlgorithm::Sha256JcsV1, D8);
+        let render_cell = CellId::from_digest(DigestAlgorithm::Sha256JcsV1, D9);
+        let render_descriptor = DescriptorId::from_digest(DigestAlgorithm::Sha256JcsV1, DA);
+        let receipt_schema = spec::public_output_receipt_schema_id().expect("receipt schema");
+        let receipt_semantic =
+            spec::public_output_receipt_semantic_type_id().expect("receipt semantic");
+        let render_lineage = spec::ValueLineageRef {
+            lineage_digest: content(0x45),
+        };
+        let render_input_root =
+            spec::InputBindingNodeSpec::Struct(vec![spec::NamedInputBindingSpec {
+                field_path: public_output_cell.public_field_path.clone(),
+                node: spec::InputBindingNodeSpec::Cell(Box::new(spec::InputBindingCellSpec {
+                    field_path: public_output_cell.public_field_path.clone(),
+                    cell_id: public_output_cell.cell_id.clone(),
+                    semantic_type_id: public_output_cell.semantic_type_id.clone(),
+                    schema_id: public_output_cell.schema_id.clone(),
+                    required_terminal: public_output_cell.required_terminal,
+                    value_lineage: public_output_cell.value_lineage.clone(),
+                })),
+            }]);
+        let render_input_binding = spec::InputBindingSpec {
+            input_schema_id: public_schema.clone(),
+            input_descriptor_id: DescriptorId::from_digest(DigestAlgorithm::Sha256JcsV1, DC),
+            digest: content_digest_json(input_node_json(&render_input_root))
+                .expect("render input digest"),
+            root: render_input_root,
+        };
+        let managed_effect = ManagedPlatformWrite::descriptor().expect("managed effect");
+        let render_state_kind = StateKind::new(
+            "mfm.framework.state",
+            "render_public_outputs",
+            DigestAlgorithm::Sha256JcsV1,
+            DD,
+        )
+        .expect("render state kind");
+        let render_state_version =
+            StateVersion::new("mfm.framework.state.render_public_outputs.v1")
+                .expect("render state version");
         let node_a_spec = node_spec(NodeSpecFixture {
             node_id: node_a.clone(),
             descriptor_id: descriptor_a.clone(),
@@ -5782,6 +6945,31 @@ mod tests {
             }],
             planning: planning.clone(),
         });
+        let render_node_spec = spec::NodeSpec {
+            node_id: render_node.clone(),
+            stable_key: spec::StableAuthorKey::new("public-output").expect("render key"),
+            scope_id: scope.clone(),
+            state_kind: render_state_kind.clone(),
+            state_version: render_state_version.clone(),
+            descriptor_id: render_descriptor.clone(),
+            config_ref: config_ref.clone(),
+            input_bindings: render_input_binding,
+            output_cell: render_cell.clone(),
+            effect_kind: managed_effect.kind.clone(),
+            capability_bindings: no_caps.clone(),
+            adapter_bindings: Vec::new(),
+            side_effect: None,
+            framework: Some(spec::FrameworkNodeSpec::PublicOutputRender(
+                spec::PublicOutputRenderNodeSpec {
+                    public_schema_id: public_schema.clone(),
+                    output_spec_digest: output_spec_digest.clone(),
+                    renderer_descriptor: renderer.clone(),
+                    required_cells: public_outputs.outputs.clone(),
+                },
+            )),
+            planning_lineage: planning.clone(),
+            deterministic_predecessors: vec![node_b.clone()],
+        };
         let spec = spec::TypedExecutionSpec::new(spec::TypedExecutionSpecParts {
             authoring: spec::AuthoringProvenance::StateComposition {
                 descriptor: spec::CompositionDescriptor {
@@ -5812,7 +7000,7 @@ mod tests {
                     descriptor_a.clone(),
                     "mfm.test.state.a",
                     effect_kind,
-                    no_caps,
+                    no_caps.clone(),
                     "pure",
                 ))),
                 spec::DescriptorIdentity::State(Box::new(state_descriptor(
@@ -5823,10 +7011,31 @@ mod tests {
                     read_caps,
                     "read",
                 ))),
+                spec::DescriptorIdentity::State(Box::new(spec::StateDescriptorIdentity {
+                    descriptor_id: render_descriptor.clone(),
+                    name: "mfm.framework.render_public_outputs".to_owned(),
+                    state_kind: render_state_kind,
+                    state_version: render_state_version,
+                    config_schema_id: config_schema.clone(),
+                    input_schema_id: public_schema.clone(),
+                    output_schema_id: receipt_schema.clone(),
+                    output_semantic_type_id: receipt_semantic.clone(),
+                    effect_kind: managed_effect.kind,
+                    effect_class: managed_effect.class.as_str().to_owned(),
+                    effect_name: managed_effect.name.to_owned(),
+                    effect_version: managed_effect.version,
+                    capabilities: no_caps,
+                    runner: "managed_platform_write".to_owned(),
+                    side_effect_contract_digest: None,
+                })),
                 spec::DescriptorIdentity::Renderer(Box::new(renderer.clone())),
             ],
             config_refs: vec![config_ref.clone()],
-            nodes: vec![node_b_spec.clone(), node_a_spec.clone()],
+            nodes: vec![
+                render_node_spec.clone(),
+                node_b_spec.clone(),
+                node_a_spec.clone(),
+            ],
             cells: vec![
                 spec::CellSpec {
                     cell_id: seed_cell,
@@ -5861,6 +7070,17 @@ mod tests {
                     storage_policy: spec::StoragePolicy::ContentAddressed,
                     redaction_policy: spec::RedactionPolicy::Public,
                 },
+                spec::CellSpec {
+                    cell_id: render_cell.clone(),
+                    producer: spec::CellProducer::Node(render_node.clone()),
+                    scope_id: scope.clone(),
+                    semantic_type_id: receipt_semantic,
+                    schema_id: receipt_schema,
+                    value_lineage: render_lineage.clone(),
+                    terminal_policy: spec::CellTerminalPolicy::ProducedOnly,
+                    storage_policy: spec::StoragePolicy::PublicOutputArtifact,
+                    redaction_policy: spec::RedactionPolicy::Public,
+                },
             ],
             value_lineages: vec![
                 spec::ValueLineage {
@@ -5888,9 +7108,19 @@ mod tests {
                 },
                 spec::ValueLineage {
                     lineage_ref: lineage_b.clone(),
-                    scope_id: scope,
+                    scope_id: scope.clone(),
                     producer: spec::CellProducer::Node(node_b.clone()),
                     input_cells: vec![cell_a.clone()],
+                    config_ref_digest: Some(config_ref.digest.clone()),
+                    planning_lineage: planning.clone(),
+                    domain_keys: Vec::new(),
+                    transform_policy: spec::LineageTransformPolicy::StateOutput,
+                },
+                spec::ValueLineage {
+                    lineage_ref: render_lineage,
+                    scope_id: scope,
+                    producer: spec::CellProducer::Node(render_node.clone()),
+                    input_cells: vec![cell_b.clone()],
                     config_ref_digest: Some(config_ref.digest.clone()),
                     planning_lineage: planning,
                     domain_keys: Vec::new(),
@@ -5898,20 +7128,7 @@ mod tests {
                 },
             ],
             planning_lineage: Vec::new(),
-            public_outputs: spec::PublicOutputSpec {
-                public_schema_id: public_schema,
-                outputs: vec![spec::PublicOutputCell {
-                    public_field_path: spec::PublicFieldPath::new("result").expect("field"),
-                    cell_id: cell_b.clone(),
-                    producer: spec::CellProducer::Node(node_b.clone()),
-                    scope_id: ScopeId::from_digest(DigestAlgorithm::Sha256JcsV1, D0),
-                    semantic_type_id: semantic.clone(),
-                    schema_id: value_schema.clone(),
-                    value_lineage: lineage_b.clone(),
-                    required_terminal: spec::RequiredTerminal::ProducedOnly,
-                }],
-                renderer_descriptor: renderer,
-            },
+            public_outputs,
         })
         .expect("typed spec");
         let envelope =
@@ -5924,6 +7141,8 @@ mod tests {
             seed_ref,
             descriptor_a,
             descriptor_b,
+            render_node,
+            render_cell,
             cell_a,
             cell_b,
             cap_kind,
@@ -6182,6 +7401,71 @@ mod tests {
         )
     }
 
+    fn input_node_json(node: &spec::InputBindingNodeSpec) -> serde_json::Value {
+        match node {
+            spec::InputBindingNodeSpec::Unit => serde_json::json!({ "kind": "unit" }),
+            spec::InputBindingNodeSpec::Cell(cell) => serde_json::json!({
+                "cell_id": cell.cell_id.as_str(),
+                "field_path": cell.field_path.as_str(),
+                "kind": "cell",
+                "required_terminal": match cell.required_terminal {
+                    spec::RequiredTerminal::ProducedOnly => "produced_only",
+                    spec::RequiredTerminal::MaybeSkipped => "maybe_skipped",
+                },
+                "schema_id": cell.schema_id.as_str(),
+                "semantic_type_id": cell.semantic_type_id.as_str(),
+                "value_lineage": cell.value_lineage.lineage_digest.as_str(),
+            }),
+            spec::InputBindingNodeSpec::Tuple(elements) => serde_json::json!({
+                "elements": elements.iter().map(input_node_json).collect::<Vec<_>>(),
+                "kind": "tuple",
+            }),
+            spec::InputBindingNodeSpec::Struct(fields) => serde_json::json!({
+                "fields": fields.iter().map(|field| {
+                    serde_json::json!({
+                        "field_path": field.field_path.as_str(),
+                        "node": input_node_json(&field.node),
+                    })
+                }).collect::<Vec<_>>(),
+                "kind": "struct",
+            }),
+            spec::InputBindingNodeSpec::Vec {
+                elements,
+                ordering,
+                domain_keys,
+            } => serde_json::json!({
+                "domain_keys": domain_keys.iter().map(stable_domain_key_ref_json).collect::<Vec<_>>(),
+                "elements": elements.iter().map(input_node_json).collect::<Vec<_>>(),
+                "kind": "vec",
+                "ordering": ordering_json(*ordering),
+            }),
+            spec::InputBindingNodeSpec::NonEmptyVec {
+                elements,
+                ordering,
+                domain_keys,
+            } => serde_json::json!({
+                "domain_keys": domain_keys.iter().map(stable_domain_key_ref_json).collect::<Vec<_>>(),
+                "elements": elements.iter().map(input_node_json).collect::<Vec<_>>(),
+                "kind": "non_empty_vec",
+                "ordering": ordering_json(*ordering),
+            }),
+        }
+    }
+
+    fn ordering_json(ordering: spec::OrderingEvidence) -> &'static str {
+        match ordering {
+            spec::OrderingEvidence::ExplicitAuthorOrder => "explicit_author_order",
+            spec::OrderingEvidence::StableDomainKey => "stable_domain_key",
+        }
+    }
+
+    fn stable_domain_key_ref_json(key: &spec::StableDomainKeyRef) -> serde_json::Value {
+        serde_json::json!({
+            "content_digest": key.content_digest.as_str(),
+            "schema_id": key.schema_id.as_str(),
+        })
+    }
+
     fn artifact(byte: u8) -> ArtifactId {
         ArtifactId::from_digest(
             DigestAlgorithm::Sha256JcsV1,
@@ -6389,6 +7673,17 @@ mod tests {
             category: events::ErrorCategory::SideEffect,
             retryable,
             safe_message: "side-effect failed".to_owned(),
+            public_details: None,
+            diagnostic_ref: None,
+        }
+    }
+
+    fn public_output_error() -> events::MfmErrorInfo {
+        events::MfmErrorInfo {
+            code: events::ErrorCode::new("public_output_render_failed").expect("error code"),
+            category: events::ErrorCategory::Runtime,
+            retryable: true,
+            safe_message: "public output render failed".to_owned(),
             public_details: None,
             diagnostic_ref: None,
         }

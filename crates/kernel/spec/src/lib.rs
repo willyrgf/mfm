@@ -7,7 +7,7 @@
 use std::fmt;
 
 use mfm_canonical::PlainCanonicalJsonBytes;
-use mfm_ids::{ContentDigest, DigestAlgorithm, IdentityError, SpecHash};
+use mfm_ids::{ContentDigest, DigestAlgorithm, IdentityError, SchemaId, SemanticTypeId, SpecHash};
 
 /// Result type for typed execution spec helpers.
 pub type Result<T> = std::result::Result<T, SpecError>;
@@ -74,6 +74,44 @@ fn canonical_json(value: serde_json::Value) -> Result<PlainCanonicalJsonBytes> {
 
 fn content_digest(value: serde_json::Value) -> Result<ContentDigest> {
     Ok(canonical_json(value)?.content_digest())
+}
+
+/// Returns the framework-owned schema id for public-output render receipts.
+pub fn public_output_receipt_schema_id() -> Result<SchemaId> {
+    let digest = content_digest(serde_json::json!({
+        "fields": [
+            "public_schema_id",
+            "output_spec_digest",
+            "cells",
+            "rendered_digest",
+            "rendered_artifact_id",
+            "renderer_descriptor_id",
+        ],
+        "name": "mfm.framework.public_output_receipt",
+        "version": "1",
+    }))?;
+    Ok(SchemaId::new(
+        "mfm.framework.public_output_receipt",
+        "1",
+        DigestAlgorithm::Sha256JcsV1,
+        *digest.digest(),
+    )?)
+}
+
+/// Returns the framework-owned semantic type id for public-output render receipts.
+pub fn public_output_receipt_semantic_type_id() -> Result<SemanticTypeId> {
+    let digest = content_digest(serde_json::json!({
+        "meaning": "framework public-output render receipt",
+        "schema_id": public_output_receipt_schema_id()?.as_str(),
+        "version": "1",
+    }))?;
+    Ok(SemanticTypeId::new(
+        "mfm.framework.public_output",
+        "receipt",
+        "1",
+        DigestAlgorithm::Sha256JcsV1,
+        *digest.digest(),
+    )?)
 }
 
 fn spec_hash_from_canonical(canonical: &PlainCanonicalJsonBytes) -> SpecHash {
@@ -192,6 +230,16 @@ pub mod v1 {
     pub const MEDIA_TYPE: &str = "application/vnd.mfm.typed-execution-spec+json;version=1";
     /// v1 lowering-version string.
     pub const LOWERING_VERSION: &str = "mfm.typed.lowering.v1";
+
+    /// Returns the v1 framework-owned schema id for public-output render receipts.
+    pub fn public_output_receipt_schema_id() -> Result<SchemaId> {
+        super::public_output_receipt_schema_id()
+    }
+
+    /// Returns the v1 framework-owned semantic type id for public-output render receipts.
+    pub fn public_output_receipt_semantic_type_id() -> Result<SemanticTypeId> {
+        super::public_output_receipt_semantic_type_id()
+    }
 
     checked_string_type!(
         /// Checked media type string.

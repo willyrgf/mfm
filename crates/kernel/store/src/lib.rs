@@ -1172,9 +1172,11 @@ pub mod v1 {
             self.retentions.get(run_id)
         }
 
-        /// Returns whether any public output is projected.
+        /// Returns whether terminal public-output authority is projected.
         pub fn has_public_output(&self) -> bool {
-            !self.public_outputs.is_empty()
+            self.public_outputs
+                .values()
+                .any(|projection| matches!(projection, PublicOutputProjection::Produced { .. }))
         }
 
         /// Iterates projected run states.
@@ -1971,6 +1973,7 @@ pub mod v1 {
     fn validate_terminal_attempt_cell_pairs(payloads: &[KernelEventPayload]) -> Result<()> {
         let mut completions = BTreeSet::new();
         let mut terminal_cells = BTreeSet::new();
+        let mut public_outputs = BTreeSet::new();
 
         for payload in payloads {
             match payload {
@@ -1993,6 +1996,13 @@ pub mod v1 {
                         payload.node_id.clone(),
                         payload.attempt_id.clone(),
                         payload.cell_id.clone(),
+                    ));
+                }
+                KernelEventPayload::PublicOutputProduced(payload) => {
+                    public_outputs.insert((
+                        payload.node_id.clone(),
+                        payload.attempt_id.clone(),
+                        payload.receipt_cell_id.clone(),
                     ));
                 }
                 _ => {}
@@ -2018,6 +2028,17 @@ pub mod v1 {
                     key: format!("cell:{cell_id}:terminal"),
                     message: "terminal cell requires matching attempt completion in same commit"
                         .to_owned(),
+                });
+            }
+        }
+        for (node_id, attempt_id, receipt_cell_id) in &public_outputs {
+            let terminal = (node_id.clone(), attempt_id.clone(), receipt_cell_id.clone());
+            if !terminal_cells.contains(&terminal) || !completions.contains(&terminal) {
+                return Err(StoreError::ProjectionConflict {
+                    key: format!("public_output:{node_id}:{attempt_id}"),
+                    message:
+                        "public output requires matching render receipt terminal in same commit"
+                            .to_owned(),
                 });
             }
         }
@@ -2239,7 +2260,10 @@ pub mod v1 {
                 format!("public_output:{}", payload.public_schema_id)
             }
             KernelEventPayload::PublicOutputRenderFailed(payload) => {
-                format!("public_output:{}", payload.public_schema_id)
+                format!(
+                    "public_output_failed:{}:{}:{}",
+                    payload.public_schema_id, payload.node_id, payload.attempt_id
+                )
             }
             KernelEventPayload::RetentionRefsAppended(payload) => {
                 format!("retention:{}:refs:{}", payload.run_id, payload_hash)
@@ -3093,10 +3117,10 @@ pub mod v1 {
                 transition_side_effect_failure(projections, payload, envelope.event_id.clone())?;
             }
             KernelEventPayload::PublicOutputProduced(payload) => {
-                if projections
-                    .public_outputs
-                    .contains_key(&payload.public_schema_id)
-                {
+                if matches!(
+                    projections.public_outputs.get(&payload.public_schema_id),
+                    Some(PublicOutputProjection::Produced { .. })
+                ) {
                     return Err(StoreError::ProjectionConflict {
                         key: format!("public_output:{}", payload.public_schema_id),
                         message: "public output already projected".to_owned(),
@@ -3112,13 +3136,13 @@ pub mod v1 {
                 );
             }
             KernelEventPayload::PublicOutputRenderFailed(payload) => {
-                if projections
-                    .public_outputs
-                    .contains_key(&payload.public_schema_id)
-                {
+                if matches!(
+                    projections.public_outputs.get(&payload.public_schema_id),
+                    Some(PublicOutputProjection::Produced { .. })
+                ) {
                     return Err(StoreError::ProjectionConflict {
                         key: format!("public_output:{}", payload.public_schema_id),
-                        message: "public output already projected".to_owned(),
+                        message: "public output already produced".to_owned(),
                     });
                 }
                 projections.public_outputs.insert(

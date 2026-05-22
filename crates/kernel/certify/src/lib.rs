@@ -533,12 +533,15 @@ impl<'a> DraftLowerer<'a> {
             self.draft.public_output_spec().key().as_str(),
             &output_spec_digest,
         )?;
-        let semantic_type_id = public_output_artifact_semantic_id(public_outputs)?;
+        let semantic_type_id = spec::public_output_receipt_semantic_type_id()
+            .map_err(|error| CertifyError::Spec(error.to_string()))?;
+        let receipt_schema_id = spec::public_output_receipt_schema_id()
+            .map_err(|error| CertifyError::Spec(error.to_string()))?;
         let output_cell = framework_cell_id(
             self.draft.root_scope_id(),
             &node_id,
             &semantic_type_id,
-            &public_outputs.public_schema_id,
+            &receipt_schema_id,
         )?;
         let planning_lineage = final_planning_lineage(self.draft.operation_lineage())?;
         let config_ref = framework_config_ref("public_output_render", &node_id)?;
@@ -581,7 +584,7 @@ impl<'a> DraftLowerer<'a> {
             root: input_root,
         };
         let descriptor = framework_render_descriptor(
-            &public_outputs.public_schema_id,
+            &receipt_schema_id,
             &semantic_type_id,
             &config_ref.schema_id,
             &input_binding.input_schema_id,
@@ -609,7 +612,7 @@ impl<'a> DraftLowerer<'a> {
             producer: spec::CellProducer::Node(node_id.clone()),
             scope_id: self.draft.root_scope_id().clone(),
             semantic_type_id,
-            schema_id: public_outputs.public_schema_id.clone(),
+            schema_id: receipt_schema_id,
             value_lineage: lineage_ref,
             terminal_policy: spec::CellTerminalPolicy::ProducedOnly,
             storage_policy: spec::StoragePolicy::PublicOutputArtifact,
@@ -2614,17 +2617,6 @@ fn state_kind_json(name: &str, value: serde_json::Value) -> Result<StateKind> {
     .map_err(|error| lower(error.to_string()))
 }
 
-fn semantic_id_json(name: &str, value: serde_json::Value) -> Result<SemanticTypeId> {
-    SemanticTypeId::new(
-        "mfm.kernel",
-        name,
-        "1",
-        DigestAlgorithm::Sha256JcsV1,
-        digest_bytes_json(value)?,
-    )
-    .map_err(|error| lower(error.to_string()))
-}
-
 fn framework_config_ref(kind: &str, node_id: &NodeId) -> Result<spec::ConfigRef> {
     let payload = serde_json::json!({
         "framework": kind,
@@ -2946,18 +2938,6 @@ fn cell_id_from_parts(
             "semantic_type_id": semantic_type_id.as_str(),
         }))?,
     ))
-}
-
-fn public_output_artifact_semantic_id(
-    public_outputs: &spec::PublicOutputSpec,
-) -> Result<SemanticTypeId> {
-    semantic_id_json(
-        "public-output-artifact",
-        serde_json::json!({
-            "public_schema_id": public_outputs.public_schema_id.as_str(),
-            "renderer_descriptor_id": public_outputs.renderer_descriptor.descriptor_id.as_str(),
-        }),
-    )
 }
 
 fn render_value_lineage_ref(
