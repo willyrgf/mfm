@@ -1,0 +1,56 @@
+error[E0277]: the trait bound `serde_json::Value: IntoStateInput<'static, 'static, serde_json::Value>` is not satisfied
+ --> tests/ui/fail/raw_json_state_input.rs:3:14
+  |
+3 |     let _ = <serde_json::Value as mfm_program::IntoStateInput<
+  |              ^^^^^^^^^^^^^^^^^ the trait `IntoStateInput<'static, 'static, serde_json::Value>` is not implemented for `serde_json::Value`
+  |
+  = help: the following other types implement trait `IntoStateInput<'program, 'scope, I>`:
+            `()` implements `IntoStateInput<'program, 'scope, ()>`
+            `(Handle<'program, 'scope, A>, Handle<'program, 'scope, B>)` implements `IntoStateInput<'program, 'scope, (A, B)>`
+            `(Handle<'program, 'scope, A>, Handle<'program, 'scope, B>, Handle<'program, 'scope, C>)` implements `IntoStateInput<'program, 'scope, (A, B, C)>`
+            `(Handle<'program, 'scope, A>, Handle<'program, 'scope, B>, Handle<'program, 'scope, C>, Handle<'program, 'scope, D>)` implements `IntoStateInput<'program, 'scope, (A, B, C, D)>`
+            `(Handle<'program, 'scope, A>, Handle<'program, 'scope, B>, Handle<'program, 'scope, C>, Handle<'program, 'scope, D>, Handle<'program, 'scope, E>)` implements `IntoStateInput<'program, 'scope, (A, B, C, D, E)>`
+            `(Handle<'program, 'scope, A>, Handle<'program, 'scope, B>, Handle<'program, 'scope, C>, Handle<'program, 'scope, D>, Handle<'program, 'scope, E>, Handle<'program, 'scope, F>)` implements `IntoStateInput<'program, 'scope, (A, B, C, D, E, F)>`
+            `(Handle<'program, 'scope, A>, Handle<'program, 'scope, B>, Handle<'program, 'scope, C>, Handle<'program, 'scope, D>, Handle<'program, 'scope, E>, Handle<'program, 'scope, F>, Handle<'program, 'scope, G>)` implements `IntoStateInput<'program, 'scope, (A, B, C, D, E, F, G)>`
+            `(Handle<'program, 'scope, A>, Handle<'program, 'scope, B>, Handle<'program, 'scope, C>, Handle<'program, 'scope, D>, Handle<'program, 'scope, E>, Handle<'program, 'scope, F>, Handle<'program, 'scope, G>, Handle<'program, 'scope, H>)` implements `IntoStateInput<'program, 'scope, (A, B, C, D, E, F, G, H)>`
+          and $N others
+
+error[E0277]: the trait bound `serde_json::Value: mfm_values::StateInput` is not satisfied
+ --> tests/ui/fail/raw_json_state_input.rs:6:9
+  |
+6 |         serde_json::Value,
+  |         ^^^^^^^^^^^^^^^^^ the trait `mfm_values::MfmValue` is not implemented for `serde_json::Value`
+  |
+  = help: the following other types implement trait `mfm_values::MfmValue`:
+            mfm_values::ArtifactRef<T>
+            mfm_values::MaybeValue<T>
+  = note: required for `serde_json::Value` to implement `mfm_values::StateInput`
+note: required by a bound in `into_binding`
+ --> src/lib.rs
+  |
+  | pub trait IntoStateInput<'program, 'scope, I: StateInput> {
+  |                                               ^^^^^^^^^^ required by this bound in `IntoStateInput::into_binding`
+  |     /// Converts into a typed input binding.
+  |     fn into_binding(self) -> Result<InputBinding<I>>;
+  |        ------------ required by a bound in this associated function
+
+error[E0277]: the trait bound `serde_json::Value: mfm_values::MfmValue` is not satisfied
+ --> tests/ui/fail/raw_json_state_input.rs:3:13
+  |
+3 |       let _ = <serde_json::Value as mfm_program::IntoStateInput<
+  |  _____________^
+4 | |         'static,
+5 | |         'static,
+6 | |         serde_json::Value,
+7 | |     >>::into_binding(value);
+  | |___________________________^ the trait `mfm_values::MfmValue` is not implemented for `serde_json::Value`
+  |
+  = help: the following other types implement trait `mfm_values::MfmValue`:
+            mfm_values::ArtifactRef<T>
+            mfm_values::MaybeValue<T>
+  = note: required for `serde_json::Value` to implement `mfm_values::StateInput`
+note: required by a bound in `InputBinding`
+ --> src/lib.rs
+  |
+  | pub struct InputBinding<I: StateInput> {
+  |                            ^^^^^^^^^^ required by this bound in `InputBinding`

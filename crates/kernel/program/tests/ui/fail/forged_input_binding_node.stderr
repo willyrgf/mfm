@@ -1,0 +1,11 @@
+error[E0223]: ambiguous associated type
+ --> tests/ui/fail/forged_input_binding_node.rs:7:17
+  |
+7 |     let _node = mfm_program::InputBindingNode::Cell {
+  |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+help: if there were a trait named `Example` with associated type `Cell` implemented for `InputBindingNode`, you could use the fully-qualified path
+  |
+7 -     let _node = mfm_program::InputBindingNode::Cell {
+7 +     let _node = <InputBindingNode as Example>::Cell {
+  |

@@ -150,6 +150,24 @@ fn framework_generic_descriptors_have_golden_schema_ids() {
 }
 
 #[test]
+fn non_empty_value_collection_rejects_empty_runtime_materialization() {
+    let value = ExampleValue {
+        amount: "1.00".to_owned(),
+        label: "cash".to_owned(),
+    };
+    let non_empty = NonEmpty::new(value.clone(), Vec::new());
+    assert_eq!(non_empty.values(), std::slice::from_ref(&value));
+
+    let encoded = serde_json::to_string(&non_empty).expect("non-empty serializes");
+    let decoded: NonEmpty<ExampleValue> =
+        serde_json::from_str(&encoded).expect("non-empty deserializes");
+    assert_eq!(decoded.values(), std::slice::from_ref(&value));
+
+    assert!(NonEmpty::<ExampleValue>::try_from_vec(Vec::new()).is_err());
+    assert!(serde_json::from_str::<NonEmpty<ExampleValue>>("{\"values\":[]}").is_err());
+}
+
+#[test]
 fn config_and_public_output_descriptors_have_schema_ids() {
     assert!(ExampleConfig::schema_id()
         .expect("config schema id")

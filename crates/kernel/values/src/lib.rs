@@ -105,6 +105,15 @@ impl fmt::Display for ConfigError {
 
 impl std::error::Error for ConfigError {}
 
+/// Terminal policy for cells containing a value type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValueTerminalPolicy {
+    /// The cell must be produced with value bytes.
+    ProducedOnly,
+    /// The cell may be produced or skipped with explicit skip provenance.
+    MaybeSkipped,
+}
+
 /// Values that may cross typed state boundaries.
 pub trait MfmValue: Serialize + DeserializeOwned + Send + Sync + 'static {
     /// Returns the schema descriptor for this value type.
@@ -112,6 +121,11 @@ pub trait MfmValue: Serialize + DeserializeOwned + Send + Sync + 'static {
 
     /// Returns the stable semantic identity for this value kind.
     fn semantic_id() -> Result<SemanticTypeId>;
+
+    /// Returns the terminal policy for cells containing this value type.
+    fn terminal_policy() -> ValueTerminalPolicy {
+        ValueTerminalPolicy::ProducedOnly
+    }
 
     /// Derives this value's schema id from its schema descriptor identity.
     fn schema_id() -> Result<SchemaId> {
@@ -156,6 +170,73 @@ pub trait StateInput: Send + Sync + 'static {
         Self::input_schema_descriptor()?.schema_id()
     }
 }
+
+impl StateInput for () {
+    fn input_schema_descriptor() -> Result<SchemaDescriptor> {
+        framework_input_descriptor("mfm.kernel.state_input.unit", SchemaShape::Unit, "()")
+    }
+}
+
+impl<T: MfmValue> StateInput for T {
+    fn input_schema_descriptor() -> Result<SchemaDescriptor> {
+        framework_input_descriptor(
+            "mfm.kernel.state_input.value",
+            SchemaShape::ValueRef {
+                schema_id: T::schema_id()?,
+                semantic_type_id: T::semantic_id()?,
+            },
+            "mfm_values::MfmValue",
+        )
+    }
+}
+
+impl<T: MfmValue> StateInput for Vec<T> {
+    fn input_schema_descriptor() -> Result<SchemaDescriptor> {
+        framework_input_descriptor(
+            "mfm.kernel.state_input.vec",
+            SchemaShape::Vec(Box::new(SchemaShape::ValueRef {
+                schema_id: T::schema_id()?,
+                semantic_type_id: T::semantic_id()?,
+            })),
+            "alloc::vec::Vec",
+        )
+    }
+}
+
+macro_rules! impl_tuple_state_input {
+    ($($name:ident),+ $(,)?) => {
+        impl<$($name),+> StateInput for ($($name,)+)
+        where
+            $($name: MfmValue,)+
+        {
+            fn input_schema_descriptor() -> Result<SchemaDescriptor> {
+                framework_input_descriptor(
+                    "mfm.kernel.state_input.tuple",
+                    SchemaShape::Tuple(vec![
+                        $(SchemaShape::ValueRef {
+                            schema_id: $name::schema_id()?,
+                            semantic_type_id: $name::semantic_id()?,
+                        },)+
+                    ]),
+                    "tuple",
+                )
+            }
+        }
+    };
+}
+
+impl_tuple_state_input!(A);
+impl_tuple_state_input!(A, B);
+impl_tuple_state_input!(A, B, C);
+impl_tuple_state_input!(A, B, C, D);
+impl_tuple_state_input!(A, B, C, D, E);
+impl_tuple_state_input!(A, B, C, D, E, F);
+impl_tuple_state_input!(A, B, C, D, E, F, G);
+impl_tuple_state_input!(A, B, C, D, E, F, G, H);
+impl_tuple_state_input!(A, B, C, D, E, F, G, H, I);
+impl_tuple_state_input!(A, B, C, D, E, F, G, H, I, J);
+impl_tuple_state_input!(A, B, C, D, E, F, G, H, I, J, K);
+impl_tuple_state_input!(A, B, C, D, E, F, G, H, I, J, K, L);
 
 /// Descriptor contract for operation output structs.
 pub trait OperationOutput: Send + Sync + 'static {
@@ -911,6 +992,10 @@ impl<T: MfmValue> MfmValue for MaybeValue<T> {
         )
         .map_err(|error| ValueError::Identity(error.to_string()))
     }
+
+    fn terminal_policy() -> ValueTerminalPolicy {
+        ValueTerminalPolicy::MaybeSkipped
+    }
 }
 
 /// Skip reason stored for skipped optional cells.
@@ -934,6 +1019,67 @@ pub enum SkipCode {
     Policy,
     /// Value is not applicable for this run.
     NotApplicable,
+}
+
+/// Runtime non-empty input collection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(bound(serialize = "T: Serialize"))]
+pub struct NonEmpty<T: MfmValue> {
+    values: Vec<T>,
+}
+
+impl<T: MfmValue> NonEmpty<T> {
+    /// Creates a non-empty collection from a first value and optional rest.
+    pub fn new(first: T, mut rest: Vec<T>) -> Self {
+        let mut values = Vec::with_capacity(rest.len() + 1);
+        values.push(first);
+        values.append(&mut rest);
+        Self { values }
+    }
+
+    /// Attempts to create a non-empty collection from a vector.
+    pub fn try_from_vec(values: Vec<T>) -> Result<Self> {
+        if values.is_empty() {
+            return Err(ValueError::Config(
+                "non-empty value collection cannot be empty".to_owned(),
+            ));
+        }
+        Ok(Self { values })
+    }
+
+    /// Returns values in their retained order.
+    pub fn values(&self) -> &[T] {
+        &self.values
+    }
+}
+
+impl<'de, T: MfmValue> Deserialize<'de> for NonEmpty<T> {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(bound(deserialize = "T: serde::de::DeserializeOwned"))]
+        struct NonEmptyWire<T: MfmValue> {
+            values: Vec<T>,
+        }
+
+        let wire = NonEmptyWire::<T>::deserialize(deserializer)?;
+        NonEmpty::try_from_vec(wire.values).map_err(de::Error::custom)
+    }
+}
+
+impl<T: MfmValue> StateInput for NonEmpty<T> {
+    fn input_schema_descriptor() -> Result<SchemaDescriptor> {
+        framework_input_descriptor(
+            "mfm.kernel.state_input.non_empty",
+            SchemaShape::NonEmptyVec(Box::new(SchemaShape::ValueRef {
+                schema_id: T::schema_id()?,
+                semantic_type_id: T::semantic_id()?,
+            })),
+            "mfm_values::NonEmpty",
+        )
+    }
 }
 
 /// Typed artifact reference that must match the referenced value type.
@@ -1077,6 +1223,23 @@ fn framework_value_descriptor(
         SchemaIdentity::new(
             SchemaKind::Value,
             Some(semantic_type_id),
+            schema_name,
+            schema_version("1")?,
+            shape,
+        )?,
+        SchemaAudit::framework("mfm-values", rust_type_path),
+    )
+}
+
+fn framework_input_descriptor(
+    schema_name: &str,
+    shape: SchemaShape,
+    rust_type_path: &str,
+) -> Result<SchemaDescriptor> {
+    SchemaDescriptor::new(
+        SchemaIdentity::new(
+            SchemaKind::StateInput,
+            None,
             schema_name,
             schema_version("1")?,
             shape,

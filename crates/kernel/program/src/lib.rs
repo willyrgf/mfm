@@ -14,10 +14,11 @@ use std::marker::PhantomData;
 
 use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
 use mfm_ids::{
-    CellId, ContentDigest, DigestAlgorithm, DigestBytes, NodeId, SchemaId, ScopeId, SeedId,
-    SemanticTypeId,
+    CellId, ContentDigest, DescriptorId, DigestAlgorithm, DigestBytes, NodeId, SchemaId, ScopeId,
+    SeedId, SemanticTypeId,
 };
-use mfm_values::{MfmValue, PublicOutputDescriptor};
+pub use mfm_values::NonEmpty;
+use mfm_values::{MfmValue, PublicOutputDescriptor, SchemaShape, StateInput, ValueTerminalPolicy};
 
 #[cfg(test)]
 mod tests;
@@ -48,6 +49,12 @@ pub enum PlanError {
     PublicOutputsAlreadyBound,
     /// Public output binding must contain at least one cell.
     EmptyPublicOutputs,
+    /// A non-empty input collection was empty.
+    EmptyNonEmptyInput,
+    /// A derived input struct had the same field path more than once.
+    DuplicateInputFieldPath(String),
+    /// Input binding tree did not match the declared state input descriptor.
+    InputBindingShape(String),
     /// Live bridge evidence did not belong to the active child scope session.
     InvalidBridgeEvidence(String),
     /// A persisted bridge reference was not backed by an emitted bridge node.
@@ -69,6 +76,13 @@ impl fmt::Display for PlanError {
             }
             Self::PublicOutputsAlreadyBound => f.write_str("root public outputs already bound"),
             Self::EmptyPublicOutputs => f.write_str("root public output binding is empty"),
+            Self::EmptyNonEmptyInput => f.write_str("non-empty input collection is empty"),
+            Self::DuplicateInputFieldPath(path) => {
+                write!(f, "duplicate input field path {path}")
+            }
+            Self::InputBindingShape(message) => {
+                write!(f, "input binding shape mismatch: {message}")
+            }
             Self::InvalidBridgeEvidence(message) => {
                 write!(f, "invalid bridge evidence: {message}")
             }
@@ -150,10 +164,41 @@ pub struct PublicFieldPath(String);
 impl PublicFieldPath {
     /// Creates a checked public field path.
     pub fn new(value: impl AsRef<str>) -> Result<Self> {
-        checked_key("public field path", value.as_ref()).map(Self)
+        checked_field_path("public field path", value.as_ref()).map(Self)
     }
 
     /// Returns the stable field path string.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Stable field path inside a state input binding tree.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct InputFieldPath(String);
+
+impl InputFieldPath {
+    /// Creates the root input field path.
+    pub fn root() -> Self {
+        Self(String::new())
+    }
+
+    /// Creates a checked input field path.
+    pub fn new(value: impl AsRef<str>) -> Result<Self> {
+        checked_field_path("input field path", value.as_ref()).map(Self)
+    }
+
+    /// Appends a checked child segment.
+    pub fn child(&self, value: impl AsRef<str>) -> Result<Self> {
+        let segment = checked_field_segment("input field segment", value.as_ref())?;
+        if self.0.is_empty() {
+            Ok(Self(segment))
+        } else {
+            Ok(Self(format!("{}.{}", self.0, segment)))
+        }
+    }
+
+    /// Returns the stable field path string. The root path is the empty string.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -216,6 +261,25 @@ impl<T: MfmValue> CanonicalSeed<T> {
     }
 }
 
+/// Reference to a value-lineage record used by input bindings.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ValueLineageRef {
+    /// Digest identifying the value-lineage record.
+    digest: ContentDigest,
+}
+
+impl ValueLineageRef {
+    /// Creates a lineage reference from an already typed digest.
+    pub fn new(digest: ContentDigest) -> Self {
+        Self { digest }
+    }
+
+    /// Returns the lineage digest.
+    pub fn digest(&self) -> &ContentDigest {
+        &self.digest
+    }
+}
+
 /// Non-forgeable typed reference to a planned cell.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Handle<'program, 'scope, T: MfmValue> {
@@ -223,6 +287,7 @@ pub struct Handle<'program, 'scope, T: MfmValue> {
     scope_id: ScopeId,
     schema_id: SchemaId,
     semantic_type_id: SemanticTypeId,
+    value_lineage: ValueLineageRef,
     origin: HandleOrigin,
     _program: PhantomData<fn(&'program ()) -> &'program ()>,
     _scope: PhantomData<fn(&'scope ()) -> &'scope ()>,
@@ -236,6 +301,7 @@ impl<'program, 'scope, T: MfmValue> Clone for Handle<'program, 'scope, T> {
             scope_id: self.scope_id.clone(),
             schema_id: self.schema_id.clone(),
             semantic_type_id: self.semantic_type_id.clone(),
+            value_lineage: self.value_lineage.clone(),
             origin: self.origin.clone(),
             _program: PhantomData,
             _scope: PhantomData,
@@ -250,12 +316,14 @@ impl<'program, 'scope, T: MfmValue> Handle<'program, 'scope, T> {
         scope_id: ScopeId,
         schema_id: SchemaId,
         semantic_type_id: SemanticTypeId,
+        value_lineage: ValueLineageRef,
     ) -> Self {
         Self {
             cell_id,
             scope_id,
             schema_id,
             semantic_type_id,
+            value_lineage,
             origin: HandleOrigin::Local,
             _program: PhantomData,
             _scope: PhantomData,
@@ -268,6 +336,7 @@ impl<'program, 'scope, T: MfmValue> Handle<'program, 'scope, T> {
         scope_id: ScopeId,
         schema_id: SchemaId,
         semantic_type_id: SemanticTypeId,
+        value_lineage: ValueLineageRef,
         evidence: BridgeEvidenceCore,
     ) -> Self {
         Self {
@@ -275,6 +344,7 @@ impl<'program, 'scope, T: MfmValue> Handle<'program, 'scope, T> {
             scope_id,
             schema_id,
             semantic_type_id,
+            value_lineage,
             origin: HandleOrigin::Bridge {
                 evidence: Box::new(evidence),
             },
@@ -291,6 +361,7 @@ impl<'program, 'scope, T: MfmValue> Handle<'program, 'scope, T> {
             scope_id: self.scope_id.clone(),
             schema_id: self.schema_id.clone(),
             semantic_type_id: self.semantic_type_id.clone(),
+            value_lineage: self.value_lineage.clone(),
         }
     }
 }
@@ -326,6 +397,8 @@ pub struct TypedHandleRef {
     schema_id: SchemaId,
     /// Value semantic type id.
     semantic_type_id: SemanticTypeId,
+    /// Value lineage reference.
+    value_lineage: ValueLineageRef,
 }
 
 impl TypedHandleRef {
@@ -347,6 +420,11 @@ impl TypedHandleRef {
     /// Returns the value semantic type id.
     pub fn semantic_type_id(&self) -> &SemanticTypeId {
         &self.semantic_type_id
+    }
+
+    /// Returns the value lineage reference.
+    pub fn value_lineage(&self) -> &ValueLineageRef {
+        &self.value_lineage
     }
 }
 
@@ -573,6 +651,413 @@ impl PublicOutputSpec {
     }
 }
 
+/// Required terminal behavior for an input cell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RequiredTerminal {
+    /// The input requires a produced value.
+    ProducedOnly,
+    /// The input accepts produced or skipped optional values.
+    MaybeSkipped,
+}
+
+impl RequiredTerminal {
+    fn from_value_policy(policy: ValueTerminalPolicy) -> Self {
+        match policy {
+            ValueTerminalPolicy::ProducedOnly => Self::ProducedOnly,
+            ValueTerminalPolicy::MaybeSkipped => Self::MaybeSkipped,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ProducedOnly => "produced_only",
+            Self::MaybeSkipped => "maybe_skipped",
+        }
+    }
+}
+
+/// Ordering evidence for vector input bindings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum OrderingEvidence {
+    /// Author-provided vector order.
+    ExplicitAuthorOrder,
+}
+
+impl OrderingEvidence {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ExplicitAuthorOrder => "explicit_author_order",
+        }
+    }
+}
+
+/// Named field binding inside a struct input binding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamedInputBinding {
+    /// Field path for this named binding.
+    pub field_path: InputFieldPath,
+    /// Binding node for this field.
+    pub node: InputBindingNode,
+}
+
+impl NamedInputBinding {
+    /// Creates a named input binding.
+    pub fn new(field_path: InputFieldPath, node: InputBindingNode) -> Self {
+        Self { field_path, node }
+    }
+}
+
+/// Canonical typed state-input binding tree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InputBindingNode {
+    kind: InputBindingNodeKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum InputBindingNodeKind {
+    Unit,
+    Cell {
+        field_path: InputFieldPath,
+        cell_id: CellId,
+        semantic_type_id: SemanticTypeId,
+        schema_id: SchemaId,
+        value_lineage: ValueLineageRef,
+        required_terminal: RequiredTerminal,
+    },
+    Tuple {
+        elements: Vec<InputBindingNode>,
+    },
+    Struct {
+        fields: Vec<NamedInputBinding>,
+    },
+    Vec {
+        elements: Vec<InputBindingNode>,
+        ordering: OrderingEvidence,
+    },
+    NonEmptyVec {
+        elements: Vec<InputBindingNode>,
+        ordering: OrderingEvidence,
+    },
+}
+
+impl InputBindingNode {
+    /// Unit input binding node.
+    #[allow(non_upper_case_globals)]
+    pub const Unit: Self = Self {
+        kind: InputBindingNodeKind::Unit,
+    };
+
+    /// Builds a struct binding from named fields, rejecting duplicate paths and sorting canonically.
+    pub fn struct_fields(mut fields: Vec<NamedInputBinding>) -> Result<Self> {
+        let mut seen = BTreeSet::new();
+        for field in &fields {
+            if !seen.insert(field.field_path.as_str().to_owned()) {
+                return Err(PlanError::DuplicateInputFieldPath(
+                    field.field_path.as_str().to_owned(),
+                ));
+            }
+        }
+        fields.sort_by(|left, right| left.field_path.cmp(&right.field_path));
+        Ok(Self::struct_fields_unchecked(fields))
+    }
+
+    fn cell(
+        field_path: InputFieldPath,
+        cell_id: CellId,
+        semantic_type_id: SemanticTypeId,
+        schema_id: SchemaId,
+        value_lineage: ValueLineageRef,
+        required_terminal: RequiredTerminal,
+    ) -> Self {
+        Self {
+            kind: InputBindingNodeKind::Cell {
+                field_path,
+                cell_id,
+                semantic_type_id,
+                schema_id,
+                value_lineage,
+                required_terminal,
+            },
+        }
+    }
+
+    fn tuple(elements: Vec<InputBindingNode>) -> Self {
+        Self {
+            kind: InputBindingNodeKind::Tuple { elements },
+        }
+    }
+
+    fn struct_fields_unchecked(fields: Vec<NamedInputBinding>) -> Self {
+        Self {
+            kind: InputBindingNodeKind::Struct { fields },
+        }
+    }
+
+    fn vector(elements: Vec<InputBindingNode>, ordering: OrderingEvidence) -> Self {
+        Self {
+            kind: InputBindingNodeKind::Vec { elements, ordering },
+        }
+    }
+
+    fn non_empty_vector(elements: Vec<InputBindingNode>, ordering: OrderingEvidence) -> Self {
+        Self {
+            kind: InputBindingNodeKind::NonEmptyVec { elements, ordering },
+        }
+    }
+}
+
+/// Author-side conversion from handles into a binding node for a runtime input type.
+pub trait IntoInputBindingNode<I> {
+    /// Converts this author-side input into a binding node at `field_path`.
+    fn into_binding_node(self, field_path: InputFieldPath) -> Result<InputBindingNode>;
+}
+
+/// Typed state-input binding with descriptor and canonical digest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InputBinding<I: StateInput> {
+    input_schema_id: SchemaId,
+    input_descriptor_id: DescriptorId,
+    root: InputBindingNode,
+    digest: ContentDigest,
+    _input: PhantomData<fn(I) -> I>,
+}
+
+impl<I: StateInput> InputBinding<I> {
+    /// Creates an input binding from a canonical root binding node.
+    pub fn from_root(root: InputBindingNode) -> Result<Self> {
+        validate_input_binding_node(&root)?;
+        let descriptor =
+            I::input_schema_descriptor().map_err(|error| PlanError::Value(error.to_string()))?;
+        validate_input_binding_node_shape(&root, &descriptor.identity.shape)?;
+        let input_schema_id = descriptor
+            .schema_id()
+            .map_err(|error| PlanError::Value(error.to_string()))?;
+        let input_descriptor_id = input_descriptor_id(&input_schema_id)?;
+        let digest = input_binding_digest(&root)?;
+        Ok(Self {
+            input_schema_id,
+            input_descriptor_id,
+            root,
+            digest,
+            _input: PhantomData,
+        })
+    }
+
+    /// Returns the input schema id.
+    pub fn input_schema_id(&self) -> &SchemaId {
+        &self.input_schema_id
+    }
+
+    /// Returns the input descriptor id.
+    pub fn input_descriptor_id(&self) -> &DescriptorId {
+        &self.input_descriptor_id
+    }
+
+    /// Returns the root binding node.
+    pub fn root(&self) -> &InputBindingNode {
+        &self.root
+    }
+
+    /// Returns the canonical binding digest.
+    pub fn digest(&self) -> &ContentDigest {
+        &self.digest
+    }
+
+    /// Returns an unbranded persisted input binding spec.
+    pub fn spec(&self) -> InputBindingSpec {
+        InputBindingSpec {
+            input_schema_id: self.input_schema_id.clone(),
+            input_descriptor_id: self.input_descriptor_id.clone(),
+            root: self.root.clone(),
+            digest: self.digest.clone(),
+        }
+    }
+}
+
+/// Persisted state-input binding spec.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InputBindingSpec {
+    /// Input schema id.
+    pub input_schema_id: SchemaId,
+    /// Input descriptor id.
+    pub input_descriptor_id: DescriptorId,
+    /// Root input binding node.
+    pub root: InputBindingNode,
+    /// Canonical digest of the root binding tree.
+    pub digest: ContentDigest,
+}
+
+/// Converts author-side handle values into a typed state-input binding.
+pub trait IntoStateInput<'program, 'scope, I: StateInput> {
+    /// Converts into a typed input binding.
+    fn into_binding(self) -> Result<InputBinding<I>>;
+}
+
+impl IntoInputBindingNode<()> for () {
+    fn into_binding_node(self, _field_path: InputFieldPath) -> Result<InputBindingNode> {
+        Ok(InputBindingNode::Unit)
+    }
+}
+
+impl<'program, 'scope> IntoStateInput<'program, 'scope, ()> for () {
+    fn into_binding(self) -> Result<InputBinding<()>> {
+        InputBinding::from_root(InputBindingNode::Unit)
+    }
+}
+
+impl<'program, 'scope, T> IntoInputBindingNode<T> for Handle<'program, 'scope, T>
+where
+    T: MfmValue,
+{
+    fn into_binding_node(self, field_path: InputFieldPath) -> Result<InputBindingNode> {
+        let typed_ref = self.typed_ref();
+        Ok(InputBindingNode::cell(
+            field_path,
+            typed_ref.cell_id,
+            typed_ref.semantic_type_id,
+            typed_ref.schema_id,
+            typed_ref.value_lineage,
+            RequiredTerminal::from_value_policy(T::terminal_policy()),
+        ))
+    }
+}
+
+impl<'program, 'scope, T> IntoStateInput<'program, 'scope, T> for Handle<'program, 'scope, T>
+where
+    T: MfmValue,
+{
+    fn into_binding(self) -> Result<InputBinding<T>> {
+        InputBinding::from_root(self.into_binding_node(InputFieldPath::root())?)
+    }
+}
+
+impl<'program, 'scope, T> IntoInputBindingNode<Vec<T>> for Vec<Handle<'program, 'scope, T>>
+where
+    T: MfmValue,
+{
+    fn into_binding_node(self, field_path: InputFieldPath) -> Result<InputBindingNode> {
+        let elements = self
+            .into_iter()
+            .enumerate()
+            .map(|(index, handle)| handle.into_binding_node(field_path.child(index.to_string())?))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(InputBindingNode::vector(
+            elements,
+            OrderingEvidence::ExplicitAuthorOrder,
+        ))
+    }
+}
+
+impl<'program, 'scope, T> IntoStateInput<'program, 'scope, Vec<T>>
+    for Vec<Handle<'program, 'scope, T>>
+where
+    T: MfmValue,
+{
+    fn into_binding(self) -> Result<InputBinding<Vec<T>>> {
+        InputBinding::from_root(self.into_binding_node(InputFieldPath::root())?)
+    }
+}
+
+macro_rules! impl_tuple_input_binding {
+    ($($name:ident:$index:literal),+ $(,)?) => {
+        impl<'program, 'scope, $($name),+> IntoInputBindingNode<($($name,)+)>
+            for ($(Handle<'program, 'scope, $name>,)+)
+        where
+            $($name: MfmValue,)+
+        {
+            fn into_binding_node(self, field_path: InputFieldPath) -> Result<InputBindingNode> {
+                #[allow(non_snake_case)]
+                let ($($name,)+) = self;
+                let elements = vec![
+                    $($name.into_binding_node(field_path.child($index.to_string())?)?,)+
+                ];
+                Ok(InputBindingNode::tuple(elements))
+            }
+        }
+
+        impl<'program, 'scope, $($name),+> IntoStateInput<'program, 'scope, ($($name,)+)>
+            for ($(Handle<'program, 'scope, $name>,)+)
+        where
+            $($name: MfmValue,)+
+        {
+            fn into_binding(self) -> Result<InputBinding<($($name,)+)>> {
+                InputBinding::from_root(self.into_binding_node(InputFieldPath::root())?)
+            }
+        }
+    };
+}
+
+impl_tuple_input_binding!(A:0);
+impl_tuple_input_binding!(A:0, B:1);
+impl_tuple_input_binding!(A:0, B:1, C:2);
+impl_tuple_input_binding!(A:0, B:1, C:2, D:3);
+impl_tuple_input_binding!(A:0, B:1, C:2, D:3, E:4);
+impl_tuple_input_binding!(A:0, B:1, C:2, D:3, E:4, F:5);
+impl_tuple_input_binding!(A:0, B:1, C:2, D:3, E:4, F:5, G:6);
+impl_tuple_input_binding!(A:0, B:1, C:2, D:3, E:4, F:5, G:6, H:7);
+impl_tuple_input_binding!(A:0, B:1, C:2, D:3, E:4, F:5, G:6, H:7, I:8);
+impl_tuple_input_binding!(A:0, B:1, C:2, D:3, E:4, F:5, G:6, H:7, I:8, J:9);
+impl_tuple_input_binding!(A:0, B:1, C:2, D:3, E:4, F:5, G:6, H:7, I:8, J:9, K:10);
+impl_tuple_input_binding!(A:0, B:1, C:2, D:3, E:4, F:5, G:6, H:7, I:8, J:9, K:10, L:11);
+
+/// Author-side non-empty handles.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NonEmptyHandles<'program, 'scope, T: MfmValue> {
+    handles: Vec<Handle<'program, 'scope, T>>,
+}
+
+impl<'program, 'scope, T: MfmValue> NonEmptyHandles<'program, 'scope, T> {
+    /// Creates a non-empty handle collection from a first handle and optional rest.
+    pub fn new(
+        first: Handle<'program, 'scope, T>,
+        mut rest: Vec<Handle<'program, 'scope, T>>,
+    ) -> Self {
+        let mut handles = Vec::with_capacity(rest.len() + 1);
+        handles.push(first);
+        handles.append(&mut rest);
+        Self { handles }
+    }
+
+    /// Attempts to create a non-empty handle collection from a vector.
+    pub fn try_from_vec(handles: Vec<Handle<'program, 'scope, T>>) -> Result<Self> {
+        if handles.is_empty() {
+            return Err(PlanError::EmptyNonEmptyInput);
+        }
+        Ok(Self { handles })
+    }
+}
+
+impl<'program, 'scope, T> IntoInputBindingNode<NonEmpty<T>> for NonEmptyHandles<'program, 'scope, T>
+where
+    T: MfmValue,
+{
+    fn into_binding_node(self, field_path: InputFieldPath) -> Result<InputBindingNode> {
+        if self.handles.is_empty() {
+            return Err(PlanError::EmptyNonEmptyInput);
+        }
+        let elements = self
+            .handles
+            .into_iter()
+            .enumerate()
+            .map(|(index, handle)| handle.into_binding_node(field_path.child(index.to_string())?))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(InputBindingNode::non_empty_vector(
+            elements,
+            OrderingEvidence::ExplicitAuthorOrder,
+        ))
+    }
+}
+
+impl<'program, 'scope, T> IntoStateInput<'program, 'scope, NonEmpty<T>>
+    for NonEmptyHandles<'program, 'scope, T>
+where
+    T: MfmValue,
+{
+    fn into_binding(self) -> Result<InputBinding<NonEmpty<T>>> {
+        InputBinding::from_root(self.into_binding_node(InputFieldPath::root())?)
+    }
+}
+
 /// Root-bound public output evidence returned by `RootBuilder::bind_public_outputs`.
 #[derive(Debug, PartialEq, Eq)]
 pub struct RootBound<'program, 'scope> {
@@ -717,6 +1202,7 @@ impl<'program, 'scope> RootBuilder<'program, 'scope> {
 
         let seed_id = seed_id(self.scope.scope_id(), &key)?;
         let cell_id = seed_cell_id(&seed_id)?;
+        let value_lineage = seed_value_lineage_ref(&cell_id)?;
         let spec = RootSeedSpec {
             key,
             seed_id,
@@ -732,6 +1218,7 @@ impl<'program, 'scope> RootBuilder<'program, 'scope> {
             spec.scope_id.clone(),
             spec.schema_id.clone(),
             spec.semantic_type_id.clone(),
+            value_lineage,
         );
         self.seeds.push(spec);
         Ok(handle)
@@ -880,6 +1367,7 @@ impl<'program, 'parent, 'child> ChildScopeBuilder<'program, 'parent, 'child> {
             target.scope_id,
             target.schema_id,
             target.semantic_type_id,
+            target.value_lineage,
             evidence,
         ))
     }
@@ -905,6 +1393,7 @@ impl<'program, 'parent, 'child> ChildScopeBuilder<'program, 'parent, 'child> {
             target.scope_id,
             target.schema_id,
             target.semantic_type_id,
+            target.value_lineage,
             evidence,
         ))
     }
@@ -954,6 +1443,7 @@ impl<'program, 'parent, 'child> ChildScopeBuilder<'program, 'parent, 'child> {
             policy,
         )?;
         let target_cell_id = bridge_cell_id(&node_id)?;
+        let target_value_lineage = bridge_value_lineage_ref(&node_id)?;
         let spec = BridgeNodeSpec {
             node_id: node_id.clone(),
             key,
@@ -975,6 +1465,7 @@ impl<'program, 'parent, 'child> ChildScopeBuilder<'program, 'parent, 'child> {
             scope_id: target_scope_id,
             schema_id: source.schema_id,
             semantic_type_id: source.semantic_type_id,
+            value_lineage: target_value_lineage,
         };
         let evidence = BridgeEvidenceCore {
             bridge_ref,
@@ -1102,6 +1593,37 @@ fn is_valid_author_key(value: &str) -> bool {
     })
 }
 
+fn checked_field_path(label: &str, value: &str) -> Result<String> {
+    if value.split('.').all(is_valid_field_segment) {
+        Ok(value.to_owned())
+    } else {
+        Err(PlanError::Key(format!(
+            "{label} {value:?} must contain non-empty ASCII field segments"
+        )))
+    }
+}
+
+fn checked_field_segment(label: &str, value: &str) -> Result<String> {
+    if is_valid_field_segment(value) {
+        Ok(value.to_owned())
+    } else {
+        Err(PlanError::Key(format!(
+            "{label} {value:?} must be a non-empty ASCII field segment"
+        )))
+    }
+}
+
+fn is_valid_field_segment(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !first.is_ascii_alphanumeric() {
+        return false;
+    }
+    chars.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '/'))
+}
+
 fn scope_id(key: &ScopeKey) -> Result<ScopeId> {
     digest_only_id("scope", key.as_str(), ScopeId::from_digest)
 }
@@ -1124,6 +1646,23 @@ fn seed_id(scope_id: &ScopeId, key: &SeedKey) -> Result<SeedId> {
 
 fn seed_cell_id(seed_id: &SeedId) -> Result<CellId> {
     digest_only_id("seed-cell", seed_id.as_str(), CellId::from_digest)
+}
+
+fn seed_value_lineage_ref(cell_id: &CellId) -> Result<ValueLineageRef> {
+    value_lineage_ref("seed", cell_id.as_str())
+}
+
+fn bridge_value_lineage_ref(node_id: &NodeId) -> Result<ValueLineageRef> {
+    value_lineage_ref("bridge", node_id.as_str())
+}
+
+fn value_lineage_ref(domain: &str, value: &str) -> Result<ValueLineageRef> {
+    let digest =
+        sha256_digest_bytes(format!("mfm.program:value-lineage:{domain}:{value}").as_bytes());
+    Ok(ValueLineageRef::new(ContentDigest::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        digest,
+    )))
 }
 
 fn bridge_node_id(
@@ -1180,6 +1719,221 @@ fn bridge_ref_key(bridge_ref: &BridgeRef) -> String {
         bridge_ref.schema_id.as_str(),
         bridge_ref.bridge_node_id.as_str()
     )
+}
+
+fn input_descriptor_id(input_schema_id: &SchemaId) -> Result<DescriptorId> {
+    digest_only_id(
+        "input-descriptor",
+        input_schema_id.as_str(),
+        DescriptorId::from_digest,
+    )
+}
+
+fn validate_input_binding_node(node: &InputBindingNode) -> Result<()> {
+    match &node.kind {
+        InputBindingNodeKind::Unit | InputBindingNodeKind::Cell { .. } => Ok(()),
+        InputBindingNodeKind::Tuple { elements } | InputBindingNodeKind::Vec { elements, .. } => {
+            for element in elements {
+                validate_input_binding_node(element)?;
+            }
+            Ok(())
+        }
+        InputBindingNodeKind::Struct { fields } => {
+            let mut seen = BTreeSet::new();
+            for field in fields {
+                if !seen.insert(field.field_path.as_str().to_owned()) {
+                    return Err(PlanError::DuplicateInputFieldPath(
+                        field.field_path.as_str().to_owned(),
+                    ));
+                }
+                validate_input_binding_node(&field.node)?;
+            }
+            Ok(())
+        }
+        InputBindingNodeKind::NonEmptyVec { elements, .. } => {
+            if elements.is_empty() {
+                return Err(PlanError::EmptyNonEmptyInput);
+            }
+            for element in elements {
+                validate_input_binding_node(element)?;
+            }
+            Ok(())
+        }
+    }
+}
+
+fn validate_input_binding_node_shape(node: &InputBindingNode, shape: &SchemaShape) -> Result<()> {
+    match (&node.kind, shape) {
+        (InputBindingNodeKind::Unit, SchemaShape::Unit) => Ok(()),
+        (
+            InputBindingNodeKind::Cell {
+                field_path,
+                semantic_type_id,
+                schema_id,
+                ..
+            },
+            SchemaShape::ValueRef {
+                schema_id: expected_schema_id,
+                semantic_type_id: expected_semantic_type_id,
+            },
+        ) => {
+            if schema_id != expected_schema_id || semantic_type_id != expected_semantic_type_id {
+                return Err(PlanError::InputBindingShape(format!(
+                    "cell {} expected ({}, {}) but got ({}, {})",
+                    field_path.as_str(),
+                    expected_schema_id,
+                    expected_semantic_type_id,
+                    schema_id,
+                    semantic_type_id
+                )));
+            }
+            Ok(())
+        }
+        (InputBindingNodeKind::Tuple { elements }, SchemaShape::Tuple(expected)) => {
+            if elements.len() != expected.len() {
+                return Err(PlanError::InputBindingShape(format!(
+                    "tuple expected {} elements but got {}",
+                    expected.len(),
+                    elements.len()
+                )));
+            }
+            for (element, expected_shape) in elements.iter().zip(expected) {
+                validate_input_binding_node_shape(element, expected_shape)?;
+            }
+            Ok(())
+        }
+        (InputBindingNodeKind::Struct { fields }, SchemaShape::Struct { fields: expected }) => {
+            if fields.len() != expected.len() {
+                return Err(PlanError::InputBindingShape(format!(
+                    "struct expected {} fields but got {}",
+                    expected.len(),
+                    fields.len()
+                )));
+            }
+            for (field, expected_field) in fields.iter().zip(expected) {
+                if field.field_path.as_str() != expected_field.name {
+                    return Err(PlanError::InputBindingShape(format!(
+                        "struct expected field {} but got {}",
+                        expected_field.name,
+                        field.field_path.as_str()
+                    )));
+                }
+                validate_input_binding_node_shape(&field.node, &expected_field.shape)?;
+            }
+            Ok(())
+        }
+        (InputBindingNodeKind::Vec { elements, .. }, SchemaShape::Vec(expected)) => {
+            for element in elements {
+                validate_input_binding_node_shape(element, expected)?;
+            }
+            Ok(())
+        }
+        (
+            InputBindingNodeKind::NonEmptyVec { elements, .. },
+            SchemaShape::NonEmptyVec(expected),
+        ) => {
+            for element in elements {
+                validate_input_binding_node_shape(element, expected)?;
+            }
+            Ok(())
+        }
+        (node, shape) => Err(PlanError::InputBindingShape(format!(
+            "expected {} but got {}",
+            schema_shape_kind(shape),
+            input_binding_node_kind_from_kind(node)
+        ))),
+    }
+}
+
+fn schema_shape_kind(shape: &SchemaShape) -> &'static str {
+    match shape {
+        SchemaShape::Unit => "unit",
+        SchemaShape::Bool => "bool",
+        SchemaShape::String => "string",
+        SchemaShape::Bytes => "bytes",
+        SchemaShape::SignedInteger { .. } => "signed_integer",
+        SchemaShape::UnsignedInteger { .. } => "unsigned_integer",
+        SchemaShape::DecimalString { .. } => "decimal_string",
+        SchemaShape::Option(_) => "option",
+        SchemaShape::Vec(_) => "vec",
+        SchemaShape::NonEmptyVec(_) => "non_empty_vec",
+        SchemaShape::Tuple(_) => "tuple",
+        SchemaShape::Struct { .. } => "struct",
+        SchemaShape::BTreeMapString { .. } => "btree_map_string",
+        SchemaShape::Enum { .. } => "enum",
+        SchemaShape::ValueRef { .. } => "value_ref",
+        SchemaShape::Generic { .. } => "generic",
+    }
+}
+
+fn input_binding_node_kind_from_kind(kind: &InputBindingNodeKind) -> &'static str {
+    match kind {
+        InputBindingNodeKind::Unit => "unit",
+        InputBindingNodeKind::Cell { .. } => "cell",
+        InputBindingNodeKind::Tuple { .. } => "tuple",
+        InputBindingNodeKind::Struct { .. } => "struct",
+        InputBindingNodeKind::Vec { .. } => "vec",
+        InputBindingNodeKind::NonEmptyVec { .. } => "non_empty_vec",
+    }
+}
+
+fn input_binding_digest(root: &InputBindingNode) -> Result<ContentDigest> {
+    let json = serde_json::to_string(&input_binding_node_json(root))
+        .map_err(|error| PlanError::Serialize(error.to_string()))?;
+    let canonical = PlainCanonicalJsonBytes::from_json_str(&json)
+        .map_err(|error| PlanError::Canonical(error.to_string()))?;
+    Ok(canonical.content_digest())
+}
+
+fn input_binding_node_json(node: &InputBindingNode) -> serde_json::Value {
+    match &node.kind {
+        InputBindingNodeKind::Unit => serde_json::json!({
+            "kind": "unit",
+        }),
+        InputBindingNodeKind::Cell {
+            field_path,
+            cell_id,
+            semantic_type_id,
+            schema_id,
+            value_lineage,
+            required_terminal,
+            ..
+        } => serde_json::json!({
+            "cell_id": cell_id.as_str(),
+            "field_path": field_path.as_str(),
+            "kind": "cell",
+            "required_terminal": required_terminal.as_str(),
+            "schema_id": schema_id.as_str(),
+            "semantic_type_id": semantic_type_id.as_str(),
+            "value_lineage": value_lineage.digest().as_str(),
+        }),
+        InputBindingNodeKind::Tuple { elements } => serde_json::json!({
+            "elements": elements.iter().map(input_binding_node_json).collect::<Vec<_>>(),
+            "kind": "tuple",
+        }),
+        InputBindingNodeKind::Struct { fields } => serde_json::json!({
+            "fields": fields
+                .iter()
+                .map(|field| {
+                    serde_json::json!({
+                        "field_path": field.field_path.as_str(),
+                        "node": input_binding_node_json(&field.node),
+                    })
+                })
+                .collect::<Vec<_>>(),
+            "kind": "struct",
+        }),
+        InputBindingNodeKind::Vec { elements, ordering } => serde_json::json!({
+            "elements": elements.iter().map(input_binding_node_json).collect::<Vec<_>>(),
+            "kind": "vec",
+            "ordering": ordering.as_str(),
+        }),
+        InputBindingNodeKind::NonEmptyVec { elements, ordering } => serde_json::json!({
+            "elements": elements.iter().map(input_binding_node_json).collect::<Vec<_>>(),
+            "kind": "non_empty_vec",
+            "ordering": ordering.as_str(),
+        }),
+    }
 }
 
 fn digest_only_id<I>(

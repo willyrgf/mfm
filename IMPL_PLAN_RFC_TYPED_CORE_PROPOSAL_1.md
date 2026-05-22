@@ -167,12 +167,12 @@ workflow ports, and deletion or hard isolation of old dynamic semantic APIs.
 
 ### Commit 13: `kernel program add state inputs and bindings`
 
-- [ ] Implement `StateInput`, `InputBindingSpec`, `InputBindingNode`, `IntoStateInput`, tuples,
+- [x] Implement `StateInput`, `InputBindingSpec`, `InputBindingNode`, `IntoStateInput`, tuples,
       vectors, non-empty handles, optional values, artifact refs, and derive-backed input structs.
-- [ ] Add value lineage refs to input cell bindings.
-- [ ] Reject raw JSON, context keys, `OutputCellId`, dynamic erased inputs, and empty non-empty
+- [x] Add value lineage refs to input cell bindings.
+- [x] Reject raw JSON, context keys, `OutputCellId`, dynamic erased inputs, and empty non-empty
       inputs.
-- [ ] Validation: `nix run .#test`.
+- [x] Validation: `nix run .#test`.
 
 ### Commit 14: `kernel program add state registry authority`
 

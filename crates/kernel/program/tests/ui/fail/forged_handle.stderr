@@ -28,7 +28,7 @@ error: cannot construct `Handle<'_, '_, TryValue>` with struct literal syntax du
 28 |           _value: std::marker::PhantomData,
    |           -------------------------------- private field
    |
-   = note: ...and other private field `origin` that was not provided
+   = note: ...and other private fields `value_lineage` and `origin` that were not provided
 help: you might have meant to use an associated function to build this type
    |
  8 -     let _handle = mfm_program::Handle::<types::TryValue> {
@@ -53,7 +53,7 @@ help: you might have meant to use an associated function to build this type
 27 -         _scope: std::marker::PhantomData,
 28 -         _value: std::marker::PhantomData,
 29 -     };
- 8 +     let _handle = mfm_program::Handle::<types::TryValue>::new(_, _, _, _);
+ 8 +     let _handle = mfm_program::Handle::<types::TryValue>::new(_, _, _, _, _);
    |
  8 -     let _handle = mfm_program::Handle::<types::TryValue> {
  9 -         cell_id: CellId::from_digest(DigestAlgorithm::Sha256JcsV1, digest.clone()),
@@ -77,5 +77,5 @@ help: you might have meant to use an associated function to build this type
 27 -         _scope: std::marker::PhantomData,
 28 -         _value: std::marker::PhantomData,
 29 -     };
- 8 +     let _handle = mfm_program::Handle::<types::TryValue>::new_bridge(_, _, _, _, _);
+ 8 +     let _handle = mfm_program::Handle::<types::TryValue>::new_bridge(_, _, _, _, _, _);
    |

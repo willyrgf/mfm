@@ -2428,6 +2428,7 @@ version = "0.1.0"
 dependencies = [
  "mfm-canonical",
  "mfm-ids",
+ "mfm-program",
  "mfm-values",
  "proc-macro2",
  "quote",

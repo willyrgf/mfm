@@ -36,6 +36,12 @@ pub fn derive_state_input(input: TokenStream) -> TokenStream {
     .into()
 }
 
+#[proc_macro_derive(StateInputHandles, attributes(mfm, serde))]
+/// Derives handle-side `mfm_program::IntoStateInput` bindings for a state input struct.
+pub fn derive_state_input_handles(input: TokenStream) -> TokenStream {
+    expand_state_input_handles_derive(parse_macro_input!(input as DeriveInput)).into()
+}
+
 #[proc_macro_derive(OperationOutput, attributes(mfm, serde))]
 /// Derives `mfm_values::OperationOutput` for a named struct.
 pub fn derive_operation_output(input: TokenStream) -> TokenStream {
@@ -93,6 +99,13 @@ fn expand_schema_derive(input: DeriveInput, kind: DeriveKind) -> proc_macro2::To
     }
 }
 
+fn expand_state_input_handles_derive(input: DeriveInput) -> proc_macro2::TokenStream {
+    match expand_state_input_handles_derive_result(input) {
+        Ok(tokens) => tokens,
+        Err(error) => error.to_compile_error(),
+    }
+}
+
 fn expand_schema_derive_result(
     input: DeriveInput,
     kind: DeriveKind,
@@ -110,7 +123,12 @@ fn expand_schema_derive_result(
 
     let attrs = ContainerAttrs::parse(&input.attrs, &input.ident)?;
     let fields = named_struct_fields(&input.data)?;
-    let field_output = field_descriptor_tokens(fields, attrs.rename_all.as_deref())?;
+    let field_output = field_descriptor_tokens(fields, attrs.rename_all.as_deref(), kind)?;
+    let state_input_handles = if kind == DeriveKind::StateInput {
+        generated_state_input_handles_tokens(&input.ident, fields, attrs.rename_all.as_deref())?
+    } else {
+        quote! {}
+    };
     let field_descriptors = field_output.descriptors;
     let default_bounds = field_output.default_bounds;
     let ident = &input.ident;
@@ -212,7 +230,70 @@ fn expand_schema_derive_result(
         },
     };
 
-    Ok(impl_block)
+    Ok(quote! {
+        #impl_block
+        #state_input_handles
+    })
+}
+
+fn expand_state_input_handles_derive_result(
+    input: DeriveInput,
+) -> syn::Result<proc_macro2::TokenStream> {
+    let lifetimes = input
+        .generics
+        .params
+        .iter()
+        .filter_map(|param| match param {
+            GenericParam::Lifetime(lifetime) => Some(&lifetime.lifetime),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if lifetimes.len() != 2 || input.generics.params.len() != 2 {
+        return Err(syn::Error::new_spanned(
+            input.generics,
+            "program StateInputHandles derive expects exactly two lifetime parameters",
+        ));
+    }
+    let program_lifetime = lifetimes[0];
+    let scope_lifetime = lifetimes[1];
+
+    let attrs = StateInputHandlesAttrs::parse(&input.attrs)?;
+    let fields = named_struct_fields(&input.data)?;
+    let input_bindings = program_state_input_handle_field_tokens(
+        fields,
+        attrs.rename_all.as_deref(),
+        program_lifetime,
+        scope_lifetime,
+    )?;
+    let ident = &input.ident;
+    let input_type = &attrs.input_type;
+    let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
+
+    Ok(quote! {
+        impl #impl_generics ::mfm_program::IntoInputBindingNode<#input_type>
+            for #ident #ty_generics #where_clause
+        {
+            fn into_binding_node(
+                self,
+                field_path: ::mfm_program::InputFieldPath,
+            ) -> ::mfm_program::Result<::mfm_program::InputBindingNode> {
+                ::mfm_program::InputBindingNode::struct_fields(vec![#(#input_bindings),*])
+            }
+        }
+
+        impl #impl_generics ::mfm_program::IntoStateInput<#program_lifetime, #scope_lifetime, #input_type>
+            for #ident #ty_generics #where_clause
+        {
+            fn into_binding(self) -> ::mfm_program::Result<::mfm_program::InputBinding<#input_type>> {
+                ::mfm_program::InputBinding::from_root(
+                    <Self as ::mfm_program::IntoInputBindingNode<#input_type>>::into_binding_node(
+                        self,
+                        ::mfm_program::InputFieldPath::root(),
+                    )?,
+                )
+            }
+        }
+    })
 }
 
 fn expand_program_public_outputs_derive_result(
@@ -351,6 +432,69 @@ impl ContainerAttrs {
     }
 }
 
+#[derive(Debug)]
+struct StateInputHandlesAttrs {
+    input_type: Type,
+    rename_all: Option<String>,
+}
+
+impl StateInputHandlesAttrs {
+    fn parse(attrs: &[Attribute]) -> syn::Result<Self> {
+        let mut input_type = None;
+        let mut rename_all = None;
+
+        for attr in attrs {
+            if attr.path().is_ident("mfm") {
+                attr.parse_nested_meta(|meta| {
+                    if meta.path.is_ident("input") {
+                        let value = meta.value()?.parse::<LitStr>()?.value();
+                        input_type = Some(syn::parse_str::<Type>(&value).map_err(|error| {
+                            syn::Error::new(
+                                meta.path.span(),
+                                format!("invalid input type: {error}"),
+                            )
+                        })?);
+                        Ok(())
+                    } else {
+                        Err(meta.error("unsupported #[mfm(...)] container attribute"))
+                    }
+                })?;
+            } else if attr.path().is_ident("serde") {
+                attr.parse_nested_meta(|meta| {
+                    if meta.path.is_ident("rename_all") {
+                        let value = meta.value()?.parse::<LitStr>()?.value();
+                        match value.as_str() {
+                            "snake_case" | "kebab-case" | "camelCase" => {
+                                rename_all = Some(value);
+                                Ok(())
+                            }
+                            _ => {
+                                Err(meta
+                                    .error("unsupported serde(rename_all) value for MFM derive"))
+                            }
+                        }
+                    } else {
+                        Err(meta
+                            .error("unsupported #[serde(...)] container attribute for MFM derive"))
+                    }
+                })?;
+            }
+        }
+
+        let Some(input_type) = input_type else {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                "StateInputHandles derive requires #[mfm(input = \"RuntimeInputType\")]",
+            ));
+        };
+
+        Ok(Self {
+            input_type,
+            rename_all,
+        })
+    }
+}
+
 fn named_struct_fields(
     data: &Data,
 ) -> syn::Result<&syn::punctuated::Punctuated<syn::Field, syn::Token![,]>> {
@@ -387,6 +531,7 @@ struct ProgramPublicOutputFieldOutput {
 fn field_descriptor_tokens(
     fields: &syn::punctuated::Punctuated<syn::Field, syn::Token![,]>,
     rename_all: Option<&str>,
+    kind: DeriveKind,
 ) -> syn::Result<FieldDescriptorOutput> {
     let mut output = Vec::new();
     let mut default_bounds = Vec::new();
@@ -408,7 +553,7 @@ fn field_descriptor_tokens(
             ));
         }
         names.push(wire_name.clone());
-        let shape = shape_tokens(&field.ty)?;
+        let shape = shape_tokens(&field.ty, kind)?;
         let constructor = if attrs.default {
             let ty = &field.ty;
             default_bounds.push(quote! {
@@ -486,6 +631,146 @@ fn program_public_output_field_tokens(
     })
 }
 
+fn program_state_input_handle_field_tokens(
+    fields: &syn::punctuated::Punctuated<syn::Field, syn::Token![,]>,
+    rename_all: Option<&str>,
+    program_lifetime: &syn::Lifetime,
+    scope_lifetime: &syn::Lifetime,
+) -> syn::Result<Vec<proc_macro2::TokenStream>> {
+    let mut output = Vec::new();
+    let mut names = Vec::new();
+
+    for field in fields {
+        let ident = field
+            .ident
+            .as_ref()
+            .ok_or_else(|| syn::Error::new(field.span(), "MFM derives require named fields"))?;
+        let attrs = FieldAttrs::parse(&field.attrs)?;
+        if attrs.default {
+            return Err(syn::Error::new(
+                ident.span(),
+                "program state input handle fields cannot use serde(default)",
+            ));
+        }
+        let wire_name = attrs
+            .rename
+            .unwrap_or_else(|| apply_rename_all(&ident.to_string(), rename_all));
+        if names.iter().any(|name: &String| name == &wire_name) {
+            return Err(syn::Error::new(
+                ident.span(),
+                format!("duplicate MFM field wire name '{wire_name}'"),
+            ));
+        }
+        names.push(wire_name.clone());
+        let runtime_input_ty =
+            state_input_lifted_type_tokens(&field.ty, program_lifetime, scope_lifetime)?;
+        output.push(quote! {
+            {
+                let field_path = field_path.child(#wire_name)?;
+                ::mfm_program::NamedInputBinding::new(
+                    field_path.clone(),
+                    ::mfm_program::IntoInputBindingNode::<#runtime_input_ty>::into_binding_node(
+                        self.#ident,
+                        field_path,
+                    )?,
+                )
+            }
+        });
+    }
+
+    Ok(output)
+}
+
+fn generated_state_input_handles_tokens(
+    input_ident: &Ident,
+    fields: &syn::punctuated::Punctuated<syn::Field, syn::Token![,]>,
+    rename_all: Option<&str>,
+) -> syn::Result<proc_macro2::TokenStream> {
+    let handle_ident = format_ident!("{}Handles", input_ident);
+    let program_lifetime = syn::Lifetime::new("'program", Span::call_site());
+    let scope_lifetime = syn::Lifetime::new("'scope", Span::call_site());
+    let mut handle_fields = Vec::new();
+    let mut input_bindings = Vec::new();
+    let mut names = Vec::new();
+
+    for field in fields {
+        let ident = field
+            .ident
+            .as_ref()
+            .ok_or_else(|| syn::Error::new(field.span(), "MFM derives require named fields"))?;
+        let attrs = FieldAttrs::parse(&field.attrs)?;
+        if attrs.default {
+            return Err(syn::Error::new(
+                ident.span(),
+                "state input fields cannot use serde(default)",
+            ));
+        }
+        let wire_name = attrs
+            .rename
+            .unwrap_or_else(|| apply_rename_all(&ident.to_string(), rename_all));
+        if names.iter().any(|name: &String| name == &wire_name) {
+            return Err(syn::Error::new(
+                ident.span(),
+                format!("duplicate MFM field wire name '{wire_name}'"),
+            ));
+        }
+        names.push(wire_name.clone());
+
+        let runtime_input_ty = &field.ty;
+        let handle_ty = generated_state_input_handle_type_tokens(
+            runtime_input_ty,
+            &program_lifetime,
+            &scope_lifetime,
+        )?;
+        handle_fields.push(quote! {
+            pub #ident: #handle_ty
+        });
+        input_bindings.push(quote! {
+            {
+                let field_path = field_path.child(#wire_name)?;
+                ::mfm_program::NamedInputBinding::new(
+                    field_path.clone(),
+                    ::mfm_program::IntoInputBindingNode::<#runtime_input_ty>::into_binding_node(
+                        self.#ident,
+                        field_path,
+                    )?,
+                )
+            }
+        });
+    }
+
+    Ok(quote! {
+        #[allow(missing_docs)]
+        pub struct #handle_ident<#program_lifetime, #scope_lifetime> {
+            #(#handle_fields,)*
+        }
+
+        impl<#program_lifetime, #scope_lifetime> ::mfm_program::IntoInputBindingNode<#input_ident>
+            for #handle_ident<#program_lifetime, #scope_lifetime>
+        {
+            fn into_binding_node(
+                self,
+                field_path: ::mfm_program::InputFieldPath,
+            ) -> ::mfm_program::Result<::mfm_program::InputBindingNode> {
+                ::mfm_program::InputBindingNode::struct_fields(vec![#(#input_bindings),*])
+            }
+        }
+
+        impl<#program_lifetime, #scope_lifetime> ::mfm_program::IntoStateInput<#program_lifetime, #scope_lifetime, #input_ident>
+            for #handle_ident<#program_lifetime, #scope_lifetime>
+        {
+            fn into_binding(self) -> ::mfm_program::Result<::mfm_program::InputBinding<#input_ident>> {
+                ::mfm_program::InputBinding::from_root(
+                    <Self as ::mfm_program::IntoInputBindingNode<#input_ident>>::into_binding_node(
+                        self,
+                        ::mfm_program::InputFieldPath::root(),
+                    )?,
+                )
+            }
+        }
+    })
+}
+
 #[derive(Default)]
 struct FieldAttrs {
     rename: Option<String>,
@@ -540,15 +825,15 @@ impl FieldAttrs {
     }
 }
 
-fn shape_tokens(ty: &Type) -> syn::Result<proc_macro2::TokenStream> {
+fn shape_tokens(ty: &Type, kind: DeriveKind) -> syn::Result<proc_macro2::TokenStream> {
     reject_known_secret_type(ty)?;
     match ty {
-        Type::Path(type_path) => shape_tokens_for_path(type_path),
+        Type::Path(type_path) => shape_tokens_for_path(type_path, kind),
         Type::Tuple(tuple) => {
             let elements = tuple
                 .elems
                 .iter()
-                .map(shape_tokens)
+                .map(|element| shape_tokens(element, kind))
                 .collect::<syn::Result<Vec<_>>>()?;
             Ok(quote!(::mfm_values::SchemaShape::Tuple(
                 vec![#(#elements),*]
@@ -561,7 +846,10 @@ fn shape_tokens(ty: &Type) -> syn::Result<proc_macro2::TokenStream> {
     }
 }
 
-fn shape_tokens_for_path(type_path: &TypePath) -> syn::Result<proc_macro2::TokenStream> {
+fn shape_tokens_for_path(
+    type_path: &TypePath,
+    kind: DeriveKind,
+) -> syn::Result<proc_macro2::TokenStream> {
     let Some(segment) = type_path.path.segments.last() else {
         return Err(syn::Error::new_spanned(
             type_path,
@@ -604,13 +892,18 @@ fn shape_tokens_for_path(type_path: &TypePath) -> syn::Result<proc_macro2::Token
         }
         "Option" => {
             let element = one_generic_type(segment, "Option")?;
-            let shape = shape_tokens(element)?;
+            let shape = shape_tokens(element, kind)?;
             Ok(quote!(::mfm_values::SchemaShape::Option(Box::new(#shape))))
         }
         "Vec" => {
             let element = one_generic_type(segment, "Vec")?;
-            let shape = shape_tokens(element)?;
+            let shape = shape_tokens(element, kind)?;
             Ok(quote!(::mfm_values::SchemaShape::Vec(Box::new(#shape))))
+        }
+        "NonEmpty" => {
+            let element = one_generic_type(segment, "NonEmpty")?;
+            let shape = shape_tokens(element, kind)?;
+            Ok(quote!(::mfm_values::SchemaShape::NonEmptyVec(Box::new(#shape))))
         }
         "BTreeMap" => {
             let (key, value) = two_generic_types(segment, "BTreeMap")?;
@@ -620,9 +913,16 @@ fn shape_tokens_for_path(type_path: &TypePath) -> syn::Result<proc_macro2::Token
                     "BTreeMap keys must be String for MFM descriptors",
                 ));
             }
-            let value_shape = shape_tokens(value)?;
+            let value_shape = shape_tokens(value, kind)?;
             Ok(quote!(::mfm_values::SchemaShape::BTreeMapString {
                 value: Box::new(#value_shape)
+            }))
+        }
+        _ if kind == DeriveKind::StateInput && ident.ends_with("Input") => {
+            let ty = quote!(#type_path);
+            Ok(quote!({
+                let descriptor = <#ty as ::mfm_values::StateInput>::input_schema_descriptor()?;
+                descriptor.identity.shape
             }))
         }
         _ => {
@@ -643,19 +943,19 @@ fn handle_value_type<'a>(
     let Type::Path(type_path) = ty else {
         return Err(syn::Error::new_spanned(
             ty,
-            "program PublicOutputs fields must be mfm_program::Handle<'p, 's, T>",
+            "handle fields must be mfm_program::Handle<'p, 's, T>",
         ));
     };
     let Some(segment) = type_path.path.segments.last() else {
         return Err(syn::Error::new_spanned(
             ty,
-            "program PublicOutputs fields must be mfm_program::Handle<'p, 's, T>",
+            "handle fields must be mfm_program::Handle<'p, 's, T>",
         ));
     };
     if segment.ident != "Handle" {
         return Err(syn::Error::new_spanned(
             ty,
-            "program PublicOutputs fields must be mfm_program::Handle<'p, 's, T>",
+            "handle fields must be mfm_program::Handle<'p, 's, T>",
         ));
     }
     let PathArguments::AngleBracketed(args) = &segment.arguments else {
@@ -697,6 +997,263 @@ fn handle_value_type<'a>(
             "Handle value argument must be a type",
         )),
     }
+}
+
+fn state_input_lifted_type_tokens(
+    ty: &Type,
+    program_lifetime: &syn::Lifetime,
+    scope_lifetime: &syn::Lifetime,
+) -> syn::Result<proc_macro2::TokenStream> {
+    reject_known_secret_type(ty)?;
+    let Type::Path(type_path) = ty else {
+        return Err(syn::Error::new_spanned(
+            ty,
+            "state input handle fields must be Handle, Vec<Handle>, NonEmptyHandles, or nested handle structs",
+        ));
+    };
+    let Some(segment) = type_path.path.segments.last() else {
+        return Err(syn::Error::new_spanned(ty, "unsupported empty type path"));
+    };
+    let ident = segment.ident.to_string();
+    match ident.as_str() {
+        "Handle" => {
+            let value_ty = handle_value_type(ty, program_lifetime, scope_lifetime)?;
+            Ok(quote!(#value_ty))
+        }
+        "Vec" => {
+            let element = one_generic_type(segment, "Vec")?;
+            let value_ty = handle_value_type(element, program_lifetime, scope_lifetime)?;
+            Ok(quote!(::std::vec::Vec<#value_ty>))
+        }
+        "NonEmptyHandles" => {
+            let value_ty = non_empty_handles_value_type(ty, program_lifetime, scope_lifetime)?;
+            Ok(quote!(::mfm_program::NonEmpty<#value_ty>))
+        }
+        _ if ident.ends_with("Handles") => {
+            validate_nested_handles_lifetimes(type_path, program_lifetime, scope_lifetime)?;
+            let runtime_path = nested_handles_runtime_path(type_path)?;
+            Ok(quote!(#runtime_path))
+        }
+        _ => Err(syn::Error::new_spanned(
+            ty,
+            "state input handle fields must be Handle, Vec<Handle>, NonEmptyHandles, or nested handle structs",
+        )),
+    }
+}
+
+fn generated_state_input_handle_type_tokens(
+    ty: &Type,
+    program_lifetime: &syn::Lifetime,
+    scope_lifetime: &syn::Lifetime,
+) -> syn::Result<proc_macro2::TokenStream> {
+    reject_known_secret_type(ty)?;
+    let Type::Path(type_path) = ty else {
+        return Err(syn::Error::new_spanned(
+            ty,
+            "state input fields must lift to handles from MfmValue, Vec<T>, NonEmpty<T>, MaybeValue<T>, ArtifactRef<T>, or nested StateInput structs",
+        ));
+    };
+    let Some(segment) = type_path.path.segments.last() else {
+        return Err(syn::Error::new_spanned(ty, "unsupported empty type path"));
+    };
+    let ident = segment.ident.to_string();
+    match ident.as_str() {
+        "Vec" => {
+            let element = one_generic_type(segment, "Vec")?;
+            reject_unsupported_state_input_leaf(element)?;
+            Ok(
+                quote!(::std::vec::Vec<::mfm_program::Handle<#program_lifetime, #scope_lifetime, #element>>),
+            )
+        }
+        "NonEmpty" => {
+            let element = one_generic_type(segment, "NonEmpty")?;
+            reject_unsupported_state_input_leaf(element)?;
+            Ok(quote!(::mfm_program::NonEmptyHandles<#program_lifetime, #scope_lifetime, #element>))
+        }
+        "Option" => Err(syn::Error::new_spanned(
+            ty,
+            "state input optionality must use mfm_values::MaybeValue<T>",
+        )),
+        _ if ident.ends_with("Input") => {
+            let mut handles_path = type_path.path.clone();
+            let last = handles_path
+                .segments
+                .iter_mut()
+                .last()
+                .expect("last segment exists");
+            last.ident = format_ident!("{}Handles", last.ident);
+            last.arguments = PathArguments::AngleBracketed(
+                syn::parse_quote!(<#program_lifetime, #scope_lifetime>),
+            );
+            Ok(quote!(#handles_path))
+        }
+        _ => {
+            reject_unsupported_state_input_leaf(ty)?;
+            Ok(quote!(::mfm_program::Handle<#program_lifetime, #scope_lifetime, #ty>))
+        }
+    }
+}
+
+fn reject_unsupported_state_input_leaf(ty: &Type) -> syn::Result<()> {
+    let Type::Path(type_path) = ty else {
+        return Err(syn::Error::new_spanned(
+            ty,
+            "state input fields must use named typed values",
+        ));
+    };
+    let Some(segment) = type_path.path.segments.last() else {
+        return Err(syn::Error::new_spanned(ty, "unsupported empty type path"));
+    };
+    let ident = segment.ident.to_string();
+    match ident.as_str() {
+        "bool" | "String" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "f32"
+        | "f64" | "usize" | "isize" | "Option" | "HashMap" | "BTreeMap" => {
+            Err(syn::Error::new_spanned(
+                ty,
+                "state input fields must use MfmValue types or supported typed wrappers",
+            ))
+        }
+        "Value"
+            if path_contains(&type_path.path, "serde_json")
+                || type_path.path.segments.len() == 1 =>
+        {
+            Err(syn::Error::new_spanned(
+                ty,
+                "state input fields must use MfmValue types or supported typed wrappers",
+            ))
+        }
+        _ => Ok(()),
+    }
+}
+
+fn non_empty_handles_value_type<'a>(
+    ty: &'a Type,
+    program_lifetime: &syn::Lifetime,
+    scope_lifetime: &syn::Lifetime,
+) -> syn::Result<&'a Type> {
+    let Type::Path(type_path) = ty else {
+        return Err(syn::Error::new_spanned(
+            ty,
+            "NonEmptyHandles fields must be mfm_program::NonEmptyHandles<'p, 's, T>",
+        ));
+    };
+    let Some(segment) = type_path.path.segments.last() else {
+        return Err(syn::Error::new_spanned(
+            ty,
+            "NonEmptyHandles fields must be mfm_program::NonEmptyHandles<'p, 's, T>",
+        ));
+    };
+    if segment.ident != "NonEmptyHandles" {
+        return Err(syn::Error::new_spanned(
+            ty,
+            "NonEmptyHandles fields must be mfm_program::NonEmptyHandles<'p, 's, T>",
+        ));
+    }
+    let PathArguments::AngleBracketed(args) = &segment.arguments else {
+        return Err(syn::Error::new_spanned(
+            ty,
+            "NonEmptyHandles fields must include program lifetime, scope lifetime, and value type",
+        ));
+    };
+    if args.args.len() != 3 {
+        return Err(syn::Error::new_spanned(
+            args,
+            "NonEmptyHandles fields must include program lifetime, scope lifetime, and value type",
+        ));
+    }
+    validate_program_scope_lifetime_args(args, program_lifetime, scope_lifetime)?;
+    match args.args.last() {
+        Some(GenericArgument::Type(value_ty)) => Ok(value_ty),
+        _ => Err(syn::Error::new_spanned(
+            args,
+            "NonEmptyHandles value argument must be a type",
+        )),
+    }
+}
+
+fn validate_nested_handles_lifetimes(
+    type_path: &TypePath,
+    program_lifetime: &syn::Lifetime,
+    scope_lifetime: &syn::Lifetime,
+) -> syn::Result<()> {
+    let Some(segment) = type_path.path.segments.last() else {
+        return Err(syn::Error::new_spanned(
+            type_path,
+            "unsupported empty type path",
+        ));
+    };
+    let PathArguments::AngleBracketed(args) = &segment.arguments else {
+        return Err(syn::Error::new_spanned(
+            type_path,
+            "nested handle structs must include program and scope lifetimes",
+        ));
+    };
+    if args.args.len() != 2 {
+        return Err(syn::Error::new_spanned(
+            args,
+            "nested handle structs must include program and scope lifetimes",
+        ));
+    }
+    validate_program_scope_lifetime_args(args, program_lifetime, scope_lifetime)
+}
+
+fn validate_program_scope_lifetime_args(
+    args: &syn::AngleBracketedGenericArguments,
+    program_lifetime: &syn::Lifetime,
+    scope_lifetime: &syn::Lifetime,
+) -> syn::Result<()> {
+    match args.args.first() {
+        Some(GenericArgument::Lifetime(lifetime)) if lifetime.ident == program_lifetime.ident => {}
+        Some(arg) => {
+            return Err(syn::Error::new_spanned(
+                arg,
+                "program lifetime must match the first StateInputHandles lifetime",
+            ));
+        }
+        None => unreachable!("checked argument length"),
+    }
+    match args.args.iter().nth(1) {
+        Some(GenericArgument::Lifetime(lifetime)) if lifetime.ident == scope_lifetime.ident => {}
+        Some(arg) => {
+            return Err(syn::Error::new_spanned(
+                arg,
+                "scope lifetime must match the second StateInputHandles lifetime",
+            ));
+        }
+        None => unreachable!("checked argument length"),
+    }
+    Ok(())
+}
+
+fn nested_handles_runtime_path(type_path: &TypePath) -> syn::Result<syn::Path> {
+    let Some(segment) = type_path.path.segments.last() else {
+        return Err(syn::Error::new_spanned(
+            type_path,
+            "unsupported empty type path",
+        ));
+    };
+    let ident = segment.ident.to_string();
+    let Some(runtime_ident) = ident.strip_suffix("Handles") else {
+        return Err(syn::Error::new_spanned(
+            type_path,
+            "nested handle struct names must end with Handles",
+        ));
+    };
+    if runtime_ident.is_empty() {
+        return Err(syn::Error::new_spanned(
+            type_path,
+            "nested handle struct names must include a runtime type prefix",
+        ));
+    }
+    let mut runtime_path = type_path.path.clone();
+    let last = runtime_path
+        .segments
+        .iter_mut()
+        .last()
+        .expect("last segment exists");
+    last.ident = Ident::new(runtime_ident, last.ident.span());
+    last.arguments = PathArguments::None;
+    Ok(runtime_path)
 }
 
 fn signed_integer(bits: u16) -> proc_macro2::TokenStream {
