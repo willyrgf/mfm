@@ -2137,6 +2137,10 @@ version = "0.1.0"
 [[package]]
 name = "mfm-effects"
 version = "0.1.0"
+dependencies = [
+ "mfm-canonical",
+ "mfm-ids",
+]
 
 [[package]]
 name = "mfm-events"

@@ -129,11 +129,11 @@ workflow ports, and deletion or hard isolation of old dynamic semantic APIs.
 
 ### Commit 09: `kernel effects add sealed effect markers`
 
-- [ ] Implement sealed `Pure`, `ReadExternal`, `ManagedPlatformWrite`, and `ApplySideEffect`
+- [x] Implement sealed `Pure`, `ReadExternal`, `ManagedPlatformWrite`, and `ApplySideEffect`
       markers in `mfm-effects`.
-- [ ] Add effect kind ids and versions where needed by descriptors.
-- [ ] Ensure effect markers are framework-owned, not downstream extension traits.
-- [ ] Validation: `nix run .#test`.
+- [x] Add effect kind ids and versions where needed by descriptors.
+- [x] Ensure effect markers are framework-owned, not downstream extension traits.
+- [x] Validation: `nix run .#test`.
 
 ### Commit 10: `kernel capabilities add role checked capability sets`
 

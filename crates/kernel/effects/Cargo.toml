@@ -10,3 +10,7 @@ readme = "README.md"
 [lib]
 name = "mfm_effects"
 path = "src/lib.rs"
+
+[dependencies]
+mfm-canonical = { path = "../canonical" }
+mfm-ids = { path = "../ids" }

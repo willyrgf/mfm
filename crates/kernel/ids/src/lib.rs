@@ -338,6 +338,7 @@ macro_rules! impl_kind_identity_constructor {
 }
 
 impl_kind_identity_constructor!(StateKindKind, "state");
+impl_kind_identity_constructor!(EffectKindKind, "effect");
 impl_kind_identity_constructor!(CapabilityKindKind, "capability");
 impl_kind_identity_constructor!(AdapterKindKind, "adapter");
 impl_kind_identity_constructor!(OperationKindKind, "operation");
@@ -435,6 +436,9 @@ pub enum SchemaKind {}
 /// Marker for state kind ids.
 pub enum StateKindKind {}
 
+/// Marker for effect kind ids.
+pub enum EffectKindKind {}
+
 /// Marker for capability kind ids.
 pub enum CapabilityKindKind {}
 
@@ -486,6 +490,9 @@ pub enum SchemaVersionKind {}
 /// Marker for state versions.
 pub enum StateVersionKind {}
 
+/// Marker for effect versions.
+pub enum EffectVersionKind {}
+
 /// Marker for capability versions.
 pub enum CapabilityVersionKind {}
 
@@ -509,6 +516,9 @@ pub type SchemaId = Identity<SchemaKind>;
 
 /// Typed state kind identity.
 pub type StateKind = Identity<StateKindKind>;
+
+/// Typed effect kind identity.
+pub type EffectKind = Identity<EffectKindKind>;
 
 /// Typed capability kind identity.
 pub type CapabilityKind = Identity<CapabilityKindKind>;
@@ -560,6 +570,9 @@ pub type SchemaVersion = Version<SchemaVersionKind>;
 
 /// State implementation version string.
 pub type StateVersion = Version<StateVersionKind>;
+
+/// Effect descriptor version string.
+pub type EffectVersion = Version<EffectVersionKind>;
 
 /// Capability implementation version string.
 pub type CapabilityVersion = Version<CapabilityVersionKind>;
@@ -736,6 +749,7 @@ macro_rules! impl_digest_only_category {
 impl_identity_category!(SemanticTypeKind, "semantic", NamespaceNameVersionDigest);
 impl_identity_category!(SchemaKind, "schema", NameVersionDigest);
 impl_identity_category!(StateKindKind, "state", NamespaceNameDigest);
+impl_identity_category!(EffectKindKind, "effect", NamespaceNameDigest);
 impl_identity_category!(CapabilityKindKind, "capability", NamespaceNameDigest);
 impl_identity_category!(AdapterKindKind, "adapter", NamespaceNameDigest);
 impl_identity_category!(OperationKindKind, "operation", NamespaceNameDigest);
@@ -763,6 +777,7 @@ macro_rules! impl_version_category {
 impl_version_category!(SemanticTypeVersionKind, "semantic type version");
 impl_version_category!(SchemaVersionKind, "schema version");
 impl_version_category!(StateVersionKind, "state version");
+impl_version_category!(EffectVersionKind, "effect version");
 impl_version_category!(CapabilityVersionKind, "capability version");
 impl_version_category!(AdapterVersionKind, "adapter version");
 impl_version_category!(OperationVersionKind, "operation version");
@@ -822,6 +837,15 @@ mod tests {
             .expect("state kind"),
             "state:mfm.evm:read-balance:sha256-jcs-v1:",
             Some("mfm.evm/read-balance"),
+            None,
+        );
+        assert_identity(
+            &EffectKind::parse(format!(
+                "effect:mfm.kernel:read-external:sha256-jcs-v1:{DIGEST_HEX}"
+            ))
+            .expect("effect kind"),
+            "effect:mfm.kernel:read-external:sha256-jcs-v1:",
+            Some("mfm.kernel/read-external"),
             None,
         );
         assert_identity(
@@ -949,6 +973,13 @@ mod tests {
         );
 
         assert_eq!(
+            EffectKind::new("mfm.kernel", "pure", DigestAlgorithm::Sha256JcsV1, digest())
+                .expect("effect constructor")
+                .as_str(),
+            format!("effect:mfm.kernel:pure:sha256-jcs-v1:{DIGEST_HEX}")
+        );
+
+        assert_eq!(
             DescriptorId::from_digest(DigestAlgorithm::Sha256JcsV1, digest()).as_str(),
             format!("descriptor:sha256-jcs-v1:{DIGEST_HEX}")
         );
@@ -957,10 +988,12 @@ mod tests {
     #[test]
     fn checked_versions_reject_stringly_mixups() {
         let state_version = StateVersion::new("mfm.state.v1").expect("state version");
+        let effect_version = EffectVersion::new("mfm.effect.v1").expect("effect version");
         let operation_version =
             OperationVersion::new("mfm.operation.v1").expect("operation version");
 
         assert_eq!(state_version.as_str(), "mfm.state.v1");
+        assert_eq!(effect_version.as_str(), "mfm.effect.v1");
         assert_eq!(operation_version.as_str(), "mfm.operation.v1");
         assert!(StateVersion::new("_private").is_err());
         assert!(SpecVersion::new("MFM.typed.v1").is_err());
