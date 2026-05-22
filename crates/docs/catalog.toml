@@ -119,6 +119,15 @@ docs_policy = "docs-rs"
 umbrella_policy = "when-published"
 
 [[packages]]
+name = "mfm-runtime"
+workspace_path = "crates/kernel/runtime"
+visibility = "public"
+section = "core"
+summary = "Certified serial typed scheduler and erased runner boundary."
+docs_policy = "docs-rs"
+umbrella_policy = "when-published"
+
+[[packages]]
 name = "mfm-spec"
 workspace_path = "crates/kernel/spec"
 visibility = "public"

@@ -2504,6 +2504,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "mfm-runtime"
+version = "0.1.0"
+dependencies = [
+ "mfm-canonical",
+ "mfm-capabilities",
+ "mfm-events",
+ "mfm-ids",
+ "mfm-spec",
+ "mfm-store",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "mfm-sdk"
 version = "0.1.0"
 dependencies = [

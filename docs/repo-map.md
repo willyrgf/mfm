@@ -45,6 +45,7 @@ Generated from `docs/repo-index.json`.
 - `crates/kernel/ids/Cargo.toml` (rust-cargo)
 - `crates/kernel/program-derive/Cargo.toml` (rust-cargo)
 - `crates/kernel/program/Cargo.toml` (rust-cargo)
+- `crates/kernel/runtime/Cargo.toml` (rust-cargo)
 - `crates/kernel/spec/Cargo.toml` (rust-cargo)
 - `crates/kernel/store/Cargo.toml` (rust-cargo)
 - `crates/kernel/test-support/Cargo.toml` (rust-cargo)

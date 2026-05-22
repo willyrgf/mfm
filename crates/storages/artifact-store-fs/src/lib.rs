@@ -407,7 +407,10 @@ fn validate_evidence_shape(evidence: &ArtifactEvidenceRef) -> TypedArtifactResul
                 });
             }
         }
-        ArtifactRole::RedactedDiagnostic | ArtifactRole::RetentionManifest => {}
+        ArtifactRole::TypedExecutionSpec
+        | ArtifactRole::TypedConfig
+        | ArtifactRole::RedactedDiagnostic
+        | ArtifactRole::RetentionManifest => {}
         _ => {
             if evidence.producer_node_id.is_none() {
                 return Err(FsTypedArtifactError::InvalidEvidence {
@@ -775,6 +778,8 @@ where
 
 fn artifact_role_str(role: ArtifactRole) -> &'static str {
     match role {
+        ArtifactRole::TypedExecutionSpec => "typed_execution_spec",
+        ArtifactRole::TypedConfig => "typed_config",
         ArtifactRole::SeedInput => "seed_input",
         ArtifactRole::StateOutput => "state_output",
         ArtifactRole::FactResponse => "fact_response",
@@ -794,6 +799,8 @@ fn artifact_role_str(role: ArtifactRole) -> &'static str {
 
 fn parse_artifact_role(value: &str) -> TypedArtifactResult<ArtifactRole> {
     match value {
+        "typed_execution_spec" => Ok(ArtifactRole::TypedExecutionSpec),
+        "typed_config" => Ok(ArtifactRole::TypedConfig),
         "seed_input" => Ok(ArtifactRole::SeedInput),
         "state_output" => Ok(ArtifactRole::StateOutput),
         "fact_response" => Ok(ArtifactRole::FactResponse),

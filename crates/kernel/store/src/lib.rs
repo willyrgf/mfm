@@ -2229,6 +2229,20 @@ pub mod v1 {
         let mut requirements = Vec::new();
         match payload {
             KernelEventPayload::RunStarted(payload) => {
+                requirements.push(ArtifactRequirement {
+                    artifact_id: payload.spec_artifact_id.clone(),
+                    digest: Some(ContentDigest::from_digest(
+                        payload.spec_hash.algorithm(),
+                        *payload.spec_hash.digest(),
+                    )),
+                    byte_len: None,
+                    media_type: Some(payload.spec_media_type.clone()),
+                    schema_id: None,
+                    semantic_type_id: None,
+                    producer_node_id: None,
+                    producer_seed_id: None,
+                    artifact_role: Some(ArtifactRole::TypedExecutionSpec),
+                });
                 for seed in &payload.seed_cells {
                     push_event_artifact(
                         &mut requirements,
@@ -4309,6 +4323,8 @@ pub mod v1 {
 
     fn parse_artifact_role(value: &str) -> Result<ArtifactRole> {
         match value {
+            "typed_execution_spec" => Ok(ArtifactRole::TypedExecutionSpec),
+            "typed_config" => Ok(ArtifactRole::TypedConfig),
             "seed_input" => Ok(ArtifactRole::SeedInput),
             "state_output" => Ok(ArtifactRole::StateOutput),
             "fact_response" => Ok(ArtifactRole::FactResponse),
@@ -4747,6 +4763,8 @@ pub mod v1 {
 
     fn artifact_role_str(role: ArtifactRole) -> &'static str {
         match role {
+            ArtifactRole::TypedExecutionSpec => "typed_execution_spec",
+            ArtifactRole::TypedConfig => "typed_config",
             ArtifactRole::SeedInput => "seed_input",
             ArtifactRole::StateOutput => "state_output",
             ArtifactRole::FactResponse => "fact_response",

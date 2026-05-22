@@ -1478,6 +1478,8 @@ fn parse_run_state(value: &str) -> Result<RunState> {
 
 fn artifact_role_str(role: ArtifactRole) -> &'static str {
     match role {
+        ArtifactRole::TypedExecutionSpec => "typed_execution_spec",
+        ArtifactRole::TypedConfig => "typed_config",
         ArtifactRole::SeedInput => "seed_input",
         ArtifactRole::StateOutput => "state_output",
         ArtifactRole::FactResponse => "fact_response",
@@ -1497,6 +1499,8 @@ fn artifact_role_str(role: ArtifactRole) -> &'static str {
 
 fn parse_artifact_role(value: &str) -> Result<ArtifactRole> {
     match value {
+        "typed_execution_spec" => Ok(ArtifactRole::TypedExecutionSpec),
+        "typed_config" => Ok(ArtifactRole::TypedConfig),
         "seed_input" => Ok(ArtifactRole::SeedInput),
         "state_output" => Ok(ArtifactRole::StateOutput),
         "fact_response" => Ok(ArtifactRole::FactResponse),
@@ -1916,6 +1920,21 @@ mod tests {
         }
     }
 
+    fn spec_artifact_ref() -> ArtifactEvidenceRef {
+        let hash = spec_hash(1);
+        ArtifactEvidenceRef {
+            artifact_id: artifact_id(2),
+            digest: ContentDigest::from_digest(hash.algorithm(), *hash.digest()),
+            byte_len: 128,
+            media_type: media_type("application/vnd.mfm.typed-execution-spec+json;version=1"),
+            schema_id: None,
+            semantic_type_id: None,
+            producer_node_id: None,
+            producer_seed_id: None,
+            artifact_role: ArtifactRole::TypedExecutionSpec,
+        }
+    }
+
     fn request(
         run_id: RunId,
         seq: u64,
@@ -1946,6 +1965,10 @@ mod tests {
             ))
             .await
             .expect("artifact evidence");
+        store
+            .record_artifact_evidence(spec_artifact_ref())
+            .await
+            .expect("spec artifact evidence");
 
         store
             .append_typed_run_commit(request(
@@ -2033,6 +2056,10 @@ mod tests {
     async fn typed_required_artifacts_and_fact_projection_are_atomic() {
         let (store, schema) = test_store().await;
         let run = run_id(10);
+        store
+            .record_artifact_evidence(spec_artifact_ref())
+            .await
+            .expect("spec artifact evidence");
         store
             .append_typed_run_commit(request(
                 run.clone(),

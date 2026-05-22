@@ -1,0 +1,24 @@
+[package]
+name = "mfm-runtime"
+version = "0.1.0"
+edition = "2021"
+description = "Serial typed scheduler for MFM certified execution specs"
+repository = "https://github.com/willyrgf/mfm"
+license = "MIT"
+readme = "README.md"
+
+[lib]
+name = "mfm_runtime"
+path = "src/lib.rs"
+
+[dependencies]
+mfm-canonical = { path = "../canonical" }
+mfm-capabilities = { path = "../capabilities" }
+mfm-events = { path = "../events" }
+mfm-ids = { path = "../ids" }
+mfm-spec = { path = "../spec" }
+mfm-store = { path = "../store" }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

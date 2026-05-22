@@ -273,13 +273,13 @@ workflow ports, and deletion or hard isolation of old dynamic semantic APIs.
 
 ### Commit 24: `kernel runtime add serial typed scheduler`
 
-- [ ] Add `crates/kernel/runtime` and `mfm-runtime`.
-- [ ] Implement the serial typed scheduler over certified specs and erased runner bindings derived
+- [x] Add `crates/kernel/runtime` and `mfm-runtime`.
+- [x] Implement the serial typed scheduler over certified specs and erased runner bindings derived
       only from the spec.
-- [ ] Implement deterministic runnable-node selection.
-- [ ] Materialize typed inputs only from certified cells.
-- [ ] Mint only certified capabilities.
-- [ ] Validation: `nix run .#test`.
+- [x] Implement deterministic runnable-node selection.
+- [x] Materialize typed inputs only from certified cells.
+- [x] Mint only certified capabilities.
+- [x] Validation: `nix run .#test`.
 
 ### Commit 25: `kernel runtime add non side effect recovery`
 

@@ -9,6 +9,7 @@ EXPECTED_KERNEL_MANIFESTS=(
   "crates/kernel/capabilities/Cargo.toml"
   "crates/kernel/program/Cargo.toml"
   "crates/kernel/program-derive/Cargo.toml"
+  "crates/kernel/runtime/Cargo.toml"
   "crates/kernel/spec/Cargo.toml"
   "crates/kernel/certify/Cargo.toml"
   "crates/kernel/events/Cargo.toml"

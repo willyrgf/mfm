@@ -294,13 +294,34 @@ fn fact_artifact_ref(artifact_id: ArtifactId, digest: ContentDigest) -> Artifact
     }
 }
 
+fn spec_artifact_ref() -> ArtifactEvidenceRef {
+    let hash = spec_hash(1);
+    ArtifactEvidenceRef {
+        artifact_id: artifact_id(2),
+        digest: ContentDigest::from_digest(hash.algorithm(), *hash.digest()),
+        byte_len: 128,
+        media_type: media_type(SPEC_MEDIA_TYPE),
+        schema_id: None,
+        semantic_type_id: None,
+        producer_node_id: None,
+        producer_seed_id: None::<SeedId>,
+        artifact_role: ArtifactRole::TypedExecutionSpec,
+    }
+}
+
+fn record_run_start_artifact(store: &mut InMemoryTypedRunStore) {
+    store
+        .record_artifact_evidence(spec_artifact_ref())
+        .expect("record spec artifact");
+}
+
 fn run_start_request(run_id: RunId, commit_key: &str) -> TypedCommitRequest {
     TypedCommitRequest {
         run_id: run_id.clone(),
         expected_next_seq: StreamSeq::FIRST,
         commit_key: CommitKey::new(commit_key).expect("commit key"),
         payloads: vec![run_started(run_id)],
-        required_artifacts: Vec::new(),
+        required_artifacts: vec![spec_artifact_ref()],
         preconditions: CommitPreconditions {
             required_run_state: RequiredRunState::Absent,
             ..CommitPreconditions::default()
@@ -312,6 +333,7 @@ fn run_start_request(run_id: RunId, commit_key: &str) -> TypedCommitRequest {
 fn commit_key_idempotency_precedes_stale_expected_next_seq() {
     let run_id = run_id(40);
     let mut store = InMemoryTypedRunStore::new();
+    record_run_start_artifact(&mut store);
     let request = run_start_request(run_id.clone(), "run-start");
     let appended = store
         .append_typed_run_commit(request.clone())
@@ -335,6 +357,7 @@ fn commit_key_idempotency_precedes_stale_expected_next_seq() {
 fn commit_key_conflict_is_rejected_before_stale_sequence() {
     let run_id = run_id(41);
     let mut store = InMemoryTypedRunStore::new();
+    record_run_start_artifact(&mut store);
     let request = run_start_request(run_id.clone(), "run-start");
     store
         .append_typed_run_commit(request)
@@ -359,6 +382,7 @@ fn commit_key_conflict_is_rejected_before_stale_sequence() {
 fn store_owns_envelope_sequence_ordinal_and_event_id() {
     let run_id = run_id(42);
     let mut store = InMemoryTypedRunStore::new();
+    record_run_start_artifact(&mut store);
     let first = store
         .append_typed_run_commit(run_start_request(run_id.clone(), "run-start"))
         .expect("append run start");
@@ -738,6 +762,7 @@ fn fact_recorded_projects_reusable_fact_evidence() {
     let artifact_id = artifact_id(96);
     let artifact_digest = content_digest(97);
     let mut store = InMemoryTypedRunStore::new();
+    record_run_start_artifact(&mut store);
     store
         .record_artifact_evidence(fact_artifact_ref(
             artifact_id.clone(),
@@ -776,6 +801,7 @@ fn projections_rebuild_from_authoritative_run_stream() {
     let artifact_id = artifact_id(61);
     let artifact_digest = content_digest(62);
     let mut store = InMemoryTypedRunStore::new();
+    record_run_start_artifact(&mut store);
     store
         .record_artifact_evidence(store_artifact_ref(
             artifact_id.clone(),

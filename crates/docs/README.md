@@ -55,6 +55,7 @@ The live runtime inventory still lives in the repository docs:
 | `mfm-portfolio-plan` | Pure semantic portfolio planning vocabulary and adapter catalog. | pending | `crates/portfolio/plan` |
 | `mfm-program` | Typed state-program authoring API and lowering evidence. | pending | `crates/kernel/program` |
 | `mfm-program-derive` | Proc-macro derives for typed kernel value and program contracts. | pending | `crates/kernel/program-derive` |
+| `mfm-runtime` | Certified serial typed scheduler and erased runner boundary. | pending | `crates/kernel/runtime` |
 | `mfm-spec` | Certified typed execution-spec data model. | pending | `crates/kernel/spec` |
 | `mfm-store` | Typed kernel commit contract and projection interfaces. | pending | `crates/kernel/store` |
 | `mfm-values` | Typed persisted value, config, and public-output descriptors. | pending | `crates/kernel/values` |
