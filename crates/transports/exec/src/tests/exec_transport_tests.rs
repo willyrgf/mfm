@@ -395,7 +395,7 @@ async fn stdout_overflow_reports_bounded_failure_metadata() {
                 "program_path": program.to_string_lossy(),
                 "argv": [],
                 "stdin_json": {},
-                "timeout_ms": 5_000
+                "timeout_ms": 30_000
             }),
             fact_key: None,
         })

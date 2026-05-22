@@ -14,7 +14,8 @@ use std::marker::PhantomData;
 
 use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
 use mfm_ids::{
-    CellId, ContentDigest, DigestAlgorithm, DigestBytes, SchemaId, ScopeId, SeedId, SemanticTypeId,
+    CellId, ContentDigest, DigestAlgorithm, DigestBytes, NodeId, SchemaId, ScopeId, SeedId,
+    SemanticTypeId,
 };
 use mfm_values::{MfmValue, PublicOutputDescriptor};
 
@@ -37,12 +38,20 @@ pub enum PlanError {
     Serialize(String),
     /// A root seed key was declared more than once.
     DuplicateSeedKey(String),
+    /// A child scope key was declared more than once under the same parent.
+    DuplicateChildScopeKey(String),
+    /// A bridge key was declared more than once in the same child scope session.
+    DuplicateBridgeKey(String),
     /// A public output field path was declared more than once.
     DuplicatePublicOutputPath(String),
     /// Root public outputs were bound more than once.
     PublicOutputsAlreadyBound,
     /// Public output binding must contain at least one cell.
     EmptyPublicOutputs,
+    /// Live bridge evidence did not belong to the active child scope session.
+    InvalidBridgeEvidence(String),
+    /// A persisted bridge reference was not backed by an emitted bridge node.
+    UnknownBridgeRef,
 }
 
 impl fmt::Display for PlanError {
@@ -53,11 +62,17 @@ impl fmt::Display for PlanError {
             Self::Canonical(message) => write!(f, "canonical seed error: {message}"),
             Self::Serialize(message) => write!(f, "seed serialization error: {message}"),
             Self::DuplicateSeedKey(key) => write!(f, "duplicate root seed key {key}"),
+            Self::DuplicateChildScopeKey(key) => write!(f, "duplicate child scope key {key}"),
+            Self::DuplicateBridgeKey(key) => write!(f, "duplicate bridge key {key}"),
             Self::DuplicatePublicOutputPath(path) => {
                 write!(f, "duplicate public output field path {path}")
             }
             Self::PublicOutputsAlreadyBound => f.write_str("root public outputs already bound"),
             Self::EmptyPublicOutputs => f.write_str("root public output binding is empty"),
+            Self::InvalidBridgeEvidence(message) => {
+                write!(f, "invalid bridge evidence: {message}")
+            }
+            Self::UnknownBridgeRef => f.write_str("bridge ref is not backed by an emitted node"),
         }
     }
 }
@@ -104,6 +119,22 @@ impl PublicOutputKey {
     /// Creates a checked public-output key.
     pub fn new(value: impl AsRef<str>) -> Result<Self> {
         checked_key("public output key", value.as_ref()).map(Self)
+    }
+
+    /// Returns the stable key string.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Stable bridge node author key.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct BridgeKey(String);
+
+impl BridgeKey {
+    /// Creates a checked bridge key.
+    pub fn new(value: impl AsRef<str>) -> Result<Self> {
+        checked_key("bridge key", value.as_ref()).map(Self)
     }
 
     /// Returns the stable key string.
@@ -192,6 +223,7 @@ pub struct Handle<'program, 'scope, T: MfmValue> {
     scope_id: ScopeId,
     schema_id: SchemaId,
     semantic_type_id: SemanticTypeId,
+    origin: HandleOrigin,
     _program: PhantomData<fn(&'program ()) -> &'program ()>,
     _scope: PhantomData<fn(&'scope ()) -> &'scope ()>,
     _value: PhantomData<fn(T) -> T>,
@@ -204,6 +236,7 @@ impl<'program, 'scope, T: MfmValue> Clone for Handle<'program, 'scope, T> {
             scope_id: self.scope_id.clone(),
             schema_id: self.schema_id.clone(),
             semantic_type_id: self.semantic_type_id.clone(),
+            origin: self.origin.clone(),
             _program: PhantomData,
             _scope: PhantomData,
             _value: PhantomData,
@@ -223,6 +256,28 @@ impl<'program, 'scope, T: MfmValue> Handle<'program, 'scope, T> {
             scope_id,
             schema_id,
             semantic_type_id,
+            origin: HandleOrigin::Local,
+            _program: PhantomData,
+            _scope: PhantomData,
+            _value: PhantomData,
+        }
+    }
+
+    fn new_bridge(
+        cell_id: CellId,
+        scope_id: ScopeId,
+        schema_id: SchemaId,
+        semantic_type_id: SemanticTypeId,
+        evidence: BridgeEvidenceCore,
+    ) -> Self {
+        Self {
+            cell_id,
+            scope_id,
+            schema_id,
+            semantic_type_id,
+            origin: HandleOrigin::Bridge {
+                evidence: Box::new(evidence),
+            },
             _program: PhantomData,
             _scope: PhantomData,
             _value: PhantomData,
@@ -236,6 +291,26 @@ impl<'program, 'scope, T: MfmValue> Handle<'program, 'scope, T> {
             scope_id: self.scope_id.clone(),
             schema_id: self.schema_id.clone(),
             semantic_type_id: self.semantic_type_id.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum HandleOrigin {
+    Local,
+    Bridge { evidence: Box<BridgeEvidenceCore> },
+}
+
+impl HandleOrigin {
+    fn bridge_evidence<'program, 'parent>(&self) -> Vec<BridgeEvidence<'program, 'parent>> {
+        match self {
+            Self::Local => Vec::new(),
+            Self::Bridge { evidence } => vec![BridgeEvidence {
+                core: (**evidence).clone(),
+                _program: PhantomData,
+                _parent: PhantomData,
+                _private: (),
+            }],
         }
     }
 }
@@ -294,6 +369,148 @@ pub struct RootSeedSpec {
     pub content_digest: ContentDigest,
     /// Canonical seed byte length.
     pub byte_len: usize,
+}
+
+/// Persisted typed scope specification emitted by the program builder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopeSpec {
+    /// Stable scope author key.
+    pub key: ScopeKey,
+    /// Derived scope id.
+    pub scope_id: ScopeId,
+    /// Parent scope id for child scopes.
+    pub parent_scope_id: Option<ScopeId>,
+}
+
+/// Framework bridge direction for same-value cross-scope movement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BridgeKind {
+    /// Parent value imported into a child scope.
+    ImportFromParent,
+    /// Child value exported into the parent scope.
+    ExportToParent,
+}
+
+impl BridgeKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ImportFromParent => "import-from-parent",
+            Self::ExportToParent => "export-to-parent",
+        }
+    }
+}
+
+/// Bridge policy supported by typed program v1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BridgePolicy {
+    /// Same-run, same-value movement with no semantic transform.
+    SameRunSameValueV1,
+}
+
+impl BridgePolicy {
+    /// Returns the v1 same-run same-value bridge policy.
+    pub const fn same_run_same_value() -> Self {
+        Self::SameRunSameValueV1
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::SameRunSameValueV1 => "same-run-same-value-v1",
+        }
+    }
+}
+
+/// Framework provenance for an emitted bridge node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BridgeProvenance {
+    /// Bridge emitted by the typed kernel child-scope builder.
+    FrameworkChildScopeV1,
+}
+
+/// Persisted bridge reference. This is audit evidence, not live authority.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct BridgeRef {
+    /// Source scope id.
+    pub source_scope_id: ScopeId,
+    /// Target scope id.
+    pub target_scope_id: ScopeId,
+    /// Source cell id.
+    pub source_cell_id: CellId,
+    /// Target cell id created by the bridge.
+    pub target_cell_id: CellId,
+    /// Value semantic type id.
+    pub semantic_type_id: SemanticTypeId,
+    /// Value schema id.
+    pub schema_id: SchemaId,
+    /// Framework bridge node id.
+    pub bridge_node_id: NodeId,
+}
+
+/// Bridge node specification emitted into the typed program draft.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BridgeNodeSpec {
+    /// Derived bridge node id.
+    pub node_id: NodeId,
+    /// Stable bridge author key.
+    pub key: BridgeKey,
+    /// Source scope id.
+    pub source_scope_id: ScopeId,
+    /// Target scope id.
+    pub target_scope_id: ScopeId,
+    /// Source cell id.
+    pub source_cell_id: CellId,
+    /// Target cell id.
+    pub target_cell_id: CellId,
+    /// Value semantic type id.
+    pub semantic_type_id: SemanticTypeId,
+    /// Value schema id.
+    pub schema_id: SchemaId,
+    /// Bridge direction.
+    pub bridge_kind: BridgeKind,
+    /// Same-value bridge policy.
+    pub policy: BridgePolicy,
+    /// Framework provenance.
+    pub provenance: BridgeProvenance,
+}
+
+impl BridgeNodeSpec {
+    /// Returns the persisted bridge reference for this emitted node.
+    pub fn bridge_ref(&self) -> BridgeRef {
+        BridgeRef {
+            source_scope_id: self.source_scope_id.clone(),
+            target_scope_id: self.target_scope_id.clone(),
+            source_cell_id: self.source_cell_id.clone(),
+            target_cell_id: self.target_cell_id.clone(),
+            semantic_type_id: self.semantic_type_id.clone(),
+            schema_id: self.schema_id.clone(),
+            bridge_node_id: self.node_id.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct BridgeSessionToken(DigestBytes);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BridgeEvidenceCore {
+    bridge_ref: BridgeRef,
+    session_token: BridgeSessionToken,
+}
+
+/// Live bridge authority owned by one active child-scope builder invocation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BridgeEvidence<'program, 'parent> {
+    core: BridgeEvidenceCore,
+    _program: PhantomData<fn(&'program ()) -> &'program ()>,
+    _parent: PhantomData<fn(&'parent ()) -> &'parent ()>,
+    _private: (),
+}
+
+impl<'program, 'parent> BridgeEvidence<'program, 'parent> {
+    /// Returns the persisted bridge reference carried by this live evidence.
+    pub fn bridge_ref(&self) -> &BridgeRef {
+        &self.core.bridge_ref
+    }
 }
 
 /// Public-output cell binding specification.
@@ -365,12 +582,68 @@ pub struct RootBound<'program, 'scope> {
     _private: (),
 }
 
+/// Parent-visible value returned from a child scope after bridge validation.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Bridged<'program, 'parent, R> {
+    value: R,
+    bridge_evidence: Vec<BridgeEvidence<'program, 'parent>>,
+    _program: PhantomData<fn(&'program ()) -> &'program ()>,
+    _parent: PhantomData<fn(&'parent ()) -> &'parent ()>,
+    _private: (),
+}
+
+/// Framework-owned trait for values that may leave a child scope.
+pub trait BridgeableToParent<'program, 'parent>: private::BridgeableSealed {
+    /// Returns live bridge evidence that must validate against the active child session.
+    fn bridge_evidence(&self) -> Vec<BridgeEvidence<'program, 'parent>>;
+}
+
+impl<'program, 'parent, T> BridgeableToParent<'program, 'parent> for Handle<'program, 'parent, T>
+where
+    T: MfmValue,
+{
+    fn bridge_evidence(&self) -> Vec<BridgeEvidence<'program, 'parent>> {
+        self.origin.bridge_evidence()
+    }
+}
+
+impl<'program, 'parent> BridgeableToParent<'program, 'parent> for () {
+    fn bridge_evidence(&self) -> Vec<BridgeEvidence<'program, 'parent>> {
+        Vec::new()
+    }
+}
+
+macro_rules! impl_bridgeable_tuple {
+    ($($name:ident),+ $(,)?) => {
+        impl<'program, 'parent, $($name),+> BridgeableToParent<'program, 'parent>
+            for ($($name,)+)
+        where
+            $($name: BridgeableToParent<'program, 'parent>,)+
+        {
+            fn bridge_evidence(&self) -> Vec<BridgeEvidence<'program, 'parent>> {
+                #[allow(non_snake_case)]
+                let ($($name,)+) = self;
+                let mut output = Vec::new();
+                $(output.extend($name.bridge_evidence());)+
+                output
+            }
+        }
+    };
+}
+
+impl_bridgeable_tuple!(A);
+impl_bridgeable_tuple!(A, B);
+impl_bridgeable_tuple!(A, B, C);
+impl_bridgeable_tuple!(A, B, C, D);
+
 /// Unbranded typed program draft produced by [`build_root`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypedProgramDraft {
     root_key: ScopeKey,
     root_scope_id: ScopeId,
     seeds: Vec<RootSeedSpec>,
+    scopes: Vec<ScopeSpec>,
+    bridge_nodes: Vec<BridgeNodeSpec>,
     public_output_spec: PublicOutputSpec,
 }
 
@@ -390,9 +663,30 @@ impl TypedProgramDraft {
         &self.seeds
     }
 
+    /// Returns emitted scope specs, including the root scope.
+    pub fn scopes(&self) -> &[ScopeSpec] {
+        &self.scopes
+    }
+
+    /// Returns emitted framework bridge nodes.
+    pub fn bridge_nodes(&self) -> &[BridgeNodeSpec] {
+        &self.bridge_nodes
+    }
+
     /// Returns the public-output spec bound at the root.
     pub fn public_output_spec(&self) -> &PublicOutputSpec {
         &self.public_output_spec
+    }
+
+    /// Validates that a persisted bridge ref is backed by an emitted bridge node.
+    pub fn validate_bridge_ref_for_certification(
+        &self,
+        bridge_ref: &BridgeRef,
+    ) -> Result<&BridgeNodeSpec> {
+        self.bridge_nodes
+            .iter()
+            .find(|node| node.bridge_ref() == *bridge_ref)
+            .ok_or(PlanError::UnknownBridgeRef)
     }
 }
 
@@ -485,6 +779,9 @@ impl<'program, 'scope> RootBuilder<'program, 'scope> {
 /// typed-core sections.
 pub struct ScopeBuilder<'program, 'scope> {
     scope_id: ScopeId,
+    child_scope_keys: BTreeSet<String>,
+    child_scopes: Vec<ScopeSpec>,
+    bridge_nodes: Vec<BridgeNodeSpec>,
     _program: PhantomData<fn(&'program ()) -> &'program ()>,
     _scope: PhantomData<fn(&'scope ()) -> &'scope ()>,
 }
@@ -493,6 +790,237 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
     /// Returns the typed scope id.
     pub fn scope_id(&self) -> &ScopeId {
         &self.scope_id
+    }
+
+    /// Opens a child scope and returns only values explicitly bridged back to this scope.
+    pub fn child_scope<R>(
+        &mut self,
+        key: ScopeKey,
+        f: impl for<'child> FnOnce(
+            &mut ChildScopeBuilder<'program, 'scope, 'child>,
+        ) -> Result<Bridged<'program, 'scope, R>>,
+    ) -> Result<R> {
+        if !self.child_scope_keys.insert(key.as_str().to_owned()) {
+            return Err(PlanError::DuplicateChildScopeKey(key.as_str().to_owned()));
+        }
+
+        let child_scope_id = child_scope_id(&self.scope_id, &key)?;
+        let session_token = bridge_session_token(&self.scope_id, &child_scope_id, &key);
+        let mut child = ChildScopeBuilder {
+            parent_scope_id: self.scope_id.clone(),
+            scope: ScopeBuilder {
+                scope_id: child_scope_id.clone(),
+                child_scope_keys: BTreeSet::new(),
+                child_scopes: Vec::new(),
+                bridge_nodes: Vec::new(),
+                _program: PhantomData,
+                _scope: PhantomData,
+            },
+            session_token,
+            bridge_keys: BTreeSet::new(),
+            active_bridge_refs: BTreeSet::new(),
+            bridge_nodes: Vec::new(),
+            _parent: PhantomData,
+        };
+
+        let bridged = f(&mut child)?;
+        child.validate_bridge_evidence_set(&bridged.bridge_evidence)?;
+        self.child_scopes.push(ScopeSpec {
+            key,
+            scope_id: child_scope_id,
+            parent_scope_id: Some(self.scope_id.clone()),
+        });
+        self.child_scopes.extend(child.scope.child_scopes);
+        self.bridge_nodes.extend(child.bridge_nodes);
+        self.bridge_nodes.extend(child.scope.bridge_nodes);
+        Ok(bridged.value)
+    }
+}
+
+/// Child-scope builder with live bridge-session authority.
+pub struct ChildScopeBuilder<'program, 'parent, 'child> {
+    parent_scope_id: ScopeId,
+    scope: ScopeBuilder<'program, 'child>,
+    session_token: BridgeSessionToken,
+    bridge_keys: BTreeSet<String>,
+    active_bridge_refs: BTreeSet<String>,
+    bridge_nodes: Vec<BridgeNodeSpec>,
+    _parent: PhantomData<fn(&'parent ()) -> &'parent ()>,
+}
+
+impl<'program, 'parent, 'child> ChildScopeBuilder<'program, 'parent, 'child> {
+    /// Returns the child scope builder for nested child scopes.
+    pub fn scope(&mut self) -> &mut ScopeBuilder<'program, 'child> {
+        &mut self.scope
+    }
+
+    /// Returns the child scope id.
+    pub fn scope_id(&self) -> &ScopeId {
+        self.scope.scope_id()
+    }
+
+    /// Imports a parent handle into this child scope through an emitted bridge node.
+    pub fn import_from_parent<T: MfmValue>(
+        &mut self,
+        key: BridgeKey,
+        value: Handle<'program, 'parent, T>,
+        policy: BridgePolicy,
+    ) -> Result<Handle<'program, 'child, T>> {
+        let source = value.typed_ref();
+        let (target, evidence) = self.emit_bridge(
+            key,
+            BridgeKind::ImportFromParent,
+            source,
+            self.parent_scope_id.clone(),
+            self.scope.scope_id().clone(),
+            policy,
+        )?;
+        Ok(Handle::new_bridge(
+            target.cell_id,
+            target.scope_id,
+            target.schema_id,
+            target.semantic_type_id,
+            evidence,
+        ))
+    }
+
+    /// Exports a child handle into the parent scope through an emitted bridge node.
+    pub fn export_to_parent<T: MfmValue>(
+        &mut self,
+        key: BridgeKey,
+        value: Handle<'program, 'child, T>,
+        policy: BridgePolicy,
+    ) -> Result<Handle<'program, 'parent, T>> {
+        let source = value.typed_ref();
+        let (target, evidence) = self.emit_bridge(
+            key,
+            BridgeKind::ExportToParent,
+            source,
+            self.scope.scope_id().clone(),
+            self.parent_scope_id.clone(),
+            policy,
+        )?;
+        Ok(Handle::new_bridge(
+            target.cell_id,
+            target.scope_id,
+            target.schema_id,
+            target.semantic_type_id,
+            evidence,
+        ))
+    }
+
+    /// Wraps parent-visible values after validating their live bridge evidence.
+    pub fn bridge_to_parent<R>(&mut self, value: R) -> Result<Bridged<'program, 'parent, R>>
+    where
+        R: BridgeableToParent<'program, 'parent>,
+    {
+        let evidence = value.bridge_evidence();
+        self.validate_bridge_evidence_set(&evidence)?;
+        Ok(Bridged {
+            value,
+            bridge_evidence: evidence,
+            _program: PhantomData,
+            _parent: PhantomData,
+            _private: (),
+        })
+    }
+
+    fn emit_bridge(
+        &mut self,
+        key: BridgeKey,
+        bridge_kind: BridgeKind,
+        source: TypedHandleRef,
+        source_scope_id: ScopeId,
+        target_scope_id: ScopeId,
+        policy: BridgePolicy,
+    ) -> Result<(TypedHandleRef, BridgeEvidenceCore)> {
+        if source.scope_id != source_scope_id {
+            return Err(PlanError::InvalidBridgeEvidence(format!(
+                "source handle scope {} did not match bridge source {}",
+                source.scope_id.as_str(),
+                source_scope_id.as_str()
+            )));
+        }
+        if !self.bridge_keys.insert(key.as_str().to_owned()) {
+            return Err(PlanError::DuplicateBridgeKey(key.as_str().to_owned()));
+        }
+
+        let node_id = bridge_node_id(
+            &source_scope_id,
+            &target_scope_id,
+            &source.cell_id,
+            &key,
+            bridge_kind,
+            policy,
+        )?;
+        let target_cell_id = bridge_cell_id(&node_id)?;
+        let spec = BridgeNodeSpec {
+            node_id: node_id.clone(),
+            key,
+            source_scope_id,
+            target_scope_id: target_scope_id.clone(),
+            source_cell_id: source.cell_id,
+            target_cell_id: target_cell_id.clone(),
+            semantic_type_id: source.semantic_type_id.clone(),
+            schema_id: source.schema_id.clone(),
+            bridge_kind,
+            policy,
+            provenance: BridgeProvenance::FrameworkChildScopeV1,
+        };
+        let bridge_ref = spec.bridge_ref();
+        self.active_bridge_refs.insert(bridge_ref_key(&bridge_ref));
+        self.bridge_nodes.push(spec);
+        let target = TypedHandleRef {
+            cell_id: target_cell_id,
+            scope_id: target_scope_id,
+            schema_id: source.schema_id,
+            semantic_type_id: source.semantic_type_id,
+        };
+        let evidence = BridgeEvidenceCore {
+            bridge_ref,
+            session_token: self.session_token,
+        };
+        Ok((target, evidence))
+    }
+
+    fn validate_bridge_evidence_set(
+        &self,
+        evidence_set: &[BridgeEvidence<'program, 'parent>],
+    ) -> Result<()> {
+        for evidence in evidence_set {
+            self.validate_bridge_evidence(evidence)?;
+        }
+        Ok(())
+    }
+
+    fn validate_bridge_evidence(&self, evidence: &BridgeEvidence<'program, 'parent>) -> Result<()> {
+        let bridge_ref = &evidence.core.bridge_ref;
+        if evidence.core.session_token != self.session_token {
+            if bridge_ref.target_scope_id == self.parent_scope_id
+                && bridge_ref.source_scope_id != *self.scope.scope_id()
+            {
+                return Ok(());
+            }
+            return Err(PlanError::InvalidBridgeEvidence(
+                "bridge evidence belongs to a different child-scope session".to_owned(),
+            ));
+        }
+        if bridge_ref.source_scope_id != *self.scope.scope_id()
+            || bridge_ref.target_scope_id != self.parent_scope_id
+        {
+            return Err(PlanError::InvalidBridgeEvidence(
+                "bridge evidence does not export from this child to its parent".to_owned(),
+            ));
+        }
+        if !self
+            .active_bridge_refs
+            .contains(&bridge_ref_key(bridge_ref))
+        {
+            return Err(PlanError::InvalidBridgeEvidence(
+                "bridge ref was not created by this child-scope builder".to_owned(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -517,6 +1045,9 @@ where
         root_key: root_key.clone(),
         scope: ScopeBuilder {
             scope_id: root_scope_id.clone(),
+            child_scope_keys: BTreeSet::new(),
+            child_scopes: Vec::new(),
+            bridge_nodes: Vec::new(),
             _program: PhantomData,
             _scope: PhantomData,
         },
@@ -527,8 +1058,18 @@ where
     let bound = f(&mut builder)?;
     Ok(TypedProgramDraft {
         root_key: builder.root_key,
-        root_scope_id,
+        root_scope_id: root_scope_id.clone(),
         seeds: builder.seeds,
+        scopes: {
+            let mut scopes = vec![ScopeSpec {
+                key: root_key,
+                scope_id: root_scope_id,
+                parent_scope_id: None,
+            }];
+            scopes.extend(builder.scope.child_scopes);
+            scopes
+        },
+        bridge_nodes: builder.scope.bridge_nodes,
         public_output_spec: bound.public_output_spec,
     })
 }
@@ -565,6 +1106,14 @@ fn scope_id(key: &ScopeKey) -> Result<ScopeId> {
     digest_only_id("scope", key.as_str(), ScopeId::from_digest)
 }
 
+fn child_scope_id(parent_scope_id: &ScopeId, key: &ScopeKey) -> Result<ScopeId> {
+    digest_only_id(
+        "child-scope",
+        &format!("{}:{}", parent_scope_id.as_str(), key.as_str()),
+        ScopeId::from_digest,
+    )
+}
+
 fn seed_id(scope_id: &ScopeId, key: &SeedKey) -> Result<SeedId> {
     digest_only_id(
         "seed",
@@ -577,6 +1126,62 @@ fn seed_cell_id(seed_id: &SeedId) -> Result<CellId> {
     digest_only_id("seed-cell", seed_id.as_str(), CellId::from_digest)
 }
 
+fn bridge_node_id(
+    source_scope_id: &ScopeId,
+    target_scope_id: &ScopeId,
+    source_cell_id: &CellId,
+    key: &BridgeKey,
+    bridge_kind: BridgeKind,
+    policy: BridgePolicy,
+) -> Result<NodeId> {
+    digest_only_id(
+        "bridge-node",
+        &format!(
+            "{}:{}:{}:{}:{}:{}",
+            source_scope_id.as_str(),
+            target_scope_id.as_str(),
+            source_cell_id.as_str(),
+            key.as_str(),
+            bridge_kind.as_str(),
+            policy.as_str()
+        ),
+        NodeId::from_digest,
+    )
+}
+
+fn bridge_cell_id(node_id: &NodeId) -> Result<CellId> {
+    digest_only_id("bridge-cell", node_id.as_str(), CellId::from_digest)
+}
+
+fn bridge_session_token(
+    parent_scope_id: &ScopeId,
+    child_scope_id: &ScopeId,
+    key: &ScopeKey,
+) -> BridgeSessionToken {
+    BridgeSessionToken(sha256_digest_bytes(
+        format!(
+            "mfm.program:bridge-session:{}:{}:{}",
+            parent_scope_id.as_str(),
+            child_scope_id.as_str(),
+            key.as_str()
+        )
+        .as_bytes(),
+    ))
+}
+
+fn bridge_ref_key(bridge_ref: &BridgeRef) -> String {
+    format!(
+        "{}:{}:{}:{}:{}:{}:{}",
+        bridge_ref.source_scope_id.as_str(),
+        bridge_ref.target_scope_id.as_str(),
+        bridge_ref.source_cell_id.as_str(),
+        bridge_ref.target_cell_id.as_str(),
+        bridge_ref.semantic_type_id.as_str(),
+        bridge_ref.schema_id.as_str(),
+        bridge_ref.bridge_node_id.as_str()
+    )
+}
+
 fn digest_only_id<I>(
     domain: &str,
     value: &str,
@@ -584,4 +1189,25 @@ fn digest_only_id<I>(
 ) -> Result<I> {
     let digest = sha256_digest_bytes(format!("mfm.program:{domain}:{value}").as_bytes());
     Ok(construct(DigestAlgorithm::Sha256JcsV1, digest))
+}
+
+mod private {
+    use super::{Handle, MfmValue};
+
+    pub trait BridgeableSealed {}
+
+    impl<'program, 'parent, T> BridgeableSealed for Handle<'program, 'parent, T> where T: MfmValue {}
+
+    impl BridgeableSealed for () {}
+
+    macro_rules! impl_tuple {
+        ($($name:ident),+ $(,)?) => {
+            impl<$($name),+> BridgeableSealed for ($($name,)+) {}
+        };
+    }
+
+    impl_tuple!(A);
+    impl_tuple!(A, B);
+    impl_tuple!(A, B, C);
+    impl_tuple!(A, B, C, D);
 }

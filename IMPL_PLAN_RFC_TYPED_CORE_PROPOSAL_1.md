@@ -158,12 +158,12 @@ workflow ports, and deletion or hard isolation of old dynamic semantic APIs.
 
 ### Commit 12: `kernel program add scopes and bridge evidence`
 
-- [ ] Implement root/child scope builders.
-- [ ] Split persisted `BridgeRef` from live private `BridgeEvidence`.
-- [ ] Implement bridge session validation and bridge node spec emission.
-- [ ] Add trybuild failures for child/sibling handle mixing without bridge evidence.
-- [ ] Add certification fixture for forged or stale bridge refs.
-- [ ] Validation: `nix run .#test`.
+- [x] Implement root/child scope builders.
+- [x] Split persisted `BridgeRef` from live private `BridgeEvidence`.
+- [x] Implement bridge session validation and bridge node spec emission.
+- [x] Add trybuild failures for child/sibling handle mixing without bridge evidence.
+- [x] Add certification fixture for forged or stale bridge refs.
+- [x] Validation: `nix run .#test`.
 
 ### Commit 13: `kernel program add state inputs and bindings`
 
