@@ -1212,7 +1212,7 @@ in
             jq -e '.payload.manual_value_config_output_impls_rejected == true' "$typed_kernel_contract_summary" >/dev/null
             echo "INFO: command=bash ${./check-typed-program-authority.sh} --root . --self-test --summary-file $typed_kernel_contract_summary log=$typed_program_authority_log"
             run_with_log "$typed_program_authority_log" bash ${./check-typed-program-authority.sh} --root . --self-test --summary-file "$typed_kernel_contract_summary"
-            jq -e '.payload.registered_state_required == true' "$typed_kernel_contract_summary" >/dev/null
+            jq -e '.payload.registered_state_required == true and .payload.registered_operation_required == true' "$typed_kernel_contract_summary" >/dev/null
 
             echo "INFO: running formatting checks"
             echo "INFO: command=${cargoFmtCheckCmd} log=$fmt_log"
@@ -1421,7 +1421,7 @@ in
             run_with_log "$manual_impl_log_file" bash ${./check-manual-persisted-impls.sh} --root . --self-test --summary-file "$typed_kernel_contract_summary"
             jq -e '.payload.manual_value_config_output_impls_rejected == true' "$typed_kernel_contract_summary" >/dev/null
             run_with_log "$typed_program_authority_log_file" bash ${./check-typed-program-authority.sh} --root . --self-test --summary-file "$typed_kernel_contract_summary"
-            jq -e '.payload.registered_state_required == true' "$typed_kernel_contract_summary" >/dev/null
+            jq -e '.payload.registered_state_required == true and .payload.registered_operation_required == true' "$typed_kernel_contract_summary" >/dev/null
             echo "OK: ci step passed step=kernel-crate-dag log=$log_file summary=$typed_kernel_contract_summary"
           '';
         };

@@ -1,0 +1,37 @@
+error[E0277]: the trait bound `ForgedInput: mfm_program::private::OperationInputSealed` is not satisfied
+ --> tests/ui/fail/manual_operation_input.rs:6:54
+  |
+6 | impl<'p, 's> mfm_program::OperationInput<'p, 's> for ForgedInput {
+  |                                                      ^^^^^^^^^^^ unsatisfied trait bound
+  |
+help: the trait `mfm_program::private::OperationInputSealed` is not implemented for `ForgedInput`
+ --> tests/ui/fail/manual_operation_input.rs:4:1
+  |
+4 | struct ForgedInput;
+  | ^^^^^^^^^^^^^^^^^^
+  = help: the following other types implement trait `mfm_program::private::OperationInputSealed`:
+            ()
+            (Handle<'program, 'scope, A>, Handle<'program, 'scope, B>)
+            (Handle<'program, 'scope, A>, Handle<'program, 'scope, B>, Handle<'program, 'scope, C>)
+            (Handle<'program, 'scope, A>, Handle<'program, 'scope, B>, Handle<'program, 'scope, C>, Handle<'program, 'scope, D>)
+            (Handle<'program, 'scope, A>, Handle<'program, 'scope, B>, Handle<'program, 'scope, C>, Handle<'program, 'scope, D>, Handle<'program, 'scope, E>)
+            (Handle<'program, 'scope, A>, Handle<'program, 'scope, B>, Handle<'program, 'scope, C>, Handle<'program, 'scope, D>, Handle<'program, 'scope, E>, Handle<'program, 'scope, F>)
+            (Handle<'program, 'scope, A>, Handle<'program, 'scope, B>, Handle<'program, 'scope, C>, Handle<'program, 'scope, D>, Handle<'program, 'scope, E>, Handle<'program, 'scope, F>, Handle<'program, 'scope, G>)
+            (Handle<'program, 'scope, A>, Handle<'program, 'scope, B>, Handle<'program, 'scope, C>, Handle<'program, 'scope, D>, Handle<'program, 'scope, E>, Handle<'program, 'scope, F>, Handle<'program, 'scope, G>, Handle<'program, 'scope, H>)
+          and $N others
+note: required by a bound in `OperationInput`
+ --> src/lib.rs
+  |
+  | pub trait OperationInput<'program, 'scope>: private::OperationInputSealed {
+  |                                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `OperationInput`
+  = note: `OperationInput` is a "sealed trait", because to implement it you also need to implement `mfm_program::private::OperationInputSealed`, which is not accessible; this is usually done to force you to use one of the provided types that already implement it
+  = help: the following types implement the trait:
+            ()
+            mfm_program::Handle<'program, 'scope, T>
+            std::vec::Vec<mfm_program::Handle<'program, 'scope, T>>
+            mfm_program::NonEmptyHandles<'program, 'scope, T>
+            (mfm_program::Handle<'program, 'scope, A>,)
+            (mfm_program::Handle<'program, 'scope, A>, mfm_program::Handle<'program, 'scope, B>)
+            (mfm_program::Handle<'program, 'scope, A>, mfm_program::Handle<'program, 'scope, B>, mfm_program::Handle<'program, 'scope, C>)
+            (mfm_program::Handle<'program, 'scope, A>, mfm_program::Handle<'program, 'scope, B>, mfm_program::Handle<'program, 'scope, C>, mfm_program::Handle<'program, 'scope, D>)
+          and $N others

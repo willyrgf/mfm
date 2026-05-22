@@ -158,6 +158,16 @@ impl<'p, 's> mfm_program::PublicOutputs<'p, 's> for DomainOutputs {
     }
 }
 
+impl<'p, 's> mfm_program::OperationOutput<'p, 's> for DomainOperationOutput<'p, 's> {
+    fn output_schema_id() -> mfm_program::Result<mfm_ids::SchemaId> {
+        unimplemented!()
+    }
+
+    fn output_handles(&self) -> mfm_program::Result<Vec<mfm_program::TypedHandleRef>> {
+        unimplemented!()
+    }
+}
+
 fn forge() {
     let _ = Audit::__derive_generated("domain", "DomainConfig", "mfm-program-derive/0.1.0");
 }
@@ -166,9 +176,11 @@ fn forge() {
     .map_err(|error| format!("write self-test domain source: {error}"))?;
 
     let bad_report = check_root(&tmp_root, false)?;
-    if bad_report.manual_impl_count < 2 {
+    if bad_report.manual_impl_count < 3 {
         let _ = fs::remove_dir_all(&tmp_root);
-        return Err("self-test did not reject manual persisted/public-output impls".to_owned());
+        return Err(
+            "self-test did not reject manual persisted/public/operation-output impls".to_owned(),
+        );
     }
     if bad_report.provenance_forgery_count == 0 {
         let _ = fs::remove_dir_all(&tmp_root);

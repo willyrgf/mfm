@@ -1,6 +1,7 @@
 use super::*;
 use mfm_program_derive::{
-    MfmConfig, MfmValue, PublicOutputs as PublicOutputsDerive, StateInput as StateInputDerive,
+    MfmConfig, MfmValue, OperationOutput as OperationOutputDerive,
+    PublicOutputs as PublicOutputsDerive, StateInput as StateInputDerive,
 };
 use serde::{Deserialize, Serialize};
 
@@ -19,6 +20,12 @@ struct LaunchValue {
 #[derive(PublicOutputsDerive)]
 #[mfm(schema = "mfm.program.test.public_outputs")]
 struct LaunchPublicOutputs<'p, 's> {
+    result: Handle<'p, 's, LaunchValue>,
+}
+
+#[derive(OperationOutputDerive)]
+#[mfm(schema = "mfm.program.test.operation_outputs")]
+struct LaunchOperationOutputs<'p, 's> {
     result: Handle<'p, 's, LaunchValue>,
 }
 
@@ -80,6 +87,48 @@ impl PureState for MultiplyState {
             amount: input.amount * self.config.multiplier,
             label: input.label,
         })
+    }
+}
+
+#[derive(Debug, Clone)]
+struct MultiplyOperation;
+
+impl Operation for MultiplyOperation {
+    type Config = LaunchConfig;
+    type Input<'program, 'scope> = Handle<'program, 'scope, LaunchValue>;
+    type Output<'program, 'scope> = LaunchOperationOutputs<'program, 'scope>;
+
+    fn kind() -> Result<OperationKind> {
+        OperationKind::new(
+            "mfm.program.test.operation",
+            "multiply",
+            DigestAlgorithm::Sha256JcsV1,
+            sha256_digest_bytes(b"mfm.program.test.operation:multiply"),
+        )
+        .map_err(|error| PlanError::Key(error.to_string()))
+    }
+
+    fn version() -> Result<OperationVersion> {
+        OperationVersion::new("mfm.program.test.operation.multiply.v1")
+            .map_err(|error| PlanError::Key(error.to_string()))
+    }
+
+    fn name() -> &'static str {
+        "multiply"
+    }
+
+    fn expand<'program, 'scope>(
+        &self,
+        config: Self::Config,
+        input: Self::Input<'program, 'scope>,
+        builder: &mut ScopeBuilder<'program, 'scope>,
+    ) -> Result<Self::Output<'program, 'scope>> {
+        let result = builder.state::<MultiplyState, _>(
+            StateKey::new("multiply-operation/state")?,
+            config,
+            input,
+        )?;
+        Ok(LaunchOperationOutputs { result })
     }
 }
 
@@ -220,6 +269,145 @@ fn explicit_registered_state_token_plans_without_builder_registry() {
 
     assert_eq!(draft.state_nodes().len(), 1);
     assert_eq!(draft.state_nodes()[0].key.as_str(), "multiply");
+}
+
+#[test]
+fn registered_operation_registry_records_lineage_frame() {
+    let mut state_registry = StateRegistryBuilder::new();
+    state_registry
+        .register::<MultiplyState>()
+        .expect("state registers");
+    let mut operation_registry = OperationRegistryBuilder::new();
+    let registered_operation = operation_registry
+        .register::<MultiplyOperation>()
+        .expect("operation registers");
+
+    let draft = build_root_with_registries(
+        ScopeKey::new("portfolio/root").expect("scope key"),
+        state_registry.snapshot(),
+        operation_registry.snapshot(),
+        |root| {
+            let seed = CanonicalSeed::from_value(&LaunchValue {
+                amount: 4,
+                label: "operation".to_owned(),
+            })?;
+            let input = root.seed(SeedKey::new("launch-input")?, seed)?;
+            let result = root.scope().call::<MultiplyOperation, _>(
+                OperationKey::new("multiply-operation")?,
+                MultiplyOperation,
+                LaunchConfig { multiplier: 8 },
+                input,
+            )?;
+            root.bind_public_outputs(
+                PublicOutputKey::new("terminal")?,
+                &LaunchPublicOutputs {
+                    result: result.result,
+                },
+            )
+        },
+    )
+    .expect("root builds");
+
+    assert_eq!(draft.state_nodes().len(), 1);
+    assert_eq!(draft.operation_lineage().len(), 1);
+    let frame = &draft.operation_lineage()[0];
+    assert_eq!(frame.key.as_str(), "multiply-operation");
+    assert_eq!(frame.scope_id, *draft.root_scope_id());
+    assert_eq!(
+        &frame.operation_descriptor_id,
+        registered_operation.descriptor().descriptor_id()
+    );
+    assert_eq!(
+        frame.output_schema_id,
+        <LaunchOperationOutputs<'static, 'static> as OperationOutput<'static, 'static>>::output_schema_id()
+            .expect("output schema id")
+    );
+    assert_eq!(frame.output_handles.len(), 1);
+    assert_eq!(
+        frame.output_handles[0].cell_id(),
+        &draft.state_nodes()[0].output_cell_id
+    );
+    assert!(frame
+        .lineage_digest
+        .as_str()
+        .starts_with("content:sha256-jcs-v1:"));
+}
+
+#[test]
+fn explicit_registered_operation_token_calls_without_builder_registry() {
+    let mut state_registry = StateRegistryBuilder::new();
+    state_registry
+        .register::<MultiplyState>()
+        .expect("state registers");
+    let mut operation_registry = OperationRegistryBuilder::new();
+    let registered_operation = operation_registry
+        .register::<MultiplyOperation>()
+        .expect("operation registers");
+
+    let draft = build_root_with_registry(
+        ScopeKey::new("root").expect("scope key"),
+        state_registry.into_snapshot(),
+        |root| {
+            let seed = CanonicalSeed::from_value(&LaunchValue {
+                amount: 5,
+                label: "explicit-operation".to_owned(),
+            })?;
+            let input = root.seed(SeedKey::new("input")?, seed)?;
+            let result = root.scope().call_registered::<MultiplyOperation, _>(
+                OperationKey::new("multiply-operation")?,
+                registered_operation,
+                MultiplyOperation,
+                LaunchConfig { multiplier: 2 },
+                input,
+            )?;
+            root.bind_public_outputs(
+                PublicOutputKey::new("terminal")?,
+                &LaunchPublicOutputs {
+                    result: result.result,
+                },
+            )
+        },
+    )
+    .expect("root builds");
+
+    assert_eq!(draft.operation_lineage().len(), 1);
+    assert_eq!(
+        draft.operation_lineage()[0].key.as_str(),
+        "multiply-operation"
+    );
+}
+
+#[test]
+fn unregistered_operation_cannot_be_called() {
+    let mut state_registry = StateRegistryBuilder::new();
+    state_registry
+        .register::<MultiplyState>()
+        .expect("state registers");
+
+    let result = build_root_with_registry(
+        ScopeKey::new("root").expect("scope key"),
+        state_registry.into_snapshot(),
+        |root| {
+            let seed = CanonicalSeed::from_value(&LaunchValue {
+                amount: 1,
+                label: "unregistered-operation".to_owned(),
+            })?;
+            let input = root.seed(SeedKey::new("input")?, seed)?;
+            let _ = root.scope().call::<MultiplyOperation, _>(
+                OperationKey::new("multiply-operation")?,
+                MultiplyOperation,
+                LaunchConfig { multiplier: 2 },
+                input,
+            )?;
+            unreachable!("unregistered operation planning must fail before public output binding")
+        },
+    );
+
+    let Err(PlanError::Registry(message)) = result else {
+        panic!("expected unregistered operation registry error, got {result:?}");
+    };
+    assert!(message.contains("operation"));
+    assert!(message.contains("is not registered"));
 }
 
 #[test]

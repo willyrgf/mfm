@@ -69,19 +69,23 @@ write_contract_summary() {
   if [ -f "$summary_file" ]; then
     jq \
       --argjson registered_state_required true \
+      --argjson registered_operation_required true \
       '.kind = "typed-kernel-contract-summary"
        | .version = 1
        | .payload = (.payload // {})
-       | .payload.registered_state_required = $registered_state_required' \
+       | .payload.registered_state_required = $registered_state_required
+       | .payload.registered_operation_required = $registered_operation_required' \
       "$summary_file" >"$summary_tmp"
   else
     jq -n \
       --argjson registered_state_required true \
+      --argjson registered_operation_required true \
       '{
         kind: "typed-kernel-contract-summary",
         version: 1,
         payload: {
-          registered_state_required: $registered_state_required
+          registered_state_required: $registered_state_required,
+          registered_operation_required: $registered_operation_required
         }
       }' >"$summary_tmp"
   fi
@@ -94,6 +98,7 @@ run_authority_check() {
   (
     cd "$ROOT_ABS"
     cargo test -p mfm-program unregistered_state_cannot_be_planned --lib
+    cargo test -p mfm-program unregistered_operation_cannot_be_called --lib
     cargo test -p mfm-program --test program_ui program_authoring_accepts_and_rejects_branded_handles
   )
 }

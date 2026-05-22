@@ -19,8 +19,8 @@ use mfm_effects::{
     ApplySideEffect, EffectDescriptor, EffectSpec, ManagedPlatformWrite, Pure, ReadExternal,
 };
 use mfm_ids::{
-    CellId, ContentDigest, DescriptorId, DigestAlgorithm, DigestBytes, NodeId, SchemaId, ScopeId,
-    SeedId, SemanticTypeId, StateKind, StateVersion,
+    CellId, ContentDigest, DescriptorId, DigestAlgorithm, DigestBytes, NodeId, OperationKind,
+    OperationVersion, SchemaId, ScopeId, SeedId, SemanticTypeId, StateKind, StateVersion,
 };
 pub use mfm_values::NonEmpty;
 use mfm_values::{
@@ -52,6 +52,8 @@ pub enum PlanError {
     DuplicateBridgeKey(String),
     /// A state key was declared more than once in the same scope.
     DuplicateStateKey(String),
+    /// An operation key was declared more than once in the same scope.
+    DuplicateOperationKey(String),
     /// A public output field path was declared more than once.
     DuplicatePublicOutputPath(String),
     /// Root public outputs were bound more than once.
@@ -83,6 +85,7 @@ impl fmt::Display for PlanError {
             Self::DuplicateChildScopeKey(key) => write!(f, "duplicate child scope key {key}"),
             Self::DuplicateBridgeKey(key) => write!(f, "duplicate bridge key {key}"),
             Self::DuplicateStateKey(key) => write!(f, "duplicate state key {key}"),
+            Self::DuplicateOperationKey(key) => write!(f, "duplicate operation key {key}"),
             Self::DuplicatePublicOutputPath(path) => {
                 write!(f, "duplicate public output field path {path}")
             }
@@ -178,6 +181,22 @@ impl StateKey {
     /// Creates a checked state key.
     pub fn new(value: impl AsRef<str>) -> Result<Self> {
         checked_key("state key", value.as_ref()).map(Self)
+    }
+
+    /// Returns the stable key string.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Stable operation author key.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct OperationKey(String);
+
+impl OperationKey {
+    /// Creates a checked operation key.
+    pub fn new(value: impl AsRef<str>) -> Result<Self> {
+        checked_key("operation key", value.as_ref()).map(Self)
     }
 
     /// Returns the stable key string.
@@ -338,6 +357,33 @@ pub trait StateSpec: Send + Sync + 'static {
         Self: Sized;
 }
 
+/// Descriptive contract for a deterministic typed operation expansion.
+pub trait Operation: Send + Sync + 'static {
+    /// Deterministic planning config type.
+    type Config: MfmConfig;
+    /// Typed handle input accepted by this operation expansion.
+    type Input<'program, 'scope>: OperationInput<'program, 'scope>;
+    /// Typed handle output produced by this operation expansion.
+    type Output<'program, 'scope>: OperationOutput<'program, 'scope>;
+
+    /// Returns the stable operation kind id.
+    fn kind() -> Result<OperationKind>;
+
+    /// Returns the operation descriptor version.
+    fn version() -> Result<OperationVersion>;
+
+    /// Returns the stable operation descriptor name.
+    fn name() -> &'static str;
+
+    /// Expands this operation into typed state and child-operation calls.
+    fn expand<'program, 'scope>(
+        &self,
+        config: Self::Config,
+        input: Self::Input<'program, 'scope>,
+        builder: &mut ScopeBuilder<'program, 'scope>,
+    ) -> Result<Self::Output<'program, 'scope>>;
+}
+
 /// Effect-specific runner kind recorded by a registered state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RunnerKind {
@@ -481,7 +527,94 @@ impl StateDescriptorIdentity {
     }
 }
 
-/// Error returned by state registry operations.
+/// Hash-defining registered operation descriptor identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OperationDescriptorIdentity {
+    descriptor_id: DescriptorId,
+    kind: OperationKind,
+    version: OperationVersion,
+    name: &'static str,
+    config_schema_id: SchemaId,
+    input_schema_id: SchemaId,
+    output_schema_id: SchemaId,
+    expansion_abi: &'static str,
+}
+
+impl OperationDescriptorIdentity {
+    fn for_operation<O: Operation>() -> Result<Self> {
+        let kind = O::kind()?;
+        let version = O::version()?;
+        let config_schema_id =
+            O::Config::schema_id().map_err(|error| PlanError::Value(error.to_string()))?;
+        let input_schema_id =
+            <O::Input<'static, 'static> as OperationInput<'static, 'static>>::input_schema_id()
+                .map_err(|error| PlanError::Value(error.to_string()))?;
+        let output_schema_id =
+            <O::Output<'static, 'static> as OperationOutput<'static, 'static>>::output_schema_id()?;
+        let expansion_abi = "mfm.typed-operation-expand.v1";
+        let descriptor_id = operation_descriptor_id(OperationDescriptorIdParts {
+            kind: &kind,
+            version: &version,
+            name: O::name(),
+            config_schema_id: &config_schema_id,
+            input_schema_id: &input_schema_id,
+            output_schema_id: &output_schema_id,
+            expansion_abi,
+        })?;
+        Ok(Self {
+            descriptor_id,
+            kind,
+            version,
+            name: O::name(),
+            config_schema_id,
+            input_schema_id,
+            output_schema_id,
+            expansion_abi,
+        })
+    }
+
+    /// Returns this descriptor's content-addressed identity.
+    pub fn descriptor_id(&self) -> &DescriptorId {
+        &self.descriptor_id
+    }
+
+    /// Returns the stable operation kind.
+    pub fn kind(&self) -> &OperationKind {
+        &self.kind
+    }
+
+    /// Returns the operation version.
+    pub fn version(&self) -> &OperationVersion {
+        &self.version
+    }
+
+    /// Returns the stable operation descriptor name.
+    pub fn name(&self) -> &'static str {
+        self.name
+    }
+
+    /// Returns the config schema id.
+    pub fn config_schema_id(&self) -> &SchemaId {
+        &self.config_schema_id
+    }
+
+    /// Returns the operation input schema id.
+    pub fn input_schema_id(&self) -> &SchemaId {
+        &self.input_schema_id
+    }
+
+    /// Returns the operation output schema id.
+    pub fn output_schema_id(&self) -> &SchemaId {
+        &self.output_schema_id
+    }
+
+    /// Returns the deterministic expansion ABI name.
+    pub fn expansion_abi(&self) -> &'static str {
+        self.expansion_abi
+    }
+}
+
+/// Error returned by typed registry operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RegistryError {
     /// State descriptor construction failed.
@@ -507,6 +640,27 @@ pub enum RegistryError {
         /// Registered state version.
         version: String,
     },
+    /// No registered operation matched the requested kind/version.
+    UnregisteredOperation {
+        /// Requested operation kind.
+        kind: String,
+        /// Requested operation version.
+        version: String,
+    },
+    /// A different descriptor already owns this operation kind/version pair.
+    DuplicateOperationRegistration {
+        /// Registered operation kind.
+        kind: String,
+        /// Registered operation version.
+        version: String,
+    },
+    /// Registry record and operation descriptor evidence diverged.
+    OperationDescriptorMismatch {
+        /// Registered operation kind.
+        kind: String,
+        /// Registered operation version.
+        version: String,
+    },
 }
 
 impl fmt::Display for RegistryError {
@@ -521,6 +675,18 @@ impl fmt::Display for RegistryError {
             }
             Self::DescriptorMismatch { kind, version } => {
                 write!(f, "state registry descriptor mismatch for {kind}@{version}")
+            }
+            Self::UnregisteredOperation { kind, version } => {
+                write!(f, "operation {kind}@{version} is not registered")
+            }
+            Self::DuplicateOperationRegistration { kind, version } => {
+                write!(f, "duplicate operation registration for {kind}@{version}")
+            }
+            Self::OperationDescriptorMismatch { kind, version } => {
+                write!(
+                    f,
+                    "operation registry descriptor mismatch for {kind}@{version}"
+                )
             }
         }
     }
@@ -594,6 +760,58 @@ impl<S: StateSpec> RegisteredState<S> {
     }
 }
 
+/// Private registration evidence carried by a registered operation token.
+#[derive(Debug, PartialEq, Eq)]
+pub struct OperationRegistrationEvidence<O: Operation> {
+    _operation: PhantomData<fn(O) -> O>,
+    _private: (),
+}
+
+impl<O: Operation> Clone for OperationRegistrationEvidence<O> {
+    fn clone(&self) -> Self {
+        Self {
+            _operation: PhantomData,
+            _private: (),
+        }
+    }
+}
+
+/// Framework-owned authority token for a registered operation.
+#[derive(Debug, PartialEq, Eq)]
+pub struct RegisteredOperation<O: Operation> {
+    descriptor: OperationDescriptorIdentity,
+    evidence: OperationRegistrationEvidence<O>,
+    _operation: PhantomData<fn(O) -> O>,
+}
+
+impl<O: Operation> Clone for RegisteredOperation<O> {
+    fn clone(&self) -> Self {
+        Self {
+            descriptor: self.descriptor.clone(),
+            evidence: self.evidence.clone(),
+            _operation: PhantomData,
+        }
+    }
+}
+
+impl<O: Operation> RegisteredOperation<O> {
+    fn new(descriptor: OperationDescriptorIdentity) -> Self {
+        Self {
+            descriptor,
+            evidence: OperationRegistrationEvidence {
+                _operation: PhantomData,
+                _private: (),
+            },
+            _operation: PhantomData,
+        }
+    }
+
+    /// Returns the validated operation descriptor identity.
+    pub fn descriptor(&self) -> &OperationDescriptorIdentity {
+        &self.descriptor
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct StateRegistrationKey {
     kind: String,
@@ -613,6 +831,26 @@ impl StateRegistrationKey {
 struct StateRegistrationRecord {
     descriptor_id: DescriptorId,
     runner: RunnerKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct OperationRegistrationKey {
+    kind: String,
+    version: String,
+}
+
+impl OperationRegistrationKey {
+    fn from_descriptor(descriptor: &OperationDescriptorIdentity) -> Self {
+        Self {
+            kind: descriptor.kind().as_str().to_owned(),
+            version: descriptor.version().as_str().to_owned(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OperationRegistrationRecord {
+    descriptor_id: DescriptorId,
 }
 
 /// Immutable state registry snapshot used by typed program builders.
@@ -726,6 +964,103 @@ impl StateRegistry for StateRegistrySnapshot {
             });
         }
         Ok(RegisteredState::new(descriptor, record.runner))
+    }
+}
+
+/// Immutable operation registry snapshot used by typed program builders.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OperationRegistrySnapshot {
+    records: std::collections::BTreeMap<OperationRegistrationKey, OperationRegistrationRecord>,
+}
+
+impl OperationRegistrySnapshot {
+    /// Returns true when the registry has no registered operations.
+    pub fn is_empty(&self) -> bool {
+        self.records.is_empty()
+    }
+
+    /// Returns the number of registered operation kind/version pairs.
+    pub fn len(&self) -> usize {
+        self.records.len()
+    }
+}
+
+/// Mutable framework operation registry builder.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OperationRegistryBuilder {
+    snapshot: OperationRegistrySnapshot,
+}
+
+impl OperationRegistryBuilder {
+    /// Creates an empty registry builder.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Registers an operation after validating descriptor evidence.
+    pub fn register<O>(&mut self) -> std::result::Result<RegisteredOperation<O>, RegistryError>
+    where
+        O: Operation,
+    {
+        let descriptor = OperationDescriptorIdentity::for_operation::<O>()
+            .map_err(|error| RegistryError::Descriptor(error.to_string()))?;
+        let key = OperationRegistrationKey::from_descriptor(&descriptor);
+        let record = OperationRegistrationRecord {
+            descriptor_id: descriptor.descriptor_id().clone(),
+        };
+        if let Some(existing) = self.snapshot.records.get(&key) {
+            if existing != &record {
+                return Err(RegistryError::DuplicateOperationRegistration {
+                    kind: key.kind,
+                    version: key.version,
+                });
+            }
+        } else {
+            self.snapshot.records.insert(key, record);
+        }
+        Ok(RegisteredOperation::new(descriptor))
+    }
+
+    /// Returns an immutable registry snapshot.
+    pub fn snapshot(&self) -> OperationRegistrySnapshot {
+        self.snapshot.clone()
+    }
+
+    /// Converts this builder into an immutable registry snapshot.
+    pub fn into_snapshot(self) -> OperationRegistrySnapshot {
+        self.snapshot
+    }
+}
+
+/// Framework-owned operation registry lookup contract.
+pub trait OperationRegistry {
+    /// Resolves a registered operation token for `O`.
+    fn registered_operation<O>(&self) -> std::result::Result<RegisteredOperation<O>, RegistryError>
+    where
+        O: Operation;
+}
+
+impl OperationRegistry for OperationRegistrySnapshot {
+    fn registered_operation<O>(&self) -> std::result::Result<RegisteredOperation<O>, RegistryError>
+    where
+        O: Operation,
+    {
+        let descriptor = OperationDescriptorIdentity::for_operation::<O>()
+            .map_err(|error| RegistryError::Descriptor(error.to_string()))?;
+        let key = OperationRegistrationKey::from_descriptor(&descriptor);
+        let Some(record) = self.records.get(&key) else {
+            return Err(RegistryError::UnregisteredOperation {
+                kind: key.kind,
+                version: key.version,
+            });
+        };
+        if record.descriptor_id != *descriptor.descriptor_id() {
+            return Err(RegistryError::OperationDescriptorMismatch {
+                kind: key.kind,
+                version: key.version,
+            });
+        }
+        Ok(RegisteredOperation::new(descriptor))
     }
 }
 
@@ -1104,6 +1439,33 @@ pub struct StateNodeSpec {
     pub output_schema_id: SchemaId,
     /// Output semantic type id.
     pub output_semantic_type_id: SemanticTypeId,
+}
+
+/// Operation lineage frame emitted by a registry-mediated call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OperationLineageFrameSpec {
+    /// Stable operation author key.
+    pub key: OperationKey,
+    /// Owning scope id.
+    pub scope_id: ScopeId,
+    /// Registered operation kind.
+    pub operation_kind: OperationKind,
+    /// Registered operation version.
+    pub operation_version: OperationVersion,
+    /// Registered operation descriptor id.
+    pub operation_descriptor_id: DescriptorId,
+    /// Deterministic expansion ABI recorded by the descriptor.
+    pub expansion_abi: &'static str,
+    /// Canonical operation config binding.
+    pub config: ConfigBindingSpec,
+    /// Typed operation input binding.
+    pub input: OperationInputBindingSpec,
+    /// Operation output schema id.
+    pub output_schema_id: SchemaId,
+    /// Output handles actually returned by expansion.
+    pub output_handles: Vec<TypedHandleRef>,
+    /// Digest of this lineage frame.
+    pub lineage_digest: ContentDigest,
 }
 
 /// Framework bridge direction for same-value cross-scope movement.
@@ -1536,6 +1898,75 @@ pub struct InputBindingSpec {
     pub digest: ContentDigest,
 }
 
+/// Persisted operation-input binding spec.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OperationInputBindingSpec {
+    /// Input schema id.
+    pub input_schema_id: SchemaId,
+    /// Input descriptor id.
+    pub input_descriptor_id: DescriptorId,
+    /// Root input binding node.
+    pub root: InputBindingNode,
+    /// Canonical digest of the root binding tree.
+    pub digest: ContentDigest,
+}
+
+impl OperationInputBindingSpec {
+    /// Converts a validated state-input binding into an operation-input binding.
+    pub fn from_binding<I: StateInput>(binding: InputBinding<I>) -> Self {
+        Self::from_state_input_spec(binding.spec())
+    }
+
+    fn from_state_input_spec(spec: InputBindingSpec) -> Self {
+        Self {
+            input_schema_id: spec.input_schema_id,
+            input_descriptor_id: spec.input_descriptor_id,
+            root: spec.root,
+            digest: spec.digest,
+        }
+    }
+}
+
+/// Typed operation input contract over framework-owned branded handle wrappers.
+pub trait OperationInput<'program, 'scope>: private::OperationInputSealed {
+    /// Runtime input descriptor represented by this handle-side input.
+    type Runtime: StateInput;
+
+    /// Returns the input schema id.
+    fn input_schema_id() -> mfm_values::Result<SchemaId> {
+        Self::Runtime::input_schema_id()
+    }
+
+    /// Returns the canonical operation input binding.
+    fn input_binding(&self) -> Result<OperationInputBindingSpec>;
+}
+
+/// Author-side conversion into an operation's typed input value.
+pub trait IntoOperationInput<'program, 'scope, I: OperationInput<'program, 'scope>> {
+    /// Converts into the operation input expected by `Operation::expand`.
+    fn into_operation_input(self) -> Result<I>;
+}
+
+impl<'program, 'scope, I> IntoOperationInput<'program, 'scope, I> for I
+where
+    I: OperationInput<'program, 'scope>,
+{
+    fn into_operation_input(self) -> Result<I> {
+        Ok(self)
+    }
+}
+
+/// Typed operation output contract over branded handles.
+pub trait OperationOutput<'program, 'scope> {
+    /// Returns the operation output schema id.
+    fn output_schema_id() -> Result<SchemaId>
+    where
+        Self: Sized;
+
+    /// Returns typed handles actually produced by this operation expansion.
+    fn output_handles(&self) -> Result<Vec<TypedHandleRef>>;
+}
+
 /// Converts author-side handle values into a typed state-input binding.
 pub trait IntoStateInput<'program, 'scope, I: StateInput> {
     /// Converts into a typed input binding.
@@ -1650,9 +2081,17 @@ impl_tuple_input_binding!(A:0, B:1, C:2, D:3, E:4, F:5, G:6, H:7, I:8, J:9, K:10
 impl_tuple_input_binding!(A:0, B:1, C:2, D:3, E:4, F:5, G:6, H:7, I:8, J:9, K:10, L:11);
 
 /// Author-side non-empty handles.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct NonEmptyHandles<'program, 'scope, T: MfmValue> {
     handles: Vec<Handle<'program, 'scope, T>>,
+}
+
+impl<'program, 'scope, T: MfmValue> Clone for NonEmptyHandles<'program, 'scope, T> {
+    fn clone(&self) -> Self {
+        Self {
+            handles: self.handles.clone(),
+        }
+    }
 }
 
 impl<'program, 'scope, T: MfmValue> NonEmptyHandles<'program, 'scope, T> {
@@ -1706,6 +2145,86 @@ where
         InputBinding::from_root(self.into_binding_node(InputFieldPath::root())?)
     }
 }
+
+impl<'program, 'scope> OperationInput<'program, 'scope> for () {
+    type Runtime = ();
+
+    fn input_binding(&self) -> Result<OperationInputBindingSpec> {
+        Ok(OperationInputBindingSpec::from_state_input_spec(
+            InputBinding::<()>::from_root(InputBindingNode::Unit)?.spec(),
+        ))
+    }
+}
+
+impl<'program, 'scope, T> OperationInput<'program, 'scope> for Handle<'program, 'scope, T>
+where
+    T: MfmValue,
+{
+    type Runtime = T;
+
+    fn input_binding(&self) -> Result<OperationInputBindingSpec> {
+        Ok(OperationInputBindingSpec::from_state_input_spec(
+            self.clone().into_binding()?.spec(),
+        ))
+    }
+}
+
+impl<'program, 'scope, T> OperationInput<'program, 'scope> for Vec<Handle<'program, 'scope, T>>
+where
+    T: MfmValue,
+{
+    type Runtime = Vec<T>;
+
+    fn input_binding(&self) -> Result<OperationInputBindingSpec> {
+        Ok(OperationInputBindingSpec::from_state_input_spec(
+            self.clone().into_binding()?.spec(),
+        ))
+    }
+}
+
+impl<'program, 'scope, T> OperationInput<'program, 'scope> for NonEmptyHandles<'program, 'scope, T>
+where
+    T: MfmValue,
+{
+    type Runtime = NonEmpty<T>;
+
+    fn input_binding(&self) -> Result<OperationInputBindingSpec> {
+        Ok(OperationInputBindingSpec::from_state_input_spec(
+            self.clone().into_binding()?.spec(),
+        ))
+    }
+}
+
+macro_rules! impl_tuple_operation_input {
+    ($($name:ident),+ $(,)?) => {
+        impl<'program, 'scope, $($name),+> OperationInput<'program, 'scope>
+            for ($(Handle<'program, 'scope, $name>,)+)
+        where
+            $($name: MfmValue,)+
+        {
+            type Runtime = ($($name,)+);
+
+            fn input_binding(&self) -> Result<OperationInputBindingSpec> {
+                Ok(OperationInputBindingSpec::from_state_input_spec(
+                    self.clone().into_binding()?.spec(),
+                ))
+            }
+        }
+    };
+}
+
+impl_tuple_operation_input!(A);
+impl_tuple_operation_input!(A, B);
+impl_tuple_operation_input!(A, B, C);
+impl_tuple_operation_input!(A, B, C, D);
+impl_tuple_operation_input!(A, B, C, D, E);
+impl_tuple_operation_input!(A, B, C, D, E, F);
+impl_tuple_operation_input!(A, B, C, D, E, F, G);
+impl_tuple_operation_input!(A, B, C, D, E, F, G, H);
+impl_tuple_operation_input!(A, B, C, D, E, F, G, H, I);
+impl_tuple_operation_input!(A, B, C, D, E, F, G, H, I, J);
+impl_tuple_operation_input!(A, B, C, D, E, F, G, H, I, J, K);
+impl_tuple_operation_input!(A, B, C, D, E, F, G, H, I, J, K, L);
 
 /// Root-bound public output evidence returned by `RootBuilder::bind_public_outputs`.
 #[derive(Debug, PartialEq, Eq)]
@@ -1778,6 +2297,7 @@ pub struct TypedProgramDraft {
     seeds: Vec<RootSeedSpec>,
     scopes: Vec<ScopeSpec>,
     state_nodes: Vec<StateNodeSpec>,
+    operation_lineage: Vec<OperationLineageFrameSpec>,
     bridge_nodes: Vec<BridgeNodeSpec>,
     public_output_spec: PublicOutputSpec,
 }
@@ -1806,6 +2326,11 @@ impl TypedProgramDraft {
     /// Returns emitted typed state nodes.
     pub fn state_nodes(&self) -> &[StateNodeSpec] {
         &self.state_nodes
+    }
+
+    /// Returns registry-mediated operation lineage frames.
+    pub fn operation_lineage(&self) -> &[OperationLineageFrameSpec] {
+        &self.operation_lineage
     }
 
     /// Returns emitted framework bridge nodes.
@@ -1922,13 +2447,27 @@ impl<'program, 'scope> RootBuilder<'program, 'scope> {
 pub struct ScopeBuilder<'program, 'scope> {
     scope_id: ScopeId,
     state_registry: StateRegistrySnapshot,
+    operation_registry: OperationRegistrySnapshot,
     state_keys: BTreeSet<String>,
+    operation_keys: BTreeSet<String>,
     state_nodes: Vec<StateNodeSpec>,
+    operation_lineage: Vec<OperationLineageFrameSpec>,
     child_scope_keys: BTreeSet<String>,
     child_scopes: Vec<ScopeSpec>,
     bridge_nodes: Vec<BridgeNodeSpec>,
     _program: PhantomData<fn(&'program ()) -> &'program ()>,
     _scope: PhantomData<fn(&'scope ()) -> &'scope ()>,
+}
+
+#[derive(Debug, Clone)]
+struct ScopeBuilderCheckpoint {
+    state_keys: BTreeSet<String>,
+    operation_keys: BTreeSet<String>,
+    state_nodes: Vec<StateNodeSpec>,
+    operation_lineage: Vec<OperationLineageFrameSpec>,
+    child_scope_keys: BTreeSet<String>,
+    child_scopes: Vec<ScopeSpec>,
+    bridge_nodes: Vec<BridgeNodeSpec>,
 }
 
 impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
@@ -1956,8 +2495,11 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
             scope: ScopeBuilder {
                 scope_id: child_scope_id.clone(),
                 state_registry: self.state_registry.clone(),
+                operation_registry: self.operation_registry.clone(),
                 state_keys: BTreeSet::new(),
+                operation_keys: BTreeSet::new(),
                 state_nodes: Vec::new(),
+                operation_lineage: Vec::new(),
                 child_scope_keys: BTreeSet::new(),
                 child_scopes: Vec::new(),
                 bridge_nodes: Vec::new(),
@@ -1979,6 +2521,7 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
             parent_scope_id: Some(self.scope_id.clone()),
         });
         self.state_nodes.extend(child.scope.state_nodes);
+        self.operation_lineage.extend(child.scope.operation_lineage);
         self.child_scopes.extend(child.scope.child_scopes);
         self.bridge_nodes.extend(child.bridge_nodes);
         self.bridge_nodes.extend(child.scope.bridge_nodes);
@@ -2063,6 +2606,115 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
             output_semantic_type_id,
         });
         Ok(handle)
+    }
+
+    /// Expands a registered typed operation by resolving `O` through this builder's registry.
+    pub fn call<O, I>(
+        &mut self,
+        key: OperationKey,
+        operation: O,
+        config: O::Config,
+        input: I,
+    ) -> Result<O::Output<'program, 'scope>>
+    where
+        O: Operation,
+        I: IntoOperationInput<'program, 'scope, O::Input<'program, 'scope>>,
+    {
+        let registered = self.operation_registry.registered_operation::<O>()?;
+        self.call_registered(key, registered, operation, config, input)
+    }
+
+    /// Expands a typed operation from an explicit framework-owned registration token.
+    pub fn call_registered<O, I>(
+        &mut self,
+        key: OperationKey,
+        registered: RegisteredOperation<O>,
+        operation: O,
+        config: O::Config,
+        input: I,
+    ) -> Result<O::Output<'program, 'scope>>
+    where
+        O: Operation,
+        I: IntoOperationInput<'program, 'scope, O::Input<'program, 'scope>>,
+    {
+        let key_string = key.as_str().to_owned();
+        if self.operation_keys.contains(&key_string) {
+            return Err(PlanError::DuplicateOperationKey(key.as_str().to_owned()));
+        }
+        let config_binding = canonical_config_binding::<O::Config>(&config)?;
+        let operation_input = input.into_operation_input()?;
+        let input_binding = operation_input.input_binding()?;
+        let output_schema_id =
+            <O::Output<'program, 'scope> as OperationOutput<'program, 'scope>>::output_schema_id()?;
+        let descriptor = registered.descriptor().clone();
+        let checkpoint = self.checkpoint();
+        self.operation_keys.insert(key_string);
+
+        let output = match operation.expand(config, operation_input, self) {
+            Ok(output) => output,
+            Err(error) => {
+                self.restore(checkpoint);
+                return Err(error);
+            }
+        };
+        let output_handles = match output.output_handles() {
+            Ok(handles) => handles,
+            Err(error) => {
+                self.restore(checkpoint);
+                return Err(error);
+            }
+        };
+        let lineage_digest =
+            match operation_lineage_frame_digest(OperationLineageFrameDigestParts {
+                scope_id: &self.scope_id,
+                key: &key,
+                descriptor: &descriptor,
+                config_digest: &config_binding.content_digest,
+                input_digest: &input_binding.digest,
+                output_handles: &output_handles,
+            }) {
+                Ok(digest) => digest,
+                Err(error) => {
+                    self.restore(checkpoint);
+                    return Err(error);
+                }
+            };
+        self.operation_lineage.push(OperationLineageFrameSpec {
+            key,
+            scope_id: self.scope_id.clone(),
+            operation_kind: descriptor.kind().clone(),
+            operation_version: descriptor.version().clone(),
+            operation_descriptor_id: descriptor.descriptor_id().clone(),
+            expansion_abi: descriptor.expansion_abi(),
+            config: config_binding,
+            input: input_binding,
+            output_schema_id,
+            output_handles,
+            lineage_digest,
+        });
+        Ok(output)
+    }
+
+    fn checkpoint(&self) -> ScopeBuilderCheckpoint {
+        ScopeBuilderCheckpoint {
+            state_keys: self.state_keys.clone(),
+            operation_keys: self.operation_keys.clone(),
+            state_nodes: self.state_nodes.clone(),
+            operation_lineage: self.operation_lineage.clone(),
+            child_scope_keys: self.child_scope_keys.clone(),
+            child_scopes: self.child_scopes.clone(),
+            bridge_nodes: self.bridge_nodes.clone(),
+        }
+    }
+
+    fn restore(&mut self, checkpoint: ScopeBuilderCheckpoint) {
+        self.state_keys = checkpoint.state_keys;
+        self.operation_keys = checkpoint.operation_keys;
+        self.state_nodes = checkpoint.state_nodes;
+        self.operation_lineage = checkpoint.operation_lineage;
+        self.child_scope_keys = checkpoint.child_scope_keys;
+        self.child_scopes = checkpoint.child_scopes;
+        self.bridge_nodes = checkpoint.bridge_nodes;
     }
 }
 
@@ -2273,7 +2925,12 @@ where
         &mut RootBuilder<'program, 'root>,
     ) -> Result<RootBound<'program, 'root>>,
 {
-    build_root_with_registry(root_key, StateRegistrySnapshot::default(), f)
+    build_root_with_registries(
+        root_key,
+        StateRegistrySnapshot::default(),
+        OperationRegistrySnapshot::default(),
+        f,
+    )
 }
 
 /// Builds a branded root typed program with a state registry snapshot.
@@ -2287,14 +2944,37 @@ where
         &mut RootBuilder<'program, 'root>,
     ) -> Result<RootBound<'program, 'root>>,
 {
+    build_root_with_registries(
+        root_key,
+        state_registry,
+        OperationRegistrySnapshot::default(),
+        f,
+    )
+}
+
+/// Builds a branded root typed program with state and operation registry snapshots.
+pub fn build_root_with_registries<F>(
+    root_key: ScopeKey,
+    state_registry: StateRegistrySnapshot,
+    operation_registry: OperationRegistrySnapshot,
+    f: F,
+) -> Result<TypedProgramDraft>
+where
+    F: for<'program, 'root> FnOnce(
+        &mut RootBuilder<'program, 'root>,
+    ) -> Result<RootBound<'program, 'root>>,
+{
     let root_scope_id = scope_id(&root_key)?;
     let mut builder = RootBuilder {
         root_key: root_key.clone(),
         scope: ScopeBuilder {
             scope_id: root_scope_id.clone(),
             state_registry,
+            operation_registry,
             state_keys: BTreeSet::new(),
+            operation_keys: BTreeSet::new(),
             state_nodes: Vec::new(),
+            operation_lineage: Vec::new(),
             child_scope_keys: BTreeSet::new(),
             child_scopes: Vec::new(),
             bridge_nodes: Vec::new(),
@@ -2320,6 +3000,7 @@ where
             scopes
         },
         state_nodes: builder.scope.state_nodes,
+        operation_lineage: builder.scope.operation_lineage,
         bridge_nodes: builder.scope.bridge_nodes,
         public_output_spec: bound.public_output_spec,
     })
@@ -2552,6 +3233,36 @@ fn state_descriptor_id(parts: StateDescriptorIdParts<'_>) -> Result<DescriptorId
     ))
 }
 
+struct OperationDescriptorIdParts<'a> {
+    kind: &'a OperationKind,
+    version: &'a OperationVersion,
+    name: &'static str,
+    config_schema_id: &'a SchemaId,
+    input_schema_id: &'a SchemaId,
+    output_schema_id: &'a SchemaId,
+    expansion_abi: &'static str,
+}
+
+fn operation_descriptor_id(parts: OperationDescriptorIdParts<'_>) -> Result<DescriptorId> {
+    let json = serde_json::json!({
+        "config_schema_id": parts.config_schema_id.as_str(),
+        "expansion_abi": parts.expansion_abi,
+        "input_schema_id": parts.input_schema_id.as_str(),
+        "kind": parts.kind.as_str(),
+        "name": parts.name,
+        "output_schema_id": parts.output_schema_id.as_str(),
+        "version": parts.version.as_str(),
+    });
+    let json =
+        serde_json::to_string(&json).map_err(|error| PlanError::Serialize(error.to_string()))?;
+    let canonical = PlainCanonicalJsonBytes::from_json_str(&json)
+        .map_err(|error| PlanError::Canonical(error.to_string()))?;
+    Ok(DescriptorId::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        sha256_digest_bytes(canonical.as_bytes()),
+    ))
+}
+
 fn effect_runner_kind_for_effect<E: EffectSpec>() -> RunnerKind {
     match E::class() {
         mfm_effects::EffectClass::Pure => RunnerKind::Pure,
@@ -2590,6 +3301,47 @@ fn state_output_cell_id(node_id: &NodeId) -> Result<CellId> {
 
 fn state_value_lineage_ref(node_id: &NodeId) -> Result<ValueLineageRef> {
     value_lineage_ref("state", node_id.as_str())
+}
+
+struct OperationLineageFrameDigestParts<'a> {
+    scope_id: &'a ScopeId,
+    key: &'a OperationKey,
+    descriptor: &'a OperationDescriptorIdentity,
+    config_digest: &'a ContentDigest,
+    input_digest: &'a ContentDigest,
+    output_handles: &'a [TypedHandleRef],
+}
+
+fn operation_lineage_frame_digest(
+    parts: OperationLineageFrameDigestParts<'_>,
+) -> Result<ContentDigest> {
+    let json = serde_json::json!({
+        "config_digest": parts.config_digest.as_str(),
+        "expansion_abi": parts.descriptor.expansion_abi(),
+        "input_digest": parts.input_digest.as_str(),
+        "operation_descriptor_id": parts.descriptor.descriptor_id().as_str(),
+        "operation_key": parts.key.as_str(),
+        "operation_kind": parts.descriptor.kind().as_str(),
+        "operation_version": parts.descriptor.version().as_str(),
+        "output_handles": parts.output_handles
+            .iter()
+            .map(|handle| {
+                serde_json::json!({
+                    "cell_id": handle.cell_id().as_str(),
+                    "schema_id": handle.schema_id().as_str(),
+                    "scope_id": handle.scope_id().as_str(),
+                    "semantic_type_id": handle.semantic_type_id().as_str(),
+                    "value_lineage": handle.value_lineage().digest().as_str(),
+                })
+            })
+            .collect::<Vec<_>>(),
+        "scope_id": parts.scope_id.as_str(),
+    });
+    let json =
+        serde_json::to_string(&json).map_err(|error| PlanError::Serialize(error.to_string()))?;
+    let canonical = PlainCanonicalJsonBytes::from_json_str(&json)
+        .map_err(|error| PlanError::Canonical(error.to_string()))?;
+    Ok(canonical.content_digest())
 }
 
 fn input_descriptor_id(input_schema_id: &SchemaId) -> Result<DescriptorId> {
@@ -2807,11 +3559,12 @@ fn digest_only_id<I>(
 
 mod private {
     use super::{
-        ApplySideEffect, Handle, ManagedPlatformWrite, MfmValue, Pure, ReadExternal,
-        SideEffectState, StateSpec,
+        ApplySideEffect, Handle, ManagedPlatformWrite, MfmValue, NonEmptyHandles, Pure,
+        ReadExternal, SideEffectState, StateSpec,
     };
 
     pub trait EffectRunnerSealed<S: StateSpec> {}
+    pub trait OperationInputSealed {}
     pub trait BridgeableSealed {}
 
     impl<S> EffectRunnerSealed<S> for Pure where S: super::PureState {}
@@ -2821,6 +3574,18 @@ mod private {
     impl<S> EffectRunnerSealed<S> for ManagedPlatformWrite where S: super::ManagedWriteState {}
 
     impl<S> EffectRunnerSealed<S> for ApplySideEffect where S: SideEffectState {}
+
+    impl OperationInputSealed for () {}
+
+    impl<'program, 'scope, T> OperationInputSealed for Handle<'program, 'scope, T> where T: MfmValue {}
+
+    impl<'program, 'scope, T> OperationInputSealed for Vec<Handle<'program, 'scope, T>> where T: MfmValue
+    {}
+
+    impl<'program, 'scope, T> OperationInputSealed for NonEmptyHandles<'program, 'scope, T> where
+        T: MfmValue
+    {
+    }
 
     impl<'program, 'parent, T> BridgeableSealed for Handle<'program, 'parent, T> where T: MfmValue {}
 
@@ -2832,8 +3597,32 @@ mod private {
         };
     }
 
+    macro_rules! impl_operation_input_tuple {
+        ($($name:ident),+ $(,)?) => {
+            impl<'program, 'scope, $($name),+> OperationInputSealed
+                for ($(Handle<'program, 'scope, $name>,)+)
+            where
+                $($name: MfmValue,)+
+            {
+            }
+        };
+    }
+
     impl_tuple!(A);
     impl_tuple!(A, B);
     impl_tuple!(A, B, C);
     impl_tuple!(A, B, C, D);
+
+    impl_operation_input_tuple!(A);
+    impl_operation_input_tuple!(A, B);
+    impl_operation_input_tuple!(A, B, C);
+    impl_operation_input_tuple!(A, B, C, D);
+    impl_operation_input_tuple!(A, B, C, D, E);
+    impl_operation_input_tuple!(A, B, C, D, E, F);
+    impl_operation_input_tuple!(A, B, C, D, E, F, G);
+    impl_operation_input_tuple!(A, B, C, D, E, F, G, H);
+    impl_operation_input_tuple!(A, B, C, D, E, F, G, H, I);
+    impl_operation_input_tuple!(A, B, C, D, E, F, G, H, I, J);
+    impl_operation_input_tuple!(A, B, C, D, E, F, G, H, I, J, K);
+    impl_operation_input_tuple!(A, B, C, D, E, F, G, H, I, J, K, L);
 }

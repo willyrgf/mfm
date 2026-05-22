@@ -113,6 +113,9 @@ fn expand_schema_derive_result(
     if kind == DeriveKind::PublicOutputs && !input.generics.params.is_empty() {
         return expand_program_public_outputs_derive_result(input);
     }
+    if kind == DeriveKind::OperationOutput && !input.generics.params.is_empty() {
+        return expand_program_operation_output_derive_result(input);
+    }
 
     if !input.generics.params.is_empty() {
         return Err(syn::Error::new_spanned(
@@ -365,6 +368,80 @@ fn expand_program_public_outputs_derive_result(
                 &self,
             ) -> ::mfm_program::Result<Vec<::mfm_program::PublicOutputCellSpec>> {
                 Ok(vec![#(#output_cells),*])
+            }
+        }
+    })
+}
+
+fn expand_program_operation_output_derive_result(
+    input: DeriveInput,
+) -> syn::Result<proc_macro2::TokenStream> {
+    let lifetimes = input
+        .generics
+        .params
+        .iter()
+        .filter_map(|param| match param {
+            GenericParam::Lifetime(lifetime) => Some(&lifetime.lifetime),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if lifetimes.len() != 2 || input.generics.params.len() != 2 {
+        return Err(syn::Error::new_spanned(
+            input.generics,
+            "program OperationOutput derive expects exactly two lifetime parameters",
+        ));
+    }
+    let program_lifetime = lifetimes[0];
+    let scope_lifetime = lifetimes[1];
+
+    let attrs = ContainerAttrs::parse(&input.attrs, &input.ident)?;
+    let fields = named_struct_fields(&input.data)?;
+    let field_output = program_operation_output_field_tokens(
+        fields,
+        attrs.rename_all.as_deref(),
+        program_lifetime,
+        scope_lifetime,
+    )?;
+    let field_descriptors = field_output.descriptors;
+    let output_handles = field_output.output_cells;
+    let ident = &input.ident;
+    let schema_name = attrs.schema_name;
+    let version = attrs.version;
+    let derive_macro_version = concat!("mfm-program-derive/", env!("CARGO_PKG_VERSION"));
+    let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
+
+    Ok(quote! {
+        impl #impl_generics ::mfm_program::OperationOutput<#program_lifetime, #scope_lifetime>
+            for #ident #ty_generics #where_clause
+        {
+            fn output_schema_id() -> ::mfm_program::Result<::mfm_ids::SchemaId> {
+                let descriptor = (|| -> ::mfm_values::Result<::mfm_values::SchemaDescriptor> {
+                    ::mfm_values::SchemaDescriptor::new(
+                        ::mfm_values::SchemaIdentity::new(
+                            ::mfm_values::SchemaKind::OperationOutput,
+                            None,
+                            #schema_name,
+                            ::mfm_ids::SchemaVersion::new(#version)
+                                .map_err(|error| ::mfm_values::ValueError::Identity(error.to_string()))?,
+                            ::mfm_values::SchemaShape::named_struct(vec![#(#field_descriptors),*])?,
+                        )?,
+                        ::mfm_values::SchemaAudit::__derive_generated(
+                            env!("CARGO_PKG_NAME"),
+                            concat!(module_path!(), "::", stringify!(#ident)),
+                            #derive_macro_version,
+                        ),
+                    )
+                })()
+                .map_err(|error| ::mfm_program::PlanError::Value(error.to_string()))?;
+                descriptor
+                    .schema_id()
+                    .map_err(|error| ::mfm_program::PlanError::Value(error.to_string()))
+            }
+
+            fn output_handles(
+                &self,
+            ) -> ::mfm_program::Result<Vec<::mfm_program::TypedHandleRef>> {
+                Ok(vec![#(#output_handles),*])
             }
         }
     })
@@ -631,6 +708,59 @@ fn program_public_output_field_tokens(
     })
 }
 
+fn program_operation_output_field_tokens(
+    fields: &syn::punctuated::Punctuated<syn::Field, syn::Token![,]>,
+    rename_all: Option<&str>,
+    program_lifetime: &syn::Lifetime,
+    scope_lifetime: &syn::Lifetime,
+) -> syn::Result<ProgramPublicOutputFieldOutput> {
+    let mut descriptors = Vec::new();
+    let mut output_cells = Vec::new();
+    let mut names = Vec::new();
+
+    for field in fields {
+        let ident = field
+            .ident
+            .as_ref()
+            .ok_or_else(|| syn::Error::new(field.span(), "MFM derives require named fields"))?;
+        let attrs = FieldAttrs::parse(&field.attrs)?;
+        if attrs.default {
+            return Err(syn::Error::new(
+                ident.span(),
+                "program operation output handle fields cannot use serde(default)",
+            ));
+        }
+        let wire_name = attrs
+            .rename
+            .unwrap_or_else(|| apply_rename_all(&ident.to_string(), rename_all));
+        if names.iter().any(|name: &String| name == &wire_name) {
+            return Err(syn::Error::new(
+                ident.span(),
+                format!("duplicate MFM field wire name '{wire_name}'"),
+            ));
+        }
+        names.push(wire_name.clone());
+        let value_ty = handle_value_type(&field.ty, program_lifetime, scope_lifetime)?;
+        descriptors.push(quote! {
+            ::mfm_values::FieldDescriptor::required(
+                #wire_name,
+                ::mfm_values::SchemaShape::ValueRef {
+                    schema_id: <#value_ty as ::mfm_values::MfmValue>::schema_id()?,
+                    semantic_type_id: <#value_ty as ::mfm_values::MfmValue>::semantic_id()?,
+                },
+            )
+        });
+        output_cells.push(quote! {
+            self.#ident.typed_ref()
+        });
+    }
+
+    Ok(ProgramPublicOutputFieldOutput {
+        descriptors,
+        output_cells,
+    })
+}
+
 fn program_state_input_handle_field_tokens(
     fields: &syn::punctuated::Punctuated<syn::Field, syn::Token![,]>,
     rename_all: Option<&str>,
@@ -740,6 +870,7 @@ fn generated_state_input_handles_tokens(
     }
 
     Ok(quote! {
+        #[derive(Clone)]
         #[allow(missing_docs)]
         pub struct #handle_ident<#program_lifetime, #scope_lifetime> {
             #(#handle_fields,)*

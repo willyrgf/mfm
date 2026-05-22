@@ -185,13 +185,13 @@ workflow ports, and deletion or hard isolation of old dynamic semantic APIs.
 
 ### Commit 15: `kernel program add operation registry authority`
 
-- [ ] Implement `Operation`, `RegisteredOperation<O>`, private operation registration evidence, and
+- [x] Implement `Operation`, `RegisteredOperation<O>`, private operation registration evidence, and
       operation descriptors.
-- [ ] Make `ScopeBuilder::call` resolve through an operation registry or registered token.
-- [ ] Record operation lineage frames in the typed program.
-- [ ] Add tests proving unregistered operations cannot be called.
-- [ ] Add CI summary key: `registered_operation_required`.
-- [ ] Validation: `nix run .#test`.
+- [x] Make `ScopeBuilder::call` resolve through an operation registry or registered token.
+- [x] Record operation lineage frames in the typed program.
+- [x] Add tests proving unregistered operations cannot be called.
+- [x] Add CI summary key: `registered_operation_required`.
+- [x] Validation: `nix run .#test`.
 
 ### Commit 16: `kernel program add stable ids and value lineage`
 
