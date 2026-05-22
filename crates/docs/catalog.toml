@@ -582,9 +582,18 @@ name = "mfm-app"
 workspace_path = "crates/app"
 visibility = "public"
 section = "binaries_tooling"
-summary = "App-level registry and observability glue."
+summary = "Typed application assembly for certified runtime services."
 docs_policy = "repo-only"
 umbrella_policy = "always"
+
+[[packages]]
+name = "mfm-app-legacy"
+workspace_path = "crates/app-legacy"
+visibility = "private"
+section = "binaries_tooling"
+summary = "Isolated pre-typed application bridge for transitional binary rewrites."
+docs_policy = "hidden"
+umbrella_policy = "never"
 
 [[packages]]
 name = "mfm-publish-docs"

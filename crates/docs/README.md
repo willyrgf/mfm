@@ -129,7 +129,7 @@ Ops stay thin and focus on graph composition and config validation. Most are sti
 | Package | Role | Workspace Path |
 | --- | --- | --- |
 | `mfm` | CLI package and `mfm_cli` binary. | `bin/cli` |
-| `mfm-app` | App-level registry and observability glue. | `crates/app` |
+| `mfm-app` | Typed application assembly for certified runtime services. | `crates/app` |
 | `mfm-integration-tests` | Workspace integration-test crate. | `tests/integration` |
 | `mfm-rest-api` | REST API package and `mfm_rest_api` binary. | `bin/rest-api` |
 

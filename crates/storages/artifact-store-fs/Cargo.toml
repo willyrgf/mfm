@@ -3,12 +3,16 @@ name = "mfm-artifact-store-fs"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = ["legacy-machine"]
+legacy-machine = ["dep:async-trait", "dep:mfm-machine"]
+
 [dependencies]
-async-trait = { workspace = true }
+async-trait = { workspace = true, optional = true }
 mfm-canonical = { path = "../../kernel/canonical" }
 mfm-events = { path = "../../kernel/events" }
 mfm-ids = { path = "../../kernel/ids" }
-mfm-machine = { path = "../../machine" }
+mfm-machine = { path = "../../machine", optional = true }
 mfm-spec = { path = "../../kernel/spec" }
 mfm-store = { path = "../../kernel/store" }
 serde_json = { workspace = true }

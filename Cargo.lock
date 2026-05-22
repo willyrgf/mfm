@@ -1888,7 +1888,7 @@ dependencies = [
  "assert_cmd",
  "clap",
  "hex",
- "mfm-app",
+ "mfm-app-legacy",
  "mfm-artifact-store-fs",
  "mfm-machine",
  "mfm-op-portfolio-tracker",
@@ -1908,6 +1908,26 @@ dependencies = [
 
 [[package]]
 name = "mfm-app"
+version = "0.1.0"
+dependencies = [
+ "mfm-artifact-store-fs",
+ "mfm-canonical",
+ "mfm-events",
+ "mfm-ids",
+ "mfm-replay",
+ "mfm-runtime",
+ "mfm-spec",
+ "mfm-store",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "mfm-app-legacy"
 version = "0.1.0"
 dependencies = [
  "async-trait",
@@ -2516,7 +2536,7 @@ dependencies = [
  "async-trait",
  "axum",
  "http",
- "mfm-app",
+ "mfm-app-legacy",
  "mfm-machine",
  "serde",
  "serde_json",

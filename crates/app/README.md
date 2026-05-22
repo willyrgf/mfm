@@ -1,28 +1,16 @@
 # mfm-app
 
-Application-facing orchestration bridge for MFM binaries and transports.
+Typed application assembly for certified MFM runs.
 
-`mfm-app` keeps `bin/cli` and `bin/rest-api` transport-only by exposing:
+`mfm-app` wires certified typed runtime pieces only:
 
-- default engine, operation, and transport wiring
-- environment-driven storage bootstrapping
-- request/response helpers for starting, resuming, and inspecting runs
-- higher-level built-in feature entrypoints such as portfolio snapshots
+- certified runtime specs
+- typed runner registries
+- typed run event stores
+- typed artifact stores
+- typed start/resume/replay dispatch
+- typed public-output rendering
 
-This crate depends on `mfm-sdk` and `mfm-machine`, but it does not own workflow logic. Planning
-stays in op crates and executable behavior stays in shared-state crates.
-
-## Example
-
-```no_run
-use mfm_app::{
-    make_default_artifact_store, make_default_stream_store, make_engine_bundle, AppServices,
-};
-
-async fn boot() -> Result<AppServices, mfm_app::AppError> {
-    let bundle = make_engine_bundle();
-    let streams = make_default_stream_store().await?;
-    let artifacts = make_default_artifact_store().await?;
-    Ok(AppServices::new(bundle, streams, artifacts))
-}
-```
+It does not depend on `mfm-machine`, `mfm-sdk`, dynamic DAG planning, context snapshots, or generic
+IO providers. The old dynamic application bridge is isolated in `mfm-app-legacy` while CLI and REST
+surfaces are being rewritten.

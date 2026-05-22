@@ -15,7 +15,7 @@ http = "1"
 uuid = { version = "1.0", features = ["v4"] }
 
 mfm-machine = { path = "../../crates/machine" }
-mfm-app = { path = "../../crates/app" }
+mfm-app = { package = "mfm-app-legacy", path = "../../crates/app-legacy" }
 
 [features]
 parity-tests = []

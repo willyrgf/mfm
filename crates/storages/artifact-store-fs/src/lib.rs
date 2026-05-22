@@ -26,6 +26,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[cfg(feature = "legacy-machine")]
 use async_trait::async_trait;
 use mfm_canonical::sha256_digest_bytes;
 use mfm_events::v1::{ArtifactRole, SeedCellRef};
@@ -33,9 +34,13 @@ use mfm_ids::{
     ArtifactId, ContentDigest, DigestAlgorithm, IdentityError, NodeId, SchemaId, SeedId,
     SemanticTypeId,
 };
+#[cfg(feature = "legacy-machine")]
 use mfm_machine::errors::{ErrorCategory, ErrorInfo, StorageError};
+#[cfg(feature = "legacy-machine")]
 use mfm_machine::hashing::artifact_id_for_bytes;
+#[cfg(feature = "legacy-machine")]
 use mfm_machine::ids::{ArtifactId as LegacyArtifactId, ErrorCode};
+#[cfg(feature = "legacy-machine")]
 use mfm_machine::stores::{ArtifactKind, ArtifactStore};
 use mfm_spec::v1::MediaType;
 use mfm_store::v1::{ArtifactEvidenceRef, VerifiedRetentionProjectionSet};
@@ -43,6 +48,7 @@ use serde_json::Value;
 use tokio::io::AsyncWriteExt;
 
 /// Filesystem-backed immutable artifact store rooted at a directory path.
+#[cfg(feature = "legacy-machine")]
 #[derive(Clone, Debug)]
 pub struct FsArtifactStore {
     root: PathBuf,
@@ -245,6 +251,19 @@ impl FsTypedArtifactStore {
         Ok(bytes)
     }
 
+    /// Loads typed artifact bytes by id and returns the persisted evidence.
+    ///
+    /// This is intended for public-output rendering and replay assembly paths that start from a
+    /// store-owned projected artifact id. The method verifies metadata and bytes before returning.
+    pub async fn get_artifact_by_id(
+        &self,
+        artifact_id: &ArtifactId,
+    ) -> TypedArtifactResult<(Vec<u8>, ArtifactEvidenceRef)> {
+        let evidence = self.load_metadata(artifact_id).await?;
+        let bytes = self.get_artifact(&evidence).await?;
+        Ok((bytes, evidence))
+    }
+
     /// Returns true only when bytes and metadata both match the supplied evidence.
     pub async fn has_artifact(&self, evidence: &ArtifactEvidenceRef) -> TypedArtifactResult<bool> {
         match self.get_artifact(evidence).await {
@@ -346,6 +365,7 @@ impl FsTypedArtifactStore {
     }
 }
 
+#[cfg(feature = "legacy-machine")]
 impl FsArtifactStore {
     /// Creates a store rooted at `root`.
     pub fn new(root: impl Into<PathBuf>) -> Self {
@@ -395,18 +415,18 @@ impl FsArtifactStore {
             Err(e) => Err(Self::other(format!("failed to read artifact: {e}"))),
         }
     }
+}
 
-    fn temp_path_for(path: &Path) -> PathBuf {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        let seq = TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let mut name = OsString::from(".");
-        name.push(path.file_name().unwrap_or_else(|| OsStr::new("artifact")));
-        name.push(format!(".tmp-{}-{nanos}-{seq}", std::process::id()));
-        path.with_file_name(name)
-    }
+fn temp_path_for(path: &Path) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let seq = TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let mut name = OsString::from(".");
+    name.push(path.file_name().unwrap_or_else(|| OsStr::new("artifact")));
+    name.push(format!(".tmp-{}-{nanos}-{seq}", std::process::id()));
+    path.with_file_name(name)
 }
 
 fn content_digest_for_bytes(bytes: &[u8]) -> ContentDigest {
@@ -700,7 +720,7 @@ async fn write_new_file(path: &Path, bytes: &[u8]) -> TypedArtifactResult<()> {
             context: "failed to create typed artifact directory",
             source,
         })?;
-    let temp_path = FsArtifactStore::temp_path_for(path);
+    let temp_path = temp_path_for(path);
     let mut file = match tokio::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -860,6 +880,7 @@ fn parse_artifact_role(value: &str) -> TypedArtifactResult<ArtifactRole> {
 }
 
 #[async_trait]
+#[cfg(feature = "legacy-machine")]
 impl ArtifactStore for FsArtifactStore {
     async fn put(
         &self,
@@ -882,7 +903,7 @@ impl ArtifactStore for FsArtifactStore {
         }
 
         // Write to a private temp file first so readers never observe partial bytes.
-        let temp_path = Self::temp_path_for(&path);
+        let temp_path = temp_path_for(&path);
         let mut file = match tokio::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -1012,7 +1033,7 @@ impl ArtifactStore for FsArtifactStore {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "legacy-machine"))]
 mod tests {
     use super::*;
     use std::sync::Arc;

@@ -10,7 +10,7 @@ parity-tests = []
 tokio = { workspace = true }
 mfm-machine = { path = "../../crates/machine" }
 mfm-sdk = { path = "../../crates/sdk" }
-mfm-app = { path = "../../crates/app" }
+mfm-app = { package = "mfm-app-legacy", path = "../../crates/app-legacy" }
 mfm-artifact-store-fs = { path = "../../crates/storages/artifact-store-fs" }
 mfm-stream-store-postgres = { path = "../../crates/storages/stream-store-postgres" }
 mfm-stream-store-mem = { path = "../../crates/storages/stream-store-mem" }

@@ -347,14 +347,14 @@ workflow ports, and deletion or hard isolation of old dynamic semantic APIs.
 
 ### Commit 31: `app wire typed runtime assembly`
 
-- [ ] Rewrite `crates/app` as assembly only:
+- [x] Rewrite `crates/app` as assembly only:
       input decoding,
       registry construction,
       store/artifact/capability selection,
       start/resume/replay dispatch,
       typed public-output rendering.
-- [ ] Remove old SDK planning/runtime authority from app code.
-- [ ] Validation: `nix run .#test`.
+- [x] Remove old SDK planning/runtime authority from app code.
+- [x] Validation: `nix run .#test`.
 
 ### Commit 32: `cli rewrite for typed public outputs`
 

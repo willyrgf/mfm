@@ -85,6 +85,11 @@
       "kind": "rust-cargo"
     },
     {
+      "name": "app-legacy",
+      "path": "crates/app-legacy/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
       "name": "authored-config",
       "path": "crates/authored-config/Cargo.toml",
       "kind": "rust-cargo"

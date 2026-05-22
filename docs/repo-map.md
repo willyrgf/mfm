@@ -19,6 +19,7 @@ Generated from `docs/repo-index.json`.
 - `bin/cli/Cargo.toml` (rust-cargo)
 - `bin/rest-api/Cargo.toml` (rust-cargo)
 - `crates/app/Cargo.toml` (rust-cargo)
+- `crates/app-legacy/Cargo.toml` (rust-cargo)
 - `crates/authored-config/Cargo.toml` (rust-cargo)
 - `crates/collectors/btc-jsonrpc-http/Cargo.toml` (rust-cargo)
 - `crates/collectors/evm-jsonrpc-http/Cargo.toml` (rust-cargo)

@@ -1,218 +1,109 @@
-//! Shared observability helpers for application-facing binaries.
-//!
-//! The CLI and REST API use this module to resolve environment-driven tracing configuration while
-//! preserving the repository-wide logging contract: logs on stderr, stable payloads on stdout, and
-//! canonical environment variables plus the standard `RUST_LOG` fallback.
+//! Observability setup shared by typed app binaries.
 
-use std::io::IsTerminal;
+use std::fmt;
 
+use serde::{Deserialize, Serialize};
+use tracing_subscriber::filter::EnvFilter;
 use tracing_subscriber::fmt::format::FmtSpan;
-use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::prelude::*;
 
-use crate::{AppError, ErrorClass};
-
-/// Canonical baseline log filter override.
-pub const ENV_LOG_LEVEL: &str = "LOG_LEVEL";
-/// Canonical log format selector.
-pub const ENV_LOG_FORMAT: &str = "LOG_FORMAT";
-/// Canonical span lifecycle selector.
-pub const ENV_LOG_SPAN_EVENTS: &str = "LOG_SPAN_EVENTS";
-/// Standard Rust fallback log filter override.
-pub const ENV_RUST_LOG: &str = "RUST_LOG";
-
-const DEFAULT_FILTER: &str = "warn,mfm=info,tower_http=info";
-
-/// Supported log output encodings.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Observability format selected by environment or binary defaults.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum LogFormat {
-    /// Compact human-readable text logs.
+    /// Human-readable compact logs.
     Text,
-    /// Structured JSON logs.
+    /// JSON logs suitable for process supervision.
     Json,
 }
 
-/// Fully resolved observability settings for an application process.
-#[derive(Debug, Clone)]
+/// Observability configuration used during process boot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObservabilityConfig {
-    /// Application name used in initialization errors.
-    pub app_name: &'static str,
-    /// Default filter used when no environment override is present.
-    pub default_filter: String,
-    /// Effective filter resolved from the environment.
+    /// Logical service name.
+    pub service_name: String,
+    /// Trace/log filter expression.
     pub filter: String,
-    /// Effective output format.
+    /// Log encoding.
     pub format: LogFormat,
-    /// Whether log target names should be included.
-    pub include_targets: bool,
-    /// Whether ANSI colors should be emitted.
-    pub ansi: bool,
-    /// Span lifecycle events to emit.
-    pub span_events: FmtSpan,
 }
 
-fn parse_format(raw: &str) -> LogFormat {
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "json" => LogFormat::Json,
-        _ => LogFormat::Text,
+/// Observability setup error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObservabilityError {
+    /// Stable error code.
+    pub code: String,
+    /// Redaction-safe error message.
+    pub message: String,
+}
+
+impl fmt::Display for ObservabilityError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}: {}", self.code, self.message)
     }
 }
 
-fn parse_span_events(raw: &str) -> FmtSpan {
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "new" => FmtSpan::NEW,
-        "close" => FmtSpan::CLOSE,
-        "active" => FmtSpan::ACTIVE,
-        _ => FmtSpan::NONE,
-    }
+impl std::error::Error for ObservabilityError {}
+
+/// Builds observability config from environment variables.
+#[allow(clippy::disallowed_methods)]
+pub fn observability_from_env(service_name: impl Into<String>) -> ObservabilityConfig {
+    observability_from_env_with_default(service_name, "info")
 }
 
-fn resolve_log_filter<F>(default_filter: &str, mut lookup: F) -> String
-where
-    F: FnMut(&str) -> Option<String>,
-{
-    for key in [ENV_LOG_LEVEL, ENV_RUST_LOG] {
-        if let Some(value) = lookup(key) {
-            return value;
-        }
-    }
-    default_filter.to_string()
-}
-
-fn resolve_log_format<F>(mut lookup: F) -> LogFormat
-where
-    F: FnMut(&str) -> Option<String>,
-{
-    if let Some(raw) = lookup(ENV_LOG_FORMAT) {
-        return parse_format(&raw);
-    }
-    LogFormat::Text
-}
-
-fn resolve_log_span_events<F>(mut lookup: F) -> FmtSpan
-where
-    F: FnMut(&str) -> Option<String>,
-{
-    if let Some(raw) = lookup(ENV_LOG_SPAN_EVENTS) {
-        return parse_span_events(&raw);
-    }
-    FmtSpan::NONE
-}
-
-/// Resolves observability settings from environment variables using the default filter.
-pub fn observability_from_env(app_name: &'static str) -> ObservabilityConfig {
-    observability_from_env_with_default(app_name, DEFAULT_FILTER)
-}
-
-/// Resolves observability settings from environment variables with an explicit default filter.
+/// Builds observability config from environment variables with a fallback filter.
 #[allow(clippy::disallowed_methods)]
 pub fn observability_from_env_with_default(
-    app_name: &'static str,
+    service_name: impl Into<String>,
     default_filter: &str,
 ) -> ObservabilityConfig {
-    let default_filter = default_filter.to_string();
-    let filter = resolve_log_filter(&default_filter, |name| std::env::var(name).ok());
-    let format = resolve_log_format(|name| std::env::var(name).ok());
-    let span_events = resolve_log_span_events(|name| std::env::var(name).ok());
-
-    let ansi = matches!(format, LogFormat::Text) && std::io::stderr().is_terminal();
-
+    let filter = std::env::var("RUST_LOG").unwrap_or_else(|_| default_filter.to_owned());
+    let format = match std::env::var("MFM_LOG_FORMAT")
+        .unwrap_or_else(|_| "text".to_owned())
+        .as_str()
+    {
+        "json" => LogFormat::Json,
+        _ => LogFormat::Text,
+    };
     ObservabilityConfig {
-        app_name,
-        default_filter,
+        service_name: service_name.into(),
         filter,
         format,
-        include_targets: true,
-        ansi,
-        span_events,
     }
 }
 
-/// Installs the process-wide tracing subscriber from the provided configuration.
-pub fn init_observability(config: ObservabilityConfig) -> Result<(), AppError> {
-    let filter = EnvFilter::try_new(config.filter.clone()).map_err(|_| {
-        AppError::new(
-            ErrorClass::BadRequest,
-            "InvalidLogFilter",
-            format!(
-                "invalid log filter value (supported env vars: {}, {})",
-                ENV_LOG_LEVEL, ENV_RUST_LOG
-            ),
-        )
+/// Initializes process-global tracing using the supplied config.
+pub fn init_observability(config: ObservabilityConfig) -> Result<(), ObservabilityError> {
+    let filter = EnvFilter::try_new(config.filter.clone()).map_err(|error| ObservabilityError {
+        code: "ObservabilityFilterInvalid".to_owned(),
+        message: error.to_string(),
     })?;
 
-    let text_layer = tracing_subscriber::fmt::layer()
-        .with_target(config.include_targets)
-        .with_span_events(config.span_events)
-        .with_ansi(config.ansi)
-        .with_writer(std::io::stderr);
-
-    let init_result = match config.format {
-        LogFormat::Text => tracing_subscriber::registry()
-            .with(filter)
-            .with(text_layer.compact())
-            .try_init(),
-        LogFormat::Json => tracing_subscriber::registry()
-            .with(filter)
-            .with(text_layer.json().flatten_event(true))
-            .try_init(),
-    };
-
-    if let Err(err) = init_result {
-        let msg = err.to_string();
-        if msg.contains("already been set") {
-            return Ok(());
-        }
-        return Err(AppError::new(
-            ErrorClass::Internal,
-            "ObservabilityInitFailed",
-            format!("failed to initialize observability for {}", config.app_name),
-        ));
-    }
-
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use std::collections::HashMap;
-
-    use super::*;
-
-    fn lookup_from(entries: &[(&str, &str)]) -> impl FnMut(&str) -> Option<String> {
-        let vars: HashMap<String, String> = entries
-            .iter()
-            .map(|(name, value)| ((*name).to_string(), (*value).to_string()))
-            .collect();
-        move |name| vars.get(name).cloned()
-    }
-
-    #[test]
-    fn filter_resolution_uses_log_level_before_rust_log() {
-        let filter = resolve_log_filter(
-            "warn,mfm=info",
-            lookup_from(&[(ENV_LOG_LEVEL, "info"), (ENV_RUST_LOG, "debug")]),
-        );
-
-        assert_eq!(filter, "info");
-    }
-
-    #[test]
-    fn filter_resolution_falls_back_to_default() {
-        let filter = resolve_log_filter("warn,mfm=info", lookup_from(&[]));
-        assert_eq!(filter, "warn,mfm=info");
-    }
-
-    #[test]
-    fn format_resolution_supports_global_alias() {
-        let format = resolve_log_format(lookup_from(&[(ENV_LOG_FORMAT, "json")]));
-        assert_eq!(format, LogFormat::Json);
-    }
-
-    #[test]
-    fn span_event_resolution_supports_global_alias() {
-        let span_events = resolve_log_span_events(lookup_from(&[(ENV_LOG_SPAN_EVENTS, "active")]));
-        assert_eq!(span_events, FmtSpan::ACTIVE);
+    let registry = tracing_subscriber::registry().with(filter);
+    match config.format {
+        LogFormat::Text => registry
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_span_events(FmtSpan::CLOSE)
+                    .with_target(true)
+                    .with_thread_ids(false),
+            )
+            .try_init()
+            .map_err(|error| ObservabilityError {
+                code: "ObservabilityInitFailed".to_owned(),
+                message: error.to_string(),
+            }),
+        LogFormat::Json => registry
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .json()
+                    .with_span_events(FmtSpan::CLOSE)
+                    .with_target(true),
+            )
+            .try_init()
+            .map_err(|error| ObservabilityError {
+                code: "ObservabilityInitFailed".to_owned(),
+                message: error.to_string(),
+            }),
     }
 }
