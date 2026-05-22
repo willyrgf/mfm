@@ -10,7 +10,7 @@ use quote::{format_ident, quote};
 use syn::parse_macro_input;
 use syn::spanned::Spanned;
 use syn::{
-    Attribute, Data, DataStruct, DeriveInput, Fields, GenericArgument, Ident, LitStr,
+    Attribute, Data, DataStruct, DeriveInput, Fields, GenericArgument, GenericParam, Ident, LitStr,
     PathArguments, Type, TypePath,
 };
 
@@ -97,6 +97,10 @@ fn expand_schema_derive_result(
     input: DeriveInput,
     kind: DeriveKind,
 ) -> syn::Result<proc_macro2::TokenStream> {
+    if kind == DeriveKind::PublicOutputs && !input.generics.params.is_empty() {
+        return expand_program_public_outputs_derive_result(input);
+    }
+
     if !input.generics.params.is_empty() {
         return Err(syn::Error::new_spanned(
             input.generics,
@@ -211,6 +215,80 @@ fn expand_schema_derive_result(
     Ok(impl_block)
 }
 
+fn expand_program_public_outputs_derive_result(
+    input: DeriveInput,
+) -> syn::Result<proc_macro2::TokenStream> {
+    let lifetimes = input
+        .generics
+        .params
+        .iter()
+        .filter_map(|param| match param {
+            GenericParam::Lifetime(lifetime) => Some(&lifetime.lifetime),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if lifetimes.len() != 2 || input.generics.params.len() != 2 {
+        return Err(syn::Error::new_spanned(
+            input.generics,
+            "program PublicOutputs derive expects exactly two lifetime parameters",
+        ));
+    }
+    let program_lifetime = lifetimes[0];
+    let scope_lifetime = lifetimes[1];
+
+    let attrs = ContainerAttrs::parse(&input.attrs, &input.ident)?;
+    let fields = named_struct_fields(&input.data)?;
+    let field_output = program_public_output_field_tokens(
+        fields,
+        attrs.rename_all.as_deref(),
+        program_lifetime,
+        scope_lifetime,
+    )?;
+    let field_descriptors = field_output.descriptors;
+    let output_cells = field_output.output_cells;
+    let ident = &input.ident;
+    let schema_name = attrs.schema_name;
+    let version = attrs.version;
+    let derive_macro_version = concat!("mfm-program-derive/", env!("CARGO_PKG_VERSION"));
+    let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
+
+    Ok(quote! {
+        impl #impl_generics ::mfm_program::PublicOutputs<#program_lifetime, #scope_lifetime>
+            for #ident #ty_generics #where_clause
+        {
+            fn public_schema_id(&self) -> ::mfm_program::Result<::mfm_ids::SchemaId> {
+                let descriptor = (|| -> ::mfm_values::Result<::mfm_values::SchemaDescriptor> {
+                    ::mfm_values::SchemaDescriptor::new(
+                        ::mfm_values::SchemaIdentity::new(
+                            ::mfm_values::SchemaKind::PublicOutput,
+                            None,
+                            #schema_name,
+                            ::mfm_ids::SchemaVersion::new(#version)
+                                .map_err(|error| ::mfm_values::ValueError::Identity(error.to_string()))?,
+                            ::mfm_values::SchemaShape::named_struct(vec![#(#field_descriptors),*])?,
+                        )?,
+                        ::mfm_values::SchemaAudit::__derive_generated(
+                            env!("CARGO_PKG_NAME"),
+                            concat!(module_path!(), "::", stringify!(#ident)),
+                            #derive_macro_version,
+                        ),
+                    )
+                })()
+                .map_err(|error| ::mfm_program::PlanError::Value(error.to_string()))?;
+                descriptor
+                    .schema_id()
+                    .map_err(|error| ::mfm_program::PlanError::Value(error.to_string()))
+            }
+
+            fn output_cells(
+                &self,
+            ) -> ::mfm_program::Result<Vec<::mfm_program::PublicOutputCellSpec>> {
+                Ok(vec![#(#output_cells),*])
+            }
+        }
+    })
+}
+
 #[derive(Debug)]
 struct ContainerAttrs {
     namespace: String,
@@ -301,6 +379,11 @@ struct FieldDescriptorOutput {
     default_bounds: Vec<proc_macro2::TokenStream>,
 }
 
+struct ProgramPublicOutputFieldOutput {
+    descriptors: Vec<proc_macro2::TokenStream>,
+    output_cells: Vec<proc_macro2::TokenStream>,
+}
+
 fn field_descriptor_tokens(
     fields: &syn::punctuated::Punctuated<syn::Field, syn::Token![,]>,
     rename_all: Option<&str>,
@@ -344,6 +427,62 @@ fn field_descriptor_tokens(
     Ok(FieldDescriptorOutput {
         descriptors: output,
         default_bounds,
+    })
+}
+
+fn program_public_output_field_tokens(
+    fields: &syn::punctuated::Punctuated<syn::Field, syn::Token![,]>,
+    rename_all: Option<&str>,
+    program_lifetime: &syn::Lifetime,
+    scope_lifetime: &syn::Lifetime,
+) -> syn::Result<ProgramPublicOutputFieldOutput> {
+    let mut descriptors = Vec::new();
+    let mut output_cells = Vec::new();
+    let mut names = Vec::new();
+
+    for field in fields {
+        let ident = field
+            .ident
+            .as_ref()
+            .ok_or_else(|| syn::Error::new(field.span(), "MFM derives require named fields"))?;
+        let attrs = FieldAttrs::parse(&field.attrs)?;
+        if attrs.default {
+            return Err(syn::Error::new(
+                ident.span(),
+                "program public output handle fields cannot use serde(default)",
+            ));
+        }
+        let wire_name = attrs
+            .rename
+            .unwrap_or_else(|| apply_rename_all(&ident.to_string(), rename_all));
+        if names.iter().any(|name: &String| name == &wire_name) {
+            return Err(syn::Error::new(
+                ident.span(),
+                format!("duplicate MFM field wire name '{wire_name}'"),
+            ));
+        }
+        names.push(wire_name.clone());
+        let value_ty = handle_value_type(&field.ty, program_lifetime, scope_lifetime)?;
+        descriptors.push(quote! {
+            ::mfm_values::FieldDescriptor::required(
+                #wire_name,
+                ::mfm_values::SchemaShape::ValueRef {
+                    schema_id: <#value_ty as ::mfm_values::MfmValue>::schema_id()?,
+                    semantic_type_id: <#value_ty as ::mfm_values::MfmValue>::semantic_id()?,
+                },
+            )
+        });
+        output_cells.push(quote! {
+            ::mfm_program::PublicOutputCellSpec::from_handle(
+                ::mfm_program::PublicFieldPath::new(#wire_name)?,
+                &self.#ident,
+            )
+        });
+    }
+
+    Ok(ProgramPublicOutputFieldOutput {
+        descriptors,
+        output_cells,
     })
 }
 
@@ -493,6 +632,70 @@ fn shape_tokens_for_path(type_path: &TypePath) -> syn::Result<proc_macro2::Token
                 semantic_type_id: <#ty as ::mfm_values::MfmValue>::semantic_id()?,
             }))
         }
+    }
+}
+
+fn handle_value_type<'a>(
+    ty: &'a Type,
+    program_lifetime: &syn::Lifetime,
+    scope_lifetime: &syn::Lifetime,
+) -> syn::Result<&'a Type> {
+    let Type::Path(type_path) = ty else {
+        return Err(syn::Error::new_spanned(
+            ty,
+            "program PublicOutputs fields must be mfm_program::Handle<'p, 's, T>",
+        ));
+    };
+    let Some(segment) = type_path.path.segments.last() else {
+        return Err(syn::Error::new_spanned(
+            ty,
+            "program PublicOutputs fields must be mfm_program::Handle<'p, 's, T>",
+        ));
+    };
+    if segment.ident != "Handle" {
+        return Err(syn::Error::new_spanned(
+            ty,
+            "program PublicOutputs fields must be mfm_program::Handle<'p, 's, T>",
+        ));
+    }
+    let PathArguments::AngleBracketed(args) = &segment.arguments else {
+        return Err(syn::Error::new_spanned(
+            ty,
+            "Handle fields must include program lifetime, scope lifetime, and value type",
+        ));
+    };
+    if args.args.len() != 3 {
+        return Err(syn::Error::new_spanned(
+            args,
+            "Handle fields must include program lifetime, scope lifetime, and value type",
+        ));
+    }
+    match args.args.first() {
+        Some(GenericArgument::Lifetime(lifetime)) if lifetime.ident == program_lifetime.ident => {}
+        Some(arg) => {
+            return Err(syn::Error::new_spanned(
+                arg,
+                "Handle program lifetime must match the first PublicOutputs lifetime",
+            ));
+        }
+        None => unreachable!("checked argument length"),
+    }
+    match args.args.iter().nth(1) {
+        Some(GenericArgument::Lifetime(lifetime)) if lifetime.ident == scope_lifetime.ident => {}
+        Some(arg) => {
+            return Err(syn::Error::new_spanned(
+                arg,
+                "Handle scope lifetime must match the second PublicOutputs lifetime",
+            ));
+        }
+        None => unreachable!("checked argument length"),
+    }
+    match args.args.last() {
+        Some(GenericArgument::Type(value_ty)) => Ok(value_ty),
+        _ => Err(syn::Error::new_spanned(
+            args,
+            "Handle value argument must be a type",
+        )),
     }
 }
 

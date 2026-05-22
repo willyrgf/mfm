@@ -1,0 +1,61 @@
+error: lifetime may not live long enough
+  --> tests/ui/fail/stale_root_bound.rs:16:13
+   |
+ 5 |     let mut stale = None;
+   |         --------- lifetime `'2` appears in the type of `stale`
+...
+ 8 |         |root| {
+   |          ---- has type `&mut RootBuilder<'1, '_>`
+...
+16 |             Ok(stale.take().unwrap())
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^ returning this value requires that `'1` must outlive `'2`
+   |
+   = note: requirement occurs because of the type `RootBound<'_, '_>`, which makes the generic argument `'_` invariant
+   = note: the struct `RootBound<'program, 'scope>` is invariant over the parameter `'program`
+   = help: see <https://doc.rust-lang.org/nomicon/subtyping.html> for more information about variance
+
+error: lifetime may not live long enough
+  --> tests/ui/fail/stale_root_bound.rs:16:13
+   |
+ 5 |     let mut stale = None;
+   |         --------- lifetime `'4` appears in the type of `stale`
+...
+ 8 |         |root| {
+   |          ---- has type `&mut RootBuilder<'_, '3>`
+...
+16 |             Ok(stale.take().unwrap())
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^ returning this value requires that `'3` must outlive `'4`
+   |
+   = note: requirement occurs because of the type `RootBound<'_, '_>`, which makes the generic argument `'_` invariant
+   = note: the struct `RootBound<'program, 'scope>` is invariant over the parameter `'program`
+   = help: see <https://doc.rust-lang.org/nomicon/subtyping.html> for more information about variance
+
+error: lifetime may not live long enough
+  --> tests/ui/fail/stale_root_bound.rs:22:17
+   |
+ 5 |     let mut stale = None;
+   |         --------- lifetime `'2` appears in the type of `stale`
+...
+22 |         |_root| Ok(stale.take().unwrap()),
+   |          -----  ^^^^^^^^^^^^^^^^^^^^^^^^^ returning this value requires that `'1` must outlive `'2`
+   |          |
+   |          has type `&mut RootBuilder<'1, '_>`
+   |
+   = note: requirement occurs because of the type `RootBound<'_, '_>`, which makes the generic argument `'_` invariant
+   = note: the struct `RootBound<'program, 'scope>` is invariant over the parameter `'program`
+   = help: see <https://doc.rust-lang.org/nomicon/subtyping.html> for more information about variance
+
+error: lifetime may not live long enough
+  --> tests/ui/fail/stale_root_bound.rs:22:17
+   |
+ 5 |     let mut stale = None;
+   |         --------- lifetime `'4` appears in the type of `stale`
+...
+22 |         |_root| Ok(stale.take().unwrap()),
+   |          -----  ^^^^^^^^^^^^^^^^^^^^^^^^^ returning this value requires that `'3` must outlive `'4`
+   |          |
+   |          has type `&mut RootBuilder<'_, '3>`
+   |
+   = note: requirement occurs because of the type `RootBound<'_, '_>`, which makes the generic argument `'_` invariant
+   = note: the struct `RootBound<'program, 'scope>` is invariant over the parameter `'program`
+   = help: see <https://doc.rust-lang.org/nomicon/subtyping.html> for more information about variance

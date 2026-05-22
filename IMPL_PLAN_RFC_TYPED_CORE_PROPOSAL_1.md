@@ -149,12 +149,12 @@ workflow ports, and deletion or hard isolation of old dynamic semantic APIs.
 
 ### Commit 11: `kernel program add handles roots and seeds`
 
-- [ ] Implement invariant branded `Handle<'program, 'scope, T>`.
-- [ ] Implement `build_root`, `RootBuilder`, `ScopeBuilder`, root seed specs, and public-output
+- [x] Implement invariant branded `Handle<'program, 'scope, T>`.
+- [x] Implement `build_root`, `RootBuilder`, `ScopeBuilder`, root seed specs, and public-output
       binding.
-- [ ] Make handle constructors private and non-forgeable.
-- [ ] Add trybuild failures for forged handles, escaped handles, and runtime values used as seeds.
-- [ ] Validation: `nix run .#test`.
+- [x] Make handle constructors private and non-forgeable.
+- [x] Add trybuild failures for forged handles, escaped handles, and runtime values used as seeds.
+- [x] Validation: `nix run .#test`.
 
 ### Commit 12: `kernel program add scopes and bridge evidence`
 

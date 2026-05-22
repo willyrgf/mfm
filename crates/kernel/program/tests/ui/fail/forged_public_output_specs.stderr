@@ -1,0 +1,35 @@
+error[E0451]: fields `cell_id`, `scope_id`, `schema_id` and `semantic_type_id` of struct `TypedHandleRef` are private
+  --> tests/ui/fail/forged_public_output_specs.rs:27:9
+   |
+26 |     let handle_ref = mfm_program::TypedHandleRef {
+   |                      --------------------------- in this type
+27 |         cell_id,
+   |         ^^^^^^^ private field
+28 |         scope_id,
+   |         ^^^^^^^^ private field
+29 |         schema_id: schema_id.clone(),
+   |         ^^^^^^^^^ private field
+30 |         semantic_type_id,
+   |         ^^^^^^^^^^^^^^^^ private field
+
+error[E0451]: fields `public_field_path` and `cell` of struct `PublicOutputCellSpec` are private
+  --> tests/ui/fail/forged_public_output_specs.rs:33:9
+   |
+32 |     let cell = mfm_program::PublicOutputCellSpec {
+   |                --------------------------------- in this type
+33 |         public_field_path: mfm_program::PublicFieldPath::new("result").unwrap(),
+   |         ^^^^^^^^^^^^^^^^^ private field
+34 |         cell: handle_ref,
+   |         ^^^^ private field
+
+error[E0451]: fields `key`, `public_schema_id` and `outputs` of struct `PublicOutputSpec` are private
+  --> tests/ui/fail/forged_public_output_specs.rs:37:9
+   |
+36 |     let _spec = mfm_program::PublicOutputSpec {
+   |                 ----------------------------- in this type
+37 |         key: mfm_program::PublicOutputKey::new("terminal").unwrap(),
+   |         ^^^ private field
+38 |         public_schema_id: schema_id,
+   |         ^^^^^^^^^^^^^^^^ private field
+39 |         outputs: vec![cell],
+   |         ^^^^^^^ private field

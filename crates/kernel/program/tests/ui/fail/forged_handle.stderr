@@ -1,0 +1,21 @@
+error[E0451]: fields `cell_id`, `scope_id`, `schema_id`, `semantic_type_id`, `_program`, `_scope` and `_value` of struct `Handle` are private
+  --> tests/ui/fail/forged_handle.rs:9:9
+   |
+ 8 |     let _handle = mfm_program::Handle::<types::TryValue> {
+   |                   -------------------------------------- in this type
+ 9 |         cell_id: CellId::from_digest(DigestAlgorithm::Sha256JcsV1, digest.clone()),
+   |         ^^^^^^^ private field
+10 |         scope_id: ScopeId::from_digest(DigestAlgorithm::Sha256JcsV1, digest.clone()),
+   |         ^^^^^^^^ private field
+11 |         schema_id: SchemaId::new(
+   |         ^^^^^^^^^ private field
+...
+18 |         semantic_type_id: SemanticTypeId::new(
+   |         ^^^^^^^^^^^^^^^^ private field
+...
+26 |         _program: std::marker::PhantomData,
+   |         ^^^^^^^^ private field
+27 |         _scope: std::marker::PhantomData,
+   |         ^^^^^^ private field
+28 |         _value: std::marker::PhantomData,
+   |         ^^^^^^ private field

@@ -2412,6 +2412,15 @@ dependencies = [
 [[package]]
 name = "mfm-program"
 version = "0.1.0"
+dependencies = [
+ "mfm-canonical",
+ "mfm-ids",
+ "mfm-program-derive",
+ "mfm-values",
+ "serde",
+ "serde_json",
+ "trybuild",
+]
 
 [[package]]
 name = "mfm-program-derive"

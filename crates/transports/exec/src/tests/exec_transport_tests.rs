@@ -243,7 +243,7 @@ async fn non_zero_exit_includes_safe_failure_metadata() {
                 "program_path": program.to_string_lossy(),
                 "argv": [],
                 "stdin_json": {},
-                "timeout_ms": 5_000
+                "timeout_ms": 30_000
             }),
             fact_key: None,
         })

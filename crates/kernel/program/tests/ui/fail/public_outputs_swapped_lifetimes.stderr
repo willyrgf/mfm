@@ -1,0 +1,5 @@
+error: Handle program lifetime must match the first PublicOutputs lifetime
+ --> tests/ui/fail/public_outputs_swapped_lifetimes.rs:8:33
+  |
+8 |     result: mfm_program::Handle<'s, 'p, types::TryValue>,
+  |                                 ^^

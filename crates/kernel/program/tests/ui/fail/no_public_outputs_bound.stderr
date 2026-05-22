@@ -1,0 +1,7 @@
+error[E0308]: mismatched types
+ --> tests/ui/fail/no_public_outputs_bound.rs:5:42
+  |
+5 |     let _bound: mfm_program::RootBound = ();
+  |                 ----------------------   ^^ expected `RootBound<'_, '_>`, found `()`
+  |                 |
+  |                 expected due to this

@@ -10,3 +10,14 @@ readme = "README.md"
 [lib]
 name = "mfm_program"
 path = "src/lib.rs"
+
+[dependencies]
+mfm-canonical = { path = "../canonical" }
+mfm-ids = { path = "../ids" }
+mfm-values = { path = "../values" }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+mfm-program-derive = { path = "../program-derive" }
+serde = { workspace = true }
+trybuild = "1.0"

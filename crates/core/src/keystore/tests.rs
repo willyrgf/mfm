@@ -1512,7 +1512,10 @@ fn test_tampered_audit_log_and_mac_fail_integrity() {
     ));
 
     let mut mac_json = read_keystore_json(&mac_path);
-    mac_json["file_integrity_mac"][0] = serde_json::json!(1);
+    let mac_byte = mac_json["file_integrity_mac"][0]
+        .as_u64()
+        .expect("file integrity MAC byte");
+    mac_json["file_integrity_mac"][0] = serde_json::json!((mac_byte + 1) % 256);
     write_keystore_json(&mac_path, &mac_json);
     let mut loaded_mac =
         Keystore::new_with_config(&mac_path, KeystoreConfig::development()).unwrap();
