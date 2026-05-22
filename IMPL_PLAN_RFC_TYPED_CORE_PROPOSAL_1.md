@@ -214,12 +214,12 @@ workflow ports, and deletion or hard isolation of old dynamic semantic APIs.
 
 ### Commit 18: `kernel events add v1 event schemas`
 
-- [ ] Implement `mfm-events::v1` closed kernel event enum and payload structs.
-- [ ] Include `RunStarted`, attempt events, fact/artifact events, cell events, side-effect events,
+- [x] Implement `mfm-events::v1` closed kernel event enum and payload structs.
+- [x] Include `RunStarted`, attempt events, fact/artifact events, cell events, side-effect events,
       public-output events, run completion, and retention events.
-- [ ] Use `run_started_v1_present` in summary output, never `run_started_v2_present`.
-- [ ] Add schema descriptor golden fixtures for all event payloads.
-- [ ] Validation: `nix run .#test`.
+- [x] Use `run_started_v1_present` in summary output, never `run_started_v2_present`.
+- [x] Add schema descriptor golden fixtures for all event payloads.
+- [x] Validation: `nix run .#test`.
 
 ### Commit 19: `kernel certify add typed spec certification`
 

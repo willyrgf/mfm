@@ -1189,6 +1189,7 @@ in
             crate_dag_log="$artifacts_dir/check-crate-dag.log"
             manual_impl_log="$artifacts_dir/check-manual-persisted-impls.log"
             typed_program_authority_log="$artifacts_dir/check-typed-program-authority.log"
+            typed_event_schema_log="$artifacts_dir/check-typed-event-schemas.log"
             typed_kernel_contract_summary="$artifacts_dir/typed-kernel-contract.summary.json"
             fmt_log="$artifacts_dir/check-fmt.log"
             clippy_log="$artifacts_dir/check-clippy.log"
@@ -1213,6 +1214,9 @@ in
             echo "INFO: command=bash ${./check-typed-program-authority.sh} --root . --self-test --summary-file $typed_kernel_contract_summary log=$typed_program_authority_log"
             run_with_log "$typed_program_authority_log" bash ${./check-typed-program-authority.sh} --root . --self-test --summary-file "$typed_kernel_contract_summary"
             jq -e '.payload.registered_state_required == true and .payload.registered_operation_required == true' "$typed_kernel_contract_summary" >/dev/null
+            echo "INFO: command=bash ${./check-typed-event-schemas.sh} --root . --self-test --summary-file $typed_kernel_contract_summary log=$typed_event_schema_log"
+            run_with_log "$typed_event_schema_log" bash ${./check-typed-event-schemas.sh} --root . --self-test --summary-file "$typed_kernel_contract_summary"
+            jq -e '.payload.v1_event_schema_golden == true and .payload.run_started_v1_present == true and (.payload | has("run_started_v2_present") | not)' "$typed_kernel_contract_summary" >/dev/null
 
             echo "INFO: running formatting checks"
             echo "INFO: command=${cargoFmtCheckCmd} log=$fmt_log"
@@ -1414,6 +1418,7 @@ in
             log_file="$artifacts_dir/kernel-crate-dag.log"
             manual_impl_log_file="$artifacts_dir/manual-persisted-impls.log"
             typed_program_authority_log_file="$artifacts_dir/typed-program-authority.log"
+            typed_event_schema_log_file="$artifacts_dir/typed-event-schemas.log"
             typed_kernel_contract_summary="$artifacts_dir/typed-kernel-contract.summary.json"
             echo "INFO: running ci step=kernel-crate-dag"
             run_with_log "$log_file" bash ${./check-kernel-crate-dag.sh} --root . --self-test --summary-file "$typed_kernel_contract_summary"
@@ -1422,6 +1427,8 @@ in
             jq -e '.payload.manual_value_config_output_impls_rejected == true' "$typed_kernel_contract_summary" >/dev/null
             run_with_log "$typed_program_authority_log_file" bash ${./check-typed-program-authority.sh} --root . --self-test --summary-file "$typed_kernel_contract_summary"
             jq -e '.payload.registered_state_required == true and .payload.registered_operation_required == true' "$typed_kernel_contract_summary" >/dev/null
+            run_with_log "$typed_event_schema_log_file" bash ${./check-typed-event-schemas.sh} --root . --self-test --summary-file "$typed_kernel_contract_summary"
+            jq -e '.payload.v1_event_schema_golden == true and .payload.run_started_v1_present == true and (.payload | has("run_started_v2_present") | not)' "$typed_kernel_contract_summary" >/dev/null
             echo "OK: ci step passed step=kernel-crate-dag log=$log_file summary=$typed_kernel_contract_summary"
           '';
         };
