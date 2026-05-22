@@ -239,10 +239,10 @@ workflow ports, and deletion or hard isolation of old dynamic semantic APIs.
 
 ### Commit 20: `ci add typed kernel contract gate`
 
-- [ ] Add `typed-kernel-contract` to Nixfied check/test/summary wiring.
-- [ ] Emit all required `typed-kernel-contract` summary keys from the RFC.
-- [ ] Fail on missing, false, skipped, xfail, or zero required counts.
-- [ ] Validation: `nix run .#check`, `nix run .#test`.
+- [x] Add `typed-kernel-contract` to Nixfied check/test/summary wiring.
+- [x] Emit all required `typed-kernel-contract` summary keys from the RFC.
+- [x] Fail on missing, false, skipped, xfail, or zero required counts.
+- [x] Validation: `nix run .#check`, `nix run .#test`.
 
 ### Commit 21: `kernel store add typed commit contract`
 

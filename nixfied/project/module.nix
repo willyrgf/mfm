@@ -1191,6 +1191,7 @@ in
             typed_program_authority_log="$artifacts_dir/check-typed-program-authority.log"
             typed_event_schema_log="$artifacts_dir/check-typed-event-schemas.log"
             typed_certification_log="$artifacts_dir/check-typed-certification.log"
+            typed_kernel_contract_log="$artifacts_dir/check-typed-kernel-contract.log"
             typed_kernel_contract_summary="$artifacts_dir/typed-kernel-contract.summary.json"
             fmt_log="$artifacts_dir/check-fmt.log"
             clippy_log="$artifacts_dir/check-clippy.log"
@@ -1221,6 +1222,8 @@ in
             echo "INFO: command=bash ${./check-typed-certification.sh} --root . --self-test --summary-file $typed_kernel_contract_summary log=$typed_certification_log"
             run_with_log "$typed_certification_log" bash ${./check-typed-certification.sh} --root . --self-test --summary-file "$typed_kernel_contract_summary"
             jq -e '.payload.invalid_topology_rejected == true and .payload.invalid_interface_wiring_rejected == true and .payload.invalid_semantic_transition_rejected == true and .payload.invalid_data_shape_rejected == true and .payload.invalid_data_meaning_rejected == true and .payload.invalid_terminal_shape_rejected == true' "$typed_kernel_contract_summary" >/dev/null
+            echo "INFO: command=bash ${./check-typed-kernel-contract.sh} --root . --self-test --summary-file $typed_kernel_contract_summary log=$typed_kernel_contract_log"
+            run_with_log "$typed_kernel_contract_log" bash ${./check-typed-kernel-contract.sh} --root . --self-test --summary-file "$typed_kernel_contract_summary"
 
             echo "INFO: running formatting checks"
             echo "INFO: command=${cargoFmtCheckCmd} log=$fmt_log"
@@ -1303,9 +1306,27 @@ in
             set -euo pipefail
             ${cargoWorkspaceTargetPreamble}
 
+            artifacts_dir="''${CI_ARTIFACTS_DIR:-${ciArtifactsRoot}}"
+            mkdir -p "$artifacts_dir"
+            typed_kernel_contract_summary="$artifacts_dir/typed-kernel-contract.summary.json"
+
+            run_with_log() {
+              local logfile="$1"
+              shift
+              "$@" 2>&1 | tee "$logfile"
+            }
+
             echo "INFO: running workspace tests"
             ${cargoNextestWorkspaceCiCmd}
-            echo "OK: tests completed"
+
+            echo "INFO: running typed-kernel-contract summary checks"
+            run_with_log "$artifacts_dir/test-kernel-crate-dag.log" bash ${./check-kernel-crate-dag.sh} --root . --self-test --summary-file "$typed_kernel_contract_summary"
+            run_with_log "$artifacts_dir/test-manual-persisted-impls.log" bash ${./check-manual-persisted-impls.sh} --root . --self-test --summary-file "$typed_kernel_contract_summary"
+            run_with_log "$artifacts_dir/test-typed-program-authority.log" bash ${./check-typed-program-authority.sh} --root . --self-test --summary-file "$typed_kernel_contract_summary"
+            run_with_log "$artifacts_dir/test-typed-event-schemas.log" bash ${./check-typed-event-schemas.sh} --root . --self-test --summary-file "$typed_kernel_contract_summary"
+            run_with_log "$artifacts_dir/test-typed-certification.log" bash ${./check-typed-certification.sh} --root . --self-test --summary-file "$typed_kernel_contract_summary"
+            run_with_log "$artifacts_dir/test-typed-kernel-contract.log" bash ${./check-typed-kernel-contract.sh} --root . --self-test --summary-file "$typed_kernel_contract_summary"
+            echo "OK: tests completed summary=$typed_kernel_contract_summary"
           '';
         };
 
@@ -1424,6 +1445,7 @@ in
             typed_program_authority_log_file="$artifacts_dir/typed-program-authority.log"
             typed_event_schema_log_file="$artifacts_dir/typed-event-schemas.log"
             typed_certification_log_file="$artifacts_dir/typed-certification.log"
+            typed_kernel_contract_log_file="$artifacts_dir/typed-kernel-contract.log"
             typed_kernel_contract_summary="$artifacts_dir/typed-kernel-contract.summary.json"
             echo "INFO: running ci step=kernel-crate-dag"
             run_with_log "$log_file" bash ${./check-kernel-crate-dag.sh} --root . --self-test --summary-file "$typed_kernel_contract_summary"
@@ -1436,6 +1458,7 @@ in
             jq -e '.payload.v1_event_schema_golden == true and .payload.run_started_v1_present == true and (.payload | has("run_started_v2_present") | not)' "$typed_kernel_contract_summary" >/dev/null
             run_with_log "$typed_certification_log_file" bash ${./check-typed-certification.sh} --root . --self-test --summary-file "$typed_kernel_contract_summary"
             jq -e '.payload.invalid_topology_rejected == true and .payload.invalid_interface_wiring_rejected == true and .payload.invalid_semantic_transition_rejected == true and .payload.invalid_data_shape_rejected == true and .payload.invalid_data_meaning_rejected == true and .payload.invalid_terminal_shape_rejected == true' "$typed_kernel_contract_summary" >/dev/null
+            run_with_log "$typed_kernel_contract_log_file" bash ${./check-typed-kernel-contract.sh} --root . --self-test --summary-file "$typed_kernel_contract_summary"
             echo "OK: ci step passed step=kernel-crate-dag log=$log_file summary=$typed_kernel_contract_summary"
           '';
         };

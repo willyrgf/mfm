@@ -282,13 +282,8 @@ mod tests {
 
     #[tokio::test]
     async fn stream_overflow_is_detected_without_unbounded_growth() {
-        let program = write_test_program(
-            "i=0
-while [ \"$i\" -lt 2048 ]; do
-  printf '12345678'
-  i=$((i + 1))
-done",
-        );
+        let payload = "12345678".repeat(256);
+        let program = write_test_program(&format!("printf '{payload}'"));
         let cmd = Command::new(&program);
         let out = run_command(
             cmd,
