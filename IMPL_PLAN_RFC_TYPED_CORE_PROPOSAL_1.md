@@ -292,7 +292,7 @@ workflow ports, and deletion or hard isolation of old dynamic semantic APIs.
 
 ### Commit 26: `kernel runtime add side effect ledger`
 
-- [ ] Implement side-effect phases:
+- [x] Implement side-effect phases:
       intent,
       claim,
       invocation prepared,
@@ -303,11 +303,11 @@ workflow ports, and deletion or hard isolation of old dynamic semantic APIs.
       output,
       failure,
       ambiguity.
-- [ ] Add `ClaimTakenOver`, claim generation, and claim fencing token logic.
-- [ ] Reject stale owners, stale fencing tokens, duplicate submits, receipt without submission,
+- [x] Add `ClaimTakenOver`, claim generation, and claim fencing token logic.
+- [x] Reject stale owners, stale fencing tokens, duplicate submits, receipt without submission,
       confirmation without receipt, and takeover after invocation started.
-- [ ] Use a deterministic local adapter fixture, not a live external service.
-- [ ] Validation: `nix run .#test`.
+- [x] Use a deterministic local adapter fixture, not a live external service.
+- [x] Validation: `nix run .#test`.
 
 ### Commit 27: `kernel replay add replay brokers and verifiers`
 

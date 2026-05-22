@@ -209,8 +209,38 @@ fn intent_artifact_ref(artifact_id: ArtifactId, digest: ContentDigest) -> Artifa
     }
 }
 
+fn side_effect_artifact_ref(
+    artifact_id: ArtifactId,
+    digest: ContentDigest,
+    schema_id: SchemaId,
+    artifact_role: ArtifactRole,
+) -> ArtifactEvidenceRef {
+    ArtifactEvidenceRef {
+        artifact_id,
+        digest,
+        byte_len: 256,
+        media_type: media_type("application/json"),
+        schema_id: Some(schema_id),
+        semantic_type_id: None,
+        producer_node_id: Some(node_id(70)),
+        producer_seed_id: None::<SeedId>,
+        artifact_role,
+    }
+}
+
 fn side_effect_ledger_key() -> events::SideEffectLedgerKey {
     events::SideEffectLedgerKey::new("ledger-key-1").expect("ledger key")
+}
+
+fn side_effect_attempt_started() -> KernelEventPayload {
+    KernelEventPayload::StateAttemptStarted(events::StateAttemptStarted {
+        spec_hash: spec_hash(1),
+        node_id: node_id(70),
+        attempt_id: attempt_id(72),
+        attempt_no: 1,
+        state_kind: state_kind(70),
+        state_version: StateVersion::new("mfm.test.side_effect_state.v1").expect("state version"),
+    })
 }
 
 fn side_effect_intent(artifact_id: ArtifactId, digest: ContentDigest) -> KernelEventPayload {
@@ -248,6 +278,36 @@ fn side_effect_claim() -> KernelEventPayload {
     })
 }
 
+fn side_effect_claim_taken_over() -> KernelEventPayload {
+    KernelEventPayload::SideEffectClaimTakenOver(side_effect::ClaimTakenOver {
+        spec_hash: spec_hash(1),
+        node_id: node_id(70),
+        attempt_id: attempt_id(72),
+        ledger_key: side_effect_ledger_key(),
+        previous_claim_owner: events::RunnerInvocationId::new("owner-1").expect("previous owner"),
+        new_claim_owner: events::RunnerInvocationId::new("owner-2").expect("new owner"),
+        invocation_epoch: 1,
+        previous_claim_generation: 1,
+        claim_generation: 2,
+        claim_fencing_token: side_effect::ClaimFencingToken::new("token-2").expect("token"),
+    })
+}
+
+fn side_effect_claim_taken_over_with_token(token: &str) -> KernelEventPayload {
+    KernelEventPayload::SideEffectClaimTakenOver(side_effect::ClaimTakenOver {
+        spec_hash: spec_hash(1),
+        node_id: node_id(70),
+        attempt_id: attempt_id(72),
+        ledger_key: side_effect_ledger_key(),
+        previous_claim_owner: events::RunnerInvocationId::new("owner-1").expect("previous owner"),
+        new_claim_owner: events::RunnerInvocationId::new("owner-2").expect("new owner"),
+        invocation_epoch: 1,
+        previous_claim_generation: 1,
+        claim_generation: 2,
+        claim_fencing_token: side_effect::ClaimFencingToken::new(token).expect("token"),
+    })
+}
+
 fn side_effect_prepared(claim_generation: u32, token: &str) -> KernelEventPayload {
     KernelEventPayload::SideEffectInvocationPrepared(side_effect::InvocationPrepared {
         spec_hash: spec_hash(1),
@@ -259,6 +319,132 @@ fn side_effect_prepared(claim_generation: u32, token: &str) -> KernelEventPayloa
         claim_fencing_token: side_effect::ClaimFencingToken::new(token).expect("token"),
         prepared_artifact_id: None,
         prepared_hash: None,
+    })
+}
+
+fn side_effect_started(owner: &str, claim_generation: u32, token: &str) -> KernelEventPayload {
+    KernelEventPayload::SideEffectInvocationStarted(side_effect::InvocationStarted {
+        spec_hash: spec_hash(1),
+        node_id: node_id(70),
+        attempt_id: attempt_id(72),
+        ledger_key: side_effect_ledger_key(),
+        invocation_epoch: 1,
+        claim_owner: events::RunnerInvocationId::new(owner).expect("claim owner"),
+        claim_generation,
+        claim_fencing_token: side_effect::ClaimFencingToken::new(token).expect("token"),
+    })
+}
+
+fn submission_schema() -> SchemaId {
+    schema_id("mfm.test.submission", 77)
+}
+
+fn receipt_schema() -> SchemaId {
+    schema_id("mfm.test.receipt", 78)
+}
+
+fn confirmation_schema() -> SchemaId {
+    schema_id("mfm.test.confirmation", 79)
+}
+
+fn unknown_schema() -> SchemaId {
+    schema_id("mfm.test.submission_unknown", 83)
+}
+
+fn side_effect_submission_observed(
+    artifact_id: ArtifactId,
+    digest: ContentDigest,
+) -> KernelEventPayload {
+    KernelEventPayload::SideEffectSubmissionObserved(side_effect::SubmissionObserved {
+        spec_hash: spec_hash(1),
+        node_id: node_id(70),
+        attempt_id: attempt_id(72),
+        ledger_key: side_effect_ledger_key(),
+        invocation_epoch: 1,
+        submission_schema_id: submission_schema(),
+        submission_hash: digest,
+        submission_artifact_id: artifact_id,
+    })
+}
+
+fn side_effect_submission_unknown(
+    artifact_id: ArtifactId,
+    digest: ContentDigest,
+) -> KernelEventPayload {
+    KernelEventPayload::SideEffectSubmissionUnknown(side_effect::SubmissionUnknown {
+        spec_hash: spec_hash(1),
+        node_id: node_id(70),
+        attempt_id: attempt_id(72),
+        ledger_key: side_effect_ledger_key(),
+        invocation_epoch: 1,
+        evidence_schema_id: unknown_schema(),
+        evidence_hash: digest,
+        evidence_artifact_id: artifact_id,
+    })
+}
+
+fn side_effect_receipt(artifact_id: ArtifactId, digest: ContentDigest) -> KernelEventPayload {
+    KernelEventPayload::SideEffectReceiptObserved(side_effect::ReceiptObserved {
+        spec_hash: spec_hash(1),
+        node_id: node_id(70),
+        attempt_id: attempt_id(72),
+        ledger_key: side_effect_ledger_key(),
+        invocation_epoch: 1,
+        receipt_schema_id: receipt_schema(),
+        receipt_hash: digest,
+        receipt_artifact_id: artifact_id,
+        replay_verifier_id: events::ReplayVerifierId::new("verifier-1").expect("verifier"),
+    })
+}
+
+fn side_effect_confirmation(artifact_id: ArtifactId, digest: ContentDigest) -> KernelEventPayload {
+    KernelEventPayload::SideEffectConfirmationObserved(side_effect::ConfirmationObserved {
+        spec_hash: spec_hash(1),
+        node_id: node_id(70),
+        attempt_id: attempt_id(72),
+        ledger_key: side_effect_ledger_key(),
+        invocation_epoch: 1,
+        confirmation_schema_id: confirmation_schema(),
+        confirmation_hash: digest,
+        confirmation_artifact_id: artifact_id,
+        replay_verifier_id: events::ReplayVerifierId::new("verifier-1").expect("verifier"),
+    })
+}
+
+fn side_effect_failed(retryable: bool) -> KernelEventPayload {
+    KernelEventPayload::SideEffectFailed(side_effect::Failed {
+        spec_hash: spec_hash(1),
+        node_id: node_id(70),
+        attempt_id: attempt_id(72),
+        ledger_key: side_effect_ledger_key(),
+        invocation_epoch: 1,
+        failure_phase: side_effect::FailurePhase::BeforeInvocationStarted,
+        retryable,
+        error: events::MfmErrorInfo {
+            code: events::ErrorCode::new("sidefx_failed").expect("error code"),
+            category: events::ErrorCategory::SideEffect,
+            retryable,
+            safe_message: "side-effect failed".to_owned(),
+            public_details: None,
+            diagnostic_ref: None,
+        },
+    })
+}
+
+fn side_effect_attempt_failed(retryable: bool) -> KernelEventPayload {
+    KernelEventPayload::StateAttemptFailed(events::StateAttemptFailed {
+        spec_hash: spec_hash(1),
+        node_id: node_id(70),
+        attempt_id: attempt_id(72),
+        retryable,
+        error: events::MfmErrorInfo {
+            code: events::ErrorCode::new("sidefx_failed").expect("error code"),
+            category: events::ErrorCategory::SideEffect,
+            retryable,
+            safe_message: "side-effect failed".to_owned(),
+            public_details: None,
+            diagnostic_ref: None,
+        },
     })
 }
 
@@ -338,6 +524,71 @@ fn run_start_request(run_id: RunId, commit_key: &str) -> TypedCommitRequest {
             ..CommitPreconditions::default()
         },
     }
+}
+
+fn append_side_effect_prepare(store: &mut InMemoryTypedRunStore, run_id: &RunId) {
+    let artifact_id = artifact_id(81);
+    let artifact_digest = content_digest(82);
+    store
+        .record_artifact_evidence(intent_artifact_ref(
+            artifact_id.clone(),
+            artifact_digest.clone(),
+        ))
+        .expect("record intent artifact");
+    store
+        .append_typed_run_commit(TypedCommitRequest {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(run_id),
+            commit_key: CommitKey::new("sidefx-attempt-start").expect("commit key"),
+            payloads: vec![side_effect_attempt_started()],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect("append sidefx attempt start");
+    store
+        .append_typed_run_commit(TypedCommitRequest {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(run_id),
+            commit_key: CommitKey::new("sidefx-prepare").expect("commit key"),
+            payloads: vec![
+                side_effect_intent(artifact_id, artifact_digest),
+                side_effect_claim(),
+                side_effect_prepared(1, "token-1"),
+            ],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect("append sidefx prepare");
+}
+
+fn append_side_effect_started(store: &mut InMemoryTypedRunStore, run_id: &RunId) {
+    store
+        .append_typed_run_commit(TypedCommitRequest {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(run_id),
+            commit_key: CommitKey::new("sidefx-started").expect("commit key"),
+            payloads: vec![side_effect_started("owner-1", 1, "token-1")],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect("append sidefx started");
+}
+
+fn record_side_effect_artifact(
+    store: &mut InMemoryTypedRunStore,
+    artifact_id: ArtifactId,
+    digest: ContentDigest,
+    schema_id: SchemaId,
+    role: ArtifactRole,
+) {
+    store
+        .record_artifact_evidence(side_effect_artifact_ref(
+            artifact_id,
+            digest,
+            schema_id,
+            role,
+        ))
+        .expect("record side-effect artifact");
 }
 
 #[test]
@@ -722,6 +973,16 @@ fn side_effect_transition_mismatches_are_rejected() {
         .append_typed_run_commit(TypedCommitRequest {
             run_id: run_id.clone(),
             expected_next_seq: StreamSeq::FIRST,
+            commit_key: CommitKey::new("sidefx-attempt-start").expect("commit key"),
+            payloads: vec![side_effect_attempt_started()],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect("append sidefx attempt start");
+    store
+        .append_typed_run_commit(TypedCommitRequest {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&run_id),
             commit_key: CommitKey::new("sidefx-intent").expect("commit key"),
             payloads: vec![side_effect_intent(artifact_id, artifact_digest)],
             required_artifacts: Vec::new(),
@@ -765,6 +1026,245 @@ fn side_effect_transition_mismatches_are_rejected() {
         })
         .expect_err("prepared token mismatch rejects");
     assert!(matches!(wrong_token, StoreError::ProjectionConflict { .. }));
+}
+
+#[test]
+fn side_effect_phase_order_and_fencing_are_enforced() {
+    let mut stale_owner_store = InMemoryTypedRunStore::new();
+    let stale_owner_run = run_id(100);
+    append_side_effect_prepare(&mut stale_owner_store, &stale_owner_run);
+    let stale_owner = stale_owner_store
+        .append_typed_run_commit(TypedCommitRequest {
+            run_id: stale_owner_run.clone(),
+            expected_next_seq: stale_owner_store.expected_next_seq(&stale_owner_run),
+            commit_key: CommitKey::new("sidefx-started-stale-owner").expect("commit key"),
+            payloads: vec![side_effect_started("owner-2", 1, "token-1")],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect_err("stale owner rejects");
+    assert!(matches!(stale_owner, StoreError::ProjectionConflict { .. }));
+
+    let mut stale_token_store = InMemoryTypedRunStore::new();
+    let stale_token_run = run_id(101);
+    append_side_effect_prepare(&mut stale_token_store, &stale_token_run);
+    let stale_token = stale_token_store
+        .append_typed_run_commit(TypedCommitRequest {
+            run_id: stale_token_run.clone(),
+            expected_next_seq: stale_token_store.expected_next_seq(&stale_token_run),
+            commit_key: CommitKey::new("sidefx-started-stale-token").expect("commit key"),
+            payloads: vec![side_effect_started("owner-1", 1, "token-2")],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect_err("stale token rejects");
+    assert!(matches!(stale_token, StoreError::ProjectionConflict { .. }));
+
+    let mut takeover_store = InMemoryTypedRunStore::new();
+    let takeover_run = run_id(102);
+    append_side_effect_prepare(&mut takeover_store, &takeover_run);
+    let reused_token_takeover = takeover_store
+        .append_typed_run_commit(TypedCommitRequest {
+            run_id: takeover_run.clone(),
+            expected_next_seq: takeover_store.expected_next_seq(&takeover_run),
+            commit_key: CommitKey::new("sidefx-takeover-reused-token").expect("commit key"),
+            payloads: vec![side_effect_claim_taken_over_with_token("token-1")],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect_err("takeover reusing fencing token rejects");
+    assert!(matches!(
+        reused_token_takeover,
+        StoreError::ProjectionConflict { .. }
+    ));
+    takeover_store
+        .append_typed_run_commit(TypedCommitRequest {
+            run_id: takeover_run.clone(),
+            expected_next_seq: takeover_store.expected_next_seq(&takeover_run),
+            commit_key: CommitKey::new("sidefx-takeover").expect("commit key"),
+            payloads: vec![side_effect_claim_taken_over()],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect("takeover before invocation started succeeds");
+    takeover_store
+        .append_typed_run_commit(TypedCommitRequest {
+            run_id: takeover_run.clone(),
+            expected_next_seq: takeover_store.expected_next_seq(&takeover_run),
+            commit_key: CommitKey::new("sidefx-prepared-after-takeover").expect("commit key"),
+            payloads: vec![side_effect_prepared(2, "token-2")],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect("prepare after takeover succeeds");
+    takeover_store
+        .append_typed_run_commit(TypedCommitRequest {
+            run_id: takeover_run.clone(),
+            expected_next_seq: takeover_store.expected_next_seq(&takeover_run),
+            commit_key: CommitKey::new("sidefx-started-after-takeover").expect("commit key"),
+            payloads: vec![side_effect_started("owner-2", 2, "token-2")],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect("start after takeover succeeds");
+    let late_takeover = takeover_store
+        .append_typed_run_commit(TypedCommitRequest {
+            run_id: takeover_run.clone(),
+            expected_next_seq: takeover_store.expected_next_seq(&takeover_run),
+            commit_key: CommitKey::new("sidefx-late-takeover").expect("commit key"),
+            payloads: vec![KernelEventPayload::SideEffectClaimTakenOver(
+                side_effect::ClaimTakenOver {
+                    spec_hash: spec_hash(1),
+                    node_id: node_id(70),
+                    attempt_id: attempt_id(72),
+                    ledger_key: side_effect_ledger_key(),
+                    previous_claim_owner: events::RunnerInvocationId::new("owner-2")
+                        .expect("previous owner"),
+                    new_claim_owner: events::RunnerInvocationId::new("owner-3").expect("new owner"),
+                    invocation_epoch: 1,
+                    previous_claim_generation: 2,
+                    claim_generation: 3,
+                    claim_fencing_token: side_effect::ClaimFencingToken::new("token-3")
+                        .expect("token"),
+                },
+            )],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect_err("takeover after invocation started rejects");
+    assert!(matches!(
+        late_takeover,
+        StoreError::ProjectionConflict { .. }
+    ));
+
+    let mut receipt_store = InMemoryTypedRunStore::new();
+    let receipt_run = run_id(103);
+    append_side_effect_prepare(&mut receipt_store, &receipt_run);
+    append_side_effect_started(&mut receipt_store, &receipt_run);
+    let receipt_artifact = artifact_id(103);
+    let receipt_digest = content_digest(104);
+    record_side_effect_artifact(
+        &mut receipt_store,
+        receipt_artifact.clone(),
+        receipt_digest.clone(),
+        receipt_schema(),
+        ArtifactRole::Receipt,
+    );
+    let receipt_without_submission = receipt_store
+        .append_typed_run_commit(TypedCommitRequest {
+            run_id: receipt_run.clone(),
+            expected_next_seq: receipt_store.expected_next_seq(&receipt_run),
+            commit_key: CommitKey::new("sidefx-receipt-without-submission").expect("commit key"),
+            payloads: vec![side_effect_receipt(receipt_artifact, receipt_digest)],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect_err("receipt without submission rejects");
+    assert!(matches!(
+        receipt_without_submission,
+        StoreError::ProjectionConflict { .. }
+    ));
+
+    let mut confirmation_store = InMemoryTypedRunStore::new();
+    let confirmation_run = run_id(104);
+    append_side_effect_prepare(&mut confirmation_store, &confirmation_run);
+    append_side_effect_started(&mut confirmation_store, &confirmation_run);
+    let submission_artifact = artifact_id(105);
+    let submission_digest = content_digest(106);
+    record_side_effect_artifact(
+        &mut confirmation_store,
+        submission_artifact.clone(),
+        submission_digest.clone(),
+        submission_schema(),
+        ArtifactRole::Submission,
+    );
+    confirmation_store
+        .append_typed_run_commit(TypedCommitRequest {
+            run_id: confirmation_run.clone(),
+            expected_next_seq: confirmation_store.expected_next_seq(&confirmation_run),
+            commit_key: CommitKey::new("sidefx-submission").expect("commit key"),
+            payloads: vec![side_effect_submission_observed(
+                submission_artifact,
+                submission_digest,
+            )],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect("append submission");
+    let confirmation_artifact = artifact_id(107);
+    let confirmation_digest = content_digest(108);
+    record_side_effect_artifact(
+        &mut confirmation_store,
+        confirmation_artifact.clone(),
+        confirmation_digest.clone(),
+        confirmation_schema(),
+        ArtifactRole::Confirmation,
+    );
+    let confirmation_without_receipt = confirmation_store
+        .append_typed_run_commit(TypedCommitRequest {
+            run_id: confirmation_run.clone(),
+            expected_next_seq: confirmation_store.expected_next_seq(&confirmation_run),
+            commit_key: CommitKey::new("sidefx-confirmation-without-receipt").expect("commit key"),
+            payloads: vec![side_effect_confirmation(
+                confirmation_artifact,
+                confirmation_digest,
+            )],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect_err("confirmation without receipt rejects");
+    assert!(matches!(
+        confirmation_without_receipt,
+        StoreError::ProjectionConflict { .. }
+    ));
+
+    let unknown_artifact = artifact_id(109);
+    let unknown_digest = content_digest(110);
+    record_side_effect_artifact(
+        &mut confirmation_store,
+        unknown_artifact.clone(),
+        unknown_digest.clone(),
+        unknown_schema(),
+        ArtifactRole::SubmissionUnknownEvidence,
+    );
+    let duplicate_submit = confirmation_store
+        .append_typed_run_commit(TypedCommitRequest {
+            run_id: confirmation_run.clone(),
+            expected_next_seq: confirmation_store.expected_next_seq(&confirmation_run),
+            commit_key: CommitKey::new("sidefx-duplicate-submit").expect("commit key"),
+            payloads: vec![side_effect_submission_unknown(
+                unknown_artifact,
+                unknown_digest,
+            )],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect_err("duplicate submit rejects");
+    assert!(matches!(
+        duplicate_submit,
+        StoreError::DuplicateLogicalKey { .. }
+            | StoreError::LogicalKeyConflict { .. }
+            | StoreError::ProjectionConflict { .. }
+    ));
+
+    let mut failure_store = InMemoryTypedRunStore::new();
+    let failure_run = run_id(105);
+    append_side_effect_prepare(&mut failure_store, &failure_run);
+    let mismatched_retryability = failure_store
+        .append_typed_run_commit(TypedCommitRequest {
+            run_id: failure_run.clone(),
+            expected_next_seq: failure_store.expected_next_seq(&failure_run),
+            commit_key: CommitKey::new("sidefx-failure-mismatched-retryability")
+                .expect("commit key"),
+            payloads: vec![side_effect_failed(false), side_effect_attempt_failed(true)],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect_err("mismatched retryability rejects");
+    assert!(matches!(
+        mismatched_retryability,
+        StoreError::ProjectionConflict { .. }
+    ));
 }
 
 #[test]

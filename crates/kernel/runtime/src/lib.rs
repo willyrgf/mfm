@@ -360,6 +360,23 @@ impl CertifiedRuntimeSpec {
                     node.node_id, node.descriptor_id
                 )));
             }
+            match (&node.side_effect, &descriptor.side_effect_contract_digest) {
+                (Some(contract), Some(descriptor_digest))
+                    if descriptor_digest == &contract.contract_digest => {}
+                (Some(_), _) => {
+                    return Err(RuntimeError::InvalidSpec(format!(
+                        "side-effect node {} lacks matching descriptor side-effect contract",
+                        node.node_id
+                    )));
+                }
+                (None, Some(_)) => {
+                    return Err(RuntimeError::InvalidSpec(format!(
+                        "non-side-effect node {} references a descriptor with side-effect contract",
+                        node.node_id
+                    )));
+                }
+                (None, None) => {}
+            }
 
             if !config_refs.contains(&config_ref_key(&node.config_ref)) {
                 return Err(RuntimeError::InvalidSpec(format!(
@@ -1064,49 +1081,240 @@ impl SerialTypedScheduler {
             &attempt_id,
             &caps,
             &recorded_facts,
+            &latest_projection,
             &output,
         )?;
         for artifact in &output.required_artifacts {
             store.record_artifact_evidence(artifact.clone())?;
         }
+        let preconditions =
+            runner_output_preconditions(node, &attempt_id, &latest_projection, &output.payloads)?;
         let terminal_request = store::TypedCommitRequest {
             run_id: run_id.clone(),
             expected_next_seq: store.expected_next_seq(run_id),
-            commit_key: store::CommitKey::new(format!(
-                "attempt-terminal:{}:{}",
-                node.node_id, attempt_id
-            ))?,
+            commit_key: runner_output_commit_key(node, &attempt_id, &output.payloads)?,
             payloads: output.payloads,
             required_artifacts: output.required_artifacts,
-            preconditions: store::CommitPreconditions {
-                required_run_state: store::RequiredRunState::NotCompleted,
-                required_present_logical_keys: vec![store::LogicalEventKey::new(format!(
-                    "attempt:{}:{}",
-                    node.node_id, attempt_id
-                ))?],
-                required_cell_states: vec![store::CellStatePrecondition {
-                    cell_id: node.output_cell.clone(),
-                    required: store::RequiredCellState::Absent,
-                }],
-                required_public_output_absent: matches!(
-                    node.framework,
-                    Some(spec::FrameworkNodeSpec::PublicOutputRender(_))
-                ),
-                ..store::CommitPreconditions::default()
-            },
+            preconditions,
         };
         store.append_typed_run_commit(terminal_request)?;
         Ok(())
     }
 }
 
+fn runner_output_commit_key(
+    node: &spec::NodeSpec,
+    attempt_id: &AttemptId,
+    payloads: &[events::KernelEventPayload],
+) -> Result<store::CommitKey> {
+    let mut fragments = BTreeSet::new();
+    for payload in payloads {
+        fragments.insert(runner_output_commit_fragment(payload));
+    }
+    if fragments.is_empty() {
+        return Err(RuntimeError::InvalidRunnerOutput(format!(
+            "runner for node {} returned no typed payloads",
+            node.node_id
+        )));
+    }
+    let suffix = fragments.into_iter().collect::<Vec<_>>().join("+");
+    Ok(store::CommitKey::new(format!(
+        "attempt-output:{}:{}:{}",
+        node.node_id, attempt_id, suffix
+    ))?)
+}
+
+fn runner_output_commit_fragment(payload: &events::KernelEventPayload) -> String {
+    match payload {
+        events::KernelEventPayload::StateAttemptCompleted(payload) => {
+            format!("completed:{}", payload.output_cell_id)
+        }
+        events::KernelEventPayload::StateAttemptFailed(_) => "failed".to_owned(),
+        events::KernelEventPayload::CellProduced(payload) => {
+            format!("cell-produced:{}", payload.cell_id)
+        }
+        events::KernelEventPayload::CellSkipped(payload) => {
+            format!("cell-skipped:{}", payload.cell_id)
+        }
+        events::KernelEventPayload::FactRecorded(payload) => format!("fact:{}", payload.fact_key),
+        events::KernelEventPayload::ArtifactReferenced(payload) => {
+            format!("artifact:{}", payload.artifact_ref.artifact_id)
+        }
+        events::KernelEventPayload::PublicOutputProduced(payload) => {
+            format!("public-output:{}", payload.public_schema_id)
+        }
+        events::KernelEventPayload::PublicOutputRenderFailed(payload) => {
+            format!("public-output-failed:{}", payload.public_schema_id)
+        }
+        events::KernelEventPayload::SideEffectIntentPersisted(payload) => {
+            format!("sidefx-intent:{}", payload.ledger_key)
+        }
+        events::KernelEventPayload::SideEffectClaimed(payload) => format!(
+            "sidefx-claim:{}:{}:{}",
+            payload.ledger_key, payload.invocation_epoch, payload.claim_generation
+        ),
+        events::KernelEventPayload::SideEffectClaimTakenOver(payload) => format!(
+            "sidefx-claim-takeover:{}:{}:{}",
+            payload.ledger_key, payload.invocation_epoch, payload.claim_generation
+        ),
+        events::KernelEventPayload::SideEffectInvocationPrepared(payload) => format!(
+            "sidefx-prepared:{}:{}",
+            payload.ledger_key, payload.invocation_epoch
+        ),
+        events::KernelEventPayload::SideEffectInvocationStarted(payload) => format!(
+            "sidefx-started:{}:{}",
+            payload.ledger_key, payload.invocation_epoch
+        ),
+        events::KernelEventPayload::SideEffectNotSubmittedProven(payload) => format!(
+            "sidefx-not-submitted:{}:{}",
+            payload.ledger_key, payload.invocation_epoch
+        ),
+        events::KernelEventPayload::SideEffectSubmissionObserved(payload) => format!(
+            "sidefx-submission:{}:{}",
+            payload.ledger_key, payload.invocation_epoch
+        ),
+        events::KernelEventPayload::SideEffectSubmissionUnknown(payload) => format!(
+            "sidefx-submission-unknown:{}:{}",
+            payload.ledger_key, payload.invocation_epoch
+        ),
+        events::KernelEventPayload::SideEffectReceiptObserved(payload) => format!(
+            "sidefx-receipt:{}:{}",
+            payload.ledger_key, payload.invocation_epoch
+        ),
+        events::KernelEventPayload::SideEffectConfirmationObserved(payload) => format!(
+            "sidefx-confirmation:{}:{}",
+            payload.ledger_key, payload.invocation_epoch
+        ),
+        events::KernelEventPayload::SideEffectAmbiguous(payload) => {
+            format!("sidefx-ambiguous:{}", payload.ledger_key)
+        }
+        events::KernelEventPayload::SideEffectFailed(payload) => format!(
+            "sidefx-failed:{}:{}",
+            payload.ledger_key, payload.invocation_epoch
+        ),
+        events::KernelEventPayload::RunStarted(_)
+        | events::KernelEventPayload::RunCompleted(_)
+        | events::KernelEventPayload::RetentionRefsAppended(_)
+        | events::KernelEventPayload::RetentionManifestProjected(_)
+        | events::KernelEventPayload::StateAttemptStarted(_) => "scheduler-owned".to_owned(),
+    }
+}
+
+fn runner_output_preconditions(
+    node: &spec::NodeSpec,
+    attempt_id: &AttemptId,
+    projections: &store::ProjectionSnapshot,
+    payloads: &[events::KernelEventPayload],
+) -> Result<store::CommitPreconditions> {
+    let mut preconditions = store::CommitPreconditions {
+        required_run_state: store::RequiredRunState::NotCompleted,
+        required_present_logical_keys: vec![store::LogicalEventKey::new(format!(
+            "attempt:{}:{}",
+            node.node_id, attempt_id
+        ))?],
+        required_cell_states: vec![store::CellStatePrecondition {
+            cell_id: node.output_cell.clone(),
+            required: store::RequiredCellState::Absent,
+        }],
+        required_public_output_absent: matches!(
+            node.framework,
+            Some(spec::FrameworkNodeSpec::PublicOutputRender(_))
+        ),
+        ..store::CommitPreconditions::default()
+    };
+
+    if node.side_effect.is_none() {
+        return Ok(preconditions);
+    }
+
+    let mut requires_terminal_confirmation = false;
+    let prepared_in_batch = payloads
+        .iter()
+        .filter_map(|payload| match payload {
+            events::KernelEventPayload::SideEffectInvocationPrepared(payload) => {
+                Some(payload.ledger_key.clone())
+            }
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    for payload in payloads {
+        match payload {
+            events::KernelEventPayload::SideEffectIntentPersisted(payload) => {
+                preconditions.required_side_effect_states.push(
+                    store::SideEffectStatePrecondition {
+                        ledger_key: payload.ledger_key.clone(),
+                        required: store::RequiredSideEffectState::Absent,
+                    },
+                );
+            }
+            events::KernelEventPayload::SideEffectInvocationStarted(payload) => {
+                if !prepared_in_batch.contains(&payload.ledger_key) {
+                    preconditions.required_side_effect_states.push(
+                        store::SideEffectStatePrecondition {
+                            ledger_key: payload.ledger_key.clone(),
+                            required: store::RequiredSideEffectState::InvocationPrepared,
+                        },
+                    );
+                }
+            }
+            events::KernelEventPayload::SideEffectReceiptObserved(payload) => {
+                preconditions.required_side_effect_states.push(
+                    store::SideEffectStatePrecondition {
+                        ledger_key: payload.ledger_key.clone(),
+                        required: store::RequiredSideEffectState::SubmissionResult,
+                    },
+                );
+            }
+            events::KernelEventPayload::SideEffectConfirmationObserved(payload) => {
+                preconditions.required_side_effect_states.push(
+                    store::SideEffectStatePrecondition {
+                        ledger_key: payload.ledger_key.clone(),
+                        required: store::RequiredSideEffectState::ReceiptObserved,
+                    },
+                );
+            }
+            events::KernelEventPayload::CellProduced(_)
+            | events::KernelEventPayload::CellSkipped(_)
+            | events::KernelEventPayload::StateAttemptCompleted(_) => {
+                requires_terminal_confirmation = true;
+            }
+            _ => {}
+        }
+    }
+
+    if requires_terminal_confirmation {
+        let projection = side_effect_projection_for_attempt(projections, node, attempt_id)?
+            .ok_or_else(|| {
+                RuntimeError::InvalidRunnerOutput(format!(
+                    "side-effect node {} attempted output without ledger evidence",
+                    node.node_id
+                ))
+            })?;
+        preconditions
+            .required_side_effect_states
+            .push(store::SideEffectStatePrecondition {
+                ledger_key: projection.ledger_key.clone(),
+                required: store::RequiredSideEffectState::ConfirmationObserved,
+            });
+    }
+
+    Ok(preconditions)
+}
+
 fn next_runnable_node<'a>(
     runtime_spec: &'a CertifiedRuntimeSpec,
     view: &RuntimeRunView,
 ) -> Result<Option<RunnableNode<'a>>> {
+    if view
+        .projections
+        .side_effects()
+        .any(|(_, projection)| matches!(projection.phase, store::SideEffectPhase::Ambiguous { .. }))
+    {
+        return Ok(None);
+    }
     for node_id in runtime_spec.topological_order() {
         let node = runtime_spec.node(node_id).expect("topological node exists");
-        let Some(attempt) = non_side_effect_attempt_plan(runtime_spec, node, view)? else {
+        let Some(attempt) = attempt_plan(runtime_spec, node, view)? else {
             continue;
         };
         if node_inputs_ready(runtime_spec, node, view)? {
@@ -1116,15 +1324,23 @@ fn next_runnable_node<'a>(
     Ok(None)
 }
 
-fn non_side_effect_attempt_plan(
+fn attempt_plan(
     runtime_spec: &CertifiedRuntimeSpec,
     node: &spec::NodeSpec,
     view: &RuntimeRunView,
 ) -> Result<Option<AttemptPlan>> {
     if node.side_effect.is_some() {
-        return Ok(None);
+        side_effect_attempt_plan(runtime_spec, node, view)
+    } else {
+        non_side_effect_attempt_plan(runtime_spec, node, view)
     }
+}
 
+fn non_side_effect_attempt_plan(
+    runtime_spec: &CertifiedRuntimeSpec,
+    node: &spec::NodeSpec,
+    view: &RuntimeRunView,
+) -> Result<Option<AttemptPlan>> {
     if let Some(cell_terminal) = view.projections.cell_terminal(&node.output_cell) {
         validate_terminal_cell_has_completed_attempt(
             runtime_spec,
@@ -1183,12 +1399,92 @@ fn non_side_effect_attempt_plan(
     }
 }
 
+fn side_effect_attempt_plan(
+    runtime_spec: &CertifiedRuntimeSpec,
+    node: &spec::NodeSpec,
+    view: &RuntimeRunView,
+) -> Result<Option<AttemptPlan>> {
+    if let Some(cell_terminal) = view.projections.cell_terminal(&node.output_cell) {
+        let attempt_id = validate_terminal_cell_has_completed_attempt(
+            runtime_spec,
+            &view.projections,
+            node,
+            cell_terminal,
+        )?;
+        validate_side_effect_terminal_evidence(&view.projections, node, &attempt_id)?;
+        return Ok(None);
+    }
+
+    let mut started = None::<(AttemptId, u32)>;
+    for ((attempt_node_id, attempt_id), projection) in view.projections.attempts() {
+        if attempt_node_id != &node.node_id {
+            continue;
+        }
+        match &projection.status {
+            store::AttemptStatus::Started {
+                attempt_no,
+                state_kind,
+                state_version,
+            } => {
+                if state_kind != &node.state_kind || state_version != &node.state_version {
+                    return Err(RuntimeError::InvalidRunStream(format!(
+                        "started side-effect attempt {} for node {} has state identity outside the certified spec",
+                        attempt_id, node.node_id
+                    )));
+                }
+                if let Some(projection) =
+                    side_effect_projection_for_attempt(&view.projections, node, attempt_id)?
+                {
+                    match projection.phase {
+                        store::SideEffectPhase::Ambiguous { .. } => return Ok(None),
+                        store::SideEffectPhase::Failed { .. } => {
+                            return Err(RuntimeError::InvalidRunStream(format!(
+                                "side-effect ledger {} failed while attempt {} for node {} remained started",
+                                projection.ledger_key, attempt_id, node.node_id
+                            )));
+                        }
+                        _ => {}
+                    }
+                }
+                if started.replace((attempt_id.clone(), *attempt_no)).is_some() {
+                    return Err(RuntimeError::InvalidRunStream(format!(
+                        "node {} has multiple non-terminal side-effect attempts",
+                        node.node_id
+                    )));
+                }
+            }
+            store::AttemptStatus::Completed { output_cell_id } => {
+                if view.projections.cell_terminal(output_cell_id).is_none() {
+                    return Err(RuntimeError::InvalidRunStream(format!(
+                        "side-effect node {} attempt {} completed without terminal output cell {}",
+                        node.node_id, attempt_id, output_cell_id
+                    )));
+                }
+            }
+            store::AttemptStatus::Failed { retryable, .. } => {
+                if !*retryable {
+                    return Ok(None);
+                }
+            }
+        }
+    }
+
+    if let Some((attempt_id, attempt_no)) = started {
+        Ok(Some(AttemptPlan::Continue {
+            attempt_id,
+            attempt_no,
+        }))
+    } else {
+        Ok(Some(AttemptPlan::StartNew))
+    }
+}
+
 fn validate_terminal_cell_has_completed_attempt(
     runtime_spec: &CertifiedRuntimeSpec,
     projections: &store::ProjectionSnapshot,
     node: &spec::NodeSpec,
     terminal: &store::CellTerminalProjection,
-) -> Result<()> {
+) -> Result<AttemptId> {
     let certified = runtime_spec.cell(&node.output_cell).ok_or_else(|| {
         RuntimeError::InvalidSpec(format!(
             "node {} output cell {} is missing",
@@ -1225,11 +1521,56 @@ fn validate_terminal_cell_has_completed_attempt(
         Some(store::AttemptProjection {
             status: store::AttemptStatus::Completed { output_cell_id },
             ..
-        }) if output_cell_id == &node.output_cell => Ok(()),
+        }) if output_cell_id == &node.output_cell => Ok(terminal_attempt_id.clone()),
         _ => Err(RuntimeError::InvalidRunStream(format!(
             "terminal cell {} for node {} lacks matching completed attempt {}",
             node.output_cell, node.node_id, terminal_attempt_id
         ))),
+    }
+}
+
+fn side_effect_projection_for_attempt<'a>(
+    projections: &'a store::ProjectionSnapshot,
+    node: &spec::NodeSpec,
+    attempt_id: &AttemptId,
+) -> Result<Option<&'a store::SideEffectProjection>> {
+    let mut found = None;
+    for (_, projection) in projections.side_effects() {
+        if projection.intent.node_id == node.node_id
+            && projection.intent.attempt_id == *attempt_id
+            && found.replace(projection).is_some()
+        {
+            return Err(RuntimeError::InvalidRunStream(format!(
+                "side-effect node {} attempt {} has multiple ledger projections",
+                node.node_id, attempt_id
+            )));
+        }
+    }
+    Ok(found)
+}
+
+fn validate_side_effect_terminal_evidence(
+    projections: &store::ProjectionSnapshot,
+    node: &spec::NodeSpec,
+    attempt_id: &AttemptId,
+) -> Result<()> {
+    let Some(projection) = side_effect_projection_for_attempt(projections, node, attempt_id)?
+    else {
+        return Err(RuntimeError::InvalidRunStream(format!(
+            "side-effect node {} attempt {} produced output without ledger evidence",
+            node.node_id, attempt_id
+        )));
+    };
+    if matches!(
+        projection.phase,
+        store::SideEffectPhase::ConfirmationObserved { .. }
+    ) {
+        Ok(())
+    } else {
+        Err(RuntimeError::InvalidRunStream(format!(
+            "side-effect node {} attempt {} produced output before confirmation",
+            node.node_id, attempt_id
+        )))
     }
 }
 
@@ -1535,6 +1876,28 @@ fn validate_seed_cells(
     Ok(by_cell)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HistoricalSideEffectPhase {
+    IntentPersisted,
+    Claimed,
+    InvocationPrepared,
+    InvocationStarted,
+    NotSubmittedProven,
+    SubmissionObserved,
+    SubmissionUnknown,
+    ReceiptObserved,
+    ConfirmationObserved,
+    Ambiguous,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HistoricalSideEffectLedger {
+    node_id: NodeId,
+    attempt_id: AttemptId,
+    phase: HistoricalSideEffectPhase,
+}
+
 fn validate_historical_run_stream(
     runtime_spec: &CertifiedRuntimeSpec,
     stream: &[store::KernelEventEnvelope],
@@ -1542,6 +1905,8 @@ fn validate_historical_run_stream(
 ) -> Result<()> {
     let mut available_cells = BTreeSet::<CellId>::new();
     let mut active_attempts = BTreeSet::<(NodeId, AttemptId)>::new();
+    let mut side_effect_ledgers =
+        BTreeMap::<events::SideEffectLedgerKey, HistoricalSideEffectLedger>::new();
     let mut seen_run_started = false;
     for event in stream {
         if !seen_run_started
@@ -1602,6 +1967,13 @@ fn validate_historical_run_stream(
                         payload.attempt_id, payload.node_id, payload.output_cell_id
                     )));
                 }
+                if node.side_effect.is_some() {
+                    validate_historical_side_effect_confirmation(
+                        &side_effect_ledgers,
+                        &payload.node_id,
+                        &payload.attempt_id,
+                    )?;
+                }
                 if !active_attempts.remove(&(payload.node_id.clone(), payload.attempt_id.clone())) {
                     return Err(RuntimeError::InvalidRunStream(format!(
                         "attempt completion for node {} attempt {} was not preceded by an active attempt",
@@ -1616,6 +1988,18 @@ fn validate_historical_run_stream(
                         payload.node_id
                     ))
                 })?;
+                if runtime_spec
+                    .node(&payload.node_id)
+                    .expect("checked above")
+                    .side_effect
+                    .is_some()
+                {
+                    validate_historical_side_effect_failure(
+                        &side_effect_ledgers,
+                        &payload.node_id,
+                        &payload.attempt_id,
+                    )?;
+                }
                 if !active_attempts.remove(&(payload.node_id.clone(), payload.attempt_id.clone())) {
                     return Err(RuntimeError::InvalidRunStream(format!(
                         "attempt failure for node {} attempt {} was not preceded by an active attempt",
@@ -1625,10 +2009,30 @@ fn validate_historical_run_stream(
             }
             events::KernelEventPayload::CellProduced(payload) => {
                 validate_historical_produced_cell(runtime_spec, projections, event, payload)?;
+                let node = runtime_spec
+                    .node(&payload.node_id)
+                    .expect("validated cell node");
+                if node.side_effect.is_some() {
+                    validate_historical_side_effect_confirmation(
+                        &side_effect_ledgers,
+                        &payload.node_id,
+                        &payload.attempt_id,
+                    )?;
+                }
                 available_cells.insert(payload.cell_id.clone());
             }
             events::KernelEventPayload::CellSkipped(payload) => {
                 validate_historical_skipped_cell(runtime_spec, projections, event, payload)?;
+                let node = runtime_spec
+                    .node(&payload.node_id)
+                    .expect("validated cell node");
+                if node.side_effect.is_some() {
+                    validate_historical_side_effect_confirmation(
+                        &side_effect_ledgers,
+                        &payload.node_id,
+                        &payload.attempt_id,
+                    )?;
+                }
                 available_cells.insert(payload.cell_id.clone());
             }
             events::KernelEventPayload::FactRecorded(payload) => {
@@ -1739,16 +2143,243 @@ fn validate_historical_run_stream(
             | events::KernelEventPayload::SideEffectConfirmationObserved(_)
             | events::KernelEventPayload::SideEffectAmbiguous(_)
             | events::KernelEventPayload::SideEffectFailed(_) => {
-                return Err(RuntimeError::InvalidRunStream(
-                    "side-effect events are not accepted before the side-effect scheduler protocol is enabled"
-                        .to_owned(),
-                ));
+                validate_historical_side_effect_payload(
+                    runtime_spec,
+                    &active_attempts,
+                    &mut side_effect_ledgers,
+                    event.payload(),
+                )?;
             }
         }
     }
     validate_atomic_terminal_pairs(runtime_spec, stream)?;
-    validate_non_side_effect_recovery_frontier(runtime_spec, projections)?;
+    validate_atomic_side_effect_failure_pairs(runtime_spec, stream)?;
+    validate_recovery_frontier(runtime_spec, projections)?;
     Ok(())
+}
+
+fn validate_historical_side_effect_payload(
+    runtime_spec: &CertifiedRuntimeSpec,
+    active_attempts: &BTreeSet<(NodeId, AttemptId)>,
+    ledgers: &mut BTreeMap<events::SideEffectLedgerKey, HistoricalSideEffectLedger>,
+    payload: &events::KernelEventPayload,
+) -> Result<()> {
+    let (node_id, attempt_id, ledger_key, phase) = side_effect_payload_ref(payload)
+        .ok_or_else(|| RuntimeError::InvalidRunStream("expected side-effect payload".to_owned()))?;
+    let node = runtime_spec.node(node_id).ok_or_else(|| {
+        RuntimeError::InvalidRunStream(format!("side-effect event for uncertified node {node_id}"))
+    })?;
+    if node.side_effect.is_none() {
+        return Err(RuntimeError::InvalidRunStream(format!(
+            "non-side-effect node {} emitted side-effect ledger event",
+            node.node_id
+        )));
+    }
+    if !active_attempts.contains(&(node_id.clone(), attempt_id.clone())) {
+        return Err(RuntimeError::InvalidRunStream(format!(
+            "side-effect ledger {} for node {} attempt {} was recorded outside an active started attempt",
+            ledger_key, node_id, attempt_id
+        )));
+    }
+
+    match payload {
+        events::KernelEventPayload::SideEffectIntentPersisted(payload) => {
+            if payload.scope_id != node.scope_id {
+                return Err(RuntimeError::InvalidRunStream(format!(
+                    "side-effect intent for node {} carries uncertified scope {}",
+                    node.node_id, payload.scope_id
+                )));
+            }
+            let caps = CertifiedRuntimeCapabilities::new(
+                node.node_id.clone(),
+                node.capability_bindings.clone(),
+            );
+            require_capability(
+                &caps,
+                &payload.capability_kind,
+                &payload.capability_version,
+                &node.node_id,
+            )
+            .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))?;
+            require_adapter(node, &payload.adapter_kind, &payload.adapter_version)
+                .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))?;
+            if ledgers
+                .insert(
+                    ledger_key.clone(),
+                    HistoricalSideEffectLedger {
+                        node_id: node_id.clone(),
+                        attempt_id: attempt_id.clone(),
+                        phase,
+                    },
+                )
+                .is_some()
+            {
+                return Err(RuntimeError::InvalidRunStream(format!(
+                    "side-effect ledger {} persisted intent more than once",
+                    ledger_key
+                )));
+            }
+        }
+        _ => {
+            let ledger = ledgers.get_mut(ledger_key).ok_or_else(|| {
+                RuntimeError::InvalidRunStream(format!(
+                    "side-effect ledger {} advanced before intent was persisted",
+                    ledger_key
+                ))
+            })?;
+            if ledger.node_id != *node_id || ledger.attempt_id != *attempt_id {
+                return Err(RuntimeError::InvalidRunStream(format!(
+                    "side-effect ledger {} changed node or attempt authority",
+                    ledger_key
+                )));
+            }
+            ledger.phase = phase;
+        }
+    }
+
+    Ok(())
+}
+
+fn side_effect_payload_ref(
+    payload: &events::KernelEventPayload,
+) -> Option<(
+    &NodeId,
+    &AttemptId,
+    &events::SideEffectLedgerKey,
+    HistoricalSideEffectPhase,
+)> {
+    match payload {
+        events::KernelEventPayload::SideEffectIntentPersisted(payload) => Some((
+            &payload.node_id,
+            &payload.attempt_id,
+            &payload.ledger_key,
+            HistoricalSideEffectPhase::IntentPersisted,
+        )),
+        events::KernelEventPayload::SideEffectClaimed(payload) => Some((
+            &payload.node_id,
+            &payload.attempt_id,
+            &payload.ledger_key,
+            HistoricalSideEffectPhase::Claimed,
+        )),
+        events::KernelEventPayload::SideEffectClaimTakenOver(payload) => Some((
+            &payload.node_id,
+            &payload.attempt_id,
+            &payload.ledger_key,
+            HistoricalSideEffectPhase::Claimed,
+        )),
+        events::KernelEventPayload::SideEffectInvocationPrepared(payload) => Some((
+            &payload.node_id,
+            &payload.attempt_id,
+            &payload.ledger_key,
+            HistoricalSideEffectPhase::InvocationPrepared,
+        )),
+        events::KernelEventPayload::SideEffectInvocationStarted(payload) => Some((
+            &payload.node_id,
+            &payload.attempt_id,
+            &payload.ledger_key,
+            HistoricalSideEffectPhase::InvocationStarted,
+        )),
+        events::KernelEventPayload::SideEffectNotSubmittedProven(payload) => Some((
+            &payload.node_id,
+            &payload.attempt_id,
+            &payload.ledger_key,
+            HistoricalSideEffectPhase::NotSubmittedProven,
+        )),
+        events::KernelEventPayload::SideEffectSubmissionObserved(payload) => Some((
+            &payload.node_id,
+            &payload.attempt_id,
+            &payload.ledger_key,
+            HistoricalSideEffectPhase::SubmissionObserved,
+        )),
+        events::KernelEventPayload::SideEffectSubmissionUnknown(payload) => Some((
+            &payload.node_id,
+            &payload.attempt_id,
+            &payload.ledger_key,
+            HistoricalSideEffectPhase::SubmissionUnknown,
+        )),
+        events::KernelEventPayload::SideEffectReceiptObserved(payload) => Some((
+            &payload.node_id,
+            &payload.attempt_id,
+            &payload.ledger_key,
+            HistoricalSideEffectPhase::ReceiptObserved,
+        )),
+        events::KernelEventPayload::SideEffectConfirmationObserved(payload) => Some((
+            &payload.node_id,
+            &payload.attempt_id,
+            &payload.ledger_key,
+            HistoricalSideEffectPhase::ConfirmationObserved,
+        )),
+        events::KernelEventPayload::SideEffectAmbiguous(payload) => Some((
+            &payload.node_id,
+            &payload.attempt_id,
+            &payload.ledger_key,
+            HistoricalSideEffectPhase::Ambiguous,
+        )),
+        events::KernelEventPayload::SideEffectFailed(payload) => Some((
+            &payload.node_id,
+            &payload.attempt_id,
+            &payload.ledger_key,
+            HistoricalSideEffectPhase::Failed,
+        )),
+        _ => None,
+    }
+}
+
+fn validate_historical_side_effect_confirmation(
+    ledgers: &BTreeMap<events::SideEffectLedgerKey, HistoricalSideEffectLedger>,
+    node_id: &NodeId,
+    attempt_id: &AttemptId,
+) -> Result<()> {
+    let ledger = historical_side_effect_ledger_for_attempt(ledgers, node_id, attempt_id)?;
+    if ledger.phase == HistoricalSideEffectPhase::ConfirmationObserved {
+        Ok(())
+    } else {
+        Err(RuntimeError::InvalidRunStream(format!(
+            "side-effect node {} attempt {} produced output before confirmation",
+            node_id, attempt_id
+        )))
+    }
+}
+
+fn validate_historical_side_effect_failure(
+    ledgers: &BTreeMap<events::SideEffectLedgerKey, HistoricalSideEffectLedger>,
+    node_id: &NodeId,
+    attempt_id: &AttemptId,
+) -> Result<()> {
+    let ledger = historical_side_effect_ledger_for_attempt(ledgers, node_id, attempt_id)?;
+    if ledger.phase == HistoricalSideEffectPhase::Failed {
+        Ok(())
+    } else {
+        Err(RuntimeError::InvalidRunStream(format!(
+            "side-effect node {} attempt {} failed without side-effect failure evidence",
+            node_id, attempt_id
+        )))
+    }
+}
+
+fn historical_side_effect_ledger_for_attempt<'a>(
+    ledgers: &'a BTreeMap<events::SideEffectLedgerKey, HistoricalSideEffectLedger>,
+    node_id: &NodeId,
+    attempt_id: &AttemptId,
+) -> Result<&'a HistoricalSideEffectLedger> {
+    let mut found = None;
+    for ledger in ledgers.values() {
+        if ledger.node_id == *node_id
+            && ledger.attempt_id == *attempt_id
+            && found.replace(ledger).is_some()
+        {
+            return Err(RuntimeError::InvalidRunStream(format!(
+                "side-effect node {} attempt {} has multiple ledgers in history",
+                node_id, attempt_id
+            )));
+        }
+    }
+    found.ok_or_else(|| {
+        RuntimeError::InvalidRunStream(format!(
+            "side-effect node {} attempt {} lacks ledger evidence",
+            node_id, attempt_id
+        ))
+    })
 }
 
 fn validate_attempt_start_boundary(
@@ -1783,14 +2414,13 @@ fn validate_atomic_terminal_pairs(
                         payload.node_id
                     ))
                 })?;
-                if node.side_effect.is_none() {
-                    completions.insert((
-                        event.seq(),
-                        payload.node_id.clone(),
-                        payload.attempt_id.clone(),
-                        payload.output_cell_id.clone(),
-                    ));
-                }
+                let _ = node;
+                completions.insert((
+                    event.seq(),
+                    payload.node_id.clone(),
+                    payload.attempt_id.clone(),
+                    payload.output_cell_id.clone(),
+                ));
             }
             events::KernelEventPayload::CellProduced(payload) => {
                 let node = runtime_spec.node(&payload.node_id).ok_or_else(|| {
@@ -1799,14 +2429,13 @@ fn validate_atomic_terminal_pairs(
                         payload.node_id
                     ))
                 })?;
-                if node.side_effect.is_none() {
-                    terminal_cells.insert((
-                        event.seq(),
-                        payload.node_id.clone(),
-                        payload.attempt_id.clone(),
-                        payload.cell_id.clone(),
-                    ));
-                }
+                let _ = node;
+                terminal_cells.insert((
+                    event.seq(),
+                    payload.node_id.clone(),
+                    payload.attempt_id.clone(),
+                    payload.cell_id.clone(),
+                ));
             }
             events::KernelEventPayload::CellSkipped(payload) => {
                 let node = runtime_spec.node(&payload.node_id).ok_or_else(|| {
@@ -1815,14 +2444,13 @@ fn validate_atomic_terminal_pairs(
                         payload.node_id
                     ))
                 })?;
-                if node.side_effect.is_none() {
-                    terminal_cells.insert((
-                        event.seq(),
-                        payload.node_id.clone(),
-                        payload.attempt_id.clone(),
-                        payload.cell_id.clone(),
-                    ));
-                }
+                let _ = node;
+                terminal_cells.insert((
+                    event.seq(),
+                    payload.node_id.clone(),
+                    payload.attempt_id.clone(),
+                    payload.cell_id.clone(),
+                ));
             }
             _ => {}
         }
@@ -1836,7 +2464,7 @@ fn validate_atomic_terminal_pairs(
             output_cell_id.clone(),
         )) {
             return Err(RuntimeError::InvalidRunStream(format!(
-                "non-side-effect attempt {} for node {} completed without terminal cell {} in the same commit",
+                "attempt {} for node {} completed without terminal cell {} in the same commit",
                 attempt_id, node_id, output_cell_id
             )));
         }
@@ -1844,7 +2472,7 @@ fn validate_atomic_terminal_pairs(
     for (seq, node_id, attempt_id, cell_id) in &terminal_cells {
         if !completions.contains(&(*seq, node_id.clone(), attempt_id.clone(), cell_id.clone())) {
             return Err(RuntimeError::InvalidRunStream(format!(
-                "non-side-effect terminal cell {} for node {} lacks StateAttemptCompleted in the same commit",
+                "terminal cell {} for node {} lacks StateAttemptCompleted in the same commit",
                 cell_id, node_id
             )));
         }
@@ -1852,22 +2480,89 @@ fn validate_atomic_terminal_pairs(
     Ok(())
 }
 
-fn validate_non_side_effect_recovery_frontier(
+fn validate_atomic_side_effect_failure_pairs(
+    runtime_spec: &CertifiedRuntimeSpec,
+    stream: &[store::KernelEventEnvelope],
+) -> Result<()> {
+    let mut side_effect_failures = BTreeMap::new();
+    let mut attempt_failures = BTreeMap::new();
+    for event in stream {
+        match event.payload() {
+            events::KernelEventPayload::SideEffectFailed(payload) => {
+                side_effect_failures.insert(
+                    (
+                        event.seq(),
+                        payload.node_id.clone(),
+                        payload.attempt_id.clone(),
+                    ),
+                    payload.retryable,
+                );
+            }
+            events::KernelEventPayload::StateAttemptFailed(payload) => {
+                let node = runtime_spec.node(&payload.node_id).ok_or_else(|| {
+                    RuntimeError::InvalidRunStream(format!(
+                        "attempt failed for uncertified node {}",
+                        payload.node_id
+                    ))
+                })?;
+                if node.side_effect.is_some() {
+                    attempt_failures.insert(
+                        (
+                            event.seq(),
+                            payload.node_id.clone(),
+                            payload.attempt_id.clone(),
+                        ),
+                        payload.retryable,
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+    for (failure, side_effect_retryable) in &side_effect_failures {
+        match attempt_failures.get(failure) {
+            Some(attempt_retryable) if attempt_retryable == side_effect_retryable => {}
+            Some(_) => {
+                return Err(RuntimeError::InvalidRunStream(format!(
+                    "side-effect failure for node {} attempt {} disagrees with StateAttemptFailed retryability",
+                    failure.1, failure.2
+                )));
+            }
+            None => {
+                return Err(RuntimeError::InvalidRunStream(format!(
+                    "side-effect failure for node {} attempt {} lacks StateAttemptFailed in the same commit",
+                    failure.1, failure.2
+                )));
+            }
+        }
+    }
+    for failure in attempt_failures.keys() {
+        if !side_effect_failures.contains_key(failure) {
+            return Err(RuntimeError::InvalidRunStream(format!(
+                "side-effect attempt failure for node {} attempt {} lacks SideEffectFailed in the same commit",
+                failure.1, failure.2
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_recovery_frontier(
     runtime_spec: &CertifiedRuntimeSpec,
     projections: &store::ProjectionSnapshot,
 ) -> Result<()> {
     for node_id in runtime_spec.topological_order() {
         let node = runtime_spec.node(node_id).expect("topological node exists");
-        if node.side_effect.is_some() {
-            continue;
-        }
         if let Some(terminal) = projections.cell_terminal(&node.output_cell) {
-            validate_terminal_cell_has_completed_attempt(
+            let attempt_id = validate_terminal_cell_has_completed_attempt(
                 runtime_spec,
                 projections,
                 node,
                 terminal,
             )?;
+            if node.side_effect.is_some() {
+                validate_side_effect_terminal_evidence(projections, node, &attempt_id)?;
+            }
         }
         let mut started = None;
         for ((attempt_node_id, attempt_id), projection) in projections.attempts() {
@@ -2215,6 +2910,7 @@ fn validate_runner_output(
     attempt_id: &AttemptId,
     caps: &CertifiedRuntimeCapabilities,
     recorded_facts: &RecordedFacts,
+    projections: &store::ProjectionSnapshot,
     output: &ErasedRunnerOutput,
 ) -> Result<()> {
     if output.payloads.is_empty() {
@@ -2228,6 +2924,10 @@ fn validate_runner_output(
     let mut terminal_cell = false;
     let mut public_output_produced = false;
     let mut public_output_failed = false;
+    let mut side_effect_payload = false;
+    let mut side_effect_failed = false;
+    let mut attempt_failure_retryable = None;
+    let mut side_effect_failure_retryable = None;
     for payload in &output.payloads {
         if payload_spec_hash(payload) != *runtime_spec.spec_hash() {
             return Err(RuntimeError::InvalidRunnerOutput(format!(
@@ -2254,6 +2954,7 @@ fn validate_runner_output(
                         node.node_id
                     )));
                 }
+                attempt_failure_retryable = Some(payload.retryable);
                 failed = true;
             }
             events::KernelEventPayload::CellProduced(payload) => {
@@ -2364,12 +3065,68 @@ fn validate_runner_output(
             | events::KernelEventPayload::SideEffectConfirmationObserved(_)
             | events::KernelEventPayload::SideEffectAmbiguous(_)
             | events::KernelEventPayload::SideEffectFailed(_) => {
+                validate_runner_side_effect_payload(node, attempt_id, caps, projections, payload)?;
+                side_effect_payload = true;
+                if let events::KernelEventPayload::SideEffectFailed(payload) = payload {
+                    side_effect_failed = true;
+                    side_effect_failure_retryable = Some(payload.retryable);
+                }
+            }
+        }
+    }
+    if node.side_effect.is_some() {
+        validate_side_effect_resume_output(projections, node, attempt_id, &output.payloads)?;
+        if failed {
+            if !side_effect_failed {
                 return Err(RuntimeError::InvalidRunnerOutput(format!(
-                    "runner for node {} returned side-effect payload before the side-effect scheduler protocol is enabled",
+                    "side-effect node {} returned StateAttemptFailed without SideEffectFailed",
                     node.node_id
                 )));
             }
+            if side_effect_failure_retryable != attempt_failure_retryable {
+                return Err(RuntimeError::InvalidRunnerOutput(format!(
+                    "side-effect node {} returned inconsistent failure retryability",
+                    node.node_id
+                )));
+            }
+            if completed || terminal_cell || public_output_produced {
+                return Err(RuntimeError::InvalidRunnerOutput(format!(
+                    "runner for node {} mixed side-effect failure with successful terminal evidence",
+                    node.node_id
+                )));
+            }
+            return Ok(());
         }
+        if side_effect_failed {
+            return Err(RuntimeError::InvalidRunnerOutput(format!(
+                "side-effect node {} returned SideEffectFailed without StateAttemptFailed",
+                node.node_id
+            )));
+        }
+        if side_effect_payload {
+            if completed || terminal_cell || public_output_produced || public_output_failed {
+                return Err(RuntimeError::InvalidRunnerOutput(format!(
+                    "side-effect node {} mixed ledger phase events with terminal output evidence",
+                    node.node_id
+                )));
+            }
+            return Ok(());
+        }
+        if !completed || !terminal_cell {
+            return Err(RuntimeError::InvalidRunnerOutput(format!(
+                "side-effect node {} output commit must pair StateAttemptCompleted with terminal cell evidence",
+                node.node_id
+            )));
+        }
+        validate_side_effect_terminal_evidence(projections, node, attempt_id)
+            .map_err(|error| RuntimeError::InvalidRunnerOutput(error.to_string()))?;
+        if public_output_produced && !completed {
+            return Err(RuntimeError::InvalidRunnerOutput(format!(
+                "node {} projected public output without completing its certified output cell",
+                node.node_id
+            )));
+        }
+        return Ok(());
     }
     if failed && (completed || terminal_cell || public_output_produced) {
         return Err(RuntimeError::InvalidRunnerOutput(format!(
@@ -2395,6 +3152,168 @@ fn validate_runner_output(
             node.node_id
         )));
     }
+    Ok(())
+}
+
+fn validate_runner_side_effect_payload(
+    node: &spec::NodeSpec,
+    attempt_id: &AttemptId,
+    caps: &CertifiedRuntimeCapabilities,
+    projections: &store::ProjectionSnapshot,
+    payload: &events::KernelEventPayload,
+) -> Result<()> {
+    if node.side_effect.is_none() {
+        return Err(RuntimeError::InvalidRunnerOutput(format!(
+            "non-side-effect node {} returned side-effect payload",
+            node.node_id
+        )));
+    }
+    let (payload_node_id, payload_attempt_id, _, _) =
+        side_effect_payload_ref(payload).ok_or_else(|| {
+            RuntimeError::InvalidRunnerOutput("expected side-effect payload".to_owned())
+        })?;
+    require_attempt(node, attempt_id, payload_node_id, payload_attempt_id)?;
+    match payload {
+        events::KernelEventPayload::SideEffectIntentPersisted(payload) => {
+            if payload.scope_id != node.scope_id {
+                return Err(RuntimeError::InvalidRunnerOutput(format!(
+                    "side-effect node {} persisted intent for uncertified scope {}",
+                    node.node_id, payload.scope_id
+                )));
+            }
+            require_capability(
+                caps,
+                &payload.capability_kind,
+                &payload.capability_version,
+                &node.node_id,
+            )?;
+            require_adapter(node, &payload.adapter_kind, &payload.adapter_version)?;
+        }
+        events::KernelEventPayload::SideEffectClaimTakenOver(payload) => {
+            if payload.new_claim_owner == payload.previous_claim_owner {
+                return Err(RuntimeError::InvalidRunnerOutput(format!(
+                    "side-effect node {} takeover reused the previous claim owner",
+                    node.node_id
+                )));
+            }
+            if payload.claim_generation <= payload.previous_claim_generation {
+                return Err(RuntimeError::InvalidRunnerOutput(format!(
+                    "side-effect node {} takeover did not increase claim generation",
+                    node.node_id
+                )));
+            }
+            if let Some(projection) =
+                side_effect_projection_for_attempt(projections, node, attempt_id)?
+            {
+                let claim = projection.claim.as_ref().ok_or_else(|| {
+                    RuntimeError::InvalidRunnerOutput(format!(
+                        "side-effect node {} takeover requires an active claim",
+                        node.node_id
+                    ))
+                })?;
+                if payload.claim_fencing_token == claim.claim_fencing_token {
+                    return Err(RuntimeError::InvalidRunnerOutput(format!(
+                        "side-effect node {} takeover reused the previous fencing token",
+                        node.node_id
+                    )));
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn validate_side_effect_resume_output(
+    projections: &store::ProjectionSnapshot,
+    node: &spec::NodeSpec,
+    attempt_id: &AttemptId,
+    payloads: &[events::KernelEventPayload],
+) -> Result<()> {
+    let Some(projection) = side_effect_projection_for_attempt(projections, node, attempt_id)?
+    else {
+        return Ok(());
+    };
+    let has_takeover = payloads.iter().any(|payload| {
+        matches!(
+            payload,
+            events::KernelEventPayload::SideEffectClaimTakenOver(_)
+        )
+    });
+    let has_claim = payloads
+        .iter()
+        .any(|payload| matches!(payload, events::KernelEventPayload::SideEffectClaimed(_)));
+    let has_invocation_started = payloads.iter().any(|payload| {
+        matches!(
+            payload,
+            events::KernelEventPayload::SideEffectInvocationStarted(_)
+        )
+    });
+    let has_submission_recovery = payloads.iter().any(|payload| {
+        matches!(
+            payload,
+            events::KernelEventPayload::SideEffectNotSubmittedProven(_)
+                | events::KernelEventPayload::SideEffectSubmissionObserved(_)
+                | events::KernelEventPayload::SideEffectSubmissionUnknown(_)
+                | events::KernelEventPayload::SideEffectAmbiguous(_)
+        )
+    });
+
+    match projection.phase {
+        store::SideEffectPhase::Claimed { .. }
+        | store::SideEffectPhase::InvocationPrepared { .. } => {
+            if !has_takeover {
+                return Err(RuntimeError::InvalidRunnerOutput(format!(
+                    "side-effect node {} resumed pre-invocation ledger {} without claim takeover",
+                    node.node_id, projection.ledger_key
+                )));
+            }
+        }
+        store::SideEffectPhase::NotSubmittedProven { .. } => {
+            if !has_claim {
+                return Err(RuntimeError::InvalidRunnerOutput(format!(
+                    "side-effect node {} resumed not-submitted ledger {} without next-epoch claim",
+                    node.node_id, projection.ledger_key
+                )));
+            }
+        }
+        store::SideEffectPhase::InvocationStarted { .. }
+        | store::SideEffectPhase::SubmissionUnknown { .. } => {
+            if !has_submission_recovery {
+                return Err(RuntimeError::InvalidRunnerOutput(format!(
+                    "side-effect node {} resumed uncertain submission ledger {} without submission recovery evidence",
+                    node.node_id, projection.ledger_key
+                )));
+            }
+        }
+        store::SideEffectPhase::Ambiguous { .. } => {
+            return Err(RuntimeError::InvalidRunnerOutput(format!(
+                "side-effect node {} attempted to run ambiguous ledger {}",
+                node.node_id, projection.ledger_key
+            )));
+        }
+        store::SideEffectPhase::Failed { .. } => {
+            return Err(RuntimeError::InvalidRunnerOutput(format!(
+                "side-effect node {} attempted to run failed ledger {} on the same attempt",
+                node.node_id, projection.ledger_key
+            )));
+        }
+        store::SideEffectPhase::IntentPersisted { .. }
+        | store::SideEffectPhase::SubmissionObserved { .. }
+        | store::SideEffectPhase::ReceiptObserved { .. }
+        | store::SideEffectPhase::ConfirmationObserved { .. } => {}
+    }
+
+    if has_invocation_started
+        && matches!(projection.phase, store::SideEffectPhase::Claimed { .. })
+        && !has_takeover
+    {
+        return Err(RuntimeError::InvalidRunnerOutput(format!(
+            "side-effect node {} started invocation from stale claim without takeover",
+            node.node_id
+        )));
+    }
+
     Ok(())
 }
 
@@ -3614,6 +4533,617 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn side_effect_scheduler_commits_durable_ledger_phases_before_output() {
+        let fixture = fixture_with_first_side_effect_state();
+        let scheduler = SerialTypedScheduler::new(registered_side_effect_fixture_runners(&fixture));
+        let mut store = store::InMemoryTypedRunStore::new();
+        scheduler
+            .start_run(
+                &mut store,
+                &fixture.runtime_spec,
+                fixture.run_id.clone(),
+                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
+            )
+            .expect("start run");
+
+        for _ in 0..6 {
+            assert_eq!(
+                scheduler
+                    .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+                    .await
+                    .expect("drive side effect phase"),
+                SchedulerStatus::Advanced
+            );
+        }
+
+        assert!(store
+            .projection_snapshot()
+            .cell_terminal(&fixture.cell_a)
+            .is_some());
+        let node = node_by_output(&fixture, &fixture.cell_a);
+        let attempt_id = attempt_id(
+            &fixture.run_id,
+            fixture.runtime_spec.spec_hash(),
+            &node.node_id,
+            1,
+        )
+        .expect("attempt id");
+        let projection =
+            side_effect_projection_for_attempt(store.projection_snapshot(), node, &attempt_id)
+                .expect("projection lookup")
+                .expect("side-effect projection");
+        assert!(matches!(
+            projection.phase,
+            store::SideEffectPhase::ConfirmationObserved { .. }
+        ));
+        assert!(store
+            .load_run_stream(&fixture.run_id)
+            .iter()
+            .any(|event| matches!(
+                event.payload(),
+                events::KernelEventPayload::SideEffectClaimTakenOver(_)
+            )));
+        assert_eq!(
+            attempt_started_count(&store, &fixture.run_id, &node.node_id),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn side_effect_not_submitted_resume_claims_next_epoch() {
+        let fixture = fixture_with_first_side_effect_state();
+        let scheduler = SerialTypedScheduler::new(registered_side_effect_fixture_runners(&fixture));
+        let mut store = store::InMemoryTypedRunStore::new();
+        scheduler
+            .start_run(
+                &mut store,
+                &fixture.runtime_spec,
+                fixture.run_id.clone(),
+                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
+            )
+            .expect("start run");
+        scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("prepare side effect");
+        scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("take over and start invocation");
+
+        let node = node_by_output(&fixture, &fixture.cell_a);
+        let attempt_id = attempt_id(
+            &fixture.run_id,
+            fixture.runtime_spec.spec_hash(),
+            &node.node_id,
+            1,
+        )
+        .expect("attempt id");
+        append_not_submitted_proven(&mut store, &fixture, node, &attempt_id, 1);
+
+        scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("resume not-submitted");
+        let projection =
+            side_effect_projection_for_attempt(store.projection_snapshot(), node, &attempt_id)
+                .expect("projection lookup")
+                .expect("side-effect projection");
+        assert!(matches!(
+            projection.phase,
+            store::SideEffectPhase::InvocationStarted {
+                invocation_epoch: 2,
+                claim_generation: 3,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn side_effect_ambiguous_phase_blocks_resume() {
+        let fixture = fixture_with_first_side_effect_state();
+        let mut registry = ErasedRunnerRegistry::new();
+        registry
+            .register(binding(
+                fixture.descriptor_a.clone(),
+                "sidefx",
+                AmbiguousSideEffectRunner::new(&fixture),
+            ))
+            .expect("binding a");
+        registry
+            .register(binding(
+                fixture.descriptor_b.clone(),
+                "read",
+                RecordingRunner {
+                    expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
+                    output_artifact: artifact(0xb1),
+                    output_digest: content(0xb2),
+                },
+            ))
+            .expect("binding b");
+        let scheduler = SerialTypedScheduler::new(registry);
+        let mut store = store::InMemoryTypedRunStore::new();
+        scheduler
+            .start_run(
+                &mut store,
+                &fixture.runtime_spec,
+                fixture.run_id.clone(),
+                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
+            )
+            .expect("start run");
+
+        for _ in 0..3 {
+            assert_eq!(
+                scheduler
+                    .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+                    .await
+                    .expect("advance to ambiguity"),
+                SchedulerStatus::Advanced
+            );
+        }
+        assert_eq!(
+            scheduler
+                .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+                .await
+                .expect("ambiguous side effect blocks"),
+            SchedulerStatus::Blocked
+        );
+        assert!(store
+            .projection_snapshot()
+            .cell_terminal(&fixture.cell_a)
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn side_effect_ambiguity_blocks_independent_ready_nodes() {
+        let fixture = fixture_with_independent_second_node_and_first_side_effect_state();
+        let mut registry = ErasedRunnerRegistry::new();
+        registry
+            .register(binding(
+                fixture.descriptor_a.clone(),
+                "sidefx",
+                AmbiguousSideEffectRunner::new(&fixture),
+            ))
+            .expect("binding a");
+        registry
+            .register(binding(
+                fixture.descriptor_b.clone(),
+                "read",
+                RecordingRunner {
+                    expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
+                    output_artifact: artifact(0xb1),
+                    output_digest: content(0xb2),
+                },
+            ))
+            .expect("binding b");
+        let scheduler = SerialTypedScheduler::new(registry);
+        let mut store = store::InMemoryTypedRunStore::new();
+        scheduler
+            .start_run(
+                &mut store,
+                &fixture.runtime_spec,
+                fixture.run_id.clone(),
+                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
+            )
+            .expect("start run");
+
+        for _ in 0..3 {
+            scheduler
+                .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+                .await
+                .expect("advance to ambiguity");
+        }
+        assert_eq!(
+            scheduler
+                .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+                .await
+                .expect("ambiguity blocks independent node"),
+            SchedulerStatus::Blocked
+        );
+        assert!(store
+            .projection_snapshot()
+            .cell_terminal(&fixture.cell_b)
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn side_effect_output_before_confirmation_is_rejected() {
+        let fixture = fixture_with_first_side_effect_state();
+        let mut registry = ErasedRunnerRegistry::new();
+        registry
+            .register(binding(
+                fixture.descriptor_a.clone(),
+                "sidefx",
+                PrematureSideEffectOutputRunner {
+                    output_artifact: artifact(0xa1),
+                    output_digest: content(0xa2),
+                },
+            ))
+            .expect("binding a");
+        registry
+            .register(binding(
+                fixture.descriptor_b.clone(),
+                "read",
+                RecordingRunner {
+                    expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
+                    output_artifact: artifact(0xb1),
+                    output_digest: content(0xb2),
+                },
+            ))
+            .expect("binding b");
+        let scheduler = SerialTypedScheduler::new(registry);
+        let mut store = store::InMemoryTypedRunStore::new();
+        scheduler
+            .start_run(
+                &mut store,
+                &fixture.runtime_spec,
+                fixture.run_id.clone(),
+                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
+            )
+            .expect("start run");
+
+        assert!(matches!(
+            scheduler
+                .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+                .await,
+            Err(RuntimeError::InvalidRunnerOutput(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn side_effect_failure_retryability_must_match_attempt_failure() {
+        let fixture = fixture_with_first_side_effect_state();
+        let mut registry = ErasedRunnerRegistry::new();
+        registry
+            .register(binding(
+                fixture.descriptor_a.clone(),
+                "sidefx",
+                MismatchedSideEffectFailureRunner,
+            ))
+            .expect("binding a");
+        registry
+            .register(binding(
+                fixture.descriptor_b.clone(),
+                "read",
+                RecordingRunner {
+                    expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
+                    output_artifact: artifact(0xb1),
+                    output_digest: content(0xb2),
+                },
+            ))
+            .expect("binding b");
+        let scheduler = SerialTypedScheduler::new(registry);
+        let mut store = store::InMemoryTypedRunStore::new();
+        scheduler
+            .start_run(
+                &mut store,
+                &fixture.runtime_spec,
+                fixture.run_id.clone(),
+                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
+            )
+            .expect("start run");
+
+        assert!(matches!(
+            scheduler
+                .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+                .await,
+            Err(RuntimeError::InvalidRunnerOutput(_))
+        ));
+    }
+
+    struct DeterministicSideEffectRunner {
+        cap_kind: CapabilityKind,
+        cap_version: CapabilityVersion,
+        adapter_kind: AdapterKind,
+        adapter_version: AdapterVersion,
+        output_artifact: ArtifactId,
+        output_digest: ContentDigest,
+    }
+
+    impl DeterministicSideEffectRunner {
+        fn new(fixture: &Fixture) -> Self {
+            Self {
+                cap_kind: side_effect_capability_kind(),
+                cap_version: side_effect_capability_version(),
+                adapter_kind: fixture.adapter_kind.clone(),
+                adapter_version: fixture.adapter_version.clone(),
+                output_artifact: artifact(0xa1),
+                output_digest: content(0xa2),
+            }
+        }
+    }
+
+    impl ErasedNodeRunner for DeterministicSideEffectRunner {
+        fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
+            Box::pin(async move {
+                let ledger = side_effect_ledger_key(ctx.attempt_no);
+                let phase =
+                    side_effect_projection_for_attempt(ctx.projections, ctx.node, ctx.attempt_id)?;
+                match phase {
+                    None => self.prepare(ctx, ledger),
+                    Some(projection)
+                        if matches!(
+                            projection.phase,
+                            store::SideEffectPhase::Claimed { .. }
+                                | store::SideEffectPhase::InvocationPrepared { .. }
+                        ) =>
+                    {
+                        let claim = projection.claim.as_ref().expect("claim projection");
+                        Ok(ErasedRunnerOutput::new(vec![
+                            side_effect_claim_taken_over(&ctx, ledger.clone(), claim, 2),
+                            side_effect_prepared(&ctx, ledger.clone(), 1, 2),
+                            side_effect_invocation_started(&ctx, ledger, 1, 2),
+                        ]))
+                    }
+                    Some(store::SideEffectProjection {
+                        phase:
+                            store::SideEffectPhase::InvocationStarted {
+                                invocation_epoch, ..
+                            }
+                            | store::SideEffectPhase::SubmissionUnknown { invocation_epoch },
+                        ..
+                    }) => {
+                        let artifact_id = artifact(0xc5);
+                        let digest = content(0xc4);
+                        Ok(ErasedRunnerOutput {
+                            required_artifacts: vec![side_effect_artifact(
+                                &ctx,
+                                artifact_id.clone(),
+                                digest.clone(),
+                                events::ArtifactRole::Submission,
+                            )],
+                            payloads: vec![side_effect_submission_observed(
+                                &ctx,
+                                ledger,
+                                *invocation_epoch,
+                                artifact_id,
+                                digest,
+                            )],
+                        })
+                    }
+                    Some(store::SideEffectProjection {
+                        phase: store::SideEffectPhase::NotSubmittedProven { invocation_epoch },
+                        claim,
+                        ..
+                    }) => {
+                        let claim = claim.as_ref().expect("claim projection");
+                        let next_epoch = invocation_epoch + 1;
+                        let next_generation = claim.claim_generation + 1;
+                        Ok(ErasedRunnerOutput::new(vec![
+                            side_effect_claimed(&ctx, ledger.clone(), next_epoch, next_generation),
+                            side_effect_prepared(&ctx, ledger.clone(), next_epoch, next_generation),
+                            side_effect_invocation_started(
+                                &ctx,
+                                ledger,
+                                next_epoch,
+                                next_generation,
+                            ),
+                        ]))
+                    }
+                    Some(store::SideEffectProjection {
+                        phase: store::SideEffectPhase::SubmissionObserved { invocation_epoch },
+                        ..
+                    }) => {
+                        let artifact_id = artifact(0xc7);
+                        let digest = content(0xc6);
+                        Ok(ErasedRunnerOutput {
+                            required_artifacts: vec![side_effect_artifact(
+                                &ctx,
+                                artifact_id.clone(),
+                                digest.clone(),
+                                events::ArtifactRole::Receipt,
+                            )],
+                            payloads: vec![side_effect_receipt_observed(
+                                &ctx,
+                                ledger,
+                                *invocation_epoch,
+                                artifact_id,
+                                digest,
+                            )],
+                        })
+                    }
+                    Some(store::SideEffectProjection {
+                        phase: store::SideEffectPhase::ReceiptObserved { invocation_epoch },
+                        ..
+                    }) => {
+                        let artifact_id = artifact(0xc9);
+                        let digest = content(0xc8);
+                        Ok(ErasedRunnerOutput {
+                            required_artifacts: vec![side_effect_artifact(
+                                &ctx,
+                                artifact_id.clone(),
+                                digest.clone(),
+                                events::ArtifactRole::Confirmation,
+                            )],
+                            payloads: vec![side_effect_confirmation_observed(
+                                &ctx,
+                                ledger,
+                                *invocation_epoch,
+                                artifact_id,
+                                digest,
+                            )],
+                        })
+                    }
+                    Some(store::SideEffectProjection {
+                        phase: store::SideEffectPhase::ConfirmationObserved { .. },
+                        ..
+                    }) => {
+                        let artifact = state_output_artifact(
+                            ctx.node,
+                            ctx.descriptor,
+                            self.output_artifact.clone(),
+                            self.output_digest.clone(),
+                        );
+                        Ok(ErasedRunnerOutput {
+                            required_artifacts: vec![artifact],
+                            payloads: terminal_payloads(
+                                &ctx,
+                                self.output_artifact.clone(),
+                                self.output_digest.clone(),
+                            ),
+                        })
+                    }
+                    Some(_) => Err(RuntimeError::Blocked(
+                        "side-effect fixture blocked".to_owned(),
+                    )),
+                }
+            })
+        }
+    }
+
+    impl DeterministicSideEffectRunner {
+        fn prepare(
+            &self,
+            ctx: ErasedRunCtx<'_>,
+            ledger: events::SideEffectLedgerKey,
+        ) -> Result<ErasedRunnerOutput> {
+            assert!(ctx.caps.contains(&self.cap_kind, &self.cap_version));
+            let intent_artifact_id = artifact(0xc2);
+            let intent_hash = content(0xc1);
+            Ok(ErasedRunnerOutput {
+                required_artifacts: vec![side_effect_artifact(
+                    &ctx,
+                    intent_artifact_id.clone(),
+                    intent_hash.clone(),
+                    events::ArtifactRole::SideEffectIntent,
+                )],
+                payloads: vec![
+                    events::KernelEventPayload::SideEffectIntentPersisted(
+                        events::side_effect::IntentPersisted {
+                            spec_hash: ctx.spec_hash.clone(),
+                            node_id: ctx.node.node_id.clone(),
+                            scope_id: ctx.node.scope_id.clone(),
+                            attempt_id: ctx.attempt_id.clone(),
+                            ledger_key: ledger.clone(),
+                            invocation_epoch: 1,
+                            intent_schema_id: ctx.node.config_ref.schema_id.clone(),
+                            intent_hash,
+                            intent_artifact_id,
+                            idempotency_input_schema_id: ctx.node.config_ref.schema_id.clone(),
+                            idempotency_input_hash: content(0xc3),
+                            idempotency_key: events::IdempotencyKeyRef::new("idem-1")
+                                .expect("idempotency key"),
+                            capability_kind: self.cap_kind.clone(),
+                            capability_version: self.cap_version.clone(),
+                            adapter_kind: self.adapter_kind.clone(),
+                            adapter_version: self.adapter_version.clone(),
+                        },
+                    ),
+                    side_effect_claimed(&ctx, ledger.clone(), 1, 1),
+                    side_effect_prepared(&ctx, ledger, 1, 1),
+                ],
+            })
+        }
+    }
+
+    struct AmbiguousSideEffectRunner {
+        inner: DeterministicSideEffectRunner,
+    }
+
+    impl AmbiguousSideEffectRunner {
+        fn new(fixture: &Fixture) -> Self {
+            Self {
+                inner: DeterministicSideEffectRunner::new(fixture),
+            }
+        }
+    }
+
+    impl ErasedNodeRunner for AmbiguousSideEffectRunner {
+        fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
+            Box::pin(async move {
+                let ledger = side_effect_ledger_key(ctx.attempt_no);
+                let phase =
+                    side_effect_projection_for_attempt(ctx.projections, ctx.node, ctx.attempt_id)?;
+                if matches!(
+                    phase.map(|projection| &projection.phase),
+                    Some(store::SideEffectPhase::InvocationStarted { .. })
+                ) {
+                    let artifact_id = artifact(0xcb);
+                    let digest = content(0xca);
+                    Ok(ErasedRunnerOutput {
+                        required_artifacts: vec![side_effect_artifact(
+                            &ctx,
+                            artifact_id.clone(),
+                            digest.clone(),
+                            events::ArtifactRole::AmbiguityEvidence,
+                        )],
+                        payloads: vec![events::KernelEventPayload::SideEffectAmbiguous(
+                            events::side_effect::Ambiguous {
+                                spec_hash: ctx.spec_hash.clone(),
+                                node_id: ctx.node.node_id.clone(),
+                                attempt_id: ctx.attempt_id.clone(),
+                                ledger_key: ledger,
+                                invocation_epoch: 1,
+                                ambiguity_code: events::AmbiguityCode::new("unknown_submission")
+                                    .expect("ambiguity code"),
+                                evidence_schema_id: ctx.node.config_ref.schema_id.clone(),
+                                evidence_hash: digest,
+                                evidence_artifact_id: artifact_id,
+                            },
+                        )],
+                    })
+                } else {
+                    self.inner.run_erased(ctx).await
+                }
+            })
+        }
+    }
+
+    struct PrematureSideEffectOutputRunner {
+        output_artifact: ArtifactId,
+        output_digest: ContentDigest,
+    }
+
+    impl ErasedNodeRunner for PrematureSideEffectOutputRunner {
+        fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
+            Box::pin(async move {
+                let artifact = state_output_artifact(
+                    ctx.node,
+                    ctx.descriptor,
+                    self.output_artifact.clone(),
+                    self.output_digest.clone(),
+                );
+                Ok(ErasedRunnerOutput {
+                    required_artifacts: vec![artifact],
+                    payloads: terminal_payloads(
+                        &ctx,
+                        self.output_artifact.clone(),
+                        self.output_digest.clone(),
+                    ),
+                })
+            })
+        }
+    }
+
+    struct MismatchedSideEffectFailureRunner;
+
+    impl ErasedNodeRunner for MismatchedSideEffectFailureRunner {
+        fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
+            Box::pin(async move {
+                Ok(ErasedRunnerOutput::new(vec![
+                    events::KernelEventPayload::SideEffectFailed(events::side_effect::Failed {
+                        spec_hash: ctx.spec_hash.clone(),
+                        node_id: ctx.node.node_id.clone(),
+                        attempt_id: ctx.attempt_id.clone(),
+                        ledger_key: side_effect_ledger_key(ctx.attempt_no),
+                        invocation_epoch: 1,
+                        failure_phase: events::side_effect::FailurePhase::BeforeInvocationStarted,
+                        retryable: false,
+                        error: side_effect_error(false),
+                    }),
+                    events::KernelEventPayload::StateAttemptFailed(events::StateAttemptFailed {
+                        spec_hash: ctx.spec_hash.clone(),
+                        node_id: ctx.node.node_id.clone(),
+                        attempt_id: ctx.attempt_id.clone(),
+                        retryable: true,
+                        error: side_effect_error(true),
+                    }),
+                ]))
+            })
+        }
+    }
+
     struct ReadOnlyCorruptStore {
         stream: Vec<store::KernelEventEnvelope>,
         projection: store::ProjectionSnapshot,
@@ -3946,6 +5476,64 @@ mod tests {
             .expect("append terminal");
     }
 
+    fn append_not_submitted_proven(
+        store: &mut store::InMemoryTypedRunStore,
+        fixture: &Fixture,
+        node: &spec::NodeSpec,
+        attempt_id: &AttemptId,
+        invocation_epoch: u32,
+    ) {
+        let proof_artifact = artifact(0xd5);
+        let proof_hash = content(0xd6);
+        let evidence = store::ArtifactEvidenceRef {
+            artifact_id: proof_artifact.clone(),
+            digest: proof_hash.clone(),
+            byte_len: 19,
+            media_type: spec::MediaType::new("application/json").expect("media"),
+            schema_id: Some(node.config_ref.schema_id.clone()),
+            semantic_type_id: None,
+            producer_node_id: Some(node.node_id.clone()),
+            producer_seed_id: None,
+            artifact_role: events::ArtifactRole::NotSubmittedProof,
+        };
+        store
+            .record_artifact_evidence(evidence.clone())
+            .expect("record proof artifact");
+        store
+            .append_typed_run_commit(store::TypedCommitRequest {
+                run_id: fixture.run_id.clone(),
+                expected_next_seq: store.expected_next_seq(&fixture.run_id),
+                commit_key: store::CommitKey::new(format!(
+                    "manual-not-submitted:{}:{}",
+                    node.node_id, attempt_id
+                ))
+                .expect("commit key"),
+                payloads: vec![events::KernelEventPayload::SideEffectNotSubmittedProven(
+                    events::side_effect::NotSubmittedProven {
+                        spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                        node_id: node.node_id.clone(),
+                        attempt_id: attempt_id.clone(),
+                        ledger_key: side_effect_ledger_key(1),
+                        invocation_epoch,
+                        proof_schema_id: node.config_ref.schema_id.clone(),
+                        proof_hash,
+                        proof_artifact_id: proof_artifact,
+                    },
+                )],
+                required_artifacts: vec![evidence],
+                preconditions: store::CommitPreconditions {
+                    required_run_state: store::RequiredRunState::NotCompleted,
+                    required_present_logical_keys: vec![store::LogicalEventKey::new(format!(
+                        "attempt:{}:{}",
+                        node.node_id, attempt_id
+                    ))
+                    .expect("attempt logical key")],
+                    ..store::CommitPreconditions::default()
+                },
+            })
+            .expect("append not-submitted proof");
+    }
+
     fn attempt_started_count(
         store: &store::InMemoryTypedRunStore,
         run_id: &RunId,
@@ -3997,6 +5585,29 @@ mod tests {
                     output_artifact: artifact(0xa1),
                     output_digest: content(0xa2),
                 },
+            ))
+            .expect("binding a");
+        registry
+            .register(binding(
+                fixture.descriptor_b.clone(),
+                "read",
+                RecordingRunner {
+                    expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
+                    output_artifact: artifact(0xb1),
+                    output_digest: content(0xb2),
+                },
+            ))
+            .expect("binding b");
+        registry
+    }
+
+    fn registered_side_effect_fixture_runners(fixture: &Fixture) -> ErasedRunnerRegistry {
+        let mut registry = ErasedRunnerRegistry::new();
+        registry
+            .register(binding(
+                fixture.descriptor_a.clone(),
+                "sidefx",
+                DeterministicSideEffectRunner::new(fixture),
             ))
             .expect("binding a");
         registry
@@ -4369,6 +5980,97 @@ mod tests {
         fixture
     }
 
+    fn fixture_with_first_side_effect_state() -> Fixture {
+        let mut fixture = fixture();
+        let mut envelope = fixture.runtime_spec.envelope().clone();
+        let side_effect =
+            EffectKind::new("mfm.test", "side-effect", DigestAlgorithm::Sha256JcsV1, D8)
+                .expect("side-effect");
+        let side_effect_cap = CapabilityDescriptor::new(
+            side_effect_capability_kind(),
+            side_effect_capability_version(),
+            CapabilityRole::ExternalMutationAuthority,
+            "external-mutation",
+        )
+        .expect("side-effect cap");
+        let side_effect_caps =
+            CapabilitySetDescriptor::new(vec![side_effect_cap]).expect("side-effect caps");
+        let contract_digest = content(0x88);
+        for node in &mut envelope.spec.nodes {
+            if node.descriptor_id == fixture.descriptor_a {
+                node.effect_kind = side_effect.clone();
+                node.capability_bindings = side_effect_caps.clone();
+                node.adapter_bindings = vec![spec::AdapterBinding {
+                    adapter_kind: fixture.adapter_kind.clone(),
+                    adapter_version: fixture.adapter_version.clone(),
+                    binding_digest: None,
+                }];
+                node.side_effect = Some(spec::SideEffectContractSpec {
+                    contract_digest: contract_digest.clone(),
+                });
+            }
+        }
+        for descriptor in &mut envelope.spec.descriptor_identities {
+            if let spec::DescriptorIdentity::State(identity) = descriptor {
+                if identity.descriptor_id == fixture.descriptor_a {
+                    identity.effect_kind = side_effect.clone();
+                    identity.effect_class = "sidefx".to_owned();
+                    identity.effect_name = "sidefx".to_owned();
+                    identity.capabilities = side_effect_caps.clone();
+                    identity.runner = "sidefx".to_owned();
+                    identity.side_effect_contract_digest = Some(contract_digest.clone());
+                }
+            }
+        }
+        let envelope =
+            spec::CertifiedSpecEnvelope::new(envelope.spec, envelope.audit).expect("rehash");
+        fixture.runtime_spec = CertifiedRuntimeSpec::new(envelope).expect("runtime spec");
+        fixture
+    }
+
+    fn fixture_with_independent_second_node_and_first_side_effect_state() -> Fixture {
+        let mut fixture = fixture_with_first_side_effect_state();
+        let mut envelope = fixture.runtime_spec.envelope().clone();
+        let seed_cell = envelope
+            .spec
+            .cells
+            .iter()
+            .find(|cell| cell.cell_id == fixture.seed_ref.cell_id)
+            .expect("seed cell")
+            .clone();
+        let node_b_id = envelope
+            .spec
+            .nodes
+            .iter()
+            .find(|node| node.descriptor_id == fixture.descriptor_b)
+            .expect("node b")
+            .node_id
+            .clone();
+        for node in &mut envelope.spec.nodes {
+            if node.descriptor_id == fixture.descriptor_b {
+                node.input_bindings.root =
+                    spec::InputBindingNodeSpec::Cell(Box::new(spec::InputBindingCellSpec {
+                        field_path: spec::PublicFieldPath::new("input").expect("field"),
+                        cell_id: seed_cell.cell_id.clone(),
+                        semantic_type_id: seed_cell.semantic_type_id.clone(),
+                        schema_id: seed_cell.schema_id.clone(),
+                        required_terminal: spec::RequiredTerminal::ProducedOnly,
+                        value_lineage: seed_cell.value_lineage.clone(),
+                    }));
+                node.deterministic_predecessors.clear();
+            }
+        }
+        for lineage in &mut envelope.spec.value_lineages {
+            if lineage.producer == spec::CellProducer::Node(node_b_id.clone()) {
+                lineage.input_cells = vec![seed_cell.cell_id.clone()];
+            }
+        }
+        let envelope =
+            spec::CertifiedSpecEnvelope::new(envelope.spec, envelope.audit).expect("rehash");
+        fixture.runtime_spec = CertifiedRuntimeSpec::new(envelope).expect("runtime spec");
+        fixture
+    }
+
     struct NodeSpecFixture {
         node_id: NodeId,
         descriptor_id: DescriptorId,
@@ -4485,5 +6187,210 @@ mod tests {
             DigestAlgorithm::Sha256JcsV1,
             DigestBytes::from_array([byte; 32]),
         )
+    }
+
+    fn side_effect_capability_kind() -> CapabilityKind {
+        CapabilityKind::new(
+            "mfm.test",
+            "external-mutation",
+            DigestAlgorithm::Sha256JcsV1,
+            D9,
+        )
+        .expect("side-effect cap kind")
+    }
+
+    fn side_effect_capability_version() -> CapabilityVersion {
+        CapabilityVersion::new("mfm.cap.external_mutation.v1").expect("side-effect cap version")
+    }
+
+    fn side_effect_ledger_key(attempt_no: u32) -> events::SideEffectLedgerKey {
+        events::SideEffectLedgerKey::new(format!("ledger-{attempt_no}")).expect("ledger key")
+    }
+
+    fn side_effect_claim_owner(attempt_no: u32, generation: u32) -> events::RunnerInvocationId {
+        events::RunnerInvocationId::new(format!("owner-{attempt_no}-{generation}"))
+            .expect("claim owner")
+    }
+
+    fn side_effect_fencing_token(
+        attempt_no: u32,
+        generation: u32,
+    ) -> events::side_effect::ClaimFencingToken {
+        events::side_effect::ClaimFencingToken::new(format!("token-{attempt_no}-{generation}"))
+            .expect("fencing token")
+    }
+
+    fn side_effect_artifact(
+        ctx: &ErasedRunCtx<'_>,
+        artifact_id: ArtifactId,
+        digest: ContentDigest,
+        role: events::ArtifactRole,
+    ) -> store::ArtifactEvidenceRef {
+        store::ArtifactEvidenceRef {
+            artifact_id,
+            digest,
+            byte_len: 19,
+            media_type: spec::MediaType::new("application/json").expect("media"),
+            schema_id: Some(ctx.node.config_ref.schema_id.clone()),
+            semantic_type_id: None,
+            producer_node_id: Some(ctx.node.node_id.clone()),
+            producer_seed_id: None,
+            artifact_role: role,
+        }
+    }
+
+    fn side_effect_claimed(
+        ctx: &ErasedRunCtx<'_>,
+        ledger: events::SideEffectLedgerKey,
+        invocation_epoch: u32,
+        claim_generation: u32,
+    ) -> events::KernelEventPayload {
+        events::KernelEventPayload::SideEffectClaimed(events::side_effect::Claimed {
+            spec_hash: ctx.spec_hash.clone(),
+            node_id: ctx.node.node_id.clone(),
+            attempt_id: ctx.attempt_id.clone(),
+            ledger_key: ledger,
+            claim_owner: side_effect_claim_owner(ctx.attempt_no, claim_generation),
+            invocation_epoch,
+            claim_generation,
+            claim_fencing_token: side_effect_fencing_token(ctx.attempt_no, claim_generation),
+        })
+    }
+
+    fn side_effect_claim_taken_over(
+        ctx: &ErasedRunCtx<'_>,
+        ledger: events::SideEffectLedgerKey,
+        previous: &store::SideEffectClaimProjection,
+        claim_generation: u32,
+    ) -> events::KernelEventPayload {
+        events::KernelEventPayload::SideEffectClaimTakenOver(events::side_effect::ClaimTakenOver {
+            spec_hash: ctx.spec_hash.clone(),
+            node_id: ctx.node.node_id.clone(),
+            attempt_id: ctx.attempt_id.clone(),
+            ledger_key: ledger,
+            previous_claim_owner: previous.claim_owner.clone(),
+            new_claim_owner: side_effect_claim_owner(ctx.attempt_no, claim_generation),
+            invocation_epoch: previous.invocation_epoch,
+            previous_claim_generation: previous.claim_generation,
+            claim_generation,
+            claim_fencing_token: side_effect_fencing_token(ctx.attempt_no, claim_generation),
+        })
+    }
+
+    fn side_effect_prepared(
+        ctx: &ErasedRunCtx<'_>,
+        ledger: events::SideEffectLedgerKey,
+        invocation_epoch: u32,
+        claim_generation: u32,
+    ) -> events::KernelEventPayload {
+        events::KernelEventPayload::SideEffectInvocationPrepared(
+            events::side_effect::InvocationPrepared {
+                spec_hash: ctx.spec_hash.clone(),
+                node_id: ctx.node.node_id.clone(),
+                attempt_id: ctx.attempt_id.clone(),
+                ledger_key: ledger,
+                invocation_epoch,
+                claim_generation,
+                claim_fencing_token: side_effect_fencing_token(ctx.attempt_no, claim_generation),
+                prepared_artifact_id: None,
+                prepared_hash: None,
+            },
+        )
+    }
+
+    fn side_effect_invocation_started(
+        ctx: &ErasedRunCtx<'_>,
+        ledger: events::SideEffectLedgerKey,
+        invocation_epoch: u32,
+        claim_generation: u32,
+    ) -> events::KernelEventPayload {
+        events::KernelEventPayload::SideEffectInvocationStarted(
+            events::side_effect::InvocationStarted {
+                spec_hash: ctx.spec_hash.clone(),
+                node_id: ctx.node.node_id.clone(),
+                attempt_id: ctx.attempt_id.clone(),
+                ledger_key: ledger,
+                invocation_epoch,
+                claim_owner: side_effect_claim_owner(ctx.attempt_no, claim_generation),
+                claim_generation,
+                claim_fencing_token: side_effect_fencing_token(ctx.attempt_no, claim_generation),
+            },
+        )
+    }
+
+    fn side_effect_submission_observed(
+        ctx: &ErasedRunCtx<'_>,
+        ledger: events::SideEffectLedgerKey,
+        invocation_epoch: u32,
+        artifact_id: ArtifactId,
+        digest: ContentDigest,
+    ) -> events::KernelEventPayload {
+        events::KernelEventPayload::SideEffectSubmissionObserved(
+            events::side_effect::SubmissionObserved {
+                spec_hash: ctx.spec_hash.clone(),
+                node_id: ctx.node.node_id.clone(),
+                attempt_id: ctx.attempt_id.clone(),
+                ledger_key: ledger,
+                invocation_epoch,
+                submission_schema_id: ctx.node.config_ref.schema_id.clone(),
+                submission_hash: digest,
+                submission_artifact_id: artifact_id,
+            },
+        )
+    }
+
+    fn side_effect_receipt_observed(
+        ctx: &ErasedRunCtx<'_>,
+        ledger: events::SideEffectLedgerKey,
+        invocation_epoch: u32,
+        artifact_id: ArtifactId,
+        digest: ContentDigest,
+    ) -> events::KernelEventPayload {
+        events::KernelEventPayload::SideEffectReceiptObserved(
+            events::side_effect::ReceiptObserved {
+                spec_hash: ctx.spec_hash.clone(),
+                node_id: ctx.node.node_id.clone(),
+                attempt_id: ctx.attempt_id.clone(),
+                ledger_key: ledger,
+                invocation_epoch,
+                receipt_schema_id: ctx.node.config_ref.schema_id.clone(),
+                receipt_hash: digest,
+                receipt_artifact_id: artifact_id,
+                replay_verifier_id: events::ReplayVerifierId::new("verifier-1").expect("verifier"),
+            },
+        )
+    }
+
+    fn side_effect_confirmation_observed(
+        ctx: &ErasedRunCtx<'_>,
+        ledger: events::SideEffectLedgerKey,
+        invocation_epoch: u32,
+        artifact_id: ArtifactId,
+        digest: ContentDigest,
+    ) -> events::KernelEventPayload {
+        events::KernelEventPayload::SideEffectConfirmationObserved(
+            events::side_effect::ConfirmationObserved {
+                spec_hash: ctx.spec_hash.clone(),
+                node_id: ctx.node.node_id.clone(),
+                attempt_id: ctx.attempt_id.clone(),
+                ledger_key: ledger,
+                invocation_epoch,
+                confirmation_schema_id: ctx.node.config_ref.schema_id.clone(),
+                confirmation_hash: digest,
+                confirmation_artifact_id: artifact_id,
+                replay_verifier_id: events::ReplayVerifierId::new("verifier-1").expect("verifier"),
+            },
+        )
+    }
+
+    fn side_effect_error(retryable: bool) -> events::MfmErrorInfo {
+        events::MfmErrorInfo {
+            code: events::ErrorCode::new("sidefx_failed").expect("error code"),
+            category: events::ErrorCategory::SideEffect,
+            retryable,
+            safe_message: "side-effect failed".to_owned(),
+            public_details: None,
+            diagnostic_ref: None,
+        }
     }
 }

@@ -1638,6 +1638,7 @@ pub mod v1 {
 
         validate_payload_run_and_spec(&request.run_id, &request.payloads)?;
         validate_terminal_attempt_cell_pairs(&request.payloads)?;
+        validate_side_effect_attempt_failure_pairs(&request.payloads)?;
 
         let verifier = InMemoryTypedRunStore {
             streams: BTreeMap::new(),
@@ -2023,6 +2024,48 @@ pub mod v1 {
         Ok(())
     }
 
+    fn validate_side_effect_attempt_failure_pairs(payloads: &[KernelEventPayload]) -> Result<()> {
+        let mut side_effect_failures = BTreeMap::new();
+        let mut attempt_failures = BTreeMap::new();
+        for payload in payloads {
+            match payload {
+                KernelEventPayload::SideEffectFailed(payload) => {
+                    side_effect_failures.insert(
+                        (payload.node_id.clone(), payload.attempt_id.clone()),
+                        payload.retryable,
+                    );
+                }
+                KernelEventPayload::StateAttemptFailed(payload) => {
+                    attempt_failures.insert(
+                        (payload.node_id.clone(), payload.attempt_id.clone()),
+                        payload.retryable,
+                    );
+                }
+                _ => {}
+            }
+        }
+        for (key, side_effect_retryable) in &side_effect_failures {
+            match attempt_failures.get(key) {
+                Some(attempt_retryable) if attempt_retryable == side_effect_retryable => {}
+                Some(_) => {
+                    return Err(StoreError::ProjectionConflict {
+                        key: format!("sidefx:{}:{}:failure", key.0, key.1),
+                        message: "side-effect failure retryability must match attempt failure"
+                            .to_owned(),
+                    });
+                }
+                None => {
+                    return Err(StoreError::ProjectionConflict {
+                        key: format!("sidefx:{}:{}:failure", key.0, key.1),
+                        message: "side-effect failure requires matching StateAttemptFailed in same commit"
+                            .to_owned(),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn payload_run_id(payload: &KernelEventPayload) -> Option<RunId> {
         match payload {
             KernelEventPayload::RunStarted(payload) => Some(payload.run_id.clone()),
@@ -2158,8 +2201,8 @@ pub mod v1 {
                 payload.ledger_key, payload.invocation_epoch, payload.claim_generation
             ),
             KernelEventPayload::SideEffectInvocationPrepared(payload) => format!(
-                "sidefx:{}:invocation:{}:prepared",
-                payload.ledger_key, payload.invocation_epoch
+                "sidefx:{}:invocation:{}:prepared:{}",
+                payload.ledger_key, payload.invocation_epoch, payload.claim_generation
             ),
             KernelEventPayload::SideEffectInvocationStarted(payload) => format!(
                 "sidefx:{}:invocation:{}:started",
@@ -2641,6 +2684,12 @@ pub mod v1 {
                 );
             }
             KernelEventPayload::SideEffectIntentPersisted(payload) => {
+                require_active_attempt_for_side_effect(
+                    projections,
+                    &payload.node_id,
+                    &payload.attempt_id,
+                    &payload.ledger_key,
+                )?;
                 if projections.side_effects.contains_key(&payload.ledger_key) {
                     return Err(side_effect_projection_error(
                         &payload.ledger_key,
@@ -2677,20 +2726,73 @@ pub mod v1 {
                 );
             }
             KernelEventPayload::SideEffectClaimed(payload) => {
+                require_active_attempt_for_side_effect(
+                    projections,
+                    &payload.node_id,
+                    &payload.attempt_id,
+                    &payload.ledger_key,
+                )?;
                 let previous = require_side_effect_phase(
                     projections,
                     &payload.ledger_key,
-                    "intent",
+                    "intent or not-submitted",
                     |projection| {
-                        matches!(projection.phase, SideEffectPhase::IntentPersisted { .. })
+                        matches!(
+                            projection.phase,
+                            SideEffectPhase::IntentPersisted { .. }
+                                | SideEffectPhase::NotSubmittedProven { .. }
+                        )
                     },
                 )?;
-                require_intent_context(
-                    previous,
-                    &payload.node_id,
-                    &payload.attempt_id,
-                    payload.invocation_epoch,
-                )?;
+                match previous.phase {
+                    SideEffectPhase::IntentPersisted { invocation_epoch } => {
+                        if payload.invocation_epoch != invocation_epoch {
+                            return Err(side_effect_projection_error(
+                                &payload.ledger_key,
+                                "initial claim invocation epoch does not match intent",
+                            ));
+                        }
+                        require_intent_context(
+                            previous,
+                            &payload.node_id,
+                            &payload.attempt_id,
+                            payload.invocation_epoch,
+                        )?;
+                    }
+                    SideEffectPhase::NotSubmittedProven { invocation_epoch } => {
+                        require_intent_attempt_context(
+                            previous,
+                            &payload.node_id,
+                            &payload.attempt_id,
+                        )?;
+                        let previous_claim = previous_claim(previous, &payload.ledger_key)?;
+                        if payload.claim_generation <= previous_claim.claim_generation {
+                            return Err(side_effect_projection_error(
+                                &payload.ledger_key,
+                                "retry claim generation must increase",
+                            ));
+                        }
+                        if payload.claim_fencing_token == previous_claim.claim_fencing_token {
+                            return Err(side_effect_projection_error(
+                                &payload.ledger_key,
+                                "retry claim fencing token must change",
+                            ));
+                        }
+                        let next_epoch = invocation_epoch.checked_add(1).ok_or_else(|| {
+                            side_effect_projection_error(
+                                &payload.ledger_key,
+                                "invocation epoch overflow",
+                            )
+                        })?;
+                        if payload.invocation_epoch != next_epoch {
+                            return Err(side_effect_projection_error(
+                                &payload.ledger_key,
+                                "retry claim must advance to the next invocation epoch",
+                            ));
+                        }
+                    }
+                    _ => unreachable!("phase predicate checked above"),
+                }
                 let intent = previous.intent.clone();
                 let claim = SideEffectClaimProjection {
                     node_id: payload.node_id.clone(),
@@ -2717,6 +2819,12 @@ pub mod v1 {
                 );
             }
             KernelEventPayload::SideEffectClaimTakenOver(payload) => {
+                require_active_attempt_for_side_effect(
+                    projections,
+                    &payload.node_id,
+                    &payload.attempt_id,
+                    &payload.ledger_key,
+                )?;
                 let previous = require_side_effect_phase(
                     projections,
                     &payload.ledger_key,
@@ -2757,6 +2865,12 @@ pub mod v1 {
                 );
             }
             KernelEventPayload::SideEffectInvocationPrepared(payload) => {
+                require_active_attempt_for_side_effect(
+                    projections,
+                    &payload.node_id,
+                    &payload.attempt_id,
+                    &payload.ledger_key,
+                )?;
                 let previous = require_side_effect_phase(
                     projections,
                     &payload.ledger_key,
@@ -2793,6 +2907,12 @@ pub mod v1 {
                 );
             }
             KernelEventPayload::SideEffectInvocationStarted(payload) => {
+                require_active_attempt_for_side_effect(
+                    projections,
+                    &payload.node_id,
+                    &payload.attempt_id,
+                    &payload.ledger_key,
+                )?;
                 let previous = require_side_effect_phase(
                     projections,
                     &payload.ledger_key,
@@ -2832,6 +2952,12 @@ pub mod v1 {
                 );
             }
             KernelEventPayload::SideEffectNotSubmittedProven(payload) => {
+                require_active_attempt_for_side_effect(
+                    projections,
+                    &payload.node_id,
+                    &payload.attempt_id,
+                    &payload.ledger_key,
+                )?;
                 transition_side_effect_epoch_only(
                     projections,
                     EpochOnlyTransition {
@@ -2840,7 +2966,7 @@ pub mod v1 {
                         attempt_id: &payload.attempt_id,
                         event_id: envelope.event_id.clone(),
                         invocation_epoch: payload.invocation_epoch,
-                        required_previous: "started",
+                        required_previous: "submission_recovery",
                     },
                     |epoch| SideEffectPhase::NotSubmittedProven {
                         invocation_epoch: epoch,
@@ -2848,6 +2974,12 @@ pub mod v1 {
                 )?;
             }
             KernelEventPayload::SideEffectSubmissionObserved(payload) => {
+                require_active_attempt_for_side_effect(
+                    projections,
+                    &payload.node_id,
+                    &payload.attempt_id,
+                    &payload.ledger_key,
+                )?;
                 transition_side_effect_epoch_only(
                     projections,
                     EpochOnlyTransition {
@@ -2856,7 +2988,7 @@ pub mod v1 {
                         attempt_id: &payload.attempt_id,
                         event_id: envelope.event_id.clone(),
                         invocation_epoch: payload.invocation_epoch,
-                        required_previous: "started",
+                        required_previous: "submission_recovery",
                     },
                     |epoch| SideEffectPhase::SubmissionObserved {
                         invocation_epoch: epoch,
@@ -2864,6 +2996,12 @@ pub mod v1 {
                 )?;
             }
             KernelEventPayload::SideEffectSubmissionUnknown(payload) => {
+                require_active_attempt_for_side_effect(
+                    projections,
+                    &payload.node_id,
+                    &payload.attempt_id,
+                    &payload.ledger_key,
+                )?;
                 transition_side_effect_epoch_only(
                     projections,
                     EpochOnlyTransition {
@@ -2880,6 +3018,12 @@ pub mod v1 {
                 )?;
             }
             KernelEventPayload::SideEffectReceiptObserved(payload) => {
+                require_active_attempt_for_side_effect(
+                    projections,
+                    &payload.node_id,
+                    &payload.attempt_id,
+                    &payload.ledger_key,
+                )?;
                 transition_side_effect_epoch_only(
                     projections,
                     EpochOnlyTransition {
@@ -2896,6 +3040,12 @@ pub mod v1 {
                 )?;
             }
             KernelEventPayload::SideEffectConfirmationObserved(payload) => {
+                require_active_attempt_for_side_effect(
+                    projections,
+                    &payload.node_id,
+                    &payload.attempt_id,
+                    &payload.ledger_key,
+                )?;
                 transition_side_effect_epoch_only(
                     projections,
                     EpochOnlyTransition {
@@ -2912,6 +3062,12 @@ pub mod v1 {
                 )?;
             }
             KernelEventPayload::SideEffectAmbiguous(payload) => {
+                require_active_attempt_for_side_effect(
+                    projections,
+                    &payload.node_id,
+                    &payload.attempt_id,
+                    &payload.ledger_key,
+                )?;
                 transition_side_effect_epoch_only(
                     projections,
                     EpochOnlyTransition {
@@ -2920,7 +3076,7 @@ pub mod v1 {
                         attempt_id: &payload.attempt_id,
                         event_id: envelope.event_id.clone(),
                         invocation_epoch: payload.invocation_epoch,
-                        required_previous: "started",
+                        required_previous: "ambiguity_source",
                     },
                     |epoch| SideEffectPhase::Ambiguous {
                         invocation_epoch: epoch,
@@ -2928,6 +3084,12 @@ pub mod v1 {
                 )?;
             }
             KernelEventPayload::SideEffectFailed(payload) => {
+                require_active_attempt_for_side_effect(
+                    projections,
+                    &payload.node_id,
+                    &payload.attempt_id,
+                    &payload.ledger_key,
+                )?;
                 transition_side_effect_failure(projections, payload, envelope.event_id.clone())?;
             }
             KernelEventPayload::PublicOutputProduced(payload) => {
@@ -3126,6 +3288,28 @@ pub mod v1 {
         })
     }
 
+    fn require_active_attempt_for_side_effect(
+        projections: &ProjectionSnapshot,
+        node_id: &NodeId,
+        attempt_id: &AttemptId,
+        ledger_key: &events::SideEffectLedgerKey,
+    ) -> Result<()> {
+        match projections.attempt(node_id, attempt_id) {
+            Some(AttemptProjection {
+                status: AttemptStatus::Started { .. },
+                ..
+            }) => Ok(()),
+            Some(_) => Err(side_effect_projection_error(
+                ledger_key,
+                "side-effect event requires an active started attempt",
+            )),
+            None => Err(side_effect_projection_error(
+                ledger_key,
+                "side-effect event requires a started attempt",
+            )),
+        }
+    }
+
     fn require_intent_context(
         projection: &SideEffectProjection,
         node_id: &NodeId,
@@ -3149,6 +3333,27 @@ pub mod v1 {
             return Err(side_effect_projection_error(
                 ledger_key,
                 "invocation epoch does not match intent projection",
+            ));
+        }
+        Ok(())
+    }
+
+    fn require_intent_attempt_context(
+        projection: &SideEffectProjection,
+        node_id: &NodeId,
+        attempt_id: &AttemptId,
+    ) -> Result<()> {
+        let ledger_key = &projection.ledger_key;
+        if projection.intent.node_id != *node_id {
+            return Err(side_effect_projection_error(
+                ledger_key,
+                "node id does not match intent projection",
+            ));
+        }
+        if projection.intent.attempt_id != *attempt_id {
+            return Err(side_effect_projection_error(
+                ledger_key,
+                "attempt id does not match intent projection",
             ));
         }
         Ok(())
@@ -3244,6 +3449,12 @@ pub mod v1 {
                 "takeover claim generation must increase",
             ));
         }
+        if payload.claim_fencing_token == claim.claim_fencing_token {
+            return Err(side_effect_projection_error(
+                ledger_key,
+                "takeover claim fencing token must change",
+            ));
+        }
         if claim.invocation_epoch != payload.invocation_epoch {
             return Err(side_effect_projection_error(
                 ledger_key,
@@ -3256,9 +3467,21 @@ pub mod v1 {
     fn phase_matches_expected(phase: &SideEffectPhase, expected: &'static str) -> bool {
         match expected {
             "started" => matches!(phase, SideEffectPhase::InvocationStarted { .. }),
+            "submission_recovery" => matches!(
+                phase,
+                SideEffectPhase::InvocationStarted { .. }
+                    | SideEffectPhase::SubmissionUnknown { .. }
+            ),
             "submission_observed" => matches!(phase, SideEffectPhase::SubmissionObserved { .. }),
             "receipt" => matches!(phase, SideEffectPhase::ReceiptObserved { .. }),
             "not_submitted" => matches!(phase, SideEffectPhase::NotSubmittedProven { .. }),
+            "ambiguity_source" => matches!(
+                phase,
+                SideEffectPhase::InvocationStarted { .. }
+                    | SideEffectPhase::SubmissionUnknown { .. }
+                    | SideEffectPhase::SubmissionObserved { .. }
+                    | SideEffectPhase::ReceiptObserved { .. }
+            ),
             _ => false,
         }
     }
@@ -3327,33 +3550,44 @@ pub mod v1 {
                 ));
             };
             match payload.failure_phase {
-                side_effect::FailurePhase::BeforeInvocationStarted => {
-                    if !matches!(
-                        previous.phase,
-                        SideEffectPhase::IntentPersisted { .. }
-                            | SideEffectPhase::Claimed { .. }
-                            | SideEffectPhase::InvocationPrepared { .. }
-                    ) {
+                side_effect::FailurePhase::BeforeInvocationStarted => match previous.phase {
+                    SideEffectPhase::IntentPersisted { invocation_epoch } => {
+                        if payload.invocation_epoch != invocation_epoch {
+                            return Err(side_effect_projection_error(
+                                &payload.ledger_key,
+                                "failure invocation epoch does not match intent",
+                            ));
+                        }
+                        require_intent_context(
+                            previous,
+                            &payload.node_id,
+                            &payload.attempt_id,
+                            payload.invocation_epoch,
+                        )?;
+                    }
+                    SideEffectPhase::Claimed { .. }
+                    | SideEffectPhase::InvocationPrepared { .. } => {
+                        let claim = previous_claim(previous, &payload.ledger_key)?;
+                        require_claim_context(
+                            &payload.ledger_key,
+                            claim,
+                            ExpectedClaimContext {
+                                node_id: &payload.node_id,
+                                attempt_id: &payload.attempt_id,
+                                invocation_epoch: payload.invocation_epoch,
+                                claim_generation: claim.claim_generation,
+                                claim_fencing_token: &claim.claim_fencing_token,
+                                claim_owner: None,
+                            },
+                        )?;
+                    }
+                    _ => {
                         return Err(side_effect_projection_error(
                             &payload.ledger_key,
                             "before-start failure requires intent, claim, or prepared phase",
                         ));
                     }
-                    require_intent_context(
-                        previous,
-                        &payload.node_id,
-                        &payload.attempt_id,
-                        payload.invocation_epoch,
-                    )?;
-                    if let Some(claim) = &previous.claim {
-                        if claim.invocation_epoch != payload.invocation_epoch {
-                            return Err(side_effect_projection_error(
-                                &payload.ledger_key,
-                                "failure invocation epoch does not match active claim",
-                            ));
-                        }
-                    }
-                }
+                },
                 side_effect::FailurePhase::AfterNotSubmittedProven => {
                     if !phase_matches_expected(&previous.phase, "not_submitted") {
                         return Err(side_effect_projection_error(
