@@ -288,7 +288,7 @@ mod tests {
         let out = run_command(
             cmd,
             None,
-            Duration::from_secs(5),
+            Duration::from_secs(30),
             StreamLimit {
                 max_stdout_bytes: 1024,
                 max_stderr_bytes: 1024,

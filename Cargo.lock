@@ -1948,8 +1948,14 @@ name = "mfm-artifact-store-fs"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "mfm-canonical",
+ "mfm-events",
+ "mfm-ids",
  "mfm-machine",
  "mfm-machine-test-support",
+ "mfm-spec",
+ "mfm-store",
+ "serde_json",
  "tempfile",
  "tokio",
 ]

@@ -265,11 +265,11 @@ workflow ports, and deletion or hard isolation of old dynamic semantic APIs.
 
 ### Commit 23: `storage fs add typed artifact store`
 
-- [ ] Rewrite `crates/storages/artifact-store-fs` as the first certified local artifact store.
-- [ ] Store canonical bytes by digest and verify digest, byte length, media type, schema id,
+- [x] Rewrite `crates/storages/artifact-store-fs` as the first certified local artifact store.
+- [x] Store canonical bytes by digest and verify digest, byte length, media type, schema id,
       semantic id, producer node/seed, and artifact role.
-- [ ] Enforce seed material persistence and missing seed artifact rejection.
-- [ ] Validation: `nix run .#test`.
+- [x] Enforce seed material persistence and missing seed artifact rejection.
+- [x] Validation: `nix run .#test`.
 
 ### Commit 24: `kernel runtime add serial typed scheduler`
 

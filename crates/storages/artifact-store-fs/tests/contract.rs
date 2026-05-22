@@ -1,5 +1,16 @@
-use mfm_artifact_store_fs::FsArtifactStore;
+use mfm_artifact_store_fs::{
+    FsArtifactStore, FsTypedArtifactError, FsTypedArtifactStore, TypedArtifactDescriptor,
+};
+use mfm_canonical::sha256_digest_bytes;
+use mfm_events::v1::{ArtifactEvidenceRef as EventArtifactEvidenceRef, ArtifactRole, SeedCellRef};
+use mfm_ids::{
+    ArtifactId, CellId, ContentDigest, DigestAlgorithm, DigestBytes, NodeId, SchemaId, ScopeId,
+    SeedId, SemanticTypeId,
+};
 use mfm_machine_test_support::artifact_store_contract_tests;
+use mfm_spec::v1::MediaType;
+use mfm_store::v1::ArtifactEvidenceRef;
+use std::path::{Path, PathBuf};
 
 #[tokio::test]
 async fn artifact_store_fs_contract() {
@@ -7,4 +18,382 @@ async fn artifact_store_fs_contract() {
     let store = FsArtifactStore::new(dir.path());
 
     artifact_store_contract_tests(&store).await;
+}
+
+fn digest(byte: u8) -> DigestBytes {
+    DigestBytes::from_array([byte; 32])
+}
+
+fn content_digest(bytes: &[u8]) -> ContentDigest {
+    ContentDigest::from_digest(DigestAlgorithm::Sha256JcsV1, sha256_digest_bytes(bytes))
+}
+
+fn artifact_id(bytes: &[u8]) -> ArtifactId {
+    ArtifactId::from_digest(DigestAlgorithm::Sha256JcsV1, sha256_digest_bytes(bytes))
+}
+
+fn schema_id(name: &str, byte: u8) -> SchemaId {
+    SchemaId::new(name, "1", DigestAlgorithm::Sha256JcsV1, digest(byte)).expect("schema id")
+}
+
+fn semantic_id(name: &str, byte: u8) -> SemanticTypeId {
+    SemanticTypeId::new(
+        "mfm.test",
+        name,
+        "1",
+        DigestAlgorithm::Sha256JcsV1,
+        digest(byte),
+    )
+    .expect("semantic id")
+}
+
+fn node_id(byte: u8) -> NodeId {
+    NodeId::from_digest(DigestAlgorithm::Sha256JcsV1, digest(byte))
+}
+
+fn seed_id(byte: u8) -> SeedId {
+    SeedId::from_digest(DigestAlgorithm::Sha256JcsV1, digest(byte))
+}
+
+fn cell_id(byte: u8) -> CellId {
+    CellId::from_digest(DigestAlgorithm::Sha256JcsV1, digest(byte))
+}
+
+fn scope_id(byte: u8) -> ScopeId {
+    ScopeId::from_digest(DigestAlgorithm::Sha256JcsV1, digest(byte))
+}
+
+fn json_media_type() -> MediaType {
+    MediaType::new("application/json").expect("media type")
+}
+
+fn state_output_descriptor() -> TypedArtifactDescriptor {
+    TypedArtifactDescriptor {
+        media_type: json_media_type(),
+        schema_id: Some(schema_id("mfm.test.position", 1)),
+        semantic_type_id: Some(semantic_id("position", 2)),
+        producer_node_id: Some(node_id(3)),
+        producer_seed_id: None,
+        artifact_role: ArtifactRole::StateOutput,
+    }
+}
+
+fn seed_descriptor(seed_id: SeedId) -> TypedArtifactDescriptor {
+    TypedArtifactDescriptor {
+        media_type: json_media_type(),
+        schema_id: Some(schema_id("mfm.test.seed", 4)),
+        semantic_type_id: Some(semantic_id("seed", 5)),
+        producer_node_id: None,
+        producer_seed_id: Some(seed_id),
+        artifact_role: ArtifactRole::SeedInput,
+    }
+}
+
+fn typed_blob_path(root: &Path, artifact_id: &ArtifactId) -> PathBuf {
+    let digest = artifact_id.digest().to_string();
+    root.join("typed")
+        .join("blobs")
+        .join(&digest[0..2])
+        .join(artifact_id.as_str())
+}
+
+fn typed_metadata_path(root: &Path, artifact_id: &ArtifactId) -> PathBuf {
+    let digest = artifact_id.digest().to_string();
+    root.join("typed")
+        .join("metadata")
+        .join(&digest[0..2])
+        .join(format!("{}.json", artifact_id.as_str()))
+}
+
+async fn persisted_artifact_fixture() -> (
+    tempfile::TempDir,
+    FsTypedArtifactStore,
+    ArtifactEvidenceRef,
+    Vec<u8>,
+) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = FsTypedArtifactStore::new(dir.path());
+    let bytes = br#"{"amount":42}"#.to_vec();
+    let evidence = store
+        .put_artifact(bytes.clone(), state_output_descriptor())
+        .await
+        .expect("put typed artifact");
+    (dir, store, evidence, bytes)
+}
+
+#[tokio::test]
+async fn typed_artifact_store_persists_and_verifies_full_evidence() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = FsTypedArtifactStore::new(dir.path());
+    let bytes = br#"{"amount":1}"#.to_vec();
+
+    let evidence = store
+        .put_artifact(bytes.clone(), state_output_descriptor())
+        .await
+        .expect("put typed artifact");
+
+    assert_eq!(evidence.artifact_id, artifact_id(&bytes));
+    assert_eq!(evidence.digest, content_digest(&bytes));
+    assert_eq!(evidence.byte_len, bytes.len() as u64);
+    assert_eq!(evidence.artifact_role, ArtifactRole::StateOutput);
+    assert_eq!(store.get_artifact(&evidence).await.expect("get"), bytes);
+    assert!(store.has_artifact(&evidence).await.expect("exists"));
+}
+
+#[tokio::test]
+async fn typed_artifact_store_rejects_mismatched_evidence() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = FsTypedArtifactStore::new(dir.path());
+    let bytes = b"payload".to_vec();
+    let evidence = store
+        .put_artifact(bytes.clone(), state_output_descriptor())
+        .await
+        .expect("put typed artifact");
+
+    let mut wrong_len = evidence.clone();
+    wrong_len.byte_len += 1;
+    let error = store
+        .put_verified_artifact(bytes.clone(), wrong_len)
+        .await
+        .expect_err("byte length mismatch rejects");
+    assert!(matches!(
+        error,
+        FsTypedArtifactError::EvidenceMismatch {
+            field: "byte_len",
+            ..
+        }
+    ));
+
+    let mut wrong_schema = evidence.clone();
+    wrong_schema.schema_id = Some(schema_id("mfm.test.other", 9));
+    let error = store
+        .get_artifact(&wrong_schema)
+        .await
+        .expect_err("schema mismatch rejects");
+    assert!(matches!(
+        error,
+        FsTypedArtifactError::EvidenceMismatch {
+            field: "schema_id",
+            ..
+        }
+    ));
+
+    let mut wrong_role = evidence;
+    wrong_role.artifact_role = ArtifactRole::PublicOutput;
+    let error = store
+        .get_artifact(&wrong_role)
+        .await
+        .expect_err("role mismatch rejects");
+    assert!(matches!(
+        error,
+        FsTypedArtifactError::EvidenceMismatch {
+            field: "artifact_role",
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn typed_artifact_store_detects_persisted_tampering() {
+    let (dir, store, evidence, _) = persisted_artifact_fixture().await;
+    tokio::fs::write(
+        typed_blob_path(dir.path(), &evidence.artifact_id),
+        b"tampered",
+    )
+    .await
+    .expect("tamper bytes");
+    let error = store
+        .get_artifact(&evidence)
+        .await
+        .expect_err("corrupt bytes reject");
+    assert!(matches!(
+        error,
+        FsTypedArtifactError::EvidenceMismatch {
+            field: "content_digest",
+            ..
+        }
+    ));
+
+    let (dir, store, evidence, _) = persisted_artifact_fixture().await;
+    tokio::fs::remove_file(typed_metadata_path(dir.path(), &evidence.artifact_id))
+        .await
+        .expect("remove metadata");
+    let error = store
+        .get_artifact(&evidence)
+        .await
+        .expect_err("missing metadata rejects");
+    assert!(matches!(error, FsTypedArtifactError::NotFound { .. }));
+
+    let (dir, store, evidence, _) = persisted_artifact_fixture().await;
+    tokio::fs::remove_file(typed_blob_path(dir.path(), &evidence.artifact_id))
+        .await
+        .expect("remove bytes");
+    let error = store
+        .get_artifact(&evidence)
+        .await
+        .expect_err("missing bytes rejects");
+    assert!(matches!(error, FsTypedArtifactError::NotFound { .. }));
+
+    let (dir, store, evidence, _) = persisted_artifact_fixture().await;
+    tokio::fs::write(
+        typed_metadata_path(dir.path(), &evidence.artifact_id),
+        b"{not-json",
+    )
+    .await
+    .expect("tamper metadata");
+    let error = store
+        .get_artifact(&evidence)
+        .await
+        .expect_err("invalid metadata rejects");
+    assert!(matches!(error, FsTypedArtifactError::Corruption { .. }));
+}
+
+#[tokio::test]
+async fn typed_artifact_store_enforces_seed_material_persistence() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = FsTypedArtifactStore::new(dir.path());
+    let bytes = br#"{"seed":7}"#.to_vec();
+    let seed_id = seed_id(10);
+    let schema_id = schema_id("mfm.test.seed", 4);
+    let semantic_type_id = semantic_id("seed", 5);
+    let seed_ref = SeedCellRef {
+        seed_id: seed_id.clone(),
+        cell_id: cell_id(11),
+        scope_id: scope_id(12),
+        semantic_type_id: semantic_type_id.clone(),
+        schema_id: schema_id.clone(),
+        digest: content_digest(&bytes),
+        seed_artifact: EventArtifactEvidenceRef {
+            artifact_id: artifact_id(&bytes),
+            role: ArtifactRole::SeedInput,
+            schema_id,
+            semantic_type_id: Some(semantic_type_id),
+            content_digest: content_digest(&bytes),
+            byte_len: bytes.len() as u64,
+            media_type: json_media_type(),
+        },
+    };
+
+    let missing = store
+        .require_seed_material(&seed_ref)
+        .await
+        .expect_err("missing seed material rejects");
+    assert!(matches!(missing, FsTypedArtifactError::NotFound { .. }));
+
+    store
+        .put_artifact(bytes.clone(), seed_descriptor(seed_id))
+        .await
+        .expect("put seed material");
+    assert_eq!(
+        store
+            .require_seed_material(&seed_ref)
+            .await
+            .expect("seed material"),
+        bytes
+    );
+}
+
+#[tokio::test]
+async fn typed_artifact_store_rejects_non_seed_evidence_for_seed_material() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = FsTypedArtifactStore::new(dir.path());
+    let bytes = br#"{"seed":9}"#.to_vec();
+    let stored = store
+        .put_artifact(bytes.clone(), state_output_descriptor())
+        .await
+        .expect("put non-seed artifact");
+    let seed_ref = SeedCellRef {
+        seed_id: seed_id(20),
+        cell_id: cell_id(21),
+        scope_id: scope_id(22),
+        semantic_type_id: stored.semantic_type_id.clone().expect("semantic"),
+        schema_id: stored.schema_id.clone().expect("schema"),
+        digest: stored.digest.clone(),
+        seed_artifact: EventArtifactEvidenceRef {
+            artifact_id: stored.artifact_id.clone(),
+            role: ArtifactRole::SeedInput,
+            schema_id: stored.schema_id.clone().expect("schema"),
+            semantic_type_id: stored.semantic_type_id.clone(),
+            content_digest: stored.digest,
+            byte_len: stored.byte_len,
+            media_type: stored.media_type,
+        },
+    };
+
+    let error = store
+        .require_seed_material(&seed_ref)
+        .await
+        .expect_err("non-seed persisted evidence rejects seed material");
+    assert!(matches!(
+        error,
+        FsTypedArtifactError::EvidenceMismatch {
+            field: "artifact_role",
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn typed_seed_artifacts_require_seed_producer() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = FsTypedArtifactStore::new(dir.path());
+    let bytes = b"seed-without-producer".to_vec();
+    let mut evidence = ArtifactEvidenceRef {
+        artifact_id: artifact_id(&bytes),
+        digest: content_digest(&bytes),
+        byte_len: bytes.len() as u64,
+        media_type: json_media_type(),
+        schema_id: Some(schema_id("mfm.test.seed", 4)),
+        semantic_type_id: Some(semantic_id("seed", 5)),
+        producer_node_id: None,
+        producer_seed_id: None,
+        artifact_role: ArtifactRole::SeedInput,
+    };
+
+    let error = store
+        .put_verified_artifact(bytes.clone(), evidence.clone())
+        .await
+        .expect_err("seed input without seed producer rejects");
+    assert!(matches!(
+        error,
+        FsTypedArtifactError::InvalidEvidence { .. }
+    ));
+
+    evidence.producer_node_id = Some(node_id(99));
+    evidence.producer_seed_id = Some(seed_id(99));
+    let error = store
+        .put_verified_artifact(bytes, evidence)
+        .await
+        .expect_err("seed input with node producer rejects");
+    assert!(matches!(
+        error,
+        FsTypedArtifactError::InvalidEvidence { .. }
+    ));
+}
+
+#[tokio::test]
+async fn typed_non_seed_value_artifacts_require_node_producer() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = FsTypedArtifactStore::new(dir.path());
+    let bytes = b"state-output-without-producer".to_vec();
+    let evidence = ArtifactEvidenceRef {
+        artifact_id: artifact_id(&bytes),
+        digest: content_digest(&bytes),
+        byte_len: bytes.len() as u64,
+        media_type: json_media_type(),
+        schema_id: Some(schema_id("mfm.test.position", 1)),
+        semantic_type_id: Some(semantic_id("position", 2)),
+        producer_node_id: None,
+        producer_seed_id: None,
+        artifact_role: ArtifactRole::StateOutput,
+    };
+
+    let error = store
+        .put_verified_artifact(bytes, evidence)
+        .await
+        .expect_err("state output without node producer rejects");
+    assert!(matches!(
+        error,
+        FsTypedArtifactError::InvalidEvidence { .. }
+    ));
 }
