@@ -1,0 +1,5 @@
+error: unsupported serde(rename_all) value for MFM derive
+ --> tests/ui/fail/serde_unsupported_rename_all.rs:5:9
+  |
+5 | #[serde(rename_all = "PascalCase")]
+  |         ^^^^^^^^^^^^^^^^^^^^^^^^^

@@ -1,0 +1,5 @@
+error: custom serde default functions are not supported
+  --> tests/ui/fail/custom_default.rs:10:13
+   |
+10 |     #[serde(default = "default_name")]
+   |             ^^^^^^^

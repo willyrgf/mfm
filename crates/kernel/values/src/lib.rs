@@ -146,6 +146,31 @@ pub trait PublicOutputDescriptor: Send + Sync + 'static {
     }
 }
 
+/// Descriptor contract for typed state input structs.
+pub trait StateInput: Send + Sync + 'static {
+    /// Returns the state input schema descriptor.
+    fn input_schema_descriptor() -> Result<SchemaDescriptor>;
+
+    /// Derives the state input schema id from the descriptor identity.
+    fn input_schema_id() -> Result<SchemaId> {
+        Self::input_schema_descriptor()?.schema_id()
+    }
+}
+
+/// Descriptor contract for operation output structs.
+pub trait OperationOutput: Send + Sync + 'static {
+    /// Returns the operation output schema descriptor.
+    fn output_schema_descriptor() -> Result<SchemaDescriptor>;
+
+    /// Derives the operation output schema id from the descriptor identity.
+    fn output_schema_id() -> Result<SchemaId> {
+        Self::output_schema_descriptor()?.schema_id()
+    }
+}
+
+/// Public launch/render output contract.
+pub trait PublicOutputs: PublicOutputDescriptor {}
+
 /// Schema descriptor with hash-defining identity fields split from audit-only
 /// provenance.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -242,13 +267,22 @@ impl SchemaIdentity {
             (SchemaKind::Value, None) => Err(ValueError::Descriptor(
                 "value schema identities must include a semantic type id".to_owned(),
             )),
-            (SchemaKind::PlanningConfig | SchemaKind::PublicOutput, None) => Ok(()),
-            (SchemaKind::PlanningConfig | SchemaKind::PublicOutput, Some(_)) => {
-                Err(ValueError::Descriptor(
-                    "planning config and public output schema identities must not include a semantic type id"
-                        .to_owned(),
-                ))
-            }
+            (
+                SchemaKind::PlanningConfig
+                | SchemaKind::StateInput
+                | SchemaKind::OperationOutput
+                | SchemaKind::PublicOutput,
+                None,
+            ) => Ok(()),
+            (
+                SchemaKind::PlanningConfig
+                | SchemaKind::StateInput
+                | SchemaKind::OperationOutput
+                | SchemaKind::PublicOutput,
+                Some(_),
+            ) => Err(ValueError::Descriptor(
+                "non-value schema identities must not include a semantic type id".to_owned(),
+            )),
         }
     }
 
@@ -313,6 +347,27 @@ impl SchemaAudit {
         }
     }
 
+    /// Creates derive-generated audit provenance from framework macros.
+    ///
+    /// This is public so proc-macro expansion can reference it from downstream
+    /// crates. It is hidden from normal docs and is paired with source-boundary
+    /// checks that reject manual persisted trait impls outside framework
+    /// allowlists.
+    #[doc(hidden)]
+    pub fn __derive_generated(
+        owner_crate: impl Into<String>,
+        rust_type_path: impl Into<String>,
+        derive_macro_version: impl Into<String>,
+    ) -> Self {
+        Self {
+            owner_crate: owner_crate.into(),
+            rust_type_path: rust_type_path.into(),
+            provenance: DescriptorProvenance::DeriveGenerated,
+            derive_macro_version: Some(derive_macro_version.into()),
+            source_package: None,
+        }
+    }
+
     /// Returns the owner crate.
     pub fn owner_crate(&self) -> &str {
         &self.owner_crate
@@ -355,6 +410,10 @@ pub enum SchemaKind {
     Value,
     /// Deterministic planning config.
     PlanningConfig,
+    /// Typed state input interface.
+    StateInput,
+    /// Operation output interface.
+    OperationOutput,
     /// Public output surface.
     PublicOutput,
 }
@@ -364,6 +423,8 @@ impl SchemaKind {
         match self {
             Self::Value => "value",
             Self::PlanningConfig => "planning_config",
+            Self::StateInput => "state_input",
+            Self::OperationOutput => "operation_output",
             Self::PublicOutput => "public_output",
         }
     }

@@ -1,0 +1,5 @@
+error: custom serde serializers are not supported by MFM derives
+  --> tests/ui/fail/serde_with.rs:24:13
+   |
+24 |     #[serde(with = "string_codec")]
+   |             ^^^^

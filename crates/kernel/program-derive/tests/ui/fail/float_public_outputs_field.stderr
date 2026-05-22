@@ -1,0 +1,5 @@
+error: floating point fields are not supported by MFM persisted surfaces
+ --> tests/ui/fail/float_public_outputs_field.rs:6:13
+  |
+6 |     amount: f64,
+  |             ^^^

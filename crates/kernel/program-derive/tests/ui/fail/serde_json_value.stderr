@@ -1,0 +1,5 @@
+error: serde_json::Value is not supported by MFM persisted surfaces
+ --> tests/ui/fail/serde_json_value.rs:6:10
+  |
+6 |     raw: serde_json::Value,
+  |          ^^^^^^^^^^^^^^^^^

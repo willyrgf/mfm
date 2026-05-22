@@ -112,20 +112,20 @@ workflow ports, and deletion or hard isolation of old dynamic semantic APIs.
 
 ### Commit 07: `kernel derive add value config output derives`
 
-- [ ] Implement derives in `mfm-program-derive` for `MfmValue`, `MfmConfig`, `StateInput`,
+- [x] Implement derives in `mfm-program-derive` for `MfmValue`, `MfmConfig`, `StateInput`,
       `OperationOutput`, and `PublicOutputs`.
-- [ ] Reject unsupported serde attributes, floats, raw `serde_json::Value`, `HashMap`, skipped
+- [x] Reject unsupported serde attributes, floats, raw `serde_json::Value`, `HashMap`, skipped
       fields, custom serializers, and known secret wrappers.
-- [ ] Add trybuild pass/fail fixtures for downstream-crate derive use.
-- [ ] Add manual impl rejection fixtures for domain crates.
-- [ ] Validation: `nix run .#test`.
+- [x] Add trybuild pass/fail fixtures for downstream-crate derive use.
+- [x] Add manual impl rejection fixtures for domain crates.
+- [x] Validation: `nix run .#test`.
 
 ### Commit 08: `check block manual persisted trait impls`
 
-- [ ] Add source-boundary checks that reject manual `impl MfmValue`, `impl MfmConfig`, and manual
+- [x] Add source-boundary checks that reject manual `impl MfmValue`, `impl MfmConfig`, and manual
       public-output impls outside framework allowlists.
-- [ ] Add CI summary key: `manual_value_config_output_impls_rejected`.
-- [ ] Validation: `nix run .#check`.
+- [x] Add CI summary key: `manual_value_config_output_impls_rejected`.
+- [x] Validation: `nix run .#check`.
 
 ### Commit 09: `kernel effects add sealed effect markers`
 

@@ -1187,6 +1187,7 @@ in
             mkdir -p "$artifacts_dir"
             discovery_log="$artifacts_dir/check-discovery.log"
             crate_dag_log="$artifacts_dir/check-crate-dag.log"
+            manual_impl_log="$artifacts_dir/check-manual-persisted-impls.log"
             typed_kernel_contract_summary="$artifacts_dir/typed-kernel-contract.summary.json"
             fmt_log="$artifacts_dir/check-fmt.log"
             clippy_log="$artifacts_dir/check-clippy.log"
@@ -1205,6 +1206,9 @@ in
             echo "INFO: command=bash ${./check-kernel-crate-dag.sh} --root . --self-test --summary-file $typed_kernel_contract_summary log=$crate_dag_log"
             run_with_log "$crate_dag_log" bash ${./check-kernel-crate-dag.sh} --root . --self-test --summary-file "$typed_kernel_contract_summary"
             jq -e '.payload.kernel_crates_present == true and .payload.crate_dag_passed == true' "$typed_kernel_contract_summary" >/dev/null
+            echo "INFO: command=bash ${./check-manual-persisted-impls.sh} --root . --self-test --summary-file $typed_kernel_contract_summary log=$manual_impl_log"
+            run_with_log "$manual_impl_log" bash ${./check-manual-persisted-impls.sh} --root . --self-test --summary-file "$typed_kernel_contract_summary"
+            jq -e '.payload.manual_value_config_output_impls_rejected == true' "$typed_kernel_contract_summary" >/dev/null
 
             echo "INFO: running formatting checks"
             echo "INFO: command=${cargoFmtCheckCmd} log=$fmt_log"
@@ -1404,10 +1408,13 @@ in
             ${ciStepPreamble}
 
             log_file="$artifacts_dir/kernel-crate-dag.log"
+            manual_impl_log_file="$artifacts_dir/manual-persisted-impls.log"
             typed_kernel_contract_summary="$artifacts_dir/typed-kernel-contract.summary.json"
             echo "INFO: running ci step=kernel-crate-dag"
             run_with_log "$log_file" bash ${./check-kernel-crate-dag.sh} --root . --self-test --summary-file "$typed_kernel_contract_summary"
             jq -e '.payload.kernel_crates_present == true and .payload.crate_dag_passed == true' "$typed_kernel_contract_summary" >/dev/null
+            run_with_log "$manual_impl_log_file" bash ${./check-manual-persisted-impls.sh} --root . --self-test --summary-file "$typed_kernel_contract_summary"
+            jq -e '.payload.manual_value_config_output_impls_rejected == true' "$typed_kernel_contract_summary" >/dev/null
             echo "OK: ci step passed step=kernel-crate-dag log=$log_file summary=$typed_kernel_contract_summary"
           '';
         };
