@@ -1552,7 +1552,7 @@ boundary must be durable before the external submit call:
 | attempt | `v1::events::StateAttemptStarted` | none | restart attempt or continue to intent |
 | prepare | `v1::events::side_effect::IntentPersisted`, `Claimed`, `InvocationPrepared` | none | continue to invocation-started |
 | invocation-started | `v1::events::side_effect::InvocationStarted` | call `submit` exactly after this commit succeeds | enter `recover_submission`; never blindly resubmit |
-| submission-result | exactly one of `SubmissionObserved`, `NotSubmittedProven`, `SubmissionUnknown`, or `Ambiguous` | none | follow the recorded state |
+| submission-result | one current result slot: `SubmissionObserved`, `NotSubmittedProven`, `SubmissionUnknown`, or `Ambiguous` | none | follow the recorded state |
 | receipt | `v1::events::side_effect::ReceiptObserved` | none | recover confirmation |
 | confirmation | `v1::events::side_effect::ConfirmationObserved` | none | derive output |
 | output | `v1::events::CellProduced`, `v1::events::StateAttemptCompleted` | none | node is terminal |
@@ -2434,9 +2434,12 @@ retention:{run_id}:refs:{payload_hash}
 retention:{run_id}:manifest:{manifest_seq}
 ```
 
-`submission_result` is mutually exclusive for observed, not-submitted, unknown, or ambiguous
-evidence for one invocation epoch. The store must reject duplicate or conflicting phase-specific
-keys for the same ledger key.
+`submission_result` is one logical result slot for one invocation epoch. `SubmissionObserved`,
+`NotSubmittedProven`, and `SubmissionUnknown` derive the same slot key. The store must reject
+duplicates or conflicts, except that a persisted `SubmissionUnknown` may be superseded in the
+current projection slot by later recovery evidence (`SubmissionObserved` or `NotSubmittedProven`)
+for the same ledger key and invocation epoch. The append-only history is not mutated. `Ambiguous`
+uses the ledger-level `sidefx:{ledger_key}:ambiguous` key and blocks future progress.
 
 The `v1` event payload variants include:
 

@@ -338,12 +338,12 @@ workflow ports, and deletion or hard isolation of old dynamic semantic APIs.
 
 ### Commit 30: `ci add typed certified slice gate`
 
-- [ ] Add the synthetic reference certified workflow.
-- [ ] Exercise pure, read, managed-write, and deterministic local side-effect paths.
-- [ ] Emit all `typed-certified-slice` summary keys from the RFC.
-- [ ] Fail on missing seed material, missing public-output evidence, replay live-cap request, resume
+- [x] Add the synthetic reference certified workflow.
+- [x] Exercise pure, read, managed-write, and deterministic local side-effect paths.
+- [x] Emit all `typed-certified-slice` summary keys from the RFC.
+- [x] Fail on missing seed material, missing public-output evidence, replay live-cap request, resume
       drift, ambiguity, duplicate submit, or incomplete retention projection.
-- [ ] Validation: `nix run .#ci -- --mode full --summary`.
+- [x] Validation: `nix run .#ci -- --mode full --summary`.
 
 ### Commit 31: `app wire typed runtime assembly`
 

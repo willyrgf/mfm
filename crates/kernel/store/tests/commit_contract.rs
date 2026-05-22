@@ -9,9 +9,9 @@ use mfm_spec::v1::{
 };
 use mfm_store::v1::{
     build_committed_batch, ArtifactEvidenceRef, CellTerminalProjection, CommitKey, CommitOutcome,
-    CommitPreconditions, InMemoryTypedRunStore, ProjectionSnapshot, RequiredRunState, StoreError,
-    StreamSeq, TypedCommitRequest, TypedProjectionRead, TypedRunEventStore,
-    VerifiedRetentionProjection, VerifiedRetentionProjectionSet,
+    CommitPreconditions, InMemoryTypedRunStore, ProjectionSnapshot, RequiredRunState,
+    SideEffectPhase, StoreError, StreamSeq, TypedCommitRequest, TypedProjectionRead,
+    TypedRunEventStore, VerifiedRetentionProjection, VerifiedRetentionProjectionSet,
 };
 
 const SPEC_MEDIA_TYPE: &str = "application/vnd.mfm.typed-execution-spec+json;version=1";
@@ -1418,6 +1418,115 @@ fn side_effect_phase_order_and_fencing_are_enforced() {
     assert!(matches!(
         mismatched_retryability,
         StoreError::ProjectionConflict { .. }
+    ));
+}
+
+#[test]
+fn side_effect_submission_unknown_recovery_uses_one_submission_result_key() {
+    let mut store = InMemoryTypedRunStore::new();
+    let run_id = run_id(106);
+    append_side_effect_prepare(&mut store, &run_id);
+    append_side_effect_started(&mut store, &run_id);
+
+    let unknown_artifact = artifact_id(111);
+    let unknown_digest = content_digest(112);
+    record_side_effect_artifact(
+        &mut store,
+        unknown_artifact.clone(),
+        unknown_digest.clone(),
+        unknown_schema(),
+        ArtifactRole::SubmissionUnknownEvidence,
+    );
+    let unknown = store
+        .append_typed_run_commit(TypedCommitRequest {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&run_id),
+            commit_key: CommitKey::new("sidefx-submission-unknown").expect("commit key"),
+            payloads: vec![side_effect_submission_unknown(
+                unknown_artifact,
+                unknown_digest,
+            )],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect("append submission unknown")
+        .batch()
+        .clone();
+    let submission_result_key = format!(
+        "sidefx:{}:invocation:1:submission_result",
+        side_effect_ledger_key()
+    );
+    assert_eq!(
+        unknown.events()[0].logical_key().as_str(),
+        submission_result_key
+    );
+
+    let submission_artifact = artifact_id(113);
+    let submission_digest = content_digest(114);
+    record_side_effect_artifact(
+        &mut store,
+        submission_artifact.clone(),
+        submission_digest.clone(),
+        submission_schema(),
+        ArtifactRole::Submission,
+    );
+    let observed = store
+        .append_typed_run_commit(TypedCommitRequest {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&run_id),
+            commit_key: CommitKey::new("sidefx-submission-observed-after-unknown")
+                .expect("commit key"),
+            payloads: vec![side_effect_submission_observed(
+                submission_artifact,
+                submission_digest,
+            )],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect("recover observed submission")
+        .batch()
+        .clone();
+    assert_eq!(
+        observed.events()[0].logical_key().as_str(),
+        submission_result_key
+    );
+    let projection = store
+        .projection_snapshot()
+        .side_effect(&side_effect_ledger_key())
+        .expect("side-effect projection");
+    assert!(matches!(
+        projection.phase,
+        SideEffectPhase::SubmissionObserved {
+            invocation_epoch: 1
+        }
+    ));
+
+    let duplicate_artifact = artifact_id(115);
+    let duplicate_digest = content_digest(116);
+    record_side_effect_artifact(
+        &mut store,
+        duplicate_artifact.clone(),
+        duplicate_digest.clone(),
+        submission_schema(),
+        ArtifactRole::Submission,
+    );
+    let duplicate = store
+        .append_typed_run_commit(TypedCommitRequest {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&run_id),
+            commit_key: CommitKey::new("sidefx-duplicate-observed-after-recovery")
+                .expect("commit key"),
+            payloads: vec![side_effect_submission_observed(
+                duplicate_artifact,
+                duplicate_digest,
+            )],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect_err("duplicate observed submission rejects after recovery");
+    assert!(matches!(
+        duplicate,
+        StoreError::LogicalKeyConflict { .. } | StoreError::ProjectionConflict { .. }
     ));
 }
 

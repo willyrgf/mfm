@@ -266,7 +266,9 @@ impl PostgresTypedRunEventStore {
             if is_unique_logical_key(event.logical_key()) {
                 tx.execute(
                     "INSERT INTO typed_unique_logical_payloads \
-                     (run_id, logical_key, payload_hash) VALUES ($1,$2,$3)",
+                     (run_id, logical_key, payload_hash) VALUES ($1,$2,$3) \
+                     ON CONFLICT (run_id, logical_key) DO UPDATE \
+                     SET payload_hash = EXCLUDED.payload_hash",
                     &[
                         &request.run_id.as_str(),
                         &event.logical_key().as_str(),
@@ -1661,7 +1663,7 @@ mod tests {
     use mfm_spec::v1::{CanonicalizerIdentity, MediaType, ValueLineageRef};
     use mfm_store::v1::{
         ArtifactEvidenceRef, CellTerminalProjection, CommitKey, CommitOutcome, CommitPreconditions,
-        RequiredRunState, StoreError, StreamSeq,
+        RequiredRunState, SideEffectPhase, StoreError, StreamSeq,
     };
     use tokio_postgres::NoTls;
 
@@ -1870,6 +1872,139 @@ mod tests {
         })
     }
 
+    fn side_effect_ledger_key() -> events::SideEffectLedgerKey {
+        events::SideEffectLedgerKey::new("ledger-key-1").expect("ledger key")
+    }
+
+    fn side_effect_attempt_started() -> KernelEventPayload {
+        KernelEventPayload::StateAttemptStarted(events::StateAttemptStarted {
+            spec_hash: spec_hash(1),
+            node_id: node_id(70),
+            attempt_id: attempt_id(72),
+            attempt_no: 1,
+            state_kind: state_kind(70),
+            state_version: StateVersion::new("mfm.test.side_effect_state.v1")
+                .expect("state version"),
+        })
+    }
+
+    fn side_effect_intent(artifact_id: ArtifactId, digest: ContentDigest) -> KernelEventPayload {
+        KernelEventPayload::SideEffectIntentPersisted(events::side_effect::IntentPersisted {
+            spec_hash: spec_hash(1),
+            node_id: node_id(70),
+            scope_id: scope_id(71),
+            attempt_id: attempt_id(72),
+            ledger_key: side_effect_ledger_key(),
+            invocation_epoch: 1,
+            intent_schema_id: schema_id("mfm.test.side_effect_intent", 70),
+            intent_hash: digest,
+            intent_artifact_id: artifact_id,
+            idempotency_input_schema_id: schema_id("mfm.test.idempotency_input", 73),
+            idempotency_input_hash: content_digest(74),
+            idempotency_key: events::IdempotencyKeyRef::new("idem-key-1").expect("idempotency key"),
+            capability_kind: CapabilityKind::new(
+                "mfm.test",
+                "side_effect",
+                DigestAlgorithm::Sha256JcsV1,
+                digest_bytes(75),
+            )
+            .expect("capability kind"),
+            capability_version: CapabilityVersion::new("mfm.test.side_effect.v1")
+                .expect("capability version"),
+            adapter_kind: AdapterKind::new(
+                "mfm.test",
+                "adapter",
+                DigestAlgorithm::Sha256JcsV1,
+                digest_bytes(76),
+            )
+            .expect("adapter kind"),
+            adapter_version: AdapterVersion::new("mfm.test.adapter.v1").expect("adapter version"),
+        })
+    }
+
+    fn side_effect_claim() -> KernelEventPayload {
+        KernelEventPayload::SideEffectClaimed(events::side_effect::Claimed {
+            spec_hash: spec_hash(1),
+            node_id: node_id(70),
+            attempt_id: attempt_id(72),
+            ledger_key: side_effect_ledger_key(),
+            claim_owner: events::RunnerInvocationId::new("owner-1").expect("claim owner"),
+            invocation_epoch: 1,
+            claim_generation: 1,
+            claim_fencing_token: events::side_effect::ClaimFencingToken::new("token-1")
+                .expect("token"),
+        })
+    }
+
+    fn side_effect_prepared() -> KernelEventPayload {
+        KernelEventPayload::SideEffectInvocationPrepared(events::side_effect::InvocationPrepared {
+            spec_hash: spec_hash(1),
+            node_id: node_id(70),
+            attempt_id: attempt_id(72),
+            ledger_key: side_effect_ledger_key(),
+            invocation_epoch: 1,
+            claim_generation: 1,
+            claim_fencing_token: events::side_effect::ClaimFencingToken::new("token-1")
+                .expect("token"),
+            prepared_artifact_id: None,
+            prepared_hash: None,
+        })
+    }
+
+    fn side_effect_started() -> KernelEventPayload {
+        KernelEventPayload::SideEffectInvocationStarted(events::side_effect::InvocationStarted {
+            spec_hash: spec_hash(1),
+            node_id: node_id(70),
+            attempt_id: attempt_id(72),
+            ledger_key: side_effect_ledger_key(),
+            invocation_epoch: 1,
+            claim_owner: events::RunnerInvocationId::new("owner-1").expect("claim owner"),
+            claim_generation: 1,
+            claim_fencing_token: events::side_effect::ClaimFencingToken::new("token-1")
+                .expect("token"),
+        })
+    }
+
+    fn unknown_schema() -> SchemaId {
+        schema_id("mfm.test.submission_unknown", 83)
+    }
+
+    fn submission_schema() -> SchemaId {
+        schema_id("mfm.test.submission", 77)
+    }
+
+    fn side_effect_submission_unknown(
+        artifact_id: ArtifactId,
+        digest: ContentDigest,
+    ) -> KernelEventPayload {
+        KernelEventPayload::SideEffectSubmissionUnknown(events::side_effect::SubmissionUnknown {
+            spec_hash: spec_hash(1),
+            node_id: node_id(70),
+            attempt_id: attempt_id(72),
+            ledger_key: side_effect_ledger_key(),
+            invocation_epoch: 1,
+            evidence_schema_id: unknown_schema(),
+            evidence_hash: digest,
+            evidence_artifact_id: artifact_id,
+        })
+    }
+
+    fn side_effect_submission_observed(
+        artifact_id: ArtifactId,
+        digest: ContentDigest,
+    ) -> KernelEventPayload {
+        KernelEventPayload::SideEffectSubmissionObserved(events::side_effect::SubmissionObserved {
+            spec_hash: spec_hash(1),
+            node_id: node_id(70),
+            attempt_id: attempt_id(72),
+            ledger_key: side_effect_ledger_key(),
+            invocation_epoch: 1,
+            submission_schema_id: submission_schema(),
+            submission_hash: digest,
+            submission_artifact_id: artifact_id,
+        })
+    }
+
     fn store_artifact_ref(
         artifact_id: ArtifactId,
         digest: ContentDigest,
@@ -1896,6 +2031,25 @@ mod tests {
             schema_id,
             semantic_type_id,
             producer_node_id,
+            producer_seed_id: None,
+            artifact_role: role,
+        }
+    }
+
+    fn side_effect_artifact_ref(
+        artifact_id: ArtifactId,
+        digest: ContentDigest,
+        schema_id: SchemaId,
+        role: ArtifactRole,
+    ) -> ArtifactEvidenceRef {
+        ArtifactEvidenceRef {
+            artifact_id,
+            digest,
+            byte_len: 128,
+            media_type: media_type("application/json"),
+            schema_id: Some(schema_id),
+            semantic_type_id: None,
+            producer_node_id: Some(node_id(70)),
             producer_seed_id: None,
             artifact_role: role,
         }
@@ -2096,6 +2250,149 @@ mod tests {
                 &events::FactKey::new("fact-key-1").unwrap()
             )
             .is_some());
+
+        drop_schema(&store, &schema).await;
+    }
+
+    #[tokio::test]
+    async fn typed_side_effect_unknown_recovery_updates_submission_result_slot() {
+        let (store, schema) = test_store().await;
+        let run = run_id(13);
+
+        let intent_artifact = artifact_id(14);
+        let intent_digest = content_digest(15);
+        store
+            .record_artifact_evidence(side_effect_artifact_ref(
+                intent_artifact.clone(),
+                intent_digest.clone(),
+                schema_id("mfm.test.side_effect_intent", 70),
+                ArtifactRole::SideEffectIntent,
+            ))
+            .await
+            .expect("intent artifact evidence");
+        store
+            .append_typed_run_commit(request(
+                run.clone(),
+                1,
+                "sidefx-attempt-start",
+                vec![side_effect_attempt_started()],
+            ))
+            .await
+            .expect("attempt start");
+        store
+            .append_typed_run_commit(request(
+                run.clone(),
+                2,
+                "sidefx-prepare",
+                vec![
+                    side_effect_intent(intent_artifact, intent_digest),
+                    side_effect_claim(),
+                    side_effect_prepared(),
+                ],
+            ))
+            .await
+            .expect("prepare");
+        store
+            .append_typed_run_commit(request(
+                run.clone(),
+                3,
+                "sidefx-started",
+                vec![side_effect_started()],
+            ))
+            .await
+            .expect("started");
+
+        let unknown_artifact = artifact_id(16);
+        let unknown_digest = content_digest(17);
+        store
+            .record_artifact_evidence(side_effect_artifact_ref(
+                unknown_artifact.clone(),
+                unknown_digest.clone(),
+                unknown_schema(),
+                ArtifactRole::SubmissionUnknownEvidence,
+            ))
+            .await
+            .expect("unknown artifact evidence");
+        let unknown = store
+            .append_typed_run_commit(request(
+                run.clone(),
+                4,
+                "sidefx-submission-unknown",
+                vec![side_effect_submission_unknown(
+                    unknown_artifact,
+                    unknown_digest,
+                )],
+            ))
+            .await
+            .expect("submission unknown")
+            .batch()
+            .clone();
+        let submission_result_key = format!(
+            "sidefx:{}:invocation:1:submission_result",
+            side_effect_ledger_key()
+        );
+        assert_eq!(
+            unknown.events()[0].logical_key().as_str(),
+            submission_result_key
+        );
+
+        let submission_artifact = artifact_id(18);
+        let submission_digest = content_digest(19);
+        store
+            .record_artifact_evidence(side_effect_artifact_ref(
+                submission_artifact.clone(),
+                submission_digest.clone(),
+                submission_schema(),
+                ArtifactRole::Submission,
+            ))
+            .await
+            .expect("submission artifact evidence");
+        let observed = store
+            .append_typed_run_commit(request(
+                run.clone(),
+                5,
+                "sidefx-submission-observed-after-unknown",
+                vec![side_effect_submission_observed(
+                    submission_artifact,
+                    submission_digest,
+                )],
+            ))
+            .await
+            .expect("submission observed recovery")
+            .batch()
+            .clone();
+        assert_eq!(
+            observed.events()[0].logical_key().as_str(),
+            submission_result_key
+        );
+
+        let projection = store.projection_snapshot(&run).await.expect("projection");
+        let side_effect = projection
+            .side_effect(&side_effect_ledger_key())
+            .expect("side-effect projection");
+        assert!(matches!(
+            side_effect.phase,
+            SideEffectPhase::SubmissionObserved {
+                invocation_epoch: 1
+            }
+        ));
+
+        let stored_payload_hash: String = {
+            let client = store.client.lock().await;
+            client
+                .query_one(
+                    "SELECT payload_hash FROM typed_unique_logical_payloads \
+                     WHERE run_id = $1 AND logical_key = $2",
+                    &[&run.as_str(), &submission_result_key.as_str()],
+                )
+                .await
+                .expect("unique logical payload row")
+                .get("payload_hash")
+        };
+        assert_eq!(
+            stored_payload_hash,
+            observed.events()[0].payload_hash().as_str()
+        );
 
         drop_schema(&store, &schema).await;
     }

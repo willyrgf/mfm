@@ -10,3 +10,15 @@ readme = "README.md"
 [lib]
 name = "mfm_kernel_test_support"
 path = "src/lib.rs"
+
+[dependencies]
+mfm-canonical = { path = "../canonical" }
+mfm-capabilities = { path = "../capabilities" }
+mfm-events = { path = "../events" }
+mfm-ids = { path = "../ids" }
+mfm-replay = { path = "../replay" }
+mfm-runtime = { path = "../runtime" }
+mfm-spec = { path = "../spec" }
+mfm-store = { path = "../store" }
+serde_json = { workspace = true }
+tokio = { workspace = true }

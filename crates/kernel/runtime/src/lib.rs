@@ -1866,7 +1866,9 @@ fn runner_output_commit_key(
             node.node_id
         )));
     }
-    let suffix = fragments.into_iter().collect::<Vec<_>>().join("+");
+    let suffix = content_digest_json(serde_json::json!({
+        "fragments": fragments.into_iter().collect::<Vec<_>>(),
+    }))?;
     Ok(store::CommitKey::new(format!(
         "attempt-output:{}:{}:{}",
         node.node_id, attempt_id, suffix

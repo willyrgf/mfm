@@ -1441,7 +1441,11 @@ pub mod v1 {
         pub artifacts: BTreeMap<ArtifactId, ArtifactEvidenceRef>,
         /// Logical keys already present in the run stream.
         pub logical_keys: LogicalKeySet,
-        /// Unique logical keys and their existing payload hash.
+        /// Unique logical keys and their current payload hash.
+        ///
+        /// Most unique logical keys are immutable after their first write. The side-effect
+        /// `submission_result` key is the one recoverable slot: `SubmissionUnknown` may be
+        /// superseded in projection by later recovery evidence for the same invocation epoch.
         pub unique_logical_payloads: UniqueLogicalPayloads,
         /// Current projections derived from the authoritative run stream.
         pub projections: ProjectionSnapshot,
@@ -1774,6 +1778,7 @@ pub mod v1 {
         let mut staged_projections = base.projections.clone();
         let mut staged_logical_keys = base.logical_keys.clone();
         let mut staged_unique_payloads = base.unique_logical_payloads.clone();
+        let mut commit_unique_keys = BTreeSet::new();
         let mut events = Vec::with_capacity(request.payloads.len());
         for (index, payload) in request.payloads.iter().cloned().enumerate() {
             let canonical_payload = payload_canonical_json(&payload)?;
@@ -1805,15 +1810,28 @@ pub mod v1 {
 
             let key = (request.run_id.clone(), envelope.logical_key.clone());
             if is_unique_logical_key(&envelope.logical_key) {
+                if !commit_unique_keys.insert(key.clone()) {
+                    return Err(StoreError::DuplicateLogicalKey {
+                        logical_key: envelope.logical_key.clone(),
+                    });
+                }
                 if let Some(existing_hash) = staged_unique_payloads.get(&key) {
                     if existing_hash == &envelope.payload_hash {
                         return Err(StoreError::DuplicateLogicalKey {
                             logical_key: envelope.logical_key.clone(),
                         });
                     }
-                    return Err(StoreError::LogicalKeyConflict {
-                        logical_key: envelope.logical_key.clone(),
-                    });
+                    if !unique_logical_key_rewrite_allowed(
+                        base,
+                        &request.run_id,
+                        &envelope.logical_key,
+                        &envelope.payload,
+                        &staged_projections,
+                    ) {
+                        return Err(StoreError::LogicalKeyConflict {
+                            logical_key: envelope.logical_key.clone(),
+                        });
+                    }
                 }
                 staged_unique_payloads.insert(key.clone(), envelope.payload_hash.clone());
             }
@@ -2430,6 +2448,46 @@ pub mod v1 {
     fn is_unique_logical_key(key: &LogicalEventKey) -> bool {
         let key = key.as_str();
         !key.starts_with("attempt:")
+    }
+
+    fn unique_logical_key_rewrite_allowed(
+        base: &TypedCommitBase,
+        run_id: &RunId,
+        logical_key: &LogicalEventKey,
+        payload: &KernelEventPayload,
+        projections: &ProjectionSnapshot,
+    ) -> bool {
+        if !base
+            .logical_keys
+            .contains(&(run_id.clone(), logical_key.clone()))
+        {
+            return false;
+        }
+        let Some((ledger_key, invocation_epoch)) = recoverable_submission_result_payload(payload)
+        else {
+            return false;
+        };
+        matches!(
+            projections.side_effect(ledger_key).map(|projection| &projection.phase),
+            Some(SideEffectPhase::SubmissionUnknown {
+                invocation_epoch: existing_epoch
+            }) if *existing_epoch == invocation_epoch
+        )
+    }
+
+    fn recoverable_submission_result_payload(
+        payload: &KernelEventPayload,
+    ) -> Option<(&events::SideEffectLedgerKey, u32)> {
+        match payload {
+            KernelEventPayload::SideEffectNotSubmittedProven(payload) => {
+                Some((&payload.ledger_key, payload.invocation_epoch))
+            }
+            KernelEventPayload::SideEffectSubmissionObserved(payload) => {
+                Some((&payload.ledger_key, payload.invocation_epoch))
+            }
+            KernelEventPayload::SideEffectSubmissionUnknown(_) => None,
+            _ => None,
+        }
     }
 
     #[derive(Debug, Clone, PartialEq, Eq)]

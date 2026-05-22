@@ -1683,6 +1683,7 @@ EOF
               require_task "task.ci.kernel-crate-dag"
               require_task "task.ci.services-start"
               require_task "task.ci.sccache-contracts"
+              require_task "task.ci.typed-certified-slice"
               require_task "task.ci.workflow-basic"
               require_task "task.ci.workflow-parity"
               require_task "task.ci.parity-rest-api-smoke"
@@ -1703,6 +1704,7 @@ EOF
               require_workflow_plan_task "workflow.ci.parity" "task.ci.parity-evm-reth"
               require_workflow_plan_task "workflow.ci.parity" "task.ci.parity-postgres-state-events-audit"
               require_workflow_plan_task "workflow.ci.full" "task.ci.workflow-basic"
+              require_workflow_plan_task "workflow.ci.full" "task.ci.typed-certified-slice"
               require_workflow_plan_task "workflow.ci.full" "task.ci.workflow-parity"
 
               ${renderNextestContractCheck "task.ci.parity-rest-api-smoke" parityRestApiSmokeNextest}
@@ -1958,6 +1960,32 @@ EOF
             echo "INFO: running ci step=tests"
             run_with_log "$log_file" ${cargoNextestWorkspaceCiCmd}
             echo "OK: ci step passed step=tests log=$log_file"
+          '';
+        };
+
+        ci-typed-certified-slice = mkCommandTask {
+          id = "task.ci.typed-certified-slice";
+          kind = "ci-step";
+          summary = "CI typed-certified-slice acceptance gate";
+          tags = [
+            "ci"
+            "typed-kernel"
+          ];
+          runtimeInputs = rustRuntimeInputs;
+          env = ciCargoRustEnv;
+          produces = {
+            artifacts = [ "typed-certified-slice.summary.json" ];
+            stateKeys = [ ];
+          };
+          command = ''
+            set -euo pipefail
+            ${ciStepPreamble}
+
+            log_file="$artifacts_dir/typed-certified-slice.log"
+            summary_file="$artifacts_dir/typed-certified-slice.summary.json"
+            echo "INFO: running ci step=typed-certified-slice"
+            run_with_log "$log_file" bash ${./check-typed-certified-slice.sh} --root . --self-test --summary-file "$summary_file"
+            echo "OK: ci step passed step=typed-certified-slice log=$log_file summary=$summary_file"
           '';
         };
 
@@ -2461,9 +2489,14 @@ EOF
               taskId = "task.ci.workflow-basic";
             };
 
+            typed-certified-slice = mkWorkflowUnit {
+              taskId = "task.ci.typed-certified-slice";
+              needs = [ "basic" ];
+            };
+
             parity = mkWorkflowUnit {
               taskId = "task.ci.workflow-parity";
-              needs = [ "basic" ];
+              needs = [ "typed-certified-slice" ];
             };
           };
           stages = [ ];

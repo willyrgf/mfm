@@ -2261,6 +2261,18 @@ dependencies = [
 [[package]]
 name = "mfm-kernel-test-support"
 version = "0.1.0"
+dependencies = [
+ "mfm-canonical",
+ "mfm-capabilities",
+ "mfm-events",
+ "mfm-ids",
+ "mfm-replay",
+ "mfm-runtime",
+ "mfm-spec",
+ "mfm-store",
+ "serde_json",
+ "tokio",
+]
 
 [[package]]
 name = "mfm-machine"
