@@ -1060,6 +1060,8 @@ fn fact_projection_json(projection: &FactProjection) -> Value {
         "event_id": projection.event_id.as_str(),
         "fact_key": projection.fact_key.as_str(),
         "node_id": projection.node_id.as_str(),
+        "request_hash": projection.request_hash.as_str(),
+        "request_schema_id": projection.request_schema_id.as_str(),
         "response_hash": projection.response_hash.as_str(),
         "response_schema_id": projection.response_schema_id.as_str(),
     })
@@ -1071,6 +1073,8 @@ fn parse_fact_projection(json: &Value) -> Result<FactProjection> {
         node_id: parse_identity(required_str(json, "node_id")?)?,
         attempt_id: parse_identity(required_str(json, "attempt_id")?)?,
         fact_key: events::FactKey::new(required_str(json, "fact_key")?)?,
+        request_schema_id: parse_identity(required_str(json, "request_schema_id")?)?,
+        request_hash: parse_identity(required_str(json, "request_hash")?)?,
         response_schema_id: parse_identity(required_str(json, "response_schema_id")?)?,
         response_hash: parse_identity(required_str(json, "response_hash")?)?,
         artifact_id: parse_identity(required_str(json, "artifact_id")?)?,

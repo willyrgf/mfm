@@ -283,12 +283,12 @@ workflow ports, and deletion or hard isolation of old dynamic semantic APIs.
 
 ### Commit 25: `kernel runtime add non side effect recovery`
 
-- [ ] Implement attempt recovery for pure, read, and managed-write states.
-- [ ] Require terminal cell and `StateAttemptCompleted` in the same atomic terminal commit.
-- [ ] Reuse committed facts for the same read attempt.
-- [ ] Allow managed-write artifact re-stage only before typed commit authority.
-- [ ] Add crash/restart fixtures for pure, read, and managed-write attempts.
-- [ ] Validation: `nix run .#test`.
+- [x] Implement attempt recovery for pure, read, and managed-write states.
+- [x] Require terminal cell and `StateAttemptCompleted` in the same atomic terminal commit.
+- [x] Reuse committed facts for the same read attempt.
+- [x] Allow managed-write artifact re-stage only before typed commit authority.
+- [x] Add crash/restart fixtures for pure, read, and managed-write attempts.
+- [x] Validation: `nix run .#test`.
 
 ### Commit 26: `kernel runtime add side effect ledger`
 

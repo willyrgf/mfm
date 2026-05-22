@@ -1011,6 +1011,10 @@ pub mod v1 {
         pub attempt_id: AttemptId,
         /// Stable fact key.
         pub fact_key: events::FactKey,
+        /// Request schema id.
+        pub request_schema_id: SchemaId,
+        /// Canonical request hash.
+        pub request_hash: ContentDigest,
         /// Response schema id.
         pub response_schema_id: SchemaId,
         /// Canonical response hash.
@@ -2994,6 +2998,30 @@ pub mod v1 {
                 });
             }
             KernelEventPayload::FactRecorded(payload) => {
+                match projections.attempt(&payload.node_id, &payload.attempt_id) {
+                    Some(AttemptProjection {
+                        status: AttemptStatus::Started { .. },
+                        ..
+                    }) => {}
+                    Some(_) => {
+                        return Err(StoreError::ProjectionConflict {
+                            key: format!(
+                                "fact:{}:{}:{}",
+                                payload.node_id, payload.attempt_id, payload.fact_key
+                            ),
+                            message: "fact requires an active started attempt".to_owned(),
+                        });
+                    }
+                    None => {
+                        return Err(StoreError::ProjectionConflict {
+                            key: format!(
+                                "fact:{}:{}:{}",
+                                payload.node_id, payload.attempt_id, payload.fact_key
+                            ),
+                            message: "fact requires a started attempt".to_owned(),
+                        });
+                    }
+                }
                 let key = (
                     payload.node_id.clone(),
                     payload.attempt_id.clone(),
@@ -3015,6 +3043,8 @@ pub mod v1 {
                         node_id: payload.node_id.clone(),
                         attempt_id: payload.attempt_id.clone(),
                         fact_key: payload.fact_key.clone(),
+                        request_schema_id: payload.request_schema_id.clone(),
+                        request_hash: payload.request_hash.clone(),
                         response_schema_id: payload.response_schema_id.clone(),
                         response_hash: payload.response_hash.clone(),
                         artifact_id: payload.artifact_id.clone(),

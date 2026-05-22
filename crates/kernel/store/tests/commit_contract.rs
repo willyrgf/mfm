@@ -280,6 +280,17 @@ fn fact_recorded(artifact_id: ArtifactId, digest: ContentDigest) -> KernelEventP
     })
 }
 
+fn fact_attempt_started() -> KernelEventPayload {
+    KernelEventPayload::StateAttemptStarted(events::StateAttemptStarted {
+        spec_hash: spec_hash(1),
+        node_id: node_id(90),
+        attempt_id: attempt_id(91),
+        attempt_no: 1,
+        state_kind: state_kind(90),
+        state_version: StateVersion::new("mfm.test.fact_state.v1").expect("state version"),
+    })
+}
+
 fn fact_artifact_ref(artifact_id: ArtifactId, digest: ContentDigest) -> ArtifactEvidenceRef {
     ArtifactEvidenceRef {
         artifact_id,
@@ -776,6 +787,19 @@ fn fact_recorded_projects_reusable_fact_evidence() {
         .append_typed_run_commit(TypedCommitRequest {
             run_id: run_id.clone(),
             expected_next_seq: store.expected_next_seq(&run_id),
+            commit_key: CommitKey::new("fact-attempt-start").expect("commit key"),
+            payloads: vec![fact_attempt_started()],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions {
+                required_run_state: RequiredRunState::Started,
+                ..CommitPreconditions::default()
+            },
+        })
+        .expect("append fact attempt start");
+    store
+        .append_typed_run_commit(TypedCommitRequest {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&run_id),
             commit_key: CommitKey::new("fact-recorded").expect("commit key"),
             payloads: vec![fact_recorded(artifact_id.clone(), artifact_digest.clone())],
             required_artifacts: Vec::new(),
@@ -793,6 +817,39 @@ fn fact_recorded_projects_reusable_fact_evidence() {
         .expect("fact projection");
     assert_eq!(projection.artifact_id, artifact_id);
     assert_eq!(projection.response_hash, artifact_digest);
+}
+
+#[test]
+fn fact_recorded_requires_started_attempt_projection() {
+    let run_id = run_id(96);
+    let artifact_id = artifact_id(97);
+    let artifact_digest = content_digest(98);
+    let mut store = InMemoryTypedRunStore::new();
+    record_run_start_artifact(&mut store);
+    store
+        .record_artifact_evidence(fact_artifact_ref(
+            artifact_id.clone(),
+            artifact_digest.clone(),
+        ))
+        .expect("record fact artifact");
+    store
+        .append_typed_run_commit(run_start_request(run_id.clone(), "run-start"))
+        .expect("append run start");
+
+    let error = store
+        .append_typed_run_commit(TypedCommitRequest {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&run_id),
+            commit_key: CommitKey::new("fact-before-attempt").expect("commit key"),
+            payloads: vec![fact_recorded(artifact_id, artifact_digest)],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions {
+                required_run_state: RequiredRunState::Started,
+                ..CommitPreconditions::default()
+            },
+        })
+        .expect_err("fact before attempt must reject");
+    assert!(matches!(error, StoreError::ProjectionConflict { .. }));
 }
 
 #[test]

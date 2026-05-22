@@ -57,8 +57,58 @@ pub struct ErasedRunCtx<'a> {
     pub inputs: &'a MaterializedInputs,
     /// Runtime capabilities minted only from the certified node capability set.
     pub caps: &'a CertifiedRuntimeCapabilities,
+    /// Facts already committed for this attempt and therefore reusable after recovery.
+    pub recorded_facts: &'a RecordedFacts,
     /// Store-owned projection snapshot observed before the attempt.
     pub projections: &'a store::ProjectionSnapshot,
+}
+
+/// Facts committed for one node attempt before recovery resumed execution.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RecordedFacts {
+    facts: BTreeMap<events::FactKey, RecordedFact>,
+}
+
+impl RecordedFacts {
+    /// Returns true when no facts have been recorded for the attempt.
+    pub fn is_empty(&self) -> bool {
+        self.facts.is_empty()
+    }
+
+    /// Returns a recorded fact by stable fact key.
+    pub fn get(&self, fact_key: &events::FactKey) -> Option<&RecordedFact> {
+        self.facts.get(fact_key)
+    }
+
+    /// Iterates recorded facts in deterministic fact-key order.
+    pub fn iter(&self) -> impl Iterator<Item = (&events::FactKey, &RecordedFact)> {
+        self.facts.iter()
+    }
+}
+
+/// Store-projected read fact available for same-attempt recovery.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordedFact {
+    /// Stable fact key.
+    pub fact_key: events::FactKey,
+    /// Request schema id.
+    pub request_schema_id: SchemaId,
+    /// Canonical request hash.
+    pub request_hash: ContentDigest,
+    /// Response schema id.
+    pub response_schema_id: SchemaId,
+    /// Canonical response hash.
+    pub response_hash: ContentDigest,
+    /// Response artifact id.
+    pub artifact_id: ArtifactId,
+    /// Capability kind used for the original read.
+    pub capability_kind: CapabilityKind,
+    /// Capability version used for the original read.
+    pub capability_version: CapabilityVersion,
+    /// Adapter kind used for the original read.
+    pub adapter_kind: AdapterKind,
+    /// Adapter version used for the original read.
+    pub adapter_version: AdapterVersion,
 }
 
 /// Typed payload batch returned by an erased runner.
@@ -794,6 +844,20 @@ pub enum SchedulerStatus {
     PublicOutputProjected,
 }
 
+struct RunnableNode<'a> {
+    node: &'a spec::NodeSpec,
+    attempt: AttemptPlan,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AttemptPlan {
+    StartNew,
+    Continue {
+        attempt_id: AttemptId,
+        attempt_no: u32,
+    },
+}
+
 /// Serial typed scheduler.
 #[derive(Clone)]
 pub struct SerialTypedScheduler {
@@ -883,10 +947,10 @@ impl SerialTypedScheduler {
         {
             return Ok(SchedulerStatus::PublicOutputProjected);
         }
-        let Some(node) = next_runnable_node(runtime_spec, &view)? else {
+        let Some(runnable) = next_runnable_node(runtime_spec, &view)? else {
             return Ok(SchedulerStatus::Blocked);
         };
-        self.run_node_attempt(store, runtime_spec, run_id, &view, node)
+        self.run_node_attempt(store, runtime_spec, run_id, &view, runnable)
             .await?;
         Ok(SchedulerStatus::Advanced)
     }
@@ -914,8 +978,9 @@ impl SerialTypedScheduler {
         runtime_spec: &CertifiedRuntimeSpec,
         run_id: &RunId,
         view: &RuntimeRunView,
-        node: &spec::NodeSpec,
+        runnable: RunnableNode<'_>,
     ) -> Result<()> {
+        let node = runnable.node;
         let descriptor = runtime_spec.state_descriptor_for_node(node)?;
         let output_cell = runtime_spec.cell(&node.output_cell).ok_or_else(|| {
             RuntimeError::InvalidSpec(format!(
@@ -929,43 +994,54 @@ impl SerialTypedScheduler {
             node.node_id.clone(),
             node.capability_bindings.clone(),
         );
-        let attempt_no = next_attempt_no(&view.projections, &node.node_id)?;
-        let attempt_id = attempt_id(run_id, runtime_spec.spec_hash(), &node.node_id, attempt_no)?;
-
-        let start_payload =
-            events::KernelEventPayload::StateAttemptStarted(events::StateAttemptStarted {
-                spec_hash: runtime_spec.spec_hash().clone(),
-                node_id: node.node_id.clone(),
-                attempt_id: attempt_id.clone(),
+        let (attempt_id, attempt_no) = match runnable.attempt {
+            AttemptPlan::StartNew => {
+                let attempt_no = next_attempt_no(&view.projections, &node.node_id)?;
+                let attempt_id =
+                    attempt_id(run_id, runtime_spec.spec_hash(), &node.node_id, attempt_no)?;
+                let start_payload =
+                    events::KernelEventPayload::StateAttemptStarted(events::StateAttemptStarted {
+                        spec_hash: runtime_spec.spec_hash().clone(),
+                        node_id: node.node_id.clone(),
+                        attempt_id: attempt_id.clone(),
+                        attempt_no,
+                        state_kind: node.state_kind.clone(),
+                        state_version: node.state_version.clone(),
+                    });
+                let mut preconditions = store::CommitPreconditions {
+                    required_run_state: store::RequiredRunState::NotCompleted,
+                    required_cell_states: vec![store::CellStatePrecondition {
+                        cell_id: node.output_cell.clone(),
+                        required: store::RequiredCellState::Absent,
+                    }],
+                    ..store::CommitPreconditions::default()
+                };
+                preconditions
+                    .required_cell_states
+                    .extend(node_cell_preconditions(runtime_spec, node)?);
+                let start_request = store::TypedCommitRequest {
+                    run_id: run_id.clone(),
+                    expected_next_seq: store.expected_next_seq(run_id),
+                    commit_key: store::CommitKey::new(format!(
+                        "attempt-start:{}:{}",
+                        node.node_id, attempt_id
+                    ))?,
+                    payloads: vec![start_payload],
+                    required_artifacts: Vec::new(),
+                    preconditions,
+                };
+                store.append_typed_run_commit(start_request)?;
+                (attempt_id, attempt_no)
+            }
+            AttemptPlan::Continue {
+                attempt_id,
                 attempt_no,
-                state_kind: node.state_kind.clone(),
-                state_version: node.state_version.clone(),
-            });
-        let mut preconditions = store::CommitPreconditions {
-            required_run_state: store::RequiredRunState::NotCompleted,
-            required_cell_states: vec![store::CellStatePrecondition {
-                cell_id: node.output_cell.clone(),
-                required: store::RequiredCellState::Absent,
-            }],
-            ..store::CommitPreconditions::default()
+            } => (attempt_id, attempt_no),
         };
-        preconditions
-            .required_cell_states
-            .extend(node_cell_preconditions(runtime_spec, node)?);
-        let start_request = store::TypedCommitRequest {
-            run_id: run_id.clone(),
-            expected_next_seq: store.expected_next_seq(run_id),
-            commit_key: store::CommitKey::new(format!(
-                "attempt-start:{}:{}",
-                node.node_id, attempt_id
-            ))?,
-            payloads: vec![start_payload],
-            required_artifacts: Vec::new(),
-            preconditions,
-        };
-        store.append_typed_run_commit(start_request)?;
 
         let latest_projection = store.projection_snapshot().clone();
+        let recorded_facts =
+            recorded_facts_for_attempt(&latest_projection, &node.node_id, &attempt_id)?;
         let output = binding
             .runner
             .run_erased(ErasedRunCtx {
@@ -978,10 +1054,18 @@ impl SerialTypedScheduler {
                 attempt_no,
                 inputs: &inputs,
                 caps: &caps,
+                recorded_facts: &recorded_facts,
                 projections: &latest_projection,
             })
             .await?;
-        validate_runner_output(runtime_spec, node, &attempt_id, &caps, &output)?;
+        validate_runner_output(
+            runtime_spec,
+            node,
+            &attempt_id,
+            &caps,
+            &recorded_facts,
+            &output,
+        )?;
         for artifact in &output.required_artifacts {
             store.record_artifact_evidence(artifact.clone())?;
         }
@@ -1019,26 +1103,172 @@ impl SerialTypedScheduler {
 fn next_runnable_node<'a>(
     runtime_spec: &'a CertifiedRuntimeSpec,
     view: &RuntimeRunView,
-) -> Result<Option<&'a spec::NodeSpec>> {
+) -> Result<Option<RunnableNode<'a>>> {
     for node_id in runtime_spec.topological_order() {
         let node = runtime_spec.node(node_id).expect("topological node exists");
-        if view.projections.cell_terminal(&node.output_cell).is_some() {
+        let Some(attempt) = non_side_effect_attempt_plan(runtime_spec, node, view)? else {
             continue;
-        }
-        if has_started_attempt(&view.projections, &node.node_id) {
-            continue;
-        }
+        };
         if node_inputs_ready(runtime_spec, node, view)? {
-            return Ok(Some(node));
+            return Ok(Some(RunnableNode { node, attempt }));
         }
     }
     Ok(None)
 }
 
-fn has_started_attempt(projections: &store::ProjectionSnapshot, node_id: &NodeId) -> bool {
-    projections
-        .attempts()
-        .any(|((attempt_node_id, _), _)| attempt_node_id == node_id)
+fn non_side_effect_attempt_plan(
+    runtime_spec: &CertifiedRuntimeSpec,
+    node: &spec::NodeSpec,
+    view: &RuntimeRunView,
+) -> Result<Option<AttemptPlan>> {
+    if node.side_effect.is_some() {
+        return Ok(None);
+    }
+
+    if let Some(cell_terminal) = view.projections.cell_terminal(&node.output_cell) {
+        validate_terminal_cell_has_completed_attempt(
+            runtime_spec,
+            &view.projections,
+            node,
+            cell_terminal,
+        )?;
+        return Ok(None);
+    }
+
+    let mut started = None::<(AttemptId, u32)>;
+    for ((attempt_node_id, attempt_id), projection) in view.projections.attempts() {
+        if attempt_node_id != &node.node_id {
+            continue;
+        }
+        match &projection.status {
+            store::AttemptStatus::Started {
+                attempt_no,
+                state_kind,
+                state_version,
+            } => {
+                if state_kind != &node.state_kind || state_version != &node.state_version {
+                    return Err(RuntimeError::InvalidRunStream(format!(
+                        "started attempt {} for node {} has state identity outside the certified spec",
+                        attempt_id, node.node_id
+                    )));
+                }
+                if started.replace((attempt_id.clone(), *attempt_no)).is_some() {
+                    return Err(RuntimeError::InvalidRunStream(format!(
+                        "node {} has multiple non-terminal attempts",
+                        node.node_id
+                    )));
+                }
+            }
+            store::AttemptStatus::Completed { output_cell_id } => {
+                return Err(RuntimeError::InvalidRunStream(format!(
+                    "node {} attempt {} completed output cell {} without terminal cell authority",
+                    node.node_id, attempt_id, output_cell_id
+                )));
+            }
+            store::AttemptStatus::Failed { retryable, .. } => {
+                if !*retryable {
+                    return Ok(None);
+                }
+            }
+        }
+    }
+
+    if let Some((attempt_id, attempt_no)) = started {
+        Ok(Some(AttemptPlan::Continue {
+            attempt_id,
+            attempt_no,
+        }))
+    } else {
+        Ok(Some(AttemptPlan::StartNew))
+    }
+}
+
+fn validate_terminal_cell_has_completed_attempt(
+    runtime_spec: &CertifiedRuntimeSpec,
+    projections: &store::ProjectionSnapshot,
+    node: &spec::NodeSpec,
+    terminal: &store::CellTerminalProjection,
+) -> Result<()> {
+    let certified = runtime_spec.cell(&node.output_cell).ok_or_else(|| {
+        RuntimeError::InvalidSpec(format!(
+            "node {} output cell {} is missing",
+            node.node_id, node.output_cell
+        ))
+    })?;
+    let (terminal_node_id, terminal_attempt_id, schema_id, semantic_type_id) = match terminal {
+        store::CellTerminalProjection::Produced {
+            node_id,
+            attempt_id,
+            schema_id,
+            semantic_type_id,
+            ..
+        }
+        | store::CellTerminalProjection::Skipped {
+            node_id,
+            attempt_id,
+            schema_id,
+            semantic_type_id,
+            ..
+        } => (node_id, attempt_id, schema_id, semantic_type_id),
+    };
+    if terminal_node_id != &node.node_id
+        || certified.producer != spec::CellProducer::Node(node.node_id.clone())
+        || schema_id != &certified.schema_id
+        || semantic_type_id != &certified.semantic_type_id
+    {
+        return Err(RuntimeError::InvalidRunStream(format!(
+            "terminal cell {} is not certified terminal evidence for node {}",
+            node.output_cell, node.node_id
+        )));
+    }
+    match projections.attempt(&node.node_id, terminal_attempt_id) {
+        Some(store::AttemptProjection {
+            status: store::AttemptStatus::Completed { output_cell_id },
+            ..
+        }) if output_cell_id == &node.output_cell => Ok(()),
+        _ => Err(RuntimeError::InvalidRunStream(format!(
+            "terminal cell {} for node {} lacks matching completed attempt {}",
+            node.output_cell, node.node_id, terminal_attempt_id
+        ))),
+    }
+}
+
+fn recorded_facts_for_attempt(
+    projections: &store::ProjectionSnapshot,
+    node_id: &NodeId,
+    attempt_id: &AttemptId,
+) -> Result<RecordedFacts> {
+    let mut facts = BTreeMap::new();
+    for ((fact_node_id, fact_attempt_id, fact_key), projection) in projections.facts() {
+        if fact_node_id != node_id || fact_attempt_id != attempt_id {
+            continue;
+        }
+        if projection.node_id != *node_id
+            || projection.attempt_id != *attempt_id
+            || projection.fact_key != *fact_key
+        {
+            return Err(RuntimeError::InvalidRunStream(format!(
+                "fact projection {} for node {} attempt {} is internally inconsistent",
+                fact_key, node_id, attempt_id
+            )));
+        }
+        facts.insert(
+            fact_key.clone(),
+            RecordedFact {
+                fact_key: fact_key.clone(),
+                request_schema_id: projection.request_schema_id.clone(),
+                request_hash: projection.request_hash.clone(),
+                response_schema_id: projection.response_schema_id.clone(),
+                response_hash: projection.response_hash.clone(),
+                artifact_id: projection.artifact_id.clone(),
+                capability_kind: projection.capability_kind.clone(),
+                capability_version: projection.capability_version.clone(),
+                adapter_kind: projection.adapter_kind.clone(),
+                adapter_version: projection.adapter_version.clone(),
+            },
+        );
+    }
+    Ok(RecordedFacts { facts })
 }
 
 fn node_inputs_ready(
@@ -1310,10 +1540,30 @@ fn validate_historical_run_stream(
     stream: &[store::KernelEventEnvelope],
     projections: &store::ProjectionSnapshot,
 ) -> Result<()> {
+    let mut available_cells = BTreeSet::<CellId>::new();
+    let mut active_attempts = BTreeSet::<(NodeId, AttemptId)>::new();
+    let mut seen_run_started = false;
     for event in stream {
+        if !seen_run_started
+            && !matches!(event.payload(), events::KernelEventPayload::RunStarted(_))
+        {
+            return Err(RuntimeError::InvalidRunStream(
+                "run stream events appeared before RunStarted".to_owned(),
+            ));
+        }
         match event.payload() {
-            events::KernelEventPayload::RunStarted(_)
-            | events::KernelEventPayload::RunCompleted(_)
+            events::KernelEventPayload::RunStarted(payload) => {
+                if seen_run_started {
+                    return Err(RuntimeError::InvalidRunStream(
+                        "run stream contains multiple RunStarted events".to_owned(),
+                    ));
+                }
+                seen_run_started = true;
+                for cell_id in validate_seed_cells(runtime_spec, &payload.seed_cells)?.into_keys() {
+                    available_cells.insert(cell_id);
+                }
+            }
+            events::KernelEventPayload::RunCompleted(_)
             | events::KernelEventPayload::RetentionRefsAppended(_)
             | events::KernelEventPayload::RetentionManifestProjected(_) => {}
             events::KernelEventPayload::StateAttemptStarted(payload) => {
@@ -1331,6 +1581,13 @@ fn validate_historical_run_stream(
                         payload.attempt_id, payload.node_id
                     )));
                 }
+                validate_attempt_start_boundary(runtime_spec, node, payload, &available_cells)?;
+                if !active_attempts.insert((payload.node_id.clone(), payload.attempt_id.clone())) {
+                    return Err(RuntimeError::InvalidRunStream(format!(
+                        "attempt {} for node {} was started more than once",
+                        payload.attempt_id, payload.node_id
+                    )));
+                }
             }
             events::KernelEventPayload::StateAttemptCompleted(payload) => {
                 let node = runtime_spec.node(&payload.node_id).ok_or_else(|| {
@@ -1345,6 +1602,12 @@ fn validate_historical_run_stream(
                         payload.attempt_id, payload.node_id, payload.output_cell_id
                     )));
                 }
+                if !active_attempts.remove(&(payload.node_id.clone(), payload.attempt_id.clone())) {
+                    return Err(RuntimeError::InvalidRunStream(format!(
+                        "attempt completion for node {} attempt {} was not preceded by an active attempt",
+                        payload.node_id, payload.attempt_id
+                    )));
+                }
             }
             events::KernelEventPayload::StateAttemptFailed(payload) => {
                 runtime_spec.node(&payload.node_id).ok_or_else(|| {
@@ -1353,12 +1616,20 @@ fn validate_historical_run_stream(
                         payload.node_id
                     ))
                 })?;
+                if !active_attempts.remove(&(payload.node_id.clone(), payload.attempt_id.clone())) {
+                    return Err(RuntimeError::InvalidRunStream(format!(
+                        "attempt failure for node {} attempt {} was not preceded by an active attempt",
+                        payload.node_id, payload.attempt_id
+                    )));
+                }
             }
             events::KernelEventPayload::CellProduced(payload) => {
                 validate_historical_produced_cell(runtime_spec, projections, event, payload)?;
+                available_cells.insert(payload.cell_id.clone());
             }
             events::KernelEventPayload::CellSkipped(payload) => {
                 validate_historical_skipped_cell(runtime_spec, projections, event, payload)?;
+                available_cells.insert(payload.cell_id.clone());
             }
             events::KernelEventPayload::FactRecorded(payload) => {
                 let node = runtime_spec.node(&payload.node_id).ok_or_else(|| {
@@ -1386,6 +1657,13 @@ fn validate_historical_run_stream(
                     &payload.attempt_id,
                     "fact",
                 )?;
+                if !active_attempts.contains(&(payload.node_id.clone(), payload.attempt_id.clone()))
+                {
+                    return Err(RuntimeError::InvalidRunStream(format!(
+                        "fact {} for node {} attempt {} was recorded outside an active started attempt",
+                        payload.fact_key, payload.node_id, payload.attempt_id
+                    )));
+                }
                 let fact = projections
                     .fact(&payload.node_id, &payload.attempt_id, &payload.fact_key)
                     .ok_or_else(|| {
@@ -1395,6 +1673,8 @@ fn validate_historical_run_stream(
                         ))
                     })?;
                 if fact.event_id != *event.event_id()
+                    || fact.request_schema_id != payload.request_schema_id
+                    || fact.request_hash != payload.request_hash
                     || fact.response_schema_id != payload.response_schema_id
                     || fact.response_hash != payload.response_hash
                     || fact.artifact_id != payload.artifact_id
@@ -1463,6 +1743,155 @@ fn validate_historical_run_stream(
                     "side-effect events are not accepted before the side-effect scheduler protocol is enabled"
                         .to_owned(),
                 ));
+            }
+        }
+    }
+    validate_atomic_terminal_pairs(runtime_spec, stream)?;
+    validate_non_side_effect_recovery_frontier(runtime_spec, projections)?;
+    Ok(())
+}
+
+fn validate_attempt_start_boundary(
+    runtime_spec: &CertifiedRuntimeSpec,
+    node: &spec::NodeSpec,
+    payload: &events::StateAttemptStarted,
+    available_cells: &BTreeSet<CellId>,
+) -> Result<()> {
+    for cell_id in runtime_spec.validate_input_binding(&node.input_bindings.root)? {
+        if !available_cells.contains(&cell_id) {
+            return Err(RuntimeError::InvalidRunStream(format!(
+                "attempt {} for node {} started before certified input cell {} was terminal",
+                payload.attempt_id, node.node_id, cell_id
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_atomic_terminal_pairs(
+    runtime_spec: &CertifiedRuntimeSpec,
+    stream: &[store::KernelEventEnvelope],
+) -> Result<()> {
+    let mut completions = BTreeSet::new();
+    let mut terminal_cells = BTreeSet::new();
+    for event in stream {
+        match event.payload() {
+            events::KernelEventPayload::StateAttemptCompleted(payload) => {
+                let node = runtime_spec.node(&payload.node_id).ok_or_else(|| {
+                    RuntimeError::InvalidRunStream(format!(
+                        "attempt completed for uncertified node {}",
+                        payload.node_id
+                    ))
+                })?;
+                if node.side_effect.is_none() {
+                    completions.insert((
+                        event.seq(),
+                        payload.node_id.clone(),
+                        payload.attempt_id.clone(),
+                        payload.output_cell_id.clone(),
+                    ));
+                }
+            }
+            events::KernelEventPayload::CellProduced(payload) => {
+                let node = runtime_spec.node(&payload.node_id).ok_or_else(|| {
+                    RuntimeError::InvalidRunStream(format!(
+                        "cell produced by uncertified node {}",
+                        payload.node_id
+                    ))
+                })?;
+                if node.side_effect.is_none() {
+                    terminal_cells.insert((
+                        event.seq(),
+                        payload.node_id.clone(),
+                        payload.attempt_id.clone(),
+                        payload.cell_id.clone(),
+                    ));
+                }
+            }
+            events::KernelEventPayload::CellSkipped(payload) => {
+                let node = runtime_spec.node(&payload.node_id).ok_or_else(|| {
+                    RuntimeError::InvalidRunStream(format!(
+                        "cell skipped by uncertified node {}",
+                        payload.node_id
+                    ))
+                })?;
+                if node.side_effect.is_none() {
+                    terminal_cells.insert((
+                        event.seq(),
+                        payload.node_id.clone(),
+                        payload.attempt_id.clone(),
+                        payload.cell_id.clone(),
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    for (seq, node_id, attempt_id, output_cell_id) in &completions {
+        if !terminal_cells.contains(&(
+            *seq,
+            node_id.clone(),
+            attempt_id.clone(),
+            output_cell_id.clone(),
+        )) {
+            return Err(RuntimeError::InvalidRunStream(format!(
+                "non-side-effect attempt {} for node {} completed without terminal cell {} in the same commit",
+                attempt_id, node_id, output_cell_id
+            )));
+        }
+    }
+    for (seq, node_id, attempt_id, cell_id) in &terminal_cells {
+        if !completions.contains(&(*seq, node_id.clone(), attempt_id.clone(), cell_id.clone())) {
+            return Err(RuntimeError::InvalidRunStream(format!(
+                "non-side-effect terminal cell {} for node {} lacks StateAttemptCompleted in the same commit",
+                cell_id, node_id
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_non_side_effect_recovery_frontier(
+    runtime_spec: &CertifiedRuntimeSpec,
+    projections: &store::ProjectionSnapshot,
+) -> Result<()> {
+    for node_id in runtime_spec.topological_order() {
+        let node = runtime_spec.node(node_id).expect("topological node exists");
+        if node.side_effect.is_some() {
+            continue;
+        }
+        if let Some(terminal) = projections.cell_terminal(&node.output_cell) {
+            validate_terminal_cell_has_completed_attempt(
+                runtime_spec,
+                projections,
+                node,
+                terminal,
+            )?;
+        }
+        let mut started = None;
+        for ((attempt_node_id, attempt_id), projection) in projections.attempts() {
+            if attempt_node_id != &node.node_id {
+                continue;
+            }
+            match &projection.status {
+                store::AttemptStatus::Started { .. } => {
+                    if started.replace(attempt_id.clone()).is_some() {
+                        return Err(RuntimeError::InvalidRunStream(format!(
+                            "node {} has multiple started attempts during recovery",
+                            node.node_id
+                        )));
+                    }
+                }
+                store::AttemptStatus::Completed { output_cell_id }
+                    if projections.cell_terminal(output_cell_id).is_none() =>
+                {
+                    return Err(RuntimeError::InvalidRunStream(format!(
+                        "node {} attempt {} completed without terminal cell projection",
+                        node.node_id, attempt_id
+                    )));
+                }
+                store::AttemptStatus::Completed { .. } | store::AttemptStatus::Failed { .. } => {}
             }
         }
     }
@@ -1785,6 +2214,7 @@ fn validate_runner_output(
     node: &spec::NodeSpec,
     attempt_id: &AttemptId,
     caps: &CertifiedRuntimeCapabilities,
+    recorded_facts: &RecordedFacts,
     output: &ErasedRunnerOutput,
 ) -> Result<()> {
     if output.payloads.is_empty() {
@@ -1873,6 +2303,12 @@ fn validate_runner_output(
             }
             events::KernelEventPayload::FactRecorded(payload) => {
                 require_attempt(node, attempt_id, &payload.node_id, &payload.attempt_id)?;
+                if !recorded_facts.is_empty() {
+                    return Err(RuntimeError::InvalidRunnerOutput(format!(
+                        "node {} attempted to record fact {} after committed facts existed for the same attempt",
+                        node.node_id, payload.fact_key
+                    )));
+                }
                 require_capability(
                     caps,
                     &payload.capability_kind,
@@ -2595,8 +3031,8 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
-    async fn replay_rejects_fact_without_projected_attempt() {
+    #[test]
+    fn store_rejects_fact_without_started_attempt() {
         let fixture = fixture();
         let scheduler = SerialTypedScheduler::new(registered_fixture_runners(&fixture));
         let mut store = store::InMemoryTypedRunStore::new();
@@ -2632,7 +3068,7 @@ mod tests {
                 artifact_role: events::ArtifactRole::FactResponse,
             })
             .expect("record fact artifact");
-        store
+        assert!(store
             .append_typed_run_commit(store::TypedCommitRequest {
                 run_id: fixture.run_id.clone(),
                 expected_next_seq: store.expected_next_seq(&fixture.run_id),
@@ -2663,13 +3099,7 @@ mod tests {
                     ..store::CommitPreconditions::default()
                 },
             })
-            .expect("append forged fact");
-        assert!(matches!(
-            scheduler
-                .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-                .await,
-            Err(RuntimeError::InvalidRunStream(_))
-        ));
+            .is_err());
     }
 
     #[tokio::test]
@@ -2783,6 +3213,446 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn recovery_continues_started_pure_attempt_with_same_attempt_id() {
+        let fixture = fixture();
+        let scheduler = SerialTypedScheduler::new(registered_fixture_runners(&fixture));
+        let mut store = store::InMemoryTypedRunStore::new();
+        scheduler
+            .start_run(
+                &mut store,
+                &fixture.runtime_spec,
+                fixture.run_id.clone(),
+                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
+            )
+            .expect("start run");
+        let node = node_by_output(&fixture, &fixture.cell_a);
+        let attempt_id = append_attempt_start(&mut store, &fixture, node, 1);
+
+        assert_eq!(
+            scheduler
+                .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+                .await
+                .expect("resume pure"),
+            SchedulerStatus::Advanced
+        );
+        assert_eq!(
+            attempt_started_count(&store, &fixture.run_id, &node.node_id),
+            1
+        );
+        match store
+            .projection_snapshot()
+            .cell_terminal(&fixture.cell_a)
+            .expect("terminal cell")
+        {
+            store::CellTerminalProjection::Produced {
+                attempt_id: produced_attempt,
+                ..
+            } => assert_eq!(produced_attempt, &attempt_id),
+            terminal => panic!("unexpected terminal projection: {terminal:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn recovery_rejects_split_terminal_cell_and_attempt_completion() {
+        let fixture = fixture();
+        let scheduler = SerialTypedScheduler::new(registered_fixture_runners(&fixture));
+        let mut store = store::InMemoryTypedRunStore::new();
+        scheduler
+            .start_run(
+                &mut store,
+                &fixture.runtime_spec,
+                fixture.run_id.clone(),
+                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
+            )
+            .expect("start run");
+        scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("produce first cell");
+        let mut corrupt_stream = store.load_run_stream(&fixture.run_id);
+        corrupt_stream.retain(|event| {
+            !matches!(
+                event.payload(),
+                events::KernelEventPayload::StateAttemptCompleted(payload)
+                    if payload.output_cell_id == fixture.cell_a
+            )
+        });
+        let projection =
+            store::ProjectionSnapshot::rebuild_from_run_stream(&corrupt_stream).expect("rebuild");
+        let mut corrupt_store = ReadOnlyCorruptStore {
+            stream: corrupt_stream,
+            projection,
+        };
+
+        assert!(matches!(
+            scheduler
+                .drive_once(&mut corrupt_store, &fixture.runtime_spec, &fixture.run_id)
+                .await,
+            Err(RuntimeError::InvalidRunStream(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn recovery_rejects_attempt_started_before_inputs_were_terminal() {
+        let fixture = fixture();
+        let scheduler = SerialTypedScheduler::new(registered_fixture_runners(&fixture));
+        let mut store = store::InMemoryTypedRunStore::new();
+        scheduler
+            .start_run(
+                &mut store,
+                &fixture.runtime_spec,
+                fixture.run_id.clone(),
+                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
+            )
+            .expect("start run");
+        let node_a = node_by_output(&fixture, &fixture.cell_a);
+        let node_b = node_by_output(&fixture, &fixture.cell_b);
+        append_attempt_start(&mut store, &fixture, node_b, 1);
+        let attempt_a = append_attempt_start(&mut store, &fixture, node_a, 1);
+        append_terminal(
+            &mut store,
+            &fixture,
+            node_a,
+            &attempt_a,
+            artifact(0xa1),
+            content(0xa2),
+        );
+
+        assert!(matches!(
+            scheduler
+                .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+                .await,
+            Err(RuntimeError::InvalidRunStream(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn recovery_reuses_committed_read_facts_for_same_attempt() {
+        struct FactReuseRunner {
+            fact_key: events::FactKey,
+            output_artifact: ArtifactId,
+            output_digest: ContentDigest,
+        }
+
+        impl ErasedNodeRunner for FactReuseRunner {
+            fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
+                Box::pin(async move {
+                    let fact = ctx
+                        .recorded_facts
+                        .get(&self.fact_key)
+                        .expect("recorded fact");
+                    assert_eq!(fact.fact_key, self.fact_key);
+                    assert_eq!(fact.request_schema_id, ctx.node.config_ref.schema_id);
+                    assert_eq!(ctx.recorded_facts.iter().count(), 1);
+                    let artifact = store::ArtifactEvidenceRef {
+                        artifact_id: self.output_artifact.clone(),
+                        digest: self.output_digest.clone(),
+                        byte_len: 17,
+                        media_type: spec::MediaType::new("application/json").expect("media"),
+                        schema_id: Some(ctx.descriptor.output_schema_id.clone()),
+                        semantic_type_id: Some(ctx.descriptor.output_semantic_type_id.clone()),
+                        producer_node_id: Some(ctx.node.node_id.clone()),
+                        producer_seed_id: None,
+                        artifact_role: events::ArtifactRole::StateOutput,
+                    };
+                    Ok(ErasedRunnerOutput {
+                        required_artifacts: vec![artifact],
+                        payloads: terminal_payloads(
+                            &ctx,
+                            self.output_artifact.clone(),
+                            self.output_digest.clone(),
+                        ),
+                    })
+                })
+            }
+        }
+
+        let fixture = fixture();
+        let fact_key = events::FactKey::new("reused-fact").expect("fact key");
+        let mut registry = ErasedRunnerRegistry::new();
+        registry
+            .register(binding(
+                fixture.descriptor_a.clone(),
+                "pure",
+                RecordingRunner {
+                    expected_caps: Vec::new(),
+                    output_artifact: artifact(0xa1),
+                    output_digest: content(0xa2),
+                },
+            ))
+            .expect("binding a");
+        registry
+            .register(binding(
+                fixture.descriptor_b.clone(),
+                "read",
+                FactReuseRunner {
+                    fact_key: fact_key.clone(),
+                    output_artifact: artifact(0xb1),
+                    output_digest: content(0xb2),
+                },
+            ))
+            .expect("binding b");
+        let scheduler = SerialTypedScheduler::new(registry);
+        let mut store = store::InMemoryTypedRunStore::new();
+        scheduler
+            .start_run(
+                &mut store,
+                &fixture.runtime_spec,
+                fixture.run_id.clone(),
+                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
+            )
+            .expect("start run");
+        scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("produce input");
+        let node = node_by_output(&fixture, &fixture.cell_b);
+        let attempt_id = append_attempt_start(&mut store, &fixture, node, 1);
+        append_fact(
+            &mut store,
+            &fixture,
+            node,
+            &attempt_id,
+            fact_key.clone(),
+            artifact(0xd1),
+            content(0xd2),
+        );
+
+        scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("resume read");
+        assert_eq!(fact_recorded_count(&store), 1);
+        match store
+            .projection_snapshot()
+            .cell_terminal(&fixture.cell_b)
+            .expect("terminal cell")
+        {
+            store::CellTerminalProjection::Produced {
+                attempt_id: produced_attempt,
+                ..
+            } => assert_eq!(produced_attempt, &attempt_id),
+            terminal => panic!("unexpected terminal projection: {terminal:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn recovery_rejects_new_fact_after_same_attempt_fact_exists() {
+        struct NewFactRunner {
+            cap_kind: CapabilityKind,
+            cap_version: CapabilityVersion,
+            adapter_kind: AdapterKind,
+            adapter_version: AdapterVersion,
+        }
+
+        impl ErasedNodeRunner for NewFactRunner {
+            fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
+                Box::pin(async move {
+                    Ok(ErasedRunnerOutput::new(vec![
+                        events::KernelEventPayload::FactRecorded(events::FactRecorded {
+                            spec_hash: ctx.spec_hash.clone(),
+                            node_id: ctx.node.node_id.clone(),
+                            attempt_id: ctx.attempt_id.clone(),
+                            capability_kind: self.cap_kind.clone(),
+                            capability_version: self.cap_version.clone(),
+                            adapter_kind: self.adapter_kind.clone(),
+                            adapter_version: self.adapter_version.clone(),
+                            request_schema_id: ctx.node.config_ref.schema_id.clone(),
+                            request_hash: content(0xe1),
+                            response_schema_id: ctx.node.config_ref.schema_id.clone(),
+                            response_hash: content(0xe2),
+                            fact_key: events::FactKey::new("new-fact").expect("fact key"),
+                            artifact_id: artifact(0xe3),
+                        }),
+                    ]))
+                })
+            }
+        }
+
+        let fixture = fixture();
+        let mut registry = ErasedRunnerRegistry::new();
+        registry
+            .register(binding(
+                fixture.descriptor_a.clone(),
+                "pure",
+                RecordingRunner {
+                    expected_caps: Vec::new(),
+                    output_artifact: artifact(0xa1),
+                    output_digest: content(0xa2),
+                },
+            ))
+            .expect("binding a");
+        registry
+            .register(binding(
+                fixture.descriptor_b.clone(),
+                "read",
+                NewFactRunner {
+                    cap_kind: fixture.cap_kind.clone(),
+                    cap_version: fixture.cap_version.clone(),
+                    adapter_kind: fixture.adapter_kind.clone(),
+                    adapter_version: fixture.adapter_version.clone(),
+                },
+            ))
+            .expect("binding b");
+        let scheduler = SerialTypedScheduler::new(registry);
+        let mut store = store::InMemoryTypedRunStore::new();
+        scheduler
+            .start_run(
+                &mut store,
+                &fixture.runtime_spec,
+                fixture.run_id.clone(),
+                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
+            )
+            .expect("start run");
+        scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("produce input");
+        let node = node_by_output(&fixture, &fixture.cell_b);
+        let attempt_id = append_attempt_start(&mut store, &fixture, node, 1);
+        append_fact(
+            &mut store,
+            &fixture,
+            node,
+            &attempt_id,
+            events::FactKey::new("existing-fact").expect("fact key"),
+            artifact(0xd1),
+            content(0xd2),
+        );
+
+        assert!(matches!(
+            scheduler
+                .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+                .await,
+            Err(RuntimeError::InvalidRunnerOutput(_))
+        ));
+        assert_eq!(store.projection_snapshot().facts().count(), 1);
+    }
+
+    #[tokio::test]
+    async fn recovery_allows_managed_write_artifact_restage_before_terminal_commit() {
+        let fixture = fixture_with_first_managed_write_state();
+        let output_artifact = artifact(0xa1);
+        let output_digest = content(0xa2);
+        let node = node_by_output(&fixture, &fixture.cell_a);
+        let expected_caps = node
+            .capability_bindings
+            .capabilities
+            .iter()
+            .map(|capability| (capability.kind.clone(), capability.version.clone()))
+            .collect();
+        let mut registry = ErasedRunnerRegistry::new();
+        registry
+            .register(binding(
+                fixture.descriptor_a.clone(),
+                "managed-write",
+                RecordingRunner {
+                    expected_caps,
+                    output_artifact: output_artifact.clone(),
+                    output_digest: output_digest.clone(),
+                },
+            ))
+            .expect("binding a");
+        registry
+            .register(binding(
+                fixture.descriptor_b.clone(),
+                "read",
+                RecordingRunner {
+                    expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
+                    output_artifact: artifact(0xb1),
+                    output_digest: content(0xb2),
+                },
+            ))
+            .expect("binding b");
+        let scheduler = SerialTypedScheduler::new(registry);
+        let mut store = store::InMemoryTypedRunStore::new();
+        scheduler
+            .start_run(
+                &mut store,
+                &fixture.runtime_spec,
+                fixture.run_id.clone(),
+                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
+            )
+            .expect("start run");
+        let attempt_id = append_attempt_start(&mut store, &fixture, node, 1);
+        let descriptor = fixture
+            .runtime_spec
+            .state_descriptor_for_node(node)
+            .expect("descriptor");
+        store
+            .record_artifact_evidence(state_output_artifact(
+                node,
+                descriptor,
+                output_artifact,
+                output_digest,
+            ))
+            .expect("stage managed artifact");
+        assert!(store
+            .projection_snapshot()
+            .cell_terminal(&fixture.cell_a)
+            .is_none());
+
+        scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("resume managed write");
+        assert_eq!(
+            attempt_started_count(&store, &fixture.run_id, &node.node_id),
+            1
+        );
+        match store
+            .projection_snapshot()
+            .cell_terminal(&fixture.cell_a)
+            .expect("terminal cell")
+        {
+            store::CellTerminalProjection::Produced {
+                attempt_id: produced_attempt,
+                ..
+            } => assert_eq!(produced_attempt, &attempt_id),
+            terminal => panic!("unexpected terminal projection: {terminal:?}"),
+        }
+    }
+
+    struct ReadOnlyCorruptStore {
+        stream: Vec<store::KernelEventEnvelope>,
+        projection: store::ProjectionSnapshot,
+    }
+
+    impl store::TypedProjectionRead for ReadOnlyCorruptStore {
+        fn projection_snapshot(&self) -> &store::ProjectionSnapshot {
+            &self.projection
+        }
+    }
+
+    impl store::TypedRunEventStore for ReadOnlyCorruptStore {
+        fn record_artifact_evidence(
+            &mut self,
+            _evidence: store::ArtifactEvidenceRef,
+        ) -> store::Result<()> {
+            Err(store::StoreError::Identity(
+                "corrupt test store is read-only".to_owned(),
+            ))
+        }
+
+        fn append_typed_run_commit(
+            &mut self,
+            _request: store::TypedCommitRequest,
+        ) -> store::Result<store::CommitOutcome> {
+            Err(store::StoreError::Identity(
+                "corrupt test store is read-only".to_owned(),
+            ))
+        }
+
+        fn load_run_stream(&self, _run_id: &RunId) -> Vec<store::KernelEventEnvelope> {
+            self.stream.clone()
+        }
+
+        fn expected_next_seq(&self, _run_id: &RunId) -> store::StreamSeq {
+            store::StreamSeq::FIRST
+        }
+    }
+
     fn run_start_evidence(
         fixture: &Fixture,
         seed_cells: Vec<events::SeedCellRef>,
@@ -2834,6 +3704,272 @@ mod tests {
             producer_seed_id: None,
             artifact_role: events::ArtifactRole::TypedConfig,
         }
+    }
+
+    fn terminal_payloads(
+        ctx: &ErasedRunCtx<'_>,
+        output_artifact: ArtifactId,
+        output_digest: ContentDigest,
+    ) -> Vec<events::KernelEventPayload> {
+        vec![
+            events::KernelEventPayload::CellProduced(events::CellProduced {
+                spec_hash: ctx.spec_hash.clone(),
+                node_id: ctx.node.node_id.clone(),
+                cell_id: ctx.node.output_cell.clone(),
+                scope_id: ctx.node.scope_id.clone(),
+                attempt_id: ctx.attempt_id.clone(),
+                semantic_type_id: ctx.descriptor.output_semantic_type_id.clone(),
+                schema_id: ctx.descriptor.output_schema_id.clone(),
+                value_lineage: ctx.output_cell.value_lineage.clone(),
+                artifact_id: output_artifact,
+                content_digest: output_digest,
+                producer_state_kind: Some(ctx.node.state_kind.clone()),
+                producer_state_version: Some(ctx.node.state_version.clone()),
+            }),
+            events::KernelEventPayload::StateAttemptCompleted(events::StateAttemptCompleted {
+                spec_hash: ctx.spec_hash.clone(),
+                node_id: ctx.node.node_id.clone(),
+                attempt_id: ctx.attempt_id.clone(),
+                output_cell_id: ctx.node.output_cell.clone(),
+            }),
+        ]
+    }
+
+    fn state_output_artifact(
+        node: &spec::NodeSpec,
+        descriptor: &spec::StateDescriptorIdentity,
+        artifact_id: ArtifactId,
+        digest: ContentDigest,
+    ) -> store::ArtifactEvidenceRef {
+        store::ArtifactEvidenceRef {
+            artifact_id,
+            digest,
+            byte_len: 17,
+            media_type: spec::MediaType::new("application/json").expect("media"),
+            schema_id: Some(descriptor.output_schema_id.clone()),
+            semantic_type_id: Some(descriptor.output_semantic_type_id.clone()),
+            producer_node_id: Some(node.node_id.clone()),
+            producer_seed_id: None,
+            artifact_role: events::ArtifactRole::StateOutput,
+        }
+    }
+
+    fn node_by_output<'a>(fixture: &'a Fixture, cell_id: &CellId) -> &'a spec::NodeSpec {
+        fixture
+            .runtime_spec
+            .topological_order()
+            .iter()
+            .filter_map(|node_id| fixture.runtime_spec.node(node_id))
+            .find(|node| &node.output_cell == cell_id)
+            .expect("node by output")
+    }
+
+    fn append_attempt_start(
+        store: &mut store::InMemoryTypedRunStore,
+        fixture: &Fixture,
+        node: &spec::NodeSpec,
+        attempt_no: u32,
+    ) -> AttemptId {
+        let attempt_id = attempt_id(
+            &fixture.run_id,
+            fixture.runtime_spec.spec_hash(),
+            &node.node_id,
+            attempt_no,
+        )
+        .expect("attempt id");
+        store
+            .append_typed_run_commit(store::TypedCommitRequest {
+                run_id: fixture.run_id.clone(),
+                expected_next_seq: store.expected_next_seq(&fixture.run_id),
+                commit_key: store::CommitKey::new(format!(
+                    "manual-attempt-start:{}:{}",
+                    node.node_id, attempt_id
+                ))
+                .expect("commit key"),
+                payloads: vec![events::KernelEventPayload::StateAttemptStarted(
+                    events::StateAttemptStarted {
+                        spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                        node_id: node.node_id.clone(),
+                        attempt_id: attempt_id.clone(),
+                        attempt_no,
+                        state_kind: node.state_kind.clone(),
+                        state_version: node.state_version.clone(),
+                    },
+                )],
+                required_artifacts: Vec::new(),
+                preconditions: store::CommitPreconditions {
+                    required_run_state: store::RequiredRunState::NotCompleted,
+                    required_cell_states: vec![store::CellStatePrecondition {
+                        cell_id: node.output_cell.clone(),
+                        required: store::RequiredCellState::Absent,
+                    }],
+                    ..store::CommitPreconditions::default()
+                },
+            })
+            .expect("append attempt start");
+        attempt_id
+    }
+
+    fn append_fact(
+        store: &mut store::InMemoryTypedRunStore,
+        fixture: &Fixture,
+        node: &spec::NodeSpec,
+        attempt_id: &AttemptId,
+        fact_key: events::FactKey,
+        artifact_id: ArtifactId,
+        response_hash: ContentDigest,
+    ) {
+        let response_schema_id = node.config_ref.schema_id.clone();
+        let evidence = store::ArtifactEvidenceRef {
+            artifact_id: artifact_id.clone(),
+            digest: response_hash.clone(),
+            byte_len: 10,
+            media_type: spec::MediaType::new("application/json").expect("media"),
+            schema_id: Some(response_schema_id.clone()),
+            semantic_type_id: None,
+            producer_node_id: Some(node.node_id.clone()),
+            producer_seed_id: None,
+            artifact_role: events::ArtifactRole::FactResponse,
+        };
+        store
+            .record_artifact_evidence(evidence.clone())
+            .expect("record fact artifact");
+        store
+            .append_typed_run_commit(store::TypedCommitRequest {
+                run_id: fixture.run_id.clone(),
+                expected_next_seq: store.expected_next_seq(&fixture.run_id),
+                commit_key: store::CommitKey::new(format!(
+                    "manual-fact:{}:{}:{}",
+                    node.node_id, attempt_id, fact_key
+                ))
+                .expect("commit key"),
+                payloads: vec![events::KernelEventPayload::FactRecorded(
+                    events::FactRecorded {
+                        spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                        node_id: node.node_id.clone(),
+                        attempt_id: attempt_id.clone(),
+                        capability_kind: fixture.cap_kind.clone(),
+                        capability_version: fixture.cap_version.clone(),
+                        adapter_kind: fixture.adapter_kind.clone(),
+                        adapter_version: fixture.adapter_version.clone(),
+                        request_schema_id: node.config_ref.schema_id.clone(),
+                        request_hash: content(0xd4),
+                        response_schema_id,
+                        response_hash,
+                        fact_key,
+                        artifact_id,
+                    },
+                )],
+                required_artifacts: vec![evidence],
+                preconditions: store::CommitPreconditions {
+                    required_run_state: store::RequiredRunState::NotCompleted,
+                    required_present_logical_keys: vec![store::LogicalEventKey::new(format!(
+                        "attempt:{}:{}",
+                        node.node_id, attempt_id
+                    ))
+                    .expect("attempt logical key")],
+                    ..store::CommitPreconditions::default()
+                },
+            })
+            .expect("append fact");
+    }
+
+    fn append_terminal(
+        store: &mut store::InMemoryTypedRunStore,
+        fixture: &Fixture,
+        node: &spec::NodeSpec,
+        attempt_id: &AttemptId,
+        artifact_id: ArtifactId,
+        output_digest: ContentDigest,
+    ) {
+        let descriptor = fixture
+            .runtime_spec
+            .state_descriptor_for_node(node)
+            .expect("descriptor");
+        let output_cell = fixture
+            .runtime_spec
+            .cell(&node.output_cell)
+            .expect("output cell");
+        let evidence =
+            state_output_artifact(node, descriptor, artifact_id.clone(), output_digest.clone());
+        store
+            .record_artifact_evidence(evidence.clone())
+            .expect("record output artifact");
+        store
+            .append_typed_run_commit(store::TypedCommitRequest {
+                run_id: fixture.run_id.clone(),
+                expected_next_seq: store.expected_next_seq(&fixture.run_id),
+                commit_key: store::CommitKey::new(format!(
+                    "manual-terminal:{}:{}",
+                    node.node_id, attempt_id
+                ))
+                .expect("commit key"),
+                payloads: vec![
+                    events::KernelEventPayload::CellProduced(events::CellProduced {
+                        spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                        node_id: node.node_id.clone(),
+                        cell_id: node.output_cell.clone(),
+                        scope_id: node.scope_id.clone(),
+                        attempt_id: attempt_id.clone(),
+                        semantic_type_id: descriptor.output_semantic_type_id.clone(),
+                        schema_id: descriptor.output_schema_id.clone(),
+                        value_lineage: output_cell.value_lineage.clone(),
+                        artifact_id,
+                        content_digest: output_digest,
+                        producer_state_kind: Some(node.state_kind.clone()),
+                        producer_state_version: Some(node.state_version.clone()),
+                    }),
+                    events::KernelEventPayload::StateAttemptCompleted(
+                        events::StateAttemptCompleted {
+                            spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                            node_id: node.node_id.clone(),
+                            attempt_id: attempt_id.clone(),
+                            output_cell_id: node.output_cell.clone(),
+                        },
+                    ),
+                ],
+                required_artifacts: vec![evidence],
+                preconditions: store::CommitPreconditions {
+                    required_run_state: store::RequiredRunState::NotCompleted,
+                    required_present_logical_keys: vec![store::LogicalEventKey::new(format!(
+                        "attempt:{}:{}",
+                        node.node_id, attempt_id
+                    ))
+                    .expect("attempt logical key")],
+                    required_cell_states: vec![store::CellStatePrecondition {
+                        cell_id: node.output_cell.clone(),
+                        required: store::RequiredCellState::Absent,
+                    }],
+                    ..store::CommitPreconditions::default()
+                },
+            })
+            .expect("append terminal");
+    }
+
+    fn attempt_started_count(
+        store: &store::InMemoryTypedRunStore,
+        run_id: &RunId,
+        node_id: &NodeId,
+    ) -> usize {
+        store
+            .load_run_stream(run_id)
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event.payload(),
+                    events::KernelEventPayload::StateAttemptStarted(payload)
+                        if &payload.node_id == node_id
+                )
+            })
+            .count()
+    }
+
+    fn fact_recorded_count(store: &store::InMemoryTypedRunStore) -> usize {
+        store
+            .projection_snapshot()
+            .facts()
+            .filter(|(_, fact)| fact.fact_key.as_str() == "reused-fact")
+            .count()
     }
 
     #[test]
@@ -3184,6 +4320,53 @@ mod tests {
             adapter_kind,
             adapter_version,
         }
+    }
+
+    fn fixture_with_first_managed_write_state() -> Fixture {
+        let mut fixture = fixture();
+        let mut envelope = fixture.runtime_spec.envelope().clone();
+        let managed_effect = EffectKind::new(
+            "mfm.test",
+            "managed-write",
+            DigestAlgorithm::Sha256JcsV1,
+            D8,
+        )
+        .expect("managed effect");
+        let managed_cap = CapabilityDescriptor::new(
+            CapabilityKind::new(
+                "mfm.test",
+                "managed-store",
+                DigestAlgorithm::Sha256JcsV1,
+                D9,
+            )
+            .expect("managed cap kind"),
+            CapabilityVersion::new("mfm.cap.managed_store.v1").expect("managed cap version"),
+            CapabilityRole::ManagedPlatformWrite,
+            "managed-store",
+        )
+        .expect("managed cap");
+        let managed_caps = CapabilitySetDescriptor::new(vec![managed_cap]).expect("managed caps");
+        for node in &mut envelope.spec.nodes {
+            if node.descriptor_id == fixture.descriptor_a {
+                node.effect_kind = managed_effect.clone();
+                node.capability_bindings = managed_caps.clone();
+            }
+        }
+        for descriptor in &mut envelope.spec.descriptor_identities {
+            if let spec::DescriptorIdentity::State(identity) = descriptor {
+                if identity.descriptor_id == fixture.descriptor_a {
+                    identity.effect_kind = managed_effect.clone();
+                    identity.effect_class = "managed-write".to_owned();
+                    identity.effect_name = "managed-write".to_owned();
+                    identity.capabilities = managed_caps.clone();
+                    identity.runner = "managed-write".to_owned();
+                }
+            }
+        }
+        let envelope =
+            spec::CertifiedSpecEnvelope::new(envelope.spec, envelope.audit).expect("rehash");
+        fixture.runtime_spec = CertifiedRuntimeSpec::new(envelope).expect("runtime spec");
+        fixture
     }
 
     struct NodeSpecFixture {
