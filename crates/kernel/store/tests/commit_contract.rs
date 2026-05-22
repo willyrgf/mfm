@@ -11,6 +11,7 @@ use mfm_store::v1::{
     build_committed_batch, ArtifactEvidenceRef, CellTerminalProjection, CommitKey, CommitOutcome,
     CommitPreconditions, InMemoryTypedRunStore, ProjectionSnapshot, RequiredRunState, StoreError,
     StreamSeq, TypedCommitRequest, TypedProjectionRead, TypedRunEventStore,
+    VerifiedRetentionProjection, VerifiedRetentionProjectionSet,
 };
 
 const SPEC_MEDIA_TYPE: &str = "application/vnd.mfm.typed-execution-spec+json;version=1";
@@ -522,6 +523,77 @@ fn fact_artifact_ref(artifact_id: ArtifactId, digest: ContentDigest) -> Artifact
         producer_seed_id: None::<SeedId>,
         artifact_role: ArtifactRole::FactResponse,
     }
+}
+
+fn retention_refs_appended(
+    artifact_id: ArtifactId,
+    digest: ContentDigest,
+    role: ArtifactRole,
+) -> KernelEventPayload {
+    KernelEventPayload::RetentionRefsAppended(events::RetentionRefsAppended {
+        run_id: run_id(120),
+        spec_hash: spec_hash(1),
+        refs: vec![events::RetentionRef {
+            artifact_id,
+            role,
+            content_digest: digest,
+        }],
+        reason: events::RetentionReason::RuntimeEvidence,
+    })
+}
+
+fn retention_manifest_artifact_ref(
+    artifact_id: ArtifactId,
+    digest: ContentDigest,
+) -> ArtifactEvidenceRef {
+    ArtifactEvidenceRef {
+        artifact_id,
+        digest,
+        byte_len: 512,
+        media_type: media_type("application/vnd.mfm.retention-manifest+json;version=1"),
+        schema_id: None,
+        semantic_type_id: None,
+        producer_node_id: None,
+        producer_seed_id: None::<SeedId>,
+        artifact_role: ArtifactRole::RetentionManifest,
+    }
+}
+
+fn retention_manifest_projected(
+    seq: u64,
+    digest: ContentDigest,
+    previous: Option<ContentDigest>,
+    artifact_id: ArtifactId,
+) -> KernelEventPayload {
+    KernelEventPayload::RetentionManifestProjected(events::RetentionManifestProjected {
+        run_id: run_id(120),
+        spec_hash: spec_hash(1),
+        manifest_seq: seq,
+        manifest_digest: digest,
+        previous_manifest_digest: previous,
+        manifest_artifact_id: artifact_id,
+    })
+}
+
+fn retention_manifest_commit_payloads(
+    seq: u64,
+    digest: ContentDigest,
+    previous: Option<ContentDigest>,
+    artifact_id: ArtifactId,
+) -> Vec<KernelEventPayload> {
+    vec![
+        retention_manifest_projected(seq, digest.clone(), previous, artifact_id.clone()),
+        KernelEventPayload::RetentionRefsAppended(events::RetentionRefsAppended {
+            run_id: run_id(120),
+            spec_hash: spec_hash(1),
+            refs: vec![events::RetentionRef {
+                artifact_id,
+                role: ArtifactRole::RetentionManifest,
+                content_digest: digest,
+            }],
+            reason: events::RetentionReason::ManifestProjection,
+        }),
+    ]
 }
 
 fn spec_artifact_ref() -> ArtifactEvidenceRef {
@@ -1432,6 +1504,222 @@ fn fact_recorded_requires_started_attempt_projection() {
         })
         .expect_err("fact before attempt must reject");
     assert!(matches!(error, StoreError::ProjectionConflict { .. }));
+}
+
+#[test]
+fn retention_refs_are_projected_from_authoritative_stream() {
+    let run_id = run_id(120);
+    let artifact_id = artifact_id(121);
+    let digest = content_digest(122);
+    let mut store = InMemoryTypedRunStore::new();
+    record_run_start_artifact(&mut store);
+    store
+        .record_artifact_evidence(store_artifact_ref(artifact_id.clone(), digest.clone()))
+        .expect("record retained artifact");
+    store
+        .append_typed_run_commit(run_start_request(run_id.clone(), "run-start"))
+        .expect("append run start");
+    store
+        .append_typed_run_commit(TypedCommitRequest {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&run_id),
+            commit_key: CommitKey::new("retention-refs").expect("commit key"),
+            payloads: vec![retention_refs_appended(
+                artifact_id.clone(),
+                digest.clone(),
+                ArtifactRole::StateOutput,
+            )],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions {
+                required_run_state: RequiredRunState::Started,
+                ..CommitPreconditions::default()
+            },
+        })
+        .expect("append retention refs");
+
+    let stream = store.load_run_stream(&run_id);
+    let verified = VerifiedRetentionProjection::from_run_stream(run_id.clone(), &stream)
+        .expect("verified retention");
+    let evidence = store_artifact_ref(artifact_id.clone(), digest.clone());
+    assert!(verified.retains_artifact(&evidence));
+    assert_eq!(
+        verified
+            .projection()
+            .refs
+            .get(&artifact_id)
+            .expect("retention ref")
+            .content_digest,
+        digest
+    );
+}
+
+#[test]
+fn retention_manifest_projection_must_chain_append_only() {
+    let run_id = run_id(120);
+    let first_artifact = artifact_id(123);
+    let first_digest = content_digest(124);
+    let second_artifact = artifact_id(125);
+    let second_digest = content_digest(126);
+    let mut store = InMemoryTypedRunStore::new();
+    record_run_start_artifact(&mut store);
+    store
+        .record_artifact_evidence(retention_manifest_artifact_ref(
+            first_artifact.clone(),
+            first_digest.clone(),
+        ))
+        .expect("record first manifest artifact");
+    store
+        .record_artifact_evidence(retention_manifest_artifact_ref(
+            second_artifact.clone(),
+            second_digest.clone(),
+        ))
+        .expect("record second manifest artifact");
+    store
+        .append_typed_run_commit(run_start_request(run_id.clone(), "run-start"))
+        .expect("append run start");
+
+    let skipped_first = store
+        .append_typed_run_commit(TypedCommitRequest {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&run_id),
+            commit_key: CommitKey::new("retention-manifest-skipped-first").expect("commit key"),
+            payloads: retention_manifest_commit_payloads(
+                2,
+                first_digest.clone(),
+                None,
+                first_artifact.clone(),
+            ),
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions {
+                required_run_state: RequiredRunState::Started,
+                ..CommitPreconditions::default()
+            },
+        })
+        .expect_err("first manifest must be seq 1");
+    assert!(matches!(
+        skipped_first,
+        StoreError::ProjectionConflict { .. }
+    ));
+
+    store
+        .append_typed_run_commit(TypedCommitRequest {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&run_id),
+            commit_key: CommitKey::new("retention-manifest-1").expect("commit key"),
+            payloads: retention_manifest_commit_payloads(
+                1,
+                first_digest.clone(),
+                None,
+                first_artifact,
+            ),
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions {
+                required_run_state: RequiredRunState::Started,
+                ..CommitPreconditions::default()
+            },
+        })
+        .expect("append first manifest");
+
+    let wrong_previous = store
+        .append_typed_run_commit(TypedCommitRequest {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&run_id),
+            commit_key: CommitKey::new("retention-manifest-wrong-prev").expect("commit key"),
+            payloads: retention_manifest_commit_payloads(
+                2,
+                second_digest.clone(),
+                Some(content_digest(128)),
+                second_artifact.clone(),
+            ),
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions {
+                required_run_state: RequiredRunState::Started,
+                ..CommitPreconditions::default()
+            },
+        })
+        .expect_err("wrong previous digest rejects");
+    assert!(matches!(
+        wrong_previous,
+        StoreError::ProjectionConflict { .. }
+    ));
+
+    store
+        .append_typed_run_commit(TypedCommitRequest {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&run_id),
+            commit_key: CommitKey::new("retention-manifest-2").expect("commit key"),
+            payloads: retention_manifest_commit_payloads(
+                2,
+                second_digest.clone(),
+                Some(first_digest.clone()),
+                second_artifact,
+            ),
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions {
+                required_run_state: RequiredRunState::Started,
+                ..CommitPreconditions::default()
+            },
+        })
+        .expect("append second manifest");
+
+    let retention = store
+        .projection_snapshot()
+        .retention(&run_id)
+        .expect("retention projection");
+    assert_eq!(retention.manifests.len(), 2);
+    assert_eq!(
+        retention.manifest.as_ref().expect("latest").manifest_digest,
+        second_digest
+    );
+    assert_eq!(
+        retention
+            .manifest
+            .as_ref()
+            .expect("latest")
+            .previous_manifest_digest,
+        Some(first_digest)
+    );
+    let stream = store.load_run_stream(&run_id);
+    let verified =
+        VerifiedRetentionProjectionSet::from_run_streams(vec![(run_id.clone(), stream.as_slice())])
+            .expect("verified retention set");
+    assert!(verified.retains_artifact(&retention_manifest_artifact_ref(
+        artifact_id(125),
+        second_digest,
+    )));
+}
+
+#[test]
+fn retention_manifest_projection_requires_same_commit_retention_ref() {
+    let run_id = run_id(120);
+    let artifact_id = artifact_id(129);
+    let digest = content_digest(130);
+    let mut store = InMemoryTypedRunStore::new();
+    record_run_start_artifact(&mut store);
+    store
+        .record_artifact_evidence(retention_manifest_artifact_ref(
+            artifact_id.clone(),
+            digest.clone(),
+        ))
+        .expect("record manifest artifact");
+    store
+        .append_typed_run_commit(run_start_request(run_id.clone(), "run-start"))
+        .expect("append run start");
+
+    let missing_ref = store
+        .append_typed_run_commit(TypedCommitRequest {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&run_id),
+            commit_key: CommitKey::new("retention-manifest-missing-ref").expect("commit key"),
+            payloads: vec![retention_manifest_projected(1, digest, None, artifact_id)],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions {
+                required_run_state: RequiredRunState::Started,
+                ..CommitPreconditions::default()
+            },
+        })
+        .expect_err("manifest without retention ref rejects");
+    assert!(matches!(missing_ref, StoreError::ProjectionConflict { .. }));
 }
 
 #[test]

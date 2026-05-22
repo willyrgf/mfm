@@ -2,14 +2,20 @@ use mfm_artifact_store_fs::{
     FsArtifactStore, FsTypedArtifactError, FsTypedArtifactStore, TypedArtifactDescriptor,
 };
 use mfm_canonical::sha256_digest_bytes;
-use mfm_events::v1::{ArtifactEvidenceRef as EventArtifactEvidenceRef, ArtifactRole, SeedCellRef};
+use mfm_events::v1::{
+    ArtifactEvidenceRef as EventArtifactEvidenceRef, ArtifactRole, FrameworkVersion,
+    KernelEventPayload, RetentionReason, SeedCellRef, SourceRevision,
+};
 use mfm_ids::{
-    ArtifactId, CellId, ContentDigest, DigestAlgorithm, DigestBytes, NodeId, SchemaId, ScopeId,
-    SeedId, SemanticTypeId,
+    ArtifactId, CellId, ContentDigest, DigestAlgorithm, DigestBytes, LoweringVersion, NodeId,
+    RunId, SchemaId, ScopeId, SeedId, SemanticTypeId, SpecHash, SpecVersion,
 };
 use mfm_machine_test_support::artifact_store_contract_tests;
-use mfm_spec::v1::MediaType;
-use mfm_store::v1::ArtifactEvidenceRef;
+use mfm_spec::v1::{CanonicalizerIdentity, MediaType};
+use mfm_store::v1::{
+    ArtifactEvidenceRef, CommitKey, CommitPreconditions, InMemoryTypedRunStore, RequiredRunState,
+    StreamSeq, TypedCommitRequest, TypedRunEventStore, VerifiedRetentionProjectionSet,
+};
 use std::path::{Path, PathBuf};
 
 #[tokio::test]
@@ -53,6 +59,14 @@ fn node_id(byte: u8) -> NodeId {
 
 fn seed_id(byte: u8) -> SeedId {
     SeedId::from_digest(DigestAlgorithm::Sha256JcsV1, digest(byte))
+}
+
+fn run_id(byte: u8) -> RunId {
+    RunId::from_digest(DigestAlgorithm::Sha256JcsV1, digest(byte))
+}
+
+fn spec_hash(byte: u8) -> SpecHash {
+    SpecHash::from_digest(DigestAlgorithm::Sha256JcsV1, digest(byte))
 }
 
 fn cell_id(byte: u8) -> CellId {
@@ -119,6 +133,92 @@ async fn persisted_artifact_fixture() -> (
         .await
         .expect("put typed artifact");
     (dir, store, evidence, bytes)
+}
+
+fn verified_retention_projection_for(
+    evidence: &ArtifactEvidenceRef,
+) -> VerifiedRetentionProjectionSet {
+    let run_id = run_id(80);
+    let spec_hash = spec_hash(81);
+    let spec_artifact_id =
+        ArtifactId::from_digest(DigestAlgorithm::Sha256JcsV1, *spec_hash.digest());
+    let spec_evidence = ArtifactEvidenceRef {
+        artifact_id: spec_artifact_id.clone(),
+        digest: ContentDigest::from_digest(spec_hash.algorithm(), *spec_hash.digest()),
+        byte_len: 64,
+        media_type: MediaType::new("application/vnd.mfm.typed-execution-spec+json;version=1")
+            .expect("spec media"),
+        schema_id: None,
+        semantic_type_id: None,
+        producer_node_id: None,
+        producer_seed_id: None,
+        artifact_role: ArtifactRole::TypedExecutionSpec,
+    };
+    let mut run_store = InMemoryTypedRunStore::new();
+    run_store
+        .record_artifact_evidence(spec_evidence.clone())
+        .expect("record spec artifact");
+    run_store
+        .record_artifact_evidence(evidence.clone())
+        .expect("record retained artifact");
+    run_store
+        .append_typed_run_commit(TypedCommitRequest {
+            run_id: run_id.clone(),
+            expected_next_seq: StreamSeq::FIRST,
+            commit_key: CommitKey::new("run-start").expect("commit key"),
+            payloads: vec![KernelEventPayload::RunStarted(mfm_events::v1::RunStarted {
+                run_id: run_id.clone(),
+                spec_hash: spec_hash.clone(),
+                spec_artifact_id,
+                spec_media_type: spec_evidence.media_type.clone(),
+                spec_version: SpecVersion::new("mfm.typed.execution_spec.v1")
+                    .expect("spec version"),
+                lowering_version: LoweringVersion::new("mfm.typed.lowering.v1")
+                    .expect("lowering version"),
+                public_output_schema_id: schema_id("mfm.test.public_output", 82),
+                descriptor_identities: Vec::new(),
+                runner_executables: Vec::new(),
+                adapter_executables: Vec::new(),
+                canonicalizer_identity: CanonicalizerIdentity::new("mfm.jcs.v1")
+                    .expect("canonicalizer"),
+                framework_version: FrameworkVersion::new("mfm.test.1").expect("framework version"),
+                source_revision: SourceRevision::new("test-revision").expect("source revision"),
+                seed_cells: Vec::new(),
+            })],
+            required_artifacts: vec![spec_evidence],
+            preconditions: CommitPreconditions {
+                required_run_state: RequiredRunState::Absent,
+                ..CommitPreconditions::default()
+            },
+        })
+        .expect("append run start");
+    run_store
+        .append_typed_run_commit(TypedCommitRequest {
+            run_id: run_id.clone(),
+            expected_next_seq: run_store.expected_next_seq(&run_id),
+            commit_key: CommitKey::new("retain-artifact").expect("commit key"),
+            payloads: vec![KernelEventPayload::RetentionRefsAppended(
+                mfm_events::v1::RetentionRefsAppended {
+                    run_id: run_id.clone(),
+                    spec_hash,
+                    refs: vec![mfm_events::v1::RetentionRef {
+                        artifact_id: evidence.artifact_id.clone(),
+                        role: evidence.artifact_role,
+                        content_digest: evidence.digest.clone(),
+                    }],
+                    reason: RetentionReason::RuntimeEvidence,
+                },
+            )],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions {
+                required_run_state: RequiredRunState::Started,
+                ..CommitPreconditions::default()
+            },
+        })
+        .expect("append retention refs");
+    let stream = run_store.load_run_stream(&run_id);
+    VerifiedRetentionProjectionSet::from_run_streams(vec![(run_id, stream.as_slice())])
+        .expect("verified retention projection")
 }
 
 #[tokio::test]
@@ -246,6 +346,43 @@ async fn typed_artifact_store_detects_persisted_tampering() {
         .await
         .expect_err("invalid metadata rejects");
     assert!(matches!(error, FsTypedArtifactError::Corruption { .. }));
+}
+
+#[tokio::test]
+async fn typed_artifact_gc_refuses_verified_retained_artifacts() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = FsTypedArtifactStore::new(dir.path());
+    let retained = store
+        .put_artifact(br#"{"retained":true}"#.to_vec(), state_output_descriptor())
+        .await
+        .expect("put retained artifact");
+    let unretained = store
+        .put_artifact(br#"{"retained":false}"#.to_vec(), state_output_descriptor())
+        .await
+        .expect("put unretained artifact");
+    let retention = verified_retention_projection_for(&retained);
+
+    let error = store
+        .remove_unretained_artifact(&retained, &retention)
+        .await
+        .expect_err("retained artifact must not be removed");
+    assert!(matches!(
+        error,
+        FsTypedArtifactError::RetainedArtifactRefused { .. }
+    ));
+    assert!(store
+        .has_artifact(&retained)
+        .await
+        .expect("retained exists"));
+
+    store
+        .remove_unretained_artifact(&unretained, &retention)
+        .await
+        .expect("remove unretained artifact");
+    assert!(!store
+        .has_artifact(&unretained)
+        .await
+        .expect("unretained removed"));
 }
 
 #[tokio::test]

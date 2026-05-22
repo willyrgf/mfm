@@ -118,6 +118,8 @@ pub struct RecordedFact {
 pub struct ErasedRunnerOutput {
     /// Artifact evidence written before payload commit.
     pub required_artifacts: Vec<store::ArtifactEvidenceRef>,
+    /// Retention refs staged by the runner for scheduler-owned event binding.
+    pub staged_retention_refs: Vec<StagedRetentionRefs>,
     /// Typed event payloads to commit atomically for this attempt.
     pub payloads: Vec<events::KernelEventPayload>,
 }
@@ -127,9 +129,19 @@ impl ErasedRunnerOutput {
     pub fn new(payloads: Vec<events::KernelEventPayload>) -> Self {
         Self {
             required_artifacts: Vec::new(),
+            staged_retention_refs: Vec::new(),
             payloads,
         }
     }
+}
+
+/// Retention refs staged by a runner before the scheduler binds them to typed events.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StagedRetentionRefs {
+    /// Retained artifact refs.
+    pub refs: Vec<events::RetentionRef>,
+    /// Retention reason.
+    pub reason: events::RetentionReason,
 }
 
 /// Runtime failure.
@@ -869,6 +881,10 @@ fn render_public_output(ctx: ErasedRunCtx<'_>) -> Result<ErasedRunnerOutput> {
         artifact_role: events::ArtifactRole::StateOutput,
     };
     Ok(ErasedRunnerOutput {
+        staged_retention_refs: vec![StagedRetentionRefs {
+            refs: vec![retention_ref_for_artifact(&receipt_artifact)],
+            reason: events::RetentionReason::PublicOutput,
+        }],
         payloads: vec![
             events::KernelEventPayload::CellProduced(events::CellProduced {
                 spec_hash: ctx.spec_hash.clone(),
@@ -972,6 +988,190 @@ fn public_output_cell_json(cell: &events::NamedTypedCellRef) -> serde_json::Valu
         "semantic_type_id": cell.semantic_type_id.as_str(),
         "value_lineage": cell.value_lineage.lineage_digest.as_str(),
     })
+}
+
+fn retention_manifest_json(
+    runtime_spec: &CertifiedRuntimeSpec,
+    run_id: &RunId,
+    run_started: &events::RunStarted,
+    manifest_seq: u64,
+    previous_manifest_digest: Option<&ContentDigest>,
+    retained_refs: &[&events::RetentionRef],
+    stream: &[store::KernelEventEnvelope],
+) -> Result<PlainCanonicalJsonBytes> {
+    let spec_canonical = runtime_spec
+        .spec()
+        .canonical_json()
+        .map_err(|error| RuntimeError::Canonical(error.to_string()))?;
+    let spec_digest = spec_canonical.content_digest();
+    let event_schema_ids = stream
+        .iter()
+        .map(|event| event.event_schema_id().as_str())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let retained_by_role = retained_refs_by_role(retained_refs);
+    canonical_json(serde_json::json!({
+        "adapter_executables": run_started.adapter_executables.iter().map(executable_json).collect::<Vec<_>>(),
+        "canonicalizer_identity": run_started.canonicalizer_identity.as_str(),
+        "config_artifacts": runtime_spec.spec().config_refs.iter().map(config_artifact_json).collect::<Vec<_>>(),
+        "descriptor_digests": runtime_spec.spec().descriptor_identities.iter().map(descriptor_digest_json).collect::<Vec<_>>(),
+        "descriptor_identities": runtime_spec.spec().descriptor_identities.iter().map(descriptor_identity_json).collect::<Vec<_>>(),
+        "event_schema_ids": event_schema_ids,
+        "manifest_seq": manifest_seq,
+        "previous_manifest_digest": previous_manifest_digest.map(ContentDigest::as_str),
+        "public_output_artifacts": retained_by_role.public_output_artifacts,
+        "receipt_artifacts": retained_by_role.receipt_artifacts,
+        "confirmation_artifacts": retained_by_role.confirmation_artifacts,
+        "retained_refs": retained_refs.iter().map(|retention_ref| retention_ref_json(retention_ref)).collect::<Vec<_>>(),
+        "run_id": run_id.as_str(),
+        "runner_executables": run_started.runner_executables.iter().map(executable_json).collect::<Vec<_>>(),
+        "spec_artifact": {
+            "artifact_id": run_started.spec_artifact_id.as_str(),
+            "byte_len": spec_canonical.as_bytes().len(),
+            "content_digest": spec_digest.as_str(),
+            "media_type": run_started.spec_media_type.as_str(),
+        },
+        "spec_hash": runtime_spec.spec_hash().as_str(),
+        "value_artifacts": retained_by_role.value_artifacts,
+    }))
+}
+
+struct RetainedRefsByRole {
+    value_artifacts: Vec<String>,
+    receipt_artifacts: Vec<String>,
+    confirmation_artifacts: Vec<String>,
+    public_output_artifacts: Vec<String>,
+}
+
+fn retained_refs_by_role(retained_refs: &[&events::RetentionRef]) -> RetainedRefsByRole {
+    let mut value_artifacts = Vec::new();
+    let mut receipt_artifacts = Vec::new();
+    let mut confirmation_artifacts = Vec::new();
+    let mut public_output_artifacts = Vec::new();
+    for retention_ref in retained_refs {
+        match retention_ref.role {
+            events::ArtifactRole::StateOutput
+            | events::ArtifactRole::FactResponse
+            | events::ArtifactRole::SideEffectIntent
+            | events::ArtifactRole::PreparedInvocation
+            | events::ArtifactRole::NotSubmittedProof
+            | events::ArtifactRole::Submission
+            | events::ArtifactRole::SubmissionUnknownEvidence
+            | events::ArtifactRole::AmbiguityEvidence
+            | events::ArtifactRole::RedactedDiagnostic => {
+                value_artifacts.push(retention_ref.artifact_id.as_str().to_owned());
+            }
+            events::ArtifactRole::Receipt => {
+                receipt_artifacts.push(retention_ref.artifact_id.as_str().to_owned());
+            }
+            events::ArtifactRole::Confirmation => {
+                confirmation_artifacts.push(retention_ref.artifact_id.as_str().to_owned());
+            }
+            events::ArtifactRole::PublicOutput => {
+                public_output_artifacts.push(retention_ref.artifact_id.as_str().to_owned());
+            }
+            events::ArtifactRole::TypedExecutionSpec
+            | events::ArtifactRole::TypedConfig
+            | events::ArtifactRole::SeedInput
+            | events::ArtifactRole::RetentionManifest => {}
+        }
+    }
+    RetainedRefsByRole {
+        value_artifacts,
+        receipt_artifacts,
+        confirmation_artifacts,
+        public_output_artifacts,
+    }
+}
+
+fn config_artifact_json(config: &spec::ConfigRef) -> serde_json::Value {
+    serde_json::json!({
+        "artifact_id": config.artifact_id.as_str(),
+        "byte_len": config.byte_len,
+        "content_digest": config.digest.as_str(),
+        "media_type": config.media_type.as_str(),
+        "schema_id": config.schema_id.as_str(),
+    })
+}
+
+fn descriptor_identity_json(identity: &spec::DescriptorIdentity) -> serde_json::Value {
+    match identity {
+        spec::DescriptorIdentity::State(identity) => serde_json::json!({
+            "descriptor_family": "state",
+            "descriptor_id": identity.descriptor_id.as_str(),
+            "name": identity.name.as_str(),
+            "state_kind": identity.state_kind.as_str(),
+            "state_version": identity.state_version.as_str(),
+        }),
+        spec::DescriptorIdentity::Operation(identity) => serde_json::json!({
+            "descriptor_family": "operation",
+            "descriptor_id": identity.descriptor_id.as_str(),
+            "name": identity.name.as_str(),
+            "operation_kind": identity.operation_kind.as_str(),
+            "operation_version": identity.operation_version.as_str(),
+        }),
+        spec::DescriptorIdentity::Renderer(identity) => serde_json::json!({
+            "descriptor_family": "renderer",
+            "descriptor_id": identity.descriptor_id.as_str(),
+            "renderer_kind": identity.renderer_kind.as_str(),
+            "renderer_version": identity.renderer_version.as_str(),
+        }),
+    }
+}
+
+fn descriptor_digest_json(identity: &spec::DescriptorIdentity) -> serde_json::Value {
+    let descriptor_id = match identity {
+        spec::DescriptorIdentity::State(identity) => &identity.descriptor_id,
+        spec::DescriptorIdentity::Operation(identity) => &identity.descriptor_id,
+        spec::DescriptorIdentity::Renderer(identity) => &identity.descriptor_id,
+    };
+    serde_json::json!({
+        "descriptor_id": descriptor_id.as_str(),
+        "digest": ContentDigest::from_digest(descriptor_id.algorithm(), *descriptor_id.digest()).as_str(),
+    })
+}
+
+fn executable_json(identity: &events::ExecutableIdentity) -> serde_json::Value {
+    serde_json::json!({
+        "binary_digest": identity.binary_digest.as_str(),
+        "cargo_package_digest": identity.cargo_package_digest.as_str(),
+        "cargo_package_name": identity.cargo_package_name.as_str(),
+        "cargo_package_version": identity.cargo_package_version.as_str(),
+        "factory_id": identity.factory_id.as_str(),
+        "nix_derivation_hash": identity.nix_derivation_hash.as_ref().map(events::NixDerivationHash::as_str),
+        "nix_output_hash": identity.nix_output_hash.as_ref().map(events::NixOutputHash::as_str),
+        "source_revision": identity.source_revision.as_str(),
+    })
+}
+
+fn retention_ref_json(retention_ref: &events::RetentionRef) -> serde_json::Value {
+    serde_json::json!({
+        "artifact_id": retention_ref.artifact_id.as_str(),
+        "content_digest": retention_ref.content_digest.as_str(),
+        "role": retention_role_str(retention_ref.role),
+    })
+}
+
+fn retention_role_str(role: events::ArtifactRole) -> &'static str {
+    match role {
+        events::ArtifactRole::TypedExecutionSpec => "typed_execution_spec",
+        events::ArtifactRole::TypedConfig => "typed_config",
+        events::ArtifactRole::SeedInput => "seed_input",
+        events::ArtifactRole::StateOutput => "state_output",
+        events::ArtifactRole::FactResponse => "fact_response",
+        events::ArtifactRole::SideEffectIntent => "side_effect_intent",
+        events::ArtifactRole::PreparedInvocation => "prepared_invocation",
+        events::ArtifactRole::NotSubmittedProof => "not_submitted_proof",
+        events::ArtifactRole::Submission => "submission",
+        events::ArtifactRole::SubmissionUnknownEvidence => "submission_unknown_evidence",
+        events::ArtifactRole::Receipt => "receipt",
+        events::ArtifactRole::Confirmation => "confirmation",
+        events::ArtifactRole::AmbiguityEvidence => "ambiguity_evidence",
+        events::ArtifactRole::PublicOutput => "public_output",
+        events::ArtifactRole::RedactedDiagnostic => "redacted_diagnostic",
+        events::ArtifactRole::RetentionManifest => "retention_manifest",
+    }
 }
 
 fn cell_producer_json(producer: &spec::CellProducer) -> serde_json::Value {
@@ -1176,6 +1376,19 @@ pub struct RunStartEvidence {
     pub seed_cells: Vec<events::SeedCellRef>,
 }
 
+/// Canonical retention manifest artifact staged before appending a manifest projection event.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetentionManifestArtifact {
+    /// Canonical manifest bytes.
+    pub bytes: PlainCanonicalJsonBytes,
+    /// Typed artifact evidence for the canonical manifest bytes.
+    pub evidence: store::ArtifactEvidenceRef,
+    /// Manifest sequence represented by this artifact.
+    pub manifest_seq: u64,
+    /// Previous manifest digest represented by this artifact.
+    pub previous_manifest_digest: Option<ContentDigest>,
+}
+
 /// Result of one serial scheduler drive call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SchedulerStatus {
@@ -1237,6 +1450,10 @@ impl SerialTypedScheduler {
         required_artifacts.push(spec_artifact.clone());
         required_artifacts.extend(config_artifacts);
         required_artifacts.extend(seed_cells.values().map(store_seed_artifact));
+        let run_started_retention_refs = required_artifacts
+            .iter()
+            .map(retention_ref_for_artifact)
+            .collect::<Vec<_>>();
         let payload = events::KernelEventPayload::RunStarted(events::RunStarted {
             run_id: run_id.clone(),
             spec_hash: runtime_spec.spec_hash().clone(),
@@ -1258,6 +1475,13 @@ impl SerialTypedScheduler {
             source_revision: evidence.source_revision,
             seed_cells: evidence.seed_cells,
         });
+        let retention_payload =
+            events::KernelEventPayload::RetentionRefsAppended(events::RetentionRefsAppended {
+                run_id: run_id.clone(),
+                spec_hash: runtime_spec.spec_hash().clone(),
+                refs: run_started_retention_refs,
+                reason: events::RetentionReason::RunStarted,
+            });
         let request = store::TypedCommitRequest {
             run_id: run_id.clone(),
             expected_next_seq: store.expected_next_seq(&run_id),
@@ -1265,7 +1489,7 @@ impl SerialTypedScheduler {
                 "run-start:{}",
                 runtime_spec.spec_hash().as_str()
             ))?,
-            payloads: vec![payload],
+            payloads: vec![payload, retention_payload],
             required_artifacts,
             preconditions: store::CommitPreconditions {
                 required_run_state: store::RequiredRunState::Absent,
@@ -1411,16 +1635,24 @@ impl SerialTypedScheduler {
             &latest_projection,
             &output,
         )?;
+        let mut payloads = output.payloads;
+        payloads.extend(bind_staged_retention_refs(
+            runtime_spec,
+            run_id,
+            node,
+            &output.required_artifacts,
+            output.staged_retention_refs,
+        )?);
         for artifact in &output.required_artifacts {
             store.record_artifact_evidence(artifact.clone())?;
         }
         let preconditions =
-            runner_output_preconditions(node, &attempt_id, &latest_projection, &output.payloads)?;
+            runner_output_preconditions(node, &attempt_id, &latest_projection, &payloads)?;
         let terminal_request = store::TypedCommitRequest {
             run_id: run_id.clone(),
             expected_next_seq: store.expected_next_seq(run_id),
-            commit_key: runner_output_commit_key(node, &attempt_id, &output.payloads)?,
-            payloads: output.payloads,
+            commit_key: runner_output_commit_key(node, &attempt_id, &payloads)?,
+            payloads,
             required_artifacts: output.required_artifacts,
             preconditions,
         };
@@ -1463,6 +1695,72 @@ impl SerialTypedScheduler {
         store.append_typed_run_commit(request)?;
         Ok(())
     }
+
+    /// Appends a retention manifest projection after its bytes have been persisted.
+    pub fn append_retention_manifest_projection<S: store::TypedRunEventStore + ?Sized>(
+        &self,
+        store: &mut S,
+        runtime_spec: &CertifiedRuntimeSpec,
+        run_id: &RunId,
+        manifest: RetentionManifestArtifact,
+    ) -> Result<store::CommitOutcome> {
+        if manifest.evidence.artifact_role != events::ArtifactRole::RetentionManifest
+            || manifest.evidence.digest != manifest.bytes.content_digest()
+            || manifest.evidence.byte_len != manifest.bytes.as_bytes().len() as u64
+            || manifest.evidence.schema_id.is_some()
+            || manifest.evidence.semantic_type_id.is_some()
+            || manifest.evidence.producer_node_id.is_some()
+            || manifest.evidence.producer_seed_id.is_some()
+        {
+            return Err(RuntimeError::InvalidRunStream(
+                "retention manifest artifact evidence does not match manifest bytes".to_owned(),
+            ));
+        }
+        let expected_manifest = build_retention_manifest_artifact(
+            runtime_spec,
+            run_id,
+            &store.load_run_stream(run_id),
+        )?;
+        if manifest != expected_manifest {
+            return Err(RuntimeError::InvalidRunStream(
+                "retention manifest artifact does not match current run stream".to_owned(),
+            ));
+        }
+        store.record_artifact_evidence(manifest.evidence.clone())?;
+        let manifest_ref = retention_ref_for_artifact(&manifest.evidence);
+        let request = store::TypedCommitRequest {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(run_id),
+            commit_key: store::CommitKey::new(format!(
+                "retention-manifest:{}:{}",
+                manifest.manifest_seq, manifest.evidence.digest
+            ))?,
+            payloads: vec![
+                events::KernelEventPayload::RetentionManifestProjected(
+                    events::RetentionManifestProjected {
+                        run_id: run_id.clone(),
+                        spec_hash: runtime_spec.spec_hash().clone(),
+                        manifest_seq: manifest.manifest_seq,
+                        manifest_digest: manifest.evidence.digest.clone(),
+                        previous_manifest_digest: manifest.previous_manifest_digest,
+                        manifest_artifact_id: manifest.evidence.artifact_id.clone(),
+                    },
+                ),
+                events::KernelEventPayload::RetentionRefsAppended(events::RetentionRefsAppended {
+                    run_id: run_id.clone(),
+                    spec_hash: runtime_spec.spec_hash().clone(),
+                    refs: vec![manifest_ref],
+                    reason: events::RetentionReason::ManifestProjection,
+                }),
+            ],
+            required_artifacts: vec![manifest.evidence],
+            preconditions: store::CommitPreconditions {
+                required_run_state: store::RequiredRunState::Started,
+                ..store::CommitPreconditions::default()
+            },
+        };
+        Ok(store.append_typed_run_commit(request)?)
+    }
 }
 
 fn public_output_completion_evidence(
@@ -1479,6 +1777,78 @@ fn public_output_completion_evidence(
         }
         Some(store::PublicOutputProjection::RenderFailed { .. }) | None => None,
     }
+}
+
+/// Builds the next canonical retention manifest artifact from an authoritative run stream.
+pub fn build_retention_manifest_artifact(
+    runtime_spec: &CertifiedRuntimeSpec,
+    run_id: &RunId,
+    stream: &[store::KernelEventEnvelope],
+) -> Result<RetentionManifestArtifact> {
+    store::ProjectionSnapshot::validate_run_stream(stream)?;
+    let projection = store::ProjectionSnapshot::rebuild_from_run_stream(stream)?;
+    let run_started = stream
+        .iter()
+        .find_map(|event| match event.payload() {
+            events::KernelEventPayload::RunStarted(payload) => Some(payload),
+            _ => None,
+        })
+        .ok_or_else(|| {
+            RuntimeError::InvalidRunStream(
+                "retention manifest requires RunStarted evidence".to_owned(),
+            )
+        })?;
+    if &run_started.run_id != run_id || &run_started.spec_hash != runtime_spec.spec_hash() {
+        return Err(RuntimeError::InvalidRunStream(
+            "retention manifest run-start evidence does not match certified run".to_owned(),
+        ));
+    }
+    let retention = projection.retention(run_id).cloned().unwrap_or_default();
+    let manifest_seq = retention
+        .manifest
+        .as_ref()
+        .map(|manifest| {
+            manifest.manifest_seq.checked_add(1).ok_or_else(|| {
+                RuntimeError::InvalidRunStream("retention manifest sequence overflow".to_owned())
+            })
+        })
+        .transpose()?
+        .unwrap_or(1);
+    let previous_manifest_digest = retention
+        .manifest
+        .as_ref()
+        .map(|manifest| manifest.manifest_digest.clone());
+    let retained_refs = retention.refs.values().collect::<Vec<_>>();
+    let manifest_json = retention_manifest_json(
+        runtime_spec,
+        run_id,
+        run_started,
+        manifest_seq,
+        previous_manifest_digest.as_ref(),
+        &retained_refs,
+        stream,
+    )?;
+    let digest = manifest_json.content_digest();
+    let artifact_id = ArtifactId::from_digest(digest.algorithm(), *digest.digest());
+    let byte_len = manifest_json.as_bytes().len() as u64;
+    Ok(RetentionManifestArtifact {
+        bytes: manifest_json,
+        evidence: store::ArtifactEvidenceRef {
+            artifact_id,
+            digest,
+            byte_len,
+            media_type: spec::MediaType::new(
+                "application/vnd.mfm.retention-manifest+json;version=1",
+            )?,
+            schema_id: None,
+            semantic_type_id: None,
+            producer_node_id: None,
+            producer_seed_id: None,
+            artifact_role: events::ArtifactRole::RetentionManifest,
+        },
+        manifest_seq,
+        previous_manifest_digest,
+    })
 }
 
 fn runner_output_commit_key(
@@ -1577,6 +1947,53 @@ fn runner_output_commit_fragment(payload: &events::KernelEventPayload) -> String
         | events::KernelEventPayload::RetentionManifestProjected(_)
         | events::KernelEventPayload::StateAttemptStarted(_) => "scheduler-owned".to_owned(),
     }
+}
+
+fn bind_staged_retention_refs(
+    runtime_spec: &CertifiedRuntimeSpec,
+    run_id: &RunId,
+    node: &spec::NodeSpec,
+    required_artifacts: &[store::ArtifactEvidenceRef],
+    staged: Vec<StagedRetentionRefs>,
+) -> Result<Vec<events::KernelEventPayload>> {
+    let artifact_evidence = required_artifacts
+        .iter()
+        .map(|artifact| (artifact.artifact_id.clone(), artifact))
+        .collect::<BTreeMap<_, _>>();
+    let mut payloads = Vec::with_capacity(staged.len());
+    for staged_refs in staged {
+        if staged_refs.refs.is_empty() {
+            return Err(RuntimeError::InvalidRunnerOutput(format!(
+                "node {} staged empty retention refs",
+                node.node_id
+            )));
+        }
+        for retention_ref in &staged_refs.refs {
+            let Some(artifact) = artifact_evidence.get(&retention_ref.artifact_id) else {
+                return Err(RuntimeError::InvalidRunnerOutput(format!(
+                    "node {} staged retention for artifact {} without staged artifact evidence",
+                    node.node_id, retention_ref.artifact_id
+                )));
+            };
+            if artifact.digest != retention_ref.content_digest
+                || artifact.artifact_role != retention_ref.role
+            {
+                return Err(RuntimeError::InvalidRunnerOutput(format!(
+                    "node {} staged retention evidence for artifact {} does not match artifact evidence",
+                    node.node_id, retention_ref.artifact_id
+                )));
+            }
+        }
+        payloads.push(events::KernelEventPayload::RetentionRefsAppended(
+            events::RetentionRefsAppended {
+                run_id: run_id.clone(),
+                spec_hash: runtime_spec.spec_hash().clone(),
+                refs: staged_refs.refs,
+                reason: staged_refs.reason,
+            },
+        ));
+    }
+    Ok(payloads)
 }
 
 fn runner_output_preconditions(
@@ -4019,6 +4436,14 @@ fn store_seed_artifact(seed: &events::SeedCellRef) -> store::ArtifactEvidenceRef
     }
 }
 
+fn retention_ref_for_artifact(artifact: &store::ArtifactEvidenceRef) -> events::RetentionRef {
+    events::RetentionRef {
+        artifact_id: artifact.artifact_id.clone(),
+        role: artifact.artifact_role,
+        content_digest: artifact.digest.clone(),
+    }
+}
+
 fn canonical_json(value: serde_json::Value) -> Result<PlainCanonicalJsonBytes> {
     let json = serde_json::to_string(&value)
         .map_err(|error| RuntimeError::Canonical(error.to_string()))?;
@@ -4121,6 +4546,7 @@ mod tests {
                 };
                 Ok(ErasedRunnerOutput {
                     required_artifacts: vec![artifact],
+                    staged_retention_refs: Vec::new(),
                     payloads: vec![
                         events::KernelEventPayload::CellProduced(events::CellProduced {
                             spec_hash: ctx.spec_hash.clone(),
@@ -4288,6 +4714,90 @@ mod tests {
                 public_output_event_id: public_event.event_id().clone(),
             })
         );
+    }
+
+    #[tokio::test]
+    async fn scheduler_binds_staged_retention_refs_and_projects_manifest() {
+        let fixture = fixture();
+        let scheduler = SerialTypedScheduler::new(registered_fixture_runners(&fixture));
+        let mut store = store::InMemoryTypedRunStore::new();
+        scheduler
+            .start_run(
+                &mut store,
+                &fixture.runtime_spec,
+                fixture.run_id.clone(),
+                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
+            )
+            .expect("start run");
+
+        let start_retention = store
+            .projection_snapshot()
+            .retention(&fixture.run_id)
+            .expect("run-start retention");
+        assert!(start_retention
+            .refs
+            .contains_key(&fixture.seed_ref.seed_artifact.artifact_id));
+
+        scheduler
+            .drive_until_blocked(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("drive to completion");
+        let render_receipt_artifact = match store
+            .projection_snapshot()
+            .cell_terminal(&fixture.render_cell)
+            .expect("render receipt cell")
+        {
+            store::CellTerminalProjection::Produced { artifact_id, .. } => artifact_id.clone(),
+            terminal => panic!("unexpected render terminal: {terminal:?}"),
+        };
+        assert!(store
+            .projection_snapshot()
+            .retention(&fixture.run_id)
+            .expect("runtime retention")
+            .refs
+            .contains_key(&render_receipt_artifact));
+
+        let manifest = build_retention_manifest_artifact(
+            &fixture.runtime_spec,
+            &fixture.run_id,
+            &store.load_run_stream(&fixture.run_id),
+        )
+        .expect("build manifest");
+        assert_eq!(manifest.manifest_seq, 1);
+        let mut forged_manifest = manifest.clone();
+        forged_manifest.manifest_seq = 2;
+        assert!(matches!(
+            scheduler.append_retention_manifest_projection(
+                &mut store,
+                &fixture.runtime_spec,
+                &fixture.run_id,
+                forged_manifest,
+            ),
+            Err(RuntimeError::InvalidRunStream(message))
+                if message.contains("current run stream")
+        ));
+        scheduler
+            .append_retention_manifest_projection(
+                &mut store,
+                &fixture.runtime_spec,
+                &fixture.run_id,
+                manifest.clone(),
+            )
+            .expect("append manifest");
+
+        let projection = store
+            .projection_snapshot()
+            .retention(&fixture.run_id)
+            .expect("retention projection");
+        assert_eq!(
+            projection
+                .manifest
+                .as_ref()
+                .expect("manifest")
+                .manifest_digest,
+            manifest.evidence.digest
+        );
+        assert!(projection.refs.contains_key(&manifest.evidence.artifact_id));
     }
 
     #[tokio::test]
@@ -5122,6 +5632,16 @@ mod tests {
                         public_output_commit_key.clone(),
                     )
                 }
+                events::KernelEventPayload::RetentionRefsAppended(_)
+                    if event.seq() == render_seq =>
+                {
+                    rewrite_envelope(
+                        event,
+                        render_seq,
+                        store::CommitOrdinal::new(2),
+                        render_commit_key.clone(),
+                    )
+                }
                 _ => event.clone(),
             })
             .collect::<Vec<_>>();
@@ -5287,6 +5807,7 @@ mod tests {
                     };
                     Ok(ErasedRunnerOutput {
                         required_artifacts: vec![artifact],
+                        staged_retention_refs: Vec::new(),
                         payloads: terminal_payloads(
                             &ctx,
                             self.output_artifact.clone(),
@@ -5903,6 +6424,7 @@ mod tests {
                                 digest.clone(),
                                 events::ArtifactRole::Submission,
                             )],
+                            staged_retention_refs: Vec::new(),
                             payloads: vec![side_effect_submission_observed(
                                 &ctx,
                                 ledger,
@@ -5944,6 +6466,7 @@ mod tests {
                                 digest.clone(),
                                 events::ArtifactRole::Receipt,
                             )],
+                            staged_retention_refs: Vec::new(),
                             payloads: vec![side_effect_receipt_observed(
                                 &ctx,
                                 ledger,
@@ -5966,6 +6489,7 @@ mod tests {
                                 digest.clone(),
                                 events::ArtifactRole::Confirmation,
                             )],
+                            staged_retention_refs: Vec::new(),
                             payloads: vec![side_effect_confirmation_observed(
                                 &ctx,
                                 ledger,
@@ -5987,6 +6511,7 @@ mod tests {
                         );
                         Ok(ErasedRunnerOutput {
                             required_artifacts: vec![artifact],
+                            staged_retention_refs: Vec::new(),
                             payloads: terminal_payloads(
                                 &ctx,
                                 self.output_artifact.clone(),
@@ -6018,6 +6543,7 @@ mod tests {
                     intent_hash.clone(),
                     events::ArtifactRole::SideEffectIntent,
                 )],
+                staged_retention_refs: Vec::new(),
                 payloads: vec![
                     events::KernelEventPayload::SideEffectIntentPersisted(
                         events::side_effect::IntentPersisted {
@@ -6078,6 +6604,7 @@ mod tests {
                             digest.clone(),
                             events::ArtifactRole::AmbiguityEvidence,
                         )],
+                        staged_retention_refs: Vec::new(),
                         payloads: vec![events::KernelEventPayload::SideEffectAmbiguous(
                             events::side_effect::Ambiguous {
                                 spec_hash: ctx.spec_hash.clone(),
@@ -6116,6 +6643,7 @@ mod tests {
                 );
                 Ok(ErasedRunnerOutput {
                     required_artifacts: vec![artifact],
+                    staged_retention_refs: Vec::new(),
                     payloads: terminal_payloads(
                         &ctx,
                         self.output_artifact.clone(),

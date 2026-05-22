@@ -38,7 +38,7 @@ use mfm_machine::hashing::artifact_id_for_bytes;
 use mfm_machine::ids::{ArtifactId as LegacyArtifactId, ErrorCode};
 use mfm_machine::stores::{ArtifactKind, ArtifactStore};
 use mfm_spec::v1::MediaType;
-use mfm_store::v1::ArtifactEvidenceRef;
+use mfm_store::v1::{ArtifactEvidenceRef, VerifiedRetentionProjectionSet};
 use serde_json::Value;
 use tokio::io::AsyncWriteExt;
 
@@ -75,6 +75,11 @@ pub enum FsTypedArtifactError {
         /// Evidence field that did not match.
         field: &'static str,
     },
+    /// Garbage collection refused an artifact retained by a verified projection.
+    RetainedArtifactRefused {
+        /// Retained artifact id.
+        artifact_id: Box<ArtifactId>,
+    },
     /// Artifact evidence violates the typed artifact contract.
     InvalidEvidence {
         /// Stable diagnostic message without artifact bytes.
@@ -107,6 +112,9 @@ impl fmt::Display for FsTypedArtifactError {
                     f,
                     "typed artifact {artifact_id} evidence mismatch for {field}"
                 )
+            }
+            Self::RetainedArtifactRefused { artifact_id } => {
+                write!(f, "typed artifact {artifact_id} is retained")
             }
             Self::InvalidEvidence { message } => f.write_str(message),
             Self::InvalidIdentity { message } => f.write_str(message),
@@ -250,6 +258,36 @@ impl FsTypedArtifactStore {
     pub async fn require_seed_material(&self, seed: &SeedCellRef) -> TypedArtifactResult<Vec<u8>> {
         let evidence = seed_artifact_evidence(seed)?;
         self.get_artifact(&evidence).await
+    }
+
+    /// Removes an artifact only when a complete verified retention set does not protect it.
+    pub async fn remove_unretained_artifact(
+        &self,
+        evidence: &ArtifactEvidenceRef,
+        retention: &VerifiedRetentionProjectionSet,
+    ) -> TypedArtifactResult<()> {
+        validate_evidence_shape(evidence)?;
+        if retention.retains_artifact(evidence) {
+            return Err(FsTypedArtifactError::RetainedArtifactRefused {
+                artifact_id: Box::new(evidence.artifact_id.clone()),
+            });
+        }
+        self.get_artifact(evidence).await?;
+        let metadata_path = self.metadata_path_for(&evidence.artifact_id);
+        let blob_path = self.blob_path_for(&evidence.artifact_id);
+        tokio::fs::remove_file(&metadata_path)
+            .await
+            .map_err(|source| FsTypedArtifactError::Io {
+                context: "failed to remove typed artifact metadata",
+                source,
+            })?;
+        tokio::fs::remove_file(&blob_path)
+            .await
+            .map_err(|source| FsTypedArtifactError::Io {
+                context: "failed to remove typed artifact bytes",
+                source,
+            })?;
+        Ok(())
     }
 
     fn typed_root(&self) -> PathBuf {

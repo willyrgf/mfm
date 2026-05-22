@@ -16,7 +16,7 @@ use mfm_store::v1::{
     PersistedKernelEventRecord, ProjectionSnapshot, PublicOutputProjection,
     RetentionManifestProjection, RetentionProjection, RunState, SideEffectClaimProjection,
     SideEffectIntentProjection, SideEffectPhase, SideEffectProjection, StoreError, StreamSeq,
-    TypedCommitBase, TypedCommitRequest,
+    TypedCommitBase, TypedCommitRequest, VerifiedRetentionProjection,
 };
 use serde_json::Value;
 use tokio::sync::Mutex;
@@ -639,32 +639,7 @@ async fn load_projection_snapshot_tx(
         public_outputs.insert(schema_id, projection);
     }
 
-    let mut retention = RetentionProjection::default();
-    for row in tx
-        .query(
-            "SELECT projection_json FROM typed_retention_projection WHERE run_id = $1",
-            &[&run_id.as_str()],
-        )
-        .await
-        .map_err(|_| PostgresTypedStoreError::Database("failed to load retention projection"))?
-    {
-        let json: Value = row.get(0);
-        let retention_ref = parse_retention_ref(&json)?;
-        retention
-            .refs
-            .insert(retention_ref.artifact_id.clone(), retention_ref);
-    }
-    if let Some(row) = tx
-        .query_opt(
-            "SELECT projection_json FROM typed_retention_manifests WHERE run_id = $1",
-            &[&run_id.as_str()],
-        )
-        .await
-        .map_err(|_| PostgresTypedStoreError::Database("failed to load retention manifest"))?
-    {
-        let json: Value = row.get(0);
-        retention.manifest = Some(parse_retention_manifest_projection(&json)?);
-    }
+    let retention = retention_projection_from_run_stream_tx(tx, run_id).await?;
     let mut retentions = BTreeMap::new();
     if !retention.refs.is_empty() || retention.manifest.is_some() {
         retentions.insert(run_id.clone(), retention);
@@ -881,7 +856,12 @@ async fn write_projection_tables(
                 PostgresTypedStoreError::Database("failed to write retention projection")
             })?;
         }
-        if let Some(manifest) = &retention.manifest {
+        let manifests = if retention.manifests.is_empty() {
+            retention.manifest.iter().collect::<Vec<_>>()
+        } else {
+            retention.manifests.values().collect::<Vec<_>>()
+        };
+        for manifest in manifests {
             let json = retention_manifest_projection_json(manifest);
             tx.execute(
                 "INSERT INTO typed_retention_manifests (run_id, manifest_seq, projection_json) \
@@ -909,6 +889,18 @@ async fn rebuild_projection_snapshot_from_events(
 ) -> Result<ProjectionSnapshot> {
     let stream = load_run_stream_tx(tx, run_id).await?;
     Ok(ProjectionSnapshot::rebuild_from_run_stream(&stream)?)
+}
+
+async fn retention_projection_from_run_stream_tx(
+    tx: &Transaction<'_>,
+    run_id: &RunId,
+) -> Result<RetentionProjection> {
+    let stream = load_run_stream_tx(tx, run_id).await?;
+    Ok(
+        VerifiedRetentionProjection::from_run_stream(run_id.clone(), &stream)?
+            .projection()
+            .clone(),
+    )
 }
 
 fn canonical_payload_value(payload: &events::KernelEventPayload) -> Result<Value> {
@@ -1365,27 +1357,12 @@ fn retention_ref_json(retention_ref: &events::RetentionRef) -> Value {
     })
 }
 
-fn parse_retention_ref(json: &Value) -> Result<events::RetentionRef> {
-    Ok(events::RetentionRef {
-        artifact_id: parse_identity(required_str(json, "artifact_id")?)?,
-        role: parse_artifact_role(required_str(json, "role")?)?,
-        content_digest: parse_identity(required_str(json, "content_digest")?)?,
-    })
-}
-
 fn retention_manifest_projection_json(manifest: &RetentionManifestProjection) -> Value {
     serde_json::json!({
         "manifest_artifact_id": manifest.manifest_artifact_id.as_str(),
         "manifest_digest": manifest.manifest_digest.as_str(),
+        "previous_manifest_digest": manifest.previous_manifest_digest.as_ref().map(ContentDigest::as_str),
         "manifest_seq": manifest.manifest_seq,
-    })
-}
-
-fn parse_retention_manifest_projection(json: &Value) -> Result<RetentionManifestProjection> {
-    Ok(RetentionManifestProjection {
-        manifest_seq: required_u64(json, "manifest_seq")?,
-        manifest_digest: parse_identity(required_str(json, "manifest_digest")?)?,
-        manifest_artifact_id: parse_identity(required_str(json, "manifest_artifact_id")?)?,
     })
 }
 

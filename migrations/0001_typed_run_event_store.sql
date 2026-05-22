@@ -115,9 +115,10 @@ CREATE TABLE IF NOT EXISTS typed_retention_projection (
 );
 
 CREATE TABLE IF NOT EXISTS typed_retention_manifests (
-  run_id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
   manifest_seq BIGINT NOT NULL,
   projection_json JSONB NOT NULL,
+  PRIMARY KEY (run_id, manifest_seq),
   CONSTRAINT typed_retention_manifests_seq_positive CHECK (manifest_seq >= 1)
 );
 

@@ -330,11 +330,11 @@ workflow ports, and deletion or hard isolation of old dynamic semantic APIs.
 
 ### Commit 29: `kernel runtime add retention event sourcing`
 
-- [ ] Implement staged retention refs and store-owned `RetentionRefsAppended`.
-- [ ] Rebuild retention projection from run stream only.
-- [ ] Implement append-only `RetentionManifestProjected` artifacts.
-- [ ] Ensure local artifact GC refuses verified retained artifacts.
-- [ ] Validation: `nix run .#test`.
+- [x] Implement staged retention refs and store-owned `RetentionRefsAppended`.
+- [x] Rebuild retention projection from run stream only.
+- [x] Implement append-only `RetentionManifestProjected` artifacts.
+- [x] Ensure local artifact GC refuses verified retained artifacts.
+- [x] Validation: `nix run .#test`.
 
 ### Commit 30: `ci add typed certified slice gate`
 

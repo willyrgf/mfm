@@ -1057,6 +1057,8 @@ pub mod v1 {
     pub struct RetentionProjection {
         /// Retained artifact refs by artifact id.
         pub refs: BTreeMap<ArtifactId, events::RetentionRef>,
+        /// Projected retention manifests by manifest sequence.
+        pub manifests: BTreeMap<u64, RetentionManifestProjection>,
         /// Last retention manifest projected for this run.
         pub manifest: Option<RetentionManifestProjection>,
     }
@@ -1068,8 +1070,114 @@ pub mod v1 {
         pub manifest_seq: u64,
         /// Manifest digest.
         pub manifest_digest: ContentDigest,
+        /// Previous manifest digest, when any.
+        pub previous_manifest_digest: Option<ContentDigest>,
         /// Manifest artifact id.
         pub manifest_artifact_id: ArtifactId,
+    }
+
+    /// Retention projection verified by rebuilding from one contiguous authoritative run stream.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct VerifiedRetentionProjection {
+        run_id: RunId,
+        projection: RetentionProjection,
+    }
+
+    impl VerifiedRetentionProjection {
+        /// Rebuilds and verifies retention projection state from committed run events only.
+        pub fn from_run_stream(run_id: RunId, events: &[KernelEventEnvelope]) -> Result<Self> {
+            if let Some(event) = events.iter().find(|event| event.run_id() != &run_id) {
+                return Err(StoreError::PersistedEventMismatch {
+                    field: "run_id",
+                    message: format!(
+                        "retention projection requested run {} but stream contains {}",
+                        run_id,
+                        event.run_id()
+                    ),
+                });
+            }
+            let snapshot = ProjectionSnapshot::rebuild_from_run_stream(events)?;
+            let projection = snapshot.retention(&run_id).cloned().unwrap_or_default();
+            Ok(Self { run_id, projection })
+        }
+
+        /// Run id covered by this verified projection.
+        pub fn run_id(&self) -> &RunId {
+            &self.run_id
+        }
+
+        /// Verified retention projection.
+        pub fn projection(&self) -> &RetentionProjection {
+            &self.projection
+        }
+
+        /// Returns true when the artifact is retained with matching digest and role evidence.
+        pub fn retains_artifact(&self, evidence: &ArtifactEvidenceRef) -> bool {
+            retention_projection_retains_artifact(&self.projection, evidence)
+        }
+    }
+
+    /// Complete verified retention projection set supplied to local artifact garbage collection.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct VerifiedRetentionProjectionSet {
+        projections: BTreeMap<RunId, RetentionProjection>,
+    }
+
+    impl VerifiedRetentionProjectionSet {
+        /// Rebuilds retention projections for all supplied run streams.
+        ///
+        /// Callers must pass the complete authoritative run-stream set for the artifact store
+        /// scope. The type then guarantees every member projection was rebuilt from contiguous
+        /// typed run events rather than mutable projection tables.
+        pub fn from_run_streams<'a, I>(streams: I) -> Result<Self>
+        where
+            I: IntoIterator<Item = (RunId, &'a [KernelEventEnvelope])>,
+        {
+            let mut projections = BTreeMap::new();
+            for (run_id, events) in streams {
+                let verified =
+                    VerifiedRetentionProjection::from_run_stream(run_id.clone(), events)?;
+                projections.insert(run_id, verified.projection);
+            }
+            if projections.is_empty() {
+                return Err(StoreError::ProjectionConflict {
+                    key: "retention:complete".to_owned(),
+                    message: "verified retention projection set requires at least one run stream"
+                        .to_owned(),
+                });
+            }
+            Ok(Self { projections })
+        }
+
+        /// Iterates verified run retention projections.
+        pub fn projections(&self) -> impl Iterator<Item = (&RunId, &RetentionProjection)> {
+            self.projections.iter()
+        }
+
+        /// Returns true when any verified run retention projection retains the artifact.
+        pub fn retains_artifact(&self, evidence: &ArtifactEvidenceRef) -> bool {
+            self.projections
+                .values()
+                .any(|projection| retention_projection_retains_artifact(projection, evidence))
+        }
+    }
+
+    fn retention_projection_retains_artifact(
+        projection: &RetentionProjection,
+        evidence: &ArtifactEvidenceRef,
+    ) -> bool {
+        projection
+            .refs
+            .get(&evidence.artifact_id)
+            .is_some_and(|retained| {
+                retained.content_digest == evidence.digest
+                    && retained.role == evidence.artifact_role
+            })
+            || projection.manifests.values().any(|manifest| {
+                evidence.artifact_role == ArtifactRole::RetentionManifest
+                    && manifest.manifest_artifact_id == evidence.artifact_id
+                    && manifest.manifest_digest == evidence.digest
+            })
     }
 
     /// Store-owned projection snapshot derived from authoritative run streams.
@@ -1641,6 +1749,7 @@ pub mod v1 {
         validate_payload_run_and_spec(&request.run_id, &request.payloads)?;
         validate_terminal_attempt_cell_pairs(&request.payloads)?;
         validate_side_effect_attempt_failure_pairs(&request.payloads)?;
+        validate_retention_manifest_pairs(&request.payloads)?;
 
         let verifier = InMemoryTypedRunStore {
             streams: BTreeMap::new(),
@@ -1737,6 +1846,7 @@ pub mod v1 {
     ) -> Result<CommittedBatch> {
         validate_payload_run_and_spec(&request.run_id, &request.payloads)?;
         validate_terminal_attempt_cell_pairs(&request.payloads)?;
+        validate_retention_manifest_pairs(&request.payloads)?;
 
         let fingerprint = commit_fingerprint(request)?;
         let mut events = Vec::with_capacity(request.payloads.len());
@@ -2082,6 +2192,45 @@ pub mod v1 {
                             .to_owned(),
                     });
                 }
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_retention_manifest_pairs(payloads: &[KernelEventPayload]) -> Result<()> {
+        let retained_manifest_refs = payloads
+            .iter()
+            .filter_map(|payload| match payload {
+                KernelEventPayload::RetentionRefsAppended(payload) => Some(&payload.refs),
+                _ => None,
+            })
+            .flatten()
+            .filter(|retention_ref| retention_ref.role == ArtifactRole::RetentionManifest)
+            .map(|retention_ref| {
+                (
+                    retention_ref.artifact_id.clone(),
+                    retention_ref.content_digest.clone(),
+                )
+            })
+            .collect::<BTreeSet<_>>();
+
+        for payload in payloads {
+            let KernelEventPayload::RetentionManifestProjected(payload) = payload else {
+                continue;
+            };
+            if !retained_manifest_refs.contains(&(
+                payload.manifest_artifact_id.clone(),
+                payload.manifest_digest.clone(),
+            )) {
+                return Err(StoreError::ProjectionConflict {
+                    key: format!(
+                        "retention:{}:manifest:{}",
+                        payload.run_id, payload.manifest_seq
+                    ),
+                    message:
+                        "retention manifest projection requires matching retention ref in same commit"
+                            .to_owned(),
+                });
             }
         }
         Ok(())
@@ -3154,6 +3303,12 @@ pub mod v1 {
                 );
             }
             KernelEventPayload::RetentionRefsAppended(payload) => {
+                if projections.run_state(&payload.run_id) == RunState::Absent {
+                    return Err(StoreError::ProjectionConflict {
+                        key: format!("retention:{}:refs", payload.run_id),
+                        message: "retention refs require a started run".to_owned(),
+                    });
+                }
                 let retention = projections
                     .retentions
                     .entry(payload.run_id.clone())
@@ -3165,23 +3320,72 @@ pub mod v1 {
                 }
             }
             KernelEventPayload::RetentionManifestProjected(payload) => {
+                if projections.run_state(&payload.run_id) == RunState::Absent {
+                    return Err(StoreError::ProjectionConflict {
+                        key: format!("retention:{}:manifest", payload.run_id),
+                        message: "retention manifest requires a started run".to_owned(),
+                    });
+                }
                 let retention = projections
                     .retentions
                     .entry(payload.run_id.clone())
                     .or_default();
-                if let Some(previous) = &retention.manifest {
-                    if payload.manifest_seq <= previous.manifest_seq {
-                        return Err(StoreError::ProjectionConflict {
-                            key: format!("retention:{}:manifest", payload.run_id),
-                            message: "manifest sequence must increase".to_owned(),
-                        });
+                if retention.manifests.contains_key(&payload.manifest_seq) {
+                    return Err(StoreError::ProjectionConflict {
+                        key: format!(
+                            "retention:{}:manifest:{}",
+                            payload.run_id, payload.manifest_seq
+                        ),
+                        message: "manifest sequence already projected".to_owned(),
+                    });
+                }
+                match &retention.manifest {
+                    Some(previous) => {
+                        let expected_seq =
+                            previous.manifest_seq.checked_add(1).ok_or_else(|| {
+                                StoreError::ProjectionConflict {
+                                    key: format!("retention:{}:manifest", payload.run_id),
+                                    message: "manifest sequence overflow".to_owned(),
+                                }
+                            })?;
+                        if payload.manifest_seq != expected_seq {
+                            return Err(StoreError::ProjectionConflict {
+                                key: format!("retention:{}:manifest", payload.run_id),
+                                message: "manifest sequence must advance by one".to_owned(),
+                            });
+                        }
+                        if payload.previous_manifest_digest.as_ref()
+                            != Some(&previous.manifest_digest)
+                        {
+                            return Err(StoreError::ProjectionConflict {
+                                key: format!("retention:{}:manifest", payload.run_id),
+                                message:
+                                    "manifest previous digest does not match latest projection"
+                                        .to_owned(),
+                            });
+                        }
+                    }
+                    None => {
+                        if payload.manifest_seq != 1 || payload.previous_manifest_digest.is_some() {
+                            return Err(StoreError::ProjectionConflict {
+                                key: format!("retention:{}:manifest", payload.run_id),
+                                message:
+                                    "first manifest must use sequence 1 and no previous digest"
+                                        .to_owned(),
+                            });
+                        }
                     }
                 }
-                retention.manifest = Some(RetentionManifestProjection {
+                let projection = RetentionManifestProjection {
                     manifest_seq: payload.manifest_seq,
                     manifest_digest: payload.manifest_digest.clone(),
                     manifest_artifact_id: payload.manifest_artifact_id.clone(),
-                });
+                    previous_manifest_digest: payload.previous_manifest_digest.clone(),
+                };
+                retention
+                    .manifests
+                    .insert(payload.manifest_seq, projection.clone());
+                retention.manifest = Some(projection);
             }
             KernelEventPayload::FactRecorded(payload) => {
                 match projections.attempt(&payload.node_id, &payload.attempt_id) {
