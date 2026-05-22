@@ -195,13 +195,13 @@ workflow ports, and deletion or hard isolation of old dynamic semantic APIs.
 
 ### Commit 16: `kernel program add stable ids and value lineage`
 
-- [ ] Implement stable author keys and `StableDomainKey`.
-- [ ] Implement `ValueLineageRef`, `ValueLineage`, domain key refs, and lineage transform policy.
-- [ ] Derive deterministic scope, operation instance, node, cell, seed, input binding, config ref,
+- [x] Implement stable author keys and `StableDomainKey`.
+- [x] Implement `ValueLineageRef`, `ValueLineage`, domain key refs, and lineage transform policy.
+- [x] Derive deterministic scope, operation instance, node, cell, seed, input binding, config ref,
       operation lineage, and value lineage digests.
-- [ ] Add golden vectors for stable ids and lineage.
-- [ ] Add mismatch certification fixtures for same-type same-scope wrong lineage.
-- [ ] Validation: `nix run .#test`.
+- [x] Add golden vectors for stable ids and lineage.
+- [x] Add mismatch certification fixtures for same-type same-scope wrong lineage.
+- [x] Validation: `nix run .#test`.
 
 ### Commit 17: `kernel spec add v1 typed execution spec`
 

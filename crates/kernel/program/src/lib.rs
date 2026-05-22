@@ -19,16 +19,20 @@ use mfm_effects::{
     ApplySideEffect, EffectDescriptor, EffectSpec, ManagedPlatformWrite, Pure, ReadExternal,
 };
 use mfm_ids::{
-    CellId, ContentDigest, DescriptorId, DigestAlgorithm, DigestBytes, NodeId, OperationKind,
-    OperationVersion, SchemaId, ScopeId, SeedId, SemanticTypeId, StateKind, StateVersion,
+    CellId, ContentDigest, DescriptorId, DigestAlgorithm, DigestBytes, NodeId, OperationInstanceId,
+    OperationKind, OperationVersion, SchemaId, ScopeId, SeedId, SemanticTypeId, StateKind,
+    StateVersion,
 };
 pub use mfm_values::NonEmpty;
 use mfm_values::{
-    MfmConfig, MfmValue, PublicOutputDescriptor, SchemaShape, StateInput, ValueTerminalPolicy,
+    MfmConfig, MfmValue, PublicOutputDescriptor, SchemaDescriptor, SchemaShape, StateInput,
+    ValueTerminalPolicy,
 };
 
 #[cfg(test)]
 mod tests;
+
+const LOWERING_VERSION: &str = "mfm.typed.lowering.v1";
 
 /// Result type for typed program authoring operations.
 pub type Result<T> = std::result::Result<T, PlanError>;
@@ -54,6 +58,8 @@ pub enum PlanError {
     DuplicateStateKey(String),
     /// An operation key was declared more than once in the same scope.
     DuplicateOperationKey(String),
+    /// A stable domain key appeared more than once in a canonical collection.
+    DuplicateDomainKey(String),
     /// A public output field path was declared more than once.
     DuplicatePublicOutputPath(String),
     /// Root public outputs were bound more than once.
@@ -66,6 +72,8 @@ pub enum PlanError {
     DuplicateInputFieldPath(String),
     /// Input binding tree did not match the declared state input descriptor.
     InputBindingShape(String),
+    /// Same-type same-scope lineage did not match the required lineage.
+    LineageMismatch(String),
     /// State registry authority rejected planning.
     Registry(String),
     /// Live bridge evidence did not belong to the active child scope session.
@@ -86,6 +94,7 @@ impl fmt::Display for PlanError {
             Self::DuplicateBridgeKey(key) => write!(f, "duplicate bridge key {key}"),
             Self::DuplicateStateKey(key) => write!(f, "duplicate state key {key}"),
             Self::DuplicateOperationKey(key) => write!(f, "duplicate operation key {key}"),
+            Self::DuplicateDomainKey(key) => write!(f, "duplicate stable domain key {key}"),
             Self::DuplicatePublicOutputPath(path) => {
                 write!(f, "duplicate public output field path {path}")
             }
@@ -98,6 +107,7 @@ impl fmt::Display for PlanError {
             Self::InputBindingShape(message) => {
                 write!(f, "input binding shape mismatch: {message}")
             }
+            Self::LineageMismatch(message) => write!(f, "value lineage mismatch: {message}"),
             Self::Registry(message) => write!(f, "state registry error: {message}"),
             Self::InvalidBridgeEvidence(message) => {
                 write!(f, "invalid bridge evidence: {message}")
@@ -382,6 +392,22 @@ pub trait Operation: Send + Sync + 'static {
         input: Self::Input<'program, 'scope>,
         builder: &mut ScopeBuilder<'program, 'scope>,
     ) -> Result<Self::Output<'program, 'scope>>;
+}
+
+/// Typed dynamic fanout key with canonical bytes for stable ordering.
+pub trait StableDomainKey: MfmValue {
+    /// Returns the domain-key schema descriptor.
+    fn domain_key_descriptor() -> mfm_values::Result<SchemaDescriptor> {
+        Self::schema_descriptor()
+    }
+
+    /// Returns canonical domain-key bytes used for ordering and duplicate detection.
+    fn canonical_domain_bytes(&self) -> Result<PlainCanonicalJsonBytes> {
+        let json =
+            serde_json::to_string(self).map_err(|error| PlanError::Serialize(error.to_string()))?;
+        PlainCanonicalJsonBytes::from_json_str(&json)
+            .map_err(|error| PlanError::Canonical(error.to_string()))
+    }
 }
 
 /// Effect-specific runner kind recorded by a registered state.
@@ -1200,6 +1226,124 @@ where
     }
 }
 
+/// Producer of a typed cell in value-lineage evidence.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum CellProducer {
+    /// Cell produced by a state or framework node.
+    Node(NodeId),
+    /// Cell produced by a launch seed.
+    Seed(SeedId),
+}
+
+/// Policy describing how a value lineage relates to its inputs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum LineageTransformPolicy {
+    /// Source value with no same-type input dependency.
+    Source,
+    /// State output derived from declared input cells and config.
+    StateOutput,
+    /// Same-run same-value bridge.
+    SameValueBridge,
+}
+
+impl LineageTransformPolicy {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Source => "source",
+            Self::StateOutput => "state_output",
+            Self::SameValueBridge => "same_value_bridge",
+        }
+    }
+}
+
+/// Canonical reference to a stable domain key.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct StableDomainKeyRef {
+    /// Domain-key schema id.
+    pub schema_id: SchemaId,
+    /// Canonical domain-key content digest.
+    pub content_digest: ContentDigest,
+}
+
+impl StableDomainKeyRef {
+    /// Builds a stable domain-key reference from a typed key.
+    pub fn from_key<K: StableDomainKey>(key: &K) -> Result<Self> {
+        let schema_id = K::domain_key_descriptor()
+            .and_then(|descriptor| descriptor.schema_id())
+            .map_err(|error| PlanError::Value(error.to_string()))?;
+        let content_digest = key.canonical_domain_bytes()?.content_digest();
+        Ok(Self {
+            schema_id,
+            content_digest,
+        })
+    }
+
+    fn stable_sort_key(&self) -> String {
+        format!(
+            "{}:{}",
+            self.schema_id.as_str(),
+            self.content_digest.as_str()
+        )
+    }
+}
+
+/// Operation-lineage digest sequence visible to value-lineage records.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OperationLineage {
+    /// Operation instance ids from outermost to innermost active expansion.
+    pub active_instances: Vec<OperationInstanceId>,
+    /// Completed operation lineage frame digests already recorded in this scope.
+    pub completed_frames: Vec<ContentDigest>,
+    /// Digest of this lineage sequence.
+    pub digest: ContentDigest,
+}
+
+impl OperationLineage {
+    fn empty() -> Result<Self> {
+        Self::from_parts(Vec::new(), Vec::new())
+    }
+
+    fn from_parts(
+        active_instances: Vec<OperationInstanceId>,
+        completed_frames: Vec<ContentDigest>,
+    ) -> Result<Self> {
+        let digest = canonical_digest(serde_json::json!({
+            "active_instances": active_instances
+                .iter()
+                .map(OperationInstanceId::as_str)
+                .collect::<Vec<_>>(),
+            "completed_frames": completed_frames
+                .iter()
+                .map(ContentDigest::as_str)
+                .collect::<Vec<_>>(),
+        }))?;
+        Ok(Self {
+            active_instances,
+            completed_frames,
+            digest,
+        })
+    }
+}
+
+/// Hash-defining value-lineage evidence for a typed cell.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValueLineage {
+    /// Scope containing this value.
+    pub scope_id: ScopeId,
+    /// Producer for this value.
+    pub producer: CellProducer,
+    /// Input cells used to produce this value.
+    pub input_cells: Vec<CellId>,
+    /// Config reference digest used by the producer, when any.
+    pub config_ref_digest: Option<ContentDigest>,
+    /// Operation lineage active when this value was produced.
+    pub operation_lineage: OperationLineage,
+    /// Stable domain keys associated with this value.
+    pub domain_keys: Vec<StableDomainKeyRef>,
+    /// Lineage transform policy.
+    pub transform_policy: LineageTransformPolicy,
+}
+
 /// Reference to a value-lineage record used by input bindings.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ValueLineageRef {
@@ -1382,10 +1526,25 @@ pub struct RootSeedSpec {
     pub schema_id: SchemaId,
     /// Seed value semantic type id.
     pub semantic_type_id: SemanticTypeId,
+    /// Seed value lineage ref.
+    pub value_lineage: ValueLineageRef,
     /// Canonical seed content digest.
     pub content_digest: ContentDigest,
     /// Canonical seed byte length.
     pub byte_len: usize,
+}
+
+impl RootSeedSpec {
+    /// Returns this seed's typed cell reference.
+    pub fn typed_ref(&self) -> TypedHandleRef {
+        TypedHandleRef {
+            cell_id: self.cell_id.clone(),
+            scope_id: self.scope_id.clone(),
+            schema_id: self.schema_id.clone(),
+            semantic_type_id: self.semantic_type_id.clone(),
+            value_lineage: self.value_lineage.clone(),
+        }
+    }
 }
 
 /// Persisted typed scope specification emitted by the program builder.
@@ -1408,6 +1567,8 @@ pub struct ConfigBindingSpec {
     pub canonical_json: PlainCanonicalJsonBytes,
     /// Canonical config content digest.
     pub content_digest: ContentDigest,
+    /// Canonical config reference digest.
+    pub config_ref_digest: ContentDigest,
     /// Canonical byte length.
     pub byte_len: usize,
 }
@@ -1439,11 +1600,15 @@ pub struct StateNodeSpec {
     pub output_schema_id: SchemaId,
     /// Output semantic type id.
     pub output_semantic_type_id: SemanticTypeId,
+    /// Output value lineage ref.
+    pub output_value_lineage: ValueLineageRef,
 }
 
 /// Operation lineage frame emitted by a registry-mediated call.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OperationLineageFrameSpec {
+    /// Derived operation instance id.
+    pub operation_instance_id: OperationInstanceId,
     /// Stable operation author key.
     pub key: OperationKey,
     /// Owning scope id.
@@ -1685,16 +1850,19 @@ impl RequiredTerminal {
 }
 
 /// Ordering evidence for vector input bindings.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum OrderingEvidence {
     /// Author-provided vector order.
     ExplicitAuthorOrder,
+    /// Canonical order by stable domain key.
+    StableDomainKey,
 }
 
 impl OrderingEvidence {
-    fn as_str(self) -> &'static str {
+    fn as_str(&self) -> &'static str {
         match self {
             Self::ExplicitAuthorOrder => "explicit_author_order",
+            Self::StableDomainKey => "stable_domain_key",
         }
     }
 }
@@ -1734,10 +1902,12 @@ enum InputBindingNodeKind {
     Vec {
         elements: Vec<InputBindingNode>,
         ordering: OrderingEvidence,
+        domain_keys: Vec<StableDomainKeyRef>,
     },
     NonEmptyVec {
         elements: Vec<InputBindingNode>,
         ordering: OrderingEvidence,
+        domain_keys: Vec<StableDomainKeyRef>,
     },
 }
 
@@ -1804,15 +1974,31 @@ impl InputBindingNode {
         }
     }
 
-    fn vector(elements: Vec<InputBindingNode>, ordering: OrderingEvidence) -> Self {
+    fn vector(
+        elements: Vec<InputBindingNode>,
+        ordering: OrderingEvidence,
+        domain_keys: Vec<StableDomainKeyRef>,
+    ) -> Self {
         Self {
-            kind: InputBindingNodeKind::Vec { elements, ordering },
+            kind: InputBindingNodeKind::Vec {
+                elements,
+                ordering,
+                domain_keys,
+            },
         }
     }
 
-    fn non_empty_vector(elements: Vec<InputBindingNode>, ordering: OrderingEvidence) -> Self {
+    fn non_empty_vector(
+        elements: Vec<InputBindingNode>,
+        ordering: OrderingEvidence,
+        domain_keys: Vec<StableDomainKeyRef>,
+    ) -> Self {
         Self {
-            kind: InputBindingNodeKind::NonEmptyVec { elements, ordering },
+            kind: InputBindingNodeKind::NonEmptyVec {
+                elements,
+                ordering,
+                domain_keys,
+            },
         }
     }
 }
@@ -2024,6 +2210,7 @@ where
         Ok(InputBindingNode::vector(
             elements,
             OrderingEvidence::ExplicitAuthorOrder,
+            Vec::new(),
         ))
     }
 }
@@ -2132,6 +2319,7 @@ where
         Ok(InputBindingNode::non_empty_vector(
             elements,
             OrderingEvidence::ExplicitAuthorOrder,
+            Vec::new(),
         ))
     }
 }
@@ -2142,6 +2330,117 @@ where
     T: MfmValue,
 {
     fn into_binding(self) -> Result<InputBinding<NonEmpty<T>>> {
+        InputBinding::from_root(self.into_binding_node(InputFieldPath::root())?)
+    }
+}
+
+/// Author-side handles paired with stable domain keys.
+#[derive(Debug, PartialEq, Eq)]
+pub struct DomainKeyedHandles<'program, 'scope, K: StableDomainKey, T: MfmValue> {
+    entries: Vec<DomainKeyedHandle<'program, 'scope, K, T>>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct DomainKeyedHandle<'program, 'scope, K: StableDomainKey, T: MfmValue> {
+    key_ref: StableDomainKeyRef,
+    canonical_domain_bytes: PlainCanonicalJsonBytes,
+    handle: Handle<'program, 'scope, T>,
+    _key: PhantomData<fn(K) -> K>,
+}
+
+impl<'program, 'scope, K, T> DomainKeyedHandles<'program, 'scope, K, T>
+where
+    K: StableDomainKey,
+    T: MfmValue,
+{
+    /// Creates domain-keyed handles, rejecting duplicate canonical keys and sorting by canonical bytes.
+    pub fn new(entries: Vec<(K, Handle<'program, 'scope, T>)>) -> Result<Self> {
+        let mut keyed = entries
+            .into_iter()
+            .map(|(key, handle)| {
+                let schema_id = K::domain_key_descriptor()
+                    .and_then(|descriptor| descriptor.schema_id())
+                    .map_err(|error| PlanError::Value(error.to_string()))?;
+                let canonical_domain_bytes = key.canonical_domain_bytes()?;
+                let key_ref = StableDomainKeyRef {
+                    schema_id,
+                    content_digest: canonical_domain_bytes.content_digest(),
+                };
+                Ok(DomainKeyedHandle {
+                    key_ref,
+                    canonical_domain_bytes,
+                    handle,
+                    _key: PhantomData,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        keyed.sort_by(|left, right| {
+            left.key_ref
+                .schema_id
+                .cmp(&right.key_ref.schema_id)
+                .then_with(|| {
+                    left.canonical_domain_bytes
+                        .cmp(&right.canonical_domain_bytes)
+                })
+        });
+        let mut seen = BTreeSet::new();
+        for entry in &keyed {
+            let key = (
+                entry.key_ref.schema_id.clone(),
+                entry.canonical_domain_bytes.clone(),
+            );
+            if !seen.insert(key) {
+                return Err(PlanError::DuplicateDomainKey(
+                    entry.key_ref.stable_sort_key(),
+                ));
+            }
+        }
+        Ok(Self { entries: keyed })
+    }
+
+    /// Returns the number of keyed handles.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Returns true when no keyed handles are present.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+impl<'program, 'scope, K, T> IntoInputBindingNode<Vec<T>>
+    for DomainKeyedHandles<'program, 'scope, K, T>
+where
+    K: StableDomainKey,
+    T: MfmValue,
+{
+    fn into_binding_node(self, field_path: InputFieldPath) -> Result<InputBindingNode> {
+        let mut domain_keys = Vec::with_capacity(self.entries.len());
+        let mut elements = Vec::with_capacity(self.entries.len());
+        for (index, entry) in self.entries.into_iter().enumerate() {
+            domain_keys.push(entry.key_ref);
+            elements.push(
+                entry
+                    .handle
+                    .into_binding_node(field_path.child(index.to_string())?)?,
+            );
+        }
+        Ok(InputBindingNode::vector(
+            elements,
+            OrderingEvidence::StableDomainKey,
+            domain_keys,
+        ))
+    }
+}
+
+impl<'program, 'scope, K, T> IntoStateInput<'program, 'scope, Vec<T>>
+    for DomainKeyedHandles<'program, 'scope, K, T>
+where
+    K: StableDomainKey,
+    T: MfmValue,
+{
+    fn into_binding(self) -> Result<InputBinding<Vec<T>>> {
         InputBinding::from_root(self.into_binding_node(InputFieldPath::root())?)
     }
 }
@@ -2353,6 +2652,29 @@ impl TypedProgramDraft {
             .find(|node| node.bridge_ref() == *bridge_ref)
             .ok_or(PlanError::UnknownBridgeRef)
     }
+
+    /// Validates same-scope same-type lineage equality for certification fixtures.
+    pub fn validate_same_scope_same_type_lineage_for_certification(
+        &self,
+        expected: &TypedHandleRef,
+        actual: &TypedHandleRef,
+    ) -> Result<()> {
+        if expected.scope_id == actual.scope_id
+            && expected.schema_id == actual.schema_id
+            && expected.semantic_type_id == actual.semantic_type_id
+            && expected.value_lineage != actual.value_lineage
+        {
+            return Err(PlanError::LineageMismatch(format!(
+                "scope={} schema={} semantic={} expected={} actual={}",
+                expected.scope_id.as_str(),
+                expected.schema_id.as_str(),
+                expected.semantic_type_id.as_str(),
+                expected.value_lineage.digest().as_str(),
+                actual.value_lineage.digest().as_str()
+            )));
+        }
+        Ok(())
+    }
 }
 
 /// Root-scope builder for a typed program.
@@ -2380,9 +2702,11 @@ impl<'program, 'scope> RootBuilder<'program, 'scope> {
             return Err(PlanError::DuplicateSeedKey(key.as_str().to_owned()));
         }
 
-        let seed_id = seed_id(self.scope.scope_id(), &key)?;
-        let cell_id = seed_cell_id(&seed_id)?;
-        let value_lineage = seed_value_lineage_ref(&cell_id)?;
+        let operation_lineage = self.scope.current_operation_lineage()?;
+        let seed_id = seed_id(self.scope.scope_id(), &key, &value)?;
+        let cell_id = seed_cell_id(self.scope.scope_id(), &seed_id, &value)?;
+        let lineage = seed_value_lineage(self.scope.scope_id(), &seed_id, &operation_lineage)?;
+        let value_lineage = value_lineage_ref(&lineage)?;
         let spec = RootSeedSpec {
             key,
             seed_id,
@@ -2390,6 +2714,7 @@ impl<'program, 'scope> RootBuilder<'program, 'scope> {
             scope_id: self.scope.scope_id().clone(),
             schema_id: value.schema_id.clone(),
             semantic_type_id: value.semantic_type_id.clone(),
+            value_lineage: value_lineage.clone(),
             content_digest: value.content_digest,
             byte_len: value.byte_len,
         };
@@ -2452,6 +2777,7 @@ pub struct ScopeBuilder<'program, 'scope> {
     operation_keys: BTreeSet<String>,
     state_nodes: Vec<StateNodeSpec>,
     operation_lineage: Vec<OperationLineageFrameSpec>,
+    active_operation_stack: Vec<OperationInstanceId>,
     child_scope_keys: BTreeSet<String>,
     child_scopes: Vec<ScopeSpec>,
     bridge_nodes: Vec<BridgeNodeSpec>,
@@ -2465,6 +2791,7 @@ struct ScopeBuilderCheckpoint {
     operation_keys: BTreeSet<String>,
     state_nodes: Vec<StateNodeSpec>,
     operation_lineage: Vec<OperationLineageFrameSpec>,
+    active_operation_stack: Vec<OperationInstanceId>,
     child_scope_keys: BTreeSet<String>,
     child_scopes: Vec<ScopeSpec>,
     bridge_nodes: Vec<BridgeNodeSpec>,
@@ -2474,6 +2801,16 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
     /// Returns the typed scope id.
     pub fn scope_id(&self) -> &ScopeId {
         &self.scope_id
+    }
+
+    fn current_operation_lineage(&self) -> Result<OperationLineage> {
+        OperationLineage::from_parts(
+            self.active_operation_stack.clone(),
+            self.operation_lineage
+                .iter()
+                .map(|frame| frame.lineage_digest.clone())
+                .collect(),
+        )
     }
 
     /// Opens a child scope and returns only values explicitly bridged back to this scope.
@@ -2488,7 +2825,8 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
             return Err(PlanError::DuplicateChildScopeKey(key.as_str().to_owned()));
         }
 
-        let child_scope_id = child_scope_id(&self.scope_id, &key)?;
+        let operation_lineage = self.current_operation_lineage()?;
+        let child_scope_id = child_scope_id(&self.scope_id, &key, &operation_lineage)?;
         let session_token = bridge_session_token(&self.scope_id, &child_scope_id, &key);
         let mut child = ChildScopeBuilder {
             parent_scope_id: self.scope_id.clone(),
@@ -2500,6 +2838,7 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
                 operation_keys: BTreeSet::new(),
                 state_nodes: Vec::new(),
                 operation_lineage: Vec::new(),
+                active_operation_stack: self.active_operation_stack.clone(),
                 child_scope_keys: BTreeSet::new(),
                 child_scopes: Vec::new(),
                 bridge_nodes: Vec::new(),
@@ -2574,21 +2913,33 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
             &key,
             descriptor.kind(),
             descriptor.version(),
-            &config_binding.content_digest,
+            &config_binding.config_ref_digest,
             input.digest(),
         )?;
-        let output_cell_id = state_output_cell_id(&node_id)?;
         let output_schema_id =
             S::Output::schema_id().map_err(|error| PlanError::Value(error.to_string()))?;
         let output_semantic_type_id =
             S::Output::semantic_id().map_err(|error| PlanError::Value(error.to_string()))?;
-        let value_lineage = state_value_lineage_ref(&node_id)?;
+        let output_cell_id = state_output_cell_id(
+            &self.scope_id,
+            &node_id,
+            &output_semantic_type_id,
+            &output_schema_id,
+        )?;
+        let lineage = state_value_lineage(
+            &self.scope_id,
+            &node_id,
+            input.root(),
+            &config_binding.config_ref_digest,
+            &self.current_operation_lineage()?,
+        )?;
+        let value_lineage = value_lineage_ref(&lineage)?;
         let handle = Handle::new(
             output_cell_id.clone(),
             self.scope_id.clone(),
             output_schema_id.clone(),
             output_semantic_type_id.clone(),
-            value_lineage,
+            value_lineage.clone(),
         );
         self.state_keys.insert(key_string);
         self.state_nodes.push(StateNodeSpec {
@@ -2604,6 +2955,7 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
             output_cell_id,
             output_schema_id,
             output_semantic_type_id,
+            output_value_lineage: value_lineage,
         });
         Ok(handle)
     }
@@ -2647,8 +2999,19 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
         let output_schema_id =
             <O::Output<'program, 'scope> as OperationOutput<'program, 'scope>>::output_schema_id()?;
         let descriptor = registered.descriptor().clone();
+        let parent_operation_lineage = self.current_operation_lineage()?;
+        let operation_instance_id = operation_instance_id(OperationInstanceIdParts {
+            scope_id: &self.scope_id,
+            key: &key,
+            descriptor: &descriptor,
+            parent_operation_lineage: &parent_operation_lineage,
+            config_digest: &config_binding.config_ref_digest,
+            input_digest: &input_binding.digest,
+        })?;
         let checkpoint = self.checkpoint();
         self.operation_keys.insert(key_string);
+        self.active_operation_stack
+            .push(operation_instance_id.clone());
 
         let output = match operation.expand(config, operation_input, self) {
             Ok(output) => output,
@@ -2664,12 +3027,15 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
                 return Err(error);
             }
         };
+        self.active_operation_stack.pop();
         let lineage_digest =
             match operation_lineage_frame_digest(OperationLineageFrameDigestParts {
                 scope_id: &self.scope_id,
                 key: &key,
+                operation_instance_id: &operation_instance_id,
                 descriptor: &descriptor,
-                config_digest: &config_binding.content_digest,
+                parent_operation_lineage: &parent_operation_lineage,
+                config_digest: &config_binding.config_ref_digest,
                 input_digest: &input_binding.digest,
                 output_handles: &output_handles,
             }) {
@@ -2680,6 +3046,7 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
                 }
             };
         self.operation_lineage.push(OperationLineageFrameSpec {
+            operation_instance_id,
             key,
             scope_id: self.scope_id.clone(),
             operation_kind: descriptor.kind().clone(),
@@ -2701,6 +3068,7 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
             operation_keys: self.operation_keys.clone(),
             state_nodes: self.state_nodes.clone(),
             operation_lineage: self.operation_lineage.clone(),
+            active_operation_stack: self.active_operation_stack.clone(),
             child_scope_keys: self.child_scope_keys.clone(),
             child_scopes: self.child_scopes.clone(),
             bridge_nodes: self.bridge_nodes.clone(),
@@ -2712,6 +3080,7 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
         self.operation_keys = checkpoint.operation_keys;
         self.state_nodes = checkpoint.state_nodes;
         self.operation_lineage = checkpoint.operation_lineage;
+        self.active_operation_stack = checkpoint.active_operation_stack;
         self.child_scope_keys = checkpoint.child_scope_keys;
         self.child_scopes = checkpoint.child_scopes;
         self.bridge_nodes = checkpoint.bridge_nodes;
@@ -2836,14 +3205,24 @@ impl<'program, 'parent, 'child> ChildScopeBuilder<'program, 'parent, 'child> {
             bridge_kind,
             policy,
         )?;
-        let target_cell_id = bridge_cell_id(&node_id)?;
-        let target_value_lineage = bridge_value_lineage_ref(&node_id)?;
+        let target_cell_id = bridge_cell_id(
+            &target_scope_id,
+            &node_id,
+            &source.semantic_type_id,
+            &source.schema_id,
+        )?;
+        let target_value_lineage = value_lineage_ref(&bridge_value_lineage(
+            &target_scope_id,
+            &node_id,
+            &source.cell_id,
+            &self.scope.current_operation_lineage()?,
+        )?)?;
         let spec = BridgeNodeSpec {
             node_id: node_id.clone(),
             key,
             source_scope_id,
             target_scope_id: target_scope_id.clone(),
-            source_cell_id: source.cell_id,
+            source_cell_id: source.cell_id.clone(),
             target_cell_id: target_cell_id.clone(),
             semantic_type_id: source.semantic_type_id.clone(),
             schema_id: source.schema_id.clone(),
@@ -2975,6 +3354,7 @@ where
             operation_keys: BTreeSet::new(),
             state_nodes: Vec::new(),
             operation_lineage: Vec::new(),
+            active_operation_stack: Vec::new(),
             child_scope_keys: BTreeSet::new(),
             child_scopes: Vec::new(),
             bridge_nodes: Vec::new(),
@@ -3016,22 +3396,35 @@ fn checked_key(label: &str, value: &str) -> Result<String> {
         Ok(value.to_owned())
     } else {
         Err(PlanError::Key(format!(
-            "{label} {value:?} must match [a-z0-9][a-z0-9._/-]*"
+            "{label} {value:?} must use stable key grammar"
         )))
     }
 }
 
 fn is_valid_author_key(value: &str) -> bool {
-    let mut chars = value.chars();
+    if value.is_empty()
+        || value.len() > 256
+        || value.starts_with("mfm.")
+        || value.starts_with("sys.")
+        || value.starts_with('_')
+    {
+        return false;
+    }
+    value.split('/').all(is_valid_author_key_segment)
+}
+
+fn is_valid_author_key_segment(segment: &str) -> bool {
+    if segment.is_empty() || segment.len() > 64 {
+        return false;
+    }
+    let mut chars = segment.chars();
     let Some(first) = chars.next() else {
         return false;
     };
-    if !first.is_ascii_lowercase() && !first.is_ascii_digit() {
-        return false;
-    }
-    chars.all(|ch| {
-        ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '.' | '_' | '-' | '/')
-    })
+    (first.is_ascii_lowercase() || first.is_ascii_digit())
+        && chars.all(|ch| {
+            ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '.' | '_' | '-')
+        })
 }
 
 fn checked_field_path(label: &str, value: &str) -> Result<String> {
@@ -3065,45 +3458,153 @@ fn is_valid_field_segment(value: &str) -> bool {
     chars.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '/'))
 }
 
+fn canonical_digest(value: serde_json::Value) -> Result<ContentDigest> {
+    let json =
+        serde_json::to_string(&value).map_err(|error| PlanError::Serialize(error.to_string()))?;
+    let canonical = PlainCanonicalJsonBytes::from_json_str(&json)
+        .map_err(|error| PlanError::Canonical(error.to_string()))?;
+    Ok(canonical.content_digest())
+}
+
+fn canonical_digest_bytes(value: serde_json::Value) -> Result<DigestBytes> {
+    Ok(*canonical_digest(value)?.digest())
+}
+
+fn stable_domain_key_refs_json(domain_keys: &[StableDomainKeyRef]) -> Vec<serde_json::Value> {
+    domain_keys
+        .iter()
+        .map(|key| {
+            serde_json::json!({
+                "content_digest": key.content_digest.as_str(),
+                "schema_id": key.schema_id.as_str(),
+            })
+        })
+        .collect()
+}
+
+fn operation_lineage_json(lineage: &OperationLineage) -> serde_json::Value {
+    serde_json::json!({
+        "active_instances": lineage
+            .active_instances
+            .iter()
+            .map(OperationInstanceId::as_str)
+            .collect::<Vec<_>>(),
+        "completed_frames": lineage
+            .completed_frames
+            .iter()
+            .map(ContentDigest::as_str)
+            .collect::<Vec<_>>(),
+        "digest": lineage.digest.as_str(),
+    })
+}
+
 fn scope_id(key: &ScopeKey) -> Result<ScopeId> {
-    digest_only_id("scope", key.as_str(), ScopeId::from_digest)
+    scope_id_from_parts(None, key, &OperationLineage::empty()?)
 }
 
-fn child_scope_id(parent_scope_id: &ScopeId, key: &ScopeKey) -> Result<ScopeId> {
-    digest_only_id(
-        "child-scope",
-        &format!("{}:{}", parent_scope_id.as_str(), key.as_str()),
-        ScopeId::from_digest,
-    )
-}
-
-fn seed_id(scope_id: &ScopeId, key: &SeedKey) -> Result<SeedId> {
-    digest_only_id(
-        "seed",
-        &format!("{}:{}", scope_id.as_str(), key.as_str()),
-        SeedId::from_digest,
-    )
-}
-
-fn seed_cell_id(seed_id: &SeedId) -> Result<CellId> {
-    digest_only_id("seed-cell", seed_id.as_str(), CellId::from_digest)
-}
-
-fn seed_value_lineage_ref(cell_id: &CellId) -> Result<ValueLineageRef> {
-    value_lineage_ref("seed", cell_id.as_str())
-}
-
-fn bridge_value_lineage_ref(node_id: &NodeId) -> Result<ValueLineageRef> {
-    value_lineage_ref("bridge", node_id.as_str())
-}
-
-fn value_lineage_ref(domain: &str, value: &str) -> Result<ValueLineageRef> {
-    let digest =
-        sha256_digest_bytes(format!("mfm.program:value-lineage:{domain}:{value}").as_bytes());
-    Ok(ValueLineageRef::new(ContentDigest::from_digest(
+fn scope_id_from_parts(
+    parent_scope_id: Option<&ScopeId>,
+    key: &ScopeKey,
+    operation_lineage: &OperationLineage,
+) -> Result<ScopeId> {
+    Ok(ScopeId::from_digest(
         DigestAlgorithm::Sha256JcsV1,
-        digest,
-    )))
+        canonical_digest_bytes(serde_json::json!({
+            "alg": DigestAlgorithm::Sha256JcsV1.as_str(),
+            "local_scope_key": key.as_str(),
+            "operation_lineage": operation_lineage.digest.as_str(),
+            "parent_scope_id": parent_scope_id.map(ScopeId::as_str),
+        }))?,
+    ))
+}
+
+fn child_scope_id(
+    parent_scope_id: &ScopeId,
+    key: &ScopeKey,
+    operation_lineage: &OperationLineage,
+) -> Result<ScopeId> {
+    scope_id_from_parts(Some(parent_scope_id), key, operation_lineage)
+}
+
+fn seed_id<T: MfmValue>(
+    scope_id: &ScopeId,
+    key: &SeedKey,
+    seed: &CanonicalSeed<T>,
+) -> Result<SeedId> {
+    Ok(SeedId::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        canonical_digest_bytes(serde_json::json!({
+            "alg": DigestAlgorithm::Sha256JcsV1.as_str(),
+            "lowering_version": LOWERING_VERSION,
+            "scope_id": scope_id.as_str(),
+            "seed_key": key.as_str(),
+            "semantic_type_id": seed.semantic_type_id.as_str(),
+            "schema_id": seed.schema_id.as_str(),
+        }))?,
+    ))
+}
+
+fn seed_cell_id<T: MfmValue>(
+    scope_id: &ScopeId,
+    seed_id: &SeedId,
+    seed: &CanonicalSeed<T>,
+) -> Result<CellId> {
+    cell_id(
+        scope_id,
+        &CellProducer::Seed(seed_id.clone()),
+        &seed.semantic_type_id,
+        &seed.schema_id,
+    )
+}
+
+fn seed_value_lineage(
+    scope_id: &ScopeId,
+    seed_id: &SeedId,
+    operation_lineage: &OperationLineage,
+) -> Result<ValueLineage> {
+    Ok(ValueLineage {
+        scope_id: scope_id.clone(),
+        producer: CellProducer::Seed(seed_id.clone()),
+        input_cells: Vec::new(),
+        config_ref_digest: None,
+        operation_lineage: operation_lineage.clone(),
+        domain_keys: Vec::new(),
+        transform_policy: LineageTransformPolicy::Source,
+    })
+}
+
+fn bridge_value_lineage(
+    target_scope_id: &ScopeId,
+    node_id: &NodeId,
+    source_cell_id: &CellId,
+    operation_lineage: &OperationLineage,
+) -> Result<ValueLineage> {
+    Ok(ValueLineage {
+        scope_id: target_scope_id.clone(),
+        producer: CellProducer::Node(node_id.clone()),
+        input_cells: vec![source_cell_id.clone()],
+        config_ref_digest: None,
+        operation_lineage: operation_lineage.clone(),
+        domain_keys: Vec::new(),
+        transform_policy: LineageTransformPolicy::SameValueBridge,
+    })
+}
+
+fn value_lineage_ref(lineage: &ValueLineage) -> Result<ValueLineageRef> {
+    let mut input_cells = lineage.input_cells.clone();
+    input_cells.sort();
+    let mut domain_keys = lineage.domain_keys.clone();
+    domain_keys.sort();
+    let digest = canonical_digest(serde_json::json!({
+        "config_ref_digest": lineage.config_ref_digest.as_ref().map(ContentDigest::as_str),
+        "domain_keys": stable_domain_key_refs_json(&domain_keys),
+        "input_cells": input_cells.iter().map(CellId::as_str).collect::<Vec<_>>(),
+        "operation_lineage": operation_lineage_json(&lineage.operation_lineage),
+        "producer": cell_producer_json(&lineage.producer),
+        "scope_id": lineage.scope_id.as_str(),
+        "transform_policy": lineage.transform_policy.as_str(),
+    }))?;
+    Ok(ValueLineageRef::new(digest))
 }
 
 fn bridge_node_id(
@@ -3114,23 +3615,33 @@ fn bridge_node_id(
     bridge_kind: BridgeKind,
     policy: BridgePolicy,
 ) -> Result<NodeId> {
-    digest_only_id(
-        "bridge-node",
-        &format!(
-            "{}:{}:{}:{}:{}:{}",
-            source_scope_id.as_str(),
-            target_scope_id.as_str(),
-            source_cell_id.as_str(),
-            key.as_str(),
-            bridge_kind.as_str(),
-            policy.as_str()
-        ),
-        NodeId::from_digest,
-    )
+    Ok(NodeId::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        canonical_digest_bytes(serde_json::json!({
+            "alg": DigestAlgorithm::Sha256JcsV1.as_str(),
+            "bridge_kind": bridge_kind.as_str(),
+            "local_node_key": key.as_str(),
+            "lowering_version": LOWERING_VERSION,
+            "policy": policy.as_str(),
+            "source_cell_id": source_cell_id.as_str(),
+            "source_scope_id": source_scope_id.as_str(),
+            "target_scope_id": target_scope_id.as_str(),
+        }))?,
+    ))
 }
 
-fn bridge_cell_id(node_id: &NodeId) -> Result<CellId> {
-    digest_only_id("bridge-cell", node_id.as_str(), CellId::from_digest)
+fn bridge_cell_id(
+    target_scope_id: &ScopeId,
+    node_id: &NodeId,
+    semantic_type_id: &SemanticTypeId,
+    schema_id: &SchemaId,
+) -> Result<CellId> {
+    cell_id(
+        target_scope_id,
+        &CellProducer::Node(node_id.clone()),
+        semantic_type_id,
+        schema_id,
+    )
 }
 
 fn bridge_session_token(
@@ -3173,10 +3684,16 @@ fn canonical_config_binding<C: MfmConfig>(config: &C) -> Result<ConfigBindingSpe
     let schema_id = C::schema_id().map_err(|error| PlanError::Value(error.to_string()))?;
     let content_digest = canonical.content_digest();
     let byte_len = canonical.as_bytes().len();
+    let config_ref_digest = canonical_digest(serde_json::json!({
+        "byte_len": byte_len,
+        "content_digest": content_digest.as_str(),
+        "schema_id": schema_id.as_str(),
+    }))?;
     Ok(ConfigBindingSpec {
         schema_id,
         canonical_json: canonical,
         content_digest,
+        config_ref_digest,
         byte_len,
     })
 }
@@ -3280,33 +3797,121 @@ fn state_node_id(
     config_digest: &ContentDigest,
     input_digest: &ContentDigest,
 ) -> Result<NodeId> {
-    digest_only_id(
-        "state-node",
-        &format!(
-            "{}:{}:{}:{}:{}:{}",
-            scope_id.as_str(),
-            key.as_str(),
-            state_kind.as_str(),
-            state_version.as_str(),
-            config_digest.as_str(),
-            input_digest.as_str()
-        ),
-        NodeId::from_digest,
+    Ok(NodeId::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        canonical_digest_bytes(serde_json::json!({
+            "alg": DigestAlgorithm::Sha256JcsV1.as_str(),
+            "config_digest": config_digest.as_str(),
+            "input_binding_digest": input_digest.as_str(),
+            "local_node_key": key.as_str(),
+            "lowering_version": LOWERING_VERSION,
+            "scope_id": scope_id.as_str(),
+            "state_kind": state_kind.as_str(),
+            "state_version": state_version.as_str(),
+        }))?,
+    ))
+}
+
+fn state_output_cell_id(
+    scope_id: &ScopeId,
+    node_id: &NodeId,
+    semantic_type_id: &SemanticTypeId,
+    schema_id: &SchemaId,
+) -> Result<CellId> {
+    cell_id(
+        scope_id,
+        &CellProducer::Node(node_id.clone()),
+        semantic_type_id,
+        schema_id,
     )
 }
 
-fn state_output_cell_id(node_id: &NodeId) -> Result<CellId> {
-    digest_only_id("state-output-cell", node_id.as_str(), CellId::from_digest)
+fn state_value_lineage(
+    scope_id: &ScopeId,
+    node_id: &NodeId,
+    input_root: &InputBindingNode,
+    config_ref_digest: &ContentDigest,
+    operation_lineage: &OperationLineage,
+) -> Result<ValueLineage> {
+    let mut input_cells = Vec::new();
+    collect_input_cell_ids(input_root, &mut input_cells);
+    input_cells.sort();
+    Ok(ValueLineage {
+        scope_id: scope_id.clone(),
+        producer: CellProducer::Node(node_id.clone()),
+        input_cells,
+        config_ref_digest: Some(config_ref_digest.clone()),
+        operation_lineage: operation_lineage.clone(),
+        domain_keys: Vec::new(),
+        transform_policy: LineageTransformPolicy::StateOutput,
+    })
 }
 
-fn state_value_lineage_ref(node_id: &NodeId) -> Result<ValueLineageRef> {
-    value_lineage_ref("state", node_id.as_str())
+fn cell_id(
+    scope_id: &ScopeId,
+    producer: &CellProducer,
+    semantic_type_id: &SemanticTypeId,
+    schema_id: &SchemaId,
+) -> Result<CellId> {
+    Ok(CellId::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        canonical_digest_bytes(serde_json::json!({
+            "alg": DigestAlgorithm::Sha256JcsV1.as_str(),
+            "lowering_version": LOWERING_VERSION,
+            "output_index": 0,
+            "producer": cell_producer_json(producer),
+            "schema_id": schema_id.as_str(),
+            "scope_id": scope_id.as_str(),
+            "semantic_type_id": semantic_type_id.as_str(),
+        }))?,
+    ))
+}
+
+fn cell_producer_json(producer: &CellProducer) -> serde_json::Value {
+    match producer {
+        CellProducer::Node(node_id) => serde_json::json!({
+            "kind": "node",
+            "node_id": node_id.as_str(),
+        }),
+        CellProducer::Seed(seed_id) => serde_json::json!({
+            "kind": "seed",
+            "seed_id": seed_id.as_str(),
+        }),
+    }
+}
+
+struct OperationInstanceIdParts<'a> {
+    scope_id: &'a ScopeId,
+    key: &'a OperationKey,
+    descriptor: &'a OperationDescriptorIdentity,
+    parent_operation_lineage: &'a OperationLineage,
+    config_digest: &'a ContentDigest,
+    input_digest: &'a ContentDigest,
+}
+
+fn operation_instance_id(parts: OperationInstanceIdParts<'_>) -> Result<OperationInstanceId> {
+    Ok(OperationInstanceId::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        canonical_digest_bytes(serde_json::json!({
+            "alg": DigestAlgorithm::Sha256JcsV1.as_str(),
+            "config_digest": parts.config_digest.as_str(),
+            "input_binding_digest": parts.input_digest.as_str(),
+            "operation_descriptor_id": parts.descriptor.descriptor_id().as_str(),
+            "operation_key": parts.key.as_str(),
+            "operation_kind": parts.descriptor.kind().as_str(),
+            "operation_version": parts.descriptor.version().as_str(),
+            "parent_operation_lineage": parts.parent_operation_lineage.digest.as_str(),
+            "parent_scope_id": parts.scope_id.as_str(),
+        }))?,
+    ))
 }
 
 struct OperationLineageFrameDigestParts<'a> {
     scope_id: &'a ScopeId,
     key: &'a OperationKey,
+    operation_instance_id: &'a OperationInstanceId,
     descriptor: &'a OperationDescriptorIdentity,
+    parent_operation_lineage: &'a OperationLineage,
     config_digest: &'a ContentDigest,
     input_digest: &'a ContentDigest,
     output_handles: &'a [TypedHandleRef],
@@ -3320,9 +3925,11 @@ fn operation_lineage_frame_digest(
         "expansion_abi": parts.descriptor.expansion_abi(),
         "input_digest": parts.input_digest.as_str(),
         "operation_descriptor_id": parts.descriptor.descriptor_id().as_str(),
+        "operation_instance_id": parts.operation_instance_id.as_str(),
         "operation_key": parts.key.as_str(),
         "operation_kind": parts.descriptor.kind().as_str(),
         "operation_version": parts.descriptor.version().as_str(),
+        "parent_operation_lineage": parts.parent_operation_lineage.digest.as_str(),
         "output_handles": parts.output_handles
             .iter()
             .map(|handle| {
@@ -3350,6 +3957,25 @@ fn input_descriptor_id(input_schema_id: &SchemaId) -> Result<DescriptorId> {
         input_schema_id.as_str(),
         DescriptorId::from_digest,
     )
+}
+
+fn collect_input_cell_ids(node: &InputBindingNode, output: &mut Vec<CellId>) {
+    match &node.kind {
+        InputBindingNodeKind::Unit => {}
+        InputBindingNodeKind::Cell(cell) => output.push(cell.cell_id.clone()),
+        InputBindingNodeKind::Tuple { elements }
+        | InputBindingNodeKind::Vec { elements, .. }
+        | InputBindingNodeKind::NonEmptyVec { elements, .. } => {
+            for element in elements {
+                collect_input_cell_ids(element, output);
+            }
+        }
+        InputBindingNodeKind::Struct { fields } => {
+            for field in fields {
+                collect_input_cell_ids(&field.node, output);
+            }
+        }
+    }
 }
 
 fn validate_input_binding_node(node: &InputBindingNode) -> Result<()> {
@@ -3535,12 +4161,22 @@ fn input_binding_node_json(node: &InputBindingNode) -> serde_json::Value {
                 .collect::<Vec<_>>(),
             "kind": "struct",
         }),
-        InputBindingNodeKind::Vec { elements, ordering } => serde_json::json!({
+        InputBindingNodeKind::Vec {
+            elements,
+            ordering,
+            domain_keys,
+        } => serde_json::json!({
+            "domain_keys": stable_domain_key_refs_json(domain_keys),
             "elements": elements.iter().map(input_binding_node_json).collect::<Vec<_>>(),
             "kind": "vec",
             "ordering": ordering.as_str(),
         }),
-        InputBindingNodeKind::NonEmptyVec { elements, ordering } => serde_json::json!({
+        InputBindingNodeKind::NonEmptyVec {
+            elements,
+            ordering,
+            domain_keys,
+        } => serde_json::json!({
+            "domain_keys": stable_domain_key_refs_json(domain_keys),
             "elements": elements.iter().map(input_binding_node_json).collect::<Vec<_>>(),
             "kind": "non_empty_vec",
             "ordering": ordering.as_str(),

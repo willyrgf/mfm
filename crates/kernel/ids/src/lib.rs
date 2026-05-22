@@ -448,6 +448,9 @@ pub enum AdapterKindKind {}
 /// Marker for operation kind ids.
 pub enum OperationKindKind {}
 
+/// Marker for operation instance ids.
+pub enum OperationInstanceIdKind {}
+
 /// Marker for descriptor ids.
 pub enum DescriptorKind {}
 
@@ -528,6 +531,9 @@ pub type AdapterKind = Identity<AdapterKindKind>;
 
 /// Typed operation kind identity.
 pub type OperationKind = Identity<OperationKindKind>;
+
+/// Planned operation instance identity.
+pub type OperationInstanceId = Identity<OperationInstanceIdKind>;
 
 /// Typed descriptor identity.
 pub type DescriptorId = Identity<DescriptorKind>;
@@ -754,6 +760,7 @@ impl_identity_category!(CapabilityKindKind, "capability", NamespaceNameDigest);
 impl_identity_category!(AdapterKindKind, "adapter", NamespaceNameDigest);
 impl_identity_category!(OperationKindKind, "operation", NamespaceNameDigest);
 
+impl_digest_only_category!(OperationInstanceIdKind, "op");
 impl_digest_only_category!(DescriptorKind, "descriptor");
 impl_digest_only_category!(SpecHashKind, "spec");
 impl_digest_only_category!(NodeIdKind, "node");
@@ -886,6 +893,9 @@ mod tests {
             SpecHash::parse(format!("spec:sha256-jcs-v1:{DIGEST_HEX}"))
                 .expect("spec hash")
                 .to_string(),
+            OperationInstanceId::parse(format!("op:sha256-jcs-v1:{DIGEST_HEX}"))
+                .expect("operation instance id")
+                .to_string(),
             NodeId::parse(format!("node:sha256-jcs-v1:{DIGEST_HEX}"))
                 .expect("node id")
                 .to_string(),
@@ -920,6 +930,7 @@ mod tests {
             [
                 format!("descriptor:sha256-jcs-v1:{DIGEST_HEX}"),
                 format!("spec:sha256-jcs-v1:{DIGEST_HEX}"),
+                format!("op:sha256-jcs-v1:{DIGEST_HEX}"),
                 format!("node:sha256-jcs-v1:{DIGEST_HEX}"),
                 format!("cell:sha256-jcs-v1:{DIGEST_HEX}"),
                 format!("scope:sha256-jcs-v1:{DIGEST_HEX}"),

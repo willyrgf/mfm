@@ -17,6 +17,20 @@ struct LaunchValue {
     label: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, MfmValue)]
+#[mfm(
+    namespace = "mfm.program.test",
+    name = "domain_key",
+    version = "1",
+    schema = "mfm.program.test.domain_key"
+)]
+struct TestDomainKey {
+    source: String,
+    index: u64,
+}
+
+impl StableDomainKey for TestDomainKey {}
+
 #[derive(PublicOutputsDerive)]
 #[mfm(schema = "mfm.program.test.public_outputs")]
 struct LaunchPublicOutputs<'p, 's> {
@@ -334,6 +348,279 @@ fn registered_operation_registry_records_lineage_frame() {
 }
 
 #[test]
+fn stable_ids_and_value_lineage_golden_vectors() {
+    let mut state_registry = StateRegistryBuilder::new();
+    state_registry
+        .register::<MultiplyState>()
+        .expect("state registers");
+    let mut operation_registry = OperationRegistryBuilder::new();
+    operation_registry
+        .register::<MultiplyOperation>()
+        .expect("operation registers");
+
+    let draft = build_root_with_registries(
+        ScopeKey::new("portfolio/root").expect("scope key"),
+        state_registry.snapshot(),
+        operation_registry.snapshot(),
+        |root| {
+            let seed = CanonicalSeed::from_value(&LaunchValue {
+                amount: 4,
+                label: "operation".to_owned(),
+            })?;
+            let input = root.seed(SeedKey::new("launch-input")?, seed)?;
+            let result = root.scope().call::<MultiplyOperation, _>(
+                OperationKey::new("multiply-operation")?,
+                MultiplyOperation,
+                LaunchConfig { multiplier: 8 },
+                input,
+            )?;
+            root.bind_public_outputs(
+                PublicOutputKey::new("terminal")?,
+                &LaunchPublicOutputs {
+                    result: result.result,
+                },
+            )
+        },
+    )
+    .expect("root builds");
+
+    let seed = &draft.seeds()[0];
+    let node = &draft.state_nodes()[0];
+    let frame = &draft.operation_lineage()[0];
+    let empty_lineage = OperationLineage::empty().expect("empty lineage");
+    let active_lineage =
+        OperationLineage::from_parts(vec![frame.operation_instance_id.clone()], Vec::new())
+            .expect("active lineage");
+    let alternate_lowering_node_id = NodeId::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        canonical_digest_bytes(serde_json::json!({
+            "alg": DigestAlgorithm::Sha256JcsV1.as_str(),
+            "config_digest": node.config.config_ref_digest.as_str(),
+            "input_binding_digest": node.input.digest.as_str(),
+            "local_node_key": node.key.as_str(),
+            "lowering_version": "mfm.typed.lowering.v2",
+            "scope_id": node.scope_id.as_str(),
+            "state_kind": node.state_kind.as_str(),
+            "state_version": node.state_version.as_str(),
+        }))
+        .expect("alternate lowering digest"),
+    );
+
+    assert_eq!(
+        draft.root_scope_id().as_str(),
+        "scope:sha256-jcs-v1:b773e3f182b4866afd06c3948883ad1545bd26152fa9ebc9a9df4f67ae7151b9"
+    );
+    assert_eq!(
+        empty_lineage.digest.as_str(),
+        "content:sha256-jcs-v1:c593e42bace983cf3dd7de37223c5f442e305ec8e5a37e828d23c4a9e8584f22"
+    );
+    assert_eq!(
+        seed.seed_id.as_str(),
+        "seed:sha256-jcs-v1:05ba036389ad5af4fbcbbbc36f5b4f4b566573aa04de470a7b2a88d5e7f1b1a5"
+    );
+    assert_eq!(
+        seed.cell_id.as_str(),
+        "cell:sha256-jcs-v1:b4c309b0528560c3051be99b494bcb10c533c2cf93fa83c91279fb228508ff3d"
+    );
+    assert_eq!(
+        seed.value_lineage.digest().as_str(),
+        "content:sha256-jcs-v1:f005d65682c9906a11c1ce57c98f64927f83f1ad703617cda53d50d69b92a60d"
+    );
+    assert_eq!(
+        frame.config.config_ref_digest.as_str(),
+        "content:sha256-jcs-v1:1f8dd8a7c84f19669abfd377eb9aa48375902a67c411bf749bba71a1a85b45a0"
+    );
+    assert_eq!(
+        node.config.config_ref_digest,
+        frame.config.config_ref_digest
+    );
+    assert_eq!(
+        frame.input.digest.as_str(),
+        "content:sha256-jcs-v1:e1ce2703046def490275d72752cd8a6cd6c0b7de2bacb07534287f23ca9c977a"
+    );
+    assert_eq!(node.input.digest, frame.input.digest);
+    assert_eq!(
+        frame.operation_instance_id.as_str(),
+        "op:sha256-jcs-v1:533c77227ce83750315e974e7e035db5b8e28e40cd8410457d92a579d83859c6"
+    );
+    assert_eq!(
+        active_lineage.digest.as_str(),
+        "content:sha256-jcs-v1:d91451cae88e67ef43cfc4b278e6e4e86f13abcbfb6fbbc22d62ad52267e1b9c"
+    );
+    assert_eq!(
+        node.node_id.as_str(),
+        "node:sha256-jcs-v1:9a49914a5d8ee46fc1e04db4fcd1b580271fbbc7873856319e34d79552de57d1"
+    );
+    assert_ne!(
+        node.node_id, alternate_lowering_node_id,
+        "lowering version must be hash-defining for node ids"
+    );
+    assert_eq!(
+        node.output_cell_id.as_str(),
+        "cell:sha256-jcs-v1:698379d96c605e76ba02e502e6fa10f730648ca331f92bc45e977576b70a27b2"
+    );
+    assert_eq!(
+        node.output_value_lineage.digest().as_str(),
+        "content:sha256-jcs-v1:1de344be80a35690b25d386cfb260772264a81c49e74cd6f9c19a7ecd1538012"
+    );
+    assert_eq!(
+        frame.lineage_digest.as_str(),
+        "content:sha256-jcs-v1:0484085c21c43ed0176591ee9d109886922ebe96040a02bae6ace100a828c240"
+    );
+}
+
+#[test]
+fn domain_keyed_handles_sort_canonically_and_reject_duplicates() {
+    build_root(ScopeKey::new("root").expect("scope key"), |root| {
+        let late = root.seed(
+            SeedKey::new("late")?,
+            CanonicalSeed::from_value(&LaunchValue {
+                amount: 3,
+                label: "late".to_owned(),
+            })?,
+        )?;
+        let early = root.seed(
+            SeedKey::new("early")?,
+            CanonicalSeed::from_value(&LaunchValue {
+                amount: 1,
+                label: "early".to_owned(),
+            })?,
+        )?;
+        let late_ref = late.typed_ref();
+        let early_ref = early.typed_ref();
+        let keyed = DomainKeyedHandles::new(vec![
+            (
+                TestDomainKey {
+                    source: "z".to_owned(),
+                    index: 2,
+                },
+                late.clone(),
+            ),
+            (
+                TestDomainKey {
+                    source: "a".to_owned(),
+                    index: 1,
+                },
+                early.clone(),
+            ),
+        ])?;
+        let reversed_keyed = DomainKeyedHandles::new(vec![
+            (
+                TestDomainKey {
+                    source: "a".to_owned(),
+                    index: 1,
+                },
+                early.clone(),
+            ),
+            (
+                TestDomainKey {
+                    source: "z".to_owned(),
+                    index: 2,
+                },
+                late,
+            ),
+        ])?;
+        let binding: InputBinding<Vec<LaunchValue>> = keyed.into_binding()?;
+        let reversed_binding: InputBinding<Vec<LaunchValue>> = reversed_keyed.into_binding()?;
+        assert_eq!(
+            binding.digest(),
+            reversed_binding.digest(),
+            "canonical domain-key order must make input order irrelevant"
+        );
+        let InputBindingNodeKind::Vec {
+            ordering,
+            domain_keys,
+            elements,
+        } = &binding.root().kind
+        else {
+            panic!("domain-keyed handles should bind as vector");
+        };
+        assert_eq!(ordering, &OrderingEvidence::StableDomainKey);
+        assert_eq!(domain_keys.len(), 2);
+        assert_eq!(elements.len(), 2);
+        assert_eq!(
+            binding.digest().as_str(),
+            "content:sha256-jcs-v1:718b1e5b84a831a8b770461ae241eae095ededa3eb6a5470116e49b0c9b5c7be"
+        );
+        assert_eq!(
+            domain_keys[0].content_digest.as_str(),
+            "content:sha256-jcs-v1:dcf7ba6724b36bcbb4945ba25c50e8fadc7b56b00be10009321a918484de9187"
+        );
+        assert_eq!(
+            domain_keys[1].content_digest.as_str(),
+            "content:sha256-jcs-v1:201a76ed8dddaee1cc860ade5d752a9b6e710be9f1ccece57a7c69f6a062e64f"
+        );
+        let InputBindingNodeKind::Cell(first_cell) = &elements[0].kind else {
+            panic!("first domain-keyed element should be a cell");
+        };
+        let InputBindingNodeKind::Cell(second_cell) = &elements[1].kind else {
+            panic!("second domain-keyed element should be a cell");
+        };
+        assert_eq!(first_cell.cell_id, early_ref.cell_id);
+        assert_eq!(second_cell.cell_id, late_ref.cell_id);
+
+        let duplicate = DomainKeyedHandles::new(vec![
+            (
+                TestDomainKey {
+                    source: "dup".to_owned(),
+                    index: 1,
+                },
+                early.clone(),
+            ),
+            (
+                TestDomainKey {
+                    source: "dup".to_owned(),
+                    index: 1,
+                },
+                early.clone(),
+            ),
+        ]);
+        assert!(matches!(duplicate, Err(PlanError::DuplicateDomainKey(_))));
+
+        root.bind_public_outputs(
+            PublicOutputKey::new("terminal")?,
+            &LaunchPublicOutputs { result: early },
+        )
+    })
+    .expect("root builds");
+}
+
+#[test]
+fn same_scope_same_type_lineage_mismatch_rejects_for_certification() {
+    let draft = build_root(ScopeKey::new("root").expect("scope key"), |root| {
+        let first = root.seed(
+            SeedKey::new("first")?,
+            CanonicalSeed::from_value(&LaunchValue {
+                amount: 1,
+                label: "first".to_owned(),
+            })?,
+        )?;
+        let _second = root.seed(
+            SeedKey::new("second")?,
+            CanonicalSeed::from_value(&LaunchValue {
+                amount: 2,
+                label: "second".to_owned(),
+            })?,
+        )?;
+        root.bind_public_outputs(
+            PublicOutputKey::new("terminal")?,
+            &LaunchPublicOutputs { result: first },
+        )
+    })
+    .expect("root builds");
+
+    let first = draft.seeds()[0].typed_ref();
+    let second = draft.seeds()[1].typed_ref();
+    assert!(matches!(
+        draft.validate_same_scope_same_type_lineage_for_certification(&first, &second),
+        Err(PlanError::LineageMismatch(_))
+    ));
+    assert!(draft
+        .validate_same_scope_same_type_lineage_for_certification(&first, &first)
+        .is_ok());
+}
+
+#[test]
 fn explicit_registered_operation_token_calls_without_builder_registry() {
     let mut state_registry = StateRegistryBuilder::new();
     state_registry
@@ -601,10 +888,13 @@ fn tuple_vector_and_non_empty_inputs_preserve_author_order() {
             reversed_binding.digest(),
             "explicit vector order is part of the binding digest"
         );
-        let InputBindingNodeKind::Vec { elements, ordering } = &vector_binding.root().kind else {
+        let InputBindingNodeKind::Vec {
+            elements, ordering, ..
+        } = &vector_binding.root().kind
+        else {
             panic!("vector input should bind as vector");
         };
-        assert_eq!(*ordering, OrderingEvidence::ExplicitAuthorOrder);
+        assert_eq!(ordering, &OrderingEvidence::ExplicitAuthorOrder);
         assert_eq!(cell_path(elements.first().expect("first vector cell")), "0");
         assert_eq!(cell_path(elements.get(1).expect("second vector cell")), "1");
 
@@ -614,16 +904,20 @@ fn tuple_vector_and_non_empty_inputs_preserve_author_order() {
         );
         let non_empty_binding: InputBinding<NonEmpty<LaunchValue>> =
             NonEmptyHandles::try_from_vec(vec![first.clone(), second.clone()])?.into_binding()?;
-        let InputBindingNodeKind::NonEmptyVec { elements, ordering } =
-            &non_empty_binding.root().kind
+        let InputBindingNodeKind::NonEmptyVec {
+            elements, ordering, ..
+        } = &non_empty_binding.root().kind
         else {
             panic!("non-empty input should bind as non-empty vector");
         };
-        assert_eq!(*ordering, OrderingEvidence::ExplicitAuthorOrder);
+        assert_eq!(ordering, &OrderingEvidence::ExplicitAuthorOrder);
         assert_eq!(elements.len(), 2);
 
-        let empty_node =
-            InputBindingNode::non_empty_vector(Vec::new(), OrderingEvidence::ExplicitAuthorOrder);
+        let empty_node = InputBindingNode::non_empty_vector(
+            Vec::new(),
+            OrderingEvidence::ExplicitAuthorOrder,
+            Vec::new(),
+        );
         assert_eq!(
             InputBinding::<NonEmpty<LaunchValue>>::from_root(empty_node)
                 .expect_err("public empty NonEmptyVec rejects"),
@@ -708,10 +1002,13 @@ fn derive_backed_state_input_handles_build_canonical_struct_bindings() {
             .iter()
             .find(|field| field.field_path.as_str() == "orderedValues")
             .expect("ordered field");
-        let InputBindingNodeKind::Vec { elements, ordering } = &ordered_field.node.kind else {
+        let InputBindingNodeKind::Vec {
+            elements, ordering, ..
+        } = &ordered_field.node.kind
+        else {
             panic!("orderedValues should bind as a vector");
         };
-        assert_eq!(*ordering, OrderingEvidence::ExplicitAuthorOrder);
+        assert_eq!(ordering, &OrderingEvidence::ExplicitAuthorOrder);
         assert_eq!(
             cell_path(elements.first().expect("first ordered cell")),
             "orderedValues.0"
@@ -962,8 +1259,14 @@ fn duplicate_seed_keys_reject() {
 fn keys_reject_non_ascii_and_empty_values() {
     assert!(ScopeKey::new("").is_err());
     assert!(ScopeKey::new("Root").is_err());
+    assert!(ScopeKey::new("mfm.reserved").is_err());
+    assert!(ScopeKey::new("sys.reserved").is_err());
+    assert!(ScopeKey::new("_reserved").is_err());
+    assert!(ScopeKey::new(format!("a/{}", "b".repeat(65))).is_err());
     assert!(SeedKey::new("semente-á").is_err());
+    assert!(SeedKey::new("seed_1").is_ok());
     assert!(PublicFieldPath::new("result.total").is_ok());
+    assert!(PublicFieldPath::new("result..total").is_err());
 }
 
 #[test]
