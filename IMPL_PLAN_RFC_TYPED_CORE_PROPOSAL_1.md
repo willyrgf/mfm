@@ -311,13 +311,13 @@ workflow ports, and deletion or hard isolation of old dynamic semantic APIs.
 
 ### Commit 27: `kernel replay add replay brokers and verifiers`
 
-- [ ] Add `crates/kernel/replay` and `mfm-replay`.
-- [ ] Replay from stored certified spec as authority.
-- [ ] Implement replay brokers that answer only from recorded facts, submissions, receipts,
+- [x] Add `crates/kernel/replay` and `mfm-replay`.
+- [x] Replay from stored certified spec as authority.
+- [x] Implement replay brokers that answer only from recorded facts, submissions, receipts,
       confirmations, artifacts, and typed evidence.
-- [ ] Reject live capability requests, missing facts, mismatched hashes/schema ids, unsupported
+- [x] Reject live capability requests, missing facts, mismatched hashes/schema ids, unsupported
       adapter versions, executable identity mismatch, and canonicalizer mismatch.
-- [ ] Validation: `nix run .#test`.
+- [x] Validation: `nix run .#test`.
 
 ### Commit 28: `kernel runtime add public outputs`
 

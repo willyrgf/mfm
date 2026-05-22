@@ -68,6 +68,12 @@
       "docs_rs": "https://docs.rs/mfm-store"
     },
     {
+      "name": "mfm-replay",
+      "group": "typed-kernel",
+      "workspace_path": "crates/kernel/replay",
+      "docs_rs": "https://docs.rs/mfm-replay"
+    },
+    {
       "name": "mfm-kernel-test-support",
       "group": "typed-kernel",
       "workspace_path": "crates/kernel/test-support",

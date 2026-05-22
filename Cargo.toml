@@ -28,6 +28,7 @@ members = [
 	"crates/kernel/ids",
 	"crates/kernel/program",
 	"crates/kernel/program-derive",
+	"crates/kernel/replay",
 	"crates/kernel/runtime",
 	"crates/kernel/spec",
 	"crates/kernel/store",

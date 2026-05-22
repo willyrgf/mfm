@@ -1,0 +1,19 @@
+[package]
+name = "mfm-replay"
+version = "0.1.0"
+edition = "2021"
+description = "Typed replay brokers and verifier contracts for MFM certified execution specs"
+repository = "https://github.com/willyrgf/mfm"
+license = "MIT"
+readme = "README.md"
+
+[lib]
+name = "mfm_replay"
+path = "src/lib.rs"
+
+[dependencies]
+mfm-capabilities = { path = "../capabilities" }
+mfm-events = { path = "../events" }
+mfm-ids = { path = "../ids" }
+mfm-spec = { path = "../spec" }
+mfm-store = { path = "../store" }

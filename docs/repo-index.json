@@ -215,6 +215,11 @@
       "kind": "rust-cargo"
     },
     {
+      "name": "replay",
+      "path": "crates/kernel/replay/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
       "name": "spec",
       "path": "crates/kernel/spec/Cargo.toml",
       "kind": "rust-cargo"
