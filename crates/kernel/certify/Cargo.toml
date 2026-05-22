@@ -10,3 +10,17 @@ readme = "README.md"
 [lib]
 name = "mfm_certify"
 path = "src/lib.rs"
+
+[dependencies]
+mfm-capabilities = { path = "../capabilities" }
+mfm-canonical = { path = "../canonical" }
+mfm-effects = { path = "../effects" }
+mfm-ids = { path = "../ids" }
+mfm-program = { path = "../program" }
+mfm-spec = { path = "../spec" }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+mfm-program-derive = { path = "../program-derive" }
+mfm-values = { path = "../values" }
+serde = { workspace = true }

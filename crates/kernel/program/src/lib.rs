@@ -19,9 +19,9 @@ use mfm_effects::{
     ApplySideEffect, EffectDescriptor, EffectSpec, ManagedPlatformWrite, Pure, ReadExternal,
 };
 use mfm_ids::{
-    CellId, ContentDigest, DescriptorId, DigestAlgorithm, DigestBytes, NodeId, OperationInstanceId,
-    OperationKind, OperationVersion, SchemaId, ScopeId, SeedId, SemanticTypeId, StateKind,
-    StateVersion,
+    CellId, ContentDigest, DescriptorId, DigestAlgorithm, DigestBytes, EffectKind, NodeId,
+    OperationInstanceId, OperationKind, OperationVersion, SchemaId, ScopeId, SeedId,
+    SemanticTypeId, StateKind, StateVersion,
 };
 pub use mfm_values::NonEmpty;
 use mfm_values::{
@@ -238,7 +238,7 @@ pub struct InputFieldPath(String);
 impl InputFieldPath {
     /// Creates the root input field path.
     pub fn root() -> Self {
-        Self(String::new())
+        Self("root".to_owned())
     }
 
     /// Creates a checked input field path.
@@ -249,14 +249,14 @@ impl InputFieldPath {
     /// Appends a checked child segment.
     pub fn child(&self, value: impl AsRef<str>) -> Result<Self> {
         let segment = checked_field_segment("input field segment", value.as_ref())?;
-        if self.0.is_empty() {
+        if self.0 == "root" {
             Ok(Self(segment))
         } else {
             Ok(Self(format!("{}.{}", self.0, segment)))
         }
     }
 
-    /// Returns the stable field path string. The root path is the empty string.
+    /// Returns the stable field path string.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -447,11 +447,15 @@ pub struct StateDescriptorIdentity {
     output_semantic_type_id: SemanticTypeId,
     effect: EffectDescriptor,
     capabilities: CapabilitySetDescriptor,
+    side_effect_contract_digest: Option<ContentDigest>,
     runner: RunnerKind,
 }
 
 impl StateDescriptorIdentity {
-    fn for_state<S: StateSpec>() -> Result<Self> {
+    fn for_state<S: StateSpec>() -> Result<Self>
+    where
+        S::Effect: EffectRunner<S>,
+    {
         let kind = S::kind()?;
         let version = S::version()?;
         let config_schema_id =
@@ -469,7 +473,9 @@ impl StateDescriptorIdentity {
         capabilities
             .validate_for_effect::<S::Effect>()
             .map_err(|error| PlanError::Registry(error.to_string()))?;
-        let runner = effect_runner_kind_for_effect::<S::Effect>();
+        let runner = <S::Effect as EffectRunner<S>>::runner_kind();
+        let side_effect_contract_digest =
+            <S::Effect as EffectRunner<S>>::side_effect_contract_digest()?;
         let descriptor_id = state_descriptor_id(StateDescriptorIdParts {
             kind: &kind,
             version: &version,
@@ -480,6 +486,7 @@ impl StateDescriptorIdentity {
             output_semantic_type_id: &output_semantic_type_id,
             effect: &effect,
             capabilities: &capabilities,
+            side_effect_contract_digest: side_effect_contract_digest.as_ref(),
             runner,
         })?;
         Ok(Self {
@@ -493,6 +500,7 @@ impl StateDescriptorIdentity {
             output_semantic_type_id,
             effect,
             capabilities,
+            side_effect_contract_digest,
             runner,
         })
     }
@@ -545,6 +553,11 @@ impl StateDescriptorIdentity {
     /// Returns the capability-set descriptor.
     pub fn capabilities(&self) -> &CapabilitySetDescriptor {
         &self.capabilities
+    }
+
+    /// Returns the side-effect contract digest when this descriptor mutates an external system.
+    pub fn side_effect_contract_digest(&self) -> Option<&ContentDigest> {
+        self.side_effect_contract_digest.as_ref()
     }
 
     /// Returns the registered runner kind.
@@ -1094,6 +1107,11 @@ impl OperationRegistry for OperationRegistrySnapshot {
 pub trait EffectRunner<S: StateSpec>: private::EffectRunnerSealed<S> {
     /// Returns the runner kind for this effect/state pair.
     fn runner_kind() -> RunnerKind;
+
+    /// Returns the side-effect contract digest for external mutation states.
+    fn side_effect_contract_digest() -> Result<Option<ContentDigest>> {
+        Ok(None)
+    }
 }
 
 /// Pure deterministic state runner.
@@ -1223,6 +1241,42 @@ where
 {
     fn runner_kind() -> RunnerKind {
         RunnerKind::ApplySideEffect
+    }
+
+    fn side_effect_contract_digest() -> Result<Option<ContentDigest>> {
+        let digest = canonical_digest(serde_json::json!({
+            "confirmation_schema_id": S::Confirmation::schema_id()
+                .map_err(|error| PlanError::Value(error.to_string()))?
+                .as_str(),
+            "confirmation_semantic_type_id": S::Confirmation::semantic_id()
+                .map_err(|error| PlanError::Value(error.to_string()))?
+                .as_str(),
+            "idempotency_input_schema_id": S::IdempotencyInput::schema_id()
+                .map_err(|error| PlanError::Value(error.to_string()))?
+                .as_str(),
+            "idempotency_input_semantic_type_id": S::IdempotencyInput::semantic_id()
+                .map_err(|error| PlanError::Value(error.to_string()))?
+                .as_str(),
+            "intent_schema_id": S::Intent::schema_id()
+                .map_err(|error| PlanError::Value(error.to_string()))?
+                .as_str(),
+            "intent_semantic_type_id": S::Intent::semantic_id()
+                .map_err(|error| PlanError::Value(error.to_string()))?
+                .as_str(),
+            "receipt_schema_id": S::Receipt::schema_id()
+                .map_err(|error| PlanError::Value(error.to_string()))?
+                .as_str(),
+            "receipt_semantic_type_id": S::Receipt::semantic_id()
+                .map_err(|error| PlanError::Value(error.to_string()))?
+                .as_str(),
+            "submission_schema_id": S::Submission::schema_id()
+                .map_err(|error| PlanError::Value(error.to_string()))?
+                .as_str(),
+            "submission_semantic_type_id": S::Submission::semantic_id()
+                .map_err(|error| PlanError::Value(error.to_string()))?
+                .as_str(),
+        }))?;
+        Ok(Some(digest))
     }
 }
 
@@ -1556,6 +1610,8 @@ pub struct ScopeSpec {
     pub scope_id: ScopeId,
     /// Parent scope id for child scopes.
     pub parent_scope_id: Option<ScopeId>,
+    /// Operation lineage active when this scope id was derived.
+    pub planning_lineage: OperationLineage,
 }
 
 /// Canonical config reference embedded in a typed state node draft.
@@ -1588,8 +1644,16 @@ pub struct StateNodeSpec {
     pub state_version: StateVersion,
     /// Registered state descriptor id.
     pub state_descriptor_id: DescriptorId,
+    /// Stable registered state descriptor name.
+    pub state_descriptor_name: String,
     /// Registered runner kind.
     pub runner: RunnerKind,
+    /// Framework effect kind required by the registered state.
+    pub effect_kind: EffectKind,
+    /// Framework capability descriptor set required by the registered state.
+    pub capability_bindings: CapabilitySetDescriptor,
+    /// Side-effect contract digest when this node mutates an external system.
+    pub side_effect_contract_digest: Option<ContentDigest>,
     /// Canonical config binding.
     pub config: ConfigBindingSpec,
     /// Typed input binding.
@@ -1602,6 +1666,8 @@ pub struct StateNodeSpec {
     pub output_semantic_type_id: SemanticTypeId,
     /// Output value lineage ref.
     pub output_value_lineage: ValueLineageRef,
+    /// Planning lineage active while this node was emitted.
+    pub planning_lineage: OperationLineage,
 }
 
 /// Operation lineage frame emitted by a registry-mediated call.
@@ -1619,8 +1685,12 @@ pub struct OperationLineageFrameSpec {
     pub operation_version: OperationVersion,
     /// Registered operation descriptor id.
     pub operation_descriptor_id: DescriptorId,
+    /// Stable registered operation descriptor name.
+    pub operation_name: String,
     /// Deterministic expansion ABI recorded by the descriptor.
     pub expansion_abi: &'static str,
+    /// Operation lineage active before this operation expanded.
+    pub parent_operation_lineage: OperationLineage,
     /// Canonical operation config binding.
     pub config: ConfigBindingSpec,
     /// Typed operation input binding.
@@ -1712,6 +1782,8 @@ pub struct BridgeNodeSpec {
     pub source_cell_id: CellId,
     /// Target cell id.
     pub target_cell_id: CellId,
+    /// Target value lineage ref.
+    pub target_value_lineage: ValueLineageRef,
     /// Value semantic type id.
     pub semantic_type_id: SemanticTypeId,
     /// Value schema id.
@@ -1722,6 +1794,8 @@ pub struct BridgeNodeSpec {
     pub policy: BridgePolicy,
     /// Framework provenance.
     pub provenance: BridgeProvenance,
+    /// Planning lineage active while this bridge was emitted.
+    pub planning_lineage: OperationLineage,
 }
 
 impl BridgeNodeSpec {
@@ -1921,6 +1995,75 @@ struct InputCellBinding {
     required_terminal: RequiredTerminal,
 }
 
+/// Read-only view over a typed input cell binding.
+#[derive(Debug, Clone, Copy)]
+pub struct InputCellBindingRef<'a> {
+    binding: &'a InputCellBinding,
+}
+
+impl<'a> InputCellBindingRef<'a> {
+    /// Returns the input field path.
+    pub fn field_path(&self) -> &'a InputFieldPath {
+        &self.binding.field_path
+    }
+
+    /// Returns the referenced cell id.
+    pub fn cell_id(&self) -> &'a CellId {
+        &self.binding.cell_id
+    }
+
+    /// Returns the referenced semantic type id.
+    pub fn semantic_type_id(&self) -> &'a SemanticTypeId {
+        &self.binding.semantic_type_id
+    }
+
+    /// Returns the referenced schema id.
+    pub fn schema_id(&self) -> &'a SchemaId {
+        &self.binding.schema_id
+    }
+
+    /// Returns the referenced value-lineage ref.
+    pub fn value_lineage(&self) -> &'a ValueLineageRef {
+        &self.binding.value_lineage
+    }
+
+    /// Returns the required terminal policy.
+    pub fn required_terminal(&self) -> RequiredTerminal {
+        self.binding.required_terminal
+    }
+}
+
+/// Read-only view over a typed input binding node.
+#[derive(Debug, Clone, Copy)]
+pub enum InputBindingNodeRef<'a> {
+    /// Unit input.
+    Unit,
+    /// Typed cell input.
+    Cell(InputCellBindingRef<'a>),
+    /// Tuple input.
+    Tuple(&'a [InputBindingNode]),
+    /// Struct input.
+    Struct(&'a [NamedInputBinding]),
+    /// Vector input.
+    Vec {
+        /// Element bindings.
+        elements: &'a [InputBindingNode],
+        /// Ordering evidence.
+        ordering: &'a OrderingEvidence,
+        /// Stable domain-key refs.
+        domain_keys: &'a [StableDomainKeyRef],
+    },
+    /// Non-empty vector input.
+    NonEmptyVec {
+        /// Element bindings.
+        elements: &'a [InputBindingNode],
+        /// Ordering evidence.
+        ordering: &'a OrderingEvidence,
+        /// Stable domain-key refs.
+        domain_keys: &'a [StableDomainKeyRef],
+    },
+}
+
 impl InputBindingNode {
     /// Unit input binding node.
     #[allow(non_upper_case_globals)]
@@ -1995,6 +2138,36 @@ impl InputBindingNode {
     ) -> Self {
         Self {
             kind: InputBindingNodeKind::NonEmptyVec {
+                elements,
+                ordering,
+                domain_keys,
+            },
+        }
+    }
+
+    /// Returns a read-only structural view of this binding node.
+    pub fn as_ref(&self) -> InputBindingNodeRef<'_> {
+        match &self.kind {
+            InputBindingNodeKind::Unit => InputBindingNodeRef::Unit,
+            InputBindingNodeKind::Cell(binding) => {
+                InputBindingNodeRef::Cell(InputCellBindingRef { binding })
+            }
+            InputBindingNodeKind::Tuple { elements } => InputBindingNodeRef::Tuple(elements),
+            InputBindingNodeKind::Struct { fields } => InputBindingNodeRef::Struct(fields),
+            InputBindingNodeKind::Vec {
+                elements,
+                ordering,
+                domain_keys,
+            } => InputBindingNodeRef::Vec {
+                elements,
+                ordering,
+                domain_keys,
+            },
+            InputBindingNodeKind::NonEmptyVec {
+                elements,
+                ordering,
+                domain_keys,
+            } => InputBindingNodeRef::NonEmptyVec {
                 elements,
                 ordering,
                 domain_keys,
@@ -2858,6 +3031,7 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
             key,
             scope_id: child_scope_id,
             parent_scope_id: Some(self.scope_id.clone()),
+            planning_lineage: operation_lineage,
         });
         self.state_nodes.extend(child.scope.state_nodes);
         self.operation_lineage.extend(child.scope.operation_lineage);
@@ -2942,6 +3116,7 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
             value_lineage.clone(),
         );
         self.state_keys.insert(key_string);
+        let planning_lineage = self.current_operation_lineage()?;
         self.state_nodes.push(StateNodeSpec {
             node_id,
             key,
@@ -2949,13 +3124,18 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
             state_kind: descriptor.kind().clone(),
             state_version: descriptor.version().clone(),
             state_descriptor_id: descriptor.descriptor_id().clone(),
+            state_descriptor_name: descriptor.name().to_owned(),
             runner: registered.runner(),
+            effect_kind: descriptor.effect().kind.clone(),
+            capability_bindings: descriptor.capabilities().clone(),
+            side_effect_contract_digest: descriptor.side_effect_contract_digest().cloned(),
             config: config_binding,
             input: input.spec(),
             output_cell_id,
             output_schema_id,
             output_semantic_type_id,
             output_value_lineage: value_lineage,
+            planning_lineage,
         });
         Ok(handle)
     }
@@ -3052,7 +3232,9 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
             operation_kind: descriptor.kind().clone(),
             operation_version: descriptor.version().clone(),
             operation_descriptor_id: descriptor.descriptor_id().clone(),
+            operation_name: descriptor.name().to_owned(),
             expansion_abi: descriptor.expansion_abi(),
+            parent_operation_lineage,
             config: config_binding,
             input: input_binding,
             output_schema_id,
@@ -3211,11 +3393,12 @@ impl<'program, 'parent, 'child> ChildScopeBuilder<'program, 'parent, 'child> {
             &source.semantic_type_id,
             &source.schema_id,
         )?;
+        let planning_lineage = self.scope.current_operation_lineage()?;
         let target_value_lineage = value_lineage_ref(&bridge_value_lineage(
             &target_scope_id,
             &node_id,
             &source.cell_id,
-            &self.scope.current_operation_lineage()?,
+            &planning_lineage,
         )?)?;
         let spec = BridgeNodeSpec {
             node_id: node_id.clone(),
@@ -3224,11 +3407,13 @@ impl<'program, 'parent, 'child> ChildScopeBuilder<'program, 'parent, 'child> {
             target_scope_id: target_scope_id.clone(),
             source_cell_id: source.cell_id.clone(),
             target_cell_id: target_cell_id.clone(),
+            target_value_lineage: target_value_lineage.clone(),
             semantic_type_id: source.semantic_type_id.clone(),
             schema_id: source.schema_id.clone(),
             bridge_kind,
             policy,
             provenance: BridgeProvenance::FrameworkChildScopeV1,
+            planning_lineage,
         };
         let bridge_ref = spec.bridge_ref();
         self.active_bridge_refs.insert(bridge_ref_key(&bridge_ref));
@@ -3375,6 +3560,7 @@ where
                 key: root_key,
                 scope_id: root_scope_id,
                 parent_scope_id: None,
+                planning_lineage: OperationLineage::empty()?,
             }];
             scopes.extend(builder.scope.child_scopes);
             scopes
@@ -3708,6 +3894,7 @@ struct StateDescriptorIdParts<'a> {
     output_semantic_type_id: &'a SemanticTypeId,
     effect: &'a EffectDescriptor,
     capabilities: &'a CapabilitySetDescriptor,
+    side_effect_contract_digest: Option<&'a ContentDigest>,
     runner: RunnerKind,
 }
 
@@ -3738,6 +3925,9 @@ fn state_descriptor_id(parts: StateDescriptorIdParts<'_>) -> Result<DescriptorId
         "output_schema_id": parts.output_schema_id.as_str(),
         "output_semantic_type_id": parts.output_semantic_type_id.as_str(),
         "runner": parts.runner.as_str(),
+        "side_effect_contract_digest": parts
+            .side_effect_contract_digest
+            .map(ContentDigest::as_str),
         "version": parts.version.as_str(),
     });
     let json =
@@ -3778,15 +3968,6 @@ fn operation_descriptor_id(parts: OperationDescriptorIdParts<'_>) -> Result<Desc
         DigestAlgorithm::Sha256JcsV1,
         sha256_digest_bytes(canonical.as_bytes()),
     ))
-}
-
-fn effect_runner_kind_for_effect<E: EffectSpec>() -> RunnerKind {
-    match E::class() {
-        mfm_effects::EffectClass::Pure => RunnerKind::Pure,
-        mfm_effects::EffectClass::ReadExternal => RunnerKind::ReadExternal,
-        mfm_effects::EffectClass::ManagedPlatformWrite => RunnerKind::ManagedPlatformWrite,
-        mfm_effects::EffectClass::ApplySideEffect => RunnerKind::ApplySideEffect,
-    }
 }
 
 fn state_node_id(

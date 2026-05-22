@@ -436,20 +436,20 @@ fn stable_ids_and_value_lineage_golden_vectors() {
     );
     assert_eq!(
         frame.input.digest.as_str(),
-        "content:sha256-jcs-v1:e1ce2703046def490275d72752cd8a6cd6c0b7de2bacb07534287f23ca9c977a"
+        "content:sha256-jcs-v1:6412ef8c501baed54b3f226b0be63f809ee71af4e93a5ebcc604eed2c93532aa"
     );
     assert_eq!(node.input.digest, frame.input.digest);
     assert_eq!(
         frame.operation_instance_id.as_str(),
-        "op:sha256-jcs-v1:533c77227ce83750315e974e7e035db5b8e28e40cd8410457d92a579d83859c6"
+        "op:sha256-jcs-v1:ab3164ca69c1baced88da5dc70c1908e6b9a4ddc9a745ab2c091680747c2a942"
     );
     assert_eq!(
         active_lineage.digest.as_str(),
-        "content:sha256-jcs-v1:d91451cae88e67ef43cfc4b278e6e4e86f13abcbfb6fbbc22d62ad52267e1b9c"
+        "content:sha256-jcs-v1:25cbc2f3098de077b73ed91e482c5288d9b330d962711243187a3ec039e1a127"
     );
     assert_eq!(
         node.node_id.as_str(),
-        "node:sha256-jcs-v1:9a49914a5d8ee46fc1e04db4fcd1b580271fbbc7873856319e34d79552de57d1"
+        "node:sha256-jcs-v1:6a93779963e1277aa469b1f9c984f39a36d2b37a98c94b2ce638c5b27af3cb98"
     );
     assert_ne!(
         node.node_id, alternate_lowering_node_id,
@@ -457,15 +457,15 @@ fn stable_ids_and_value_lineage_golden_vectors() {
     );
     assert_eq!(
         node.output_cell_id.as_str(),
-        "cell:sha256-jcs-v1:698379d96c605e76ba02e502e6fa10f730648ca331f92bc45e977576b70a27b2"
+        "cell:sha256-jcs-v1:e56569392147d60a2205202c5dc2843a5bb201f1ef445c0eb0dcc26de100dfc2"
     );
     assert_eq!(
         node.output_value_lineage.digest().as_str(),
-        "content:sha256-jcs-v1:1de344be80a35690b25d386cfb260772264a81c49e74cd6f9c19a7ecd1538012"
+        "content:sha256-jcs-v1:7f253a7c654077612a83a7aad5117f25a0032e2f3fe34e3d2e1109eaadf6cad6"
     );
     assert_eq!(
         frame.lineage_digest.as_str(),
-        "content:sha256-jcs-v1:0484085c21c43ed0176591ee9d109886922ebe96040a02bae6ace100a828c240"
+        "content:sha256-jcs-v1:31ecb879b7dd45c4ad33bc9a540a88bc7ce875e2aedeb128d811fe11aa02a1ec"
     );
 }
 
@@ -778,7 +778,7 @@ fn single_handle_input_binding_records_identity_and_lineage() {
             panic!("single handle should bind as a cell");
         };
 
-        assert_eq!(cell.field_path.as_str(), "");
+        assert_eq!(cell.field_path.as_str(), "root");
         assert_eq!(cell.cell_id, handle.typed_ref().cell_id);
         assert_eq!(
             cell.semantic_type_id,

@@ -2003,6 +2003,18 @@ dependencies = [
 [[package]]
 name = "mfm-certify"
 version = "0.1.0"
+dependencies = [
+ "mfm-canonical",
+ "mfm-capabilities",
+ "mfm-effects",
+ "mfm-ids",
+ "mfm-program",
+ "mfm-program-derive",
+ "mfm-spec",
+ "mfm-values",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "mfm-collectors-btc-jsonrpc-http"

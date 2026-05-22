@@ -223,19 +223,19 @@ workflow ports, and deletion or hard isolation of old dynamic semantic APIs.
 
 ### Commit 19: `kernel certify add typed spec certification`
 
-- [ ] Implement certification over typed program drafts and `v1::TypedExecutionSpec`.
-- [ ] Verify registered state/operation descriptors, config refs, input bindings, cells, effects,
+- [x] Implement certification over typed program drafts and `v1::TypedExecutionSpec`.
+- [x] Verify registered state/operation descriptors, config refs, input bindings, cells, effects,
       capabilities, side-effect contracts, public outputs, stable ids, bridge nodes, lineage, and
       dynamic collection ordering.
-- [ ] Reject all six problem taxonomy classes.
-- [ ] Add CI summary keys:
+- [x] Reject all six problem taxonomy classes.
+- [x] Add CI summary keys:
       `invalid_topology_rejected`,
       `invalid_interface_wiring_rejected`,
       `invalid_semantic_transition_rejected`,
       `invalid_data_shape_rejected`,
       `invalid_data_meaning_rejected`,
       `invalid_terminal_shape_rejected`.
-- [ ] Validation: `nix run .#test`.
+- [x] Validation: `nix run .#test`.
 
 ### Commit 20: `ci add typed kernel contract gate`
 

@@ -181,9 +181,9 @@ pub mod v1 {
     };
     use mfm_capabilities::CapabilitySetDescriptor;
     use mfm_ids::{
-        AdapterKind, AdapterVersion, ArtifactId, CellId, DescriptorId, EffectKind, LoweringVersion,
-        NodeId, OperationInstanceId, OperationKind, OperationVersion, SchemaId, ScopeId, SeedId,
-        SemanticTypeId, SpecVersion, StateKind, StateVersion,
+        AdapterKind, AdapterVersion, ArtifactId, CellId, DescriptorId, EffectKind, EffectVersion,
+        LoweringVersion, NodeId, OperationInstanceId, OperationKind, OperationVersion, SchemaId,
+        ScopeId, SeedId, SemanticTypeId, SpecVersion, StateKind, StateVersion,
     };
 
     /// v1 spec-version string.
@@ -560,12 +560,15 @@ pub mod v1 {
         pub parent_scope_id: Option<ScopeId>,
         /// Stable author key.
         pub stable_key: StableAuthorKey,
+        /// Operation lineage active when this scope id was derived.
+        pub planning_lineage: PlanningLineage,
     }
 
     impl ScopeSpec {
         fn json(&self) -> serde_json::Value {
             serde_json::json!({
                 "parent_scope_id": self.parent_scope_id.as_ref().map(ScopeId::as_str),
+                "planning_lineage": self.planning_lineage.json(),
                 "scope_id": self.scope_id.as_str(),
                 "stable_key": self.stable_key.as_str(),
             })
@@ -643,6 +646,8 @@ pub mod v1 {
     pub struct StateDescriptorIdentity {
         /// State descriptor id.
         pub descriptor_id: DescriptorId,
+        /// Stable state descriptor name.
+        pub name: String,
         /// State kind.
         pub state_kind: StateKind,
         /// State version.
@@ -657,8 +662,18 @@ pub mod v1 {
         pub output_semantic_type_id: SemanticTypeId,
         /// Effect kind.
         pub effect_kind: EffectKind,
+        /// Semantic effect class string.
+        pub effect_class: String,
+        /// Framework-owned effect descriptor name.
+        pub effect_name: String,
+        /// Effect descriptor version.
+        pub effect_version: EffectVersion,
         /// Capability descriptor set.
         pub capabilities: CapabilitySetDescriptor,
+        /// Runner kind recorded by the registered state.
+        pub runner: String,
+        /// Side-effect contract digest for external mutations.
+        pub side_effect_contract_digest: Option<ContentDigest>,
     }
 
     impl StateDescriptorIdentity {
@@ -667,10 +682,16 @@ pub mod v1 {
                 "capabilities": capability_set_json(&self.capabilities),
                 "config_schema_id": self.config_schema_id.as_str(),
                 "descriptor_id": self.descriptor_id.as_str(),
+                "effect_class": self.effect_class.as_str(),
                 "effect_kind": self.effect_kind.as_str(),
+                "effect_name": self.effect_name.as_str(),
+                "effect_version": self.effect_version.as_str(),
                 "input_schema_id": self.input_schema_id.as_str(),
+                "name": self.name.as_str(),
                 "output_schema_id": self.output_schema_id.as_str(),
                 "output_semantic_type_id": self.output_semantic_type_id.as_str(),
+                "runner": self.runner.as_str(),
+                "side_effect_contract_digest": self.side_effect_contract_digest.as_ref().map(ContentDigest::as_str),
                 "state_kind": self.state_kind.as_str(),
                 "state_version": self.state_version.as_str(),
             })
@@ -682,6 +703,8 @@ pub mod v1 {
     pub struct OperationDescriptorIdentity {
         /// Operation descriptor id.
         pub descriptor_id: DescriptorId,
+        /// Stable operation descriptor name.
+        pub name: String,
         /// Operation kind.
         pub operation_kind: OperationKind,
         /// Operation version.
@@ -701,8 +724,9 @@ pub mod v1 {
             serde_json::json!({
                 "config_schema_id": self.config_schema_id.as_str(),
                 "descriptor_id": self.descriptor_id.as_str(),
-                "expansion_abi": self.expansion_abi,
+                "expansion_abi": self.expansion_abi.as_str(),
                 "input_schema_id": self.input_schema_id.as_str(),
+                "name": self.name.as_str(),
                 "operation_kind": self.operation_kind.as_str(),
                 "operation_version": self.operation_version.as_str(),
                 "output_schema_id": self.output_schema_id.as_str(),
@@ -1383,8 +1407,12 @@ pub mod v1 {
         pub operation_descriptor_id: DescriptorId,
         /// Config reference digest.
         pub config_ref_digest: ContentDigest,
+        /// Typed input binding evidence for the operation expansion.
+        pub input_bindings: InputBindingSpec,
         /// Input binding digest.
         pub input_binding_digest: ContentDigest,
+        /// Operation lineage active before this operation was expanded.
+        pub parent_planning_lineage: PlanningLineage,
         /// Output cells returned by expansion.
         pub output_cells: Vec<CellId>,
         /// Lineage frame digest.
@@ -1395,12 +1423,14 @@ pub mod v1 {
         fn json(&self) -> serde_json::Value {
             serde_json::json!({
                 "config_ref_digest": self.config_ref_digest.as_str(),
+                "input_bindings": self.input_bindings.json(),
                 "input_binding_digest": self.input_binding_digest.as_str(),
                 "lineage_digest": self.lineage_digest.as_str(),
                 "operation_descriptor_id": self.operation_descriptor_id.as_str(),
                 "operation_instance_id": self.operation_instance_id.as_str(),
                 "operation_key": self.operation_key.as_str(),
                 "output_cells": self.output_cells.iter().map(CellId::as_str).collect::<Vec<_>>(),
+                "parent_planning_lineage": self.parent_planning_lineage.json(),
                 "scope_id": self.scope_id.as_str(),
             })
         }
@@ -1660,6 +1690,7 @@ pub mod v1 {
                     scope_id: scope_id.clone(),
                     parent_scope_id: None,
                     stable_key: StableAuthorKey::new("root").expect("root key"),
+                    planning_lineage: empty_planning_lineage.clone(),
                 }],
                 seeds: vec![SeedSpec {
                     seed_id: seed_id.clone(),
@@ -1673,6 +1704,7 @@ pub mod v1 {
                 descriptor_identities: vec![
                     DescriptorIdentity::State(Box::new(StateDescriptorIdentity {
                         descriptor_id: state_descriptor.clone(),
+                        name: "mfm.spec.test.state.multiply".to_owned(),
                         state_kind: StateKind::new(
                             "mfm.spec.test.state",
                             "multiply",
@@ -1693,10 +1725,17 @@ pub mod v1 {
                             DIGEST_B,
                         )
                         .expect("effect kind"),
+                        effect_class: "pure".to_owned(),
+                        effect_name: "pure".to_owned(),
+                        effect_version: EffectVersion::new("mfm.effect.v1")
+                            .expect("effect version"),
                         capabilities: no_caps.clone(),
+                        runner: "pure".to_owned(),
+                        side_effect_contract_digest: None,
                     })),
                     DescriptorIdentity::State(Box::new(StateDescriptorIdentity {
                         descriptor_id: bridge_state_descriptor.clone(),
+                        name: "mfm.framework.bridge_same_value".to_owned(),
                         state_kind: StateKind::new(
                             "mfm.framework.state",
                             "same_value_bridge",
@@ -1719,10 +1758,17 @@ pub mod v1 {
                             DIGEST_B,
                         )
                         .expect("effect kind"),
+                        effect_class: "pure".to_owned(),
+                        effect_name: "pure".to_owned(),
+                        effect_version: EffectVersion::new("mfm.effect.v1")
+                            .expect("effect version"),
                         capabilities: no_caps.clone(),
+                        runner: "pure".to_owned(),
+                        side_effect_contract_digest: None,
                     })),
                     DescriptorIdentity::State(Box::new(StateDescriptorIdentity {
                         descriptor_id: render_state_descriptor.clone(),
+                        name: "mfm.framework.render_public_outputs".to_owned(),
                         state_kind: StateKind::new(
                             "mfm.framework.state",
                             "render_public_outputs",
@@ -1745,10 +1791,17 @@ pub mod v1 {
                             DIGEST_D,
                         )
                         .expect("managed effect kind"),
+                        effect_class: "managed_platform_write".to_owned(),
+                        effect_name: "managed_platform_write".to_owned(),
+                        effect_version: EffectVersion::new("mfm.effect.v1")
+                            .expect("effect version"),
                         capabilities: no_caps.clone(),
+                        runner: "managed_platform_write".to_owned(),
+                        side_effect_contract_digest: None,
                     })),
                     DescriptorIdentity::Operation(Box::new(OperationDescriptorIdentity {
                         descriptor_id: operation_descriptor_id.clone(),
+                        name: "mfm.spec.test.operation.multiply".to_owned(),
                         operation_kind: OperationKind::new(
                             "mfm.spec.test.operation",
                             "multiply",
@@ -1784,7 +1837,7 @@ pub mod v1 {
                             .expect("state version"),
                         descriptor_id: state_descriptor,
                         config_ref: config_ref.clone(),
-                        input_bindings: input_binding,
+                        input_bindings: input_binding.clone(),
                         output_cell: output_cell.clone(),
                         effect_kind: EffectKind::new(
                             "mfm.kernel.effect",
@@ -2004,7 +2057,7 @@ pub mod v1 {
                         producer: CellProducer::Node(render_node),
                         input_cells: vec![output_cell.clone()],
                         config_ref_digest: Some(content(0x32)),
-                        planning_lineage: empty_planning_lineage,
+                        planning_lineage: empty_planning_lineage.clone(),
                         domain_keys: Vec::new(),
                         transform_policy: LineageTransformPolicy::StateOutput,
                     },
@@ -2016,7 +2069,9 @@ pub mod v1 {
                     scope_id: scope(0x01),
                     operation_descriptor_id,
                     config_ref_digest: content(0x82),
+                    input_bindings: input_binding.clone(),
                     input_binding_digest: content(0x83),
+                    parent_planning_lineage: empty_planning_lineage,
                     output_cells: vec![output_cell],
                     lineage_digest: content(0x84),
                 }],
@@ -2035,7 +2090,7 @@ pub mod v1 {
             );
             assert_eq!(
                 spec.spec_hash().expect("spec hash").as_str(),
-                "spec:sha256-jcs-v1:3539d1397b65ef493c3f1e4218bd18a15ff44a279b7ccb007841869b58ee366a"
+                "spec:sha256-jcs-v1:defd7fe1f27684db36ff4f45d5ad6a0f55047f0c35909786e9d0faae121437da"
             );
             assert!(canonical
                 .as_str()
