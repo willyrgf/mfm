@@ -176,12 +176,12 @@ workflow ports, and deletion or hard isolation of old dynamic semantic APIs.
 
 ### Commit 14: `kernel program add state registry authority`
 
-- [ ] Implement `StateSpec`, public effect-specific state traits, `RegisteredState<S>`, and private
+- [x] Implement `StateSpec`, public effect-specific state traits, `RegisteredState<S>`, and private
       state registration evidence.
-- [ ] Make `ScopeBuilder::state` resolve through a builder-owned registry or registered token.
-- [ ] Add tests proving unregistered states cannot be planned or lowered.
-- [ ] Add CI summary key: `registered_state_required`.
-- [ ] Validation: `nix run .#test`.
+- [x] Make `ScopeBuilder::state` resolve through a builder-owned registry or registered token.
+- [x] Add tests proving unregistered states cannot be planned or lowered.
+- [x] Add CI summary key: `registered_state_required`.
+- [x] Validation: `nix run .#test`.
 
 ### Commit 15: `kernel program add operation registry authority`
 

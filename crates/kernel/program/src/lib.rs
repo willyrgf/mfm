@@ -10,15 +10,22 @@ extern crate self as mfm_program;
 
 use std::collections::BTreeSet;
 use std::fmt;
+use std::future::Future;
 use std::marker::PhantomData;
 
 use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
+use mfm_capabilities::{CapabilitySet, CapabilitySetDescriptor, CapabilitySetFor, NoCaps};
+use mfm_effects::{
+    ApplySideEffect, EffectDescriptor, EffectSpec, ManagedPlatformWrite, Pure, ReadExternal,
+};
 use mfm_ids::{
     CellId, ContentDigest, DescriptorId, DigestAlgorithm, DigestBytes, NodeId, SchemaId, ScopeId,
-    SeedId, SemanticTypeId,
+    SeedId, SemanticTypeId, StateKind, StateVersion,
 };
 pub use mfm_values::NonEmpty;
-use mfm_values::{MfmValue, PublicOutputDescriptor, SchemaShape, StateInput, ValueTerminalPolicy};
+use mfm_values::{
+    MfmConfig, MfmValue, PublicOutputDescriptor, SchemaShape, StateInput, ValueTerminalPolicy,
+};
 
 #[cfg(test)]
 mod tests;
@@ -43,6 +50,8 @@ pub enum PlanError {
     DuplicateChildScopeKey(String),
     /// A bridge key was declared more than once in the same child scope session.
     DuplicateBridgeKey(String),
+    /// A state key was declared more than once in the same scope.
+    DuplicateStateKey(String),
     /// A public output field path was declared more than once.
     DuplicatePublicOutputPath(String),
     /// Root public outputs were bound more than once.
@@ -55,6 +64,8 @@ pub enum PlanError {
     DuplicateInputFieldPath(String),
     /// Input binding tree did not match the declared state input descriptor.
     InputBindingShape(String),
+    /// State registry authority rejected planning.
+    Registry(String),
     /// Live bridge evidence did not belong to the active child scope session.
     InvalidBridgeEvidence(String),
     /// A persisted bridge reference was not backed by an emitted bridge node.
@@ -71,6 +82,7 @@ impl fmt::Display for PlanError {
             Self::DuplicateSeedKey(key) => write!(f, "duplicate root seed key {key}"),
             Self::DuplicateChildScopeKey(key) => write!(f, "duplicate child scope key {key}"),
             Self::DuplicateBridgeKey(key) => write!(f, "duplicate bridge key {key}"),
+            Self::DuplicateStateKey(key) => write!(f, "duplicate state key {key}"),
             Self::DuplicatePublicOutputPath(path) => {
                 write!(f, "duplicate public output field path {path}")
             }
@@ -83,6 +95,7 @@ impl fmt::Display for PlanError {
             Self::InputBindingShape(message) => {
                 write!(f, "input binding shape mismatch: {message}")
             }
+            Self::Registry(message) => write!(f, "state registry error: {message}"),
             Self::InvalidBridgeEvidence(message) => {
                 write!(f, "invalid bridge evidence: {message}")
             }
@@ -149,6 +162,22 @@ impl BridgeKey {
     /// Creates a checked bridge key.
     pub fn new(value: impl AsRef<str>) -> Result<Self> {
         checked_key("bridge key", value.as_ref()).map(Self)
+    }
+
+    /// Returns the stable key string.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Stable state node author key.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct StateKey(String);
+
+impl StateKey {
+    /// Creates a checked state key.
+    pub fn new(value: impl AsRef<str>) -> Result<Self> {
+        checked_key("state key", value.as_ref()).map(Self)
     }
 
     /// Returns the stable key string.
@@ -258,6 +287,581 @@ impl<T: MfmValue> CanonicalSeed<T> {
     /// Returns the canonical byte length.
     pub fn byte_len(&self) -> usize {
         self.byte_len
+    }
+}
+
+/// Error returned while executing a typed state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StateError {
+    /// Stable, redacted state error message.
+    Message(String),
+}
+
+impl fmt::Display for StateError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Message(message) => f.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for StateError {}
+
+/// Result type returned by executable state traits.
+pub type StateResult<T> = std::result::Result<T, StateError>;
+
+/// Descriptive contract for a versioned executable state.
+pub trait StateSpec: Send + Sync + 'static {
+    /// Deterministic planning config type.
+    type Config: MfmConfig;
+    /// Runtime input type materialized from certified input bindings.
+    type Input: StateInput;
+    /// Runtime output value type.
+    type Output: MfmValue;
+    /// Framework-owned effect class.
+    type Effect: EffectSpec;
+    /// Capability set required by this state.
+    type Caps: CapabilitySet;
+
+    /// Returns the stable state kind id.
+    fn kind() -> Result<StateKind>;
+
+    /// Returns the state descriptor version.
+    fn version() -> Result<StateVersion>;
+
+    /// Returns the stable state descriptor name.
+    fn name() -> &'static str;
+
+    /// Constructs the executable state from validated config.
+    fn new(config: Self::Config) -> Result<Self>
+    where
+        Self: Sized;
+}
+
+/// Effect-specific runner kind recorded by a registered state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RunnerKind {
+    /// Pure synchronous state runner.
+    Pure,
+    /// External read runner.
+    ReadExternal,
+    /// MFM-managed platform write runner.
+    ManagedPlatformWrite,
+    /// External side-effect runner.
+    ApplySideEffect,
+}
+
+impl RunnerKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Pure => "pure",
+            Self::ReadExternal => "read_external",
+            Self::ManagedPlatformWrite => "managed_platform_write",
+            Self::ApplySideEffect => "apply_side_effect",
+        }
+    }
+}
+
+/// Hash-defining registered state descriptor identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StateDescriptorIdentity {
+    descriptor_id: DescriptorId,
+    kind: StateKind,
+    version: StateVersion,
+    name: &'static str,
+    config_schema_id: SchemaId,
+    input_schema_id: SchemaId,
+    output_schema_id: SchemaId,
+    output_semantic_type_id: SemanticTypeId,
+    effect: EffectDescriptor,
+    capabilities: CapabilitySetDescriptor,
+    runner: RunnerKind,
+}
+
+impl StateDescriptorIdentity {
+    fn for_state<S: StateSpec>() -> Result<Self> {
+        let kind = S::kind()?;
+        let version = S::version()?;
+        let config_schema_id =
+            S::Config::schema_id().map_err(|error| PlanError::Value(error.to_string()))?;
+        let input_schema_id =
+            S::Input::input_schema_id().map_err(|error| PlanError::Value(error.to_string()))?;
+        let output_schema_id =
+            S::Output::schema_id().map_err(|error| PlanError::Value(error.to_string()))?;
+        let output_semantic_type_id =
+            S::Output::semantic_id().map_err(|error| PlanError::Value(error.to_string()))?;
+        let effect =
+            S::Effect::descriptor().map_err(|error| PlanError::Registry(error.to_string()))?;
+        let capabilities =
+            S::Caps::descriptor().map_err(|error| PlanError::Registry(error.to_string()))?;
+        capabilities
+            .validate_for_effect::<S::Effect>()
+            .map_err(|error| PlanError::Registry(error.to_string()))?;
+        let runner = effect_runner_kind_for_effect::<S::Effect>();
+        let descriptor_id = state_descriptor_id(StateDescriptorIdParts {
+            kind: &kind,
+            version: &version,
+            name: S::name(),
+            config_schema_id: &config_schema_id,
+            input_schema_id: &input_schema_id,
+            output_schema_id: &output_schema_id,
+            output_semantic_type_id: &output_semantic_type_id,
+            effect: &effect,
+            capabilities: &capabilities,
+            runner,
+        })?;
+        Ok(Self {
+            descriptor_id,
+            kind,
+            version,
+            name: S::name(),
+            config_schema_id,
+            input_schema_id,
+            output_schema_id,
+            output_semantic_type_id,
+            effect,
+            capabilities,
+            runner,
+        })
+    }
+
+    /// Returns this descriptor's content-addressed identity.
+    pub fn descriptor_id(&self) -> &DescriptorId {
+        &self.descriptor_id
+    }
+
+    /// Returns the stable state kind.
+    pub fn kind(&self) -> &StateKind {
+        &self.kind
+    }
+
+    /// Returns the state version.
+    pub fn version(&self) -> &StateVersion {
+        &self.version
+    }
+
+    /// Returns the stable state descriptor name.
+    pub fn name(&self) -> &'static str {
+        self.name
+    }
+
+    /// Returns the config schema id.
+    pub fn config_schema_id(&self) -> &SchemaId {
+        &self.config_schema_id
+    }
+
+    /// Returns the input schema id.
+    pub fn input_schema_id(&self) -> &SchemaId {
+        &self.input_schema_id
+    }
+
+    /// Returns the output schema id.
+    pub fn output_schema_id(&self) -> &SchemaId {
+        &self.output_schema_id
+    }
+
+    /// Returns the output semantic type id.
+    pub fn output_semantic_type_id(&self) -> &SemanticTypeId {
+        &self.output_semantic_type_id
+    }
+
+    /// Returns the effect descriptor.
+    pub fn effect(&self) -> &EffectDescriptor {
+        &self.effect
+    }
+
+    /// Returns the capability-set descriptor.
+    pub fn capabilities(&self) -> &CapabilitySetDescriptor {
+        &self.capabilities
+    }
+
+    /// Returns the registered runner kind.
+    pub fn runner(&self) -> RunnerKind {
+        self.runner
+    }
+}
+
+/// Error returned by state registry operations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RegistryError {
+    /// State descriptor construction failed.
+    Descriptor(String),
+    /// No registered state matched the requested kind/version.
+    UnregisteredState {
+        /// Requested state kind.
+        kind: String,
+        /// Requested state version.
+        version: String,
+    },
+    /// A different descriptor already owns this kind/version pair.
+    DuplicateStateRegistration {
+        /// Registered state kind.
+        kind: String,
+        /// Registered state version.
+        version: String,
+    },
+    /// Registry record and descriptor evidence diverged.
+    DescriptorMismatch {
+        /// Registered state kind.
+        kind: String,
+        /// Registered state version.
+        version: String,
+    },
+}
+
+impl fmt::Display for RegistryError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Descriptor(message) => write!(f, "state descriptor error: {message}"),
+            Self::UnregisteredState { kind, version } => {
+                write!(f, "state {kind}@{version} is not registered")
+            }
+            Self::DuplicateStateRegistration { kind, version } => {
+                write!(f, "duplicate state registration for {kind}@{version}")
+            }
+            Self::DescriptorMismatch { kind, version } => {
+                write!(f, "state registry descriptor mismatch for {kind}@{version}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for RegistryError {}
+
+impl From<RegistryError> for PlanError {
+    fn from(error: RegistryError) -> Self {
+        Self::Registry(error.to_string())
+    }
+}
+
+/// Private registration evidence carried by a registered state token.
+#[derive(Debug, PartialEq, Eq)]
+pub struct StateRegistrationEvidence<S: StateSpec> {
+    _state: PhantomData<fn(S) -> S>,
+    _private: (),
+}
+
+impl<S: StateSpec> Clone for StateRegistrationEvidence<S> {
+    fn clone(&self) -> Self {
+        Self {
+            _state: PhantomData,
+            _private: (),
+        }
+    }
+}
+
+/// Framework-owned authority token for a registered state.
+#[derive(Debug, PartialEq, Eq)]
+pub struct RegisteredState<S: StateSpec> {
+    descriptor: StateDescriptorIdentity,
+    runner: RunnerKind,
+    evidence: StateRegistrationEvidence<S>,
+    _state: PhantomData<fn(S) -> S>,
+}
+
+impl<S: StateSpec> Clone for RegisteredState<S> {
+    fn clone(&self) -> Self {
+        Self {
+            descriptor: self.descriptor.clone(),
+            runner: self.runner,
+            evidence: self.evidence.clone(),
+            _state: PhantomData,
+        }
+    }
+}
+
+impl<S: StateSpec> RegisteredState<S> {
+    fn new(descriptor: StateDescriptorIdentity, runner: RunnerKind) -> Self {
+        Self {
+            descriptor,
+            runner,
+            evidence: StateRegistrationEvidence {
+                _state: PhantomData,
+                _private: (),
+            },
+            _state: PhantomData,
+        }
+    }
+
+    /// Returns the validated state descriptor identity.
+    pub fn descriptor(&self) -> &StateDescriptorIdentity {
+        &self.descriptor
+    }
+
+    /// Returns the registered runner kind.
+    pub fn runner(&self) -> RunnerKind {
+        self.runner
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct StateRegistrationKey {
+    kind: String,
+    version: String,
+}
+
+impl StateRegistrationKey {
+    fn from_descriptor(descriptor: &StateDescriptorIdentity) -> Self {
+        Self {
+            kind: descriptor.kind().as_str().to_owned(),
+            version: descriptor.version().as_str().to_owned(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StateRegistrationRecord {
+    descriptor_id: DescriptorId,
+    runner: RunnerKind,
+}
+
+/// Immutable state registry snapshot used by typed program builders.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StateRegistrySnapshot {
+    records: std::collections::BTreeMap<StateRegistrationKey, StateRegistrationRecord>,
+}
+
+impl StateRegistrySnapshot {
+    /// Returns true when the registry has no registered states.
+    pub fn is_empty(&self) -> bool {
+        self.records.is_empty()
+    }
+
+    /// Returns the number of registered state kind/version pairs.
+    pub fn len(&self) -> usize {
+        self.records.len()
+    }
+}
+
+/// Mutable framework state registry builder.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StateRegistryBuilder {
+    snapshot: StateRegistrySnapshot,
+}
+
+impl StateRegistryBuilder {
+    /// Creates an empty registry builder.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Registers a state after validating descriptor, effect, capability, and runner evidence.
+    pub fn register<S>(&mut self) -> std::result::Result<RegisteredState<S>, RegistryError>
+    where
+        S: StateSpec,
+        S::Effect: EffectRunner<S>,
+        S::Caps: CapabilitySetFor<S::Effect>,
+    {
+        let descriptor = StateDescriptorIdentity::for_state::<S>()
+            .map_err(|error| RegistryError::Descriptor(error.to_string()))?;
+        let runner = <S::Effect as EffectRunner<S>>::runner_kind();
+        if descriptor.runner() != runner {
+            return Err(RegistryError::Descriptor(format!(
+                "runner {:?} did not match descriptor runner {:?}",
+                runner,
+                descriptor.runner()
+            )));
+        }
+        let key = StateRegistrationKey::from_descriptor(&descriptor);
+        let record = StateRegistrationRecord {
+            descriptor_id: descriptor.descriptor_id().clone(),
+            runner,
+        };
+        if let Some(existing) = self.snapshot.records.get(&key) {
+            if existing != &record {
+                return Err(RegistryError::DuplicateStateRegistration {
+                    kind: key.kind,
+                    version: key.version,
+                });
+            }
+        } else {
+            self.snapshot.records.insert(key, record);
+        }
+        Ok(RegisteredState::new(descriptor, runner))
+    }
+
+    /// Returns an immutable registry snapshot.
+    pub fn snapshot(&self) -> StateRegistrySnapshot {
+        self.snapshot.clone()
+    }
+
+    /// Converts this builder into an immutable registry snapshot.
+    pub fn into_snapshot(self) -> StateRegistrySnapshot {
+        self.snapshot
+    }
+}
+
+/// Framework-owned registry lookup contract.
+pub trait StateRegistry {
+    /// Resolves a registered state token for `S`.
+    fn registered_state<S>(&self) -> std::result::Result<RegisteredState<S>, RegistryError>
+    where
+        S: StateSpec,
+        S::Effect: EffectRunner<S>,
+        S::Caps: CapabilitySetFor<S::Effect>;
+}
+
+impl StateRegistry for StateRegistrySnapshot {
+    fn registered_state<S>(&self) -> std::result::Result<RegisteredState<S>, RegistryError>
+    where
+        S: StateSpec,
+        S::Effect: EffectRunner<S>,
+        S::Caps: CapabilitySetFor<S::Effect>,
+    {
+        let descriptor = StateDescriptorIdentity::for_state::<S>()
+            .map_err(|error| RegistryError::Descriptor(error.to_string()))?;
+        let key = StateRegistrationKey::from_descriptor(&descriptor);
+        let Some(record) = self.records.get(&key) else {
+            return Err(RegistryError::UnregisteredState {
+                kind: key.kind,
+                version: key.version,
+            });
+        };
+        if record.descriptor_id != *descriptor.descriptor_id()
+            || record.runner != descriptor.runner()
+        {
+            return Err(RegistryError::DescriptorMismatch {
+                kind: key.kind,
+                version: key.version,
+            });
+        }
+        Ok(RegisteredState::new(descriptor, record.runner))
+    }
+}
+
+/// Sealed framework evidence that an effect has the matching state runner shape.
+pub trait EffectRunner<S: StateSpec>: private::EffectRunnerSealed<S> {
+    /// Returns the runner kind for this effect/state pair.
+    fn runner_kind() -> RunnerKind;
+}
+
+/// Pure deterministic state runner.
+pub trait PureState: StateSpec<Effect = Pure, Caps = NoCaps> {
+    /// Executes this pure state.
+    fn run(&self, input: Self::Input) -> StateResult<Self::Output>;
+}
+
+/// External read state runner.
+pub trait ReadState: StateSpec<Effect = ReadExternal> {
+    /// Future returned by [`ReadState::run`].
+    type RunFuture<'a>: Future<Output = StateResult<Self::Output>> + Send + 'a
+    where
+        Self: 'a;
+
+    /// Executes this read state through declared capabilities.
+    fn run<'a>(&'a self, input: Self::Input, caps: &'a Self::Caps) -> Self::RunFuture<'a>;
+}
+
+/// MFM-managed platform write state runner.
+pub trait ManagedWriteState: StateSpec<Effect = ManagedPlatformWrite> {
+    /// Future returned by [`ManagedWriteState::run`].
+    type RunFuture<'a>: Future<Output = StateResult<Self::Output>> + Send + 'a
+    where
+        Self: 'a;
+
+    /// Executes this managed write through declared capabilities.
+    fn run<'a>(&'a self, input: Self::Input, caps: &'a Self::Caps) -> Self::RunFuture<'a>;
+}
+
+/// Typed idempotency key for side-effect submission protocols.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IdempotencyKey<T: MfmValue> {
+    digest: ContentDigest,
+    _input: PhantomData<fn(T) -> T>,
+}
+
+impl<T: MfmValue> IdempotencyKey<T> {
+    /// Creates an idempotency key from a typed digest.
+    pub fn new(digest: ContentDigest) -> Self {
+        Self {
+            digest,
+            _input: PhantomData,
+        }
+    }
+
+    /// Returns the idempotency digest.
+    pub fn digest(&self) -> &ContentDigest {
+        &self.digest
+    }
+}
+
+/// External mutation state runner governed by a side-effect protocol.
+pub trait SideEffectState: StateSpec<Effect = ApplySideEffect> {
+    /// Deterministic mutation intent.
+    type Intent: MfmValue;
+    /// Deterministic idempotency input.
+    type IdempotencyInput: MfmValue;
+    /// Submission result value.
+    type Submission: MfmValue;
+    /// Receipt value observed after submission.
+    type Receipt: MfmValue;
+    /// Confirmation value used to produce terminal output.
+    type Confirmation: MfmValue;
+    /// Future returned by [`SideEffectState::submit`].
+    type SubmitFuture<'a>: Future<Output = StateResult<Self::Submission>> + Send + 'a
+    where
+        Self: 'a;
+
+    /// Builds a deterministic mutation intent from materialized input.
+    fn prepare_intent(&self, input: &Self::Input) -> StateResult<Self::Intent>;
+
+    /// Builds deterministic idempotency input from materialized input and intent.
+    fn idempotency_input(
+        &self,
+        input: &Self::Input,
+        intent: &Self::Intent,
+    ) -> StateResult<Self::IdempotencyInput>;
+
+    /// Submits the intent through declared capabilities.
+    fn submit<'a>(
+        &'a self,
+        intent: &'a Self::Intent,
+        key: &'a IdempotencyKey<Self::IdempotencyInput>,
+        caps: &'a Self::Caps,
+    ) -> Self::SubmitFuture<'a>;
+
+    /// Constructs terminal output from confirmed side-effect evidence.
+    fn output_from_confirmation(
+        &self,
+        input: &Self::Input,
+        intent: &Self::Intent,
+        confirmation: &Self::Confirmation,
+    ) -> StateResult<Self::Output>;
+}
+
+impl<S> EffectRunner<S> for Pure
+where
+    S: PureState,
+{
+    fn runner_kind() -> RunnerKind {
+        RunnerKind::Pure
+    }
+}
+
+impl<S> EffectRunner<S> for ReadExternal
+where
+    S: ReadState,
+{
+    fn runner_kind() -> RunnerKind {
+        RunnerKind::ReadExternal
+    }
+}
+
+impl<S> EffectRunner<S> for ManagedPlatformWrite
+where
+    S: ManagedWriteState,
+{
+    fn runner_kind() -> RunnerKind {
+        RunnerKind::ManagedPlatformWrite
+    }
+}
+
+impl<S> EffectRunner<S> for ApplySideEffect
+where
+    S: SideEffectState,
+{
+    fn runner_kind() -> RunnerKind {
+        RunnerKind::ApplySideEffect
     }
 }
 
@@ -458,6 +1062,48 @@ pub struct ScopeSpec {
     pub scope_id: ScopeId,
     /// Parent scope id for child scopes.
     pub parent_scope_id: Option<ScopeId>,
+}
+
+/// Canonical config reference embedded in a typed state node draft.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigBindingSpec {
+    /// Config schema id.
+    pub schema_id: SchemaId,
+    /// Canonical config bytes.
+    pub canonical_json: PlainCanonicalJsonBytes,
+    /// Canonical config content digest.
+    pub content_digest: ContentDigest,
+    /// Canonical byte length.
+    pub byte_len: usize,
+}
+
+/// Persisted typed state node draft emitted by the program builder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StateNodeSpec {
+    /// Derived state node id.
+    pub node_id: NodeId,
+    /// Stable state author key.
+    pub key: StateKey,
+    /// Owning scope id.
+    pub scope_id: ScopeId,
+    /// Registered state kind.
+    pub state_kind: StateKind,
+    /// Registered state version.
+    pub state_version: StateVersion,
+    /// Registered state descriptor id.
+    pub state_descriptor_id: DescriptorId,
+    /// Registered runner kind.
+    pub runner: RunnerKind,
+    /// Canonical config binding.
+    pub config: ConfigBindingSpec,
+    /// Typed input binding.
+    pub input: InputBindingSpec,
+    /// Output cell id.
+    pub output_cell_id: CellId,
+    /// Output schema id.
+    pub output_schema_id: SchemaId,
+    /// Output semantic type id.
+    pub output_semantic_type_id: SemanticTypeId,
 }
 
 /// Framework bridge direction for same-value cross-scope movement.
@@ -716,14 +1362,7 @@ pub struct InputBindingNode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum InputBindingNodeKind {
     Unit,
-    Cell {
-        field_path: InputFieldPath,
-        cell_id: CellId,
-        semantic_type_id: SemanticTypeId,
-        schema_id: SchemaId,
-        value_lineage: ValueLineageRef,
-        required_terminal: RequiredTerminal,
-    },
+    Cell(Box<InputCellBinding>),
     Tuple {
         elements: Vec<InputBindingNode>,
     },
@@ -738,6 +1377,16 @@ enum InputBindingNodeKind {
         elements: Vec<InputBindingNode>,
         ordering: OrderingEvidence,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InputCellBinding {
+    field_path: InputFieldPath,
+    cell_id: CellId,
+    semantic_type_id: SemanticTypeId,
+    schema_id: SchemaId,
+    value_lineage: ValueLineageRef,
+    required_terminal: RequiredTerminal,
 }
 
 impl InputBindingNode {
@@ -770,14 +1419,14 @@ impl InputBindingNode {
         required_terminal: RequiredTerminal,
     ) -> Self {
         Self {
-            kind: InputBindingNodeKind::Cell {
+            kind: InputBindingNodeKind::Cell(Box::new(InputCellBinding {
                 field_path,
                 cell_id,
                 semantic_type_id,
                 schema_id,
                 value_lineage,
                 required_terminal,
-            },
+            })),
         }
     }
 
@@ -1128,6 +1777,7 @@ pub struct TypedProgramDraft {
     root_scope_id: ScopeId,
     seeds: Vec<RootSeedSpec>,
     scopes: Vec<ScopeSpec>,
+    state_nodes: Vec<StateNodeSpec>,
     bridge_nodes: Vec<BridgeNodeSpec>,
     public_output_spec: PublicOutputSpec,
 }
@@ -1151,6 +1801,11 @@ impl TypedProgramDraft {
     /// Returns emitted scope specs, including the root scope.
     pub fn scopes(&self) -> &[ScopeSpec] {
         &self.scopes
+    }
+
+    /// Returns emitted typed state nodes.
+    pub fn state_nodes(&self) -> &[StateNodeSpec] {
+        &self.state_nodes
     }
 
     /// Returns emitted framework bridge nodes.
@@ -1266,6 +1921,9 @@ impl<'program, 'scope> RootBuilder<'program, 'scope> {
 /// typed-core sections.
 pub struct ScopeBuilder<'program, 'scope> {
     scope_id: ScopeId,
+    state_registry: StateRegistrySnapshot,
+    state_keys: BTreeSet<String>,
+    state_nodes: Vec<StateNodeSpec>,
     child_scope_keys: BTreeSet<String>,
     child_scopes: Vec<ScopeSpec>,
     bridge_nodes: Vec<BridgeNodeSpec>,
@@ -1297,6 +1955,9 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
             parent_scope_id: self.scope_id.clone(),
             scope: ScopeBuilder {
                 scope_id: child_scope_id.clone(),
+                state_registry: self.state_registry.clone(),
+                state_keys: BTreeSet::new(),
+                state_nodes: Vec::new(),
                 child_scope_keys: BTreeSet::new(),
                 child_scopes: Vec::new(),
                 bridge_nodes: Vec::new(),
@@ -1317,10 +1978,91 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
             scope_id: child_scope_id,
             parent_scope_id: Some(self.scope_id.clone()),
         });
+        self.state_nodes.extend(child.scope.state_nodes);
         self.child_scopes.extend(child.scope.child_scopes);
         self.bridge_nodes.extend(child.bridge_nodes);
         self.bridge_nodes.extend(child.scope.bridge_nodes);
         Ok(bridged.value)
+    }
+
+    /// Plans a registered typed state by resolving `S` through this builder's registry.
+    pub fn state<S, I>(
+        &mut self,
+        key: StateKey,
+        config: S::Config,
+        input: I,
+    ) -> Result<Handle<'program, 'scope, S::Output>>
+    where
+        S: StateSpec,
+        S::Effect: EffectRunner<S>,
+        S::Caps: CapabilitySetFor<S::Effect>,
+        I: IntoStateInput<'program, 'scope, S::Input>,
+    {
+        let registered = self.state_registry.registered_state::<S>()?;
+        self.state_registered(key, registered, config, input)
+    }
+
+    /// Plans a typed state from an explicit framework-owned registration token.
+    pub fn state_registered<S, I>(
+        &mut self,
+        key: StateKey,
+        registered: RegisteredState<S>,
+        config: S::Config,
+        input: I,
+    ) -> Result<Handle<'program, 'scope, S::Output>>
+    where
+        S: StateSpec,
+        S::Effect: EffectRunner<S>,
+        S::Caps: CapabilitySetFor<S::Effect>,
+        I: IntoStateInput<'program, 'scope, S::Input>,
+    {
+        let key_string = key.as_str().to_owned();
+        if self.state_keys.contains(&key_string) {
+            return Err(PlanError::DuplicateStateKey(key.as_str().to_owned()));
+        }
+        let config_binding = canonical_config_binding::<S::Config>(&config)?;
+        let input = input.into_binding()?;
+        let state = S::new(config)?;
+        drop(state);
+
+        let descriptor = registered.descriptor();
+        let node_id = state_node_id(
+            &self.scope_id,
+            &key,
+            descriptor.kind(),
+            descriptor.version(),
+            &config_binding.content_digest,
+            input.digest(),
+        )?;
+        let output_cell_id = state_output_cell_id(&node_id)?;
+        let output_schema_id =
+            S::Output::schema_id().map_err(|error| PlanError::Value(error.to_string()))?;
+        let output_semantic_type_id =
+            S::Output::semantic_id().map_err(|error| PlanError::Value(error.to_string()))?;
+        let value_lineage = state_value_lineage_ref(&node_id)?;
+        let handle = Handle::new(
+            output_cell_id.clone(),
+            self.scope_id.clone(),
+            output_schema_id.clone(),
+            output_semantic_type_id.clone(),
+            value_lineage,
+        );
+        self.state_keys.insert(key_string);
+        self.state_nodes.push(StateNodeSpec {
+            node_id,
+            key,
+            scope_id: self.scope_id.clone(),
+            state_kind: descriptor.kind().clone(),
+            state_version: descriptor.version().clone(),
+            state_descriptor_id: descriptor.descriptor_id().clone(),
+            runner: registered.runner(),
+            config: config_binding,
+            input: input.spec(),
+            output_cell_id,
+            output_schema_id,
+            output_semantic_type_id,
+        });
+        Ok(handle)
     }
 }
 
@@ -1531,11 +2273,28 @@ where
         &mut RootBuilder<'program, 'root>,
     ) -> Result<RootBound<'program, 'root>>,
 {
+    build_root_with_registry(root_key, StateRegistrySnapshot::default(), f)
+}
+
+/// Builds a branded root typed program with a state registry snapshot.
+pub fn build_root_with_registry<F>(
+    root_key: ScopeKey,
+    state_registry: StateRegistrySnapshot,
+    f: F,
+) -> Result<TypedProgramDraft>
+where
+    F: for<'program, 'root> FnOnce(
+        &mut RootBuilder<'program, 'root>,
+    ) -> Result<RootBound<'program, 'root>>,
+{
     let root_scope_id = scope_id(&root_key)?;
     let mut builder = RootBuilder {
         root_key: root_key.clone(),
         scope: ScopeBuilder {
             scope_id: root_scope_id.clone(),
+            state_registry,
+            state_keys: BTreeSet::new(),
+            state_nodes: Vec::new(),
             child_scope_keys: BTreeSet::new(),
             child_scopes: Vec::new(),
             bridge_nodes: Vec::new(),
@@ -1560,6 +2319,7 @@ where
             scopes.extend(builder.scope.child_scopes);
             scopes
         },
+        state_nodes: builder.scope.state_nodes,
         bridge_nodes: builder.scope.bridge_nodes,
         public_output_spec: bound.public_output_spec,
     })
@@ -1721,6 +2481,117 @@ fn bridge_ref_key(bridge_ref: &BridgeRef) -> String {
     )
 }
 
+fn canonical_config_binding<C: MfmConfig>(config: &C) -> Result<ConfigBindingSpec> {
+    config
+        .validate()
+        .map_err(|error| PlanError::Value(error.to_string()))?;
+    let json =
+        serde_json::to_string(config).map_err(|error| PlanError::Serialize(error.to_string()))?;
+    let canonical = PlainCanonicalJsonBytes::from_json_str(&json)
+        .map_err(|error| PlanError::Canonical(error.to_string()))?;
+    let schema_id = C::schema_id().map_err(|error| PlanError::Value(error.to_string()))?;
+    let content_digest = canonical.content_digest();
+    let byte_len = canonical.as_bytes().len();
+    Ok(ConfigBindingSpec {
+        schema_id,
+        canonical_json: canonical,
+        content_digest,
+        byte_len,
+    })
+}
+
+struct StateDescriptorIdParts<'a> {
+    kind: &'a StateKind,
+    version: &'a StateVersion,
+    name: &'static str,
+    config_schema_id: &'a SchemaId,
+    input_schema_id: &'a SchemaId,
+    output_schema_id: &'a SchemaId,
+    output_semantic_type_id: &'a SemanticTypeId,
+    effect: &'a EffectDescriptor,
+    capabilities: &'a CapabilitySetDescriptor,
+    runner: RunnerKind,
+}
+
+fn state_descriptor_id(parts: StateDescriptorIdParts<'_>) -> Result<DescriptorId> {
+    let json = serde_json::json!({
+        "capabilities": parts.capabilities
+            .capabilities
+            .iter()
+            .map(|capability| {
+                serde_json::json!({
+                    "kind": capability.kind.as_str(),
+                    "name": capability.name,
+                    "role": capability.role.as_str(),
+                    "version": capability.version.as_str(),
+                })
+            })
+            .collect::<Vec<_>>(),
+        "config_schema_id": parts.config_schema_id.as_str(),
+        "effect": {
+            "class": parts.effect.class.as_str(),
+            "kind": parts.effect.kind.as_str(),
+            "name": parts.effect.name,
+            "version": parts.effect.version.as_str(),
+        },
+        "input_schema_id": parts.input_schema_id.as_str(),
+        "kind": parts.kind.as_str(),
+        "name": parts.name,
+        "output_schema_id": parts.output_schema_id.as_str(),
+        "output_semantic_type_id": parts.output_semantic_type_id.as_str(),
+        "runner": parts.runner.as_str(),
+        "version": parts.version.as_str(),
+    });
+    let json =
+        serde_json::to_string(&json).map_err(|error| PlanError::Serialize(error.to_string()))?;
+    let canonical = PlainCanonicalJsonBytes::from_json_str(&json)
+        .map_err(|error| PlanError::Canonical(error.to_string()))?;
+    Ok(DescriptorId::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        sha256_digest_bytes(canonical.as_bytes()),
+    ))
+}
+
+fn effect_runner_kind_for_effect<E: EffectSpec>() -> RunnerKind {
+    match E::class() {
+        mfm_effects::EffectClass::Pure => RunnerKind::Pure,
+        mfm_effects::EffectClass::ReadExternal => RunnerKind::ReadExternal,
+        mfm_effects::EffectClass::ManagedPlatformWrite => RunnerKind::ManagedPlatformWrite,
+        mfm_effects::EffectClass::ApplySideEffect => RunnerKind::ApplySideEffect,
+    }
+}
+
+fn state_node_id(
+    scope_id: &ScopeId,
+    key: &StateKey,
+    state_kind: &StateKind,
+    state_version: &StateVersion,
+    config_digest: &ContentDigest,
+    input_digest: &ContentDigest,
+) -> Result<NodeId> {
+    digest_only_id(
+        "state-node",
+        &format!(
+            "{}:{}:{}:{}:{}:{}",
+            scope_id.as_str(),
+            key.as_str(),
+            state_kind.as_str(),
+            state_version.as_str(),
+            config_digest.as_str(),
+            input_digest.as_str()
+        ),
+        NodeId::from_digest,
+    )
+}
+
+fn state_output_cell_id(node_id: &NodeId) -> Result<CellId> {
+    digest_only_id("state-output-cell", node_id.as_str(), CellId::from_digest)
+}
+
+fn state_value_lineage_ref(node_id: &NodeId) -> Result<ValueLineageRef> {
+    value_lineage_ref("state", node_id.as_str())
+}
+
 fn input_descriptor_id(input_schema_id: &SchemaId) -> Result<DescriptorId> {
     digest_only_id(
         "input-descriptor",
@@ -1731,7 +2602,7 @@ fn input_descriptor_id(input_schema_id: &SchemaId) -> Result<DescriptorId> {
 
 fn validate_input_binding_node(node: &InputBindingNode) -> Result<()> {
     match &node.kind {
-        InputBindingNodeKind::Unit | InputBindingNodeKind::Cell { .. } => Ok(()),
+        InputBindingNodeKind::Unit | InputBindingNodeKind::Cell(_) => Ok(()),
         InputBindingNodeKind::Tuple { elements } | InputBindingNodeKind::Vec { elements, .. } => {
             for element in elements {
                 validate_input_binding_node(element)?;
@@ -1766,25 +2637,22 @@ fn validate_input_binding_node_shape(node: &InputBindingNode, shape: &SchemaShap
     match (&node.kind, shape) {
         (InputBindingNodeKind::Unit, SchemaShape::Unit) => Ok(()),
         (
-            InputBindingNodeKind::Cell {
-                field_path,
-                semantic_type_id,
-                schema_id,
-                ..
-            },
+            InputBindingNodeKind::Cell(cell),
             SchemaShape::ValueRef {
                 schema_id: expected_schema_id,
                 semantic_type_id: expected_semantic_type_id,
             },
         ) => {
-            if schema_id != expected_schema_id || semantic_type_id != expected_semantic_type_id {
+            if &cell.schema_id != expected_schema_id
+                || &cell.semantic_type_id != expected_semantic_type_id
+            {
                 return Err(PlanError::InputBindingShape(format!(
                     "cell {} expected ({}, {}) but got ({}, {})",
-                    field_path.as_str(),
+                    cell.field_path.as_str(),
                     expected_schema_id,
                     expected_semantic_type_id,
-                    schema_id,
-                    semantic_type_id
+                    cell.schema_id,
+                    cell.semantic_type_id
                 )));
             }
             Ok(())
@@ -1869,7 +2737,7 @@ fn schema_shape_kind(shape: &SchemaShape) -> &'static str {
 fn input_binding_node_kind_from_kind(kind: &InputBindingNodeKind) -> &'static str {
     match kind {
         InputBindingNodeKind::Unit => "unit",
-        InputBindingNodeKind::Cell { .. } => "cell",
+        InputBindingNodeKind::Cell(_) => "cell",
         InputBindingNodeKind::Tuple { .. } => "tuple",
         InputBindingNodeKind::Struct { .. } => "struct",
         InputBindingNodeKind::Vec { .. } => "vec",
@@ -1890,22 +2758,14 @@ fn input_binding_node_json(node: &InputBindingNode) -> serde_json::Value {
         InputBindingNodeKind::Unit => serde_json::json!({
             "kind": "unit",
         }),
-        InputBindingNodeKind::Cell {
-            field_path,
-            cell_id,
-            semantic_type_id,
-            schema_id,
-            value_lineage,
-            required_terminal,
-            ..
-        } => serde_json::json!({
-            "cell_id": cell_id.as_str(),
-            "field_path": field_path.as_str(),
+        InputBindingNodeKind::Cell(cell) => serde_json::json!({
+            "cell_id": cell.cell_id.as_str(),
+            "field_path": cell.field_path.as_str(),
             "kind": "cell",
-            "required_terminal": required_terminal.as_str(),
-            "schema_id": schema_id.as_str(),
-            "semantic_type_id": semantic_type_id.as_str(),
-            "value_lineage": value_lineage.digest().as_str(),
+            "required_terminal": cell.required_terminal.as_str(),
+            "schema_id": cell.schema_id.as_str(),
+            "semantic_type_id": cell.semantic_type_id.as_str(),
+            "value_lineage": cell.value_lineage.digest().as_str(),
         }),
         InputBindingNodeKind::Tuple { elements } => serde_json::json!({
             "elements": elements.iter().map(input_binding_node_json).collect::<Vec<_>>(),
@@ -1946,9 +2806,21 @@ fn digest_only_id<I>(
 }
 
 mod private {
-    use super::{Handle, MfmValue};
+    use super::{
+        ApplySideEffect, Handle, ManagedPlatformWrite, MfmValue, Pure, ReadExternal,
+        SideEffectState, StateSpec,
+    };
 
+    pub trait EffectRunnerSealed<S: StateSpec> {}
     pub trait BridgeableSealed {}
+
+    impl<S> EffectRunnerSealed<S> for Pure where S: super::PureState {}
+
+    impl<S> EffectRunnerSealed<S> for ReadExternal where S: super::ReadState {}
+
+    impl<S> EffectRunnerSealed<S> for ManagedPlatformWrite where S: super::ManagedWriteState {}
+
+    impl<S> EffectRunnerSealed<S> for ApplySideEffect where S: SideEffectState {}
 
     impl<'program, 'parent, T> BridgeableSealed for Handle<'program, 'parent, T> where T: MfmValue {}
 

@@ -1,6 +1,6 @@
 use super::*;
 use mfm_program_derive::{
-    MfmValue, PublicOutputs as PublicOutputsDerive, StateInput as StateInputDerive,
+    MfmConfig, MfmValue, PublicOutputs as PublicOutputsDerive, StateInput as StateInputDerive,
 };
 use serde::{Deserialize, Serialize};
 
@@ -30,6 +30,57 @@ struct LaunchInput {
     ordered_values: Vec<LaunchValue>,
     required_values: NonEmpty<LaunchValue>,
     artifact_value: mfm_values::ArtifactRef<LaunchValue>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmConfig)]
+#[mfm(schema = "mfm.program.test.launch_config")]
+struct LaunchConfig {
+    multiplier: u64,
+}
+
+#[derive(Debug, Clone)]
+struct MultiplyState {
+    config: LaunchConfig,
+}
+
+impl StateSpec for MultiplyState {
+    type Config = LaunchConfig;
+    type Input = LaunchValue;
+    type Output = LaunchValue;
+    type Effect = Pure;
+    type Caps = NoCaps;
+
+    fn kind() -> Result<StateKind> {
+        StateKind::new(
+            "mfm.program.test.state",
+            "multiply",
+            DigestAlgorithm::Sha256JcsV1,
+            sha256_digest_bytes(b"mfm.program.test.state:multiply"),
+        )
+        .map_err(|error| PlanError::Key(error.to_string()))
+    }
+
+    fn version() -> Result<StateVersion> {
+        StateVersion::new("mfm.program.test.state.multiply.v1")
+            .map_err(|error| PlanError::Key(error.to_string()))
+    }
+
+    fn name() -> &'static str {
+        "multiply"
+    }
+
+    fn new(config: Self::Config) -> Result<Self> {
+        Ok(Self { config })
+    }
+}
+
+impl PureState for MultiplyState {
+    fn run(&self, input: Self::Input) -> StateResult<Self::Output> {
+        Ok(LaunchValue {
+            amount: input.amount * self.config.multiplier,
+            label: input.label,
+        })
+    }
 }
 
 #[test]
@@ -81,6 +132,164 @@ fn root_builder_binds_seed_and_public_output_specs() {
 }
 
 #[test]
+fn registered_state_registry_plans_state_node() {
+    let mut registry = StateRegistryBuilder::new();
+    let registered = registry
+        .register::<MultiplyState>()
+        .expect("state registers");
+    assert_eq!(registered.runner(), RunnerKind::Pure);
+
+    let draft = build_root_with_registry(
+        ScopeKey::new("portfolio/root").expect("scope key"),
+        registry.snapshot(),
+        |root| {
+            let seed = CanonicalSeed::from_value(&LaunchValue {
+                amount: 7,
+                label: "gross".to_owned(),
+            })?;
+            let input = root.seed(SeedKey::new("launch-input")?, seed)?;
+            let result = root.scope().state::<MultiplyState, _>(
+                StateKey::new("multiply")?,
+                LaunchConfig { multiplier: 3 },
+                input,
+            )?;
+            root.bind_public_outputs(
+                PublicOutputKey::new("terminal")?,
+                &LaunchPublicOutputs { result },
+            )
+        },
+    )
+    .expect("root builds");
+
+    assert_eq!(draft.state_nodes().len(), 1);
+    let node = &draft.state_nodes()[0];
+    assert_eq!(node.key.as_str(), "multiply");
+    assert_eq!(node.scope_id, *draft.root_scope_id());
+    assert_eq!(
+        &node.state_descriptor_id,
+        registered.descriptor().descriptor_id()
+    );
+    assert_eq!(node.runner, RunnerKind::Pure);
+    assert_eq!(
+        node.config.schema_id,
+        LaunchConfig::schema_id().expect("config schema id")
+    );
+    assert_eq!(
+        node.input.input_schema_id,
+        LaunchValue::input_schema_id().expect("input schema id")
+    );
+    assert_eq!(
+        node.output_schema_id,
+        LaunchValue::schema_id().expect("output schema id")
+    );
+    assert_eq!(
+        node.output_semantic_type_id,
+        LaunchValue::semantic_id().expect("output semantic id")
+    );
+    assert_eq!(
+        draft.public_output_spec().outputs()[0].cell().cell_id(),
+        &node.output_cell_id
+    );
+}
+
+#[test]
+fn explicit_registered_state_token_plans_without_builder_registry() {
+    let mut registry = StateRegistryBuilder::new();
+    let registered = registry
+        .register::<MultiplyState>()
+        .expect("state registers");
+
+    let draft = build_root(ScopeKey::new("root").expect("scope key"), |root| {
+        let seed = CanonicalSeed::from_value(&LaunchValue {
+            amount: 2,
+            label: "explicit".to_owned(),
+        })?;
+        let input = root.seed(SeedKey::new("input")?, seed)?;
+        let result = root.scope().state_registered::<MultiplyState, _>(
+            StateKey::new("multiply")?,
+            registered,
+            LaunchConfig { multiplier: 5 },
+            input,
+        )?;
+        root.bind_public_outputs(
+            PublicOutputKey::new("terminal")?,
+            &LaunchPublicOutputs { result },
+        )
+    })
+    .expect("root builds");
+
+    assert_eq!(draft.state_nodes().len(), 1);
+    assert_eq!(draft.state_nodes()[0].key.as_str(), "multiply");
+}
+
+#[test]
+fn unregistered_state_cannot_be_planned() {
+    let result = build_root(ScopeKey::new("root").expect("scope key"), |root| {
+        let seed = CanonicalSeed::from_value(&LaunchValue {
+            amount: 1,
+            label: "unregistered".to_owned(),
+        })?;
+        let input = root.seed(SeedKey::new("input")?, seed)?;
+        let _ = root.scope().state::<MultiplyState, _>(
+            StateKey::new("multiply")?,
+            LaunchConfig { multiplier: 2 },
+            input,
+        )?;
+        unreachable!("unregistered state planning must fail before public output binding")
+    });
+
+    let Err(PlanError::Registry(message)) = result else {
+        panic!("expected unregistered state registry error, got {result:?}");
+    };
+    assert!(message.contains("is not registered"));
+}
+
+#[test]
+fn duplicate_state_key_is_rejected_without_partial_node() {
+    let mut registry = StateRegistryBuilder::new();
+    registry
+        .register::<MultiplyState>()
+        .expect("state registers");
+
+    let result = build_root_with_registry(
+        ScopeKey::new("root").expect("scope key"),
+        registry.into_snapshot(),
+        |root| {
+            let first = root.seed(
+                SeedKey::new("first")?,
+                CanonicalSeed::from_value(&LaunchValue {
+                    amount: 1,
+                    label: "first".to_owned(),
+                })?,
+            )?;
+            let second = root.seed(
+                SeedKey::new("second")?,
+                CanonicalSeed::from_value(&LaunchValue {
+                    amount: 2,
+                    label: "second".to_owned(),
+                })?,
+            )?;
+            let _ = root.scope().state::<MultiplyState, _>(
+                StateKey::new("multiply")?,
+                LaunchConfig { multiplier: 2 },
+                first,
+            )?;
+            let _ = root.scope().state::<MultiplyState, _>(
+                StateKey::new("multiply")?,
+                LaunchConfig { multiplier: 3 },
+                second,
+            )?;
+            unreachable!("duplicate state key must fail")
+        },
+    );
+
+    assert_eq!(
+        result.expect_err("duplicate key rejects"),
+        PlanError::DuplicateStateKey("multiply".to_owned())
+    );
+}
+
+#[test]
 fn single_handle_input_binding_records_identity_and_lineage() {
     build_root(ScopeKey::new("root").expect("scope key"), |root| {
         let seed = CanonicalSeed::from_value(&LaunchValue {
@@ -90,27 +299,19 @@ fn single_handle_input_binding_records_identity_and_lineage() {
         let handle = root.seed(SeedKey::new("single")?, seed)?;
         let binding: InputBinding<LaunchValue> = handle.clone().into_binding()?;
 
-        let InputBindingNodeKind::Cell {
-            field_path,
-            cell_id,
-            semantic_type_id,
-            schema_id,
-            value_lineage,
-            required_terminal,
-        } = &binding.root().kind
-        else {
+        let InputBindingNodeKind::Cell(cell) = &binding.root().kind else {
             panic!("single handle should bind as a cell");
         };
 
-        assert_eq!(field_path.as_str(), "");
-        assert_eq!(cell_id, &handle.typed_ref().cell_id);
+        assert_eq!(cell.field_path.as_str(), "");
+        assert_eq!(cell.cell_id, handle.typed_ref().cell_id);
         assert_eq!(
-            semantic_type_id,
-            &LaunchValue::semantic_id().expect("semantic id")
+            cell.semantic_type_id,
+            LaunchValue::semantic_id().expect("semantic id")
         );
-        assert_eq!(schema_id, &LaunchValue::schema_id().expect("schema id"));
-        assert_eq!(*required_terminal, RequiredTerminal::ProducedOnly);
-        assert_eq!(value_lineage, handle.typed_ref().value_lineage());
+        assert_eq!(cell.schema_id, LaunchValue::schema_id().expect("schema id"));
+        assert_eq!(cell.required_terminal, RequiredTerminal::ProducedOnly);
+        assert_eq!(&cell.value_lineage, handle.typed_ref().value_lineage());
         assert!(binding
             .digest()
             .as_str()
@@ -136,18 +337,13 @@ fn optional_and_artifact_handles_bind_as_typed_value_cells() {
         let optional_binding: InputBinding<mfm_values::MaybeValue<LaunchValue>> =
             optional.into_binding()?;
 
-        let InputBindingNodeKind::Cell {
-            required_terminal,
-            semantic_type_id,
-            ..
-        } = &optional_binding.root().kind
-        else {
+        let InputBindingNodeKind::Cell(cell) = &optional_binding.root().kind else {
             panic!("optional handle should bind as a cell");
         };
-        assert_eq!(*required_terminal, RequiredTerminal::MaybeSkipped);
+        assert_eq!(cell.required_terminal, RequiredTerminal::MaybeSkipped);
         assert_eq!(
-            semantic_type_id,
-            &mfm_values::MaybeValue::<LaunchValue>::semantic_id().expect("maybe semantic id")
+            cell.semantic_type_id,
+            mfm_values::MaybeValue::<LaunchValue>::semantic_id().expect("maybe semantic id")
         );
 
         let artifact_ref = artifact_ref_fixture(0xaa)?;
@@ -157,18 +353,13 @@ fn optional_and_artifact_handles_bind_as_typed_value_cells() {
         )?;
         let artifact_binding: InputBinding<mfm_values::ArtifactRef<LaunchValue>> =
             artifact.into_binding()?;
-        let InputBindingNodeKind::Cell {
-            required_terminal,
-            semantic_type_id,
-            ..
-        } = &artifact_binding.root().kind
-        else {
+        let InputBindingNodeKind::Cell(cell) = &artifact_binding.root().kind else {
             panic!("artifact handle should bind as a cell");
         };
-        assert_eq!(*required_terminal, RequiredTerminal::ProducedOnly);
+        assert_eq!(cell.required_terminal, RequiredTerminal::ProducedOnly);
         assert_eq!(
-            semantic_type_id,
-            &mfm_values::ArtifactRef::<LaunchValue>::semantic_id().expect("artifact semantic id")
+            cell.semantic_type_id,
+            mfm_values::ArtifactRef::<LaunchValue>::semantic_id().expect("artifact semantic id")
         );
 
         let final_seed = CanonicalSeed::from_value(&LaunchValue {
@@ -643,10 +834,10 @@ fn root_scope_id_is_stable_for_key() {
 }
 
 fn cell_path(node: &InputBindingNode) -> &str {
-    let InputBindingNodeKind::Cell { field_path, .. } = &node.kind else {
+    let InputBindingNodeKind::Cell(cell) = &node.kind else {
         panic!("expected cell node");
     };
-    field_path.as_str()
+    cell.field_path.as_str()
 }
 
 fn artifact_ref_fixture(byte: u8) -> Result<mfm_values::ArtifactRef<LaunchValue>> {

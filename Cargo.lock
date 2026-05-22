@@ -2414,6 +2414,8 @@ name = "mfm-program"
 version = "0.1.0"
 dependencies = [
  "mfm-canonical",
+ "mfm-capabilities",
+ "mfm-effects",
  "mfm-ids",
  "mfm-program-derive",
  "mfm-values",
