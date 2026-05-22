@@ -2493,6 +2493,12 @@ dependencies = [
 [[package]]
 name = "mfm-spec"
 version = "0.1.0"
+dependencies = [
+ "mfm-canonical",
+ "mfm-capabilities",
+ "mfm-ids",
+ "serde_json",
+]
 
 [[package]]
 name = "mfm-state-aave-v3"

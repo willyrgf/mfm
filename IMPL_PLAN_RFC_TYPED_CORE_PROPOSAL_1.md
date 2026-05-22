@@ -205,12 +205,12 @@ workflow ports, and deletion or hard isolation of old dynamic semantic APIs.
 
 ### Commit 17: `kernel spec add v1 typed execution spec`
 
-- [ ] Implement `mfm-spec::v1::TypedExecutionSpec` and `CertifiedSpecEnvelope`.
-- [ ] Include scopes, seeds, descriptor identities, config refs, nodes, cells, public outputs,
+- [x] Implement `mfm-spec::v1::TypedExecutionSpec` and `CertifiedSpecEnvelope`.
+- [x] Include scopes, seeds, descriptor identities, config refs, nodes, cells, public outputs,
       framework bridge nodes, public-output render nodes, planning lineage, and value lineage.
-- [ ] Add canonical spec hash generation and golden fixtures.
-- [ ] Reject obsolete `state_program`/`outputs` sketch shapes.
-- [ ] Validation: `nix run .#test`.
+- [x] Add canonical spec hash generation and golden fixtures.
+- [x] Reject obsolete `state_program`/`outputs` sketch shapes.
+- [x] Validation: `nix run .#test`.
 
 ### Commit 18: `kernel events add v1 event schemas`
 

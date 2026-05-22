@@ -10,3 +10,9 @@ readme = "README.md"
 [lib]
 name = "mfm_spec"
 path = "src/lib.rs"
+
+[dependencies]
+mfm-capabilities = { path = "../capabilities" }
+mfm-canonical = { path = "../canonical" }
+mfm-ids = { path = "../ids" }
+serde_json = { workspace = true }
