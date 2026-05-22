@@ -20,13 +20,18 @@ pub mod v1 {
     use std::fmt;
 
     use mfm_canonical::PlainCanonicalJsonBytes;
+    use mfm_capabilities::{CapabilityDescriptor, CapabilityRole, CapabilitySetDescriptor};
     use mfm_events::v1::{self as events, side_effect, ArtifactRole, KernelEventPayload};
     use mfm_ids::{
         AdapterKind, AdapterVersion, ArtifactId, AttemptId, CapabilityKind, CapabilityVersion,
         CellId, ContentDigest, DigestAlgorithm, EventId, IdentityError, NodeId, RunId, SchemaId,
         ScopeId, SeedId, SemanticTypeId, SpecHash, StateKind, StateVersion,
     };
-    use mfm_spec::v1::{CellProducer, DescriptorIdentity, MediaType, ValueLineageRef};
+    use mfm_spec::v1::{
+        CanonicalizerIdentity, CellProducer, DescriptorIdentity, MediaType,
+        OperationDescriptorIdentity, PublicFieldPath, RendererDescriptorIdentity, RendererKind,
+        RendererVersion, StateDescriptorIdentity, ValueLineageRef,
+    };
 
     /// Result type for typed store helpers.
     pub type Result<T> = std::result::Result<T, StoreError>;
@@ -123,6 +128,13 @@ pub mod v1 {
             /// Stable diagnostic.
             message: String,
         },
+        /// A persisted event row disagrees with store-derived typed event fields.
+        PersistedEventMismatch {
+            /// Mismatched field label.
+            field: &'static str,
+            /// Stable diagnostic.
+            message: String,
+        },
         /// Identity construction failed.
         Identity(String),
         /// JSON serialization failed before canonicalization.
@@ -199,6 +211,9 @@ pub mod v1 {
                 Self::ProjectionConflict { key, message } => {
                     write!(f, "projection conflict for {key}: {message}")
                 }
+                Self::PersistedEventMismatch { field, message } => {
+                    write!(f, "persisted event mismatch for {field}: {message}")
+                }
                 Self::Identity(message) => write!(f, "identity error: {message}"),
                 Self::Serialize(message) => write!(f, "store JSON serialization error: {message}"),
                 Self::Canonical(message) => write!(f, "store canonicalization error: {message}"),
@@ -218,6 +233,12 @@ pub mod v1 {
     impl From<mfm_events::EventError> for StoreError {
         fn from(error: mfm_events::EventError) -> Self {
             Self::Event(error.to_string())
+        }
+    }
+
+    impl From<mfm_capabilities::CapabilityError> for StoreError {
+        fn from(error: mfm_capabilities::CapabilityError) -> Self {
+            Self::Identity(error.to_string())
         }
     }
 
@@ -280,6 +301,11 @@ pub mod v1 {
     pub struct CommitOrdinal(u32);
 
     impl CommitOrdinal {
+        /// Creates an ordinal loaded from a persisted typed event row.
+        pub const fn new(value: u32) -> Self {
+            Self(value)
+        }
+
         /// Returns the ordinal as a `u32`.
         pub const fn as_u32(self) -> u32 {
             self.0
@@ -400,7 +426,110 @@ pub mod v1 {
         audit: KernelEventAudit,
     }
 
+    /// Raw persisted event row loaded from an authoritative typed run stream.
+    ///
+    /// Durable stores pass rows through [`KernelEventEnvelope::from_persisted_record`] so replay and
+    /// projection rebuilds re-derive the semantic envelope fields instead of trusting stored
+    /// projection tables or caller-supplied metadata.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct PersistedKernelEventRecord {
+        /// Persisted store-derived event id.
+        pub event_id: EventId,
+        /// Persisted event schema id.
+        pub event_schema_id: SchemaId,
+        /// Persisted run id.
+        pub run_id: RunId,
+        /// Persisted store-owned stream sequence.
+        pub seq: StreamSeq,
+        /// Persisted ordinal inside the atomic commit.
+        pub ordinal: CommitOrdinal,
+        /// Persisted payload spec hash.
+        pub spec_hash: SpecHash,
+        /// Persisted commit key.
+        pub commit_key: CommitKey,
+        /// Persisted logical event key.
+        pub logical_key: LogicalEventKey,
+        /// Persisted canonical payload hash.
+        pub payload_hash: ContentDigest,
+        /// Persisted typed event payload.
+        pub payload: KernelEventPayload,
+        /// Persisted canonical payload byte length.
+        pub payload_canonical_byte_len: u64,
+    }
+
     impl KernelEventEnvelope {
+        /// Reconstructs a store-owned envelope from a persisted typed event row.
+        ///
+        /// This validates every derived envelope field against the typed payload, run id, sequence,
+        /// and ordinal. It is the durable-store read path counterpart to append-time envelope
+        /// derivation.
+        pub fn from_persisted_record(record: PersistedKernelEventRecord) -> Result<Self> {
+            let canonical_payload = payload_canonical_json(&record.payload)?;
+            let derived_payload_hash = canonical_payload.content_digest();
+            if derived_payload_hash != record.payload_hash {
+                return Err(StoreError::PersistedEventMismatch {
+                    field: "payload_hash",
+                    message: "persisted payload hash does not match canonical payload".to_owned(),
+                });
+            }
+            let derived_byte_len = canonical_payload.as_bytes().len() as u64;
+            if derived_byte_len != record.payload_canonical_byte_len {
+                return Err(StoreError::PersistedEventMismatch {
+                    field: "payload_canonical_byte_len",
+                    message: "persisted payload byte length does not match canonical payload"
+                        .to_owned(),
+                });
+            }
+            let derived_schema_id = record.payload.event_schema_id()?;
+            if derived_schema_id != record.event_schema_id {
+                return Err(StoreError::PersistedEventMismatch {
+                    field: "event_schema_id",
+                    message: "persisted schema id does not match payload variant".to_owned(),
+                });
+            }
+            let derived_spec_hash = payload_spec_hash(&record.payload);
+            if derived_spec_hash != record.spec_hash {
+                return Err(StoreError::PersistedEventMismatch {
+                    field: "spec_hash",
+                    message: "persisted spec hash does not match payload".to_owned(),
+                });
+            }
+            let derived_logical_key = derive_logical_key(&record.payload, &record.payload_hash)?;
+            if derived_logical_key != record.logical_key {
+                return Err(StoreError::PersistedEventMismatch {
+                    field: "logical_key",
+                    message: "persisted logical key does not match payload".to_owned(),
+                });
+            }
+            let derived_event_id = derive_event_id(
+                &record.run_id,
+                record.seq,
+                record.ordinal,
+                &record.event_schema_id,
+                &record.payload_hash,
+            )?;
+            if derived_event_id != record.event_id {
+                return Err(StoreError::PersistedEventMismatch {
+                    field: "event_id",
+                    message: "persisted event id does not match envelope inputs".to_owned(),
+                });
+            }
+
+            Ok(Self {
+                event_id: record.event_id,
+                event_schema_id: record.event_schema_id,
+                run_id: record.run_id,
+                seq: record.seq,
+                ordinal: record.ordinal,
+                spec_hash: record.spec_hash,
+                commit_key: record.commit_key,
+                logical_key: record.logical_key,
+                payload_hash: record.payload_hash,
+                payload: record.payload,
+                audit: KernelEventAudit::new(record.payload_canonical_byte_len),
+            })
+        }
+
         /// Store-derived event id.
         pub fn event_id(&self) -> &EventId {
             &self.event_id
@@ -871,6 +1000,33 @@ pub mod v1 {
         },
     }
 
+    /// Fact projection derived from committed read-fact events.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct FactProjection {
+        /// Store-owned event id that recorded the fact.
+        pub event_id: EventId,
+        /// Node id that requested the fact.
+        pub node_id: NodeId,
+        /// Attempt id that requested the fact.
+        pub attempt_id: AttemptId,
+        /// Stable fact key.
+        pub fact_key: events::FactKey,
+        /// Response schema id.
+        pub response_schema_id: SchemaId,
+        /// Canonical response hash.
+        pub response_hash: ContentDigest,
+        /// Response artifact id.
+        pub artifact_id: ArtifactId,
+        /// Adapter capability kind.
+        pub capability_kind: CapabilityKind,
+        /// Adapter capability version.
+        pub capability_version: CapabilityVersion,
+        /// Adapter kind.
+        pub adapter_kind: AdapterKind,
+        /// Adapter version.
+        pub adapter_version: AdapterVersion,
+    }
+
     /// Public-output projection derived from committed run events.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub enum PublicOutputProjection {
@@ -918,14 +1074,42 @@ pub mod v1 {
         run_states: BTreeMap<RunId, RunState>,
         attempts: BTreeMap<(NodeId, AttemptId), AttemptProjection>,
         cells: BTreeMap<CellId, CellTerminalProjection>,
+        facts: BTreeMap<(NodeId, AttemptId, events::FactKey), FactProjection>,
         side_effects: BTreeMap<events::SideEffectLedgerKey, SideEffectProjection>,
         public_outputs: BTreeMap<SchemaId, PublicOutputProjection>,
         retentions: BTreeMap<RunId, RetentionProjection>,
     }
 
     impl ProjectionSnapshot {
+        /// Creates a projection snapshot from storage-owned projection maps.
+        pub fn from_parts(
+            run_states: BTreeMap<RunId, RunState>,
+            attempts: BTreeMap<(NodeId, AttemptId), AttemptProjection>,
+            cells: BTreeMap<CellId, CellTerminalProjection>,
+            facts: BTreeMap<(NodeId, AttemptId, events::FactKey), FactProjection>,
+            side_effects: BTreeMap<events::SideEffectLedgerKey, SideEffectProjection>,
+            public_outputs: BTreeMap<SchemaId, PublicOutputProjection>,
+            retentions: BTreeMap<RunId, RetentionProjection>,
+        ) -> Self {
+            Self {
+                run_states,
+                attempts,
+                cells,
+                facts,
+                side_effects,
+                public_outputs,
+                retentions,
+            }
+        }
+
+        /// Validates that a loaded run stream is ordered and contiguous.
+        pub fn validate_run_stream(events: &[KernelEventEnvelope]) -> Result<()> {
+            validate_run_stream_order(events)
+        }
+
         /// Rebuilds projections from store-owned event envelopes.
         pub fn rebuild_from_run_stream(events: &[KernelEventEnvelope]) -> Result<Self> {
+            Self::validate_run_stream(events)?;
             let mut snapshot = Self::default();
             for event in events {
                 apply_projection(&mut snapshot, event)?;
@@ -944,6 +1128,17 @@ pub mod v1 {
         /// Returns a cell terminal projection.
         pub fn cell_terminal(&self, cell_id: &CellId) -> Option<&CellTerminalProjection> {
             self.cells.get(cell_id)
+        }
+
+        /// Returns a recorded fact projection.
+        pub fn fact(
+            &self,
+            node_id: &NodeId,
+            attempt_id: &AttemptId,
+            fact_key: &events::FactKey,
+        ) -> Option<&FactProjection> {
+            self.facts
+                .get(&(node_id.clone(), attempt_id.clone(), fact_key.clone()))
         }
 
         /// Returns an attempt lifecycle projection.
@@ -977,6 +1172,113 @@ pub mod v1 {
         pub fn has_public_output(&self) -> bool {
             !self.public_outputs.is_empty()
         }
+
+        /// Iterates projected run states.
+        pub fn run_states(&self) -> impl Iterator<Item = (&RunId, &RunState)> {
+            self.run_states.iter()
+        }
+
+        /// Iterates attempt lifecycle projections.
+        pub fn attempts(&self) -> impl Iterator<Item = (&(NodeId, AttemptId), &AttemptProjection)> {
+            self.attempts.iter()
+        }
+
+        /// Iterates cell terminal projections.
+        pub fn cells(&self) -> impl Iterator<Item = (&CellId, &CellTerminalProjection)> {
+            self.cells.iter()
+        }
+
+        /// Iterates fact projections.
+        pub fn facts(
+            &self,
+        ) -> impl Iterator<Item = (&(NodeId, AttemptId, events::FactKey), &FactProjection)>
+        {
+            self.facts.iter()
+        }
+
+        /// Iterates side-effect projections.
+        pub fn side_effects(
+            &self,
+        ) -> impl Iterator<Item = (&events::SideEffectLedgerKey, &SideEffectProjection)> {
+            self.side_effects.iter()
+        }
+
+        /// Iterates public-output projections.
+        pub fn public_outputs(&self) -> impl Iterator<Item = (&SchemaId, &PublicOutputProjection)> {
+            self.public_outputs.iter()
+        }
+
+        /// Iterates retention projections.
+        pub fn retentions(&self) -> impl Iterator<Item = (&RunId, &RetentionProjection)> {
+            self.retentions.iter()
+        }
+    }
+
+    fn validate_run_stream_order(events: &[KernelEventEnvelope]) -> Result<()> {
+        let mut stream_run_id: Option<RunId> = None;
+        let mut current_seq: Option<StreamSeq> = None;
+        let mut expected_ordinal = 0_u32;
+
+        for event in events {
+            match &stream_run_id {
+                Some(run_id) if event.run_id() != run_id => {
+                    return Err(StoreError::PersistedEventMismatch {
+                        field: "run_id",
+                        message: "persisted run stream contains events for multiple runs"
+                            .to_owned(),
+                    });
+                }
+                Some(_) => {}
+                None => stream_run_id = Some(event.run_id().clone()),
+            }
+
+            match current_seq {
+                Some(seq) if event.seq() == seq => {}
+                Some(seq) => {
+                    let expected_next = seq.checked_next()?;
+                    if event.seq() != expected_next {
+                        return Err(StoreError::PersistedEventMismatch {
+                            field: "seq",
+                            message: format!(
+                                "persisted run stream expected seq {expected_next} but found {}",
+                                event.seq()
+                            ),
+                        });
+                    }
+                    current_seq = Some(expected_next);
+                    expected_ordinal = 0;
+                }
+                None => {
+                    if event.seq() != StreamSeq::FIRST {
+                        return Err(StoreError::PersistedEventMismatch {
+                            field: "seq",
+                            message: format!(
+                                "persisted run stream expected first seq {} but found {}",
+                                StreamSeq::FIRST,
+                                event.seq()
+                            ),
+                        });
+                    }
+                    current_seq = Some(StreamSeq::FIRST);
+                }
+            }
+
+            if event.ordinal().as_u32() != expected_ordinal {
+                return Err(StoreError::PersistedEventMismatch {
+                    field: "ordinal",
+                    message: format!(
+                        "persisted run stream expected ordinal {expected_ordinal} for seq {} but found {}",
+                        event.seq(),
+                        event.ordinal()
+                    ),
+                });
+            }
+            expected_ordinal = expected_ordinal
+                .checked_add(1)
+                .ok_or(StoreError::SequenceOverflow)?;
+        }
+
+        Ok(())
     }
 
     /// Read-only access to store-owned projections.
@@ -1005,6 +1307,80 @@ pub mod v1 {
     struct CommitKeyRecord {
         fingerprint: CommitFingerprint,
         batch: CommittedBatch,
+    }
+
+    /// Set of logical keys already present for run streams.
+    pub type LogicalKeySet = BTreeSet<(RunId, LogicalEventKey)>;
+
+    /// Unique logical-key payload hashes already present for run streams.
+    pub type UniqueLogicalPayloads = BTreeMap<(RunId, LogicalEventKey), ContentDigest>;
+
+    /// Authoritative state needed to validate and stage one absent commit-key append.
+    ///
+    /// Durable stores load this from their run stream, artifact table, logical-key table, and
+    /// rebuilt projections before calling [`stage_typed_run_commit`]. Commit-key lookup remains the
+    /// storage implementation's responsibility because the RFC requires that lookup to precede stale
+    /// `expected_next_seq` checks.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct TypedCommitBase {
+        /// Artifact evidence recorded before event commit.
+        pub artifacts: BTreeMap<ArtifactId, ArtifactEvidenceRef>,
+        /// Logical keys already present in the run stream.
+        pub logical_keys: LogicalKeySet,
+        /// Unique logical keys and their existing payload hash.
+        pub unique_logical_payloads: UniqueLogicalPayloads,
+        /// Current projections derived from the authoritative run stream.
+        pub projections: ProjectionSnapshot,
+        /// Store-owned next sequence for the run being committed.
+        pub actual_next_seq: StreamSeq,
+    }
+
+    /// Staged result of validating a typed commit against a [`TypedCommitBase`].
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct StagedTypedCommit {
+        batch: CommittedBatch,
+        logical_keys: LogicalKeySet,
+        unique_logical_payloads: UniqueLogicalPayloads,
+        projections: ProjectionSnapshot,
+    }
+
+    impl StagedTypedCommit {
+        /// Store-owned committed batch.
+        pub fn batch(&self) -> &CommittedBatch {
+            &self.batch
+        }
+
+        /// Staged logical-key set after this commit.
+        pub fn logical_keys(&self) -> &LogicalKeySet {
+            &self.logical_keys
+        }
+
+        /// Staged unique logical-key payload map after this commit.
+        pub fn unique_logical_payloads(&self) -> &UniqueLogicalPayloads {
+            &self.unique_logical_payloads
+        }
+
+        /// Staged projection snapshot after this commit.
+        pub fn projections(&self) -> &ProjectionSnapshot {
+            &self.projections
+        }
+
+        /// Consumes this staged commit into owned parts.
+        pub fn into_parts(
+            self,
+        ) -> (
+            CommittedBatch,
+            LogicalKeySet,
+            UniqueLogicalPayloads,
+            ProjectionSnapshot,
+        ) {
+            (
+                self.batch,
+                self.logical_keys,
+                self.unique_logical_payloads,
+                self.projections,
+            )
+        }
     }
 
     /// In-memory implementation of the typed store contract for contract tests.
@@ -1240,6 +1616,161 @@ pub mod v1 {
         }
     }
 
+    /// Validates and stages a typed commit after the caller has handled commit-key idempotency.
+    ///
+    /// This is the shared commit engine for in-memory and durable stores. It checks stale sequence,
+    /// payload run/spec identity, logical-key preconditions, artifact evidence, and projection
+    /// transitions, then returns the store-owned envelopes plus staged projection/logical-key state.
+    pub fn stage_typed_run_commit(
+        base: &TypedCommitBase,
+        request: &TypedCommitRequest,
+    ) -> Result<StagedTypedCommit> {
+        if request.expected_next_seq != base.actual_next_seq {
+            return Err(StoreError::StaleExpectedNextSeq {
+                expected: request.expected_next_seq,
+                actual: base.actual_next_seq,
+            });
+        }
+
+        validate_payload_run_and_spec(&request.run_id, &request.payloads)?;
+        validate_terminal_attempt_cell_pairs(&request.payloads)?;
+
+        let verifier = InMemoryTypedRunStore {
+            streams: BTreeMap::new(),
+            commit_keys: BTreeMap::new(),
+            artifacts: base.artifacts.clone(),
+            logical_keys: base.logical_keys.clone(),
+            unique_logical_payloads: base.unique_logical_payloads.clone(),
+            projections: base.projections.clone(),
+        };
+        verifier.validate_preconditions(request)?;
+
+        for evidence in &request.required_artifacts {
+            verifier.validate_artifact_evidence(evidence)?;
+        }
+        for payload in &request.payloads {
+            for requirement in artifact_requirements(payload) {
+                verifier.validate_artifact_requirement(&requirement)?;
+            }
+        }
+
+        let fingerprint = commit_fingerprint(request)?;
+        let mut staged_projections = base.projections.clone();
+        let mut staged_logical_keys = base.logical_keys.clone();
+        let mut staged_unique_payloads = base.unique_logical_payloads.clone();
+        let mut events = Vec::with_capacity(request.payloads.len());
+        for (index, payload) in request.payloads.iter().cloned().enumerate() {
+            let canonical_payload = payload_canonical_json(&payload)?;
+            let payload_hash = canonical_payload.content_digest();
+            let schema_id = payload.event_schema_id()?;
+            let logical_key = derive_logical_key(&payload, &payload_hash)?;
+            let ordinal = CommitOrdinal::from_index(index)?;
+            let event_id = derive_event_id(
+                &request.run_id,
+                request.expected_next_seq,
+                ordinal,
+                &schema_id,
+                &payload_hash,
+            )?;
+            let spec_hash = payload_spec_hash(&payload);
+            let envelope = KernelEventEnvelope {
+                event_id,
+                event_schema_id: schema_id,
+                run_id: request.run_id.clone(),
+                seq: request.expected_next_seq,
+                ordinal,
+                spec_hash,
+                commit_key: request.commit_key.clone(),
+                logical_key,
+                payload_hash,
+                payload,
+                audit: KernelEventAudit::new(canonical_payload.as_bytes().len() as u64),
+            };
+
+            let key = (request.run_id.clone(), envelope.logical_key.clone());
+            if is_unique_logical_key(&envelope.logical_key) {
+                if let Some(existing_hash) = staged_unique_payloads.get(&key) {
+                    if existing_hash == &envelope.payload_hash {
+                        return Err(StoreError::DuplicateLogicalKey {
+                            logical_key: envelope.logical_key.clone(),
+                        });
+                    }
+                    return Err(StoreError::LogicalKeyConflict {
+                        logical_key: envelope.logical_key.clone(),
+                    });
+                }
+                staged_unique_payloads.insert(key.clone(), envelope.payload_hash.clone());
+            }
+            staged_logical_keys.insert(key);
+            apply_projection(&mut staged_projections, &envelope)?;
+            events.push(envelope);
+        }
+
+        Ok(StagedTypedCommit {
+            batch: CommittedBatch {
+                run_id: request.run_id.clone(),
+                commit_key: request.commit_key.clone(),
+                fingerprint,
+                seq: request.expected_next_seq,
+                events,
+            },
+            logical_keys: staged_logical_keys,
+            unique_logical_payloads: staged_unique_payloads,
+            projections: staged_projections,
+        })
+    }
+
+    /// Builds a store-owned committed batch for an already validated request and persisted sequence.
+    ///
+    /// Durable stores use this after a same-fingerprint commit-key hit so the idempotent result can
+    /// return the original sequence even when the caller's `expected_next_seq` is stale.
+    pub fn build_committed_batch(
+        request: &TypedCommitRequest,
+        committed_seq: StreamSeq,
+    ) -> Result<CommittedBatch> {
+        validate_payload_run_and_spec(&request.run_id, &request.payloads)?;
+        validate_terminal_attempt_cell_pairs(&request.payloads)?;
+
+        let fingerprint = commit_fingerprint(request)?;
+        let mut events = Vec::with_capacity(request.payloads.len());
+        for (index, payload) in request.payloads.iter().cloned().enumerate() {
+            let canonical_payload = payload_canonical_json(&payload)?;
+            let payload_hash = canonical_payload.content_digest();
+            let schema_id = payload.event_schema_id()?;
+            let logical_key = derive_logical_key(&payload, &payload_hash)?;
+            let ordinal = CommitOrdinal::from_index(index)?;
+            let event_id = derive_event_id(
+                &request.run_id,
+                committed_seq,
+                ordinal,
+                &schema_id,
+                &payload_hash,
+            )?;
+            let spec_hash = payload_spec_hash(&payload);
+            events.push(KernelEventEnvelope {
+                event_id,
+                event_schema_id: schema_id,
+                run_id: request.run_id.clone(),
+                seq: committed_seq,
+                ordinal,
+                spec_hash,
+                commit_key: request.commit_key.clone(),
+                logical_key,
+                payload_hash,
+                payload,
+                audit: KernelEventAudit::new(canonical_payload.as_bytes().len() as u64),
+            });
+        }
+
+        Ok(CommittedBatch {
+            run_id: request.run_id.clone(),
+            commit_key: request.commit_key.clone(),
+            fingerprint,
+            seq: committed_seq,
+            events,
+        })
+    }
+
     impl TypedProjectionRead for InMemoryTypedRunStore {
         fn projection_snapshot(&self) -> &ProjectionSnapshot {
             &self.projections
@@ -1280,85 +1811,16 @@ pub mod v1 {
                 });
             }
 
-            let actual_next_seq = self.expected_next_seq(&request.run_id);
-            if request.expected_next_seq != actual_next_seq {
-                return Err(StoreError::StaleExpectedNextSeq {
-                    expected: request.expected_next_seq,
-                    actual: actual_next_seq,
-                });
-            }
-
-            validate_payload_run_and_spec(&request.run_id, &request.payloads)?;
-            validate_terminal_attempt_cell_pairs(&request.payloads)?;
-            self.validate_preconditions(&request)?;
-
-            for evidence in &request.required_artifacts {
-                self.validate_artifact_evidence(evidence)?;
-            }
-            for payload in &request.payloads {
-                for requirement in artifact_requirements(payload) {
-                    self.validate_artifact_requirement(&requirement)?;
-                }
-            }
-
-            let mut staged_projections = self.projections.clone();
-            let mut staged_logical_keys = self.logical_keys.clone();
-            let mut staged_unique_payloads = self.unique_logical_payloads.clone();
-            let mut events = Vec::with_capacity(request.payloads.len());
-            for (index, payload) in request.payloads.iter().cloned().enumerate() {
-                let canonical_payload = payload_canonical_json(&payload)?;
-                let payload_hash = canonical_payload.content_digest();
-                let schema_id = payload.event_schema_id()?;
-                let logical_key = derive_logical_key(&payload, &payload_hash)?;
-                let ordinal = CommitOrdinal::from_index(index)?;
-                let event_id = derive_event_id(
-                    &request.run_id,
-                    request.expected_next_seq,
-                    ordinal,
-                    &schema_id,
-                    &payload_hash,
-                )?;
-                let spec_hash = payload_spec_hash(&payload);
-                let envelope = KernelEventEnvelope {
-                    event_id,
-                    event_schema_id: schema_id,
-                    run_id: request.run_id.clone(),
-                    seq: request.expected_next_seq,
-                    ordinal,
-                    spec_hash,
-                    commit_key: request.commit_key.clone(),
-                    logical_key,
-                    payload_hash,
-                    payload,
-                    audit: KernelEventAudit::new(canonical_payload.as_bytes().len() as u64),
-                };
-
-                let key = (request.run_id.clone(), envelope.logical_key.clone());
-                if is_unique_logical_key(&envelope.logical_key) {
-                    if let Some(existing_hash) = staged_unique_payloads.get(&key) {
-                        if existing_hash == &envelope.payload_hash {
-                            return Err(StoreError::DuplicateLogicalKey {
-                                logical_key: envelope.logical_key.clone(),
-                            });
-                        }
-                        return Err(StoreError::LogicalKeyConflict {
-                            logical_key: envelope.logical_key.clone(),
-                        });
-                    }
-                    staged_unique_payloads.insert(key.clone(), envelope.payload_hash.clone());
-                }
-                staged_logical_keys.insert(key);
-                apply_projection(&mut staged_projections, &envelope)?;
-                events.push(envelope);
-            }
-
-            let batch = CommittedBatch {
-                run_id: request.run_id.clone(),
-                commit_key: request.commit_key.clone(),
-                fingerprint: fingerprint.clone(),
-                seq: request.expected_next_seq,
-                events,
+            let base = TypedCommitBase {
+                artifacts: self.artifacts.clone(),
+                logical_keys: self.logical_keys.clone(),
+                unique_logical_payloads: self.unique_logical_payloads.clone(),
+                projections: self.projections.clone(),
+                actual_next_seq: self.expected_next_seq(&request.run_id),
             };
+            let staged = stage_typed_run_commit(&base, &request)?;
+            let (batch, staged_logical_keys, staged_unique_payloads, staged_projections) =
+                staged.into_parts();
             self.streams
                 .entry(request.run_id.clone())
                 .or_default()
@@ -1609,7 +2071,11 @@ pub mod v1 {
         Ok(payload_canonical_json(payload)?.content_digest())
     }
 
-    fn commit_fingerprint(request: &TypedCommitRequest) -> Result<CommitFingerprint> {
+    /// Computes the canonical idempotency fingerprint for a typed commit request.
+    ///
+    /// The fingerprint intentionally excludes `expected_next_seq`, so idempotent retries can be
+    /// recognized before stale sequence checks as required by the store contract.
+    pub fn commit_fingerprint(request: &TypedCommitRequest) -> Result<CommitFingerprint> {
         let mut required_artifacts = request
             .required_artifacts
             .iter()
@@ -2513,7 +2979,39 @@ pub mod v1 {
                     manifest_artifact_id: payload.manifest_artifact_id.clone(),
                 });
             }
-            KernelEventPayload::FactRecorded(_) | KernelEventPayload::ArtifactReferenced(_) => {}
+            KernelEventPayload::FactRecorded(payload) => {
+                let key = (
+                    payload.node_id.clone(),
+                    payload.attempt_id.clone(),
+                    payload.fact_key.clone(),
+                );
+                if projections.facts.contains_key(&key) {
+                    return Err(StoreError::ProjectionConflict {
+                        key: format!(
+                            "fact:{}:{}:{}",
+                            payload.node_id, payload.attempt_id, payload.fact_key
+                        ),
+                        message: "fact already recorded for attempt".to_owned(),
+                    });
+                }
+                projections.facts.insert(
+                    key,
+                    FactProjection {
+                        event_id: envelope.event_id.clone(),
+                        node_id: payload.node_id.clone(),
+                        attempt_id: payload.attempt_id.clone(),
+                        fact_key: payload.fact_key.clone(),
+                        response_schema_id: payload.response_schema_id.clone(),
+                        response_hash: payload.response_hash.clone(),
+                        artifact_id: payload.artifact_id.clone(),
+                        capability_kind: payload.capability_kind.clone(),
+                        capability_version: payload.capability_version.clone(),
+                        adapter_kind: payload.adapter_kind.clone(),
+                        adapter_version: payload.adapter_version.clone(),
+                    },
+                );
+            }
+            KernelEventPayload::ArtifactReferenced(_) => {}
         }
         Ok(())
     }
@@ -3138,6 +3636,839 @@ pub mod v1 {
         }
     }
 
+    /// Parses a typed kernel event payload from its store canonical JSON shape.
+    pub fn payload_from_json_value(json: &serde_json::Value) -> Result<KernelEventPayload> {
+        match required_str(json, "variant")? {
+            "RunStarted" => Ok(KernelEventPayload::RunStarted(events::RunStarted {
+                run_id: parse_identity(required_str(json, "run_id")?)?,
+                spec_hash: parse_identity(required_str(json, "spec_hash")?)?,
+                spec_artifact_id: parse_identity(required_str(json, "spec_artifact_id")?)?,
+                spec_media_type: MediaType::new(required_str(json, "spec_media_type")?)
+                    .map_err(|error| StoreError::Identity(error.to_string()))?,
+                spec_version: parse_identity(required_str(json, "spec_version")?)?,
+                lowering_version: parse_identity(required_str(json, "lowering_version")?)?,
+                public_output_schema_id: parse_identity(required_str(
+                    json,
+                    "public_output_schema_id",
+                )?)?,
+                descriptor_identities: parse_vec(json, "descriptor_identities", |item| {
+                    parse_descriptor_identity(item)
+                })?,
+                runner_executables: parse_vec(json, "runner_executables", parse_executable)?,
+                adapter_executables: parse_vec(json, "adapter_executables", parse_executable)?,
+                canonicalizer_identity: CanonicalizerIdentity::new(required_str(
+                    json,
+                    "canonicalizer_identity",
+                )?)
+                .map_err(|error| StoreError::Identity(error.to_string()))?,
+                framework_version: events::FrameworkVersion::new(required_str(
+                    json,
+                    "framework_version",
+                )?)?,
+                source_revision: events::SourceRevision::new(required_str(
+                    json,
+                    "source_revision",
+                )?)?,
+                seed_cells: parse_vec(json, "seed_cells", parse_seed_cell_ref)?,
+            })),
+            "StateAttemptStarted" => Ok(KernelEventPayload::StateAttemptStarted(
+                events::StateAttemptStarted {
+                    spec_hash: parse_identity(required_str(json, "spec_hash")?)?,
+                    node_id: parse_identity(required_str(json, "node_id")?)?,
+                    attempt_id: parse_identity(required_str(json, "attempt_id")?)?,
+                    attempt_no: required_u32(json, "attempt_no")?,
+                    state_kind: parse_identity(required_str(json, "state_kind")?)?,
+                    state_version: parse_identity(required_str(json, "state_version")?)?,
+                },
+            )),
+            "FactRecorded" => Ok(KernelEventPayload::FactRecorded(events::FactRecorded {
+                spec_hash: parse_identity(required_str(json, "spec_hash")?)?,
+                node_id: parse_identity(required_str(json, "node_id")?)?,
+                attempt_id: parse_identity(required_str(json, "attempt_id")?)?,
+                capability_kind: parse_identity(required_str(json, "capability_kind")?)?,
+                capability_version: parse_identity(required_str(json, "capability_version")?)?,
+                adapter_kind: parse_identity(required_str(json, "adapter_kind")?)?,
+                adapter_version: parse_identity(required_str(json, "adapter_version")?)?,
+                request_schema_id: parse_identity(required_str(json, "request_schema_id")?)?,
+                request_hash: parse_identity(required_str(json, "request_hash")?)?,
+                response_schema_id: parse_identity(required_str(json, "response_schema_id")?)?,
+                response_hash: parse_identity(required_str(json, "response_hash")?)?,
+                fact_key: events::FactKey::new(required_str(json, "fact_key")?)?,
+                artifact_id: parse_identity(required_str(json, "artifact_id")?)?,
+            })),
+            "ArtifactReferenced" => Ok(KernelEventPayload::ArtifactReferenced(
+                events::ArtifactReferenced {
+                    spec_hash: parse_identity(required_str(json, "spec_hash")?)?,
+                    node_id: optional_str(json, "node_id")?
+                        .map(parse_identity)
+                        .transpose()?,
+                    attempt_id: optional_str(json, "attempt_id")?
+                        .map(parse_identity)
+                        .transpose()?,
+                    artifact_ref: parse_event_artifact(required_obj(json, "artifact_ref")?)?,
+                },
+            )),
+            "CellProduced" => Ok(KernelEventPayload::CellProduced(events::CellProduced {
+                spec_hash: parse_identity(required_str(json, "spec_hash")?)?,
+                node_id: parse_identity(required_str(json, "node_id")?)?,
+                cell_id: parse_identity(required_str(json, "cell_id")?)?,
+                scope_id: parse_identity(required_str(json, "scope_id")?)?,
+                attempt_id: parse_identity(required_str(json, "attempt_id")?)?,
+                semantic_type_id: parse_identity(required_str(json, "semantic_type_id")?)?,
+                schema_id: parse_identity(required_str(json, "schema_id")?)?,
+                value_lineage: parse_value_lineage(required_obj(json, "value_lineage")?)?,
+                artifact_id: parse_identity(required_str(json, "artifact_id")?)?,
+                content_digest: parse_identity(required_str(json, "content_digest")?)?,
+                producer_state_kind: optional_str(json, "producer_state_kind")?
+                    .map(parse_identity)
+                    .transpose()?,
+                producer_state_version: optional_str(json, "producer_state_version")?
+                    .map(parse_identity)
+                    .transpose()?,
+            })),
+            "CellSkipped" => Ok(KernelEventPayload::CellSkipped(events::CellSkipped {
+                spec_hash: parse_identity(required_str(json, "spec_hash")?)?,
+                node_id: parse_identity(required_str(json, "node_id")?)?,
+                cell_id: parse_identity(required_str(json, "cell_id")?)?,
+                scope_id: parse_identity(required_str(json, "scope_id")?)?,
+                attempt_id: parse_identity(required_str(json, "attempt_id")?)?,
+                semantic_type_id: parse_identity(required_str(json, "semantic_type_id")?)?,
+                schema_id: parse_identity(required_str(json, "schema_id")?)?,
+                value_lineage: parse_value_lineage(required_obj(json, "value_lineage")?)?,
+                skip_reason: parse_skip_reason(required_obj(json, "skip_reason")?)?,
+            })),
+            "SideEffectIntentPersisted" => Ok(KernelEventPayload::SideEffectIntentPersisted(
+                side_effect::IntentPersisted {
+                    spec_hash: parse_identity(required_str(json, "spec_hash")?)?,
+                    node_id: parse_identity(required_str(json, "node_id")?)?,
+                    scope_id: parse_identity(required_str(json, "scope_id")?)?,
+                    attempt_id: parse_identity(required_str(json, "attempt_id")?)?,
+                    ledger_key: events::SideEffectLedgerKey::new(required_str(
+                        json,
+                        "ledger_key",
+                    )?)?,
+                    invocation_epoch: required_u32(json, "invocation_epoch")?,
+                    intent_schema_id: parse_identity(required_str(json, "intent_schema_id")?)?,
+                    intent_hash: parse_identity(required_str(json, "intent_hash")?)?,
+                    intent_artifact_id: parse_identity(required_str(json, "intent_artifact_id")?)?,
+                    idempotency_input_schema_id: parse_identity(required_str(
+                        json,
+                        "idempotency_input_schema_id",
+                    )?)?,
+                    idempotency_input_hash: parse_identity(required_str(
+                        json,
+                        "idempotency_input_hash",
+                    )?)?,
+                    idempotency_key: events::IdempotencyKeyRef::new(required_str(
+                        json,
+                        "idempotency_key",
+                    )?)?,
+                    capability_kind: parse_identity(required_str(json, "capability_kind")?)?,
+                    capability_version: parse_identity(required_str(json, "capability_version")?)?,
+                    adapter_kind: parse_identity(required_str(json, "adapter_kind")?)?,
+                    adapter_version: parse_identity(required_str(json, "adapter_version")?)?,
+                },
+            )),
+            "SideEffectClaimed" => Ok(KernelEventPayload::SideEffectClaimed(
+                side_effect::Claimed {
+                    spec_hash: parse_identity(required_str(json, "spec_hash")?)?,
+                    node_id: parse_identity(required_str(json, "node_id")?)?,
+                    attempt_id: parse_identity(required_str(json, "attempt_id")?)?,
+                    ledger_key: events::SideEffectLedgerKey::new(required_str(
+                        json,
+                        "ledger_key",
+                    )?)?,
+                    claim_owner: events::RunnerInvocationId::new(required_str(
+                        json,
+                        "claim_owner",
+                    )?)?,
+                    invocation_epoch: required_u32(json, "invocation_epoch")?,
+                    claim_generation: required_u32(json, "claim_generation")?,
+                    claim_fencing_token: side_effect::ClaimFencingToken::new(required_str(
+                        json,
+                        "claim_fencing_token",
+                    )?)?,
+                },
+            )),
+            "SideEffectClaimTakenOver" => Ok(KernelEventPayload::SideEffectClaimTakenOver(
+                side_effect::ClaimTakenOver {
+                    spec_hash: parse_identity(required_str(json, "spec_hash")?)?,
+                    node_id: parse_identity(required_str(json, "node_id")?)?,
+                    attempt_id: parse_identity(required_str(json, "attempt_id")?)?,
+                    ledger_key: events::SideEffectLedgerKey::new(required_str(
+                        json,
+                        "ledger_key",
+                    )?)?,
+                    previous_claim_owner: events::RunnerInvocationId::new(required_str(
+                        json,
+                        "previous_claim_owner",
+                    )?)?,
+                    new_claim_owner: events::RunnerInvocationId::new(required_str(
+                        json,
+                        "new_claim_owner",
+                    )?)?,
+                    invocation_epoch: required_u32(json, "invocation_epoch")?,
+                    previous_claim_generation: required_u32(json, "previous_claim_generation")?,
+                    claim_generation: required_u32(json, "claim_generation")?,
+                    claim_fencing_token: side_effect::ClaimFencingToken::new(required_str(
+                        json,
+                        "claim_fencing_token",
+                    )?)?,
+                },
+            )),
+            "SideEffectInvocationPrepared" => Ok(KernelEventPayload::SideEffectInvocationPrepared(
+                side_effect::InvocationPrepared {
+                    spec_hash: parse_identity(required_str(json, "spec_hash")?)?,
+                    node_id: parse_identity(required_str(json, "node_id")?)?,
+                    attempt_id: parse_identity(required_str(json, "attempt_id")?)?,
+                    ledger_key: events::SideEffectLedgerKey::new(required_str(
+                        json,
+                        "ledger_key",
+                    )?)?,
+                    invocation_epoch: required_u32(json, "invocation_epoch")?,
+                    claim_generation: required_u32(json, "claim_generation")?,
+                    claim_fencing_token: side_effect::ClaimFencingToken::new(required_str(
+                        json,
+                        "claim_fencing_token",
+                    )?)?,
+                    prepared_artifact_id: optional_str(json, "prepared_artifact_id")?
+                        .map(parse_identity)
+                        .transpose()?,
+                    prepared_hash: optional_str(json, "prepared_hash")?
+                        .map(parse_identity)
+                        .transpose()?,
+                },
+            )),
+            "SideEffectInvocationStarted" => Ok(KernelEventPayload::SideEffectInvocationStarted(
+                side_effect::InvocationStarted {
+                    spec_hash: parse_identity(required_str(json, "spec_hash")?)?,
+                    node_id: parse_identity(required_str(json, "node_id")?)?,
+                    attempt_id: parse_identity(required_str(json, "attempt_id")?)?,
+                    ledger_key: events::SideEffectLedgerKey::new(required_str(
+                        json,
+                        "ledger_key",
+                    )?)?,
+                    invocation_epoch: required_u32(json, "invocation_epoch")?,
+                    claim_owner: events::RunnerInvocationId::new(required_str(
+                        json,
+                        "claim_owner",
+                    )?)?,
+                    claim_generation: required_u32(json, "claim_generation")?,
+                    claim_fencing_token: side_effect::ClaimFencingToken::new(required_str(
+                        json,
+                        "claim_fencing_token",
+                    )?)?,
+                },
+            )),
+            "SideEffectNotSubmittedProven" => Ok(KernelEventPayload::SideEffectNotSubmittedProven(
+                side_effect::NotSubmittedProven {
+                    spec_hash: parse_identity(required_str(json, "spec_hash")?)?,
+                    node_id: parse_identity(required_str(json, "node_id")?)?,
+                    attempt_id: parse_identity(required_str(json, "attempt_id")?)?,
+                    ledger_key: events::SideEffectLedgerKey::new(required_str(
+                        json,
+                        "ledger_key",
+                    )?)?,
+                    invocation_epoch: required_u32(json, "invocation_epoch")?,
+                    proof_schema_id: parse_identity(required_str(json, "proof_schema_id")?)?,
+                    proof_hash: parse_identity(required_str(json, "proof_hash")?)?,
+                    proof_artifact_id: parse_identity(required_str(json, "proof_artifact_id")?)?,
+                },
+            )),
+            "SideEffectSubmissionObserved" => Ok(KernelEventPayload::SideEffectSubmissionObserved(
+                side_effect::SubmissionObserved {
+                    spec_hash: parse_identity(required_str(json, "spec_hash")?)?,
+                    node_id: parse_identity(required_str(json, "node_id")?)?,
+                    attempt_id: parse_identity(required_str(json, "attempt_id")?)?,
+                    ledger_key: events::SideEffectLedgerKey::new(required_str(
+                        json,
+                        "ledger_key",
+                    )?)?,
+                    invocation_epoch: required_u32(json, "invocation_epoch")?,
+                    submission_schema_id: parse_identity(required_str(
+                        json,
+                        "submission_schema_id",
+                    )?)?,
+                    submission_hash: parse_identity(required_str(json, "submission_hash")?)?,
+                    submission_artifact_id: parse_identity(required_str(
+                        json,
+                        "submission_artifact_id",
+                    )?)?,
+                },
+            )),
+            "SideEffectSubmissionUnknown" => Ok(KernelEventPayload::SideEffectSubmissionUnknown(
+                side_effect::SubmissionUnknown {
+                    spec_hash: parse_identity(required_str(json, "spec_hash")?)?,
+                    node_id: parse_identity(required_str(json, "node_id")?)?,
+                    attempt_id: parse_identity(required_str(json, "attempt_id")?)?,
+                    ledger_key: events::SideEffectLedgerKey::new(required_str(
+                        json,
+                        "ledger_key",
+                    )?)?,
+                    invocation_epoch: required_u32(json, "invocation_epoch")?,
+                    evidence_schema_id: parse_identity(required_str(json, "evidence_schema_id")?)?,
+                    evidence_hash: parse_identity(required_str(json, "evidence_hash")?)?,
+                    evidence_artifact_id: parse_identity(required_str(
+                        json,
+                        "evidence_artifact_id",
+                    )?)?,
+                },
+            )),
+            "SideEffectReceiptObserved" => Ok(KernelEventPayload::SideEffectReceiptObserved(
+                side_effect::ReceiptObserved {
+                    spec_hash: parse_identity(required_str(json, "spec_hash")?)?,
+                    node_id: parse_identity(required_str(json, "node_id")?)?,
+                    attempt_id: parse_identity(required_str(json, "attempt_id")?)?,
+                    ledger_key: events::SideEffectLedgerKey::new(required_str(
+                        json,
+                        "ledger_key",
+                    )?)?,
+                    invocation_epoch: required_u32(json, "invocation_epoch")?,
+                    receipt_schema_id: parse_identity(required_str(json, "receipt_schema_id")?)?,
+                    receipt_hash: parse_identity(required_str(json, "receipt_hash")?)?,
+                    receipt_artifact_id: parse_identity(required_str(
+                        json,
+                        "receipt_artifact_id",
+                    )?)?,
+                    replay_verifier_id: events::ReplayVerifierId::new(required_str(
+                        json,
+                        "replay_verifier_id",
+                    )?)?,
+                },
+            )),
+            "SideEffectConfirmationObserved" => {
+                Ok(KernelEventPayload::SideEffectConfirmationObserved(
+                    side_effect::ConfirmationObserved {
+                        spec_hash: parse_identity(required_str(json, "spec_hash")?)?,
+                        node_id: parse_identity(required_str(json, "node_id")?)?,
+                        attempt_id: parse_identity(required_str(json, "attempt_id")?)?,
+                        ledger_key: events::SideEffectLedgerKey::new(required_str(
+                            json,
+                            "ledger_key",
+                        )?)?,
+                        invocation_epoch: required_u32(json, "invocation_epoch")?,
+                        confirmation_schema_id: parse_identity(required_str(
+                            json,
+                            "confirmation_schema_id",
+                        )?)?,
+                        confirmation_hash: parse_identity(required_str(
+                            json,
+                            "confirmation_hash",
+                        )?)?,
+                        confirmation_artifact_id: parse_identity(required_str(
+                            json,
+                            "confirmation_artifact_id",
+                        )?)?,
+                        replay_verifier_id: events::ReplayVerifierId::new(required_str(
+                            json,
+                            "replay_verifier_id",
+                        )?)?,
+                    },
+                ))
+            }
+            "SideEffectAmbiguous" => Ok(KernelEventPayload::SideEffectAmbiguous(
+                side_effect::Ambiguous {
+                    spec_hash: parse_identity(required_str(json, "spec_hash")?)?,
+                    node_id: parse_identity(required_str(json, "node_id")?)?,
+                    attempt_id: parse_identity(required_str(json, "attempt_id")?)?,
+                    ledger_key: events::SideEffectLedgerKey::new(required_str(
+                        json,
+                        "ledger_key",
+                    )?)?,
+                    invocation_epoch: required_u32(json, "invocation_epoch")?,
+                    ambiguity_code: events::AmbiguityCode::new(required_str(
+                        json,
+                        "ambiguity_code",
+                    )?)?,
+                    evidence_schema_id: parse_identity(required_str(json, "evidence_schema_id")?)?,
+                    evidence_hash: parse_identity(required_str(json, "evidence_hash")?)?,
+                    evidence_artifact_id: parse_identity(required_str(
+                        json,
+                        "evidence_artifact_id",
+                    )?)?,
+                },
+            )),
+            "SideEffectFailed" => Ok(KernelEventPayload::SideEffectFailed(side_effect::Failed {
+                spec_hash: parse_identity(required_str(json, "spec_hash")?)?,
+                node_id: parse_identity(required_str(json, "node_id")?)?,
+                attempt_id: parse_identity(required_str(json, "attempt_id")?)?,
+                ledger_key: events::SideEffectLedgerKey::new(required_str(json, "ledger_key")?)?,
+                invocation_epoch: required_u32(json, "invocation_epoch")?,
+                failure_phase: parse_failure_phase(required_str(json, "failure_phase")?)?,
+                retryable: required_bool(json, "retryable")?,
+                error: parse_error_info(required_obj(json, "error")?)?,
+            })),
+            "PublicOutputProduced" => Ok(KernelEventPayload::PublicOutputProduced(
+                events::PublicOutputProduced {
+                    spec_hash: parse_identity(required_str(json, "spec_hash")?)?,
+                    node_id: parse_identity(required_str(json, "node_id")?)?,
+                    attempt_id: parse_identity(required_str(json, "attempt_id")?)?,
+                    receipt_cell_id: parse_identity(required_str(json, "receipt_cell_id")?)?,
+                    public_schema_id: parse_identity(required_str(json, "public_schema_id")?)?,
+                    output_spec_digest: parse_identity(required_str(json, "output_spec_digest")?)?,
+                    cells: parse_vec(json, "cells", parse_named_cell_ref)?,
+                    rendered_digest: parse_identity(required_str(json, "rendered_digest")?)?,
+                    rendered_artifact_id: optional_str(json, "rendered_artifact_id")?
+                        .map(parse_identity)
+                        .transpose()?,
+                    renderer_descriptor_id: parse_identity(required_str(
+                        json,
+                        "renderer_descriptor_id",
+                    )?)?,
+                },
+            )),
+            "PublicOutputRenderFailed" => Ok(KernelEventPayload::PublicOutputRenderFailed(
+                events::PublicOutputRenderFailed {
+                    spec_hash: parse_identity(required_str(json, "spec_hash")?)?,
+                    node_id: parse_identity(required_str(json, "node_id")?)?,
+                    attempt_id: parse_identity(required_str(json, "attempt_id")?)?,
+                    public_schema_id: parse_identity(required_str(json, "public_schema_id")?)?,
+                    renderer_descriptor_id: parse_identity(required_str(
+                        json,
+                        "renderer_descriptor_id",
+                    )?)?,
+                    error: parse_error_info(required_obj(json, "error")?)?,
+                },
+            )),
+            "StateAttemptCompleted" => Ok(KernelEventPayload::StateAttemptCompleted(
+                events::StateAttemptCompleted {
+                    spec_hash: parse_identity(required_str(json, "spec_hash")?)?,
+                    node_id: parse_identity(required_str(json, "node_id")?)?,
+                    attempt_id: parse_identity(required_str(json, "attempt_id")?)?,
+                    output_cell_id: parse_identity(required_str(json, "output_cell_id")?)?,
+                },
+            )),
+            "StateAttemptFailed" => Ok(KernelEventPayload::StateAttemptFailed(
+                events::StateAttemptFailed {
+                    spec_hash: parse_identity(required_str(json, "spec_hash")?)?,
+                    node_id: parse_identity(required_str(json, "node_id")?)?,
+                    attempt_id: parse_identity(required_str(json, "attempt_id")?)?,
+                    retryable: required_bool(json, "retryable")?,
+                    error: parse_error_info(required_obj(json, "error")?)?,
+                },
+            )),
+            "RunCompleted" => Ok(KernelEventPayload::RunCompleted(events::RunCompleted {
+                run_id: parse_identity(required_str(json, "run_id")?)?,
+                spec_hash: parse_identity(required_str(json, "spec_hash")?)?,
+                outcome: parse_run_completion_outcome(required_obj(json, "outcome")?)?,
+            })),
+            "RetentionRefsAppended" => Ok(KernelEventPayload::RetentionRefsAppended(
+                events::RetentionRefsAppended {
+                    run_id: parse_identity(required_str(json, "run_id")?)?,
+                    spec_hash: parse_identity(required_str(json, "spec_hash")?)?,
+                    refs: parse_vec(json, "refs", parse_retention_ref)?,
+                    reason: parse_retention_reason(required_str(json, "reason")?)?,
+                },
+            )),
+            "RetentionManifestProjected" => Ok(KernelEventPayload::RetentionManifestProjected(
+                events::RetentionManifestProjected {
+                    run_id: parse_identity(required_str(json, "run_id")?)?,
+                    spec_hash: parse_identity(required_str(json, "spec_hash")?)?,
+                    manifest_seq: required_u64(json, "manifest_seq")?,
+                    manifest_digest: parse_identity(required_str(json, "manifest_digest")?)?,
+                    previous_manifest_digest: optional_str(json, "previous_manifest_digest")?
+                        .map(parse_identity)
+                        .transpose()?,
+                    manifest_artifact_id: parse_identity(required_str(
+                        json,
+                        "manifest_artifact_id",
+                    )?)?,
+                },
+            )),
+            other => Err(StoreError::Event(format!(
+                "unknown event payload variant {other}"
+            ))),
+        }
+    }
+
+    fn parse_descriptor_identity(json: &serde_json::Value) -> Result<DescriptorIdentity> {
+        match required_str(json, "descriptor_family")? {
+            "state" => Ok(DescriptorIdentity::State(Box::new(
+                StateDescriptorIdentity {
+                    descriptor_id: parse_identity(required_str(json, "descriptor_id")?)?,
+                    name: required_str(json, "name")?.to_owned(),
+                    state_kind: parse_identity(required_str(json, "state_kind")?)?,
+                    state_version: parse_identity(required_str(json, "state_version")?)?,
+                    config_schema_id: parse_identity(required_str(json, "config_schema_id")?)?,
+                    input_schema_id: parse_identity(required_str(json, "input_schema_id")?)?,
+                    output_schema_id: parse_identity(required_str(json, "output_schema_id")?)?,
+                    output_semantic_type_id: parse_identity(required_str(
+                        json,
+                        "output_semantic_type_id",
+                    )?)?,
+                    effect_kind: parse_identity(required_str(json, "effect_kind")?)?,
+                    effect_class: required_str(json, "effect_class")?.to_owned(),
+                    effect_name: required_str(json, "effect_name")?.to_owned(),
+                    effect_version: parse_identity(required_str(json, "effect_version")?)?,
+                    capabilities: parse_capability_set(required_obj(json, "capabilities")?)?,
+                    runner: required_str(json, "runner")?.to_owned(),
+                    side_effect_contract_digest: optional_str(json, "side_effect_contract_digest")?
+                        .map(parse_identity)
+                        .transpose()?,
+                },
+            ))),
+            "operation" => Ok(DescriptorIdentity::Operation(Box::new(
+                OperationDescriptorIdentity {
+                    descriptor_id: parse_identity(required_str(json, "descriptor_id")?)?,
+                    name: required_str(json, "name")?.to_owned(),
+                    operation_kind: parse_identity(required_str(json, "operation_kind")?)?,
+                    operation_version: parse_identity(required_str(json, "operation_version")?)?,
+                    config_schema_id: parse_identity(required_str(json, "config_schema_id")?)?,
+                    input_schema_id: parse_identity(required_str(json, "input_schema_id")?)?,
+                    output_schema_id: parse_identity(required_str(json, "output_schema_id")?)?,
+                    expansion_abi: required_str(json, "expansion_abi")?.to_owned(),
+                },
+            ))),
+            "renderer" => Ok(DescriptorIdentity::Renderer(Box::new(
+                RendererDescriptorIdentity {
+                    descriptor_id: parse_identity(required_str(json, "descriptor_id")?)?,
+                    renderer_kind: RendererKind::new(required_str(json, "renderer_kind")?)
+                        .map_err(|error| StoreError::Identity(error.to_string()))?,
+                    renderer_version: RendererVersion::new(required_str(json, "renderer_version")?)
+                        .map_err(|error| StoreError::Identity(error.to_string()))?,
+                    public_schema_id: parse_identity(required_str(json, "public_schema_id")?)?,
+                    canonicalizer_identity: CanonicalizerIdentity::new(required_str(
+                        json,
+                        "canonicalizer_identity",
+                    )?)
+                    .map_err(|error| StoreError::Identity(error.to_string()))?,
+                },
+            ))),
+            other => Err(StoreError::Identity(format!(
+                "unknown descriptor identity family {other}"
+            ))),
+        }
+    }
+
+    fn parse_capability_set(json: &serde_json::Value) -> Result<CapabilitySetDescriptor> {
+        let capabilities = required_array(json, "capabilities")?
+            .iter()
+            .map(parse_capability)
+            .collect::<Result<Vec<_>>>()?;
+        Ok(CapabilitySetDescriptor::new(capabilities)?)
+    }
+
+    fn parse_capability(json: &serde_json::Value) -> Result<CapabilityDescriptor> {
+        Ok(CapabilityDescriptor::new(
+            parse_identity::<CapabilityKind>(required_str(json, "kind")?)?,
+            parse_identity::<CapabilityVersion>(required_str(json, "version")?)?,
+            parse_capability_role(required_str(json, "role")?)?,
+            required_str(json, "name")?.to_owned(),
+        )?)
+    }
+
+    fn parse_executable(json: &serde_json::Value) -> Result<events::ExecutableIdentity> {
+        Ok(events::ExecutableIdentity {
+            factory_id: events::RunnerFactoryId::new(required_str(json, "factory_id")?)?,
+            source_revision: events::SourceRevision::new(required_str(json, "source_revision")?)?,
+            cargo_package_name: events::PackageName::new(required_str(
+                json,
+                "cargo_package_name",
+            )?)?,
+            cargo_package_version: events::PackageVersion::new(required_str(
+                json,
+                "cargo_package_version",
+            )?)?,
+            cargo_package_digest: parse_identity(required_str(json, "cargo_package_digest")?)?,
+            binary_digest: parse_identity(required_str(json, "binary_digest")?)?,
+            nix_derivation_hash: optional_str(json, "nix_derivation_hash")?
+                .map(events::NixDerivationHash::new)
+                .transpose()?,
+            nix_output_hash: optional_str(json, "nix_output_hash")?
+                .map(events::NixOutputHash::new)
+                .transpose()?,
+        })
+    }
+
+    fn parse_seed_cell_ref(json: &serde_json::Value) -> Result<events::SeedCellRef> {
+        Ok(events::SeedCellRef {
+            seed_id: parse_identity(required_str(json, "seed_id")?)?,
+            cell_id: parse_identity(required_str(json, "cell_id")?)?,
+            scope_id: parse_identity(required_str(json, "scope_id")?)?,
+            semantic_type_id: parse_identity(required_str(json, "semantic_type_id")?)?,
+            schema_id: parse_identity(required_str(json, "schema_id")?)?,
+            digest: parse_identity(required_str(json, "digest")?)?,
+            seed_artifact: parse_event_artifact(required_obj(json, "seed_artifact")?)?,
+        })
+    }
+
+    fn parse_named_cell_ref(json: &serde_json::Value) -> Result<events::NamedTypedCellRef> {
+        Ok(events::NamedTypedCellRef {
+            public_field_path: PublicFieldPath::new(required_str(json, "public_field_path")?)
+                .map_err(|error| StoreError::Identity(error.to_string()))?,
+            cell_id: parse_identity(required_str(json, "cell_id")?)?,
+            producer: parse_cell_producer(required_obj(json, "producer")?)?,
+            scope_id: parse_identity(required_str(json, "scope_id")?)?,
+            semantic_type_id: parse_identity(required_str(json, "semantic_type_id")?)?,
+            schema_id: parse_identity(required_str(json, "schema_id")?)?,
+            value_lineage: parse_value_lineage(required_obj(json, "value_lineage")?)?,
+            content_digest: parse_identity(required_str(json, "content_digest")?)?,
+            artifact_id: parse_identity(required_str(json, "artifact_id")?)?,
+        })
+    }
+
+    fn parse_cell_producer(json: &serde_json::Value) -> Result<CellProducer> {
+        match required_str(json, "kind")? {
+            "node" => Ok(CellProducer::Node(parse_identity(required_str(
+                json, "node_id",
+            )?)?)),
+            "seed" => Ok(CellProducer::Seed(parse_identity(required_str(
+                json, "seed_id",
+            )?)?)),
+            other => Err(StoreError::Identity(format!(
+                "unknown cell producer {other}"
+            ))),
+        }
+    }
+
+    fn parse_value_lineage(json: &serde_json::Value) -> Result<ValueLineageRef> {
+        Ok(ValueLineageRef {
+            lineage_digest: parse_identity(required_str(json, "lineage_digest")?)?,
+        })
+    }
+
+    fn parse_event_artifact(json: &serde_json::Value) -> Result<events::ArtifactEvidenceRef> {
+        Ok(events::ArtifactEvidenceRef {
+            artifact_id: parse_identity(required_str(json, "artifact_id")?)?,
+            role: parse_artifact_role(required_str(json, "role")?)?,
+            schema_id: parse_identity(required_str(json, "schema_id")?)?,
+            semantic_type_id: optional_str(json, "semantic_type_id")?
+                .map(parse_identity)
+                .transpose()?,
+            content_digest: parse_identity(required_str(json, "content_digest")?)?,
+            byte_len: required_u64(json, "byte_len")?,
+            media_type: MediaType::new(required_str(json, "media_type")?)
+                .map_err(|error| StoreError::Identity(error.to_string()))?,
+        })
+    }
+
+    fn parse_skip_reason(json: &serde_json::Value) -> Result<events::SkipReason> {
+        Ok(events::SkipReason {
+            code: events::ErrorCode::new(required_str(json, "code")?)?,
+            safe_message: required_str(json, "safe_message")?.to_owned(),
+        })
+    }
+
+    fn parse_error_info(json: &serde_json::Value) -> Result<events::MfmErrorInfo> {
+        Ok(events::MfmErrorInfo {
+            code: events::ErrorCode::new(required_str(json, "code")?)?,
+            category: parse_error_category(required_str(json, "category")?)?,
+            retryable: required_bool(json, "retryable")?,
+            safe_message: required_str(json, "safe_message")?.to_owned(),
+            public_details: optional_obj(json, "public_details")?
+                .map(|details| {
+                    Ok::<events::RedactedJson, StoreError>(events::RedactedJson {
+                        content_digest: parse_identity(required_str(details, "content_digest")?)?,
+                    })
+                })
+                .transpose()?,
+            diagnostic_ref: optional_obj(json, "diagnostic_ref")?
+                .map(parse_event_artifact)
+                .transpose()?,
+        })
+    }
+
+    fn parse_run_completion_outcome(
+        json: &serde_json::Value,
+    ) -> Result<events::RunCompletionOutcome> {
+        match required_str(json, "kind")? {
+            "completed" => {
+                let evidence = required_obj(json, "public_output")?;
+                Ok(events::RunCompletionOutcome::Completed(
+                    events::PublicOutputCompletionEvidence {
+                        public_output_schema_id: parse_identity(required_str(
+                            evidence,
+                            "public_output_schema_id",
+                        )?)?,
+                        public_output_event_id: parse_identity(required_str(
+                            evidence,
+                            "public_output_event_id",
+                        )?)?,
+                    },
+                ))
+            }
+            "failed" => Ok(events::RunCompletionOutcome::Failed(parse_error_info(
+                required_obj(json, "terminal_error")?,
+            )?)),
+            "cancelled" => Ok(events::RunCompletionOutcome::Cancelled(parse_error_info(
+                required_obj(json, "terminal_error")?,
+            )?)),
+            other => Err(StoreError::Identity(format!(
+                "unknown run completion outcome {other}"
+            ))),
+        }
+    }
+
+    fn parse_retention_ref(json: &serde_json::Value) -> Result<events::RetentionRef> {
+        Ok(events::RetentionRef {
+            artifact_id: parse_identity(required_str(json, "artifact_id")?)?,
+            role: parse_artifact_role(required_str(json, "role")?)?,
+            content_digest: parse_identity(required_str(json, "content_digest")?)?,
+        })
+    }
+
+    fn parse_artifact_role(value: &str) -> Result<ArtifactRole> {
+        match value {
+            "seed_input" => Ok(ArtifactRole::SeedInput),
+            "state_output" => Ok(ArtifactRole::StateOutput),
+            "fact_response" => Ok(ArtifactRole::FactResponse),
+            "side_effect_intent" => Ok(ArtifactRole::SideEffectIntent),
+            "prepared_invocation" => Ok(ArtifactRole::PreparedInvocation),
+            "not_submitted_proof" => Ok(ArtifactRole::NotSubmittedProof),
+            "submission" => Ok(ArtifactRole::Submission),
+            "submission_unknown_evidence" => Ok(ArtifactRole::SubmissionUnknownEvidence),
+            "receipt" => Ok(ArtifactRole::Receipt),
+            "confirmation" => Ok(ArtifactRole::Confirmation),
+            "ambiguity_evidence" => Ok(ArtifactRole::AmbiguityEvidence),
+            "public_output" => Ok(ArtifactRole::PublicOutput),
+            "redacted_diagnostic" => Ok(ArtifactRole::RedactedDiagnostic),
+            "retention_manifest" => Ok(ArtifactRole::RetentionManifest),
+            other => Err(StoreError::Identity(format!(
+                "unknown artifact role {other}"
+            ))),
+        }
+    }
+
+    fn parse_capability_role(value: &str) -> Result<CapabilityRole> {
+        match value {
+            "read_external" => Ok(CapabilityRole::ReadExternal),
+            "managed_platform_write" => Ok(CapabilityRole::ManagedPlatformWrite),
+            "support" => Ok(CapabilityRole::Support),
+            "external_mutation_authority" => Ok(CapabilityRole::ExternalMutationAuthority),
+            other => Err(StoreError::Identity(format!(
+                "unknown capability role {other}"
+            ))),
+        }
+    }
+
+    fn parse_error_category(value: &str) -> Result<events::ErrorCategory> {
+        match value {
+            "planning" => Ok(events::ErrorCategory::Planning),
+            "validation" => Ok(events::ErrorCategory::Validation),
+            "capability" => Ok(events::ErrorCategory::Capability),
+            "side_effect" => Ok(events::ErrorCategory::SideEffect),
+            "runtime" => Ok(events::ErrorCategory::Runtime),
+            "storage" => Ok(events::ErrorCategory::Storage),
+            "cancelled" => Ok(events::ErrorCategory::Cancelled),
+            other => Err(StoreError::Identity(format!(
+                "unknown error category {other}"
+            ))),
+        }
+    }
+
+    fn parse_failure_phase(value: &str) -> Result<side_effect::FailurePhase> {
+        match value {
+            "before_invocation_started" => Ok(side_effect::FailurePhase::BeforeInvocationStarted),
+            "after_not_submitted_proven" => Ok(side_effect::FailurePhase::AfterNotSubmittedProven),
+            other => Err(StoreError::Identity(format!(
+                "unknown failure phase {other}"
+            ))),
+        }
+    }
+
+    fn parse_retention_reason(value: &str) -> Result<events::RetentionReason> {
+        match value {
+            "run_started" => Ok(events::RetentionReason::RunStarted),
+            "runtime_evidence" => Ok(events::RetentionReason::RuntimeEvidence),
+            "public_output" => Ok(events::RetentionReason::PublicOutput),
+            "manifest_projection" => Ok(events::RetentionReason::ManifestProjection),
+            other => Err(StoreError::Identity(format!(
+                "unknown retention reason {other}"
+            ))),
+        }
+    }
+
+    fn parse_identity<T>(value: &str) -> Result<T>
+    where
+        T: std::str::FromStr<Err = IdentityError>,
+    {
+        value.parse().map_err(StoreError::from)
+    }
+
+    fn parse_vec<T>(
+        json: &serde_json::Value,
+        field: &'static str,
+        parser: impl Fn(&serde_json::Value) -> Result<T>,
+    ) -> Result<Vec<T>> {
+        required_array(json, field)?.iter().map(parser).collect()
+    }
+
+    fn required_str<'a>(json: &'a serde_json::Value, field: &'static str) -> Result<&'a str> {
+        json.get(field)
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| StoreError::Event(format!("missing string field {field}")))
+    }
+
+    fn optional_str<'a>(
+        json: &'a serde_json::Value,
+        field: &'static str,
+    ) -> Result<Option<&'a str>> {
+        match json.get(field) {
+            Some(serde_json::Value::Null) | None => Ok(None),
+            Some(value) => value
+                .as_str()
+                .map(Some)
+                .ok_or_else(|| StoreError::Event(format!("field {field} was not a string"))),
+        }
+    }
+
+    fn required_obj<'a>(
+        json: &'a serde_json::Value,
+        field: &'static str,
+    ) -> Result<&'a serde_json::Value> {
+        let value = json
+            .get(field)
+            .ok_or_else(|| StoreError::Event(format!("missing object field {field}")))?;
+        if value.is_object() {
+            Ok(value)
+        } else {
+            Err(StoreError::Event(format!(
+                "field {field} was not an object"
+            )))
+        }
+    }
+
+    fn optional_obj<'a>(
+        json: &'a serde_json::Value,
+        field: &'static str,
+    ) -> Result<Option<&'a serde_json::Value>> {
+        match json.get(field) {
+            Some(serde_json::Value::Null) | None => Ok(None),
+            Some(value) if value.is_object() => Ok(Some(value)),
+            Some(_) => Err(StoreError::Event(format!(
+                "field {field} was not an object"
+            ))),
+        }
+    }
+
+    fn required_array<'a>(
+        json: &'a serde_json::Value,
+        field: &'static str,
+    ) -> Result<&'a [serde_json::Value]> {
+        json.get(field)
+            .and_then(serde_json::Value::as_array)
+            .map(Vec::as_slice)
+            .ok_or_else(|| StoreError::Event(format!("missing array field {field}")))
+    }
+
+    fn required_u64(json: &serde_json::Value, field: &'static str) -> Result<u64> {
+        json.get(field)
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| StoreError::Event(format!("missing u64 field {field}")))
+    }
+
+    fn required_u32(json: &serde_json::Value, field: &'static str) -> Result<u32> {
+        required_u64(json, field)?
+            .try_into()
+            .map_err(|_| StoreError::Event(format!("{field} overflowed u32")))
+    }
+
+    fn required_bool(json: &serde_json::Value, field: &'static str) -> Result<bool> {
+        json.get(field)
+            .and_then(serde_json::Value::as_bool)
+            .ok_or_else(|| StoreError::Event(format!("missing bool field {field}")))
+    }
+
     fn preconditions_json(preconditions: &CommitPreconditions) -> serde_json::Value {
         let mut absent = preconditions
             .required_absent_logical_keys
@@ -3289,7 +4620,7 @@ pub mod v1 {
             "capabilities": descriptor.capabilities.iter().map(|capability| {
                 serde_json::json!({
                     "kind": capability.kind.as_str(),
-                    "name": capability.name,
+                    "name": capability.name.as_str(),
                     "role": capability.role.as_str(),
                     "version": capability.version.as_str(),
                 })

@@ -6,9 +6,9 @@ use mfm_ids::{
 };
 use mfm_spec::v1::{CanonicalizerIdentity, MediaType, ValueLineageRef};
 use mfm_store::v1::{
-    ArtifactEvidenceRef, CellTerminalProjection, CommitKey, CommitOutcome, CommitPreconditions,
-    InMemoryTypedRunStore, ProjectionSnapshot, RequiredRunState, StoreError, StreamSeq,
-    TypedCommitRequest, TypedProjectionRead, TypedRunEventStore,
+    build_committed_batch, ArtifactEvidenceRef, CellTerminalProjection, CommitKey, CommitOutcome,
+    CommitPreconditions, InMemoryTypedRunStore, ProjectionSnapshot, RequiredRunState, StoreError,
+    StreamSeq, TypedCommitRequest, TypedProjectionRead, TypedRunEventStore,
 };
 
 const SPEC_MEDIA_TYPE: &str = "application/vnd.mfm.typed-execution-spec+json;version=1";
@@ -262,6 +262,38 @@ fn side_effect_prepared(claim_generation: u32, token: &str) -> KernelEventPayloa
     })
 }
 
+fn fact_recorded(artifact_id: ArtifactId, digest: ContentDigest) -> KernelEventPayload {
+    KernelEventPayload::FactRecorded(events::FactRecorded {
+        spec_hash: spec_hash(1),
+        node_id: node_id(90),
+        attempt_id: attempt_id(91),
+        capability_kind: capability_kind(92),
+        capability_version: CapabilityVersion::new("mfm.test.fact.v1").expect("capability version"),
+        adapter_kind: adapter_kind(93),
+        adapter_version: AdapterVersion::new("mfm.test.adapter.v1").expect("adapter version"),
+        request_schema_id: schema_id("mfm.test.fact_request", 94),
+        request_hash: content_digest(95),
+        response_schema_id: schema_id("mfm.test.fact_response", 96),
+        response_hash: digest,
+        fact_key: events::FactKey::new("fact-key-1").expect("fact key"),
+        artifact_id,
+    })
+}
+
+fn fact_artifact_ref(artifact_id: ArtifactId, digest: ContentDigest) -> ArtifactEvidenceRef {
+    ArtifactEvidenceRef {
+        artifact_id,
+        digest,
+        byte_len: 64,
+        media_type: media_type("application/json"),
+        schema_id: Some(schema_id("mfm.test.fact_response", 96)),
+        semantic_type_id: None,
+        producer_node_id: Some(node_id(90)),
+        producer_seed_id: None::<SeedId>,
+        artifact_role: ArtifactRole::FactResponse,
+    }
+}
+
 fn run_start_request(run_id: RunId, commit_key: &str) -> TypedCommitRequest {
     TypedCommitRequest {
         run_id: run_id.clone(),
@@ -353,6 +385,37 @@ fn store_owns_envelope_sequence_ordinal_and_event_id() {
     assert_eq!(second_event.seq(), StreamSeq::new(2).unwrap());
     assert_eq!(second_event.ordinal().as_u32(), 0);
     assert_ne!(first_event.event_id(), second_event.event_id());
+}
+
+#[test]
+fn projection_rebuild_rejects_gapped_persisted_run_stream() {
+    let run_id = run_id(43);
+    let first = build_committed_batch(
+        &run_start_request(run_id.clone(), "run-start"),
+        StreamSeq::FIRST,
+    )
+    .expect("first batch");
+    let second = build_committed_batch(
+        &TypedCommitRequest {
+            run_id,
+            expected_next_seq: StreamSeq::new(3).expect("gapped seq"),
+            commit_key: CommitKey::new("attempt-start").expect("commit key"),
+            payloads: vec![state_attempt_started()],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions::default(),
+        },
+        StreamSeq::new(3).expect("gapped seq"),
+    )
+    .expect("second batch");
+    let mut events = first.events().to_vec();
+    events.extend(second.events().iter().cloned());
+
+    let error = ProjectionSnapshot::rebuild_from_run_stream(&events)
+        .expect_err("gapped persisted stream rejects");
+    assert!(matches!(
+        error,
+        StoreError::PersistedEventMismatch { field: "seq", .. }
+    ));
 }
 
 #[test]
@@ -667,6 +730,44 @@ fn side_effect_transition_mismatches_are_rejected() {
         })
         .expect_err("prepared token mismatch rejects");
     assert!(matches!(wrong_token, StoreError::ProjectionConflict { .. }));
+}
+
+#[test]
+fn fact_recorded_projects_reusable_fact_evidence() {
+    let run_id = run_id(95);
+    let artifact_id = artifact_id(96);
+    let artifact_digest = content_digest(97);
+    let mut store = InMemoryTypedRunStore::new();
+    store
+        .record_artifact_evidence(fact_artifact_ref(
+            artifact_id.clone(),
+            artifact_digest.clone(),
+        ))
+        .expect("record fact artifact");
+    store
+        .append_typed_run_commit(run_start_request(run_id.clone(), "run-start"))
+        .expect("append run start");
+    store
+        .append_typed_run_commit(TypedCommitRequest {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&run_id),
+            commit_key: CommitKey::new("fact-recorded").expect("commit key"),
+            payloads: vec![fact_recorded(artifact_id.clone(), artifact_digest.clone())],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions {
+                required_run_state: RequiredRunState::Started,
+                ..CommitPreconditions::default()
+            },
+        })
+        .expect("append fact");
+
+    let fact_key = events::FactKey::new("fact-key-1").expect("fact key");
+    let projection = store
+        .projection_snapshot()
+        .fact(&node_id(90), &attempt_id(91), &fact_key)
+        .expect("fact projection");
+    assert_eq!(projection.artifact_id, artifact_id);
+    assert_eq!(projection.response_hash, artifact_digest);
 }
 
 #[test]

@@ -336,7 +336,14 @@ let
   cargoNextestCiCmd = "cargo nextest run --cargo-profile ci";
   cargoNextestArchiveCiCmd = "cargo nextest archive --cargo-profile ci";
   cargoNextestWorkspaceCiCmd = "${cargoNextestCiCmd} --workspace";
-  parityNextestArgs = "-p mfm-integration-tests --features parity-tests -p mfm --features parity-tests";
+  parityNextestArgs = builtins.concatStringsSep " " [
+    "-p mfm-integration-tests"
+    "--features parity-tests"
+    "-p mfm"
+    "--features parity-tests"
+    "-p mfm-stream-store-postgres"
+    "--features parity-tests"
+  ];
   parityNextestCmd = "${cargoNextestCiCmd} ${parityNextestArgs}";
   parityNextestArchiveCmd = "${cargoNextestArchiveCiCmd} ${parityNextestArgs}";
   mkNextestSelection =

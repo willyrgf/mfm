@@ -256,12 +256,12 @@ workflow ports, and deletion or hard isolation of old dynamic semantic APIs.
 
 ### Commit 22: `storage postgres add typed run event store`
 
-- [ ] Replace or rewrite `crates/storages/stream-store-postgres` around `mfm-store`.
-- [ ] Add migrations for typed run events, commit keys, artifacts, cell projection, fact projection,
+- [x] Replace or rewrite `crates/storages/stream-store-postgres` around `mfm-store`.
+- [x] Add migrations for typed run events, commit keys, artifacts, cell projection, fact projection,
       side-effect projection, public-output projection, retention projection, and retention manifests.
-- [ ] Enforce contiguous sequence, logical-key conflicts, required artifact preconditions, and
+- [x] Enforce contiguous sequence, logical-key conflicts, required artifact preconditions, and
       projection rebuild.
-- [ ] Validation: `nix run .#test`.
+- [x] Validation: `nix run .#test`.
 
 ### Commit 23: `storage fs add typed artifact store`
 

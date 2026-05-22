@@ -3906,7 +3906,7 @@ fn state_descriptor_id(parts: StateDescriptorIdParts<'_>) -> Result<DescriptorId
             .map(|capability| {
                 serde_json::json!({
                     "kind": capability.kind.as_str(),
-                    "name": capability.name,
+                    "name": capability.name.as_str(),
                     "role": capability.role.as_str(),
                     "version": capability.version.as_str(),
                 })

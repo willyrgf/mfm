@@ -2615,7 +2615,11 @@ name = "mfm-stream-store-postgres"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "mfm-events",
+ "mfm-ids",
  "mfm-machine",
+ "mfm-spec",
+ "mfm-store",
  "serde_json",
  "tokio",
  "tokio-postgres",

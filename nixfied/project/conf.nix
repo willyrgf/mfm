@@ -320,7 +320,12 @@ rec {
       };
       migrations = {
         dir = "migrations";
-        command = "";
+        command = ''
+          for migration in migrations/*.sql; do
+            [ -e "$migration" ] || continue
+            psql -h 127.0.0.1 -U postgres -v ON_ERROR_STOP=1 -f "$migration"
+          done
+        '';
         sourceDatabase = null;
       };
       sources.local = {

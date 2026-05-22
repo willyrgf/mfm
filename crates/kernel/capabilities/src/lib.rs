@@ -161,7 +161,7 @@ pub struct CapabilityDescriptor {
     /// Capability role.
     pub role: CapabilityRole,
     /// Stable capability name.
-    pub name: &'static str,
+    pub name: String,
 }
 
 impl CapabilityDescriptor {
@@ -170,9 +170,10 @@ impl CapabilityDescriptor {
         kind: CapabilityKind,
         version: CapabilityVersion,
         role: CapabilityRole,
-        name: &'static str,
+        name: impl Into<String>,
     ) -> Result<Self> {
-        if !is_valid_descriptor_name(name) {
+        let name = name.into();
+        if !is_valid_descriptor_name(&name) {
             return Err(CapabilityError::Descriptor(format!(
                 "invalid capability descriptor name {name:?}"
             )));
