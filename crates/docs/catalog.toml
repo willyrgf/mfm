@@ -128,6 +128,15 @@ docs_policy = "docs-rs"
 umbrella_policy = "when-published"
 
 [[packages]]
+name = "mfm-store"
+workspace_path = "crates/kernel/store"
+visibility = "public"
+section = "core"
+summary = "Typed kernel commit contract and projection interfaces."
+docs_policy = "docs-rs"
+umbrella_policy = "when-published"
+
+[[packages]]
 name = "mfm-values"
 workspace_path = "crates/kernel/values"
 visibility = "public"

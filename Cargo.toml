@@ -29,6 +29,7 @@ members = [
 	"crates/kernel/program",
 	"crates/kernel/program-derive",
 	"crates/kernel/spec",
+	"crates/kernel/store",
 	"crates/kernel/test-support",
 	"crates/kernel/values",
 	"crates/evm-dcv-model",

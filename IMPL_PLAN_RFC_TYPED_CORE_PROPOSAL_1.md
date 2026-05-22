@@ -246,13 +246,13 @@ workflow ports, and deletion or hard isolation of old dynamic semantic APIs.
 
 ### Commit 21: `kernel store add typed commit contract`
 
-- [ ] Add `crates/kernel/store` and `mfm-store`.
-- [ ] Define typed commit API, commit keys, logical keys, preconditions, artifact evidence refs, and
+- [x] Add `crates/kernel/store` and `mfm-store`.
+- [x] Define typed commit API, commit keys, logical keys, preconditions, artifact evidence refs, and
       projection traits.
-- [ ] Make commit-key lookup precede stale `expected_next_seq`.
-- [ ] Ensure callers cannot forge sequence, ordinal, event id, envelopes, or projections.
-- [ ] Add storage commit contract tests.
-- [ ] Validation: `nix run .#test`.
+- [x] Make commit-key lookup precede stale `expected_next_seq`.
+- [x] Ensure callers cannot forge sequence, ordinal, event id, envelopes, or projections.
+- [x] Add storage commit contract tests.
+- [x] Validation: `nix run .#test`.
 
 ### Commit 22: `storage postgres add typed run event store`
 

@@ -56,6 +56,7 @@ The live runtime inventory still lives in the repository docs:
 | `mfm-program` | Typed state-program authoring API and lowering evidence. | pending | `crates/kernel/program` |
 | `mfm-program-derive` | Proc-macro derives for typed kernel value and program contracts. | pending | `crates/kernel/program-derive` |
 | `mfm-spec` | Certified typed execution-spec data model. | pending | `crates/kernel/spec` |
+| `mfm-store` | Typed kernel commit contract and projection interfaces. | pending | `crates/kernel/store` |
 | `mfm-values` | Typed persisted value, config, and public-output descriptors. | pending | `crates/kernel/values` |
 | `mfm_core` | Security-sensitive keystore, config, and primitives. | pending | `crates/core` |
 

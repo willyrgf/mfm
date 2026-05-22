@@ -2588,6 +2588,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "mfm-store"
+version = "0.1.0"
+dependencies = [
+ "mfm-canonical",
+ "mfm-capabilities",
+ "mfm-events",
+ "mfm-ids",
+ "mfm-spec",
+ "serde_json",
+]
+
+[[package]]
 name = "mfm-stream-store-mem"
 version = "0.1.0"
 dependencies = [

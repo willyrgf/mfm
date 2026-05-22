@@ -62,6 +62,12 @@
       "docs_rs": "https://docs.rs/mfm-events"
     },
     {
+      "name": "mfm-store",
+      "group": "typed-kernel",
+      "workspace_path": "crates/kernel/store",
+      "docs_rs": "https://docs.rs/mfm-store"
+    },
+    {
       "name": "mfm-kernel-test-support",
       "group": "typed-kernel",
       "workspace_path": "crates/kernel/test-support",
