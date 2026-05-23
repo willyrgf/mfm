@@ -1,26 +1,27 @@
 #![warn(missing_docs)]
-//! REST API wiring for MFM application services.
+//! REST API wiring for certified typed MFM runs.
 //!
-//! This crate adapts [`mfm_app`] request/response helpers onto an `axum` router while keeping
-//! domain execution inside shared app and SDK crates.
+//! This crate adapts typed [`mfm_app`] services onto an `axum` router. It is an assembly layer
+//! only: it decodes HTTP input, chooses stores, starts/resumes/replays certified typed runs, and
+//! renders typed public outputs.
 //!
 //! # Examples
 //!
 //! ```no_run
-//! use mfm_rest_api::{make_app, AppState};
+//! use mfm_rest_api::{make_app, make_default_app_state};
 //!
 //! async fn build_router() -> Result<axum::Router, mfm_rest_api::ApiError> {
-//!     let state = AppState {
-//!         bundle: mfm_rest_api::make_engine_bundle(),
-//!         streams: mfm_rest_api::make_default_stream_store().await?,
-//!         artifacts: mfm_rest_api::make_default_artifact_store().await?,
-//!     };
+//!     let state = make_default_app_state().await?;
 //!     Ok(make_app(state))
 //! }
 //! ```
-use std::sync::Arc;
+
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use axum::body::Bytes;
+use axum::extract::rejection::{JsonRejection, QueryRejection};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
@@ -28,12 +29,18 @@ use axum::Json;
 use axum::Router;
 use http::header::HeaderName;
 use mfm_app::{
-    AppError, AppServices, EngineBundle, ErrorClass, FeatureCatalog, FeatureRequest,
-    RunsStartRequest, RunsStreamQuery,
+    AppError, DriveMode, ErrorClass, TypedAsyncAppServices, TypedRunStreamResponse, TypedSeedInput,
 };
-use mfm_machine::ids::{ArtifactId, RunId};
-use mfm_machine::stores::{ArtifactStore, StreamId, StreamStore};
-use serde::Serialize;
+use mfm_artifact_store_fs::{FsTypedArtifactError, FsTypedArtifactStore};
+use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
+use mfm_events::v1::ArtifactRole;
+use mfm_ids::{ArtifactId, ContentDigest, DigestAlgorithm, RunId, SchemaId, SeedId};
+use mfm_spec::v1 as spec;
+use mfm_store::v1 as store;
+use mfm_store::v1::{AsyncStoreFuture, AsyncTypedRunEventStore, TypedRunEventStore};
+use mfm_stream_store_postgres::{PostgresTypedRunEventStore, PostgresTypedStoreError};
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::trace::TraceLayer;
@@ -67,8 +74,8 @@ fn json_ok<T: Serialize>(data: T) -> Result<Json<serde_json::Value>, ApiError> {
     Ok(Json(ok(serialize_response(data)?)))
 }
 
-#[derive(Debug, Clone)]
 /// Error payload mapped onto HTTP responses.
+#[derive(Debug, Clone)]
 pub struct ApiError {
     /// HTTP status to return.
     pub status: StatusCode,
@@ -104,7 +111,6 @@ impl From<AppError> for ApiError {
             ErrorClass::BadRequest => StatusCode::BAD_REQUEST,
             ErrorClass::NotFound => StatusCode::NOT_FOUND,
             ErrorClass::Conflict => StatusCode::CONFLICT,
-            ErrorClass::BadGateway => StatusCode::BAD_GATEWAY,
             ErrorClass::Internal => StatusCode::INTERNAL_SERVER_ERROR,
         };
 
@@ -126,72 +132,145 @@ impl axum::response::IntoResponse for ApiError {
     }
 }
 
-/// Builds the default artifact store used by the REST API.
-pub async fn make_default_artifact_store() -> Result<Arc<dyn ArtifactStore>, ApiError> {
-    mfm_app::make_default_artifact_store()
-        .await
-        .map_err(Into::into)
+/// Async in-memory typed run store for tests and single-process development tools.
+#[derive(Clone, Default)]
+pub struct InMemoryAsyncTypedRunStore {
+    inner: Arc<Mutex<store::InMemoryTypedRunStore>>,
 }
 
-/// Builds the default stream store used by the REST API.
-pub async fn make_default_stream_store() -> Result<Arc<dyn StreamStore>, ApiError> {
-    mfm_app::make_default_stream_store()
-        .await
-        .map_err(Into::into)
+impl AsyncTypedRunEventStore for InMemoryAsyncTypedRunStore {
+    type Error = store::StoreError;
+
+    fn record_artifact_evidence<'a>(
+        &'a self,
+        evidence: store::ArtifactEvidenceRef,
+    ) -> AsyncStoreFuture<'a, (), Self::Error> {
+        let result = self
+            .inner
+            .lock()
+            .expect("typed run store lock")
+            .record_artifact_evidence(evidence);
+        Box::pin(std::future::ready(result))
+    }
+
+    fn append_typed_run_commit<'a>(
+        &'a self,
+        request: store::TypedCommitRequest,
+    ) -> AsyncStoreFuture<'a, store::CommitOutcome, Self::Error> {
+        let result = self
+            .inner
+            .lock()
+            .expect("typed run store lock")
+            .append_typed_run_commit(request);
+        Box::pin(std::future::ready(result))
+    }
+
+    fn load_run_stream<'a>(
+        &'a self,
+        run_id: &'a RunId,
+    ) -> AsyncStoreFuture<'a, Vec<store::KernelEventEnvelope>, Self::Error> {
+        let result = Ok(self
+            .inner
+            .lock()
+            .expect("typed run store lock")
+            .load_run_stream(run_id));
+        Box::pin(std::future::ready(result))
+    }
+
+    fn expected_next_seq<'a>(
+        &'a self,
+        run_id: &'a RunId,
+    ) -> AsyncStoreFuture<'a, store::StreamSeq, Self::Error> {
+        let result = Ok(self
+            .inner
+            .lock()
+            .expect("typed run store lock")
+            .expected_next_seq(run_id));
+        Box::pin(std::future::ready(result))
+    }
 }
 
-/// Builds the default engine bundle used by the REST API.
-pub fn make_engine_bundle() -> EngineBundle {
-    mfm_app::make_engine_bundle()
-}
+/// Default production REST API state.
+pub type DefaultAppState = AppState<PostgresTypedRunEventStore>;
 
-#[derive(Clone)]
 /// Shared router state injected into request handlers.
-pub struct AppState {
-    /// Engine bundle used for planning and execution.
-    pub bundle: EngineBundle,
-    /// Stream store used for run queries.
-    pub streams: Arc<dyn StreamStore>,
-    /// Artifact store used for snapshot and output retrieval.
-    pub artifacts: Arc<dyn ArtifactStore>,
+#[derive(Clone)]
+pub struct AppState<S = PostgresTypedRunEventStore> {
+    /// Certified typed run-event store.
+    pub store: S,
+    /// Certified typed filesystem artifact store.
+    pub artifacts: FsTypedArtifactStore,
 }
 
 #[derive(Clone)]
-struct RouterState {
-    app: AppState,
-    catalog: Arc<FeatureCatalog>,
+struct RouterState<S> {
+    app: AppState<S>,
 }
 
-impl RouterState {
-    fn services(&self) -> AppServices {
-        AppServices::new(
-            self.app.bundle.clone(),
-            Arc::clone(&self.app.streams),
-            Arc::clone(&self.app.artifacts),
+impl<S> RouterState<S>
+where
+    S: AsyncTypedRunEventStore + Clone + Send + Sync,
+{
+    fn services(&self) -> TypedAsyncAppServices<S> {
+        mfm_app::make_async_typed_services(
+            mfm_app::production_typed_runner_registry(),
+            self.app.store.clone(),
+            self.app.artifacts.clone(),
         )
     }
 }
 
+/// Builds the default certified typed filesystem artifact store.
+pub fn make_default_typed_artifact_store() -> FsTypedArtifactStore {
+    mfm_app::make_default_typed_artifact_store()
+}
+
+/// Connects to the default certified typed run-event store.
+pub async fn make_default_typed_run_store() -> Result<PostgresTypedRunEventStore, ApiError> {
+    PostgresTypedRunEventStore::connect_env()
+        .await
+        .map_err(api_error_from_typed_store_error)
+}
+
+/// Builds default production REST API state from environment-selected stores.
+pub async fn make_default_app_state() -> Result<DefaultAppState, ApiError> {
+    Ok(AppState {
+        store: make_default_typed_run_store().await?,
+        artifacts: make_default_typed_artifact_store(),
+    })
+}
+
+/// Builds in-memory REST API state rooted at `artifact_root`.
+pub fn make_in_memory_app_state(
+    artifact_root: impl Into<PathBuf>,
+) -> AppState<InMemoryAsyncTypedRunStore> {
+    AppState {
+        store: InMemoryAsyncTypedRunStore::default(),
+        artifacts: FsTypedArtifactStore::new(artifact_root),
+    }
+}
+
 /// Builds the `axum` router for the public REST API surface.
-pub fn make_app(state: AppState) -> Router {
+pub fn make_app<S>(state: AppState<S>) -> Router
+where
+    S: AsyncTypedRunEventStore + Clone + Send + Sync + 'static,
+{
     let request_id_header = HeaderName::from_static("x-request-id");
     let make_span_header = request_id_header.clone();
-
-    let state = RouterState {
-        app: state,
-        catalog: Arc::new(FeatureCatalog::with_builtins()),
-    };
+    let state = RouterState { app: state };
 
     Router::new()
         .route("/v1/health", get(health))
-        .route("/v1/ready", get(ready))
-        .route("/v1/features", get(features_list))
-        .route("/v1/features/:feature_id/execute", post(features_execute))
-        .route("/v1/runs/start", post(runs_start))
-        .route("/v1/runs/:run_id/resume", post(runs_resume))
-        .route("/v1/runs/:run_id/status", get(runs_status))
-        .route("/v1/runs/:run_id/stream", get(runs_stream))
-        .route("/v1/artifacts/:artifact_id", get(artifacts_get))
+        .route("/v1/ready", get(ready::<S>))
+        .route("/v1/runs/start", post(runs_start::<S>))
+        .route("/v1/runs/:run_id/resume", post(runs_resume::<S>))
+        .route("/v1/runs/:run_id/status", get(runs_status::<S>))
+        .route("/v1/runs/:run_id/stream", get(runs_stream::<S>))
+        .route("/v1/runs/:run_id/replay", post(runs_replay::<S>))
+        .route(
+            "/v1/runs/:run_id/public-output/:schema_id",
+            get(runs_public_output::<S>),
+        )
         .fallback(not_found)
         .layer(PropagateRequestIdLayer::new(request_id_header.clone()))
         .layer(SetRequestIdLayer::new(
@@ -238,42 +317,42 @@ async fn health() -> Json<serde_json::Value> {
 }
 
 #[instrument(level = "debug", skip(state))]
-async fn ready(State(state): State<RouterState>) -> Result<Json<serde_json::Value>, ApiError> {
-    // Liveness probe for the stream store.
+async fn ready<S>(State(state): State<RouterState<S>>) -> Result<Json<serde_json::Value>, ApiError>
+where
+    S: AsyncTypedRunEventStore + Clone + Send + Sync,
+{
     state
         .app
-        .streams
-        .head_seq(&StreamId::run(RunId(uuid::Uuid::nil())))
+        .store
+        .expected_next_seq(&mfm_app::new_run_id())
         .await
         .map_err(|_| {
             ApiError::new(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "NotReady",
-                "stream store is not ready",
+                "typed run store is not ready",
             )
         })?;
 
-    // Usability probe for the artifact store.
-    let probe_artifact_id =
-        ArtifactId::must_new("0000000000000000000000000000000000000000000000000000000000000000");
+    let probe = readiness_artifact_probe()?;
     state
         .app
         .artifacts
-        .exists(&probe_artifact_id)
+        .has_artifact(&probe)
         .await
         .map_err(|_| {
             ApiError::new(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "NotReady",
-                "artifact store is not ready",
+                "typed artifact store is not ready",
             )
         })?;
 
     Ok(Json(ok(json!({
       "ok": true,
       "checks": {
-        "stream_store": "ready",
-        "artifact_store": "ready"
+        "typed_run_store": "ready",
+        "typed_artifact_store": "ready"
       }
     }))))
 }
@@ -282,32 +361,150 @@ async fn not_found() -> (StatusCode, Json<serde_json::Value>) {
     (StatusCode::NOT_FOUND, Json(err("not_found", "not found")))
 }
 
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum TypedRunStartKind {
+    TypedRunStartV1,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum RestDriveMode {
+    AppendOnly,
+    #[default]
+    UntilBlocked,
+}
+
+impl RestDriveMode {
+    fn into_app(self) -> DriveMode {
+        match self {
+            Self::AppendOnly => DriveMode::AppendOnly,
+            Self::UntilBlocked => DriveMode::UntilBlocked,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TypedRunStartBody {
+    kind: TypedRunStartKind,
+    spec: serde_json::Value,
+    #[serde(default)]
+    run_id: Option<String>,
+    #[serde(default)]
+    seeds: Vec<TypedSeedBody>,
+    #[serde(default = "default_framework_version")]
+    framework_version: String,
+    #[serde(default = "default_source_revision")]
+    source_revision: String,
+    #[serde(default)]
+    drive: RestDriveMode,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TypedSeedBody {
+    seed_id: String,
+    json: serde_json::Value,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TypedRunResumeBody {
+    #[serde(default)]
+    drive: RestDriveMode,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RunStreamQuery {
+    #[serde(default = "default_from_seq")]
+    from_seq: u64,
+    #[serde(default)]
+    to_seq: Option<u64>,
+}
+
+fn default_from_seq() -> u64 {
+    1
+}
+
+fn default_framework_version() -> String {
+    "mfm.rest_api.typed.v1".to_owned()
+}
+
+#[allow(clippy::disallowed_methods)]
+fn default_source_revision() -> String {
+    std::env::var("MFM_SOURCE_REVISION").unwrap_or_else(|_| "unknown".to_owned())
+}
+
 #[instrument(level = "info", skip(state, body))]
-async fn runs_start(
-    State(state): State<RouterState>,
-    body: Result<Json<RunsStartRequest>, axum::extract::rejection::JsonRejection>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+async fn runs_start<S>(
+    State(state): State<RouterState<S>>,
+    body: Result<Json<TypedRunStartBody>, JsonRejection>,
+) -> Result<Json<serde_json::Value>, ApiError>
+where
+    S: AsyncTypedRunEventStore + Clone + Send + Sync,
+{
     let Json(req) = body.map_err(|_| ApiError::invalid_json())?;
-    let data = state.services().start_run(req).await?;
+    match req.kind {
+        TypedRunStartKind::TypedRunStartV1 => {}
+    }
+    let run_id = parse_optional_run_id(req.run_id)?;
+    let spec_bytes = canonical_json_value_bytes(&req.spec, "TypedSpecInvalid")?;
+    let seed_media_type = mfm_app::json_media_type()?;
+    let mut seeds = Vec::with_capacity(req.seeds.len());
+    for seed in req.seeds {
+        seeds.push(TypedSeedInput {
+            seed_id: parse_seed_id(&seed.seed_id)?,
+            bytes: canonical_json_value_bytes(&seed.json, "TypedSeedInvalid")?,
+            media_type: seed_media_type.clone(),
+        });
+    }
+
+    let services = state.services();
+    let start = mfm_app::build_typed_run_start_request(
+        services.artifacts(),
+        &spec_bytes,
+        run_id,
+        &req.framework_version,
+        &req.source_revision,
+        seeds,
+        req.drive.into_app(),
+    )
+    .await?;
+    let data = services.start_certified_run(start).await?;
 
     json_ok(data)
 }
 
-#[instrument(level = "info", skip(state), fields(run_id = run_id.as_str()))]
-async fn runs_resume(
-    State(state): State<RouterState>,
+#[instrument(level = "info", skip(state, body), fields(run_id = run_id.as_str()))]
+async fn runs_resume<S>(
+    State(state): State<RouterState<S>>,
     Path(run_id): Path<String>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    let data = state.services().resume_run(&run_id).await?;
+    body: Bytes,
+) -> Result<Json<serde_json::Value>, ApiError>
+where
+    S: AsyncTypedRunEventStore + Clone + Send + Sync,
+{
+    let run_id = parse_run_id(&run_id)?;
+    let req: TypedRunResumeBody = parse_optional_body(body)?;
+    let data = state
+        .services()
+        .resume_stored_run(&run_id, req.drive.into_app())
+        .await?;
 
     json_ok(data)
 }
 
 #[instrument(level = "debug", skip(state), fields(run_id = run_id.as_str()))]
-async fn runs_status(
-    State(state): State<RouterState>,
+async fn runs_status<S>(
+    State(state): State<RouterState<S>>,
     Path(run_id): Path<String>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Json<serde_json::Value>, ApiError>
+where
+    S: AsyncTypedRunEventStore + Clone + Send + Sync,
+{
+    let run_id = parse_run_id(&run_id)?;
     let data = state.services().run_status(&run_id).await?;
 
     json_ok(data)
@@ -316,122 +513,256 @@ async fn runs_status(
 #[instrument(
     level = "debug",
     skip(state, query),
-    fields(run_id = run_id.as_str(), from_seq = query.from_seq, to_seq = ?query.to_seq)
+    fields(run_id = run_id.as_str())
 )]
-async fn runs_stream(
-    State(state): State<RouterState>,
+async fn runs_stream<S>(
+    State(state): State<RouterState<S>>,
     Path(run_id): Path<String>,
-    Query(query): Query<RunsStreamQuery>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    let data = state.services().run_stream(&run_id, query).await?;
+    query: Result<Query<RunStreamQuery>, QueryRejection>,
+) -> Result<Json<serde_json::Value>, ApiError>
+where
+    S: AsyncTypedRunEventStore + Clone + Send + Sync,
+{
+    let Query(query) = query.map_err(|_| {
+        ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "InvalidQuery",
+            "Failed to parse stream query",
+        )
+    })?;
+    validate_sequence_range(query.from_seq, query.to_seq)?;
+
+    let run_id = parse_run_id(&run_id)?;
+    let response = state.services().run_stream(&run_id).await?;
+    let data = TypedRunStreamResponse {
+        run_id: response.run_id,
+        head_seq: response.head_seq,
+        events: response
+            .events
+            .into_iter()
+            .filter(|event| {
+                event.seq >= query.from_seq
+                    && match query.to_seq {
+                        Some(to_seq) => event.seq <= to_seq,
+                        None => true,
+                    }
+            })
+            .collect(),
+    };
 
     json_ok(data)
 }
 
-#[instrument(level = "debug", skip(state), fields(artifact_id = artifact_id.as_str()))]
-async fn artifacts_get(
-    State(state): State<RouterState>,
-    Path(artifact_id): Path<String>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    let data = state.services().artifact_get(&artifact_id).await?;
+#[instrument(level = "info", skip(state), fields(run_id = run_id.as_str()))]
+async fn runs_replay<S>(
+    State(state): State<RouterState<S>>,
+    Path(run_id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError>
+where
+    S: AsyncTypedRunEventStore + Clone + Send + Sync,
+{
+    let run_id = parse_run_id(&run_id)?;
+    let data = state.services().verify_replay_for_run(&run_id).await?;
 
     json_ok(data)
 }
 
-#[derive(Clone, Debug, Serialize)]
-struct FeaturesListResponse {
-    features: Vec<mfm_app::FeatureDescriptor>,
+#[instrument(
+    level = "debug",
+    skip(state),
+    fields(run_id = run_id.as_str(), schema_id = schema_id.as_str())
+)]
+async fn runs_public_output<S>(
+    State(state): State<RouterState<S>>,
+    Path((run_id, schema_id)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, ApiError>
+where
+    S: AsyncTypedRunEventStore + Clone + Send + Sync,
+{
+    let run_id = parse_run_id(&run_id)?;
+    let schema_id = parse_schema_id(&schema_id)?;
+    let data = state
+        .services()
+        .typed_public_output(&run_id, &schema_id)
+        .await?;
+
+    json_ok(data)
 }
 
-#[instrument(level = "debug", skip(state))]
-async fn features_list(
-    State(state): State<RouterState>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    json_ok(FeaturesListResponse {
-        features: state.catalog.descriptors().to_vec(),
+fn parse_run_id(value: &str) -> Result<RunId, ApiError> {
+    RunId::parse(value).map_err(|_| {
+        ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "InvalidRunId",
+            "Run id must use the typed run identity format `run:<algorithm>:<digest>`",
+        )
     })
 }
 
-#[instrument(level = "info", skip(state, body), fields(feature_id = feature_id.as_str()))]
-async fn features_execute(
-    State(state): State<RouterState>,
-    Path(feature_id): Path<String>,
-    body: Result<Json<serde_json::Value>, axum::extract::rejection::JsonRejection>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    let Json(payload) = body.map_err(|_| ApiError::invalid_json())?;
+fn parse_optional_run_id(value: Option<String>) -> Result<RunId, ApiError> {
+    match value {
+        Some(value) => parse_run_id(&value),
+        None => Ok(mfm_app::new_run_id()),
+    }
+}
 
-    let result = state
-        .catalog
-        .execute(
-            &state.services(),
-            FeatureRequest {
-                feature_id,
-                payload,
-            },
+fn parse_schema_id(value: &str) -> Result<SchemaId, ApiError> {
+    SchemaId::parse(value).map_err(|_| {
+        ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "InvalidSchemaId",
+            "Schema id must use the typed schema identity format",
         )
-        .await?;
+    })
+}
 
-    json_ok(result)
+fn parse_seed_id(value: &str) -> Result<SeedId, ApiError> {
+    SeedId::parse(value).map_err(|_| {
+        ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "InvalidSeedId",
+            "Seed id must use the typed seed identity format",
+        )
+    })
+}
+
+fn parse_optional_body<T>(body: Bytes) -> Result<T, ApiError>
+where
+    T: DeserializeOwned + Default,
+{
+    if body.iter().all(|byte| byte.is_ascii_whitespace()) {
+        return Ok(T::default());
+    }
+    serde_json::from_slice(&body).map_err(|_| ApiError::invalid_json())
+}
+
+fn canonical_json_value_bytes(
+    value: &serde_json::Value,
+    error_code: &'static str,
+) -> Result<Vec<u8>, ApiError> {
+    let json = serde_json::to_string(value).map_err(|_| {
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "SerializationError",
+            "Failed to serialize request JSON",
+        )
+    })?;
+    PlainCanonicalJsonBytes::from_json_str(&json)
+        .map(|canonical| canonical.to_vec())
+        .map_err(|error| ApiError::new(StatusCode::BAD_REQUEST, error_code, error.to_string()))
+}
+
+fn validate_sequence_range(from_seq: u64, to_seq: Option<u64>) -> Result<(), ApiError> {
+    if from_seq == 0 {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "InvalidSequenceRange",
+            "from_seq must be greater than zero",
+        ));
+    }
+    if let Some(to_seq) = to_seq {
+        if to_seq < from_seq {
+            return Err(ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "InvalidSequenceRange",
+                "to_seq must be greater than or equal to from_seq",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn readiness_artifact_probe() -> Result<store::ArtifactEvidenceRef, ApiError> {
+    let bytes = b"null";
+    let digest =
+        ContentDigest::from_digest(DigestAlgorithm::Sha256JcsV1, sha256_digest_bytes(bytes));
+    Ok(store::ArtifactEvidenceRef {
+        artifact_id: ArtifactId::from_digest(DigestAlgorithm::Sha256JcsV1, *digest.digest()),
+        digest,
+        byte_len: bytes.len() as u64,
+        media_type: spec::MediaType::new("application/json").map_err(|error| {
+            ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "TypedJsonMediaTypeInvalid",
+                error.to_string(),
+            )
+        })?,
+        schema_id: None,
+        semantic_type_id: None,
+        producer_node_id: None,
+        producer_seed_id: None,
+        artifact_role: ArtifactRole::RetentionManifest,
+    })
+}
+
+fn api_error_from_typed_store_error(error: PostgresTypedStoreError) -> ApiError {
+    match error {
+        PostgresTypedStoreError::Store(error) => ApiError::new(
+            StatusCode::CONFLICT,
+            "TypedStoreRejected",
+            error.to_string(),
+        ),
+        PostgresTypedStoreError::Database(message) => ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "TypedStoreUnavailable",
+            message,
+        ),
+        PostgresTypedStoreError::DatabaseSource { context, source } => ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "TypedStoreUnavailable",
+            format!("{context}: {source}"),
+        ),
+        PostgresTypedStoreError::Corruption(message) => ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "TypedStoreCorruption",
+            message,
+        ),
+    }
+}
+
+fn api_error_from_typed_artifact_error(error: FsTypedArtifactError) -> ApiError {
+    match error {
+        FsTypedArtifactError::NotFound { .. } => ApiError::new(
+            StatusCode::NOT_FOUND,
+            "TypedArtifactNotFound",
+            error.to_string(),
+        ),
+        FsTypedArtifactError::InvalidEvidence { .. }
+        | FsTypedArtifactError::InvalidIdentity { .. }
+        | FsTypedArtifactError::EvidenceMismatch { .. } => ApiError::new(
+            StatusCode::CONFLICT,
+            "TypedArtifactRejected",
+            error.to_string(),
+        ),
+        FsTypedArtifactError::RetainedArtifactRefused { .. } => ApiError::new(
+            StatusCode::CONFLICT,
+            "TypedArtifactRetained",
+            error.to_string(),
+        ),
+        FsTypedArtifactError::Corruption { .. } => ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "TypedArtifactCorruption",
+            error.to_string(),
+        ),
+        FsTypedArtifactError::Io { .. } => ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "TypedArtifactStoreUnavailable",
+            error.to_string(),
+        ),
+    }
+}
+
+impl From<FsTypedArtifactError> for ApiError {
+    fn from(value: FsTypedArtifactError) -> Self {
+        api_error_from_typed_artifact_error(value)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use async_trait::async_trait;
-    use mfm_machine::errors::StorageError;
-    use mfm_machine::stores::{AppendBatchResult, ArtifactKind, StreamAppend, StreamRecord};
 
     struct FailingSerialize;
-
-    struct UnusedStreamStore;
-
-    #[async_trait]
-    impl StreamStore for UnusedStreamStore {
-        async fn head_seq(&self, _stream_id: &StreamId) -> Result<u64, StorageError> {
-            panic!("invalid artifact id should be rejected before stream storage")
-        }
-
-        async fn append(&self, _append: StreamAppend) -> Result<u64, StorageError> {
-            panic!("invalid artifact id should be rejected before stream storage")
-        }
-
-        async fn append_batch(
-            &self,
-            _appends: Vec<StreamAppend>,
-        ) -> Result<AppendBatchResult, StorageError> {
-            panic!("invalid artifact id should be rejected before stream storage")
-        }
-
-        async fn read_range(
-            &self,
-            _stream_id: &StreamId,
-            _from_seq: u64,
-            _to_seq: Option<u64>,
-        ) -> Result<Vec<StreamRecord>, StorageError> {
-            panic!("invalid artifact id should be rejected before stream storage")
-        }
-    }
-
-    struct UnusedArtifactStore;
-
-    #[async_trait]
-    impl ArtifactStore for UnusedArtifactStore {
-        async fn put(
-            &self,
-            _kind: ArtifactKind,
-            _bytes: Vec<u8>,
-        ) -> Result<ArtifactId, StorageError> {
-            panic!("invalid artifact id should be rejected before artifact storage")
-        }
-
-        async fn get(&self, _id: &ArtifactId) -> Result<Vec<u8>, StorageError> {
-            panic!("invalid artifact id should be rejected before artifact storage")
-        }
-
-        async fn exists(&self, _id: &ArtifactId) -> Result<bool, StorageError> {
-            panic!("invalid artifact id should be rejected before artifact storage")
-        }
-    }
 
     impl Serialize for FailingSerialize {
         fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
@@ -439,17 +770,6 @@ mod tests {
             S: serde::Serializer,
         {
             Err(serde::ser::Error::custom("boom"))
-        }
-    }
-
-    fn test_router_state() -> RouterState {
-        RouterState {
-            app: AppState {
-                bundle: make_engine_bundle(),
-                streams: Arc::new(UnusedStreamStore),
-                artifacts: Arc::new(UnusedArtifactStore),
-            },
-            catalog: Arc::new(FeatureCatalog::with_builtins()),
         }
     }
 
@@ -463,63 +783,37 @@ mod tests {
         assert_eq!(err.message, "Failed to serialize response payload");
     }
 
-    #[tokio::test]
-    async fn artifacts_get_rejects_invalid_artifact_id_with_bad_request() {
-        let state = test_router_state();
-
-        let err = artifacts_get(State(state), Path("artifact_123".to_string()))
-            .await
-            .expect_err("invalid artifact id should return an API error");
+    #[test]
+    fn invalid_run_id_is_typed_error() {
+        let err = parse_run_id("not-a-uuid").expect_err("dynamic ids are rejected");
 
         assert_eq!(err.status, StatusCode::BAD_REQUEST);
-        assert_eq!(err.code, "InvalidArtifactId");
+        assert_eq!(err.code, "InvalidRunId");
     }
 
-    #[tokio::test]
-    async fn features_execute_uses_raw_object_body_as_payload() {
-        let body = Json::<serde_json::Value>::from_bytes(br#"{"run_id":"not-a-uuid"}"#);
-
-        let err = features_execute(
-            State(test_router_state()),
-            Path("run.status".to_string()),
-            body,
+    #[test]
+    fn run_routes_do_not_import_dynamic_semantic_surfaces() {
+        let source = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs"),
         )
-        .await
-        .expect_err("raw run.status payload should reach app validation");
+        .expect("read rest source");
+        let forbidden = [
+            format!("mfm_{}", "sdk"),
+            format!("mfm_{}", "machine"),
+            format!("mfm_app_{}", "legacy"),
+            format!("Runs{}Request", "Start"),
+            format!("{}line", "Pipe"),
+            format!("Port{}", "Key"),
+            format!("Dyn{}", "Context"),
+            format!("State{}", "Graph"),
+            format!("Dependency{}", "Edge"),
+        ];
 
-        assert_eq!(err.status, StatusCode::BAD_REQUEST);
-        assert_eq!(err.code, "InvalidUuid");
-    }
-
-    #[tokio::test]
-    async fn features_execute_rejects_invalid_body() {
-        let body = Json::<serde_json::Value>::from_bytes(br#"{"artifact_id":"#);
-
-        let err = features_execute(
-            State(test_router_state()),
-            Path("artifact.get".to_string()),
-            body,
-        )
-        .await
-        .expect_err("invalid JSON body should be rejected");
-
-        assert_eq!(err.status, StatusCode::BAD_REQUEST);
-        assert_eq!(err.code, "InvalidJson");
-    }
-
-    #[tokio::test]
-    async fn features_execute_rejects_missing_body() {
-        let body = Json::<serde_json::Value>::from_bytes(b"");
-
-        let err = features_execute(
-            State(test_router_state()),
-            Path("artifact.get".to_string()),
-            body,
-        )
-        .await
-        .expect_err("missing JSON body should be rejected");
-
-        assert_eq!(err.status, StatusCode::BAD_REQUEST);
-        assert_eq!(err.code, "InvalidJson");
+        for needle in forbidden {
+            assert!(
+                !source.contains(&needle),
+                "REST typed run surface must not mention dynamic semantic surface `{needle}`"
+            );
+        }
     }
 }

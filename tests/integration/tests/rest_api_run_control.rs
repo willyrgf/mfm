@@ -1,45 +1,13 @@
 #![allow(clippy::disallowed_methods)]
 
-use std::sync::Arc;
-
-use async_trait::async_trait;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
 
-use mfm_artifact_store_fs::FsArtifactStore;
-use mfm_machine::errors::{ErrorCategory, ErrorInfo, StorageError};
-use mfm_machine::ids::{ArtifactId, ErrorCode};
-use mfm_machine::stores::{
-    AppendBatchResult, ArtifactKind, ArtifactStore, StreamAppend, StreamId, StreamRecord,
-    StreamStore,
-};
-use mfm_op_portfolio_tracker::portfolio_tracker_internal_op_ids;
-use mfm_stream_store_mem::MemStreamStore;
-
-static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-struct EnvVarGuard {
-    key: &'static str,
-    prev: Option<String>,
-}
-
-impl EnvVarGuard {
-    fn remove(key: &'static str) -> Self {
-        let prev = std::env::var(key).ok();
-        std::env::remove_var(key);
-        Self { key, prev }
-    }
-}
-
-impl Drop for EnvVarGuard {
-    fn drop(&mut self) {
-        match &self.prev {
-            Some(v) => std::env::set_var(self.key, v.as_str()),
-            None => std::env::remove_var(self.key),
-        }
-    }
-}
+const VALID_RUN_ID: &str =
+    "run:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000001";
+const VALID_SCHEMA_ID: &str =
+    "schema:mfm.test.public:1:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000002";
 
 fn json_post(uri: &str, body: serde_json::Value) -> Request<Body> {
     let s = serde_json::to_string(&body).expect("json request must serialize");
@@ -51,57 +19,12 @@ fn json_post(uri: &str, body: serde_json::Value) -> Request<Body> {
         .expect("request")
 }
 
-fn canonical_portfolio_snapshot_payload() -> serde_json::Value {
-    serde_json::json!({
-        "portfolio": {
-            "portfolio_id": "portfolio_main",
-            "quote_codes": [],
-            "networks": [
-                {
-                    "network_id": "ethereum-mainnet",
-                    "chain_id": 1,
-                    "metadata": {}
-                }
-            ],
-            "wallets": [
-                {
-                    "wallet_id": "wallet_mainnet",
-                    "address": "0x000000000000000000000000000000000000dead",
-                    "implementation": {
-                        "kind": "address_only"
-                    },
-                    "network_id": "ethereum-mainnet",
-                    "symbol_ids": [
-                        "eth.native.ethereum-mainnet"
-                    ],
-                    "metadata": {}
-                }
-            ],
-            "symbol_configs": [
-                {
-                    "symbol_id": "eth.native.ethereum-mainnet",
-                    "display_symbol": "ETH",
-                    "kind": "native_balance",
-                    "role": "native",
-                    "network_id": "ethereum-mainnet",
-                    "protocol": null,
-                    "balance_reader": {
-                        "kind": "native_balance"
-                    },
-                    "valuation": {
-                        "quotes": []
-                    },
-                    "decimals": 18,
-                    "underlying_symbol_id": null,
-                    "metadata": {}
-                }
-            ],
-            "metadata": {}
-        },
-        "valuation_source_registry": {
-            "sources": []
-        }
-    })
+fn empty_post(uri: &str) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(uri)
+        .body(Body::empty())
+        .expect("request")
 }
 
 async fn response_json(resp: axum::response::Response) -> serde_json::Value {
@@ -111,96 +34,16 @@ async fn response_json(resp: axum::response::Response) -> serde_json::Value {
     serde_json::from_slice(&bytes).expect("json response")
 }
 
-fn storage_other(code: &str, message: &str) -> StorageError {
-    StorageError::Other(ErrorInfo {
-        code: ErrorCode::must_new(code),
-        category: ErrorCategory::Storage,
-        retryable: false,
-        message: message.to_string(),
-        details: None,
-    })
-}
-
-struct FailingStreamStore;
-
-#[async_trait]
-impl StreamStore for FailingStreamStore {
-    async fn head_seq(&self, _stream_id: &StreamId) -> Result<u64, StorageError> {
-        Err(storage_other(
-            "stream_store_unavailable",
-            "stream store unavailable",
-        ))
-    }
-
-    async fn append(&self, _append: StreamAppend) -> Result<u64, StorageError> {
-        Err(storage_other(
-            "stream_store_unavailable",
-            "stream store unavailable",
-        ))
-    }
-
-    async fn append_batch(
-        &self,
-        _appends: Vec<StreamAppend>,
-    ) -> Result<AppendBatchResult, StorageError> {
-        Err(storage_other(
-            "stream_store_unavailable",
-            "stream store unavailable",
-        ))
-    }
-
-    async fn read_range(
-        &self,
-        _stream_id: &StreamId,
-        _from_seq: u64,
-        _to_seq: Option<u64>,
-    ) -> Result<Vec<StreamRecord>, StorageError> {
-        Err(storage_other(
-            "stream_store_unavailable",
-            "stream store unavailable",
-        ))
-    }
-}
-
-struct FailingArtifactStore;
-
-#[async_trait]
-impl ArtifactStore for FailingArtifactStore {
-    async fn put(&self, _kind: ArtifactKind, _bytes: Vec<u8>) -> Result<ArtifactId, StorageError> {
-        Err(storage_other(
-            "artifact_store_unavailable",
-            "artifact store unavailable",
-        ))
-    }
-
-    async fn get(&self, _id: &ArtifactId) -> Result<Vec<u8>, StorageError> {
-        Err(storage_other(
-            "artifact_store_unavailable",
-            "artifact store unavailable",
-        ))
-    }
-
-    async fn exists(&self, _id: &ArtifactId) -> Result<bool, StorageError> {
-        Err(storage_other(
-            "artifact_store_unavailable",
-            "artifact store unavailable",
-        ))
-    }
+fn test_app() -> axum::Router {
+    let root = std::env::temp_dir().join(format!("mfm-rest-api-test-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).expect("artifact root");
+    let state = mfm_rest_api::make_in_memory_app_state(root);
+    mfm_rest_api::make_app(state)
 }
 
 #[tokio::test]
 async fn health_endpoint_reports_liveness() {
-    let streams: Arc<dyn StreamStore> = Arc::new(MemStreamStore::new());
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let artifacts: Arc<dyn ArtifactStore> =
-        Arc::new(FsArtifactStore::new(tmp.path().to_path_buf()));
-
-    let bundle = mfm_rest_api::make_engine_bundle();
-    let app = mfm_rest_api::make_app(mfm_rest_api::AppState {
-        bundle,
-        streams,
-        artifacts,
-    });
+    let app = test_app();
 
     let resp = app
         .oneshot(
@@ -220,18 +63,8 @@ async fn health_endpoint_reports_liveness() {
 }
 
 #[tokio::test]
-async fn ready_endpoint_reports_readiness_when_stores_are_usable() {
-    let streams: Arc<dyn StreamStore> = Arc::new(MemStreamStore::new());
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let artifacts: Arc<dyn ArtifactStore> =
-        Arc::new(FsArtifactStore::new(tmp.path().to_path_buf()));
-
-    let bundle = mfm_rest_api::make_engine_bundle();
-    let app = mfm_rest_api::make_app(mfm_rest_api::AppState {
-        bundle,
-        streams,
-        artifacts,
-    });
+async fn ready_endpoint_reports_typed_store_readiness() {
+    let app = test_app();
 
     let resp = app
         .oneshot(
@@ -248,313 +81,43 @@ async fn ready_endpoint_reports_readiness_when_stores_are_usable() {
     let v = response_json(resp).await;
     assert_eq!(v["status"], "success");
     assert_eq!(v["data"]["ok"], true);
-    assert_eq!(v["data"]["checks"]["stream_store"], "ready");
-    assert_eq!(v["data"]["checks"]["artifact_store"], "ready");
+    assert_eq!(v["data"]["checks"]["typed_run_store"], "ready");
+    assert_eq!(v["data"]["checks"]["typed_artifact_store"], "ready");
 }
 
 #[tokio::test]
-async fn ready_endpoint_returns_503_when_stream_store_is_unavailable() {
-    let streams: Arc<dyn StreamStore> = Arc::new(FailingStreamStore);
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let artifacts: Arc<dyn ArtifactStore> =
-        Arc::new(FsArtifactStore::new(tmp.path().to_path_buf()));
+async fn removed_dynamic_feature_and_artifact_routes_are_not_found() {
+    let app = test_app();
 
-    let bundle = mfm_rest_api::make_engine_bundle();
-    let app = mfm_rest_api::make_app(mfm_rest_api::AppState {
-        bundle,
-        streams,
-        artifacts,
-    });
-
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/v1/ready")
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("response");
-
-    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
-    let v = response_json(resp).await;
-    assert_eq!(v["status"], "error");
-    assert_eq!(v["error"]["code"], "NotReady");
-    assert_eq!(v["error"]["message"], "stream store is not ready");
-}
-
-#[tokio::test]
-async fn ready_endpoint_returns_503_when_artifact_store_is_unavailable() {
-    let streams: Arc<dyn StreamStore> = Arc::new(MemStreamStore::new());
-    let artifacts: Arc<dyn ArtifactStore> = Arc::new(FailingArtifactStore);
-
-    let bundle = mfm_rest_api::make_engine_bundle();
-    let app = mfm_rest_api::make_app(mfm_rest_api::AppState {
-        bundle,
-        streams,
-        artifacts,
-    });
-
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/v1/ready")
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("response");
-
-    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
-    let v = response_json(resp).await;
-    assert_eq!(v["status"], "error");
-    assert_eq!(v["error"]["code"], "NotReady");
-    assert_eq!(v["error"]["message"], "artifact store is not ready");
-}
-
-#[tokio::test]
-async fn start_status_resume_happy_path() {
-    let streams: Arc<dyn StreamStore> = Arc::new(MemStreamStore::new());
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let artifacts: Arc<dyn ArtifactStore> =
-        Arc::new(FsArtifactStore::new(tmp.path().to_path_buf()));
-
-    let bundle = mfm_rest_api::make_engine_bundle();
-    let app = mfm_rest_api::make_app(mfm_rest_api::AppState {
-        bundle,
-        streams,
-        artifacts,
-    });
-
-    let start = app
-        .clone()
-        .oneshot(json_post(
-            "/v1/runs/start",
-            serde_json::json!({
-                "kind": "single_op_start_v1",
-                "op_id": "proof",
-                "op_version": "v1",
-                "op_config": {}
-            }),
-        ))
-        .await
-        .expect("start response");
-
-    assert_eq!(start.status(), StatusCode::OK);
-    let start_v = response_json(start).await;
-    assert_eq!(start_v["status"], "success");
-
-    let run_id = start_v["data"]["run_id"]
-        .as_str()
-        .expect("run_id")
-        .to_string();
-    let start_phase = start_v["data"]["phase"].as_str().expect("phase");
-    assert_eq!(start_phase, "completed");
-    let final_snapshot_id = start_v["data"]["final_snapshot_id"]
-        .as_str()
-        .expect("final_snapshot_id")
-        .to_string();
-
-    let status = app
+    let features = app
         .clone()
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri(format!("/v1/runs/{run_id}/status"))
+                .uri("/v1/features")
                 .body(Body::empty())
                 .expect("request"),
         )
         .await
-        .expect("status response");
+        .expect("features response");
+    assert_eq!(features.status(), StatusCode::NOT_FOUND);
 
-    assert_eq!(status.status(), StatusCode::OK);
-    let status_v = response_json(status).await;
-    assert_eq!(status_v["status"], "success");
-    assert_eq!(status_v["data"]["run_id"], run_id);
-    assert!(status_v["data"]["head_seq"].as_u64().expect("head_seq") > 0);
-    assert_eq!(status_v["data"]["phase"], "completed");
-    assert_eq!(status_v["data"]["final_snapshot_id"], final_snapshot_id);
-
-    let stream_resp = app
-        .clone()
+    let artifacts = app
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri(format!("/v1/runs/{run_id}/stream?from_seq=1"))
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("stream response");
-
-    assert_eq!(stream_resp.status(), StatusCode::OK);
-    let stream_v = response_json(stream_resp).await;
-    assert_eq!(stream_v["status"], "success");
-    assert_eq!(stream_v["data"]["run_id"], run_id);
-    assert!(stream_v["data"]["head_seq"].as_u64().expect("head_seq") > 0);
-    assert!(!stream_v["data"]["records"]
-        .as_array()
-        .expect("records")
-        .is_empty());
-
-    let artifact = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri(format!("/v1/artifacts/{final_snapshot_id}"))
+                .uri("/v1/artifacts/0000000000000000000000000000000000000000000000000000000000000000")
                 .body(Body::empty())
                 .expect("request"),
         )
         .await
         .expect("artifact response");
-
-    assert_eq!(artifact.status(), StatusCode::OK);
-    let artifact_v = response_json(artifact).await;
-    assert_eq!(artifact_v["status"], "success");
-    assert_eq!(artifact_v["data"]["artifact_id"], final_snapshot_id);
-    assert_eq!(artifact_v["data"]["encoding"], "json");
-    assert!(artifact_v["data"]["value"].is_object());
-
-    let resume = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri(format!("/v1/runs/{run_id}/resume"))
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("resume response");
-
-    assert_eq!(resume.status(), StatusCode::OK);
-    let resume_v = response_json(resume).await;
-    assert_eq!(resume_v["status"], "success");
-    assert_eq!(resume_v["data"]["run_id"], run_id);
-    assert_eq!(resume_v["data"]["phase"], "completed");
-    assert_eq!(resume_v["data"]["final_snapshot_id"], final_snapshot_id);
+    assert_eq!(artifacts.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
-async fn start_pipeline_payload_happy_path() {
-    let streams: Arc<dyn StreamStore> = Arc::new(MemStreamStore::new());
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let artifacts: Arc<dyn ArtifactStore> =
-        Arc::new(FsArtifactStore::new(tmp.path().to_path_buf()));
-
-    let bundle = mfm_rest_api::make_engine_bundle();
-    let app = mfm_rest_api::make_app(mfm_rest_api::AppState {
-        bundle,
-        streams,
-        artifacts,
-    });
-
-    let start = app
-        .clone()
-        .oneshot(json_post(
-            "/v1/runs/start",
-            serde_json::json!({
-                "kind": "pipeline_start_v1",
-                "pipeline": {
-                    "machine_id": "proof",
-                    "pipeline_version": "v1",
-                    "steps": [
-                        {
-                            "step_id": "main",
-                            "op_id": "proof",
-                            "op_version": "v1",
-                            "op_config": {}
-                        }
-                    ]
-                },
-                "input": {}
-            }),
-        ))
-        .await
-        .expect("start response");
-
-    assert_eq!(start.status(), StatusCode::OK);
-    let start_v = response_json(start).await;
-    assert_eq!(start_v["status"], "success");
-    assert_eq!(start_v["data"]["phase"], "completed");
-}
-
-#[tokio::test]
-async fn artifacts_not_found_is_404() {
-    let streams: Arc<dyn StreamStore> = Arc::new(MemStreamStore::new());
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let artifacts: Arc<dyn ArtifactStore> =
-        Arc::new(FsArtifactStore::new(tmp.path().to_path_buf()));
-
-    let bundle = mfm_rest_api::make_engine_bundle();
-    let app = mfm_rest_api::make_app(mfm_rest_api::AppState {
-        bundle,
-        streams,
-        artifacts,
-    });
-
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/v1/artifacts/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("response");
-
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-    let v = response_json(resp).await;
-    assert_eq!(v["status"], "error");
-}
-
-#[tokio::test]
-async fn status_invalid_uuid_is_stable_error() {
-    let streams: Arc<dyn StreamStore> = Arc::new(MemStreamStore::new());
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let artifacts: Arc<dyn ArtifactStore> =
-        Arc::new(FsArtifactStore::new(tmp.path().to_path_buf()));
-
-    let bundle = mfm_rest_api::make_engine_bundle();
-    let app = mfm_rest_api::make_app(mfm_rest_api::AppState {
-        bundle,
-        streams,
-        artifacts,
-    });
-
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/v1/runs/not-a-uuid/status")
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("response");
-
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-    let v = response_json(resp).await;
-    assert_eq!(v["status"], "error");
-    assert_eq!(v["error"]["code"], "InvalidUuid");
-}
-
-#[tokio::test]
-async fn start_invalid_json_is_stable_error() {
-    let streams: Arc<dyn StreamStore> = Arc::new(MemStreamStore::new());
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let artifacts: Arc<dyn ArtifactStore> =
-        Arc::new(FsArtifactStore::new(tmp.path().to_path_buf()));
-
-    let bundle = mfm_rest_api::make_engine_bundle();
-    let app = mfm_rest_api::make_app(mfm_rest_api::AppState {
-        bundle,
-        streams,
-        artifacts,
-    });
+async fn start_rejects_invalid_json_with_stable_envelope() {
+    let app = test_app();
 
     let resp = app
         .oneshot(
@@ -575,102 +138,12 @@ async fn start_invalid_json_is_stable_error() {
 }
 
 #[tokio::test]
-async fn features_list_exposes_builtin_catalog() {
-    let streams: Arc<dyn StreamStore> = Arc::new(MemStreamStore::new());
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let artifacts: Arc<dyn ArtifactStore> =
-        Arc::new(FsArtifactStore::new(tmp.path().to_path_buf()));
-
-    let bundle = mfm_rest_api::make_engine_bundle();
-    let app = mfm_rest_api::make_app(mfm_rest_api::AppState {
-        bundle,
-        streams,
-        artifacts,
-    });
-
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/v1/features")
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("response");
-
-    assert_eq!(resp.status(), StatusCode::OK);
-    let v = response_json(resp).await;
-    assert_eq!(v["status"], "success");
-
-    let features = v["data"]["features"].as_array().expect("feature list");
-    assert!(features.iter().any(|f| f["id"] == "run.start"));
-    assert!(features.iter().any(|f| f["id"] == "run.resume"));
-    assert!(features.iter().any(|f| f["id"] == "run.status"));
-    assert!(features.iter().any(|f| f["id"] == "run.stream"));
-    assert!(features.iter().any(|f| f["id"] == "artifact.get"));
-    assert!(features
-        .iter()
-        .any(|f| f["id"] == "pipeline.deploy_configure_validate.start"));
-    assert!(features.iter().any(|f| f["id"] == "portfolio.config.build"));
-    assert!(features.iter().any(|f| f["id"] == "portfolio.snapshot"));
-}
-
-#[tokio::test]
-async fn feature_execute_portfolio_config_build_returns_built_config_and_report() {
-    let streams: Arc<dyn StreamStore> = Arc::new(MemStreamStore::new());
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let artifacts: Arc<dyn ArtifactStore> =
-        Arc::new(FsArtifactStore::new(tmp.path().to_path_buf()));
-
-    let bundle = mfm_rest_api::make_engine_bundle();
-    let app = mfm_rest_api::make_app(mfm_rest_api::AppState {
-        bundle,
-        streams,
-        artifacts,
-    });
+async fn start_rejects_dynamic_single_op_payloads() {
+    let app = test_app();
 
     let resp = app
         .oneshot(json_post(
-            "/v1/features/portfolio.config.build/execute",
-            canonical_portfolio_snapshot_payload(),
-        ))
-        .await
-        .expect("feature execute response");
-
-    assert_eq!(resp.status(), StatusCode::OK);
-    let v = response_json(resp).await;
-    assert_eq!(v["status"], "success");
-    assert_eq!(v["data"]["feature_id"], "portfolio.config.build");
-    assert_eq!(v["data"]["result"]["phase"], "completed");
-    assert_eq!(v["data"]["result"]["report"]["schema_version"], 1);
-    assert_eq!(
-        v["data"]["result"]["report"]["portfolio_id"],
-        "portfolio_main"
-    );
-    assert!(v["data"]["result"]["built_config"].is_object());
-    assert!(v["data"]["result"]["canonical_config_artifact_id"].is_string());
-    assert!(v["data"]["result"]["built_config_artifact_id"].is_string());
-}
-
-#[tokio::test]
-async fn feature_execute_run_start_happy_path() {
-    let streams: Arc<dyn StreamStore> = Arc::new(MemStreamStore::new());
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let artifacts: Arc<dyn ArtifactStore> =
-        Arc::new(FsArtifactStore::new(tmp.path().to_path_buf()));
-
-    let bundle = mfm_rest_api::make_engine_bundle();
-    let app = mfm_rest_api::make_app(mfm_rest_api::AppState {
-        bundle,
-        streams,
-        artifacts,
-    });
-
-    let resp = app
-        .clone()
-        .oneshot(json_post(
-            "/v1/features/run.start/execute",
+            "/v1/runs/start",
             serde_json::json!({
                 "kind": "single_op_start_v1",
                 "op_id": "proof",
@@ -679,118 +152,123 @@ async fn feature_execute_run_start_happy_path() {
             }),
         ))
         .await
-        .expect("feature execute response");
+        .expect("response");
 
-    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     let v = response_json(resp).await;
-    assert_eq!(v["status"], "success");
-    assert_eq!(v["data"]["feature_id"], "run.start");
-    assert_eq!(v["data"]["result"]["phase"], "completed");
-    assert!(v["data"]["result"]["run_id"].as_str().is_some());
+    assert_eq!(v["status"], "error");
+    assert_eq!(v["error"]["code"], "InvalidJson");
 }
 
 #[tokio::test]
-async fn feature_execute_run_start_rejects_portfolio_internal_child_ops() {
-    let streams: Arc<dyn StreamStore> = Arc::new(MemStreamStore::new());
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let artifacts: Arc<dyn ArtifactStore> =
-        Arc::new(FsArtifactStore::new(tmp.path().to_path_buf()));
-
-    let bundle = mfm_rest_api::make_engine_bundle();
-    let app = mfm_rest_api::make_app(mfm_rest_api::AppState {
-        bundle,
-        streams,
-        artifacts,
-    });
-
-    for op_id in portfolio_tracker_internal_op_ids() {
-        let resp = app
-            .clone()
-            .oneshot(json_post(
-                "/v1/features/run.start/execute",
-                serde_json::json!({
-                    "kind": "single_op_start_v1",
-                    "op_id": op_id,
-                    "op_version": "v1",
-                    "op_config": {}
-                }),
-            ))
-            .await
-            .expect("feature execute response");
-
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-        let v = response_json(resp).await;
-        assert_eq!(v["status"], "error");
-        assert_eq!(v["error"]["code"], "op_not_public");
-    }
-}
-
-#[tokio::test]
-async fn run_start_rejects_portfolio_internal_child_ops() {
-    let streams: Arc<dyn StreamStore> = Arc::new(MemStreamStore::new());
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let artifacts: Arc<dyn ArtifactStore> =
-        Arc::new(FsArtifactStore::new(tmp.path().to_path_buf()));
-
-    let bundle = mfm_rest_api::make_engine_bundle();
-    let app = mfm_rest_api::make_app(mfm_rest_api::AppState {
-        bundle,
-        streams,
-        artifacts,
-    });
-
-    for op_id in portfolio_tracker_internal_op_ids() {
-        let resp = app
-            .clone()
-            .oneshot(json_post(
-                "/v1/runs/start",
-                serde_json::json!({
-                    "kind": "single_op_start_v1",
-                    "op_id": op_id,
-                    "op_version": "v1",
-                    "op_config": {}
-                }),
-            ))
-            .await
-            .expect("start response");
-
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-        let v = response_json(resp).await;
-        assert_eq!(v["status"], "error");
-        assert_eq!(v["error"]["code"], "op_not_public");
-    }
-}
-
-// Holding `ENV_LOCK` across `.await` is intentional: we mutate process env vars
-// and need to prevent cross-test interference under concurrent test execution.
-#[allow(clippy::await_holding_lock)]
-#[tokio::test]
-async fn feature_execute_portfolio_snapshot_missing_rpc_sources_is_stable_error() {
-    let _guard = ENV_LOCK.lock().expect("env lock");
-    let _rpc_sources = EnvVarGuard::remove("MFM_EVM_RPC_SOURCES_JSON");
-
-    let streams: Arc<dyn StreamStore> = Arc::new(MemStreamStore::new());
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let artifacts: Arc<dyn ArtifactStore> =
-        Arc::new(FsArtifactStore::new(tmp.path().to_path_buf()));
-
-    let bundle = mfm_rest_api::make_engine_bundle();
-    let app = mfm_rest_api::make_app(mfm_rest_api::AppState {
-        bundle,
-        streams,
-        artifacts,
-    });
+async fn start_parses_typed_envelope_and_rejects_invalid_spec() {
+    let app = test_app();
 
     let resp = app
         .oneshot(json_post(
-            "/v1/features/portfolio.snapshot/execute",
-            canonical_portfolio_snapshot_payload(),
+            "/v1/runs/start",
+            serde_json::json!({
+                "kind": "typed_run_start_v1",
+                "run_id": VALID_RUN_ID,
+                "spec": {},
+                "drive": "append_only"
+            }),
         ))
         .await
-        .expect("feature execute response");
+        .expect("response");
 
-    assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     let v = response_json(resp).await;
     assert_eq!(v["status"], "error");
-    assert_eq!(v["error"]["code"], "rpc_control_no_sources");
+    assert_eq!(v["error"]["code"], "TypedSpecInvalid");
+}
+
+#[tokio::test]
+async fn status_invalid_run_id_is_typed_error() {
+    let app = test_app();
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/v1/runs/not-a-uuid/status")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let v = response_json(resp).await;
+    assert_eq!(v["status"], "error");
+    assert_eq!(v["error"]["code"], "InvalidRunId");
+}
+
+#[tokio::test]
+async fn absent_typed_run_status_resume_replay_and_public_output_are_not_found() {
+    let app = test_app();
+
+    let status = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v1/runs/{VALID_RUN_ID}/status"))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("status response");
+    assert_eq!(status.status(), StatusCode::NOT_FOUND);
+
+    let resume = app
+        .clone()
+        .oneshot(empty_post(&format!("/v1/runs/{VALID_RUN_ID}/resume")))
+        .await
+        .expect("resume response");
+    assert_eq!(resume.status(), StatusCode::NOT_FOUND);
+
+    let replay = app
+        .clone()
+        .oneshot(empty_post(&format!("/v1/runs/{VALID_RUN_ID}/replay")))
+        .await
+        .expect("replay response");
+    assert_eq!(replay.status(), StatusCode::NOT_FOUND);
+
+    let output = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!(
+                    "/v1/runs/{VALID_RUN_ID}/public-output/{VALID_SCHEMA_ID}"
+                ))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("public output response");
+    assert_eq!(output.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn stream_validates_sequence_range_before_reading() {
+    let app = test_app();
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!(
+                    "/v1/runs/{VALID_RUN_ID}/stream?from_seq=3&to_seq=2"
+                ))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let v = response_json(resp).await;
+    assert_eq!(v["status"], "error");
+    assert_eq!(v["error"]["code"], "InvalidSequenceRange");
 }

@@ -26,6 +26,7 @@ tempfile = "3.0"
 tracing = { workspace = true }
 
 mfm-rest-api = { path = "../../bin/rest-api" }
+mfm-app-legacy = { package = "mfm-app-legacy", path = "../../crates/app-legacy" }
 mfm-sdk = { path = "../../crates/sdk" }
 mfm-machine-test-support = { path = "../../crates/machine-test-support" }
 

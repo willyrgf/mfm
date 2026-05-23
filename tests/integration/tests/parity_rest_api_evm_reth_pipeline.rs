@@ -410,7 +410,7 @@ async fn parity_reth_pipeline_contract_from_nix() {
 
     let run_config = run_config_with_allowlist(mfm_machine::config::default_nix_flake_allowlist());
 
-    let bundle = mfm_rest_api::make_engine_bundle();
+    let bundle = mfm_app_legacy::make_engine_bundle();
     let launcher = DefaultRunLauncher;
     let run = launcher
         .start_pipeline(
@@ -586,7 +586,7 @@ async fn parity_reth_deploy_configure_validate_root_op() {
 
     let run_config = run_config_with_allowlist(mfm_machine::config::default_nix_flake_allowlist());
 
-    let bundle = mfm_rest_api::make_engine_bundle();
+    let bundle = mfm_app_legacy::make_engine_bundle();
     let launcher = DefaultRunLauncher;
     let run = launcher
         .start_pipeline(

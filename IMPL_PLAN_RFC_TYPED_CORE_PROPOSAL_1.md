@@ -366,10 +366,10 @@ workflow ports, and deletion or hard isolation of old dynamic semantic APIs.
 
 ### Commit 33: `rest api rewrite for typed runs`
 
-- [ ] Rewrite `bin/rest-api` around typed run start/resume/replay and typed public outputs.
-- [ ] Remove dynamic DAG and context-dataflow endpoints.
-- [ ] Update `bin/rest-api/README.md`.
-- [ ] Validation: `nix run .#test`.
+- [x] Rewrite `bin/rest-api` around typed run start/resume/replay and typed public outputs.
+- [x] Remove dynamic DAG and context-dataflow endpoints.
+- [x] Update `bin/rest-api/README.md`.
+- [x] Validation: `nix run .#test`.
 
 ### Commit 34: `proof port to typed contracts`
 

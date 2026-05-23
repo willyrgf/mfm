@@ -3,28 +3,15 @@
 
 use std::sync::Arc;
 
-use axum::body::Body;
-use axum::http::{Request, StatusCode};
-use tower::ServiceExt;
-
 use mfm_artifact_store_fs::FsArtifactStore;
 use mfm_integration_tests::rpc_control;
+use mfm_machine::ids::ArtifactId;
 use mfm_machine::stores::{ArtifactStore, StreamStore};
 use mfm_stream_store_mem::MemStreamStore;
 use mfm_transports_rpc_control::RpcControlBootstrapSource;
 
 const NETWORK_ID: &str = "ethereum-mainnet";
 const CONTROL_SCOPE: &str = "parity.portfolio_snapshot.eth_only";
-
-fn json_post(uri: &str, body: serde_json::Value) -> Request<Body> {
-    let s = serde_json::to_string(&body).expect("json request must serialize");
-    Request::builder()
-        .method("POST")
-        .uri(uri)
-        .header("content-type", "application/json")
-        .body(Body::from(s))
-        .expect("request")
-}
 
 fn canonical_portfolio_snapshot_payload(
     wallet_address: &str,
@@ -93,13 +80,6 @@ fn canonical_portfolio_snapshot_payload(
     })
 }
 
-async fn response_json(resp: axum::response::Response) -> serde_json::Value {
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
-        .await
-        .expect("body bytes");
-    serde_json::from_slice(&bytes).expect("json response")
-}
-
 fn find_quote_total<'a>(totals: &'a serde_json::Value, quote: &str) -> &'a serde_json::Value {
     totals
         .as_array()
@@ -166,65 +146,46 @@ async fn parity_portfolio_snapshot_feature_against_reth_eth_only() {
     // support/configuration in the node.
     let wallet_address = "0x000000000000000000000000000000000000dead";
 
-    let bundle = mfm_rest_api::make_engine_bundle();
-    let app = mfm_rest_api::make_app(mfm_rest_api::AppState {
-        bundle,
-        streams: Arc::clone(&streams),
-        artifacts: Arc::clone(&artifacts),
-    });
-
-    let resp = app
-        .clone()
-        .oneshot(json_post(
-            "/v1/features/portfolio.snapshot/execute",
-            canonical_portfolio_snapshot_payload(wallet_address, chain_id, &control_scope),
-        ))
-        .await
-        .expect("feature execute response");
-
-    assert_eq!(resp.status(), StatusCode::OK);
-
-    let v = response_json(resp).await;
-    assert_eq!(v["status"], "success");
-    assert_eq!(v["data"]["feature_id"], "portfolio.snapshot");
-    assert_eq!(v["data"]["result"]["phase"], "completed");
-    assert_eq!(
-        v["data"]["result"]["report"]["portfolio_id"],
-        "reth-eth-only"
+    let services = mfm_app_legacy::AppServices::new(
+        mfm_app_legacy::make_engine_bundle(),
+        Arc::clone(&streams),
+        Arc::clone(&artifacts),
     );
-    assert_eq!(v["data"]["result"]["report"]["error_count"], 0);
-    let report_wallet = &v["data"]["result"]["report"]["wallet_summaries"][0];
+
+    let response = services
+        .start_portfolio_snapshot(
+            serde_json::from_value(canonical_portfolio_snapshot_payload(
+                wallet_address,
+                chain_id,
+                &control_scope,
+            ))
+            .expect("portfolio snapshot request"),
+        )
+        .await
+        .expect("portfolio snapshot response");
+    assert_eq!(response.phase, "completed");
+    let report = serde_json::to_value(response.report.as_ref().expect("portfolio report"))
+        .expect("report json");
+    assert_eq!(report["portfolio_id"], "reth-eth-only");
+    assert_eq!(report["error_count"], 0);
+    let report_wallet = &report["wallet_summaries"][0];
     let report_wallet_usd = find_quote_total(&report_wallet["totals_by_quote"], "USD");
-    let report_portfolio_usd =
-        find_quote_total(&v["data"]["result"]["report"]["totals_by_quote"], "USD");
+    let report_portfolio_usd = find_quote_total(&report["totals_by_quote"], "USD");
     assert_eq!(report_wallet_usd["collateral_value_dec"], "0");
     assert_eq!(report_wallet_usd["debt_value_dec"], "0");
     assert_eq!(report_wallet_usd["staked_value_dec"], "0");
     assert_eq!(report_wallet_usd, report_portfolio_usd);
 
-    let snapshot_artifact_id = v["data"]["result"]["snapshot_artifact_id"]
-        .as_str()
-        .expect("snapshot_artifact_id")
-        .to_string();
-
-    let artifact_resp = app
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri(format!("/v1/artifacts/{snapshot_artifact_id}"))
-                .body(Body::empty())
-                .expect("artifact request"),
-        )
+    let snapshot_artifact_id = response
+        .snapshot_artifact_id
+        .as_deref()
+        .expect("snapshot_artifact_id");
+    let snapshot_bytes = artifacts
+        .get(&ArtifactId::new(snapshot_artifact_id.to_owned()).expect("artifact id"))
         .await
-        .expect("artifact get response");
-
-    assert_eq!(artifact_resp.status(), StatusCode::OK);
-    let a = response_json(artifact_resp).await;
-
-    assert_eq!(a["status"], "success");
-    assert_eq!(a["data"]["artifact_id"], snapshot_artifact_id);
-    assert_eq!(a["data"]["encoding"], "json");
-    let out = a["data"]["value"].clone();
+        .expect("snapshot artifact");
+    let out: serde_json::Value =
+        serde_json::from_slice(&snapshot_bytes).expect("snapshot artifact json");
     assert_eq!(out["portfolio_id"], "reth-eth-only");
     assert_eq!(out["network_pins"][0]["anchor"]["chain_id"], chain_id);
     assert_eq!(out["wallets"][0]["address"], wallet_address);

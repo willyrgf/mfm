@@ -5,10 +5,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::body::Body;
-use axum::http::{Request, StatusCode};
-use tower::ServiceExt;
-
 use mfm_integration_tests::artifact_stores;
 use mfm_integration_tests::rpc_control;
 use mfm_machine::config::{
@@ -19,7 +15,7 @@ use mfm_machine::context::DynContext;
 use mfm_machine::engine::{RunPhase, Stores};
 use mfm_machine::errors::ContextError;
 use mfm_machine::events::{event_envelopes_from_stream_records, Event, KernelEvent};
-use mfm_machine::ids::{ContextKey, OpId, RunId};
+use mfm_machine::ids::{ArtifactId, ContextKey, OpId, RunId};
 use mfm_machine::stores::{ArtifactStore, StreamId, StreamStore};
 use mfm_sdk::ids::{MachineId, StepId};
 use mfm_sdk::launcher::{LaunchPipeline, RunLauncher};
@@ -90,16 +86,6 @@ fn required_snapshot_value<'a>(
             .unwrap_or_default();
         panic!("missing snapshot key `{key}`; keys={keys:?}");
     })
-}
-
-fn json_post(uri: &str, body: serde_json::Value) -> Request<Body> {
-    let s = serde_json::to_string(&body).expect("json request must serialize");
-    Request::builder()
-        .method("POST")
-        .uri(uri)
-        .header("content-type", "application/json")
-        .body(Body::from(s))
-        .expect("request")
 }
 
 fn canonical_mock_erc20_snapshot_payload(
@@ -196,13 +182,6 @@ fn canonical_mock_erc20_snapshot_payload(
             "sources": []
         }
     })
-}
-
-async fn response_json(resp: axum::response::Response) -> serde_json::Value {
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
-        .await
-        .expect("body bytes");
-    serde_json::from_slice(&bytes).expect("json response")
 }
 
 fn find_quote_total<'a>(totals: &'a serde_json::Value, quote: &str) -> &'a serde_json::Value {
@@ -499,7 +478,7 @@ async fn parity_portfolio_tracker_snapshot_with_mock_erc20_mint() {
     };
 
     let run_config = run_config_with_allowlist(mfm_machine::config::default_nix_flake_allowlist());
-    let bundle = mfm_rest_api::make_engine_bundle();
+    let bundle = mfm_app_legacy::make_engine_bundle();
     let launcher = DefaultRunLauncher;
     let setup_run = launcher
         .start_pipeline(
@@ -548,41 +527,30 @@ async fn parity_portfolio_tracker_snapshot_with_mock_erc20_mint() {
             .expect("contract address");
     let token_address_norm = normalize_address_lower(token_address);
 
-    // 2) Run `portfolio.snapshot` feature end-to-end (REST feature execution path).
-    let app = mfm_rest_api::make_app(mfm_rest_api::AppState {
-        bundle,
-        streams: Arc::clone(&streams),
-        artifacts: Arc::clone(&artifacts),
-    });
-
-    let resp = app
-        .clone()
-        .oneshot(json_post(
-            "/v1/features/portfolio.snapshot/execute",
-            canonical_mock_erc20_snapshot_payload(
+    // 2) Run the legacy portfolio snapshot directly; dynamic REST feature execution is removed.
+    let services =
+        mfm_app_legacy::AppServices::new(bundle, Arc::clone(&streams), Arc::clone(&artifacts));
+    let response = services
+        .start_portfolio_snapshot(
+            serde_json::from_value(canonical_mock_erc20_snapshot_payload(
                 &from_norm,
                 chain_id,
                 &token_address_norm,
                 &control_scope,
-            ),
-        ))
+            ))
+            .expect("portfolio snapshot request"),
+        )
         .await
-        .expect("feature execute response");
+        .expect("portfolio snapshot response");
 
-    assert_eq!(resp.status(), StatusCode::OK);
-    let v = response_json(resp).await;
-    assert_eq!(v["status"], "success");
-    assert_eq!(v["data"]["feature_id"], "portfolio.snapshot");
-    assert_eq!(v["data"]["result"]["phase"], "completed");
-    assert_eq!(
-        v["data"]["result"]["report"]["portfolio_id"],
-        "reth-mock-erc20"
-    );
-    assert_eq!(v["data"]["result"]["report"]["error_count"], 0);
-    let report_wallet = &v["data"]["result"]["report"]["wallet_summaries"][0];
+    assert_eq!(response.phase, "completed");
+    let report = serde_json::to_value(response.report.as_ref().expect("portfolio report"))
+        .expect("report json");
+    assert_eq!(report["portfolio_id"], "reth-mock-erc20");
+    assert_eq!(report["error_count"], 0);
+    let report_wallet = &report["wallet_summaries"][0];
     let report_wallet_usd = find_quote_total(&report_wallet["totals_by_quote"], "USD");
-    let report_portfolio_usd =
-        find_quote_total(&v["data"]["result"]["report"]["totals_by_quote"], "USD");
+    let report_portfolio_usd = find_quote_total(&report["totals_by_quote"], "USD");
     assert_eq!(report_wallet_usd, report_portfolio_usd);
     assert_eq!(report_wallet_usd["collateral_value_dec"], "0");
     assert_eq!(report_wallet_usd["debt_value_dec"], "0");
@@ -592,33 +560,16 @@ async fn parity_portfolio_tracker_snapshot_with_mock_erc20_mint() {
         report_wallet_usd["net_value_dec"]
     );
 
-    let snapshot_artifact_id = v["data"]["result"]["snapshot_artifact_id"]
-        .as_str()
-        .expect("snapshot_artifact_id")
-        .to_string();
-
-    let artifact_resp = app
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri(format!("/v1/artifacts/{snapshot_artifact_id}"))
-                .body(Body::empty())
-                .expect("artifact request"),
-        )
+    let snapshot_artifact_id = response
+        .snapshot_artifact_id
+        .as_deref()
+        .expect("snapshot_artifact_id");
+    let snapshot_bytes = artifacts
+        .get(&ArtifactId::new(snapshot_artifact_id.to_owned()).expect("artifact id"))
         .await
-        .expect("artifact get response");
-
-    assert_eq!(artifact_resp.status(), StatusCode::OK);
-    let a = response_json(artifact_resp).await;
-
-    assert_eq!(a["status"], "success");
-    assert_eq!(a["data"]["artifact_id"], snapshot_artifact_id);
-    assert_eq!(a["data"]["encoding"], "json");
-
-    let out = a
-        .get("data")
-        .and_then(|v| v.get("value"))
-        .expect("output value");
+        .expect("snapshot artifact");
+    let out: serde_json::Value =
+        serde_json::from_slice(&snapshot_bytes).expect("snapshot artifact json");
 
     assert_eq!(
         out.get("portfolio_id").and_then(|v| v.as_str()),

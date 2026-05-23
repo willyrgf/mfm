@@ -1,11 +1,16 @@
 # MFM REST API Documentation
 
-Experimental REST API (Axum) for starting/resuming runs and inspecting run stream records/artifacts.
+Experimental REST API (Axum) for certified typed runs.
+
+The REST API is a typed assembly surface only. It can start, resume, inspect, replay, and render
+certified typed runs through `mfm-app`, `mfm-runtime`, `mfm-store`, and typed artifact storage. It
+does not accept old dynamic DAGs, `PlannedOp`, context snapshots, generic feature execution, or
+legacy artifact ids as semantic run authority.
 
 ## Running (Nixfied)
 
 ```bash
-# Local dev workflow (starts Postgres + MinIO + REST API)
+# Local dev workflow (starts Postgres + REST API)
 nix run .#dev
 
 # Run the server only (requires DATABASE_URL)
@@ -17,23 +22,9 @@ nix run .#mfm_rest_api
 Environment variables:
 
 - `MFM_REST_API_ADDR`: bind address (default: `127.0.0.1:3001`)
-- `DATABASE_URL`: Postgres URL for the stream store (required)
-- `MFM_ARTIFACT_BACKEND`: `fs` (default) or `s3`
-- `MFM_ARTIFACT_ROOT`: artifact root dir when using `fs` (default: `~/.mfm/run_artifacts`)
-- `MFM_S3_ENSURE_BUCKET`: if set (any value), ensure the S3 bucket exists on startup
-- `MFM_EVM_RPC_SOURCES_JSON`: optional JSON array of bootstrap source objects for the canonical
-  `rpc.control` source catalog.
-  Example:
-  ```json
-  [
-    {"id":"reth_local","network_id":"ethereum-mainnet","rpc_url":"http://127.0.0.1:8545","kind":"local"},
-    {"id":"drpc_public","network_id":"ethereum-mainnet","rpc_url":"https://eth.drpc.org","kind":"remote_public"}
-  ]
-  ```
-- `MFM_EVM_RPC_PREFERRED_ORDER`: optional comma-separated source IDs used as bootstrap preference.
-- `MFM_EVM_RPC_REQUIRE_GET_PROOF_IDS`: optional comma-separated source IDs that must pass
-  `eth_getProof` during `rpc.control` preparation.
-- Every `MFM_EVM_RPC_SOURCES_JSON` source must declare a `network_id`.
+- `DATABASE_URL`: Postgres URL for the certified typed run-event store (required)
+- `MFM_TYPED_ARTIFACT_ROOT`: typed artifact root (default: `~/.mfm/typed_run_artifacts`)
+- `MFM_SOURCE_REVISION`: optional source revision evidence for typed run starts
 
 ## API
 
@@ -46,108 +37,90 @@ Endpoints:
 
 - `GET /v1/health`
 - `GET /v1/ready`
-- `GET /v1/features`
-- `POST /v1/features/:feature_id/execute`
 - `POST /v1/runs/start`
 - `POST /v1/runs/:run_id/resume`
 - `GET /v1/runs/:run_id/status`
 - `GET /v1/runs/:run_id/stream?from_seq=1&to_seq=<optional>`
-- `GET /v1/artifacts/:artifact_id` (artifact ids must be 64 lowercase hex characters)
-
-`rpc.control` routing notes:
-
-- Canonical EVM reads route through `namespace="rpc.control"` with `network_id`.
-- `control_scope` defaults to `shared` unless the caller explicitly isolates the request flow.
-- Canonical managed requests do not expose caller-controlled source pinning.
-- Per-request `rpc_url` override is rejected for managed calls.
-- EVM routing runbook: [`../../docs/evm-rpc-routing.md`](../../docs/evm-rpc-routing.md)
+- `POST /v1/runs/:run_id/replay`
+- `GET /v1/runs/:run_id/public-output/:schema_id`
 
 Probe semantics:
 
 - `/v1/health`: liveness only (process is running)
-- `/v1/ready`: readiness (stream store + artifact store probes must succeed)
+- `/v1/ready`: typed run store and typed artifact store probes must succeed
 
-Start a run:
+## Start A Typed Run
 
-```bash
-curl -s "http://127.0.0.1:3001/v1/runs/start" \
-  -H "content-type: application/json" \
-  -d '{"kind":"single_op_start_v1","op_id":"proof","op_version":"v1","op_config":{}}'
-```
+`POST /v1/runs/start` accepts only a certified typed execution spec request:
 
-Generic feature execution:
-
-```bash
-curl -s "http://127.0.0.1:3001/v1/features/run.start/execute" \
-  -H "content-type: application/json" \
-  -d '{"kind":"single_op_start_v1","op_id":"proof","op_version":"v1","op_config":{}}'
-```
-
-`/v1/runs/start` and feature `run.start` require an explicit request tag. Use
-`kind: "single_op_start_v1"` with `op_id` and `op_version`, or `kind: "pipeline_start_v1"` with
-`pipeline`. Generic feature execution uses the request body itself as the feature payload; send `{}`
-for features with no inputs. Unknown top-level fields are rejected by features with typed payloads.
-
-Portfolio snapshot feature:
-
-```bash
-curl -s "http://127.0.0.1:3001/v1/features/portfolio.snapshot/execute" \
-  -H "content-type: application/json" \
-  -d '{
-    "portfolio": {
-      "...": "canonical PortfolioConfig"
-    },
-    "valuation_source_registry": {
-      "...": "canonical ValuationSourceRegistry"
+```json
+{
+  "kind": "typed_run_start_v1",
+  "spec": {
+    "...": "TypedExecutionSpec JSON"
+  },
+  "run_id": "run:sha256-jcs-v1:<optional-digest>",
+  "seeds": [
+    {
+      "seed_id": "seed:sha256-jcs-v1:<digest>",
+      "json": {
+        "...": "canonical seed value"
+      }
     }
-  }'
+  ],
+  "framework_version": "mfm.rest_api.typed.v1",
+  "source_revision": "git-or-build-id",
+  "drive": "until_blocked"
+}
 ```
 
-Successful `portfolio.snapshot` responses include the canonical `report` when the run completes.
-`report.wallet_summaries[*].totals_by_quote[*]` and `report.totals_by_quote[*]` carry the derived
-per-quote `assets_value_dec`, `collateral_value_dec`, `debt_value_dec`, `staked_value_dec`, and
-`net_value_dec` summary fields.
+Request notes:
 
-`payload.portfolio.networks[*].control_scope` is optional and defaults to `shared`. Set it when
-one portfolio flow must isolate managed `rpc.control` source state from another flow on the same
-network.
+- `kind` must be `typed_run_start_v1`.
+- `spec` is canonicalized and parsed through the typed spec checker before certification.
+- `run_id` is optional; the server generates a typed digest run id when omitted.
+- `seeds[*].json` is canonicalized and persisted as JSON seed material.
+- `drive` is `until_blocked` or `append_only`; it defaults to `until_blocked`.
+- Specs that reference unported domain descriptors fail before `RunStarted` with
+  `TypedRunnerUnavailable`.
 
-Supported public root `op_id` values for `/v1/runs/start` and feature `run.start` (current):
+## Resume, Replay, And Public Output
 
-- `proof`
-- `keystore_import`
-- `keystore_list`
-- `keystore_delete`
-- `keystore_tx_sign`
-- `evm_read`
-- `evm_contract_from_nix`
-- `evm_deploy_contract_set`
-- `evm_deploy`
-- `evm_configure`
-- `evm_validate`
-- `evm_deploy_configure_validate_config_build`
-- `evm_deploy_configure_validate_execute`
-- `evm_deploy_configure_validate`
-- `portfolio_config_build`
-- `portfolio_execute`
-- `portfolio_tracker`
-- `nix_app`
+Resume:
 
-EVM write operation configs must provide `signing_key_env`; node-managed unsigned transaction
-submission is rejected so signed transaction intents are durable before broadcast.
+```bash
+curl -s -X POST "http://127.0.0.1:3001/v1/runs/$RUN_ID/resume" \
+  -H "content-type: application/json" \
+  -d '{"drive":"append_only"}'
+```
 
-Notes:
-- `evm_read` executes through the shared `rpc.control`-backed EVM read states.
-- Planner-internal semantic ids such as `portfolio_prepare_execution_sources` and
-  `portfolio_project_report` remain registered for recursive expansion but are rejected by public
-  single-op entrypoints with `op_not_public`.
+Replay verification:
 
-There are no dedicated keystore tx endpoints. Use generic run APIs (`/v1/runs/start`,
-`/v1/runs/:run_id/resume`) with those `op_id` values.
+```bash
+curl -s -X POST "http://127.0.0.1:3001/v1/runs/$RUN_ID/replay"
+```
 
-Supported `feature_id` values (current):
+Render typed public output:
 
-- `portfolio.snapshot`
+```bash
+curl -s "http://127.0.0.1:3001/v1/runs/$RUN_ID/public-output/$SCHEMA_ID"
+```
+
+The status and stream endpoints are typed inspection views over the authoritative typed run stream.
+The public-output endpoint and append-only resume validate the stored stream against the persisted
+certified spec before returning semantic output.
+
+## Removed Dynamic Surfaces
+
+These old REST surfaces are intentionally not part of the typed API:
+
+- `GET /v1/features`
+- `POST /v1/features/:feature_id/execute`
+- `GET /v1/artifacts/:artifact_id`
+- dynamic single-op or pipeline run-start payloads
+- context snapshot reads as public output
+
+Old dynamic runs are not silently migrated into certified typed runs.
 
 Docs:
 
