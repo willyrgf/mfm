@@ -1,20 +1,26 @@
-use crate::commands::result::{CommandError, CommandOutput, CommandResult};
+use crate::commands::result::{CommandOutput, CommandResult};
 use crate::commands::CommandContext;
 use crate::presentation::output::handle_command_result;
-use crate::support::app_services::{command_error_from_app_error, make_app_services_from_args};
-use crate::support::run_stores::RunStoresArgs;
+use crate::support::typed_run::{
+    command_error_from_typed_app_error, drive_mode, make_typed_app_services, parse_typed_run_id,
+    TypedDriveArg, TypedRunStoresArgs,
+};
 use clap::Args;
-use mfm_app::RunResumeResponse;
+use mfm_app::TypedRunResponse;
 
 /// Arguments for `mfm run resume`.
 #[derive(Args)]
 pub(crate) struct ResumeArgs {
-    /// Run id (UUID)
+    /// Typed run id (`run:<algorithm>:<digest>`)
     pub run_id: String,
 
-    /// Storage configuration for the run's event and artifact backends.
+    /// Scheduler drive policy for typed resumes once certified spec loading is available.
+    #[arg(long, value_enum, default_value_t = TypedDriveArg::UntilBlocked)]
+    pub drive: TypedDriveArg,
+
+    /// Storage configuration for certified typed run events and artifacts.
     #[command(flatten)]
-    pub stores: RunStoresArgs,
+    pub stores: TypedRunStoresArgs,
 }
 
 /// Executes the resume command and terminates the process.
@@ -23,16 +29,12 @@ pub(crate) async fn execute(ctx: &CommandContext, args: &ResumeArgs) -> ! {
     handle_command_result(result, &ctx.output_format);
 }
 
-async fn execute_internal(args: &ResumeArgs) -> CommandResult<RunResumeResponse> {
-    uuid::Uuid::parse_str(&args.run_id)
-        .map_err(|_| CommandError::invalid_uuid("Invalid UUID format"))?;
-
-    let services = make_app_services_from_args(&args.stores).await?;
-
+async fn execute_internal(args: &ResumeArgs) -> CommandResult<TypedRunResponse> {
+    let run_id = parse_typed_run_id(&args.run_id)?;
+    let services = make_typed_app_services(&args.stores).await?;
     let response = services
-        .resume_run(&args.run_id)
+        .resume_stored_run(&run_id, drive_mode(args.drive))
         .await
-        .map_err(command_error_from_app_error)?;
-
+        .map_err(command_error_from_typed_app_error)?;
     Ok(CommandOutput::new(response))
 }

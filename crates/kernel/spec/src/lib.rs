@@ -26,6 +26,8 @@ pub enum SpecError {
     Identity(String),
     /// JSON serialization failed before canonicalization.
     Serialize(String),
+    /// Persisted JSON decoding failed.
+    Json(String),
     /// Canonical JSON construction failed.
     Canonical(String),
     /// Envelope hash did not match the canonical spec bytes.
@@ -47,6 +49,7 @@ impl fmt::Display for SpecError {
             }
             Self::Identity(message) => write!(f, "identity error: {message}"),
             Self::Serialize(message) => write!(f, "spec JSON serialization error: {message}"),
+            Self::Json(message) => write!(f, "spec JSON decoding error: {message}"),
             Self::Canonical(message) => write!(f, "spec canonicalization error: {message}"),
             Self::HashMismatch { expected, actual } => write!(
                 f,
@@ -61,6 +64,12 @@ impl std::error::Error for SpecError {}
 
 impl From<IdentityError> for SpecError {
     fn from(error: IdentityError) -> Self {
+        Self::Identity(error.to_string())
+    }
+}
+
+impl From<mfm_capabilities::CapabilityError> for SpecError {
+    fn from(error: mfm_capabilities::CapabilityError) -> Self {
         Self::Identity(error.to_string())
     }
 }
@@ -217,7 +226,7 @@ pub mod v1 {
         content_digest, spec_hash_from_canonical, ContentDigest, DigestAlgorithm,
         PlainCanonicalJsonBytes, Result, SpecError, SpecHash,
     };
-    use mfm_capabilities::CapabilitySetDescriptor;
+    use mfm_capabilities::{CapabilityDescriptor, CapabilityRole, CapabilitySetDescriptor};
     use mfm_ids::{
         AdapterKind, AdapterVersion, ArtifactId, CellId, DescriptorId, EffectKind, EffectVersion,
         LoweringVersion, NodeId, OperationInstanceId, OperationKind, OperationVersion, SchemaId,
@@ -397,6 +406,35 @@ pub mod v1 {
                 ));
             }
             Ok(())
+        }
+
+        /// Decodes a persisted v1 typed execution spec from canonical or non-canonical JSON.
+        ///
+        /// The returned value is reconstructed through checked typed constructors and can be
+        /// re-hashed through [`Self::spec_hash`]. Callers that load a run-start artifact must
+        /// compare the recomputed hash with the `RunStarted.spec_hash` stored in the typed stream.
+        pub fn from_json_str(input: &str) -> Result<Self> {
+            Self::validate_persisted_json_shape(input)?;
+            let input_canonical = PlainCanonicalJsonBytes::from_json_str(input)
+                .map_err(|error| SpecError::Canonical(error.to_string()))?;
+            let value: serde_json::Value =
+                serde_json::from_str(input).map_err(|error| SpecError::Json(error.to_string()))?;
+            let spec = parse_typed_execution_spec(&value)?;
+            let parsed_canonical = spec.canonical_json()?;
+            if parsed_canonical != input_canonical {
+                return Err(SpecError::Json(
+                    "persisted typed execution spec contains unknown or non-normalized fields"
+                        .to_owned(),
+                ));
+            }
+            Ok(spec)
+        }
+
+        /// Decodes a persisted v1 typed execution spec from UTF-8 JSON bytes.
+        pub fn from_json_slice(input: &[u8]) -> Result<Self> {
+            let input = std::str::from_utf8(input)
+                .map_err(|error| SpecError::Json(format!("spec JSON is not UTF-8: {error}")))?;
+            Self::from_json_str(input)
         }
 
         fn json(&self) -> serde_json::Value {
@@ -1581,6 +1619,700 @@ pub mod v1 {
         )
     }
 
+    fn parse_typed_execution_spec(value: &serde_json::Value) -> Result<TypedExecutionSpec> {
+        let object = object(value, "typed execution spec")?;
+        let spec_version = version::<SpecVersion>(required_str(object, "spec_version")?)?;
+        if spec_version.as_str() != SPEC_VERSION {
+            return Err(json_error(format!(
+                "unsupported spec_version {}",
+                spec_version.as_str()
+            )));
+        }
+        let media_type = MediaType::new(required_str(object, "media_type")?)?;
+        if media_type.as_str() != MEDIA_TYPE {
+            return Err(json_error(format!(
+                "unsupported media_type {}",
+                media_type.as_str()
+            )));
+        }
+        let canonicalization =
+            parse_string::<DigestAlgorithm>(required_str(object, "canonicalization")?)?;
+        if canonicalization != DigestAlgorithm::Sha256JcsV1 {
+            return Err(json_error(format!(
+                "unsupported canonicalization {}",
+                canonicalization.as_str()
+            )));
+        }
+        let lowering_version =
+            version::<LoweringVersion>(required_str(object, "lowering_version")?)?;
+        if lowering_version.as_str() != LOWERING_VERSION {
+            return Err(json_error(format!(
+                "unsupported lowering_version {}",
+                lowering_version.as_str()
+            )));
+        }
+
+        TypedExecutionSpec::new(TypedExecutionSpecParts {
+            authoring: parse_authoring(required(object, "authoring")?)?,
+            scopes: parse_vec(required(object, "scopes")?, parse_scope_spec)?,
+            seeds: parse_vec(required(object, "seeds")?, parse_seed_spec)?,
+            descriptor_identities: parse_vec(
+                required(object, "descriptor_identities")?,
+                parse_descriptor_identity,
+            )?,
+            config_refs: parse_vec(required(object, "config_refs")?, parse_config_ref)?,
+            nodes: parse_vec(required(object, "nodes")?, parse_node_spec)?,
+            cells: parse_vec(required(object, "cells")?, parse_cell_spec)?,
+            value_lineages: parse_vec(required(object, "value_lineages")?, parse_value_lineage)?,
+            planning_lineage: parse_vec(
+                required(object, "planning_lineage")?,
+                parse_operation_lineage_frame,
+            )?,
+            public_outputs: parse_public_output_spec(required(object, "public_outputs")?)?,
+        })
+    }
+
+    fn parse_authoring(value: &serde_json::Value) -> Result<AuthoringProvenance> {
+        let object = object(value, "authoring")?;
+        match required_str(object, "kind")? {
+            "operation_expansion" => Ok(AuthoringProvenance::OperationExpansion {
+                operation_descriptor_id: identity(required_str(
+                    object,
+                    "operation_descriptor_id",
+                )?)?,
+                config_hash: identity(required_str(object, "config_hash")?)?,
+            }),
+            "state_composition" => Ok(AuthoringProvenance::StateComposition {
+                descriptor: parse_composition_descriptor(required(object, "descriptor")?)?,
+                config_hash: identity(required_str(object, "config_hash")?)?,
+            }),
+            "mixed_composition" => Ok(AuthoringProvenance::MixedComposition {
+                descriptor: parse_composition_descriptor(required(object, "descriptor")?)?,
+                config_hash: identity(required_str(object, "config_hash")?)?,
+            }),
+            kind => Err(json_error(format!("unsupported authoring kind {kind:?}"))),
+        }
+    }
+
+    fn parse_composition_descriptor(value: &serde_json::Value) -> Result<CompositionDescriptor> {
+        let object = object(value, "composition descriptor")?;
+        Ok(CompositionDescriptor {
+            descriptor_id: identity(required_str(object, "descriptor_id")?)?,
+            name: required_str(object, "name")?.to_owned(),
+            version: required_str(object, "version")?.to_owned(),
+        })
+    }
+
+    fn parse_config_ref(value: &serde_json::Value) -> Result<ConfigRef> {
+        let object = object(value, "config ref")?;
+        Ok(ConfigRef {
+            schema_id: identity(required_str(object, "schema_id")?)?,
+            artifact_id: identity(required_str(object, "artifact_id")?)?,
+            digest: identity(required_str(object, "digest")?)?,
+            byte_len: required_u64(object, "byte_len")?,
+            media_type: MediaType::new(required_str(object, "media_type")?)?,
+        })
+    }
+
+    fn parse_scope_spec(value: &serde_json::Value) -> Result<ScopeSpec> {
+        let object = object(value, "scope")?;
+        Ok(ScopeSpec {
+            scope_id: identity(required_str(object, "scope_id")?)?,
+            parent_scope_id: optional_identity(object, "parent_scope_id")?,
+            stable_key: StableAuthorKey::new(required_str(object, "stable_key")?)?,
+            planning_lineage: parse_planning_lineage(required(object, "planning_lineage")?)?,
+        })
+    }
+
+    fn parse_seed_spec(value: &serde_json::Value) -> Result<SeedSpec> {
+        let object = object(value, "seed")?;
+        Ok(SeedSpec {
+            seed_id: identity(required_str(object, "seed_id")?)?,
+            seed_key: StableAuthorKey::new(required_str(object, "seed_key")?)?,
+            cell_id: identity(required_str(object, "cell_id")?)?,
+            scope_id: identity(required_str(object, "scope_id")?)?,
+            semantic_type_id: identity(required_str(object, "semantic_type_id")?)?,
+            schema_id: identity(required_str(object, "schema_id")?)?,
+            required_digest: optional_identity(object, "required_digest")?,
+        })
+    }
+
+    fn parse_descriptor_identity(value: &serde_json::Value) -> Result<DescriptorIdentity> {
+        let object = object(value, "descriptor identity")?;
+        match required_str(object, "descriptor_family")? {
+            "state" => Ok(DescriptorIdentity::State(Box::new(
+                parse_state_descriptor_identity(value)?,
+            ))),
+            "operation" => Ok(DescriptorIdentity::Operation(Box::new(
+                parse_operation_descriptor_identity(value)?,
+            ))),
+            "renderer" => Ok(DescriptorIdentity::Renderer(Box::new(
+                parse_renderer_descriptor_identity(value)?,
+            ))),
+            family => Err(json_error(format!(
+                "unsupported descriptor_family {family:?}"
+            ))),
+        }
+    }
+
+    fn parse_state_descriptor_identity(
+        value: &serde_json::Value,
+    ) -> Result<StateDescriptorIdentity> {
+        let object = object(value, "state descriptor identity")?;
+        Ok(StateDescriptorIdentity {
+            descriptor_id: identity(required_str(object, "descriptor_id")?)?,
+            name: required_str(object, "name")?.to_owned(),
+            state_kind: identity(required_str(object, "state_kind")?)?,
+            state_version: version(required_str(object, "state_version")?)?,
+            config_schema_id: identity(required_str(object, "config_schema_id")?)?,
+            input_schema_id: identity(required_str(object, "input_schema_id")?)?,
+            output_schema_id: identity(required_str(object, "output_schema_id")?)?,
+            output_semantic_type_id: identity(required_str(object, "output_semantic_type_id")?)?,
+            effect_kind: identity(required_str(object, "effect_kind")?)?,
+            effect_class: required_str(object, "effect_class")?.to_owned(),
+            effect_name: required_str(object, "effect_name")?.to_owned(),
+            effect_version: version(required_str(object, "effect_version")?)?,
+            capabilities: parse_capability_set(required(object, "capabilities")?)?,
+            runner: required_str(object, "runner")?.to_owned(),
+            side_effect_contract_digest: optional_identity(object, "side_effect_contract_digest")?,
+        })
+    }
+
+    fn parse_operation_descriptor_identity(
+        value: &serde_json::Value,
+    ) -> Result<OperationDescriptorIdentity> {
+        let object = object(value, "operation descriptor identity")?;
+        Ok(OperationDescriptorIdentity {
+            descriptor_id: identity(required_str(object, "descriptor_id")?)?,
+            name: required_str(object, "name")?.to_owned(),
+            operation_kind: identity(required_str(object, "operation_kind")?)?,
+            operation_version: version(required_str(object, "operation_version")?)?,
+            config_schema_id: identity(required_str(object, "config_schema_id")?)?,
+            input_schema_id: identity(required_str(object, "input_schema_id")?)?,
+            output_schema_id: identity(required_str(object, "output_schema_id")?)?,
+            expansion_abi: required_str(object, "expansion_abi")?.to_owned(),
+        })
+    }
+
+    fn parse_renderer_descriptor_identity(
+        value: &serde_json::Value,
+    ) -> Result<RendererDescriptorIdentity> {
+        let object = object(value, "renderer descriptor identity")?;
+        Ok(RendererDescriptorIdentity {
+            descriptor_id: identity(required_str(object, "descriptor_id")?)?,
+            renderer_kind: RendererKind::new(required_str(object, "renderer_kind")?)?,
+            renderer_version: RendererVersion::new(required_str(object, "renderer_version")?)?,
+            public_schema_id: identity(required_str(object, "public_schema_id")?)?,
+            canonicalizer_identity: CanonicalizerIdentity::new(required_str(
+                object,
+                "canonicalizer_identity",
+            )?)?,
+        })
+    }
+
+    fn parse_node_spec(value: &serde_json::Value) -> Result<NodeSpec> {
+        let object = object(value, "node")?;
+        Ok(NodeSpec {
+            node_id: identity(required_str(object, "node_id")?)?,
+            stable_key: StableAuthorKey::new(required_str(object, "stable_key")?)?,
+            scope_id: identity(required_str(object, "scope_id")?)?,
+            state_kind: identity(required_str(object, "state_kind")?)?,
+            state_version: version(required_str(object, "state_version")?)?,
+            descriptor_id: identity(required_str(object, "descriptor_id")?)?,
+            config_ref: parse_config_ref(required(object, "config_ref")?)?,
+            input_bindings: parse_input_binding_spec(required(object, "input_bindings")?)?,
+            output_cell: identity(required_str(object, "output_cell")?)?,
+            effect_kind: identity(required_str(object, "effect_kind")?)?,
+            capability_bindings: parse_capability_set(required(object, "capability_bindings")?)?,
+            adapter_bindings: parse_vec(
+                required(object, "adapter_bindings")?,
+                parse_adapter_binding,
+            )?,
+            side_effect: optional_parse(object, "side_effect", parse_side_effect_contract)?,
+            framework: optional_parse(object, "framework", parse_framework_node)?,
+            planning_lineage: parse_planning_lineage(required(object, "planning_lineage")?)?,
+            deterministic_predecessors: parse_identity_vec(required(
+                object,
+                "deterministic_predecessors",
+            )?)?,
+        })
+    }
+
+    fn parse_adapter_binding(value: &serde_json::Value) -> Result<AdapterBinding> {
+        let object = object(value, "adapter binding")?;
+        Ok(AdapterBinding {
+            adapter_kind: identity(required_str(object, "adapter_kind")?)?,
+            adapter_version: version(required_str(object, "adapter_version")?)?,
+            binding_digest: optional_identity(object, "binding_digest")?,
+        })
+    }
+
+    fn parse_side_effect_contract(value: &serde_json::Value) -> Result<SideEffectContractSpec> {
+        let object = object(value, "side-effect contract")?;
+        Ok(SideEffectContractSpec {
+            contract_digest: identity(required_str(object, "contract_digest")?)?,
+        })
+    }
+
+    fn parse_framework_node(value: &serde_json::Value) -> Result<FrameworkNodeSpec> {
+        let object = object(value, "framework node")?;
+        match required_str(object, "kind")? {
+            "bridge" => Ok(FrameworkNodeSpec::Bridge(parse_bridge_node(required(
+                object, "bridge",
+            )?)?)),
+            "public_output_render" => Ok(FrameworkNodeSpec::PublicOutputRender(
+                parse_public_output_render_node(required(object, "public_output_render")?)?,
+            )),
+            kind => Err(json_error(format!("unsupported framework kind {kind:?}"))),
+        }
+    }
+
+    fn parse_bridge_node(value: &serde_json::Value) -> Result<BridgeNodeSpec> {
+        let object = object(value, "bridge node")?;
+        Ok(BridgeNodeSpec {
+            bridge_kind: parse_bridge_kind(required_str(object, "bridge_kind")?)?,
+            source_scope_id: identity(required_str(object, "source_scope_id")?)?,
+            target_scope_id: identity(required_str(object, "target_scope_id")?)?,
+            source_cell_id: identity(required_str(object, "source_cell_id")?)?,
+            target_cell_id: identity(required_str(object, "target_cell_id")?)?,
+            semantic_type_id: identity(required_str(object, "semantic_type_id")?)?,
+            schema_id: identity(required_str(object, "schema_id")?)?,
+            policy: parse_bridge_policy(required_str(object, "policy")?)?,
+            provenance: parse_bridge_provenance(required_str(object, "provenance")?)?,
+        })
+    }
+
+    fn parse_public_output_render_node(
+        value: &serde_json::Value,
+    ) -> Result<PublicOutputRenderNodeSpec> {
+        let object = object(value, "public-output render node")?;
+        Ok(PublicOutputRenderNodeSpec {
+            public_schema_id: identity(required_str(object, "public_schema_id")?)?,
+            output_spec_digest: identity(required_str(object, "output_spec_digest")?)?,
+            renderer_descriptor: parse_renderer_descriptor_identity(required(
+                object,
+                "renderer_descriptor",
+            )?)?,
+            required_cells: parse_vec(required(object, "required_cells")?, parse_public_cell)?,
+        })
+    }
+
+    fn parse_input_binding_spec(value: &serde_json::Value) -> Result<InputBindingSpec> {
+        let object = object(value, "input binding")?;
+        Ok(InputBindingSpec {
+            input_schema_id: identity(required_str(object, "input_schema_id")?)?,
+            input_descriptor_id: identity(required_str(object, "input_descriptor_id")?)?,
+            root: parse_input_binding_node(required(object, "root")?)?,
+            digest: identity(required_str(object, "digest")?)?,
+        })
+    }
+
+    fn parse_input_binding_node(value: &serde_json::Value) -> Result<InputBindingNodeSpec> {
+        let object = object(value, "input binding node")?;
+        match required_str(object, "kind")? {
+            "unit" => Ok(InputBindingNodeSpec::Unit),
+            "cell" => Ok(InputBindingNodeSpec::Cell(Box::new(
+                parse_input_binding_cell(value)?,
+            ))),
+            "tuple" => Ok(InputBindingNodeSpec::Tuple(parse_vec(
+                required(object, "elements")?,
+                parse_input_binding_node,
+            )?)),
+            "struct" => Ok(InputBindingNodeSpec::Struct(parse_vec(
+                required(object, "fields")?,
+                parse_named_input_binding,
+            )?)),
+            "vec" => Ok(InputBindingNodeSpec::Vec {
+                elements: parse_vec(required(object, "elements")?, parse_input_binding_node)?,
+                ordering: parse_ordering(required_str(object, "ordering")?)?,
+                domain_keys: parse_vec(required(object, "domain_keys")?, parse_domain_key_ref)?,
+            }),
+            "non_empty_vec" => Ok(InputBindingNodeSpec::NonEmptyVec {
+                elements: parse_vec(required(object, "elements")?, parse_input_binding_node)?,
+                ordering: parse_ordering(required_str(object, "ordering")?)?,
+                domain_keys: parse_vec(required(object, "domain_keys")?, parse_domain_key_ref)?,
+            }),
+            kind => Err(json_error(format!(
+                "unsupported input binding kind {kind:?}"
+            ))),
+        }
+    }
+
+    fn parse_input_binding_cell(value: &serde_json::Value) -> Result<InputBindingCellSpec> {
+        let object = object(value, "input binding cell")?;
+        Ok(InputBindingCellSpec {
+            field_path: PublicFieldPath::new(required_str(object, "field_path")?)?,
+            cell_id: identity(required_str(object, "cell_id")?)?,
+            semantic_type_id: identity(required_str(object, "semantic_type_id")?)?,
+            schema_id: identity(required_str(object, "schema_id")?)?,
+            required_terminal: parse_required_terminal(required_str(object, "required_terminal")?)?,
+            value_lineage: parse_value_lineage_ref(required(object, "value_lineage")?)?,
+        })
+    }
+
+    fn parse_named_input_binding(value: &serde_json::Value) -> Result<NamedInputBindingSpec> {
+        let object = object(value, "named input binding")?;
+        Ok(NamedInputBindingSpec {
+            field_path: PublicFieldPath::new(required_str(object, "field_path")?)?,
+            node: parse_input_binding_node(required(object, "node")?)?,
+        })
+    }
+
+    fn parse_domain_key_ref(value: &serde_json::Value) -> Result<StableDomainKeyRef> {
+        let object = object(value, "stable domain key")?;
+        Ok(StableDomainKeyRef {
+            schema_id: identity(required_str(object, "schema_id")?)?,
+            content_digest: identity(required_str(object, "content_digest")?)?,
+        })
+    }
+
+    fn parse_cell_producer(value: &serde_json::Value) -> Result<CellProducer> {
+        let object = object(value, "cell producer")?;
+        match required_str(object, "kind")? {
+            "node" => Ok(CellProducer::Node(identity(required_str(
+                object, "node_id",
+            )?)?)),
+            "seed" => Ok(CellProducer::Seed(identity(required_str(
+                object, "seed_id",
+            )?)?)),
+            kind => Err(json_error(format!(
+                "unsupported cell producer kind {kind:?}"
+            ))),
+        }
+    }
+
+    fn parse_cell_spec(value: &serde_json::Value) -> Result<CellSpec> {
+        let object = object(value, "cell")?;
+        Ok(CellSpec {
+            cell_id: identity(required_str(object, "cell_id")?)?,
+            producer: parse_cell_producer(required(object, "producer")?)?,
+            scope_id: identity(required_str(object, "scope_id")?)?,
+            semantic_type_id: identity(required_str(object, "semantic_type_id")?)?,
+            schema_id: identity(required_str(object, "schema_id")?)?,
+            value_lineage: parse_value_lineage_ref(required(object, "value_lineage")?)?,
+            terminal_policy: parse_cell_terminal_policy(required_str(object, "terminal_policy")?)?,
+            storage_policy: parse_storage_policy(required_str(object, "storage_policy")?)?,
+            redaction_policy: parse_redaction_policy(required_str(object, "redaction_policy")?)?,
+        })
+    }
+
+    fn parse_value_lineage_ref(value: &serde_json::Value) -> Result<ValueLineageRef> {
+        let object = object(value, "value lineage ref")?;
+        Ok(ValueLineageRef {
+            lineage_digest: identity(required_str(object, "lineage_digest")?)?,
+        })
+    }
+
+    fn parse_value_lineage(value: &serde_json::Value) -> Result<ValueLineage> {
+        let object = object(value, "value lineage")?;
+        Ok(ValueLineage {
+            lineage_ref: parse_value_lineage_ref(required(object, "lineage_ref")?)?,
+            scope_id: identity(required_str(object, "scope_id")?)?,
+            producer: parse_cell_producer(required(object, "producer")?)?,
+            input_cells: parse_identity_vec(required(object, "input_cells")?)?,
+            config_ref_digest: optional_identity(object, "config_ref_digest")?,
+            planning_lineage: parse_planning_lineage(required(object, "planning_lineage")?)?,
+            domain_keys: parse_vec(required(object, "domain_keys")?, parse_domain_key_ref)?,
+            transform_policy: parse_transform_policy(required_str(object, "transform_policy")?)?,
+        })
+    }
+
+    fn parse_planning_lineage(value: &serde_json::Value) -> Result<PlanningLineage> {
+        let object = object(value, "planning lineage")?;
+        Ok(PlanningLineage {
+            active_operation_instances: parse_identity_vec(required(
+                object,
+                "active_operation_instances",
+            )?)?,
+            completed_operation_frames: parse_identity_vec(required(
+                object,
+                "completed_operation_frames",
+            )?)?,
+            lineage_digest: identity(required_str(object, "lineage_digest")?)?,
+        })
+    }
+
+    fn parse_operation_lineage_frame(
+        value: &serde_json::Value,
+    ) -> Result<OperationLineageFrameSpec> {
+        let object = object(value, "operation lineage frame")?;
+        Ok(OperationLineageFrameSpec {
+            operation_instance_id: identity(required_str(object, "operation_instance_id")?)?,
+            operation_key: StableAuthorKey::new(required_str(object, "operation_key")?)?,
+            scope_id: identity(required_str(object, "scope_id")?)?,
+            operation_descriptor_id: identity(required_str(object, "operation_descriptor_id")?)?,
+            config_ref_digest: identity(required_str(object, "config_ref_digest")?)?,
+            input_bindings: parse_input_binding_spec(required(object, "input_bindings")?)?,
+            input_binding_digest: identity(required_str(object, "input_binding_digest")?)?,
+            parent_planning_lineage: parse_planning_lineage(required(
+                object,
+                "parent_planning_lineage",
+            )?)?,
+            output_cells: parse_identity_vec(required(object, "output_cells")?)?,
+            lineage_digest: identity(required_str(object, "lineage_digest")?)?,
+        })
+    }
+
+    fn parse_public_output_spec(value: &serde_json::Value) -> Result<PublicOutputSpec> {
+        let object = object(value, "public output spec")?;
+        Ok(PublicOutputSpec {
+            public_schema_id: identity(required_str(object, "public_schema_id")?)?,
+            outputs: parse_vec(required(object, "outputs")?, parse_public_cell)?,
+            renderer_descriptor: parse_renderer_descriptor_identity(required(
+                object,
+                "renderer_descriptor",
+            )?)?,
+        })
+    }
+
+    fn parse_public_cell(value: &serde_json::Value) -> Result<PublicOutputCell> {
+        let object = object(value, "public output cell")?;
+        Ok(PublicOutputCell {
+            public_field_path: PublicFieldPath::new(required_str(object, "public_field_path")?)?,
+            cell_id: identity(required_str(object, "cell_id")?)?,
+            producer: parse_cell_producer(required(object, "producer")?)?,
+            scope_id: identity(required_str(object, "scope_id")?)?,
+            semantic_type_id: identity(required_str(object, "semantic_type_id")?)?,
+            schema_id: identity(required_str(object, "schema_id")?)?,
+            value_lineage: parse_value_lineage_ref(required(object, "value_lineage")?)?,
+            required_terminal: parse_required_terminal(required_str(object, "required_terminal")?)?,
+        })
+    }
+
+    fn parse_capability_set(value: &serde_json::Value) -> Result<CapabilitySetDescriptor> {
+        let capabilities = array(value, "capabilities")?
+            .iter()
+            .map(parse_capability_descriptor)
+            .collect::<Result<Vec<_>>>()?;
+        CapabilitySetDescriptor::new(capabilities).map_err(SpecError::from)
+    }
+
+    fn parse_capability_descriptor(value: &serde_json::Value) -> Result<CapabilityDescriptor> {
+        let object = object(value, "capability descriptor")?;
+        CapabilityDescriptor::new(
+            identity(required_str(object, "kind")?)?,
+            version(required_str(object, "version")?)?,
+            parse_capability_role(required_str(object, "role")?)?,
+            required_str(object, "name")?,
+        )
+        .map_err(SpecError::from)
+    }
+
+    fn parse_capability_role(value: &str) -> Result<CapabilityRole> {
+        match value {
+            "read_external" => Ok(CapabilityRole::ReadExternal),
+            "managed_platform_write" => Ok(CapabilityRole::ManagedPlatformWrite),
+            "support" => Ok(CapabilityRole::Support),
+            "external_mutation_authority" => Ok(CapabilityRole::ExternalMutationAuthority),
+            role => Err(json_error(format!("unsupported capability role {role:?}"))),
+        }
+    }
+
+    fn parse_bridge_kind(value: &str) -> Result<BridgeKind> {
+        match value {
+            "import_from_parent" => Ok(BridgeKind::ImportFromParent),
+            "export_to_parent" => Ok(BridgeKind::ExportToParent),
+            kind => Err(json_error(format!("unsupported bridge kind {kind:?}"))),
+        }
+    }
+
+    fn parse_bridge_policy(value: &str) -> Result<BridgePolicy> {
+        match value {
+            "same_run_same_value" => Ok(BridgePolicy::SameRunSameValue),
+            policy => Err(json_error(format!("unsupported bridge policy {policy:?}"))),
+        }
+    }
+
+    fn parse_bridge_provenance(value: &str) -> Result<BridgeProvenance> {
+        match value {
+            "framework_child_scope_v1" => Ok(BridgeProvenance::FrameworkChildScopeV1),
+            provenance => Err(json_error(format!(
+                "unsupported bridge provenance {provenance:?}"
+            ))),
+        }
+    }
+
+    fn parse_ordering(value: &str) -> Result<OrderingEvidence> {
+        match value {
+            "explicit_author_order" => Ok(OrderingEvidence::ExplicitAuthorOrder),
+            "stable_domain_key" => Ok(OrderingEvidence::StableDomainKey),
+            ordering => Err(json_error(format!("unsupported ordering {ordering:?}"))),
+        }
+    }
+
+    fn parse_cell_terminal_policy(value: &str) -> Result<CellTerminalPolicy> {
+        match value {
+            "produced_only" => Ok(CellTerminalPolicy::ProducedOnly),
+            "maybe_skipped" => Ok(CellTerminalPolicy::MaybeSkipped),
+            policy => Err(json_error(format!(
+                "unsupported cell terminal policy {policy:?}"
+            ))),
+        }
+    }
+
+    fn parse_storage_policy(value: &str) -> Result<StoragePolicy> {
+        match value {
+            "content_addressed" => Ok(StoragePolicy::ContentAddressed),
+            "artifact_reference" => Ok(StoragePolicy::ArtifactReference),
+            "public_output_artifact" => Ok(StoragePolicy::PublicOutputArtifact),
+            policy => Err(json_error(format!("unsupported storage policy {policy:?}"))),
+        }
+    }
+
+    fn parse_redaction_policy(value: &str) -> Result<RedactionPolicy> {
+        match value {
+            "public" => Ok(RedactionPolicy::Public),
+            "redacted" => Ok(RedactionPolicy::Redacted),
+            policy => Err(json_error(format!(
+                "unsupported redaction policy {policy:?}"
+            ))),
+        }
+    }
+
+    fn parse_transform_policy(value: &str) -> Result<LineageTransformPolicy> {
+        match value {
+            "source" => Ok(LineageTransformPolicy::Source),
+            "state_output" => Ok(LineageTransformPolicy::StateOutput),
+            "same_value_bridge" => Ok(LineageTransformPolicy::SameValueBridge),
+            policy => Err(json_error(format!(
+                "unsupported lineage transform policy {policy:?}"
+            ))),
+        }
+    }
+
+    fn parse_required_terminal(value: &str) -> Result<RequiredTerminal> {
+        match value {
+            "produced_only" => Ok(RequiredTerminal::ProducedOnly),
+            "maybe_skipped" => Ok(RequiredTerminal::MaybeSkipped),
+            terminal => Err(json_error(format!(
+                "unsupported required terminal {terminal:?}"
+            ))),
+        }
+    }
+
+    fn parse_vec<T>(
+        value: &serde_json::Value,
+        parser: fn(&serde_json::Value) -> Result<T>,
+    ) -> Result<Vec<T>> {
+        array(value, "array")?.iter().map(parser).collect()
+    }
+
+    fn parse_identity_vec<T>(value: &serde_json::Value) -> Result<Vec<T>>
+    where
+        T: std::str::FromStr,
+        T::Err: std::fmt::Display,
+    {
+        array(value, "identity array")?
+            .iter()
+            .map(|value| identity(string(value, "identity")?))
+            .collect()
+    }
+
+    fn optional_parse<T>(
+        object: &serde_json::Map<String, serde_json::Value>,
+        field: &'static str,
+        parser: fn(&serde_json::Value) -> Result<T>,
+    ) -> Result<Option<T>> {
+        match object.get(field) {
+            Some(serde_json::Value::Null) | None => Ok(None),
+            Some(value) => parser(value).map(Some),
+        }
+    }
+
+    fn optional_identity<T>(
+        object: &serde_json::Map<String, serde_json::Value>,
+        field: &'static str,
+    ) -> Result<Option<T>>
+    where
+        T: std::str::FromStr,
+        T::Err: std::fmt::Display,
+    {
+        match object.get(field) {
+            Some(serde_json::Value::Null) | None => Ok(None),
+            Some(value) => identity(string(value, field)?).map(Some),
+        }
+    }
+
+    fn identity<T>(value: &str) -> Result<T>
+    where
+        T: std::str::FromStr,
+        T::Err: std::fmt::Display,
+    {
+        parse_string(value)
+    }
+
+    fn version<T>(value: &str) -> Result<T>
+    where
+        T: std::str::FromStr,
+        T::Err: std::fmt::Display,
+    {
+        parse_string(value)
+    }
+
+    fn parse_string<T>(value: &str) -> Result<T>
+    where
+        T: std::str::FromStr,
+        T::Err: std::fmt::Display,
+    {
+        match value.parse::<T>() {
+            Ok(parsed) => Ok(parsed),
+            Err(error) => Err(SpecError::Identity(error.to_string())),
+        }
+    }
+
+    fn object<'a>(
+        value: &'a serde_json::Value,
+        context: &'static str,
+    ) -> Result<&'a serde_json::Map<String, serde_json::Value>> {
+        value
+            .as_object()
+            .ok_or_else(|| json_error(format!("{context} must be a JSON object")))
+    }
+
+    fn array<'a>(
+        value: &'a serde_json::Value,
+        context: &'static str,
+    ) -> Result<&'a Vec<serde_json::Value>> {
+        value
+            .as_array()
+            .ok_or_else(|| json_error(format!("{context} must be a JSON array")))
+    }
+
+    fn required<'a>(
+        object: &'a serde_json::Map<String, serde_json::Value>,
+        field: &'static str,
+    ) -> Result<&'a serde_json::Value> {
+        object
+            .get(field)
+            .ok_or_else(|| json_error(format!("missing required field {field}")))
+    }
+
+    fn required_str<'a>(
+        object: &'a serde_json::Map<String, serde_json::Value>,
+        field: &'static str,
+    ) -> Result<&'a str> {
+        string(required(object, field)?, field)
+    }
+
+    fn required_u64(
+        object: &serde_json::Map<String, serde_json::Value>,
+        field: &'static str,
+    ) -> Result<u64> {
+        required(object, field)?
+            .as_u64()
+            .ok_or_else(|| json_error(format!("{field} must be an unsigned integer")))
+    }
+
+    fn string<'a>(value: &'a serde_json::Value, field: &'static str) -> Result<&'a str> {
+        value
+            .as_str()
+            .ok_or_else(|| json_error(format!("{field} must be a string")))
+    }
+
+    fn json_error(message: impl Into<String>) -> SpecError {
+        SpecError::Json(message.into())
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -2161,6 +2893,41 @@ pub mod v1 {
                 stale.verify_hash(),
                 Err(SpecError::HashMismatch { .. })
             ));
+        }
+
+        #[test]
+        fn persisted_spec_json_round_trips_through_checked_parser() {
+            let spec = test_spec();
+            let canonical = spec.canonical_json().expect("canonical spec");
+            let parsed = TypedExecutionSpec::from_json_slice(canonical.as_bytes())
+                .expect("parse canonical spec");
+
+            assert_eq!(parsed, spec);
+            assert_eq!(
+                parsed.canonical_json().expect("canonical parsed"),
+                canonical
+            );
+            assert_eq!(
+                parsed.spec_hash().expect("parsed hash"),
+                spec.spec_hash().expect("spec hash")
+            );
+        }
+
+        #[test]
+        fn persisted_spec_json_rejects_unknown_fields() {
+            let spec = test_spec();
+            let mut value: serde_json::Value =
+                serde_json::from_str(spec.canonical_json().expect("canonical spec").as_str())
+                    .expect("spec JSON");
+            value
+                .as_object_mut()
+                .expect("spec object")
+                .insert("unknown_field".to_owned(), serde_json::json!(true));
+            let input = serde_json::to_string(&value).expect("JSON");
+
+            let err = TypedExecutionSpec::from_json_str(&input).expect_err("unknown field rejects");
+
+            assert!(matches!(err, SpecError::Json(message) if message.contains("unknown")));
         }
 
         #[test]

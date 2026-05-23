@@ -214,6 +214,10 @@ impl From<mfm_events::EventError> for RuntimeError {
     }
 }
 
+fn async_store_error(error: impl fmt::Display) -> RuntimeError {
+    RuntimeError::Store(error.to_string())
+}
+
 /// Certified executable runtime spec with indexes used by the serial scheduler.
 #[derive(Debug, Clone)]
 pub struct CertifiedRuntimeSpec {
@@ -990,6 +994,51 @@ fn public_output_cell_json(cell: &events::NamedTypedCellRef) -> serde_json::Valu
     })
 }
 
+/// Rebuilds framework public-output receipt artifact bytes and evidence.
+pub fn build_public_output_receipt_artifact(
+    runtime_spec: &CertifiedRuntimeSpec,
+    payload: &events::PublicOutputProduced,
+) -> Result<(PlainCanonicalJsonBytes, store::ArtifactEvidenceRef)> {
+    let node = runtime_spec.node(&payload.node_id).ok_or_else(|| {
+        RuntimeError::InvalidSpec(format!(
+            "public-output payload references missing node {}",
+            payload.node_id
+        ))
+    })?;
+    validate_public_output(runtime_spec, node, payload)?;
+    let Some(spec::FrameworkNodeSpec::PublicOutputRender(render)) = &node.framework else {
+        return Err(RuntimeError::InvalidSpec(format!(
+            "public-output node {} is not a framework render node",
+            node.node_id
+        )));
+    };
+    let output_cell = runtime_spec.cell(&node.output_cell).ok_or_else(|| {
+        RuntimeError::InvalidSpec(format!(
+            "public-output node {} output cell {} is missing",
+            node.node_id, node.output_cell
+        ))
+    })?;
+    let bytes = public_output_receipt_json(
+        render,
+        &payload.cells,
+        &payload.rendered_digest,
+        payload.rendered_artifact_id.as_ref(),
+    )?;
+    let digest = bytes.content_digest();
+    let evidence = store::ArtifactEvidenceRef {
+        artifact_id: ArtifactId::from_digest(digest.algorithm(), *digest.digest()),
+        digest,
+        byte_len: bytes.as_bytes().len() as u64,
+        media_type: spec::MediaType::new("application/json")?,
+        schema_id: Some(output_cell.schema_id.clone()),
+        semantic_type_id: Some(output_cell.semantic_type_id.clone()),
+        producer_node_id: Some(node.node_id.clone()),
+        producer_seed_id: None,
+        artifact_role: events::ArtifactRole::StateOutput,
+    };
+    Ok((bytes, evidence))
+}
+
 fn retention_manifest_json(
     runtime_spec: &CertifiedRuntimeSpec,
     run_id: &RunId,
@@ -1310,10 +1359,18 @@ impl RuntimeRunView {
         store: &S,
     ) -> Result<Self> {
         let stream = store.load_run_stream(run_id);
-        store::ProjectionSnapshot::validate_run_stream(&stream)?;
-        let projections = store::ProjectionSnapshot::rebuild_from_run_stream(&stream)?;
+        Self::from_stream(runtime_spec, run_id, &stream)
+    }
+
+    fn from_stream(
+        runtime_spec: &CertifiedRuntimeSpec,
+        run_id: &RunId,
+        stream: &[store::KernelEventEnvelope],
+    ) -> Result<Self> {
+        store::ProjectionSnapshot::validate_run_stream(stream)?;
+        let projections = store::ProjectionSnapshot::rebuild_from_run_stream(stream)?;
         let mut run_started = None;
-        for event in &stream {
+        for event in stream {
             match event.payload() {
                 events::KernelEventPayload::RunStarted(payload) => {
                     if &payload.run_id != run_id {
@@ -1350,13 +1407,26 @@ impl RuntimeRunView {
                 "run has not started with certified RunStarted evidence".to_owned(),
             ));
         };
-        validate_historical_run_stream(runtime_spec, &stream, &projections)?;
+        validate_historical_run_stream(runtime_spec, stream, &projections)?;
         let seed_cells = validate_seed_cells(runtime_spec, &run_started.seed_cells)?;
         Ok(Self {
             projections,
             seed_cells,
         })
     }
+}
+
+/// Validates a stored typed run stream against the certified runtime spec without executing work.
+///
+/// This is the read-only counterpart to scheduler resume: callers that inspect, render, or
+/// append-only resume a run must still prove the historical stream is bound to the stored certified
+/// spec before trusting projections.
+pub fn validate_run_stream(
+    runtime_spec: &CertifiedRuntimeSpec,
+    run_id: &RunId,
+    stream: &[store::KernelEventEnvelope],
+) -> Result<()> {
+    RuntimeRunView::from_stream(runtime_spec, run_id, stream).map(|_| ())
 }
 
 /// Evidence needed to append `RunStarted`.
@@ -1499,6 +1569,94 @@ impl SerialTypedScheduler {
         Ok(store.append_typed_run_commit(request)?)
     }
 
+    /// Appends the typed `RunStarted` event through an async typed store.
+    pub async fn start_run_async<S: store::AsyncTypedRunEventStore + ?Sized>(
+        &self,
+        store: &S,
+        runtime_spec: &CertifiedRuntimeSpec,
+        run_id: RunId,
+        evidence: RunStartEvidence,
+    ) -> Result<store::CommitOutcome> {
+        let spec_artifact = validate_spec_artifact(runtime_spec, evidence.spec_artifact)?;
+        let config_artifacts = validate_config_artifacts(runtime_spec, evidence.config_artifacts)?;
+        let seed_cells = validate_seed_cells(runtime_spec, &evidence.seed_cells)?;
+        let runner_executables = self.runners.executables_for_spec(runtime_spec)?;
+        store
+            .record_artifact_evidence(spec_artifact.clone())
+            .await
+            .map_err(async_store_error)?;
+        for artifact in &config_artifacts {
+            store
+                .record_artifact_evidence(artifact.clone())
+                .await
+                .map_err(async_store_error)?;
+        }
+        for seed in seed_cells.values() {
+            store
+                .record_artifact_evidence(store_seed_artifact(seed))
+                .await
+                .map_err(async_store_error)?;
+        }
+        let mut required_artifacts =
+            Vec::with_capacity(1 + config_artifacts.len() + seed_cells.len());
+        required_artifacts.push(spec_artifact.clone());
+        required_artifacts.extend(config_artifacts);
+        required_artifacts.extend(seed_cells.values().map(store_seed_artifact));
+        let run_started_retention_refs = required_artifacts
+            .iter()
+            .map(retention_ref_for_artifact)
+            .collect::<Vec<_>>();
+        let payload = events::KernelEventPayload::RunStarted(events::RunStarted {
+            run_id: run_id.clone(),
+            spec_hash: runtime_spec.spec_hash().clone(),
+            spec_artifact_id: spec_artifact.artifact_id,
+            spec_media_type: runtime_spec.spec().media_type.clone(),
+            spec_version: runtime_spec.spec().spec_version.clone(),
+            lowering_version: runtime_spec.spec().lowering_version.clone(),
+            public_output_schema_id: runtime_spec.spec().public_outputs.public_schema_id.clone(),
+            descriptor_identities: runtime_spec.spec().descriptor_identities.clone(),
+            runner_executables,
+            adapter_executables: evidence.adapter_executables,
+            canonicalizer_identity: runtime_spec
+                .spec()
+                .public_outputs
+                .renderer_descriptor
+                .canonicalizer_identity
+                .clone(),
+            framework_version: evidence.framework_version,
+            source_revision: evidence.source_revision,
+            seed_cells: evidence.seed_cells,
+        });
+        let retention_payload =
+            events::KernelEventPayload::RetentionRefsAppended(events::RetentionRefsAppended {
+                run_id: run_id.clone(),
+                spec_hash: runtime_spec.spec_hash().clone(),
+                refs: run_started_retention_refs,
+                reason: events::RetentionReason::RunStarted,
+            });
+        let request = store::TypedCommitRequest {
+            run_id: run_id.clone(),
+            expected_next_seq: store
+                .expected_next_seq(&run_id)
+                .await
+                .map_err(async_store_error)?,
+            commit_key: store::CommitKey::new(format!(
+                "run-start:{}",
+                runtime_spec.spec_hash().as_str()
+            ))?,
+            payloads: vec![payload, retention_payload],
+            required_artifacts,
+            preconditions: store::CommitPreconditions {
+                required_run_state: store::RequiredRunState::Absent,
+                ..store::CommitPreconditions::default()
+            },
+        };
+        store
+            .append_typed_run_commit(request)
+            .await
+            .map_err(async_store_error)
+    }
+
     /// Runs one deterministic runnable node, if any.
     pub async fn drive_once<S: store::TypedRunEventStore + ?Sized>(
         &self,
@@ -1533,6 +1691,52 @@ impl SerialTypedScheduler {
         let mut advanced = false;
         loop {
             match self.drive_once(store, runtime_spec, run_id).await? {
+                SchedulerStatus::Advanced => advanced = true,
+                SchedulerStatus::Blocked if advanced => return Ok(SchedulerStatus::Advanced),
+                status => return Ok(status),
+            }
+        }
+    }
+
+    /// Runs one deterministic runnable node against an async durable typed store, if any.
+    pub async fn drive_once_async<S: store::AsyncTypedRunEventStore + ?Sized>(
+        &self,
+        store: &S,
+        runtime_spec: &CertifiedRuntimeSpec,
+        run_id: &RunId,
+    ) -> Result<SchedulerStatus> {
+        let stream = store
+            .load_run_stream(run_id)
+            .await
+            .map_err(async_store_error)?;
+        let view = RuntimeRunView::from_stream(runtime_spec, run_id, &stream)?;
+        if let Some(completion) = public_output_completion_evidence(runtime_spec, &view.projections)
+        {
+            if view.projections.run_state(run_id) == store::RunState::Started {
+                self.complete_run_async(store, runtime_spec, run_id, completion)
+                    .await?;
+                return Ok(SchedulerStatus::Advanced);
+            }
+            return Ok(SchedulerStatus::PublicOutputProjected);
+        }
+        let Some(runnable) = next_runnable_node(runtime_spec, &view)? else {
+            return Ok(SchedulerStatus::Blocked);
+        };
+        self.run_node_attempt_async(store, runtime_spec, run_id, &view, runnable)
+            .await?;
+        Ok(SchedulerStatus::Advanced)
+    }
+
+    /// Runs deterministic runnable nodes against an async durable typed store until blocked.
+    pub async fn drive_until_blocked_async<S: store::AsyncTypedRunEventStore + ?Sized>(
+        &self,
+        store: &S,
+        runtime_spec: &CertifiedRuntimeSpec,
+        run_id: &RunId,
+    ) -> Result<SchedulerStatus> {
+        let mut advanced = false;
+        loop {
+            match self.drive_once_async(store, runtime_spec, run_id).await? {
                 SchedulerStatus::Advanced => advanced = true,
                 SchedulerStatus::Blocked if advanced => return Ok(SchedulerStatus::Advanced),
                 status => return Ok(status),
@@ -1660,6 +1864,146 @@ impl SerialTypedScheduler {
         Ok(())
     }
 
+    async fn run_node_attempt_async<S: store::AsyncTypedRunEventStore + ?Sized>(
+        &self,
+        store: &S,
+        runtime_spec: &CertifiedRuntimeSpec,
+        run_id: &RunId,
+        view: &RuntimeRunView,
+        runnable: RunnableNode<'_>,
+    ) -> Result<()> {
+        let node = runnable.node;
+        let descriptor = runtime_spec.state_descriptor_for_node(node)?;
+        let output_cell = runtime_spec.cell(&node.output_cell).ok_or_else(|| {
+            RuntimeError::InvalidSpec(format!(
+                "node {} output cell {} is missing",
+                node.node_id, node.output_cell
+            ))
+        })?;
+        let binding = self.runners.resolve(node, descriptor)?;
+        let inputs = materialize_inputs(runtime_spec, node, view)?;
+        let caps = CertifiedRuntimeCapabilities::new(
+            node.node_id.clone(),
+            node.capability_bindings.clone(),
+        );
+        let (attempt_id, attempt_no) = match runnable.attempt {
+            AttemptPlan::StartNew => {
+                let attempt_no = next_attempt_no(&view.projections, &node.node_id)?;
+                let attempt_id =
+                    attempt_id(run_id, runtime_spec.spec_hash(), &node.node_id, attempt_no)?;
+                let start_payload =
+                    events::KernelEventPayload::StateAttemptStarted(events::StateAttemptStarted {
+                        spec_hash: runtime_spec.spec_hash().clone(),
+                        node_id: node.node_id.clone(),
+                        attempt_id: attempt_id.clone(),
+                        attempt_no,
+                        state_kind: node.state_kind.clone(),
+                        state_version: node.state_version.clone(),
+                    });
+                let mut preconditions = store::CommitPreconditions {
+                    required_run_state: store::RequiredRunState::NotCompleted,
+                    required_cell_states: vec![store::CellStatePrecondition {
+                        cell_id: node.output_cell.clone(),
+                        required: store::RequiredCellState::Absent,
+                    }],
+                    ..store::CommitPreconditions::default()
+                };
+                preconditions
+                    .required_cell_states
+                    .extend(node_cell_preconditions(runtime_spec, node)?);
+                let start_request = store::TypedCommitRequest {
+                    run_id: run_id.clone(),
+                    expected_next_seq: store
+                        .expected_next_seq(run_id)
+                        .await
+                        .map_err(async_store_error)?,
+                    commit_key: store::CommitKey::new(format!(
+                        "attempt-start:{}:{}",
+                        node.node_id, attempt_id
+                    ))?,
+                    payloads: vec![start_payload],
+                    required_artifacts: Vec::new(),
+                    preconditions,
+                };
+                store
+                    .append_typed_run_commit(start_request)
+                    .await
+                    .map_err(async_store_error)?;
+                (attempt_id, attempt_no)
+            }
+            AttemptPlan::Continue {
+                attempt_id,
+                attempt_no,
+            } => (attempt_id, attempt_no),
+        };
+
+        let latest_stream = store
+            .load_run_stream(run_id)
+            .await
+            .map_err(async_store_error)?;
+        let latest_view = RuntimeRunView::from_stream(runtime_spec, run_id, &latest_stream)?;
+        let latest_projection = latest_view.projections;
+        let recorded_facts =
+            recorded_facts_for_attempt(&latest_projection, &node.node_id, &attempt_id)?;
+        let output = binding
+            .runner
+            .run_erased(ErasedRunCtx {
+                run_id,
+                spec_hash: runtime_spec.spec_hash(),
+                node,
+                descriptor,
+                output_cell,
+                attempt_id: &attempt_id,
+                attempt_no,
+                inputs: &inputs,
+                caps: &caps,
+                recorded_facts: &recorded_facts,
+                projections: &latest_projection,
+            })
+            .await?;
+        validate_runner_output(
+            runtime_spec,
+            node,
+            &attempt_id,
+            &caps,
+            &recorded_facts,
+            &latest_projection,
+            &output,
+        )?;
+        let mut payloads = output.payloads;
+        payloads.extend(bind_staged_retention_refs(
+            runtime_spec,
+            run_id,
+            node,
+            &output.required_artifacts,
+            output.staged_retention_refs,
+        )?);
+        for artifact in &output.required_artifacts {
+            store
+                .record_artifact_evidence(artifact.clone())
+                .await
+                .map_err(async_store_error)?;
+        }
+        let preconditions =
+            runner_output_preconditions(node, &attempt_id, &latest_projection, &payloads)?;
+        let terminal_request = store::TypedCommitRequest {
+            run_id: run_id.clone(),
+            expected_next_seq: store
+                .expected_next_seq(run_id)
+                .await
+                .map_err(async_store_error)?,
+            commit_key: runner_output_commit_key(node, &attempt_id, &payloads)?,
+            payloads,
+            required_artifacts: output.required_artifacts,
+            preconditions,
+        };
+        store
+            .append_typed_run_commit(terminal_request)
+            .await
+            .map_err(async_store_error)?;
+        Ok(())
+    }
+
     fn complete_run<S: store::TypedRunEventStore + ?Sized>(
         &self,
         store: &mut S,
@@ -1693,6 +2037,48 @@ impl SerialTypedScheduler {
             },
         };
         store.append_typed_run_commit(request)?;
+        Ok(())
+    }
+
+    async fn complete_run_async<S: store::AsyncTypedRunEventStore + ?Sized>(
+        &self,
+        store: &S,
+        runtime_spec: &CertifiedRuntimeSpec,
+        run_id: &RunId,
+        completion: events::PublicOutputCompletionEvidence,
+    ) -> Result<()> {
+        let public_output_key = store::LogicalEventKey::new(format!(
+            "public_output:{}",
+            completion.public_output_schema_id
+        ))?;
+        let request = store::TypedCommitRequest {
+            run_id: run_id.clone(),
+            expected_next_seq: store
+                .expected_next_seq(run_id)
+                .await
+                .map_err(async_store_error)?,
+            commit_key: store::CommitKey::new(format!(
+                "run-completed:{}:{}",
+                completion.public_output_schema_id, completion.public_output_event_id
+            ))?,
+            payloads: vec![events::KernelEventPayload::RunCompleted(
+                events::RunCompleted {
+                    run_id: run_id.clone(),
+                    spec_hash: runtime_spec.spec_hash().clone(),
+                    outcome: events::RunCompletionOutcome::Completed(completion),
+                },
+            )],
+            required_artifacts: Vec::new(),
+            preconditions: store::CommitPreconditions {
+                required_run_state: store::RequiredRunState::NotCompleted,
+                required_present_logical_keys: vec![public_output_key],
+                ..store::CommitPreconditions::default()
+            },
+        };
+        store
+            .append_typed_run_commit(request)
+            .await
+            .map_err(async_store_error)?;
         Ok(())
     }
 
@@ -1760,6 +2146,83 @@ impl SerialTypedScheduler {
             },
         };
         Ok(store.append_typed_run_commit(request)?)
+    }
+
+    /// Appends a retention-manifest projection to an async durable typed store.
+    pub async fn append_retention_manifest_projection_async<
+        S: store::AsyncTypedRunEventStore + ?Sized,
+    >(
+        &self,
+        store: &S,
+        runtime_spec: &CertifiedRuntimeSpec,
+        run_id: &RunId,
+        manifest: RetentionManifestArtifact,
+    ) -> Result<store::CommitOutcome> {
+        if manifest.evidence.artifact_role != events::ArtifactRole::RetentionManifest
+            || manifest.evidence.digest != manifest.bytes.content_digest()
+            || manifest.evidence.byte_len != manifest.bytes.as_bytes().len() as u64
+            || manifest.evidence.schema_id.is_some()
+            || manifest.evidence.semantic_type_id.is_some()
+            || manifest.evidence.producer_node_id.is_some()
+            || manifest.evidence.producer_seed_id.is_some()
+        {
+            return Err(RuntimeError::InvalidRunStream(
+                "retention manifest artifact evidence does not match manifest bytes".to_owned(),
+            ));
+        }
+        let stream = store
+            .load_run_stream(run_id)
+            .await
+            .map_err(async_store_error)?;
+        let expected_manifest = build_retention_manifest_artifact(runtime_spec, run_id, &stream)?;
+        if manifest != expected_manifest {
+            return Err(RuntimeError::InvalidRunStream(
+                "retention manifest artifact does not match current run stream".to_owned(),
+            ));
+        }
+        store
+            .record_artifact_evidence(manifest.evidence.clone())
+            .await
+            .map_err(async_store_error)?;
+        let manifest_ref = retention_ref_for_artifact(&manifest.evidence);
+        let request = store::TypedCommitRequest {
+            run_id: run_id.clone(),
+            expected_next_seq: store
+                .expected_next_seq(run_id)
+                .await
+                .map_err(async_store_error)?,
+            commit_key: store::CommitKey::new(format!(
+                "retention-manifest:{}:{}",
+                manifest.manifest_seq, manifest.evidence.digest
+            ))?,
+            payloads: vec![
+                events::KernelEventPayload::RetentionManifestProjected(
+                    events::RetentionManifestProjected {
+                        run_id: run_id.clone(),
+                        spec_hash: runtime_spec.spec_hash().clone(),
+                        manifest_seq: manifest.manifest_seq,
+                        manifest_digest: manifest.evidence.digest.clone(),
+                        previous_manifest_digest: manifest.previous_manifest_digest,
+                        manifest_artifact_id: manifest.evidence.artifact_id.clone(),
+                    },
+                ),
+                events::KernelEventPayload::RetentionRefsAppended(events::RetentionRefsAppended {
+                    run_id: run_id.clone(),
+                    spec_hash: runtime_spec.spec_hash().clone(),
+                    refs: vec![manifest_ref],
+                    reason: events::RetentionReason::ManifestProjection,
+                }),
+            ],
+            required_artifacts: vec![manifest.evidence],
+            preconditions: store::CommitPreconditions {
+                required_run_state: store::RequiredRunState::Started,
+                ..store::CommitPreconditions::default()
+            },
+        };
+        store
+            .append_typed_run_commit(request)
+            .await
+            .map_err(async_store_error)
     }
 }
 

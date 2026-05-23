@@ -82,6 +82,17 @@ fn collected(bytes: &[u8], total_bytes: usize, overflowed: bool) -> CollectedStr
     }
 }
 
+fn nix_can_fetch_local_flake(root: &Path) -> bool {
+    std::process::Command::new("nix")
+        .arg("flake")
+        .arg("metadata")
+        .arg("--no-write-lock-file")
+        .arg(format!("path:{}", root.display()))
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
 fn run_config_with_allowlist(prefixes: Vec<String>) -> RunConfig {
     RunConfig {
         io_mode: IoMode::Live,
@@ -306,6 +317,15 @@ fn store_root_from_program_path_rejects_non_store_paths() {
 }
 
 #[test]
+fn nix_commands_run_from_temp_dir() {
+    let mut cmd = tokio::process::Command::new("nix");
+    set_nix_command_work_dir(&mut cmd).expect("set cwd");
+    let expected = std::env::temp_dir();
+
+    assert_eq!(cmd.as_std().get_current_dir(), Some(expected.as_path()));
+}
+
+#[test]
 fn inject_host_env_bindings_uses_host_value_without_recording_it() {
     let source_env = format!("MFM_TEST_HOST_ENV_{}", uuid::Uuid::new_v4().simple());
     std::env::set_var(&source_env, "secret-value");
@@ -509,6 +529,65 @@ async fn rejects_invalid_request_shape() {
         IoError::Other(info) => assert_eq!(info.code.as_str(), CODE_NIX_REQUEST_INVALID),
         other => panic!("expected Other, got: {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn run_flake_app_uses_neutral_cwd_for_nix_child() {
+    if std::process::Command::new("nix")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        return;
+    }
+
+    let nix_bin =
+        std::fs::canonicalize("/nix/var/nix/profiles/default/bin/nix").expect("resolve nix binary");
+    let temp_root = std::env::temp_dir().join(format!(
+        "mfm-nix-exec-cwd-{}",
+        uuid::Uuid::new_v4().simple()
+    ));
+    std::fs::create_dir_all(&temp_root).expect("create temp root");
+    let temp_root = temp_root.canonicalize().expect("canonical temp root");
+    let flake_nix = format!(
+        "{{\n  outputs = {{ self }}: {{\n    apps.{}.echo_json = {{\n      type = \"app\";\n      program = \"{}\";\n    }};\n  }};\n}}\n",
+        nix_system(),
+        nix_bin.display()
+    );
+    std::fs::write(temp_root.join("flake.nix"), flake_nix).expect("write flake.nix");
+    if !nix_can_fetch_local_flake(&temp_root) {
+        std::fs::remove_file(temp_root.join("flake.nix")).expect("remove flake.nix");
+        std::fs::remove_dir(temp_root).expect("remove temp root");
+        return;
+    }
+
+    let repo_prefix = format!("path:{}", temp_root.display());
+    let app_ref = format!("{repo_prefix}#echo_json");
+    let factory = NixFlakeTransportFactory::new(NixFlakePolicy {
+        allow_prefixes: vec![repo_prefix],
+    });
+    let mut transport = factory.make(env());
+
+    let result = transport
+        .call(IoCall {
+            namespace: NAMESPACE_NIX_EXEC.to_string(),
+            request: serde_json::json!({
+                "kind": "run_flake_app_v1",
+                "app": app_ref,
+                "argv": ["eval", "--json", "--expr", "{ b = 1; a = 2; }"],
+                "stdin_json": {"ignored": true},
+                "timeout_ms": 60000
+            }),
+            fact_key: None,
+        })
+        .await;
+
+    std::fs::remove_file(temp_root.join("flake.nix")).expect("remove flake.nix");
+    std::fs::remove_dir(temp_root).expect("remove temp root");
+    assert_eq!(
+        result.expect("run flake app"),
+        serde_json::json!({"a": 2, "b": 1})
+    );
 }
 
 #[tokio::test]

@@ -36,6 +36,17 @@ fn into_leaf(planned: PlannedOp) -> LeafOpSpec {
     }
 }
 
+fn nix_can_fetch_local_flake(root: &std::path::Path) -> bool {
+    std::process::Command::new("nix")
+        .arg("flake")
+        .arg("metadata")
+        .arg("--no-write-lock-file")
+        .arg(format!("path:{}", root.display()))
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
 #[test]
 fn expand_accepts_flake_app_ref_config() {
     let op = NixAppOp;
@@ -494,8 +505,13 @@ async fn at_flake_app_mode_real_preflight_and_exec_local_path_ref() {
     let flake_nix = format!(
             "{{\n  outputs = {{ self }}: {{\n    apps.{system}.echo_json = {{\n      type = \"app\";\n      program = \"{}\";\n    }};\n  }};\n}}\n",
             nix_bin.display()
-        );
+    );
     std::fs::write(temp_root.join("flake.nix"), flake_nix).expect("write flake.nix");
+    if !nix_can_fetch_local_flake(&temp_root) {
+        std::fs::remove_file(temp_root.join("flake.nix")).expect("remove flake.nix");
+        std::fs::remove_dir(temp_root).expect("remove temp root");
+        return;
+    }
 
     let repo_prefix = format!("path:{}", temp_root.display());
     let app_ref = format!("{repo_prefix}#echo_json");
@@ -603,8 +619,13 @@ async fn at_multi_step_pipeline_runs_nix_jq_fmt_example() {
     let flake_nix = format!(
             "{{\n  outputs = {{ self }}: {{\n    apps.{system}.jq_fmt_example = {{\n      type = \"app\";\n      program = \"{}\";\n    }};\n  }};\n}}\n",
             nix_bin.display()
-        );
+    );
     std::fs::write(temp_root.join("flake.nix"), flake_nix).expect("write flake.nix");
+    if !nix_can_fetch_local_flake(&temp_root) {
+        std::fs::remove_file(temp_root.join("flake.nix")).expect("remove flake.nix");
+        std::fs::remove_dir(temp_root).expect("remove temp root");
+        return;
+    }
 
     let repo_prefix = format!("path:{}", temp_root.display());
     let app_ref = format!("{repo_prefix}#jq_fmt_example");

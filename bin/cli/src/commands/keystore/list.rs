@@ -3,7 +3,7 @@ use crate::commands::CommandContext;
 use crate::presentation::output::{format_keys_table, handle_command_result, KeyDisplay};
 use crate::support::{app_services, command_defaults};
 use clap::Args;
-use mfm_app::{KeystoreListRequest, KeystoreListSortBy};
+use mfm_app_legacy::{KeystoreListRequest, KeystoreListSortBy};
 use serde::Serialize;
 use std::fmt;
 use std::path::PathBuf;

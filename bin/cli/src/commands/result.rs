@@ -49,11 +49,6 @@ impl CommandError {
         self.exit_code = code;
         self
     }
-
-    /// Builds the standard invalid-UUID command error.
-    pub(crate) fn invalid_uuid(message: impl Into<String>) -> Self {
-        Self::new("InvalidUuid", message)
-    }
 }
 
 impl fmt::Display for CommandError {

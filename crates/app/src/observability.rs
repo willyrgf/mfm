@@ -86,7 +86,8 @@ pub fn init_observability(config: ObservabilityConfig) -> Result<(), Observabili
                 tracing_subscriber::fmt::layer()
                     .with_span_events(FmtSpan::CLOSE)
                     .with_target(true)
-                    .with_thread_ids(false),
+                    .with_thread_ids(false)
+                    .with_writer(std::io::stderr),
             )
             .try_init()
             .map_err(|error| ObservabilityError {
@@ -98,7 +99,8 @@ pub fn init_observability(config: ObservabilityConfig) -> Result<(), Observabili
                 tracing_subscriber::fmt::layer()
                     .json()
                     .with_span_events(FmtSpan::CLOSE)
-                    .with_target(true),
+                    .with_target(true)
+                    .with_writer(std::io::stderr),
             )
             .try_init()
             .map_err(|error| ObservabilityError {

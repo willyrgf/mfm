@@ -3,7 +3,7 @@ use crate::commands::CommandContext;
 use crate::presentation::output::handle_command_result;
 use crate::support::{app_services, command_defaults};
 use clap::Args;
-use mfm_app::{
+use mfm_app_legacy::{
     KeystoreBip39ExtraSource, KeystoreImportRequest, KeystoreImportType as AppKeystoreImportType,
 };
 use serde::Serialize;

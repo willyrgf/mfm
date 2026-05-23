@@ -18,6 +18,8 @@
 pub mod v1 {
     use std::collections::{BTreeMap, BTreeSet};
     use std::fmt;
+    use std::future::Future;
+    use std::pin::Pin;
 
     use mfm_canonical::PlainCanonicalJsonBytes;
     use mfm_capabilities::{CapabilityDescriptor, CapabilityRole, CapabilitySetDescriptor};
@@ -35,6 +37,10 @@ pub mod v1 {
 
     /// Result type for typed store helpers.
     pub type Result<T> = std::result::Result<T, StoreError>;
+
+    /// Boxed future returned by async typed store adapters.
+    pub type AsyncStoreFuture<'a, T, E> =
+        Pin<Box<dyn Future<Output = std::result::Result<T, E>> + Send + 'a>>;
 
     /// Error returned by typed store contract validation.
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1415,6 +1421,40 @@ pub mod v1 {
 
         /// Returns the next store-owned stream sequence for a run.
         fn expected_next_seq(&self, run_id: &RunId) -> StreamSeq;
+    }
+
+    /// Async typed run event store commit contract for durable stores.
+    ///
+    /// This is the same certified commit surface as [`TypedRunEventStore`] without exposing
+    /// implementation-owned projection state to callers. Runtime code must derive read views from
+    /// the authoritative stream returned by [`Self::load_run_stream`].
+    pub trait AsyncTypedRunEventStore {
+        /// Store-specific error type.
+        type Error: fmt::Display + Send + Sync + 'static;
+
+        /// Records artifact evidence before events reference that artifact.
+        fn record_artifact_evidence<'a>(
+            &'a self,
+            evidence: ArtifactEvidenceRef,
+        ) -> AsyncStoreFuture<'a, (), Self::Error>;
+
+        /// Appends one typed run commit or returns an idempotent previous batch.
+        fn append_typed_run_commit<'a>(
+            &'a self,
+            request: TypedCommitRequest,
+        ) -> AsyncStoreFuture<'a, CommitOutcome, Self::Error>;
+
+        /// Loads the authoritative run stream.
+        fn load_run_stream<'a>(
+            &'a self,
+            run_id: &'a RunId,
+        ) -> AsyncStoreFuture<'a, Vec<KernelEventEnvelope>, Self::Error>;
+
+        /// Returns the next store-owned stream sequence for a run.
+        fn expected_next_seq<'a>(
+            &'a self,
+            run_id: &'a RunId,
+        ) -> AsyncStoreFuture<'a, StreamSeq, Self::Error>;
     }
 
     #[derive(Debug, Clone, PartialEq, Eq)]

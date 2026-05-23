@@ -292,6 +292,21 @@ fn store_root_from_program_path(program_path: &str) -> Option<String> {
     Some(format!("/nix/store/{entry}"))
 }
 
+fn set_nix_command_work_dir(cmd: &mut Command) -> Result<(), IoError> {
+    // Nix subcommands can inspect the inherited cwd as an installable. Task
+    // apps often run from a non-flake /nix/store source, so keep cwd neutral.
+    let work_dir = std::env::temp_dir();
+    std::fs::create_dir_all(&work_dir).map_err(|_| {
+        IoError::Transport(info(
+            CODE_NIX_REQUEST_INVALID,
+            ErrorCategory::Unknown,
+            "failed to prepare nix command working directory",
+        ))
+    })?;
+    cmd.current_dir(work_dir);
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy)]
 struct FlakeAppRef<'a> {
     url: &'a str,
@@ -760,6 +775,7 @@ impl LiveIoTransport for NixFlakeTransport {
                     .arg("builtins.unsafeDiscardStringContext")
                     .arg("--no-write-lock-file")
                     .arg(&target);
+                set_nix_command_work_dir(&mut eval)?;
 
                 let out = run_with_timeout(eval, req.timeout_ms)
                     .await
@@ -828,6 +844,7 @@ impl LiveIoTransport for NixFlakeTransport {
                         .arg("--no-link")
                         .arg("--no-write-lock-file")
                         .arg(&build_target);
+                    set_nix_command_work_dir(&mut build)?;
 
                     let out = run_with_timeout(build, req.timeout_ms)
                         .await
@@ -880,6 +897,7 @@ impl LiveIoTransport for NixFlakeTransport {
                     .arg(&resolved_app)
                     .arg("--");
                 cmd.args(&req.argv);
+                set_nix_command_work_dir(&mut cmd)?;
                 for (key, value) in &req.env {
                     cmd.env(key, value);
                 }

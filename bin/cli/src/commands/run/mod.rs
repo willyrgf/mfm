@@ -2,10 +2,10 @@ use clap::Subcommand;
 
 use super::CommandContext;
 
-/// Artifact inspection subcommands.
-mod artifacts;
-/// Pipeline-start command implementations.
-mod pipeline;
+/// Typed public-output rendering command implementation.
+mod public_output;
+/// Typed replay command implementation.
+mod replay;
 /// Run-resume command implementation.
 mod resume;
 /// Run-start command implementation.
@@ -18,41 +18,41 @@ mod stream;
 /// Subcommands under `mfm run`.
 #[derive(Subcommand)]
 pub(crate) enum RunCommand {
-    /// Start a run (currently supports built-in ops like `proof`)
+    /// Start a certified typed run
     Start {
         /// Parsed arguments for the start command.
         #[command(flatten)]
         args: start::StartArgs,
     },
-    /// Start a multi-step pipeline run
-    Pipeline {
-        /// Nested pipeline command to execute.
-        #[command(subcommand)]
-        command: pipeline::PipelineCommand,
-    },
-    /// Resume an existing run by id
+    /// Resume a certified typed run by id
     Resume {
         /// Parsed arguments for the resume command.
         #[command(flatten)]
         args: resume::ResumeArgs,
     },
-    /// Show run status (does not execute states)
+    /// Show certified typed run status without executing states
     Status {
         /// Parsed arguments for the status command.
         #[command(flatten)]
         args: status::StatusArgs,
     },
-    /// Print run stream records
+    /// Print certified typed run stream records
     Stream {
         /// Parsed arguments for the stream command.
         #[command(flatten)]
         args: stream::StreamArgs,
     },
-    /// Artifact operations
-    Artifacts {
-        /// Nested artifact command to execute.
-        #[command(subcommand)]
-        command: artifacts::ArtifactsCommand,
+    /// Render a typed public output by schema id
+    PublicOutput {
+        /// Parsed arguments for the public-output command.
+        #[command(flatten)]
+        args: public_output::PublicOutputArgs,
+    },
+    /// Verify typed replay authority for a run
+    Replay {
+        /// Parsed arguments for the replay command.
+        #[command(flatten)]
+        args: replay::ReplayArgs,
     },
 }
 
@@ -61,11 +61,54 @@ impl RunCommand {
     pub(crate) async fn execute(&self, ctx: &CommandContext) -> ! {
         match self {
             RunCommand::Start { args } => start::execute(ctx, args).await,
-            RunCommand::Pipeline { command } => command.execute(ctx).await,
             RunCommand::Resume { args } => resume::execute(ctx, args).await,
             RunCommand::Status { args } => status::execute(ctx, args).await,
             RunCommand::Stream { args } => stream::execute(ctx, args).await,
-            RunCommand::Artifacts { command } => command.execute(ctx).await,
+            RunCommand::PublicOutput { args } => public_output::execute(ctx, args).await,
+            RunCommand::Replay { args } => replay::execute(ctx, args).await,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn run_commands_do_not_import_dynamic_semantic_surfaces() {
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let run_root = manifest_dir.join("src/commands/run");
+        let forbidden = [
+            format!("mfm_{}", "sdk"),
+            format!("mfm_{}", "machine"),
+            format!("mfm_app_{}", "legacy"),
+            format!("Runs{}Request", "Start"),
+            format!("{}line", "Pipe"),
+            format!("Port{}", "Key"),
+            format!("Dyn{}", "Context"),
+            format!("State{}", "Graph"),
+            format!("Dependency{}", "Edge"),
+            format!("Context{}", "Key"),
+        ];
+        let mut paths = Vec::new();
+
+        for entry in std::fs::read_dir(&run_root).expect("read run command dir") {
+            let path = entry.expect("dir entry").path();
+            if path.extension().and_then(|value| value.to_str()) != Some("rs") {
+                continue;
+            }
+            paths.push(path);
+        }
+        paths.push(manifest_dir.join("src/support/typed_run.rs"));
+
+        for path in paths {
+            let source = std::fs::read_to_string(&path).expect("read run command source");
+            for needle in &forbidden {
+                assert!(
+                    !source.contains(needle),
+                    "{} must not import or mention dynamic semantic surface `{}`",
+                    path.display(),
+                    needle
+                );
+            }
         }
     }
 }

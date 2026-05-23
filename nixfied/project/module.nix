@@ -333,8 +333,8 @@ let
   # Keep CI linting on the same Cargo profile as nextest to avoid profile drift
   # within .#ci. Clippy still uses its own driver, so reuse remains partial.
   cargoCiClippyCmd = "cargo clippy --profile ci --workspace --lib --examples --tests --benches --all-features -- -D warnings";
-  cargoNextestCiCmd = "cargo nextest run --cargo-profile ci";
-  cargoNextestArchiveCiCmd = "cargo nextest archive --cargo-profile ci";
+  cargoNextestCiCmd = "cargo nextest run --cargo-profile ci --target-dir \"\${CARGO_TARGET_DIR:-target}\" --config-file \"\${MFM_NEXTEST_CONFIG_FILE:-\${CARGO_TARGET_DIR:-target}/nextest.toml}\"";
+  cargoNextestArchiveCiCmd = "cargo nextest archive --cargo-profile ci --target-dir \"\${CARGO_TARGET_DIR:-target}\" --config-file \"\${MFM_NEXTEST_CONFIG_FILE:-\${CARGO_TARGET_DIR:-target}/nextest.toml}\"";
   cargoNextestWorkspaceCiCmd = "${cargoNextestCiCmd} --workspace";
   parityNextestArgs = builtins.concatStringsSep " " [
     "-p mfm-integration-tests"
@@ -438,6 +438,15 @@ let
     fi
   '';
 
+  cargoNextestStorePreamble = ''
+    export MFM_NEXTEST_CONFIG_FILE="''${MFM_NEXTEST_CONFIG_FILE:-$CARGO_TARGET_DIR/nextest.toml}"
+    mkdir -p "$(dirname "$MFM_NEXTEST_CONFIG_FILE")" "$CARGO_TARGET_DIR/nextest"
+    cat >"$MFM_NEXTEST_CONFIG_FILE" <<EOF
+[store]
+dir = "$CARGO_TARGET_DIR/nextest"
+EOF
+  '';
+
   ciStepPreamble = ''
     artifacts_dir="''${CI_ARTIFACTS_DIR:-${ciArtifactsRoot}}"
     mkdir -p "$artifacts_dir"
@@ -461,6 +470,7 @@ let
     mkdir -p "$CARGO_HOME"
     export CARGO_TARGET_DIR="''${CARGO_TARGET_DIR:-$cargo_artifacts_root/cargo-target/$cargo_cache_scope}"
     mkdir -p "$CARGO_TARGET_DIR"
+    ${cargoNextestStorePreamble}
 
     run_with_log() {
       local logfile="$1"
@@ -489,6 +499,7 @@ let
     # must be redirected into a writable per-run location.
     export CARGO_TARGET_DIR="''${CARGO_TARGET_DIR:-''${CI_ARTIFACTS_DIR:-''${TMPDIR:-/tmp}/mfm-task-artifacts}/cargo-target}"
     mkdir -p "$CARGO_TARGET_DIR"
+    ${cargoNextestStorePreamble}
   '';
 
   ciServicePortPrelude = ciRuntime.servicePortPrelude;
@@ -1324,7 +1335,7 @@ in
             }
 
             echo "INFO: running workspace tests"
-            ${cargoNextestWorkspaceCiCmd}
+            run_with_log "$artifacts_dir/test-nextest.log" ${cargoNextestWorkspaceCiCmd}
 
             echo "INFO: running typed-kernel-contract summary checks"
             run_with_log "$artifacts_dir/test-kernel-crate-dag.log" bash ${./check-kernel-crate-dag.sh} --root . --self-test --summary-file "$typed_kernel_contract_summary"

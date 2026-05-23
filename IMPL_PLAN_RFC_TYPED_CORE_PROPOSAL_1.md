@@ -358,11 +358,11 @@ workflow ports, and deletion or hard isolation of old dynamic semantic APIs.
 
 ### Commit 32: `cli rewrite for typed public outputs`
 
-- [ ] Rewrite `bin/cli` to launch, resume, replay, and render typed certified runs only.
-- [ ] Preserve documented stable public JSON fields where still valid.
-- [ ] Remove semantic `PortKey`, context snapshot, dynamic DAG, and old SDK command paths.
-- [ ] Update `bin/cli/README.md`.
-- [ ] Validation: `nix run .#test`.
+- [x] Rewrite `bin/cli` to launch, resume, replay, and render typed certified runs only.
+- [x] Preserve documented stable public JSON fields where still valid.
+- [x] Remove semantic `PortKey`, context snapshot, dynamic DAG, and old SDK command paths.
+- [x] Update `bin/cli/README.md`.
+- [x] Validation: `nix run .#test`.
 
 ### Commit 33: `rest api rewrite for typed runs`
 

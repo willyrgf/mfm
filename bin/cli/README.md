@@ -243,135 +243,68 @@ mfm_cli --output-format json keystore tx-sign \
 
 ## Run Commands (Experimental)
 
-Run operations are available under the `run` subcommand.
+Typed certified run dispatch and inspection are available under the `run` subcommand.
 
-These commands are intended for parity/integration testing and early workflows. They currently use:
+These commands use:
 
-- a PostgreSQL-backed stream store (requires `DATABASE_URL` or `--database-url`)
-- a filesystem artifact store (defaults to `$MFM_ARTIFACT_ROOT` or `~/.mfm/run_artifacts`, or use `--artifact-root`)
+- the certified typed PostgreSQL run-event store (requires `DATABASE_URL` or `--database-url`)
+- the typed filesystem artifact store (defaults to `$MFM_TYPED_ARTIFACT_ROOT` or `~/.mfm/typed_run_artifacts`, or use `--typed-artifact-root`)
 
-Run commands and REST API run endpoints are backed by the same shared feature catalog/runtime layer (`mfm-app`) to keep both entrypoints behaviorally aligned.
-The CLI applies its `proof`/`v1` defaults before calling the app layer; REST and generic feature
-payloads must use the explicit tagged `run.start` envelope documented in `bin/rest-api/README.md`.
+Run ids use the typed identity format `run:<algorithm>:<digest>`. Old UUID dynamic run ids are not
+accepted by the typed CLI run surface.
 
-Keystore tx commands are also run-backed and use the same shared op registry; they intentionally keep domain execution out of `bin/cli`. They use ephemeral in-memory stream storage (no `DATABASE_URL` requirement) plus filesystem artifacts.
+Old dynamic op launch, pipeline launch, context snapshots, and generic artifact reads have been
+removed from the `run` subcommand. The CLI starts only from certified typed execution specs and
+resumes/replays only from stored typed run streams.
+
+Keystore tx commands still use the isolated legacy app bridge while the keystore workflow is ported;
+they do not expose certified typed run start/resume authority.
 
 ### `run start`
 
-Starts a new run.
+Starts a certified typed run from a persisted typed execution spec JSON file. The command persists
+the canonical spec artifact, verifies referenced config artifacts already exist in the typed
+artifact store, persists supplied seed artifacts, appends `RunStarted`, and optionally drives the
+typed scheduler.
 
 **Usage:**
 ```sh
-mfm_cli run start [OPTIONS]
+mfm_cli run start --spec <PATH> [--seed <SEED_ID=PATH>]... [OPTIONS]
 ```
 
 **Key Options:**
-- `--op-id <ID>`: Public root operation id (default: `proof`)
-- `--op-version <VERSION>`: Operation version (default: `v1`)
-- `--op-config-json <JSON>`: Operation config JSON (must be canonical-json-hashable; no floats)
+- `--spec <PATH>`: Certified typed execution spec JSON file.
+- `--run-id <RUN_ID>`: Optional typed run id. If omitted, a new typed digest id is generated.
+- `--seed <SEED_ID=PATH>`: Canonical JSON seed input for a seed declared by the certified spec.
+- `--framework-version <VALUE>`: Framework version evidence recorded in `RunStarted`.
+- `--source-revision <VALUE>`: Source revision evidence recorded in `RunStarted` (or `MFM_SOURCE_REVISION`).
+- `--drive <append-only|until-blocked>`: Scheduler drive policy after `RunStarted`.
 - `--database-url <URL>`: PostgreSQL connection string (default: `$DATABASE_URL`)
-- `--artifact-root <PATH>`: Artifact store root directory (default: `$MFM_ARTIFACT_ROOT` or `~/.mfm/run_artifacts`)
+- `--typed-artifact-root <PATH>`: Typed artifact store root directory
 
-`run start` accepts only public root ops from the built-in app bundle. Planner-internal semantic
-ids such as `portfolio_prepare_execution_sources` and `portfolio_project_report` are registered for
-recursive planning only and are rejected with `op_not_public`. Use `run pipeline start` when you
-need an explicit custom pipeline payload.
-
-**Examples:**
-```sh
-export DATABASE_URL="postgresql://postgres:postgres@localhost:5432/mfm_test"
-
-# Start the built-in proof op
-mfm_cli run start
-
-# Start with an explicit op config JSON
-mfm_cli run start --op-config-json '{"message":"hello"}'
-```
-
-Current built-in public root ops for `run start` are:
-
-- `proof`
-- `keystore_import`
-- `keystore_list`
-- `keystore_delete`
-- `keystore_tx_sign`
-- `evm_read`
-- `evm_contract_from_nix`
-- `evm_deploy_contract_set`
-- `evm_deploy`
-- `evm_configure`
-- `evm_validate`
-- `evm_deploy_configure_validate_config_build`
-- `evm_deploy_configure_validate_execute`
-- `evm_deploy_configure_validate`
-- `portfolio_config_build`
-- `portfolio_execute`
-- `portfolio_tracker`
-- `nix_app`
-
-### `run pipeline start`
-
-Starts a run from a full pipeline JSON payload.
-
-**Usage:**
-```sh
-mfm_cli run pipeline start --pipeline-json '<PIPELINE_JSON>' [OPTIONS]
-```
-
-**Key Options:**
-- `--pipeline-json <JSON>`: Required. Full `mfm_sdk::pipeline::Pipeline` JSON.
-- `--input-json <JSON>`: Optional pipeline input payload (default: `{}`).
-- `--database-url <URL>`: PostgreSQL connection string (default: `$DATABASE_URL`).
-- `--artifact-root <PATH>`: Artifact store root directory (default: `$MFM_ARTIFACT_ROOT` or `~/.mfm/run_artifacts`).
-
-**Example:**
-```sh
-mfm_cli run pipeline start \
-  --pipeline-json '{"machine_id":"proof","pipeline_version":"v1","steps":[{"step_id":"main","op_id":"proof","op_version":"v1","op_config":{}}]}'
-```
-
-### `run pipeline deploy-configure-validate`
-
-Starts a standard 3-step pipeline:
-1. `evm_deploy`
-2. `evm_configure`
-3. `evm_validate`
-
-**Usage:**
-```sh
-mfm_cli run pipeline deploy-configure-validate --spec-json '<SPEC_JSON>' [OPTIONS]
-mfm_cli run pipeline deploy-configure-validate --spec-file /path/to/spec.json [OPTIONS]
-mfm_cli run pipeline deploy-configure-validate --spec-file /path/to/config.toml [OPTIONS]
-```
-
-`--spec-json` remains inline JSON-only. `--spec-file` accepts authored JSON or TOML and
-canonicalizes it into the same typed pipeline spec before launch, preserving the existing default
-values for `machine_id`, `pipeline_version`, and `input`. The generated pipeline still targets the
-legacy `evm_deploy_configure_validate` root so existing CLI behavior stays stable while canonical
-input is internally lowered through the new config-build and strict execute boundaries.
-
-EVM write phases (`evm_deploy`, `evm_configure`, and contract-set deploys) require
-`signing_key_env` and protected artifact storage via `MFM_SECRET_KEY_HEX`. Node-managed unsigned
-transaction submission is rejected so the runtime can record durable public intent metadata and keep
-signed raw transaction bytes out of normal facts before broadcast.
+Run start always resolves runner executable identities before `RunStarted`, because those identities
+are replay authority. `--drive append-only` suppresses post-start execution only; it does not bypass
+runner resolution. Specs that reference unported domain state descriptors fail with
+`TypedRunnerUnavailable` before any typed run event is written. The current production CLI registry
+contains the runtime built-in framework public-output renderer; domain runners are added by their
+typed porting commits.
 
 ### `run resume`
 
-Resumes an existing run by id (executes any remaining states).
+Resumes a certified typed run by loading the spec artifact bound by `RunStarted` and driving the
+typed scheduler according to `--drive`.
 
 **Usage:**
 ```sh
 mfm_cli run resume <RUN_ID> [OPTIONS]
 ```
 
-**Examples:**
-```sh
-mfm_cli run resume "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
-```
+It rejects non-typed run ids before storage access. `--drive append-only` validates and reports the
+stored run without executing states.
 
 ### `run status`
 
-Shows run status without executing states.
+Shows certified typed run status without executing states.
 
 **Usage:**
 ```sh
@@ -380,8 +313,7 @@ mfm_cli run status <RUN_ID> [OPTIONS]
 
 ### `run stream`
 
-Prints run stream records from the stream store.
-For `run:*`, these records encode machine event payloads.
+Prints store-owned references for certified typed run events.
 
 **Usage:**
 ```sh
@@ -392,33 +324,40 @@ mfm_cli run stream <RUN_ID> [OPTIONS]
 - `--from-seq <N>`: First sequence number to read (default: 1)
 - `--to-seq <N>`: Optional last sequence number to read (inclusive)
 
-### `run artifacts get`
+### `run public-output`
 
-Fetches an artifact by id from the artifact store. The id must be a valid SHA-256 content address:
-exactly 64 lowercase hexadecimal characters.
-
-Note: this command does not require Postgres; it only uses the filesystem artifact store.
+Renders a typed public output by schema id from store-owned public-output projection evidence and
+typed artifact bytes.
 
 **Usage:**
 ```sh
-mfm_cli run artifacts get <ARTIFACT_ID> [OPTIONS]
+mfm_cli run public-output <RUN_ID> --schema-id <SCHEMA_ID> [OPTIONS]
 ```
 
-**Output Notes:**
-- If the artifact bytes decode as JSON, the response uses `encoding: "json"` and includes a `value` field.
-- Otherwise the response uses `encoding: "hex"` and includes a hex string field.
+### `run replay`
+
+Verifies replay authority for a certified typed run by loading the stored certified spec artifact
+and retained artifact evidence, then constructing the typed replay broker. The command rejects
+missing retained evidence, executable identity drift, and live-capability fallback. Domain replay
+execution is available only after the corresponding typed runner/replay adapter is registered by a
+domain port.
+
+**Usage:**
+```sh
+mfm_cli run replay <RUN_ID> [OPTIONS]
+```
 
 ## Portfolio Commands (Experimental)
 
 ### `portfolio snapshot`
 
-Starts the canonical portfolio snapshot flow from a full request object containing:
+Validates and canonicalizes the portfolio snapshot request object containing:
 - `portfolio`
 - `valuation_source_registry`
 
-**Requirements:**
-- `DATABASE_URL` (stream store)
-- managed RPC bootstrap configuration (`MFM_EVM_RPC_SOURCES_JSON`)
+The command currently returns `TypedPortfolioPortPending` after request parsing. The old dynamic
+portfolio launch path has been removed; this command will start typed portfolio runs again once the
+portfolio workflow port emits a certified typed execution spec and run-start evidence.
 
 **Usage:**
 ```sh
@@ -446,11 +385,9 @@ portfolio flow must not share managed `rpc.control` source state with another fl
 network.
 
 **Output Notes:**
-- Result metadata includes run ids and snapshot ids.
-- The response includes `snapshot_artifact_id` when the run completed.
-- The response includes the canonical portfolio `report` when available.
-- `report.schema_version` is currently `2`; the referenced snapshot artifact also carries `schema_version = 2`.
-- `report.wallet_summaries[*].totals_by_quote[*]` and `report.totals_by_quote[*]` expose derived per-quote `assets_value_dec`, `collateral_value_dec`, `debt_value_dec`, `staked_value_dec`, and `net_value_dec`.
+- Until the typed portfolio port lands, successful request parsing is followed by
+  `TypedPortfolioPortPending`.
+- No dynamic run id, snapshot artifact id, or portfolio report is emitted by this disabled path.
 
 ## Configuration
 
@@ -479,13 +416,13 @@ The CLI's behavior can be modified using environment variables, which is ideal f
 - **`DATABASE_URL`**: PostgreSQL connection string used by `run` commands (unless `--database-url` is provided).
   ```sh
   export DATABASE_URL="postgresql://postgres:postgres@localhost:5432/mfm_test"
-  mfm_cli run start
+  mfm_cli run status "run:sha256-jcs-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
   ```
 
-- **`MFM_ARTIFACT_ROOT`**: Filesystem artifact store root used by `run` commands (unless `--artifact-root` is provided).
+- **`MFM_TYPED_ARTIFACT_ROOT`**: Filesystem typed artifact store root used by typed `run` commands (unless `--typed-artifact-root` is provided).
   ```sh
-  export MFM_ARTIFACT_ROOT="/tmp/mfm_artifacts"
-  mfm_cli run artifacts get "<ARTIFACT_ID>"
+  export MFM_TYPED_ARTIFACT_ROOT="/tmp/mfm_typed_artifacts"
+  mfm_cli run public-output "run:sha256-jcs-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" --schema-id "<SCHEMA_ID>"
   ```
 
 - **`MFM_EVM_RPC_SOURCES_JSON`**: Optional JSON array of source objects used to bootstrap the canonical `rpc.control` source catalog. Runtime-only and never persisted.

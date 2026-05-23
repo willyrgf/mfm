@@ -11,12 +11,12 @@ use mfm_ids::{
 use mfm_spec::v1::MediaType;
 use mfm_store::v1::{
     build_committed_batch, commit_fingerprint, payload_from_json_value, ArtifactEvidenceRef,
-    AttemptProjection, AttemptStatus, CellTerminalProjection, CommitKey, CommitOrdinal,
-    CommitOutcome, FactProjection, KernelEventEnvelope, LogicalEventKey,
-    PersistedKernelEventRecord, ProjectionSnapshot, PublicOutputProjection,
-    RetentionManifestProjection, RetentionProjection, RunState, SideEffectClaimProjection,
-    SideEffectIntentProjection, SideEffectPhase, SideEffectProjection, StoreError, StreamSeq,
-    TypedCommitBase, TypedCommitRequest, VerifiedRetentionProjection,
+    AsyncStoreFuture, AsyncTypedRunEventStore, AttemptProjection, AttemptStatus,
+    CellTerminalProjection, CommitKey, CommitOrdinal, CommitOutcome, FactProjection,
+    KernelEventEnvelope, LogicalEventKey, PersistedKernelEventRecord, ProjectionSnapshot,
+    PublicOutputProjection, RetentionManifestProjection, RetentionProjection, RunState,
+    SideEffectClaimProjection, SideEffectIntentProjection, SideEffectPhase, SideEffectProjection,
+    StoreError, StreamSeq, TypedCommitBase, TypedCommitRequest, VerifiedRetentionProjection,
 };
 use serde_json::Value;
 use tokio::sync::Mutex;
@@ -327,6 +327,42 @@ impl PostgresTypedRunEventStore {
             .await
             .map_err(|_| PostgresTypedStoreError::Database("failed to commit transaction"))?;
         Ok(snapshot)
+    }
+}
+
+impl AsyncTypedRunEventStore for PostgresTypedRunEventStore {
+    type Error = PostgresTypedStoreError;
+
+    fn record_artifact_evidence<'a>(
+        &'a self,
+        evidence: ArtifactEvidenceRef,
+    ) -> AsyncStoreFuture<'a, (), Self::Error> {
+        Box::pin(async move {
+            PostgresTypedRunEventStore::record_artifact_evidence(self, evidence).await
+        })
+    }
+
+    fn append_typed_run_commit<'a>(
+        &'a self,
+        request: TypedCommitRequest,
+    ) -> AsyncStoreFuture<'a, CommitOutcome, Self::Error> {
+        Box::pin(
+            async move { PostgresTypedRunEventStore::append_typed_run_commit(self, request).await },
+        )
+    }
+
+    fn load_run_stream<'a>(
+        &'a self,
+        run_id: &'a RunId,
+    ) -> AsyncStoreFuture<'a, Vec<KernelEventEnvelope>, Self::Error> {
+        Box::pin(async move { PostgresTypedRunEventStore::load_run_stream(self, run_id).await })
+    }
+
+    fn expected_next_seq<'a>(
+        &'a self,
+        run_id: &'a RunId,
+    ) -> AsyncStoreFuture<'a, StreamSeq, Self::Error> {
+        Box::pin(async move { PostgresTypedRunEventStore::expected_next_seq(self, run_id).await })
     }
 }
 

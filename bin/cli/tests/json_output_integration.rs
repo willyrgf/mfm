@@ -1,8 +1,6 @@
 #![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 use assert_cmd::Command;
 use mfm::presentation::output::{ErrorResponse, ResponseStatus, SuccessResponse};
-use mfm_artifact_store_fs::FsArtifactStore;
-use mfm_machine::stores::{ArtifactKind, ArtifactStore};
 use predicates::prelude::*;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -312,7 +310,7 @@ fn test_environment_variable_precedence() {
 }
 
 #[test]
-fn test_run_start_json_error_missing_database_url() {
+fn test_run_start_requires_certified_spec_path() {
     let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
     let output = cmd
         .env_remove("DATABASE_URL")
@@ -323,11 +321,12 @@ fn test_run_start_json_error_missing_database_url() {
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).unwrap();
     let parsed = verify_error_response(&stderr);
-    assert_eq!(parsed.error.code, "MissingDatabaseUrl");
+    assert_eq!(parsed.error.code, "CliParseError");
+    assert!(parsed.error.message.contains("--spec"));
 }
 
 #[test]
-fn test_run_pipeline_start_json_error_missing_database_url() {
+fn test_run_start_rejects_legacy_op_id_flag() {
     let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
     let output = cmd
         .env_remove("DATABASE_URL")
@@ -335,10 +334,85 @@ fn test_run_pipeline_start_json_error_missing_database_url() {
             "--output-format",
             "json",
             "run",
-            "pipeline",
             "start",
-            "--pipeline-json",
-            r#"{"machine_id":"proof","pipeline_version":"v1","steps":[{"step_id":"main","op_id":"proof","op_version":"v1","op_config":{}}]}"#,
+            "--op-id",
+            "portfolio.snapshot",
+        ])
+        .output()
+        .expect("Failed to execute command");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    let parsed = verify_error_response(&stderr);
+    assert_eq!(parsed.error.code, "CliParseError");
+    assert!(parsed.error.message.contains("--op-id"));
+}
+
+#[test]
+fn test_run_resume_rejects_legacy_uuid_before_storage() {
+    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
+    let output = cmd
+        .env_remove("DATABASE_URL")
+        .args([
+            "--output-format",
+            "json",
+            "run",
+            "resume",
+            "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        ])
+        .output()
+        .expect("Failed to execute command");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    let parsed = verify_error_response(&stderr);
+    assert_eq!(parsed.error.code, "InvalidRunId");
+}
+
+#[test]
+fn test_run_pipeline_subcommand_is_removed() {
+    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
+    let output = cmd
+        .args(["--output-format", "json", "run", "pipeline"])
+        .output()
+        .expect("Failed to execute command");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    let parsed = verify_error_response(&stderr);
+    assert_eq!(parsed.error.code, "CliParseError");
+    assert!(parsed.error.message.contains("pipeline"));
+}
+
+#[test]
+fn test_run_artifacts_subcommand_is_removed() {
+    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
+    let output = cmd
+        .args(["--output-format", "json", "run", "artifacts"])
+        .output()
+        .expect("Failed to execute command");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    let parsed = verify_error_response(&stderr);
+    assert_eq!(parsed.error.code, "CliParseError");
+    assert!(parsed.error.message.contains("artifacts"));
+}
+
+#[test]
+fn test_run_replay_requires_typed_store_after_valid_run_id() {
+    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
+    let output = cmd
+        .env_remove("DATABASE_URL")
+        .args([
+            "--output-format",
+            "json",
+            "run",
+            "replay",
+            "run:sha256-jcs-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         ])
         .output()
         .expect("Failed to execute command");
@@ -350,36 +424,22 @@ fn test_run_pipeline_start_json_error_missing_database_url() {
 }
 
 #[test]
-fn test_run_status_json_error_invalid_uuid() {
+fn test_run_status_json_error_invalid_typed_run_id() {
     let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
     let output = cmd
         .env_remove("DATABASE_URL")
-        .args(["--output-format", "json", "run", "status", "not-a-uuid"])
+        .args(["--output-format", "json", "run", "status", "not-a-run-id"])
         .output()
         .expect("Failed to execute command");
 
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).unwrap();
     let parsed = verify_error_response(&stderr);
-    assert_eq!(parsed.error.code, "InvalidUuid");
+    assert_eq!(parsed.error.code, "InvalidRunId");
 }
 
 #[test]
-fn test_run_artifacts_get_json_success_for_json_payload() {
-    let temp = TempDir::new().unwrap();
-
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let store = FsArtifactStore::new(temp.path());
-    let id = rt.block_on(async {
-        store
-            .put(
-                ArtifactKind::Other("test".to_string()),
-                serde_json::to_vec(&json!({"a": 1})).unwrap(),
-            )
-            .await
-            .unwrap()
-    });
-
+fn test_run_public_output_json_rejects_invalid_schema_id() {
     let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
     let output = cmd
         .env_remove("DATABASE_URL")
@@ -387,76 +447,10 @@ fn test_run_artifacts_get_json_success_for_json_payload() {
             "--output-format",
             "json",
             "run",
-            "artifacts",
-            "get",
-            id.as_str(),
-            "--artifact-root",
-            temp.path().to_str().unwrap(),
-        ])
-        .output()
-        .expect("Failed to execute command");
-
-    assert!(output.status.success());
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    let data = verify_success_response(&stdout);
-    assert_eq!(data["artifact_id"], id.as_str());
-    assert_eq!(data["encoding"], "json");
-    assert_eq!(data["value"]["a"], 1);
-}
-
-#[test]
-fn test_run_artifacts_get_json_success_for_binary_payload() {
-    let temp = TempDir::new().unwrap();
-
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let store = FsArtifactStore::new(temp.path());
-    let id = rt.block_on(async {
-        store
-            .put(ArtifactKind::Other("test".to_string()), b"hello".to_vec())
-            .await
-            .unwrap()
-    });
-
-    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
-    let output = cmd
-        .env_remove("DATABASE_URL")
-        .args([
-            "--output-format",
-            "json",
-            "run",
-            "artifacts",
-            "get",
-            id.as_str(),
-            "--artifact-root",
-            temp.path().to_str().unwrap(),
-        ])
-        .output()
-        .expect("Failed to execute command");
-
-    assert!(output.status.success());
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    let data = verify_success_response(&stdout);
-    assert_eq!(data["artifact_id"], id.as_str());
-    assert_eq!(data["encoding"], "hex");
-    assert_eq!(data["hex"], "68656c6c6f");
-}
-
-#[test]
-fn test_run_artifacts_get_json_rejects_invalid_artifact_id() {
-    let temp = TempDir::new().unwrap();
-
-    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
-    let output = cmd
-        .env_remove("DATABASE_URL")
-        .args([
-            "--output-format",
-            "json",
-            "run",
-            "artifacts",
-            "get",
-            "artifact_123",
-            "--artifact-root",
-            temp.path().to_str().unwrap(),
+            "public-output",
+            "run:sha256-jcs-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "--schema-id",
+            "schema_123",
         ])
         .output()
         .expect("Failed to execute command");
@@ -464,7 +458,7 @@ fn test_run_artifacts_get_json_rejects_invalid_artifact_id() {
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).unwrap();
     let err = verify_error_response(&stderr);
-    assert_eq!(err.error.code, "InvalidArtifactId");
+    assert_eq!(err.error.code, "InvalidSchemaId");
 }
 
 #[test]

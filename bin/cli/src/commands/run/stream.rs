@@ -1,15 +1,17 @@
 use crate::commands::result::{CommandError, CommandOutput, CommandResult};
 use crate::commands::CommandContext;
 use crate::presentation::output::handle_command_result;
-use crate::support::app_services::{command_error_from_app_error, make_app_services_from_args};
-use crate::support::run_stores::RunStoresArgs;
+use crate::support::typed_run::{
+    command_error_from_typed_app_error, make_typed_app_services, parse_typed_run_id,
+    TypedRunStoresArgs,
+};
 use clap::Args;
-use mfm_app::{RunsStreamQuery, RunsStreamResponse};
+use mfm_app::TypedRunStreamResponse;
 
 /// Arguments for `mfm run stream`.
 #[derive(Args)]
 pub(crate) struct StreamArgs {
-    /// Run id (UUID)
+    /// Typed run id (`run:<algorithm>:<digest>`)
     pub run_id: String,
 
     /// First sequence number to read (1-indexed)
@@ -20,9 +22,9 @@ pub(crate) struct StreamArgs {
     #[arg(long)]
     pub to_seq: Option<u64>,
 
-    /// Storage configuration for the run's stream and artifact backends.
+    /// Storage configuration for certified typed run events and artifacts.
     #[command(flatten)]
-    pub stores: RunStoresArgs,
+    pub stores: TypedRunStoresArgs,
 }
 
 /// Executes the stream command and terminates the process.
@@ -31,22 +33,43 @@ pub(crate) async fn execute(ctx: &CommandContext, args: &StreamArgs) -> ! {
     handle_command_result(result, &ctx.output_format);
 }
 
-async fn execute_internal(args: &StreamArgs) -> CommandResult<RunsStreamResponse> {
-    uuid::Uuid::parse_str(&args.run_id)
-        .map_err(|_| CommandError::invalid_uuid("Invalid UUID format"))?;
+async fn execute_internal(args: &StreamArgs) -> CommandResult<TypedRunStreamResponse> {
+    if args.from_seq == 0 {
+        return Err(CommandError::new(
+            "InvalidSequenceRange",
+            "--from-seq must be greater than zero",
+        ));
+    }
+    if let Some(to_seq) = args.to_seq {
+        if to_seq < args.from_seq {
+            return Err(CommandError::new(
+                "InvalidSequenceRange",
+                "--to-seq must be greater than or equal to --from-seq",
+            ));
+        }
+    }
 
-    let services = make_app_services_from_args(&args.stores).await?;
-
+    let run_id = parse_typed_run_id(&args.run_id)?;
+    let services = make_typed_app_services(&args.stores).await?;
     let response = services
-        .run_stream(
-            &args.run_id,
-            RunsStreamQuery {
-                from_seq: args.from_seq,
-                to_seq: args.to_seq,
-            },
-        )
+        .run_stream(&run_id)
         .await
-        .map_err(command_error_from_app_error)?;
+        .map_err(command_error_from_typed_app_error)?;
+    let response = TypedRunStreamResponse {
+        run_id: response.run_id,
+        head_seq: response.head_seq,
+        events: response
+            .events
+            .into_iter()
+            .filter(|event| {
+                event.seq >= args.from_seq
+                    && match args.to_seq {
+                        Some(to_seq) => event.seq <= to_seq,
+                        None => true,
+                    }
+            })
+            .collect(),
+    };
 
     Ok(CommandOutput::new(response))
 }

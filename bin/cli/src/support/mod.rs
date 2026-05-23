@@ -4,3 +4,5 @@ pub(crate) mod app_services;
 pub(crate) mod command_defaults;
 /// Helpers for constructing run storage backends from CLI inputs.
 pub(crate) mod run_stores;
+/// Helpers for typed certified run store access.
+pub(crate) mod typed_run;

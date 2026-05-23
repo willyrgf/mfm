@@ -9,11 +9,12 @@ parity-tests = []
 [dependencies]
 tokio = { workspace = true }
 mfm-machine = { path = "../../crates/machine" }
-mfm-sdk = { path = "../../crates/sdk" }
-mfm-app = { package = "mfm-app-legacy", path = "../../crates/app-legacy" }
+mfm-app = { path = "../../crates/app" }
+mfm-app-legacy = { package = "mfm-app-legacy", path = "../../crates/app-legacy" }
 mfm-artifact-store-fs = { path = "../../crates/storages/artifact-store-fs" }
 mfm-stream-store-postgres = { path = "../../crates/storages/stream-store-postgres" }
 mfm-stream-store-mem = { path = "../../crates/storages/stream-store-mem" }
+mfm-ids = { path = "../../crates/kernel/ids" }
 clap = { version = "4.4", features = ["derive", "env"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

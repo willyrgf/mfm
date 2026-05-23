@@ -1,31 +1,68 @@
+use std::path::PathBuf;
+use std::str::FromStr;
+
 use crate::commands::result::{CommandError, CommandOutput, CommandResult};
 use crate::commands::CommandContext;
 use crate::presentation::output::handle_command_result;
-use crate::support::app_services::{command_error_from_app_error, make_app_services_from_args};
-#[cfg(test)]
-use crate::support::run_stores::make_ephemeral_stores;
-use crate::support::run_stores::RunStoresArgs;
+use crate::support::typed_run::{
+    command_error_from_typed_app_error, drive_mode, make_typed_app_services, parse_typed_run_id,
+    TypedDriveArg, TypedRunStoresArgs,
+};
 use clap::Args;
-use mfm_app::{AppServices, RunStartResponse, RunsStartRequest};
+use mfm_app::{TypedRunResponse, TypedSeedInput};
+use mfm_ids::SeedId;
 
 /// Arguments for `mfm run start`.
 #[derive(Args)]
 pub(crate) struct StartArgs {
-    /// Operation id (default: proof)
-    #[arg(long, default_value = "proof")]
-    pub op_id: String,
+    /// Certified typed execution spec JSON file.
+    #[arg(long, value_name = "PATH")]
+    pub spec: PathBuf,
 
-    /// Operation version (default: v1)
-    #[arg(long, default_value = "v1")]
-    pub op_version: String,
+    /// Optional typed run id (`run:<algorithm>:<digest>`). Defaults to a generated typed id.
+    #[arg(long)]
+    pub run_id: Option<String>,
 
-    /// Operation config JSON (must be canonical-json-hashable; no floats)
-    #[arg(long, default_value = "{}")]
-    pub op_config_json: String,
+    /// Seed input as `seed:<algorithm>:<digest>=/path/to/canonical-seed.json`.
+    #[arg(long = "seed", value_name = "SEED_ID=PATH")]
+    pub seeds: Vec<SeedInputArg>,
 
-    /// Storage configuration for the run's event and artifact backends.
+    /// Framework version evidence recorded in RunStarted.
+    #[arg(long, default_value = "mfm.cli.typed.v1")]
+    pub framework_version: String,
+
+    /// Source revision evidence recorded in RunStarted.
+    #[arg(long, env = "MFM_SOURCE_REVISION", default_value = "unknown")]
+    pub source_revision: String,
+
+    /// Scheduler drive policy after the typed RunStarted event is committed.
+    #[arg(long, value_enum, default_value_t = TypedDriveArg::UntilBlocked)]
+    pub drive: TypedDriveArg,
+
+    /// Storage configuration for certified typed run events and artifacts.
     #[command(flatten)]
-    pub stores: RunStoresArgs,
+    pub stores: TypedRunStoresArgs,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct SeedInputArg {
+    seed_id: SeedId,
+    path: PathBuf,
+}
+
+impl FromStr for SeedInputArg {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let (seed_id, path) = value
+            .split_once('=')
+            .ok_or_else(|| "seed input must use SEED_ID=PATH".to_owned())?;
+        Ok(Self {
+            seed_id: SeedId::parse(seed_id)
+                .map_err(|_| "seed id must use the typed seed identity format".to_owned())?,
+            path: PathBuf::from(path),
+        })
+    }
 }
 
 /// Executes the start command and terminates the process.
@@ -34,62 +71,55 @@ pub(crate) async fn execute(ctx: &CommandContext, args: &StartArgs) -> ! {
     handle_command_result(result, &ctx.output_format);
 }
 
-async fn execute_internal(args: &StartArgs) -> CommandResult<RunStartResponse> {
-    let services = make_app_services_from_args(&args.stores).await?;
-    execute_internal_with_services(args, services).await
-}
-
-async fn execute_internal_with_services(
-    args: &StartArgs,
-    services: AppServices,
-) -> CommandResult<RunStartResponse> {
-    let op_config: serde_json::Value =
-        serde_json::from_str(&args.op_config_json).map_err(|_| {
-            CommandError::new("InvalidJson", "Failed to parse --op-config-json as JSON")
+async fn execute_internal(args: &StartArgs) -> CommandResult<TypedRunResponse> {
+    let run_id = match &args.run_id {
+        Some(run_id) => parse_typed_run_id(run_id)?,
+        None => mfm_app::new_run_id(),
+    };
+    let spec_bytes = tokio::fs::read(&args.spec).await.map_err(|error| {
+        CommandError::new(
+            "TypedSpecReadFailed",
+            format!(
+                "failed to read typed spec file {}: {error}",
+                args.spec.display()
+            ),
+        )
+    })?;
+    let seed_media_type = mfm_app::json_media_type().map_err(command_error_from_typed_app_error)?;
+    let mut seed_inputs = Vec::with_capacity(args.seeds.len());
+    for seed in &args.seeds {
+        let bytes = tokio::fs::read(&seed.path).await.map_err(|error| {
+            CommandError::new(
+                "TypedSeedReadFailed",
+                format!(
+                    "failed to read seed input {} for {}: {error}",
+                    seed.path.display(),
+                    seed.seed_id
+                ),
+            )
         })?;
-
-    let response = services
-        .start_run(RunsStartRequest::SingleOp {
-            op_id: args.op_id.clone(),
-            op_version: args.op_version.clone(),
-            op_config,
-            input: serde_json::json!({}),
-        })
-        .await
-        .map_err(command_error_from_app_error)?;
-
-    Ok(CommandOutput::new(response))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use mfm_op_portfolio_tracker::portfolio_tracker_internal_op_ids;
-
-    #[tokio::test]
-    async fn execute_internal_rejects_portfolio_internal_child_ops() {
-        let stores = make_ephemeral_stores(None);
-        let services = AppServices::new(
-            mfm_app::make_engine_bundle(),
-            stores.streams,
-            stores.artifacts,
-        );
-
-        for op_id in portfolio_tracker_internal_op_ids() {
-            let args = StartArgs {
-                op_id: (*op_id).to_string(),
-                op_version: "v1".to_string(),
-                op_config_json: "{}".to_string(),
-                stores: RunStoresArgs {
-                    artifact_root: None,
-                    database_url: None,
-                },
-            };
-
-            let err = execute_internal_with_services(&args, services.clone())
-                .await
-                .expect_err("planner-internal op must not be publicly startable");
-            assert_eq!(err.code, "op_not_public");
-        }
+        seed_inputs.push(TypedSeedInput {
+            seed_id: seed.seed_id.clone(),
+            bytes,
+            media_type: seed_media_type.clone(),
+        });
     }
+
+    let services = make_typed_app_services(&args.stores).await?;
+    let request = mfm_app::build_typed_run_start_request(
+        services.artifacts(),
+        &spec_bytes,
+        run_id,
+        &args.framework_version,
+        &args.source_revision,
+        seed_inputs,
+        drive_mode(args.drive),
+    )
+    .await
+    .map_err(command_error_from_typed_app_error)?;
+    let response = services
+        .start_certified_run(request)
+        .await
+        .map_err(command_error_from_typed_app_error)?;
+    Ok(CommandOutput::new(response))
 }
