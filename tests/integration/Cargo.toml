@@ -26,11 +26,14 @@ tempfile = "3.0"
 tracing = { workspace = true }
 
 mfm-rest-api = { path = "../../bin/rest-api" }
+mfm-app = { path = "../../crates/app" }
 mfm-app-legacy = { package = "mfm-app-legacy", path = "../../crates/app-legacy" }
 mfm-sdk = { path = "../../crates/sdk" }
 mfm-machine-test-support = { path = "../../crates/machine-test-support" }
 
 mfm-artifact-store-fs = { path = "../../crates/storages/artifact-store-fs" }
+mfm-events = { path = "../../crates/kernel/events" }
 mfm-stream-store-mem = { path = "../../crates/storages/stream-store-mem" }
 mfm-stream-store-postgres = { path = "../../crates/storages/stream-store-postgres" }
 mfm-op-portfolio-tracker = { path = "../../crates/ops/portfolio-tracker-op" }
+mfm-portfolio-config = { path = "../../crates/portfolio-config" }

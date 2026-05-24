@@ -390,13 +390,13 @@ workflow ports, and deletion or hard isolation of old dynamic semantic APIs.
 
 ### Commit 36: `portfolio port tracker workflow`
 
-- [ ] Rewrite portfolio tracker states and operations through typed builder APIs.
-- [ ] Use typed fanout/fanin, `DomainKeyedHandles`, non-empty observations where required, value
+- [x] Rewrite portfolio tracker states and operations through typed builder APIs.
+- [x] Use typed fanout/fanin, `DomainKeyedHandles`, non-empty observations where required, value
       lineage, and typed public outputs.
-- [ ] Remove `PortKey`, semantic JSON context dataflow, hand-authored dependency edges, and old SDK
+- [x] Remove `PortKey`, semantic JSON context dataflow, hand-authored dependency edges, and old SDK
       semantic imports.
-- [ ] Add duplicate domain key, stable ordering, replay/resume, and CLI/API parity fixtures.
-- [ ] Validation: `nix run .#ci -- --mode parity --summary`.
+- [x] Add duplicate domain key, stable ordering, replay/resume, and CLI/API parity fixtures.
+- [x] Validation: `nix run .#ci -- --mode parity --summary`.
 
 ### Commit 37: `evm model align with typed lifecycle`
 

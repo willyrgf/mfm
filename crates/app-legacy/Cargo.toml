@@ -16,7 +16,6 @@ tracing-subscriber = { workspace = true, features = ["env-filter", "fmt", "json"
 
 mfm-machine = { path = "../machine" }
 mfm-evm-deploy-configure-validate-config = { path = "../evm-deploy-configure-validate-config" }
-mfm-portfolio-config = { path = "../portfolio-config" }
 mfm-sdk = { path = "../sdk" }
 mfm-collectors-nix-exec = { path = "../collectors/nix-exec" }
 mfm-transports-exec = { path = "../transports/exec" }
@@ -28,9 +27,7 @@ mfm-op-keystore = { path = "../ops/keystore-op" }
 mfm-op-evm-read = { path = "../ops/evm-read-op" }
 mfm-op-evm-write = { path = "../ops/evm-write-op" }
 mfm-op-evm-deploy-configure-validate = { path = "../ops/evm-deploy-configure-validate-op" }
-mfm-op-portfolio-tracker = { path = "../ops/portfolio-tracker-op" }
 mfm-op-nix-app = { path = "../ops/nix-app-op" }
-mfm-portfolio-model = { path = "../portfolio/model" }
 mfm-artifact-store-fs = { path = "../storages/artifact-store-fs" }
 mfm-artifact-store-secret = { path = "../storages/artifact-store-secret" }
 mfm-artifact-store-s3 = { path = "../storages/artifact-store-s3" }

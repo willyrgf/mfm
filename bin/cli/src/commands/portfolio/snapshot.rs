@@ -2,16 +2,27 @@ use std::fmt;
 use std::path::PathBuf;
 
 use clap::Args;
-use mfm_app_legacy::{
-    canonicalize_portfolio_snapshot_input, AuthoredConfigInput, PortfolioSnapshotRequest,
+use mfm_app::{TypedPublicOutputResponse, TypedRunPhase, TypedRunResponse};
+use mfm_artifact_store_fs::{FsTypedArtifactStore, TypedArtifactDescriptor};
+use mfm_events::v1 as events;
+use mfm_op_portfolio_tracker::{
+    certified_portfolio_spec, portfolio_config_artifacts_for_spec, portfolio_program_draft,
+    PortfolioConfigArtifact, PortfolioWorkflowConfig,
+};
+use mfm_portfolio_config::{
+    canonicalize_portfolio_snapshot_authored_config, parse_portfolio_snapshot_authored_config,
+    parse_portfolio_snapshot_authored_config_with_hint, AuthoredConfigFormat,
+    PortfolioSnapshotCanonicalConfig, PortfolioSnapshotConfigError,
 };
 use serde::Serialize;
 
-use crate::commands::result::{CommandError, CommandResult};
+use crate::commands::result::{CommandError, CommandOutput, CommandResult};
 use crate::commands::CommandContext;
 use crate::presentation::output::handle_command_result;
-use crate::support::app_services::command_error_from_app_error;
-use crate::support::typed_run::TypedRunStoresArgs;
+use crate::support::typed_run::{
+    command_error_from_typed_app_error, drive_mode, make_typed_app_services, TypedDriveArg,
+    TypedRunStoresArgs,
+};
 
 /// Arguments for `mfm portfolio snapshot`.
 #[derive(Args)]
@@ -27,20 +38,32 @@ pub(crate) struct SnapshotArgs {
     /// Typed storage configuration reserved for the typed portfolio port.
     #[command(flatten)]
     pub stores: TypedRunStoresArgs,
+
+    /// Framework version evidence recorded in RunStarted.
+    #[arg(long, default_value = "mfm.cli.portfolio.typed.v1")]
+    pub framework_version: String,
+
+    /// Source revision evidence recorded in RunStarted.
+    #[arg(long, env = "MFM_SOURCE_REVISION", default_value = "unknown")]
+    pub source_revision: String,
+
+    /// Scheduler drive policy after the typed RunStarted event is committed.
+    #[arg(long, value_enum, default_value_t = TypedDriveArg::UntilBlocked)]
+    pub drive: TypedDriveArg,
 }
 
 #[derive(Debug, Serialize)]
-struct PortfolioSnapshotDisabledResponse {
-    feature_id: String,
+struct PortfolioSnapshotResponse {
+    run: TypedRunResponse,
+    public_output: Option<TypedPublicOutputResponse>,
 }
 
-impl fmt::Display for PortfolioSnapshotDisabledResponse {
+impl fmt::Display for PortfolioSnapshotResponse {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{} is disabled until the typed portfolio port lands",
-            self.feature_id
-        )
+        match &self.public_output {
+            Some(public_output) => write!(f, "{public_output}"),
+            None => write!(f, "{}", self.run),
+        }
     }
 }
 
@@ -50,15 +73,67 @@ pub(crate) async fn execute(ctx: &CommandContext, args: &SnapshotArgs) -> ! {
     handle_command_result(result, &ctx.output_format);
 }
 
-async fn execute_internal(args: &SnapshotArgs) -> CommandResult<PortfolioSnapshotDisabledResponse> {
-    let _request = parse_request(args)?;
-    Err(CommandError::new(
-        "TypedPortfolioPortPending",
-        "portfolio snapshot is temporarily disabled until the typed portfolio workflow port replaces the old dynamic run path",
-    ))
+async fn execute_internal(args: &SnapshotArgs) -> CommandResult<PortfolioSnapshotResponse> {
+    let canonical = parse_request(args)?;
+    let workflow_config = PortfolioWorkflowConfig::from(canonical);
+    let draft = portfolio_program_draft(workflow_config.clone())
+        .map_err(|error| CommandError::new("TypedPortfolioPlanInvalid", error.to_string()))?;
+    let certified = certified_portfolio_spec(workflow_config)
+        .map_err(|error| CommandError::new("TypedPortfolioSpecInvalid", error.to_string()))?;
+    let public_schema_id = certified
+        .envelope
+        .spec
+        .public_outputs
+        .public_schema_id
+        .clone();
+
+    let services = make_typed_app_services(&args.stores).await?;
+    persist_config_artifacts(
+        services.artifacts(),
+        portfolio_config_artifacts_for_spec(&draft, &certified.envelope.spec)
+            .map_err(|error| CommandError::new("TypedPortfolioConfigInvalid", error.to_string()))?,
+    )
+    .await?;
+
+    let spec_bytes = certified
+        .envelope
+        .spec
+        .canonical_json()
+        .map_err(|error| CommandError::new("TypedPortfolioSpecInvalid", error.to_string()))?
+        .to_vec();
+    let run_id = mfm_app::new_run_id();
+    let request = mfm_app::build_typed_run_start_request(
+        services.artifacts(),
+        &spec_bytes,
+        run_id.clone(),
+        &args.framework_version,
+        &args.source_revision,
+        Vec::new(),
+        drive_mode(args.drive),
+    )
+    .await
+    .map_err(command_error_from_typed_app_error)?;
+    let run = services
+        .start_certified_run(request)
+        .await
+        .map_err(command_error_from_typed_app_error)?;
+    let public_output = if run.phase == TypedRunPhase::Completed {
+        Some(
+            services
+                .typed_public_output(&run_id, &public_schema_id)
+                .await
+                .map_err(command_error_from_typed_app_error)?,
+        )
+    } else {
+        None
+    };
+    Ok(CommandOutput::new(PortfolioSnapshotResponse {
+        run,
+        public_output,
+    }))
 }
 
-fn parse_request(args: &SnapshotArgs) -> Result<PortfolioSnapshotRequest, CommandError> {
+fn parse_request(args: &SnapshotArgs) -> Result<PortfolioSnapshotCanonicalConfig, CommandError> {
     match (&args.request_json, &args.request_file) {
         (Some(_), Some(_)) => Err(CommandError::new(
             "InvalidArguments",
@@ -68,10 +143,7 @@ fn parse_request(args: &SnapshotArgs) -> Result<PortfolioSnapshotRequest, Comman
             "MissingArgument",
             "Pass one of --request-json or --request-file",
         )),
-        (Some(raw), None) => {
-            canonicalize_portfolio_snapshot_input(AuthoredConfigInput::json(raw.clone()))
-                .map_err(command_error_from_app_error)
-        }
+        (Some(raw), None) => parse_and_canonicalize_json(raw),
         (None, Some(path)) => {
             let raw = std::fs::read_to_string(path).map_err(|_| {
                 CommandError::new(
@@ -79,8 +151,63 @@ fn parse_request(args: &SnapshotArgs) -> Result<PortfolioSnapshotRequest, Comman
                     "Failed to read --request-file contents",
                 )
             })?;
-            canonicalize_portfolio_snapshot_input(AuthoredConfigInput::with_path_hint(raw, path))
-                .map_err(command_error_from_app_error)
+            let authored = parse_portfolio_snapshot_authored_config_with_hint(&raw, Some(path))
+                .map_err(command_error_from_portfolio_snapshot_config_error)?;
+            canonicalize_portfolio_snapshot_authored_config(authored)
+                .map_err(command_error_from_portfolio_snapshot_config_error)
+        }
+    }
+}
+
+fn parse_and_canonicalize_json(
+    raw: &str,
+) -> Result<PortfolioSnapshotCanonicalConfig, CommandError> {
+    let authored = parse_portfolio_snapshot_authored_config(raw, AuthoredConfigFormat::Json)
+        .map_err(command_error_from_portfolio_snapshot_config_error)?;
+    canonicalize_portfolio_snapshot_authored_config(authored)
+        .map_err(command_error_from_portfolio_snapshot_config_error)
+}
+
+async fn persist_config_artifacts(
+    artifacts: &FsTypedArtifactStore,
+    configs: Vec<PortfolioConfigArtifact>,
+) -> Result<(), CommandError> {
+    for config in configs {
+        artifacts
+            .put_artifact(
+                config.bytes,
+                TypedArtifactDescriptor {
+                    media_type: config.media_type,
+                    schema_id: Some(config.schema_id),
+                    semantic_type_id: None,
+                    producer_node_id: None,
+                    producer_seed_id: None,
+                    artifact_role: events::ArtifactRole::TypedConfig,
+                },
+            )
+            .await
+            .map_err(|error| {
+                CommandError::new("TypedPortfolioConfigPersistFailed", error.to_string())
+            })?;
+    }
+    Ok(())
+}
+
+fn command_error_from_portfolio_snapshot_config_error(
+    err: PortfolioSnapshotConfigError,
+) -> CommandError {
+    match err {
+        PortfolioSnapshotConfigError::InvalidJson { .. } => {
+            CommandError::new("InvalidJson", "Failed to parse request body as JSON")
+        }
+        PortfolioSnapshotConfigError::InvalidToml { .. } => {
+            CommandError::new("InvalidToml", "Failed to parse request body as TOML")
+        }
+        PortfolioSnapshotConfigError::InvalidBundle(_)
+        | PortfolioSnapshotConfigError::Decode { .. }
+        | PortfolioSnapshotConfigError::Serialize { .. }
+        | PortfolioSnapshotConfigError::CanonicalJson { .. } => {
+            CommandError::new("InvalidRequest", err.to_string())
         }
     }
 }
@@ -91,8 +218,8 @@ mod tests {
     use serde_json::json;
     use tempfile::Builder;
 
-    #[tokio::test]
-    async fn execute_internal_rejects_dynamic_portfolio_execution_after_parsing() {
+    #[test]
+    fn parse_request_accepts_valid_canonical_request() {
         let args = SnapshotArgs {
             request_json: Some(canonical_request_json().to_string()),
             request_file: None,
@@ -100,17 +227,18 @@ mod tests {
                 typed_artifact_root: None,
                 database_url: None,
             },
+            framework_version: "mfm.cli.portfolio.typed.v1".to_owned(),
+            source_revision: "unknown".to_owned(),
+            drive: TypedDriveArg::UntilBlocked,
         };
 
-        let err = execute_internal(&args)
-            .await
-            .expect_err("dynamic portfolio execution must be disabled");
+        let parsed = parse_request(&args).expect("valid request");
 
-        assert_eq!(err.code, "TypedPortfolioPortPending");
+        assert_eq!(parsed.portfolio.portfolio_id, "portfolio_main");
     }
 
-    #[tokio::test]
-    async fn execute_internal_preserves_json_parse_error_contract() {
+    #[test]
+    fn parse_request_preserves_json_parse_error_contract() {
         let args = SnapshotArgs {
             request_json: Some("{".to_string()),
             request_file: None,
@@ -118,18 +246,19 @@ mod tests {
                 typed_artifact_root: None,
                 database_url: None,
             },
+            framework_version: "mfm.cli.portfolio.typed.v1".to_owned(),
+            source_revision: "unknown".to_owned(),
+            drive: TypedDriveArg::UntilBlocked,
         };
 
-        let err = execute_internal(&args)
-            .await
-            .expect_err("invalid json should fail");
+        let err = parse_request(&args).expect_err("invalid json should fail");
 
         assert_eq!(err.code, "InvalidJson");
         assert_eq!(err.message, "Failed to parse request body as JSON");
     }
 
-    #[tokio::test]
-    async fn execute_internal_preserves_toml_parse_error_contract() {
+    #[test]
+    fn parse_request_preserves_toml_parse_error_contract() {
         let request_file = Builder::new().suffix(".toml").tempfile().expect("tempfile");
         std::fs::write(request_file.path(), "portfolio = [").expect("write invalid request file");
 
@@ -140,11 +269,12 @@ mod tests {
                 typed_artifact_root: None,
                 database_url: None,
             },
+            framework_version: "mfm.cli.portfolio.typed.v1".to_owned(),
+            source_revision: "unknown".to_owned(),
+            drive: TypedDriveArg::UntilBlocked,
         };
 
-        let err = execute_internal(&args)
-            .await
-            .expect_err("invalid toml should fail");
+        let err = parse_request(&args).expect_err("invalid toml should fail");
 
         assert_eq!(err.code, "InvalidToml");
         assert_eq!(err.message, "Failed to parse request body as TOML");

@@ -1,33 +1,27 @@
 # mfm-op-portfolio-tracker
 
-Portfolio tracking operations:
+Typed portfolio tracking operation:
 
-- `portfolio_config_build/v1`: canonical config build root that publishes built config plus
-  config artifacts
-- `portfolio_execute/v1`: strict built-config execution root used by thin transport adapters
-- `portfolio_tracker/v1`: canonical public root that composes `portfolio_config_build` before
-  `portfolio_execute`
+- `mfm.portfolio.tracker_workflow`: typed operation authored through `mfm-program` and certified
+  into a typed execution spec
 
-These ops are thin planners for the canonical multi-network portfolio snapshot flow. They wire the
-same fixed semantic runtime:
+This op is a thin typed planner for the canonical multi-network portfolio snapshot flow. It wires
+typed state contracts through handles, domain-keyed fanout/fanin, non-empty observation batches,
+and typed public outputs:
 
-- `PrepareExecutionSources`
+- `PrepareSources`
 - `ResolveSubjects`
-- `PinExecutionViews`
-- `ResolveValuationInputs`
-- `ObserveCompiledBatch`
+- `PinViews`
+- `ResolveValuations`
+- `ObserveBatch`
 - `MergeObservations`
 - `AssembleSnapshot`
+- `PublishSnapshot`
 - `ProjectReport`
 
-`portfolio_config_build` consumes canonical portfolio config and publishes the typed built config,
-the canonical config artifact id, the built config artifact id, and a stable build report.
-`portfolio_execute` consumes the pre-built execution config emitted by `mfm-portfolio-config`.
-`portfolio_tracker` is the composed canonical root: it plans the `portfolio_config_build`
-publication step before lowering into the same semantic runtime.
-
-Protocol and network specialization now happens in the semantic adapter catalog rather than through
-protocol-specific graph shapes.
+The crate exposes no legacy dynamic `PlannedOp`, `PortKey`, `DynContext`, context-key, or
+hand-authored dependency-edge surface. Runtime execution is provided by the typed runner registry
+in `mfm-transports-portfolio`.
 
 Docs:
 - `docs/design.md`

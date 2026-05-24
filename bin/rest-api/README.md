@@ -37,6 +37,7 @@ Endpoints:
 
 - `GET /v1/health`
 - `GET /v1/ready`
+- `POST /v1/portfolio/snapshot`
 - `POST /v1/runs/start`
 - `POST /v1/runs/:run_id/resume`
 - `GET /v1/runs/:run_id/status`
@@ -48,6 +49,30 @@ Probe semantics:
 
 - `/v1/health`: liveness only (process is running)
 - `/v1/ready`: typed run store and typed artifact store probes must succeed
+
+## Start A Portfolio Snapshot
+
+`POST /v1/portfolio/snapshot` accepts the same documented portfolio snapshot request JSON as
+`mfm_cli portfolio snapshot`, compiles it into a certified typed portfolio spec, persists the
+required typed config artifacts, and starts the certified run:
+
+```json
+{
+  "kind": "portfolio_snapshot_start_v1",
+  "request": {
+    "portfolio": { "...": "PortfolioConfig" },
+    "valuation_source_registry": { "sources": [] }
+  },
+  "run_id": "run:sha256-jcs-v1:<optional-digest>",
+  "framework_version": "mfm.rest_api.portfolio.typed.v1",
+  "source_revision": "git-or-build-id",
+  "drive": "until_blocked"
+}
+```
+
+The response is `{"run": ..., "public_output": ...}` inside the standard success envelope.
+`public_output` is present when the run completes during the selected drive mode. This route never
+submits old dynamic `portfolio_tracker`, `portfolio_execute`, or `portfolio_config_build` ops.
 
 ## Start A Typed Run
 

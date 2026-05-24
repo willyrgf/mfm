@@ -121,7 +121,7 @@ pub fn string_contains_secret_marker(input: &str) -> bool {
 }
 
 /// Returns the first string-map key whose key or value matches the secret-marker policy.
-pub fn string_map_secret_marker_key<'a>(map: &'a BTreeMap<String, String>) -> Option<&'a str> {
+pub fn string_map_secret_marker_key(map: &BTreeMap<String, String>) -> Option<&str> {
     map.iter()
         .find(|(key, value)| {
             string_contains_secret_marker(key) || string_contains_secret_marker(value)

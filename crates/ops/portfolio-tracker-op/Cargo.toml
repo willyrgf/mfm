@@ -2,24 +2,20 @@
 name = "mfm-op-portfolio-tracker"
 version = "0.1.0"
 edition = "2021"
-description = "Composite portfolio snapshot op with semantic compilation and multi-network observation"
+description = "Typed portfolio snapshot workflow operation"
 
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
-thiserror = { workspace = true }
 
 mfm-canonical = { path = "../../kernel/canonical" }
+mfm-certify = { path = "../../kernel/certify" }
 mfm-ids = { path = "../../kernel/ids" }
-mfm-machine = { path = "../../machine" }
+mfm-program = { path = "../../kernel/program" }
+mfm-spec = { path = "../../kernel/spec" }
 mfm-portfolio-config = { path = "../../portfolio-config" }
 mfm-portfolio-model = { path = "../../portfolio/model" }
-mfm-portfolio-plan = { path = "../../portfolio/plan" }
-mfm-sdk = { path = "../../sdk" }
-mfm-state-aave-v3 = { path = "../../states/aave-v3" }
-mfm-state-common = { path = "../../states/common" }
 mfm-state-portfolio = { path = "../../states/portfolio" }
 
 [dev-dependencies]
-async-trait = { workspace = true }
 tokio = { workspace = true }

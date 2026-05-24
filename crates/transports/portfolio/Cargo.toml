@@ -1,0 +1,31 @@
+[package]
+name = "mfm-transports-portfolio"
+version = "0.1.0"
+edition = "2021"
+description = "Typed portfolio workflow runners"
+repository = "https://github.com/willyrgf/mfm"
+license = "MIT"
+
+[dependencies]
+alloy-primitives = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
+tokio = { workspace = true }
+
+mfm-artifact-store-fs = { path = "../../storages/artifact-store-fs", default-features = false }
+mfm-canonical = { path = "../../kernel/canonical" }
+mfm-capabilities = { path = "../../kernel/capabilities" }
+mfm-events = { path = "../../kernel/events" }
+mfm-evm-core = { path = "../../evm-core" }
+mfm-ids = { path = "../../kernel/ids" }
+mfm-program = { path = "../../kernel/program" }
+mfm-runtime = { path = "../../kernel/runtime" }
+mfm-spec = { path = "../../kernel/spec" }
+mfm-portfolio-model = { path = "../../portfolio/model" }
+mfm-state-portfolio = { path = "../../states/portfolio" }
+mfm-store = { path = "../../kernel/store" }
+mfm-values = { path = "../../kernel/values" }
+
+[dev-dependencies]
+mfm-op-portfolio-tracker = { path = "../../ops/portfolio-tracker-op" }

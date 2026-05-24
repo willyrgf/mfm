@@ -84,30 +84,11 @@ use mfm_op_keystore::{
     KEYSTORE_IMPORT_OP_ID, KEYSTORE_LIST_OP_ID, TX_OP_VERSION, TX_SIGN_OP_ID,
 };
 use mfm_op_nix_app::NixAppOp;
-#[cfg(test)]
-use mfm_op_portfolio_tracker::PORTFOLIO_EXECUTE_OP_ID;
-use mfm_op_portfolio_tracker::{
-    is_portfolio_tracker_internal_op_id, portfolio_config_build_built_artifact_id_context_key,
-    portfolio_config_build_built_config_context_key,
-    portfolio_config_build_canonical_artifact_id_context_key,
-    portfolio_config_build_report_context_key, portfolio_public_ops,
-    portfolio_snapshot_artifact_id_context_key, portfolio_snapshot_report_context_key,
-    portfolio_tracker_internal_ops, PortfolioSnapshotBuiltConfig, PORTFOLIO_CONFIG_BUILD_OP_ID,
-    PORTFOLIO_PUBLIC_OP_VERSION, PORTFOLIO_TRACKER_OP_ID,
-};
-use mfm_portfolio_config::{
-    canonicalize_portfolio_snapshot_authored_config, parse_portfolio_snapshot_authored_config,
-    parse_portfolio_snapshot_authored_config_with_hint,
-    AuthoredConfigFormat as PortfolioAuthoredConfigFormat, PortfolioSnapshotBuildReport,
-    PortfolioSnapshotConfigError,
-};
-use mfm_portfolio_model::portfolio::PortfolioReport;
 use mfm_sdk::launcher::{LaunchPipeline, RunLauncher};
 use mfm_sdk::op::OperationRegistry;
 use mfm_sdk::pipeline::{Pipeline, PipelinePlanner};
 use mfm_sdk::unstable::{
-    decode_context_value_with_slot_fallback, execute_single_op_report, load_context_snapshot_json,
-    single_op_pipeline, ContextSnapshotLoadError, DefaultPipelinePlanner, DefaultRunLauncher,
+    execute_single_op_report, single_op_pipeline, DefaultPipelinePlanner, DefaultRunLauncher,
     HashMapOperationRegistry, SdkPlanResolver, SingleOpReportError, SingleOpReportRequest,
 };
 use mfm_stream_store_postgres::PostgresStreamStore;
@@ -131,17 +112,6 @@ fn ensure_single_start_op(
     op_id: &OpId,
     op_version: &str,
 ) -> Result<(), AppError> {
-    if is_portfolio_tracker_internal_op_id(op_id.as_str()) {
-        return Err(AppError::new(
-            ErrorClass::BadRequest,
-            "op_not_public",
-            format!(
-                "op_id `{}` is not a public run.start target: planner-internal semantic child ops are not valid run.start targets",
-                op_id.as_str()
-            ),
-        ));
-    }
-
     registry
         .resolve(op_id, op_version)
         .map_err(|err| {
@@ -247,27 +217,6 @@ pub fn app_error_from_storage_error(err: StorageError) -> AppError {
     }
 }
 
-fn app_error_from_context_snapshot_load_error(err: ContextSnapshotLoadError) -> AppError {
-    match err {
-        ContextSnapshotLoadError::Storage(err) => app_error_from_storage_error(err),
-        ContextSnapshotLoadError::InvalidSnapshot => AppError::new(
-            ErrorClass::Internal,
-            "ContextSnapshotDecodeFailed",
-            "failed to decode context snapshot json",
-        ),
-    }
-}
-
-fn decode_optional_snapshot_context_value<T: serde::de::DeserializeOwned>(
-    snapshot: &serde_json::Value,
-    key: &ContextKey,
-    code: &'static str,
-    message: &'static str,
-) -> Result<Option<T>, AppError> {
-    decode_context_value_with_slot_fallback(snapshot, key)
-        .map_err(|_| AppError::new(ErrorClass::Internal, code, message))
-}
-
 fn run_stream_id(run_id: RunId) -> StreamId {
     StreamId::run(run_id)
 }
@@ -355,24 +304,6 @@ fn app_error_from_single_op_report_error(err: SingleOpReportError) -> AppError {
     };
 
     AppError::new(class, err.code, err.message)
-}
-
-fn app_error_from_error_info(info: &mfm_machine::errors::ErrorInfo) -> AppError {
-    let class = if info.code.as_str().starts_with("rpc_control_") {
-        ErrorClass::BadGateway
-    } else {
-        match info.category {
-            ErrorCategory::ParsingInput => ErrorClass::BadRequest,
-            ErrorCategory::OnChain | ErrorCategory::OffChain | ErrorCategory::Rpc => {
-                ErrorClass::BadGateway
-            }
-            ErrorCategory::Storage | ErrorCategory::Context | ErrorCategory::Unknown => {
-                ErrorClass::Internal
-            }
-        }
-    };
-
-    AppError::new(class, info.code.as_str(), info.message.clone())
 }
 
 /// In-memory context implementation used by default request flows.
@@ -574,12 +505,6 @@ impl OperationPlugin for DefaultOperationPlugin {
         registry.register(Arc::new(EvmConfigureOp));
         registry.register(Arc::new(EvmValidateOp));
         for op in evm_deploy_configure_validate_public_ops() {
-            registry.register(op);
-        }
-        for op in portfolio_public_ops() {
-            registry.register(op);
-        }
-        for op in portfolio_tracker_internal_ops() {
             registry.register(op);
         }
         registry.register(Arc::new(NixAppOp));
@@ -834,31 +759,6 @@ impl AppServices {
             phase: phase_str(&run.phase).to_string(),
             final_snapshot_id: run.final_snapshot_id.map(|id| id.into_string()),
         })
-    }
-
-    async fn failed_run_error(&self, run_id: &str) -> Result<AppError, AppError> {
-        let run_id = uuid::Uuid::parse_str(run_id).map_err(|_| {
-            AppError::new(
-                ErrorClass::Internal,
-                "InvalidRunId",
-                "run_id is not a valid UUID",
-            )
-        })?;
-        let run_id = RunId(run_id);
-
-        let events = read_run_stream_events(self.streams.as_ref(), run_id, 1, None).await?;
-
-        for envelope in events.iter().rev() {
-            if let Event::Kernel(KernelEvent::StateFailed { error, .. }) = &envelope.event {
-                return Ok(app_error_from_error_info(&error.info));
-            }
-        }
-
-        Ok(AppError::new(
-            ErrorClass::Internal,
-            "RunFailed".to_string(),
-            format!("run {} finished with phase failed", run_id.0),
-        ))
     }
 
     #[instrument(level = "info", skip(self), fields(run_id = run_id))]
@@ -1250,137 +1150,6 @@ impl AppServices {
         })
         .await
     }
-
-    /// Starts a portfolio config-build run and extracts the built config outputs when available.
-    pub async fn start_portfolio_config_build(
-        &self,
-        req: PortfolioConfigBuildRequest,
-    ) -> Result<PortfolioConfigBuildResponse, AppError> {
-        let op_config = serde_json::to_value(&req).map_err(|_| {
-            AppError::invalid_request("failed to encode portfolio config build request")
-        })?;
-
-        let run = self
-            .start_run(RunsStartRequest::SingleOp {
-                op_id: PORTFOLIO_CONFIG_BUILD_OP_ID.to_string(),
-                op_version: PORTFOLIO_PUBLIC_OP_VERSION.to_string(),
-                op_config,
-                input: serde_json::json!({}),
-            })
-            .await?;
-
-        if run.phase == "failed" {
-            return Err(self.failed_run_error(&run.run_id).await?);
-        }
-
-        let mut canonical_config_artifact_id = None;
-        let mut built_config_artifact_id = None;
-        let mut built_config = None;
-        let mut report = None;
-
-        if let Some(final_snapshot_id) = &run.final_snapshot_id {
-            let snapshot = load_context_snapshot_json(
-                self.artifacts.as_ref(),
-                &parse_artifact_id(final_snapshot_id)?,
-            )
-            .await
-            .map_err(app_error_from_context_snapshot_load_error)?;
-
-            canonical_config_artifact_id = decode_optional_snapshot_context_value(
-                &snapshot,
-                &portfolio_config_build_canonical_artifact_id_context_key(),
-                "PortfolioCanonicalConfigArtifactIdDecodeFailed",
-                "failed to decode portfolio canonical config artifact id",
-            )?;
-            built_config_artifact_id = decode_optional_snapshot_context_value(
-                &snapshot,
-                &portfolio_config_build_built_artifact_id_context_key(),
-                "PortfolioBuiltConfigArtifactIdDecodeFailed",
-                "failed to decode portfolio built config artifact id",
-            )?;
-            built_config = decode_optional_snapshot_context_value(
-                &snapshot,
-                &portfolio_config_build_built_config_context_key(),
-                "PortfolioBuiltConfigDecodeFailed",
-                "failed to decode portfolio built config",
-            )?;
-            report = decode_optional_snapshot_context_value(
-                &snapshot,
-                &portfolio_config_build_report_context_key(),
-                "PortfolioConfigBuildReportDecodeFailed",
-                "failed to decode portfolio config build report",
-            )?;
-        }
-
-        Ok(PortfolioConfigBuildResponse {
-            run_id: run.run_id,
-            phase: run.phase,
-            final_snapshot_id: run.final_snapshot_id,
-            canonical_config_artifact_id,
-            built_config_artifact_id,
-            built_config,
-            report,
-        })
-    }
-
-    /// Starts a portfolio snapshot run and extracts the final report when available.
-    pub async fn start_portfolio_snapshot(
-        &self,
-        req: PortfolioSnapshotRequest,
-    ) -> Result<PortfolioSnapshotResponse, AppError> {
-        let op_config = serde_json::to_value(&req).map_err(|_| {
-            AppError::invalid_request("failed to encode portfolio snapshot request")
-        })?;
-
-        let run = self
-            .start_run(RunsStartRequest::SingleOp {
-                op_id: PORTFOLIO_TRACKER_OP_ID.to_string(),
-                op_version: PORTFOLIO_PUBLIC_OP_VERSION.to_string(),
-                op_config,
-                input: serde_json::json!({}),
-            })
-            .await?;
-
-        if run.phase == "failed" {
-            return Err(self.failed_run_error(&run.run_id).await?);
-        }
-
-        let mut snapshot_artifact_id = None;
-        let mut report = None;
-
-        if let Some(final_snapshot_id) = &run.final_snapshot_id {
-            let report_key = portfolio_snapshot_report_context_key();
-            let snapshot_artifact_id_key = portfolio_snapshot_artifact_id_context_key();
-            let snapshot = load_context_snapshot_json(
-                self.artifacts.as_ref(),
-                &parse_artifact_id(final_snapshot_id)?,
-            )
-            .await
-            .map_err(app_error_from_context_snapshot_load_error)?;
-
-            snapshot_artifact_id = decode_optional_snapshot_context_value(
-                &snapshot,
-                &snapshot_artifact_id_key,
-                "PortfolioSnapshotArtifactIdDecodeFailed",
-                "failed to decode portfolio snapshot artifact id",
-            )?;
-
-            report = decode_optional_snapshot_context_value(
-                &snapshot,
-                &report_key,
-                "PortfolioSnapshotReportDecodeFailed",
-                "failed to decode portfolio snapshot report",
-            )?;
-        }
-
-        Ok(PortfolioSnapshotResponse {
-            run_id: run.run_id,
-            phase: run.phase,
-            final_snapshot_id: run.final_snapshot_id,
-            snapshot_artifact_id,
-            report,
-        })
-    }
 }
 
 fn app_error_from_deploy_configure_validate_config_error(
@@ -1410,27 +1179,6 @@ fn app_error_from_deploy_configure_validate_config_error(
             "DeployConfigureValidateConfigError",
             err.to_string(),
         ),
-    }
-}
-
-fn app_error_from_portfolio_snapshot_config_error(err: PortfolioSnapshotConfigError) -> AppError {
-    match err {
-        PortfolioSnapshotConfigError::InvalidJson { .. } => AppError::new(
-            ErrorClass::BadRequest,
-            "InvalidJson",
-            "Failed to parse request body as JSON",
-        ),
-        PortfolioSnapshotConfigError::InvalidToml { .. } => AppError::new(
-            ErrorClass::BadRequest,
-            "InvalidToml",
-            "Failed to parse request body as TOML",
-        ),
-        PortfolioSnapshotConfigError::InvalidBundle(_)
-        | PortfolioSnapshotConfigError::Decode { .. }
-        | PortfolioSnapshotConfigError::Serialize { .. }
-        | PortfolioSnapshotConfigError::CanonicalJson { .. } => {
-            AppError::new(ErrorClass::BadRequest, "InvalidRequest", err.to_string())
-        }
     }
 }
 
@@ -1920,31 +1668,6 @@ pub fn canonicalize_deploy_configure_validate_input(
         .map_err(|err| app_error_from_deploy_configure_validate_config_error(err, None))
 }
 
-/// Parses and canonicalizes authored portfolio snapshot config.
-pub fn canonicalize_portfolio_snapshot_input(
-    input: AuthoredConfigInput,
-) -> Result<PortfolioSnapshotRequest, AppError> {
-    let authored = match input.format_hint {
-        AuthoredConfigFormatHint::Json => parse_portfolio_snapshot_authored_config(
-            &input.body,
-            PortfolioAuthoredConfigFormat::Json,
-        )
-        .map_err(app_error_from_portfolio_snapshot_config_error)?,
-        AuthoredConfigFormatHint::Toml => parse_portfolio_snapshot_authored_config(
-            &input.body,
-            PortfolioAuthoredConfigFormat::Toml,
-        )
-        .map_err(app_error_from_portfolio_snapshot_config_error)?,
-        AuthoredConfigFormatHint::Infer => {
-            parse_portfolio_snapshot_authored_config_with_hint(&input.body, None)
-                .map_err(app_error_from_portfolio_snapshot_config_error)?
-        }
-    };
-
-    canonicalize_portfolio_snapshot_authored_config(authored)
-        .map_err(app_error_from_portfolio_snapshot_config_error)
-}
-
 fn default_empty_object() -> serde_json::Value {
     serde_json::json!({})
 }
@@ -2057,8 +1780,6 @@ enum BuiltinFeature {
     RunStream,
     ArtifactGet,
     PipelineDeployConfigureValidateStart,
-    PortfolioConfigBuild,
-    PortfolioSnapshot,
 }
 
 impl FeatureCatalog {
@@ -2074,15 +1795,6 @@ impl FeatureCatalog {
             "pipeline.deploy_configure_validate.start".to_string(),
             BuiltinFeature::PipelineDeployConfigureValidateStart,
         );
-        handlers.insert(
-            "portfolio.snapshot".to_string(),
-            BuiltinFeature::PortfolioSnapshot,
-        );
-        handlers.insert(
-            "portfolio.config.build".to_string(),
-            BuiltinFeature::PortfolioConfigBuild,
-        );
-
         let descriptors = vec![
             FeatureDescriptor {
                 id: "run.start".to_string(),
@@ -2222,8 +1934,7 @@ impl FeatureCatalog {
                 id: "pipeline.deploy_configure_validate.start".to_string(),
                 version: "v1".to_string(),
                 kind: FeatureKind::PipelineTemplate,
-                description: "Start the standard deploy->configure->validate workflow"
-                    .to_string(),
+                description: "Start the standard deploy->configure->validate workflow".to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -2242,62 +1953,6 @@ impl FeatureCatalog {
                         "run_id": {"type": "string"},
                         "phase": {"type": "string"},
                         "final_snapshot_id": {"type": ["string", "null"]}
-                    },
-                    "required": ["run_id", "phase"]
-                }),
-            },
-            FeatureDescriptor {
-                id: "portfolio.config.build".to_string(),
-                version: "v1".to_string(),
-                kind: FeatureKind::Operation,
-                description:
-                    "Build canonical portfolio config into built execution config and explicit config artifacts"
-                        .to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "portfolio": {"type": "object"},
-                        "valuation_source_registry": {"type": "object"}
-                    },
-                    "required": ["portfolio", "valuation_source_registry"]
-                }),
-                output_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "run_id": {"type": "string"},
-                        "phase": {"type": "string"},
-                        "final_snapshot_id": {"type": ["string", "null"]},
-                        "canonical_config_artifact_id": {"type": ["string", "null"]},
-                        "built_config_artifact_id": {"type": ["string", "null"]},
-                        "built_config": {"type": ["object", "null"]},
-                        "report": {"type": ["object", "null"]}
-                    },
-                    "required": ["run_id", "phase"]
-                }),
-            },
-            FeatureDescriptor {
-                id: "portfolio.snapshot".to_string(),
-                version: "v1".to_string(),
-                kind: FeatureKind::Operation,
-                description:
-                    "Start a canonical portfolio snapshot run from portfolio config plus valuation source registry"
-                        .to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "portfolio": {"type": "object"},
-                        "valuation_source_registry": {"type": "object"}
-                    },
-                    "required": ["portfolio", "valuation_source_registry"]
-                }),
-                output_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "run_id": {"type": "string"},
-                        "phase": {"type": "string"},
-                        "final_snapshot_id": {"type": ["string", "null"]},
-                        "snapshot_artifact_id": {"type": ["string", "null"]},
-                        "report": {"type": ["object", "null"]}
                     },
                     "required": ["run_id", "phase"]
                 }),
@@ -2367,16 +2022,6 @@ impl FeatureCatalog {
                     })?;
                 serde_json::to_value(services.start_deploy_configure_validate(parsed).await?)
             }
-            BuiltinFeature::PortfolioConfigBuild => {
-                let parsed: PortfolioConfigBuildRequest =
-                    serde_json::from_value(req.payload).map_err(|_| AppError::invalid_json())?;
-                serde_json::to_value(services.start_portfolio_config_build(parsed).await?)
-            }
-            BuiltinFeature::PortfolioSnapshot => {
-                let parsed: PortfolioSnapshotRequest =
-                    serde_json::from_value(req.payload).map_err(|_| AppError::invalid_json())?;
-                serde_json::to_value(services.start_portfolio_snapshot(parsed).await?)
-            }
         }
         .map_err(|_| {
             AppError::new(
@@ -2413,46 +2058,6 @@ struct RunStreamInput {
     to_seq: Option<u64>,
 }
 
-/// Request payload for the portfolio config-build feature.
-pub use mfm_portfolio_config::PortfolioSnapshotCanonicalConfig as PortfolioConfigBuildRequest;
-
-/// Response returned after starting a portfolio config-build run.
-#[derive(Clone, Debug, Serialize)]
-pub struct PortfolioConfigBuildResponse {
-    /// UUID string of the run.
-    pub run_id: String,
-    /// Current run phase string.
-    pub phase: String,
-    /// Final snapshot id when the run completed.
-    pub final_snapshot_id: Option<String>,
-    /// Canonical config artifact id, when available.
-    pub canonical_config_artifact_id: Option<String>,
-    /// Built config artifact id, when available.
-    pub built_config_artifact_id: Option<String>,
-    /// Built portfolio config, when available.
-    pub built_config: Option<PortfolioSnapshotBuiltConfig>,
-    /// Stable build report, when available.
-    pub report: Option<PortfolioSnapshotBuildReport>,
-}
-
-/// Request payload for the portfolio snapshot feature.
-pub use mfm_portfolio_config::PortfolioSnapshotCanonicalConfig as PortfolioSnapshotRequest;
-
-/// Response returned after starting a portfolio snapshot feature run.
-#[derive(Clone, Debug, Serialize)]
-pub struct PortfolioSnapshotResponse {
-    /// UUID string of the run.
-    pub run_id: String,
-    /// Current run phase string.
-    pub phase: String,
-    /// Final snapshot id when the run completed.
-    pub final_snapshot_id: Option<String>,
-    /// Canonical portfolio snapshot artifact id, when available.
-    pub snapshot_artifact_id: Option<String>,
-    /// Canonical portfolio report derived from the snapshot artifact, when available.
-    pub report: Option<PortfolioReport>,
-}
-
 #[cfg(test)]
 #[allow(clippy::disallowed_methods)]
 mod tests {
@@ -2477,7 +2082,6 @@ mod tests {
         AppendBatchResult, ArtifactKind, ArtifactStore, StreamAppend, StreamId, StreamRecord,
         StreamStore,
     };
-    use mfm_op_portfolio_tracker::portfolio_tracker_internal_op_ids;
     use mfm_sdk::errors::SdkError;
     use mfm_sdk::ids::{MachineId, StepId};
     use mfm_sdk::op::{
@@ -2503,22 +2107,6 @@ mod tests {
         assert_eq!(json, toml);
         assert_eq!(json.machine_id, "evm_deploy_configure_validate");
         assert_eq!(json.pipeline_version, "v1");
-    }
-
-    #[test]
-    fn app_canonicalizes_portfolio_snapshot_json_and_toml_equally() {
-        let json = canonicalize_portfolio_snapshot_input(AuthoredConfigInput::json(
-            portfolio_snapshot_json().to_string(),
-        ))
-        .expect("json portfolio config");
-        let toml = canonicalize_portfolio_snapshot_input(AuthoredConfigInput {
-            format_hint: AuthoredConfigFormatHint::Toml,
-            body: portfolio_snapshot_toml().to_string(),
-        })
-        .expect("toml portfolio config");
-
-        assert_eq!(json, toml);
-        assert_eq!(json.portfolio.portfolio_id, "portfolio_main");
     }
 
     #[test]
@@ -2997,110 +2585,21 @@ mod tests {
     }
 
     #[test]
-    fn default_registry_keeps_portfolio_internal_ops_for_planning() {
+    fn default_registry_does_not_register_portfolio_semantic_ops() {
         let bundle = make_engine_bundle();
 
-        for op_id in portfolio_tracker_internal_op_ids() {
-            bundle
-                .registry
-                .resolve(&OpId::must_new((*op_id).to_string()), "v1")
-                .expect("internal op should remain registered for recursive planning");
-        }
-        bundle
-            .registry
-            .resolve(&OpId::must_new("portfolio_tracker".to_string()), "v1")
-            .expect("public root op should remain registered");
-        bundle
-            .registry
-            .resolve(
-                &OpId::must_new(PORTFOLIO_CONFIG_BUILD_OP_ID.to_string()),
-                PORTFOLIO_PUBLIC_OP_VERSION,
-            )
-            .expect("config-build public root op should remain registered");
-        bundle
-            .registry
-            .resolve(
-                &OpId::must_new(PORTFOLIO_EXECUTE_OP_ID.to_string()),
-                PORTFOLIO_PUBLIC_OP_VERSION,
-            )
-            .expect("built-config public root op should remain registered");
-    }
-
-    #[test]
-    fn portfolio_tracker_root_op_remains_v1() {
-        let bundle = make_engine_bundle();
-
-        let op = bundle
-            .registry
-            .resolve(&OpId::must_new("portfolio_tracker".to_string()), "v1")
-            .expect("public root op should remain v1");
-        assert_eq!(op.op_version(), "v1");
-
-        assert!(bundle
-            .registry
-            .resolve(&OpId::must_new("portfolio_tracker".to_string()), "v2")
-            .is_err());
-    }
-
-    #[test]
-    fn portfolio_execute_root_op_remains_v1() {
-        let bundle = make_engine_bundle();
-
-        let op = bundle
-            .registry
-            .resolve(
-                &OpId::must_new(PORTFOLIO_EXECUTE_OP_ID.to_string()),
-                PORTFOLIO_PUBLIC_OP_VERSION,
-            )
-            .expect("built-config public root op should remain v1");
-        assert_eq!(op.op_version(), PORTFOLIO_PUBLIC_OP_VERSION);
-
-        assert!(bundle
-            .registry
-            .resolve(&OpId::must_new(PORTFOLIO_EXECUTE_OP_ID.to_string()), "v2")
-            .is_err());
-    }
-
-    #[test]
-    fn portfolio_config_build_root_op_remains_v1() {
-        let bundle = make_engine_bundle();
-
-        let op = bundle
-            .registry
-            .resolve(
-                &OpId::must_new(PORTFOLIO_CONFIG_BUILD_OP_ID.to_string()),
-                PORTFOLIO_PUBLIC_OP_VERSION,
-            )
-            .expect("config-build public root op should remain v1");
-        assert_eq!(op.op_version(), PORTFOLIO_PUBLIC_OP_VERSION);
-
-        assert!(bundle
-            .registry
-            .resolve(
-                &OpId::must_new(PORTFOLIO_CONFIG_BUILD_OP_ID.to_string()),
-                "v2"
-            )
-            .is_err());
-    }
-
-    #[tokio::test]
-    async fn start_run_rejects_portfolio_internal_child_ops() {
-        let services = test_services(make_engine_bundle());
-
-        for op_id in portfolio_tracker_internal_op_ids() {
-            let err = services
-                .start_run(RunsStartRequest::SingleOp {
-                    op_id: (*op_id).to_string(),
-                    op_version: "v1".to_string(),
-                    op_config: serde_json::json!({}),
-                    input: serde_json::json!({}),
-                })
-                .await
-                .expect_err("planner-internal op must not be publicly startable");
-
-            assert_eq!(err.class, ErrorClass::BadRequest);
-            assert_eq!(err.code, "op_not_public");
-            assert!(is_portfolio_tracker_internal_op_id(op_id));
+        for op_id in [
+            "portfolio_tracker",
+            "portfolio_execute",
+            "portfolio_config_build",
+        ] {
+            assert!(
+                bundle
+                    .registry
+                    .resolve(&OpId::must_new(op_id.to_string()), "v1")
+                    .is_err(),
+                "legacy registry must not expose dynamic portfolio op `{op_id}`"
+            );
         }
     }
 
@@ -3206,36 +2705,6 @@ mod tests {
             .is_err());
     }
 
-    #[tokio::test]
-    async fn start_run_rejects_portfolio_internal_ops_in_pipeline() {
-        let services = test_services(make_engine_bundle());
-
-        for op_id in portfolio_tracker_internal_op_ids() {
-            let pipeline = Pipeline {
-                machine_id: MachineId("portfolio_tracker".to_string()),
-                pipeline_version: "v1".to_string(),
-                steps: vec![PipelineStep {
-                    step_id: StepId("main".to_string()),
-                    op_id: OpId::must_new((*op_id).to_string()),
-                    op_version: "v1".to_string(),
-                    op_config: serde_json::json!({}),
-                }],
-            };
-            let err = services
-                .start_run(RunsStartRequest::Pipeline {
-                    pipeline,
-                    input: serde_json::json!({}),
-                    run_config: None,
-                })
-                .await
-                .expect_err("internal pipeline step should be rejected");
-
-            assert_eq!(err.class, ErrorClass::BadRequest);
-            assert_eq!(err.code, "op_not_public");
-            assert!(is_portfolio_tracker_internal_op_id(op_id));
-        }
-    }
-
     fn deploy_configure_validate_json() -> serde_json::Value {
         serde_json::json!({
             "deploy": {
@@ -3268,117 +2737,6 @@ calls = []
 [validate]
 network_id = "ethereum-mainnet"
 expected_chain_id = 1
-"#
-    }
-
-    fn portfolio_snapshot_json() -> serde_json::Value {
-        serde_json::json!({
-            "portfolio": {
-                "portfolio_id": "portfolio_main",
-                "quote_codes": ["USD"],
-                "networks": [
-                    {
-                        "network_id": "ethereum-mainnet",
-                        "family": "evm",
-                        "chain_id": 1,
-                        "control_scope": "shared",
-                        "metadata": {}
-                    }
-                ],
-                "wallets": [
-                    {
-                        "wallet_id": "wallet_main",
-                        "address": "0x000000000000000000000000000000000000dead",
-                        "implementation": {
-                            "kind": "address_only"
-                        },
-                        "network_id": "ethereum-mainnet",
-                        "symbol_ids": ["eth.native.ethereum-mainnet"],
-                        "metadata": {}
-                    }
-                ],
-                "symbol_configs": [
-                    {
-                        "symbol_id": "eth.native.ethereum-mainnet",
-                        "display_symbol": "ETH",
-                        "kind": "native_balance",
-                        "role": "native",
-                        "network_id": "ethereum-mainnet",
-                        "protocol": null,
-                        "balance_reader": {
-                            "kind": "native_balance"
-                        },
-                        "valuation": {
-                            "quotes": [
-                                {
-                                    "quote": "USD",
-                                    "priced_symbol_id": "eth.native.ethereum-mainnet",
-                                    "reader": {
-                                        "kind": "fixed_unit_price",
-                                        "unit_price_dec": "1800.00"
-                                    }
-                                }
-                            ]
-                        },
-                        "decimals": 18,
-                        "underlying_symbol_id": null,
-                        "metadata": {}
-                    }
-                ],
-                "metadata": {}
-            },
-            "valuation_source_registry": {
-                "sources": []
-            }
-        })
-    }
-
-    fn portfolio_snapshot_toml() -> &'static str {
-        r#"
-[portfolio]
-portfolio_id = "portfolio_main"
-quote_codes = ["USD"]
-metadata = {}
-
-[[portfolio.networks]]
-network_id = "ethereum-mainnet"
-family = "evm"
-chain_id = 1
-control_scope = "shared"
-metadata = {}
-
-[[portfolio.wallets]]
-wallet_id = "wallet_main"
-address = "0x000000000000000000000000000000000000dead"
-network_id = "ethereum-mainnet"
-symbol_ids = ["eth.native.ethereum-mainnet"]
-metadata = {}
-
-[portfolio.wallets.implementation]
-kind = "address_only"
-
-[[portfolio.symbol_configs]]
-symbol_id = "eth.native.ethereum-mainnet"
-display_symbol = "ETH"
-kind = "native_balance"
-role = "native"
-network_id = "ethereum-mainnet"
-decimals = 18
-metadata = {}
-
-[portfolio.symbol_configs.balance_reader]
-kind = "native_balance"
-
-[[portfolio.symbol_configs.valuation.quotes]]
-quote = "USD"
-priced_symbol_id = "eth.native.ethereum-mainnet"
-
-[portfolio.symbol_configs.valuation.quotes.reader]
-kind = "fixed_unit_price"
-unit_price_dec = "1800.00"
-
-[valuation_source_registry]
-sources = []
 "#
     }
 }

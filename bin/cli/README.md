@@ -355,9 +355,9 @@ Validates and canonicalizes the portfolio snapshot request object containing:
 - `portfolio`
 - `valuation_source_registry`
 
-The command currently returns `TypedPortfolioPortPending` after request parsing. The old dynamic
-portfolio launch path has been removed; this command will start typed portfolio runs again once the
-portfolio workflow port emits a certified typed execution spec and run-start evidence.
+The command compiles the canonical request into a certified typed portfolio execution spec,
+persists typed config/spec evidence, starts a typed run, and renders the typed public output when
+the scheduler completes.
 
 **Usage:**
 ```sh
@@ -368,10 +368,12 @@ mfm_cli portfolio snapshot --request-json '<REQUEST_JSON>' [OPTIONS]
 **Key Options:**
 - `--request-file <PATH>`: Path to an authored request file in JSON or TOML
 - `--request-json <JSON>`: Inline canonical request JSON payload
+- `--drive <append-only|until-blocked>`: Scheduler drive policy after `RunStarted`
+- `--typed-artifact-root <PATH>`: Typed artifact root
+- `--database-url <URL>`: PostgreSQL typed run-event store URL
 
 Both authored formats normalize immediately into the same canonical typed request shape. The
-resulting canonical request must use the same in-place contract as the `portfolio.snapshot`
-feature:
+resulting canonical request must use this in-place contract:
 
 ```json
 {
@@ -385,9 +387,11 @@ portfolio flow must not share managed `rpc.control` source state with another fl
 network.
 
 **Output Notes:**
-- Until the typed portfolio port lands, successful request parsing is followed by
-  `TypedPortfolioPortPending`.
-- No dynamic run id, snapshot artifact id, or portfolio report is emitted by this disabled path.
+- JSON output wraps the typed run response and, when completed, the typed public output containing
+  `snapshot` and `report`.
+- Text output prints the public output JSON when available.
+- The command never submits old dynamic `portfolio_tracker`, `portfolio_execute`, or
+  `portfolio_config_build` ops.
 
 ## Configuration
 

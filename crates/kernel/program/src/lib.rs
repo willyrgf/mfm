@@ -1355,6 +1355,21 @@ impl StableDomainKeyRef {
     }
 }
 
+fn stable_domain_key_refs<K: StableDomainKey>(keys: Vec<K>) -> Result<Vec<StableDomainKeyRef>> {
+    let mut refs = keys
+        .iter()
+        .map(StableDomainKeyRef::from_key)
+        .collect::<Result<Vec<_>>>()?;
+    refs.sort();
+    let mut seen = BTreeSet::new();
+    for key_ref in &refs {
+        if !seen.insert(key_ref.clone()) {
+            return Err(PlanError::DuplicateDomainKey(key_ref.stable_sort_key()));
+        }
+    }
+    Ok(refs)
+}
+
 /// Operation-lineage digest sequence visible to value-lineage records.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OperationLineage {
@@ -1682,6 +1697,8 @@ pub struct StateNodeSpec {
     pub output_semantic_type_id: SemanticTypeId,
     /// Output value lineage ref.
     pub output_value_lineage: ValueLineageRef,
+    /// Stable domain keys associated with the output value lineage.
+    pub output_domain_keys: Vec<StableDomainKeyRef>,
     /// Planning lineage active while this node was emitted.
     pub planning_lineage: OperationLineage,
 }
@@ -2529,6 +2546,12 @@ pub struct DomainKeyedHandles<'program, 'scope, K: StableDomainKey, T: MfmValue>
     entries: Vec<DomainKeyedHandle<'program, 'scope, K, T>>,
 }
 
+/// Author-side non-empty handles paired with stable domain keys.
+#[derive(Debug, PartialEq, Eq)]
+pub struct DomainKeyedNonEmptyHandles<'program, 'scope, K: StableDomainKey, T: MfmValue> {
+    entries: Vec<DomainKeyedHandle<'program, 'scope, K, T>>,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct DomainKeyedHandle<'program, 'scope, K: StableDomainKey, T: MfmValue> {
     key_ref: StableDomainKeyRef,
@@ -2544,6 +2567,14 @@ where
 {
     /// Creates domain-keyed handles, rejecting duplicate canonical keys and sorting by canonical bytes.
     pub fn new(entries: Vec<(K, Handle<'program, 'scope, T>)>) -> Result<Self> {
+        Ok(Self {
+            entries: Self::sorted_entries(entries)?,
+        })
+    }
+
+    fn sorted_entries(
+        entries: Vec<(K, Handle<'program, 'scope, T>)>,
+    ) -> Result<Vec<DomainKeyedHandle<'program, 'scope, K, T>>> {
         let mut keyed = entries
             .into_iter()
             .map(|(key, handle)| {
@@ -2584,7 +2615,33 @@ where
                 ));
             }
         }
-        Ok(Self { entries: keyed })
+        Ok(keyed)
+    }
+
+    /// Returns the number of keyed handles.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Returns true when no keyed handles are present.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+impl<'program, 'scope, K, T> DomainKeyedNonEmptyHandles<'program, 'scope, K, T>
+where
+    K: StableDomainKey,
+    T: MfmValue,
+{
+    /// Creates non-empty domain-keyed handles, rejecting empty input and duplicate canonical keys.
+    pub fn new(entries: Vec<(K, Handle<'program, 'scope, T>)>) -> Result<Self> {
+        if entries.is_empty() {
+            return Err(PlanError::EmptyNonEmptyInput);
+        }
+        Ok(Self {
+            entries: DomainKeyedHandles::<K, T>::sorted_entries(entries)?,
+        })
     }
 
     /// Returns the number of keyed handles.
@@ -2630,6 +2687,45 @@ where
     T: MfmValue,
 {
     fn into_binding(self) -> Result<InputBinding<Vec<T>>> {
+        InputBinding::from_root(self.into_binding_node(InputFieldPath::root())?)
+    }
+}
+
+impl<'program, 'scope, K, T> IntoInputBindingNode<NonEmpty<T>>
+    for DomainKeyedNonEmptyHandles<'program, 'scope, K, T>
+where
+    K: StableDomainKey,
+    T: MfmValue,
+{
+    fn into_binding_node(self, field_path: InputFieldPath) -> Result<InputBindingNode> {
+        if self.entries.is_empty() {
+            return Err(PlanError::EmptyNonEmptyInput);
+        }
+        let mut domain_keys = Vec::with_capacity(self.entries.len());
+        let mut elements = Vec::with_capacity(self.entries.len());
+        for (index, entry) in self.entries.into_iter().enumerate() {
+            domain_keys.push(entry.key_ref);
+            elements.push(
+                entry
+                    .handle
+                    .into_binding_node(field_path.child(index.to_string())?)?,
+            );
+        }
+        Ok(InputBindingNode::non_empty_vector(
+            elements,
+            OrderingEvidence::StableDomainKey,
+            domain_keys,
+        ))
+    }
+}
+
+impl<'program, 'scope, K, T> IntoStateInput<'program, 'scope, NonEmpty<T>>
+    for DomainKeyedNonEmptyHandles<'program, 'scope, K, T>
+where
+    K: StableDomainKey,
+    T: MfmValue,
+{
+    fn into_binding(self) -> Result<InputBinding<NonEmpty<T>>> {
         InputBinding::from_root(self.into_binding_node(InputFieldPath::root())?)
     }
 }
@@ -3071,7 +3167,33 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
         I: IntoStateInput<'program, 'scope, S::Input>,
     {
         let registered = self.state_registry.registered_state::<S>()?;
-        self.state_registered(key, registered, config, input)
+        self.state_registered_with_domain_key_refs(key, registered, config, input, Vec::new())
+    }
+
+    /// Plans a registered typed state and attaches stable domain-key evidence to its output
+    /// value lineage.
+    pub fn state_with_domain_keys<S, I, K>(
+        &mut self,
+        key: StateKey,
+        config: S::Config,
+        input: I,
+        domain_keys: Vec<K>,
+    ) -> Result<Handle<'program, 'scope, S::Output>>
+    where
+        S: StateSpec,
+        S::Effect: EffectRunner<S>,
+        S::Caps: CapabilitySetFor<S::Effect>,
+        I: IntoStateInput<'program, 'scope, S::Input>,
+        K: StableDomainKey,
+    {
+        let registered = self.state_registry.registered_state::<S>()?;
+        self.state_registered_with_domain_key_refs(
+            key,
+            registered,
+            config,
+            input,
+            stable_domain_key_refs(domain_keys)?,
+        )
     }
 
     /// Plans a typed state from an explicit framework-owned registration token.
@@ -3081,6 +3203,49 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
         registered: RegisteredState<S>,
         config: S::Config,
         input: I,
+    ) -> Result<Handle<'program, 'scope, S::Output>>
+    where
+        S: StateSpec,
+        S::Effect: EffectRunner<S>,
+        S::Caps: CapabilitySetFor<S::Effect>,
+        I: IntoStateInput<'program, 'scope, S::Input>,
+    {
+        self.state_registered_with_domain_key_refs(key, registered, config, input, Vec::new())
+    }
+
+    /// Plans a typed state from an explicit registration token and attaches stable domain-key
+    /// evidence to its output value lineage.
+    pub fn state_registered_with_domain_keys<S, I, K>(
+        &mut self,
+        key: StateKey,
+        registered: RegisteredState<S>,
+        config: S::Config,
+        input: I,
+        domain_keys: Vec<K>,
+    ) -> Result<Handle<'program, 'scope, S::Output>>
+    where
+        S: StateSpec,
+        S::Effect: EffectRunner<S>,
+        S::Caps: CapabilitySetFor<S::Effect>,
+        I: IntoStateInput<'program, 'scope, S::Input>,
+        K: StableDomainKey,
+    {
+        self.state_registered_with_domain_key_refs(
+            key,
+            registered,
+            config,
+            input,
+            stable_domain_key_refs(domain_keys)?,
+        )
+    }
+
+    fn state_registered_with_domain_key_refs<S, I>(
+        &mut self,
+        key: StateKey,
+        registered: RegisteredState<S>,
+        config: S::Config,
+        input: I,
+        output_domain_keys: Vec<StableDomainKeyRef>,
     ) -> Result<Handle<'program, 'scope, S::Output>>
     where
         S: StateSpec,
@@ -3123,6 +3288,7 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
             input.root(),
             &config_binding.config_ref_digest,
             &self.current_operation_lineage()?,
+            output_domain_keys.clone(),
         )?;
         let value_lineage = value_lineage_ref(&lineage)?;
         let handle = Handle::new(
@@ -3153,6 +3319,7 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
             output_schema_id,
             output_semantic_type_id,
             output_value_lineage: value_lineage,
+            output_domain_keys,
             planning_lineage,
         });
         Ok(handle)
@@ -4031,6 +4198,7 @@ fn state_value_lineage(
     input_root: &InputBindingNode,
     config_ref_digest: &ContentDigest,
     operation_lineage: &OperationLineage,
+    domain_keys: Vec<StableDomainKeyRef>,
 ) -> Result<ValueLineage> {
     let mut input_cells = Vec::new();
     collect_input_cell_ids(input_root, &mut input_cells);
@@ -4041,7 +4209,7 @@ fn state_value_lineage(
         input_cells,
         config_ref_digest: Some(config_ref_digest.clone()),
         operation_lineage: operation_lineage.clone(),
-        domain_keys: Vec::new(),
+        domain_keys,
         transform_policy: LineageTransformPolicy::StateOutput,
     })
 }

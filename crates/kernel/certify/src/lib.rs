@@ -345,6 +345,11 @@ impl<'a> DraftLowerer<'a> {
             let input_bindings = lower_input_binding(&node.input)?;
             let input_cells = collect_input_cells(&input_bindings.root);
             let planning_lineage = lower_planning_lineage(&node.planning_lineage);
+            let domain_keys = node
+                .output_domain_keys
+                .iter()
+                .map(lower_domain_key_ref)
+                .collect::<Vec<_>>();
             let output_lineage = spec::ValueLineage {
                 lineage_ref: lineage_ref(node.output_value_lineage.digest()),
                 scope_id: node.scope_id.clone(),
@@ -352,7 +357,7 @@ impl<'a> DraftLowerer<'a> {
                 input_cells: sorted_cell_ids(input_cells.clone()),
                 config_ref_digest: Some(node.config.config_ref_digest.clone()),
                 planning_lineage: planning_lineage.clone(),
-                domain_keys: Vec::new(),
+                domain_keys,
                 transform_policy: spec::LineageTransformPolicy::StateOutput,
             };
             self.insert_value_lineage(output_lineage)?;

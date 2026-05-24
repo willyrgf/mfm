@@ -11,7 +11,9 @@ It exposes the old dynamic bridge:
 - default engine, operation, and transport wiring
 - environment-driven storage bootstrapping
 - request/response helpers for starting, resuming, and inspecting runs
-- higher-level built-in feature entrypoints such as portfolio snapshots
+
+Portfolio snapshots are intentionally absent from this legacy bridge. They are submitted only
+through certified typed specs in `mfm-app`.
 
 This crate depends on `mfm-sdk` and `mfm-machine`. It is isolated from the typed `mfm-app` crate so
 old dynamic planning cannot influence certified typed runs.

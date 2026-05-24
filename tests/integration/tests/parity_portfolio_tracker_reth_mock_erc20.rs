@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use mfm_app::TypedRunPhase;
 use mfm_integration_tests::artifact_stores;
 use mfm_integration_tests::rpc_control;
 use mfm_machine::config::{
@@ -15,7 +16,7 @@ use mfm_machine::context::DynContext;
 use mfm_machine::engine::{RunPhase, Stores};
 use mfm_machine::errors::ContextError;
 use mfm_machine::events::{event_envelopes_from_stream_records, Event, KernelEvent};
-use mfm_machine::ids::{ArtifactId, ContextKey, OpId, RunId};
+use mfm_machine::ids::{ContextKey, OpId, RunId};
 use mfm_machine::stores::{ArtifactStore, StreamId, StreamStore};
 use mfm_sdk::ids::{MachineId, StepId};
 use mfm_sdk::launcher::{LaunchPipeline, RunLauncher};
@@ -23,6 +24,8 @@ use mfm_sdk::pipeline::{Pipeline, PipelineStep};
 use mfm_sdk::unstable::DefaultRunLauncher;
 use mfm_stream_store_postgres::PostgresStreamStore;
 use mfm_transports_rpc_control::RpcControlBootstrapSource;
+
+mod support;
 
 const NETWORK_ID: &str = "ethereum-mainnet";
 const CONTROL_SCOPE: &str = "parity.portfolio_tracker.mock_erc20";
@@ -527,25 +530,22 @@ async fn parity_portfolio_tracker_snapshot_with_mock_erc20_mint() {
             .expect("contract address");
     let token_address_norm = normalize_address_lower(token_address);
 
-    // 2) Run the legacy portfolio snapshot directly; dynamic REST feature execution is removed.
-    let services =
-        mfm_app_legacy::AppServices::new(bundle, Arc::clone(&streams), Arc::clone(&artifacts));
-    let response = services
-        .start_portfolio_snapshot(
-            serde_json::from_value(canonical_mock_erc20_snapshot_payload(
-                &from_norm,
-                chain_id,
-                &token_address_norm,
-                &control_scope,
-            ))
-            .expect("portfolio snapshot request"),
-        )
-        .await
-        .expect("portfolio snapshot response");
+    // 2) Run the portfolio snapshot through the certified typed workflow.
+    let response = support::run_typed_portfolio_snapshot(canonical_mock_erc20_snapshot_payload(
+        &from_norm,
+        chain_id,
+        &token_address_norm,
+        &control_scope,
+    ))
+    .await;
 
-    assert_eq!(response.phase, "completed");
-    let report = serde_json::to_value(response.report.as_ref().expect("portfolio report"))
-        .expect("report json");
+    assert_eq!(response.run.phase, TypedRunPhase::Completed);
+    let public_output = response
+        .public_output
+        .json
+        .as_ref()
+        .expect("public output json");
+    let report = &public_output["report"];
     assert_eq!(report["portfolio_id"], "reth-mock-erc20");
     assert_eq!(report["error_count"], 0);
     let report_wallet = &report["wallet_summaries"][0];
@@ -560,16 +560,7 @@ async fn parity_portfolio_tracker_snapshot_with_mock_erc20_mint() {
         report_wallet_usd["net_value_dec"]
     );
 
-    let snapshot_artifact_id = response
-        .snapshot_artifact_id
-        .as_deref()
-        .expect("snapshot_artifact_id");
-    let snapshot_bytes = artifacts
-        .get(&ArtifactId::new(snapshot_artifact_id.to_owned()).expect("artifact id"))
-        .await
-        .expect("snapshot artifact");
-    let out: serde_json::Value =
-        serde_json::from_slice(&snapshot_bytes).expect("snapshot artifact json");
+    let out = &public_output["snapshot"];
 
     assert_eq!(
         out.get("portfolio_id").and_then(|v| v.as_str()),

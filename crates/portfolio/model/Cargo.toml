@@ -15,5 +15,6 @@ thiserror = { workspace = true }
 mfm-evm-core = { path = "../../evm-core", version = "0.1.0" }
 mfm-canonical = { path = "../../kernel/canonical" }
 mfm-ids = { path = "../../kernel/ids" }
+mfm-program = { path = "../../kernel/program" }
 mfm-program-derive = { path = "../../kernel/program-derive" }
 mfm-values = { path = "../../kernel/values" }

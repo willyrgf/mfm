@@ -29,13 +29,23 @@ use axum::Json;
 use axum::Router;
 use http::header::HeaderName;
 use mfm_app::{
-    AppError, DriveMode, ErrorClass, TypedAsyncAppServices, TypedRunStreamResponse, TypedSeedInput,
+    AppError, DriveMode, ErrorClass, TypedAsyncAppServices, TypedPublicOutputResponse,
+    TypedRunPhase, TypedRunResponse, TypedRunStreamResponse, TypedSeedInput,
 };
-use mfm_artifact_store_fs::{FsTypedArtifactError, FsTypedArtifactStore};
+use mfm_artifact_store_fs::{FsTypedArtifactError, FsTypedArtifactStore, TypedArtifactDescriptor};
 use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
 use mfm_events::v1::ArtifactRole;
 use mfm_ids::{ArtifactId, ContentDigest, DigestAlgorithm, RunId, SchemaId, SeedId};
+use mfm_op_portfolio_tracker::{
+    certified_portfolio_spec, portfolio_config_artifacts_for_spec, portfolio_program_draft,
+    PortfolioConfigArtifact,
+};
+use mfm_portfolio_config::{
+    canonicalize_portfolio_snapshot_authored_config, parse_portfolio_snapshot_authored_config,
+    AuthoredConfigFormat, PortfolioSnapshotConfigError,
+};
 use mfm_spec::v1 as spec;
+use mfm_state_portfolio::PortfolioWorkflowConfig;
 use mfm_store::v1 as store;
 use mfm_store::v1::{AsyncStoreFuture, AsyncTypedRunEventStore, TypedRunEventStore};
 use mfm_stream_store_postgres::{PostgresTypedRunEventStore, PostgresTypedStoreError};
@@ -263,6 +273,7 @@ where
     Router::new()
         .route("/v1/health", get(health))
         .route("/v1/ready", get(ready::<S>))
+        .route("/v1/portfolio/snapshot", post(portfolio_snapshot::<S>))
         .route("/v1/runs/start", post(runs_start::<S>))
         .route("/v1/runs/:run_id/resume", post(runs_resume::<S>))
         .route("/v1/runs/:run_id/status", get(runs_status::<S>))
@@ -368,6 +379,12 @@ enum TypedRunStartKind {
     TypedRunStartV1,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum PortfolioSnapshotStartKind {
+    PortfolioSnapshotStartV1,
+}
+
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum RestDriveMode {
@@ -404,6 +421,27 @@ struct TypedRunStartBody {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct PortfolioSnapshotStartBody {
+    kind: PortfolioSnapshotStartKind,
+    request: serde_json::Value,
+    #[serde(default)]
+    run_id: Option<String>,
+    #[serde(default = "default_portfolio_framework_version")]
+    framework_version: String,
+    #[serde(default = "default_source_revision")]
+    source_revision: String,
+    #[serde(default)]
+    drive: RestDriveMode,
+}
+
+#[derive(Debug, Serialize)]
+struct PortfolioSnapshotStartResponse {
+    run: TypedRunResponse,
+    public_output: Option<TypedPublicOutputResponse>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct TypedSeedBody {
     seed_id: String,
     json: serde_json::Value,
@@ -433,9 +471,95 @@ fn default_framework_version() -> String {
     "mfm.rest_api.typed.v1".to_owned()
 }
 
+fn default_portfolio_framework_version() -> String {
+    "mfm.rest_api.portfolio.typed.v1".to_owned()
+}
+
 #[allow(clippy::disallowed_methods)]
 fn default_source_revision() -> String {
     std::env::var("MFM_SOURCE_REVISION").unwrap_or_else(|_| "unknown".to_owned())
+}
+
+#[instrument(level = "info", skip(state, body))]
+async fn portfolio_snapshot<S>(
+    State(state): State<RouterState<S>>,
+    body: Result<Json<PortfolioSnapshotStartBody>, JsonRejection>,
+) -> Result<Json<serde_json::Value>, ApiError>
+where
+    S: AsyncTypedRunEventStore + Clone + Send + Sync,
+{
+    let Json(req) = body.map_err(|_| ApiError::invalid_json())?;
+    match req.kind {
+        PortfolioSnapshotStartKind::PortfolioSnapshotStartV1 => {}
+    }
+    let canonical = parse_portfolio_snapshot_request(&req.request)?;
+    let workflow_config = PortfolioWorkflowConfig::from(canonical);
+    let draft = portfolio_program_draft(workflow_config.clone()).map_err(|error| {
+        ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "TypedPortfolioPlanInvalid",
+            error.to_string(),
+        )
+    })?;
+    let certified = certified_portfolio_spec(workflow_config).map_err(|error| {
+        ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "TypedPortfolioSpecInvalid",
+            error.to_string(),
+        )
+    })?;
+    let public_schema_id = certified
+        .envelope
+        .spec
+        .public_outputs
+        .public_schema_id
+        .clone();
+    let configs =
+        portfolio_config_artifacts_for_spec(&draft, &certified.envelope.spec).map_err(|error| {
+            ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "TypedPortfolioConfigInvalid",
+                error.to_string(),
+            )
+        })?;
+
+    let run_id = parse_optional_run_id(req.run_id)?;
+    let spec_bytes = certified
+        .envelope
+        .spec
+        .canonical_json()
+        .map_err(|error| {
+            ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "TypedPortfolioSpecInvalid",
+                error.to_string(),
+            )
+        })?
+        .to_vec();
+    let services = state.services()?;
+    persist_portfolio_config_artifacts(services.artifacts(), configs).await?;
+    let start = mfm_app::build_typed_run_start_request(
+        services.artifacts(),
+        &spec_bytes,
+        run_id.clone(),
+        &req.framework_version,
+        &req.source_revision,
+        Vec::new(),
+        req.drive.into_app(),
+    )
+    .await?;
+    let run = services.start_certified_run(start).await?;
+    let public_output = if run.phase == TypedRunPhase::Completed {
+        Some(
+            services
+                .typed_public_output(&run_id, &public_schema_id)
+                .await?,
+        )
+    } else {
+        None
+    };
+
+    json_ok(PortfolioSnapshotStartResponse { run, public_output })
 }
 
 #[instrument(level = "info", skip(state, body))]
@@ -651,6 +775,68 @@ fn canonical_json_value_bytes(
     PlainCanonicalJsonBytes::from_json_str(&json)
         .map(|canonical| canonical.to_vec())
         .map_err(|error| ApiError::new(StatusCode::BAD_REQUEST, error_code, error.to_string()))
+}
+
+fn parse_portfolio_snapshot_request(
+    value: &serde_json::Value,
+) -> Result<mfm_portfolio_config::PortfolioSnapshotCanonicalConfig, ApiError> {
+    let raw = serde_json::to_string(value).map_err(|_| {
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "SerializationError",
+            "Failed to serialize portfolio request JSON",
+        )
+    })?;
+    let authored = parse_portfolio_snapshot_authored_config(&raw, AuthoredConfigFormat::Json)
+        .map_err(api_error_from_portfolio_config_error)?;
+    canonicalize_portfolio_snapshot_authored_config(authored)
+        .map_err(api_error_from_portfolio_config_error)
+}
+
+async fn persist_portfolio_config_artifacts(
+    artifacts: &FsTypedArtifactStore,
+    configs: Vec<PortfolioConfigArtifact>,
+) -> Result<(), ApiError> {
+    for config in configs {
+        artifacts
+            .put_artifact(
+                config.bytes,
+                TypedArtifactDescriptor {
+                    media_type: config.media_type,
+                    schema_id: Some(config.schema_id),
+                    semantic_type_id: None,
+                    producer_node_id: None,
+                    producer_seed_id: None,
+                    artifact_role: ArtifactRole::TypedConfig,
+                },
+            )
+            .await
+            .map_err(api_error_from_typed_artifact_error)?;
+    }
+    Ok(())
+}
+
+fn api_error_from_portfolio_config_error(error: PortfolioSnapshotConfigError) -> ApiError {
+    match error {
+        PortfolioSnapshotConfigError::InvalidJson { .. } => ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "InvalidJson",
+            "Failed to parse request body as JSON",
+        ),
+        PortfolioSnapshotConfigError::InvalidToml { .. } => ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "InvalidToml",
+            "Failed to parse request body as TOML",
+        ),
+        PortfolioSnapshotConfigError::InvalidBundle(_)
+        | PortfolioSnapshotConfigError::Decode { .. }
+        | PortfolioSnapshotConfigError::Serialize { .. }
+        | PortfolioSnapshotConfigError::CanonicalJson { .. } => ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "InvalidPortfolioRequest",
+            error.to_string(),
+        ),
+    }
 }
 
 fn validate_sequence_range(from_seq: u64, to_seq: Option<u64>) -> Result<(), ApiError> {

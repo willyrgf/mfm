@@ -233,6 +233,9 @@ pub fn production_typed_runner_registry(
     artifacts: FsTypedArtifactStore,
 ) -> Result<ErasedRunnerRegistry, AppError> {
     let mut registry = ErasedRunnerRegistry::new();
+    let portfolio_artifacts: Arc<dyn mfm_transports_portfolio::PortfolioArtifactStore> =
+        Arc::new(artifacts.clone());
+    mfm_transports_portfolio::register_portfolio_runners(&mut registry, portfolio_artifacts)?;
     let proof_artifacts: Arc<dyn mfm_transports_proof::ProofArtifactSink> =
         Arc::new(FsProofArtifactSink { artifacts });
     mfm_transports_proof::register_deterministic_proof_runners(&mut registry, proof_artifacts)?;

@@ -108,6 +108,13 @@ stable_domain_key_type!(
     "Stable domain key for a portfolio report instance."
 );
 
+impl mfm_program::StableDomainKey for SourceDomainKey {}
+impl mfm_program::StableDomainKey for SubjectDomainKey {}
+impl mfm_program::StableDomainKey for ViewDomainKey {}
+impl mfm_program::StableDomainKey for ValuationDomainKey {}
+impl mfm_program::StableDomainKey for ObservationBatchDomainKey {}
+impl mfm_program::StableDomainKey for ReportDomainKey {}
+
 /// Errors returned when validating stable domain keys.
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
 pub enum StableDomainKeyError {

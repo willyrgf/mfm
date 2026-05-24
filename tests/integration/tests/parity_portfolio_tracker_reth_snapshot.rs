@@ -3,12 +3,14 @@
 
 use std::sync::Arc;
 
+use mfm_app::TypedRunPhase;
 use mfm_artifact_store_fs::FsArtifactStore;
 use mfm_integration_tests::rpc_control;
-use mfm_machine::ids::ArtifactId;
 use mfm_machine::stores::{ArtifactStore, StreamStore};
 use mfm_stream_store_mem::MemStreamStore;
 use mfm_transports_rpc_control::RpcControlBootstrapSource;
+
+mod support;
 
 const NETWORK_ID: &str = "ethereum-mainnet";
 const CONTROL_SCOPE: &str = "parity.portfolio_snapshot.eth_only";
@@ -138,34 +140,23 @@ async fn parity_portfolio_snapshot_feature_against_reth_eth_only() {
         .map(parse_u64_hex)
         .expect("eth_chainId hex");
 
-    let streams: Arc<dyn StreamStore> = Arc::new(MemStreamStore::new());
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let artifacts: Arc<dyn ArtifactStore> = Arc::new(FsArtifactStore::new(tmp.path()));
-
     // Intentionally use a fixed address. This keeps the test independent of `eth_accounts`
     // support/configuration in the node.
     let wallet_address = "0x000000000000000000000000000000000000dead";
 
-    let services = mfm_app_legacy::AppServices::new(
-        mfm_app_legacy::make_engine_bundle(),
-        Arc::clone(&streams),
-        Arc::clone(&artifacts),
-    );
-
-    let response = services
-        .start_portfolio_snapshot(
-            serde_json::from_value(canonical_portfolio_snapshot_payload(
-                wallet_address,
-                chain_id,
-                &control_scope,
-            ))
-            .expect("portfolio snapshot request"),
-        )
-        .await
-        .expect("portfolio snapshot response");
-    assert_eq!(response.phase, "completed");
-    let report = serde_json::to_value(response.report.as_ref().expect("portfolio report"))
-        .expect("report json");
+    let response = support::run_typed_portfolio_snapshot(canonical_portfolio_snapshot_payload(
+        wallet_address,
+        chain_id,
+        &control_scope,
+    ))
+    .await;
+    assert_eq!(response.run.phase, TypedRunPhase::Completed);
+    let public_output = response
+        .public_output
+        .json
+        .as_ref()
+        .expect("public output json");
+    let report = &public_output["report"];
     assert_eq!(report["portfolio_id"], "reth-eth-only");
     assert_eq!(report["error_count"], 0);
     let report_wallet = &report["wallet_summaries"][0];
@@ -176,16 +167,7 @@ async fn parity_portfolio_snapshot_feature_against_reth_eth_only() {
     assert_eq!(report_wallet_usd["staked_value_dec"], "0");
     assert_eq!(report_wallet_usd, report_portfolio_usd);
 
-    let snapshot_artifact_id = response
-        .snapshot_artifact_id
-        .as_deref()
-        .expect("snapshot_artifact_id");
-    let snapshot_bytes = artifacts
-        .get(&ArtifactId::new(snapshot_artifact_id.to_owned()).expect("artifact id"))
-        .await
-        .expect("snapshot artifact");
-    let out: serde_json::Value =
-        serde_json::from_slice(&snapshot_bytes).expect("snapshot artifact json");
+    let out = &public_output["snapshot"];
     assert_eq!(out["portfolio_id"], "reth-eth-only");
     assert_eq!(out["network_pins"][0]["anchor"]["chain_id"], chain_id);
     assert_eq!(out["wallets"][0]["address"], wallet_address);

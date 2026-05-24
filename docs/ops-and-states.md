@@ -3,7 +3,8 @@
 > Status: living inventory of built-in operations and production `State` implementations.
 >
 > Source of truth:
-> - built-in op registry: `crates/app/src/lib.rs`
+> - legacy dynamic op registry: `crates/app-legacy/src/lib.rs`
+> - certified typed runner registry: `crates/app/src/lib.rs`
 > - shared production state modules documented below under `crates/states/*` and `crates/evm-runtime/src/states/*`
 > - concrete production states: `impl State for` definitions under those shared modules, plus the
 >   intentional op-local exceptions documented below
@@ -22,23 +23,21 @@ Use `docs/design.md` for normative semantics and invariants.
 
 Current snapshot:
 
-- Built-in public root ops: `18`
-- Planner-internal registered child ops: `8` (`portfolio_tracker` semantic lowering)
-- Shared production `State` impls: `28`
+- Built-in public dynamic root ops: `14`
+- Planner-internal registered dynamic child ops: `0`
+- Shared production legacy `State` impls: `20`
+- Certified typed portfolio state contracts: `9`
 - Intentional op-local production `State` impls: `1`
 
 Planning model note:
 
 - This inventory is intentionally focused on built-in/public root ops registered in the default app
-  bundle and on production runtime states.
-- The default app registry also keeps planner-internal portfolio semantic child ops available so
-  recursive flattening can resolve them, but public `run.start` entrypoints reject those internal
-  ids.
+  bundle, certified typed workflows registered in the typed app bundle, and production runtime
+  states.
 - Runtime execution units remain states only; internal recursive op expansion must flatten before
   runtime starts.
-- Current canonical-input compatibility roots for portfolio and deploy/configure/validate now
-  compose build then execute with the execute child sourcing its config from the build child's
-  planner payload.
+- Current canonical-input compatibility roots for deploy/configure/validate compose build then
+  execute with the execute child sourcing its config from the build child's planner payload.
   The build child is authoritative for artifact/report publication, ordering, and execute-child
   input materialization.
 - This document does not attempt to enumerate every future internal composite planning boundary.
@@ -47,8 +46,7 @@ Planning model note:
 
 The built-in app bundle registers these public root ops in
 `DefaultOperationPlugin::register_operations`. Public single-op entrypoints such as CLI `run start`
-and REST `/v1/runs/start` accept only these root ops; planner-internal semantic ids are not public
-API.
+and REST `/v1/runs/start` accept only these root ops.
 REST `/v1/runs/start` and feature `run.start` require tagged request envelopes
 (`single_op_start_v1` or `pipeline_start_v1`) and reject unknown top-level fields.
 
@@ -67,14 +65,12 @@ REST `/v1/runs/start` and feature `run.start` require tagged request envelopes
 | `evm_deploy_configure_validate_config_build` | `v1` | `crates/ops/evm-deploy-configure-validate-op` | Build canonical deploy/configure/validate config into built execution config, publish canonical/built config artifacts, and emit a stable build report | `WriteJsonValueState`, `WriteContextValueArtifactState` | feature `run.start` |
 | `evm_deploy_configure_validate_execute` | `v1` | `crates/ops/evm-deploy-configure-validate-op` | Execute pre-built deploy/configure/validate config through the fixed deploy/configure/validate runtime graph | Child ops `evm_deploy`, `evm_configure`, `evm_validate` | feature `run.start` |
 | `evm_deploy_configure_validate` | `v1` | `crates/ops/evm-deploy-configure-validate-op` | Canonical public root that composes `evm_deploy_configure_validate_config_build` before `evm_deploy_configure_validate_execute` | Child build workflow plus `evm_deploy`, `evm_configure`, `evm_validate` | `mfm run pipeline deploy-configure-validate`, feature `pipeline.deploy_configure_validate.start`, feature `run.start` |
-| `portfolio_config_build` | `v1` | `crates/ops/portfolio-tracker-op` | Build canonical portfolio config into built execution config, publish canonical/built config artifacts, and emit a stable build report | `WriteJsonValueState`, `WriteContextValueArtifactState` | feature `portfolio.config.build`, feature `run.start` |
-| `portfolio_execute` | `v1` | `crates/ops/portfolio-tracker-op` | Execute pre-built portfolio config and produce a canonical replayable multi-network portfolio snapshot and typed report through the fixed semantic runtime | `PrepareExecutionSourcesState`, `ResolveSubjectsState`, `PinExecutionViewsState`, `ResolveValuationInputsState`, `ObserveCompiledBatchState`, `MergeObservationsState`, `AssembleSnapshotState`, `ProjectReportState` | feature `run.start` |
-| `portfolio_tracker` | `v1` | `crates/ops/portfolio-tracker-op` | Canonical public root that composes `portfolio_config_build` before the fixed semantic runtime | Child build workflow plus `PrepareExecutionSourcesState`, `ResolveSubjectsState`, `PinExecutionViewsState`, `ResolveValuationInputsState`, `ObserveCompiledBatchState`, `MergeObservationsState`, `AssembleSnapshotState`, `ProjectReportState` | `mfm portfolio snapshot`, feature `portfolio.snapshot`, feature `run.start` |
 | `nix_app` | `v1` | `crates/ops/nix-app-op` | Run a nix-resolved program via the exec namespace | `NixExecState` | `mfm run start`, feature `run.start` |
 
 Notes:
 
-- Built-in feature entry points are owned by `FeatureCatalog` in `crates/app/src/lib.rs`.
+- Built-in dynamic feature entry points are owned by `FeatureCatalog` in
+  `crates/app-legacy/src/lib.rs`.
 - `pipeline.deploy_configure_validate.start` now routes through the public
   `evm_deploy_configure_validate/v1` root op family instead of assembling a one-step pipeline
   template in app glue.
@@ -86,7 +82,17 @@ Notes:
   certified typed program in `crates/ops/proof-op`, with typed fact, side-effect, receipt,
   confirmation, public-output, and replay-verifier contracts in `crates/collectors/proof` and the
   deterministic typed runner implementation in `crates/transports/proof`.
+- Portfolio snapshots are no longer registered as legacy dynamic `portfolio_tracker`,
+  `portfolio_execute`, or `portfolio_config_build` ops. `mfm portfolio snapshot` compiles a
+  certified typed spec through `crates/ops/portfolio-tracker-op` and executes it with runners from
+  `crates/transports/portfolio`.
 - CLI/API transport layers stay thin; dedicated CLI commands exist only for a subset of ops.
+
+## Certified Typed Workflows
+
+| Workflow | Owner | Typed state contracts | Entry points |
+|---|---|---|---|
+| portfolio tracker | `crates/ops/portfolio-tracker-op` | `PrepareSourcesState`, `ResolveSubjectsState`, `PinViewsState`, `ResolveValuationsState`, `ObserveBatchState`, `MergeObservationsState`, `AssembleSnapshotState`, `PublishSnapshotState`, `ProjectReportState` | `mfm portfolio snapshot` |
 
 ## Shared Production States
 
@@ -105,13 +111,12 @@ The shared states below keep reusable EVM execution behavior in `crates/evm-runt
 | Module | State types | Purpose | Used by built-in ops |
 |---|---|---|---|
 | `crates/states/common/src/states/nix.rs` | `NixExecState` | Execute a nix-resolved or pre-resolved program through the exec namespace, with optional runtime stdin handoff and non-secret environment overrides for compatibility backends | `nix_app` |
-| `crates/states/common/src/states/publish.rs` | `WriteJsonValueState`, `WriteContextValueArtifactState` | Deterministic JSON publication and context-to-artifact emission for thin workflow boundaries | `evm_deploy_configure_validate_config_build`, `portfolio_config_build`, `portfolio_tracker` (canonical input path) |
+| `crates/states/common/src/states/publish.rs` | `WriteJsonValueState`, `WriteContextValueArtifactState` | Deterministic JSON publication and context-to-artifact emission for thin workflow boundaries | `evm_deploy_configure_validate_config_build` |
 | `crates/states/keystore/src/states/admin.rs` | `KeystoreImportState`, `KeystoreListState`, `KeystoreDeleteState` | Reusable keystore administration flows that route typed `local.keystore.*` requests and persist non-secret reports; live filesystem/prompt/password handling stays in `crates/transports/local-keystore` | `keystore_import`, `keystore_list`, `keystore_delete` |
 | `crates/states/keystore/src/states/tx.rs` | `KeystoreTxSignState` | Reusable transaction-signing state that routes typed local-keystore signing requests and persists only the non-secret signing report; EIP-1559 transaction modeling/encoding lives in `crates/evm-core`, key signing in `crates/core`, and raw transaction file writes stay in `crates/transports/local-keystore` | `keystore_tx_sign` |
-| `crates/evm-runtime/src/states/read.rs` | `ReadHexStringState`, `ReadU256HexState`, `EthCallState`, `ReadU64HexState`, `NativeBalanceState`, `TokenBalanceState` | Reusable control-plane-backed chain read/query states | `evm_read`, `portfolio_execute`, `portfolio_tracker` |
+| `crates/evm-runtime/src/states/read.rs` | `ReadHexStringState`, `ReadU256HexState`, `EthCallState`, `ReadU64HexState`, `NativeBalanceState`, `TokenBalanceState` | Reusable control-plane-backed chain read/query states | `evm_read` |
 | `crates/evm-runtime/src/states/rpc_control.rs` | `PrepareSourcesState` | Reusable `rpc.control` source preparation and responsiveness preflight | none directly; shared contract used by semantic and EVM write runtimes |
-| `crates/evm-runtime/src/states/price.rs` | `read_evm_oracle_unit_price` | Reusable control-plane-backed EVM oracle price reads for valuation source execution | `portfolio_execute`, `portfolio_tracker` |
-| `crates/states/portfolio/src/execution_states.rs` | `PrepareExecutionSourcesState`, `ResolveSubjectsState`, `PinExecutionViewsState`, `ResolveValuationInputsState`, `ObserveCompiledBatchState`, `MergeObservationsState`, `AssembleSnapshotState`, `ProjectReportState` | Fixed semantic runtime states for source preparation, subject/view resolution, valuation resolution, batch observation, merge, and snapshot/report projection; canonical schema lives in `crates/portfolio/model` and pure plan vocabulary lives in `crates/portfolio/plan` | `portfolio_execute`, `portfolio_tracker` |
+| `crates/evm-runtime/src/states/price.rs` | `read_evm_oracle_unit_price` | Reusable control-plane-backed EVM oracle price reads for valuation source execution | none directly |
 | `crates/evm-runtime/src/states/contract_set.rs` | `LoadCompiledContractSetState`, `DeployContractSetState`, `WaitForContractSetReceiptsState`, `CollectDeployedContractSetState`, `WriteDeployedContractSetState` | Reusable generic contract-set deployment states that record public signed transaction intent metadata, keep raw transaction capabilities in protected artifacts, and broadcast idempotently through `rpc.control` | `evm_deploy_contract_set` |
 | `crates/evm-runtime/src/states/write.rs` | `NixArtifactToEvmContractState`, `EvmDeployState`, `EvmConfigureState`, `EvmValidateState` | Reusable contract artifact adaptation and deploy/configure/validate states routed through `rpc.control`; write states require `signing_key_env`, record public signed transaction intent metadata, and keep raw transaction capabilities in protected artifacts before broadcast | `evm_contract_from_nix`, `evm_deploy`, `evm_configure`, `evm_validate` |
 

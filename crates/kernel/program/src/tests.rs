@@ -286,6 +286,59 @@ fn explicit_registered_state_token_plans_without_builder_registry() {
 }
 
 #[test]
+fn state_output_domain_keys_are_lineage_evidence() {
+    let mut registry = StateRegistryBuilder::new();
+    registry
+        .register::<MultiplyState>()
+        .expect("state registers");
+    let registry = registry.into_snapshot();
+
+    let build = |domain_key: TestDomainKey| {
+        build_root_with_registry(
+            ScopeKey::new("root").expect("scope key"),
+            registry.clone(),
+            |root| {
+                let seed = CanonicalSeed::from_value(&LaunchValue {
+                    amount: 2,
+                    label: "domain".to_owned(),
+                })?;
+                let input = root.seed(SeedKey::new("input")?, seed)?;
+                let result = root.scope().state_with_domain_keys::<MultiplyState, _, _>(
+                    StateKey::new("multiply")?,
+                    LaunchConfig { multiplier: 5 },
+                    input,
+                    vec![domain_key],
+                )?;
+                root.bind_public_outputs(
+                    PublicOutputKey::new("terminal")?,
+                    &LaunchPublicOutputs { result },
+                )
+            },
+        )
+        .expect("root builds")
+    };
+
+    let first = build(TestDomainKey {
+        source: "portfolio".to_owned(),
+        index: 1,
+    });
+    let second = build(TestDomainKey {
+        source: "portfolio".to_owned(),
+        index: 2,
+    });
+
+    let first_node = &first.state_nodes()[0];
+    let second_node = &second.state_nodes()[0];
+    assert_eq!(first_node.output_domain_keys.len(), 1);
+    assert_eq!(first_node.node_id, second_node.node_id);
+    assert_eq!(first_node.output_cell_id, second_node.output_cell_id);
+    assert_ne!(
+        first_node.output_value_lineage, second_node.output_value_lineage,
+        "stable domain keys must be hash-defining for state output lineage"
+    );
+}
+
+#[test]
 fn registered_operation_registry_records_lineage_frame() {
     let mut state_registry = StateRegistryBuilder::new();
     state_registry
@@ -517,7 +570,7 @@ fn domain_keyed_handles_sort_canonically_and_reject_duplicates() {
                     source: "z".to_owned(),
                     index: 2,
                 },
-                late,
+                late.clone(),
             ),
         ])?;
         let binding: InputBinding<Vec<LaunchValue>> = keyed.into_binding()?;
@@ -558,6 +611,40 @@ fn domain_keyed_handles_sort_canonically_and_reject_duplicates() {
         };
         assert_eq!(first_cell.cell_id, early_ref.cell_id);
         assert_eq!(second_cell.cell_id, late_ref.cell_id);
+
+        let non_empty_keyed = DomainKeyedNonEmptyHandles::new(vec![
+            (
+                TestDomainKey {
+                    source: "z".to_owned(),
+                    index: 2,
+                },
+                late.clone(),
+            ),
+            (
+                TestDomainKey {
+                    source: "a".to_owned(),
+                    index: 1,
+                },
+                early.clone(),
+            ),
+        ])?;
+        let non_empty_binding: InputBinding<NonEmpty<LaunchValue>> =
+            non_empty_keyed.into_binding()?;
+        let InputBindingNodeKind::NonEmptyVec {
+            ordering,
+            domain_keys,
+            elements,
+        } = &non_empty_binding.root().kind
+        else {
+            panic!("domain-keyed non-empty handles should bind as non-empty vector");
+        };
+        assert_eq!(ordering, &OrderingEvidence::StableDomainKey);
+        assert_eq!(domain_keys.len(), 2);
+        assert_eq!(elements.len(), 2);
+        assert!(matches!(
+            DomainKeyedNonEmptyHandles::<TestDomainKey, LaunchValue>::new(Vec::new()),
+            Err(PlanError::EmptyNonEmptyInput)
+        ));
 
         let duplicate = DomainKeyedHandles::new(vec![
             (

@@ -15,6 +15,9 @@ mfm-artifact-store-fs = { path = "../../crates/storages/artifact-store-fs" }
 mfm-stream-store-postgres = { path = "../../crates/storages/stream-store-postgres" }
 mfm-stream-store-mem = { path = "../../crates/storages/stream-store-mem" }
 mfm-ids = { path = "../../crates/kernel/ids" }
+mfm-events = { path = "../../crates/kernel/events" }
+mfm-op-portfolio-tracker = { path = "../../crates/ops/portfolio-tracker-op" }
+mfm-portfolio-config = { path = "../../crates/portfolio-config" }
 clap = { version = "4.4", features = ["derive", "env"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -24,7 +27,6 @@ hex = "0.4"
 [dev-dependencies]
 mfm_core = { path = "../../crates/core" }
 mfm-portfolio-model = { path = "../../crates/portfolio/model" }
-mfm-op-portfolio-tracker = { path = "../../crates/ops/portfolio-tracker-op" }
 tempfile = "3.0"
 assert_cmd = "2.0"
 predicates = "3.0"
