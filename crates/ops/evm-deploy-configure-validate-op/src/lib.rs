@@ -1,799 +1,492 @@
-#![cfg_attr(test, allow(clippy::disallowed_methods, clippy::disallowed_types))]
-#![cfg_attr(not(test), deny(clippy::disallowed_methods, clippy::disallowed_types))]
 #![warn(missing_docs)]
-//! Deploy/configure/validate config-build and execution planner ops.
+//! Typed EVM deploy/configure/validate workflow operation.
 //!
-//! This crate owns the additive public deploy/configure/validate workflow boundaries:
-//!
-//! - `evm_deploy_configure_validate_config_build`: canonical config -> built config plus explicit
-//!   config artifacts
-//! - `evm_deploy_configure_validate_execute`: strict built-config execution root
-//! - `evm_deploy_configure_validate`: canonical public root that composes build then execute
-//!
-//! All three remain thin planners. Typed authored/canonical/built config lives in
-//! `mfm-evm-deploy-configure-validate-config`, and runtime execution stays in the shared EVM
-//! state crates.
+//! The workflow is authored through `mfm-program` and lowers to certified typed state programs.
+//! It exposes no legacy dynamic planner or context-key surface. Deploy and configure are
+//! side-effect states; validate is a read state that consumes a [`ConfiguredContract`] typestate
+//! value.
 //!
 //! # Examples
 //!
 //! ```rust
-//! use mfm_op_evm_deploy_configure_validate::EvmDeployConfigureValidateOp;
-//! use mfm_sdk::op::Operation;
+//! use mfm_op_evm_deploy_configure_validate::{
+//!     dcv_program_draft, DeployConfigureValidateCanonicalConfig,
+//! };
 //!
-//! let op = EvmDeployConfigureValidateOp;
-//! assert_eq!(op.op_id().as_str(), "evm_deploy_configure_validate");
+//! # fn demo(config: DeployConfigureValidateCanonicalConfig) -> mfm_program::Result<()> {
+//! let draft = dcv_program_draft(config)?;
+//! assert_eq!(draft.state_nodes().len(), 3);
+//! # Ok(())
+//! # }
 //! ```
 
-use std::collections::HashMap;
-use std::collections::HashSet;
-use std::sync::Arc;
+use std::collections::BTreeMap;
 
-use mfm_evm_deploy_configure_validate_config::{
-    build_deploy_configure_validate_outcome, decode_deploy_configure_validate_built_config,
-    decode_deploy_configure_validate_canonical_config, DeployConfigureValidateBuiltConfig,
-    DeployConfigureValidateCanonicalConfig, DeployConfigureValidateExecutionConfig,
+use mfm_certify::{certify_program_draft, CertifiedTypedSpec};
+use mfm_evm_deploy_configure_validate_config::build_deploy_configure_validate_config;
+pub use mfm_evm_deploy_configure_validate_config::{
+    canonicalize_deploy_configure_validate_authored_config,
+    decode_deploy_configure_validate_built_config,
+    decode_deploy_configure_validate_canonical_config,
+    parse_deploy_configure_validate_authored_config,
+    parse_deploy_configure_validate_authored_config_with_hint,
+    DeployConfigureValidateAuthoredConfig, DeployConfigureValidateBuildOutcome,
+    DeployConfigureValidateBuildReport, DeployConfigureValidateBuiltConfig,
+    DeployConfigureValidateCanonicalConfig, DeployConfigureValidateConfigError,
+    DeployConfigureValidateConfigureConfig, DeployConfigureValidateDeployConfig,
+    DeployConfigureValidateExecutionConfig, DeployConfigureValidateInput,
+    DeployConfigureValidateValidateConfig, ExistingConfiguredContractValidationConfig,
 };
-use mfm_machine::config::RunConfig;
-use mfm_machine::errors::ErrorCategory;
-use mfm_machine::ids::OpId;
-use mfm_machine::ids::OpPath;
-use mfm_op_evm_write::{EvmConfigureOp, EvmDeployOp, EvmValidateOp};
-use mfm_sdk::errors::SdkError;
-use mfm_sdk::ids::{ChildOpLocalId, PortKey};
-use mfm_sdk::op::{
-    child_op_path, AfterEdge, ChildOpInstance, CompositeOpSpec, DynOperation, ImportBinding,
-    OpInterface, Operation, PlannedOp, PlannedOpKind, PlannerPayloadConfigSource, PortSource,
-    ReExportBinding,
+use mfm_ids::{
+    ArtifactId, ContentDigest, DigestAlgorithm, OperationKind, OperationVersion, SchemaId,
 };
-use mfm_state_common::errors as op_errors;
-use serde::Serialize;
-use serde_json::Value;
-
-mod config_build;
-pub use config_build::{
-    evm_deploy_configure_validate_config_build_built_artifact_id_context_key,
-    evm_deploy_configure_validate_config_build_built_config_context_key,
-    evm_deploy_configure_validate_config_build_canonical_artifact_id_context_key,
-    evm_deploy_configure_validate_config_build_public_ops,
-    evm_deploy_configure_validate_config_build_report_context_key,
-    EvmDeployConfigureValidateConfigBuildOp, EVM_DEPLOY_CONFIGURE_VALIDATE_CONFIG_BUILD_OP_ID,
+use mfm_program::{
+    Operation, OperationKey, OperationRegistryBuilder, PublicOutputKey, RootBuilder, ScopeKey,
+    StateKey, StateRegistryBuilder,
+};
+use mfm_spec::v1 as spec;
+pub use mfm_state_evm_dcv::{
+    configure_intent_from_config, deploy_intent_from_config, evm_dcv_adapter_kind,
+    evm_dcv_adapter_version, validate_configured_contract_with_backend, ConfigureContractState,
+    ConfiguredContract, ConfiguredContractRef, DcvOperationOutputs, DcvPublicOutputs,
+    DeployContractState, DeployedContract, EvmDcvConfigureConfirmation,
+    EvmDcvConfigureIdempotencyInput, EvmDcvConfigureIntent, EvmDcvConfigureReceipt,
+    EvmDcvConfigureReceiptEntry, EvmDcvConfigureSubmission, EvmDcvDeployConfirmation,
+    EvmDcvDeployIdempotencyInput, EvmDcvDeployIntent, EvmDcvDeployReceipt, EvmDcvDeploySubmission,
+    EvmDcvReadBackend, EvmDcvReadCapability, EvmDcvReadError, EvmDcvReadFuture,
+    EvmDcvSignerCapability, EvmDcvTransactionIntent, EvmDcvTransactionSubmitCapability,
+    ProtectedRawTransaction, ValidateContractState, ValidationReport,
 };
 
-/// Canonical public root op id that composes build then execute.
-pub const EVM_DEPLOY_CONFIGURE_VALIDATE_OP_ID: &str = "evm_deploy_configure_validate";
-/// Strict built-config execution root op id used by thin transport adapters.
-pub const EVM_DEPLOY_CONFIGURE_VALIDATE_EXECUTE_OP_ID: &str =
-    "evm_deploy_configure_validate_execute";
-/// Shared version for the public deploy/configure/validate roots.
-pub const EVM_DEPLOY_CONFIGURE_VALIDATE_PUBLIC_OP_VERSION: &str = "v1";
+const DCV_OPERATION_KIND_NAME: &str = "deploy_configure_validate_workflow";
+const DCV_OPERATION_VERSION: &str = "mfm.evm.dcv.operation.workflow.v1";
+const ROOT_SCOPE: &str = "evm_dcv";
+const OP_KEY: &str = "deploy_configure_validate";
+const PUBLIC_OUTPUT_KEY: &str = "evm_dcv";
 
-#[cfg(test)]
-const CONFIGURE_EXPORT: &str = "configure_receipts";
-#[cfg(test)]
-const CONTRACT_ADDRESS_EXPORT: &str = "contract_address";
-#[cfg(test)]
-const DEPLOY_TX_HASH_EXPORT: &str = "deploy_tx_hash";
-const CONFIGURE_CHILD_ID: &str = "configure";
-const DEPLOY_CHILD_ID: &str = "deploy";
-const EXECUTE_CHILD_ID: &str = "e";
-const TRACKER_BUILD_CHILD_ID: &str = "b";
-#[cfg(test)]
-const VALIDATED_EXPORT: &str = "validated";
-const VALIDATE_CHILD_ID: &str = "validate";
+/// Typed EVM deploy/configure/validate workflow operation.
+pub struct DeployConfigureValidateWorkflowOperation;
 
-fn sdk_input_error(code: &'static str, message: impl Into<String>) -> SdkError {
-    op_errors::sdk_error(code, ErrorCategory::ParsingInput, false, message)
-}
+impl Operation for DeployConfigureValidateWorkflowOperation {
+    type Config = DeployConfigureValidateCanonicalConfig;
+    type Input<'program, 'scope> = ();
+    type Output<'program, 'scope> = DcvOperationOutputs<'program, 'scope>;
 
-fn parse_built_config(op_config: &Value) -> Result<DeployConfigureValidateBuiltConfig, SdkError> {
-    decode_deploy_configure_validate_built_config(op_config).map_err(|err| {
-        sdk_input_error(
-            "invalid_evm_deploy_configure_validate_execution_config",
-            err.to_string(),
+    fn kind() -> mfm_program::Result<OperationKind> {
+        OperationKind::new(
+            "mfm.evm.dcv",
+            DCV_OPERATION_KIND_NAME,
+            DigestAlgorithm::Sha256JcsV1,
+            mfm_canonical::sha256_digest_bytes(b"mfm.evm.dcv.operation:workflow"),
         )
-    })
+        .map_err(|error| mfm_program::PlanError::Key(error.to_string()))
+    }
+
+    fn version() -> mfm_program::Result<OperationVersion> {
+        OperationVersion::new(DCV_OPERATION_VERSION)
+            .map_err(|error| mfm_program::PlanError::Key(error.to_string()))
+    }
+
+    fn name() -> &'static str {
+        "mfm.evm.dcv.deploy_configure_validate"
+    }
+
+    fn expand<'program, 'scope>(
+        &self,
+        config: Self::Config,
+        _input: Self::Input<'program, 'scope>,
+        builder: &mut mfm_program::ScopeBuilder<'program, 'scope>,
+    ) -> mfm_program::Result<Self::Output<'program, 'scope>> {
+        let built = build_deploy_configure_validate_config(config)
+            .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?;
+        let mut deploy = built.execution.deploy;
+        let mut configure = built.execution.configure;
+        let mut validate = built.execution.validate;
+        normalize_phase_artifacts(&mut deploy, &mut configure, &mut validate)?;
+        validate_phase_alignment(&deploy, &configure, &validate)?;
+
+        let deployed = builder.state::<DeployContractState, _>(
+            StateKey::new("deploy_contract")?,
+            deploy,
+            (),
+        )?;
+        let configured = builder.state::<ConfigureContractState, _>(
+            StateKey::new("configure_contract")?,
+            configure,
+            deployed.clone(),
+        )?;
+        let validation_report = builder.state::<ValidateContractState, _>(
+            StateKey::new("validate_contract")?,
+            validate,
+            configured.clone(),
+        )?;
+
+        Ok(DcvOperationOutputs {
+            deployed,
+            configured,
+            validation_report,
+        })
+    }
 }
 
-fn re_export_binding(export: &PortKey) -> ReExportBinding {
-    ReExportBinding {
-        export: export.clone(),
-        source: PortSource::ChildExport {
-            child: ChildOpLocalId(EXECUTE_CHILD_ID.to_string()),
-            export: export.clone(),
+/// Builds the EVM DCV state registry used for authoring and certification.
+pub fn dcv_state_registry() -> mfm_program::Result<mfm_program::StateRegistrySnapshot> {
+    let mut states = StateRegistryBuilder::new();
+    states.register::<DeployContractState>()?;
+    states.register::<ConfigureContractState>()?;
+    states.register::<ValidateContractState>()?;
+    Ok(states.into_snapshot())
+}
+
+/// Builds the EVM DCV operation registry used for authoring and certification.
+pub fn dcv_operation_registry() -> mfm_program::Result<mfm_program::OperationRegistrySnapshot> {
+    let mut operations = OperationRegistryBuilder::new();
+    operations.register::<DeployConfigureValidateWorkflowOperation>()?;
+    Ok(operations.into_snapshot())
+}
+
+/// Builds a typed EVM deploy/configure/validate program draft.
+pub fn dcv_program_draft(
+    config: DeployConfigureValidateCanonicalConfig,
+) -> mfm_program::Result<mfm_program::TypedProgramDraft> {
+    mfm_program::build_root_with_registries(
+        ScopeKey::new(ROOT_SCOPE)?,
+        dcv_state_registry()?,
+        dcv_operation_registry()?,
+        |root: &mut RootBuilder<'_, '_>| {
+            let result = root
+                .scope()
+                .call::<DeployConfigureValidateWorkflowOperation, _>(
+                    OperationKey::new(OP_KEY)?,
+                    DeployConfigureValidateWorkflowOperation,
+                    config,
+                    (),
+                )?;
+            root.bind_public_outputs(
+                PublicOutputKey::new(PUBLIC_OUTPUT_KEY)?,
+                &DcvPublicOutputs {
+                    validation_report: result.validation_report,
+                },
+            )
         },
-    }
-}
-
-fn child_import_binding(import: &PortKey) -> ImportBinding {
-    ImportBinding {
-        to_child: ChildOpLocalId(EXECUTE_CHILD_ID.to_string()),
-        import: import.clone(),
-        source: PortSource::ParentImport(import.clone()),
-    }
-}
-
-fn serialize_execution_phase<T: Serialize>(
-    phase: &T,
-    phase_name: &'static str,
-) -> Result<Value, SdkError> {
-    serde_json::to_value(phase).map_err(|err| {
-        sdk_input_error(
-            "invalid_evm_deploy_configure_validate_execution_config",
-            format!("failed to serialize {phase_name} config: {err}"),
-        )
-    })
-}
-
-struct ExecutionChildPlan {
-    child_op_local_id: ChildOpLocalId,
-    op_id: OpId,
-    op_version: String,
-    op_config: Value,
-    interface: OpInterface,
-}
-
-struct ChildExportProducer {
-    child_op_local_id: ChildOpLocalId,
-    op_id: OpId,
-}
-
-fn duplicate_child_export_error(
-    export: &PortKey,
-    first: &ChildExportProducer,
-    duplicate: &ExecutionChildPlan,
-) -> SdkError {
-    sdk_input_error(
-        "duplicate_child_export",
-        format!(
-            "duplicate child export `{}` produced by child `{}` ({}) and child `{}` ({})",
-            export.0,
-            first.child_op_local_id.0,
-            first.op_id.as_str(),
-            duplicate.child_op_local_id.0,
-            duplicate.op_id.as_str()
-        ),
     )
 }
 
-fn plan_execution_child(
-    op_path: &OpPath,
-    child_id: &'static str,
-    op_id: OpId,
-    op_version: String,
-    op_config: Value,
-    run_config: &RunConfig,
-    op: impl Operation,
-) -> Result<ExecutionChildPlan, SdkError> {
-    let interface = op
-        .expand(child_op_path(op_path, child_id)?, &op_config, run_config)?
-        .interface;
-
-    Ok(ExecutionChildPlan {
-        child_op_local_id: ChildOpLocalId(child_id.to_string()),
-        op_id,
-        op_version,
-        op_config,
-        interface,
-    })
+/// Builds and certifies the typed EVM deploy/configure/validate program.
+pub fn certified_dcv_spec(
+    config: DeployConfigureValidateCanonicalConfig,
+) -> mfm_certify::Result<CertifiedTypedSpec> {
+    let draft = dcv_program_draft(config)
+        .map_err(|error| mfm_certify::CertifyError::Lowering(error.to_string()))?;
+    certify_program_draft(&draft)
 }
 
-fn plan_execution_children(
-    op_path: &OpPath,
-    cfg: &DeployConfigureValidateExecutionConfig,
-    run_config: &RunConfig,
-) -> Result<Vec<ExecutionChildPlan>, SdkError> {
-    let deploy_config = serialize_execution_phase(&cfg.deploy, "deploy")?;
-    let configure_config = serialize_execution_phase(&cfg.configure, "configure")?;
-    let validate_config = serialize_execution_phase(&cfg.validate, "validate")?;
-
-    let deploy_op = EvmDeployOp;
-    let configure_op = EvmConfigureOp;
-    let validate_op = EvmValidateOp;
-
-    Ok(vec![
-        plan_execution_child(
-            op_path,
-            DEPLOY_CHILD_ID,
-            deploy_op.op_id(),
-            deploy_op.op_version(),
-            deploy_config,
-            run_config,
-            deploy_op,
-        )?,
-        plan_execution_child(
-            op_path,
-            CONFIGURE_CHILD_ID,
-            configure_op.op_id(),
-            configure_op.op_version(),
-            configure_config,
-            run_config,
-            configure_op,
-        )?,
-        plan_execution_child(
-            op_path,
-            VALIDATE_CHILD_ID,
-            validate_op.op_id(),
-            validate_op.op_version(),
-            validate_config,
-            run_config,
-            validate_op,
-        )?,
-    ])
+/// Canonical bytes for one config artifact required by a typed EVM DCV spec.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DcvConfigArtifact {
+    /// Content-addressed artifact id.
+    pub artifact_id: ArtifactId,
+    /// Canonical content digest.
+    pub digest: ContentDigest,
+    /// Canonical byte length.
+    pub byte_len: u64,
+    /// Canonical JSON bytes.
+    pub bytes: Vec<u8>,
+    /// Config schema id.
+    pub schema_id: SchemaId,
+    /// Config media type.
+    pub media_type: spec::MediaType,
 }
 
-fn execution_composite(
-    op_path: &OpPath,
-    cfg: &DeployConfigureValidateExecutionConfig,
-    run_config: &RunConfig,
-) -> Result<(OpInterface, CompositeOpSpec), SdkError> {
-    let children = plan_execution_children(op_path, cfg, run_config)?;
-    let mut export_producers: HashMap<String, ChildExportProducer> = HashMap::new();
-    let mut seen_parent_imports: HashSet<String> = HashSet::new();
-    let mut parent_imports = Vec::new();
-    let mut bindings = Vec::new();
-
-    for child in &children {
-        for import in &child.interface.imports {
-            let source = match export_producers.get(&import.0) {
-                Some(source_child) => PortSource::ChildExport {
-                    child: source_child.child_op_local_id.clone(),
-                    export: import.clone(),
-                },
-                None => {
-                    if seen_parent_imports.insert(import.0.clone()) {
-                        parent_imports.push(import.clone());
-                    }
-                    PortSource::ParentImport(import.clone())
-                }
-            };
-            bindings.push(ImportBinding {
-                to_child: child.child_op_local_id.clone(),
-                import: import.clone(),
-                source,
-            });
-        }
-
-        for export in &child.interface.exports {
-            let producer = ChildExportProducer {
-                child_op_local_id: child.child_op_local_id.clone(),
-                op_id: child.op_id.clone(),
-            };
-            if let Some(first) = export_producers.insert(export.0.clone(), producer) {
-                return Err(duplicate_child_export_error(export, &first, child));
-            }
-        }
-    }
-
-    let mut seen_parent_exports: HashSet<String> = HashSet::new();
-    let mut parent_exports = Vec::new();
-    let mut re_exports = Vec::new();
-    for child in &children {
-        for export in &child.interface.exports {
-            if seen_parent_exports.insert(export.0.clone()) {
-                parent_exports.push(export.clone());
-                re_exports.push(ReExportBinding {
-                    export: export.clone(),
-                    source: PortSource::ChildExport {
-                        child: child.child_op_local_id.clone(),
-                        export: export.clone(),
-                    },
-                });
-            }
-        }
-    }
-
-    let child_instances = children
+/// Returns all author-emitted config artifacts from an EVM DCV draft.
+pub fn dcv_draft_config_artifacts(
+    draft: &mfm_program::TypedProgramDraft,
+) -> mfm_program::Result<Vec<DcvConfigArtifact>> {
+    let media_type = spec::MediaType::new("application/json")
+        .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?;
+    Ok(draft
+        .state_nodes()
         .iter()
-        .map(|child| ChildOpInstance {
-            child_op_local_id: child.child_op_local_id.clone(),
-            op_id: child.op_id.clone(),
-            op_version: child.op_version.clone(),
-            op_config: child.op_config.clone(),
-            op_config_from_planner_payload: None,
-        })
-        .collect();
-    let order = children
-        .windows(2)
-        .map(|pair| AfterEdge {
-            from_child: pair[0].child_op_local_id.clone(),
-            to_child: pair[1].child_op_local_id.clone(),
-        })
-        .collect();
-
-    Ok((
-        OpInterface {
-            imports: parent_imports,
-            exports: parent_exports,
-        },
-        CompositeOpSpec {
-            children: child_instances,
-            bindings,
-            order,
-            re_exports,
-        },
-    ))
-}
-
-fn expand_from_canonical(
-    op_path: OpPath,
-    canonical: DeployConfigureValidateCanonicalConfig,
-    run_config: &RunConfig,
-) -> Result<PlannedOp, SdkError> {
-    let canonical_json = serde_json::to_value(&canonical).map_err(|err| {
-        sdk_input_error(
-            "invalid_evm_deploy_configure_validate_execution_config",
-            err.to_string(),
-        )
-    })?;
-
-    let execute_interface = build_deploy_configure_validate_outcome(canonical.clone())
-        .map_err(|err| {
-            sdk_input_error(
-                "invalid_evm_deploy_configure_validate_execution_config",
-                err.to_string(),
+        .map(|node| &node.config)
+        .chain(draft.operation_lineage().iter().map(|frame| &frame.config))
+        .map(|config| {
+            config_artifact(
+                config.canonical_json.clone(),
+                config.schema_id.clone(),
+                media_type.clone(),
             )
         })
-        .and_then(|outcome| {
-            expand_execution(
-                child_op_path(&op_path, EXECUTE_CHILD_ID)?,
-                &outcome.built,
-                run_config,
-            )
-            .map(|planned| planned.interface)
-        })?;
-
-    Ok(PlannedOp {
-        interface: execute_interface.clone(),
-        kind: PlannedOpKind::Composite(CompositeOpSpec {
-            children: vec![
-                mfm_sdk::op::ChildOpInstance {
-                    child_op_local_id: ChildOpLocalId(TRACKER_BUILD_CHILD_ID.to_string()),
-                    op_id: OpId::must_new(
-                        EVM_DEPLOY_CONFIGURE_VALIDATE_CONFIG_BUILD_OP_ID.to_string(),
-                    ),
-                    op_version: EVM_DEPLOY_CONFIGURE_VALIDATE_PUBLIC_OP_VERSION.to_string(),
-                    op_config: canonical_json,
-                    op_config_from_planner_payload: None,
-                },
-                mfm_sdk::op::ChildOpInstance {
-                    child_op_local_id: ChildOpLocalId(EXECUTE_CHILD_ID.to_string()),
-                    op_id: OpId::must_new(EVM_DEPLOY_CONFIGURE_VALIDATE_EXECUTE_OP_ID.to_string()),
-                    op_version: EVM_DEPLOY_CONFIGURE_VALIDATE_PUBLIC_OP_VERSION.to_string(),
-                    op_config: serde_json::json!({}),
-                    op_config_from_planner_payload: Some(PlannerPayloadConfigSource {
-                        child: ChildOpLocalId(TRACKER_BUILD_CHILD_ID.to_string()),
-                        pointer: "/built_config".to_string(),
-                    }),
-                },
-            ],
-            bindings: execute_interface
-                .imports
-                .iter()
-                .map(child_import_binding)
-                .collect(),
-            order: vec![mfm_sdk::op::AfterEdge {
-                from_child: ChildOpLocalId(TRACKER_BUILD_CHILD_ID.to_string()),
-                to_child: ChildOpLocalId(EXECUTE_CHILD_ID.to_string()),
-            }],
-            re_exports: execute_interface
-                .exports
-                .iter()
-                .map(re_export_binding)
-                .collect(),
-        }),
-    })
+        .collect())
 }
 
-fn expand_execution(
-    op_path: OpPath,
-    cfg: &DeployConfigureValidateBuiltConfig,
-    run_config: &RunConfig,
-) -> Result<PlannedOp, SdkError> {
-    let (interface, spec) = execution_composite(&op_path, &cfg.execution, run_config)?;
-    Ok(PlannedOp {
-        interface,
-        kind: PlannedOpKind::Composite(spec),
-    })
-}
-
-/// Thin planner op that accepts canonical config and composes the build/execute workflow.
-#[derive(Clone, Default)]
-pub struct EvmDeployConfigureValidateOp;
-
-/// Thin planner op that executes pre-built deploy/configure/validate config.
-#[derive(Clone, Default)]
-pub struct EvmDeployConfigureValidateExecuteOp;
-
-/// Returns the built-in public `evm_deploy_configure_validate` root op.
-pub fn evm_deploy_configure_validate_root_public_ops() -> Vec<DynOperation> {
-    vec![Arc::new(EvmDeployConfigureValidateOp) as DynOperation]
-}
-
-/// Returns the built-in public `evm_deploy_configure_validate_execute` root op.
-pub fn evm_deploy_configure_validate_execute_public_ops() -> Vec<DynOperation> {
-    vec![Arc::new(EvmDeployConfigureValidateExecuteOp) as DynOperation]
-}
-
-/// Returns all built-in public deploy/configure/validate root ops.
-pub fn evm_deploy_configure_validate_public_ops() -> Vec<DynOperation> {
-    let mut ops = evm_deploy_configure_validate_config_build_public_ops();
-    ops.extend(evm_deploy_configure_validate_root_public_ops());
-    ops.extend(evm_deploy_configure_validate_execute_public_ops());
-    ops
-}
-
-impl Operation for EvmDeployConfigureValidateOp {
-    fn op_id(&self) -> OpId {
-        OpId::must_new(EVM_DEPLOY_CONFIGURE_VALIDATE_OP_ID.to_string())
+/// Returns framework config artifacts introduced during certification.
+pub fn dcv_framework_config_artifacts(
+    typed_spec: &spec::TypedExecutionSpec,
+) -> mfm_program::Result<Vec<DcvConfigArtifact>> {
+    let mut artifacts = Vec::new();
+    for node in &typed_spec.nodes {
+        let Some(framework) = &node.framework else {
+            continue;
+        };
+        let framework_kind = match framework {
+            spec::FrameworkNodeSpec::Bridge(_) => "bridge_same_value",
+            spec::FrameworkNodeSpec::PublicOutputRender(_) => "public_output_render",
+        };
+        let payload = serde_json::json!({
+            "framework": framework_kind,
+            "node_id": node.node_id.as_str(),
+        });
+        let json = serde_json::to_string(&payload)
+            .map_err(|error| mfm_program::PlanError::Serialize(error.to_string()))?;
+        let bytes = mfm_canonical::PlainCanonicalJsonBytes::from_json_str(&json)
+            .map_err(|error| mfm_program::PlanError::Canonical(error.to_string()))?;
+        if bytes.content_digest() != node.config_ref.digest
+            || bytes.as_bytes().len() as u64 != node.config_ref.byte_len
+        {
+            return Err(mfm_program::PlanError::Canonical(format!(
+                "framework config helper did not match certified config ref for node {}",
+                node.node_id
+            )));
+        }
+        artifacts.push(config_artifact(
+            bytes,
+            node.config_ref.schema_id.clone(),
+            node.config_ref.media_type.clone(),
+        ));
     }
+    Ok(artifacts)
+}
 
-    fn op_version(&self) -> String {
-        EVM_DEPLOY_CONFIGURE_VALIDATE_PUBLIC_OP_VERSION.to_string()
-    }
-
-    fn expand(
-        &self,
-        op_path: OpPath,
-        op_config: &serde_json::Value,
-        run_config: &RunConfig,
-    ) -> Result<PlannedOp, SdkError> {
-        let canonical =
-            decode_deploy_configure_validate_canonical_config(op_config).map_err(|err| {
-                sdk_input_error(
-                    "invalid_evm_deploy_configure_validate_execution_config",
-                    err.to_string(),
-                )
+/// Returns only config artifacts required by the certified spec, with metadata matching
+/// `config_refs`.
+pub fn dcv_config_artifacts_for_spec(
+    draft: &mfm_program::TypedProgramDraft,
+    typed_spec: &spec::TypedExecutionSpec,
+) -> mfm_program::Result<Vec<DcvConfigArtifact>> {
+    let mut candidates = dcv_draft_config_artifacts(draft)?;
+    candidates.extend(dcv_framework_config_artifacts(typed_spec)?);
+    let mut selected = Vec::new();
+    let mut seen_artifact_ids = BTreeMap::new();
+    for config_ref in &typed_spec.config_refs {
+        if let Some(previous_schema) =
+            seen_artifact_ids.insert(config_ref.artifact_id.clone(), config_ref.schema_id.clone())
+        {
+            if previous_schema != config_ref.schema_id {
+                return Err(mfm_program::PlanError::Key(format!(
+                    "certified spec contains duplicate config artifact {} with schemas {} and {}",
+                    config_ref.artifact_id, previous_schema, config_ref.schema_id
+                )));
+            }
+            continue;
+        }
+        let artifact = candidates
+            .iter()
+            .find(|artifact| {
+                artifact.artifact_id == config_ref.artifact_id
+                    && artifact.digest == config_ref.digest
+                    && artifact.byte_len == config_ref.byte_len
+                    && artifact.media_type == config_ref.media_type
+                    && artifact.schema_id == config_ref.schema_id
+            })
+            .cloned()
+            .ok_or_else(|| {
+                mfm_program::PlanError::Key(format!(
+                    "missing typed config artifact for {}",
+                    config_ref.artifact_id
+                ))
             })?;
-        expand_from_canonical(op_path, canonical, run_config)
+        selected.push(artifact);
     }
+    Ok(selected)
 }
 
-impl Operation for EvmDeployConfigureValidateExecuteOp {
-    fn op_id(&self) -> OpId {
-        OpId::must_new(EVM_DEPLOY_CONFIGURE_VALIDATE_EXECUTE_OP_ID.to_string())
+fn normalize_phase_artifacts(
+    deploy: &mut DeployConfigureValidateDeployConfig,
+    configure: &mut DeployConfigureValidateConfigureConfig,
+    validate: &mut DeployConfigureValidateValidateConfig,
+) -> mfm_program::Result<()> {
+    let Some(artifact) = deploy.artifact.clone() else {
+        return Err(mfm_program::PlanError::Key(
+            "deploy config must include an inline typed contract artifact; dynamic artifact ports are not part of certified typed EVM DCV execution"
+                .to_owned(),
+        ));
+    };
+    if configure.artifact.is_none() {
+        configure.artifact = Some(artifact.clone());
     }
-
-    fn op_version(&self) -> String {
-        EVM_DEPLOY_CONFIGURE_VALIDATE_PUBLIC_OP_VERSION.to_string()
+    if validate.artifact.is_none() {
+        validate.artifact = Some(artifact);
     }
+    Ok(())
+}
 
-    fn expand(
-        &self,
-        op_path: OpPath,
-        op_config: &serde_json::Value,
-        run_config: &RunConfig,
-    ) -> Result<PlannedOp, SdkError> {
-        let cfg = parse_built_config(op_config)?;
-        expand_execution(op_path, &cfg, run_config)
+fn validate_phase_alignment(
+    deploy: &DeployConfigureValidateDeployConfig,
+    configure: &DeployConfigureValidateConfigureConfig,
+    validate: &DeployConfigureValidateValidateConfig,
+) -> mfm_program::Result<()> {
+    if deploy.network_id != configure.network_id || deploy.network_id != validate.network_id {
+        return Err(mfm_program::PlanError::Key(
+            "deploy/configure/validate network_id values must match".to_owned(),
+        ));
+    }
+    if deploy.control_scope != configure.control_scope
+        || deploy.control_scope != validate.control_scope
+    {
+        return Err(mfm_program::PlanError::Key(
+            "deploy/configure/validate control_scope values must match".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn config_artifact(
+    bytes: mfm_canonical::PlainCanonicalJsonBytes,
+    schema_id: SchemaId,
+    media_type: spec::MediaType,
+) -> DcvConfigArtifact {
+    let digest = bytes.content_digest();
+    let artifact_id = ArtifactId::from_digest(digest.algorithm(), *digest.digest());
+    let byte_len = bytes.as_bytes().len() as u64;
+    DcvConfigArtifact {
+        artifact_id,
+        digest,
+        byte_len,
+        bytes: bytes.to_vec(),
+        schema_id,
+        media_type,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    use mfm_evm_deploy_configure_validate_config::{
-        build_deploy_configure_validate_outcome, DeployConfigureValidateBuildReport,
-    };
-    use mfm_machine::engine::{ExecutionEngine, RunPhase, Stores};
-    use mfm_machine::ids::{ArtifactId, ContextKey};
-    use mfm_machine::runtime::DefaultExecutionEngine;
-    use mfm_sdk::unstable::{
-        context_value_with_slot_fallback, single_op_pipeline, SdkPlanResolver,
-    };
-    use mfm_state_common::test_support as op_test_support;
-
-    fn into_composite(planned: PlannedOp) -> CompositeOpSpec {
-        match planned.kind {
-            PlannedOpKind::Composite(spec) => spec,
-            PlannedOpKind::Leaf(_) => panic!("expected composite planned op"),
-        }
-    }
-
-    fn sample_config() -> serde_json::Value {
-        serde_json::json!({
-            "deploy": {
-                "network_id": "ethereum-mainnet",
-                "from": "0x000000000000000000000000000000000000dead",
-                "signing_key_env": "MFM_DEPLOYER_KEY"
-            },
-            "configure": {
-                "network_id": "ethereum-mainnet",
-                "from": "0x000000000000000000000000000000000000dead",
-                "signing_key_env": "MFM_DEPLOYER_KEY",
-                "calls": [
-                    {"function": "noop", "args": []}
-                ]
-            },
-            "validate": {
-                "network_id": "ethereum-mainnet",
-                "expected_chain_id": 1
-            }
-        })
-    }
-
-    fn built_config() -> DeployConfigureValidateBuiltConfig {
-        build_deploy_configure_validate_outcome(
-            decode_deploy_configure_validate_canonical_config(&sample_config()).expect("canonical"),
-        )
-        .expect("build outcome")
-        .built
-    }
-
-    async fn load_context_snapshot(stores: &Stores, snapshot_id: &ArtifactId) -> serde_json::Value {
-        let bytes = stores
-            .artifacts
-            .get(snapshot_id)
-            .await
-            .expect("snapshot bytes");
-        serde_json::from_slice(&bytes).expect("snapshot json")
-    }
-
-    fn read_required_context_value(
-        snapshot: &serde_json::Value,
-        key: &ContextKey,
-    ) -> serde_json::Value {
-        context_value_with_slot_fallback(snapshot, key)
-            .unwrap_or_else(|| panic!("missing context key `{}`", key.0))
-    }
+    use mfm_evm_dcv_model::{AbiJson, BytecodeJson, ContractArtifactConfig};
 
     #[test]
-    fn expand_composes_build_and_execute_children_for_canonical_input() {
-        let op = EvmDeployConfigureValidateOp;
-        let planned = op
-            .expand(
-                OpPath("evm_deploy_configure_validate.main".to_string()),
-                &sample_config(),
-                &op_test_support::run_config_live(),
-            )
-            .expect("expand canonical config");
-        assert!(planned
-            .interface
-            .imports
+    fn dcv_program_lowers_to_typed_lifecycle_states() {
+        let draft = dcv_program_draft(sample_config()).expect("draft");
+        let node_keys = draft
+            .state_nodes()
             .iter()
-            .any(|port| port.0 == "contract_artifact"));
-        let composite = into_composite(planned);
-
-        assert_eq!(composite.children.len(), 2);
-        assert!(composite
-            .children
-            .iter()
-            .any(|child| child.child_op_local_id.0 == TRACKER_BUILD_CHILD_ID
-                && child.op_id.as_str() == EVM_DEPLOY_CONFIGURE_VALIDATE_CONFIG_BUILD_OP_ID));
-        assert!(composite
-            .children
-            .iter()
-            .any(|child| child.child_op_local_id.0 == EXECUTE_CHILD_ID
-                && child.op_id.as_str() == EVM_DEPLOY_CONFIGURE_VALIDATE_EXECUTE_OP_ID));
-        assert!(composite.order.iter().any(|edge| {
-            edge.from_child.0 == TRACKER_BUILD_CHILD_ID && edge.to_child.0 == EXECUTE_CHILD_ID
-        }));
-        assert!(composite.bindings.iter().any(|binding| {
-            binding.to_child.0 == EXECUTE_CHILD_ID
-                && binding.import.0 == "contract_artifact"
-                && matches!(binding.source, PortSource::ParentImport(ref import) if import.0 == "contract_artifact")
-        }));
-        assert!(composite
-            .re_exports
-            .iter()
-            .any(|binding| binding.export.0 == CONTRACT_ADDRESS_EXPORT));
-        assert!(composite
-            .re_exports
-            .iter()
-            .any(|binding| binding.export.0 == VALIDATED_EXPORT));
-    }
-
-    #[test]
-    fn root_rejects_built_input() {
-        let op = EvmDeployConfigureValidateOp;
-        let err = op
-            .expand(
-                OpPath("evm_deploy_configure_validate.main".to_string()),
-                &serde_json::to_value(built_config()).expect("built json"),
-                &op_test_support::run_config_live(),
-            )
-            .err()
-            .expect("built config must not decode for public root");
-
-        assert_eq!(
-            err.info.code.as_str(),
-            "invalid_evm_deploy_configure_validate_execution_config"
-        );
-    }
-
-    #[test]
-    fn execute_root_uses_built_execute_graph() {
-        let op = EvmDeployConfigureValidateExecuteOp;
-        assert_eq!(
-            op.op_version(),
-            EVM_DEPLOY_CONFIGURE_VALIDATE_PUBLIC_OP_VERSION
-        );
-
-        let planned = op
-            .expand(
-                OpPath("evm_deploy_configure_validate_execute.main".to_string()),
-                &serde_json::to_value(built_config()).expect("built json"),
-                &op_test_support::run_config_live(),
-            )
-            .expect("expand built config");
-        let io = planned.interface.clone();
-        let graph = into_composite(planned);
-
-        assert_eq!(graph.children.len(), 3);
-        assert_eq!(graph.order.len(), 2);
-        assert!(graph
-            .bindings
-            .iter()
-            .any(|binding| binding.to_child.0 == DEPLOY_CHILD_ID
-                && binding.import.0 == "contract_artifact"
-                && matches!(binding.source, PortSource::ParentImport(ref import) if import.0 == "contract_artifact")));
-        assert!(graph
-            .bindings
-            .iter()
-            .any(|binding| binding.to_child.0 == CONFIGURE_CHILD_ID
-                && binding.import.0 == "contract_address"
-                && matches!(binding.source, PortSource::ChildExport { ref child, ref export } if child.0 == DEPLOY_CHILD_ID && export.0 == "contract_address")));
-        assert!(graph
-            .bindings
-            .iter()
-            .any(|binding| binding.to_child.0 == VALIDATE_CHILD_ID
-                && binding.import.0 == "contract_address"
-                && matches!(binding.source, PortSource::ChildExport { ref child, ref export } if child.0 == DEPLOY_CHILD_ID && export.0 == "contract_address")));
-        assert!(io.exports.iter().any(|p| p.0 == CONTRACT_ADDRESS_EXPORT));
-        assert!(io.exports.iter().any(|p| p.0 == DEPLOY_TX_HASH_EXPORT));
-        assert!(io.exports.iter().any(|p| p.0 == CONFIGURE_EXPORT));
-        assert!(io.exports.iter().any(|p| p.0 == VALIDATED_EXPORT));
-    }
-
-    #[test]
-    fn execute_root_rejects_duplicate_child_exports() {
-        let op = EvmDeployConfigureValidateExecuteOp;
-        let mut cfg = built_config();
-        cfg.execution.configure.tx_hashes_export_key = CONTRACT_ADDRESS_EXPORT.to_string();
-
-        let err = op
-            .expand(
-                OpPath("evm_deploy_configure_validate_execute.main".to_string()),
-                &serde_json::to_value(cfg).expect("built json"),
-                &op_test_support::run_config_live(),
-            )
-            .err()
-            .expect("duplicate child exports should fail");
-
-        assert_eq!(err.info.code.as_str(), "duplicate_child_export");
-        assert!(err.info.message.contains(CONTRACT_ADDRESS_EXPORT));
-        assert!(err.info.message.contains(DEPLOY_CHILD_ID));
-        assert!(err.info.message.contains(CONFIGURE_CHILD_ID));
-        assert!(err.info.message.contains("evm_deploy"));
-        assert!(err.info.message.contains("evm_configure"));
-    }
-
-    #[test]
-    fn execute_root_rejects_legacy_canonical_config() {
-        let op = EvmDeployConfigureValidateExecuteOp;
-        let err = op
-            .expand(
-                OpPath("evm_deploy_configure_validate_execute.main".to_string()),
-                &sample_config(),
-                &op_test_support::run_config_live(),
-            )
-            .err()
-            .expect("legacy canonical config should not decode for execute root");
-
-        assert_eq!(
-            err.info.code.as_str(),
-            "invalid_evm_deploy_configure_validate_execution_config"
-        );
-    }
-
-    #[tokio::test]
-    async fn config_build_emits_built_config_artifacts_and_report() {
-        let registry =
-            op_test_support::registry_with_ops(evm_deploy_configure_validate_public_ops());
-        let planner = op_test_support::default_pipeline_planner();
-        let pipeline = single_op_pipeline(
-            OpId::must_new(EVM_DEPLOY_CONFIGURE_VALIDATE_CONFIG_BUILD_OP_ID.to_string()),
-            EVM_DEPLOY_CONFIGURE_VALIDATE_PUBLIC_OP_VERSION.to_string(),
-            sample_config(),
-        )
-        .expect("pipeline");
-        let stores = op_test_support::in_memory_stores();
-        let resolver = Arc::new(SdkPlanResolver::new(
-            Arc::clone(&registry),
-            Arc::clone(&planner),
-        ));
-        let engine: Arc<dyn ExecutionEngine> = Arc::new(DefaultExecutionEngine::new(resolver));
-
-        let run = op_test_support::start_pipeline_with_defaults(
-            engine,
-            &stores,
-            registry,
-            planner,
-            pipeline,
-            op_test_support::run_config_live(),
-        )
-        .await
-        .expect("start");
-
-        assert_eq!(run.phase, RunPhase::Completed);
-        let final_snapshot_id = run.final_snapshot_id.expect("final snapshot");
-        let context_snapshot = load_context_snapshot(&stores, &final_snapshot_id).await;
-        let snapshot_object = context_snapshot
-            .as_object()
-            .expect("context snapshot object");
-        let exported_keys = [
-            evm_deploy_configure_validate_config_build_built_config_context_key(),
-            evm_deploy_configure_validate_config_build_canonical_artifact_id_context_key(),
-            evm_deploy_configure_validate_config_build_built_artifact_id_context_key(),
-            evm_deploy_configure_validate_config_build_report_context_key(),
-        ];
-        for key in &exported_keys {
-            assert!(
-                snapshot_object.contains_key(&key.0),
-                "declared export `{}` should be present under its exact context key",
-                key.0
-            );
-        }
-        let (op_path, _) = exported_keys[0]
-            .0
-            .rsplit_once(".out.")
-            .expect("export key shape");
-        let leaked_qualified_export_prefix = format!("{op_path}.work.{op_path}.out.");
+            .map(|node| node.key.as_str())
+            .collect::<Vec<_>>();
+        assert!(node_keys.contains(&"deploy_contract"));
+        assert!(node_keys.contains(&"configure_contract"));
+        assert!(node_keys.contains(&"validate_contract"));
+        assert_eq!(draft.state_nodes().len(), 3);
         assert!(
-            !snapshot_object
-                .keys()
-                .any(|key| key.starts_with(&leaked_qualified_export_prefix)),
-            "pre-qualified export keys must not be requalified as work slots"
+            draft.state_nodes().iter().all(|node| !node
+                .state_descriptor_name
+                .contains(&format!("{}{}", "Dyn", "Context"))),
+            "EVM DCV state descriptors must not expose dynamic context"
         );
 
-        let built_config: DeployConfigureValidateBuiltConfig =
-            serde_json::from_value(read_required_context_value(
-                &context_snapshot,
-                &evm_deploy_configure_validate_config_build_built_config_context_key(),
-            ))
-            .expect("built config");
-        let report: DeployConfigureValidateBuildReport =
-            serde_json::from_value(read_required_context_value(
-                &context_snapshot,
-                &evm_deploy_configure_validate_config_build_report_context_key(),
-            ))
-            .expect("report");
-        let canonical_artifact_id: String = serde_json::from_value(read_required_context_value(
-            &context_snapshot,
-            &evm_deploy_configure_validate_config_build_canonical_artifact_id_context_key(),
-        ))
-        .expect("canonical artifact id");
-        let built_artifact_id: String = serde_json::from_value(read_required_context_value(
-            &context_snapshot,
-            &evm_deploy_configure_validate_config_build_built_artifact_id_context_key(),
-        ))
-        .expect("built artifact id");
+        let certified = certify_program_draft(&draft).expect("certified EVM DCV spec");
+        certified.envelope.verify_hash().expect("hash verifies");
+        let deploy = certified
+            .envelope
+            .spec
+            .nodes
+            .iter()
+            .find(|node| node.stable_key.as_str() == "deploy_contract")
+            .expect("deploy node");
+        let configure = certified
+            .envelope
+            .spec
+            .nodes
+            .iter()
+            .find(|node| node.stable_key.as_str() == "configure_contract")
+            .expect("configure node");
+        let validate = certified
+            .envelope
+            .spec
+            .nodes
+            .iter()
+            .find(|node| node.stable_key.as_str() == "validate_contract")
+            .expect("validate node");
+        assert!(deploy.side_effect.is_some());
+        assert!(configure.side_effect.is_some());
+        assert!(validate.side_effect.is_none());
+        assert_eq!(deploy.adapter_bindings.len(), 1);
+        assert_eq!(configure.adapter_bindings.len(), 1);
+        assert_eq!(validate.adapter_bindings.len(), 1);
+    }
 
-        assert_eq!(report.canonical_config_artifact_id, canonical_artifact_id);
-        assert_eq!(report.built_config_artifact_id, built_artifact_id);
-        assert_eq!(report.machine_id, built_config.canonical.machine_id);
-        assert_eq!(
-            report.pipeline_version,
-            built_config.canonical.pipeline_version
-        );
-        assert_eq!(report.phase_count, 3);
+    #[test]
+    fn dcv_program_rejects_missing_inline_deploy_artifact() {
+        let mut config = sample_config();
+        config.deploy.artifact = None;
+        let error = dcv_program_draft(config).expect_err("missing artifact rejected");
+        assert!(error
+            .to_string()
+            .contains("dynamic artifact ports are not part of certified typed EVM DCV execution"));
+    }
 
-        let canonical_bytes = stores
-            .artifacts
-            .get(&ArtifactId::must_new(canonical_artifact_id.as_str()))
-            .await
-            .expect("canonical artifact");
-        let built_bytes = stores
-            .artifacts
-            .get(&ArtifactId::must_new(built_artifact_id.as_str()))
-            .await
-            .expect("built artifact");
-        let canonical_from_artifact: DeployConfigureValidateCanonicalConfig =
-            serde_json::from_slice(&canonical_bytes).expect("canonical json");
-        let built_from_artifact: DeployConfigureValidateBuiltConfig =
-            serde_json::from_slice(&built_bytes).expect("built json");
+    #[test]
+    fn config_artifacts_match_certified_spec_refs() {
+        let draft = dcv_program_draft(sample_config()).expect("draft");
+        let certified = certify_program_draft(&draft).expect("certified");
+        let artifacts = dcv_config_artifacts_for_spec(&draft, &certified.envelope.spec)
+            .expect("config artifacts");
+        assert_eq!(artifacts.len(), certified.envelope.spec.config_refs.len());
+    }
 
-        assert_eq!(canonical_from_artifact, built_config.canonical);
-        assert_eq!(built_from_artifact, built_config);
+    fn sample_config() -> DeployConfigureValidateCanonicalConfig {
+        let artifact = sample_artifact();
+        DeployConfigureValidateCanonicalConfig {
+            machine_id: "evm_deploy_configure_validate".to_owned(),
+            pipeline_version: "v1".to_owned(),
+            input: DeployConfigureValidateInput::from_json_value(&serde_json::json!({}))
+                .expect("input"),
+            deploy: DeployConfigureValidateDeployConfig {
+                artifact: Some(artifact.clone()),
+                network_id: "local".to_owned(),
+                control_scope: "shared".to_owned(),
+                from: "0x0000000000000000000000000000000000000000".to_owned(),
+                constructor_args: Vec::new(),
+                value_wei: None,
+                signing_key_env: Some("MFM_TEST_KEY".to_owned()),
+                poll_interval_ms: 1,
+                max_receipt_polls: 1,
+            },
+            configure: DeployConfigureValidateConfigureConfig {
+                artifact: None,
+                network_id: "local".to_owned(),
+                control_scope: "shared".to_owned(),
+                from: "0x0000000000000000000000000000000000000000".to_owned(),
+                signing_key_env: Some("MFM_TEST_KEY".to_owned()),
+                calls: vec![mfm_evm_dcv_model::ConfigureCallConfig {
+                    function: "configure".to_owned(),
+                    args: Vec::new(),
+                    value_wei: None,
+                }],
+                tx_hashes_export_key: "tx_hashes".to_owned(),
+                receipts_export_key: "receipts".to_owned(),
+                poll_interval_ms: 1,
+                max_receipt_polls: 1,
+            },
+            validate: DeployConfigureValidateValidateConfig {
+                artifact: None,
+                network_id: "local".to_owned(),
+                control_scope: "shared".to_owned(),
+                expected_chain_id: 1,
+                require_client_substring: "reth".to_owned(),
+                read_assertions: Vec::new(),
+                event_assertions: Vec::new(),
+            },
+        }
+    }
+
+    fn sample_artifact() -> ContractArtifactConfig {
+        ContractArtifactConfig {
+            abi: AbiJson::from_json_value(&serde_json::json!([
+                {"type": "constructor", "inputs": []},
+                {"type": "function", "name": "configure", "inputs": [], "outputs": []}
+            ]))
+            .expect("abi"),
+            bytecode: BytecodeJson::from_json_value(&serde_json::json!("0x6000"))
+                .expect("bytecode"),
+        }
     }
 }

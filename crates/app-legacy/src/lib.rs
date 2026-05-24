@@ -38,7 +38,6 @@ use mfm_artifact_store_secret::{is_secret_payload_envelope, SecretArtifactStore,
 use mfm_collectors_nix_exec::NixFlakeTransportFactory;
 use mfm_evm_deploy_configure_validate_config::{
     canonicalize_deploy_configure_validate_authored_config,
-    decode_deploy_configure_validate_canonical_config,
     parse_deploy_configure_validate_authored_config,
     parse_deploy_configure_validate_authored_config_with_hint,
     AuthoredConfigFormat as DeployConfigureValidateAuthoredConfigFormat,
@@ -60,14 +59,6 @@ use mfm_machine::live_io_registry::{HashMapTransportRegistry, TransportRegistry}
 use mfm_machine::live_io_router::RouterLiveIoTransportFactory;
 use mfm_machine::runtime::{ChildRunLiveIoTransportFactory, DefaultExecutionEngine, PlanResolver};
 use mfm_machine::stores::{ArtifactStore, StreamId, StreamRecord, StreamStore};
-use mfm_op_evm_deploy_configure_validate::{
-    evm_deploy_configure_validate_public_ops, EVM_DEPLOY_CONFIGURE_VALIDATE_OP_ID,
-    EVM_DEPLOY_CONFIGURE_VALIDATE_PUBLIC_OP_VERSION,
-};
-#[cfg(test)]
-use mfm_op_evm_deploy_configure_validate::{
-    EVM_DEPLOY_CONFIGURE_VALIDATE_CONFIG_BUILD_OP_ID, EVM_DEPLOY_CONFIGURE_VALIDATE_EXECUTE_OP_ID,
-};
 use mfm_op_evm_read::EvmReadOp;
 use mfm_op_evm_write::{
     EvmConfigureOp, EvmContractFromNixOp, EvmDeployContractSetOp, EvmDeployOp, EvmValidateOp,
@@ -504,9 +495,6 @@ impl OperationPlugin for DefaultOperationPlugin {
         registry.register(Arc::new(EvmDeployOp));
         registry.register(Arc::new(EvmConfigureOp));
         registry.register(Arc::new(EvmValidateOp));
-        for op in evm_deploy_configure_validate_public_ops() {
-            registry.register(op);
-        }
         registry.register(Arc::new(NixAppOp));
     }
 }
@@ -1131,28 +1119,6 @@ impl AppServices {
             tx_type: report.tx_type,
             payload_hash: report.payload_hash,
         })
-    }
-
-    /// Starts the standard deploy-configure-validate workflow through the public root op family.
-    pub async fn start_deploy_configure_validate(
-        &self,
-        spec: DeployConfigureValidateSpec,
-    ) -> Result<RunStartResponse, AppError> {
-        let input = spec.input.to_json_value().map_err(|err| {
-            AppError::invalid_request(format!(
-                "failed to decode deploy-configure-validate input: {err}"
-            ))
-        })?;
-        let op_config = serde_json::to_value(&spec).map_err(|_| {
-            AppError::invalid_request("failed to encode deploy-configure-validate request")
-        })?;
-        self.start_run(RunsStartRequest::SingleOp {
-            op_id: EVM_DEPLOY_CONFIGURE_VALIDATE_OP_ID.to_string(),
-            op_version: EVM_DEPLOY_CONFIGURE_VALIDATE_PUBLIC_OP_VERSION.to_string(),
-            op_config,
-            input,
-        })
-        .await
     }
 }
 
@@ -1788,7 +1754,6 @@ enum BuiltinFeature {
     RunStatus,
     RunStream,
     ArtifactGet,
-    PipelineDeployConfigureValidateStart,
 }
 
 impl FeatureCatalog {
@@ -1800,10 +1765,6 @@ impl FeatureCatalog {
         handlers.insert("run.status".to_string(), BuiltinFeature::RunStatus);
         handlers.insert("run.stream".to_string(), BuiltinFeature::RunStream);
         handlers.insert("artifact.get".to_string(), BuiltinFeature::ArtifactGet);
-        handlers.insert(
-            "pipeline.deploy_configure_validate.start".to_string(),
-            BuiltinFeature::PipelineDeployConfigureValidateStart,
-        );
         let descriptors = vec![
             FeatureDescriptor {
                 id: "run.start".to_string(),
@@ -1939,33 +1900,6 @@ impl FeatureCatalog {
                     "required": ["artifact_id", "encoding"]
                 }),
             },
-            FeatureDescriptor {
-                id: "pipeline.deploy_configure_validate.start".to_string(),
-                version: "v1".to_string(),
-                kind: FeatureKind::PipelineTemplate,
-                description: "Start the standard deploy->configure->validate workflow".to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "machine_id": {"type": "string"},
-                        "pipeline_version": {"type": "string"},
-                        "input": {"type": "object"},
-                        "deploy": {"type": "object"},
-                        "configure": {"type": "object"},
-                        "validate": {"type": "object"}
-                    },
-                    "required": ["deploy", "configure", "validate"]
-                }),
-                output_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "run_id": {"type": "string"},
-                        "phase": {"type": "string"},
-                        "final_snapshot_id": {"type": ["string", "null"]}
-                    },
-                    "required": ["run_id", "phase"]
-                }),
-            },
         ];
 
         Self {
@@ -2023,13 +1957,6 @@ impl FeatureCatalog {
                     get_artifact_from_store(Arc::clone(&services.artifacts), &parsed.artifact_id)
                         .await?,
                 )
-            }
-            BuiltinFeature::PipelineDeployConfigureValidateStart => {
-                let parsed = decode_deploy_configure_validate_canonical_config(&req.payload)
-                    .map_err(|err| {
-                        app_error_from_deploy_configure_validate_config_error(err, None)
-                    })?;
-                serde_json::to_value(services.start_deploy_configure_validate(parsed).await?)
             }
         }
         .map_err(|_| {
@@ -2613,105 +2540,21 @@ mod tests {
     }
 
     #[test]
-    fn deploy_configure_validate_public_root_ops_remain_registered() {
+    fn deploy_configure_validate_dynamic_roots_are_not_registered() {
         let bundle = make_engine_bundle();
-
-        bundle
-            .registry
-            .resolve(
-                &OpId::must_new(EVM_DEPLOY_CONFIGURE_VALIDATE_OP_ID.to_string()),
-                EVM_DEPLOY_CONFIGURE_VALIDATE_PUBLIC_OP_VERSION,
-            )
-            .expect("compatibility root op should remain registered");
-        bundle
-            .registry
-            .resolve(
-                &OpId::must_new(EVM_DEPLOY_CONFIGURE_VALIDATE_CONFIG_BUILD_OP_ID.to_string()),
-                EVM_DEPLOY_CONFIGURE_VALIDATE_PUBLIC_OP_VERSION,
-            )
-            .expect("config-build root op should remain registered");
-        bundle
-            .registry
-            .resolve(
-                &OpId::must_new(EVM_DEPLOY_CONFIGURE_VALIDATE_EXECUTE_OP_ID.to_string()),
-                EVM_DEPLOY_CONFIGURE_VALIDATE_PUBLIC_OP_VERSION,
-            )
-            .expect("execute root op should remain registered");
-    }
-
-    #[test]
-    fn deploy_configure_validate_root_op_remains_v1() {
-        let bundle = make_engine_bundle();
-
-        let op = bundle
-            .registry
-            .resolve(
-                &OpId::must_new(EVM_DEPLOY_CONFIGURE_VALIDATE_OP_ID.to_string()),
-                EVM_DEPLOY_CONFIGURE_VALIDATE_PUBLIC_OP_VERSION,
-            )
-            .expect("compatibility root op should remain v1");
-        assert_eq!(
-            op.op_version(),
-            EVM_DEPLOY_CONFIGURE_VALIDATE_PUBLIC_OP_VERSION
-        );
-
-        assert!(bundle
-            .registry
-            .resolve(
-                &OpId::must_new(EVM_DEPLOY_CONFIGURE_VALIDATE_OP_ID.to_string()),
-                "v2"
-            )
-            .is_err());
-    }
-
-    #[test]
-    fn deploy_configure_validate_execute_root_op_remains_v1() {
-        let bundle = make_engine_bundle();
-
-        let op = bundle
-            .registry
-            .resolve(
-                &OpId::must_new(EVM_DEPLOY_CONFIGURE_VALIDATE_EXECUTE_OP_ID.to_string()),
-                EVM_DEPLOY_CONFIGURE_VALIDATE_PUBLIC_OP_VERSION,
-            )
-            .expect("execute root op should remain v1");
-        assert_eq!(
-            op.op_version(),
-            EVM_DEPLOY_CONFIGURE_VALIDATE_PUBLIC_OP_VERSION
-        );
-
-        assert!(bundle
-            .registry
-            .resolve(
-                &OpId::must_new(EVM_DEPLOY_CONFIGURE_VALIDATE_EXECUTE_OP_ID.to_string()),
-                "v2"
-            )
-            .is_err());
-    }
-
-    #[test]
-    fn deploy_configure_validate_config_build_root_op_remains_v1() {
-        let bundle = make_engine_bundle();
-
-        let op = bundle
-            .registry
-            .resolve(
-                &OpId::must_new(EVM_DEPLOY_CONFIGURE_VALIDATE_CONFIG_BUILD_OP_ID.to_string()),
-                EVM_DEPLOY_CONFIGURE_VALIDATE_PUBLIC_OP_VERSION,
-            )
-            .expect("config-build root op should remain v1");
-        assert_eq!(
-            op.op_version(),
-            EVM_DEPLOY_CONFIGURE_VALIDATE_PUBLIC_OP_VERSION
-        );
-
-        assert!(bundle
-            .registry
-            .resolve(
-                &OpId::must_new(EVM_DEPLOY_CONFIGURE_VALIDATE_CONFIG_BUILD_OP_ID.to_string()),
-                "v2"
-            )
-            .is_err());
+        for op_id in [
+            "evm_deploy_configure_validate",
+            "evm_deploy_configure_validate_config_build",
+            "evm_deploy_configure_validate_execute",
+        ] {
+            assert!(
+                bundle
+                    .registry
+                    .resolve(&OpId::must_new(op_id.to_owned()), "v1")
+                    .is_err(),
+                "legacy registry must not expose dynamic EVM DCV op `{op_id}`"
+            );
+        }
     }
 
     fn deploy_configure_validate_json() -> serde_json::Value {

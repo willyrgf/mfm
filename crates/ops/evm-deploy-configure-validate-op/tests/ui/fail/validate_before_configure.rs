@@ -1,0 +1,27 @@
+use mfm_op_evm_deploy_configure_validate::{
+    DeployConfigureValidateDeployConfig, DeployConfigureValidateValidateConfig, DeployContractState,
+    ValidateContractState,
+};
+use mfm_program::{ScopeBuilder, StateKey};
+
+fn validate_before_configure<'program, 'scope>(
+    builder: &mut ScopeBuilder<'program, 'scope>,
+    deploy_config: DeployConfigureValidateDeployConfig,
+    validate_config: DeployConfigureValidateValidateConfig,
+) -> mfm_program::Result<()> {
+    let deployed = builder.state::<DeployContractState, _>(
+        StateKey::new("deploy_contract")?,
+        deploy_config,
+        (),
+    )?;
+
+    let _invalid = builder.state::<ValidateContractState, _>(
+        StateKey::new("validate_contract")?,
+        validate_config,
+        deployed,
+    )?;
+
+    Ok(())
+}
+
+fn main() {}

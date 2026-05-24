@@ -263,6 +263,15 @@ docs_policy = "docs-rs"
 umbrella_policy = "when-published"
 
 [[packages]]
+name = "mfm-state-evm-dcv"
+workspace_path = "crates/states/evm-dcv"
+visibility = "public"
+section = "states"
+summary = "Typed EVM deploy/configure/validate lifecycle state contracts."
+docs_policy = "docs-rs"
+umbrella_policy = "when-published"
+
+[[packages]]
 name = "mfm-state-keystore"
 workspace_path = "crates/states/keystore"
 visibility = "public"
@@ -502,6 +511,15 @@ workspace_path = "crates/transports/exec"
 visibility = "public"
 section = "transports"
 summary = "Live `exec` namespace transport for bounded local process execution."
+docs_policy = "repo-only"
+umbrella_policy = "always"
+
+[[packages]]
+name = "mfm-transports-evm-dcv"
+workspace_path = "crates/transports/evm-dcv"
+visibility = "public"
+section = "transports"
+summary = "Typed EVM deploy/configure/validate workflow runners."
 docs_policy = "repo-only"
 umbrella_policy = "always"
 

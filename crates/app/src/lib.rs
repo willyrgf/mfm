@@ -236,6 +236,9 @@ pub fn production_typed_runner_registry(
     let portfolio_artifacts: Arc<dyn mfm_transports_portfolio::PortfolioArtifactStore> =
         Arc::new(artifacts.clone());
     mfm_transports_portfolio::register_portfolio_runners(&mut registry, portfolio_artifacts)?;
+    let evm_dcv_artifacts: Arc<dyn mfm_transports_evm_dcv::EvmDcvArtifactStore> =
+        Arc::new(artifacts.clone());
+    mfm_transports_evm_dcv::register_evm_dcv_runners(&mut registry, evm_dcv_artifacts)?;
     let proof_artifacts: Arc<dyn mfm_transports_proof::ProofArtifactSink> =
         Arc::new(FsProofArtifactSink { artifacts });
     mfm_transports_proof::register_deterministic_proof_runners(&mut registry, proof_artifacts)?;
@@ -277,6 +280,8 @@ pub fn new_run_id() -> RunId {
 pub enum DriveMode {
     /// Append only the requested lifecycle event.
     AppendOnly,
+    /// Drive at most one scheduler step, preserving a restart boundary after each durable commit.
+    Once,
     /// Drive deterministic runnable nodes until the scheduler blocks or the run completes.
     UntilBlocked,
 }
@@ -662,11 +667,32 @@ where
     ) -> Result<SchedulerStatus, AppError> {
         match drive {
             DriveMode::AppendOnly => Ok(SchedulerStatus::Blocked),
+            DriveMode::Once => {
+                self.drive_once_with_retention(store, runtime_spec, run_id)
+                    .await
+            }
             DriveMode::UntilBlocked => {
                 self.drive_until_blocked_with_retention(store, runtime_spec, run_id)
                     .await
             }
         }
+    }
+
+    async fn drive_once_with_retention(
+        &self,
+        store: &mut S,
+        runtime_spec: &CertifiedRuntimeSpec,
+        run_id: &RunId,
+    ) -> Result<SchedulerStatus, AppError> {
+        let status = self
+            .scheduler
+            .drive_once(store, runtime_spec, run_id)
+            .await?;
+        if status == SchedulerStatus::Advanced {
+            self.project_retention_manifest_if_ready(store, runtime_spec, run_id)
+                .await?;
+        }
+        Ok(status)
     }
 
     async fn validate_launch_artifacts(
@@ -901,11 +927,28 @@ where
     ) -> Result<SchedulerStatus, AppError> {
         match drive {
             DriveMode::AppendOnly => Ok(SchedulerStatus::Blocked),
+            DriveMode::Once => self.drive_once_with_retention(runtime_spec, run_id).await,
             DriveMode::UntilBlocked => {
                 self.drive_until_blocked_with_retention(runtime_spec, run_id)
                     .await
             }
         }
+    }
+
+    async fn drive_once_with_retention(
+        &self,
+        runtime_spec: &CertifiedRuntimeSpec,
+        run_id: &RunId,
+    ) -> Result<SchedulerStatus, AppError> {
+        let status = self
+            .scheduler
+            .drive_once_async(&self.store, runtime_spec, run_id)
+            .await?;
+        if status == SchedulerStatus::Advanced {
+            self.project_retention_manifest_if_ready(runtime_spec, run_id)
+                .await?;
+        }
+        Ok(status)
     }
 
     async fn drive_until_blocked_with_retention(

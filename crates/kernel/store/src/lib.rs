@@ -833,10 +833,29 @@ pub mod v1 {
         pub event_id: EventId,
         /// Intent evidence that opened this ledger key.
         pub intent: SideEffectIntentProjection,
+        /// Prepared invocation artifact evidence, when one has been recorded.
+        pub prepared_invocation: Option<SideEffectArtifactProjection>,
+        /// Submission artifact evidence, when one has been recorded.
+        pub submission: Option<SideEffectArtifactProjection>,
+        /// Receipt artifact evidence, when one has been recorded.
+        pub receipt: Option<SideEffectArtifactProjection>,
+        /// Confirmation artifact evidence, when one has been recorded.
+        pub confirmation: Option<SideEffectArtifactProjection>,
         /// Active claim, when one exists.
         pub claim: Option<SideEffectClaimProjection>,
         /// Current projected phase.
         pub phase: SideEffectPhase,
+    }
+
+    /// Side-effect artifact evidence retained by the projection.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct SideEffectArtifactProjection {
+        /// Artifact id.
+        pub artifact_id: ArtifactId,
+        /// Canonical content digest.
+        pub content_digest: ContentDigest,
+        /// Schema id, when the artifact is a typed value.
+        pub schema_id: Option<SchemaId>,
     }
 
     /// Side-effect intent evidence projected from the authoritative run stream.
@@ -1485,7 +1504,8 @@ pub mod v1 {
         ///
         /// Most unique logical keys are immutable after their first write. The side-effect
         /// `submission_result` key is the one recoverable slot: `SubmissionUnknown` may be
-        /// superseded in projection by later recovery evidence for the same invocation epoch.
+        /// refreshed or superseded in projection by later recovery evidence for the same invocation
+        /// epoch.
         pub unique_logical_payloads: UniqueLogicalPayloads,
         /// Current projections derived from the authoritative run stream.
         pub projections: ProjectionSnapshot,
@@ -2525,7 +2545,9 @@ pub mod v1 {
             KernelEventPayload::SideEffectSubmissionObserved(payload) => {
                 Some((&payload.ledger_key, payload.invocation_epoch))
             }
-            KernelEventPayload::SideEffectSubmissionUnknown(_) => None,
+            KernelEventPayload::SideEffectSubmissionUnknown(payload) => {
+                Some((&payload.ledger_key, payload.invocation_epoch))
+            }
             _ => None,
         }
     }
@@ -2989,6 +3011,10 @@ pub mod v1 {
                         ledger_key: payload.ledger_key.clone(),
                         event_id: envelope.event_id.clone(),
                         intent,
+                        prepared_invocation: None,
+                        submission: None,
+                        receipt: None,
+                        confirmation: None,
                         claim: None,
                         phase: SideEffectPhase::IntentPersisted {
                             invocation_epoch: payload.invocation_epoch,
@@ -3065,6 +3091,10 @@ pub mod v1 {
                     _ => unreachable!("phase predicate checked above"),
                 }
                 let intent = previous.intent.clone();
+                let prepared_invocation = previous.prepared_invocation.clone();
+                let submission = previous.submission.clone();
+                let receipt = previous.receipt.clone();
+                let confirmation = previous.confirmation.clone();
                 let claim = SideEffectClaimProjection {
                     node_id: payload.node_id.clone(),
                     attempt_id: payload.attempt_id.clone(),
@@ -3079,6 +3109,10 @@ pub mod v1 {
                         ledger_key: payload.ledger_key.clone(),
                         event_id: envelope.event_id.clone(),
                         intent,
+                        prepared_invocation,
+                        submission,
+                        receipt,
+                        confirmation,
                         claim: Some(claim),
                         phase: SideEffectPhase::Claimed {
                             claim_owner: payload.claim_owner.clone(),
@@ -3111,6 +3145,10 @@ pub mod v1 {
                 let old_claim = previous_claim(previous, &payload.ledger_key)?;
                 require_claim_takeover_matches(&payload.ledger_key, old_claim, payload)?;
                 let intent = previous.intent.clone();
+                let prepared_invocation = previous.prepared_invocation.clone();
+                let submission = previous.submission.clone();
+                let receipt = previous.receipt.clone();
+                let confirmation = previous.confirmation.clone();
                 let claim = SideEffectClaimProjection {
                     node_id: payload.node_id.clone(),
                     attempt_id: payload.attempt_id.clone(),
@@ -3125,6 +3163,10 @@ pub mod v1 {
                         ledger_key: payload.ledger_key.clone(),
                         event_id: envelope.event_id.clone(),
                         intent,
+                        prepared_invocation,
+                        submission,
+                        receipt,
+                        confirmation,
                         claim: Some(claim),
                         phase: SideEffectPhase::Claimed {
                             claim_owner: payload.new_claim_owner.clone(),
@@ -3162,12 +3204,25 @@ pub mod v1 {
                     },
                 )?;
                 let intent = previous.intent.clone();
+                let prepared_invocation = prepared_invocation_projection(
+                    &payload.prepared_artifact_id,
+                    &payload.prepared_hash,
+                    &payload.ledger_key,
+                )?
+                .or_else(|| previous.prepared_invocation.clone());
+                let submission = previous.submission.clone();
+                let receipt = previous.receipt.clone();
+                let confirmation = previous.confirmation.clone();
                 projections.side_effects.insert(
                     payload.ledger_key.clone(),
                     SideEffectProjection {
                         ledger_key: payload.ledger_key.clone(),
                         event_id: envelope.event_id.clone(),
                         intent,
+                        prepared_invocation,
+                        submission,
+                        receipt,
+                        confirmation,
                         claim: Some(claim.clone()),
                         phase: SideEffectPhase::InvocationPrepared {
                             invocation_epoch: payload.invocation_epoch,
@@ -3206,12 +3261,20 @@ pub mod v1 {
                     },
                 )?;
                 let intent = previous.intent.clone();
+                let prepared_invocation = previous.prepared_invocation.clone();
+                let submission = previous.submission.clone();
+                let receipt = previous.receipt.clone();
+                let confirmation = previous.confirmation.clone();
                 projections.side_effects.insert(
                     payload.ledger_key.clone(),
                     SideEffectProjection {
                         ledger_key: payload.ledger_key.clone(),
                         event_id: envelope.event_id.clone(),
                         intent,
+                        prepared_invocation,
+                        submission,
+                        receipt,
+                        confirmation,
                         claim: Some(claim.clone()),
                         phase: SideEffectPhase::InvocationStarted {
                             claim_owner: payload.claim_owner.clone(),
@@ -3242,6 +3305,7 @@ pub mod v1 {
                     |epoch| SideEffectPhase::NotSubmittedProven {
                         invocation_epoch: epoch,
                     },
+                    |_| Ok(()),
                 )?;
             }
             KernelEventPayload::SideEffectSubmissionObserved(payload) => {
@@ -3264,6 +3328,14 @@ pub mod v1 {
                     |epoch| SideEffectPhase::SubmissionObserved {
                         invocation_epoch: epoch,
                     },
+                    |projection| {
+                        projection.submission = Some(SideEffectArtifactProjection {
+                            artifact_id: payload.submission_artifact_id.clone(),
+                            content_digest: payload.submission_hash.clone(),
+                            schema_id: Some(payload.submission_schema_id.clone()),
+                        });
+                        Ok(())
+                    },
                 )?;
             }
             KernelEventPayload::SideEffectSubmissionUnknown(payload) => {
@@ -3281,11 +3353,12 @@ pub mod v1 {
                         attempt_id: &payload.attempt_id,
                         event_id: envelope.event_id.clone(),
                         invocation_epoch: payload.invocation_epoch,
-                        required_previous: "started",
+                        required_previous: "submission_recovery",
                     },
                     |epoch| SideEffectPhase::SubmissionUnknown {
                         invocation_epoch: epoch,
                     },
+                    |_| Ok(()),
                 )?;
             }
             KernelEventPayload::SideEffectReceiptObserved(payload) => {
@@ -3307,6 +3380,14 @@ pub mod v1 {
                     },
                     |epoch| SideEffectPhase::ReceiptObserved {
                         invocation_epoch: epoch,
+                    },
+                    |projection| {
+                        projection.receipt = Some(SideEffectArtifactProjection {
+                            artifact_id: payload.receipt_artifact_id.clone(),
+                            content_digest: payload.receipt_hash.clone(),
+                            schema_id: Some(payload.receipt_schema_id.clone()),
+                        });
+                        Ok(())
                     },
                 )?;
             }
@@ -3330,6 +3411,14 @@ pub mod v1 {
                     |epoch| SideEffectPhase::ConfirmationObserved {
                         invocation_epoch: epoch,
                     },
+                    |projection| {
+                        projection.confirmation = Some(SideEffectArtifactProjection {
+                            artifact_id: payload.confirmation_artifact_id.clone(),
+                            content_digest: payload.confirmation_hash.clone(),
+                            schema_id: Some(payload.confirmation_schema_id.clone()),
+                        });
+                        Ok(())
+                    },
                 )?;
             }
             KernelEventPayload::SideEffectAmbiguous(payload) => {
@@ -3352,6 +3441,7 @@ pub mod v1 {
                     |epoch| SideEffectPhase::Ambiguous {
                         invocation_epoch: epoch,
                     },
+                    |_| Ok(()),
                 )?;
             }
             KernelEventPayload::SideEffectFailed(payload) => {
@@ -3790,6 +3880,25 @@ pub mod v1 {
         Ok(())
     }
 
+    fn prepared_invocation_projection(
+        artifact_id: &Option<ArtifactId>,
+        content_digest: &Option<ContentDigest>,
+        ledger_key: &events::SideEffectLedgerKey,
+    ) -> Result<Option<SideEffectArtifactProjection>> {
+        match (artifact_id, content_digest) {
+            (Some(artifact_id), Some(content_digest)) => Ok(Some(SideEffectArtifactProjection {
+                artifact_id: artifact_id.clone(),
+                content_digest: content_digest.clone(),
+                schema_id: None,
+            })),
+            (None, None) => Ok(None),
+            _ => Err(side_effect_projection_error(
+                ledger_key,
+                "prepared invocation artifact id and hash must be recorded together",
+            )),
+        }
+    }
+
     fn phase_matches_expected(phase: &SideEffectPhase, expected: &'static str) -> bool {
         match expected {
             "started" => matches!(phase, SideEffectPhase::InvocationStarted { .. }),
@@ -3825,8 +3934,9 @@ pub mod v1 {
         projections: &mut ProjectionSnapshot,
         transition: EpochOnlyTransition<'_>,
         next_phase: impl FnOnce(u32) -> SideEffectPhase,
+        update_projection: impl FnOnce(&mut SideEffectProjection) -> Result<()>,
     ) -> Result<()> {
-        let (intent, claim) = {
+        let (intent, prepared_invocation, submission, receipt, confirmation, claim) = {
             let previous = require_side_effect_phase(
                 projections,
                 transition.ledger_key,
@@ -3848,18 +3958,30 @@ pub mod v1 {
                     claim_owner: Some(&claim.claim_owner),
                 },
             )?;
-            (previous.intent.clone(), claim.clone())
+            (
+                previous.intent.clone(),
+                previous.prepared_invocation.clone(),
+                previous.submission.clone(),
+                previous.receipt.clone(),
+                previous.confirmation.clone(),
+                claim.clone(),
+            )
         };
-        projections.side_effects.insert(
-            transition.ledger_key.clone(),
-            SideEffectProjection {
-                ledger_key: transition.ledger_key.clone(),
-                event_id: transition.event_id,
-                intent,
-                claim: Some(claim),
-                phase: next_phase(transition.invocation_epoch),
-            },
-        );
+        let mut projection = SideEffectProjection {
+            ledger_key: transition.ledger_key.clone(),
+            event_id: transition.event_id,
+            intent,
+            prepared_invocation,
+            submission,
+            receipt,
+            confirmation,
+            claim: Some(claim),
+            phase: next_phase(transition.invocation_epoch),
+        };
+        update_projection(&mut projection)?;
+        projections
+            .side_effects
+            .insert(transition.ledger_key.clone(), projection);
         Ok(())
     }
 
@@ -3868,7 +3990,7 @@ pub mod v1 {
         payload: &side_effect::Failed,
         event_id: EventId,
     ) -> Result<()> {
-        let (intent, claim) = {
+        let (intent, prepared_invocation, submission, receipt, confirmation, claim) = {
             let Some(previous) = projections.side_effects.get(&payload.ledger_key) else {
                 return Err(side_effect_projection_error(
                     &payload.ledger_key,
@@ -3936,7 +4058,14 @@ pub mod v1 {
                     )?;
                 }
             }
-            (previous.intent.clone(), previous.claim.clone())
+            (
+                previous.intent.clone(),
+                previous.prepared_invocation.clone(),
+                previous.submission.clone(),
+                previous.receipt.clone(),
+                previous.confirmation.clone(),
+                previous.claim.clone(),
+            )
         };
         projections.side_effects.insert(
             payload.ledger_key.clone(),
@@ -3944,6 +4073,10 @@ pub mod v1 {
                 ledger_key: payload.ledger_key.clone(),
                 event_id,
                 intent,
+                prepared_invocation,
+                submission,
+                receipt,
+                confirmation,
                 claim,
                 phase: SideEffectPhase::Failed {
                     invocation_epoch: payload.invocation_epoch,

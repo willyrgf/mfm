@@ -26,7 +26,6 @@ mfm-transports-rpc-control = { path = "../transports/rpc-control" }
 mfm-op-keystore = { path = "../ops/keystore-op" }
 mfm-op-evm-read = { path = "../ops/evm-read-op" }
 mfm-op-evm-write = { path = "../ops/evm-write-op" }
-mfm-op-evm-deploy-configure-validate = { path = "../ops/evm-deploy-configure-validate-op" }
 mfm-op-nix-app = { path = "../ops/nix-app-op" }
 mfm-artifact-store-fs = { path = "../storages/artifact-store-fs" }
 mfm-artifact-store-secret = { path = "../storages/artifact-store-secret" }

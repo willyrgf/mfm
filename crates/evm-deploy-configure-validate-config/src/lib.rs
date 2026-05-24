@@ -108,10 +108,6 @@ where
     legacy_or_typed_json_text(value).map_err(de::Error::custom)
 }
 
-fn default_artifact_port() -> String {
-    "contract_artifact".to_string()
-}
-
 fn default_control_scope() -> String {
     "shared".to_string()
 }
@@ -194,10 +190,8 @@ impl<'de> Deserialize<'de> for DeployConfigureValidateInput {
     schema = "mfm.evm.dcv.config.deploy"
 )]
 pub struct DeployConfigureValidateDeployConfig {
-    /// Optional inline contract artifact; falls back to `artifact_port` when absent.
+    /// Inline contract artifact used by the certified typed workflow.
     pub artifact: Option<ContractArtifactConfig>,
-    /// Context key used to load the contract artifact when `artifact` is absent.
-    pub artifact_port: String,
     /// Stable network identifier targeted by the managed RPC calls.
     pub network_id: String,
     /// Stable control-plane scope used to isolate managed source state.
@@ -226,8 +220,6 @@ impl<'de> Deserialize<'de> for DeployConfigureValidateDeployConfig {
         struct RawDeployConfig {
             #[serde(default)]
             artifact: Option<ContractArtifactConfig>,
-            #[serde(default = "default_artifact_port")]
-            artifact_port: String,
             network_id: String,
             #[serde(default = "default_control_scope")]
             control_scope: String,
@@ -247,7 +239,6 @@ impl<'de> Deserialize<'de> for DeployConfigureValidateDeployConfig {
         let raw = RawDeployConfig::deserialize(deserializer)?;
         Ok(Self {
             artifact: raw.artifact,
-            artifact_port: raw.artifact_port,
             network_id: raw.network_id,
             control_scope: raw.control_scope,
             from: raw.from,
@@ -268,10 +259,8 @@ impl<'de> Deserialize<'de> for DeployConfigureValidateDeployConfig {
     schema = "mfm.evm.dcv.config.configure"
 )]
 pub struct DeployConfigureValidateConfigureConfig {
-    /// Optional inline contract artifact; falls back to `artifact_port` when absent.
+    /// Inline contract artifact used by the certified typed workflow.
     pub artifact: Option<ContractArtifactConfig>,
-    /// Context key used to load the contract artifact when `artifact` is absent.
-    pub artifact_port: String,
     /// Stable network identifier targeted by the managed RPC calls.
     pub network_id: String,
     /// Stable control-plane scope used to isolate managed source state.
@@ -302,8 +291,6 @@ impl<'de> Deserialize<'de> for DeployConfigureValidateConfigureConfig {
         struct RawConfigureConfig {
             #[serde(default)]
             artifact: Option<ContractArtifactConfig>,
-            #[serde(default = "default_artifact_port")]
-            artifact_port: String,
             network_id: String,
             #[serde(default = "default_control_scope")]
             control_scope: String,
@@ -325,7 +312,6 @@ impl<'de> Deserialize<'de> for DeployConfigureValidateConfigureConfig {
         let raw = RawConfigureConfig::deserialize(deserializer)?;
         Ok(Self {
             artifact: raw.artifact,
-            artifact_port: raw.artifact_port,
             network_id: raw.network_id,
             control_scope: raw.control_scope,
             from: raw.from,
@@ -347,10 +333,8 @@ impl<'de> Deserialize<'de> for DeployConfigureValidateConfigureConfig {
     schema = "mfm.evm.dcv.config.validate"
 )]
 pub struct DeployConfigureValidateValidateConfig {
-    /// Optional inline contract artifact; falls back to `artifact_port` when absent.
+    /// Inline contract artifact used by the certified typed workflow.
     pub artifact: Option<ContractArtifactConfig>,
-    /// Context key used to load the contract artifact when `artifact` is absent.
-    pub artifact_port: String,
     /// Stable network identifier targeted by the managed RPC calls.
     pub network_id: String,
     /// Stable control-plane scope used to isolate managed source state.
@@ -375,8 +359,6 @@ impl<'de> Deserialize<'de> for DeployConfigureValidateValidateConfig {
         struct RawValidateConfig {
             #[serde(default)]
             artifact: Option<ContractArtifactConfig>,
-            #[serde(default = "default_artifact_port")]
-            artifact_port: String,
             network_id: String,
             #[serde(default = "default_control_scope")]
             control_scope: String,
@@ -392,7 +374,6 @@ impl<'de> Deserialize<'de> for DeployConfigureValidateValidateConfig {
         let raw = RawValidateConfig::deserialize(deserializer)?;
         Ok(Self {
             artifact: raw.artifact,
-            artifact_port: raw.artifact_port,
             network_id: raw.network_id,
             control_scope: raw.control_scope,
             expected_chain_id: raw.expected_chain_id,

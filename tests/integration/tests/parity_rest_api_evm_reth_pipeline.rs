@@ -1,10 +1,13 @@
 #![cfg(feature = "parity-tests")]
 #![allow(clippy::disallowed_methods)]
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
 
+use mfm_app::{DriveMode, TypedRunResumeRequest};
+use mfm_artifact_store_fs::{FsTypedArtifactStore, TypedArtifactDescriptor};
+use mfm_events::v1 as typed_events;
 use mfm_integration_tests::artifact_stores;
 use mfm_integration_tests::parity_run_ids::write_parity_evm_run_id;
 use mfm_integration_tests::rpc_control;
@@ -19,10 +22,15 @@ use mfm_machine::events::{event_envelopes_from_stream_records, Event, KernelEven
 use mfm_machine::ids::{ContextKey, OpId, RunId};
 use mfm_machine::stores::{ArtifactStore, StreamId, StreamStore};
 use mfm_machine_test_support::init_test_observability;
+use mfm_op_evm_deploy_configure_validate::{
+    certified_dcv_spec, dcv_config_artifacts_for_spec, dcv_program_draft,
+    decode_deploy_configure_validate_canonical_config, DcvConfigArtifact,
+};
 use mfm_sdk::ids::{MachineId, StepId};
 use mfm_sdk::launcher::{LaunchPipeline, RunLauncher};
 use mfm_sdk::pipeline::{Pipeline, PipelineStep};
-use mfm_sdk::unstable::{context_value_with_slot_fallback, DefaultRunLauncher};
+use mfm_sdk::unstable::DefaultRunLauncher;
+use mfm_store::v1::TypedRunEventStore;
 use mfm_stream_store_postgres::PostgresStreamStore;
 use mfm_transports_rpc_control::RpcControlBootstrapSource;
 
@@ -30,8 +38,6 @@ const NETWORK_ID: &str = "ethereum-mainnet";
 const CONTROL_SCOPE: &str = "parity.evm_reth_pipeline";
 const PARITY_RUN_MAX_ATTEMPTS: u32 = 3;
 const PARITY_RUN_RETRY_DELAY_MS: u64 = 250;
-const EVM_DEPLOY_CONFIGURE_VALIDATE_OP_ID: &str = "evm_deploy_configure_validate";
-const EVM_DEPLOY_CONFIGURE_VALIDATE_PUBLIC_OP_VERSION: &str = "v1";
 
 #[derive(Default)]
 struct MapContext {
@@ -130,20 +136,59 @@ fn contract_artifact_program_path() -> String {
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
-fn deploy_configure_validate_canonical_config(
+fn contract_artifact_json() -> serde_json::Value {
+    let out = std::process::Command::new(contract_artifact_program_path())
+        .output()
+        .expect("run mfm-contract-artifact-configurable-counter");
+    assert!(
+        out.status.success(),
+        "mfm-contract-artifact-configurable-counter must emit an artifact"
+    );
+    let value: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("decode contract artifact JSON");
+    value
+        .get("artifact")
+        .cloned()
+        .expect("contract artifact output must include /artifact")
+}
+
+async fn persist_dcv_config_artifacts(
+    artifacts: &FsTypedArtifactStore,
+    configs: Vec<DcvConfigArtifact>,
+) {
+    for config in configs {
+        artifacts
+            .put_artifact(
+                config.bytes,
+                TypedArtifactDescriptor {
+                    media_type: config.media_type,
+                    schema_id: Some(config.schema_id),
+                    semantic_type_id: None,
+                    producer_node_id: None,
+                    producer_seed_id: None,
+                    artifact_role: typed_events::ArtifactRole::TypedConfig,
+                },
+            )
+            .await
+            .expect("persist typed EVM DCV config artifact");
+    }
+}
+
+fn typed_deploy_configure_validate_config(
+    artifact: serde_json::Value,
     from: &str,
     control_scope: &str,
     signing_key_env: &str,
     expected_chain_id: u64,
 ) -> serde_json::Value {
     serde_json::json!({
-        "machine_id": "evm_reth_root_dcv",
+        "machine_id": "evm_reth_typed_dcv",
         "pipeline_version": "v1",
         "input": {
-            "scenario": "parity_reth_root_dcv"
+            "scenario": "parity_reth_typed_dcv"
         },
         "deploy": {
-            "artifact_port": "contract_artifact",
+            "artifact": artifact,
             "network_id": NETWORK_ID,
             "control_scope": control_scope,
             "from": from,
@@ -153,7 +198,6 @@ fn deploy_configure_validate_canonical_config(
             "max_receipt_polls": 120,
         },
         "configure": {
-            "artifact_port": "contract_artifact",
             "network_id": NETWORK_ID,
             "control_scope": control_scope,
             "from": from,
@@ -165,7 +209,6 @@ fn deploy_configure_validate_canonical_config(
             "max_receipt_polls": 120,
         },
         "validate": {
-            "artifact_port": "contract_artifact",
             "network_id": NETWORK_ID,
             "control_scope": control_scope,
             "expected_chain_id": expected_chain_id,
@@ -507,18 +550,16 @@ async fn parity_reth_deploy_configure_validate_root_op() {
 
     let pg = connect_postgres_with_retry(20, 250).await;
     let streams: Arc<dyn StreamStore> = Arc::new(pg);
-
-    let artifacts = artifact_stores::protected_s3_from_env().await;
-
+    let legacy_artifacts = artifact_stores::protected_s3_from_env().await;
     let rpc_sources = rpc_control::required_bootstrap_sources_from_env_for_network(NETWORK_ID);
-    let control_scope = format!("{CONTROL_SCOPE}.root.{}", uuid::Uuid::new_v4().simple());
+    let control_scope = format!("{CONTROL_SCOPE}.typed.{}", uuid::Uuid::new_v4().simple());
     let bootstrap_control_scope = format!("{control_scope}.bootstrap");
 
     let accounts = rpc_call(
         &rpc_sources,
         &bootstrap_control_scope,
         Arc::clone(&streams),
-        Arc::clone(&artifacts),
+        Arc::clone(&legacy_artifacts),
         "eth_accounts",
         serde_json::json!([]),
     )
@@ -536,7 +577,7 @@ async fn parity_reth_deploy_configure_validate_root_op() {
         &rpc_sources,
         &bootstrap_control_scope,
         Arc::clone(&streams),
-        Arc::clone(&artifacts),
+        Arc::clone(&legacy_artifacts),
         "eth_chainId",
         serde_json::json!([]),
     )
@@ -546,144 +587,266 @@ async fn parity_reth_deploy_configure_validate_root_op() {
         .map(parse_u64_hex)
         .expect("eth_chainId hex");
 
-    let contract_program_path = contract_artifact_program_path();
-    let pipeline = Pipeline {
-        machine_id: MachineId("evm_reth_root_dcv_pipeline".to_string()),
-        pipeline_version: "v1".to_string(),
-        steps: vec![
-            PipelineStep {
-                step_id: StepId("fetch".to_string()),
-                op_id: OpId::must_new("nix_app".to_string()),
-                op_version: "v1".to_string(),
-                op_config: serde_json::json!({
-                    "program_path": contract_program_path,
-                    "stdin_json": {},
-                    "timeout_ms": 300000,
-                    "write_result_to": "result",
-                }),
-            },
-            PipelineStep {
-                step_id: StepId("adapt".to_string()),
-                op_id: OpId::must_new("evm_contract_from_nix".to_string()),
-                op_version: "v1".to_string(),
-                op_config: serde_json::json!({
-                    "result_pointer": "/artifact"
-                }),
-            },
-            PipelineStep {
-                step_id: StepId("dcv".to_string()),
-                op_id: OpId::must_new(EVM_DEPLOY_CONFIGURE_VALIDATE_OP_ID.to_string()),
-                op_version: EVM_DEPLOY_CONFIGURE_VALIDATE_PUBLIC_OP_VERSION.to_string(),
-                op_config: deploy_configure_validate_canonical_config(
-                    &from,
-                    &control_scope,
-                    signing_key_env,
-                    expected_chain_id,
-                ),
-            },
-        ],
-    };
+    let canonical =
+        decode_deploy_configure_validate_canonical_config(&typed_deploy_configure_validate_config(
+            contract_artifact_json(),
+            &from,
+            &control_scope,
+            signing_key_env,
+            expected_chain_id,
+        ))
+        .expect("typed EVM DCV canonical config");
+    let draft = dcv_program_draft(canonical.clone()).expect("typed EVM DCV draft");
+    let certified = certified_dcv_spec(canonical).expect("typed EVM DCV certified spec");
+    let public_schema_id = certified
+        .envelope
+        .spec
+        .public_outputs
+        .public_schema_id
+        .clone();
 
-    let run_config = run_config_with_allowlist(mfm_machine::config::default_nix_flake_allowlist());
+    let tmp = tempfile::tempdir().expect("typed EVM DCV artifact tempdir");
+    let typed_artifacts = FsTypedArtifactStore::new(tmp.path());
+    let runners =
+        mfm_app::production_typed_runner_registry(typed_artifacts.clone()).expect("typed runners");
+    let services = mfm_app::make_in_memory_typed_services(runners, tmp.path());
 
-    let bundle = mfm_app_legacy::make_engine_bundle();
-    let launcher = DefaultRunLauncher;
-    let run = launcher
-        .start_pipeline(
-            Arc::clone(&bundle.engine),
-            Stores {
-                streams: Arc::clone(&streams),
-                artifacts: Arc::clone(&artifacts),
-            },
-            Arc::clone(&bundle.registry),
-            Arc::clone(&bundle.planner),
-            LaunchPipeline {
-                pipeline,
-                input: serde_json::json!({}),
-                run_config,
-                build: BuildProvenance {
-                    git_commit: None,
-                    cargo_lock_hash: None,
-                    flake_lock_hash: None,
-                    rustc_version: None,
-                    target_triple: None,
-                    env_allowlist: Vec::new(),
-                },
-                initial_context: Box::new(MapContext::default()),
-            },
-        )
+    persist_dcv_config_artifacts(
+        services.artifacts(),
+        dcv_config_artifacts_for_spec(&draft, &certified.envelope.spec)
+            .expect("typed EVM DCV config artifacts"),
+    )
+    .await;
+
+    let spec_bytes = certified
+        .envelope
+        .spec
+        .canonical_json()
+        .expect("canonical typed spec")
+        .to_vec();
+    let run_id = mfm_app::new_run_id();
+    let request = mfm_app::build_typed_run_start_request(
+        services.artifacts(),
+        &spec_bytes,
+        run_id.clone(),
+        "mfm.integration.evm_dcv.typed.v1",
+        "integration-test",
+        Vec::new(),
+        DriveMode::AppendOnly,
+    )
+    .await
+    .expect("typed EVM DCV append-only start request");
+    let mut response = services
+        .start_certified_run(request)
         .await
-        .expect("start root-op pipeline");
+        .expect("start typed EVM DCV run");
+    assert_eq!(response.phase, mfm_app::TypedRunPhase::Started);
+    assert_eq!(response.scheduler_status, "blocked");
 
-    if run.phase != RunPhase::Completed {
-        let diagnostics = run_failure_diagnostics(Arc::clone(&streams), run.run_id).await;
-        panic!(
-            "root-op deploy-configure-validate expected Completed, got {:?}; {}",
-            run.phase, diagnostics
+    const MAX_TYPED_DCV_RESUMES: usize = 96;
+    let mut observed_payloads = BTreeSet::new();
+    let mut step_payloads = Vec::<BTreeSet<String>>::new();
+    let mut previous_head = response.head_seq;
+    let mut single_step_resumes = 0usize;
+    for _ in 0..MAX_TYPED_DCV_RESUMES {
+        if response.phase == mfm_app::TypedRunPhase::Completed {
+            break;
+        }
+        response = services
+            .resume_certified_run(TypedRunResumeRequest {
+                envelope: certified.envelope.clone(),
+                run_id: run_id.clone(),
+                drive: DriveMode::Once,
+            })
+            .await
+            .expect("resume typed EVM DCV run");
+        single_step_resumes += 1;
+        assert!(
+            response.head_seq > previous_head,
+            "single-step typed EVM DCV resume made no durable progress before completion"
+        );
+        let store = services.store();
+        let stream = {
+            let store = store.lock().await;
+            store.load_run_stream(&run_id)
+        };
+        step_payloads.push(BTreeSet::new());
+        for event in stream
+            .iter()
+            .filter(|event| event.seq().as_u64() > previous_head)
+        {
+            let payload_name = typed_payload_name(event.payload()).to_owned();
+            observed_payloads.insert(payload_name.clone());
+            step_payloads
+                .last_mut()
+                .expect("step payload set exists")
+                .insert(payload_name);
+        }
+        previous_head = response.head_seq;
+    }
+    assert_eq!(
+        response.phase,
+        mfm_app::TypedRunPhase::Completed,
+        "typed DCV run did not complete within {MAX_TYPED_DCV_RESUMES} single-step resumes after append-only start"
+    );
+    assert!(
+        single_step_resumes >= 8,
+        "typed DCV run completed without exercising enough restart boundaries: {single_step_resumes}"
+    );
+    for expected_payload in [
+        "StateAttemptStarted",
+        "SideEffectIntentPersisted",
+        "SideEffectClaimed",
+        "SideEffectInvocationPrepared",
+        "SideEffectInvocationStarted",
+        "SideEffectSubmissionObserved",
+        "SideEffectReceiptObserved",
+        "SideEffectConfirmationObserved",
+        "CellProduced",
+        "PublicOutputProduced",
+        "RetentionManifestProjected",
+        "StateAttemptCompleted",
+        "RunCompleted",
+    ] {
+        assert!(
+            observed_payloads.contains(expected_payload),
+            "typed DCV single-step replay missed payload {expected_payload}; observed={observed_payloads:?}"
         );
     }
-    let final_snapshot_id = run.final_snapshot_id.expect("final snapshot");
-
-    let snapshot_bytes = artifacts
-        .get(&final_snapshot_id)
-        .await
-        .expect("read final snapshot");
-    let snapshot: serde_json::Value =
-        serde_json::from_slice(&snapshot_bytes).expect("decode snapshot json");
-
-    let build_report = context_value_with_slot_fallback(
-        &snapshot,
-        &ContextKey("evm_reth_root_dcv_pipeline.dcv.b.out.report".to_string()),
-    )
-    .expect("build report");
-    assert_eq!(build_report["machine_id"], "evm_reth_root_dcv");
-    assert_eq!(build_report["phase_count"], 3);
-
-    let contract_address = required_snapshot_value(
-        &snapshot,
-        "evm_reth_root_dcv_pipeline.dcv.e.deploy.contract_address",
-    )
-    .as_str()
-    .expect("contract address");
-    assert!(contract_address.starts_with("0x"));
-
-    let deploy_tx_hash = required_snapshot_value(
-        &snapshot,
-        "evm_reth_root_dcv_pipeline.dcv.e.deploy.deploy_tx_hash",
-    )
-    .as_str()
-    .expect("deploy tx hash");
-    assert!(deploy_tx_hash.starts_with("0x"));
-
-    let configure_receipts = required_snapshot_value(
-        &snapshot,
-        "evm_reth_root_dcv_pipeline.dcv.e.configure.configure_receipts",
-    )
-    .as_array()
-    .expect("configure receipts");
-    assert!(!configure_receipts.is_empty());
-
-    assert_eq!(
-        required_snapshot_value(
-            &snapshot,
-            "evm_reth_root_dcv_pipeline.dcv.e.validate.validated"
-        ),
-        &serde_json::json!(true)
+    assert_restart_boundary(
+        &step_payloads,
+        "SideEffectIntentPersisted",
+        &["SideEffectClaimed", "SideEffectInvocationPrepared"],
+    );
+    assert_restart_boundary(
+        &step_payloads,
+        "SideEffectClaimed",
+        &[
+            "SideEffectInvocationPrepared",
+            "SideEffectInvocationStarted",
+        ],
+    );
+    assert_restart_boundary(
+        &step_payloads,
+        "SideEffectInvocationPrepared",
+        &[
+            "SideEffectInvocationStarted",
+            "SideEffectSubmissionObserved",
+        ],
+    );
+    assert_restart_boundary(
+        &step_payloads,
+        "SideEffectInvocationStarted",
+        &["SideEffectSubmissionObserved"],
     );
 
-    let chain_id = required_snapshot_value(
-        &snapshot,
-        "evm_reth_root_dcv_pipeline.dcv.e.validate.chain_id",
-    )
-    .as_u64()
-    .expect("validate chain id");
-    assert_eq!(chain_id, expected_chain_id);
+    let public_output = services
+        .typed_public_output(&run_id, &public_schema_id)
+        .await
+        .expect("typed EVM DCV public output");
+    let json = public_output.json.expect("rendered typed public output");
+    let report = json
+        .get("validation_report")
+        .expect("validation_report public output");
 
-    let client_version = required_snapshot_value(
-        &snapshot,
-        "evm_reth_root_dcv_pipeline.dcv.e.validate.client_version",
-    )
-    .as_str()
-    .expect("validate client version");
+    assert_eq!(report["valid"], serde_json::json!(true));
+    assert_eq!(
+        report["event_results"][0]["observed_count"],
+        serde_json::json!(2),
+        "typed DCV replay boundary fixture should not apply duplicate configure mutations"
+    );
+    assert_eq!(
+        report["observed_chain_id"],
+        serde_json::json!(expected_chain_id)
+    );
+    let contract_address = report["configured_contract"]["contract_address"]
+        .as_str()
+        .expect("configured contract address");
+    assert!(contract_address.starts_with("0x"));
+    let client_version = report["client_version"]
+        .as_str()
+        .expect("validate client version");
     assert!(client_version.to_ascii_lowercase().contains("reth"));
+
+    let stream = {
+        let store = services.store();
+        let store = store.lock().await;
+        store.load_run_stream(&run_id)
+    };
+    let authority = mfm_app::replay_authority_for_run(
+        services.artifacts(),
+        &certified.envelope,
+        &run_id,
+        &stream,
+    )
+    .await
+    .expect("typed EVM DCV replay authority");
+    services
+        .replay_broker(certified.envelope.clone(), &run_id, authority)
+        .await
+        .expect("typed EVM DCV evidence-only replay broker");
+}
+
+fn typed_payload_name(payload: &typed_events::KernelEventPayload) -> &'static str {
+    match payload {
+        typed_events::KernelEventPayload::RunStarted(_) => "RunStarted",
+        typed_events::KernelEventPayload::StateAttemptStarted(_) => "StateAttemptStarted",
+        typed_events::KernelEventPayload::FactRecorded(_) => "FactRecorded",
+        typed_events::KernelEventPayload::ArtifactReferenced(_) => "ArtifactReferenced",
+        typed_events::KernelEventPayload::CellProduced(_) => "CellProduced",
+        typed_events::KernelEventPayload::CellSkipped(_) => "CellSkipped",
+        typed_events::KernelEventPayload::SideEffectIntentPersisted(_) => {
+            "SideEffectIntentPersisted"
+        }
+        typed_events::KernelEventPayload::SideEffectClaimed(_) => "SideEffectClaimed",
+        typed_events::KernelEventPayload::SideEffectClaimTakenOver(_) => "SideEffectClaimTakenOver",
+        typed_events::KernelEventPayload::SideEffectInvocationPrepared(_) => {
+            "SideEffectInvocationPrepared"
+        }
+        typed_events::KernelEventPayload::SideEffectInvocationStarted(_) => {
+            "SideEffectInvocationStarted"
+        }
+        typed_events::KernelEventPayload::SideEffectNotSubmittedProven(_) => {
+            "SideEffectNotSubmittedProven"
+        }
+        typed_events::KernelEventPayload::SideEffectSubmissionObserved(_) => {
+            "SideEffectSubmissionObserved"
+        }
+        typed_events::KernelEventPayload::SideEffectSubmissionUnknown(_) => {
+            "SideEffectSubmissionUnknown"
+        }
+        typed_events::KernelEventPayload::SideEffectReceiptObserved(_) => {
+            "SideEffectReceiptObserved"
+        }
+        typed_events::KernelEventPayload::SideEffectConfirmationObserved(_) => {
+            "SideEffectConfirmationObserved"
+        }
+        typed_events::KernelEventPayload::SideEffectAmbiguous(_) => "SideEffectAmbiguous",
+        typed_events::KernelEventPayload::SideEffectFailed(_) => "SideEffectFailed",
+        typed_events::KernelEventPayload::PublicOutputProduced(_) => "PublicOutputProduced",
+        typed_events::KernelEventPayload::PublicOutputRenderFailed(_) => "PublicOutputRenderFailed",
+        typed_events::KernelEventPayload::StateAttemptCompleted(_) => "StateAttemptCompleted",
+        typed_events::KernelEventPayload::StateAttemptFailed(_) => "StateAttemptFailed",
+        typed_events::KernelEventPayload::RunCompleted(_) => "RunCompleted",
+        typed_events::KernelEventPayload::RetentionRefsAppended(_) => "RetentionRefsAppended",
+        typed_events::KernelEventPayload::RetentionManifestProjected(_) => {
+            "RetentionManifestProjected"
+        }
+    }
+}
+
+fn assert_restart_boundary(
+    steps: &[BTreeSet<String>],
+    boundary_payload: &str,
+    forbidden_same_step: &[&str],
+) {
+    let Some(step) = steps.iter().find(|step| step.contains(boundary_payload)) else {
+        panic!("typed DCV single-step replay never observed {boundary_payload}");
+    };
+    for forbidden in forbidden_same_step {
+        assert!(
+            !step.contains(*forbidden),
+            "typed DCV did not preserve restart boundary after {boundary_payload}; step={step:?}"
+        );
+    }
 }

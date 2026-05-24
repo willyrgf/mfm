@@ -1924,6 +1924,7 @@ dependencies = [
  "mfm-runtime",
  "mfm-spec",
  "mfm-store",
+ "mfm-transports-evm-dcv",
  "mfm-transports-portfolio",
  "mfm-transports-proof",
  "serde",
@@ -1946,7 +1947,6 @@ dependencies = [
  "mfm-collectors-nix-exec",
  "mfm-evm-deploy-configure-validate-config",
  "mfm-machine",
- "mfm-op-evm-deploy-configure-validate",
  "mfm-op-evm-read",
  "mfm-op-evm-write",
  "mfm-op-keystore",
@@ -2283,10 +2283,12 @@ dependencies = [
  "mfm-events",
  "mfm-machine",
  "mfm-machine-test-support",
+ "mfm-op-evm-deploy-configure-validate",
  "mfm-op-portfolio-tracker",
  "mfm-portfolio-config",
  "mfm-rest-api",
  "mfm-sdk",
+ "mfm-store",
  "mfm-stream-store-mem",
  "mfm-stream-store-postgres",
  "mfm-transports-rpc-control",
@@ -2349,14 +2351,18 @@ dependencies = [
 name = "mfm-op-evm-deploy-configure-validate"
 version = "0.1.0"
 dependencies = [
+ "mfm-canonical",
+ "mfm-certify",
+ "mfm-evm-dcv-model",
  "mfm-evm-deploy-configure-validate-config",
- "mfm-machine",
- "mfm-op-evm-write",
- "mfm-sdk",
- "mfm-state-common",
+ "mfm-ids",
+ "mfm-program",
+ "mfm-spec",
+ "mfm-state-evm-dcv",
  "serde",
  "serde_json",
  "tokio",
+ "trybuild",
 ]
 
 [[package]]
@@ -2650,6 +2656,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "mfm-state-evm-dcv"
+version = "0.1.0"
+dependencies = [
+ "mfm-canonical",
+ "mfm-capabilities",
+ "mfm-effects",
+ "mfm-evm-dcv-model",
+ "mfm-evm-deploy-configure-validate-config",
+ "mfm-ids",
+ "mfm-program",
+ "mfm-program-derive",
+ "mfm-values",
+ "serde",
+ "serde_json",
+ "tokio",
+ "trybuild",
+]
+
+[[package]]
 name = "mfm-state-keystore"
 version = "0.1.0"
 dependencies = [
@@ -2722,6 +2747,32 @@ dependencies = [
  "tokio",
  "tokio-postgres",
  "tracing",
+]
+
+[[package]]
+name = "mfm-transports-evm-dcv"
+version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "mfm-artifact-store-fs",
+ "mfm-canonical",
+ "mfm-capabilities",
+ "mfm-events",
+ "mfm-evm-core",
+ "mfm-evm-deploy-configure-validate-config",
+ "mfm-ids",
+ "mfm-program",
+ "mfm-runtime",
+ "mfm-spec",
+ "mfm-state-evm-dcv",
+ "mfm-store",
+ "mfm-values",
+ "mfm_core",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "zeroize",
 ]
 
 [[package]]

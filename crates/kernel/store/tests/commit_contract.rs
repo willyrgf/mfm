@@ -1461,6 +1461,45 @@ fn side_effect_submission_unknown_recovery_uses_one_submission_result_key() {
         submission_result_key
     );
 
+    let refreshed_unknown_artifact = artifact_id(117);
+    let refreshed_unknown_digest = content_digest(118);
+    record_side_effect_artifact(
+        &mut store,
+        refreshed_unknown_artifact.clone(),
+        refreshed_unknown_digest.clone(),
+        unknown_schema(),
+        ArtifactRole::SubmissionUnknownEvidence,
+    );
+    let refreshed_unknown = store
+        .append_typed_run_commit(TypedCommitRequest {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&run_id),
+            commit_key: CommitKey::new("sidefx-submission-unknown-refresh").expect("commit key"),
+            payloads: vec![side_effect_submission_unknown(
+                refreshed_unknown_artifact,
+                refreshed_unknown_digest,
+            )],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect("refresh submission unknown")
+        .batch()
+        .clone();
+    assert_eq!(
+        refreshed_unknown.events()[0].logical_key().as_str(),
+        submission_result_key
+    );
+    let projection = store
+        .projection_snapshot()
+        .side_effect(&side_effect_ledger_key())
+        .expect("side-effect projection");
+    assert!(matches!(
+        projection.phase,
+        SideEffectPhase::SubmissionUnknown {
+            invocation_epoch: 1
+        }
+    ));
+
     let submission_artifact = artifact_id(113);
     let submission_digest = content_digest(114);
     record_side_effect_artifact(

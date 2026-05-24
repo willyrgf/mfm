@@ -4623,6 +4623,12 @@ fn validate_side_effect_resume_output(
     let has_claim = payloads
         .iter()
         .any(|payload| matches!(payload, events::KernelEventPayload::SideEffectClaimed(_)));
+    let has_invocation_prepared = payloads.iter().any(|payload| {
+        matches!(
+            payload,
+            events::KernelEventPayload::SideEffectInvocationPrepared(_)
+        )
+    });
     let has_invocation_started = payloads.iter().any(|payload| {
         matches!(
             payload,
@@ -4640,11 +4646,18 @@ fn validate_side_effect_resume_output(
     });
 
     match projection.phase {
-        store::SideEffectPhase::Claimed { .. }
-        | store::SideEffectPhase::InvocationPrepared { .. } => {
-            if !has_takeover {
+        store::SideEffectPhase::Claimed { .. } => {
+            if !has_takeover && !has_invocation_prepared {
                 return Err(RuntimeError::InvalidRunnerOutput(format!(
-                    "side-effect node {} resumed pre-invocation ledger {} without claim takeover",
+                    "side-effect node {} resumed claimed ledger {} without takeover or prepared invocation",
+                    node.node_id, projection.ledger_key
+                )));
+            }
+        }
+        store::SideEffectPhase::InvocationPrepared { .. } => {
+            if !has_takeover && !has_invocation_started {
+                return Err(RuntimeError::InvalidRunnerOutput(format!(
+                    "side-effect node {} resumed prepared ledger {} without takeover or invocation start",
                     node.node_id, projection.ledger_key
                 )));
             }
@@ -4687,6 +4700,7 @@ fn validate_side_effect_resume_output(
     if has_invocation_started
         && matches!(projection.phase, store::SideEffectPhase::Claimed { .. })
         && !has_takeover
+        && !has_invocation_prepared
     {
         return Err(RuntimeError::InvalidRunnerOutput(format!(
             "side-effect node {} started invocation from stale claim without takeover",

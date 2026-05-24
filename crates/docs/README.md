@@ -69,6 +69,7 @@ The live runtime inventory still lives in the repository docs:
 | `mfm-evm-runtime` | Shared EVM read and write runtime states. | pending | `crates/evm-runtime` |
 | `mfm-state-aave-v3` | Shared Aave V3 portfolio-position types and runtime adapters. | pending | `crates/states/aave-v3` |
 | `mfm-state-common` | Cross-domain reusable execution states. | pending | `crates/states/common` |
+| `mfm-state-evm-dcv` | Typed EVM deploy/configure/validate lifecycle state contracts. | pending | `crates/states/evm-dcv` |
 | `mfm-state-keystore` | Shared keystore administration and local signing states. | pending | `crates/states/keystore` |
 | `mfm-state-portfolio` | Reusable portfolio-domain runtime states and adapters for canonical snapshots. | pending | `crates/states/portfolio` |
 
@@ -116,6 +117,7 @@ Ops stay thin and focus on graph composition and config validation. Most are sti
 
 | Package | Role | Workspace Path |
 | --- | --- | --- |
+| `mfm-transports-evm-dcv` | Typed EVM deploy/configure/validate workflow runners. | `crates/transports/evm-dcv` |
 | `mfm-transports-exec` | Live `exec` namespace transport for bounded local process execution. | `crates/transports/exec` |
 | `mfm-transports-local-evm` | Local EVM private-key environment and signing transport. | `crates/transports/local-evm` |
 | `mfm-transports-local-fs` | Local filesystem transport helpers. | `crates/transports/local-fs` |

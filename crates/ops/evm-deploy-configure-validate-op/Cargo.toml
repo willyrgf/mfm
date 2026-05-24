@@ -7,11 +7,15 @@ edition = "2021"
 serde = { workspace = true }
 serde_json = { workspace = true }
 
+mfm-canonical = { path = "../../kernel/canonical" }
+mfm-certify = { path = "../../kernel/certify" }
+mfm-evm-dcv-model = { path = "../../evm-dcv-model" }
 mfm-evm-deploy-configure-validate-config = { path = "../../evm-deploy-configure-validate-config" }
-mfm-machine = { path = "../../machine" }
-mfm-sdk = { path = "../../sdk" }
-mfm-state-common = { path = "../../states/common" }
-mfm-op-evm-write = { path = "../evm-write-op" }
+mfm-ids = { path = "../../kernel/ids" }
+mfm-program = { path = "../../kernel/program" }
+mfm-spec = { path = "../../kernel/spec" }
+mfm-state-evm-dcv = { path = "../../states/evm-dcv" }
 
 [dev-dependencies]
 tokio = { workspace = true }
+trybuild = "1.0"

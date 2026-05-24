@@ -15,8 +15,9 @@ use mfm_store::v1::{
     CellTerminalProjection, CommitKey, CommitOrdinal, CommitOutcome, FactProjection,
     KernelEventEnvelope, LogicalEventKey, PersistedKernelEventRecord, ProjectionSnapshot,
     PublicOutputProjection, RetentionManifestProjection, RetentionProjection, RunState,
-    SideEffectClaimProjection, SideEffectIntentProjection, SideEffectPhase, SideEffectProjection,
-    StoreError, StreamSeq, TypedCommitBase, TypedCommitRequest, VerifiedRetentionProjection,
+    SideEffectArtifactProjection, SideEffectClaimProjection, SideEffectIntentProjection,
+    SideEffectPhase, SideEffectProjection, StoreError, StreamSeq, TypedCommitBase,
+    TypedCommitRequest, VerifiedRetentionProjection,
 };
 use serde_json::Value;
 use tokio::sync::Mutex;
@@ -1118,10 +1119,14 @@ fn parse_fact_projection(json: &Value) -> Result<FactProjection> {
 fn side_effect_projection_json(projection: &SideEffectProjection) -> Value {
     serde_json::json!({
         "claim": projection.claim.as_ref().map(side_effect_claim_json),
+        "confirmation": projection.confirmation.as_ref().map(side_effect_artifact_json),
         "event_id": projection.event_id.as_str(),
         "intent": side_effect_intent_json(&projection.intent),
         "ledger_key": projection.ledger_key.as_str(),
         "phase": side_effect_phase_json(&projection.phase),
+        "prepared_invocation": projection.prepared_invocation.as_ref().map(side_effect_artifact_json),
+        "receipt": projection.receipt.as_ref().map(side_effect_artifact_json),
+        "submission": projection.submission.as_ref().map(side_effect_artifact_json),
     })
 }
 
@@ -1130,10 +1135,40 @@ fn parse_side_effect_projection(json: &Value) -> Result<SideEffectProjection> {
         ledger_key: events::SideEffectLedgerKey::new(required_str(json, "ledger_key")?)?,
         event_id: parse_identity(required_str(json, "event_id")?)?,
         intent: parse_side_effect_intent(required_obj(json, "intent")?)?,
+        prepared_invocation: optional_obj(json, "prepared_invocation")?
+            .map(parse_side_effect_artifact)
+            .transpose()?,
+        submission: optional_obj(json, "submission")?
+            .map(parse_side_effect_artifact)
+            .transpose()?,
+        receipt: optional_obj(json, "receipt")?
+            .map(parse_side_effect_artifact)
+            .transpose()?,
+        confirmation: optional_obj(json, "confirmation")?
+            .map(parse_side_effect_artifact)
+            .transpose()?,
         claim: optional_obj(json, "claim")?
             .map(parse_side_effect_claim)
             .transpose()?,
         phase: parse_side_effect_phase(required_obj(json, "phase")?)?,
+    })
+}
+
+fn side_effect_artifact_json(artifact: &SideEffectArtifactProjection) -> Value {
+    serde_json::json!({
+        "artifact_id": artifact.artifact_id.as_str(),
+        "content_digest": artifact.content_digest.as_str(),
+        "schema_id": artifact.schema_id.as_ref().map(SchemaId::as_str),
+    })
+}
+
+fn parse_side_effect_artifact(json: &Value) -> Result<SideEffectArtifactProjection> {
+    Ok(SideEffectArtifactProjection {
+        artifact_id: parse_identity(required_str(json, "artifact_id")?)?,
+        content_digest: parse_identity(required_str(json, "content_digest")?)?,
+        schema_id: optional_str(json, "schema_id")?
+            .map(parse_identity)
+            .transpose()?,
     })
 }
 

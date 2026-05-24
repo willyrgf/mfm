@@ -409,13 +409,13 @@ workflow ports, and deletion or hard isolation of old dynamic semantic APIs.
 
 ### Commit 38: `evm dcv port typed workflow`
 
-- [ ] Rewrite deploy/configure/validate operation through typed lifecycle states.
-- [ ] Make deploy/configure side-effect states with typed intent, idempotency input, submission,
+- [x] Rewrite deploy/configure/validate operation through typed lifecycle states.
+- [x] Make deploy/configure side-effect states with typed intent, idempotency input, submission,
       receipt, confirmation, and output.
-- [ ] Make validate a read state with typed read caps.
-- [ ] Add compile-fail fixture for validation before configuration.
-- [ ] Add deterministic local EVM/reth crash-boundary tests if enabled by CI environment.
-- [ ] Validation: `nix run .#ci -- --mode parity --summary`.
+- [x] Make validate a read state with typed read caps.
+- [x] Add compile-fail fixture for validation before configuration.
+- [x] Add deterministic local EVM/reth crash-boundary tests if enabled by CI environment.
+- [x] Validation: `nix run .#ci -- --mode parity --summary`.
 
 ### Commit 39: `transports port typed capabilities`
 
