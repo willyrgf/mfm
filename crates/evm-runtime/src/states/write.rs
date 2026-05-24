@@ -86,6 +86,7 @@ async fn prepare_managed_sources(
 /// # Examples
 ///
 /// ```rust
+/// use mfm_evm_dcv_model::AbiArgumentValue;
 /// use mfm_evm_runtime::states::write::EvmDeployStateConfig;
 ///
 /// let cfg = EvmDeployStateConfig {
@@ -94,7 +95,7 @@ async fn prepare_managed_sources(
 ///     artifact: None,
 ///     artifact_port: "contract_artifact".to_string(),
 ///     from: "0x0000000000000000000000000000000000000001".to_string(),
-///     constructor_args: vec![serde_json::json!(42).into()],
+///     constructor_args: vec![AbiArgumentValue::from_json_value(&serde_json::json!(42)).unwrap()],
 ///     value_hex: Some("0x0".to_string()),
 ///     signing_key_env: Some("MFM_DEPLOYER_KEY".to_string()),
 ///     poll_interval_ms: 1_000,
@@ -607,6 +608,12 @@ impl State for EvmValidateState {
                         "failed to decode eth_call output",
                     )
                 })?;
+            let actual = shared_dcv::ExpectedValue::from_json_value(&actual).map_err(|_| {
+                op_errors::state_unknown(
+                    "evm_response_invalid",
+                    "decoded eth_call output was not canonical JSON",
+                )
+            })?;
 
             op_rpc::assert_condition(
                 shared_dcv::expected_matches(&actual, &ra.expected),
@@ -954,7 +961,10 @@ mod tests {
                 contract_address: None,
                 calls: vec![EvmConfigureRuntimeCall {
                     function: "setValue".to_string(),
-                    args: vec![serde_json::json!(1).into()],
+                    args: vec![
+                        shared_dcv::AbiArgumentValue::from_json_value(&serde_json::json!(1))
+                            .expect("arg"),
+                    ],
                     value_hex: None,
                 }],
                 tx_hashes_export_key: "configure_tx_hashes".to_string(),
@@ -1062,7 +1072,10 @@ mod tests {
                 contract_address: None,
                 calls: vec![EvmConfigureRuntimeCall {
                     function: "setValue".to_string(),
-                    args: vec![serde_json::json!(1).into()],
+                    args: vec![
+                        shared_dcv::AbiArgumentValue::from_json_value(&serde_json::json!(1))
+                            .expect("arg"),
+                    ],
                     value_hex: None,
                 }],
                 tx_hashes_export_key: "configure_tx_hashes".to_string(),
@@ -1101,7 +1114,10 @@ mod tests {
                 contract_address: None,
                 calls: vec![EvmConfigureRuntimeCall {
                     function: "setValue".to_string(),
-                    args: vec![serde_json::json!(1).into()],
+                    args: vec![
+                        shared_dcv::AbiArgumentValue::from_json_value(&serde_json::json!(1))
+                            .expect("arg"),
+                    ],
                     value_hex: None,
                 }],
                 tx_hashes_export_key: "configure_tx_hashes".to_string(),

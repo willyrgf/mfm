@@ -542,6 +542,15 @@ docs_policy = "repo-only"
 umbrella_policy = "always"
 
 [[packages]]
+name = "mfm-transports-portfolio"
+workspace_path = "crates/transports/portfolio"
+visibility = "public"
+section = "transports"
+summary = "Typed portfolio workflow runners."
+docs_policy = "repo-only"
+umbrella_policy = "always"
+
+[[packages]]
 name = "mfm-transports-proof"
 workspace_path = "crates/transports/proof"
 visibility = "public"

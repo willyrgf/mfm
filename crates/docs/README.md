@@ -121,6 +121,7 @@ Ops stay thin and focus on graph composition and config validation. Most are sti
 | `mfm-transports-local-fs` | Local filesystem transport helpers. | `crates/transports/local-fs` |
 | `mfm-transports-local-keystore` | Local keystore-backed transport helpers. | `crates/transports/local-keystore` |
 | `mfm-transports-process-exec` | Bounded child-process execution helpers for live transports. | `crates/transports/process-exec` |
+| `mfm-transports-portfolio` | Typed portfolio workflow runners. | `crates/transports/portfolio` |
 | `mfm-transports-proof` | Deterministic typed proof runners and conformance fixture. | `crates/transports/proof` |
 | `mfm-transports-rpc-control` | Managed `rpc.control` transport over the internal EVM executor. | `crates/transports/rpc-control` |
 

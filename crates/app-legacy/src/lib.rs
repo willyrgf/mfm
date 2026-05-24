@@ -1138,7 +1138,11 @@ impl AppServices {
         &self,
         spec: DeployConfigureValidateSpec,
     ) -> Result<RunStartResponse, AppError> {
-        let input = spec.input.clone();
+        let input = spec.input.to_json_value().map_err(|err| {
+            AppError::invalid_request(format!(
+                "failed to decode deploy-configure-validate input: {err}"
+            ))
+        })?;
         let op_config = serde_json::to_value(&spec).map_err(|_| {
             AppError::invalid_request("failed to encode deploy-configure-validate request")
         })?;
@@ -1172,6 +1176,11 @@ fn app_error_from_deploy_configure_validate_config_error(
             ErrorClass::BadRequest,
             "InvalidToml",
             "Failed to parse deploy/configure/validate TOML",
+        ),
+        DeployConfigureValidateConfigError::InvalidJsonText { .. } => AppError::new(
+            ErrorClass::BadRequest,
+            "DeployConfigureValidateConfigError",
+            err.to_string(),
         ),
         DeployConfigureValidateConfigError::Serialize { .. }
         | DeployConfigureValidateConfigError::CanonicalJson { .. } => AppError::new(

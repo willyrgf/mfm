@@ -400,12 +400,12 @@ workflow ports, and deletion or hard isolation of old dynamic semantic APIs.
 
 ### Commit 37: `evm model align with typed lifecycle`
 
-- [ ] Move EVM deploy/configure/validate domain values onto typed values/configs.
-- [ ] Add typestate values such as deployed contract, configured contract, validation report, and
+- [x] Move EVM deploy/configure/validate domain values onto typed values/configs.
+- [x] Add typestate values such as deployed contract, configured contract, validation report, and
       existing configured contract refs.
-- [ ] Ensure raw protected transactions never implement `MfmValue`, `MfmConfig`, or public-output
+- [x] Ensure raw protected transactions never implement `MfmValue`, `MfmConfig`, or public-output
       traits.
-- [ ] Validation: `nix run .#test`.
+- [x] Validation: `nix run .#test`.
 
 ### Commit 38: `evm dcv port typed workflow`
 

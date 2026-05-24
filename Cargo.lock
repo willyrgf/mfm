@@ -2216,7 +2216,11 @@ name = "mfm-evm-dcv-model"
 version = "0.1.0"
 dependencies = [
  "alloy-primitives",
+ "mfm-canonical",
  "mfm-evm-core",
+ "mfm-ids",
+ "mfm-program-derive",
+ "mfm-values",
  "serde",
  "serde_json",
 ]
@@ -2226,8 +2230,11 @@ name = "mfm-evm-deploy-configure-validate-config"
 version = "0.1.0"
 dependencies = [
  "mfm-authored-config",
+ "mfm-canonical",
  "mfm-evm-dcv-model",
- "mfm-machine",
+ "mfm-ids",
+ "mfm-program-derive",
+ "mfm-values",
  "serde",
  "serde_json",
  "thiserror",
@@ -2244,10 +2251,14 @@ dependencies = [
  "mfm-collectors-rpc-control",
  "mfm-evm-core",
  "mfm-evm-dcv-model",
+ "mfm-ids",
  "mfm-machine",
+ "mfm-program-derive",
  "mfm-state-common",
+ "mfm-values",
  "serde",
  "serde_json",
+ "static_assertions",
  "tokio",
  "zeroize",
 ]

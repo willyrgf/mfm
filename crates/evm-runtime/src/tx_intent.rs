@@ -3,6 +3,7 @@
 use std::fmt;
 
 use alloy_primitives::keccak256;
+use mfm_program_derive::MfmValue;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
@@ -17,8 +18,13 @@ use mfm_evm_dcv_model as shared_dcv;
 pub const TX_INTENT_SCHEMA_VERSION_V1: u32 = 1;
 
 /// Kind of EVM transaction represented by a durable intent.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
 #[serde(rename_all = "snake_case")]
+#[mfm(
+    namespace = "mfm.evm",
+    name = "tx-intent-kind",
+    schema = "mfm.evm.value.tx_intent_kind"
+)]
 pub enum TxIntentKind {
     /// Contract-creation transaction.
     ContractCreate,
@@ -27,7 +33,12 @@ pub enum TxIntentKind {
 }
 
 /// Durable, non-secret intent for one signed EVM transaction.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[mfm(
+    namespace = "mfm.evm",
+    name = "tx-intent-v1",
+    schema = "mfm.evm.value.tx_intent_v1"
+)]
 pub struct TxIntentV1 {
     /// Intent schema version.
     pub schema_version: u32,
@@ -42,7 +53,7 @@ pub struct TxIntentV1 {
     /// Normalized sender address.
     pub from: String,
     /// Normalized recipient address for call transactions.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub to: Option<String>,
     /// Normalized transaction value quantity.
     pub value_hex: String,
@@ -337,8 +348,19 @@ pub fn tx_capability_fact_key(
 #[cfg(test)]
 mod tests {
     use mfm_machine::hashing::artifact_id_for_json;
+    use mfm_values::MfmValue;
+    use static_assertions::assert_not_impl_any;
 
     use super::*;
+
+    assert_not_impl_any!(
+        SignedTxCapabilityV1:
+        Serialize,
+        mfm_values::MfmValue,
+        mfm_values::MfmConfig,
+        mfm_values::PublicOutputDescriptor,
+        mfm_values::PublicOutputs
+    );
 
     fn sample_intent() -> TxIntentV1 {
         PreparedTxIntentV1::signed_legacy_call(
@@ -396,6 +418,12 @@ mod tests {
         assert!(value.get("signature").is_none());
         assert!(!rendered.contains("raw_tx_hex"));
         assert!(!rendered.contains("signature"));
+    }
+
+    #[test]
+    fn tx_intent_has_typed_value_schema() {
+        assert!(TxIntentKind::schema_id().is_ok());
+        assert!(TxIntentV1::schema_id().is_ok());
     }
 
     #[test]

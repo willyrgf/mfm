@@ -179,9 +179,10 @@ fn configure_io_exports_custom_keys_when_overridden() {
 fn configure_inline_artifact_validation_uses_shared_abi_helpers() {
     let artifact: ContractArtifactConfig =
         serde_json::from_value(small_uint_artifact()).expect("artifact");
-    let shared_artifact = shared_artifact_config(&artifact);
+    let shared_artifact = shared_artifact_config(&artifact).expect("shared artifact config");
     let (abi, _bytecode) = shared_dcv::parse_artifact(&shared_artifact).expect("shared artifact");
-    let shared_err = shared_dcv::resolve_function_call(&abi, "setSmall", &[serde_json::json!(256)])
+    let arg = shared_dcv::AbiArgumentValue::from_json_value(&serde_json::json!(256)).expect("arg");
+    let shared_err = shared_dcv::resolve_function_call(&abi, "setSmall", &[arg])
         .expect_err("shared ABI rejects uint8 overflow");
 
     let op = EvmConfigureOp;
@@ -208,9 +209,10 @@ fn configure_inline_artifact_validation_uses_shared_abi_helpers() {
 fn deploy_inline_constructor_validation_uses_shared_abi_helpers() {
     let artifact: ContractArtifactConfig =
         serde_json::from_value(small_uint_constructor_artifact()).expect("artifact");
-    let shared_artifact = shared_artifact_config(&artifact);
+    let shared_artifact = shared_artifact_config(&artifact).expect("shared artifact config");
     let (abi, bytecode) = shared_dcv::parse_artifact(&shared_artifact).expect("shared artifact");
-    let shared_err = shared_dcv::constructor_data(&abi, &bytecode, &[serde_json::json!(256)])
+    let arg = shared_dcv::AbiArgumentValue::from_json_value(&serde_json::json!(256)).expect("arg");
+    let shared_err = shared_dcv::constructor_data(&abi, &bytecode, &[arg])
         .expect_err("shared ABI rejects uint8 constructor overflow");
 
     let op = EvmDeployOp;
@@ -237,12 +239,15 @@ fn deploy_inline_constructor_validation_uses_shared_abi_helpers() {
 fn validate_inline_assertion_validation_uses_shared_abi_helpers() {
     let artifact: ContractArtifactConfig =
         serde_json::from_value(small_uint_artifact()).expect("artifact");
-    let shared_artifact = shared_artifact_config(&artifact);
+    let shared_artifact = shared_artifact_config(&artifact).expect("shared artifact config");
     let (abi, _bytecode) = shared_dcv::parse_artifact(&shared_artifact).expect("shared artifact");
     let shared_reads = vec![shared_dcv::ReadAssertionConfig {
         function: "setSmall".to_string(),
-        args: vec![serde_json::json!(256).into()],
-        expected: serde_json::json!(true).into(),
+        args: vec![
+            shared_dcv::AbiArgumentValue::from_json_value(&serde_json::json!(256)).expect("arg"),
+        ],
+        expected: shared_dcv::ExpectedValue::from_json_value(&serde_json::json!(true))
+            .expect("expected"),
     }];
     let shared_err = shared_dcv::prepare_validate_assertions(&abi, &shared_reads, &[])
         .expect_err("shared validation rejects uint8 overflow");

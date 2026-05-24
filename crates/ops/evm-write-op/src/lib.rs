@@ -26,7 +26,7 @@
 
 use std::sync::Arc;
 
-use serde::Deserialize;
+use serde::{de, Deserialize, Deserializer};
 #[cfg(test)]
 use std::time::Duration;
 
@@ -247,11 +247,48 @@ struct ReadAssertionConfig {
     expected: serde_json::Value,
 }
 
-#[derive(Clone, Debug, Deserialize)]
-#[serde(untagged)]
+#[derive(Clone, Debug)]
 enum BlockTag {
     Number(u64),
     Tag(String),
+}
+
+impl<'de> Deserialize<'de> for BlockTag {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        match value {
+            serde_json::Value::Number(number) => number
+                .as_u64()
+                .map(Self::Number)
+                .ok_or_else(|| de::Error::custom("block number must be an unsigned integer")),
+            serde_json::Value::String(tag) => Ok(Self::Tag(tag)),
+            serde_json::Value::Object(mut object) => {
+                let Some(serde_json::Value::String(kind)) = object.remove("kind") else {
+                    return Err(de::Error::custom("block tag object requires string kind"));
+                };
+                match kind.as_str() {
+                    "number" => match object.remove("number") {
+                        Some(serde_json::Value::Number(number)) => {
+                            number.as_u64().map(Self::Number)
+                        }
+                        _ => None,
+                    }
+                    .ok_or_else(|| de::Error::custom("number block tag requires number")),
+                    "tag" => match object.remove("tag") {
+                        Some(serde_json::Value::String(tag)) => Ok(Self::Tag(tag)),
+                        _ => Err(de::Error::custom("tag block tag requires tag string")),
+                    },
+                    _ => Err(de::Error::custom("unsupported block tag kind")),
+                }
+            }
+            _ => Err(de::Error::custom(
+                "block tag must be a number, string, or typed block-tag object",
+            )),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -296,37 +333,62 @@ struct EvmValidateConfig {
     event_assertions: Vec<EventAssertionConfig>,
 }
 
-fn shared_artifact_config(artifact: &ContractArtifactConfig) -> shared_dcv::ContractArtifactConfig {
-    shared_dcv::ContractArtifactConfig {
-        abi: artifact.abi.clone().into(),
-        bytecode: artifact.bytecode.clone().into(),
-    }
+fn typed_json_error(message: impl Into<String>) -> SdkError {
+    op_errors::sdk_error(
+        "invalid_op_config",
+        ErrorCategory::ParsingInput,
+        false,
+        message,
+    )
+}
+
+fn shared_abi_arg(value: serde_json::Value) -> Result<shared_dcv::AbiArgumentValue, SdkError> {
+    shared_dcv::AbiArgumentValue::from_json_value(&value)
+        .map_err(|err| typed_json_error(format!("invalid ABI argument JSON: {err}")))
+}
+
+fn shared_expected_value(value: serde_json::Value) -> Result<shared_dcv::ExpectedValue, SdkError> {
+    shared_dcv::ExpectedValue::from_json_value(&value)
+        .map_err(|err| typed_json_error(format!("invalid expected value JSON: {err}")))
+}
+
+fn shared_artifact_config(
+    artifact: &ContractArtifactConfig,
+) -> Result<shared_dcv::ContractArtifactConfig, SdkError> {
+    Ok(shared_dcv::ContractArtifactConfig {
+        abi: shared_dcv::AbiJson::from_json_value(&artifact.abi)
+            .map_err(|err| typed_json_error(format!("invalid ABI JSON: {err}")))?,
+        bytecode: shared_dcv::BytecodeJson::from_json_value(&artifact.bytecode)
+            .map_err(|err| typed_json_error(format!("invalid bytecode JSON: {err}")))?,
+    })
 }
 
 fn into_shared_artifact_config(
     artifact: ContractArtifactConfig,
-) -> shared_dcv::ContractArtifactConfig {
-    shared_dcv::ContractArtifactConfig {
-        abi: artifact.abi.into(),
-        bytecode: artifact.bytecode.into(),
-    }
+) -> Result<shared_dcv::ContractArtifactConfig, SdkError> {
+    shared_artifact_config(&artifact)
 }
 
 fn shared_block_tag(block: BlockTag) -> shared_dcv::BlockTag {
     match block {
-        BlockTag::Number(n) => shared_dcv::BlockTag::Number(n),
-        BlockTag::Tag(s) => shared_dcv::BlockTag::Tag(s),
+        BlockTag::Number(n) => shared_dcv::BlockTag::Number { number: n },
+        BlockTag::Tag(s) => shared_dcv::BlockTag::Tag { tag: s },
     }
 }
 
 fn shared_read_assertion_config(
     assertion: &ReadAssertionConfig,
-) -> shared_dcv::ReadAssertionConfig {
-    shared_dcv::ReadAssertionConfig {
+) -> Result<shared_dcv::ReadAssertionConfig, SdkError> {
+    Ok(shared_dcv::ReadAssertionConfig {
         function: assertion.function.clone(),
-        args: assertion.args.iter().cloned().map(Into::into).collect(),
-        expected: assertion.expected.clone().into(),
-    }
+        args: assertion
+            .args
+            .iter()
+            .cloned()
+            .map(shared_abi_arg)
+            .collect::<Result<Vec<_>, _>>()?,
+        expected: shared_expected_value(assertion.expected.clone())?,
+    })
 }
 
 fn shared_event_assertion_config(
@@ -581,8 +643,14 @@ impl Operation for EvmDeployOp {
         ensure_nonempty_env_name(env_name).map_err(|_| {
             op_errors::sdk_parse_error("invalid_op_config", "signing_key_env must be non-empty")
         })?;
+        let constructor_args = cfg
+            .constructor_args
+            .iter()
+            .cloned()
+            .map(shared_abi_arg)
+            .collect::<Result<Vec<_>, _>>()?;
         if let Some(artifact) = &cfg.artifact {
-            let shared_artifact = shared_artifact_config(artifact);
+            let shared_artifact = shared_artifact_config(artifact)?;
             let (abi, bytecode) = shared_dcv::parse_artifact(&shared_artifact).map_err(|err| {
                 op_errors::sdk_error(
                     "invalid_op_config",
@@ -591,16 +659,14 @@ impl Operation for EvmDeployOp {
                     format!("invalid contract artifact: {err}"),
                 )
             })?;
-            shared_dcv::constructor_data(&abi, &bytecode, &cfg.constructor_args).map_err(
-                |err| {
-                    op_errors::sdk_error(
-                        "invalid_op_config",
-                        ErrorCategory::ParsingInput,
-                        false,
-                        format!("constructor args did not match ABI: {err}"),
-                    )
-                },
-            )?;
+            shared_dcv::constructor_data(&abi, &bytecode, &constructor_args).map_err(|err| {
+                op_errors::sdk_error(
+                    "invalid_op_config",
+                    ErrorCategory::ParsingInput,
+                    false,
+                    format!("constructor args did not match ABI: {err}"),
+                )
+            })?;
         }
 
         let from = shared_dcv::normalize_address(&cfg.from)
@@ -614,17 +680,18 @@ impl Operation for EvmDeployOp {
             .map_err(|_| op_errors::sdk_parse_error("invalid_op_config", "invalid value_wei"))?;
         let artifact_from_port = cfg.artifact.is_none();
         let artifact_port = cfg.artifact_port.clone();
+        let artifact = cfg.artifact.map(into_shared_artifact_config).transpose()?;
 
         let state_id = leaf_state_id(&op_path, "deploy")?;
         let state = Arc::new(SharedDeployState {
             state_id: state_id.clone(),
             cfg: SharedDeployStateConfig {
-                artifact: cfg.artifact.map(into_shared_artifact_config),
+                artifact,
                 artifact_port: cfg.artifact_port,
                 network_id: cfg.network_id,
                 control_scope: cfg.control_scope,
                 from,
-                constructor_args: cfg.constructor_args.into_iter().map(Into::into).collect(),
+                constructor_args,
                 value_hex,
                 signing_key_env: cfg.signing_key_env,
                 poll_interval_ms: cfg.poll_interval_ms,
@@ -712,7 +779,7 @@ impl Operation for EvmConfigureOp {
         }
 
         let parsed_abi = if let Some(artifact) = &cfg.artifact {
-            let shared_artifact = shared_artifact_config(artifact);
+            let shared_artifact = shared_artifact_config(artifact)?;
             let (abi, _bytecode) = shared_dcv::parse_artifact(&shared_artifact).map_err(|err| {
                 op_errors::sdk_error(
                     "invalid_op_config",
@@ -747,17 +814,22 @@ impl Operation for EvmConfigureOp {
 
         let mut calls = Vec::with_capacity(cfg.calls.len());
         for c in &cfg.calls {
+            let args = c
+                .args
+                .iter()
+                .cloned()
+                .map(shared_abi_arg)
+                .collect::<Result<Vec<_>, _>>()?;
             if let Some(abi) = &parsed_abi {
-                let _ = shared_dcv::resolve_function_call(abi, &c.function, &c.args).map_err(
-                    |err| {
+                let _ =
+                    shared_dcv::resolve_function_call(abi, &c.function, &args).map_err(|err| {
                         op_errors::sdk_error(
                             "invalid_op_config",
                             ErrorCategory::ParsingInput,
                             false,
                             format!("configure call did not match ABI: {err}"),
                         )
-                    },
-                )?;
+                    })?;
             }
             let value_hex = shared_dcv::parse_value_wei_to_hex(&c.value_wei).map_err(|_| {
                 op_errors::sdk_parse_error(
@@ -768,16 +840,17 @@ impl Operation for EvmConfigureOp {
 
             calls.push(SharedConfigureRuntimeCall {
                 function: c.function.clone(),
-                args: c.args.iter().cloned().map(Into::into).collect(),
+                args,
                 value_hex,
             });
         }
+        let artifact = cfg.artifact.map(into_shared_artifact_config).transpose()?;
 
         let state_id = leaf_state_id(&op_path, "configure")?;
         let state = Arc::new(SharedConfigureState {
             state_id: state_id.clone(),
             cfg: SharedConfigureStateConfig {
-                artifact: cfg.artifact.map(into_shared_artifact_config),
+                artifact,
                 artifact_port: cfg.artifact_port,
                 network_id: cfg.network_id,
                 control_scope: cfg.control_scope,
@@ -844,7 +917,7 @@ impl Operation for EvmValidateOp {
         })?;
 
         let parsed_abi = if let Some(artifact) = &cfg.artifact {
-            let shared_artifact = shared_artifact_config(artifact);
+            let shared_artifact = shared_artifact_config(artifact)?;
             let (abi, _bytecode) = shared_dcv::parse_artifact(&shared_artifact).map_err(|err| {
                 op_errors::sdk_error(
                     "invalid_op_config",
@@ -879,7 +952,7 @@ impl Operation for EvmValidateOp {
                 .read_assertions
                 .iter()
                 .map(shared_read_assertion_config)
-                .collect();
+                .collect::<Result<Vec<_>, _>>()?;
             let event_assertions: Vec<_> = cfg
                 .event_assertions
                 .iter()
@@ -896,27 +969,35 @@ impl Operation for EvmValidateOp {
         let artifact_from_port = cfg.artifact.is_none();
         let contract_address_from_port = cfg.contract_address.is_none();
         let artifact_port = cfg.artifact_port.clone();
+        let artifact = cfg.artifact.map(into_shared_artifact_config).transpose()?;
+        let read_assertions = cfg
+            .read_assertions
+            .into_iter()
+            .map(|a| {
+                Ok(shared_dcv::ReadAssertionConfig {
+                    function: a.function,
+                    args: a
+                        .args
+                        .into_iter()
+                        .map(shared_abi_arg)
+                        .collect::<Result<Vec<_>, _>>()?,
+                    expected: shared_expected_value(a.expected)?,
+                })
+            })
+            .collect::<Result<Vec<_>, SdkError>>()?;
 
         let state_id = leaf_state_id(&op_path, "validate")?;
         let state = Arc::new(SharedValidateState {
             state_id: state_id.clone(),
             cfg: SharedValidateStateConfig {
-                artifact: cfg.artifact.map(into_shared_artifact_config),
+                artifact,
                 artifact_port: cfg.artifact_port,
                 network_id: cfg.network_id,
                 control_scope: cfg.control_scope,
                 contract_address,
                 expected_chain_id: cfg.expected_chain_id,
                 require_client_substring: cfg.require_client_substring,
-                read_assertions: cfg
-                    .read_assertions
-                    .into_iter()
-                    .map(|a| shared_dcv::ReadAssertionConfig {
-                        function: a.function,
-                        args: a.args.into_iter().map(Into::into).collect(),
-                        expected: a.expected.into(),
-                    })
-                    .collect(),
+                read_assertions,
                 event_assertions: cfg
                     .event_assertions
                     .into_iter()

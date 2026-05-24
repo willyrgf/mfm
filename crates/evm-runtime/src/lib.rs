@@ -11,7 +11,9 @@
 //! ```rust
 //! use mfm_evm_dcv_model::BlockTag;
 //!
-//! let _tag = BlockTag::Tag("latest".to_string());
+//! let _tag = BlockTag::Tag {
+//!     tag: "latest".to_string(),
+//! };
 //! ```
 /// Generic compiled/deployed contract-set manifests.
 pub mod contract_set;
