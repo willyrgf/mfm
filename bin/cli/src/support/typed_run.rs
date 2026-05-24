@@ -68,10 +68,10 @@ pub(crate) async fn make_typed_app_services(
 ) -> Result<TypedAsyncAppServices<PostgresTypedRunEventStore>, CommandError> {
     let store = make_typed_run_store(args).await?;
     let artifacts = make_typed_artifact_store(args);
+    let runners = mfm_app::production_typed_runner_registry(artifacts.clone())
+        .map_err(command_error_from_typed_app_error)?;
     Ok(mfm_app::make_async_typed_services(
-        mfm_app::production_typed_runner_registry(),
-        store,
-        artifacts,
+        runners, store, artifacts,
     ))
 }
 

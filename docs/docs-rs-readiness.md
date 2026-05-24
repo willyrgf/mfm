@@ -131,7 +131,7 @@ Current publish-wave framing:
 
 - `Wave 1 within ops`: `mfm-op-keystore`, `mfm-op-evm-read`, `mfm-op-evm-write`
 - `Wave 2`: `mfm-op-portfolio-tracker`, `mfm-op-nix-app`, `mfm-op-evm-deploy-configure-validate`
-- `Later / low priority`: `mfm-op-proof`
+- `Typed acceptance fixture`: `mfm-op-proof`
 
 Remaining work in this tier:
 
@@ -167,11 +167,10 @@ All 6 crates have good crate-level docs but lack item-level documentation.
 - `collectors/nix`
 - `collectors/exec`
 
-#### Transports — ALL 4 MISSING crate-level docs:
+#### Transports still missing crate-level docs:
 - `transports/local-evm`
 - `transports/local-fs`
 - `transports/local-keystore`
-- `transports/proof`
 
 #### Common undocumented items:
 - All struct types and fields across all 9 crates

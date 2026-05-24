@@ -1916,10 +1916,13 @@ dependencies = [
  "mfm-capabilities",
  "mfm-events",
  "mfm-ids",
+ "mfm-op-proof",
+ "mfm-program",
  "mfm-replay",
  "mfm-runtime",
  "mfm-spec",
  "mfm-store",
+ "mfm-transports-proof",
  "serde",
  "serde_json",
  "tokio",
@@ -1946,7 +1949,6 @@ dependencies = [
  "mfm-op-keystore",
  "mfm-op-nix-app",
  "mfm-op-portfolio-tracker",
- "mfm-op-proof",
  "mfm-portfolio-config",
  "mfm-portfolio-model",
  "mfm-sdk",
@@ -1955,7 +1957,6 @@ dependencies = [
  "mfm-transports-local-evm",
  "mfm-transports-local-fs",
  "mfm-transports-local-keystore",
- "mfm-transports-proof",
  "mfm-transports-rpc-control",
  "serde",
  "serde_json",
@@ -2136,11 +2137,14 @@ dependencies = [
 name = "mfm-collectors-proof"
 version = "0.1.0"
 dependencies = [
- "async-trait",
- "mfm-machine",
+ "mfm-canonical",
+ "mfm-capabilities",
+ "mfm-effects",
+ "mfm-ids",
+ "mfm-program",
+ "mfm-program-derive",
+ "mfm-values",
  "serde",
- "serde_json",
- "tokio",
 ]
 
 [[package]]
@@ -2420,11 +2424,11 @@ dependencies = [
 name = "mfm-op-proof"
 version = "0.1.0"
 dependencies = [
- "async-trait",
- "mfm-machine",
- "mfm-sdk",
- "mfm-state-common",
- "serde_json",
+ "mfm-canonical",
+ "mfm-certify",
+ "mfm-collectors-proof",
+ "mfm-ids",
+ "mfm-program",
  "tokio",
 ]
 
@@ -2617,7 +2621,6 @@ dependencies = [
  "async-trait",
  "mfm-collectors-exec",
  "mfm-collectors-nix",
- "mfm-collectors-proof",
  "mfm-machine",
  "mfm-sdk",
  "num-bigint",
@@ -2771,11 +2774,21 @@ dependencies = [
 name = "mfm-transports-proof"
 version = "0.1.0"
 dependencies = [
- "async-trait",
+ "mfm-canonical",
+ "mfm-capabilities",
  "mfm-collectors-proof",
- "mfm-machine",
+ "mfm-events",
+ "mfm-ids",
+ "mfm-op-proof",
+ "mfm-program",
+ "mfm-replay",
+ "mfm-runtime",
+ "mfm-spec",
+ "mfm-store",
+ "mfm-values",
  "serde",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]

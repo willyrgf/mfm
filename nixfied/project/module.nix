@@ -390,7 +390,7 @@ let
     binaryIds = [
       "mfm-integration-tests::parity_event_store_postgres_contract"
       "mfm-integration-tests::parity_artifact_store_s3_contract"
-      "mfm-integration-tests::parity_rest_api_postgres_s3_smoke"
+      "mfm-integration-tests::parity_rest_api_postgres_typed_smoke"
     ];
   };
   parityEvmRethNextest = mkNextestSelection {

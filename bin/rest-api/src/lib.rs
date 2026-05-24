@@ -211,12 +211,13 @@ impl<S> RouterState<S>
 where
     S: AsyncTypedRunEventStore + Clone + Send + Sync,
 {
-    fn services(&self) -> TypedAsyncAppServices<S> {
-        mfm_app::make_async_typed_services(
-            mfm_app::production_typed_runner_registry(),
+    fn services(&self) -> Result<TypedAsyncAppServices<S>, ApiError> {
+        let runners = mfm_app::production_typed_runner_registry(self.app.artifacts.clone())?;
+        Ok(mfm_app::make_async_typed_services(
+            runners,
             self.app.store.clone(),
             self.app.artifacts.clone(),
-        )
+        ))
     }
 }
 
@@ -461,7 +462,7 @@ where
         });
     }
 
-    let services = state.services();
+    let services = state.services()?;
     let start = mfm_app::build_typed_run_start_request(
         services.artifacts(),
         &spec_bytes,
@@ -489,7 +490,7 @@ where
     let run_id = parse_run_id(&run_id)?;
     let req: TypedRunResumeBody = parse_optional_body(body)?;
     let data = state
-        .services()
+        .services()?
         .resume_stored_run(&run_id, req.drive.into_app())
         .await?;
 
@@ -505,7 +506,7 @@ where
     S: AsyncTypedRunEventStore + Clone + Send + Sync,
 {
     let run_id = parse_run_id(&run_id)?;
-    let data = state.services().run_status(&run_id).await?;
+    let data = state.services()?.run_status(&run_id).await?;
 
     json_ok(data)
 }
@@ -533,7 +534,7 @@ where
     validate_sequence_range(query.from_seq, query.to_seq)?;
 
     let run_id = parse_run_id(&run_id)?;
-    let response = state.services().run_stream(&run_id).await?;
+    let response = state.services()?.run_stream(&run_id).await?;
     let data = TypedRunStreamResponse {
         run_id: response.run_id,
         head_seq: response.head_seq,
@@ -562,7 +563,7 @@ where
     S: AsyncTypedRunEventStore + Clone + Send + Sync,
 {
     let run_id = parse_run_id(&run_id)?;
-    let data = state.services().verify_replay_for_run(&run_id).await?;
+    let data = state.services()?.verify_replay_for_run(&run_id).await?;
 
     json_ok(data)
 }
@@ -582,7 +583,7 @@ where
     let run_id = parse_run_id(&run_id)?;
     let schema_id = parse_schema_id(&schema_id)?;
     let data = state
-        .services()
+        .services()?
         .typed_public_output(&run_id, &schema_id)
         .await?;
 

@@ -373,12 +373,12 @@ workflow ports, and deletion or hard isolation of old dynamic semantic APIs.
 
 ### Commit 34: `proof port to typed contracts`
 
-- [ ] Rewrite proof states and operations around typed facts, intent, idempotency input,
+- [x] Rewrite proof states and operations around typed facts, intent, idempotency input,
       submission, receipt, confirmation, output, public outputs, and replay verifier behavior.
-- [ ] Remove proof dependency on old `crates/sdk`, `crates/machine`, context keys, and hand-authored
+- [x] Remove proof dependency on old `crates/sdk`, `crates/machine`, context keys, and hand-authored
       edges.
-- [ ] Add `proof-implementation-conformance` fixtures for enabled proof implementations.
-- [ ] Validation: `nix run .#ci -- --mode full --summary`.
+- [x] Add `proof-implementation-conformance` fixtures for enabled proof implementations.
+- [x] Validation: `nix run .#ci -- --mode full --summary`.
 
 ### Commit 35: `portfolio model align with typed values`
 

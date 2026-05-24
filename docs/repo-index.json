@@ -80,13 +80,13 @@
       "kind": "rust-cargo"
     },
     {
-      "name": "app",
-      "path": "crates/app/Cargo.toml",
+      "name": "app-legacy",
+      "path": "crates/app-legacy/Cargo.toml",
       "kind": "rust-cargo"
     },
     {
-      "name": "app-legacy",
-      "path": "crates/app-legacy/Cargo.toml",
+      "name": "app",
+      "path": "crates/app/Cargo.toml",
       "kind": "rust-cargo"
     },
     {

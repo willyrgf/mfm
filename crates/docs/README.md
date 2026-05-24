@@ -84,7 +84,7 @@ Ops stay thin and focus on graph composition and config validation. Most are sti
 | `mfm-op-keystore` | Keystore administration and transaction planners. | `crates/ops/keystore-op` |
 | `mfm-op-nix-app` | Nix app execution planner. | `crates/ops/nix-app-op` |
 | `mfm-op-portfolio-tracker` | Portfolio tracking planner. | `crates/ops/portfolio-tracker-op` |
-| `mfm-op-proof` | Proof-generation planner. | `crates/ops/proof-op` |
+| `mfm-op-proof` | Certified typed proof workflow operation. | `crates/ops/proof-op` |
 
 ## Storages
 
@@ -121,7 +121,7 @@ Ops stay thin and focus on graph composition and config validation. Most are sti
 | `mfm-transports-local-fs` | Local filesystem transport helpers. | `crates/transports/local-fs` |
 | `mfm-transports-local-keystore` | Local keystore-backed transport helpers. | `crates/transports/local-keystore` |
 | `mfm-transports-process-exec` | Bounded child-process execution helpers for live transports. | `crates/transports/process-exec` |
-| `mfm-transports-proof` | Acceptance/demo proof live transport helpers. | `crates/transports/proof` |
+| `mfm-transports-proof` | Deterministic typed proof runners and conformance fixture. | `crates/transports/proof` |
 | `mfm-transports-rpc-control` | Managed `rpc.control` transport over the internal EVM executor. | `crates/transports/rpc-control` |
 
 ## Binaries And Tooling

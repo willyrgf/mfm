@@ -19,9 +19,9 @@ use mfm_effects::{
     ApplySideEffect, EffectDescriptor, EffectSpec, ManagedPlatformWrite, Pure, ReadExternal,
 };
 use mfm_ids::{
-    CellId, ContentDigest, DescriptorId, DigestAlgorithm, DigestBytes, EffectKind, NodeId,
-    OperationInstanceId, OperationKind, OperationVersion, SchemaId, ScopeId, SeedId,
-    SemanticTypeId, StateKind, StateVersion,
+    AdapterKind, AdapterVersion, CellId, ContentDigest, DescriptorId, DigestAlgorithm, DigestBytes,
+    EffectKind, NodeId, OperationInstanceId, OperationKind, OperationVersion, SchemaId, ScopeId,
+    SeedId, SemanticTypeId, StateKind, StateVersion,
 };
 pub use mfm_values::NonEmpty;
 use mfm_values::{
@@ -361,6 +361,11 @@ pub trait StateSpec: Send + Sync + 'static {
     /// Returns the stable state descriptor name.
     fn name() -> &'static str;
 
+    /// Returns behaviorally relevant adapter bindings for this state.
+    fn adapter_bindings() -> Result<Vec<AdapterBindingSpec>> {
+        Ok(Vec::new())
+    }
+
     /// Constructs the executable state from validated config.
     fn new(config: Self::Config) -> Result<Self>
     where
@@ -408,6 +413,15 @@ pub trait StableDomainKey: MfmValue {
         PlainCanonicalJsonBytes::from_json_str(&json)
             .map_err(|error| PlanError::Canonical(error.to_string()))
     }
+}
+
+/// Behaviorally relevant adapter binding for a typed state node.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdapterBindingSpec {
+    /// Stable adapter kind id.
+    pub adapter_kind: AdapterKind,
+    /// Adapter contract version.
+    pub adapter_version: AdapterVersion,
 }
 
 /// Effect-specific runner kind recorded by a registered state.
@@ -1652,6 +1666,8 @@ pub struct StateNodeSpec {
     pub effect_kind: EffectKind,
     /// Framework capability descriptor set required by the registered state.
     pub capability_bindings: CapabilitySetDescriptor,
+    /// Behaviorally relevant adapter bindings required by the registered state.
+    pub adapter_bindings: Vec<AdapterBindingSpec>,
     /// Side-effect contract digest when this node mutates an external system.
     pub side_effect_contract_digest: Option<ContentDigest>,
     /// Canonical config binding.
@@ -3078,6 +3094,7 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
         }
         let config_binding = canonical_config_binding::<S::Config>(&config)?;
         let input = input.into_binding()?;
+        let adapter_bindings = S::adapter_bindings()?;
         let state = S::new(config)?;
         drop(state);
 
@@ -3128,6 +3145,7 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
             runner: registered.runner(),
             effect_kind: descriptor.effect().kind.clone(),
             capability_bindings: descriptor.capabilities().clone(),
+            adapter_bindings,
             side_effect_contract_digest: descriptor.side_effect_contract_digest().cloned(),
             config: config_binding,
             input: input.spec(),

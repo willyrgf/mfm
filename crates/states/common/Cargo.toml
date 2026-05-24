@@ -15,7 +15,6 @@ mfm-machine = { path = "../../machine", version = "0.1.0" }
 mfm-sdk = { path = "../../sdk", version = "0.1.0" }
 mfm-collectors-nix = { path = "../../collectors/nix", version = "0.1.0" }
 mfm-collectors-exec = { path = "../../collectors/exec", version = "0.1.0" }
-mfm-collectors-proof = { path = "../../collectors/proof", version = "0.1.0" }
 num-bigint = "0.4"
 num-traits = "0.2"
 

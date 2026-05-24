@@ -227,11 +227,37 @@ where
 
 /// Builds the production typed runner registry for this process.
 ///
-/// Framework public-output render nodes are resolved by `mfm-runtime` as built-ins. Domain
-/// state runners are added by their typed porting commits; until then specs that reference those
-/// descriptors fail before `RunStarted` with `TypedRunnerUnavailable`.
-pub fn production_typed_runner_registry() -> ErasedRunnerRegistry {
-    ErasedRunnerRegistry::new()
+/// Framework public-output render nodes are resolved by `mfm-runtime` as built-ins. Enabled
+/// domain runners register here as certified typed descriptor bindings.
+pub fn production_typed_runner_registry(
+    artifacts: FsTypedArtifactStore,
+) -> Result<ErasedRunnerRegistry, AppError> {
+    let mut registry = ErasedRunnerRegistry::new();
+    let proof_artifacts: Arc<dyn mfm_transports_proof::ProofArtifactSink> =
+        Arc::new(FsProofArtifactSink { artifacts });
+    mfm_transports_proof::register_deterministic_proof_runners(&mut registry, proof_artifacts)?;
+    Ok(registry)
+}
+
+#[derive(Clone)]
+struct FsProofArtifactSink {
+    artifacts: FsTypedArtifactStore,
+}
+
+impl mfm_transports_proof::ProofArtifactSink for FsProofArtifactSink {
+    fn put_verified_artifact<'a>(
+        &'a self,
+        bytes: Vec<u8>,
+        evidence: store::ArtifactEvidenceRef,
+    ) -> mfm_transports_proof::ProofArtifactSinkFuture<'a> {
+        Box::pin(async move {
+            self.artifacts
+                .put_verified_artifact(bytes, evidence)
+                .await
+                .map_err(|error| mfm_runtime::RuntimeError::Store(error.to_string()))?;
+            Ok(())
+        })
+    }
 }
 
 /// Generates a digest-only typed run id from a random UUID.
@@ -826,6 +852,7 @@ where
         let authority =
             replay_authority_for_run(&self.artifacts, &envelope, run_id, &stream).await?;
         let broker = ReplayBroker::from_run_stream(envelope, &stream, authority)?;
+        mfm_transports_proof::verify_deterministic_proof_replay(&broker, &stream)?;
         let projection = broker.projection_snapshot();
         let retained_artifacts = projection
             .retention(run_id)
@@ -2040,7 +2067,8 @@ mod tests {
         let artifacts = services.artifacts().clone();
         let corrupt_stream = corrupt_public_output_history(&artifacts, &valid_stream).await;
         let corrupt_services = make_async_typed_services(
-            production_typed_runner_registry(),
+            production_typed_runner_registry(artifacts.clone())
+                .expect("production runner registry"),
             StaticAsyncStore {
                 run_id: fixture.run_id.clone(),
                 stream: corrupt_stream,
@@ -2104,7 +2132,8 @@ mod tests {
         .await
         .expect("typed run request");
         let services = make_async_typed_services(
-            production_typed_runner_registry(),
+            production_typed_runner_registry(artifacts.clone())
+                .expect("production runner registry"),
             AsyncInMemoryStore::default(),
             artifacts.clone(),
         );
@@ -2121,6 +2150,68 @@ mod tests {
             .expect_err("run was not started");
         assert_eq!(status.code, "TypedRunNotFound");
 
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn production_typed_runner_registry_executes_certified_proof_run() {
+        let root = std::env::temp_dir().join(format!(
+            "mfm-app-production-proof-run-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let artifacts = FsTypedArtifactStore::new(&root);
+        let proof_config = mfm_op_proof::ProofWorkflowConfig::default();
+        let draft = mfm_op_proof::proof_program_draft(proof_config.clone()).expect("proof draft");
+        persist_draft_config_artifacts(&artifacts, &draft).await;
+        let certified = mfm_op_proof::certified_proof_spec(proof_config).expect("proof spec");
+        persist_framework_config_artifacts(&artifacts, &certified.envelope.spec).await;
+        let spec_bytes = certified
+            .envelope
+            .spec
+            .canonical_json()
+            .expect("canonical proof spec");
+        let request = build_typed_run_start_request(
+            &artifacts,
+            spec_bytes.as_bytes(),
+            new_run_id(),
+            "mfm.test.proof",
+            "test-source",
+            Vec::new(),
+            DriveMode::UntilBlocked,
+        )
+        .await
+        .expect("typed proof run request");
+        let services = make_async_typed_services(
+            production_typed_runner_registry(artifacts.clone())
+                .expect("production runner registry"),
+            AsyncInMemoryStore::default(),
+            artifacts.clone(),
+        );
+
+        let response = services
+            .start_certified_run(request)
+            .await
+            .expect("start proof run");
+
+        assert_eq!(response.phase, TypedRunPhase::Completed);
+        let replay = services
+            .verify_replay_for_run(&RunId::parse(&response.run_id).expect("typed run id"))
+            .await
+            .expect("verify proof replay");
+        assert_eq!(replay.phase, TypedRunPhase::Completed);
+        let public_output = services
+            .typed_public_output(
+                &RunId::parse(&response.run_id).expect("typed run id"),
+                &certified.envelope.spec.public_outputs.public_schema_id,
+            )
+            .await
+            .expect("render proof public output");
+        let public_output_json = public_output.json.expect("rendered proof json");
+        assert_eq!(public_output_json["output"]["fact"]["n"], 1);
+        assert_eq!(
+            public_output_json["output"]["side_effect"]["status"],
+            "confirmed"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -2203,6 +2294,74 @@ mod tests {
             .await
             .expect("start typed run");
         (root, fixture, services, started)
+    }
+
+    async fn persist_draft_config_artifacts(
+        artifacts: &FsTypedArtifactStore,
+        draft: &mfm_program::TypedProgramDraft,
+    ) {
+        for config in draft
+            .state_nodes()
+            .iter()
+            .map(|node| &node.config)
+            .chain(draft.operation_lineage().iter().map(|frame| &frame.config))
+        {
+            artifacts
+                .put_artifact(
+                    config.canonical_json.to_vec(),
+                    TypedArtifactDescriptor {
+                        media_type: spec::MediaType::new("application/json").expect("media type"),
+                        schema_id: Some(config.schema_id.clone()),
+                        semantic_type_id: None,
+                        producer_node_id: None,
+                        producer_seed_id: None,
+                        artifact_role: events::ArtifactRole::TypedConfig,
+                    },
+                )
+                .await
+                .expect("persist draft config artifact");
+        }
+    }
+
+    async fn persist_framework_config_artifacts(
+        artifacts: &FsTypedArtifactStore,
+        typed_spec: &spec::TypedExecutionSpec,
+    ) {
+        for node in &typed_spec.nodes {
+            let Some(framework) = &node.framework else {
+                continue;
+            };
+            let framework_kind = match framework {
+                spec::FrameworkNodeSpec::Bridge(_) => "bridge_same_value",
+                spec::FrameworkNodeSpec::PublicOutputRender(_) => "public_output_render",
+            };
+            let payload = serde_json::json!({
+                "framework": framework_kind,
+                "node_id": node.node_id.as_str(),
+            });
+            let json = serde_json::to_string(&payload).expect("framework config json");
+            let bytes = mfm_canonical::PlainCanonicalJsonBytes::from_json_str(&json)
+                .expect("canonical framework config");
+            assert_eq!(
+                bytes.content_digest(),
+                node.config_ref.digest,
+                "framework config helper must match certified config ref"
+            );
+            artifacts
+                .put_artifact(
+                    bytes.to_vec(),
+                    TypedArtifactDescriptor {
+                        media_type: node.config_ref.media_type.clone(),
+                        schema_id: Some(node.config_ref.schema_id.clone()),
+                        semantic_type_id: None,
+                        producer_node_id: None,
+                        producer_seed_id: None,
+                        artifact_role: events::ArtifactRole::TypedConfig,
+                    },
+                )
+                .await
+                .expect("persist framework config artifact");
+        }
     }
 
     async fn corrupt_public_output_history(

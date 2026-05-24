@@ -1,295 +1,571 @@
-#![allow(clippy::disallowed_methods, clippy::disallowed_types)]
-//! Typed proof collectors.
-//!
-//! This crate defines typed adapters over the generic `IoCall` surface for proof flows.
-//! It intentionally does NOT perform IO itself.
 #![warn(missing_docs)]
+//! Typed proof domain contracts.
+//!
+//! This crate owns the proof value, capability, state, and replay-verifier contracts used by the
+//! typed proof operation. It has no dependency on the legacy machine, SDK, context, or generic IO
+//! surfaces.
 
+use std::future;
+
+use mfm_canonical::sha256_digest_bytes;
+use mfm_capabilities::{
+    CapabilityError, CapabilitySpec, ExternalMutationAuthorityRole, NoCaps, ReadExternalRole,
+};
+use mfm_effects::{ApplySideEffect, Pure, ReadExternal};
+use mfm_ids::{
+    AdapterKind, AdapterVersion, CapabilityKind, CapabilityVersion, DigestAlgorithm, StateKind,
+    StateVersion,
+};
+use mfm_program::{
+    AdapterBindingSpec, IdempotencyKey, PureState, ReadState, SideEffectState, StateError,
+    StateResult, StateSpec,
+};
+use mfm_program_derive::{MfmConfig, MfmValue, OperationOutput, PublicOutputs, StateInput};
 use serde::{Deserialize, Serialize};
 
-use mfm_machine::errors::{ErrorCategory, ErrorInfo, IoError};
-use mfm_machine::hashing::{artifact_id_for_json, CanonicalJsonError};
-use mfm_machine::ids::{ErrorCode, FactKey, StateId};
-use mfm_machine::io::{IoCall, IoProvider};
+const NAMESPACE: &str = "mfm.proof";
+const ADAPTER_NAME: &str = "deterministic-proof";
+const ADAPTER_VERSION: &str = "mfm.proof.adapter.deterministic.v1";
 
-/// Canonical namespace group used for proof IO calls.
-pub const NAMESPACE_PROOF: &str = "proof";
-/// Namespace used for proof fact reads.
-pub const NAMESPACE_PROOF_READ: &str = "proof.read";
-/// Namespace used for proof side effects.
-pub const NAMESPACE_PROOF_SIDE_EFFECT: &str = "proof.side_effect";
+/// Returns the deterministic proof adapter kind.
+pub fn proof_adapter_kind() -> Result<AdapterKind, mfm_ids::IdentityError> {
+    AdapterKind::new(
+        NAMESPACE,
+        ADAPTER_NAME,
+        DigestAlgorithm::Sha256JcsV1,
+        sha256_digest_bytes(b"mfm.proof.adapter:deterministic-proof"),
+    )
+}
 
-/// Typed request for `proof.read`.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProofReadRequest {}
+/// Returns the deterministic proof adapter version.
+pub fn proof_adapter_version() -> Result<AdapterVersion, mfm_ids::IdentityError> {
+    AdapterVersion::new(ADAPTER_VERSION)
+}
 
-/// Typed response for `proof.read`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProofReadResponse {
-    /// Static proof payload field used by the acceptance tests.
+fn adapter_binding() -> mfm_program::Result<Vec<AdapterBindingSpec>> {
+    Ok(vec![AdapterBindingSpec {
+        adapter_kind: proof_adapter_kind().map_err(|error| {
+            mfm_program::PlanError::Key(format!("proof adapter kind invalid: {error}"))
+        })?,
+        adapter_version: proof_adapter_version().map_err(|error| {
+            mfm_program::PlanError::Key(format!("proof adapter version invalid: {error}"))
+        })?,
+    }])
+}
+
+fn state_kind(name: &'static str) -> mfm_program::Result<StateKind> {
+    StateKind::new(
+        NAMESPACE,
+        name,
+        DigestAlgorithm::Sha256JcsV1,
+        sha256_digest_bytes(format!("mfm.proof.state:{name}").as_bytes()),
+    )
+    .map_err(|error| mfm_program::PlanError::Key(error.to_string()))
+}
+
+fn state_version(name: &'static str) -> mfm_program::Result<StateVersion> {
+    StateVersion::new(format!("mfm.proof.state.{name}.v1"))
+        .map_err(|error| mfm_program::PlanError::Key(error.to_string()))
+}
+
+fn capability_kind(name: &'static str) -> mfm_capabilities::Result<CapabilityKind> {
+    CapabilityKind::new(
+        NAMESPACE,
+        name,
+        DigestAlgorithm::Sha256JcsV1,
+        sha256_digest_bytes(format!("mfm.proof.capability:{name}").as_bytes()),
+    )
+    .map_err(|error| CapabilityError::Identity(error.to_string()))
+}
+
+/// Read capability used by the proof fact state.
+pub struct ProofReadCapability;
+
+impl CapabilitySpec for ProofReadCapability {
+    type Role = ReadExternalRole;
+
+    fn kind() -> mfm_capabilities::Result<CapabilityKind> {
+        capability_kind("read")
+    }
+
+    fn version() -> mfm_capabilities::Result<CapabilityVersion> {
+        CapabilityVersion::new("mfm.proof.capability.read.v1")
+            .map_err(|error| CapabilityError::Identity(error.to_string()))
+    }
+
+    fn name() -> &'static str {
+        "mfm.proof.read"
+    }
+}
+
+/// External mutation capability used by the proof side-effect state.
+pub struct ProofMutationCapability;
+
+impl CapabilitySpec for ProofMutationCapability {
+    type Role = ExternalMutationAuthorityRole;
+
+    fn kind() -> mfm_capabilities::Result<CapabilityKind> {
+        capability_kind("mutation")
+    }
+
+    fn version() -> mfm_capabilities::Result<CapabilityVersion> {
+        CapabilityVersion::new("mfm.proof.capability.mutation.v1")
+            .map_err(|error| CapabilityError::Identity(error.to_string()))
+    }
+
+    fn name() -> &'static str {
+        "mfm.proof.mutation"
+    }
+}
+
+/// Config for the proof fact read state.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmConfig)]
+#[mfm(schema = "mfm.proof.config.read_fact")]
+pub struct ProofReadConfig {
+    /// Deterministic fact value returned by the enabled proof implementation.
+    pub fact_n: u64,
+}
+
+/// Config for the proof side-effect state.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmConfig)]
+#[mfm(schema = "mfm.proof.config.apply_side_effect")]
+pub struct ProofApplyConfig {
+    /// Stable action name included in the intent and idempotency input.
+    pub action: String,
+}
+
+/// Config for proof output assembly.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmConfig)]
+#[mfm(schema = "mfm.proof.config.assemble_output")]
+pub struct ProofAssembleConfig {
+    /// Output contract version.
+    pub output_version: u64,
+}
+
+/// Root proof workflow config.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmConfig)]
+#[mfm(schema = "mfm.proof.config.workflow")]
+pub struct ProofWorkflowConfig {
+    /// Workflow config contract version.
+    pub workflow_version: u64,
+    /// Deterministic fact value returned by the proof read state.
+    pub fact_n: u64,
+    /// Stable proof action used by the mutation intent.
+    pub action: String,
+}
+
+impl Default for ProofWorkflowConfig {
+    fn default() -> Self {
+        Self {
+            workflow_version: 1,
+            fact_n: 1,
+            action: "accept".to_owned(),
+        }
+    }
+}
+
+/// Recorded proof fact.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
+#[mfm(
+    namespace = "mfm.proof",
+    name = "fact",
+    version = "1",
+    schema = "mfm.proof.fact"
+)]
+pub struct ProofFact {
+    /// Deterministic fact value.
     pub n: u64,
 }
 
-/// Typed request for `proof.side_effect`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProofSideEffectRequest {
-    /// Idempotency key to bind the side effect.
-    pub idempotency_key: String,
+/// Canonical request used to record the proof fact.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
+#[mfm(
+    namespace = "mfm.proof",
+    name = "fact_request",
+    version = "1",
+    schema = "mfm.proof.fact_request"
+)]
+pub struct ProofFactRequest {
+    /// Deterministic proof source name.
+    pub source: String,
 }
 
-/// Typed response for `proof.side_effect`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProofSideEffectResponse {
-    /// Deterministic fake transaction hash used by proof flows.
+/// Canonical response artifact for the proof fact read.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
+#[mfm(
+    namespace = "mfm.proof",
+    name = "fact_response",
+    version = "1",
+    schema = "mfm.proof.fact_response"
+)]
+pub struct ProofFactResponse {
+    /// Recorded fact payload.
+    pub fact: ProofFact,
+}
+
+/// Proof mutation intent.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
+#[mfm(
+    namespace = "mfm.proof",
+    name = "intent",
+    version = "1",
+    schema = "mfm.proof.intent"
+)]
+pub struct ProofIntent {
+    /// Fact value being acted on.
+    pub fact_n: u64,
+    /// Stable action name.
+    pub action: String,
+}
+
+/// Stable proof idempotency input.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
+#[mfm(
+    namespace = "mfm.proof",
+    name = "idempotency_input",
+    version = "1",
+    schema = "mfm.proof.idempotency_input"
+)]
+pub struct ProofIdempotencyInput {
+    /// Fact value bound into the idempotency key.
+    pub fact_n: u64,
+    /// Stable action name bound into the idempotency key.
+    pub action: String,
+}
+
+/// Proof submission evidence.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
+#[mfm(
+    namespace = "mfm.proof",
+    name = "submission",
+    version = "1",
+    schema = "mfm.proof.submission"
+)]
+pub struct ProofSubmission {
+    /// Stable submission id.
+    pub submission_id: String,
+    /// Idempotency digest used for submission.
+    pub idempotency_digest: String,
+}
+
+/// Proof receipt evidence.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
+#[mfm(
+    namespace = "mfm.proof",
+    name = "receipt",
+    version = "1",
+    schema = "mfm.proof.receipt"
+)]
+pub struct ProofReceipt {
+    /// Deterministic transaction hash.
     pub tx_hash: String,
+    /// Submission id accepted by the implementation.
+    pub submission_id: String,
 }
 
-/// Error returned when a fact key cannot be derived from a request.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum FactKeyDerivationError {
-    /// The request could not be converted into JSON before hashing.
-    Serialization(String),
-    /// The request could not be canonically hashed for fact recording.
-    NotCanonical(CanonicalJsonError),
+/// Proof confirmation evidence.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
+#[mfm(
+    namespace = "mfm.proof",
+    name = "confirmation",
+    version = "1",
+    schema = "mfm.proof.confirmation"
+)]
+pub struct ProofConfirmation {
+    /// Confirmed transaction hash.
+    pub tx_hash: String,
+    /// Number of deterministic confirmations.
+    pub confirmations: u64,
 }
 
-impl std::fmt::Display for FactKeyDerivationError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            FactKeyDerivationError::Serialization(err) => {
-                write!(f, "request could not be serialized to json: {err}")
-            }
-            FactKeyDerivationError::NotCanonical(err) => write!(f, "request not canonical: {err}"),
+/// Terminal side-effect result consumed by proof output assembly.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
+#[mfm(
+    namespace = "mfm.proof",
+    name = "side_effect_result",
+    version = "1",
+    schema = "mfm.proof.side_effect_result"
+)]
+pub struct ProofSideEffectResult {
+    /// Confirmed transaction hash.
+    pub tx_hash: String,
+    /// Number of deterministic confirmations.
+    pub confirmations: u64,
+    /// Terminal side-effect status.
+    pub status: String,
+}
+
+/// Terminal proof output.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
+#[mfm(
+    namespace = "mfm.proof",
+    name = "output",
+    version = "1",
+    schema = "mfm.proof.output"
+)]
+pub struct ProofOutput {
+    /// Recorded fact used by the proof workflow.
+    pub fact: ProofFact,
+    /// Confirmed side-effect result.
+    pub side_effect: ProofSideEffectResult,
+}
+
+/// Input consumed by proof output assembly.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, StateInput)]
+#[mfm(schema = "mfm.proof.input.assemble_output")]
+pub struct ProofAssembleInput {
+    /// Recorded fact.
+    pub fact: ProofFact,
+    /// Confirmed side-effect result.
+    pub side_effect: ProofSideEffectResult,
+}
+
+/// Public output contract for proof workflows.
+#[derive(PublicOutputs)]
+#[mfm(schema = "mfm.proof.public_outputs")]
+pub struct ProofPublicOutputs<'program, 'scope> {
+    /// Terminal proof output.
+    pub output: mfm_program::Handle<'program, 'scope, ProofOutput>,
+}
+
+/// Operation output handles produced by [`ProofWorkflowOperation`].
+#[derive(OperationOutput)]
+#[mfm(schema = "mfm.proof.operation_outputs")]
+pub struct ProofOperationOutputs<'program, 'scope> {
+    /// Terminal proof output.
+    pub output: mfm_program::Handle<'program, 'scope, ProofOutput>,
+}
+
+/// Read state that records a typed proof fact.
+pub struct ProofReadFactState {
+    config: ProofReadConfig,
+}
+
+impl StateSpec for ProofReadFactState {
+    type Config = ProofReadConfig;
+    type Input = ();
+    type Output = ProofFact;
+    type Effect = ReadExternal;
+    type Caps = (ProofReadCapability,);
+
+    fn kind() -> mfm_program::Result<StateKind> {
+        state_kind("read_fact")
+    }
+
+    fn version() -> mfm_program::Result<StateVersion> {
+        state_version("read_fact")
+    }
+
+    fn name() -> &'static str {
+        "mfm.proof.read_fact"
+    }
+
+    fn adapter_bindings() -> mfm_program::Result<Vec<AdapterBindingSpec>> {
+        adapter_binding()
+    }
+
+    fn new(config: Self::Config) -> mfm_program::Result<Self> {
+        Ok(Self { config })
+    }
+}
+
+impl ReadState for ProofReadFactState {
+    type RunFuture<'a> = future::Ready<StateResult<Self::Output>>;
+
+    fn run<'a>(&'a self, _input: Self::Input, _caps: &'a Self::Caps) -> Self::RunFuture<'a> {
+        future::ready(Ok(ProofFact {
+            n: self.config.fact_n,
+        }))
+    }
+}
+
+/// Side-effect state that applies a proof mutation through typed intent and receipt contracts.
+pub struct ProofApplySideEffectState {
+    config: ProofApplyConfig,
+}
+
+impl StateSpec for ProofApplySideEffectState {
+    type Config = ProofApplyConfig;
+    type Input = ProofFact;
+    type Output = ProofSideEffectResult;
+    type Effect = ApplySideEffect;
+    type Caps = (ProofMutationCapability,);
+
+    fn kind() -> mfm_program::Result<StateKind> {
+        state_kind("apply_side_effect")
+    }
+
+    fn version() -> mfm_program::Result<StateVersion> {
+        state_version("apply_side_effect")
+    }
+
+    fn name() -> &'static str {
+        "mfm.proof.apply_side_effect"
+    }
+
+    fn adapter_bindings() -> mfm_program::Result<Vec<AdapterBindingSpec>> {
+        adapter_binding()
+    }
+
+    fn new(config: Self::Config) -> mfm_program::Result<Self> {
+        if config.action.trim().is_empty() {
+            return Err(mfm_program::PlanError::Key(
+                "proof action must be non-empty".to_owned(),
+            ));
         }
+        Ok(Self { config })
     }
 }
 
-impl std::error::Error for FactKeyDerivationError {}
+impl SideEffectState for ProofApplySideEffectState {
+    type Intent = ProofIntent;
+    type IdempotencyInput = ProofIdempotencyInput;
+    type Submission = ProofSubmission;
+    type Receipt = ProofReceipt;
+    type Confirmation = ProofConfirmation;
+    type SubmitFuture<'a> = future::Ready<StateResult<Self::Submission>>;
 
-fn info(code: &'static str, category: ErrorCategory, message: &'static str) -> ErrorInfo {
-    ErrorInfo {
-        code: ErrorCode::must_new(code),
-        category,
-        retryable: false,
-        message: message.to_string(),
-        details: None,
-    }
-}
-
-fn io_other(code: &'static str, category: ErrorCategory, message: &'static str) -> IoError {
-    IoError::Other(info(code, category, message))
-}
-
-fn request_to_value<Request: Serialize>(
-    request: &Request,
-) -> Result<serde_json::Value, FactKeyDerivationError> {
-    serde_json::to_value(request)
-        .map_err(|err| FactKeyDerivationError::Serialization(err.to_string()))
-}
-
-fn fact_key_for_request_value(
-    state_id: &StateId,
-    purpose: &str,
-    request: &serde_json::Value,
-) -> Result<FactKey, FactKeyDerivationError> {
-    let req_id = artifact_id_for_json(request).map_err(FactKeyDerivationError::NotCanonical)?;
-    Ok(FactKey(format!(
-        "mfm:proof|state:{}|purpose:{purpose}|req:{}",
-        state_id.as_str(),
-        req_id.as_str()
-    )))
-}
-
-/// Derives a deterministic fact key for a proof request.
-pub fn fact_key_for_request<Request: Serialize>(
-    state_id: &StateId,
-    purpose: &str,
-    request: &Request,
-) -> Result<FactKey, FactKeyDerivationError> {
-    let request = request_to_value(request)?;
-    fact_key_for_request_value(state_id, purpose, &request)
-}
-
-fn proof_io_call(namespace: &'static str, request: serde_json::Value, fact_key: FactKey) -> IoCall {
-    IoCall {
-        namespace: namespace.to_string(),
-        request,
-        fact_key: Some(fact_key),
-    }
-}
-
-/// First-class proof client wrapper over `IoProvider`.
-pub struct ProofIoClient<'a> {
-    state_id: StateId,
-    io: &'a mut dyn IoProvider,
-}
-
-impl<'a> ProofIoClient<'a> {
-    /// Creates a new client for the given state and IO provider.
-    pub fn new(state_id: StateId, io: &'a mut dyn IoProvider) -> Self {
-        Self { state_id, io }
-    }
-
-    async fn call<Response, Request>(
-        &mut self,
-        namespace: &'static str,
-        purpose: &str,
-        request: Request,
-    ) -> Result<Response, IoError>
-    where
-        Response: for<'de> Deserialize<'de>,
-        Request: Serialize,
-    {
-        let request = request_to_value(&request).map_err(|err| match err {
-            FactKeyDerivationError::Serialization(_) => io_other(
-                "proof_request_serialize_failed",
-                ErrorCategory::ParsingInput,
-                "proof request could not be serialized to json",
-            ),
-            FactKeyDerivationError::NotCanonical(_) => {
-                unreachable!("request_to_value only returns serialization errors")
-            }
-        })?;
-        let fact_key = fact_key_for_request_value(&self.state_id, purpose, &request).map_err(
-            |err| match err {
-                FactKeyDerivationError::Serialization(_) => unreachable!(
-                    "fact_key_for_request_value only hashes already-serialized json values"
-                ),
-                FactKeyDerivationError::NotCanonical(CanonicalJsonError::FloatNotAllowed) => {
-                    io_other(
-                        "proof_request_not_canonical",
-                        ErrorCategory::ParsingInput,
-                        "proof request was not canonical-json-hashable (floats are forbidden)",
-                    )
-                }
-                FactKeyDerivationError::NotCanonical(CanonicalJsonError::SecretsNotAllowed) => {
-                    io_other(
-                        "secrets_detected",
-                        ErrorCategory::Unknown,
-                        "proof request contained secrets",
-                    )
-                }
-            },
-        )?;
-
-        let result = self
-            .io
-            .call(proof_io_call(namespace, request, fact_key))
-            .await?;
-        serde_json::from_value(result.response).map_err(|_| {
-            io_other(
-                "proof_response_invalid",
-                ErrorCategory::Unknown,
-                "proof response payload had an unexpected shape",
-            )
+    fn prepare_intent(&self, input: &Self::Input) -> StateResult<Self::Intent> {
+        Ok(ProofIntent {
+            fact_n: input.n,
+            action: self.config.action.clone(),
         })
     }
 
-    /// Reads the proof fact payload.
-    pub async fn read(
-        &mut self,
-        purpose: &str,
-        request: ProofReadRequest,
-    ) -> Result<ProofReadResponse, IoError> {
-        self.call(NAMESPACE_PROOF_READ, purpose, request).await
+    fn idempotency_input(
+        &self,
+        _input: &Self::Input,
+        intent: &Self::Intent,
+    ) -> StateResult<Self::IdempotencyInput> {
+        Ok(ProofIdempotencyInput {
+            fact_n: intent.fact_n,
+            action: intent.action.clone(),
+        })
     }
 
-    /// Applies the proof side effect.
-    pub async fn apply_side_effect(
-        &mut self,
-        purpose: &str,
-        request: ProofSideEffectRequest,
-    ) -> Result<ProofSideEffectResponse, IoError> {
-        self.call(NAMESPACE_PROOF_SIDE_EFFECT, purpose, request)
-            .await
+    fn submit<'a>(
+        &'a self,
+        intent: &'a Self::Intent,
+        key: &'a IdempotencyKey<Self::IdempotencyInput>,
+        _caps: &'a Self::Caps,
+    ) -> Self::SubmitFuture<'a> {
+        future::ready(Ok(ProofSubmission {
+            submission_id: format!("proof-submission-{}-{}", intent.action, intent.fact_n),
+            idempotency_digest: key.digest().as_str().to_owned(),
+        }))
+    }
+
+    fn output_from_confirmation(
+        &self,
+        _input: &Self::Input,
+        _intent: &Self::Intent,
+        confirmation: &Self::Confirmation,
+    ) -> StateResult<Self::Output> {
+        Ok(ProofSideEffectResult {
+            tx_hash: confirmation.tx_hash.clone(),
+            confirmations: confirmation.confirmations,
+            status: "confirmed".to_owned(),
+        })
+    }
+}
+
+/// Pure state that assembles the proof public output value.
+pub struct ProofAssembleOutputState {
+    config: ProofAssembleConfig,
+}
+
+impl StateSpec for ProofAssembleOutputState {
+    type Config = ProofAssembleConfig;
+    type Input = ProofAssembleInput;
+    type Output = ProofOutput;
+    type Effect = Pure;
+    type Caps = NoCaps;
+
+    fn kind() -> mfm_program::Result<StateKind> {
+        state_kind("assemble_output")
+    }
+
+    fn version() -> mfm_program::Result<StateVersion> {
+        state_version("assemble_output")
+    }
+
+    fn name() -> &'static str {
+        "mfm.proof.assemble_output"
+    }
+
+    fn new(config: Self::Config) -> mfm_program::Result<Self> {
+        Ok(Self { config })
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    use async_trait::async_trait;
-    use mfm_machine::ids::ArtifactId;
-    use std::collections::BTreeMap;
-
-    struct PanicIo;
-
-    #[async_trait]
-    impl IoProvider for PanicIo {
-        async fn call(&mut self, _call: IoCall) -> Result<mfm_machine::io::IoResult, IoError> {
-            panic!("proof client should fail before reaching the io provider")
+impl PureState for ProofAssembleOutputState {
+    fn run(&self, input: Self::Input) -> StateResult<Self::Output> {
+        if self.config.output_version != 1 {
+            return Err(StateError::Message(
+                "unsupported proof output version".to_owned(),
+            ));
         }
-
-        async fn record_value(
-            &mut self,
-            _key: FactKey,
-            _value: serde_json::Value,
-        ) -> Result<ArtifactId, IoError> {
-            Ok(ArtifactId::must_new("0".repeat(64)))
-        }
-
-        async fn get_recorded_fact(
-            &mut self,
-            _key: &FactKey,
-        ) -> Result<Option<ArtifactId>, IoError> {
-            Ok(None)
-        }
-
-        async fn now_millis(&mut self) -> Result<u64, IoError> {
-            Ok(0)
-        }
-
-        async fn random_bytes(&mut self, _n: usize) -> Result<Vec<u8>, IoError> {
-            Ok(Vec::new())
-        }
-
-        async fn sleep_ms(&mut self, _duration_ms: u64) -> Result<(), IoError> {
-            Ok(())
-        }
+        Ok(ProofOutput {
+            fact: input.fact,
+            side_effect: input.side_effect,
+        })
     }
+}
 
-    #[test]
-    fn fact_key_for_request_reports_serialization_failure() {
-        let mut request = BTreeMap::new();
-        request.insert((1u8, 2u8), 3u8);
+/// Facts recorded by a proof implementation and supplied to replay verifiers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordedProofFacts {
+    /// Read fact observed by the proof workflow.
+    pub fact: ProofFact,
+}
 
-        let err = fact_key_for_request(
-            &StateId::must_new("proof.tests.fact_key".to_string()),
-            "proof.read",
-            &request,
-        )
-        .expect_err("tuple-key map should not serialize to json objects");
+/// No-live-IO replay verifier contract for proof implementations.
+pub trait ProofReplayVerifier: Send + Sync {
+    /// Verifies recorded submission evidence.
+    fn verify_submission(
+        &self,
+        intent: &ProofIntent,
+        submission: &ProofSubmission,
+        facts: &RecordedProofFacts,
+    ) -> Result<(), ProofReplayError>;
 
-        match err {
-            FactKeyDerivationError::Serialization(message) => {
-                assert!(
-                    !message.is_empty(),
-                    "serialization error should include context"
-                );
-            }
-            other => panic!("unexpected fact-key derivation error: {other:?}"),
-        }
-    }
+    /// Verifies recorded receipt evidence.
+    fn verify_receipt(
+        &self,
+        intent: &ProofIntent,
+        receipt: &ProofReceipt,
+        facts: &RecordedProofFacts,
+    ) -> Result<(), ProofReplayError>;
 
-    #[tokio::test]
-    async fn proof_client_returns_typed_error_on_request_serialization_failure() {
-        let mut io = PanicIo;
-        let mut client =
-            ProofIoClient::new(StateId::must_new("proof.tests.client".to_string()), &mut io);
-        let mut request = BTreeMap::new();
-        request.insert((1u8, 2u8), 3u8);
+    /// Verifies recorded confirmation evidence.
+    fn verify_confirmation(
+        &self,
+        receipt: &ProofReceipt,
+        confirmation: &ProofConfirmation,
+        facts: &RecordedProofFacts,
+    ) -> Result<(), ProofReplayError>;
+}
 
-        let err = client
-            .call::<ProofReadResponse, _>(NAMESPACE_PROOF_READ, "proof.read", request)
-            .await
-            .expect_err("bad json serialization should be surfaced as an io error");
+/// Proof replay verification error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProofReplayError {
+    /// Redaction-safe message.
+    pub message: String,
+}
 
-        match err {
-            IoError::Other(info) => {
-                assert_eq!(info.code.as_str(), "proof_request_serialize_failed")
-            }
-            other => panic!("unexpected io error: {other:?}"),
+impl ProofReplayError {
+    /// Creates a replay error.
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
         }
     }
 }
+
+impl std::fmt::Display for ProofReplayError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ProofReplayError {}

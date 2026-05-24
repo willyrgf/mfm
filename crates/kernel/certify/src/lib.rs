@@ -387,7 +387,15 @@ impl<'a> DraftLowerer<'a> {
                 output_cell: node.output_cell_id.clone(),
                 effect_kind: node.effect_kind.clone(),
                 capability_bindings: node.capability_bindings.clone(),
-                adapter_bindings: Vec::new(),
+                adapter_bindings: node
+                    .adapter_bindings
+                    .iter()
+                    .map(|binding| spec::AdapterBinding {
+                        adapter_kind: binding.adapter_kind.clone(),
+                        adapter_version: binding.adapter_version.clone(),
+                        binding_digest: None,
+                    })
+                    .collect(),
                 side_effect,
                 framework: None,
                 planning_lineage,

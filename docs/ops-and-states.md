@@ -54,7 +54,6 @@ REST `/v1/runs/start` and feature `run.start` require tagged request envelopes
 
 | Op ID | Version | Owner | Purpose | Primary states | Entry points |
 |---|---|---|---|---|---|
-| `proof` | `v1` | `crates/ops/proof-op` | Determinism and resume acceptance workflow | `ProofReadState`, `ProofApplySideEffectState`, `AssembleOutputState` | `mfm run start`, feature `run.start` |
 | `keystore_import` | `v1` | `crates/ops/keystore-op` | Import a key into the keystore | `KeystoreImportState` | `mfm keystore import`, feature `run.start` |
 | `keystore_list` | `v1` | `crates/ops/keystore-op` | List keystore entries | `KeystoreListState` | `mfm keystore list`, feature `run.start` |
 | `keystore_delete` | `v1` | `crates/ops/keystore-op` | Delete a keystore entry | `KeystoreDeleteState` | `mfm keystore delete`, feature `run.start` |
@@ -83,9 +82,10 @@ Notes:
   the raw `evm` executor is kept for internal/direct use only.
 - Built-in `evm_*` ops and canonical `rpc.control` requests require explicit `network_id`;
   `control_scope` defaults to `shared` unless the caller opts into isolation.
-- `proof` remains acceptance/demo infrastructure. Its shared states use the typed
-  `mfm-collectors-proof` client, while `mfm-transports-proof` owns the live deterministic demo
-  transport behavior.
+- `proof` is no longer registered as a legacy dynamic `run.start` op. Its executable surface is the
+  certified typed program in `crates/ops/proof-op`, with typed fact, side-effect, receipt,
+  confirmation, public-output, and replay-verifier contracts in `crates/collectors/proof` and the
+  deterministic typed runner implementation in `crates/transports/proof`.
 - CLI/API transport layers stay thin; dedicated CLI commands exist only for a subset of ops.
 
 ## Shared Production States
@@ -106,7 +106,6 @@ The shared states below keep reusable EVM execution behavior in `crates/evm-runt
 |---|---|---|---|
 | `crates/states/common/src/states/nix.rs` | `NixExecState` | Execute a nix-resolved or pre-resolved program through the exec namespace, with optional runtime stdin handoff and non-secret environment overrides for compatibility backends | `nix_app` |
 | `crates/states/common/src/states/publish.rs` | `WriteJsonValueState`, `WriteContextValueArtifactState` | Deterministic JSON publication and context-to-artifact emission for thin workflow boundaries | `evm_deploy_configure_validate_config_build`, `portfolio_config_build`, `portfolio_tracker` (canonical input path) |
-| `crates/states/common/src/states/proof.rs` | `ProofReadState`, `ProofApplySideEffectState` | Typed proof read and side-effect states that avoid raw proof namespace strings | `proof` |
 | `crates/states/keystore/src/states/admin.rs` | `KeystoreImportState`, `KeystoreListState`, `KeystoreDeleteState` | Reusable keystore administration flows that route typed `local.keystore.*` requests and persist non-secret reports; live filesystem/prompt/password handling stays in `crates/transports/local-keystore` | `keystore_import`, `keystore_list`, `keystore_delete` |
 | `crates/states/keystore/src/states/tx.rs` | `KeystoreTxSignState` | Reusable transaction-signing state that routes typed local-keystore signing requests and persists only the non-secret signing report; EIP-1559 transaction modeling/encoding lives in `crates/evm-core`, key signing in `crates/core`, and raw transaction file writes stay in `crates/transports/local-keystore` | `keystore_tx_sign` |
 | `crates/evm-runtime/src/states/read.rs` | `ReadHexStringState`, `ReadU256HexState`, `EthCallState`, `ReadU64HexState`, `NativeBalanceState`, `TokenBalanceState` | Reusable control-plane-backed chain read/query states | `evm_read`, `portfolio_execute`, `portfolio_tracker` |
@@ -123,7 +122,7 @@ assemble domain-specific outputs rather than reusable execution primitives.
 
 | Owner | State type | Why still local |
 |---|---|---|
-| `crates/ops/proof-op` | `AssembleOutputState` | Domain-specific output artifact for the proof acceptance workflow |
+| `crates/ops/proof-op` | `ProofWorkflowOperation` | Typed proof program assembly; executable proof state contracts live in `crates/collectors/proof` and are certified before runtime |
 
 ## Update Policy
 

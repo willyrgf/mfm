@@ -95,7 +95,6 @@ use mfm_op_portfolio_tracker::{
     portfolio_tracker_internal_ops, PORTFOLIO_CONFIG_BUILD_OP_ID, PORTFOLIO_PUBLIC_OP_VERSION,
     PORTFOLIO_TRACKER_OP_ID,
 };
-use mfm_op_proof::ProofOp;
 use mfm_portfolio_config::{
     canonicalize_portfolio_snapshot_authored_config, parse_portfolio_snapshot_authored_config,
     parse_portfolio_snapshot_authored_config_with_hint,
@@ -120,7 +119,6 @@ use mfm_transports_local_keystore::{
     LocalKeystoreImportResource, LocalKeystoreIoTransportFactory, LocalKeystoreListResource,
     LocalKeystoreResource, LocalKeystoreTxSignResource,
 };
-use mfm_transports_proof::ProofIoTransportFactory;
 use mfm_transports_rpc_control::{RpcControlConfigError, RpcControlTransportFactory};
 
 const ENV_ARTIFACT_BACKEND: &str = "MFM_ARTIFACT_BACKEND";
@@ -565,7 +563,6 @@ pub struct DefaultOperationPlugin;
 
 impl OperationPlugin for DefaultOperationPlugin {
     fn register_operations(&self, registry: &mut HashMapOperationRegistry) {
-        registry.register(Arc::new(ProofOp::default()));
         registry.register(Arc::new(KeystoreImportOp));
         registry.register(Arc::new(KeystoreListOp));
         registry.register(Arc::new(KeystoreDeleteOp));
@@ -595,7 +592,6 @@ pub struct DefaultTransportPlugin;
 
 impl TransportPlugin for DefaultTransportPlugin {
     fn register_transports(&self, registry: &mut HashMapTransportRegistry) -> Result<(), AppError> {
-        register_transport_factory(registry, Arc::new(ProofIoTransportFactory))?;
         register_transport_factory(registry, Arc::new(ExecProgramTransportFactory::default()))?;
         register_transport_factory(registry, Arc::new(NixFlakeTransportFactory::from_env()))?;
         register_transport_factory(registry, Arc::new(LocalFsIoTransportFactory))?;
@@ -2649,8 +2645,29 @@ mod tests {
                 artifacts: Arc::new(NoopArtifactStore),
             },
             run_id: RunId(uuid::Uuid::new_v4()),
-            state_id: StateId::must_new("app.tests.proof".to_string()),
+            state_id: StateId::must_new("app.tests.echo".to_string()),
             attempt: 0,
+        }
+    }
+
+    struct EchoTransportFactory;
+
+    impl LiveIoTransportFactory for EchoTransportFactory {
+        fn namespace_group(&self) -> &str {
+            "app.test"
+        }
+
+        fn make(&self, _env: LiveIoEnv) -> Box<dyn mfm_machine::live_io::LiveIoTransport> {
+            Box::new(EchoTransport)
+        }
+    }
+
+    struct EchoTransport;
+
+    #[async_trait]
+    impl mfm_machine::live_io::LiveIoTransport for EchoTransport {
+        async fn call(&mut self, call: IoCall) -> Result<serde_json::Value, IoError> {
+            Ok(serde_json::json!({ "namespace": call.namespace }))
         }
     }
 
@@ -2768,7 +2785,6 @@ mod tests {
         let registry = default_transport_registry();
 
         for group in [
-            "proof",
             "exec",
             "nix.exec",
             "local.fs",
@@ -2781,24 +2797,14 @@ mod tests {
                 "expected namespace group {group} to be registered"
             );
         }
-        assert_eq!(registry.all().len(), 7);
+        assert_eq!(registry.all().len(), 6);
     }
 
     #[tokio::test]
-    async fn router_from_default_registry_routes_proof_namespace() {
+    async fn router_from_default_registry_rejects_unknown_namespace() {
         let registry = default_transport_registry();
         let factory = RouterLiveIoTransportFactory::from_registry(&registry);
         let mut transport = factory.make(test_live_io_env());
-
-        let response = transport
-            .call(IoCall {
-                namespace: "proof.read".to_string(),
-                request: serde_json::json!({}),
-                fact_key: None,
-            })
-            .await
-            .expect("proof route should succeed");
-        assert_eq!(response, serde_json::json!({ "n": 1 }));
 
         let err = transport
             .call(IoCall {
@@ -2813,7 +2819,10 @@ mod tests {
 
     #[tokio::test]
     async fn child_run_wrapper_forwards_non_child_namespaces() {
-        let registry = default_transport_registry();
+        let mut registry = HashMapTransportRegistry::new();
+        registry
+            .register(Arc::new(EchoTransportFactory))
+            .expect("echo transport should register");
         let base_factory: Arc<dyn LiveIoTransportFactory> =
             Arc::new(RouterLiveIoTransportFactory::from_registry(&registry));
         let wrapper = ChildRunLiveIoTransportFactory::new(Arc::new(PanicResolver), base_factory);
@@ -2821,13 +2830,16 @@ mod tests {
 
         let response = transport
             .call(IoCall {
-                namespace: "proof.read".to_string(),
+                namespace: "app.test.echo".to_string(),
                 request: serde_json::json!({}),
                 fact_key: None,
             })
             .await
-            .expect("proof route should survive child-run wrapper");
-        assert_eq!(response, serde_json::json!({ "n": 1 }));
+            .expect("non-child route should survive child-run wrapper");
+        assert_eq!(
+            response,
+            serde_json::json!({ "namespace": "app.test.echo" })
+        );
     }
 
     #[tokio::test]
@@ -2912,7 +2924,7 @@ mod tests {
     fn run_start_rejects_unknown_fields() {
         let payload = serde_json::json!({
             "kind": "single_op_start_v1",
-            "op_id": "proof",
+            "op_id": "plugin_single_op",
             "op_version": "v1",
             "op_config": {},
             "unexpected": true

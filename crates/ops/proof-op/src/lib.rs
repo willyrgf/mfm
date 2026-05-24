@@ -1,222 +1,181 @@
-#![cfg_attr(test, allow(clippy::disallowed_methods, clippy::disallowed_types))]
-#![cfg_attr(not(test), deny(clippy::disallowed_methods, clippy::disallowed_types))]
 #![warn(missing_docs)]
-//! Proof op (acceptance tests).
+//! Typed proof workflow operation.
 //!
-//! Source of truth: `docs/design.md`.
-//!
-//! This crate is intentionally thin: it assembles reusable shared states into a deterministic
-//! acceptance-test workflow that exercises read IO, idempotent side effects, and output writing.
+//! The proof workflow is authored through `mfm-program` and lowers to certified typed state
+//! programs. It does not expose the legacy dynamic `PlannedOp`, `PortKey`, context-key, or generic
+//! IO surfaces.
 //!
 //! # Examples
 //!
 //! ```rust
-//! use mfm_op_proof::ProofOp;
-//! use mfm_sdk::op::Operation;
+//! use mfm_op_proof::{proof_program_draft, ProofWorkflowConfig};
 //!
-//! let op = ProofOp::default();
-//! assert_eq!(op.op_id().as_str(), "proof");
+//! let draft = proof_program_draft(ProofWorkflowConfig::default()).unwrap();
+//! assert_eq!(draft.state_nodes().len(), 3);
 //! ```
 
-use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
-
-use async_trait::async_trait;
-
-use mfm_machine::config::RunConfig;
-use mfm_machine::context::DynContext;
-use mfm_machine::errors::StateError;
-use mfm_machine::ids::{ContextKey, FactKey, OpId, OpPath};
-use mfm_machine::io::IoProvider;
-use mfm_machine::meta::StateMeta;
-use mfm_machine::plan::DependencyEdge;
-use mfm_machine::recorder::EventRecorder;
-use mfm_machine::state::{SnapshotPolicy, State, StateOutcome};
-use mfm_state_common::ctx as op_ctx;
-use mfm_state_common::states::meta;
-use mfm_state_common::states::proof::{ProofApplySideEffectState, ProofReadState};
-use mfm_state_common::states::publish::WriteContextValueArtifactState;
-use mfm_state_common::states::side_effect::TriggerOnce;
-
-use mfm_sdk::errors::SdkError;
-use mfm_sdk::ids::PortKey;
-use mfm_sdk::op::{
-    leaf_state_id, leaf_state_node, LeafOpSpec, OpInterface, Operation, PlannedOp, PlannedOpKind,
+use mfm_certify::{certify_program_draft, CertifiedTypedSpec};
+pub use mfm_collectors_proof::{
+    proof_adapter_kind, proof_adapter_version, ProofApplyConfig, ProofApplySideEffectState,
+    ProofAssembleConfig, ProofAssembleInput, ProofAssembleInputHandles, ProofAssembleOutputState,
+    ProofConfirmation, ProofFact, ProofFactRequest, ProofFactResponse, ProofIdempotencyInput,
+    ProofIntent, ProofMutationCapability, ProofOperationOutputs, ProofOutput, ProofPublicOutputs,
+    ProofReadCapability, ProofReadConfig, ProofReadFactState, ProofReceipt, ProofReplayError,
+    ProofReplayVerifier, ProofSideEffectResult, ProofSubmission, ProofWorkflowConfig,
+    RecordedProofFacts,
+};
+use mfm_ids::{DigestAlgorithm, OperationKind, OperationVersion};
+use mfm_program::{
+    build_root_with_registries, Operation, OperationKey, OperationRegistryBuilder, PublicOutputKey,
+    RootBuilder, ScopeKey, StateKey, StateRegistryBuilder,
 };
 
-#[cfg(test)]
-use mfm_machine::errors::ErrorCategory;
-#[cfg(test)]
-use mfm_machine::errors::ErrorInfo;
-#[cfg(test)]
-use mfm_machine::events::DomainEvent;
-#[cfg(test)]
-use mfm_state_common::errors as op_errors;
-#[cfg(test)]
-use mfm_state_common::idempotency as op_idempotency;
+const PROOF_OPERATION_KIND_NAME: &str = "workflow";
+const PROOF_OPERATION_VERSION: &str = "mfm.proof.operation.workflow.v1";
+const ROOT_SCOPE: &str = "proof";
+const OP_KEY: &str = "proof_workflow";
+const PUBLIC_OUTPUT_KEY: &str = "proof";
 
-const OP_ID: &str = "proof";
-const OP_VERSION: &str = "v1";
-const PORT_OUTPUT: &str = "output";
-const KEY_READ_FACT: &str = "read_fact";
-const KEY_IDEMPOTENCY: &str = "idempotency_key";
-const KEY_SIDE_EFFECT_RESULT: &str = "side_effect_result";
-const KEY_OUTPUT_PAYLOAD: &str = "output_payload";
+/// Typed proof workflow operation.
+pub struct ProofWorkflowOperation;
 
-// Custom domain event (audit only).
-const DOMAIN_EVENT_IDEMPOTENCY_KEY: &str = "proof_idempotency_key";
+impl Operation for ProofWorkflowOperation {
+    type Config = ProofWorkflowConfig;
+    type Input<'program, 'scope> = ();
+    type Output<'program, 'scope> = ProofOperationOutputs<'program, 'scope>;
 
-#[cfg(test)]
-fn info(code: &'static str, category: ErrorCategory, retryable: bool, message: &str) -> ErrorInfo {
-    op_errors::info(code, category, retryable, message)
-}
-
-fn ctx_key(s: &'static str) -> ContextKey {
-    ContextKey(s.to_string())
-}
-
-fn output_fact_key(op_path: &OpPath) -> FactKey {
-    FactKey(format!("proof:output|op:{}", op_path.0))
-}
-
-/// Proof op implementation used by acceptance tests.
-#[derive(Clone, Default)]
-pub struct ProofOp {
-    orphan_after_side_effect: Option<TriggerOnce>,
-}
-
-impl ProofOp {
-    /// Configure this op to request the engine to stop after the side-effect state handler returns once.
-    ///
-    /// Intended for crash/resume tests (orphan attempt simulation).
-    pub fn with_orphan_after_side_effect(
-        mut self,
-        stop_after_handler_once: Arc<AtomicBool>,
-    ) -> Self {
-        self.orphan_after_side_effect = Some(TriggerOnce::arm(stop_after_handler_once));
-        self
-    }
-}
-
-impl Operation for ProofOp {
-    fn op_id(&self) -> OpId {
-        OpId::must_new(OP_ID.to_string())
+    fn kind() -> mfm_program::Result<OperationKind> {
+        OperationKind::new(
+            "mfm.proof",
+            PROOF_OPERATION_KIND_NAME,
+            DigestAlgorithm::Sha256JcsV1,
+            mfm_canonical::sha256_digest_bytes(b"mfm.proof.operation:workflow"),
+        )
+        .map_err(|error| mfm_program::PlanError::Key(error.to_string()))
     }
 
-    fn op_version(&self) -> String {
-        OP_VERSION.to_string()
+    fn version() -> mfm_program::Result<OperationVersion> {
+        OperationVersion::new(PROOF_OPERATION_VERSION)
+            .map_err(|error| mfm_program::PlanError::Key(error.to_string()))
     }
 
-    fn expand(
+    fn name() -> &'static str {
+        "mfm.proof.workflow"
+    }
+
+    fn expand<'program, 'scope>(
         &self,
-        op_path: OpPath,
-        _op_config: &serde_json::Value,
-        _run_config: &RunConfig,
-    ) -> Result<PlannedOp, SdkError> {
-        let read_sid = leaf_state_id(&op_path, "read_facts")?;
-        let side_sid = leaf_state_id(&op_path, "apply_side_effect")?;
-        let assemble_sid = leaf_state_id(&op_path, "assemble_output")?;
-        let publish_sid = leaf_state_id(&op_path, "publish_output")?;
-
-        let read = Arc::new(ProofReadState {
-            state_id: read_sid.clone(),
-            purpose: "proof_read",
-            output_key: ctx_key(KEY_READ_FACT),
-            io_error_code: "read_fact_io_failed",
-            io_error_message: "failed to read input fact",
-        });
-        let side = Arc::new(ProofApplySideEffectState {
-            state_id: side_sid.clone(),
-            op_id: OP_ID,
-            input_key: ctx_key(KEY_READ_FACT),
-            idempotency_key_output: ctx_key(KEY_IDEMPOTENCY),
-            output_key: ctx_key(KEY_SIDE_EFFECT_RESULT),
-            event_name: DOMAIN_EVENT_IDEMPOTENCY_KEY.to_string(),
-            purpose: "proof_side_effect",
-            orphan_after_side_effect: self.orphan_after_side_effect.clone(),
-        });
-        let assemble = Arc::new(AssembleOutputState);
-        let publish = Arc::new(WriteContextValueArtifactState {
-            state_id: publish_sid.clone(),
-            input_key: ctx_key(KEY_OUTPUT_PAYLOAD),
-            fact_key: output_fact_key(&op_path),
-            output_artifact_id_key: ctx_key(PORT_OUTPUT),
-            missing_input_code: "missing_proof_output_payload",
-            missing_input_message: "missing assembled proof output payload before publication",
-        });
-
-        Ok(PlannedOp {
-            interface: OpInterface {
-                imports: Vec::new(),
-                exports: vec![PortKey(PORT_OUTPUT.to_string())],
+        config: Self::Config,
+        _input: Self::Input<'program, 'scope>,
+        builder: &mut mfm_program::ScopeBuilder<'program, 'scope>,
+    ) -> mfm_program::Result<Self::Output<'program, 'scope>> {
+        if config.workflow_version != 1 {
+            return Err(mfm_program::PlanError::Key(
+                "unsupported proof workflow config version".to_owned(),
+            ));
+        }
+        let fact = builder.state::<ProofReadFactState, _>(
+            StateKey::new("read_fact")?,
+            ProofReadConfig {
+                fact_n: config.fact_n,
             },
-            kind: PlannedOpKind::Leaf(LeafOpSpec {
-                states: vec![
-                    leaf_state_node(&op_path, "read_facts", read)?,
-                    leaf_state_node(&op_path, "apply_side_effect", side)?,
-                    leaf_state_node(&op_path, "assemble_output", assemble)?,
-                    leaf_state_node(&op_path, "publish_output", publish)?,
-                ],
-                edges: vec![
-                    DependencyEdge {
-                        from: read_sid.clone(),
-                        to: side_sid.clone(),
-                    },
-                    DependencyEdge {
-                        from: side_sid,
-                        to: assemble_sid.clone(),
-                    },
-                    DependencyEdge {
-                        from: assemble_sid,
-                        to: publish_sid,
-                    },
-                ],
-            }),
-        })
+            (),
+        )?;
+        let side_effect = builder.state::<ProofApplySideEffectState, _>(
+            StateKey::new("apply_side_effect")?,
+            ProofApplyConfig {
+                action: config.action,
+            },
+            fact.clone(),
+        )?;
+        let output = builder.state::<ProofAssembleOutputState, _>(
+            StateKey::new("assemble_output")?,
+            ProofAssembleConfig { output_version: 1 },
+            ProofAssembleInputHandles { fact, side_effect },
+        )?;
+        Ok(ProofOperationOutputs { output })
     }
 }
 
-struct AssembleOutputState;
+/// Builds the proof state registry used for authoring and certification.
+pub fn proof_state_registry() -> mfm_program::Result<mfm_program::StateRegistrySnapshot> {
+    let mut states = StateRegistryBuilder::new();
+    states.register::<ProofReadFactState>()?;
+    states.register::<ProofApplySideEffectState>()?;
+    states.register::<ProofAssembleOutputState>()?;
+    Ok(states.into_snapshot())
+}
 
-#[async_trait]
-impl State for AssembleOutputState {
-    fn meta(&self) -> StateMeta {
-        meta::pure()
-    }
+/// Builds the proof operation registry used for authoring and certification.
+pub fn proof_operation_registry() -> mfm_program::Result<mfm_program::OperationRegistrySnapshot> {
+    let mut operations = OperationRegistryBuilder::new();
+    operations.register::<ProofWorkflowOperation>()?;
+    Ok(operations.into_snapshot())
+}
 
-    async fn handle(
-        &self,
-        ctx: &mut dyn DynContext,
-        _io: &mut dyn IoProvider,
-        _rec: &mut dyn EventRecorder,
-    ) -> Result<StateOutcome, StateError> {
-        let read_fact = op_ctx::read_json_required(
-            ctx,
-            &ctx_key(KEY_READ_FACT),
-            "missing_read_fact",
-            "missing read_fact in context",
-        )?;
+/// Builds a typed proof program draft.
+pub fn proof_program_draft(
+    config: ProofWorkflowConfig,
+) -> mfm_program::Result<mfm_program::TypedProgramDraft> {
+    build_root_with_registries(
+        ScopeKey::new(ROOT_SCOPE)?,
+        proof_state_registry()?,
+        proof_operation_registry()?,
+        |root: &mut RootBuilder<'_, '_>| {
+            let result = root.scope().call::<ProofWorkflowOperation, _>(
+                OperationKey::new(OP_KEY)?,
+                ProofWorkflowOperation,
+                config,
+                (),
+            )?;
+            root.bind_public_outputs(
+                PublicOutputKey::new(PUBLIC_OUTPUT_KEY)?,
+                &ProofPublicOutputs {
+                    output: result.output,
+                },
+            )
+        },
+    )
+}
 
-        let side_effect = op_ctx::read_json_required(
-            ctx,
-            &ctx_key(KEY_SIDE_EFFECT_RESULT),
-            "missing_side_effect",
-            "missing side_effect_result in context",
-        )?;
-
-        let output = serde_json::json!({
-            "read_fact": read_fact,
-            "side_effect_result": side_effect,
-        });
-
-        op_ctx::write_json(ctx, ctx_key(KEY_OUTPUT_PAYLOAD), output)?;
-
-        Ok(StateOutcome {
-            snapshot: SnapshotPolicy::OnSuccess,
-        })
-    }
+/// Builds and certifies the typed proof program.
+pub fn certified_proof_spec(
+    config: ProofWorkflowConfig,
+) -> mfm_certify::Result<CertifiedTypedSpec> {
+    let draft = proof_program_draft(config)
+        .map_err(|error| mfm_certify::CertifyError::Lowering(error.to_string()))?;
+    certify_program_draft(&draft)
 }
 
 #[cfg(test)]
-#[path = "tests/proof_op_tests.rs"]
-mod proof_op_tests;
+mod tests {
+    use super::*;
+
+    #[test]
+    fn proof_program_lowers_to_typed_state_contracts() {
+        let draft = proof_program_draft(ProofWorkflowConfig::default()).expect("draft");
+        assert_eq!(draft.state_nodes().len(), 3);
+        assert!(
+            draft
+                .state_nodes()
+                .iter()
+                .all(|node| !node.state_descriptor_name.contains("DynContext")),
+            "proof state descriptors must not expose dynamic context"
+        );
+
+        let certified = certify_program_draft(&draft).expect("certified proof spec");
+        certified.envelope.verify_hash().expect("hash verifies");
+        let side_effect = certified
+            .envelope
+            .spec
+            .nodes
+            .iter()
+            .find(|node| node.stable_key.as_str() == "apply_side_effect")
+            .expect("side-effect node");
+        assert!(
+            side_effect.side_effect.is_some(),
+            "proof side effect declares a typed side-effect contract"
+        );
+        assert_eq!(side_effect.adapter_bindings.len(), 1);
+    }
+}

@@ -19,12 +19,10 @@ mfm-evm-deploy-configure-validate-config = { path = "../evm-deploy-configure-val
 mfm-portfolio-config = { path = "../portfolio-config" }
 mfm-sdk = { path = "../sdk" }
 mfm-collectors-nix-exec = { path = "../collectors/nix-exec" }
-mfm-op-proof = { path = "../ops/proof-op" }
 mfm-transports-exec = { path = "../transports/exec" }
 mfm-transports-local-fs = { path = "../transports/local-fs" }
 mfm-transports-local-evm = { path = "../transports/local-evm" }
 mfm-transports-local-keystore = { path = "../transports/local-keystore" }
-mfm-transports-proof = { path = "../transports/proof" }
 mfm-transports-rpc-control = { path = "../transports/rpc-control" }
 mfm-op-keystore = { path = "../ops/keystore-op" }
 mfm-op-evm-read = { path = "../ops/evm-read-op" }

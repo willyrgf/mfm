@@ -5,9 +5,10 @@ edition = "2021"
 
 [dependencies]
 serde = { workspace = true }
-serde_json = { workspace = true }
-mfm-machine = { path = "../../machine" }
-
-[dev-dependencies]
-async-trait = { workspace = true }
-tokio = { workspace = true }
+mfm-capabilities = { path = "../../kernel/capabilities" }
+mfm-canonical = { path = "../../kernel/canonical" }
+mfm-effects = { path = "../../kernel/effects" }
+mfm-ids = { path = "../../kernel/ids" }
+mfm-program = { path = "../../kernel/program" }
+mfm-program-derive = { path = "../../kernel/program-derive" }
+mfm-values = { path = "../../kernel/values" }

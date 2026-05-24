@@ -19,6 +19,9 @@ mfm-replay = { path = "../kernel/replay" }
 mfm-runtime = { path = "../kernel/runtime" }
 mfm-spec = { path = "../kernel/spec" }
 mfm-store = { path = "../kernel/store" }
+mfm-transports-proof = { path = "../transports/proof" }
 
 [dev-dependencies]
 mfm-capabilities = { path = "../kernel/capabilities" }
+mfm-op-proof = { path = "../ops/proof-op" }
+mfm-program = { path = "../kernel/program" }

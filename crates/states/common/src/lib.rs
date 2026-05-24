@@ -10,18 +10,10 @@
 //! # Examples
 //!
 //! ```rust
-//! use mfm_machine::ids::{ContextKey, StateId};
-//! use mfm_state_common::states::proof::ProofReadState;
+//! use mfm_state_common::states::meta;
 //!
-//! let state = ProofReadState {
-//!     state_id: StateId::must_new("proof.main.read".to_string()),
-//!     purpose: "proof_read",
-//!     output_key: ContextKey("result".to_string()),
-//!     io_error_code: "read_failed",
-//!     io_error_message: "proof read failed",
-//! };
-//!
-//! assert_eq!(state.purpose, "proof_read");
+//! let meta = meta::pure();
+//! assert!(meta.tags.is_empty());
 //! ```
 
 /// Context read/write helpers that map low-level context failures into stable state errors.
