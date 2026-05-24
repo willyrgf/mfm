@@ -2,13 +2,13 @@ use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 
 use mfm_evm_core::encoding::normalize_address;
-use mfm_portfolio_model::portfolio::PortfolioConfig;
-use mfm_portfolio_model::symbol::{
-    BalanceReaderConfig, QuoteCode, SymbolConfig, SymbolKind, SymbolRole,
-};
+use mfm_program_derive::MfmValue;
+use mfm_values::string_map_secret_marker_key;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use thiserror::Error;
+
+use crate::portfolio::PortfolioConfig;
+use crate::symbol::{BalanceReaderConfig, QuoteCode, SymbolConfig, SymbolKind, SymbolRole};
 
 /// Canonical protocol id handled by this module.
 pub const AAVE_V3_PROTOCOL_ID: &str = "aave_v3";
@@ -17,12 +17,13 @@ pub const AAVE_V3_READER_RESERVE_POSITION: &str = "reserve_position";
 /// Canonical reader id for debt-token-backed debt positions.
 pub const AAVE_V3_READER_DEBT_POSITION: &str = "debt_position";
 
-fn default_debt_kind() -> AaveDebtKind {
-    AaveDebtKind::Variable
-}
-
 /// Typed Aave V3 market config embedded inside a canonical `protocol_position` reader blob.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, MfmValue)]
+#[mfm(
+    namespace = "mfm.portfolio",
+    name = "aave-market-config",
+    schema = "mfm.portfolio.aave.market_config"
+)]
 pub struct AaveMarketConfig {
     /// Stable logical market identifier.
     pub market_id: String,
@@ -36,7 +37,7 @@ pub struct AaveMarketConfig {
     pub reserves: Vec<AaveReserveConfig>,
     /// Canonical metadata surface.
     #[serde(default)]
-    pub metadata: BTreeMap<String, Value>,
+    pub metadata: BTreeMap<String, String>,
 }
 
 impl AaveMarketConfig {
@@ -61,7 +62,12 @@ impl AaveMarketConfig {
 }
 
 /// Typed reserve entry inside an Aave market config.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, MfmValue)]
+#[mfm(
+    namespace = "mfm.portfolio",
+    name = "aave-reserve-config",
+    schema = "mfm.portfolio.aave.reserve_config"
+)]
 pub struct AaveReserveConfig {
     /// Stable reserve identifier used in symbol configs.
     pub reserve_id: String,
@@ -79,11 +85,16 @@ pub struct AaveReserveConfig {
     pub stable_debt_token_address: Option<String>,
     /// Canonical metadata surface.
     #[serde(default)]
-    pub metadata: BTreeMap<String, Value>,
+    pub metadata: BTreeMap<String, String>,
 }
 
 /// Typed reader config for an Aave reserve position.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, MfmValue)]
+#[mfm(
+    namespace = "mfm.portfolio",
+    name = "aave-reserve-position-config",
+    schema = "mfm.portfolio.aave.reserve_position_config"
+)]
 pub struct AaveReservePositionConfig {
     /// Explicit market config used to resolve reserve token addresses.
     pub market: AaveMarketConfig,
@@ -95,26 +106,39 @@ pub struct AaveReservePositionConfig {
 }
 
 /// Typed reader config for an Aave debt position.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, MfmValue)]
+#[mfm(
+    namespace = "mfm.portfolio",
+    name = "aave-debt-position-config",
+    schema = "mfm.portfolio.aave.debt_position_config"
+)]
 pub struct AaveDebtPositionConfig {
     /// Explicit market config used to resolve debt token addresses.
     pub market: AaveMarketConfig,
     /// Reserve identifier within the market.
     pub reserve_id: String,
     /// Debt token family to read.
-    #[serde(default = "default_debt_kind")]
+    #[serde(default)]
     pub debt_kind: AaveDebtKind,
 }
 
 /// Supported Aave V3 debt token families.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
 #[serde(rename_all = "snake_case")]
+#[mfm(
+    namespace = "mfm.portfolio",
+    name = "aave-debt-kind",
+    schema = "mfm.portfolio.aave.debt_kind"
+)]
 pub enum AaveDebtKind {
     /// Variable debt token balance.
+    #[default]
     Variable,
     /// Stable debt token balance.
     Stable,
 }
+
+impl mfm_values::MfmDefault for AaveDebtKind {}
 
 impl AaveDebtKind {
     /// Returns the canonical string form used in JSON and observation metadata.
@@ -133,7 +157,13 @@ impl fmt::Display for AaveDebtKind {
 }
 
 /// Typed Aave protocol-position config resolved from the generic symbol reader envelope.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, MfmValue)]
+#[serde(rename_all = "snake_case")]
+#[mfm(
+    namespace = "mfm.portfolio",
+    name = "aave-protocol-position-config",
+    schema = "mfm.portfolio.aave.protocol_position_config"
+)]
 pub enum AaveProtocolPositionConfig {
     /// Supplied/collateral position backed by an aToken balance.
     ReservePosition(AaveReservePositionConfig),
@@ -223,6 +253,28 @@ pub enum AavePortfolioConfigError {
         symbol_id: String,
         /// Referenced network id.
         network_id: String,
+    },
+    /// A market metadata entry contained a secret-shaped key or value.
+    #[error("symbol `{symbol_id}` market `{market_id}` metadata key `{key}` contains secret-shaped content")]
+    MarketMetadataContainsSecret {
+        /// Symbol that violated the contract.
+        symbol_id: String,
+        /// Market identifier associated with the rejected metadata.
+        market_id: String,
+        /// Metadata key associated with the rejected content.
+        key: String,
+    },
+    /// A reserve metadata entry contained a secret-shaped key or value.
+    #[error("symbol `{symbol_id}` market `{market_id}` reserve `{reserve_id}` metadata key `{key}` contains secret-shaped content")]
+    ReserveMetadataContainsSecret {
+        /// Symbol that violated the contract.
+        symbol_id: String,
+        /// Market identifier associated with the rejected metadata.
+        market_id: String,
+        /// Reserve identifier associated with the rejected metadata.
+        reserve_id: String,
+        /// Metadata key associated with the rejected content.
+        key: String,
     },
     /// A market-level config invariant failed.
     #[error("symbol `{symbol_id}` market config is invalid: {reason}")]
@@ -336,45 +388,26 @@ pub fn decode_aave_protocol_position_config(
         });
     }
 
-    let config_value = Value::Object(
-        config
-            .iter()
-            .map(|(key, value)| (key.clone(), value.clone()))
-            .collect(),
-    );
-    match reader.as_str() {
-        AAVE_V3_READER_RESERVE_POSITION => {
-            let cfg = serde_json::from_value::<AaveReservePositionConfig>(config_value).map_err(
-                |err| AavePortfolioConfigError::ReaderConfigDecode {
-                    symbol_id: symbol.symbol_id.clone(),
-                    reason: err.to_string(),
-                },
-            )?;
+    match (reader.as_str(), config) {
+        (AAVE_V3_READER_RESERVE_POSITION, AaveProtocolPositionConfig::ReservePosition(cfg)) => {
             if symbol.role == SymbolRole::Debt {
                 return Err(AavePortfolioConfigError::ReserveRoleInvalid {
                     symbol_id: symbol.symbol_id.clone(),
                 });
             }
-            Ok(AaveProtocolPositionConfig::ReservePosition(cfg))
+            Ok(AaveProtocolPositionConfig::ReservePosition(cfg.clone()))
         }
-        AAVE_V3_READER_DEBT_POSITION => {
-            let cfg =
-                serde_json::from_value::<AaveDebtPositionConfig>(config_value).map_err(|err| {
-                    AavePortfolioConfigError::ReaderConfigDecode {
-                        symbol_id: symbol.symbol_id.clone(),
-                        reason: err.to_string(),
-                    }
-                })?;
+        (AAVE_V3_READER_DEBT_POSITION, AaveProtocolPositionConfig::DebtPosition(cfg)) => {
             if symbol.role != SymbolRole::Debt {
                 return Err(AavePortfolioConfigError::DebtRoleInvalid {
                     symbol_id: symbol.symbol_id.clone(),
                 });
             }
-            Ok(AaveProtocolPositionConfig::DebtPosition(cfg))
+            Ok(AaveProtocolPositionConfig::DebtPosition(cfg.clone()))
         }
-        _ => Err(AavePortfolioConfigError::UnsupportedReader {
+        (reader, _) => Err(AavePortfolioConfigError::UnsupportedReader {
             symbol_id: symbol.symbol_id.clone(),
-            reader: reader.clone(),
+            reader: reader.to_string(),
         }),
     }
 }
@@ -465,6 +498,13 @@ fn validate_market_config(
     if market.market_id.trim().is_empty() {
         return Err(invalid_market(symbol, "market_id must be non-empty"));
     }
+    if let Some(key) = string_map_secret_marker_key(&market.metadata) {
+        return Err(AavePortfolioConfigError::MarketMetadataContainsSecret {
+            symbol_id: symbol.symbol_id.clone(),
+            market_id: market.market_id.clone(),
+            key: key.to_string(),
+        });
+    }
     if market.network_id.trim().is_empty() {
         return Err(invalid_market(
             symbol,
@@ -503,6 +543,14 @@ fn validate_market_config(
                 symbol,
                 "market.reserves[].reserve_id must be non-empty",
             ));
+        }
+        if let Some(key) = string_map_secret_marker_key(&reserve.metadata) {
+            return Err(AavePortfolioConfigError::ReserveMetadataContainsSecret {
+                symbol_id: symbol.symbol_id.clone(),
+                market_id: market.market_id.clone(),
+                reserve_id: reserve.reserve_id.clone(),
+                key: key.to_string(),
+            });
         }
         if reserve_ids
             .insert(reserve.reserve_id.as_str(), ())
@@ -589,12 +637,12 @@ fn invalid_market(symbol: &SymbolConfig, reason: impl Into<String>) -> AavePortf
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mfm_portfolio_model::portfolio::PortfolioConfig;
-    use mfm_portfolio_model::symbol::{
-        BalanceReaderConfig, QuoteCode, QuoteValuationConfig, SymbolConfig, SymbolKind, SymbolRole,
+    use crate::portfolio::PortfolioConfig;
+    use crate::symbol::{
+        QuoteCode, QuoteValuationConfig, SymbolConfig, SymbolKind, SymbolRole,
         SymbolValuationConfig, ValuationReaderConfig,
     };
-    use serde_json::json;
+    use serde_json::{json, Value};
 
     fn aave_market() -> AaveMarketConfig {
         AaveMarketConfig {
@@ -650,6 +698,11 @@ mod tests {
         underlying_symbol_id: Option<&str>,
         priced_symbol_id: &str,
     ) -> SymbolConfig {
+        let config = match reader {
+            AAVE_V3_READER_RESERVE_POSITION => json!({ "reserve_position": config }),
+            AAVE_V3_READER_DEBT_POSITION => json!({ "debt_position": config }),
+            _ => config,
+        };
         SymbolConfig {
             symbol_id: symbol_id.to_string(),
             display_symbol: Some("USDC".to_string()),
@@ -657,11 +710,13 @@ mod tests {
             role,
             network_id: "ethereum-mainnet".to_string(),
             protocol: Some(AAVE_V3_PROTOCOL_ID.to_string()),
-            balance_reader: BalanceReaderConfig::ProtocolPosition {
-                protocol: AAVE_V3_PROTOCOL_ID.to_string(),
-                reader: reader.to_string(),
-                config: serde_json::from_value(config).expect("config map"),
-            },
+            balance_reader: serde_json::from_value(json!({
+                "kind": "protocol_position",
+                "protocol": AAVE_V3_PROTOCOL_ID,
+                "reader": reader,
+                "config": config
+            }))
+            .expect("balance reader config"),
             valuation: SymbolValuationConfig {
                 quotes: vec![fixed_usd_quote(priced_symbol_id)],
             },
@@ -678,7 +733,9 @@ mod tests {
             "networks": [
                 {
                     "network_id": "ethereum-mainnet",
+                    "family": "evm",
                     "chain_id": 1,
+                    "control_scope": "shared",
                     "metadata": {}
                 }
             ],
@@ -767,5 +824,59 @@ mod tests {
                 if symbol_id == "aave_v3.usdc.debt.ethereum-mainnet"
                     && market_id == "aave-v3-mainnet"
         ));
+    }
+
+    #[test]
+    fn rejects_secret_markers_in_market_and_reserve_metadata() {
+        let mut market_metadata = aave_market();
+        market_metadata
+            .metadata
+            .insert("secret_key".to_string(), "redacted".to_string());
+        let portfolio = portfolio_with_aave_symbols(vec![aave_symbol(
+            "aave_v3.usdc.asset.ethereum-mainnet",
+            SymbolRole::Asset,
+            AAVE_V3_READER_RESERVE_POSITION,
+            json!({
+                "market": market_metadata,
+                "reserve_id": "usdc"
+            }),
+            Some("usdc.wallet.ethereum-mainnet"),
+            "usdc.wallet.ethereum-mainnet",
+        )]);
+
+        assert_eq!(
+            validate_aave_portfolio_config(&portfolio).unwrap_err(),
+            AavePortfolioConfigError::MarketMetadataContainsSecret {
+                symbol_id: "aave_v3.usdc.asset.ethereum-mainnet".to_string(),
+                market_id: "aave-v3-mainnet".to_string(),
+                key: "secret_key".to_string(),
+            }
+        );
+
+        let mut reserve_metadata = aave_market();
+        reserve_metadata.reserves[0]
+            .metadata
+            .insert("label".to_string(), "bearer redacted".to_string());
+        let portfolio = portfolio_with_aave_symbols(vec![aave_symbol(
+            "aave_v3.usdc.asset.ethereum-mainnet",
+            SymbolRole::Asset,
+            AAVE_V3_READER_RESERVE_POSITION,
+            json!({
+                "market": reserve_metadata,
+                "reserve_id": "usdc"
+            }),
+            Some("usdc.wallet.ethereum-mainnet"),
+            "usdc.wallet.ethereum-mainnet",
+        )]);
+
+        assert_eq!(
+            validate_aave_portfolio_config(&portfolio).unwrap_err(),
+            AavePortfolioConfigError::ReserveMetadataContainsSecret {
+                symbol_id: "aave_v3.usdc.asset.ethereum-mainnet".to_string(),
+                market_id: "aave-v3-mainnet".to_string(),
+                reserve_id: "wbtc".to_string(),
+                key: "label".to_string(),
+            }
+        );
     }
 }

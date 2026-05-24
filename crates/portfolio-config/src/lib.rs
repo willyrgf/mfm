@@ -1,22 +1,21 @@
 #![cfg_attr(test, allow(clippy::disallowed_methods, clippy::disallowed_types))]
 #![cfg_attr(not(test), deny(clippy::disallowed_methods, clippy::disallowed_types))]
 #![warn(missing_docs)]
-//! Shared authored, canonical, and built config pipeline for portfolio snapshot workflows.
+//! Shared authored and canonical config pipeline for portfolio snapshot workflows.
 //!
 //! This crate owns the workflow-family-specific config boundary for portfolio snapshots:
 //! authored bytes parse into [`PortfolioSnapshotAuthoredConfig`], canonicalization produces
-//! [`PortfolioSnapshotCanonicalConfig`], and the pure build step produces
-//! [`PortfolioSnapshotBuiltConfig`].
+//! [`PortfolioSnapshotCanonicalConfig`].
 //!
-//! The portfolio execution op consumes built config, while transport layers stay responsible for
-//! file reading and output rendering.
+//! Planning and execution-specific built config live outside this crate so authored/canonical
+//! config remains independent from runtime, scheduler, and legacy dynamic-machine APIs.
 //!
 //! # Examples
 //!
 //! ```rust
 //! use mfm_portfolio_config::{
-//!     build_portfolio_snapshot_config, canonicalize_portfolio_snapshot_authored_config,
-//!     parse_portfolio_snapshot_authored_config, AuthoredConfigFormat,
+//!     canonicalize_portfolio_snapshot_authored_config, parse_portfolio_snapshot_authored_config,
+//!     AuthoredConfigFormat,
 //! };
 //!
 //! let authored = parse_portfolio_snapshot_authored_config(
@@ -27,7 +26,9 @@
 //!             "networks": [
 //!                 {
 //!                     "network_id": "ethereum-mainnet",
+//!                     "family": "evm",
 //!                     "chain_id": 1,
+//!                     "control_scope": "shared",
 //!                     "metadata": {}
 //!                 }
 //!             ],
@@ -75,8 +76,7 @@
 //! )?;
 //!
 //! let canonical = canonicalize_portfolio_snapshot_authored_config(authored)?;
-//! let built = build_portfolio_snapshot_config(canonical)?;
-//! assert_eq!(built.canonical.portfolio.portfolio_id, "portfolio_main");
+//! assert_eq!(canonical.portfolio.portfolio_id, "portfolio_main");
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
@@ -84,26 +84,32 @@ use std::path::Path;
 
 use mfm_authored_config::parse_authored_config_with_hint;
 pub use mfm_authored_config::AuthoredConfigFormat;
-use mfm_machine::hashing::{artifact_id_for_json, CanonicalJsonError};
-use mfm_machine::ids::ArtifactId;
+use mfm_canonical::{CanonicalError, PlainCanonicalJsonBytes};
+use mfm_ids::{ArtifactId, DigestAlgorithm};
 use mfm_portfolio_model::portfolio::{
     validate_portfolio_bundle, PortfolioConfig, PortfolioConfigError,
 };
 use mfm_portfolio_model::symbol::ValuationSourceRegistry;
-use mfm_portfolio_plan::{
-    PlanExecutionSpecError, PlanningError, PortfolioExecutionSpec, PortfolioPlanCompiler,
-    PortfolioRequest,
-};
+use mfm_program_derive::{MfmConfig, MfmValue, PublicOutputs};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
-mod defaults;
-
-pub use defaults::{builtin_dispatch_catalog, DefaultPortfolioPlanCompiler};
+fn artifact_id_for_json(value: &Value) -> Result<ArtifactId, CanonicalError> {
+    let canonical = PlainCanonicalJsonBytes::from_json_str(&value.to_string())?;
+    Ok(ArtifactId::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        canonical.digest_bytes(),
+    ))
+}
 
 /// Human-authored portfolio snapshot config loaded from JSON or TOML.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, MfmConfig)]
+#[mfm(
+    namespace = "mfm.portfolio",
+    name = "snapshot-authored-config",
+    schema = "mfm.portfolio.config.snapshot_authored"
+)]
 pub struct PortfolioSnapshotAuthoredConfig {
     /// Portfolio-owned config surface.
     pub portfolio: PortfolioConfig,
@@ -112,7 +118,12 @@ pub struct PortfolioSnapshotAuthoredConfig {
 }
 
 /// Canonical portfolio snapshot config used for deterministic hashing and build.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, MfmConfig)]
+#[mfm(
+    namespace = "mfm.portfolio",
+    name = "snapshot-canonical-config",
+    schema = "mfm.portfolio.config.snapshot_canonical"
+)]
 pub struct PortfolioSnapshotCanonicalConfig {
     /// Canonical portfolio-owned config surface.
     pub portfolio: PortfolioConfig,
@@ -133,14 +144,6 @@ impl PortfolioSnapshotCanonicalConfig {
         self
     }
 
-    /// Converts the canonical config into the plan-compiler request shape.
-    pub fn as_plan_request(&self) -> PortfolioRequest {
-        PortfolioRequest {
-            portfolio: self.portfolio.clone(),
-            valuation_source_registry: self.valuation_source_registry.clone(),
-        }
-    }
-
     /// Serializes the canonical config as a JSON value.
     pub fn to_json_value(&self) -> Result<Value, PortfolioSnapshotConfigError> {
         serde_json::to_value(self).map_err(|source| PortfolioSnapshotConfigError::Serialize {
@@ -159,48 +162,13 @@ impl PortfolioSnapshotCanonicalConfig {
     }
 }
 
-/// Built portfolio snapshot config consumed by the execution op.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct PortfolioSnapshotBuiltConfig {
-    /// Canonical config from which the built config was derived.
-    pub canonical: PortfolioSnapshotCanonicalConfig,
-    /// Deterministic compiled semantic execution spec.
-    pub execution_spec: PortfolioExecutionSpec,
-}
-
-impl PortfolioSnapshotBuiltConfig {
-    /// Sorts nested collections into deterministic canonical order.
-    pub fn normalize(&mut self) {
-        self.canonical.normalize();
-        self.execution_spec.normalize();
-    }
-
-    /// Returns a normalized clone of the built config.
-    pub fn normalized(mut self) -> Self {
-        self.normalize();
-        self
-    }
-
-    /// Serializes the built config as a JSON value.
-    pub fn to_json_value(&self) -> Result<Value, PortfolioSnapshotBuildError> {
-        serde_json::to_value(self).map_err(|source| PortfolioSnapshotBuildError::Serialize {
-            stage: "built config",
-            source,
-        })
-    }
-
-    /// Computes the authoritative artifact id for the built config JSON.
-    pub fn artifact_id(&self) -> Result<ArtifactId, PortfolioSnapshotBuildError> {
-        let value = self.to_json_value()?;
-        artifact_id_for_json(&value).map_err(|source| PortfolioSnapshotBuildError::CanonicalJson {
-            stage: "built config",
-            source,
-        })
-    }
-}
-
 /// Stable report emitted by the portfolio config-build workflow.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue, PublicOutputs)]
+#[mfm(
+    namespace = "mfm.portfolio",
+    name = "snapshot-build-report",
+    schema = "mfm.portfolio.snapshot_build_report"
+)]
 pub struct PortfolioSnapshotBuildReport {
     /// Schema version for this report surface.
     pub schema_version: u32,
@@ -223,15 +191,6 @@ impl PortfolioSnapshotBuildReport {
     pub const SCHEMA_VERSION: u32 = 1;
 }
 
-/// Typed outcome produced by the pure portfolio config-build step.
-#[derive(Clone, Debug, PartialEq)]
-pub struct PortfolioSnapshotBuildOutcome {
-    /// Deterministic built config that the execute op consumes.
-    pub built: PortfolioSnapshotBuiltConfig,
-    /// Stable build report derived from the canonical and built config artifacts.
-    pub report: PortfolioSnapshotBuildReport,
-}
-
 /// Errors returned while parsing or canonicalizing portfolio snapshot config.
 #[derive(Debug, Error)]
 pub enum PortfolioSnapshotConfigError {
@@ -252,88 +211,32 @@ pub enum PortfolioSnapshotConfigError {
     /// Canonical bundle validation failed.
     #[error("invalid portfolio bundle: {0}")]
     InvalidBundle(#[from] PortfolioConfigError),
-    /// Serializing a typed config to JSON failed.
-    #[error("failed to serialize {stage}: {source}")]
-    Serialize {
-        /// Stage being serialized.
-        stage: &'static str,
-        /// Underlying serializer error.
-        #[source]
-        source: serde_json::Error,
-    },
-    /// Canonical JSON hashing failed.
-    #[error("failed to hash {stage} as canonical json: {source}")]
-    CanonicalJson {
-        /// Stage being hashed.
-        stage: &'static str,
-        /// Underlying canonical-json error.
-        #[source]
-        source: CanonicalJsonError,
-    },
-}
-
-/// Errors returned while building or validating built portfolio config.
-#[derive(Debug, Error)]
-pub enum PortfolioSnapshotBuildError {
-    /// Canonical bundle validation failed.
-    #[error("invalid canonical portfolio bundle: {0}")]
-    InvalidCanonicalConfig(#[from] PortfolioConfigError),
-    /// The built-in dispatch catalog could not be constructed.
-    #[error("failed to construct the default portfolio dispatch catalog: {source}")]
-    DispatchCatalog {
-        /// Underlying catalog construction error.
-        #[source]
-        source: mfm_portfolio_plan::DispatchCatalogError,
-    },
-    /// Semantic execution compilation failed.
-    #[error("failed to compile the portfolio execution spec: {source}")]
-    Planning {
-        /// Underlying planning error.
-        #[source]
-        source: PlanningError,
-    },
-    /// Serializing a typed config to JSON failed.
-    #[error("failed to serialize {stage}: {source}")]
-    Serialize {
-        /// Stage being serialized.
-        stage: &'static str,
-        /// Underlying serializer error.
-        #[source]
-        source: serde_json::Error,
-    },
-    /// Canonical JSON hashing failed.
-    #[error("failed to hash {stage} as canonical json: {source}")]
-    CanonicalJson {
-        /// Stage being hashed.
-        stage: &'static str,
-        /// Underlying canonical-json error.
-        #[source]
-        source: CanonicalJsonError,
-    },
-}
-
-/// Errors returned while decoding execution-op config into built portfolio config.
-#[derive(Debug, Error)]
-pub enum PortfolioSnapshotExecutionConfigError {
-    /// Decoding the op config as a canonical or built config failed.
-    #[error("portfolio execution op_config decode failed: {source}")]
+    /// Decoding an already-parsed JSON value into a typed config failed.
+    #[error("failed to decode {stage}: {source}")]
     Decode {
+        /// Stage being decoded.
+        stage: &'static str,
         /// Underlying decode error.
         #[source]
         source: serde_json::Error,
     },
-    /// Building from a canonical config failed.
-    #[error(transparent)]
-    Build(#[from] PortfolioSnapshotBuildError),
-    /// Validating the bundled canonical config failed.
-    #[error("invalid built portfolio bundle: {0}")]
-    InvalidCanonicalConfig(#[from] PortfolioConfigError),
-    /// The bundled execution spec was invalid.
-    #[error("invalid built portfolio execution spec: {source}")]
-    InvalidExecutionSpec {
-        /// Underlying planning validation error.
+    /// Serializing a typed config to JSON failed.
+    #[error("failed to serialize {stage}: {source}")]
+    Serialize {
+        /// Stage being serialized.
+        stage: &'static str,
+        /// Underlying serializer error.
         #[source]
-        source: PlanExecutionSpecError,
+        source: serde_json::Error,
+    },
+    /// Canonical JSON hashing failed.
+    #[error("failed to hash {stage} as canonical json: {source}")]
+    CanonicalJson {
+        /// Stage being hashed.
+        stage: &'static str,
+        /// Underlying canonical-json error.
+        #[source]
+        source: CanonicalError,
     },
 }
 
@@ -379,85 +282,18 @@ pub fn canonicalize_portfolio_snapshot_authored_config(
     Ok(canonical)
 }
 
-/// Builds the deterministic execution config consumed by the portfolio execution op.
-pub fn build_portfolio_snapshot_config(
-    canonical: PortfolioSnapshotCanonicalConfig,
-) -> Result<PortfolioSnapshotBuiltConfig, PortfolioSnapshotBuildError> {
-    let canonical = canonical.normalized();
-    validate_portfolio_bundle(&canonical.portfolio, &canonical.valuation_source_registry)?;
-
-    let catalog = builtin_dispatch_catalog()
-        .map_err(|source| PortfolioSnapshotBuildError::DispatchCatalog { source })?;
-    let execution_spec = DefaultPortfolioPlanCompiler
-        .compile(&canonical.as_plan_request(), &catalog)
-        .map_err(|source| PortfolioSnapshotBuildError::Planning { source })?;
-
-    Ok(PortfolioSnapshotBuiltConfig {
-        canonical,
-        execution_spec,
-    }
-    .normalized())
-}
-
-/// Builds the deterministic execution config plus the stable build report surface.
-pub fn build_portfolio_snapshot_outcome(
-    canonical: PortfolioSnapshotCanonicalConfig,
-) -> Result<PortfolioSnapshotBuildOutcome, PortfolioSnapshotBuildError> {
-    let built = build_portfolio_snapshot_config(canonical)?;
-    let canonical_value = serde_json::to_value(&built.canonical).map_err(|source| {
-        PortfolioSnapshotBuildError::Serialize {
-            stage: "canonical config",
-            source,
-        }
-    })?;
-    let canonical_artifact_id = artifact_id_for_json(&canonical_value).map_err(|source| {
-        PortfolioSnapshotBuildError::CanonicalJson {
-            stage: "canonical config",
-            source,
-        }
-    })?;
-    let built_artifact_id = built.artifact_id()?;
-
-    Ok(PortfolioSnapshotBuildOutcome {
-        report: PortfolioSnapshotBuildReport {
-            schema_version: PortfolioSnapshotBuildReport::SCHEMA_VERSION,
-            portfolio_id: built.canonical.portfolio.portfolio_id.clone(),
-            canonical_config_artifact_id: canonical_artifact_id.into_string(),
-            built_config_artifact_id: built_artifact_id.into_string(),
-            network_count: built.canonical.portfolio.networks.len() as u64,
-            wallet_count: built.canonical.portfolio.wallets.len() as u64,
-            observation_batch_count: built.execution_spec.observation_batches.len() as u64,
-        },
-        built,
-    })
-}
-
 /// Decodes canonical portfolio snapshot config.
 pub fn decode_portfolio_snapshot_canonical_config(
     value: &Value,
-) -> Result<PortfolioSnapshotCanonicalConfig, PortfolioSnapshotExecutionConfigError> {
-    serde_json::from_value::<PortfolioSnapshotCanonicalConfig>(value.clone())
-        .map_err(|source| PortfolioSnapshotExecutionConfigError::Decode { source })
-}
-
-/// Decodes a built execution op config into the normalized built representation.
-///
-/// This is the strict execution boundary used by `portfolio_execute/v1`.
-pub fn decode_portfolio_snapshot_built_config(
-    value: &Value,
-) -> Result<PortfolioSnapshotBuiltConfig, PortfolioSnapshotExecutionConfigError> {
-    let built = serde_json::from_value::<PortfolioSnapshotBuiltConfig>(value.clone())
-        .map_err(|source| PortfolioSnapshotExecutionConfigError::Decode { source })?
+) -> Result<PortfolioSnapshotCanonicalConfig, PortfolioSnapshotConfigError> {
+    let canonical = serde_json::from_value::<PortfolioSnapshotCanonicalConfig>(value.clone())
+        .map_err(|source| PortfolioSnapshotConfigError::Decode {
+            stage: "canonical config",
+            source,
+        })?
         .normalized();
-    validate_portfolio_bundle(
-        &built.canonical.portfolio,
-        &built.canonical.valuation_source_registry,
-    )?;
-    built
-        .execution_spec
-        .validate()
-        .map_err(|source| PortfolioSnapshotExecutionConfigError::InvalidExecutionSpec { source })?;
-    Ok(built)
+    validate_portfolio_bundle(&canonical.portfolio, &canonical.valuation_source_registry)?;
+    Ok(canonical)
 }
 
 #[cfg(test)]
@@ -480,7 +316,9 @@ mod tests {
                 "networks": [
                     {
                         "network_id": "ethereum-mainnet",
+                        "family": "evm",
                         "chain_id": 1,
+                        "control_scope": "shared",
                         "metadata": {}
                     }
                 ],
@@ -558,30 +396,6 @@ mod tests {
     }
 
     #[test]
-    fn build_is_deterministic_across_authoring_order() {
-        let mut authored = sample_authored_config();
-        authored.portfolio.wallets.reverse();
-        authored.portfolio.symbol_configs.reverse();
-        authored.portfolio.quote_codes.reverse();
-
-        let left = build_portfolio_snapshot_config(
-            canonicalize_portfolio_snapshot_authored_config(sample_authored_config())
-                .expect("left canonical"),
-        )
-        .expect("left build");
-        let right = build_portfolio_snapshot_config(
-            canonicalize_portfolio_snapshot_authored_config(authored).expect("right canonical"),
-        )
-        .expect("right build");
-
-        assert_eq!(left, right);
-        assert_eq!(
-            left.artifact_id().expect("left built hash"),
-            right.artifact_id().expect("right built hash")
-        );
-    }
-
-    #[test]
     fn decode_canonical_config_accepts_canonical_shape() {
         let canonical = canonicalize_portfolio_snapshot_authored_config(sample_authored_config())
             .expect("canonical");
@@ -591,47 +405,5 @@ mod tests {
         .expect("decode canonical");
 
         assert_eq!(decoded, canonical);
-    }
-
-    #[test]
-    fn decode_built_config_rejects_legacy_canonical_shape() {
-        let canonical = canonicalize_portfolio_snapshot_authored_config(sample_authored_config())
-            .expect("canonical");
-
-        let err = decode_portfolio_snapshot_built_config(
-            &serde_json::to_value(&canonical).expect("canonical json"),
-        )
-        .expect_err("legacy canonical shape should not decode as built config");
-
-        assert!(matches!(
-            err,
-            PortfolioSnapshotExecutionConfigError::Decode { .. }
-        ));
-    }
-
-    #[test]
-    fn build_outcome_report_is_deterministic_and_matches_artifact_ids() {
-        let canonical = canonicalize_portfolio_snapshot_authored_config(sample_authored_config())
-            .expect("canonical");
-
-        let left = build_portfolio_snapshot_outcome(canonical.clone()).expect("left outcome");
-        let right = build_portfolio_snapshot_outcome(canonical).expect("right outcome");
-
-        assert_eq!(left, right);
-        assert_eq!(
-            left.report.canonical_config_artifact_id,
-            left.built
-                .canonical
-                .artifact_id()
-                .expect("canonical artifact id")
-                .into_string()
-        );
-        assert_eq!(
-            left.report.built_config_artifact_id,
-            left.built
-                .artifact_id()
-                .expect("built artifact id")
-                .into_string()
-        );
     }
 }

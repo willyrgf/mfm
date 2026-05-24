@@ -275,6 +275,22 @@ fn persisted_surface_policy_is_strict_no_secret_no_float() {
 }
 
 #[test]
+fn secret_marker_scanner_rejects_keys_values_and_mnemonics() {
+    assert!(string_contains_secret_marker("password=hidden"));
+    assert!(string_contains_secret_marker(
+        "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+    ));
+    assert!(!string_contains_secret_marker("artifact_written"));
+
+    let mut metadata = BTreeMap::new();
+    metadata.insert("label".to_string(), "public".to_string());
+    assert_eq!(string_map_secret_marker_key(&metadata), None);
+
+    metadata.insert("mnemonic".to_string(), "redacted".to_string());
+    assert_eq!(string_map_secret_marker_key(&metadata), Some("mnemonic"));
+}
+
+#[test]
 fn schema_identity_rejects_invalid_kind_and_name() {
     let value_without_semantic = SchemaIdentity::new(
         SchemaKind::Value,

@@ -2407,6 +2407,8 @@ name = "mfm-op-portfolio-tracker"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "mfm-canonical",
+ "mfm-ids",
  "mfm-machine",
  "mfm-portfolio-config",
  "mfm-portfolio-model",
@@ -2417,6 +2419,7 @@ dependencies = [
  "mfm-state-portfolio",
  "serde",
  "serde_json",
+ "thiserror",
  "tokio",
 ]
 
@@ -2437,14 +2440,14 @@ name = "mfm-portfolio-config"
 version = "0.1.0"
 dependencies = [
  "mfm-authored-config",
- "mfm-machine",
+ "mfm-canonical",
+ "mfm-ids",
  "mfm-portfolio-model",
- "mfm-portfolio-plan",
- "mfm-state-aave-v3",
+ "mfm-program-derive",
+ "mfm-values",
  "serde",
  "serde_json",
  "thiserror",
- "tokio",
  "toml 0.8.23",
 ]
 
@@ -2453,8 +2456,11 @@ name = "mfm-portfolio-model"
 version = "0.1.0"
 dependencies = [
  "bs58",
+ "mfm-canonical",
  "mfm-evm-core",
- "mfm-machine",
+ "mfm-ids",
+ "mfm-program-derive",
+ "mfm-values",
  "serde",
  "serde_json",
  "thiserror",

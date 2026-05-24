@@ -2,7 +2,7 @@
 name = "mfm-portfolio-config"
 version = "0.1.0"
 edition = "2021"
-description = "Shared authored, canonical, and built config pipeline for portfolio snapshot workflows"
+description = "Shared authored and canonical config pipeline for portfolio snapshot workflows"
 repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
 
@@ -13,10 +13,8 @@ thiserror = { workspace = true }
 toml = "0.8"
 
 mfm-authored-config = { path = "../authored-config", version = "0.1.0" }
-mfm-machine = { path = "../machine", version = "0.1.0" }
+mfm-canonical = { path = "../kernel/canonical" }
+mfm-ids = { path = "../kernel/ids" }
+mfm-program-derive = { path = "../kernel/program-derive" }
+mfm-values = { path = "../kernel/values" }
 mfm-portfolio-model = { path = "../portfolio/model", version = "0.1.0" }
-mfm-portfolio-plan = { path = "../portfolio/plan", version = "0.1.0" }
-mfm-state-aave-v3 = { path = "../states/aave-v3", version = "0.1.0" }
-
-[dev-dependencies]
-tokio = { workspace = true }

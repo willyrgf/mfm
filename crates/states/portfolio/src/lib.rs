@@ -19,7 +19,9 @@
 //!     "networks": [
 //!         {
 //!             "network_id": "ethereum-mainnet",
+//!             "family": "evm",
 //!             "chain_id": 1,
+//!             "control_scope": "shared",
 //!             "metadata": {}
 //!         }
 //!     ],

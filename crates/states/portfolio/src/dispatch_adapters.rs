@@ -13,8 +13,8 @@ use mfm_machine::hashing::artifact_id_for_json;
 use mfm_machine::ids::{FactKey, StateId};
 use mfm_machine::io::{IoCall, IoProvider};
 use mfm_portfolio_model::symbol::{
-    Observation, ObservationAnchor, ObservationQuantity, ObservationSource, ObservationValue,
-    ObservationValueSourceRef, ValuationSourceReaderConfig,
+    EvmOracleConfig, Observation, ObservationAnchor, ObservationQuantity, ObservationSource,
+    ObservationValue, ObservationValueSourceRef, ValuationSourceReaderConfig,
 };
 use mfm_portfolio_model::wallet::{WalletCapabilities, WalletImplementationConfig};
 use mfm_state_common::decimal::{
@@ -766,7 +766,7 @@ async fn resolve_direct_source(
                 payload.route_policy.network_id.as_str(),
                 normalized_control_scope(payload.route_policy.control_scope.as_str()),
                 oracle_kind,
-                config,
+                &evm_oracle_config_map(config),
                 block_number,
             )
             .await?;
@@ -783,6 +783,13 @@ async fn resolve_direct_source(
             ))
         }
     }
+}
+
+fn evm_oracle_config_map(config: &EvmOracleConfig) -> BTreeMap<String, Value> {
+    BTreeMap::from([(
+        "contract_address".to_string(),
+        Value::String(config.contract_address.clone()),
+    )])
 }
 
 fn resolved_evm_subject_for_binding(

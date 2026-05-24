@@ -92,14 +92,14 @@ use mfm_op_portfolio_tracker::{
     portfolio_config_build_canonical_artifact_id_context_key,
     portfolio_config_build_report_context_key, portfolio_public_ops,
     portfolio_snapshot_artifact_id_context_key, portfolio_snapshot_report_context_key,
-    portfolio_tracker_internal_ops, PORTFOLIO_CONFIG_BUILD_OP_ID, PORTFOLIO_PUBLIC_OP_VERSION,
-    PORTFOLIO_TRACKER_OP_ID,
+    portfolio_tracker_internal_ops, PortfolioSnapshotBuiltConfig, PORTFOLIO_CONFIG_BUILD_OP_ID,
+    PORTFOLIO_PUBLIC_OP_VERSION, PORTFOLIO_TRACKER_OP_ID,
 };
 use mfm_portfolio_config::{
     canonicalize_portfolio_snapshot_authored_config, parse_portfolio_snapshot_authored_config,
     parse_portfolio_snapshot_authored_config_with_hint,
     AuthoredConfigFormat as PortfolioAuthoredConfigFormat, PortfolioSnapshotBuildReport,
-    PortfolioSnapshotBuiltConfig, PortfolioSnapshotConfigError,
+    PortfolioSnapshotConfigError,
 };
 use mfm_portfolio_model::portfolio::PortfolioReport;
 use mfm_sdk::launcher::{LaunchPipeline, RunLauncher};
@@ -1426,6 +1426,7 @@ fn app_error_from_portfolio_snapshot_config_error(err: PortfolioSnapshotConfigEr
             "Failed to parse request body as TOML",
         ),
         PortfolioSnapshotConfigError::InvalidBundle(_)
+        | PortfolioSnapshotConfigError::Decode { .. }
         | PortfolioSnapshotConfigError::Serialize { .. }
         | PortfolioSnapshotConfigError::CanonicalJson { .. } => {
             AppError::new(ErrorClass::BadRequest, "InvalidRequest", err.to_string())
@@ -3278,7 +3279,9 @@ expected_chain_id = 1
                 "networks": [
                     {
                         "network_id": "ethereum-mainnet",
+                        "family": "evm",
                         "chain_id": 1,
+                        "control_scope": "shared",
                         "metadata": {}
                     }
                 ],
@@ -3339,7 +3342,9 @@ metadata = {}
 
 [[portfolio.networks]]
 network_id = "ethereum-mainnet"
+family = "evm"
 chain_id = 1
+control_scope = "shared"
 metadata = {}
 
 [[portfolio.wallets]]

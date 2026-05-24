@@ -19,6 +19,7 @@
 //! # Ok::<(), mfm_values::ValueError>(())
 //! ```
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::marker::PhantomData;
 
@@ -33,6 +34,34 @@ use serde::{Deserialize, Serialize};
 
 #[cfg(test)]
 mod tests;
+
+// Keep this list intentionally small and high-signal to avoid false positives on public
+// descriptive fields while still blocking common secret-bearing persisted surfaces.
+const SECRET_MARKERS: &[&str] = &[
+    "password",
+    "passphrase",
+    "mnemonic",
+    "private_key",
+    "privatekey",
+    "seed phrase",
+    "seed_phrase",
+    "seedphrase",
+    "api_key",
+    "apikey",
+    "x-api-key",
+    "x_api_key",
+    "access_key",
+    "accesskey",
+    "secret_key",
+    "secretkey",
+    "aws_access_key_id",
+    "aws_secret_access_key",
+    "access_token",
+    "refresh_token",
+    "id_token",
+    "authorization",
+    "bearer ",
+];
 
 /// Result type for descriptor and value-contract operations.
 pub type Result<T> = std::result::Result<T, ValueError>;
@@ -76,6 +105,46 @@ impl fmt::Display for ValueError {
 }
 
 impl std::error::Error for ValueError {}
+
+/// Returns `true` when `input` matches MFM's high-signal secret-marker policy.
+///
+/// This is a conservative persisted-surface guard. It is not intended to prove that arbitrary
+/// text is safe; it blocks known secret field markers and mnemonic-shaped phrases before values
+/// become canonical artifacts, configs, events, or public outputs.
+pub fn string_contains_secret_marker(input: &str) -> bool {
+    let lower = input.to_ascii_lowercase();
+    if SECRET_MARKERS.iter().any(|marker| lower.contains(marker)) {
+        return true;
+    }
+
+    looks_like_mnemonic_phrase(input)
+}
+
+/// Returns the first string-map key whose key or value matches the secret-marker policy.
+pub fn string_map_secret_marker_key<'a>(map: &'a BTreeMap<String, String>) -> Option<&'a str> {
+    map.iter()
+        .find(|(key, value)| {
+            string_contains_secret_marker(key) || string_contains_secret_marker(value)
+        })
+        .map(|(key, _)| key.as_str())
+}
+
+fn looks_like_mnemonic_phrase(input: &str) -> bool {
+    let mut words = input.split_whitespace().peekable();
+    if words.peek().is_none() {
+        return false;
+    }
+
+    let mut count = 0usize;
+    for word in words {
+        count += 1;
+        if !word.chars().all(|ch| ch.is_ascii_lowercase()) {
+            return false;
+        }
+    }
+
+    (12..=24).contains(&count)
+}
 
 /// Error returned by typed planning config validation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -676,6 +745,20 @@ impl SchemaShape {
         })
     }
 
+    /// Builds an enum shape with the supplied tagging policy, rejecting
+    /// duplicate variant names.
+    pub fn tagged_enum(
+        tagging: EnumTagging,
+        mut variants: Vec<EnumVariantDescriptor>,
+    ) -> Result<Self> {
+        reject_duplicate_names(
+            variants.iter().map(|variant| variant.name.as_str()),
+            "enum variant",
+        )?;
+        variants.sort_by(|left, right| left.name.cmp(&right.name));
+        Ok(Self::Enum { tagging, variants })
+    }
+
     fn to_canonical_value(&self) -> CanonicalValue {
         match self {
             Self::Unit => kind_only("unit"),
@@ -944,6 +1027,12 @@ impl GenericArgumentDescriptor {
 /// derives and framework-owned wrappers must opt in explicitly so secret or
 /// unsupported persisted shapes cannot become defaultable by accident.
 pub trait MfmDefault: Default {}
+
+impl<T> MfmDefault for Option<T> {}
+
+impl<T> MfmDefault for Vec<T> {}
+
+impl<V> MfmDefault for BTreeMap<String, V> {}
 
 /// State-boundary optional value with explicit skip provenance.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

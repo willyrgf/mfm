@@ -10,8 +10,8 @@ use quote::{format_ident, quote};
 use syn::parse_macro_input;
 use syn::spanned::Spanned;
 use syn::{
-    Attribute, Data, DataStruct, DeriveInput, Fields, GenericArgument, GenericParam, Ident, LitStr,
-    PathArguments, Type, TypePath,
+    Attribute, Data, DataEnum, DataStruct, DeriveInput, Fields, FieldsNamed, FieldsUnnamed,
+    GenericArgument, GenericParam, Ident, LitStr, PathArguments, Type, TypePath, Variant,
 };
 
 #[proc_macro_derive(MfmValue, attributes(mfm, serde))]
@@ -125,15 +125,15 @@ fn expand_schema_derive_result(
     }
 
     let attrs = ContainerAttrs::parse(&input.attrs, &input.ident)?;
-    let fields = named_struct_fields(&input.data)?;
-    let field_output = field_descriptor_tokens(fields, attrs.rename_all.as_deref(), kind)?;
+    let shape_output = schema_shape_tokens(&input.data, attrs.rename_all.as_deref(), kind, &attrs)?;
     let state_input_handles = if kind == DeriveKind::StateInput {
+        let fields = named_struct_fields(&input.data)?;
         generated_state_input_handles_tokens(&input.ident, fields, attrs.rename_all.as_deref())?
     } else {
         quote! {}
     };
-    let field_descriptors = field_output.descriptors;
-    let default_bounds = field_output.default_bounds;
+    let shape = shape_output.shape;
+    let default_bounds = shape_output.default_bounds;
     let ident = &input.ident;
     let schema_name = attrs.schema_name;
     let version = attrs.version;
@@ -185,7 +185,7 @@ fn expand_schema_derive_result(
                 #schema_name,
                 ::mfm_ids::SchemaVersion::new(#version)
                     .map_err(|error| ::mfm_values::ValueError::Identity(error.to_string()))?,
-                ::mfm_values::SchemaShape::named_struct(vec![#(#field_descriptors),*])?,
+                #shape,
             )?,
             #audit_path,
         )
@@ -454,6 +454,8 @@ struct ContainerAttrs {
     version: String,
     schema_name: String,
     rename_all: Option<String>,
+    enum_tag: Option<String>,
+    enum_content: Option<String>,
 }
 
 impl ContainerAttrs {
@@ -465,6 +467,8 @@ impl ContainerAttrs {
             version: "1".to_owned(),
             schema_name: format!("mfm.derived.{type_name}"),
             rename_all: None,
+            enum_tag: None,
+            enum_content: None,
         };
 
         for attr in attrs {
@@ -497,6 +501,14 @@ impl ContainerAttrs {
                                     .error("unsupported serde(rename_all) value for MFM derive"))
                             }
                         }
+                    } else if meta.path.is_ident("tag") {
+                        output.enum_tag = Some(meta.value()?.parse::<LitStr>()?.value());
+                        Ok(())
+                    } else if meta.path.is_ident("content") {
+                        output.enum_content = Some(meta.value()?.parse::<LitStr>()?.value());
+                        Ok(())
+                    } else if meta.path.is_ident("untagged") {
+                        Err(meta.error("serde(untagged) is not supported by MFM derives"))
                     } else {
                         Err(meta
                             .error("unsupported #[serde(...)] container attribute for MFM derive"))
@@ -600,9 +612,140 @@ struct FieldDescriptorOutput {
     default_bounds: Vec<proc_macro2::TokenStream>,
 }
 
+struct SchemaShapeOutput {
+    shape: proc_macro2::TokenStream,
+    default_bounds: Vec<proc_macro2::TokenStream>,
+}
+
 struct ProgramPublicOutputFieldOutput {
     descriptors: Vec<proc_macro2::TokenStream>,
     output_cells: Vec<proc_macro2::TokenStream>,
+}
+
+fn schema_shape_tokens(
+    data: &Data,
+    rename_all: Option<&str>,
+    kind: DeriveKind,
+    attrs: &ContainerAttrs,
+) -> syn::Result<SchemaShapeOutput> {
+    match data {
+        Data::Struct(DataStruct {
+            fields: Fields::Named(fields),
+            ..
+        }) => {
+            let field_output = field_descriptor_tokens(&fields.named, rename_all, kind)?;
+            let descriptors = field_output.descriptors;
+            Ok(SchemaShapeOutput {
+                shape: quote!(::mfm_values::SchemaShape::named_struct(
+                    vec![#(#descriptors),*]
+                )?),
+                default_bounds: field_output.default_bounds,
+            })
+        }
+        Data::Struct(other) => Err(syn::Error::new(
+            other.fields.span(),
+            "MFM derives support named structs only in v1",
+        )),
+        Data::Enum(data) => enum_shape_tokens(data, rename_all, kind, attrs),
+        Data::Union(data) => Err(syn::Error::new(
+            data.union_token.span,
+            "MFM derives do not support unions",
+        )),
+    }
+}
+
+fn enum_shape_tokens(
+    data: &DataEnum,
+    rename_all: Option<&str>,
+    kind: DeriveKind,
+    attrs: &ContainerAttrs,
+) -> syn::Result<SchemaShapeOutput> {
+    if kind == DeriveKind::StateInput {
+        return Err(syn::Error::new(
+            data.enum_token.span,
+            "StateInput derive supports named structs only in v1",
+        ));
+    }
+
+    let mut variants = Vec::new();
+    let mut default_bounds = Vec::new();
+    let mut variant_names = Vec::new();
+    let internal_tagged = attrs.enum_tag.is_some() && attrs.enum_content.is_none();
+    for variant in &data.variants {
+        let variant_attrs = VariantAttrs::parse(&variant.attrs)?;
+        let wire_name = variant_attrs
+            .rename
+            .unwrap_or_else(|| apply_rename_all(&variant.ident.to_string(), rename_all));
+        if variant_names.iter().any(|name: &String| name == &wire_name) {
+            return Err(syn::Error::new(
+                variant.ident.span(),
+                format!("duplicate MFM enum variant wire name '{wire_name}'"),
+            ));
+        }
+        if internal_tagged && !matches!(variant.fields, Fields::Named(_)) {
+            return Err(syn::Error::new(
+                variant.ident.span(),
+                "internally tagged MFM enum variants must have named fields",
+            ));
+        }
+        variant_names.push(wire_name.clone());
+        let shape_output = variant_shape_tokens(variant, rename_all, kind)?;
+        default_bounds.extend(shape_output.default_bounds);
+        let shape = shape_output.shape;
+        variants.push(quote!(::mfm_values::EnumVariantDescriptor::new(#wire_name, #shape)));
+    }
+
+    let tagging = match (attrs.enum_tag.as_deref(), attrs.enum_content.as_deref()) {
+        (None, None) => quote!(::mfm_values::EnumTagging::External),
+        (Some(tag), None) => quote!(::mfm_values::EnumTagging::Internal { tag: #tag }),
+        (Some(tag), Some(content)) => {
+            quote!(::mfm_values::EnumTagging::Adjacent { tag: #tag, content: #content })
+        }
+        (None, Some(_)) => {
+            return Err(syn::Error::new(
+                data.enum_token.span,
+                "serde(content) requires serde(tag) for MFM enum derives",
+            ));
+        }
+    };
+
+    Ok(SchemaShapeOutput {
+        shape: quote!(::mfm_values::SchemaShape::tagged_enum(#tagging, vec![#(#variants),*])?),
+        default_bounds,
+    })
+}
+
+fn variant_shape_tokens(
+    variant: &Variant,
+    rename_all: Option<&str>,
+    kind: DeriveKind,
+) -> syn::Result<SchemaShapeOutput> {
+    match &variant.fields {
+        Fields::Unit => Ok(SchemaShapeOutput {
+            shape: quote!(::mfm_values::SchemaShape::Unit),
+            default_bounds: Vec::new(),
+        }),
+        Fields::Named(FieldsNamed { named, .. }) => {
+            let field_output = field_descriptor_tokens(named, rename_all, kind)?;
+            let descriptors = field_output.descriptors;
+            Ok(SchemaShapeOutput {
+                shape: quote!(::mfm_values::SchemaShape::named_struct(
+                    vec![#(#descriptors),*]
+                )?),
+                default_bounds: field_output.default_bounds,
+            })
+        }
+        Fields::Unnamed(FieldsUnnamed { unnamed, .. }) => {
+            let shapes = unnamed
+                .iter()
+                .map(|field| shape_tokens(&field.ty, kind))
+                .collect::<syn::Result<Vec<_>>>()?;
+            Ok(SchemaShapeOutput {
+                shape: quote!(::mfm_values::SchemaShape::Tuple(vec![#(#shapes),*])),
+                default_bounds: Vec::new(),
+            })
+        }
+    }
 }
 
 fn field_descriptor_tokens(
@@ -948,6 +1091,33 @@ impl FieldAttrs {
                         Err(meta.error("custom serde serializers are not supported by MFM derives"))
                     } else {
                         Err(meta.error("unsupported #[serde(...)] field attribute for MFM derive"))
+                    }
+                })?;
+            }
+        }
+        Ok(output)
+    }
+}
+
+#[derive(Debug, Default)]
+struct VariantAttrs {
+    rename: Option<String>,
+}
+
+impl VariantAttrs {
+    fn parse(attrs: &[Attribute]) -> syn::Result<Self> {
+        let mut output = Self::default();
+        for attr in attrs {
+            if attr.path().is_ident("serde") {
+                attr.parse_nested_meta(|meta| {
+                    if meta.path.is_ident("rename") {
+                        output.rename = Some(meta.value()?.parse::<LitStr>()?.value());
+                        Ok(())
+                    } else if meta.path.is_ident("alias") {
+                        Err(meta.error("serde(alias) is not supported by MFM derives"))
+                    } else {
+                        Err(meta
+                            .error("unsupported #[serde(...)] variant attribute for MFM derive"))
                     }
                 })?;
             }

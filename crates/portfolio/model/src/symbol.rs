@@ -3,13 +3,21 @@ use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 
 use mfm_evm_core::encoding::normalize_address;
-use mfm_machine::hashing::{canonical_json_bytes, CanonicalJsonError};
+use mfm_program_derive::MfmValue;
+use mfm_values::string_map_secret_marker_key;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
+use crate::aave::AaveProtocolPositionConfig;
+
 /// Supported quote codes for the canonical portfolio snapshot surface.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, MfmValue)]
+#[mfm(
+    namespace = "mfm.portfolio",
+    name = "quote-code",
+    schema = "mfm.portfolio.quote_code"
+)]
 pub enum QuoteCode {
     /// United States Dollar.
     #[serde(rename = "USD")]
@@ -48,8 +56,13 @@ impl PartialOrd for QuoteCode {
 }
 
 /// Canonical symbol kinds supported by the portfolio model.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
 #[serde(rename_all = "snake_case")]
+#[mfm(
+    namespace = "mfm.portfolio",
+    name = "symbol-kind",
+    schema = "mfm.portfolio.symbol_kind"
+)]
 pub enum SymbolKind {
     /// Native balance on a network.
     NativeBalance,
@@ -62,8 +75,13 @@ pub enum SymbolKind {
 }
 
 /// Canonical exposure roles for a symbol observation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
 #[serde(rename_all = "snake_case")]
+#[mfm(
+    namespace = "mfm.portfolio",
+    name = "symbol-role",
+    schema = "mfm.portfolio.symbol_role"
+)]
 pub enum SymbolRole {
     /// Native asset used for fees and transfers.
     Native,
@@ -78,7 +96,12 @@ pub enum SymbolRole {
 }
 
 /// Canonical symbol configuration referenced from portfolio and wallet configs.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, MfmValue)]
+#[mfm(
+    namespace = "mfm.portfolio",
+    name = "symbol-config",
+    schema = "mfm.portfolio.symbol_config"
+)]
 pub struct SymbolConfig {
     /// Stable machine identifier for the symbol.
     pub symbol_id: String,
@@ -102,7 +125,7 @@ pub struct SymbolConfig {
     pub underlying_symbol_id: Option<String>,
     /// Canonical metadata surface.
     #[serde(default)]
-    pub metadata: BTreeMap<String, Value>,
+    pub metadata: BTreeMap<String, String>,
 }
 
 impl SymbolConfig {
@@ -119,8 +142,13 @@ impl SymbolConfig {
 }
 
 /// Canonical balance reader selection.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, MfmValue)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[mfm(
+    namespace = "mfm.portfolio",
+    name = "balance-reader-config",
+    schema = "mfm.portfolio.balance_reader_config"
+)]
 pub enum BalanceReaderConfig {
     /// Read the native balance for the wallet on the configured network.
     NativeBalance {},
@@ -135,14 +163,18 @@ pub enum BalanceReaderConfig {
         protocol: String,
         /// Stable reader identifier inside the protocol module.
         reader: String,
-        /// Canonical protocol reader config blob.
-        #[serde(default)]
-        config: BTreeMap<String, Value>,
+        /// Typed protocol reader config.
+        config: AaveProtocolPositionConfig,
     },
 }
 
 /// Quote valuation routes configured for a symbol.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, MfmValue)]
+#[mfm(
+    namespace = "mfm.portfolio",
+    name = "symbol-valuation-config",
+    schema = "mfm.portfolio.symbol_valuation_config"
+)]
 pub struct SymbolValuationConfig {
     /// One route per requested quote code.
     pub quotes: Vec<QuoteValuationConfig>,
@@ -157,7 +189,12 @@ impl SymbolValuationConfig {
 }
 
 /// Valuation route for one requested quote code.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, MfmValue)]
+#[mfm(
+    namespace = "mfm.portfolio",
+    name = "quote-valuation-config",
+    schema = "mfm.portfolio.quote_valuation_config"
+)]
 pub struct QuoteValuationConfig {
     /// Requested quote unit.
     pub quote: QuoteCode,
@@ -168,7 +205,12 @@ pub struct QuoteValuationConfig {
 }
 
 /// Source reference used by direct and derived valuation readers.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[mfm(
+    namespace = "mfm.portfolio",
+    name = "price-source-ref",
+    schema = "mfm.portfolio.price_source_ref"
+)]
 pub struct PriceSourceRef {
     /// Stable source identifier within the runtime environment.
     pub source_id: String,
@@ -181,7 +223,12 @@ pub struct PriceSourceRef {
 }
 
 /// Typed registry of valuation sources referenced by symbol valuation routes.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, MfmValue)]
+#[mfm(
+    namespace = "mfm.portfolio",
+    name = "valuation-source-registry",
+    schema = "mfm.portfolio.valuation_source_registry"
+)]
 pub struct ValuationSourceRegistry {
     /// Configured valuation sources keyed by `source_id`.
     pub sources: Vec<ValuationSourceConfig>,
@@ -202,7 +249,12 @@ impl ValuationSourceRegistry {
 }
 
 /// Typed registry entry for one valuation source.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, MfmValue)]
+#[mfm(
+    namespace = "mfm.portfolio",
+    name = "valuation-source-config",
+    schema = "mfm.portfolio.valuation_source_config"
+)]
 pub struct ValuationSourceConfig {
     /// Stable logical source identifier.
     pub source_id: String,
@@ -216,11 +268,16 @@ pub struct ValuationSourceConfig {
     pub reader: ValuationSourceReaderConfig,
     /// Canonical metadata surface.
     #[serde(default)]
-    pub metadata: BTreeMap<String, Value>,
+    pub metadata: BTreeMap<String, String>,
 }
 
 /// Resolved balance reader selected by runtime planning.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[mfm(
+    namespace = "mfm.portfolio",
+    name = "resolved-symbol-balance-reader",
+    schema = "mfm.portfolio.resolved_symbol_balance_reader"
+)]
 pub struct ResolvedSymbolBalanceReader {
     /// Canonical runtime reader kind.
     pub kind: String,
@@ -229,7 +286,12 @@ pub struct ResolvedSymbolBalanceReader {
 }
 
 /// Resolved valuation reader selected by runtime planning.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[mfm(
+    namespace = "mfm.portfolio",
+    name = "resolved-symbol-valuation-reader",
+    schema = "mfm.portfolio.resolved_symbol_valuation_reader"
+)]
 pub struct ResolvedSymbolValuationReader {
     /// Quote handled by the resolved reader.
     pub quote: QuoteCode,
@@ -240,22 +302,43 @@ pub struct ResolvedSymbolValuationReader {
 }
 
 /// Supported valuation source reader kinds.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, MfmValue)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[mfm(
+    namespace = "mfm.portfolio",
+    name = "valuation-source-reader-config",
+    schema = "mfm.portfolio.valuation_source_reader_config"
+)]
 pub enum ValuationSourceReaderConfig {
     /// EVM oracle reader selected by `oracle_kind`.
     EvmOracle {
         /// Concrete oracle family used at runtime.
         oracle_kind: String,
-        /// Canonical oracle config blob.
-        #[serde(default)]
-        config: BTreeMap<String, Value>,
+        /// Typed oracle config.
+        config: EvmOracleConfig,
     },
 }
 
+/// Typed EVM oracle reader config.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[mfm(
+    namespace = "mfm.portfolio",
+    name = "evm-oracle-config",
+    schema = "mfm.portfolio.evm_oracle_config"
+)]
+pub struct EvmOracleConfig {
+    /// Normalized oracle contract address.
+    pub contract_address: String,
+}
+
 /// Supported valuation reader kinds.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, MfmValue)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[mfm(
+    namespace = "mfm.portfolio",
+    name = "valuation-reader-config",
+    schema = "mfm.portfolio.valuation_reader_config"
+)]
 pub enum ValuationReaderConfig {
     /// Fixed unit price encoded as a decimal string.
     FixedUnitPrice {
@@ -277,7 +360,12 @@ pub enum ValuationReaderConfig {
 }
 
 /// Canonical wallet observation emitted by runtime states.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, MfmValue)]
+#[mfm(
+    namespace = "mfm.portfolio",
+    name = "observation",
+    schema = "mfm.portfolio.observation"
+)]
 pub struct Observation {
     /// Wallet that owns the observation.
     pub wallet_id: String,
@@ -301,7 +389,7 @@ pub struct Observation {
     pub source: ObservationSource,
     /// Canonical metadata surface.
     #[serde(default)]
-    pub metadata: BTreeMap<String, Value>,
+    pub metadata: BTreeMap<String, String>,
 }
 
 impl Observation {
@@ -313,7 +401,12 @@ impl Observation {
 }
 
 /// Canonical quantity representation for an observation.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[mfm(
+    namespace = "mfm.portfolio",
+    name = "observation-quantity",
+    schema = "mfm.portfolio.observation_quantity"
+)]
 pub struct ObservationQuantity {
     /// Raw on-chain integer encoded as a decimal string.
     pub raw_dec: String,
@@ -324,7 +417,12 @@ pub struct ObservationQuantity {
 }
 
 /// Canonical value representation for one quote unit.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[mfm(
+    namespace = "mfm.portfolio",
+    name = "observation-value",
+    schema = "mfm.portfolio.observation_value"
+)]
 pub struct ObservationValue {
     /// Quote unit.
     pub quote: QuoteCode,
@@ -341,8 +439,13 @@ pub struct ObservationValue {
 }
 
 /// Concrete execution anchor captured for one observation source.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
 #[serde(tag = "family", rename_all = "snake_case")]
+#[mfm(
+    namespace = "mfm.portfolio",
+    name = "observation-anchor",
+    schema = "mfm.portfolio.observation_anchor"
+)]
 pub enum ObservationAnchor {
     /// EVM observation pinned to one block on one chain.
     Evm {
@@ -361,7 +464,12 @@ pub enum ObservationAnchor {
 }
 
 /// Concrete price source ref pinned to a network anchor.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[mfm(
+    namespace = "mfm.portfolio",
+    name = "observation-value-source-ref",
+    schema = "mfm.portfolio.observation_value_source_ref"
+)]
 pub struct ObservationValueSourceRef {
     /// Stable source identifier.
     pub source_id: String,
@@ -372,7 +480,12 @@ pub struct ObservationValueSourceRef {
 }
 
 /// Concrete balance source pinned to a network anchor.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[mfm(
+    namespace = "mfm.portfolio",
+    name = "observation-source",
+    schema = "mfm.portfolio.observation_source"
+)]
 pub struct ObservationSource {
     /// Canonical balance reader kind.
     pub balance_reader_kind: String,
@@ -400,11 +513,11 @@ pub enum SymbolConfigError {
     /// `underlying_symbol_id` was present but empty.
     #[error("underlying_symbol_id must be non-empty when present")]
     EmptyUnderlyingSymbolId,
-    /// Symbol metadata violated canonical JSON rules.
-    #[error("metadata must be canonical JSON: {reason}")]
-    MetadataNotCanonical {
-        /// Underlying canonical JSON failure.
-        reason: CanonicalJsonError,
+    /// Symbol metadata contained a secret-shaped key or value.
+    #[error("metadata key `{key}` contains secret-shaped content")]
+    MetadataContainsSecret {
+        /// Metadata key associated with the rejected content.
+        key: String,
     },
     /// ERC-20 token address was invalid or not normalized.
     #[error("token_address must be a normalized EVM address: {token_address}")]
@@ -418,12 +531,6 @@ pub enum SymbolConfigError {
     /// `reader` in a `protocol_position` reader was empty.
     #[error("protocol_position.reader must be non-empty")]
     EmptyProtocolReader,
-    /// Protocol reader config violated canonical JSON rules.
-    #[error("protocol_position.config must be canonical JSON: {reason}")]
-    ProtocolConfigNotCanonical {
-        /// Underlying canonical JSON failure.
-        reason: CanonicalJsonError,
-    },
     /// A quote route appeared more than once.
     #[error("valuation quote `{quote}` must be unique per symbol")]
     DuplicateQuoteValuation {
@@ -495,20 +602,24 @@ pub enum ValuationSourceRegistryError {
     /// `base_symbol_id` was empty.
     #[error("base_symbol_id must be non-empty")]
     EmptyBaseSymbolId,
-    /// Registry metadata violated canonical JSON rules.
-    #[error("valuation source metadata must be canonical JSON: {reason}")]
-    MetadataNotCanonical {
-        /// Underlying canonical JSON failure.
-        reason: CanonicalJsonError,
+    /// Registry metadata contained a secret-shaped key or value.
+    #[error("valuation source `{source_id}` metadata key `{key}` contains secret-shaped content")]
+    MetadataContainsSecret {
+        /// Valuation source associated with the rejected metadata.
+        source_id: String,
+        /// Metadata key associated with the rejected content.
+        key: String,
     },
     /// `oracle_kind` was empty.
     #[error("evm_oracle.oracle_kind must be non-empty")]
     EmptyOracleKind,
-    /// Oracle config violated canonical JSON rules.
-    #[error("evm_oracle.config must be canonical JSON: {reason}")]
-    OracleConfigNotCanonical {
-        /// Underlying canonical JSON failure.
-        reason: CanonicalJsonError,
+    /// Oracle contract address was invalid or not normalized.
+    #[error(
+        "evm_oracle.config.contract_address must be a normalized EVM address: {contract_address}"
+    )]
+    InvalidOracleContractAddress {
+        /// Invalid oracle contract address input.
+        contract_address: String,
     },
     /// The same `source_id` appeared more than once.
     #[error("valuation source `{source_id}` must be unique")]
@@ -558,9 +669,11 @@ pub fn validate_symbol_config(cfg: &SymbolConfig) -> Result<(), SymbolConfigErro
     {
         return Err(SymbolConfigError::EmptyUnderlyingSymbolId);
     }
-
-    validate_canonical_json_map(&cfg.metadata)
-        .map_err(|reason| SymbolConfigError::MetadataNotCanonical { reason })?;
+    if let Some(key) = string_map_secret_marker_key(&cfg.metadata) {
+        return Err(SymbolConfigError::MetadataContainsSecret {
+            key: key.to_string(),
+        });
+    }
 
     match &cfg.balance_reader {
         BalanceReaderConfig::NativeBalance {} => {}
@@ -574,7 +687,7 @@ pub fn validate_symbol_config(cfg: &SymbolConfig) -> Result<(), SymbolConfigErro
         BalanceReaderConfig::ProtocolPosition {
             protocol,
             reader,
-            config,
+            config: _,
         } => {
             if protocol.trim().is_empty() {
                 return Err(SymbolConfigError::EmptyProtocolReaderProtocol);
@@ -582,8 +695,6 @@ pub fn validate_symbol_config(cfg: &SymbolConfig) -> Result<(), SymbolConfigErro
             if reader.trim().is_empty() {
                 return Err(SymbolConfigError::EmptyProtocolReader);
             }
-            validate_canonical_json_map(config)
-                .map_err(|reason| SymbolConfigError::ProtocolConfigNotCanonical { reason })?;
         }
     }
 
@@ -621,8 +732,12 @@ pub fn validate_valuation_source_registry(
         if source.base_symbol_id.trim().is_empty() {
             return Err(ValuationSourceRegistryError::EmptyBaseSymbolId);
         }
-        validate_canonical_json_map(&source.metadata)
-            .map_err(|reason| ValuationSourceRegistryError::MetadataNotCanonical { reason })?;
+        if let Some(key) = string_map_secret_marker_key(&source.metadata) {
+            return Err(ValuationSourceRegistryError::MetadataContainsSecret {
+                source_id: source.source_id.clone(),
+                key: key.to_string(),
+            });
+        }
         match &source.reader {
             ValuationSourceReaderConfig::EvmOracle {
                 oracle_kind,
@@ -631,8 +746,10 @@ pub fn validate_valuation_source_registry(
                 if oracle_kind.trim().is_empty() {
                     return Err(ValuationSourceRegistryError::EmptyOracleKind);
                 }
-                validate_canonical_json_map(config).map_err(|reason| {
-                    ValuationSourceRegistryError::OracleConfigNotCanonical { reason }
+                validate_normalized_address(&config.contract_address).map_err(|_| {
+                    ValuationSourceRegistryError::InvalidOracleContractAddress {
+                        contract_address: config.contract_address.clone(),
+                    }
                 })?;
             }
         }
@@ -690,20 +807,6 @@ fn validate_price_source_ref(
     Ok(())
 }
 
-pub(crate) fn validate_canonical_json_map(
-    map: &BTreeMap<String, Value>,
-) -> Result<(), CanonicalJsonError> {
-    canonical_json_bytes(&json_object_value(map)).map(|_| ())
-}
-
-pub(crate) fn json_object_value(map: &BTreeMap<String, Value>) -> Value {
-    Value::Object(
-        map.iter()
-            .map(|(key, value)| (key.clone(), value.clone()))
-            .collect(),
-    )
-}
-
 pub(crate) fn validate_normalized_address(raw: &str) -> Result<(), String> {
     if raw.trim().is_empty() {
         return Err("address must be non-empty".to_string());
@@ -713,4 +816,39 @@ pub(crate) fn validate_normalized_address(raw: &str) -> Result<(), String> {
         return Err("address must already be normalized".to_string());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn valuation_source_metadata_rejects_secret_markers() {
+        let mut metadata = BTreeMap::new();
+        metadata.insert("authorization".to_string(), "redacted".to_string());
+
+        let registry = ValuationSourceRegistry {
+            sources: vec![ValuationSourceConfig {
+                source_id: "chainlink_eth_usd".to_string(),
+                network_id: "ethereum-mainnet".to_string(),
+                base_symbol_id: "eth.native.ethereum-mainnet".to_string(),
+                quote: QuoteCode::Usd,
+                reader: ValuationSourceReaderConfig::EvmOracle {
+                    oracle_kind: "chainlink".to_string(),
+                    config: EvmOracleConfig {
+                        contract_address: "0x0000000000000000000000000000000000000001".to_string(),
+                    },
+                },
+                metadata,
+            }],
+        };
+
+        assert_eq!(
+            validate_valuation_source_registry(&registry).unwrap_err(),
+            ValuationSourceRegistryError::MetadataContainsSecret {
+                source_id: "chainlink_eth_usd".to_string(),
+                key: "authorization".to_string(),
+            }
+        );
+    }
 }

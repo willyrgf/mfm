@@ -51,11 +51,12 @@ pub use compiler::{PortfolioPlanCompiler, PortfolioRequest};
 /// projections remain stable while planner/runtime internals move to semantic compilation.
 pub use mfm_portfolio_model::symbol::Observation;
 pub use payloads::{
-    BitcoinResolvedSubjectValue, BitcoinRoutePolicy, BitcoinSubjectLocator,
-    BitcoinUtxoSetObservationPayload, DerivedUnitPriceValuationPayload, DirectPriceSourcePayload,
-    DirectPriceValuationPayload, Erc20BalanceObservationPayload, EvmResolvedSubjectValue,
-    EvmRoutePolicy, EvmSubjectLocator, FixedUnitPriceValuationPayload,
-    NativeBalanceObservationPayload, ObservationProjection, QuantitySchema,
+    AaveDebtObservationPayload, AaveReserveObservationPayload, BitcoinResolvedSubjectValue,
+    BitcoinRoutePolicy, BitcoinSubjectLocator, BitcoinUtxoSetObservationPayload,
+    DerivedUnitPriceValuationPayload, DirectPriceSourcePayload, DirectPriceValuationPayload,
+    Erc20BalanceObservationPayload, EvmResolvedSubjectValue, EvmRoutePolicy, EvmSubjectLocator,
+    FixedUnitPriceValuationPayload, NativeBalanceObservationPayload, ObservationProjection,
+    QuantitySchema,
 };
 
 /// Stable semantic venue identifier authored by portfolio config.

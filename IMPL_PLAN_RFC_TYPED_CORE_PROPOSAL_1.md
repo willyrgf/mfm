@@ -382,11 +382,11 @@ workflow ports, and deletion or hard isolation of old dynamic semantic APIs.
 
 ### Commit 35: `portfolio model align with typed values`
 
-- [ ] Move stable portfolio value/config/public-output types onto derives.
-- [ ] Add `StableDomainKey` types for source, subject, view, valuation, observation batch, and
+- [x] Move stable portfolio value/config/public-output types onto derives.
+- [x] Add `StableDomainKey` types for source, subject, view, valuation, observation batch, and
       report keys.
-- [ ] Ensure portfolio model/config crates do not depend on runtime, old machine, or old SDK crates.
-- [ ] Validation: `nix run .#test`.
+- [x] Ensure portfolio model/config crates do not depend on runtime, old machine, or old SDK crates.
+- [x] Validation: `nix run .#test`.
 
 ### Commit 36: `portfolio port tracker workflow`
 

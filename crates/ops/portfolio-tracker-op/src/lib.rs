@@ -13,8 +13,9 @@
 //! - `portfolio_execute`: built config -> canonical snapshot/runtime report
 //! - `portfolio_tracker`: canonical public root that composes build then execute
 //!
-//! All three remain thin planners. Pure semantic compilation stays in `mfm-portfolio-config`, and
-//! runtime execution stays in the reusable shared portfolio states.
+//! All three remain thin planners. Legacy semantic compilation is isolated in this op crate until
+//! the typed portfolio workflow port replaces it, and runtime execution stays in the reusable
+//! shared portfolio states.
 //!
 //! # Examples
 //!
@@ -33,9 +34,7 @@ use mfm_machine::config::RunConfig;
 use mfm_machine::errors::ErrorCategory;
 use mfm_machine::ids::{ContextKey, FactKey, OpId, OpPath};
 use mfm_portfolio_config::{
-    build_portfolio_snapshot_outcome, decode_portfolio_snapshot_built_config,
-    decode_portfolio_snapshot_canonical_config, PortfolioSnapshotBuiltConfig,
-    PortfolioSnapshotCanonicalConfig,
+    decode_portfolio_snapshot_canonical_config, PortfolioSnapshotCanonicalConfig,
 };
 use mfm_portfolio_plan::{PortfolioExecutionSpec, PORTFOLIO_EXECUTION_SPEC_KEY};
 use mfm_sdk::errors::SdkError;
@@ -48,14 +47,18 @@ use mfm_state_common::errors as op_errors;
 use serde_json::Value;
 
 mod config_build;
+mod defaults;
 mod plan_ops;
 pub use config_build::{
-    portfolio_config_build_built_artifact_id_context_key,
+    build_portfolio_snapshot_config, build_portfolio_snapshot_outcome,
+    decode_portfolio_snapshot_built_config, portfolio_config_build_built_artifact_id_context_key,
     portfolio_config_build_built_config_context_key,
     portfolio_config_build_canonical_artifact_id_context_key, portfolio_config_build_public_ops,
-    portfolio_config_build_report_context_key, PortfolioConfigBuildOp,
-    PORTFOLIO_CONFIG_BUILD_OP_ID,
+    portfolio_config_build_report_context_key, PortfolioConfigBuildOp, PortfolioSnapshotBuildError,
+    PortfolioSnapshotBuildOutcome, PortfolioSnapshotBuiltConfig,
+    PortfolioSnapshotExecutionConfigError, PORTFOLIO_CONFIG_BUILD_OP_ID,
 };
+pub use defaults::{builtin_dispatch_catalog, DefaultPortfolioPlanCompiler};
 use plan_ops::{
     assemble_snapshot_config, child_ops, merge_observations_config, observe_batch_config,
     pin_execution_views_config, prepare_sources_config, resolve_subjects_config,

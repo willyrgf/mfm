@@ -1,14 +1,14 @@
 //! Shared Aave V3 portfolio-position config and semantic adapters.
 //!
 //! The portfolio module owns the typed meaning of `protocol = "aave_v3"` for canonical
-//! `protocol_position` symbols. It validates the config blob carried by the generic symbol model
-//! and lowers Aave reserve and debt token reads into semantic planner payloads and runtime
-//! adapters that emit the canonical `Observation` surface.
+//! `protocol_position` symbols. Stable Aave config and planner payload types live in
+//! `mfm-portfolio-model` and `mfm-portfolio-plan`; this module owns the runtime adapters that emit
+//! the canonical `Observation` surface.
 //!
 //! # Examples
 //!
 //! ```rust
-//! use mfm_state_aave_v3::portfolio::model::{
+//! use mfm_portfolio_model::aave::{
 //!     AaveDebtKind, AaveDebtPositionConfig, AaveMarketConfig, AaveReserveConfig,
 //! };
 //!
@@ -39,9 +39,5 @@
 //! assert_eq!(cfg.debt_kind.as_str(), "variable");
 //! ```
 
-/// Typed Aave V3 config models and validation helpers for portfolio positions.
-pub mod model;
 /// Runtime adapters for compiled Aave V3 semantic portfolio observations.
 pub mod plan_adapters;
-/// Shared semantic payloads for compiled Aave V3 portfolio execution.
-pub mod plan_payloads;

@@ -14,11 +14,27 @@ struct AssetPrice {
     symbol: String,
 }
 
+#[derive(Clone, Serialize, Deserialize, MfmValue)]
+#[serde(rename_all = "snake_case")]
+enum PriceKind {
+    Spot,
+    Twap,
+}
+
+#[derive(Clone, Serialize, Deserialize, MfmValue)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum PriceSource {
+    Fixed { price: AssetPrice },
+    Oracle { source_id: String },
+}
+
 #[derive(Clone, Serialize, Deserialize, MfmConfig)]
 #[serde(rename_all = "camelCase")]
 struct PortfolioConfig {
     account_id: String,
     latest_price: Option<AssetPrice>,
+    price_kind: PriceKind,
+    price_source: PriceSource,
     weights: BTreeMap<String, u64>,
     pair: (String, u64),
 }
@@ -41,6 +57,8 @@ struct PublicReport {
 
 fn main() {
     let _ = <AssetPrice as mfm_values::MfmValue>::schema_descriptor().unwrap();
+    let _ = <PriceKind as mfm_values::MfmValue>::schema_descriptor().unwrap();
+    let _ = <PriceSource as mfm_values::MfmValue>::schema_descriptor().unwrap();
     let _ = <PortfolioConfig as mfm_values::MfmConfig>::schema_descriptor().unwrap();
     let _ = <SnapshotInput as mfm_values::StateInput>::input_schema_descriptor().unwrap();
     let _ = <SnapshotOutput as mfm_values::OperationOutput>::output_schema_descriptor().unwrap();

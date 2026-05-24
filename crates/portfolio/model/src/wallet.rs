@@ -2,34 +2,44 @@ use std::collections::BTreeMap;
 
 use bs58;
 use mfm_evm_core::encoding::normalize_address;
-use mfm_machine::hashing::{canonical_json_bytes, CanonicalJsonError};
+use mfm_program_derive::MfmValue;
+use mfm_values::string_map_secret_marker_key;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
-fn default_wallet_subject_kind() -> WalletSubjectKind {
-    WalletSubjectKind::EvmAddress
-}
-
 /// Canonical subject kind selected for one wallet declaration.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
 #[serde(rename_all = "snake_case")]
+#[mfm(
+    namespace = "mfm.portfolio",
+    name = "wallet-subject-kind",
+    schema = "mfm.portfolio.wallet_subject_kind"
+)]
 pub enum WalletSubjectKind {
     /// Wallet resolves to an EVM address subject.
+    #[default]
     EvmAddress,
     /// Wallet resolves to a Bitcoin address subject.
     BitcoinAddress,
 }
 
+impl mfm_values::MfmDefault for WalletSubjectKind {}
+
 /// Canonical wallet config referenced by portfolio configs.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, MfmValue)]
+#[mfm(
+    namespace = "mfm.portfolio",
+    name = "wallet-config",
+    schema = "mfm.portfolio.wallet_config"
+)]
 pub struct WalletConfig {
     /// Stable machine identifier for the wallet.
     pub wallet_id: String,
     /// Canonical wallet address.
     pub address: String,
     /// Subject family resolved for this wallet declaration.
-    #[serde(default = "default_wallet_subject_kind")]
+    #[serde(default)]
     pub subject_kind: WalletSubjectKind,
     /// Stable network identifier.
     pub network_id: String,
@@ -39,7 +49,7 @@ pub struct WalletConfig {
     pub symbol_ids: Vec<String>,
     /// Canonical metadata surface.
     #[serde(default)]
-    pub metadata: BTreeMap<String, Value>,
+    pub metadata: BTreeMap<String, String>,
 }
 
 impl WalletConfig {
@@ -56,8 +66,13 @@ impl WalletConfig {
 }
 
 /// Canonical wallet implementation selection.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[mfm(
+    namespace = "mfm.portfolio",
+    name = "wallet-implementation-config",
+    schema = "mfm.portfolio.wallet_implementation_config"
+)]
 pub enum WalletImplementationConfig {
     /// Read-only address supplied directly by config.
     AddressOnly {},
@@ -69,7 +84,7 @@ pub enum WalletImplementationConfig {
     /// Account managed by the node.
     NodeManagedAccount {
         /// Node account index.
-        account_index: usize,
+        account_index: u64,
     },
     /// External signer resolved by id.
     ExternalSigner {
@@ -79,7 +94,12 @@ pub enum WalletImplementationConfig {
 }
 
 /// Wallet signer details selected by runtime planning.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[mfm(
+    namespace = "mfm.portfolio",
+    name = "wallet-signer-config",
+    schema = "mfm.portfolio.wallet_signer_config"
+)]
 pub struct WalletSignerConfig {
     /// Canonical signer kind.
     pub signer_kind: String,
@@ -88,7 +108,12 @@ pub struct WalletSignerConfig {
 }
 
 /// Runtime wallet capabilities.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[mfm(
+    namespace = "mfm.portfolio",
+    name = "wallet-capabilities",
+    schema = "mfm.portfolio.wallet_capabilities"
+)]
 pub struct WalletCapabilities {
     /// Whether the implementation can resolve an address.
     pub can_resolve_address: bool,
@@ -99,7 +124,12 @@ pub struct WalletCapabilities {
 }
 
 /// Resolved wallet after runtime planning.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[mfm(
+    namespace = "mfm.portfolio",
+    name = "resolved-wallet",
+    schema = "mfm.portfolio.resolved_wallet"
+)]
 pub struct ResolvedWallet {
     /// Stable wallet identifier.
     pub wallet_id: String,
@@ -147,11 +177,11 @@ pub enum WalletConfigError {
     /// `signer_id` was empty for an external signer wallet.
     #[error("external signer_id must be non-empty")]
     EmptyExternalSignerId,
-    /// Wallet metadata violated canonical JSON rules.
-    #[error("metadata must be canonical JSON: {reason}")]
-    MetadataNotCanonical {
-        /// Underlying canonical JSON failure.
-        reason: CanonicalJsonError,
+    /// Wallet metadata contained a secret-shaped key or value.
+    #[error("metadata key `{key}` contains secret-shaped content")]
+    MetadataContainsSecret {
+        /// Metadata key associated with the rejected content.
+        key: String,
     },
 }
 
@@ -204,9 +234,11 @@ pub fn validate_wallet_config(cfg: &WalletConfig) -> Result<(), WalletConfigErro
     {
         return Err(WalletConfigError::EmptySymbolIdRef);
     }
-    validate_canonical_json_map(&cfg.metadata)
-        .map_err(|reason| WalletConfigError::MetadataNotCanonical { reason })?;
-
+    if let Some(key) = string_map_secret_marker_key(&cfg.metadata) {
+        return Err(WalletConfigError::MetadataContainsSecret {
+            key: key.to_string(),
+        });
+    }
     match &cfg.implementation {
         WalletImplementationConfig::AddressOnly {} => {}
         WalletImplementationConfig::KeystoreEntry { entry_id } => {
@@ -223,18 +255,6 @@ pub fn validate_wallet_config(cfg: &WalletConfig) -> Result<(), WalletConfigErro
     }
 
     Ok(())
-}
-
-fn validate_canonical_json_map(map: &BTreeMap<String, Value>) -> Result<(), CanonicalJsonError> {
-    canonical_json_bytes(&json_object_value(map)).map(|_| ())
-}
-
-fn json_object_value(map: &BTreeMap<String, Value>) -> Value {
-    Value::Object(
-        map.iter()
-            .map(|(key, value)| (key.clone(), value.clone()))
-            .collect(),
-    )
 }
 
 fn validate_bitcoin_address(raw: &str) -> Result<(), String> {

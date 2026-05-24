@@ -1,6 +1,10 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
+use mfm_portfolio_model::aave::{
+    decode_aave_protocol_position_config, is_aave_protocol_position,
+    validate_aave_portfolio_config, AaveProtocolPositionConfig,
+};
 use mfm_portfolio_model::portfolio::{
     validate_portfolio_bundle, NetworkConfig, NetworkFamilyConfig,
 };
@@ -10,25 +14,18 @@ use mfm_portfolio_model::symbol::{
 };
 use mfm_portfolio_model::wallet::{WalletConfig, WalletSubjectKind};
 use mfm_portfolio_plan::{
-    AdapterId, BitcoinRoutePolicy, BitcoinSubjectLocator, BitcoinUtxoSetObservationPayload,
-    CompiledObservationBatch, CompiledObservationBinding, DerivedUnitPriceValuationPayload,
-    DirectPriceSourcePayload, DirectPriceValuationPayload, DispatchAdapter, DispatchCatalog,
-    DispatchCatalogError, DispatchCatalogParts, Erc20BalanceObservationPayload, EvmRoutePolicy,
-    EvmSubjectLocator, FixedUnitPriceValuationPayload, Instrument, InstrumentKind,
-    NativeBalanceObservationPayload, NetworkFamily, NetworkView, ObservationPlanRequest,
-    ObservationProjection, ObservationTarget, PlanningError, PortfolioExecutionSpec,
-    PortfolioPlanCompiler, PortfolioPlanConfig, PortfolioRequest, Position, PositionKind,
-    QuantitySchema, SourcePreparationTask, Subject, SubjectKind, SubjectPlanRequest,
-    SubjectPlannerAdapter, SubjectResolutionTask, Valuation, ValuationKind, ValuationPlanRequest,
-    ValuationPlannerAdapter, ValuationTask, Venue, VenueId, ViewPinTask, ViewPlanRequest,
-    ViewPlannerAdapter,
-};
-use mfm_state_aave_v3::portfolio::model::{
-    decode_aave_protocol_position_config, is_aave_protocol_position,
-    validate_aave_portfolio_config, AaveProtocolPositionConfig,
-};
-use mfm_state_aave_v3::portfolio::plan_payloads::{
-    AaveDebtObservationPayload, AaveReserveObservationPayload,
+    AaveDebtObservationPayload, AaveReserveObservationPayload, AdapterId, BitcoinRoutePolicy,
+    BitcoinSubjectLocator, BitcoinUtxoSetObservationPayload, CompiledObservationBatch,
+    CompiledObservationBinding, DerivedUnitPriceValuationPayload, DirectPriceSourcePayload,
+    DirectPriceValuationPayload, DispatchAdapter, DispatchCatalog, DispatchCatalogError,
+    DispatchCatalogParts, Erc20BalanceObservationPayload, EvmRoutePolicy, EvmSubjectLocator,
+    FixedUnitPriceValuationPayload, Instrument, InstrumentKind, NativeBalanceObservationPayload,
+    NetworkFamily, NetworkView, ObservationPlanRequest, ObservationProjection, ObservationTarget,
+    PlanningError, PortfolioExecutionSpec, PortfolioPlanCompiler, PortfolioPlanConfig,
+    PortfolioRequest, Position, PositionKind, QuantitySchema, SourcePreparationTask, Subject,
+    SubjectKind, SubjectPlanRequest, SubjectPlannerAdapter, SubjectResolutionTask, Valuation,
+    ValuationKind, ValuationPlanRequest, ValuationPlannerAdapter, ValuationTask, Venue, VenueId,
+    ViewPinTask, ViewPlanRequest, ViewPlannerAdapter,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -421,7 +418,7 @@ fn lower_plan_config(request: &PortfolioRequest) -> Result<PortfolioPlanConfig, 
         positions: positions_by_symbol_id.into_values().collect(),
         valuations: valuations_by_id.into_values().collect(),
         observation_targets,
-        metadata: request.portfolio.metadata.clone(),
+        metadata: metadata_to_value_map(&request.portfolio.metadata),
     })
 }
 
@@ -514,7 +511,7 @@ fn lower_network_view(network: &NetworkConfig) -> Result<NetworkView, PlanningEr
                     chain_id,
                     control_scope: network.control_scope.clone(),
                 })?,
-                metadata: network.metadata.clone(),
+                metadata: metadata_to_value_map(&network.metadata),
             })
         }
         NetworkFamilyConfig::Bitcoin => Ok(NetworkView {
@@ -525,7 +522,7 @@ fn lower_network_view(network: &NetworkConfig) -> Result<NetworkView, PlanningEr
                 network_id: network.network_id.clone(),
                 control_scope: network.control_scope.clone(),
             })?,
-            metadata: network.metadata.clone(),
+            metadata: metadata_to_value_map(&network.metadata),
         }),
     }
 }
@@ -540,7 +537,7 @@ fn lower_subject(wallet: &WalletConfig) -> Result<Subject, PlanningError> {
                 address: wallet.address.clone(),
                 implementation: wallet.implementation.clone(),
             })?,
-            metadata: wallet.metadata.clone(),
+            metadata: metadata_to_value_map(&wallet.metadata),
         }),
         WalletSubjectKind::BitcoinAddress => Ok(Subject {
             subject_id: wallet.wallet_id.clone(),
@@ -550,7 +547,7 @@ fn lower_subject(wallet: &WalletConfig) -> Result<Subject, PlanningError> {
                 address: wallet.address.clone(),
                 implementation: wallet.implementation.clone(),
             })?,
-            metadata: wallet.metadata.clone(),
+            metadata: metadata_to_value_map(&wallet.metadata),
         }),
     }
 }
@@ -627,7 +624,7 @@ fn build_instrument(symbol: &SymbolConfig) -> Result<Instrument, PlanningError> 
         quantity_schema: to_value(&QuantitySchema {
             decimals: symbol.decimals,
         })?,
-        metadata: symbol.metadata.clone(),
+        metadata: metadata_to_value_map(&symbol.metadata),
     })
 }
 
@@ -790,11 +787,11 @@ fn build_aave_position(
         kind: "lending_market".to_string(),
         network_id: Some(market.network_id.clone()),
         parent_venue_id: None,
-        metadata: market.metadata.clone(),
+        metadata: metadata_to_value_map(&market.metadata),
     };
     let reserve_metadata = market
         .reserve(reserve_id.as_str())
-        .map(|reserve| reserve.metadata.clone())
+        .map(|reserve| metadata_to_value_map(&reserve.metadata))
         .unwrap_or_default();
     let reserve_venue = Venue {
         venue_id: reserve_venue_id.clone(),
@@ -915,7 +912,7 @@ fn build_valuation(
         quote: quote.quote,
         semantics,
         strategy,
-        metadata: symbol.metadata.clone(),
+        metadata: metadata_to_value_map(&symbol.metadata),
     })
 }
 
@@ -975,6 +972,13 @@ fn to_object_map<T: Serialize>(value: &T) -> Result<BTreeMap<String, Value>, Pla
         "semantic_payload",
         "semantic_payload_object",
     )
+}
+
+fn metadata_to_value_map(metadata: &BTreeMap<String, String>) -> BTreeMap<String, Value> {
+    metadata
+        .iter()
+        .map(|(key, value)| (key.clone(), Value::String(value.clone())))
+        .collect()
 }
 
 fn value_to_object_map(
@@ -1535,23 +1539,25 @@ mod tests {
                         "protocol": "aave_v3",
                         "reader": "reserve_position",
                         "config": {
-                            "market": {
-                                "market_id": "aave-v3-mainnet",
-                                "network_id": "ethereum-mainnet",
-                                "chain_id": 1u64,
-                                "pool_address": "0x0000000000000000000000000000000000000002",
-                                "reserves": [
-                                    {
-                                        "reserve_id": "usdc",
-                                        "reserve_index": 1,
-                                        "underlying_token_address": "0x0000000000000000000000000000000000000001",
-                                        "a_token_address": "0x0000000000000000000000000000000000000003",
-                                        "variable_debt_token_address": "0x0000000000000000000000000000000000000004"
-                                    }
-                                ]
-                            },
-                            "reserve_id": "usdc",
-                            "use_as_collateral_required": true
+                            "reserve_position": {
+                                "market": {
+                                    "market_id": "aave-v3-mainnet",
+                                    "network_id": "ethereum-mainnet",
+                                    "chain_id": 1u64,
+                                    "pool_address": "0x0000000000000000000000000000000000000002",
+                                    "reserves": [
+                                        {
+                                            "reserve_id": "usdc",
+                                            "reserve_index": 1,
+                                            "underlying_token_address": "0x0000000000000000000000000000000000000001",
+                                            "a_token_address": "0x0000000000000000000000000000000000000003",
+                                            "variable_debt_token_address": "0x0000000000000000000000000000000000000004"
+                                        }
+                                    ]
+                                },
+                                "reserve_id": "usdc",
+                                "use_as_collateral_required": true
+                            }
                         }
                     },
                     "valuation": {
@@ -1590,23 +1596,25 @@ mod tests {
                         "protocol": "aave_v3",
                         "reader": "debt_position",
                         "config": {
-                            "market": {
-                                "market_id": "aave-v3-mainnet",
-                                "network_id": "ethereum-mainnet",
-                                "chain_id": 1u64,
-                                "pool_address": "0x0000000000000000000000000000000000000002",
-                                "reserves": [
-                                    {
-                                        "reserve_id": "usdc",
-                                        "reserve_index": 1,
-                                        "underlying_token_address": "0x0000000000000000000000000000000000000001",
-                                        "a_token_address": "0x0000000000000000000000000000000000000003",
-                                        "variable_debt_token_address": "0x0000000000000000000000000000000000000004"
-                                    }
-                                ]
-                            },
-                            "reserve_id": "usdc",
-                            "debt_kind": "variable"
+                            "debt_position": {
+                                "market": {
+                                    "market_id": "aave-v3-mainnet",
+                                    "network_id": "ethereum-mainnet",
+                                    "chain_id": 1u64,
+                                    "pool_address": "0x0000000000000000000000000000000000000002",
+                                    "reserves": [
+                                        {
+                                            "reserve_id": "usdc",
+                                            "reserve_index": 1,
+                                            "underlying_token_address": "0x0000000000000000000000000000000000000001",
+                                            "a_token_address": "0x0000000000000000000000000000000000000003",
+                                            "variable_debt_token_address": "0x0000000000000000000000000000000000000004"
+                                        }
+                                    ]
+                                },
+                                "reserve_id": "usdc",
+                                "debt_kind": "variable"
+                            }
                         }
                     },
                     "valuation": {
@@ -1836,7 +1844,7 @@ mod tests {
         );
         assert_eq!(
             debt_payload.config.debt_kind,
-            mfm_state_aave_v3::portfolio::model::AaveDebtKind::Variable
+            mfm_portfolio_model::aave::AaveDebtKind::Variable
         );
         assert_eq!(
             debt_payload

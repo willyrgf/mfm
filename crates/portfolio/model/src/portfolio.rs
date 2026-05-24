@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
-use mfm_machine::hashing::{canonical_json_bytes, CanonicalJsonError};
+use mfm_program_derive::{MfmConfig, MfmValue, PublicOutputs};
+use mfm_values::string_map_secret_marker_key;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
@@ -12,32 +13,31 @@ use crate::symbol::{
 };
 use crate::wallet::{validate_wallet_config, WalletConfig, WalletConfigError, WalletSubjectKind};
 
-const DEFAULT_CONTROL_SCOPE: &str = "shared";
-
-fn default_control_scope() -> String {
-    DEFAULT_CONTROL_SCOPE.to_string()
-}
-
-fn default_network_family() -> NetworkFamilyConfig {
-    NetworkFamilyConfig::Evm
-}
-
-fn portfolio_output_schema_version() -> u64 {
-    2
-}
-
 /// Supported network families on the canonical portfolio config surface.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
 #[serde(rename_all = "snake_case")]
+#[mfm(
+    namespace = "mfm.portfolio",
+    name = "network-family-config",
+    schema = "mfm.portfolio.network_family_config"
+)]
 pub enum NetworkFamilyConfig {
     /// Ethereum-compatible execution network.
+    #[default]
     Evm,
     /// Bitcoin-family execution network.
     Bitcoin,
 }
 
+impl mfm_values::MfmDefault for NetworkFamilyConfig {}
+
 /// Canonical top-level portfolio configuration.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, MfmValue, MfmConfig)]
+#[mfm(
+    namespace = "mfm.portfolio",
+    name = "portfolio-config",
+    schema = "mfm.portfolio.config"
+)]
 pub struct PortfolioConfig {
     /// Stable machine identifier for the portfolio.
     pub portfolio_id: String,
@@ -51,7 +51,7 @@ pub struct PortfolioConfig {
     pub symbol_configs: Vec<SymbolConfig>,
     /// Canonical metadata surface.
     #[serde(default)]
-    pub metadata: BTreeMap<String, Value>,
+    pub metadata: BTreeMap<String, String>,
 }
 
 impl PortfolioConfig {
@@ -80,27 +80,36 @@ impl PortfolioConfig {
 }
 
 /// Canonical network configuration.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, MfmValue)]
+#[mfm(
+    namespace = "mfm.portfolio",
+    name = "network-config",
+    schema = "mfm.portfolio.network_config"
+)]
 pub struct NetworkConfig {
     /// Stable machine identifier for the network.
     pub network_id: String,
     /// Declared execution family for the network.
-    #[serde(default = "default_network_family")]
+    #[serde(default)]
     pub family: NetworkFamilyConfig,
     /// EVM chain id for the network when `family = "evm"`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub chain_id: Option<u64>,
     /// Stable control-plane scope used for managed rpc.control reads on this network.
-    #[serde(default = "default_control_scope")]
     pub control_scope: String,
     /// Canonical metadata surface.
     #[serde(default)]
-    pub metadata: BTreeMap<String, Value>,
+    pub metadata: BTreeMap<String, String>,
 }
 
 /// Concrete execution anchor captured for one pinned network.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
 #[serde(tag = "family", rename_all = "snake_case")]
+#[mfm(
+    namespace = "mfm.portfolio",
+    name = "execution-anchor",
+    schema = "mfm.portfolio.execution_anchor"
+)]
 pub enum ExecutionAnchor {
     /// EVM execution pinned to one block number on one chain id.
     Evm {
@@ -119,7 +128,12 @@ pub enum ExecutionAnchor {
 }
 
 /// Concrete pinned network view captured in a snapshot/report artifact.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[mfm(
+    namespace = "mfm.portfolio",
+    name = "network-pin",
+    schema = "mfm.portfolio.network_pin"
+)]
 pub struct NetworkPin {
     /// Stable network identifier.
     pub network_id: String,
@@ -128,7 +142,12 @@ pub struct NetworkPin {
 }
 
 /// Canonical snapshot for one wallet inside a portfolio snapshot.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, MfmValue)]
+#[mfm(
+    namespace = "mfm.portfolio",
+    name = "wallet-snapshot",
+    schema = "mfm.portfolio.wallet_snapshot"
+)]
 pub struct WalletSnapshot {
     /// Stable wallet identifier.
     pub wallet_id: String,
@@ -156,10 +175,14 @@ impl WalletSnapshot {
 }
 
 /// Canonical portfolio snapshot artifact.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, MfmValue, PublicOutputs)]
+#[mfm(
+    namespace = "mfm.portfolio",
+    name = "portfolio-snapshot",
+    schema = "mfm.portfolio.snapshot"
+)]
 pub struct PortfolioSnapshot {
     /// Version of the public snapshot schema.
-    #[serde(default = "portfolio_output_schema_version")]
     pub schema_version: u64,
     /// Stable portfolio identifier.
     pub portfolio_id: String,
@@ -208,7 +231,12 @@ impl PortfolioSnapshot {
 }
 
 /// Canonical snapshot error.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[mfm(
+    namespace = "mfm.portfolio",
+    name = "portfolio-snapshot-error",
+    schema = "mfm.portfolio.snapshot_error"
+)]
 pub struct PortfolioSnapshotError {
     /// Stable machine-readable error code.
     pub code: String,
@@ -225,10 +253,14 @@ pub struct PortfolioSnapshotError {
 }
 
 /// Canonical report derived from the snapshot artifact.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue, PublicOutputs)]
+#[mfm(
+    namespace = "mfm.portfolio",
+    name = "portfolio-report",
+    schema = "mfm.portfolio.report"
+)]
 pub struct PortfolioReport {
     /// Version of the public report schema.
-    #[serde(default = "portfolio_output_schema_version")]
     pub schema_version: u64,
     /// Stable portfolio identifier.
     pub portfolio_id: String,
@@ -260,7 +292,12 @@ impl PortfolioReport {
 }
 
 /// Canonical per-wallet report summary.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[mfm(
+    namespace = "mfm.portfolio",
+    name = "wallet-report",
+    schema = "mfm.portfolio.wallet_report"
+)]
 pub struct WalletReport {
     /// Stable wallet identifier.
     pub wallet_id: String,
@@ -279,7 +316,12 @@ impl WalletReport {
 }
 
 /// Canonical quote total used by wallet and portfolio reports.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[mfm(
+    namespace = "mfm.portfolio",
+    name = "portfolio-quote-total",
+    schema = "mfm.portfolio.quote_total"
+)]
 pub struct PortfolioQuoteTotal {
     /// Quote unit.
     pub quote: QuoteCode,
@@ -304,11 +346,11 @@ pub enum PortfolioConfigError {
     /// `portfolio_id` was empty.
     #[error("portfolio_id must be non-empty")]
     EmptyPortfolioId,
-    /// Portfolio metadata violated canonical JSON rules.
-    #[error("portfolio metadata must be canonical JSON: {reason}")]
-    MetadataNotCanonical {
-        /// Underlying canonical JSON failure.
-        reason: CanonicalJsonError,
+    /// Portfolio metadata contained a secret-shaped key or value.
+    #[error("portfolio metadata key `{key}` contains secret-shaped content")]
+    MetadataContainsSecret {
+        /// Metadata key associated with the rejected content.
+        key: String,
     },
     /// One of the network ids was empty.
     #[error("network_id must be non-empty")]
@@ -337,13 +379,13 @@ pub enum PortfolioConfigError {
         /// Duplicate network id.
         network_id: String,
     },
-    /// Network metadata violated canonical JSON rules.
-    #[error("network `{network_id}` metadata must be canonical JSON: {reason}")]
-    NetworkMetadataNotCanonical {
-        /// Network that carried the invalid metadata.
+    /// Network metadata contained a secret-shaped key or value.
+    #[error("network `{network_id}` metadata key `{key}` contains secret-shaped content")]
+    NetworkMetadataContainsSecret {
+        /// Network associated with the rejected metadata.
         network_id: String,
-        /// Underlying canonical JSON failure.
-        reason: CanonicalJsonError,
+        /// Metadata key associated with the rejected content.
+        key: String,
     },
     /// Two wallets shared the same wallet id.
     #[error("wallet_id `{wallet_id}` must be unique")]
@@ -553,8 +595,11 @@ pub fn validate_portfolio_config(cfg: &PortfolioConfig) -> Result<(), PortfolioC
     if cfg.portfolio_id.trim().is_empty() {
         return Err(PortfolioConfigError::EmptyPortfolioId);
     }
-    validate_canonical_json_map(&cfg.metadata)
-        .map_err(|reason| PortfolioConfigError::MetadataNotCanonical { reason })?;
+    if let Some(key) = string_map_secret_marker_key(&cfg.metadata) {
+        return Err(PortfolioConfigError::MetadataContainsSecret {
+            key: key.to_string(),
+        });
+    }
 
     let mut requested_quotes = BTreeSet::new();
     for quote in &cfg.quote_codes {
@@ -740,12 +785,12 @@ fn validate_network_config(network: &NetworkConfig) -> Result<(), PortfolioConfi
             network_id: network.network_id.clone(),
         });
     }
-    validate_canonical_json_map(&network.metadata).map_err(|reason| {
-        PortfolioConfigError::NetworkMetadataNotCanonical {
+    if let Some(key) = string_map_secret_marker_key(&network.metadata) {
+        return Err(PortfolioConfigError::NetworkMetadataContainsSecret {
             network_id: network.network_id.clone(),
-            reason,
-        }
-    })?;
+            key: key.to_string(),
+        });
+    }
     match network.family {
         NetworkFamilyConfig::Evm => {
             if network.chain_id.is_none() {
@@ -914,18 +959,6 @@ fn validate_price_source_registry_match(
     Ok(())
 }
 
-fn validate_canonical_json_map(map: &BTreeMap<String, Value>) -> Result<(), CanonicalJsonError> {
-    canonical_json_bytes(&json_object_value(map)).map(|_| ())
-}
-
-fn json_object_value(map: &BTreeMap<String, Value>) -> Value {
-    Value::Object(
-        map.iter()
-            .map(|(key, value)| (key.clone(), value.clone()))
-            .collect(),
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -934,7 +967,6 @@ mod tests {
         ObservationValueSourceRef, SymbolConfigError, SymbolRole,
     };
     use crate::wallet::{WalletConfigError, WalletImplementationConfig};
-    use mfm_machine::hashing::CanonicalJsonError;
     use serde_json::json;
 
     #[test]
@@ -1029,34 +1061,13 @@ mod tests {
     }
 
     #[test]
-    fn no_float_validation_rejects_metadata_and_protocol_blobs() {
+    fn typed_metadata_rejects_non_string_values() {
         let mut portfolio_metadata = canonical_config_json();
         portfolio_metadata["metadata"] = json!({"threshold": 1.5});
-        assert_eq!(
-            decode_portfolio_config(&portfolio_metadata).unwrap_err(),
-            PortfolioConfigError::MetadataNotCanonical {
-                reason: CanonicalJsonError::FloatNotAllowed,
-            }
-        );
-
-        let mut protocol_config = canonical_config_json();
-        protocol_config["symbol_configs"][0]["balance_reader"] = json!({
-            "kind": "protocol_position",
-            "protocol": "aave_v3",
-            "reader": "debt_position",
-            "config": {
-                "health_factor": 1.1
-            }
-        });
-        assert_eq!(
-            decode_portfolio_config(&protocol_config).unwrap_err(),
-            PortfolioConfigError::InvalidSymbolConfig {
-                symbol_id: "eth.native.ethereum-mainnet".to_string(),
-                source: SymbolConfigError::ProtocolConfigNotCanonical {
-                    reason: CanonicalJsonError::FloatNotAllowed,
-                },
-            }
-        );
+        assert!(matches!(
+            decode_portfolio_config(&portfolio_metadata),
+            Err(PortfolioConfigError::Decode(_))
+        ));
 
         let mut float_decimals = canonical_config_json();
         float_decimals["symbol_configs"][0]["decimals"] = json!(18.5);
@@ -1067,18 +1078,53 @@ mod tests {
     }
 
     #[test]
-    fn validation_rejects_secrets_and_non_normalized_addresses() {
-        let mut secret_metadata = canonical_config_json();
-        secret_metadata["metadata"] = json!({
-            "mnemonic": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
-        });
+    fn typed_metadata_rejects_secret_markers() {
+        let mut portfolio_metadata = canonical_config_json();
+        portfolio_metadata["metadata"] = json!({"mnemonic": "redacted"});
         assert_eq!(
-            decode_portfolio_config(&secret_metadata).unwrap_err(),
-            PortfolioConfigError::MetadataNotCanonical {
-                reason: CanonicalJsonError::SecretsNotAllowed,
+            decode_portfolio_config(&portfolio_metadata).unwrap_err(),
+            PortfolioConfigError::MetadataContainsSecret {
+                key: "mnemonic".to_string(),
             }
         );
 
+        let mut network_metadata = canonical_config_json();
+        network_metadata["networks"][0]["metadata"] = json!({"label": "password=redacted"});
+        assert_eq!(
+            decode_portfolio_config(&network_metadata).unwrap_err(),
+            PortfolioConfigError::NetworkMetadataContainsSecret {
+                network_id: "ethereum-mainnet".to_string(),
+                key: "label".to_string(),
+            }
+        );
+
+        let mut wallet_metadata = canonical_config_json();
+        wallet_metadata["wallets"][0]["metadata"] = json!({"api_key": "redacted"});
+        assert_eq!(
+            decode_portfolio_config(&wallet_metadata).unwrap_err(),
+            PortfolioConfigError::InvalidWalletConfig {
+                wallet_id: "wallet_treasury_eth".to_string(),
+                source: WalletConfigError::MetadataContainsSecret {
+                    key: "api_key".to_string(),
+                },
+            }
+        );
+
+        let mut symbol_metadata = canonical_config_json();
+        symbol_metadata["symbol_configs"][0]["metadata"] = json!({"note": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"});
+        assert_eq!(
+            decode_portfolio_config(&symbol_metadata).unwrap_err(),
+            PortfolioConfigError::InvalidSymbolConfig {
+                symbol_id: "eth.native.ethereum-mainnet".to_string(),
+                source: SymbolConfigError::MetadataContainsSecret {
+                    key: "note".to_string(),
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn validation_rejects_non_normalized_addresses() {
         let mut wallet_address = canonical_config_json();
         wallet_address["wallets"][0]["address"] =
             json!("0x000000000000000000000000000000000000DEAD");
@@ -1344,12 +1390,16 @@ mod tests {
             "networks": [
                 {
                     "network_id": "ethereum-mainnet",
+                    "family": "evm",
                     "chain_id": 1,
+                    "control_scope": "shared",
                     "metadata": {}
                 },
                 {
                     "network_id": "arbitrum-mainnet",
+                    "family": "evm",
                     "chain_id": 42161,
+                    "control_scope": "shared",
                     "metadata": {}
                 }
             ],

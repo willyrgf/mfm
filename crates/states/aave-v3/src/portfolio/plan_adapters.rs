@@ -11,13 +11,15 @@ use mfm_evm_core::encoding::{
 use mfm_machine::errors::StateError;
 use mfm_machine::ids::StateId;
 use mfm_machine::io::IoProvider;
+use mfm_portfolio_model::aave::{AaveDebtKind, AAVE_V3_PROTOCOL_ID};
 use mfm_portfolio_model::symbol::{
     ObservationAnchor, ObservationQuantity, ObservationSource, ObservationValue,
 };
 use mfm_portfolio_plan::{
-    AdapterId, CompiledObservationBinding, DispatchObservationRuntimeAdapter,
-    EvmResolvedSubjectValue, ExecutionAnchor, Observation, ObservationRuntimeInput,
-    PinnedNetworkView, ResolvedSubject, RuntimeAdapter,
+    AaveDebtObservationPayload, AaveReserveObservationPayload, AdapterId,
+    CompiledObservationBinding, DispatchObservationRuntimeAdapter, EvmResolvedSubjectValue,
+    ExecutionAnchor, Observation, ObservationRuntimeInput, PinnedNetworkView, ResolvedSubject,
+    RuntimeAdapter,
 };
 use mfm_state_common::decimal::{
     multiply_decimal_strings as common_multiply_decimal_strings, DecimalArithmeticError,
@@ -25,9 +27,6 @@ use mfm_state_common::decimal::{
 use mfm_state_common::errors::{state_from_io, state_unknown, state_unknown_msg};
 use serde::Deserialize;
 use serde_json::Value;
-
-use crate::portfolio::model::{AaveDebtKind, AAVE_V3_PROTOCOL_ID};
-use crate::portfolio::plan_payloads::{AaveDebtObservationPayload, AaveReserveObservationPayload};
 
 const ADAPTER_OBSERVE_AAVE_RESERVE: &str = "observe_position/aave_v3/reserve_position";
 const ADAPTER_OBSERVE_AAVE_DEBT: &str = "observe_position/aave_v3/debt_position";
@@ -129,14 +128,11 @@ impl DispatchObservationRuntimeAdapter for AaveReserveDispatchObservationRuntime
         let mut metadata = BTreeMap::new();
         metadata.insert(
             "market_id".to_string(),
-            Value::String(payload.config.market.market_id.clone()),
+            payload.config.market.market_id.clone(),
         );
-        metadata.insert(
-            "reserve_id".to_string(),
-            Value::String(payload.config.reserve_id.clone()),
-        );
+        metadata.insert("reserve_id".to_string(), payload.config.reserve_id.clone());
         if let Some((_, enabled)) = collateral_enabled {
-            metadata.insert("collateral_enabled".to_string(), Value::Bool(enabled));
+            metadata.insert("collateral_enabled".to_string(), enabled.to_string());
         }
         Ok(Observation {
             wallet_id: binding.observation_key.subject_id.clone(),
@@ -280,16 +276,10 @@ impl DispatchObservationRuntimeAdapter for AaveDebtDispatchObservationRuntimeAda
         let mut metadata = BTreeMap::new();
         metadata.insert(
             "market_id".to_string(),
-            Value::String(payload.config.market.market_id.clone()),
+            payload.config.market.market_id.clone(),
         );
-        metadata.insert(
-            "reserve_id".to_string(),
-            Value::String(payload.config.reserve_id.clone()),
-        );
-        metadata.insert(
-            "debt_kind".to_string(),
-            Value::String(debt_kind.as_str().to_string()),
-        );
+        metadata.insert("reserve_id".to_string(), payload.config.reserve_id.clone());
+        metadata.insert("debt_kind".to_string(), debt_kind.as_str().to_string());
         Ok(Observation {
             wallet_id: binding.observation_key.subject_id.clone(),
             symbol_id: payload.projection.symbol_id,
@@ -734,13 +724,13 @@ mod tests {
         json!(format!("0x{padded}"))
     }
 
-    fn market() -> crate::portfolio::model::AaveMarketConfig {
-        crate::portfolio::model::AaveMarketConfig {
+    fn market() -> mfm_portfolio_model::aave::AaveMarketConfig {
+        mfm_portfolio_model::aave::AaveMarketConfig {
             market_id: "aave-v3-mainnet".to_string(),
             network_id: "ethereum-mainnet".to_string(),
             chain_id: 1,
             pool_address: "0x0000000000000000000000000000000000000abc".to_string(),
-            reserves: vec![crate::portfolio::model::AaveReserveConfig {
+            reserves: vec![mfm_portfolio_model::aave::AaveReserveConfig {
                 reserve_id: "usdc".to_string(),
                 reserve_index: 1,
                 underlying_token_address: "0x00000000000000000000000000000000000000a1".to_string(),
@@ -863,7 +853,7 @@ mod tests {
 
         assert_eq!(observation.quantity.decimals, 6);
         assert_eq!(observation.quantity.amount_dec, "1.500000");
-        assert_eq!(observation.metadata["collateral_enabled"], json!(true));
+        assert_eq!(observation.metadata["collateral_enabled"], "true");
         assert_eq!(
             observation.values[0].priced_symbol_id,
             "usdc.wallet.ethereum-mainnet"
@@ -927,7 +917,7 @@ mod tests {
 
         assert_eq!(observation.quantity.decimals, 6);
         assert_eq!(observation.quantity.amount_dec, "0.750000");
-        assert_eq!(observation.metadata["debt_kind"], json!("variable"));
+        assert_eq!(observation.metadata["debt_kind"], "variable");
         assert_eq!(observation.values[0].value_dec, "0.750000");
     }
 }

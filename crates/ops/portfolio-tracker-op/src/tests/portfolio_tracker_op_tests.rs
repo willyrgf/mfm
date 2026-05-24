@@ -18,9 +18,7 @@ use mfm_machine::recorder::EventRecorder;
 use mfm_machine::replay_io::ReplayIo;
 use mfm_machine::runtime::{DefaultExecutionEngine, EngineFailpoints};
 use mfm_machine::stores::StreamId;
-use mfm_portfolio_config::{
-    PortfolioSnapshotBuildReport, PortfolioSnapshotBuiltConfig, PortfolioSnapshotCanonicalConfig,
-};
+use mfm_portfolio_config::{PortfolioSnapshotBuildReport, PortfolioSnapshotCanonicalConfig};
 use mfm_portfolio_model::portfolio::{
     ExecutionAnchor, PortfolioQuoteTotal, PortfolioReport, PortfolioSnapshot,
 };
@@ -513,7 +511,9 @@ fn expand_uses_canonical_multi_network_graph() {
     let build_canonical: PortfolioSnapshotCanonicalConfig =
         serde_json::from_value(build_child.op_config.clone()).expect("canonical child config");
     let expected_canonical: PortfolioSnapshotCanonicalConfig =
-        serde_json::from_value(canonical_op_config()).expect("expected canonical config");
+        serde_json::from_value::<PortfolioSnapshotCanonicalConfig>(canonical_op_config())
+            .expect("expected canonical config")
+            .normalized();
     assert_eq!(build_canonical, expected_canonical);
 
     let execute_child = composite
@@ -1302,7 +1302,7 @@ async fn collects_aave_protocol_positions_through_the_op_boundary() {
     assert_eq!(debt.role, mfm_portfolio_model::symbol::SymbolRole::Debt);
     assert_eq!(
         debt.metadata.get("debt_kind"),
-        Some(&serde_json::json!("variable"))
+        Some(&"variable".to_string())
     );
     assert_eq!(
         debt.source.balance_reader_kind,
@@ -1348,12 +1348,16 @@ fn canonical_op_config() -> serde_json::Value {
             "networks": [
                 {
                     "network_id": "ethereum-mainnet",
+                    "family": "evm",
                     "chain_id": 1,
+                    "control_scope": "shared",
                     "metadata": {}
                 },
                 {
                     "network_id": "arbitrum-mainnet",
+                    "family": "evm",
                     "chain_id": 42161,
+                    "control_scope": "shared",
                     "metadata": {}
                 }
             ],
@@ -1566,11 +1570,13 @@ fn mixed_family_op_config() -> serde_json::Value {
                     "network_id": "ethereum-mainnet",
                     "family": "evm",
                     "chain_id": 1,
+                    "control_scope": "shared",
                     "metadata": {}
                 },
                 {
                     "network_id": "bitcoin-mainnet",
                     "family": "bitcoin",
+                    "control_scope": "shared",
                     "metadata": {}
                 }
             ],
@@ -1675,7 +1681,9 @@ fn canonical_aave_op_config() -> serde_json::Value {
             "networks": [
                 {
                     "network_id": "ethereum-mainnet",
+                    "family": "evm",
                     "chain_id": 1,
+                    "control_scope": "shared",
                     "metadata": {}
                 }
             ],
@@ -1767,34 +1775,36 @@ fn canonical_aave_op_config() -> serde_json::Value {
                         "protocol": "aave_v3",
                         "reader": "reserve_position",
                         "config": {
-                            "market": {
-                                "market_id": "aave-v3-mainnet",
-                                "network_id": "ethereum-mainnet",
-                                "chain_id": 1,
-                                "pool_address": "0x0000000000000000000000000000000000003000",
-                                "reserves": [
-                                    {
-                                        "reserve_id": "usdc",
-                                        "reserve_index": 0,
-                                        "underlying_token_address": "0x0000000000000000000000000000000000000001",
-                                        "a_token_address": "0x0000000000000000000000000000000000002001",
-                                        "variable_debt_token_address": "0x0000000000000000000000000000000000002002",
-                                        "stable_debt_token_address": null,
-                                        "metadata": {}
-                                    },
-                                    {
-                                        "reserve_id": "wbtc",
-                                        "reserve_index": 1,
-                                        "underlying_token_address": "0x0000000000000000000000000000000000000002",
-                                        "a_token_address": "0x0000000000000000000000000000000000002003",
-                                        "variable_debt_token_address": null,
-                                        "stable_debt_token_address": null,
-                                        "metadata": {}
-                                    }
-                                ],
-                                "metadata": {}
-                            },
-                            "reserve_id": "usdc"
+                            "reserve_position": {
+                                "market": {
+                                    "market_id": "aave-v3-mainnet",
+                                    "network_id": "ethereum-mainnet",
+                                    "chain_id": 1,
+                                    "pool_address": "0x0000000000000000000000000000000000003000",
+                                    "reserves": [
+                                        {
+                                            "reserve_id": "usdc",
+                                            "reserve_index": 0,
+                                            "underlying_token_address": "0x0000000000000000000000000000000000000001",
+                                            "a_token_address": "0x0000000000000000000000000000000000002001",
+                                            "variable_debt_token_address": "0x0000000000000000000000000000000000002002",
+                                            "stable_debt_token_address": null,
+                                            "metadata": {}
+                                        },
+                                        {
+                                            "reserve_id": "wbtc",
+                                            "reserve_index": 1,
+                                            "underlying_token_address": "0x0000000000000000000000000000000000000002",
+                                            "a_token_address": "0x0000000000000000000000000000000000002003",
+                                            "variable_debt_token_address": null,
+                                            "stable_debt_token_address": null,
+                                            "metadata": {}
+                                        }
+                                    ],
+                                    "metadata": {}
+                                },
+                                "reserve_id": "usdc"
+                            }
                         }
                     },
                     "valuation": {
@@ -1825,34 +1835,36 @@ fn canonical_aave_op_config() -> serde_json::Value {
                         "protocol": "aave_v3",
                         "reader": "reserve_position",
                         "config": {
-                            "market": {
-                                "market_id": "aave-v3-mainnet",
-                                "network_id": "ethereum-mainnet",
-                                "chain_id": 1,
-                                "pool_address": "0x0000000000000000000000000000000000003000",
-                                "reserves": [
-                                    {
-                                        "reserve_id": "usdc",
-                                        "reserve_index": 0,
-                                        "underlying_token_address": "0x0000000000000000000000000000000000000001",
-                                        "a_token_address": "0x0000000000000000000000000000000000002001",
-                                        "variable_debt_token_address": "0x0000000000000000000000000000000000002002",
-                                        "stable_debt_token_address": null,
-                                        "metadata": {}
-                                    },
-                                    {
-                                        "reserve_id": "wbtc",
-                                        "reserve_index": 1,
-                                        "underlying_token_address": "0x0000000000000000000000000000000000000002",
-                                        "a_token_address": "0x0000000000000000000000000000000000002003",
-                                        "variable_debt_token_address": null,
-                                        "stable_debt_token_address": null,
-                                        "metadata": {}
-                                    }
-                                ],
-                                "metadata": {}
-                            },
-                            "reserve_id": "wbtc"
+                            "reserve_position": {
+                                "market": {
+                                    "market_id": "aave-v3-mainnet",
+                                    "network_id": "ethereum-mainnet",
+                                    "chain_id": 1,
+                                    "pool_address": "0x0000000000000000000000000000000000003000",
+                                    "reserves": [
+                                        {
+                                            "reserve_id": "usdc",
+                                            "reserve_index": 0,
+                                            "underlying_token_address": "0x0000000000000000000000000000000000000001",
+                                            "a_token_address": "0x0000000000000000000000000000000000002001",
+                                            "variable_debt_token_address": "0x0000000000000000000000000000000000002002",
+                                            "stable_debt_token_address": null,
+                                            "metadata": {}
+                                        },
+                                        {
+                                            "reserve_id": "wbtc",
+                                            "reserve_index": 1,
+                                            "underlying_token_address": "0x0000000000000000000000000000000000000002",
+                                            "a_token_address": "0x0000000000000000000000000000000000002003",
+                                            "variable_debt_token_address": null,
+                                            "stable_debt_token_address": null,
+                                            "metadata": {}
+                                        }
+                                    ],
+                                    "metadata": {}
+                                },
+                                "reserve_id": "wbtc"
+                            }
                         }
                     },
                     "valuation": {
@@ -1883,35 +1895,37 @@ fn canonical_aave_op_config() -> serde_json::Value {
                         "protocol": "aave_v3",
                         "reader": "debt_position",
                         "config": {
-                            "market": {
-                                "market_id": "aave-v3-mainnet",
-                                "network_id": "ethereum-mainnet",
-                                "chain_id": 1,
-                                "pool_address": "0x0000000000000000000000000000000000003000",
-                                "reserves": [
-                                    {
-                                        "reserve_id": "usdc",
-                                        "reserve_index": 0,
-                                        "underlying_token_address": "0x0000000000000000000000000000000000000001",
-                                        "a_token_address": "0x0000000000000000000000000000000000002001",
-                                        "variable_debt_token_address": "0x0000000000000000000000000000000000002002",
-                                        "stable_debt_token_address": null,
-                                        "metadata": {}
-                                    },
-                                    {
-                                        "reserve_id": "wbtc",
-                                        "reserve_index": 1,
-                                        "underlying_token_address": "0x0000000000000000000000000000000000000002",
-                                        "a_token_address": "0x0000000000000000000000000000000000002003",
-                                        "variable_debt_token_address": null,
-                                        "stable_debt_token_address": null,
-                                        "metadata": {}
-                                    }
-                                ],
-                                "metadata": {}
-                            },
-                            "reserve_id": "usdc",
-                            "debt_kind": "variable"
+                            "debt_position": {
+                                "market": {
+                                    "market_id": "aave-v3-mainnet",
+                                    "network_id": "ethereum-mainnet",
+                                    "chain_id": 1,
+                                    "pool_address": "0x0000000000000000000000000000000000003000",
+                                    "reserves": [
+                                        {
+                                            "reserve_id": "usdc",
+                                            "reserve_index": 0,
+                                            "underlying_token_address": "0x0000000000000000000000000000000000000001",
+                                            "a_token_address": "0x0000000000000000000000000000000000002001",
+                                            "variable_debt_token_address": "0x0000000000000000000000000000000000002002",
+                                            "stable_debt_token_address": null,
+                                            "metadata": {}
+                                        },
+                                        {
+                                            "reserve_id": "wbtc",
+                                            "reserve_index": 1,
+                                            "underlying_token_address": "0x0000000000000000000000000000000000000002",
+                                            "a_token_address": "0x0000000000000000000000000000000000002003",
+                                            "variable_debt_token_address": null,
+                                            "stable_debt_token_address": null,
+                                            "metadata": {}
+                                        }
+                                    ],
+                                    "metadata": {}
+                                },
+                                "reserve_id": "usdc",
+                                "debt_kind": "variable"
+                            }
                         }
                     },
                     "valuation": {
