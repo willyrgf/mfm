@@ -882,6 +882,7 @@ where
             replay_authority_for_run(&self.artifacts, &envelope, run_id, &stream).await?;
         let broker = ReplayBroker::from_run_stream(envelope, &stream, authority)?;
         mfm_transports_proof::verify_deterministic_proof_replay(&broker, &stream)?;
+        mfm_transports_evm_dcv::verify_evm_dcv_replay(&broker, &stream, &self.artifacts).await?;
         let projection = broker.projection_snapshot();
         let retained_artifacts = projection
             .retention(run_id)

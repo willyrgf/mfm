@@ -419,11 +419,11 @@ workflow ports, and deletion or hard isolation of old dynamic semantic APIs.
 
 ### Commit 39: `transports port typed capabilities`
 
-- [ ] Rewrite transport crates as typed live/replay capability backends.
-- [ ] Remove generic `IoProvider` request/response semantics.
-- [ ] Ensure replay transports cannot mint mutation authority or fall back to live IO.
-- [ ] Add adapter recovery conformance tests.
-- [ ] Validation: `nix run .#test`.
+- [x] Rewrite transport crates as typed live/replay capability backends.
+- [x] Remove generic `IoProvider` request/response semantics.
+- [x] Ensure replay transports cannot mint mutation authority or fall back to live IO.
+- [x] Add adapter recovery conformance tests.
+- [x] Validation: `nix run .#test`.
 
 ### Commit 40: `delete old dynamic machine sdk crates`
 

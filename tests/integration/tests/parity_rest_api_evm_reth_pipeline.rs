@@ -702,6 +702,7 @@ async fn parity_reth_deploy_configure_validate_root_op() {
         "SideEffectSubmissionObserved",
         "SideEffectReceiptObserved",
         "SideEffectConfirmationObserved",
+        "FactRecorded",
         "CellProduced",
         "PublicOutputProduced",
         "RetentionManifestProjected",
@@ -781,10 +782,21 @@ async fn parity_reth_deploy_configure_validate_root_op() {
     )
     .await
     .expect("typed EVM DCV replay authority");
-    services
+    let replay_broker = services
         .replay_broker(certified.envelope.clone(), &run_id, authority)
         .await
         .expect("typed EVM DCV evidence-only replay broker");
+    let replay_verified = mfm_transports_evm_dcv::verify_evm_dcv_replay(
+        &replay_broker,
+        &stream,
+        services.artifacts(),
+    )
+    .await
+    .expect("typed EVM DCV replay verifier");
+    assert!(
+        replay_verified,
+        "typed EVM DCV replay evidence was verified"
+    );
 }
 
 fn typed_payload_name(payload: &typed_events::KernelEventPayload) -> &'static str {

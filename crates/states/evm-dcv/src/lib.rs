@@ -449,6 +449,44 @@ pub struct EvmDcvSubmissionUnknownEvidence {
     pub reason_code: String,
 }
 
+/// Typed request recorded for validation read replay.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[mfm(
+    namespace = "mfm.evm.dcv",
+    name = "validate-read-request",
+    version = "1",
+    schema = "mfm.evm.dcv.value.validate_read_request"
+)]
+pub struct EvmDcvValidateReadRequest {
+    /// Stable network id.
+    pub network_id: String,
+    /// Stable control scope.
+    pub control_scope: String,
+    /// Configured contract address.
+    pub contract_address: String,
+    /// Canonical hash of the certified validate config observed by the runner.
+    pub validate_config_hash: String,
+    /// Canonical hash of the configured contract typestate consumed by the runner.
+    pub configured_contract_hash: String,
+    /// Number of read assertions.
+    pub read_assertion_count: u64,
+    /// Number of event assertions.
+    pub event_assertion_count: u64,
+}
+
+/// Typed response recorded for validation read replay.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[mfm(
+    namespace = "mfm.evm.dcv",
+    name = "validate-read-response",
+    version = "1",
+    schema = "mfm.evm.dcv.value.validate_read_response"
+)]
+pub struct EvmDcvValidateReadResponse {
+    /// Validation report observed from the read capability backend.
+    pub report: ValidationReport,
+}
+
 /// One configuration receipt.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
 #[mfm(

@@ -23,8 +23,9 @@ use mfm_evm_deploy_configure_validate_config::{
     DeployConfigureValidateConfigureConfig, DeployConfigureValidateDeployConfig,
     DeployConfigureValidateValidateConfig,
 };
-use mfm_ids::{ArtifactId, ContentDigest, DescriptorId, NodeId};
+use mfm_ids::{ArtifactId, ContentDigest, DescriptorId, NodeId, SchemaId};
 use mfm_program::{SideEffectState, StateSpec};
+use mfm_replay::v1 as replay;
 use mfm_runtime::{
     ErasedNodeRunner, ErasedRunCtx, ErasedRunnerBinding, ErasedRunnerFuture, ErasedRunnerOutput,
     ErasedRunnerRegistry, MaterializedCellTerminal, MaterializedInputNode, StagedRetentionRefs,
@@ -37,8 +38,9 @@ use mfm_state_evm_dcv::{
     EvmDcvConfigureIdempotencyInput, EvmDcvConfigureIntent, EvmDcvConfigureReceipt,
     EvmDcvConfigureReceiptEntry, EvmDcvConfigureSubmission, EvmDcvDeployConfirmation,
     EvmDcvDeployIdempotencyInput, EvmDcvDeployIntent, EvmDcvDeployReceipt, EvmDcvDeploySubmission,
-    EvmDcvReadBackend, EvmDcvReadError, EvmDcvReadFuture, EvmDcvSubmissionUnknownEvidence,
-    EvmDcvTransactionIntent, EvmDcvTransactionSubmitCapability, ValidateContractState,
+    EvmDcvReadBackend, EvmDcvReadCapability, EvmDcvReadError, EvmDcvReadFuture,
+    EvmDcvSubmissionUnknownEvidence, EvmDcvTransactionIntent, EvmDcvTransactionSubmitCapability,
+    EvmDcvValidateReadRequest, EvmDcvValidateReadResponse, ValidateContractState, ValidationReport,
 };
 use mfm_store::v1 as store;
 use mfm_values::{MfmConfig, MfmValue};
@@ -49,6 +51,7 @@ use zeroize::Zeroizing;
 const READ_FACTORY: &str = "read_external";
 const SIDE_EFFECT_FACTORY: &str = "apply_side_effect";
 const ENV_EVM_RPC_SOURCES_JSON: &str = "MFM_EVM_RPC_SOURCES_JSON";
+const REPLAY_VERIFIER_ID: &str = "mfm.evm.dcv.replay.v1";
 
 /// Future returned by typed EVM DCV artifact stores.
 pub type EvmDcvArtifactStoreFuture<'a, T> =
@@ -788,7 +791,7 @@ where
                 receipt_schema_id: T::schema_id().map_err(runtime_value_error)?,
                 receipt_hash: artifact.evidence.digest,
                 receipt_artifact_id: artifact.evidence.artifact_id,
-                replay_verifier_id: events::ReplayVerifierId::new("mfm.evm.dcv.replay.v1")?,
+                replay_verifier_id: replay_verifier_id()?,
             },
         )],
     })
@@ -910,10 +913,716 @@ where
                 confirmation_schema_id: T::schema_id().map_err(runtime_value_error)?,
                 confirmation_hash: artifact.evidence.digest,
                 confirmation_artifact_id: artifact.evidence.artifact_id,
-                replay_verifier_id: events::ReplayVerifierId::new("mfm.evm.dcv.replay.v1")?,
+                replay_verifier_id: replay_verifier_id()?,
             },
         )],
     })
+}
+
+/// Evidence-only replay verifier for typed EVM DCV side effects.
+pub struct EvmDcvReplayVerifier {
+    verifier_id: events::ReplayVerifierId,
+}
+
+impl EvmDcvReplayVerifier {
+    /// Creates the typed EVM DCV replay verifier.
+    pub fn new() -> replay::Result<Self> {
+        Ok(Self {
+            verifier_id: replay_verifier_id().map_err(replay_runtime_error)?,
+        })
+    }
+}
+
+impl replay::SideEffectReplayVerifier for EvmDcvReplayVerifier {
+    fn verifier_id(&self) -> &events::ReplayVerifierId {
+        &self.verifier_id
+    }
+
+    fn verify_submission(
+        &self,
+        input: &replay::SideEffectSubmissionReplayInput,
+    ) -> replay::Result<()> {
+        ensure_evm_dcv_intent(&input.intent.intent)?;
+        submission_kind(&input.submission.submission.submission_schema_id)?;
+        Ok(())
+    }
+
+    fn verify_receipt(&self, input: &replay::SideEffectReceiptReplayInput) -> replay::Result<()> {
+        ensure_evm_dcv_intent(&input.intent.intent)?;
+        let receipt_kind = receipt_kind(&input.receipt.receipt.receipt_schema_id)?;
+        if let Some(submission) = &input.submission {
+            ensure_same_replay_kind(
+                receipt_kind,
+                submission_kind(&submission.submission.submission_schema_id)?,
+                "receipt",
+            )?;
+        }
+        Ok(())
+    }
+
+    fn verify_confirmation(
+        &self,
+        input: &replay::SideEffectConfirmationReplayInput,
+    ) -> replay::Result<()> {
+        ensure_evm_dcv_intent(&input.intent.intent)?;
+        let confirmation_kind =
+            confirmation_kind(&input.confirmation.confirmation.confirmation_schema_id)?;
+        if let Some(submission) = &input.submission {
+            ensure_same_replay_kind(
+                confirmation_kind,
+                submission_kind(&submission.submission.submission_schema_id)?,
+                "confirmation",
+            )?;
+        }
+        if let Some(receipt) = &input.receipt {
+            ensure_same_replay_kind(
+                confirmation_kind,
+                receipt_kind(&receipt.receipt.receipt_schema_id)?,
+                "confirmation",
+            )?;
+        }
+        Ok(())
+    }
+}
+
+/// Verifies all typed EVM DCV replay evidence in a run stream.
+///
+/// Returns `Ok(false)` when the stream does not contain EVM DCV side-effect or validation
+/// evidence. Validation read facts are checked against a request recomputed from the certified
+/// validate config and configured-contract input artifact.
+pub async fn verify_evm_dcv_replay(
+    broker: &replay::ReplayBroker,
+    stream: &[store::KernelEventEnvelope],
+    artifacts: &dyn EvmDcvArtifactStore,
+) -> replay::Result<bool> {
+    let frames = evm_dcv_replay_frames(stream)?;
+    if !frames.is_empty() {
+        let verifier = EvmDcvReplayVerifier::new()?;
+        for frame in frames.iter() {
+            let Some(submission) = &frame.submission else {
+                return Err(evm_dcv_side_effect_missing("submission"));
+            };
+            let Some(receipt) = &frame.receipt else {
+                return Err(evm_dcv_side_effect_missing("receipt"));
+            };
+            let Some(confirmation) = &frame.confirmation else {
+                return Err(evm_dcv_side_effect_missing("confirmation"));
+            };
+
+            let submission_request = side_effect_replay_request(
+                &frame.intent,
+                submission.submission_schema_id.clone(),
+                submission.submission_hash.clone(),
+                None,
+            );
+            broker.verify_side_effect_submission(&submission_request, &verifier)?;
+
+            let receipt_request = side_effect_replay_request(
+                &frame.intent,
+                receipt.receipt_schema_id.clone(),
+                receipt.receipt_hash.clone(),
+                Some(receipt.replay_verifier_id.clone()),
+            );
+            broker.verify_side_effect_receipt(&receipt_request, &verifier)?;
+
+            let confirmation_request = side_effect_replay_request(
+                &frame.intent,
+                confirmation.confirmation_schema_id.clone(),
+                confirmation.confirmation_hash.clone(),
+                Some(confirmation.replay_verifier_id.clone()),
+            );
+            broker.verify_side_effect_confirmation(&confirmation_request, &verifier)?;
+        }
+    }
+    let verified_facts = verify_evm_dcv_fact_replay(broker, artifacts).await?;
+    Ok(!frames.is_empty() || verified_facts)
+}
+
+#[derive(Debug, Clone)]
+struct EvmDcvReplayFrame {
+    intent: side_effect::IntentPersisted,
+    submission: Option<side_effect::SubmissionObserved>,
+    receipt: Option<side_effect::ReceiptObserved>,
+    confirmation: Option<side_effect::ConfirmationObserved>,
+}
+
+fn evm_dcv_replay_frames(
+    stream: &[store::KernelEventEnvelope],
+) -> replay::Result<Vec<EvmDcvReplayFrame>> {
+    let mut frames = Vec::<EvmDcvReplayFrame>::new();
+    for event in stream {
+        match event.payload() {
+            events::KernelEventPayload::SideEffectIntentPersisted(payload)
+                if is_evm_dcv_intent(payload)? =>
+            {
+                if frames.iter().any(|frame| {
+                    frame.intent.ledger_key == payload.ledger_key
+                        && frame.intent.invocation_epoch == payload.invocation_epoch
+                }) {
+                    return Err(replay::ReplayError::new(
+                        replay::ReplayErrorKind::SideEffectMismatch,
+                        "duplicate EVM DCV side-effect intent in one run",
+                    ));
+                }
+                frames.push(EvmDcvReplayFrame {
+                    intent: payload.clone(),
+                    submission: None,
+                    receipt: None,
+                    confirmation: None,
+                });
+            }
+            events::KernelEventPayload::SideEffectSubmissionObserved(payload) => {
+                if let Some(frame) = matching_evm_dcv_frame(&mut frames, payload) {
+                    frame.submission = Some(payload.clone());
+                }
+            }
+            events::KernelEventPayload::SideEffectReceiptObserved(payload) => {
+                if let Some(frame) = matching_evm_dcv_frame(&mut frames, payload) {
+                    frame.receipt = Some(payload.clone());
+                }
+            }
+            events::KernelEventPayload::SideEffectConfirmationObserved(payload) => {
+                if let Some(frame) = matching_evm_dcv_frame(&mut frames, payload) {
+                    frame.confirmation = Some(payload.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(frames)
+}
+
+fn matching_evm_dcv_frame<'a>(
+    frames: &'a mut [EvmDcvReplayFrame],
+    payload: &impl SideEffectPayloadRef,
+) -> Option<&'a mut EvmDcvReplayFrame> {
+    frames.iter_mut().find(|frame| {
+        &frame.intent.ledger_key == payload.ledger_key()
+            && frame.intent.invocation_epoch == payload.invocation_epoch()
+    })
+}
+
+trait SideEffectPayloadRef {
+    fn ledger_key(&self) -> &events::SideEffectLedgerKey;
+    fn invocation_epoch(&self) -> u32;
+}
+
+impl SideEffectPayloadRef for side_effect::SubmissionObserved {
+    fn ledger_key(&self) -> &events::SideEffectLedgerKey {
+        &self.ledger_key
+    }
+
+    fn invocation_epoch(&self) -> u32 {
+        self.invocation_epoch
+    }
+}
+
+impl SideEffectPayloadRef for side_effect::ReceiptObserved {
+    fn ledger_key(&self) -> &events::SideEffectLedgerKey {
+        &self.ledger_key
+    }
+
+    fn invocation_epoch(&self) -> u32 {
+        self.invocation_epoch
+    }
+}
+
+impl SideEffectPayloadRef for side_effect::ConfirmationObserved {
+    fn ledger_key(&self) -> &events::SideEffectLedgerKey {
+        &self.ledger_key
+    }
+
+    fn invocation_epoch(&self) -> u32 {
+        self.invocation_epoch
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EvmDcvReplayKind {
+    Deploy,
+    Configure,
+}
+
+fn is_evm_dcv_intent(intent: &side_effect::IntentPersisted) -> replay::Result<bool> {
+    Ok(intent.capability_kind
+        == EvmDcvTransactionSubmitCapability::kind().map_err(replay_capability_error)?
+        && intent.adapter_kind == evm_dcv_adapter_kind().map_err(replay_identity_error)?)
+}
+
+fn ensure_evm_dcv_intent(intent: &side_effect::IntentPersisted) -> replay::Result<()> {
+    if intent.capability_kind
+        != EvmDcvTransactionSubmitCapability::kind().map_err(replay_capability_error)?
+        || intent.capability_version
+            != EvmDcvTransactionSubmitCapability::version().map_err(replay_capability_error)?
+        || intent.adapter_kind != evm_dcv_adapter_kind().map_err(replay_identity_error)?
+        || intent.adapter_version != evm_dcv_adapter_version().map_err(replay_identity_error)?
+    {
+        return Err(replay::ReplayError::new(
+            replay::ReplayErrorKind::SideEffectMismatch,
+            "EVM DCV replay intent identity mismatch",
+        ));
+    }
+    Ok(())
+}
+
+fn submission_kind(schema_id: &SchemaId) -> replay::Result<EvmDcvReplayKind> {
+    replay_kind_from_schema(
+        schema_id,
+        EvmDcvDeploySubmission::schema_id().map_err(replay_value_error)?,
+        EvmDcvConfigureSubmission::schema_id().map_err(replay_value_error)?,
+        "submission",
+    )
+}
+
+fn receipt_kind(schema_id: &SchemaId) -> replay::Result<EvmDcvReplayKind> {
+    replay_kind_from_schema(
+        schema_id,
+        EvmDcvDeployReceipt::schema_id().map_err(replay_value_error)?,
+        EvmDcvConfigureReceipt::schema_id().map_err(replay_value_error)?,
+        "receipt",
+    )
+}
+
+fn confirmation_kind(schema_id: &SchemaId) -> replay::Result<EvmDcvReplayKind> {
+    replay_kind_from_schema(
+        schema_id,
+        EvmDcvDeployConfirmation::schema_id().map_err(replay_value_error)?,
+        EvmDcvConfigureConfirmation::schema_id().map_err(replay_value_error)?,
+        "confirmation",
+    )
+}
+
+fn replay_kind_from_schema(
+    schema_id: &SchemaId,
+    deploy_schema: SchemaId,
+    configure_schema: SchemaId,
+    phase: &'static str,
+) -> replay::Result<EvmDcvReplayKind> {
+    if schema_id == &deploy_schema {
+        Ok(EvmDcvReplayKind::Deploy)
+    } else if schema_id == &configure_schema {
+        Ok(EvmDcvReplayKind::Configure)
+    } else {
+        Err(replay::ReplayError::new(
+            replay::ReplayErrorKind::SideEffectMismatch,
+            format!("EVM DCV {phase} schema is not a typed DCV schema"),
+        ))
+    }
+}
+
+fn ensure_same_replay_kind(
+    expected: EvmDcvReplayKind,
+    actual: EvmDcvReplayKind,
+    phase: &'static str,
+) -> replay::Result<()> {
+    if expected != actual {
+        return Err(replay::ReplayError::new(
+            replay::ReplayErrorKind::SideEffectMismatch,
+            format!("EVM DCV {phase} evidence mixed deploy/configure schemas"),
+        ));
+    }
+    Ok(())
+}
+
+fn side_effect_replay_request(
+    intent: &side_effect::IntentPersisted,
+    evidence_schema_id: SchemaId,
+    evidence_hash: ContentDigest,
+    replay_verifier_id: Option<events::ReplayVerifierId>,
+) -> replay::SideEffectEvidenceReplayRequest {
+    replay::SideEffectEvidenceReplayRequest {
+        ledger_key: intent.ledger_key.clone(),
+        node_id: intent.node_id.clone(),
+        attempt_id: intent.attempt_id.clone(),
+        invocation_epoch: intent.invocation_epoch,
+        intent_schema_id: intent.intent_schema_id.clone(),
+        intent_hash: intent.intent_hash.clone(),
+        idempotency_input_schema_id: intent.idempotency_input_schema_id.clone(),
+        idempotency_input_hash: intent.idempotency_input_hash.clone(),
+        capability_kind: intent.capability_kind.clone(),
+        capability_version: intent.capability_version.clone(),
+        adapter_kind: intent.adapter_kind.clone(),
+        adapter_version: intent.adapter_version.clone(),
+        evidence_schema_id,
+        evidence_hash,
+        replay_verifier_id,
+    }
+}
+
+async fn verify_evm_dcv_fact_replay(
+    broker: &replay::ReplayBroker,
+    artifacts: &dyn EvmDcvArtifactStore,
+) -> replay::Result<bool> {
+    let mut verified = false;
+    for node in broker.certified_spec().spec.nodes.iter() {
+        if !is_evm_dcv_validate_node(node)? {
+            continue;
+        }
+        if !validate_node_is_terminal(broker, node)? {
+            continue;
+        }
+        let config =
+            load_replay_config::<DeployConfigureValidateValidateConfig>(broker, artifacts, node)
+                .await?;
+        let input = load_replay_validate_input(broker, artifacts, node).await?;
+        let request = validate_read_request(&config, &input).map_err(replay_fact_runtime_error)?;
+        let request_hash = digest_value(&request).map_err(replay_fact_runtime_error)?;
+        let replay_request = expected_validate_fact_replay_request(broker, node, request_hash)?;
+        let recorded_fact = broker.recorded_fact(&replay_request)?;
+        let response: EvmDcvValidateReadResponse =
+            load_replay_artifact_value(artifacts, &recorded_fact.artifact).await?;
+        let output = load_replay_validate_output(broker, artifacts, node).await?;
+        if output != response.report {
+            return Err(replay::ReplayError::new(
+                replay::ReplayErrorKind::FactMismatch,
+                format!(
+                    "typed EVM DCV validate output for node {} did not match recorded fact response",
+                    node.node_id
+                ),
+            ));
+        }
+        verified = true;
+    }
+    Ok(verified)
+}
+
+#[cfg(test)]
+fn is_evm_dcv_validate_fact(fact: &events::FactRecorded) -> replay::Result<bool> {
+    let capability_kind = EvmDcvReadCapability::kind().map_err(replay_capability_error)?;
+    let adapter_kind = evm_dcv_adapter_kind().map_err(replay_identity_error)?;
+    if fact.capability_kind != capability_kind && fact.adapter_kind != adapter_kind {
+        return Ok(false);
+    }
+
+    if fact.capability_kind != capability_kind
+        || fact.capability_version
+            != EvmDcvReadCapability::version().map_err(replay_capability_error)?
+        || fact.adapter_kind != adapter_kind
+        || fact.adapter_version != evm_dcv_adapter_version().map_err(replay_identity_error)?
+        || fact.request_schema_id
+            != EvmDcvValidateReadRequest::schema_id().map_err(replay_value_error)?
+        || fact.response_schema_id
+            != EvmDcvValidateReadResponse::schema_id().map_err(replay_value_error)?
+    {
+        return Err(replay::ReplayError::new(
+            replay::ReplayErrorKind::FactMismatch,
+            "EVM DCV validation fact identity mismatch",
+        ));
+    }
+    Ok(true)
+}
+
+fn is_evm_dcv_validate_node(node: &spec::NodeSpec) -> replay::Result<bool> {
+    Ok(
+        node.state_kind == ValidateContractState::kind().map_err(replay_state_error)?
+            && node.state_version
+                == ValidateContractState::version().map_err(replay_state_error)?,
+    )
+}
+
+fn validate_node_is_terminal(
+    broker: &replay::ReplayBroker,
+    node: &spec::NodeSpec,
+) -> replay::Result<bool> {
+    match broker.projection_snapshot().cell_terminal(&node.output_cell) {
+        Some(store::CellTerminalProjection::Produced { .. }) => Ok(true),
+        Some(store::CellTerminalProjection::Skipped { .. }) => Err(replay::ReplayError::new(
+            replay::ReplayErrorKind::FactMissing,
+            format!(
+                "typed EVM DCV validate node {} reached a skipped terminal without read fact evidence",
+                node.node_id
+            ),
+        )),
+        None => Ok(false),
+    }
+}
+
+async fn load_replay_config<T>(
+    broker: &replay::ReplayBroker,
+    artifacts: &dyn EvmDcvArtifactStore,
+    node: &spec::NodeSpec,
+) -> replay::Result<T>
+where
+    T: MfmConfig + DeserializeOwned,
+{
+    let evidence = broker.artifact(&replay::ArtifactReplayRequest {
+        artifact_id: node.config_ref.artifact_id.clone(),
+        role: events::ArtifactRole::TypedConfig,
+        digest: node.config_ref.digest.clone(),
+        schema_id: Some(node.config_ref.schema_id.clone()),
+        producer_node_id: None,
+    })?;
+    load_replay_artifact_value(artifacts, &evidence).await
+}
+
+async fn load_replay_validate_input(
+    broker: &replay::ReplayBroker,
+    artifacts: &dyn EvmDcvArtifactStore,
+    node: &spec::NodeSpec,
+) -> replay::Result<ConfiguredContract> {
+    let input_cell = validate_input_cell(node)?;
+    match broker
+        .projection_snapshot()
+        .cell_terminal(&input_cell.cell_id)
+    {
+        Some(store::CellTerminalProjection::Produced {
+            node_id,
+            artifact_id,
+            content_digest,
+            schema_id,
+            semantic_type_id,
+            ..
+        }) => {
+            if schema_id != &input_cell.schema_id
+                || semantic_type_id != &input_cell.semantic_type_id
+            {
+                return Err(replay::ReplayError::new(
+                    replay::ReplayErrorKind::CertifiedEvidenceMismatch,
+                    "typed EVM DCV validate input cell metadata mismatch",
+                ));
+            }
+            let evidence = broker.artifact(&replay::ArtifactReplayRequest {
+                artifact_id: artifact_id.clone(),
+                role: events::ArtifactRole::StateOutput,
+                digest: content_digest.clone(),
+                schema_id: Some(input_cell.schema_id.clone()),
+                producer_node_id: Some(node_id.clone()),
+            })?;
+            load_replay_artifact_value(artifacts, &evidence).await
+        }
+        Some(store::CellTerminalProjection::Skipped { .. }) => Err(replay::ReplayError::new(
+            replay::ReplayErrorKind::FactMissing,
+            format!(
+                "typed EVM DCV validate node {} consumed skipped configured-contract input",
+                node.node_id
+            ),
+        )),
+        None => load_replay_seed_validate_input(broker, artifacts, input_cell).await,
+    }
+}
+
+async fn load_replay_validate_output(
+    broker: &replay::ReplayBroker,
+    artifacts: &dyn EvmDcvArtifactStore,
+    node: &spec::NodeSpec,
+) -> replay::Result<ValidationReport> {
+    let Some(store::CellTerminalProjection::Produced {
+        node_id,
+        artifact_id,
+        content_digest,
+        schema_id,
+        semantic_type_id,
+        ..
+    }) = broker
+        .projection_snapshot()
+        .cell_terminal(&node.output_cell)
+    else {
+        return Err(replay::ReplayError::new(
+            replay::ReplayErrorKind::FactMissing,
+            format!(
+                "typed EVM DCV validate node {} has no produced output for replay",
+                node.node_id
+            ),
+        ));
+    };
+    if node_id != &node.node_id
+        || schema_id != &ValidationReport::schema_id().map_err(replay_value_error)?
+        || semantic_type_id != &ValidationReport::semantic_id().map_err(replay_value_error)?
+    {
+        return Err(replay::ReplayError::new(
+            replay::ReplayErrorKind::CertifiedEvidenceMismatch,
+            "typed EVM DCV validate output cell metadata mismatch",
+        ));
+    }
+    let evidence = broker.artifact(&replay::ArtifactReplayRequest {
+        artifact_id: artifact_id.clone(),
+        role: events::ArtifactRole::StateOutput,
+        digest: content_digest.clone(),
+        schema_id: Some(schema_id.clone()),
+        producer_node_id: Some(node_id.clone()),
+    })?;
+    load_replay_artifact_value(artifacts, &evidence).await
+}
+
+async fn load_replay_seed_validate_input(
+    broker: &replay::ReplayBroker,
+    artifacts: &dyn EvmDcvArtifactStore,
+    input_cell: &spec::InputBindingCellSpec,
+) -> replay::Result<ConfiguredContract> {
+    let seed = broker
+        .run_started()
+        .seed_cells
+        .iter()
+        .find(|seed| seed.cell_id == input_cell.cell_id)
+        .ok_or_else(|| {
+            replay::ReplayError::new(
+                replay::ReplayErrorKind::FactMissing,
+                format!(
+                    "typed EVM DCV validate input cell {} was not terminal in replay evidence",
+                    input_cell.cell_id
+                ),
+            )
+        })?;
+    if seed.schema_id != input_cell.schema_id
+        || seed.semantic_type_id != input_cell.semantic_type_id
+    {
+        return Err(replay::ReplayError::new(
+            replay::ReplayErrorKind::CertifiedEvidenceMismatch,
+            "typed EVM DCV validate seed input metadata mismatch",
+        ));
+    }
+    let evidence = broker.artifact(&replay::ArtifactReplayRequest {
+        artifact_id: seed.seed_artifact.artifact_id.clone(),
+        role: events::ArtifactRole::SeedInput,
+        digest: seed.digest.clone(),
+        schema_id: Some(seed.schema_id.clone()),
+        producer_node_id: None,
+    })?;
+    load_replay_artifact_value(artifacts, &evidence).await
+}
+
+fn validate_input_cell(node: &spec::NodeSpec) -> replay::Result<&spec::InputBindingCellSpec> {
+    let spec::InputBindingNodeSpec::Cell(input_cell) = &node.input_bindings.root else {
+        return Err(replay::ReplayError::new(
+            replay::ReplayErrorKind::CertifiedEvidenceMismatch,
+            format!(
+                "typed EVM DCV validate node {} does not have a configured-contract cell input",
+                node.node_id
+            ),
+        ));
+    };
+    Ok(input_cell.as_ref())
+}
+
+async fn load_replay_artifact_value<T>(
+    artifacts: &dyn EvmDcvArtifactStore,
+    expected: &store::ArtifactEvidenceRef,
+) -> replay::Result<T>
+where
+    T: DeserializeOwned,
+{
+    let (bytes, evidence) = artifacts
+        .get_artifact_by_id(&expected.artifact_id)
+        .await
+        .map_err(replay_artifact_runtime_error)?;
+    if &evidence != expected {
+        return Err(replay::ReplayError::new(
+            replay::ReplayErrorKind::ArtifactMismatch,
+            format!(
+                "typed EVM DCV replay artifact evidence mismatch for {}",
+                expected.artifact_id
+            ),
+        ));
+    }
+    serde_json::from_slice(&bytes).map_err(|error| {
+        replay::ReplayError::new(
+            replay::ReplayErrorKind::ArtifactMismatch,
+            format!(
+                "typed EVM DCV replay artifact {} could not be decoded: {error}",
+                expected.artifact_id
+            ),
+        )
+    })
+}
+
+fn expected_validate_fact_replay_request(
+    broker: &replay::ReplayBroker,
+    node: &spec::NodeSpec,
+    request_hash: ContentDigest,
+) -> replay::Result<replay::FactReplayRequest> {
+    let fact_key = validate_fact_key_for_node(&node.node_id).map_err(replay_fact_runtime_error)?;
+    let mut matches =
+        broker
+            .projection_snapshot()
+            .facts()
+            .filter(|((fact_node_id, _, candidate_key), _)| {
+                fact_node_id == &node.node_id && candidate_key == &fact_key
+            });
+    let Some((_, fact)) = matches.next() else {
+        return Err(replay::ReplayError::new(
+            replay::ReplayErrorKind::FactMissing,
+            format!(
+                "missing typed EVM DCV validation fact {} for node {}",
+                fact_key, node.node_id
+            ),
+        ));
+    };
+    if matches.next().is_some() {
+        return Err(replay::ReplayError::new(
+            replay::ReplayErrorKind::FactMismatch,
+            format!(
+                "duplicate typed EVM DCV validation fact {} for node {}",
+                fact_key, node.node_id
+            ),
+        ));
+    }
+
+    Ok(replay::FactReplayRequest {
+        node_id: node.node_id.clone(),
+        attempt_id: fact.attempt_id.clone(),
+        fact_key,
+        capability_kind: EvmDcvReadCapability::kind().map_err(replay_capability_error)?,
+        capability_version: EvmDcvReadCapability::version().map_err(replay_capability_error)?,
+        adapter_kind: evm_dcv_adapter_kind().map_err(replay_identity_error)?,
+        adapter_version: evm_dcv_adapter_version().map_err(replay_identity_error)?,
+        request_schema_id: EvmDcvValidateReadRequest::schema_id().map_err(replay_value_error)?,
+        request_hash,
+        response_schema_id: EvmDcvValidateReadResponse::schema_id().map_err(replay_value_error)?,
+    })
+}
+
+fn replay_state_error(error: mfm_program::PlanError) -> replay::ReplayError {
+    replay::ReplayError::new(
+        replay::ReplayErrorKind::CertifiedEvidenceMismatch,
+        error.to_string(),
+    )
+}
+
+fn replay_fact_runtime_error(error: mfm_runtime::RuntimeError) -> replay::ReplayError {
+    replay::ReplayError::new(replay::ReplayErrorKind::FactMismatch, error.to_string())
+}
+
+fn replay_artifact_runtime_error(error: mfm_runtime::RuntimeError) -> replay::ReplayError {
+    replay::ReplayError::new(replay::ReplayErrorKind::ArtifactMismatch, error.to_string())
+}
+
+fn evm_dcv_side_effect_missing(phase: &str) -> replay::ReplayError {
+    replay::ReplayError::new(
+        replay::ReplayErrorKind::SideEffectMissing,
+        format!("missing typed EVM DCV {phase} evidence"),
+    )
+}
+
+fn replay_verifier_id() -> mfm_runtime::Result<events::ReplayVerifierId> {
+    Ok(events::ReplayVerifierId::new(REPLAY_VERIFIER_ID)?)
+}
+
+fn replay_runtime_error(error: mfm_runtime::RuntimeError) -> replay::ReplayError {
+    replay::ReplayError::new(
+        replay::ReplayErrorKind::SideEffectMismatch,
+        error.to_string(),
+    )
+}
+
+fn replay_identity_error(error: mfm_ids::IdentityError) -> replay::ReplayError {
+    replay::ReplayError::new(
+        replay::ReplayErrorKind::SideEffectMismatch,
+        error.to_string(),
+    )
+}
+
+fn replay_capability_error(error: mfm_capabilities::CapabilityError) -> replay::ReplayError {
+    replay::ReplayError::new(
+        replay::ReplayErrorKind::SideEffectMismatch,
+        error.to_string(),
+    )
+}
+
+fn replay_value_error(error: mfm_values::ValueError) -> replay::ReplayError {
+    replay::ReplayError::new(
+        replay::ReplayErrorKind::SideEffectMismatch,
+        error.to_string(),
+    )
 }
 
 async fn deploy_output(
@@ -980,10 +1689,149 @@ async fn run_validate(
 ) -> mfm_runtime::Result<ErasedRunnerOutput> {
     let config = load_config::<DeployConfigureValidateValidateConfig>(&ctx, artifacts).await?;
     let input = load_input_cell::<ConfiguredContract>(ctx.inputs, artifacts).await?;
-    let output = validate_configured_contract_with_backend(&config, &input, rpc)
+    let request = validate_read_request(&config, &input)?;
+    let request_hash = digest_value(&request)?;
+    let fact_key = validate_fact_key(&ctx)?;
+    if let Some(fact) = ctx.recorded_facts.get(&fact_key) {
+        let response =
+            load_recorded_validate_response(fact, &request_hash, &ctx.node.node_id, artifacts)
+                .await?;
+        return state_output(ctx, artifacts, &response.report).await;
+    }
+
+    let report = validate_configured_contract_with_backend(&config, &input, rpc)
         .await
         .map_err(|error| mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string()))?;
-    state_output(ctx, artifacts, &output).await
+    let response = EvmDcvValidateReadResponse { report };
+    validate_read_output(ctx, artifacts, request_hash, fact_key, &response).await
+}
+
+fn validate_read_request(
+    config: &DeployConfigureValidateValidateConfig,
+    input: &ConfiguredContract,
+) -> mfm_runtime::Result<EvmDcvValidateReadRequest> {
+    Ok(EvmDcvValidateReadRequest {
+        network_id: config.network_id.clone(),
+        control_scope: config.control_scope.clone(),
+        contract_address: input.deployed.contract_address.clone(),
+        validate_config_hash: digest_value(config)?.to_string(),
+        configured_contract_hash: digest_value(input)?.to_string(),
+        read_assertion_count: config.read_assertions.len() as u64,
+        event_assertion_count: config.event_assertions.len() as u64,
+    })
+}
+
+async fn validate_read_output(
+    ctx: ErasedRunCtx<'_>,
+    artifacts: &dyn EvmDcvArtifactStore,
+    request_hash: ContentDigest,
+    fact_key: events::FactKey,
+    response: &EvmDcvValidateReadResponse,
+) -> mfm_runtime::Result<ErasedRunnerOutput> {
+    let response_artifact = artifact_for_value(
+        response,
+        events::ArtifactRole::FactResponse,
+        Some(ctx.node.node_id.clone()),
+    )?;
+    let output_artifact = artifact_for_value(
+        &response.report,
+        events::ArtifactRole::StateOutput,
+        Some(ctx.node.node_id.clone()),
+    )?;
+    persist_artifact(artifacts, &response_artifact).await?;
+    persist_artifact(artifacts, &output_artifact).await?;
+    Ok(ErasedRunnerOutput {
+        required_artifacts: vec![
+            response_artifact.evidence.clone(),
+            output_artifact.evidence.clone(),
+        ],
+        staged_retention_refs: vec![
+            retention(&response_artifact.evidence),
+            retention(&output_artifact.evidence),
+        ],
+        payloads: vec![
+            events::KernelEventPayload::FactRecorded(events::FactRecorded {
+                spec_hash: ctx.spec_hash.clone(),
+                node_id: ctx.node.node_id.clone(),
+                attempt_id: ctx.attempt_id.clone(),
+                capability_kind: EvmDcvReadCapability::kind().map_err(runtime_capability_error)?,
+                capability_version: EvmDcvReadCapability::version()
+                    .map_err(runtime_capability_error)?,
+                adapter_kind: evm_dcv_adapter_kind()?,
+                adapter_version: evm_dcv_adapter_version()?,
+                request_schema_id: EvmDcvValidateReadRequest::schema_id()
+                    .map_err(runtime_value_error)?,
+                request_hash,
+                response_schema_id: EvmDcvValidateReadResponse::schema_id()
+                    .map_err(runtime_value_error)?,
+                response_hash: response_artifact.evidence.digest.clone(),
+                fact_key,
+                artifact_id: response_artifact.evidence.artifact_id.clone(),
+            }),
+            cell_produced(&ctx, &output_artifact.evidence),
+            completed(&ctx),
+        ],
+    })
+}
+
+async fn load_recorded_validate_response(
+    fact: &mfm_runtime::RecordedFact,
+    request_hash: &ContentDigest,
+    node_id: &NodeId,
+    artifacts: &dyn EvmDcvArtifactStore,
+) -> mfm_runtime::Result<EvmDcvValidateReadResponse> {
+    validate_recorded_validate_fact(fact, request_hash)?;
+    let (bytes, evidence) = artifacts.get_artifact_by_id(&fact.artifact_id).await?;
+    if evidence.digest != fact.response_hash
+        || evidence.artifact_id != fact.artifact_id
+        || evidence.schema_id.as_ref()
+            != Some(&EvmDcvValidateReadResponse::schema_id().map_err(runtime_value_error)?)
+        || evidence.semantic_type_id.as_ref()
+            != Some(&EvmDcvValidateReadResponse::semantic_id().map_err(runtime_value_error)?)
+        || evidence.producer_node_id.as_ref() != Some(node_id)
+        || evidence.artifact_role != events::ArtifactRole::FactResponse
+    {
+        return Err(mfm_runtime::RuntimeError::InvalidRunnerOutput(format!(
+            "EVM DCV validation fact artifact did not match recorded fact {}",
+            fact.fact_key
+        )));
+    }
+    serde_json::from_slice(&bytes)
+        .map_err(|error| mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string()))
+}
+
+fn validate_recorded_validate_fact(
+    fact: &mfm_runtime::RecordedFact,
+    request_hash: &ContentDigest,
+) -> mfm_runtime::Result<()> {
+    if fact.capability_kind != EvmDcvReadCapability::kind().map_err(runtime_capability_error)?
+        || fact.capability_version
+            != EvmDcvReadCapability::version().map_err(runtime_capability_error)?
+        || fact.adapter_kind != evm_dcv_adapter_kind()?
+        || fact.adapter_version != evm_dcv_adapter_version()?
+        || fact.request_schema_id
+            != EvmDcvValidateReadRequest::schema_id().map_err(runtime_value_error)?
+        || &fact.request_hash != request_hash
+        || fact.response_schema_id
+            != EvmDcvValidateReadResponse::schema_id().map_err(runtime_value_error)?
+    {
+        return Err(mfm_runtime::RuntimeError::InvalidRunnerOutput(format!(
+            "EVM DCV recorded validation fact {} did not match replay request",
+            fact.fact_key
+        )));
+    }
+    Ok(())
+}
+
+fn validate_fact_key(ctx: &ErasedRunCtx<'_>) -> mfm_runtime::Result<events::FactKey> {
+    validate_fact_key_for_node(&ctx.node.node_id)
+}
+
+fn validate_fact_key_for_node(node_id: &NodeId) -> mfm_runtime::Result<events::FactKey> {
+    Ok(events::FactKey::new(format!(
+        "mfm.evm.dcv.fact.{}",
+        node_id.as_str()
+    ))?)
 }
 
 async fn state_output<T>(
@@ -1937,5 +2785,67 @@ mod tests {
         let json: serde_json::Value =
             serde_json::from_slice(&artifact.bytes).expect("evidence json");
         assert!(json.get("raw_transaction_hex").is_none());
+    }
+
+    #[test]
+    fn typed_transport_source_excludes_legacy_live_io_surface() {
+        let source = include_str!("lib.rs");
+        for banned in [
+            concat!("mfm_", "machine"),
+            concat!("Io", "Provider"),
+            concat!("Live", "IoTransport"),
+            concat!("Live", "IoTransportFactory"),
+            concat!("request: serde_json::", "Value"),
+        ] {
+            assert!(
+                !source.contains(banned),
+                "typed EVM DCV transport must not use legacy live-IO surface {banned}"
+            );
+        }
+    }
+
+    #[test]
+    fn replay_verifier_rejects_cross_phase_schema_mix() {
+        let deploy = EvmDcvReplayKind::Deploy;
+        let configure = EvmDcvReplayKind::Configure;
+        let err = ensure_same_replay_kind(deploy, configure, "receipt")
+            .expect_err("mixed replay schemas reject");
+        assert_eq!(err.kind, replay::ReplayErrorKind::SideEffectMismatch);
+    }
+
+    #[test]
+    fn validate_fact_replay_requires_typed_read_identity() {
+        let digest = format!("content:sha256-jcs-v1:{DIGEST_HEX}")
+            .parse::<ContentDigest>()
+            .expect("content digest");
+        let mut fact = events::FactRecorded {
+            spec_hash: format!("spec:sha256-jcs-v1:{DIGEST_HEX}")
+                .parse()
+                .expect("spec hash"),
+            node_id: format!("node:sha256-jcs-v1:{DIGEST_HEX}")
+                .parse()
+                .expect("node id"),
+            attempt_id: format!("attempt:sha256-jcs-v1:{DIGEST_HEX}")
+                .parse()
+                .expect("attempt id"),
+            capability_kind: EvmDcvReadCapability::kind().expect("read capability kind"),
+            capability_version: EvmDcvReadCapability::version().expect("read capability version"),
+            adapter_kind: evm_dcv_adapter_kind().expect("adapter kind"),
+            adapter_version: evm_dcv_adapter_version().expect("adapter version"),
+            request_schema_id: EvmDcvValidateReadRequest::schema_id().expect("request schema"),
+            request_hash: digest.clone(),
+            response_schema_id: EvmDcvDeployReceipt::schema_id().expect("wrong response schema"),
+            response_hash: digest.clone(),
+            fact_key: events::FactKey::new("mfm.evm.dcv.fact.test").expect("fact key"),
+            artifact_id: format!("artifact:sha256-jcs-v1:{DIGEST_HEX}")
+                .parse()
+                .expect("artifact id"),
+        };
+
+        let err = is_evm_dcv_validate_fact(&fact).expect_err("wrong response schema rejected");
+        assert_eq!(err.kind, replay::ReplayErrorKind::FactMismatch);
+
+        fact.response_schema_id = EvmDcvValidateReadResponse::schema_id().expect("response schema");
+        assert!(is_evm_dcv_validate_fact(&fact).expect("typed validation fact accepted"));
     }
 }

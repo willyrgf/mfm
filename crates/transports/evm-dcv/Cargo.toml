@@ -23,6 +23,7 @@ mfm-evm-core = { path = "../../evm-core" }
 mfm-evm-deploy-configure-validate-config = { path = "../../evm-deploy-configure-validate-config" }
 mfm-ids = { path = "../../kernel/ids" }
 mfm-program = { path = "../../kernel/program" }
+mfm-replay = { path = "../../kernel/replay" }
 mfm-runtime = { path = "../../kernel/runtime" }
 mfm-spec = { path = "../../kernel/spec" }
 mfm-state-evm-dcv = { path = "../../states/evm-dcv" }
