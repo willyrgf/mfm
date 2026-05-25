@@ -43,12 +43,6 @@ impl CommandError {
             exit_code: 1,
         }
     }
-
-    /// Overrides the exit code for this command error.
-    pub(crate) fn with_exit_code(mut self, code: i32) -> Self {
-        self.exit_code = code;
-        self
-    }
 }
 
 impl fmt::Display for CommandError {

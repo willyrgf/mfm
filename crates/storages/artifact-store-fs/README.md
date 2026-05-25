@@ -9,5 +9,4 @@ byte length, media type, schema id, semantic id, producer node or seed, and arti
 Seed material must be persisted with `SeedInput` evidence and the matching `producer_seed_id`.
 Missing or mismatched seed artifacts are rejected before they can satisfy run-start evidence.
 
-`FsArtifactStore` remains only as the legacy `mfm_machine::stores::ArtifactStore` implementation
-for old runtime tests and compatibility callers. It is not a certified typed submit/resume surface.
+No legacy dynamic artifact-store trait is exposed from this crate.

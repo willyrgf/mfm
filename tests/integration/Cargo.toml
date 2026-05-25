@@ -10,12 +10,7 @@ parity-tests = []
 serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { version = "1.0", features = ["v4"] }
-mfm-machine = { path = "../../crates/machine" }
-mfm-collectors-rpc-control = { path = "../../crates/collectors/rpc-control" }
-mfm-transports-rpc-control = { path = "../../crates/transports/rpc-control" }
-mfm-collectors-evm-jsonrpc-http = { path = "../../crates/collectors/evm-jsonrpc-http" }
-mfm-artifact-store-s3 = { path = "../../crates/storages/artifact-store-s3" }
-mfm-artifact-store-secret = { path = "../../crates/storages/artifact-store-secret" }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
 
 [dev-dependencies]
 tokio = { workspace = true }
@@ -27,14 +22,10 @@ tracing = { workspace = true }
 
 mfm-rest-api = { path = "../../bin/rest-api" }
 mfm-app = { path = "../../crates/app" }
-mfm-app-legacy = { package = "mfm-app-legacy", path = "../../crates/app-legacy" }
-mfm-sdk = { path = "../../crates/sdk" }
-mfm-machine-test-support = { path = "../../crates/machine-test-support" }
 
 mfm-artifact-store-fs = { path = "../../crates/storages/artifact-store-fs" }
 mfm-events = { path = "../../crates/kernel/events" }
 mfm-store = { path = "../../crates/kernel/store" }
-mfm-stream-store-mem = { path = "../../crates/storages/stream-store-mem" }
 mfm-stream-store-postgres = { path = "../../crates/storages/stream-store-postgres" }
 mfm-op-evm-deploy-configure-validate = { path = "../../crates/ops/evm-deploy-configure-validate-op" }
 mfm-transports-evm-dcv = { path = "../../crates/transports/evm-dcv" }

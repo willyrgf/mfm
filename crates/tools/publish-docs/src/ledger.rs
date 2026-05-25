@@ -150,7 +150,7 @@ mod tests {
         let mut ledger = empty_ledger();
         append_release_record(
             &mut ledger,
-            "mfm-machine",
+            "mfm-runtime",
             ReleaseRecord {
                 version: Version::parse("0.1.0").expect("version"),
                 git_commit: Some("abc".into()),
@@ -161,7 +161,7 @@ mod tests {
         )
         .expect("append");
         assert_eq!(
-            latest_release(&ledger, "mfm-machine")
+            latest_release(&ledger, "mfm-runtime")
                 .expect("latest")
                 .version,
             Version::parse("0.1.0").expect("version")

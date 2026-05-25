@@ -250,21 +250,6 @@
       "kind": "rust-cargo"
     },
     {
-      "name": "machine-derive",
-      "path": "crates/machine-derive/Cargo.toml",
-      "kind": "rust-cargo"
-    },
-    {
-      "name": "machine-test-support",
-      "path": "crates/machine-test-support/Cargo.toml",
-      "kind": "rust-cargo"
-    },
-    {
-      "name": "machine",
-      "path": "crates/machine/Cargo.toml",
-      "kind": "rust-cargo"
-    },
-    {
       "name": "evm-deploy-configure-validate-op",
       "path": "crates/ops/evm-deploy-configure-validate-op/Cargo.toml",
       "kind": "rust-cargo"
@@ -315,11 +300,6 @@
       "kind": "rust-cargo"
     },
     {
-      "name": "sdk",
-      "path": "crates/sdk/Cargo.toml",
-      "kind": "rust-cargo"
-    },
-    {
       "name": "aave-v3",
       "path": "crates/states/aave-v3/Cargo.toml",
       "kind": "rust-cargo"
@@ -327,6 +307,11 @@
     {
       "name": "common",
       "path": "crates/states/common/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "evm-dcv",
+      "path": "crates/states/evm-dcv/Cargo.toml",
       "kind": "rust-cargo"
     },
     {
@@ -375,6 +360,11 @@
       "kind": "rust-cargo"
     },
     {
+      "name": "evm-dcv",
+      "path": "crates/transports/evm-dcv/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
       "name": "exec",
       "path": "crates/transports/exec/Cargo.toml",
       "kind": "rust-cargo"
@@ -392,6 +382,11 @@
     {
       "name": "local-keystore",
       "path": "crates/transports/local-keystore/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "portfolio",
+      "path": "crates/transports/portfolio/Cargo.toml",
       "kind": "rust-cargo"
     },
     {
@@ -437,15 +432,6 @@
         "nix run .#check",
         "nix run .#test",
         "nix run .#ci -- --audit --summary"
-      ]
-    },
-    {
-      "path": "crates/machine",
-      "risk": "Recovery, replay, and deterministic state-machine runtime semantics.",
-      "required_checks": [
-        "nix run .#check",
-        "nix run .#test",
-        "nix run .#ci -- --parity --summary"
       ]
     },
     {

@@ -1,19 +1,15 @@
 #![cfg(feature = "parity-tests")]
 #![allow(clippy::disallowed_methods)]
 
-use std::sync::Arc;
-
 use mfm_app::TypedRunPhase;
-use mfm_artifact_store_fs::FsArtifactStore;
-use mfm_integration_tests::rpc_control;
-use mfm_machine::stores::{ArtifactStore, StreamStore};
-use mfm_stream_store_mem::MemStreamStore;
-use mfm_transports_rpc_control::RpcControlBootstrapSource;
+use serde::Deserialize;
 
 mod support;
 
 const NETWORK_ID: &str = "ethereum-mainnet";
 const CONTROL_SCOPE: &str = "parity.portfolio_snapshot.eth_only";
+const DEFAULT_PARITY_RETH_HTTP_PORT: &str = "8565";
+const ENV_EVM_RPC_SOURCES_JSON: &str = "MFM_EVM_RPC_SOURCES_JSON";
 
 fn canonical_portfolio_snapshot_payload(
     wallet_address: &str,
@@ -101,40 +97,61 @@ fn parse_u64_hex(s: &str) -> u64 {
     u64::from_str_radix(rest, 16).expect("hex u64")
 }
 
-async fn rpc_call(
-    rpc_sources: &[RpcControlBootstrapSource],
-    control_scope: &str,
-    method: &str,
-    params: serde_json::Value,
-) -> serde_json::Value {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let artifacts: Arc<dyn ArtifactStore> = Arc::new(FsArtifactStore::new(tmp.path()));
-    let streams: Arc<dyn StreamStore> = Arc::new(MemStreamStore::new());
-    rpc_control::call_in_scope(
-        rpc_sources,
-        NETWORK_ID,
-        control_scope,
-        streams,
-        artifacts,
-        method,
-        params,
-    )
-    .await
+#[derive(Deserialize)]
+struct RpcSource {
+    network_id: Option<String>,
+    rpc_url: String,
+}
+
+fn required_rpc_url_for_network(network_id: &str) -> String {
+    if let Ok(raw) = std::env::var(ENV_EVM_RPC_SOURCES_JSON) {
+        let sources: Vec<RpcSource> =
+            serde_json::from_str(&raw).expect("MFM_EVM_RPC_SOURCES_JSON must decode");
+        if let Some(source) = sources
+            .into_iter()
+            .find(|source| source.network_id.as_deref() == Some(network_id))
+        {
+            return source.rpc_url;
+        }
+    }
+
+    let port = std::env::var("RETH_HTTP_PORT")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_PARITY_RETH_HTTP_PORT.to_string());
+    format!("http://127.0.0.1:{port}")
+}
+
+async fn rpc_call(rpc_url: &str, method: &str, params: serde_json::Value) -> serde_json::Value {
+    let response = reqwest::Client::new()
+        .post(rpc_url)
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": method,
+            "params": params,
+        }))
+        .send()
+        .await
+        .expect("send json-rpc request")
+        .error_for_status()
+        .expect("json-rpc http status");
+    let payload: serde_json::Value = response.json().await.expect("json-rpc response json");
+    if let Some(error) = payload.get("error") {
+        panic!("json-rpc {method} returned error: {error}");
+    }
+    payload
+        .get("result")
+        .cloned()
+        .unwrap_or_else(|| panic!("json-rpc {method} response missing result: {payload}"))
 }
 
 #[tokio::test]
 async fn parity_portfolio_snapshot_feature_against_reth_eth_only() {
-    let rpc_sources = rpc_control::required_bootstrap_sources_from_env_for_network(NETWORK_ID);
+    let rpc_url = required_rpc_url_for_network(NETWORK_ID);
     let control_scope = format!("{CONTROL_SCOPE}.{}", uuid::Uuid::new_v4().simple());
-    let bootstrap_control_scope = format!("{control_scope}.bootstrap");
 
-    let chain_id_hex = rpc_call(
-        &rpc_sources,
-        &bootstrap_control_scope,
-        "eth_chainId",
-        serde_json::json!([]),
-    )
-    .await;
+    let chain_id_hex = rpc_call(&rpc_url, "eth_chainId", serde_json::json!([])).await;
     let chain_id = chain_id_hex
         .as_str()
         .map(parse_u64_hex)

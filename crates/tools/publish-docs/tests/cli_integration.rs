@@ -113,7 +113,7 @@ fn yank_disallowed_by_catalog_renders_json_error_envelope() {
     let mut cmd = Command::cargo_bin("mfm-publish-docs").expect("binary");
     let output = cmd
         .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .args(["yank", "mfm-machine", "--json"])
+        .args(["yank", "mfm-runtime", "--json"])
         .output()
         .expect("command output");
 
@@ -124,7 +124,7 @@ fn yank_disallowed_by_catalog_renders_json_error_envelope() {
     assert_eq!(parsed["error"]["code"], "CommandFailed");
     assert_eq!(
         parsed["error"]["message"],
-        "catalog disallows yanking package=mfm-machine"
+        "catalog disallows yanking package=mfm-runtime"
     );
     assert!(!stderr.contains("\"status\""));
 }

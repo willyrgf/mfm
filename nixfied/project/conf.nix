@@ -192,15 +192,6 @@ rec {
         ];
       }
       {
-        path = "crates/machine";
-        risk = "Recovery, replay, and deterministic state-machine runtime semantics.";
-        required_checks = [
-          "nix run .#check"
-          "nix run .#test"
-          "nix run .#ci -- --parity --summary"
-        ];
-      }
-      {
         path = "nixfied/framework";
         risk = "Framework internals; avoid direct edits in installed repos.";
         required_checks = [

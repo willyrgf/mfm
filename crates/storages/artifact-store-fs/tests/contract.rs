@@ -1,6 +1,4 @@
-use mfm_artifact_store_fs::{
-    FsArtifactStore, FsTypedArtifactError, FsTypedArtifactStore, TypedArtifactDescriptor,
-};
+use mfm_artifact_store_fs::{FsTypedArtifactError, FsTypedArtifactStore, TypedArtifactDescriptor};
 use mfm_canonical::sha256_digest_bytes;
 use mfm_events::v1::{
     ArtifactEvidenceRef as EventArtifactEvidenceRef, ArtifactRole, FrameworkVersion,
@@ -10,21 +8,12 @@ use mfm_ids::{
     ArtifactId, CellId, ContentDigest, DigestAlgorithm, DigestBytes, LoweringVersion, NodeId,
     RunId, SchemaId, ScopeId, SeedId, SemanticTypeId, SpecHash, SpecVersion,
 };
-use mfm_machine_test_support::artifact_store_contract_tests;
 use mfm_spec::v1::{CanonicalizerIdentity, MediaType};
 use mfm_store::v1::{
     ArtifactEvidenceRef, CommitKey, CommitPreconditions, InMemoryTypedRunStore, RequiredRunState,
     StreamSeq, TypedCommitRequest, TypedRunEventStore, VerifiedRetentionProjectionSet,
 };
 use std::path::{Path, PathBuf};
-
-#[tokio::test]
-async fn artifact_store_fs_contract() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let store = FsArtifactStore::new(dir.path());
-
-    artifact_store_contract_tests(&store).await;
-}
 
 fn digest(byte: u8) -> DigestBytes {
     DigestBytes::from_array([byte; 32])

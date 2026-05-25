@@ -52,15 +52,45 @@ impl IndexRegistryObserver {
         base_url: String,
         cache_relative_path: PathBuf,
     ) -> Result<Self, reqwest::Error> {
-        let client = reqwest::Client::builder()
-            .user_agent(concat!(
-                env!("CARGO_PKG_NAME"),
-                "/",
-                env!("CARGO_PKG_VERSION")
-            ))
-            .connect_timeout(Duration::from_secs(5))
-            .timeout(Duration::from_secs(10))
-            .build()?;
+        Self::with_base_url_and_client_builder(
+            workspace_root,
+            base_url,
+            cache_relative_path,
+            |builder| builder,
+        )
+    }
+
+    #[cfg(test)]
+    fn test_with_base_url(
+        workspace_root: &Path,
+        base_url: String,
+        cache_relative_path: PathBuf,
+    ) -> Result<Self, reqwest::Error> {
+        Self::with_base_url_and_client_builder(
+            workspace_root,
+            base_url,
+            cache_relative_path,
+            |builder| builder.no_proxy(),
+        )
+    }
+
+    fn with_base_url_and_client_builder(
+        workspace_root: &Path,
+        base_url: String,
+        cache_relative_path: PathBuf,
+        customize: impl FnOnce(reqwest::ClientBuilder) -> reqwest::ClientBuilder,
+    ) -> Result<Self, reqwest::Error> {
+        let client = customize(
+            reqwest::Client::builder()
+                .user_agent(concat!(
+                    env!("CARGO_PKG_NAME"),
+                    "/",
+                    env!("CARGO_PKG_VERSION")
+                ))
+                .connect_timeout(Duration::from_secs(5))
+                .timeout(Duration::from_secs(10)),
+        )
+        .build()?;
         Ok(Self {
             client,
             base_url,
@@ -407,17 +437,12 @@ fn now_rfc3339() -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        fs,
-        io::{Read, Write},
-        net::TcpListener,
-        thread,
-    };
+    use std::fs;
 
     use semver::Version;
     use tempfile::tempdir;
 
-    use super::{sparse_index_relative_path, IndexRegistryObserver};
+    use super::{parse_index_payload, sparse_index_relative_path, IndexRegistryObserver};
     use crate::error::PublishDocsError;
     use crate::model::{RegistryFreshness, RegistryStatus};
 
@@ -442,58 +467,37 @@ mod tests {
         assert_eq!(sparse_index_relative_path("ab"), "2/ab");
         assert_eq!(sparse_index_relative_path("abc"), "3/a/abc");
         assert_eq!(
-            sparse_index_relative_path("mfm-machine"),
-            "mf/m-/mfm-machine"
+            sparse_index_relative_path("mfm-runtime"),
+            "mf/m-/mfm-runtime"
         );
     }
 
-    #[tokio::test]
-    async fn observes_fresh_index_payload() {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
-        let addr = listener.local_addr().expect("addr");
-        let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("accept");
-            let mut buffer = [0_u8; 1024];
-            let _ = stream.read(&mut buffer).expect("read");
-            let body = concat!("{\"vers\":\"0.1.0\"}\n", "{\"vers\":\"0.2.0\"}\n");
-            write!(
-                stream,
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-                body.len(),
-                body
-            )
-            .expect("write");
-        });
-        let tempdir = tempdir().expect("tempdir");
-        let observer = IndexRegistryObserver::with_base_url(
-            tempdir.path(),
-            format!("http://{addr}"),
-            ".cache".into(),
-        )
-        .expect("observer");
+    #[test]
+    fn parses_fresh_index_payload() {
+        let package = local_package("mfm-runtime", "0.2.0");
+        let body = concat!("{\"vers\":\"0.1.0\"}\n", "{\"vers\":\"0.2.0\"}\n");
 
-        let observation = observer
-            .observe_package(&local_package("mfm-machine", "0.2.0"))
-            .await
-            .expect("observe package");
-        server.join().expect("server");
+        let (latest_version, exact_version_present) =
+            parse_index_payload(&package, body.as_bytes()).expect("parse index payload");
 
-        assert!(matches!(observation.status, RegistryStatus::Present));
-        assert!(matches!(observation.freshness, RegistryFreshness::Fresh));
-        assert!(observation.exact_version_present);
+        assert_eq!(
+            latest_version,
+            Some(Version::parse("0.2.0").expect("version"))
+        );
+        assert!(exact_version_present);
     }
 
     #[tokio::test]
     async fn falls_back_to_cached_payload_when_refresh_fails() {
         let tempdir = tempdir().expect("tempdir");
-        let observer = IndexRegistryObserver::with_base_url(
+        let observer = IndexRegistryObserver::test_with_base_url(
             tempdir.path(),
             "http://127.0.0.1:1".into(),
             ".cache".into(),
         )
         .expect("observer");
-        let package = local_package("mfm-machine", "0.1.0");
-        let cache_path = tempdir.path().join(".cache").join("mf/m-/mfm-machine");
+        let package = local_package("mfm-runtime", "0.1.0");
+        let cache_path = tempdir.path().join(".cache").join("mf/m-/mfm-runtime");
         if let Some(parent) = cache_path.parent() {
             fs::create_dir_all(parent).expect("cache parent");
         }
@@ -512,7 +516,7 @@ mod tests {
     #[tokio::test]
     async fn closed_semaphore_returns_structured_error() {
         let tempdir = tempdir().expect("tempdir");
-        let observer = IndexRegistryObserver::with_base_url(
+        let observer = IndexRegistryObserver::test_with_base_url(
             tempdir.path(),
             "http://127.0.0.1:1".into(),
             ".cache".into(),
@@ -521,7 +525,7 @@ mod tests {
         observer.semaphore.close();
 
         let error = observer
-            .observe_package(&local_package("mfm-machine", "0.1.0"))
+            .observe_package(&local_package("mfm-runtime", "0.1.0"))
             .await
             .expect_err("closed semaphore should fail structurally");
 

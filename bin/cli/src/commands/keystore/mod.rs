@@ -71,6 +71,7 @@ mod tests {
             ("tx_sign.rs", include_str!("tx_sign.rs")),
         ];
         let forbidden = [
+            "mfm_app_legacy",
             "mfm_op_keystore",
             "execute_single_op_report",
             "SingleOpReportRequest",
@@ -80,7 +81,7 @@ mod tests {
             for needle in forbidden {
                 assert!(
                     !source.contains(needle),
-                    "{path} must call mfm-app keystore services instead of importing {needle}"
+                    "{path} must use direct typed keystore helpers instead of importing {needle}"
                 );
             }
         }

@@ -2,42 +2,6 @@ catalog_version = 1
 umbrella_package = "mfm-docs"
 
 [[packages]]
-name = "mfm-machine"
-workspace_path = "crates/machine"
-visibility = "public"
-section = "engine_sdk"
-summary = "State-machine runtime, execution plans, events, and recovery contracts."
-docs_policy = "docs-rs"
-umbrella_policy = "when-published"
-
-[[packages]]
-name = "mfm-machine-derive"
-workspace_path = "crates/machine-derive"
-visibility = "public"
-section = "engine_sdk"
-summary = "Reserved proc-macro boundary for future machine/state helpers."
-docs_policy = "docs-rs"
-umbrella_policy = "when-published"
-
-[[packages]]
-name = "mfm-machine-test-support"
-workspace_path = "crates/machine-test-support"
-visibility = "public"
-section = "engine_sdk"
-summary = "Contract tests and test observability helpers."
-docs_policy = "docs-rs"
-umbrella_policy = "when-published"
-
-[[packages]]
-name = "mfm-sdk"
-workspace_path = "crates/sdk"
-visibility = "public"
-section = "engine_sdk"
-summary = "Run launch, resume, and registry helpers."
-docs_policy = "docs-rs"
-umbrella_policy = "when-published"
-
-[[packages]]
 name = "mfm-canonical"
 workspace_path = "crates/kernel/canonical"
 visibility = "public"
@@ -173,15 +137,6 @@ docs_policy = "docs-rs"
 umbrella_policy = "when-published"
 
 [[packages]]
-name = "mfm-control-plane-model"
-workspace_path = "crates/control-plane/model"
-visibility = "public"
-section = "core"
-summary = "Backend-neutral control-plane stream-family model and projections."
-docs_policy = "repo-only"
-umbrella_policy = "always"
-
-[[packages]]
 name = "mfm-evm-dcv-model"
 workspace_path = "crates/evm-dcv-model"
 visibility = "public"
@@ -236,56 +191,11 @@ docs_policy = "repo-only"
 umbrella_policy = "always"
 
 [[packages]]
-name = "mfm-portfolio-plan"
-workspace_path = "crates/portfolio/plan"
-visibility = "public"
-section = "core"
-summary = "Pure semantic portfolio planning vocabulary and adapter catalog."
-docs_policy = "repo-only"
-umbrella_policy = "always"
-
-[[packages]]
-name = "mfm-state-common"
-workspace_path = "crates/states/common"
-visibility = "public"
-section = "states"
-summary = "Cross-domain reusable execution states."
-docs_policy = "docs-rs"
-umbrella_policy = "when-published"
-
-[[packages]]
-name = "mfm-evm-runtime"
-workspace_path = "crates/evm-runtime"
-visibility = "public"
-section = "states"
-summary = "Shared EVM read and write runtime states."
-docs_policy = "docs-rs"
-umbrella_policy = "when-published"
-
-[[packages]]
 name = "mfm-state-evm-dcv"
 workspace_path = "crates/states/evm-dcv"
 visibility = "public"
 section = "states"
 summary = "Typed EVM deploy/configure/validate lifecycle state contracts."
-docs_policy = "docs-rs"
-umbrella_policy = "when-published"
-
-[[packages]]
-name = "mfm-state-keystore"
-workspace_path = "crates/states/keystore"
-visibility = "public"
-section = "states"
-summary = "Shared keystore administration and local signing states."
-docs_policy = "docs-rs"
-umbrella_policy = "when-published"
-
-[[packages]]
-name = "mfm-state-aave-v3"
-workspace_path = "crates/states/aave-v3"
-visibility = "public"
-section = "states"
-summary = "Shared Aave V3 portfolio-position types and runtime adapters."
 docs_policy = "docs-rs"
 umbrella_policy = "when-published"
 
@@ -297,33 +207,6 @@ section = "states"
 summary = "Reusable portfolio-domain runtime states and adapters for canonical snapshots."
 docs_policy = "docs-rs"
 umbrella_policy = "when-published"
-
-[[packages]]
-name = "mfm-op-keystore"
-workspace_path = "crates/ops/keystore-op"
-visibility = "public"
-section = "ops"
-summary = "Keystore administration and transaction planners."
-docs_policy = "repo-only"
-umbrella_policy = "always"
-
-[[packages]]
-name = "mfm-op-evm-read"
-workspace_path = "crates/ops/evm-read-op"
-visibility = "public"
-section = "ops"
-summary = "EVM read planner."
-docs_policy = "repo-only"
-umbrella_policy = "always"
-
-[[packages]]
-name = "mfm-op-evm-write"
-workspace_path = "crates/ops/evm-write-op"
-visibility = "public"
-section = "ops"
-summary = "EVM write planner."
-docs_policy = "repo-only"
-umbrella_policy = "always"
 
 [[packages]]
 name = "mfm-op-evm-deploy-configure-validate"
@@ -340,15 +223,6 @@ workspace_path = "crates/ops/portfolio-tracker-op"
 visibility = "public"
 section = "ops"
 summary = "Portfolio tracking planner."
-docs_policy = "repo-only"
-umbrella_policy = "always"
-
-[[packages]]
-name = "mfm-op-nix-app"
-workspace_path = "crates/ops/nix-app-op"
-visibility = "public"
-section = "ops"
-summary = "Nix app execution planner."
 docs_policy = "repo-only"
 umbrella_policy = "always"
 
@@ -371,47 +245,11 @@ docs_policy = "repo-only"
 umbrella_policy = "always"
 
 [[packages]]
-name = "mfm-artifact-store-secret"
-workspace_path = "crates/storages/artifact-store-secret"
-visibility = "public"
-section = "storages"
-summary = "Secret-wrapping artifact store."
-docs_policy = "repo-only"
-umbrella_policy = "always"
-
-[[packages]]
-name = "mfm-artifact-store-s3"
-workspace_path = "crates/storages/artifact-store-s3"
-visibility = "public"
-section = "storages"
-summary = "S3-backed artifact store."
-docs_policy = "repo-only"
-umbrella_policy = "always"
-
-[[packages]]
-name = "mfm-stream-store-mem"
-workspace_path = "crates/storages/stream-store-mem"
-visibility = "public"
-section = "storages"
-summary = "In-memory stream store."
-docs_policy = "repo-only"
-umbrella_policy = "always"
-
-[[packages]]
 name = "mfm-stream-store-postgres"
 workspace_path = "crates/storages/stream-store-postgres"
 visibility = "public"
 section = "storages"
-summary = "PostgreSQL stream store."
-docs_policy = "repo-only"
-umbrella_policy = "always"
-
-[[packages]]
-name = "mfm-control-plane-postgres"
-workspace_path = "crates/storages/control-plane-postgres"
-visibility = "public"
-section = "storages"
-summary = "Durable RPC control-plane stream/projection storage."
+summary = "PostgreSQL typed run event store."
 docs_policy = "repo-only"
 umbrella_policy = "always"
 
@@ -425,69 +263,6 @@ docs_policy = "docs-rs"
 umbrella_policy = "when-published"
 
 [[packages]]
-name = "mfm-collectors-evm"
-workspace_path = "crates/collectors/evm"
-visibility = "public"
-section = "collectors"
-summary = "EVM collector traits and payloads."
-docs_policy = "docs-rs"
-umbrella_policy = "when-published"
-
-[[packages]]
-name = "mfm-collectors-evm-jsonrpc-http"
-workspace_path = "crates/collectors/evm-jsonrpc-http"
-visibility = "public"
-section = "collectors"
-summary = "HTTP JSON-RPC collector implementation for EVM."
-docs_policy = "docs-rs"
-umbrella_policy = "when-published"
-
-[[packages]]
-name = "mfm-collectors-exec"
-workspace_path = "crates/collectors/exec"
-visibility = "public"
-section = "collectors"
-summary = "Command-execution collector interfaces."
-docs_policy = "docs-rs"
-umbrella_policy = "when-published"
-
-[[packages]]
-name = "mfm-collectors-local-evm"
-workspace_path = "crates/collectors/local-evm"
-visibility = "public"
-section = "collectors"
-summary = "Typed local EVM signer IO adapters."
-docs_policy = "docs-rs"
-umbrella_policy = "when-published"
-
-[[packages]]
-name = "mfm-collectors-local-keystore"
-workspace_path = "crates/collectors/local-keystore"
-visibility = "public"
-section = "collectors"
-summary = "Local keystore collector interfaces."
-docs_policy = "docs-rs"
-umbrella_policy = "when-published"
-
-[[packages]]
-name = "mfm-collectors-nix"
-workspace_path = "crates/collectors/nix"
-visibility = "public"
-section = "collectors"
-summary = "Nix evaluation collector interfaces."
-docs_policy = "docs-rs"
-umbrella_policy = "when-published"
-
-[[packages]]
-name = "mfm-collectors-nix-exec"
-workspace_path = "crates/collectors/nix-exec"
-visibility = "public"
-section = "collectors"
-summary = "Nix execution collector implementation."
-docs_policy = "docs-rs"
-umbrella_policy = "when-published"
-
-[[packages]]
 name = "mfm-collectors-proof"
 workspace_path = "crates/collectors/proof"
 visibility = "public"
@@ -497,56 +272,11 @@ docs_policy = "docs-rs"
 umbrella_policy = "when-published"
 
 [[packages]]
-name = "mfm-collectors-rpc-control"
-workspace_path = "crates/collectors/rpc-control"
-visibility = "public"
-section = "collectors"
-summary = "Typed `rpc.control` adapters for managed EVM RPC calls."
-docs_policy = "docs-rs"
-umbrella_policy = "when-published"
-
-[[packages]]
-name = "mfm-transports-exec"
-workspace_path = "crates/transports/exec"
-visibility = "public"
-section = "transports"
-summary = "Live `exec` namespace transport for bounded local process execution."
-docs_policy = "repo-only"
-umbrella_policy = "always"
-
-[[packages]]
 name = "mfm-transports-evm-dcv"
 workspace_path = "crates/transports/evm-dcv"
 visibility = "public"
 section = "transports"
 summary = "Typed EVM deploy/configure/validate workflow runners."
-docs_policy = "repo-only"
-umbrella_policy = "always"
-
-[[packages]]
-name = "mfm-transports-local-evm"
-workspace_path = "crates/transports/local-evm"
-visibility = "public"
-section = "transports"
-summary = "Local EVM signing and transaction transport."
-docs_policy = "repo-only"
-umbrella_policy = "always"
-
-[[packages]]
-name = "mfm-transports-local-fs"
-workspace_path = "crates/transports/local-fs"
-visibility = "public"
-section = "transports"
-summary = "Local filesystem transport helpers."
-docs_policy = "repo-only"
-umbrella_policy = "always"
-
-[[packages]]
-name = "mfm-transports-local-keystore"
-workspace_path = "crates/transports/local-keystore"
-visibility = "public"
-section = "transports"
-summary = "Local keystore-backed transport helpers."
 docs_policy = "repo-only"
 umbrella_policy = "always"
 
@@ -578,15 +308,6 @@ docs_policy = "repo-only"
 umbrella_policy = "always"
 
 [[packages]]
-name = "mfm-transports-rpc-control"
-workspace_path = "crates/transports/rpc-control"
-visibility = "public"
-section = "transports"
-summary = "Managed `rpc.control` transport over the internal EVM executor."
-docs_policy = "repo-only"
-umbrella_policy = "always"
-
-[[packages]]
 name = "mfm"
 workspace_path = "bin/cli"
 visibility = "public"
@@ -612,15 +333,6 @@ section = "binaries_tooling"
 summary = "Typed application assembly for certified runtime services."
 docs_policy = "repo-only"
 umbrella_policy = "always"
-
-[[packages]]
-name = "mfm-app-legacy"
-workspace_path = "crates/app-legacy"
-visibility = "private"
-section = "binaries_tooling"
-summary = "Isolated pre-typed application bridge for transitional binary rewrites."
-docs_policy = "hidden"
-umbrella_policy = "never"
 
 [[packages]]
 name = "mfm-publish-docs"

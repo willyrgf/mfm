@@ -98,18 +98,18 @@ mod tests {
         let wave = PublishWave {
             wave: "docs-rs-wave-1".into(),
             packages: vec![WavePackage {
-                name: "mfm-machine".into(),
+                name: "mfm-runtime".into(),
                 group: "foundation".into(),
-                workspace_path: "crates/machine".into(),
-                docs_rs: "https://docs.rs/mfm-machine".into(),
+                workspace_path: "crates/kernel/runtime".into(),
+                docs_rs: "https://docs.rs/mfm-runtime".into(),
             }],
         };
         let catalog = DesiredCatalog {
             catalog_version: 1,
             umbrella_package: "mfm-docs".into(),
             packages: vec![CatalogPackage {
-                name: "mfm-machine".into(),
-                workspace_path: "crates/machine".into(),
+                name: "mfm-runtime".into(),
+                workspace_path: "crates/kernel/runtime".into(),
                 visibility: Visibility::Public,
                 section: CatalogSection::EngineSdk,
                 summary: "runtime".into(),
@@ -122,11 +122,11 @@ mod tests {
             }],
         };
         let workspace = WorkspaceState {
-            selected: vec!["mfm-machine".into()],
+            selected: vec!["mfm-runtime".into()],
             packages: vec![],
         };
         let registry = vec![RegistryObservation {
-            package: "mfm-machine".into(),
+            package: "mfm-runtime".into(),
             status: RegistryStatus::Absent,
             latest_version: None,
             exact_version_present: false,
@@ -136,7 +136,7 @@ mod tests {
             diagnostic_code: None,
         }];
         let docs = vec![crate::model::DocsRsObservation {
-            package: "mfm-machine".into(),
+            package: "mfm-runtime".into(),
             status: DocsRsStatus::Absent,
             latest_available_version: None,
             exact_version_available: false,
@@ -150,7 +150,7 @@ mod tests {
             selection_only: None,
             resumed_from_run_id: None,
             packages: vec![PlannedPackage {
-                name: "mfm-machine".into(),
+                name: "mfm-runtime".into(),
                 local_version: Version::parse("0.1.0").expect("version"),
                 remote_version: None,
                 docs_status: Some(DocsRsStatus::Absent),

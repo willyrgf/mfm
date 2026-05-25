@@ -427,14 +427,14 @@ workflow ports, and deletion or hard isolation of old dynamic semantic APIs.
 
 ### Commit 40: `delete old dynamic machine sdk crates`
 
-- [ ] Remove `crates/machine`, `crates/machine-derive`, `crates/machine-test-support`, and
+- [x] Remove `crates/machine`, `crates/machine-derive`, `crates/machine-test-support`, and
       `crates/sdk` from the workspace, or reduce `crates/sdk` to typed reexports only if still
       deliberately needed.
-- [ ] Delete old `PlannedOp`, `PortKey`, `DynContext`, public `StateGraph`, `DependencyEdge`, and
+- [x] Delete old `PlannedOp`, `PortKey`, `DynContext`, public `StateGraph`, `DependencyEdge`, and
       dynamic DAG authoring surfaces.
-- [ ] Delete tests that assert old dynamic semantics.
-- [ ] Replace any remaining imports with typed kernel APIs or remove the dependent feature.
-- [ ] Validation: `nix run .#check`.
+- [x] Delete tests that assert old dynamic semantics.
+- [x] Replace any remaining imports with typed kernel APIs or remove the dependent feature.
+- [x] Validation: `nix run .#check`.
 
 ### Commit 41: `delete old dynamic ops and states`
 

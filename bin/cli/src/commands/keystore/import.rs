@@ -1,11 +1,8 @@
 use crate::commands::result::{CommandError, CommandOutput, CommandResult};
 use crate::commands::CommandContext;
 use crate::presentation::output::handle_command_result;
-use crate::support::{app_services, command_defaults};
+use crate::support::{command_defaults, keystore};
 use clap::Args;
-use mfm_app_legacy::{
-    KeystoreBip39ExtraSource, KeystoreImportRequest, KeystoreImportType as AppKeystoreImportType,
-};
 use serde::Serialize;
 use std::fmt;
 use std::path::PathBuf;
@@ -72,7 +69,8 @@ impl fmt::Display for ImportResponse {
         write!(
             f,
             "{} imported successfully with ID: {}",
-            self.key_type, self.id
+            import_display_key_type(&self.key_type),
+            self.id
         )
     }
 }
@@ -86,21 +84,17 @@ pub(crate) async fn execute(ctx: &CommandContext, args: &ImportArgs) -> ! {
 async fn execute_internal(args: &ImportArgs) -> CommandResult<ImportResponse> {
     let keystore_path = command_defaults::resolve_keystore_path(args.keystore.as_ref());
     let bip39_extra = resolve_bip39_extra(args)?;
-    let services = app_services::make_ephemeral_app_services();
-    let response = services
-        .keystore_import(KeystoreImportRequest {
-            import_type: match args.import_type {
-                ImportType::PrivateKey => AppKeystoreImportType::PrivateKey,
-                ImportType::Mnemonic => AppKeystoreImportType::Mnemonic,
-            },
-            label: args.label.clone(),
-            derivation_path: args.derivation_path.clone(),
-            stdin: args.stdin,
-            keystore_path,
-            bip39_extra,
-        })
-        .await
-        .map_err(app_services::command_error_from_app_error)?;
+    let response = keystore::import_key(keystore::ImportKeyRequest {
+        kind: match args.import_type {
+            ImportType::PrivateKey => keystore::ImportKind::PrivateKey,
+            ImportType::Mnemonic => keystore::ImportKind::Mnemonic,
+        },
+        label: args.label.clone(),
+        derivation_path: args.derivation_path.clone(),
+        stdin: args.stdin,
+        keystore_path,
+        bip39_extra,
+    })?;
 
     Ok(CommandOutput::new(ImportResponse {
         id: response.id,
@@ -111,11 +105,18 @@ async fn execute_internal(args: &ImportArgs) -> CommandResult<ImportResponse> {
     }))
 }
 
-fn resolve_bip39_extra(args: &ImportArgs) -> Result<KeystoreBip39ExtraSource, CommandError> {
+fn import_display_key_type(key_type: &str) -> &str {
+    match key_type {
+        "privatekey" => "private key",
+        other => other,
+    }
+}
+
+fn resolve_bip39_extra(args: &ImportArgs) -> Result<keystore::Bip39ExtraSource, CommandError> {
     let source = match (args.passphrase_prompt, args.passphrase_file.as_ref()) {
-        (true, None) => KeystoreBip39ExtraSource::Prompt,
-        (false, Some(path)) => KeystoreBip39ExtraSource::FilePath(path.clone()),
-        (false, None) => KeystoreBip39ExtraSource::None,
+        (true, None) => keystore::Bip39ExtraSource::Prompt,
+        (false, Some(path)) => keystore::Bip39ExtraSource::FilePath(path.clone()),
+        (false, None) => keystore::Bip39ExtraSource::None,
         (true, Some(_)) => {
             return Err(CommandError::new(
                 "InvalidArgument",
@@ -124,7 +125,7 @@ fn resolve_bip39_extra(args: &ImportArgs) -> Result<KeystoreBip39ExtraSource, Co
         }
     };
 
-    if !matches!(source, KeystoreBip39ExtraSource::None)
+    if !matches!(source, keystore::Bip39ExtraSource::None)
         && !matches!(args.import_type, ImportType::Mnemonic)
     {
         return Err(CommandError::new(
@@ -133,7 +134,7 @@ fn resolve_bip39_extra(args: &ImportArgs) -> Result<KeystoreBip39ExtraSource, Co
         ));
     }
 
-    if args.stdin && matches!(source, KeystoreBip39ExtraSource::Prompt) {
+    if args.stdin && matches!(source, keystore::Bip39ExtraSource::Prompt) {
         return Err(CommandError::new(
             "InvalidArgument",
             "BIP-39 prompt input cannot be combined with stdin material",

@@ -273,11 +273,11 @@ mod tests {
             umbrella_package: "mfm-docs".into(),
             packages: vec![
                 CatalogPackage {
-                    name: "mfm-machine".into(),
-                    workspace_path: "crates/machine".into(),
+                    name: "mfm-runtime".into(),
+                    workspace_path: "crates/kernel/runtime".into(),
                     visibility: Visibility::Public,
-                    section: CatalogSection::EngineSdk,
-                    summary: "runtime".into(),
+                    section: CatalogSection::Core,
+                    summary: "typed runtime".into(),
                     docs_policy: DocsPolicy::DocsRs,
                     umbrella_policy: UmbrellaPolicy::WhenPublished,
                     release_priority: 100,
@@ -286,11 +286,11 @@ mod tests {
                     notes: String::new(),
                 },
                 CatalogPackage {
-                    name: "mfm-sdk".into(),
-                    workspace_path: "crates/sdk".into(),
+                    name: "mfm-replay".into(),
+                    workspace_path: "crates/kernel/replay".into(),
                     visibility: Visibility::Public,
-                    section: CatalogSection::EngineSdk,
-                    summary: "sdk".into(),
+                    section: CatalogSection::Core,
+                    summary: "typed replay".into(),
                     docs_policy: DocsPolicy::DocsRs,
                     umbrella_policy: UmbrellaPolicy::WhenPublished,
                     release_priority: 90,
@@ -328,22 +328,22 @@ mod tests {
     fn renders_pending_and_available_docs_rows() {
         let catalog = catalog();
         let mut registry = BTreeMap::new();
-        registry.insert("mfm-machine".into(), registry_observation("mfm-machine"));
-        registry.insert("mfm-sdk".into(), registry_observation("mfm-sdk"));
+        registry.insert("mfm-runtime".into(), registry_observation("mfm-runtime"));
+        registry.insert("mfm-replay".into(), registry_observation("mfm-replay"));
         let mut docs = BTreeMap::new();
         docs.insert(
-            "mfm-machine".into(),
+            "mfm-runtime".into(),
             DocsRsObservation {
-                package: "mfm-machine".into(),
+                package: "mfm-runtime".into(),
                 status: DocsRsStatus::Available,
                 latest_available_version: Some(Version::parse("0.1.0").expect("version")),
                 exact_version_available: true,
             },
         );
         docs.insert(
-            "mfm-sdk".into(),
+            "mfm-replay".into(),
             DocsRsObservation {
-                package: "mfm-sdk".into(),
+                package: "mfm-replay".into(),
                 status: DocsRsStatus::Pending,
                 latest_available_version: None,
                 exact_version_available: false,
@@ -351,18 +351,20 @@ mod tests {
         );
 
         let rendered = render_readme(&catalog, &registry, &docs);
-        assert!(rendered.contains("<https://docs.rs/mfm-machine>"));
-        assert!(rendered.contains("| `mfm-sdk` | sdk | pending | `crates/sdk` |"));
+        assert!(rendered.contains("<https://docs.rs/mfm-runtime>"));
+        assert!(
+            rendered.contains("| `mfm-replay` | typed replay | pending | `crates/kernel/replay` |")
+        );
     }
 
     #[test]
-    fn generated_readme_includes_rpc_control_catalog_entries() {
+    fn generated_readme_includes_typed_runtime_catalog_entries() {
         let catalog = repository_catalog();
         let rendered = render_readme(&catalog, &BTreeMap::new(), &BTreeMap::new());
 
-        assert!(rendered.contains("| `mfm-control-plane-postgres` |"));
-        assert!(rendered.contains("| `mfm-collectors-rpc-control` |"));
-        assert!(rendered.contains("| `mfm-transports-rpc-control` |"));
+        assert!(rendered.contains("| `mfm-runtime` |"));
+        assert!(rendered.contains("| `mfm-replay` |"));
+        assert!(rendered.contains("| `mfm-store` |"));
     }
 
     #[test]
@@ -388,9 +390,9 @@ mod tests {
     fn writes_and_loads_sync_state() {
         let dir = tempdir().expect("tempdir");
         let catalog = catalog();
-        let registry = vec![registry_observation("mfm-machine")];
+        let registry = vec![registry_observation("mfm-runtime")];
         let docs = vec![DocsRsObservation {
-            package: "mfm-machine".into(),
+            package: "mfm-runtime".into(),
             status: DocsRsStatus::Available,
             latest_available_version: Some(Version::parse("0.1.0").expect("version")),
             exact_version_available: true,

@@ -25,15 +25,6 @@ The live runtime inventory still lives in the repository docs:
 - `docs/architecture.md`
 - `docs/design.md`
 
-## Engine And SDK
-
-| Package | Role | docs.rs | Workspace Path |
-| --- | --- | --- | --- |
-| `mfm-machine` | State-machine runtime, execution plans, events, and recovery contracts. | <https://docs.rs/mfm-machine> | `crates/machine` |
-| `mfm-machine-derive` | Reserved proc-macro boundary for future machine/state helpers. | <https://docs.rs/mfm-machine-derive> | `crates/machine-derive` |
-| `mfm-machine-test-support` | Contract tests and test observability helpers. | <https://docs.rs/mfm-machine-test-support> | `crates/machine-test-support` |
-| `mfm-sdk` | Run launch, resume, and registry helpers. | <https://docs.rs/mfm-sdk> | `crates/sdk` |
-
 ## Core Primitives
 
 | Package | Role | docs.rs | Workspace Path |
@@ -42,17 +33,15 @@ The live runtime inventory still lives in the repository docs:
 | `mfm-canonical` | Canonical JSON bytes and typed content digest primitives. | pending | `crates/kernel/canonical` |
 | `mfm-capabilities` | Typed capability descriptors and role-checked capability sets. | pending | `crates/kernel/capabilities` |
 | `mfm-certify` | Typed execution-spec certification contracts. | pending | `crates/kernel/certify` |
-| `mfm-control-plane-model` | Backend-neutral control-plane stream-family model and projections. | pending | `crates/control-plane/model` |
 | `mfm-effects` | Framework-owned typed effect markers. | pending | `crates/kernel/effects` |
 | `mfm-events` | Typed kernel event schemas and event identity contracts. | pending | `crates/kernel/events` |
-| `mfm-evm-core` | EVM ABI, encoding, hex, RLP, transaction models, hashes, and raw transaction encoders. | <https://docs.rs/mfm-evm-core> | `crates/evm-core` |
+| `mfm-evm-core` | EVM ABI, encoding, hex, and transaction support types. | <https://docs.rs/mfm-evm-core> | `crates/evm-core` |
 | `mfm-evm-dcv-model` | Pure EVM deploy/configure/validate model and ABI preparation helpers. | pending | `crates/evm-dcv-model` |
 | `mfm-evm-deploy-configure-validate-config` | Shared deploy/configure/validate config pipeline. | pending | `crates/evm-deploy-configure-validate-config` |
 | `mfm-ids` | Strong typed identity primitives for the typed kernel. | pending | `crates/kernel/ids` |
 | `mfm-kernel-test-support` | Shared test support for typed kernel contract fixtures. | pending | `crates/kernel/test-support` |
 | `mfm-portfolio-config` | Shared portfolio snapshot config pipeline. | pending | `crates/portfolio-config` |
 | `mfm-portfolio-model` | Pure canonical portfolio, symbol, and wallet models. | pending | `crates/portfolio/model` |
-| `mfm-portfolio-plan` | Pure semantic portfolio planning vocabulary and adapter catalog. | pending | `crates/portfolio/plan` |
 | `mfm-program` | Typed state-program authoring API and lowering evidence. | pending | `crates/kernel/program` |
 | `mfm-program-derive` | Proc-macro derives for typed kernel value and program contracts. | pending | `crates/kernel/program-derive` |
 | `mfm-replay` | Typed replay brokers and verifier contracts. | pending | `crates/kernel/replay` |
@@ -66,11 +55,7 @@ The live runtime inventory still lives in the repository docs:
 
 | Package | Role | docs.rs | Workspace Path |
 | --- | --- | --- | --- |
-| `mfm-evm-runtime` | Shared EVM read and write runtime states. | pending | `crates/evm-runtime` |
-| `mfm-state-aave-v3` | Shared Aave V3 portfolio-position types and runtime adapters. | pending | `crates/states/aave-v3` |
-| `mfm-state-common` | Cross-domain reusable execution states. | pending | `crates/states/common` |
 | `mfm-state-evm-dcv` | Typed EVM deploy/configure/validate lifecycle state contracts. | pending | `crates/states/evm-dcv` |
-| `mfm-state-keystore` | Shared keystore administration and local signing states. | pending | `crates/states/keystore` |
 | `mfm-state-portfolio` | Reusable portfolio-domain runtime states and adapters for canonical snapshots. | pending | `crates/states/portfolio` |
 
 ## Ops
@@ -80,10 +65,6 @@ Ops stay thin and focus on graph composition and config validation. Most are sti
 | Package | Role | Workspace Path |
 | --- | --- | --- |
 | `mfm-op-evm-deploy-configure-validate` | EVM deploy/configure/validate planner. | `crates/ops/evm-deploy-configure-validate-op` |
-| `mfm-op-evm-read` | EVM read planner. | `crates/ops/evm-read-op` |
-| `mfm-op-evm-write` | EVM write planner. | `crates/ops/evm-write-op` |
-| `mfm-op-keystore` | Keystore administration and transaction planners. | `crates/ops/keystore-op` |
-| `mfm-op-nix-app` | Nix app execution planner. | `crates/ops/nix-app-op` |
 | `mfm-op-portfolio-tracker` | Portfolio tracking planner. | `crates/ops/portfolio-tracker-op` |
 | `mfm-op-proof` | Certified typed proof workflow operation. | `crates/ops/proof-op` |
 
@@ -92,40 +73,23 @@ Ops stay thin and focus on graph composition and config validation. Most are sti
 | Package | Role | Workspace Path |
 | --- | --- | --- |
 | `mfm-artifact-store-fs` | Filesystem artifact store. | `crates/storages/artifact-store-fs` |
-| `mfm-artifact-store-s3` | S3-backed artifact store. | `crates/storages/artifact-store-s3` |
-| `mfm-artifact-store-secret` | Secret-wrapping artifact store. | `crates/storages/artifact-store-secret` |
-| `mfm-control-plane-postgres` | Durable RPC control-plane stream/projection storage. | `crates/storages/control-plane-postgres` |
-| `mfm-stream-store-mem` | In-memory stream store. | `crates/storages/stream-store-mem` |
-| `mfm-stream-store-postgres` | PostgreSQL stream store. | `crates/storages/stream-store-postgres` |
+| `mfm-stream-store-postgres` | PostgreSQL typed run event store. | `crates/storages/stream-store-postgres` |
 
 ## Collectors
 
 | Package | Role | docs.rs | Workspace Path |
 | --- | --- | --- | --- |
 | `mfm-collectors-btc-jsonrpc-http` | Bitcoin Core JSON-RPC over HTTP client for managed Bitcoin IO. | pending | `crates/collectors/btc-jsonrpc-http` |
-| `mfm-collectors-evm` | EVM collector traits and payloads. | <https://docs.rs/mfm-collectors-evm> | `crates/collectors/evm` |
-| `mfm-collectors-evm-jsonrpc-http` | HTTP JSON-RPC collector implementation for EVM. | pending | `crates/collectors/evm-jsonrpc-http` |
-| `mfm-collectors-exec` | Command-execution collector interfaces. | pending | `crates/collectors/exec` |
-| `mfm-collectors-local-evm` | Typed local EVM signer IO adapters. | pending | `crates/collectors/local-evm` |
-| `mfm-collectors-local-keystore` | Local keystore collector interfaces. | pending | `crates/collectors/local-keystore` |
-| `mfm-collectors-nix` | Nix evaluation collector interfaces. | pending | `crates/collectors/nix` |
-| `mfm-collectors-nix-exec` | Nix execution collector implementation. | pending | `crates/collectors/nix-exec` |
 | `mfm-collectors-proof` | Typed proof collector interfaces and payloads with no live IO. | pending | `crates/collectors/proof` |
-| `mfm-collectors-rpc-control` | Typed `rpc.control` adapters for managed EVM RPC calls. | pending | `crates/collectors/rpc-control` |
 
 ## Transports
 
 | Package | Role | Workspace Path |
 | --- | --- | --- |
 | `mfm-transports-evm-dcv` | Typed EVM deploy/configure/validate workflow runners. | `crates/transports/evm-dcv` |
-| `mfm-transports-exec` | Live `exec` namespace transport for bounded local process execution. | `crates/transports/exec` |
-| `mfm-transports-local-evm` | Local EVM private-key environment and signing transport. | `crates/transports/local-evm` |
-| `mfm-transports-local-fs` | Local filesystem transport helpers. | `crates/transports/local-fs` |
-| `mfm-transports-local-keystore` | Local keystore-backed transport helpers. | `crates/transports/local-keystore` |
 | `mfm-transports-process-exec` | Bounded child-process execution helpers for live transports. | `crates/transports/process-exec` |
 | `mfm-transports-portfolio` | Typed portfolio workflow runners. | `crates/transports/portfolio` |
 | `mfm-transports-proof` | Deterministic typed proof runners and conformance fixture. | `crates/transports/proof` |
-| `mfm-transports-rpc-control` | Managed `rpc.control` transport over the internal EVM executor. | `crates/transports/rpc-control` |
 
 ## Binaries And Tooling
 

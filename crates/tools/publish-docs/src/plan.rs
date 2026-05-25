@@ -347,8 +347,8 @@ mod tests {
             umbrella_package: "mfm-docs".into(),
             packages: vec![
                 CatalogPackage {
-                    name: "mfm-machine".into(),
-                    workspace_path: "crates/machine".into(),
+                    name: "mfm-runtime".into(),
+                    workspace_path: "crates/kernel/runtime".into(),
                     visibility: Visibility::Public,
                     section: CatalogSection::EngineSdk,
                     summary: "runtime".into(),
@@ -360,8 +360,8 @@ mod tests {
                     notes: String::new(),
                 },
                 CatalogPackage {
-                    name: "mfm-sdk".into(),
-                    workspace_path: "crates/sdk".into(),
+                    name: "mfm-replay".into(),
+                    workspace_path: "crates/kernel/replay".into(),
                     visibility: Visibility::Public,
                     section: CatalogSection::EngineSdk,
                     summary: "sdk".into(),
@@ -407,15 +407,19 @@ mod tests {
     #[test]
     fn classifies_wait_dependencies_when_selected_dependency_is_missing() {
         let workspace = WorkspaceState {
-            selected: vec!["mfm-machine".into(), "mfm-sdk".into()],
+            selected: vec!["mfm-runtime".into(), "mfm-replay".into()],
             packages: vec![
-                local_package("mfm-machine", "crates/machine", Vec::new()),
-                local_package("mfm-sdk", "crates/sdk", vec!["mfm-machine".into()]),
+                local_package("mfm-runtime", "crates/kernel/runtime", Vec::new()),
+                local_package(
+                    "mfm-replay",
+                    "crates/kernel/replay",
+                    vec!["mfm-runtime".into()],
+                ),
             ],
         };
         let observations = vec![
-            registry_observation("mfm-machine", RegistryStatus::Absent, None, false),
-            registry_observation("mfm-sdk", RegistryStatus::Absent, None, false),
+            registry_observation("mfm-runtime", RegistryStatus::Absent, None, false),
+            registry_observation("mfm-replay", RegistryStatus::Absent, None, false),
         ];
 
         let plan = build_plan(
@@ -442,7 +446,7 @@ mod tests {
         assert_eq!(plan.packages[1].action, PlanAction::WaitDependencies);
         assert_eq!(
             plan.packages[1].blocking_dependencies,
-            vec!["mfm-machine".to_string()]
+            vec!["mfm-runtime".to_string()]
         );
 
         let summary = summarize_plan(&plan);
@@ -453,17 +457,21 @@ mod tests {
     #[test]
     fn classifies_wait_docs_rs_for_published_docs_rs_crate() {
         let workspace = WorkspaceState {
-            selected: vec!["mfm-machine".into()],
-            packages: vec![local_package("mfm-machine", "crates/machine", Vec::new())],
+            selected: vec!["mfm-runtime".into()],
+            packages: vec![local_package(
+                "mfm-runtime",
+                "crates/kernel/runtime",
+                Vec::new(),
+            )],
         };
         let observations = vec![registry_observation(
-            "mfm-machine",
+            "mfm-runtime",
             RegistryStatus::Present,
             Some(Version::parse("0.1.0").expect("version")),
             true,
         )];
         let docs = vec![DocsRsObservation {
-            package: "mfm-machine".into(),
+            package: "mfm-runtime".into(),
             status: DocsRsStatus::Pending,
             latest_available_version: None,
             exact_version_available: false,
@@ -495,22 +503,26 @@ mod tests {
     #[test]
     fn classifies_needs_version_bump_when_changed_since_release() {
         let workspace = WorkspaceState {
-            selected: vec!["mfm-machine".into()],
-            packages: vec![local_package("mfm-machine", "crates/machine", Vec::new())],
+            selected: vec!["mfm-runtime".into()],
+            packages: vec![local_package(
+                "mfm-runtime",
+                "crates/kernel/runtime",
+                Vec::new(),
+            )],
         };
         let observations = vec![registry_observation(
-            "mfm-machine",
+            "mfm-runtime",
             RegistryStatus::Present,
             Some(Version::parse("0.1.0").expect("version")),
             true,
         )];
         let docs = vec![DocsRsObservation {
-            package: "mfm-machine".into(),
+            package: "mfm-runtime".into(),
             status: DocsRsStatus::Available,
             latest_available_version: Some(Version::parse("0.1.0").expect("version")),
             exact_version_available: true,
         }];
-        let changed_since_release = BTreeMap::from([("mfm-machine".to_string(), true)]);
+        let changed_since_release = BTreeMap::from([("mfm-runtime".to_string(), true)]);
 
         let plan = build_plan(
             "run_1".into(),
@@ -538,11 +550,15 @@ mod tests {
     #[test]
     fn classifies_remote_newer_than_local_as_manual_review() {
         let workspace = WorkspaceState {
-            selected: vec!["mfm-machine".into()],
-            packages: vec![local_package("mfm-machine", "crates/machine", Vec::new())],
+            selected: vec!["mfm-runtime".into()],
+            packages: vec![local_package(
+                "mfm-runtime",
+                "crates/kernel/runtime",
+                Vec::new(),
+            )],
         };
         let observations = vec![registry_observation(
-            "mfm-machine",
+            "mfm-runtime",
             RegistryStatus::Present,
             Some(Version::parse("0.2.0").expect("version")),
             false,
@@ -611,13 +627,17 @@ mod tests {
     #[test]
     fn classifies_cached_registry_visibility_as_wait_registry() {
         let workspace = WorkspaceState {
-            selected: vec!["mfm-machine".into()],
-            packages: vec![local_package("mfm-machine", "crates/machine", Vec::new())],
+            selected: vec!["mfm-runtime".into()],
+            packages: vec![local_package(
+                "mfm-runtime",
+                "crates/kernel/runtime",
+                Vec::new(),
+            )],
         };
         let observations = vec![RegistryObservation {
             freshness: RegistryFreshness::Cached,
             ..registry_observation(
-                "mfm-machine",
+                "mfm-runtime",
                 RegistryStatus::Present,
                 Some(Version::parse("0.1.0").expect("version")),
                 true,
@@ -651,13 +671,17 @@ mod tests {
     #[test]
     fn classifies_unavailable_registry_refresh_as_wait_registry() {
         let workspace = WorkspaceState {
-            selected: vec!["mfm-machine".into()],
-            packages: vec![local_package("mfm-machine", "crates/machine", Vec::new())],
+            selected: vec!["mfm-runtime".into()],
+            packages: vec![local_package(
+                "mfm-runtime",
+                "crates/kernel/runtime",
+                Vec::new(),
+            )],
         };
         let observations = vec![RegistryObservation {
             freshness: RegistryFreshness::Unavailable,
             diagnostic_code: Some("registry-timeout".into()),
-            ..registry_observation("mfm-machine", RegistryStatus::TemporaryError, None, false)
+            ..registry_observation("mfm-runtime", RegistryStatus::TemporaryError, None, false)
         }];
 
         let plan = build_plan(

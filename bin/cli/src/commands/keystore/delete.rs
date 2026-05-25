@@ -1,9 +1,8 @@
 use crate::commands::result::{CommandOutput, CommandResult};
 use crate::commands::CommandContext;
 use crate::presentation::output::handle_command_result;
-use crate::support::{app_services, command_defaults};
+use crate::support::{command_defaults, keystore};
 use clap::Args;
-use mfm_app_legacy::KeystoreDeleteRequest;
 use serde::Serialize;
 use std::fmt;
 use std::path::PathBuf;
@@ -48,16 +47,12 @@ pub(crate) async fn execute(ctx: &CommandContext, args: &DeleteArgs) -> ! {
 
 async fn execute_internal(args: &DeleteArgs) -> CommandResult<DeleteResponse> {
     let keystore_path = command_defaults::resolve_keystore_path(args.keystore.as_ref());
-    let services = app_services::make_ephemeral_app_services();
-    let response = services
-        .keystore_delete(KeystoreDeleteRequest {
-            id: args.id.clone(),
-            by_label: args.by_label.clone(),
-            yes: args.yes,
-            keystore_path,
-        })
-        .await
-        .map_err(app_services::command_error_from_app_error)?;
+    let response = keystore::delete_key(keystore::DeleteKeyRequest {
+        id: args.id.clone(),
+        by_label: args.by_label.clone(),
+        yes: args.yes,
+        keystore_path,
+    })?;
 
     Ok(CommandOutput::new(DeleteResponse {
         id: response.id,

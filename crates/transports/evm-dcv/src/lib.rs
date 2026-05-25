@@ -448,7 +448,7 @@ async fn deploy_prepare_invocation(
             &config.network_id,
             config.signing_key_env.as_deref(),
             &intent.transaction.from,
-            &[intent.transaction.clone()],
+            std::slice::from_ref(&intent.transaction),
             config.poll_interval_ms,
             config.max_receipt_polls,
         )
@@ -540,7 +540,7 @@ async fn deploy_submission(
     rpc: &EvmDcvRpcClient,
 ) -> mfm_runtime::Result<ErasedRunnerOutput> {
     let projection = side_effect_projection(ctx.projections, &ledger_key)?;
-    let prepared = load_prepared_transactions(&projection, artifacts).await?;
+    let prepared = load_prepared_transactions(projection, artifacts).await?;
     match rpc.submit_prepared(&prepared).await? {
         PreparedSubmissionOutcome::Observed => {}
         PreparedSubmissionOutcome::Unknown(evidence) => {
@@ -586,7 +586,7 @@ async fn configure_submission(
     rpc: &EvmDcvRpcClient,
 ) -> mfm_runtime::Result<ErasedRunnerOutput> {
     let projection = side_effect_projection(ctx.projections, &ledger_key)?;
-    let prepared = load_prepared_transactions(&projection, artifacts).await?;
+    let prepared = load_prepared_transactions(projection, artifacts).await?;
     match rpc.submit_prepared(&prepared).await? {
         PreparedSubmissionOutcome::Observed => {}
         PreparedSubmissionOutcome::Unknown(evidence) => {
@@ -700,7 +700,7 @@ async fn deploy_receipt(
     rpc: &EvmDcvRpcClient,
 ) -> mfm_runtime::Result<ErasedRunnerOutput> {
     let projection = side_effect_projection(ctx.projections, &ledger_key)?;
-    let prepared = load_prepared_transactions(&projection, artifacts).await?;
+    let prepared = load_prepared_transactions(projection, artifacts).await?;
     let tx = prepared.transactions.first().ok_or_else(|| {
         mfm_runtime::RuntimeError::InvalidRunnerOutput("deploy prepared no transaction".to_owned())
     })?;
@@ -735,7 +735,7 @@ async fn configure_receipt(
     rpc: &EvmDcvRpcClient,
 ) -> mfm_runtime::Result<ErasedRunnerOutput> {
     let projection = side_effect_projection(ctx.projections, &ledger_key)?;
-    let prepared = load_prepared_transactions(&projection, artifacts).await?;
+    let prepared = load_prepared_transactions(projection, artifacts).await?;
     let mut receipts = Vec::with_capacity(prepared.transactions.len());
     for tx in &prepared.transactions {
         let receipt = rpc
@@ -814,7 +814,7 @@ async fn deploy_confirmation(
         load_artifact_value::<EvmDcvDeployReceipt>(&receipt_ref.artifact_id, artifacts).await?;
     let confirmations = rpc
         .confirmations(
-            &load_prepared_transactions(&projection, artifacts)
+            &load_prepared_transactions(projection, artifacts)
                 .await?
                 .network_id,
             receipt.block_number,
@@ -857,7 +857,7 @@ async fn configure_confirmation(
         .iter()
         .map(|receipt| receipt.block_number)
         .max();
-    let network_id = load_prepared_transactions(&projection, artifacts)
+    let network_id = load_prepared_transactions(projection, artifacts)
         .await?
         .network_id;
     let confirmations = match configured_block_number {

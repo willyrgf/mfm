@@ -4,10 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-async-trait = { workspace = true }
 mfm-events = { path = "../../kernel/events" }
 mfm-ids = { path = "../../kernel/ids" }
-mfm-machine = { path = "../../machine" }
 mfm-spec = { path = "../../kernel/spec" }
 mfm-store = { path = "../../kernel/store" }
 serde_json = { workspace = true }

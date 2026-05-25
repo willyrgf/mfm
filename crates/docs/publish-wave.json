@@ -80,18 +80,6 @@
       "docs_rs": "https://docs.rs/mfm-kernel-test-support"
     },
     {
-      "name": "mfm-machine",
-      "group": "foundation",
-      "workspace_path": "crates/machine",
-      "docs_rs": "https://docs.rs/mfm-machine"
-    },
-    {
-      "name": "mfm-machine-derive",
-      "group": "foundation",
-      "workspace_path": "crates/machine-derive",
-      "docs_rs": "https://docs.rs/mfm-machine-derive"
-    },
-    {
       "name": "mfm_core",
       "group": "foundation",
       "workspace_path": "crates/core",
@@ -104,70 +92,10 @@
       "docs_rs": "https://docs.rs/mfm-evm-core"
     },
     {
-      "name": "mfm-sdk",
-      "group": "dependents",
-      "workspace_path": "crates/sdk",
-      "docs_rs": "https://docs.rs/mfm-sdk"
-    },
-    {
-      "name": "mfm-machine-test-support",
-      "group": "dependents",
-      "workspace_path": "crates/machine-test-support",
-      "docs_rs": "https://docs.rs/mfm-machine-test-support"
-    },
-    {
-      "name": "mfm-collectors-evm",
-      "group": "dependents",
-      "workspace_path": "crates/collectors/evm",
-      "docs_rs": "https://docs.rs/mfm-collectors-evm"
-    },
-    {
       "name": "mfm-docs",
       "group": "umbrella",
       "workspace_path": "crates/docs",
       "docs_rs": "https://docs.rs/mfm-docs"
-    },
-    {
-      "name": "mfm-collectors-exec",
-      "group": "dependents",
-      "workspace_path": "crates/collectors/exec",
-      "docs_rs": "https://docs.rs/mfm-collectors-exec"
-    },
-    {
-      "name": "mfm-collectors-nix",
-      "group": "dependents",
-      "workspace_path": "crates/collectors/nix",
-      "docs_rs": "https://docs.rs/mfm-collectors-nix"
-    },
-    {
-      "name": "mfm-transports-local-evm",
-      "group": "dependents",
-      "workspace_path": "crates/transports/local-evm",
-      "docs_rs": "https://docs.rs/mfm-transports-local-evm"
-    },
-    {
-      "name": "mfm-state-common",
-      "group": "shared-state-base",
-      "workspace_path": "crates/states/common",
-      "docs_rs": "https://docs.rs/mfm-state-common"
-    },
-    {
-      "name": "mfm-evm-runtime",
-      "group": "runtime",
-      "workspace_path": "crates/evm-runtime",
-      "docs_rs": "https://docs.rs/mfm-evm-runtime"
-    },
-    {
-      "name": "mfm-state-keystore",
-      "group": "state-consumers",
-      "workspace_path": "crates/states/keystore",
-      "docs_rs": "https://docs.rs/mfm-state-keystore"
-    },
-    {
-      "name": "mfm-state-aave-v3",
-      "group": "state-consumers",
-      "workspace_path": "crates/states/aave-v3",
-      "docs_rs": "https://docs.rs/mfm-state-aave-v3"
     }
   ]
 }

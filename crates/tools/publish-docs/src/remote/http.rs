@@ -57,15 +57,29 @@ pub(crate) struct HttpExecutor {
 impl HttpExecutor {
     /// Builds a new executor.
     pub(crate) fn new(config: HttpExecutorConfig) -> Result<Self, reqwest::Error> {
-        let client = reqwest::Client::builder()
-            .user_agent(concat!(
-                env!("CARGO_PKG_NAME"),
-                "/",
-                env!("CARGO_PKG_VERSION")
-            ))
-            .connect_timeout(config.connect_timeout)
-            .timeout(config.request_timeout)
-            .build()?;
+        Self::new_with_client_builder(config, |builder| builder)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_without_proxy(config: HttpExecutorConfig) -> Result<Self, reqwest::Error> {
+        Self::new_with_client_builder(config, |builder| builder.no_proxy())
+    }
+
+    fn new_with_client_builder(
+        config: HttpExecutorConfig,
+        customize: impl FnOnce(reqwest::ClientBuilder) -> reqwest::ClientBuilder,
+    ) -> Result<Self, reqwest::Error> {
+        let client = customize(
+            reqwest::Client::builder()
+                .user_agent(concat!(
+                    env!("CARGO_PKG_NAME"),
+                    "/",
+                    env!("CARGO_PKG_VERSION")
+                ))
+                .connect_timeout(config.connect_timeout)
+                .timeout(config.request_timeout),
+        )
+        .build()?;
         Ok(Self {
             client,
             config,

@@ -1,9 +1,8 @@
 use crate::commands::result::{CommandOutput, CommandResult};
 use crate::commands::CommandContext;
 use crate::presentation::output::handle_command_result;
-use crate::support::{app_services, command_defaults};
+use crate::support::{command_defaults, keystore};
 use clap::Args;
-use mfm_app_legacy::{KeystoreTxOutputWriteMode, KeystoreTxSignRequest};
 use serde::Serialize;
 use std::fmt;
 use std::path::PathBuf;
@@ -93,29 +92,25 @@ pub(crate) async fn execute(ctx: &CommandContext, args: &TxSignArgs) -> ! {
 
 async fn execute_internal(args: &TxSignArgs) -> CommandResult<TxSignResponse> {
     let keystore_path = command_defaults::resolve_keystore_path(args.keystore.as_ref());
-    let services = app_services::make_ephemeral_app_services();
-    let response = services
-        .keystore_tx_sign(KeystoreTxSignRequest {
-            id: args.id.clone(),
-            by_label: args.by_label.clone(),
-            to: args.to.clone(),
-            value_wei: args.value_wei.clone(),
-            chain_id: args.chain_id,
-            nonce: args.nonce,
-            max_fee_per_gas: args.max_fee_per_gas.clone(),
-            max_priority_fee_per_gas: args.max_priority_fee_per_gas.clone(),
-            gas_limit: args.gas_limit,
-            out_path: args.out.clone(),
-            out_write_mode: if args.overwrite {
-                KeystoreTxOutputWriteMode::Overwrite
-            } else {
-                KeystoreTxOutputWriteMode::CreateNew
-            },
-            data: args.data.clone(),
-            keystore_path,
-        })
-        .await
-        .map_err(app_services::command_error_from_app_error)?;
+    let response = keystore::sign_transaction(keystore::TxSignRequest {
+        id: args.id.clone(),
+        by_label: args.by_label.clone(),
+        to: args.to.clone(),
+        value_wei: args.value_wei.clone(),
+        chain_id: args.chain_id,
+        nonce: args.nonce,
+        max_fee_per_gas: args.max_fee_per_gas.clone(),
+        max_priority_fee_per_gas: args.max_priority_fee_per_gas.clone(),
+        gas_limit: args.gas_limit,
+        out_path: args.out.clone(),
+        out_write_mode: if args.overwrite {
+            keystore::OutputWriteMode::Overwrite
+        } else {
+            keystore::OutputWriteMode::CreateNew
+        },
+        data: args.data.clone(),
+        keystore_path,
+    })?;
 
     Ok(CommandOutput::new(TxSignResponse {
         from: response.from,

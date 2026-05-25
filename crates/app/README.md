@@ -11,6 +11,5 @@ Typed application assembly for certified MFM runs.
 - typed start/resume/replay dispatch
 - typed public-output rendering
 
-It does not depend on `mfm-machine`, `mfm-sdk`, dynamic DAG planning, context snapshots, or generic
-IO providers. The old dynamic application bridge is isolated in `mfm-app-legacy` while CLI and REST
-surfaces are being rewritten.
+It does not depend on old dynamic machine or SDK crates, dynamic DAG planning, context snapshots,
+or generic IO providers.

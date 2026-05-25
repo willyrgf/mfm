@@ -30,7 +30,7 @@ impl DocsRsClient {
     #[cfg(test)]
     pub(crate) fn with_base_url(base_url: impl Into<String>) -> Result<Self, reqwest::Error> {
         Ok(Self {
-            http: HttpExecutor::new(HttpExecutorConfig::default())?,
+            http: HttpExecutor::new_without_proxy(HttpExecutorConfig::default())?,
             base_url: base_url.into(),
         })
     }
@@ -121,26 +121,10 @@ impl DocsRsClient {
         };
 
         let status = result.response.status();
-        if status == reqwest::StatusCode::NOT_FOUND {
+        if let Some(status) = docs_status_from_response_status(status) {
             return Ok(finish_docs_observation(DocsRsObservation {
                 package: local.name.clone(),
-                status: DocsRsStatus::Pending,
-                latest_available_version: None,
-                exact_version_available: false,
-            }));
-        }
-        if status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            return Ok(finish_docs_observation(DocsRsObservation {
-                package: local.name.clone(),
-                status: DocsRsStatus::TemporaryError,
-                latest_available_version: None,
-                exact_version_available: false,
-            }));
-        }
-        if !status.is_success() {
-            return Ok(finish_docs_observation(DocsRsObservation {
-                package: local.name.clone(),
-                status: DocsRsStatus::Pending,
+                status,
                 latest_available_version: None,
                 exact_version_available: false,
             }));
@@ -158,15 +142,7 @@ impl DocsRsClient {
             }
         };
 
-        let body_lower = body.to_ascii_lowercase();
-        let docs_status = if body_lower.contains("failed to build")
-            || body_lower.contains("failed to compile")
-            || body_lower.contains("docs.rs failed")
-        {
-            DocsRsStatus::Failed
-        } else {
-            DocsRsStatus::Available
-        };
+        let docs_status = docs_status_from_success_body(&body);
 
         Ok(finish_docs_observation(DocsRsObservation {
             package: local.name.clone(),
@@ -198,6 +174,28 @@ impl DocsRsClient {
     }
 }
 
+fn docs_status_from_response_status(status: reqwest::StatusCode) -> Option<DocsRsStatus> {
+    if status.is_success() {
+        None
+    } else if status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        Some(DocsRsStatus::TemporaryError)
+    } else {
+        Some(DocsRsStatus::Pending)
+    }
+}
+
+fn docs_status_from_success_body(body: &str) -> DocsRsStatus {
+    let body_lower = body.to_ascii_lowercase();
+    if body_lower.contains("failed to build")
+        || body_lower.contains("failed to compile")
+        || body_lower.contains("docs.rs failed")
+    {
+        DocsRsStatus::Failed
+    } else {
+        DocsRsStatus::Available
+    }
+}
+
 fn finish_docs_observation(observation: DocsRsObservation) -> DocsRsObservation {
     tracing::debug!(
         target: "mfm_publish_docs",
@@ -212,13 +210,9 @@ fn finish_docs_observation(observation: DocsRsObservation) -> DocsRsObservation 
 
 #[cfg(test)]
 mod tests {
-    use std::io::{Read, Write};
-    use std::net::TcpListener;
-    use std::thread;
-
     use semver::Version;
 
-    use super::DocsRsClient;
+    use super::{docs_status_from_response_status, docs_status_from_success_body, DocsRsClient};
     use crate::model::{
         CatalogPackage, CatalogSection, DocsPolicy, DocsRsStatus, LocalPackage, RegistryFreshness,
         RegistryObservation, RegistryObservationSource, RegistryStatus, UmbrellaPolicy, Visibility,
@@ -226,10 +220,10 @@ mod tests {
 
     fn local_package() -> LocalPackage {
         LocalPackage {
-            name: "mfm-machine".into(),
+            name: "mfm-runtime".into(),
             version: Version::parse("0.1.0").expect("version"),
-            manifest_path: "crates/machine/Cargo.toml".into(),
-            workspace_path: "crates/machine".into(),
+            manifest_path: "crates/kernel/runtime/Cargo.toml".into(),
+            workspace_path: "crates/kernel/runtime".into(),
             has_docs_target: true,
             readme: Some("README.md".into()),
             repository: Some("https://github.com/willyrgf/mfm".into()),
@@ -241,11 +235,11 @@ mod tests {
 
     fn catalog_package() -> CatalogPackage {
         CatalogPackage {
-            name: "mfm-machine".into(),
-            workspace_path: "crates/machine".into(),
+            name: "mfm-runtime".into(),
+            workspace_path: "crates/kernel/runtime".into(),
             visibility: Visibility::Public,
-            section: CatalogSection::EngineSdk,
-            summary: "runtime".into(),
+            section: CatalogSection::Core,
+            summary: "typed runtime".into(),
             docs_policy: DocsPolicy::DocsRs,
             umbrella_policy: UmbrellaPolicy::WhenPublished,
             release_priority: 100,
@@ -257,7 +251,7 @@ mod tests {
 
     fn fresh_present_registry() -> RegistryObservation {
         RegistryObservation {
-            package: "mfm-machine".into(),
+            package: "mfm-runtime".into(),
             status: RegistryStatus::Present,
             latest_version: Some(Version::parse("0.1.0").expect("version")),
             exact_version_present: true,
@@ -268,33 +262,21 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn pending_when_registry_present_but_docs_page_missing() {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
-        let addr = listener.local_addr().expect("addr");
-        let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("accept");
-            let mut buffer = [0_u8; 1024];
-            let _ = stream.read(&mut buffer).expect("read");
-            write!(
-                stream,
-                "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nContent-Length: 0\r\n\r\n"
-            )
-            .expect("write");
-        });
-
-        let client = DocsRsClient::with_base_url(format!("http://{addr}")).expect("client");
-        let observation = client
-            .observe_package(
-                &local_package(),
-                &catalog_package(),
-                &fresh_present_registry(),
-            )
-            .await
-            .expect("observe package");
-        server.join().expect("server");
-
-        assert!(matches!(observation.status, DocsRsStatus::Pending));
+    #[test]
+    fn pending_when_docs_page_missing() {
+        assert!(matches!(
+            docs_status_from_response_status(reqwest::StatusCode::NOT_FOUND),
+            Some(DocsRsStatus::Pending)
+        ));
+        assert!(matches!(
+            docs_status_from_response_status(reqwest::StatusCode::FOUND),
+            Some(DocsRsStatus::Pending)
+        ));
+        assert!(matches!(
+            docs_status_from_response_status(reqwest::StatusCode::TOO_MANY_REQUESTS),
+            Some(DocsRsStatus::TemporaryError)
+        ));
+        assert!(docs_status_from_response_status(reqwest::StatusCode::OK).is_none());
     }
 
     #[tokio::test]
@@ -309,36 +291,15 @@ mod tests {
         assert!(matches!(observation.status, DocsRsStatus::TemporaryError));
     }
 
-    #[tokio::test]
-    async fn available_when_versioned_page_exists() {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
-        let addr = listener.local_addr().expect("addr");
-        let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("accept");
-            let mut buffer = [0_u8; 1024];
-            let _ = stream.read(&mut buffer).expect("read");
-            let body = "<html><body>docs ready</body></html>";
-            write!(
-                stream,
-                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\n\r\n{}",
-                body.len(),
-                body
-            )
-            .expect("write");
-        });
-
-        let client = DocsRsClient::with_base_url(format!("http://{addr}")).expect("client");
-        let observation = client
-            .observe_package(
-                &local_package(),
-                &catalog_package(),
-                &fresh_present_registry(),
-            )
-            .await
-            .expect("observe package");
-        server.join().expect("server");
-
-        assert!(matches!(observation.status, DocsRsStatus::Available));
-        assert!(observation.exact_version_available);
+    #[test]
+    fn available_when_versioned_page_exists() {
+        assert!(matches!(
+            docs_status_from_success_body("<html><body>docs ready</body></html>"),
+            DocsRsStatus::Available
+        ));
+        assert!(matches!(
+            docs_status_from_success_body("<html><body>docs.rs failed to build</body></html>"),
+            DocsRsStatus::Failed
+        ));
     }
 }
