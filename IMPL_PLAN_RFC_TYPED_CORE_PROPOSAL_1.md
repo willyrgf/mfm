@@ -446,12 +446,12 @@ workflow ports, and deletion or hard isolation of old dynamic semantic APIs.
 
 ### Commit 42: `delete old dynamic storage and replay paths`
 
-- [ ] Remove old stream/event/projection code that can act as semantic authority outside
+- [x] Remove old stream/event/projection code that can act as semantic authority outside
       `mfm-store`.
-- [ ] Remove independent authoritative side-effect streams.
-- [ ] Keep any compatibility readers only as legacy inspection tools that cannot start, resume, or
+- [x] Remove independent authoritative side-effect streams.
+- [x] Keep any compatibility readers only as legacy inspection tools that cannot start, resume, or
       certify typed runs.
-- [ ] Validation: `nix run .#test`.
+- [x] Validation: `nix run .#test`.
 
 ### Commit 43: `docs rewrite architecture for typed core`
 

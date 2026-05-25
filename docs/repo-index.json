@@ -95,53 +95,8 @@
       "kind": "rust-cargo"
     },
     {
-      "name": "evm-jsonrpc-http",
-      "path": "crates/collectors/evm-jsonrpc-http/Cargo.toml",
-      "kind": "rust-cargo"
-    },
-    {
-      "name": "evm",
-      "path": "crates/collectors/evm/Cargo.toml",
-      "kind": "rust-cargo"
-    },
-    {
-      "name": "exec",
-      "path": "crates/collectors/exec/Cargo.toml",
-      "kind": "rust-cargo"
-    },
-    {
-      "name": "local-evm",
-      "path": "crates/collectors/local-evm/Cargo.toml",
-      "kind": "rust-cargo"
-    },
-    {
-      "name": "local-keystore",
-      "path": "crates/collectors/local-keystore/Cargo.toml",
-      "kind": "rust-cargo"
-    },
-    {
-      "name": "nix-exec",
-      "path": "crates/collectors/nix-exec/Cargo.toml",
-      "kind": "rust-cargo"
-    },
-    {
-      "name": "nix",
-      "path": "crates/collectors/nix/Cargo.toml",
-      "kind": "rust-cargo"
-    },
-    {
       "name": "proof",
       "path": "crates/collectors/proof/Cargo.toml",
-      "kind": "rust-cargo"
-    },
-    {
-      "name": "rpc-control",
-      "path": "crates/collectors/rpc-control/Cargo.toml",
-      "kind": "rust-cargo"
-    },
-    {
-      "name": "model",
-      "path": "crates/control-plane/model/Cargo.toml",
       "kind": "rust-cargo"
     },
     {
@@ -280,26 +235,6 @@
       "kind": "rust-cargo"
     },
     {
-      "name": "artifact-store-s3",
-      "path": "crates/storages/artifact-store-s3/Cargo.toml",
-      "kind": "rust-cargo"
-    },
-    {
-      "name": "artifact-store-secret",
-      "path": "crates/storages/artifact-store-secret/Cargo.toml",
-      "kind": "rust-cargo"
-    },
-    {
-      "name": "control-plane-postgres",
-      "path": "crates/storages/control-plane-postgres/Cargo.toml",
-      "kind": "rust-cargo"
-    },
-    {
-      "name": "stream-store-mem",
-      "path": "crates/storages/stream-store-mem/Cargo.toml",
-      "kind": "rust-cargo"
-    },
-    {
       "name": "stream-store-postgres",
       "path": "crates/storages/stream-store-postgres/Cargo.toml",
       "kind": "rust-cargo"
@@ -315,26 +250,6 @@
       "kind": "rust-cargo"
     },
     {
-      "name": "exec",
-      "path": "crates/transports/exec/Cargo.toml",
-      "kind": "rust-cargo"
-    },
-    {
-      "name": "local-evm",
-      "path": "crates/transports/local-evm/Cargo.toml",
-      "kind": "rust-cargo"
-    },
-    {
-      "name": "local-fs",
-      "path": "crates/transports/local-fs/Cargo.toml",
-      "kind": "rust-cargo"
-    },
-    {
-      "name": "local-keystore",
-      "path": "crates/transports/local-keystore/Cargo.toml",
-      "kind": "rust-cargo"
-    },
-    {
       "name": "portfolio",
       "path": "crates/transports/portfolio/Cargo.toml",
       "kind": "rust-cargo"
@@ -347,11 +262,6 @@
     {
       "name": "proof",
       "path": "crates/transports/proof/Cargo.toml",
-      "kind": "rust-cargo"
-    },
-    {
-      "name": "rpc-control",
-      "path": "crates/transports/rpc-control/Cargo.toml",
       "kind": "rust-cargo"
     },
     {

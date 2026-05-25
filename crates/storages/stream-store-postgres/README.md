@@ -6,11 +6,11 @@ PostgreSQL typed run-event store implementation.
 durable run streams. It persists typed event envelopes, commit keys, artifact
 evidence, logical-key indexes, and replayable projections through `mfm-store`.
 
-The legacy `PostgresStreamStore` remains a parity-lane implementation for the
-old stream-store traits only. It uses separate `mfm_*` tables and is not a
-certified typed run submission or resume surface.
+The old dynamic stream-store surface has been removed from this crate. New run
+submission, resume, and replay paths go through the typed `mfm-store` contract
+only.
 
-The backend stores stream sequence and timestamp fields in PostgreSQL `BIGINT`
-columns. Stream `u64` values above `i64::MAX` are unsupported by this backend and
+The backend stores event sequence and timestamp fields in PostgreSQL `BIGINT`
+columns. Event `u64` values above `i64::MAX` are unsupported by this backend and
 are rejected before write; negative persisted sequence or timestamp values are
 treated as storage corruption on read.

@@ -8,14 +8,14 @@ Experimental, WIP toolkit for on-chain operations built around an event-sourced 
 
 ```mermaid
 flowchart TD
-    B["bin/cli<br/>bin/rest-api<br/>(transport only)"] --> S["crates/sdk<br/>(run start/resume glue)"]
-    S --> O["crates/ops/*-op<br/>(op config + graph composition)"]
-    O --> SH["shared state layer<br/>crates/states/common<br/>crates/states/keystore<br/>crates/states/aave-v3<br/>crates/evm-runtime/src/states/*"]
-    SH --> M["crates/machine<br/>(runtime/replay/resume)"]
-    M --> ST["crates/storages/*<br/>(event/artifact persistence)"]
-    K["crates/core<br/>(primitives + keystore/crypto)"] --> SH
-    AD["crates/collectors/*<br/>(typed domain adapters over IoProvider)"] --> SH
-    LT["live transport factories<br/>crates/collectors/* + crates/transports/*"] --> M
+    B["bin/cli<br/>bin/rest-api<br/>(transport only)"] --> A["crates/app<br/>(typed assembly)"]
+    A --> O["crates/ops/*-op<br/>(typed program planning)"]
+    O --> SH["crates/states/*<br/>(typed executable states)"]
+    A --> R["crates/kernel/runtime<br/>(typed scheduler)"]
+    R --> K["crates/kernel/*<br/>(ids, values, spec, events, store, replay)"]
+    R --> ST["crates/storages/*<br/>(mfm-store implementations)"]
+    R --> TP["crates/transports/*<br/>(typed capability backends)"]
+    C["crates/core<br/>(primitives + keystore/crypto)"] --> SH
 
     classDef transport fill:#e8f0ff,stroke:#2f5aa8,color:#0f2d63,stroke-width:1px;
     classDef orchestration fill:#eefbe7,stroke:#3a7a2a,color:#1d4d12,stroke-width:1px;
@@ -25,24 +25,24 @@ flowchart TD
     classDef adapter fill:#e9f8f7,stroke:#0d7a77,color:#084645,stroke-width:1px;
 
     class B transport;
-    class S,O orchestration;
+    class A,O orchestration;
     class SH statecore;
-    class M,K engine;
+    class R,K,C engine;
     class ST storage;
-    class AD,LT adapter;
+    class TP adapter;
 ```
 
-States are the core execution unit. Ops are planners (`expand` builds deterministic graphs); shared states are executors (`handle` performs one step via `IoProvider`), and binaries stay transport-only.
+Typed state programs are the semantic executable surface. Ops plan typed programs, the certified typed execution spec is the runtime contract, states execute through typed effect runners and capability backends, and binaries stay transport-only.
 
 ## Core capabilities
 
-- Event-sourced runs with append-only execution history.
-- Crash-resume and replay-aware execution semantics.
+- Event-sourced certified typed runs with append-only execution history.
+- Crash-resume and replay-aware typed execution semantics.
 - Content-addressed manifests, snapshots, facts, and outputs.
-- Deterministic state-machine orchestration for ops/pipelines.
+- Deterministic typed-state orchestration for ops/pipelines.
 - Thin CLI and REST transport layers for stable automation surfaces.
 - Security-hardened Ethereum keystore (tamper checks + signing utilities).
-- Swappable storage backends (in-memory, Postgres, fs, S3/MinIO).
+- Typed storage backends for run events and artifacts.
 
 ## Documentation
 
@@ -62,14 +62,12 @@ User-facing docs:
 Crate docs:
 
 - Core primitives (keystore + config models): [`crates/core/README.md`](crates/core/README.md)
-- Runtime: [`crates/machine/README.md`](crates/machine/README.md)
-- Proc macros: [`crates/machine-derive/README.md`](crates/machine-derive/README.md)
-- SDK (orchestration helpers): [`crates/sdk/README.md`](crates/sdk/README.md)
+- Typed runtime: [`crates/kernel/runtime/README.md`](crates/kernel/runtime/README.md)
+- Typed store contract: [`crates/kernel/store/README.md`](crates/kernel/store/README.md)
+- Typed replay: [`crates/kernel/replay/README.md`](crates/kernel/replay/README.md)
 - Ops (proof op): [`crates/ops/proof-op/README.md`](crates/ops/proof-op/README.md)
-- Storage (StreamStore, mem): [`crates/storages/stream-store-mem/README.md`](crates/storages/stream-store-mem/README.md)
-- Storage (StreamStore, Postgres): [`crates/storages/stream-store-postgres/README.md`](crates/storages/stream-store-postgres/README.md)
-- Storage (ArtifactStore, fs): [`crates/storages/artifact-store-fs/README.md`](crates/storages/artifact-store-fs/README.md)
-- Storage (ArtifactStore, S3/MinIO): [`crates/storages/artifact-store-s3/README.md`](crates/storages/artifact-store-s3/README.md)
+- Storage (typed run events, Postgres): [`crates/storages/stream-store-postgres/README.md`](crates/storages/stream-store-postgres/README.md)
+- Storage (typed artifacts, fs): [`crates/storages/artifact-store-fs/README.md`](crates/storages/artifact-store-fs/README.md)
 
 Design notes / planning:
 
