@@ -80,11 +80,6 @@
       "kind": "rust-cargo"
     },
     {
-      "name": "app-legacy",
-      "path": "crates/app-legacy/Cargo.toml",
-      "kind": "rust-cargo"
-    },
-    {
       "name": "app",
       "path": "crates/app/Cargo.toml",
       "kind": "rust-cargo"
@@ -175,11 +170,6 @@
       "kind": "rust-cargo"
     },
     {
-      "name": "evm-runtime",
-      "path": "crates/evm-runtime/Cargo.toml",
-      "kind": "rust-cargo"
-    },
-    {
       "name": "canonical",
       "path": "crates/kernel/canonical/Cargo.toml",
       "kind": "rust-cargo"
@@ -255,26 +245,6 @@
       "kind": "rust-cargo"
     },
     {
-      "name": "evm-read-op",
-      "path": "crates/ops/evm-read-op/Cargo.toml",
-      "kind": "rust-cargo"
-    },
-    {
-      "name": "evm-write-op",
-      "path": "crates/ops/evm-write-op/Cargo.toml",
-      "kind": "rust-cargo"
-    },
-    {
-      "name": "keystore-op",
-      "path": "crates/ops/keystore-op/Cargo.toml",
-      "kind": "rust-cargo"
-    },
-    {
-      "name": "nix-app-op",
-      "path": "crates/ops/nix-app-op/Cargo.toml",
-      "kind": "rust-cargo"
-    },
-    {
       "name": "portfolio-tracker-op",
       "path": "crates/ops/portfolio-tracker-op/Cargo.toml",
       "kind": "rust-cargo"
@@ -295,28 +265,8 @@
       "kind": "rust-cargo"
     },
     {
-      "name": "plan",
-      "path": "crates/portfolio/plan/Cargo.toml",
-      "kind": "rust-cargo"
-    },
-    {
-      "name": "aave-v3",
-      "path": "crates/states/aave-v3/Cargo.toml",
-      "kind": "rust-cargo"
-    },
-    {
-      "name": "common",
-      "path": "crates/states/common/Cargo.toml",
-      "kind": "rust-cargo"
-    },
-    {
       "name": "evm-dcv",
       "path": "crates/states/evm-dcv/Cargo.toml",
-      "kind": "rust-cargo"
-    },
-    {
-      "name": "keystore",
-      "path": "crates/states/keystore/Cargo.toml",
       "kind": "rust-cargo"
     },
     {

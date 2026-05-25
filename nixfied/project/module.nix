@@ -1272,14 +1272,14 @@ in
           usage = [
             "nix run .#publish-docs -- plan"
             "nix run .#publish-docs -- plan --json"
-            "nix run .#publish-docs -- --from mfm-state-common"
+            "nix run .#publish-docs -- --from mfm-runtime"
             "nix run .#publish-docs -- --only mfm-docs"
             "nix run .#publish-docs"
           ];
           examples = [
             "nix run .#publish-docs -- plan"
             "nix run .#publish-docs -- apply --json"
-            "nix run .#publish-docs -- --from mfm-evm-runtime"
+            "nix run .#publish-docs -- --from mfm-transports-evm-dcv"
           ];
           runtimeInputs = rustRuntimeInputs ++ [ pkgs.git ];
           argParser = "passthrough";
@@ -2297,14 +2297,14 @@ EOF
           usage = [
             "nix run .#publish-docs -- plan"
             "nix run .#publish-docs -- plan --json"
-            "nix run .#publish-docs -- --from mfm-state-common"
+            "nix run .#publish-docs -- --from mfm-runtime"
             "nix run .#publish-docs -- --only mfm-docs"
             "nix run .#publish-docs"
           ];
           examples = [
             "nix run .#publish-docs -- plan"
             "nix run .#publish-docs -- apply --json"
-            "nix run .#publish-docs -- --from mfm-evm-runtime"
+            "nix run .#publish-docs -- --from mfm-transports-evm-dcv"
           ];
           ownerFile = "nixfied/project/module.nix";
         };

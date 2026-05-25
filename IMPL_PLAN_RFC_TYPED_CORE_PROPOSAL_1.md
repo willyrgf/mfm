@@ -438,11 +438,11 @@ workflow ports, and deletion or hard isolation of old dynamic semantic APIs.
 
 ### Commit 41: `delete old dynamic ops and states`
 
-- [ ] Remove or rewrite old op crates that still build `StateNode`, `DependencyEdge`, `PlannedOp`,
+- [x] Remove or rewrite old op crates that still build `StateNode`, `DependencyEdge`, `PlannedOp`,
       `PortKey`, or JSON context dataflow.
-- [ ] Remove or rewrite old state crates that read semantic inputs from `DynContext`.
-- [ ] Preserve only typed state/op crates that satisfy the RFC boundaries.
-- [ ] Validation: `nix run .#test`.
+- [x] Remove or rewrite old state crates that read semantic inputs from `DynContext`.
+- [x] Preserve only typed state/op crates that satisfy the RFC boundaries.
+- [x] Validation: `nix run .#test`.
 
 ### Commit 42: `delete old dynamic storage and replay paths`
 
