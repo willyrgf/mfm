@@ -139,6 +139,12 @@ but all semantic work flows through typed operations, app services, runtime, sto
 Keystore CLI commands currently call `mfm_core` keystore primitives directly and do not submit
 workflow runs.
 
+## Release Tooling
+
+`publish-docs` is separate release tooling for crate documentation publication. `plan` produces
+the reviewable publication plan, while `apply` and the default command can run `cargo publish` and
+follow-up documentation sync work; it is not part of the typed workflow runtime surface.
+
 ## Placement Guide
 
 - New typed value/config/output type: domain model/config crate, deriving typed descriptor traits.

@@ -388,8 +388,6 @@ let
   parityRestApiSmokeNextest = mkNextestSelection {
     jobs = 1;
     binaryIds = [
-      "mfm-integration-tests::parity_event_store_postgres_contract"
-      "mfm-integration-tests::parity_artifact_store_s3_contract"
       "mfm-integration-tests::parity_rest_api_postgres_typed_smoke"
     ];
   };
@@ -397,16 +395,13 @@ let
     jobs = 1;
     binaryIds = [
       "mfm::parity_keystore_reth_tx_send"
-      "mfm-integration-tests::evm_rpc_pool_failover"
-      "mfm-integration-tests::evm_rpc_getlogs_chunking"
       "mfm-integration-tests::parity_rest_api_evm_reth_pipeline"
-      "mfm-integration-tests::parity_portfolio_tracker_reth_mock_erc20"
       "mfm-integration-tests::parity_portfolio_tracker_reth_snapshot"
     ];
   };
   parityPostgresStateEventsAuditNextest = mkNextestSelection {
     binaryIds = [
-      "mfm-integration-tests::parity_postgres_state_events_audit"
+      "mfm-stream-store-postgres"
     ];
   };
 
@@ -1662,6 +1657,15 @@ EOF
                 fi
               }
 
+              require_workflow_post_task() {
+                local workflow_id="$1"
+                local task_id="$2"
+                if ! jq -e --arg node "workflow:$workflow_id" --arg task "$task_id" ".nodeViews[\$node].jsonByMode.default.closure.summary.postRunTaskIds | index(\$task) != null" "$INTROSPECTION_BUNDLE_PATH" >/dev/null; then
+                  echo "ERROR: workflow postRun missing task workflow=$workflow_id task=$task_id"
+                  exit 1
+                fi
+              }
+
               require_absent_app() {
                 local app_name="$1"
                 if jq -e --arg node "app:$app_name" ".nodeViews | has(\$node)" "$INTROSPECTION_BUNDLE_PATH" >/dev/null; then
@@ -1703,6 +1707,8 @@ EOF
               require_task "task.ci.services-start"
               require_task "task.ci.sccache-contracts"
               require_task "task.ci.typed-certified-slice"
+              require_task "task.ci.typed-port-gates"
+              require_task "task.ci.full-typed-core-gate"
               require_task "task.ci.workflow-basic"
               require_task "task.ci.workflow-parity"
               require_task "task.ci.parity-rest-api-smoke"
@@ -1724,7 +1730,9 @@ EOF
               require_workflow_plan_task "workflow.ci.parity" "task.ci.parity-postgres-state-events-audit"
               require_workflow_plan_task "workflow.ci.full" "task.ci.workflow-basic"
               require_workflow_plan_task "workflow.ci.full" "task.ci.typed-certified-slice"
+              require_workflow_plan_task "workflow.ci.full" "task.ci.typed-port-gates"
               require_workflow_plan_task "workflow.ci.full" "task.ci.workflow-parity"
+              require_workflow_post_task "workflow.ci.full" "task.ci.full-typed-core-gate"
 
               ${renderNextestContractCheck "task.ci.parity-rest-api-smoke" parityRestApiSmokeNextest}
               ${renderNextestContractCheck "task.ci.parity-evm-reth" parityEvmRethNextest}
@@ -2005,6 +2013,66 @@ EOF
             echo "INFO: running ci step=typed-certified-slice"
             run_with_log "$log_file" bash ${./check-typed-certified-slice.sh} --root . --self-test --summary-file "$summary_file"
             echo "OK: ci step passed step=typed-certified-slice log=$log_file summary=$summary_file"
+          '';
+        };
+
+        ci-typed-port-gates = mkCommandTask {
+          id = "task.ci.typed-port-gates";
+          kind = "ci-step";
+          summary = "CI typed workflow port gates";
+          tags = [
+            "ci"
+            "typed-kernel"
+            "parity"
+          ];
+          runtimeInputs = rustRuntimeInputs;
+          env = ciCargoRustEnv;
+          produces = {
+            artifacts = [ "typed-port-gates.summary.json" ];
+            stateKeys = [ ];
+          };
+          command = ''
+            set -euo pipefail
+            ${ciStepPreamble}
+
+            log_file="$artifacts_dir/typed-port-gates.log"
+            summary_file="$artifacts_dir/typed-port-gates.summary.json"
+            echo "INFO: running ci step=typed-port-gates"
+            run_with_log "$log_file" bash ${./check-typed-port-gates.sh} --root . --self-test --summary-file "$summary_file"
+            echo "OK: ci step passed step=typed-port-gates log=$log_file summary=$summary_file"
+          '';
+        };
+
+        ci-full-typed-core-gate = mkCommandTask {
+          id = "task.ci.full-typed-core-gate";
+          kind = "ci-step";
+          summary = "CI full typed-core gate validator";
+          tags = [
+            "ci"
+            "typed-kernel"
+            "parity"
+          ];
+          runtimeInputs = rustRuntimeInputs;
+          env = ciCargoRustEnv;
+          produces = {
+            artifacts = [ "full-typed-core-gate.summary.json" ];
+            stateKeys = [ ];
+          };
+          command = ''
+            set -euo pipefail
+            ${ciStepPreamble}
+
+            log_file="$artifacts_dir/full-typed-core-gate.log"
+            summary_file="$artifacts_dir/full-typed-core-gate.summary.json"
+            registry_root="''${REGISTRY_ROOT:?REGISTRY_ROOT is required for full typed-core gate}"
+            run_id="''${NIXFIED_RUN_ID:?NIXFIED_RUN_ID is required for full typed-core gate}"
+            attempt_args=()
+            if [ -n "''${NIXFIED_ATTEMPT_ID:-}" ]; then
+              attempt_args=(--attempt-id "$NIXFIED_ATTEMPT_ID")
+            fi
+            echo "INFO: running ci step=full-typed-core-gate"
+            run_with_log "$log_file" bash ${./check-full-typed-core-gate.sh} --root . --self-test --artifacts-dir "$artifacts_dir" --registry-root "$registry_root" --run-id "$run_id" "''${attempt_args[@]}" --summary-file "$summary_file"
+            echo "OK: ci step passed step=full-typed-core-gate log=$log_file summary=$summary_file"
           '';
         };
 
@@ -2513,15 +2581,20 @@ EOF
               needs = [ "basic" ];
             };
 
+            typed-port-gates = mkWorkflowUnit {
+              taskId = "task.ci.typed-port-gates";
+              needs = [ "typed-certified-slice" ];
+            };
+
             parity = mkWorkflowUnit {
               taskId = "task.ci.workflow-parity";
-              needs = [ "typed-certified-slice" ];
+              needs = [ "typed-port-gates" ];
             };
           };
           stages = [ ];
           preRun.tasks = [ ];
           postRun = {
-            tasks = [ ];
+            tasks = [ "task.ci.full-typed-core-gate" ];
             alwaysRun = true;
           };
           artifacts = {

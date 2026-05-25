@@ -2082,6 +2082,17 @@ mod tests {
         })
     }
 
+    fn fact_attempt_started() -> KernelEventPayload {
+        KernelEventPayload::StateAttemptStarted(events::StateAttemptStarted {
+            spec_hash: spec_hash(1),
+            node_id: node_id(30),
+            attempt_id: attempt_id(31),
+            attempt_no: 1,
+            state_kind: state_kind(30),
+            state_version: StateVersion::new("mfm.test.fact_state.v1").expect("state version"),
+        })
+    }
+
     fn side_effect_ledger_key() -> events::SideEffectLedgerKey {
         events::SideEffectLedgerKey::new("ledger-key-1").expect("ledger key")
     }
@@ -2414,12 +2425,21 @@ mod tests {
             ))
             .await
             .expect("run start");
+        store
+            .append_typed_run_commit(request(
+                run.clone(),
+                2,
+                "fact-attempt-start",
+                vec![fact_attempt_started()],
+            ))
+            .await
+            .expect("fact attempt start");
 
         let missing_artifact = artifact_id(11);
         let missing_digest = content_digest(12);
         let mut fact_request = request(
             run.clone(),
-            2,
+            3,
             "fact",
             vec![fact_recorded(
                 missing_artifact.clone(),
@@ -2437,7 +2457,7 @@ mod tests {
         ));
         assert_eq!(
             store.expected_next_seq(&run).await.expect("next seq"),
-            StreamSeq::new(2).expect("seq")
+            StreamSeq::new(3).expect("seq")
         );
 
         store

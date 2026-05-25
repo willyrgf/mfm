@@ -478,11 +478,11 @@ workflow ports, and deletion or hard isolation of old dynamic semantic APIs.
 
 ### Commit 45: `ci finalize full typed core gate`
 
-- [ ] Make `typed-kernel-contract` and `typed-certified-slice` mandatory in full CI.
-- [ ] Make enabled proof, portfolio, and EVM typed-port gates mandatory.
-- [ ] Ensure `nix run .#ci -- --mode full --summary` fails on missing, false, skipped, or xfail
+- [x] Make `typed-kernel-contract` and `typed-certified-slice` mandatory in full CI.
+- [x] Make enabled proof, portfolio, and EVM typed-port gates mandatory.
+- [x] Ensure `nix run .#ci -- --mode full --summary` fails on missing, false, skipped, or xfail
       required keys.
-- [ ] Validation: `nix run .#ci -- --mode full --summary`.
+- [x] Validation: `nix run .#ci -- --mode full --summary`.
 
 ### Commit 46: `cleanup remove obsolete fixtures and docs`
 
