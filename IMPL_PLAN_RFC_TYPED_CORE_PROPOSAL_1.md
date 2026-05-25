@@ -16,34 +16,34 @@ workflow ports, and deletion or hard isolation of old dynamic semantic APIs.
 
 ## Implementation Rules
 
-- [ ] Keep each commit reviewable and focused on one logical outcome.
-- [ ] Commit subjects must be lower case.
-- [ ] Prefer deleting obsolete semantic APIs over adapting them.
-- [ ] The new `crates/kernel/*` crates must never depend on `crates/machine`, `crates/sdk`,
+- [x] Keep each commit reviewable and focused on one logical outcome.
+- [x] Commit subjects must be lower case.
+- [x] Prefer deleting obsolete semantic APIs over adapting them.
+- [x] The new `crates/kernel/*` crates must never depend on `crates/machine`, `crates/sdk`,
       domain crates, or binaries.
-- [ ] Breaking API, CLI, persisted-format, and workspace changes are allowed when they move the repo
+- [x] Breaking API, CLI, persisted-format, and workspace changes are allowed when they move the repo
       toward the RFC contract.
-- [ ] Update docs in the same commit that introduces or removes a public contract.
-- [ ] If a commit cannot keep the full workspace green during the rewrite, mark it explicitly in the
+- [x] Update docs in the same commit that introduces or removes a public contract.
+- [x] If a commit cannot keep the full workspace green during the rewrite, mark it explicitly in the
       commit body and restore green status by the next milestone gate. Do not merge a milestone while
       it is knowingly red.
-- [ ] Default verification before publishing implementation commits: `nix run .#check`,
+- [x] Default verification before publishing implementation commits: `nix run .#check`,
       `nix run .#test`, and `nix run .#ci -- --mode full --summary`.
 
 ## Milestone Gates
 
-- [ ] `typed-kernel-contract`: typed authoring, descriptor, spec, event-schema, and certification
+- [x] `typed-kernel-contract`: typed authoring, descriptor, spec, event-schema, and certification
       contracts exist and reject the six problem classes.
-- [ ] `typed-certified-slice`: serial typed runtime executes a reference certified workflow with
+- [x] `typed-certified-slice`: serial typed runtime executes a reference certified workflow with
       typed store, typed events, replay/resume, public outputs, retention, and deterministic local
       side-effect recovery.
-- [ ] `proof-implementation-conformance`: proof backend ports satisfy typed fact, submission,
+- [x] `proof-implementation-conformance`: proof backend ports satisfy typed fact, submission,
       receipt, confirmation, output, and replay contracts.
-- [ ] `portfolio-typed-port`: portfolio uses typed fanout/fanin, stable domain keys, typed public
+- [x] `portfolio-typed-port`: portfolio uses typed fanout/fanin, stable domain keys, typed public
       outputs, and no old SDK semantic imports.
-- [ ] `evm-dcv-typed-port`: EVM deploy/configure/validate uses typed lifecycle, typed side effects,
+- [x] `evm-dcv-typed-port`: EVM deploy/configure/validate uses typed lifecycle, typed side effects,
       replay without reapply, and protected transaction secrecy.
-- [ ] `dynamic-core-removal`: old dynamic semantic crates/APIs are deleted or isolated so they cannot
+- [x] `dynamic-core-removal`: old dynamic semantic crates/APIs are deleted or isolated so they cannot
       submit, resume, or influence certified typed runs.
 
 ## Commit Plan
@@ -495,12 +495,12 @@ workflow ports, and deletion or hard isolation of old dynamic semantic APIs.
 
 ### Commit 47: `release typed core rewrite`
 
-- [ ] Run `nix run .#check`.
-- [ ] Run `nix run .#test`.
-- [ ] Run `nix run .#ci -- --mode audit --summary`.
-- [ ] Run `nix run .#ci -- --mode parity --summary`.
-- [ ] Run `nix run .#ci -- --mode full --summary`.
-- [ ] Confirm summary includes:
+- [x] Run `nix run .#check`.
+- [x] Run `nix run .#test`.
+- [x] Run `nix run .#ci -- --mode audit --summary`.
+- [x] Run `nix run .#ci -- --mode parity --summary`.
+- [x] Run `nix run .#ci -- --mode full --summary`.
+- [x] Confirm summary includes:
       `typed-kernel-contract`,
       `typed-certified-slice`,
       `typed_boundary_firewall_passed`,
@@ -509,20 +509,20 @@ workflow ports, and deletion or hard isolation of old dynamic semantic APIs.
       `replay_live_cap_requests_count == 0`,
       `resume_drift_rejected`,
       `retention_projection_complete`.
-- [ ] Confirm no typed-core crate depends on old dynamic crates.
-- [ ] Confirm old dynamic semantic APIs are deleted or unable to submit/resume certified typed runs.
+- [x] Confirm no typed-core crate depends on old dynamic crates.
+- [x] Confirm old dynamic semantic APIs are deleted or unable to submit/resume certified typed runs.
 
 ## Final Merge Checklist
 
-- [ ] `RFC_TYPED_CORE_PROPOSAL_1.md` remains the typed-core authority or has been superseded by
+- [x] `RFC_TYPED_CORE_PROPOSAL_1.md` remains the typed-core authority or has been superseded by
       updated `docs/design.md` and `docs/architecture.md`.
-- [ ] `docs/design.md` and `docs/architecture.md` no longer describe old dynamic DAG execution as
+- [x] `docs/design.md` and `docs/architecture.md` no longer describe old dynamic DAG execution as
       authoritative.
-- [ ] `crates/kernel/*` exists and follows the dependency DAG.
-- [ ] Old semantic APIs cannot be imported by typed workflows.
-- [ ] CLI and REST render typed public outputs, not context snapshots.
-- [ ] Replay uses stored certified specs and replay adapters only.
-- [ ] Side-effect retry never blindly resubmits after `InvocationStarted`.
-- [ ] Retention authority is event-sourced from run events.
-- [ ] Secrets cannot cross value/config/output/event/error boundaries.
-- [ ] Full CI summary is green with no skipped or expected-failure required gates.
+- [x] `crates/kernel/*` exists and follows the dependency DAG.
+- [x] Old semantic APIs cannot be imported by typed workflows.
+- [x] CLI and REST render typed public outputs, not context snapshots.
+- [x] Replay uses stored certified specs and replay adapters only.
+- [x] Side-effect retry never blindly resubmits after `InvocationStarted`.
+- [x] Retention authority is event-sourced from run events.
+- [x] Secrets cannot cross value/config/output/event/error boundaries.
+- [x] Full CI summary is green with no skipped or expected-failure required gates.
