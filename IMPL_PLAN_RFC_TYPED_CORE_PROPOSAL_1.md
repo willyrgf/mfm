@@ -455,12 +455,12 @@ workflow ports, and deletion or hard isolation of old dynamic semantic APIs.
 
 ### Commit 43: `docs rewrite architecture for typed core`
 
-- [ ] Rewrite `docs/design.md` so typed certified specs are the normative execution contract.
-- [ ] Rewrite `docs/architecture.md` around the typed crate DAG and typed runtime boundary.
-- [ ] Rewrite `docs/ops-and-states.md` with the typed inventory.
-- [ ] Update `docs/repo-map.md` and crate READMEs.
-- [ ] Ensure docs no longer present old `DynContext`/`IoProvider`/dynamic DAG as authoritative.
-- [ ] Validation: `nix run .#check`.
+- [x] Rewrite `docs/design.md` so typed certified specs are the normative execution contract.
+- [x] Rewrite `docs/architecture.md` around the typed crate DAG and typed runtime boundary.
+- [x] Rewrite `docs/ops-and-states.md` with the typed inventory.
+- [x] Update `docs/repo-map.md` and crate READMEs.
+- [x] Ensure docs no longer present old `DynContext`/`IoProvider`/dynamic DAG as authoritative.
+- [x] Validation: `nix run .#check`.
 
 ### Commit 44: `ci remove old semantic api escape hatches`
 

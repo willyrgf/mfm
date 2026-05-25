@@ -1,116 +1,100 @@
-# EVM RPC Routing
+# Typed EVM RPC Routing
 
-Status: `rpc.control` is the canonical state-facing RPC ingress in the default app bundle.
+Status: typed transport runbook for EVM-backed portfolio and deploy/configure/validate workflows.
 
-This document is the operator and contributor runbook for two related surfaces:
-
-- `namespace = "rpc.control"`: the canonical managed ingress used by shared runtime states and
-  built-in app flows
-- `namespace = "evm"`: the internal/direct executor surface retained for explicit low-level tests
-  and control-plane internals
+The current EVM RPC path is not a separate semantic stream or workflow runtime. RPC source
+configuration is runtime-only capability input consumed by typed transport backends. Certified run
+semantics are still defined by the certified spec and typed run stream.
 
 Normative architecture references:
+
 - `docs/design.md`
 - `docs/architecture.md`
 
-## 1. Canonical Runtime Contract
+## Runtime Configuration
 
-Canonical runtime callers should use `rpc.control`.
+Typed EVM transports discover RPC sources from environment variables:
 
-Managed EVM read/write request envelope:
-
-```json
-{
-  "kind": "evm_call",
-  "control_scope": "shared",
-  "network_id": "ethereum-mainnet",
-  "method": "eth_chainId",
-  "params": []
-}
-```
-
-Control-plane preflight/setup request envelope:
-
-```json
-{
-  "kind": "prepare_sources",
-  "control_scope": "shared",
-  "network_id": "ethereum-mainnet"
-}
-```
-
-Notes:
-- Canonical callers must supply `network_id`.
-- `control_scope` is part of durable request identity; omit it only when the default `shared`
-  scope is intended.
-- Canonical managed requests do not expose caller-controlled source pinning.
-- Per-request raw `rpc_url` overrides are rejected.
-- Canonical app wiring no longer exposes the raw `evm` transport as the default state-facing
-  routing authority.
-
-## 2. Bootstrap Source Configuration
-
-The control plane bootstraps its source catalog from runtime-only environment variables:
-
-- `MFM_EVM_RPC_SOURCES_JSON`: JSON array of source objects:
-  - `id`
-  - `network_id`
-  - `rpc_url`
-  - optional `authorization`
-  - optional `kind` (`local`, `remote_user`, `remote_public`)
-  - optional `require_get_proof_probe`
-- `MFM_EVM_RPC_PREFERRED_ORDER`: comma-separated source IDs used as base ordering hints.
+- `MFM_EVM_RPC_SOURCES_JSON`: JSON array of source objects.
+- `MFM_EVM_RPC_PREFERRED_ORDER`: comma-separated source IDs used as selection preference.
 - `MFM_EVM_RPC_REQUIRE_GET_PROOF_IDS`: comma-separated source IDs that must pass `eth_getProof`
-  probing.
+  probing before use.
 
-## 3. Runtime Behavior
+Source object fields:
 
-`rpc.control` owns the managed path for:
+- `id`: stable source id used only for runtime selection and diagnostics
+- `network_id`: typed workflow network id
+- `rpc_url`: endpoint URL
+- `kind`: optional `local`, `remote_user`, or `remote_public`
+- `authorization`: optional runtime-only auth metadata
+- `require_get_proof_probe`: optional per-source probe requirement
 
-- source-pool membership bootstrap
-- source probing and capability checks
-- durable ranking snapshots
-- catalog declaration and mismatch protection per `(control_scope, network_id, pool_kind)`
-- managed source selection for unpinned EVM calls
-- best-effort runtime observation writes after live calls
+Example:
 
-Current managed behavior:
-- `prepare_sources` syncs membership, probes stale or missing sources, computes ranked order, and
-  persists source-pool state in the Postgres control-plane store.
-- `evm_call` selects a source from the durable pool; callers do not pin source ids directly.
-- Managed callers must provide `network_id` even when only one catalog is configured.
-- `control_scope` isolates durable source state; use an explicit scope when two flows must not
-  share ranking or catalog history.
+```json
+[
+  {
+    "id": "reth_local",
+    "network_id": "ethereum-mainnet",
+    "rpc_url": "http://127.0.0.1:8545",
+    "kind": "local"
+  },
+  {
+    "id": "public_eth",
+    "network_id": "ethereum-mainnet",
+    "rpc_url": "https://ethereum-rpc.publicnode.com",
+    "kind": "remote_public"
+  }
+]
+```
 
-The raw `evm` transport remains useful for:
+Do not persist `rpc_url` or authorization material in typed values, specs, events, artifacts, public
+outputs, or fixtures.
 
-- the internal executor embedded by `mfm-transports-rpc-control`
-- explicit low-level routing/failover tests
-- direct helper code that intentionally exercises executor behavior outside the canonical app bundle
+## `control_scope`
 
-## 4. Error and Diagnostic Shape
+Portfolio and EVM DCV configs still carry a non-secret `control_scope`. In the typed runtime it is
+part of the domain request identity and source-selection partition, not independent store
+authority. Use a distinct scope when two workflows on the same network should not share runtime RPC
+source preference or diagnostics.
 
-Common `rpc.control` error codes include:
+`network_id` remains required for every configured source and every typed workflow request that
+uses an EVM RPC backend.
 
-- `rpc_control_no_sources`
-- `rpc_control_network_required`
-- `rpc_control_network_invalid`
-- `rpc_control_catalog_mismatch`
-- `rpc_control_source_unknown`
-- `rpc_control_source_invalid`
-- `rpc_control_pool_invalid`
+## Live Execution
 
-`prepare_sources` returns ranked-source summaries that expose:
+Live typed transports may:
 
-- `available_source_ids`
-- `ranked_source_ids`
-- per-source health/cooldown/get-proof diagnostics
+- select a configured source for the certified network and scope
+- probe source health before use
+- perform read calls required by certified read states
+- submit side-effect transactions required by certified side-effect states
+- persist typed fact, receipt, confirmation, and artifact evidence through runtime/store APIs
 
-## 5. Contributor Guidance
+Live typed transports must not:
 
-- Shared runtime states should use the typed `mfm-collectors-rpc-control` client.
-- New canonical read APIs should pass `network_id`, not `rpc_source_id`.
-- New canonical callers that need isolation should stamp an explicit `control_scope`.
-- New canonical write APIs should not introduce fresh caller-controlled source selection.
-- If you need to test raw executor behavior directly, do so explicitly and document that it is a
-  direct/internal test rather than a canonical app-routing path.
+- add uncertified state nodes
+- rewrite a certified spec
+- create an independent run stream or side-effect stream
+- persist secrets or raw signing material in typed semantic surfaces
+- accept per-request raw RPC URL overrides from workflow configs
+
+## Replay
+
+Replay uses the stored certified spec, typed run stream, typed artifacts, and replay verifiers.
+Replay must not open live RPC connections or consult runtime source configuration.
+
+EVM DCV replay recomputes expected validation-read requests from certified config and typestate
+artifacts, then checks stored fact evidence and terminal output artifacts against that expected
+request.
+
+## Contributor Guidance
+
+- Add new EVM read behavior as typed state contracts plus typed transport runner support.
+- Add new mutation behavior as typed side-effect states with intent, idempotency input, receipt or
+  recovery evidence, and replay verifier coverage.
+- Keep RPC endpoints and auth material runtime-only.
+- Keep `network_id` and non-secret scope information in typed configs when they are part of
+  semantic request identity.
+- Add tests that prove replay uses recorded evidence and fails closed on missing or mismatched
+  facts, receipts, confirmations, artifacts, or verifier identities.

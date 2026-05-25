@@ -1,239 +1,142 @@
 # docs.rs Publishing Readiness Guide
 
-> Generated: 2026-03-08
-> Purpose: Actionable checklist for the engineer agent adding code documentation and examples across the workspace.
+Generated: 2026-05-25
 
-## Executive Summary
+Purpose: checklist for keeping public crate documentation aligned with the typed-core architecture
+and the `publish-docs` catalog.
 
-**Current state: PARTIALLY READY, but not workspace-ready.**
+## Current State
 
-- Many crates now enforce `#![warn(missing_docs)]`, so the earlier zero-coverage snapshot is stale.
-- Several core and state crates already have crate-level docs and examples.
-- The remaining gap is concentrated in item-level docs, publish-wave prioritization, and crate landing-page polish.
-- This document tracks rustdoc/docs.rs readiness only; current ops/states inventory lives in `docs/ops-and-states.md`.
-- Recent progress on 2026-03-08:
-  - wave-1 landing pages and examples are now in place for `mfm-machine`, `mfm-machine-derive`, `mfm-machine-test-support`, `mfm-sdk`, `mfm_core::config`, and `mfm-evm-core`
-  - `nix run .#check` is no longer blocked by the readonly Cargo target-dir issue in Nixfied task apps
-  - publish-wave manifests now use `path + version` for the near-term docs.rs release chain
+The active documentation wave is typed-core first. Removed dynamic crates are not publish targets
+and should not appear in publish waves, crate examples, or umbrella docs.
 
-## Current Publish Order
+Canonical package metadata lives in:
 
-`docs.rs` only builds crate documentation after a crate has been published to crates.io. Repository docs such as `docs/ops-and-states.md` stay in-repo; crate-level rustdoc and README content are what appear on docs.rs.
+- `crates/docs/catalog.toml`
+- `crates/docs/publish-wave.json`
+- `crates/docs/README.md`
 
-Current near-term release chain:
+Use `nix run .#publish-docs -- plan` for release planning and `nix run .#publish-docs --
+sync-umbrella --check` to verify umbrella README freshness.
 
-1. Foundation:
-   - `mfm-machine`
-   - `mfm-machine-derive`
-   - `mfm_core`
-   - `mfm-evm-core`
-2. First dependents:
-   - `mfm-sdk`
-   - `mfm-machine-test-support`
-   - `mfm-collectors-evm`
-   - `mfm-collectors-exec`
-   - `mfm-collectors-nix`
-   - `mfm-transports-local-evm`
-3. Shared-state base:
-   - `mfm-state-common`
-4. Runtime layer:
-   - `mfm-evm-runtime`
-5. State consumers:
-   - `mfm-state-keystore`
-   - `mfm-state-aave-v3`
-6. Umbrella landing page:
-   - `mfm-docs`
+## Current Wave
 
-Notes:
+The first docs.rs wave contains:
 
-- `mfm-machine-derive` is intentionally empty today: it reserves the public proc-macro package
-  boundary for future machine/state helpers and should not grow placeholder macro APIs.
-- `cargo publish --dry-run` for a crate with `path + version` dependencies still expects the versioned upstream crate to exist on crates.io. A dry-run failure like `no matching package named 'mfm-machine' found` is expected until the earlier publish step has completed.
-- Use `cargo check -p <crate> --lib` for local compile validation before the upstream versions exist in the registry.
-- Use `cargo package --allow-dirty --list -p <crate>` when you want to inspect the files that would be packaged without requiring the upstream versions to exist in the registry.
-- Use `nix run .#publish-docs -- plan` to validate the current ordered wave from `crates/docs/publish-wave.json` without uploading crates; `crates/docs/publish-wave.toml` is also accepted when the JSON file is absent.
-- The desired docs catalog is authored from `crates/docs/catalog.toml` by default; `crates/docs/catalog.json` is also accepted when the TOML file is absent.
-- `publish-docs` now uses the crates.io sparse index as the primary registry signal for planning; transient or cached uncertainty is treated as `wait_registry`, not as permission to publish.
-- Normal `publish-docs` planning only observes the selected wave. Full-catalog registry observation now happens in `nix run .#publish-docs -- sync-umbrella`; add `--check` when you only want to verify whether `crates/docs/README.md` is stale.
-- `nix run .#publish-docs -- apply` and the default `nix run .#publish-docs` command execute publishable actions by running `cargo publish --locked -p <package>` for each approved package. Use these commands only from an intentional release context with crates.io credentials configured.
-- `nix run .#publish-docs -- resume <run_id>` replays the previous selection and can continue real `cargo publish` actions for packages that still plan as publishable.
-- `nix run .#publish-docs` now auto-runs the umbrella sync during `apply`/`resume` when `mfm-docs` needs it, then re-plans against the refreshed sync artifact.
-- If that auto-sync updates `crates/docs/README.md` and publishable actions remain, commit the README first or rerun with `--allow-dirty`.
-- Publish `mfm-docs` after the first wave it links to, otherwise the landing page will contain avoidable `docs.rs` 404s.
-- Keep `mfm-app` out of the first publish wave; its dependency surface and end-user positioning still need curation.
+| Group | Packages |
+|---|---|
+| typed kernel | `mfm-ids`, `mfm-canonical`, `mfm-values`, `mfm-effects`, `mfm-capabilities`, `mfm-program`, `mfm-program-derive`, `mfm-spec`, `mfm-certify`, `mfm-events`, `mfm-store`, `mfm-replay`, `mfm-kernel-test-support` |
+| foundation | `mfm_core`, `mfm-evm-core` |
+| umbrella | `mfm-docs` |
 
-## Global Requirements (Apply to Every Crate)
+`mfm-runtime` is cataloged as a typed-core public package, but the current first wave keeps runtime
+publication after the lower-level contracts it consumes.
 
-1. Preserve `#![warn(missing_docs)]` in every `lib.rs` and upgrade targeted publish-wave crates toward stricter enforcement once coverage is complete.
-2. Every `lib.rs` must have a crate-level `//!` doc block explaining purpose, relationship to the architecture, and a minimal usage example.
-3. Every public item (`pub fn`, `pub struct`, `pub enum`, `pub trait`, `pub type`, `pub const`, `pub mod`) must have a `///` doc comment.
-4. Every public struct/enum field must have a `///` doc comment.
-5. Every trait method must have a `///` doc comment.
-6. Add at least one ```` ```rust ```` doc example per crate (ideally on the main public type or entry-point function).
-7. Security-sensitive items (keystore, secret store, crypto) must document threat model considerations.
+## Cataloged Typed Packages
+
+| Section | Packages |
+|---|---|
+| core | typed kernel crates, `mfm-authored-config`, `mfm_core`, `mfm-evm-core`, EVM DCV model/config, portfolio model/config |
+| states | `mfm-state-evm-dcv`, `mfm-state-portfolio` |
+| ops | proof, portfolio tracker, and EVM deploy/configure/validate typed planners |
+| transports | proof, portfolio, EVM DCV, and process execution typed backends |
+| storages | typed Postgres run-event store and filesystem artifact store |
+| tools/docs | `mfm-publish-docs`, `mfm-docs` |
+
+## Global Requirements
+
+These apply to every public crate:
+
+1. Preserve `#![warn(missing_docs)]` where it is enabled.
+2. Every crate root must explain its typed-core responsibility and owner boundary.
+3. Public items and public fields need rustdoc when the crate warns on missing docs.
+4. Examples must use active typed APIs and active package names.
+5. Examples must not introduce floats into hashed typed values/configs.
+6. Examples must not include secrets, private keys, passwords, mnemonics, or live credentials.
+7. Runtime, replay, store, and transport docs must distinguish live execution from replay.
+8. Storage docs must describe typed event/artifact authority, not removed dynamic store traits.
 
 ## Priority Tiers
 
-### Tier 1 — Core Engine (document first)
+### Tier 1: Typed Kernel Contracts
 
-These crates define the execution model and are the foundation everything else depends on.
+Prioritize:
 
-Current publish-wave framing:
+- identity grammar and versioning examples
+- canonical JSON and digest examples
+- derive examples for typed values/configs/public outputs
+- state-program authoring examples
+- certification failure examples
+- event and store commit invariants
+- replay broker and verifier examples
 
-- `Wave 1`: `mfm-machine`, `mfm-machine-derive`, `mfm-machine-test-support`
+### Tier 2: Runtime, Replay, Store, And Test Support
 
-Remaining work in this tier:
+Prioritize:
 
-- deepen `mfm-machine` item-level docs around IDs, event types, execution plans, and standard tags
-- keep this tier as the reference foundation that downstream crate docs link back to
+- certified spec start/resume/replay flow examples
+- projection rebuild and side-effect ledger documentation
+- replay evidence examples with no live capabilities
+- typed certified slice fixture documentation
 
----
+### Tier 3: Domain Model And Config Crates
 
-### Tier 2 — Core Primitives & SDK
+Prioritize:
 
-Current publish-wave framing:
+- canonical JSON/TOML authoring examples
+- no-float/no-secret value guidance
+- EVM typed JSON wrapper examples
+- portfolio stable domain-key examples
+- keystore threat model and redaction notes in `mfm_core`
 
-- `Wave 1`: `mfm_core`, `mfm-evm-core`, `mfm-sdk`
-- `Later / topology-dependent`: `mfm-app`
+### Tier 4: States, Ops, And Transports
 
-Remaining work in this tier:
+Prioritize:
 
-- expand item-level docs in `mfm_core` config models and security-sensitive keystore support types
-- treat `mfm-app` as a later publish target because packaging topology and surface curation matter as much as raw rustdoc coverage
+- each state crate's typed state contract table
+- operation planner examples that produce certified specs
+- runner backend docs that explain live versus replay behavior
+- side-effect idempotency and receipt/recovery evidence docs
 
----
+### Tier 5: Storage And Tooling
 
-### Tier 3 — States Layer
+Prioritize:
 
-The live catalog of current production states now lives in `docs/ops-and-states.md`.
-This section tracks publish readiness, not runtime inventory.
+- typed Postgres event-store setup
+- typed filesystem artifact-store setup
+- `publish-docs` plan/apply/resume examples
 
-Current publish-wave framing:
+## Validation Workflow
 
-- `Wave 1`: `mfm-evm-runtime`, `mfm-state-keystore`, `mfm-state-common`
-- `Wave 2`: `mfm-state-aave-v3`
+For documentation-only changes:
 
-Remaining work in this tier:
-
-- improve module landing pages for state families, especially `evm-runtime` read/write modules
-- add stronger security/context notes to keystore state modules
-- separate test-support visibility from state-catalog visibility in `mfm-state-common`
-- add crate/package metadata that improves crates.io/docs.rs landing pages
-
----
-
-### Tier 4 — Ops Layer
-
-The live catalog of registered ops now lives in `docs/ops-and-states.md`.
-This section tracks planner-crate publish readiness, not the current built-in registry.
-
-Current publish-wave framing:
-
-- `Wave 1 within ops`: `mfm-op-keystore`, `mfm-op-evm-read`, `mfm-op-evm-write`
-- `Wave 2`: `mfm-op-portfolio-tracker`, `mfm-op-nix-app`, `mfm-op-evm-deploy-configure-validate`
-- `Typed acceptance fixture`: `mfm-op-proof`
-
-Remaining work in this tier:
-
-- keep planner docs focused on config validation and graph composition
-- improve crate landing pages for the highest-value user-facing ops
-- avoid making thin wrapper crates the primary docs.rs navigation surface
-- document op-local report/output types where they remain intentional
-
----
-
-### Tier 5 — Storage Layer
-
-All 6 crates have good crate-level docs but lack item-level documentation.
-
-| Crate | Crate Doc | Undocumented Items |
-|-------|-----------|-------------------|
-| `stream-store-mem` | Good | `MemStreamStore`, `new()` |
-| `stream-store-postgres` | Good | `PostgresStreamStore`, `connect()`, `connect_env()` |
-| `artifact-store-fs` | Good | `FsArtifactStore`, `new()` |
-| `artifact-store-s3` | Good | `S3ArtifactStore`, `new()`, `from_env()` |
-| `artifact-store-secret` | Good | `SecretKey` (all methods), `SecretArtifactStore` (all methods) |
-
----
-
-### Tier 6 — Collectors & Transports
-
-#### Collectors with crate-level docs (3/5):
-- `collectors/evm` — Present
-- `collectors/evm-jsonrpc-http` — Present (detailed)
-- `collectors/nix-exec` — Present
-
-#### Collectors MISSING crate-level docs (2/5):
-- `collectors/nix`
-- `collectors/exec`
-
-#### Transports still missing crate-level docs:
-- `transports/local-evm`
-- `transports/local-fs`
-- `transports/local-keystore`
-
-#### Common undocumented items:
-- All struct types and fields across all 9 crates
-- All constants (namespace identifiers)
-- All factory constructors
-- All client methods
-- Zero doc examples
-
----
-
-## Documentation Gaps from Prior Review
-
-Keep only items here that directly affect docs.rs readiness:
-
-1. **Wave-1 landing pages are in place** — remaining work is deeper item-level coverage and publish-surface curation.
-2. **`crates/app/` is still a later publish target** — publishing topology is a larger issue than raw rustdoc coverage.
-3. **Selected state crates are close to publishable** — preserve that status and avoid regressing `missing_docs`.
-
-## Suggested Workflow for the Engineer Agent
-
-1. **Finish targeted item-level docs in Tier 1** — keep improving the core engine reference surface around IDs, events, execution plans, and engine-boundary types.
-2. **Finish targeted item-level docs in Tier 2** — especially `mfm_core` config types and security-sensitive support surfaces; keep `mfm-app` as a later publish target.
-3. **Then Tier 3** (states) — document the shared state primitives.
-4. **Then Tier 4-6** (ops, storages, collectors, transports) — these follow patterns established in earlier tiers.
-5. After each crate is documented, preserve or tighten `#![warn(missing_docs)]` to prevent regressions.
-6. Run `nix run .#check` after each crate to verify compilation.
-7. Run `cargo doc --no-deps --document-private-items` to preview docs.rs output.
-
-## Style Guidelines for Doc Comments
-
-Follow existing patterns from the best-documented code (crates/core/src/keystore/):
-
-```rust
-/// Brief one-line description.
-///
-/// Longer explanation if needed, covering:
-/// - what this does
-/// - when to use it
-/// - important invariants or constraints
-///
-/// # Examples
-///
-/// ```rust
-/// use mfm_machine::StateId;
-///
-/// let id = StateId::new("my_state").unwrap();
-/// assert_eq!(id.as_str(), "my_state");
-/// ```
-///
-/// # Errors
-///
-/// Returns `IdValidationError` if the identifier doesn't match `^[a-z][a-z0-9_]{0,62}$`.
-///
-/// # Panics
-///
-/// (Document if applicable)
+```bash
+nix run .#check
 ```
 
-For security-sensitive items, include a `# Security` section:
+For crate-level rustdoc work:
 
-```rust
-/// # Security
-///
-/// This type holds secret material. The inner buffer is zeroized on drop.
-/// Do not log, serialize, or expose this value in error messages.
+```bash
+cargo doc --no-deps -p <package>
+cargo test -p <package> --doc
 ```
+
+For publish planning:
+
+```bash
+nix run .#publish-docs -- plan
+nix run .#publish-docs -- sync-umbrella --check
+```
+
+Use real publishing commands only from an intentional release context with registry credentials
+configured.
+
+## Style Guidelines
+
+- Prefer small examples that compile without external services.
+- Link to `docs/design.md` for runtime semantics and `docs/architecture.md` for crate placement.
+- Keep docs.rs package docs focused on the crate's boundary, not the whole system.
+- Mention replay/live differences when documenting transports or side-effect states.
+- Document security-sensitive behavior with explicit redaction and persistence rules.
+- Avoid references to removed crates, removed store traits, or removed workflow APIs except in
+  negative tests that prove they are not active surfaces.

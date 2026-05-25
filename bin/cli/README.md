@@ -383,8 +383,8 @@ resulting canonical request must use this in-place contract:
 ```
 
 `portfolio.networks[*].control_scope` is optional and defaults to `shared`. Set it when one
-portfolio flow must not share managed `rpc.control` source state with another flow on the same
-network.
+portfolio flow must keep typed RPC source selection and diagnostics partitioned from another flow on
+the same network.
 
 **Output Notes:**
 - JSON output wraps the typed run response and, when completed, the typed public output containing
@@ -429,7 +429,8 @@ The CLI's behavior can be modified using environment variables, which is ideal f
   mfm_cli run public-output "run:sha256-jcs-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" --schema-id "<SCHEMA_ID>"
   ```
 
-- **`MFM_EVM_RPC_SOURCES_JSON`**: Optional JSON array of source objects used to bootstrap the canonical `rpc.control` source catalog. Runtime-only and never persisted.
+- **`MFM_EVM_RPC_SOURCES_JSON`**: Optional JSON array of source objects used by typed EVM RPC
+  backends. Runtime-only and never persisted.
   ```sh
   export MFM_EVM_RPC_SOURCES_JSON='[
     {"id":"reth_local","network_id":"ethereum-mainnet","rpc_url":"http://127.0.0.1:8545","kind":"local"},
@@ -437,22 +438,24 @@ The CLI's behavior can be modified using environment variables, which is ideal f
   ]'
   ```
 
-- **`MFM_EVM_RPC_PREFERRED_ORDER`**: Optional comma-separated source IDs that seed canonical control-plane ranking order.
+- **`MFM_EVM_RPC_PREFERRED_ORDER`**: Optional comma-separated source IDs that seed typed RPC source
+  preference order.
   ```sh
   export MFM_EVM_RPC_PREFERRED_ORDER="reth_local,drpc_public"
   ```
 
-- **`MFM_EVM_RPC_REQUIRE_GET_PROOF_IDS`**: Optional comma-separated source IDs that must pass `eth_getProof` during control-plane bootstrap/probe.
+- **`MFM_EVM_RPC_REQUIRE_GET_PROOF_IDS`**: Optional comma-separated source IDs that must pass
+  `eth_getProof` during typed RPC source probing.
   ```sh
   export MFM_EVM_RPC_REQUIRE_GET_PROOF_IDS="reth_local"
   ```
 
-- Managed `rpc.control` bootstrap requires `network_id` on every configured source.
-- Canonical managed requests require an explicit `network_id`; `control_scope` defaults to
-  `shared` unless an op config overrides it.
+- Typed EVM RPC source configuration requires `network_id` on every configured source.
+- Typed EVM requests require an explicit `network_id`; `control_scope` defaults to `shared` unless
+  workflow config overrides it.
 
-- Managed RPC note: per-request `rpc_url` override is not supported. Canonical routing enters through `rpc.control`.
-- Managed RPC runbook: [`../../docs/evm-rpc-routing.md`](../../docs/evm-rpc-routing.md)
+- Typed EVM RPC note: per-request `rpc_url` override is not supported.
+- Typed EVM RPC runbook: [`../../docs/evm-rpc-routing.md`](../../docs/evm-rpc-routing.md)
 
 ## Best Practices
 

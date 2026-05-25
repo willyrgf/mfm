@@ -47,5 +47,5 @@ the wrapper. Use the service policy variables instead.
 The wrapper writes a temporary JSON result file, validates the stable CLI envelope, prints
 the final JSON response to stdout, and removes the temporary file on exit.
 
-The snapshot itself uses the normal MFM artifact, stream, fact, and control-plane
-contracts described in `docs/design.md`.
+The snapshot itself uses the certified typed run-event store, typed artifact store, typed fact
+evidence, and runtime-only RPC source configuration described in `docs/design.md`.
