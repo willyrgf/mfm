@@ -486,12 +486,12 @@ workflow ports, and deletion or hard isolation of old dynamic semantic APIs.
 
 ### Commit 46: `cleanup remove obsolete fixtures and docs`
 
-- [ ] Remove stale fixtures, snapshots, migration notes, and README sections that describe the old
+- [x] Remove stale fixtures, snapshots, migration notes, and README sections that describe the old
       semantic runtime as active.
-- [ ] Keep explicit old-run operational policy only where needed for inspection or migration refusal.
-- [ ] Ensure public docs explain that old dynamic runs are not silently migrated into certified typed
+- [x] Keep explicit old-run operational policy only where needed for inspection or migration refusal.
+- [x] Ensure public docs explain that old dynamic runs are not silently migrated into certified typed
       runs.
-- [ ] Validation: `nix run .#check`, `nix run .#test`.
+- [x] Validation: `nix run .#check`, `nix run .#test`.
 
 ### Commit 47: `release typed core rewrite`
 

@@ -201,7 +201,8 @@ mfm_cli keystore delete [OPTIONS] (<ID> | --by-label <LABEL>)
 
 Signs an EIP-1559 transaction payload using a key already stored in the keystore and writes the signed raw transaction to a file.
 
-Implementation note: this command is a thin wrapper over app-owned keystore services. The CLI maps args to app input and renders the returned response.
+Implementation note: this command is a direct CLI helper over the keystore and EVM libraries. It
+does not start, resume, or certify a typed run.
 
 The command output includes metadata only (`from`, `to`, `nonce`, `chain_id`, `tx_type`, `payload_hash`) and intentionally excludes local output paths, raw tx hex, and signature bytes.
 The output file is created with restrictive permissions and must not already exist unless `--overwrite` is supplied. Symlink outputs and unsafe parent directories are rejected.
@@ -257,8 +258,11 @@ Old dynamic op launch, pipeline launch, context snapshots, and generic artifact 
 removed from the `run` subcommand. The CLI starts only from certified typed execution specs and
 resumes/replays only from stored typed run streams.
 
-Keystore tx commands still use the isolated legacy app bridge while the keystore workflow is ported;
-they do not expose certified typed run start/resume authority.
+Old dynamic runs are not silently migrated into certified typed runs. Historical dynamic run data can
+only be inspected through explicit operational tooling outside this typed run surface.
+
+Keystore tx commands are direct CLI helpers over the keystore and EVM libraries. They do not submit
+or resume certified typed runs, and they do not route through the removed legacy app bridge.
 
 ### `run start`
 
