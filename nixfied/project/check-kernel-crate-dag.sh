@@ -126,7 +126,6 @@ write_contract_summary() {
   jq -n \
     --argjson kernel_crates_present "$(bool_json "$missing_count")" \
     --argjson crate_dag_passed "$(bool_json "$((missing_count + violation_count))")" \
-    --argjson typed_boundary_firewall_passed "$(bool_json "$((missing_count + violation_count))")" \
     --argjson expected_count "$expected_count" \
     --argjson actual_count "$actual_count" \
     --argjson missing_count "$missing_count" \
@@ -137,7 +136,6 @@ write_contract_summary() {
       payload: {
         kernel_crates_present: $kernel_crates_present,
         crate_dag_passed: $crate_dag_passed,
-        typed_boundary_firewall_passed: $typed_boundary_firewall_passed,
         kernel_crates_expected_count: $expected_count,
         kernel_crates_actual_count: $actual_count,
         missing_kernel_crate_count: $missing_count,

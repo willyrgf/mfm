@@ -1205,6 +1205,7 @@ in
             mkdir -p "$artifacts_dir"
             discovery_log="$artifacts_dir/check-discovery.log"
             crate_dag_log="$artifacts_dir/check-crate-dag.log"
+            typed_boundary_firewall_log="$artifacts_dir/check-typed-boundary-firewall.log"
             manual_impl_log="$artifacts_dir/check-manual-persisted-impls.log"
             typed_program_authority_log="$artifacts_dir/check-typed-program-authority.log"
             typed_event_schema_log="$artifacts_dir/check-typed-event-schemas.log"
@@ -1228,6 +1229,9 @@ in
             echo "INFO: command=bash ${./check-kernel-crate-dag.sh} --root . --self-test --summary-file $typed_kernel_contract_summary log=$crate_dag_log"
             run_with_log "$crate_dag_log" bash ${./check-kernel-crate-dag.sh} --root . --self-test --summary-file "$typed_kernel_contract_summary"
             jq -e '.payload.kernel_crates_present == true and .payload.crate_dag_passed == true' "$typed_kernel_contract_summary" >/dev/null
+            echo "INFO: command=bash ${./check-typed-boundary-firewall.sh} --root . --self-test --summary-file $typed_kernel_contract_summary log=$typed_boundary_firewall_log"
+            run_with_log "$typed_boundary_firewall_log" bash ${./check-typed-boundary-firewall.sh} --root . --self-test --summary-file "$typed_kernel_contract_summary"
+            jq -e '.payload.typed_boundary_firewall_passed == true' "$typed_kernel_contract_summary" >/dev/null
             echo "INFO: command=bash ${./check-manual-persisted-impls.sh} --root . --self-test --summary-file $typed_kernel_contract_summary log=$manual_impl_log"
             run_with_log "$manual_impl_log" bash ${./check-manual-persisted-impls.sh} --root . --self-test --summary-file "$typed_kernel_contract_summary"
             jq -e '.payload.manual_value_config_output_impls_rejected == true' "$typed_kernel_contract_summary" >/dev/null
@@ -1339,6 +1343,7 @@ in
 
             echo "INFO: running typed-kernel-contract summary checks"
             run_with_log "$artifacts_dir/test-kernel-crate-dag.log" bash ${./check-kernel-crate-dag.sh} --root . --self-test --summary-file "$typed_kernel_contract_summary"
+            run_with_log "$artifacts_dir/test-typed-boundary-firewall.log" bash ${./check-typed-boundary-firewall.sh} --root . --self-test --summary-file "$typed_kernel_contract_summary"
             run_with_log "$artifacts_dir/test-manual-persisted-impls.log" bash ${./check-manual-persisted-impls.sh} --root . --self-test --summary-file "$typed_kernel_contract_summary"
             run_with_log "$artifacts_dir/test-typed-program-authority.log" bash ${./check-typed-program-authority.sh} --root . --self-test --summary-file "$typed_kernel_contract_summary"
             run_with_log "$artifacts_dir/test-typed-event-schemas.log" bash ${./check-typed-event-schemas.sh} --root . --self-test --summary-file "$typed_kernel_contract_summary"
@@ -1459,6 +1464,7 @@ in
             ${ciStepPreamble}
 
             log_file="$artifacts_dir/kernel-crate-dag.log"
+            typed_boundary_firewall_log_file="$artifacts_dir/typed-boundary-firewall.log"
             manual_impl_log_file="$artifacts_dir/manual-persisted-impls.log"
             typed_program_authority_log_file="$artifacts_dir/typed-program-authority.log"
             typed_event_schema_log_file="$artifacts_dir/typed-event-schemas.log"
@@ -1468,6 +1474,8 @@ in
             echo "INFO: running ci step=kernel-crate-dag"
             run_with_log "$log_file" bash ${./check-kernel-crate-dag.sh} --root . --self-test --summary-file "$typed_kernel_contract_summary"
             jq -e '.payload.kernel_crates_present == true and .payload.crate_dag_passed == true' "$typed_kernel_contract_summary" >/dev/null
+            run_with_log "$typed_boundary_firewall_log_file" bash ${./check-typed-boundary-firewall.sh} --root . --self-test --summary-file "$typed_kernel_contract_summary"
+            jq -e '.payload.typed_boundary_firewall_passed == true' "$typed_kernel_contract_summary" >/dev/null
             run_with_log "$manual_impl_log_file" bash ${./check-manual-persisted-impls.sh} --root . --self-test --summary-file "$typed_kernel_contract_summary"
             jq -e '.payload.manual_value_config_output_impls_rejected == true' "$typed_kernel_contract_summary" >/dev/null
             run_with_log "$typed_program_authority_log_file" bash ${./check-typed-program-authority.sh} --root . --self-test --summary-file "$typed_kernel_contract_summary"

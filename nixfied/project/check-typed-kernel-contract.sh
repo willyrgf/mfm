@@ -28,6 +28,7 @@ REQUIRED_TRUE_KEYS=(
 REQUIRED_POSITIVE_KEYS=(
   kernel_crates_expected_count
   kernel_crates_actual_count
+  typed_boundary_scanned_file_count
   persisted_source_boundary_rust_file_count
   typed_kernel_contract_required_key_count
 )
@@ -35,6 +36,10 @@ REQUIRED_POSITIVE_KEYS=(
 REQUIRED_ZERO_KEYS=(
   missing_kernel_crate_count
   kernel_dependency_violation_count
+  typed_boundary_forbidden_symbol_violation_count
+  typed_boundary_old_dynamic_package_violation_count
+  typed_boundary_old_dynamic_root_violation_count
+  typed_boundary_old_submission_escape_hatch_count
   manual_persisted_trait_impl_violation_count
   derive_provenance_forgery_violation_count
 )

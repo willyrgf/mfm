@@ -464,7 +464,7 @@ workflow ports, and deletion or hard isolation of old dynamic semantic APIs.
 
 ### Commit 44: `ci remove old semantic api escape hatches`
 
-- [ ] Add source-boundary checks for forbidden old symbols:
+- [x] Add source-boundary checks for forbidden old symbols:
       `PlannedOp`,
       `PortKey`,
       `DynContext`,
@@ -472,9 +472,9 @@ workflow ports, and deletion or hard isolation of old dynamic semantic APIs.
       public `DependencyEdge`,
       generic `IoProvider`,
       context-key semantic dataflow.
-- [ ] Add checks that old dynamic APIs cannot submit certified typed execution specs.
-- [ ] Add summary key: `typed_boundary_firewall_passed`.
-- [ ] Validation: `nix run .#check`.
+- [x] Add checks that old dynamic APIs cannot submit certified typed execution specs.
+- [x] Add summary key: `typed_boundary_firewall_passed`.
+- [x] Validation: `nix run .#check`.
 
 ### Commit 45: `ci finalize full typed core gate`
 
