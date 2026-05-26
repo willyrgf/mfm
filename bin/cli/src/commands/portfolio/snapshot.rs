@@ -95,16 +95,10 @@ async fn execute_internal(args: &SnapshotArgs) -> CommandResult<PortfolioSnapsho
     )
     .await?;
 
-    let spec_bytes = certified
-        .envelope()
-        .spec
-        .canonical_json()
-        .map_err(|error| CommandError::new("TypedPortfolioSpecInvalid", error.to_string()))?
-        .to_vec();
     let run_id = mfm_app::new_run_id();
-    let request = mfm_app::build_typed_run_start_request(
+    let request = mfm_app::build_certified_typed_run_start_request(
         services.artifacts(),
-        &spec_bytes,
+        certified,
         run_id.clone(),
         &args.framework_version,
         &args.source_revision,

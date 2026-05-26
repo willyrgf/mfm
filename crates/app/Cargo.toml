@@ -13,6 +13,7 @@ uuid = { version = "1.0", features = ["v4"] }
 
 mfm-artifact-store-fs = { path = "../storages/artifact-store-fs", default-features = false }
 mfm-canonical = { path = "../kernel/canonical" }
+mfm-certify = { path = "../kernel/certify" }
 mfm-events = { path = "../kernel/events" }
 mfm-ids = { path = "../kernel/ids" }
 mfm-replay = { path = "../kernel/replay" }
@@ -27,3 +28,5 @@ mfm-transports-proof = { path = "../transports/proof" }
 mfm-capabilities = { path = "../kernel/capabilities" }
 mfm-op-proof = { path = "../ops/proof-op" }
 mfm-program = { path = "../kernel/program" }
+mfm-program-derive = { path = "../kernel/program-derive" }
+mfm-values = { path = "../kernel/values" }

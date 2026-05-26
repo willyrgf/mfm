@@ -3,7 +3,7 @@
 //!
 //! This crate owns the first certified runtime boundary. It derives runnable nodes, materialized
 //! input evidence, runner bindings, and runtime capabilities only from a verified
-//! [`mfm_spec::v1::HashedSpecEnvelope`] plus store-owned typed projections.
+//! [`mfm_certify::CertifiedTypedSpec`] plus store-owned typed projections.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
@@ -15,6 +15,7 @@ use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_capabilities::{
     CapabilityDescriptor, CapabilitySetDescriptor, EffectSpec, ManagedPlatformWrite,
 };
+use mfm_certify::CertifiedTypedSpec;
 use mfm_events::v1 as events;
 use mfm_ids::{
     AdapterKind, AdapterVersion, ArtifactId, AttemptId, CapabilityKind, CapabilityVersion, CellId,
@@ -229,8 +230,13 @@ pub struct CertifiedRuntimeSpec {
 }
 
 impl CertifiedRuntimeSpec {
-    /// Verifies a hash-only spec envelope and builds deterministic runtime indexes.
-    pub fn new(envelope: spec::HashedSpecEnvelope) -> Result<Self> {
+    /// Builds deterministic runtime indexes from certifier-backed typed-spec authority.
+    pub fn new(certified: CertifiedTypedSpec) -> Result<Self> {
+        let (envelope, _certificate) = certified.into_parts();
+        Self::from_verified_envelope(envelope)
+    }
+
+    fn from_verified_envelope(envelope: spec::HashedSpecEnvelope) -> Result<Self> {
         envelope.verify_hash()?;
         let mut state_descriptors = BTreeMap::new();
         for descriptor in &envelope.spec.descriptor_identities {
@@ -4946,7 +4952,13 @@ mod tests {
         DigestBytes, EffectKind, EffectVersion, EventId, ScopeId, SeedId, SemanticTypeId,
         StateKind, StateVersion,
     };
+    use mfm_program::{
+        build_root_with_registries, CanonicalSeed, PublicOutputKey, PureState, RootBuilder,
+        ScopeKey, StateKey, StateRegistryBuilder, StateResult, StateSpec,
+    };
+    use mfm_program_derive::{MfmConfig, MfmValue, PublicOutputs};
     use mfm_store::v1::{TypedProjectionRead, TypedRunEventStore};
+    use serde::{Deserialize, Serialize};
 
     const D0: DigestBytes = DigestBytes::from_array([0x10; 32]);
     const D1: DigestBytes = DigestBytes::from_array([0x11; 32]);
@@ -4958,6 +4970,111 @@ mod tests {
     const D7: DigestBytes = DigestBytes::from_array([0x17; 32]);
     const D8: DigestBytes = DigestBytes::from_array([0x18; 32]);
     const D9: DigestBytes = DigestBytes::from_array([0x19; 32]);
+
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
+    #[mfm(
+        namespace = "mfm.runtime.test",
+        name = "value",
+        version = "1",
+        schema = "mfm.runtime.test.value"
+    )]
+    struct CertifierValue {
+        amount: u64,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmConfig)]
+    struct CertifierConfig {
+        multiplier: u64,
+    }
+
+    #[derive(PublicOutputs)]
+    #[mfm(schema = "mfm.runtime.test.public_outputs")]
+    struct CertifierPublicOutputs<'p, 's> {
+        result: mfm_program::Handle<'p, 's, CertifierValue>,
+    }
+
+    struct CertifierState {
+        config: CertifierConfig,
+    }
+
+    impl StateSpec for CertifierState {
+        type Config = CertifierConfig;
+        type Input = CertifierValue;
+        type Output = CertifierValue;
+        type Effect = mfm_effects::Pure;
+        type Caps = mfm_capabilities::NoCaps;
+
+        fn kind() -> mfm_program::Result<StateKind> {
+            StateKind::new(
+                "mfm.runtime.test",
+                "multiply",
+                DigestAlgorithm::Sha256JcsV1,
+                D1,
+            )
+            .map_err(|error| mfm_program::PlanError::Key(error.to_string()))
+        }
+
+        fn version() -> mfm_program::Result<StateVersion> {
+            StateVersion::new("mfm.runtime.test.multiply.v1")
+                .map_err(|error| mfm_program::PlanError::Key(error.to_string()))
+        }
+
+        fn name() -> &'static str {
+            "mfm.runtime.test.multiply"
+        }
+
+        fn new(config: Self::Config) -> mfm_program::Result<Self> {
+            Ok(Self { config })
+        }
+    }
+
+    impl PureState for CertifierState {
+        fn run(&self, input: Self::Input) -> StateResult<Self::Output> {
+            Ok(CertifierValue {
+                amount: input.amount * self.config.multiplier,
+            })
+        }
+    }
+
+    fn certifier_backed_runtime_authority() -> (
+        mfm_certify::CertifiedTypedSpec,
+        mfm_certify::CertificationRegistry,
+    ) {
+        let mut states = StateRegistryBuilder::new();
+        let registered = states
+            .register::<CertifierState>()
+            .expect("state registration");
+        let mut registry = mfm_certify::CertificationRegistry::new();
+        registry
+            .register_state(&registered)
+            .expect("certification registry");
+        let draft = build_root_with_registries(
+            ScopeKey::new("root").expect("root key"),
+            states.snapshot(),
+            mfm_program::OperationRegistryBuilder::new().snapshot(),
+            |root: &mut RootBuilder<'_, '_>| {
+                let seed = root.seed(
+                    mfm_program::SeedKey::new("initial").expect("seed key"),
+                    CanonicalSeed::from_value(&CertifierValue { amount: 2 }).expect("seed"),
+                )?;
+                let result = root.scope().state::<CertifierState, _>(
+                    StateKey::new("multiply-state")?,
+                    CertifierConfig { multiplier: 3 },
+                    seed,
+                )?;
+                root.bind_public_outputs(
+                    PublicOutputKey::new("terminal")?,
+                    &CertifierPublicOutputs { result },
+                )
+            },
+        )
+        .expect("program draft");
+        (
+            mfm_certify::certify_program_draft(&draft).expect("certified program"),
+            registry,
+        )
+    }
+
     const DA: DigestBytes = DigestBytes::from_array([0x1a; 32]);
     const DB: DigestBytes = DigestBytes::from_array([0x1b; 32]);
     const DC: DigestBytes = DigestBytes::from_array([0x1c; 32]);
@@ -5339,9 +5456,30 @@ mod tests {
         let mut envelope = fixture.runtime_spec.envelope().clone();
         envelope.spec_hash = SpecHash::from_digest(DigestAlgorithm::Sha256JcsV1, D9);
         assert!(matches!(
-            CertifiedRuntimeSpec::new(envelope),
+            CertifiedRuntimeSpec::from_verified_envelope(envelope),
             Err(RuntimeError::SpecHash(_))
         ));
+    }
+
+    #[test]
+    fn certified_runtime_spec_accepts_certifier_authority() {
+        let (certified, _registry) = certifier_backed_runtime_authority();
+        let runtime = CertifiedRuntimeSpec::new(certified).expect("runtime authority");
+        assert!(!runtime.topological_order().is_empty());
+    }
+
+    #[test]
+    fn certified_runtime_spec_accepts_verified_bundle_authority() {
+        let (certified, registry) = certifier_backed_runtime_authority();
+        let bundle = certified.bundle().expect("certified bundle");
+        let verified = mfm_certify::verify_certified_bundle(
+            bundle.spec_bytes(),
+            bundle.certificate_bytes(),
+            &registry,
+        )
+        .expect("verified persisted bundle");
+        let runtime = CertifiedRuntimeSpec::new(verified).expect("runtime authority");
+        assert!(!runtime.topological_order().is_empty());
     }
 
     #[test]
@@ -5357,7 +5495,7 @@ mod tests {
         let envelope =
             spec::HashedSpecEnvelope::new(envelope.spec, envelope.audit).expect("rehash");
         assert!(matches!(
-            CertifiedRuntimeSpec::new(envelope),
+            CertifiedRuntimeSpec::from_verified_envelope(envelope),
             Err(RuntimeError::InvalidSpec(message))
                 if message.contains("public-output render node")
         ));
@@ -7682,7 +7820,7 @@ mod tests {
         envelope.spec.nodes.reverse();
         let envelope =
             spec::HashedSpecEnvelope::new(envelope.spec, envelope.audit).expect("rehash");
-        let runtime = CertifiedRuntimeSpec::new(envelope).expect("runtime");
+        let runtime = CertifiedRuntimeSpec::from_verified_envelope(envelope).expect("runtime");
         assert_eq!(
             runtime.topological_order(),
             fixture.runtime_spec.topological_order()
@@ -8141,7 +8279,8 @@ mod tests {
         let envelope =
             spec::HashedSpecEnvelope::new(spec, spec::TypedExecutionSpecAudit::default())
                 .expect("envelope");
-        let runtime_spec = CertifiedRuntimeSpec::new(envelope).expect("runtime spec");
+        let runtime_spec =
+            CertifiedRuntimeSpec::from_verified_envelope(envelope).expect("runtime spec");
         Fixture {
             runtime_spec,
             run_id: RunId::from_digest(DigestAlgorithm::Sha256JcsV1, D5),
@@ -8202,7 +8341,8 @@ mod tests {
         }
         let envelope =
             spec::HashedSpecEnvelope::new(envelope.spec, envelope.audit).expect("rehash");
-        fixture.runtime_spec = CertifiedRuntimeSpec::new(envelope).expect("runtime spec");
+        fixture.runtime_spec =
+            CertifiedRuntimeSpec::from_verified_envelope(envelope).expect("runtime spec");
         fixture
     }
 
@@ -8250,7 +8390,8 @@ mod tests {
         }
         let envelope =
             spec::HashedSpecEnvelope::new(envelope.spec, envelope.audit).expect("rehash");
-        fixture.runtime_spec = CertifiedRuntimeSpec::new(envelope).expect("runtime spec");
+        fixture.runtime_spec =
+            CertifiedRuntimeSpec::from_verified_envelope(envelope).expect("runtime spec");
         fixture
     }
 
@@ -8293,7 +8434,8 @@ mod tests {
         }
         let envelope =
             spec::HashedSpecEnvelope::new(envelope.spec, envelope.audit).expect("rehash");
-        fixture.runtime_spec = CertifiedRuntimeSpec::new(envelope).expect("runtime spec");
+        fixture.runtime_spec =
+            CertifiedRuntimeSpec::from_verified_envelope(envelope).expect("runtime spec");
         fixture
     }
 

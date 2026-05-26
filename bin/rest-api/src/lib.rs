@@ -525,23 +525,11 @@ where
     )?;
 
     let run_id = parse_optional_run_id(req.run_id)?;
-    let spec_bytes = certified
-        .envelope()
-        .spec
-        .canonical_json()
-        .map_err(|error| {
-            ApiError::new(
-                StatusCode::BAD_REQUEST,
-                "TypedPortfolioSpecInvalid",
-                error.to_string(),
-            )
-        })?
-        .to_vec();
     let services = state.services()?;
     persist_portfolio_config_artifacts(services.artifacts(), configs).await?;
-    let start = mfm_app::build_typed_run_start_request(
+    let start = mfm_app::build_certified_typed_run_start_request(
         services.artifacts(),
-        &spec_bytes,
+        certified,
         run_id.clone(),
         &req.framework_version,
         &req.source_revision,

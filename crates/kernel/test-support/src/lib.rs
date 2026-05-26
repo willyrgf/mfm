@@ -9,14 +9,21 @@ use std::sync::Arc;
 
 use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_capabilities::{
-    CapabilityDescriptor, CapabilityRole, CapabilitySetDescriptor, EffectSpec, ManagedPlatformWrite,
+    ApplySideEffect, CapabilitySpec, ExternalMutationAuthorityRole, ManagedPlatformWrite,
+    ManagedPlatformWriteRole, NoCaps, Pure, ReadExternal, ReadExternalRole,
 };
 use mfm_events::v1 as events;
 use mfm_ids::{
     AdapterKind, AdapterVersion, ArtifactId, AttemptId, CapabilityKind, CapabilityVersion, CellId,
-    ContentDigest, DescriptorId, DigestAlgorithm, DigestBytes, EffectKind, EffectVersion, NodeId,
-    RunId, SchemaId, ScopeId, SeedId, SemanticTypeId, SpecHash, StateKind, StateVersion,
+    ContentDigest, DescriptorId, DigestAlgorithm, DigestBytes, NodeId, RunId, SchemaId,
+    SemanticTypeId, SpecHash, StateKind, StateVersion,
 };
+use mfm_program::{
+    build_root_with_registries, AdapterBindingSpec, CanonicalSeed, IdempotencyKey,
+    ManagedWriteState, PublicOutputKey, PureState, ReadState, RootBuilder, ScopeKey, SeedKey,
+    SideEffectState, StateKey, StateRegistryBuilder, StateResult, StateSpec,
+};
+use mfm_program_derive::{MfmConfig, MfmValue, PublicOutputs};
 use mfm_replay::v1 as replay;
 use mfm_runtime::{
     build_retention_manifest_artifact, CertifiedRuntimeSpec, ErasedNodeRunner, ErasedRunCtx,
@@ -27,6 +34,7 @@ use mfm_runtime::{
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
 use mfm_store::v1::{TypedProjectionRead, TypedRunEventStore};
+use serde::{Deserialize, Serialize};
 
 /// Summary emitted by the `typed-certified-slice` CI acceptance gate.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -288,6 +296,20 @@ fn display_error(error: impl std::fmt::Display) -> String {
     error.to_string()
 }
 
+fn reference_adapter_binding() -> mfm_program::Result<AdapterBindingSpec> {
+    Ok(AdapterBindingSpec {
+        adapter_kind: AdapterKind::new(
+            "mfm.typed_slice",
+            "deterministic-local",
+            DigestAlgorithm::Sha256JcsV1,
+            bytes(0x2e),
+        )
+        .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?,
+        adapter_version: AdapterVersion::new("mfm.typed_slice.adapter.local.v1")
+            .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?,
+    })
+}
+
 #[derive(Clone)]
 struct ReferenceRun {
     fixture: ReferenceFixture,
@@ -314,6 +336,296 @@ struct ReferenceFixture {
     side_effect_cap_version: CapabilityVersion,
     adapter_kind: AdapterKind,
     adapter_version: AdapterVersion,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
+#[mfm(
+    namespace = "mfm.typed_slice",
+    name = "value",
+    version = "1",
+    schema = "mfm.typed_slice.value"
+)]
+struct ReferenceValue {
+    amount: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmConfig)]
+struct ReferenceConfig {
+    multiplier: u64,
+}
+
+#[derive(PublicOutputs)]
+#[mfm(schema = "mfm.typed_slice.public")]
+struct ReferencePublicOutputs<'program, 'scope> {
+    result: mfm_program::Handle<'program, 'scope, ReferenceValue>,
+}
+
+struct ReferenceReadCap;
+
+impl CapabilitySpec for ReferenceReadCap {
+    type Role = ReadExternalRole;
+
+    fn kind() -> mfm_capabilities::Result<CapabilityKind> {
+        CapabilityKind::new(
+            "mfm.typed_slice",
+            "read-fixture",
+            DigestAlgorithm::Sha256JcsV1,
+            bytes(0x2b),
+        )
+        .map_err(|error| mfm_capabilities::CapabilityError::Identity(error.to_string()))
+    }
+
+    fn version() -> mfm_capabilities::Result<CapabilityVersion> {
+        CapabilityVersion::new("mfm.typed_slice.cap.read.v1")
+            .map_err(|error| mfm_capabilities::CapabilityError::Identity(error.to_string()))
+    }
+
+    fn name() -> &'static str {
+        "read-fixture"
+    }
+}
+
+struct ReferenceManagedCap;
+
+impl CapabilitySpec for ReferenceManagedCap {
+    type Role = ManagedPlatformWriteRole;
+
+    fn kind() -> mfm_capabilities::Result<CapabilityKind> {
+        CapabilityKind::new(
+            "mfm.typed_slice",
+            "managed-output",
+            DigestAlgorithm::Sha256JcsV1,
+            bytes(0x2c),
+        )
+        .map_err(|error| mfm_capabilities::CapabilityError::Identity(error.to_string()))
+    }
+
+    fn version() -> mfm_capabilities::Result<CapabilityVersion> {
+        CapabilityVersion::new("mfm.typed_slice.cap.managed_write.v1")
+            .map_err(|error| mfm_capabilities::CapabilityError::Identity(error.to_string()))
+    }
+
+    fn name() -> &'static str {
+        "managed-output"
+    }
+}
+
+struct ReferenceMutationCap;
+
+impl CapabilitySpec for ReferenceMutationCap {
+    type Role = ExternalMutationAuthorityRole;
+
+    fn kind() -> mfm_capabilities::Result<CapabilityKind> {
+        CapabilityKind::new(
+            "mfm.typed_slice",
+            "external-mutation",
+            DigestAlgorithm::Sha256JcsV1,
+            bytes(0x2d),
+        )
+        .map_err(|error| mfm_capabilities::CapabilityError::Identity(error.to_string()))
+    }
+
+    fn version() -> mfm_capabilities::Result<CapabilityVersion> {
+        CapabilityVersion::new("mfm.typed_slice.cap.external_mutation.v1")
+            .map_err(|error| mfm_capabilities::CapabilityError::Identity(error.to_string()))
+    }
+
+    fn name() -> &'static str {
+        "external-mutation"
+    }
+}
+
+struct ReferencePureState {
+    config: ReferenceConfig,
+}
+
+impl StateSpec for ReferencePureState {
+    type Config = ReferenceConfig;
+    type Input = ReferenceValue;
+    type Output = ReferenceValue;
+    type Effect = Pure;
+    type Caps = NoCaps;
+
+    fn kind() -> mfm_program::Result<StateKind> {
+        state_kind("pure", 0x3a).map_err(mfm_program::PlanError::Key)
+    }
+
+    fn version() -> mfm_program::Result<StateVersion> {
+        StateVersion::new("mfm.typed_slice.state.pure.v1")
+            .map_err(|error| mfm_program::PlanError::Key(error.to_string()))
+    }
+
+    fn name() -> &'static str {
+        "mfm.typed_slice.state.pure"
+    }
+
+    fn new(config: Self::Config) -> mfm_program::Result<Self> {
+        Ok(Self { config })
+    }
+}
+
+impl PureState for ReferencePureState {
+    fn run(&self, input: Self::Input) -> StateResult<Self::Output> {
+        Ok(ReferenceValue {
+            amount: input.amount * self.config.multiplier,
+        })
+    }
+}
+
+struct ReferenceReadState {
+    config: ReferenceConfig,
+}
+
+impl StateSpec for ReferenceReadState {
+    type Config = ReferenceConfig;
+    type Input = ReferenceValue;
+    type Output = ReferenceValue;
+    type Effect = ReadExternal;
+    type Caps = (ReferenceReadCap,);
+
+    fn kind() -> mfm_program::Result<StateKind> {
+        state_kind("read", 0x3b).map_err(mfm_program::PlanError::Key)
+    }
+
+    fn version() -> mfm_program::Result<StateVersion> {
+        StateVersion::new("mfm.typed_slice.state.read.v1")
+            .map_err(|error| mfm_program::PlanError::Key(error.to_string()))
+    }
+
+    fn name() -> &'static str {
+        "mfm.typed_slice.state.read"
+    }
+
+    fn adapter_bindings() -> mfm_program::Result<Vec<AdapterBindingSpec>> {
+        Ok(vec![reference_adapter_binding()?])
+    }
+
+    fn new(config: Self::Config) -> mfm_program::Result<Self> {
+        Ok(Self { config })
+    }
+}
+
+impl ReadState for ReferenceReadState {
+    type RunFuture<'a> = std::future::Ready<StateResult<Self::Output>>;
+
+    fn run<'a>(&'a self, input: Self::Input, _caps: &'a Self::Caps) -> Self::RunFuture<'a> {
+        std::future::ready(Ok(ReferenceValue {
+            amount: input.amount + self.config.multiplier,
+        }))
+    }
+}
+
+struct ReferenceManagedState {
+    config: ReferenceConfig,
+}
+
+impl StateSpec for ReferenceManagedState {
+    type Config = ReferenceConfig;
+    type Input = ReferenceValue;
+    type Output = ReferenceValue;
+    type Effect = ManagedPlatformWrite;
+    type Caps = (ReferenceManagedCap,);
+
+    fn kind() -> mfm_program::Result<StateKind> {
+        state_kind("managed", 0x3c).map_err(mfm_program::PlanError::Key)
+    }
+
+    fn version() -> mfm_program::Result<StateVersion> {
+        StateVersion::new("mfm.typed_slice.state.managed.v1")
+            .map_err(|error| mfm_program::PlanError::Key(error.to_string()))
+    }
+
+    fn name() -> &'static str {
+        "mfm.typed_slice.state.managed"
+    }
+
+    fn new(config: Self::Config) -> mfm_program::Result<Self> {
+        Ok(Self { config })
+    }
+}
+
+impl ManagedWriteState for ReferenceManagedState {
+    type RunFuture<'a> = std::future::Ready<StateResult<Self::Output>>;
+
+    fn run<'a>(&'a self, input: Self::Input, _caps: &'a Self::Caps) -> Self::RunFuture<'a> {
+        std::future::ready(Ok(ReferenceValue {
+            amount: input.amount + self.config.multiplier,
+        }))
+    }
+}
+
+struct ReferenceSideEffectState {
+    config: ReferenceConfig,
+}
+
+impl StateSpec for ReferenceSideEffectState {
+    type Config = ReferenceConfig;
+    type Input = ReferenceValue;
+    type Output = ReferenceValue;
+    type Effect = ApplySideEffect;
+    type Caps = (ReferenceMutationCap,);
+
+    fn kind() -> mfm_program::Result<StateKind> {
+        state_kind("side_effect", 0x3e).map_err(mfm_program::PlanError::Key)
+    }
+
+    fn version() -> mfm_program::Result<StateVersion> {
+        StateVersion::new("mfm.typed_slice.state.side_effect.v1")
+            .map_err(|error| mfm_program::PlanError::Key(error.to_string()))
+    }
+
+    fn name() -> &'static str {
+        "mfm.typed_slice.state.side_effect"
+    }
+
+    fn adapter_bindings() -> mfm_program::Result<Vec<AdapterBindingSpec>> {
+        Ok(vec![reference_adapter_binding()?])
+    }
+
+    fn new(config: Self::Config) -> mfm_program::Result<Self> {
+        Ok(Self { config })
+    }
+}
+
+impl SideEffectState for ReferenceSideEffectState {
+    type Intent = ReferenceValue;
+    type IdempotencyInput = ReferenceValue;
+    type Submission = ReferenceValue;
+    type Receipt = ReferenceValue;
+    type Confirmation = ReferenceValue;
+    type SubmitFuture<'a> = std::future::Ready<StateResult<Self::Submission>>;
+
+    fn prepare_intent(&self, input: &Self::Input) -> StateResult<Self::Intent> {
+        Ok(ReferenceValue {
+            amount: input.amount + self.config.multiplier,
+        })
+    }
+
+    fn idempotency_input(
+        &self,
+        _input: &Self::Input,
+        intent: &Self::Intent,
+    ) -> StateResult<Self::IdempotencyInput> {
+        Ok(intent.clone())
+    }
+
+    fn submit<'a>(
+        &'a self,
+        intent: &'a Self::Intent,
+        _key: &'a IdempotencyKey<Self::IdempotencyInput>,
+        _caps: &'a Self::Caps,
+    ) -> Self::SubmitFuture<'a> {
+        std::future::ready(Ok(intent.clone()))
+    }
+
+    fn output_from_confirmation(
+        &self,
+        _input: &Self::Input,
+        _intent: &Self::Intent,
+        confirmation: &Self::Confirmation,
+    ) -> StateResult<Self::Output> {
+        Ok(confirmation.clone())
+    }
 }
 
 async fn run_reference_certified_workflow() -> Result<ReferenceRun, String> {
@@ -375,7 +687,7 @@ async fn run_reference_certified_workflow() -> Result<ReferenceRun, String> {
 fn reference_registry(fixture: &ReferenceFixture) -> Result<ErasedRunnerRegistry, String> {
     reference_registry_with_side_effect(
         fixture,
-        "side-effect",
+        "apply_side_effect",
         DeterministicSideEffectRunner::new(fixture),
     )
 }
@@ -400,7 +712,7 @@ fn reference_registry_with_side_effect<R: ErasedNodeRunner + 'static>(
     registry
         .register(binding(
             fixture.read_descriptor.clone(),
-            "read",
+            "read_external",
             ReadRunner {
                 cap_kind: fixture.read_cap_kind.clone(),
                 cap_version: fixture.read_cap_version.clone(),
@@ -414,7 +726,7 @@ fn reference_registry_with_side_effect<R: ErasedNodeRunner + 'static>(
     registry
         .register(binding(
             fixture.managed_descriptor.clone(),
-            "managed-write",
+            "managed_platform_write",
             TerminalRunner {
                 expected_caps: vec![(
                     fixture.managed_cap_kind.clone(),
@@ -578,512 +890,117 @@ impl DeterministicSideEffectRunner {
 }
 
 fn reference_fixture() -> Result<ReferenceFixture, String> {
-    let scope = scope(0x10);
-    let seed_id = seed_id(0x11);
-    let seed_cell = cell(0x12);
-    let pure_node = node(0x13);
-    let read_node = node(0x14);
-    let managed_node = node(0x15);
-    let side_effect_node = node(0x16);
-    let render_node = node(0x17);
-    let pure_cell = cell(0x18);
-    let read_cell = cell(0x19);
-    let managed_cell = cell(0x1a);
-    let side_effect_cell = cell(0x1b);
-    let render_cell = cell(0x1c);
-    let pure_descriptor = descriptor(0x1d);
-    let read_descriptor = descriptor(0x1e);
-    let managed_descriptor = descriptor(0x1f);
-    let side_effect_descriptor = descriptor(0x20);
-    let render_descriptor = descriptor(0x21);
-    let semantic = SemanticTypeId::new(
-        "mfm.typed_slice",
-        "value",
-        "1",
-        DigestAlgorithm::Sha256JcsV1,
-        bytes(0x22),
+    let seed = CanonicalSeed::from_value(&ReferenceValue { amount: 1 }).map_err(display_error)?;
+    let mut states = StateRegistryBuilder::new();
+    states
+        .register::<ReferencePureState>()
+        .map_err(display_error)?;
+    states
+        .register::<ReferenceReadState>()
+        .map_err(display_error)?;
+    states
+        .register::<ReferenceManagedState>()
+        .map_err(display_error)?;
+    states
+        .register::<ReferenceSideEffectState>()
+        .map_err(display_error)?;
+    let draft = build_root_with_registries(
+        ScopeKey::new("root").map_err(display_error)?,
+        states.snapshot(),
+        mfm_program::OperationRegistryBuilder::new().snapshot(),
+        |root: &mut RootBuilder<'_, '_>| {
+            let seed = root.seed(SeedKey::new("launch")?, seed.clone())?;
+            let pure = root.scope().state::<ReferencePureState, _>(
+                StateKey::new("pure")?,
+                ReferenceConfig { multiplier: 2 },
+                seed,
+            )?;
+            let read = root.scope().state::<ReferenceReadState, _>(
+                StateKey::new("read")?,
+                ReferenceConfig { multiplier: 3 },
+                pure,
+            )?;
+            let managed = root.scope().state::<ReferenceManagedState, _>(
+                StateKey::new("managed")?,
+                ReferenceConfig { multiplier: 4 },
+                read,
+            )?;
+            let side_effect = root.scope().state::<ReferenceSideEffectState, _>(
+                StateKey::new("side-effect")?,
+                ReferenceConfig { multiplier: 5 },
+                managed,
+            )?;
+            root.bind_public_outputs(
+                PublicOutputKey::new("public-output")?,
+                &ReferencePublicOutputs {
+                    result: side_effect,
+                },
+            )
+        },
     )
     .map_err(display_error)?;
-    let value_schema = SchemaId::new(
-        "mfm.typed_slice.value",
-        "1",
-        DigestAlgorithm::Sha256JcsV1,
-        bytes(0x23),
-    )
-    .map_err(display_error)?;
-    let input_schema = SchemaId::new(
-        "mfm.typed_slice.input",
-        "1",
-        DigestAlgorithm::Sha256JcsV1,
-        bytes(0x24),
-    )
-    .map_err(display_error)?;
-    let config_schema = SchemaId::new(
-        "mfm.typed_slice.config",
-        "1",
-        DigestAlgorithm::Sha256JcsV1,
-        bytes(0x25),
-    )
-    .map_err(display_error)?;
-    let public_schema = SchemaId::new(
-        "mfm.typed_slice.public",
-        "1",
-        DigestAlgorithm::Sha256JcsV1,
-        bytes(0x26),
-    )
-    .map_err(display_error)?;
-    let pure_effect = EffectKind::new(
-        "mfm.typed_slice",
-        "pure",
-        DigestAlgorithm::Sha256JcsV1,
-        bytes(0x27),
-    )
-    .map_err(display_error)?;
-    let read_effect = EffectKind::new(
-        "mfm.typed_slice",
-        "read",
-        DigestAlgorithm::Sha256JcsV1,
-        bytes(0x28),
-    )
-    .map_err(display_error)?;
-    let managed_effect = EffectKind::new(
-        "mfm.typed_slice",
-        "managed-write",
-        DigestAlgorithm::Sha256JcsV1,
-        bytes(0x29),
-    )
-    .map_err(display_error)?;
-    let side_effect = EffectKind::new(
-        "mfm.typed_slice",
-        "side-effect",
-        DigestAlgorithm::Sha256JcsV1,
-        bytes(0x2a),
-    )
-    .map_err(display_error)?;
-    let read_cap_kind = CapabilityKind::new(
-        "mfm.typed_slice",
-        "read-fixture",
-        DigestAlgorithm::Sha256JcsV1,
-        bytes(0x2b),
-    )
-    .map_err(display_error)?;
-    let read_cap_version =
-        CapabilityVersion::new("mfm.typed_slice.cap.read.v1").map_err(display_error)?;
-    let managed_cap_kind = CapabilityKind::new(
-        "mfm.typed_slice",
-        "managed-output",
-        DigestAlgorithm::Sha256JcsV1,
-        bytes(0x2c),
-    )
-    .map_err(display_error)?;
-    let managed_cap_version =
-        CapabilityVersion::new("mfm.typed_slice.cap.managed_write.v1").map_err(display_error)?;
-    let side_effect_cap_kind = CapabilityKind::new(
-        "mfm.typed_slice",
-        "external-mutation",
-        DigestAlgorithm::Sha256JcsV1,
-        bytes(0x2d),
-    )
-    .map_err(display_error)?;
-    let side_effect_cap_version =
-        CapabilityVersion::new("mfm.typed_slice.cap.external_mutation.v1")
-            .map_err(display_error)?;
-    let adapter_kind = AdapterKind::new(
-        "mfm.typed_slice",
-        "deterministic-local",
-        DigestAlgorithm::Sha256JcsV1,
-        bytes(0x2e),
-    )
-    .map_err(display_error)?;
-    let adapter_version =
-        AdapterVersion::new("mfm.typed_slice.adapter.local.v1").map_err(display_error)?;
-    let no_caps = CapabilitySetDescriptor::new(Vec::new()).map_err(display_error)?;
-    let read_caps = CapabilitySetDescriptor::new(vec![CapabilityDescriptor::new(
-        read_cap_kind.clone(),
-        read_cap_version.clone(),
-        CapabilityRole::ReadExternal,
-        "read-fixture",
-    )
-    .map_err(display_error)?])
-    .map_err(display_error)?;
-    let managed_caps = CapabilitySetDescriptor::new(vec![CapabilityDescriptor::new(
-        managed_cap_kind.clone(),
-        managed_cap_version.clone(),
-        CapabilityRole::ManagedPlatformWrite,
-        "managed-output",
-    )
-    .map_err(display_error)?])
-    .map_err(display_error)?;
-    let side_effect_caps = CapabilitySetDescriptor::new(vec![CapabilityDescriptor::new(
-        side_effect_cap_kind.clone(),
-        side_effect_cap_version.clone(),
-        CapabilityRole::ExternalMutationAuthority,
-        "external-mutation",
-    )
-    .map_err(display_error)?])
-    .map_err(display_error)?;
-    let config_ref = spec::ConfigRef {
-        schema_id: config_schema.clone(),
-        artifact_id: artifact(0x2f),
-        digest: content(0x30),
-        byte_len: 2,
-        media_type: spec::MediaType::new("application/json").map_err(display_error)?,
+    let certified = mfm_certify::certify_program_draft(&draft).map_err(display_error)?;
+    let runtime_spec = CertifiedRuntimeSpec::new(certified).map_err(display_error)?;
+    let spec = runtime_spec.spec();
+    let node_by_key = |key: &str| -> Result<&spec::NodeSpec, String> {
+        spec.nodes
+            .iter()
+            .find(|node| node.stable_key.as_str() == key)
+            .ok_or_else(|| format!("missing node with key {key}"))
     };
-    let planning = spec::PlanningLineage {
-        active_operation_instances: Vec::new(),
-        completed_operation_frames: Vec::new(),
-        lineage_digest: content(0x31),
-    };
-    let lineage_seed = lineage(0x32);
-    let lineage_pure = lineage(0x33);
-    let lineage_read = lineage(0x34);
-    let lineage_managed = lineage(0x35);
-    let lineage_side_effect = lineage(0x36);
-    let lineage_render = lineage(0x37);
+    let pure_node = node_by_key("pure")?;
+    let read_node = node_by_key("read")?;
+    let managed_node = node_by_key("managed")?;
+    let side_effect_node = node_by_key("side-effect")?;
+    let seed_spec = spec
+        .seeds
+        .first()
+        .ok_or_else(|| "missing reference seed".to_owned())?;
+    let seed_digest = seed_spec
+        .required_digest
+        .clone()
+        .ok_or_else(|| "reference seed must require a digest".to_owned())?;
     let seed_ref = events::SeedCellRef {
-        seed_id: seed_id.clone(),
-        cell_id: seed_cell.clone(),
-        scope_id: scope.clone(),
-        semantic_type_id: semantic.clone(),
-        schema_id: value_schema.clone(),
-        digest: content(0x38),
+        seed_id: seed_spec.seed_id.clone(),
+        cell_id: seed_spec.cell_id.clone(),
+        scope_id: seed_spec.scope_id.clone(),
+        semantic_type_id: seed_spec.semantic_type_id.clone(),
+        schema_id: seed_spec.schema_id.clone(),
+        digest: seed_digest.clone(),
         seed_artifact: events::ArtifactEvidenceRef {
-            artifact_id: artifact(0x39),
+            artifact_id: artifact_id_for_digest(&seed_digest),
             role: events::ArtifactRole::SeedInput,
-            schema_id: value_schema.clone(),
-            semantic_type_id: Some(semantic.clone()),
-            content_digest: content(0x38),
-            byte_len: 11,
+            schema_id: seed_spec.schema_id.clone(),
+            semantic_type_id: Some(seed_spec.semantic_type_id.clone()),
+            content_digest: seed_digest,
+            byte_len: seed.canonical_json().as_bytes().len() as u64,
             media_type: spec::MediaType::new("application/json").map_err(display_error)?,
         },
     };
-
-    let pure_spec = node_spec(NodeSpecFixture {
-        node_id: pure_node.clone(),
-        descriptor_id: pure_descriptor.clone(),
-        scope_id: scope.clone(),
-        state_key: "pure",
-        state_kind: state_kind("pure", 0x3a)?,
-        state_version: StateVersion::new("mfm.typed_slice.state.pure.v1").map_err(display_error)?,
-        effect_kind: pure_effect.clone(),
-        config_ref: config_ref.clone(),
-        input_schema: input_schema.clone(),
-        input_cell: seed_cell.clone(),
-        input_schema_for_cell: value_schema.clone(),
-        input_lineage: lineage_seed.clone(),
-        output_cell: pure_cell.clone(),
-        caps: no_caps.clone(),
-        predecessors: Vec::new(),
-        adapter_bindings: Vec::new(),
-        planning: planning.clone(),
-    })?;
-    let read_spec = node_spec(NodeSpecFixture {
-        node_id: read_node.clone(),
-        descriptor_id: read_descriptor.clone(),
-        scope_id: scope.clone(),
-        state_key: "read",
-        state_kind: state_kind("read", 0x3b)?,
-        state_version: StateVersion::new("mfm.typed_slice.state.read.v1").map_err(display_error)?,
-        effect_kind: read_effect.clone(),
-        config_ref: config_ref.clone(),
-        input_schema: input_schema.clone(),
-        input_cell: pure_cell.clone(),
-        input_schema_for_cell: value_schema.clone(),
-        input_lineage: lineage_pure.clone(),
-        output_cell: read_cell.clone(),
-        caps: read_caps.clone(),
-        predecessors: vec![pure_node.clone()],
-        adapter_bindings: vec![spec::AdapterBinding {
-            adapter_kind: adapter_kind.clone(),
-            adapter_version: adapter_version.clone(),
-            binding_digest: None,
-        }],
-        planning: planning.clone(),
-    })?;
-    let managed_spec = node_spec(NodeSpecFixture {
-        node_id: managed_node.clone(),
-        descriptor_id: managed_descriptor.clone(),
-        scope_id: scope.clone(),
-        state_key: "managed",
-        state_kind: state_kind("managed", 0x3c)?,
-        state_version: StateVersion::new("mfm.typed_slice.state.managed.v1")
-            .map_err(display_error)?,
-        effect_kind: managed_effect.clone(),
-        config_ref: config_ref.clone(),
-        input_schema: input_schema.clone(),
-        input_cell: read_cell.clone(),
-        input_schema_for_cell: value_schema.clone(),
-        input_lineage: lineage_read.clone(),
-        output_cell: managed_cell.clone(),
-        caps: managed_caps.clone(),
-        predecessors: vec![read_node.clone()],
-        adapter_bindings: Vec::new(),
-        planning: planning.clone(),
-    })?;
-    let side_effect_contract_digest = content(0x3d);
-    let side_effect_spec = {
-        let mut node = node_spec(NodeSpecFixture {
-            node_id: side_effect_node.clone(),
-            descriptor_id: side_effect_descriptor.clone(),
-            scope_id: scope.clone(),
-            state_key: "side-effect",
-            state_kind: state_kind("side_effect", 0x3e)?,
-            state_version: StateVersion::new("mfm.typed_slice.state.side_effect.v1")
-                .map_err(display_error)?,
-            effect_kind: side_effect.clone(),
-            config_ref: config_ref.clone(),
-            input_schema: input_schema.clone(),
-            input_cell: managed_cell.clone(),
-            input_schema_for_cell: value_schema.clone(),
-            input_lineage: lineage_managed.clone(),
-            output_cell: side_effect_cell.clone(),
-            caps: side_effect_caps.clone(),
-            predecessors: vec![managed_node.clone()],
-            adapter_bindings: vec![spec::AdapterBinding {
-                adapter_kind: adapter_kind.clone(),
-                adapter_version: adapter_version.clone(),
-                binding_digest: None,
-            }],
-            planning: planning.clone(),
-        })?;
-        node.side_effect = Some(spec::SideEffectContractSpec {
-            contract_digest: side_effect_contract_digest.clone(),
-        });
-        node
+    let first_cap = |node: &spec::NodeSpec| -> Result<(CapabilityKind, CapabilityVersion), String> {
+        let capability = node
+            .capability_bindings
+            .capabilities
+            .first()
+            .ok_or_else(|| format!("node {} has no capability", node.node_id))?;
+        Ok((capability.kind.clone(), capability.version.clone()))
     };
-
-    let renderer = spec::RendererDescriptorIdentity {
-        descriptor_id: descriptor(0x3f),
-        renderer_kind: spec::RendererKind::new("public-output/json").map_err(display_error)?,
-        renderer_version: spec::RendererVersion::new("mfm.typed_slice.renderer.v1")
-            .map_err(display_error)?,
-        public_schema_id: public_schema.clone(),
-        canonicalizer_identity: spec::CanonicalizerIdentity::new("sha256-jcs-v1")
-            .map_err(display_error)?,
-    };
-    let public_output_cell = spec::PublicOutputCell {
-        public_field_path: spec::PublicFieldPath::new("result").map_err(display_error)?,
-        cell_id: side_effect_cell.clone(),
-        producer: spec::CellProducer::Node(side_effect_node.clone()),
-        scope_id: scope.clone(),
-        semantic_type_id: semantic.clone(),
-        schema_id: value_schema.clone(),
-        value_lineage: lineage_side_effect.clone(),
-        required_terminal: spec::RequiredTerminal::ProducedOnly,
-    };
-    let public_outputs = spec::PublicOutputSpec {
-        public_schema_id: public_schema.clone(),
-        outputs: vec![public_output_cell.clone()],
-        renderer_descriptor: renderer.clone(),
-    };
-    let render_spec = render_node_spec(RenderNodeSpecFixture {
-        node_id: render_node.clone(),
-        descriptor_id: render_descriptor.clone(),
-        scope_id: scope.clone(),
-        config_ref: config_ref.clone(),
-        public_output_cell: public_output_cell.clone(),
-        public_outputs: public_outputs.clone(),
-        render_cell: render_cell.clone(),
-        planning: planning.clone(),
-    })?;
-
-    let typed_spec = spec::TypedExecutionSpec::new(spec::TypedExecutionSpecParts {
-        authoring: spec::AuthoringProvenance::StateComposition {
-            descriptor: spec::CompositionDescriptor {
-                descriptor_id: descriptor(0x40),
-                name: "mfm.typed_slice.reference".to_owned(),
-                version: "mfm.typed_slice.reference.v1".to_owned(),
-            },
-            config_hash: content(0x41),
-        },
-        scopes: vec![spec::ScopeSpec {
-            scope_id: scope.clone(),
-            parent_scope_id: None,
-            stable_key: spec::StableAuthorKey::new("root").map_err(display_error)?,
-            planning_lineage: planning.clone(),
-        }],
-        seeds: vec![spec::SeedSpec {
-            seed_id: seed_id.clone(),
-            seed_key: spec::StableAuthorKey::new("launch").map_err(display_error)?,
-            cell_id: seed_cell.clone(),
-            scope_id: scope.clone(),
-            semantic_type_id: semantic.clone(),
-            schema_id: value_schema.clone(),
-            required_digest: Some(content(0x38)),
-        }],
-        descriptor_identities: vec![
-            spec::DescriptorIdentity::State(Box::new(state_descriptor(
-                &pure_spec,
-                pure_descriptor.clone(),
-                "mfm.typed_slice.state.pure",
-                pure_effect,
-                no_caps.clone(),
-                "pure",
-                None,
-            )?)),
-            spec::DescriptorIdentity::State(Box::new(state_descriptor(
-                &read_spec,
-                read_descriptor.clone(),
-                "mfm.typed_slice.state.read",
-                read_effect,
-                read_caps,
-                "read",
-                None,
-            )?)),
-            spec::DescriptorIdentity::State(Box::new(state_descriptor(
-                &managed_spec,
-                managed_descriptor.clone(),
-                "mfm.typed_slice.state.managed",
-                managed_effect,
-                managed_caps,
-                "managed-write",
-                None,
-            )?)),
-            spec::DescriptorIdentity::State(Box::new(state_descriptor(
-                &side_effect_spec,
-                side_effect_descriptor.clone(),
-                "mfm.typed_slice.state.side_effect",
-                side_effect,
-                side_effect_caps,
-                "side-effect",
-                Some(side_effect_contract_digest),
-            )?)),
-            spec::DescriptorIdentity::State(Box::new(render_descriptor_identity(
-                &render_spec,
-                render_descriptor.clone(),
-                public_schema.clone(),
-                config_schema.clone(),
-            )?)),
-            spec::DescriptorIdentity::Renderer(Box::new(renderer)),
-        ],
-        config_refs: vec![config_ref.clone()],
-        nodes: vec![
-            render_spec,
-            side_effect_spec,
-            managed_spec,
-            read_spec,
-            pure_spec,
-        ],
-        cells: vec![
-            cell_spec(
-                seed_cell,
-                spec::CellProducer::Seed(seed_id.clone()),
-                &scope,
-                &semantic,
-                &value_schema,
-                lineage_seed.clone(),
-                spec::StoragePolicy::ContentAddressed,
-            ),
-            cell_spec(
-                pure_cell.clone(),
-                spec::CellProducer::Node(pure_node.clone()),
-                &scope,
-                &semantic,
-                &value_schema,
-                lineage_pure.clone(),
-                spec::StoragePolicy::ContentAddressed,
-            ),
-            cell_spec(
-                read_cell.clone(),
-                spec::CellProducer::Node(read_node.clone()),
-                &scope,
-                &semantic,
-                &value_schema,
-                lineage_read.clone(),
-                spec::StoragePolicy::ContentAddressed,
-            ),
-            cell_spec(
-                managed_cell.clone(),
-                spec::CellProducer::Node(managed_node.clone()),
-                &scope,
-                &semantic,
-                &value_schema,
-                lineage_managed.clone(),
-                spec::StoragePolicy::ContentAddressed,
-            ),
-            cell_spec(
-                side_effect_cell.clone(),
-                spec::CellProducer::Node(side_effect_node.clone()),
-                &scope,
-                &semantic,
-                &value_schema,
-                lineage_side_effect.clone(),
-                spec::StoragePolicy::ContentAddressed,
-            ),
-            cell_spec(
-                render_cell,
-                spec::CellProducer::Node(render_node.clone()),
-                &scope,
-                &spec::public_output_receipt_semantic_type_id().map_err(display_error)?,
-                &spec::public_output_receipt_schema_id().map_err(display_error)?,
-                lineage_render.clone(),
-                spec::StoragePolicy::PublicOutputArtifact,
-            ),
-        ],
-        value_lineages: vec![
-            value_lineage(
-                lineage_seed,
-                &scope,
-                spec::CellProducer::Seed(seed_id),
-                Vec::new(),
-                None,
-                planning.clone(),
-                spec::LineageTransformPolicy::Source,
-            ),
-            value_lineage(
-                lineage_pure,
-                &scope,
-                spec::CellProducer::Node(pure_node),
-                vec![cell(0x12)],
-                Some(config_ref.digest.clone()),
-                planning.clone(),
-                spec::LineageTransformPolicy::StateOutput,
-            ),
-            value_lineage(
-                lineage_read,
-                &scope,
-                spec::CellProducer::Node(read_node),
-                vec![pure_cell.clone()],
-                Some(config_ref.digest.clone()),
-                planning.clone(),
-                spec::LineageTransformPolicy::StateOutput,
-            ),
-            value_lineage(
-                lineage_managed,
-                &scope,
-                spec::CellProducer::Node(managed_node),
-                vec![read_cell.clone()],
-                Some(config_ref.digest.clone()),
-                planning.clone(),
-                spec::LineageTransformPolicy::StateOutput,
-            ),
-            value_lineage(
-                lineage_side_effect,
-                &scope,
-                spec::CellProducer::Node(side_effect_node),
-                vec![managed_cell.clone()],
-                Some(config_ref.digest.clone()),
-                planning.clone(),
-                spec::LineageTransformPolicy::StateOutput,
-            ),
-            value_lineage(
-                lineage_render,
-                &scope,
-                spec::CellProducer::Node(render_node),
-                vec![side_effect_cell.clone()],
-                Some(config_ref.digest),
-                planning,
-                spec::LineageTransformPolicy::StateOutput,
-            ),
-        ],
-        planning_lineage: Vec::new(),
-        public_outputs,
-    })
-    .map_err(display_error)?;
-    let envelope =
-        spec::HashedSpecEnvelope::new(typed_spec, spec::TypedExecutionSpecAudit::default())
-            .map_err(display_error)?;
-    let runtime_spec = CertifiedRuntimeSpec::new(envelope).map_err(display_error)?;
+    let (read_cap_kind, read_cap_version) = first_cap(read_node)?;
+    let (managed_cap_kind, managed_cap_version) = first_cap(managed_node)?;
+    let (side_effect_cap_kind, side_effect_cap_version) = first_cap(side_effect_node)?;
+    let adapter = read_node
+        .adapter_bindings
+        .first()
+        .ok_or_else(|| "reference read node missing adapter binding".to_owned())?;
+    let pure_descriptor = pure_node.descriptor_id.clone();
+    let read_descriptor = read_node.descriptor_id.clone();
+    let managed_descriptor = managed_node.descriptor_id.clone();
+    let side_effect_descriptor = side_effect_node.descriptor_id.clone();
+    let read_cell = read_node.output_cell.clone();
+    let managed_cell = managed_node.output_cell.clone();
+    let public_schema = spec.public_outputs.public_schema_id.clone();
+    let adapter_kind = adapter.adapter_kind.clone();
+    let adapter_version = adapter.adapter_version.clone();
     Ok(ReferenceFixture {
         runtime_spec,
         run_id: run_id(0x42),
@@ -1104,249 +1021,6 @@ fn reference_fixture() -> Result<ReferenceFixture, String> {
         adapter_kind,
         adapter_version,
     })
-}
-
-struct NodeSpecFixture {
-    node_id: NodeId,
-    descriptor_id: DescriptorId,
-    scope_id: ScopeId,
-    state_key: &'static str,
-    state_kind: StateKind,
-    state_version: StateVersion,
-    effect_kind: EffectKind,
-    config_ref: spec::ConfigRef,
-    input_schema: SchemaId,
-    input_cell: CellId,
-    input_schema_for_cell: SchemaId,
-    input_lineage: spec::ValueLineageRef,
-    output_cell: CellId,
-    caps: CapabilitySetDescriptor,
-    predecessors: Vec<NodeId>,
-    adapter_bindings: Vec<spec::AdapterBinding>,
-    planning: spec::PlanningLineage,
-}
-
-fn node_spec(fixture: NodeSpecFixture) -> Result<spec::NodeSpec, String> {
-    Ok(spec::NodeSpec {
-        node_id: fixture.node_id,
-        stable_key: spec::StableAuthorKey::new(fixture.state_key).map_err(display_error)?,
-        scope_id: fixture.scope_id,
-        state_kind: fixture.state_kind,
-        state_version: fixture.state_version,
-        descriptor_id: fixture.descriptor_id,
-        config_ref: fixture.config_ref,
-        input_bindings: spec::InputBindingSpec {
-            input_schema_id: fixture.input_schema,
-            input_descriptor_id: descriptor(0x90),
-            root: spec::InputBindingNodeSpec::Cell(Box::new(spec::InputBindingCellSpec {
-                field_path: spec::PublicFieldPath::new("input").map_err(display_error)?,
-                cell_id: fixture.input_cell,
-                semantic_type_id: SemanticTypeId::new(
-                    "mfm.typed_slice",
-                    "value",
-                    "1",
-                    DigestAlgorithm::Sha256JcsV1,
-                    bytes(0x22),
-                )
-                .map_err(display_error)?,
-                schema_id: fixture.input_schema_for_cell,
-                required_terminal: spec::RequiredTerminal::ProducedOnly,
-                value_lineage: fixture.input_lineage,
-            })),
-            digest: content(0x91),
-        },
-        output_cell: fixture.output_cell,
-        effect_kind: fixture.effect_kind,
-        capability_bindings: fixture.caps,
-        adapter_bindings: fixture.adapter_bindings,
-        side_effect: None,
-        framework: None,
-        planning_lineage: fixture.planning,
-        deterministic_predecessors: fixture.predecessors,
-    })
-}
-
-struct RenderNodeSpecFixture {
-    node_id: NodeId,
-    descriptor_id: DescriptorId,
-    scope_id: ScopeId,
-    config_ref: spec::ConfigRef,
-    public_output_cell: spec::PublicOutputCell,
-    public_outputs: spec::PublicOutputSpec,
-    render_cell: CellId,
-    planning: spec::PlanningLineage,
-}
-
-fn render_node_spec(fixture: RenderNodeSpecFixture) -> Result<spec::NodeSpec, String> {
-    let render_input_root = spec::InputBindingNodeSpec::Struct(vec![spec::NamedInputBindingSpec {
-        field_path: fixture.public_output_cell.public_field_path.clone(),
-        node: spec::InputBindingNodeSpec::Cell(Box::new(spec::InputBindingCellSpec {
-            field_path: fixture.public_output_cell.public_field_path.clone(),
-            cell_id: fixture.public_output_cell.cell_id.clone(),
-            semantic_type_id: fixture.public_output_cell.semantic_type_id.clone(),
-            schema_id: fixture.public_output_cell.schema_id.clone(),
-            required_terminal: fixture.public_output_cell.required_terminal,
-            value_lineage: fixture.public_output_cell.value_lineage.clone(),
-        })),
-    }]);
-    let managed_effect = ManagedPlatformWrite::descriptor().map_err(display_error)?;
-    let output_spec_digest = fixture.public_outputs.digest().map_err(display_error)?;
-    let public_schema_id = fixture.public_outputs.public_schema_id.clone();
-    let renderer_descriptor = fixture.public_outputs.renderer_descriptor.clone();
-    let required_cells = fixture.public_outputs.outputs.clone();
-    Ok(spec::NodeSpec {
-        node_id: fixture.node_id.clone(),
-        stable_key: spec::StableAuthorKey::new("public-output").map_err(display_error)?,
-        scope_id: fixture.scope_id,
-        state_kind: StateKind::new(
-            "mfm.framework.state",
-            "render_public_outputs",
-            DigestAlgorithm::Sha256JcsV1,
-            bytes(0x92),
-        )
-        .map_err(display_error)?,
-        state_version: StateVersion::new("mfm.framework.state.render_public_outputs.v1")
-            .map_err(display_error)?,
-        descriptor_id: fixture.descriptor_id,
-        config_ref: fixture.config_ref,
-        input_bindings: spec::InputBindingSpec {
-            input_schema_id: fixture.public_outputs.public_schema_id.clone(),
-            input_descriptor_id: descriptor(0x93),
-            digest: content_digest_json(input_node_json(&render_input_root))?,
-            root: render_input_root,
-        },
-        output_cell: fixture.render_cell,
-        effect_kind: managed_effect.kind,
-        capability_bindings: CapabilitySetDescriptor::new(Vec::new()).map_err(display_error)?,
-        adapter_bindings: Vec::new(),
-        side_effect: None,
-        framework: Some(spec::FrameworkNodeSpec::PublicOutputRender(
-            spec::PublicOutputRenderNodeSpec {
-                public_schema_id,
-                output_spec_digest,
-                renderer_descriptor,
-                required_cells,
-            },
-        )),
-        planning_lineage: fixture.planning,
-        deterministic_predecessors: vec![match fixture.public_output_cell.producer {
-            spec::CellProducer::Node(node_id) => node_id,
-            spec::CellProducer::Seed(_) => {
-                return Err("public output render requires node-produced cell".to_owned())
-            }
-        }],
-    })
-}
-
-fn state_descriptor(
-    node: &spec::NodeSpec,
-    descriptor_id: DescriptorId,
-    name: &str,
-    effect_kind: EffectKind,
-    capabilities: CapabilitySetDescriptor,
-    runner: &str,
-    side_effect_contract_digest: Option<ContentDigest>,
-) -> Result<spec::StateDescriptorIdentity, String> {
-    Ok(spec::StateDescriptorIdentity {
-        descriptor_id,
-        name: name.to_owned(),
-        state_kind: node.state_kind.clone(),
-        state_version: node.state_version.clone(),
-        config_schema_id: node.config_ref.schema_id.clone(),
-        input_schema_id: node.input_bindings.input_schema_id.clone(),
-        output_schema_id: SchemaId::new(
-            "mfm.typed_slice.value",
-            "1",
-            DigestAlgorithm::Sha256JcsV1,
-            bytes(0x23),
-        )
-        .map_err(display_error)?,
-        output_semantic_type_id: SemanticTypeId::new(
-            "mfm.typed_slice",
-            "value",
-            "1",
-            DigestAlgorithm::Sha256JcsV1,
-            bytes(0x22),
-        )
-        .map_err(display_error)?,
-        effect_kind,
-        effect_class: runner.to_owned(),
-        effect_name: runner.to_owned(),
-        effect_version: EffectVersion::new("mfm.typed_slice.effect.v1").map_err(display_error)?,
-        capabilities,
-        runner: runner.to_owned(),
-        side_effect_contract_digest,
-    })
-}
-
-fn render_descriptor_identity(
-    node: &spec::NodeSpec,
-    descriptor_id: DescriptorId,
-    public_schema: SchemaId,
-    config_schema: SchemaId,
-) -> Result<spec::StateDescriptorIdentity, String> {
-    let managed_effect = ManagedPlatformWrite::descriptor().map_err(display_error)?;
-    Ok(spec::StateDescriptorIdentity {
-        descriptor_id,
-        name: "mfm.framework.render_public_outputs".to_owned(),
-        state_kind: node.state_kind.clone(),
-        state_version: node.state_version.clone(),
-        config_schema_id: config_schema,
-        input_schema_id: public_schema,
-        output_schema_id: spec::public_output_receipt_schema_id().map_err(display_error)?,
-        output_semantic_type_id: spec::public_output_receipt_semantic_type_id()
-            .map_err(display_error)?,
-        effect_kind: managed_effect.kind,
-        effect_class: managed_effect.class.as_str().to_owned(),
-        effect_name: managed_effect.name.to_owned(),
-        effect_version: managed_effect.version,
-        capabilities: CapabilitySetDescriptor::new(Vec::new()).map_err(display_error)?,
-        runner: "managed_platform_write".to_owned(),
-        side_effect_contract_digest: None,
-    })
-}
-
-fn cell_spec(
-    cell_id: CellId,
-    producer: spec::CellProducer,
-    scope_id: &ScopeId,
-    semantic_type_id: &SemanticTypeId,
-    schema_id: &SchemaId,
-    value_lineage: spec::ValueLineageRef,
-    storage_policy: spec::StoragePolicy,
-) -> spec::CellSpec {
-    spec::CellSpec {
-        cell_id,
-        producer,
-        scope_id: scope_id.clone(),
-        semantic_type_id: semantic_type_id.clone(),
-        schema_id: schema_id.clone(),
-        value_lineage,
-        terminal_policy: spec::CellTerminalPolicy::ProducedOnly,
-        storage_policy,
-        redaction_policy: spec::RedactionPolicy::Public,
-    }
-}
-
-fn value_lineage(
-    lineage_ref: spec::ValueLineageRef,
-    scope_id: &ScopeId,
-    producer: spec::CellProducer,
-    input_cells: Vec<CellId>,
-    config_ref_digest: Option<ContentDigest>,
-    planning_lineage: spec::PlanningLineage,
-    transform_policy: spec::LineageTransformPolicy,
-) -> spec::ValueLineage {
-    spec::ValueLineage {
-        lineage_ref,
-        scope_id: scope_id.clone(),
-        producer,
-        input_cells,
-        config_ref_digest,
-        planning_lineage,
-        domain_keys: Vec::new(),
-        transform_policy,
-    }
 }
 
 fn typed_spec_hash_persisted(run: &ReferenceRun, stream: &[store::KernelEventEnvelope]) -> bool {
@@ -1570,7 +1244,7 @@ async fn side_effect_failure_semantics_are_covered() -> Result<bool, String> {
     let fixture = reference_fixture()?;
     let registry = reference_registry_with_side_effect(
         &fixture,
-        "side-effect",
+        "apply_side_effect",
         FailingSideEffectRunner::new(&fixture),
     )?;
     let scheduler = SerialTypedScheduler::new(registry);
@@ -1603,7 +1277,7 @@ async fn side_effect_ambiguity_blocks_completion() -> Result<bool, String> {
     let fixture = reference_fixture()?;
     let registry = reference_registry_with_side_effect(
         &fixture,
-        "side-effect",
+        "apply_side_effect",
         AmbiguousSideEffectRunner::new(&fixture),
     )?;
     let scheduler = SerialTypedScheduler::new(registry);
@@ -2327,71 +2001,6 @@ fn content_digest_json(value: serde_json::Value) -> Result<ContentDigest, String
     Ok(canonical_json(value)?.content_digest())
 }
 
-fn input_node_json(node: &spec::InputBindingNodeSpec) -> serde_json::Value {
-    match node {
-        spec::InputBindingNodeSpec::Unit => serde_json::json!({ "kind": "unit" }),
-        spec::InputBindingNodeSpec::Cell(cell) => serde_json::json!({
-            "cell_id": cell.cell_id.as_str(),
-            "field_path": cell.field_path.as_str(),
-            "kind": "cell",
-            "required_terminal": match cell.required_terminal {
-                spec::RequiredTerminal::ProducedOnly => "produced_only",
-                spec::RequiredTerminal::MaybeSkipped => "maybe_skipped",
-            },
-            "schema_id": cell.schema_id.as_str(),
-            "semantic_type_id": cell.semantic_type_id.as_str(),
-            "value_lineage": cell.value_lineage.lineage_digest.as_str(),
-        }),
-        spec::InputBindingNodeSpec::Tuple(elements) => serde_json::json!({
-            "elements": elements.iter().map(input_node_json).collect::<Vec<_>>(),
-            "kind": "tuple",
-        }),
-        spec::InputBindingNodeSpec::Struct(fields) => serde_json::json!({
-            "fields": fields.iter().map(|field| {
-                serde_json::json!({
-                    "field_path": field.field_path.as_str(),
-                    "node": input_node_json(&field.node),
-                })
-            }).collect::<Vec<_>>(),
-            "kind": "struct",
-        }),
-        spec::InputBindingNodeSpec::Vec {
-            elements,
-            ordering,
-            domain_keys,
-        } => serde_json::json!({
-            "domain_keys": domain_keys.iter().map(stable_domain_key_ref_json).collect::<Vec<_>>(),
-            "elements": elements.iter().map(input_node_json).collect::<Vec<_>>(),
-            "kind": "vec",
-            "ordering": ordering_json(*ordering),
-        }),
-        spec::InputBindingNodeSpec::NonEmptyVec {
-            elements,
-            ordering,
-            domain_keys,
-        } => serde_json::json!({
-            "domain_keys": domain_keys.iter().map(stable_domain_key_ref_json).collect::<Vec<_>>(),
-            "elements": elements.iter().map(input_node_json).collect::<Vec<_>>(),
-            "kind": "non_empty_vec",
-            "ordering": ordering_json(*ordering),
-        }),
-    }
-}
-
-fn ordering_json(ordering: spec::OrderingEvidence) -> &'static str {
-    match ordering {
-        spec::OrderingEvidence::ExplicitAuthorOrder => "explicit_author_order",
-        spec::OrderingEvidence::StableDomainKey => "stable_domain_key",
-    }
-}
-
-fn stable_domain_key_ref_json(key: &spec::StableDomainKeyRef) -> serde_json::Value {
-    serde_json::json!({
-        "content_digest": key.content_digest.as_str(),
-        "schema_id": key.schema_id.as_str(),
-    })
-}
-
 fn executable(factory: &str) -> Result<events::ExecutableIdentity, String> {
     Ok(events::ExecutableIdentity {
         factory_id: events::RunnerFactoryId::new(factory).map_err(display_error)?,
@@ -2455,34 +2064,12 @@ fn artifact(byte: u8) -> ArtifactId {
     ArtifactId::from_digest(DigestAlgorithm::Sha256JcsV1, bytes(byte))
 }
 
-fn descriptor(byte: u8) -> DescriptorId {
-    DescriptorId::from_digest(DigestAlgorithm::Sha256JcsV1, bytes(byte))
-}
-
-fn node(byte: u8) -> NodeId {
-    NodeId::from_digest(DigestAlgorithm::Sha256JcsV1, bytes(byte))
-}
-
-fn cell(byte: u8) -> CellId {
-    CellId::from_digest(DigestAlgorithm::Sha256JcsV1, bytes(byte))
-}
-
-fn scope(byte: u8) -> ScopeId {
-    ScopeId::from_digest(DigestAlgorithm::Sha256JcsV1, bytes(byte))
-}
-
-fn seed_id(byte: u8) -> SeedId {
-    SeedId::from_digest(DigestAlgorithm::Sha256JcsV1, bytes(byte))
+fn artifact_id_for_digest(digest: &ContentDigest) -> ArtifactId {
+    ArtifactId::from_digest(digest.algorithm(), *digest.digest())
 }
 
 fn run_id(byte: u8) -> RunId {
     RunId::from_digest(DigestAlgorithm::Sha256JcsV1, bytes(byte))
-}
-
-fn lineage(byte: u8) -> spec::ValueLineageRef {
-    spec::ValueLineageRef {
-        lineage_digest: content(byte),
-    }
 }
 
 fn state_kind(name: &str, byte: u8) -> Result<StateKind, String> {

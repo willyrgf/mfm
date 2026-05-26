@@ -22,6 +22,7 @@ use std::sync::Arc;
 
 use mfm_artifact_store_fs::{FsTypedArtifactError, FsTypedArtifactStore, TypedArtifactDescriptor};
 use mfm_canonical::sha256_digest_bytes;
+use mfm_certify::{certify_typed_spec, CertificationRegistry, CertifiedTypedSpec};
 use mfm_events::v1 as events;
 use mfm_ids::{ArtifactId, DigestAlgorithm, EventId, RunId, SchemaId, SeedId, SpecHash};
 use mfm_replay::v1::{ReplayAuthority, ReplayBroker, ReplayError};
@@ -176,6 +177,16 @@ impl From<mfm_spec::SpecError> for AppError {
     }
 }
 
+impl From<mfm_certify::CertifyError> for AppError {
+    fn from(error: mfm_certify::CertifyError) -> Self {
+        Self::new(
+            ErrorClass::BadRequest,
+            "TypedCertificationFailed",
+            error.to_string(),
+        )
+    }
+}
+
 /// Returns the default typed artifact root from `MFM_TYPED_ARTIFACT_ROOT` or
 /// `$HOME/.mfm/typed_run_artifacts`.
 #[allow(clippy::disallowed_methods)]
@@ -289,8 +300,8 @@ pub enum DriveMode {
 /// Request to start a certified typed run.
 #[derive(Debug, Clone)]
 pub struct TypedRunStartRequest {
-    /// Hash-only typed spec envelope.
-    pub envelope: spec::HashedSpecEnvelope,
+    /// Certifier-backed typed spec authority.
+    pub certified_spec: CertifiedTypedSpec,
     /// Store-owned run id to bind.
     pub run_id: RunId,
     /// Run-start evidence whose artifacts must already be persisted in the typed artifact store.
@@ -313,8 +324,8 @@ pub struct TypedSeedInput {
 /// Request to resume a certified typed run.
 #[derive(Debug, Clone)]
 pub struct TypedRunResumeRequest {
-    /// Hash-only typed spec envelope bound to the run.
-    pub envelope: spec::HashedSpecEnvelope,
+    /// Certifier-backed typed spec authority bound to the run.
+    pub certified_spec: CertifiedTypedSpec,
     /// Run id to resume.
     pub run_id: RunId,
     /// Scheduler drive policy.
@@ -567,7 +578,7 @@ where
         &self,
         req: TypedRunStartRequest,
     ) -> Result<TypedRunResponse, AppError> {
-        let runtime_spec = CertifiedRuntimeSpec::new(req.envelope)?;
+        let runtime_spec = CertifiedRuntimeSpec::new(req.certified_spec)?;
         self.validate_launch_artifacts(&runtime_spec, &req.evidence)
             .await?;
         let mut store = self.store.lock().await;
@@ -584,7 +595,7 @@ where
         &self,
         req: TypedRunResumeRequest,
     ) -> Result<TypedRunResponse, AppError> {
-        let runtime_spec = CertifiedRuntimeSpec::new(req.envelope)?;
+        let runtime_spec = CertifiedRuntimeSpec::new(req.certified_spec)?;
         let mut store = self.store.lock().await;
         let stream = store.load_run_stream(&req.run_id);
         if stream.is_empty() {
@@ -652,8 +663,7 @@ where
                 "typed run stream was not found",
             ));
         }
-        let envelope = load_certified_spec_for_run(&self.artifacts, run_id, &stream).await?;
-        let runtime_spec = CertifiedRuntimeSpec::new(envelope)?;
+        let runtime_spec = load_runtime_spec_for_run(&self.artifacts, run_id, &stream).await?;
         validate_run_stream(&runtime_spec, run_id, &stream)?;
         typed_public_output_from_stream(&self.artifacts, run_id, public_schema_id, &stream).await
     }
@@ -792,7 +802,7 @@ where
         &self,
         req: TypedRunStartRequest,
     ) -> Result<TypedRunResponse, AppError> {
-        let runtime_spec = CertifiedRuntimeSpec::new(req.envelope)?;
+        let runtime_spec = CertifiedRuntimeSpec::new(req.certified_spec)?;
         validate_launch_artifacts(&self.artifacts, &runtime_spec, &req.evidence).await?;
         self.scheduler
             .start_run_async(&self.store, &runtime_spec, req.run_id.clone(), req.evidence)
@@ -825,8 +835,7 @@ where
                 "typed run stream was not found",
             ));
         }
-        let envelope = load_certified_spec_for_run(&self.artifacts, run_id, &stream).await?;
-        let runtime_spec = CertifiedRuntimeSpec::new(envelope)?;
+        let runtime_spec = load_runtime_spec_for_run(&self.artifacts, run_id, &stream).await?;
         validate_run_stream(&runtime_spec, run_id, &stream)?;
         let status = self.drive_with_mode(&runtime_spec, run_id, drive).await?;
         let stream = self
@@ -914,8 +923,7 @@ where
                 "typed run stream was not found",
             ));
         }
-        let envelope = load_certified_spec_for_run(&self.artifacts, run_id, &stream).await?;
-        let runtime_spec = CertifiedRuntimeSpec::new(envelope)?;
+        let runtime_spec = load_runtime_spec_for_run(&self.artifacts, run_id, &stream).await?;
         validate_run_stream(&runtime_spec, run_id, &stream)?;
         typed_public_output_from_stream(&self.artifacts, run_id, public_schema_id, &stream).await
     }
@@ -1020,6 +1028,34 @@ pub async fn load_certified_spec_for_run(
     envelope.verify_hash()?;
     validate_run_started_matches_spec(run_started, &envelope)?;
     Ok(envelope)
+}
+
+async fn load_runtime_spec_for_run(
+    artifacts: &FsTypedArtifactStore,
+    run_id: &RunId,
+    stream: &[store::KernelEventEnvelope],
+) -> Result<CertifiedRuntimeSpec, AppError> {
+    let envelope = load_certified_spec_for_run(artifacts, run_id, stream).await?;
+    let certified = certify_lowered_spec_with_embedded_registry(envelope.spec)?;
+    CertifiedRuntimeSpec::new(certified).map_err(Into::into)
+}
+
+fn certify_lowered_spec_with_embedded_registry(
+    spec: spec::TypedExecutionSpec,
+) -> Result<CertifiedTypedSpec, AppError> {
+    let mut registry = CertificationRegistry::new();
+    for descriptor in &spec.descriptor_identities {
+        match descriptor {
+            spec::DescriptorIdentity::State(identity) => registry
+                .register_state_descriptor((**identity).clone())
+                .map_err(AppError::from)?,
+            spec::DescriptorIdentity::Operation(identity) => registry
+                .register_operation_descriptor((**identity).clone())
+                .map_err(AppError::from)?,
+            spec::DescriptorIdentity::Renderer(_) => {}
+        }
+    }
+    certify_typed_spec(spec, &registry).map_err(AppError::from)
 }
 
 /// Builds replay authority from retained artifact evidence in the run stream.
@@ -1204,7 +1240,7 @@ pub fn json_media_type() -> Result<spec::MediaType, AppError> {
     })
 }
 
-/// Builds a typed run-start request from persisted spec JSON bytes and launch inputs.
+/// Builds a typed run-start request by certifying persisted spec JSON bytes and launch inputs.
 pub async fn build_typed_run_start_request(
     artifacts: &FsTypedArtifactStore,
     spec_bytes: &[u8],
@@ -1221,13 +1257,35 @@ pub async fn build_typed_run_start_request(
             error.to_string(),
         )
     })?;
-    let envelope = spec::HashedSpecEnvelope::new(spec, spec::TypedExecutionSpecAudit::default())?;
-    let runtime_spec = CertifiedRuntimeSpec::new(envelope.clone())?;
+    let certified_spec = certify_lowered_spec_with_embedded_registry(spec)?;
+    build_certified_typed_run_start_request(
+        artifacts,
+        certified_spec,
+        run_id,
+        framework_version,
+        source_revision,
+        seed_inputs,
+        drive,
+    )
+    .await
+}
+
+/// Builds a typed run-start request from certifier-backed typed spec authority and launch inputs.
+pub async fn build_certified_typed_run_start_request(
+    artifacts: &FsTypedArtifactStore,
+    certified_spec: CertifiedTypedSpec,
+    run_id: RunId,
+    framework_version: &str,
+    source_revision: &str,
+    seed_inputs: Vec<TypedSeedInput>,
+    drive: DriveMode,
+) -> Result<TypedRunStartRequest, AppError> {
+    let runtime_spec = CertifiedRuntimeSpec::new(certified_spec.clone())?;
     let spec_artifact = persist_certified_spec_artifact(artifacts, &runtime_spec).await?;
     let config_artifacts = load_config_artifacts_for_spec(artifacts, &runtime_spec).await?;
     let seed_cells = persist_seed_inputs_for_spec(artifacts, &runtime_spec, seed_inputs).await?;
     Ok(TypedRunStartRequest {
-        envelope,
+        certified_spec,
         run_id,
         evidence: RunStartEvidence {
             spec_artifact,
@@ -1768,14 +1826,20 @@ fn typed_event_ref(event: &store::KernelEventEnvelope) -> TypedRunEventRef {
 #[allow(clippy::disallowed_methods)]
 mod tests {
     use super::*;
-    use mfm_capabilities::{CapabilitySetDescriptor, EffectSpec, ManagedPlatformWrite, Pure};
+    use mfm_capabilities::{NoCaps, Pure};
     use mfm_ids::{AttemptId, DescriptorId, LoweringVersion, SpecVersion, StateKind, StateVersion};
     use mfm_ids::{CellId, ContentDigest, DigestBytes, NodeId, ScopeId, SeedId, SemanticTypeId};
+    use mfm_program::{
+        build_root_with_registries, CanonicalSeed, PublicOutputKey, PureState, RootBuilder,
+        ScopeKey, SeedKey, StateKey, StateRegistryBuilder, StateResult, StateSpec,
+    };
+    use mfm_program_derive::{MfmConfig, MfmValue, PublicOutputs};
     use mfm_runtime::{
         ErasedNodeRunner, ErasedRunCtx, ErasedRunnerBinding, ErasedRunnerFuture,
         ErasedRunnerOutput, StagedRetentionRefs,
     };
     use mfm_store::v1::{AsyncTypedRunEventStore, TypedRunEventStore};
+    use serde::{Deserialize, Serialize};
     use std::collections::{BTreeMap, BTreeSet};
     use std::sync::Arc;
     use std::sync::Mutex as StdMutex;
@@ -2146,24 +2210,12 @@ mod tests {
         ));
         let artifacts = FsTypedArtifactStore::new(&root);
         let fixture = framework_seed_public_output_fixture();
-        artifacts
-            .put_artifact(
-                fixture.config_bytes.clone(),
-                TypedArtifactDescriptor {
-                    media_type: spec::MediaType::new("application/json").expect("media type"),
-                    schema_id: Some(fixture.config_schema_id.clone()),
-                    semantic_type_id: None,
-                    producer_node_id: None,
-                    producer_seed_id: None,
-                    artifact_role: events::ArtifactRole::TypedConfig,
-                },
-            )
-            .await
-            .expect("persist config artifact");
-        let canonical_spec = fixture.spec.canonical_json().expect("canonical spec");
-        let request = build_typed_run_start_request(
+        persist_draft_config_artifacts(&artifacts, &fixture.draft).await;
+        persist_framework_config_artifacts(&artifacts, &fixture.certified_spec.envelope().spec)
+            .await;
+        let request = build_certified_typed_run_start_request(
             &artifacts,
-            canonical_spec.as_bytes(),
+            fixture.certified_spec.clone(),
             fixture.run_id.clone(),
             "mfm.test.framework",
             "test-source",
@@ -2272,20 +2324,9 @@ mod tests {
         ));
         let artifacts = FsTypedArtifactStore::new(&root);
         let fixture = framework_seed_public_output_fixture();
-        artifacts
-            .put_artifact(
-                fixture.config_bytes.clone(),
-                TypedArtifactDescriptor {
-                    media_type: spec::MediaType::new("application/json").expect("media type"),
-                    schema_id: Some(fixture.config_schema_id.clone()),
-                    semantic_type_id: None,
-                    producer_node_id: None,
-                    producer_seed_id: None,
-                    artifact_role: events::ArtifactRole::TypedConfig,
-                },
-            )
-            .await
-            .expect("persist config artifact");
+        persist_draft_config_artifacts(&artifacts, &fixture.draft).await;
+        persist_framework_config_artifacts(&artifacts, &fixture.certified_spec.envelope().spec)
+            .await;
         artifacts
             .put_artifact(
                 fixture.output_bytes.clone(),
@@ -2300,10 +2341,9 @@ mod tests {
             )
             .await
             .expect("persist runner output artifact");
-        let canonical_spec = fixture.spec.canonical_json().expect("canonical spec");
-        let request = build_typed_run_start_request(
+        let request = build_certified_typed_run_start_request(
             &artifacts,
-            canonical_spec.as_bytes(),
+            fixture.certified_spec.clone(),
             fixture.run_id.clone(),
             "mfm.test.framework",
             "test-source",
@@ -2317,7 +2357,7 @@ mod tests {
         .await
         .expect("typed run request");
         let mut runners = ErasedRunnerRegistry::new();
-        let factory_id = events::RunnerFactoryId::new("test-value").expect("factory id");
+        let factory_id = fixture.value_runner_factory_id.clone();
         runners
             .register(
                 ErasedRunnerBinding::new(
@@ -2615,18 +2655,94 @@ mod tests {
     }
 
     struct FrameworkSeedPublicOutputFixture {
-        spec: spec::TypedExecutionSpec,
+        draft: mfm_program::TypedProgramDraft,
+        certified_spec: CertifiedTypedSpec,
         run_id: RunId,
         seed_id: SeedId,
         seed_bytes: Vec<u8>,
         output_bytes: Vec<u8>,
-        config_bytes: Vec<u8>,
-        config_schema_id: SchemaId,
         value_schema_id: SchemaId,
         semantic_type_id: SemanticTypeId,
         value_node_id: NodeId,
         value_descriptor_id: DescriptorId,
+        value_runner_factory_id: events::RunnerFactoryId,
         public_schema_id: SchemaId,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
+    #[mfm(
+        namespace = "mfm.app.test",
+        name = "framework_input",
+        version = "1",
+        schema = "mfm.app.test.framework_input"
+    )]
+    struct FrameworkInput {
+        input: String,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
+    #[mfm(
+        namespace = "mfm.app.test",
+        name = "framework_output",
+        version = "1",
+        schema = "mfm.app.test.framework_output"
+    )]
+    struct FrameworkOutput {
+        total: String,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmConfig)]
+    struct FrameworkConfig {
+        version: u64,
+    }
+
+    #[derive(PublicOutputs)]
+    #[mfm(schema = "mfm.app.test.framework_public")]
+    struct FrameworkPublicOutputs<'program, 'scope> {
+        result: mfm_program::Handle<'program, 'scope, FrameworkOutput>,
+    }
+
+    struct FrameworkValueState {
+        _config: FrameworkConfig,
+    }
+
+    impl StateSpec for FrameworkValueState {
+        type Config = FrameworkConfig;
+        type Input = FrameworkInput;
+        type Output = FrameworkOutput;
+        type Effect = Pure;
+        type Caps = NoCaps;
+
+        fn kind() -> mfm_program::Result<StateKind> {
+            StateKind::new(
+                "mfm.app.test",
+                "framework_value",
+                DigestAlgorithm::Sha256JcsV1,
+                digest(0xbf),
+            )
+            .map_err(|error| mfm_program::PlanError::Key(error.to_string()))
+        }
+
+        fn version() -> mfm_program::Result<StateVersion> {
+            StateVersion::new("mfm.app.test.framework_value.v1")
+                .map_err(|error| mfm_program::PlanError::Key(error.to_string()))
+        }
+
+        fn name() -> &'static str {
+            "mfm.app.test.framework_value"
+        }
+
+        fn new(config: Self::Config) -> mfm_program::Result<Self> {
+            Ok(Self { _config: config })
+        }
+    }
+
+    impl PureState for FrameworkValueState {
+        fn run(&self, _input: Self::Input) -> StateResult<Self::Output> {
+            Ok(FrameworkOutput {
+                total: "12.50".to_owned(),
+            })
+        }
     }
 
     struct TestValueRunner {
@@ -2704,310 +2820,87 @@ mod tests {
 
     fn framework_seed_public_output_fixture() -> FrameworkSeedPublicOutputFixture {
         let run_id = RunId::from_digest(DigestAlgorithm::Sha256JcsV1, digest(0xa0));
-        let scope_id = scope_id(0xa1);
-        let seed_id = seed_id(0xa2);
-        let seed_cell = cell_id(0xa3);
-        let value_node = node_id(0xa4);
-        let render_node = node_id(0xa5);
-        let value_cell = cell_id(0xa6);
-        let render_cell = cell_id(0xa7);
-        let value_descriptor_id = descriptor_id(0xa8);
-        let render_descriptor_id = descriptor_id(0xa9);
-        let renderer_descriptor_id = descriptor_id(0xaa);
-        let composition_descriptor_id = descriptor_id(0xab);
-        let semantic_type_id = semantic_id("framework-seed-value", 0xac);
-        let value_schema_id = schema_id("mfm.test.framework_seed_value", 0xad);
-        let public_schema_id = schema_id("mfm.test.framework_seed_public", 0xae);
-        let config_schema_id = schema_id("mfm.test.framework_seed_config", 0xaf);
-        let seed_lineage = spec::ValueLineageRef {
-            lineage_digest: content_digest(0xb0),
-        };
-        let value_lineage = spec::ValueLineageRef {
-            lineage_digest: content_digest(0xb1),
-        };
-        let render_lineage = spec::ValueLineageRef {
-            lineage_digest: content_digest(0xb2),
-        };
-        let planning_lineage = spec::PlanningLineage {
-            active_operation_instances: Vec::new(),
-            completed_operation_frames: Vec::new(),
-            lineage_digest: content_digest(0xb3),
-        };
-        let config_bytes = b"{}".to_vec();
-        let config_digest = content_digest_for_bytes(&config_bytes);
-        let config_ref = spec::ConfigRef {
-            schema_id: config_schema_id.clone(),
-            artifact_id: artifact_id_for_digest(&config_digest),
-            digest: config_digest.clone(),
-            byte_len: config_bytes.len() as u64,
-            media_type: spec::MediaType::new("application/json").expect("media type"),
-        };
-        let seed_bytes = br#"{"input":"start"}"#.to_vec();
-        let seed_digest = content_digest_for_bytes(&seed_bytes);
-        let output_bytes = br#"{"total":"12.50"}"#.to_vec();
-        let public_output_cell = spec::PublicOutputCell {
-            public_field_path: spec::PublicFieldPath::new("result").expect("field path"),
-            cell_id: value_cell.clone(),
-            producer: spec::CellProducer::Node(value_node.clone()),
-            scope_id: scope_id.clone(),
-            semantic_type_id: semantic_type_id.clone(),
-            schema_id: value_schema_id.clone(),
-            value_lineage: value_lineage.clone(),
-            required_terminal: spec::RequiredTerminal::ProducedOnly,
-        };
-        let renderer_descriptor = spec::RendererDescriptorIdentity {
-            descriptor_id: renderer_descriptor_id,
-            renderer_kind: spec::RendererKind::new("public-output/json").expect("renderer kind"),
-            renderer_version: spec::RendererVersion::new("mfm.test.renderer.v1")
-                .expect("renderer version"),
-            public_schema_id: public_schema_id.clone(),
-            canonicalizer_identity: spec::CanonicalizerIdentity::new("sha256-jcs-v1")
-                .expect("canonicalizer"),
-        };
-        let public_outputs = spec::PublicOutputSpec {
-            public_schema_id: public_schema_id.clone(),
-            outputs: vec![public_output_cell.clone()],
-            renderer_descriptor: renderer_descriptor.clone(),
-        };
-        let value_input_root =
-            spec::InputBindingNodeSpec::Cell(Box::new(spec::InputBindingCellSpec {
-                field_path: spec::PublicFieldPath::new("input").expect("field path"),
-                cell_id: seed_cell.clone(),
-                semantic_type_id: semantic_type_id.clone(),
-                schema_id: value_schema_id.clone(),
-                required_terminal: spec::RequiredTerminal::ProducedOnly,
-                value_lineage: seed_lineage.clone(),
-            }));
-        let render_input_root =
-            spec::InputBindingNodeSpec::Struct(vec![spec::NamedInputBindingSpec {
-                field_path: public_output_cell.public_field_path.clone(),
-                node: spec::InputBindingNodeSpec::Cell(Box::new(spec::InputBindingCellSpec {
-                    field_path: public_output_cell.public_field_path.clone(),
-                    cell_id: value_cell.clone(),
-                    semantic_type_id: semantic_type_id.clone(),
-                    schema_id: value_schema_id.clone(),
-                    required_terminal: spec::RequiredTerminal::ProducedOnly,
-                    value_lineage: value_lineage.clone(),
-                })),
-            }]);
-        let value_state_kind = state_kind(0xb4);
-        let render_state_kind = StateKind::new(
-            "mfm.framework.state",
-            "render_public_outputs",
-            DigestAlgorithm::Sha256JcsV1,
-            digest(0xb5),
-        )
-        .expect("state kind");
-        let pure_effect = Pure::descriptor().expect("pure effect");
-        let managed_effect = ManagedPlatformWrite::descriptor().expect("managed effect");
-        let output_spec_digest = public_outputs.digest().expect("public output digest");
-        let value_node_spec = spec::NodeSpec {
-            node_id: value_node.clone(),
-            stable_key: spec::StableAuthorKey::new("value").expect("stable key"),
-            scope_id: scope_id.clone(),
-            state_kind: value_state_kind.clone(),
-            state_version: StateVersion::new("mfm.test.value.v1").expect("state version"),
-            descriptor_id: value_descriptor_id.clone(),
-            config_ref: config_ref.clone(),
-            input_bindings: spec::InputBindingSpec {
-                input_schema_id: value_schema_id.clone(),
-                input_descriptor_id: descriptor_id(0xb6),
-                root: value_input_root,
-                digest: content_digest(0xb7),
-            },
-            output_cell: value_cell.clone(),
-            effect_kind: pure_effect.kind.clone(),
-            capability_bindings: CapabilitySetDescriptor::new(Vec::new()).expect("capability set"),
-            adapter_bindings: Vec::new(),
-            side_effect: None,
-            framework: None,
-            planning_lineage: planning_lineage.clone(),
-            deterministic_predecessors: Vec::new(),
-        };
-        let render_node_spec = spec::NodeSpec {
-            node_id: render_node.clone(),
-            stable_key: spec::StableAuthorKey::new("public-output").expect("stable key"),
-            scope_id: scope_id.clone(),
-            state_kind: render_state_kind.clone(),
-            state_version: StateVersion::new("mfm.framework.state.render_public_outputs.v1")
-                .expect("state version"),
-            descriptor_id: render_descriptor_id.clone(),
-            config_ref: config_ref.clone(),
-            input_bindings: spec::InputBindingSpec {
-                input_schema_id: public_schema_id.clone(),
-                input_descriptor_id: descriptor_id(0xb8),
-                root: render_input_root,
-                digest: content_digest(0xb9),
-            },
-            output_cell: render_cell.clone(),
-            effect_kind: managed_effect.kind.clone(),
-            capability_bindings: CapabilitySetDescriptor::new(Vec::new()).expect("capability set"),
-            adapter_bindings: Vec::new(),
-            side_effect: None,
-            framework: Some(spec::FrameworkNodeSpec::PublicOutputRender(
-                spec::PublicOutputRenderNodeSpec {
-                    public_schema_id: public_schema_id.clone(),
-                    output_spec_digest,
-                    renderer_descriptor: renderer_descriptor.clone(),
-                    required_cells: vec![public_output_cell],
-                },
-            )),
-            planning_lineage: planning_lineage.clone(),
-            deterministic_predecessors: vec![value_node.clone()],
-        };
-        let spec = spec::TypedExecutionSpec::new(spec::TypedExecutionSpecParts {
-            authoring: spec::AuthoringProvenance::StateComposition {
-                descriptor: spec::CompositionDescriptor {
-                    descriptor_id: composition_descriptor_id,
-                    name: "mfm.test.framework_seed_public_output".to_owned(),
-                    version: "mfm.test.framework_seed_public_output.v1".to_owned(),
-                },
-                config_hash: config_digest.clone(),
-            },
-            scopes: vec![spec::ScopeSpec {
-                scope_id: scope_id.clone(),
-                parent_scope_id: None,
-                stable_key: spec::StableAuthorKey::new("root").expect("stable key"),
-                planning_lineage: planning_lineage.clone(),
-            }],
-            seeds: vec![spec::SeedSpec {
-                seed_id: seed_id.clone(),
-                seed_key: spec::StableAuthorKey::new("launch").expect("stable key"),
-                cell_id: seed_cell.clone(),
-                scope_id: scope_id.clone(),
-                semantic_type_id: semantic_type_id.clone(),
-                schema_id: value_schema_id.clone(),
-                required_digest: Some(seed_digest),
-            }],
-            descriptor_identities: vec![
-                spec::DescriptorIdentity::State(Box::new(spec::StateDescriptorIdentity {
-                    descriptor_id: value_descriptor_id.clone(),
-                    name: "mfm.test.value".to_owned(),
-                    state_kind: value_state_kind,
-                    state_version: StateVersion::new("mfm.test.value.v1").expect("state version"),
-                    config_schema_id: config_schema_id.clone(),
-                    input_schema_id: value_schema_id.clone(),
-                    output_schema_id: value_schema_id.clone(),
-                    output_semantic_type_id: semantic_type_id.clone(),
-                    effect_kind: pure_effect.kind,
-                    effect_class: pure_effect.class.as_str().to_owned(),
-                    effect_name: pure_effect.name.to_owned(),
-                    effect_version: pure_effect.version,
-                    capabilities: CapabilitySetDescriptor::new(Vec::new()).expect("capability set"),
-                    runner: "test-value".to_owned(),
-                    side_effect_contract_digest: None,
-                })),
-                spec::DescriptorIdentity::State(Box::new(spec::StateDescriptorIdentity {
-                    descriptor_id: render_descriptor_id,
-                    name: "mfm.framework.render_public_outputs".to_owned(),
-                    state_kind: render_state_kind,
-                    state_version: StateVersion::new(
-                        "mfm.framework.state.render_public_outputs.v1",
-                    )
-                    .expect("state version"),
-                    config_schema_id: config_schema_id.clone(),
-                    input_schema_id: public_schema_id.clone(),
-                    output_schema_id: spec::public_output_receipt_schema_id()
-                        .expect("receipt schema"),
-                    output_semantic_type_id: spec::public_output_receipt_semantic_type_id()
-                        .expect("receipt semantic"),
-                    effect_kind: managed_effect.kind,
-                    effect_class: managed_effect.class.as_str().to_owned(),
-                    effect_name: managed_effect.name.to_owned(),
-                    effect_version: managed_effect.version,
-                    capabilities: CapabilitySetDescriptor::new(Vec::new()).expect("capability set"),
-                    runner: "managed_platform_write".to_owned(),
-                    side_effect_contract_digest: None,
-                })),
-                spec::DescriptorIdentity::Renderer(Box::new(renderer_descriptor)),
-            ],
-            config_refs: vec![config_ref.clone()],
-            nodes: vec![render_node_spec, value_node_spec],
-            cells: vec![
-                spec::CellSpec {
-                    cell_id: seed_cell.clone(),
-                    producer: spec::CellProducer::Seed(seed_id.clone()),
-                    scope_id: scope_id.clone(),
-                    semantic_type_id: semantic_type_id.clone(),
-                    schema_id: value_schema_id.clone(),
-                    value_lineage: seed_lineage.clone(),
-                    terminal_policy: spec::CellTerminalPolicy::ProducedOnly,
-                    storage_policy: spec::StoragePolicy::ContentAddressed,
-                    redaction_policy: spec::RedactionPolicy::Public,
-                },
-                spec::CellSpec {
-                    cell_id: value_cell.clone(),
-                    producer: spec::CellProducer::Node(value_node.clone()),
-                    scope_id: scope_id.clone(),
-                    semantic_type_id: semantic_type_id.clone(),
-                    schema_id: value_schema_id.clone(),
-                    value_lineage: value_lineage.clone(),
-                    terminal_policy: spec::CellTerminalPolicy::ProducedOnly,
-                    storage_policy: spec::StoragePolicy::ContentAddressed,
-                    redaction_policy: spec::RedactionPolicy::Public,
-                },
-                spec::CellSpec {
-                    cell_id: render_cell,
-                    producer: spec::CellProducer::Node(render_node),
-                    scope_id: scope_id.clone(),
-                    semantic_type_id: spec::public_output_receipt_semantic_type_id()
-                        .expect("receipt semantic"),
-                    schema_id: spec::public_output_receipt_schema_id().expect("receipt schema"),
-                    value_lineage: render_lineage.clone(),
-                    terminal_policy: spec::CellTerminalPolicy::ProducedOnly,
-                    storage_policy: spec::StoragePolicy::PublicOutputArtifact,
-                    redaction_policy: spec::RedactionPolicy::Public,
-                },
-            ],
-            value_lineages: vec![
-                spec::ValueLineage {
-                    lineage_ref: seed_lineage,
-                    scope_id: scope_id.clone(),
-                    producer: spec::CellProducer::Seed(seed_id.clone()),
-                    input_cells: Vec::new(),
-                    config_ref_digest: None,
-                    planning_lineage: planning_lineage.clone(),
-                    domain_keys: Vec::new(),
-                    transform_policy: spec::LineageTransformPolicy::Source,
-                },
-                spec::ValueLineage {
-                    lineage_ref: value_lineage,
-                    scope_id: scope_id.clone(),
-                    producer: spec::CellProducer::Node(value_node.clone()),
-                    input_cells: vec![seed_cell],
-                    config_ref_digest: Some(config_ref.digest.clone()),
-                    planning_lineage: planning_lineage.clone(),
-                    domain_keys: Vec::new(),
-                    transform_policy: spec::LineageTransformPolicy::StateOutput,
-                },
-                spec::ValueLineage {
-                    lineage_ref: render_lineage,
-                    scope_id,
-                    producer: spec::CellProducer::Node(node_id(0xa5)),
-                    input_cells: vec![value_cell],
-                    config_ref_digest: Some(config_ref.digest),
-                    planning_lineage,
-                    domain_keys: Vec::new(),
-                    transform_policy: spec::LineageTransformPolicy::StateOutput,
-                },
-            ],
-            planning_lineage: Vec::new(),
-            public_outputs,
+        let seed = CanonicalSeed::from_value(&FrameworkInput {
+            input: "start".to_owned(),
         })
-        .expect("typed spec");
+        .expect("canonical seed");
+        let seed_bytes = seed.canonical_json().to_vec();
+        let output_bytes = mfm_canonical::PlainCanonicalJsonBytes::from_json_str(
+            &serde_json::to_string(&FrameworkOutput {
+                total: "12.50".to_owned(),
+            })
+            .expect("output json"),
+        )
+        .expect("canonical output")
+        .to_vec();
+        let mut states = StateRegistryBuilder::new();
+        states
+            .register::<FrameworkValueState>()
+            .expect("state registration");
+        let draft = build_root_with_registries(
+            ScopeKey::new("root").expect("root key"),
+            states.snapshot(),
+            mfm_program::OperationRegistryBuilder::new().snapshot(),
+            |root: &mut RootBuilder<'_, '_>| {
+                let seed = root.seed(SeedKey::new("launch")?, seed.clone())?;
+                let result = root.scope().state::<FrameworkValueState, _>(
+                    StateKey::new("value")?,
+                    FrameworkConfig { version: 1 },
+                    seed,
+                )?;
+                root.bind_public_outputs(
+                    PublicOutputKey::new("public-output")?,
+                    &FrameworkPublicOutputs { result },
+                )
+            },
+        )
+        .expect("program draft");
+        let certified_spec = mfm_certify::certify_program_draft(&draft).expect("certified spec");
+        let spec = &certified_spec.envelope().spec;
+        let public_output_cell = spec
+            .public_outputs
+            .outputs
+            .first()
+            .expect("public output cell");
+        let value_node_id = match &public_output_cell.producer {
+            spec::CellProducer::Node(node_id) => node_id.clone(),
+            spec::CellProducer::Seed(_) => panic!("public output must be node-produced"),
+        };
+        let value_node = spec
+            .nodes
+            .iter()
+            .find(|node| node.node_id == value_node_id)
+            .expect("value node");
+        let seed_id = spec.seeds.first().expect("seed").seed_id.clone();
+        let value_schema_id = public_output_cell.schema_id.clone();
+        let semantic_type_id = public_output_cell.semantic_type_id.clone();
+        let value_descriptor_id = value_node.descriptor_id.clone();
+        let value_runner_factory_id = spec
+            .descriptor_identities
+            .iter()
+            .find_map(|descriptor| match descriptor {
+                spec::DescriptorIdentity::State(identity)
+                    if identity.descriptor_id == value_descriptor_id =>
+                {
+                    Some(events::RunnerFactoryId::new(&identity.runner).expect("runner factory"))
+                }
+                _ => None,
+            })
+            .expect("value descriptor identity");
+        let public_schema_id = spec.public_outputs.public_schema_id.clone();
 
         FrameworkSeedPublicOutputFixture {
-            spec,
+            draft,
+            certified_spec,
             run_id,
             seed_id,
             seed_bytes,
             output_bytes,
-            config_bytes,
-            config_schema_id,
             value_schema_id,
             semantic_type_id,
-            value_node_id: value_node,
+            value_node_id,
             value_descriptor_id,
+            value_runner_factory_id,
             public_schema_id,
         }
     }
@@ -3089,10 +2982,6 @@ mod tests {
 
     fn scope_id(byte: u8) -> ScopeId {
         ScopeId::from_digest(DigestAlgorithm::Sha256JcsV1, digest(byte))
-    }
-
-    fn seed_id(byte: u8) -> SeedId {
-        SeedId::from_digest(DigestAlgorithm::Sha256JcsV1, digest(byte))
     }
 
     fn schema_id(name: &str, byte: u8) -> SchemaId {

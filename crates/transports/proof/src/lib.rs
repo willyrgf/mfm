@@ -1196,8 +1196,8 @@ pub async fn proof_implementation_conformance_summary(
     let config = ProofWorkflowConfig::default();
     let draft = proof_program_draft(config.clone()).map_err(|error| error.to_string())?;
     let certified = certified_proof_spec(config).map_err(|error| error.to_string())?;
-    let runtime_spec = CertifiedRuntimeSpec::new(certified.envelope().clone())
-        .map_err(|error| error.to_string())?;
+    let runtime_spec =
+        CertifiedRuntimeSpec::new(certified.clone()).map_err(|error| error.to_string())?;
     let artifacts = InMemoryProofArtifactSink::default();
     persist_conformance_config_artifacts(&artifacts, &draft, runtime_spec.spec())
         .await

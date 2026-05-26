@@ -511,6 +511,30 @@ impl CertificationRegistry {
         ))
     }
 
+    /// Adds a trusted already-lowered state descriptor identity to this registry.
+    ///
+    /// This is for registry assembly code whose descriptor source is already trusted. Do not derive
+    /// this identity from the same persisted spec that will be certified; persisted spec bytes are
+    /// hostile until [`verify_certified_bundle`] succeeds.
+    pub fn register_state_descriptor(
+        &mut self,
+        descriptor: spec::StateDescriptorIdentity,
+    ) -> Result<()> {
+        self.insert_state(descriptor)
+    }
+
+    /// Adds a trusted already-lowered operation descriptor identity to this registry.
+    ///
+    /// This is for registry assembly code whose descriptor source is already trusted. Do not derive
+    /// this identity from the same persisted spec that will be certified; persisted spec bytes are
+    /// hostile until [`verify_certified_bundle`] succeeds.
+    pub fn register_operation_descriptor(
+        &mut self,
+        descriptor: spec::OperationDescriptorIdentity,
+    ) -> Result<()> {
+        self.insert_operation(descriptor)
+    }
+
     fn from_program_draft(draft: &program::TypedProgramDraft) -> Result<Self> {
         let mut registry = Self::new();
         for node in draft.state_nodes() {

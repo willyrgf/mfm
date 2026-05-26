@@ -129,7 +129,7 @@ pub async fn resume_typed_portfolio_snapshot(
         .expect("typed portfolio append-only run");
     let resumed = services
         .resume_certified_run(TypedRunResumeRequest {
-            envelope: certified.envelope().clone(),
+            certified_spec: certified,
             run_id: run_id.clone(),
             drive: DriveMode::UntilBlocked,
         })

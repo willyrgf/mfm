@@ -265,7 +265,7 @@ async fn parity_reth_deploy_configure_validate_root_op() {
         }
         response = services
             .resume_certified_run(TypedRunResumeRequest {
-                envelope: certified.envelope().clone(),
+                certified_spec: certified.clone(),
                 run_id: run_id.clone(),
                 drive: DriveMode::Once,
             })

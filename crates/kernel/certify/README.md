@@ -8,6 +8,10 @@ registry-backed certification or persisted bundle verification. Persisted spec b
 `verify_certified_bundle` validates hashes, registry digest, descriptor evidence, lowering and
 canonicalizer identity, and the typed spec against the registry.
 
+`CertificationRegistry` is explicit certification authority. Registry assembly may register trusted
+already-lowered descriptor identities, but persisted spec descriptors are not trusted registry input
+until the bundle verifier has accepted the spec/certificate pair.
+
 `RFC_TYPED_CORE_PROPOSAL_1.md` is the authority for this crate during the typed-core rewrite.
 This crate is framework-owned and must remain domain-free. It must not depend on old dynamic
 machine or SDK crates.
