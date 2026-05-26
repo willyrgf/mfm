@@ -50,8 +50,8 @@ Typed kernel crates are framework-owned and domain-free:
 | `crates/kernel/capabilities` | Capability descriptors, roles, and effect-checked capability sets |
 | `crates/kernel/program` | Typed state-program authoring, handles, scopes, registries, lineage, and lowering evidence |
 | `crates/kernel/program-derive` | Derives for typed values, configs, state inputs, operation outputs, and public outputs |
-| `crates/kernel/spec` | Versioned certified typed execution-spec data model |
-| `crates/kernel/certify` | Certification checks and certified spec envelopes |
+| `crates/kernel/spec` | Versioned typed execution-spec data model and hash-only spec envelopes |
+| `crates/kernel/certify` | Certification checks, non-forgeable certified typed-spec authority, and certificate bundles |
 | `crates/kernel/events` | Versioned typed kernel event schemas |
 | `crates/kernel/store` | Typed commit API, side-effect ledger rules, projection contract, and retention refs |
 | `crates/kernel/runtime` | Certified typed scheduler and erased runner boundary |
@@ -165,6 +165,10 @@ The spec hash is computed from canonical bytes. The erased runner plan must be r
 from the certified spec and runner registry. It must not carry semantics missing from the certified
 spec.
 
+`mfm_spec::v1::HashedSpecEnvelope` is not certification authority. Persisted spec bytes, hash-only
+envelopes, and persisted certificate bytes are hostile data until `mfm-certify` verifies them
+against a registry and returns `CertifiedTypedSpec`.
+
 ## Store And Events
 
 `mfm-store` is the only semantic commit contract for certified typed runs. Callers submit typed event
@@ -195,7 +199,8 @@ tests, replay fixtures, and typed workflow ports.
 
 ## Runtime
 
-The runtime starts from a certified spec envelope. Before `RunStarted`, it verifies:
+The runtime authority contract starts from `CertifiedTypedSpec`, not from parsed spec JSON or a
+hash-only envelope. Before `RunStarted`, the assembly/runtime boundary verifies:
 
 - spec hash and schema/version fields
 - seed/config artifact evidence

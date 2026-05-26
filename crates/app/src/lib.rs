@@ -289,8 +289,8 @@ pub enum DriveMode {
 /// Request to start a certified typed run.
 #[derive(Debug, Clone)]
 pub struct TypedRunStartRequest {
-    /// Certified typed spec envelope.
-    pub envelope: spec::CertifiedSpecEnvelope,
+    /// Hash-only typed spec envelope.
+    pub envelope: spec::HashedSpecEnvelope,
     /// Store-owned run id to bind.
     pub run_id: RunId,
     /// Run-start evidence whose artifacts must already be persisted in the typed artifact store.
@@ -313,8 +313,8 @@ pub struct TypedSeedInput {
 /// Request to resume a certified typed run.
 #[derive(Debug, Clone)]
 pub struct TypedRunResumeRequest {
-    /// Certified typed spec envelope bound to the run.
-    pub envelope: spec::CertifiedSpecEnvelope,
+    /// Hash-only typed spec envelope bound to the run.
+    pub envelope: spec::HashedSpecEnvelope,
     /// Run id to resume.
     pub run_id: RunId,
     /// Scheduler drive policy.
@@ -621,7 +621,7 @@ where
     /// Builds an evidence-only replay broker from a certified spec and typed run stream.
     pub async fn replay_broker(
         &self,
-        envelope: spec::CertifiedSpecEnvelope,
+        envelope: spec::HashedSpecEnvelope,
         run_id: &RunId,
         authority: ReplayAuthority,
     ) -> Result<ReplayBroker, AppError> {
@@ -1009,15 +1009,14 @@ pub async fn load_certified_spec_for_run(
     artifacts: &FsTypedArtifactStore,
     run_id: &RunId,
     stream: &[store::KernelEventEnvelope],
-) -> Result<spec::CertifiedSpecEnvelope, AppError> {
+) -> Result<spec::HashedSpecEnvelope, AppError> {
     let run_started = run_started_payload(run_id, stream)?;
     let (bytes, evidence) = artifacts
         .get_artifact_by_id(&run_started.spec_artifact_id)
         .await?;
     validate_spec_artifact_evidence(run_started, &evidence)?;
     let spec = spec::TypedExecutionSpec::from_json_slice(&bytes)?;
-    let envelope =
-        spec::CertifiedSpecEnvelope::new(spec, spec::TypedExecutionSpecAudit::default())?;
+    let envelope = spec::HashedSpecEnvelope::new(spec, spec::TypedExecutionSpecAudit::default())?;
     envelope.verify_hash()?;
     validate_run_started_matches_spec(run_started, &envelope)?;
     Ok(envelope)
@@ -1026,7 +1025,7 @@ pub async fn load_certified_spec_for_run(
 /// Builds replay authority from retained artifact evidence in the run stream.
 pub async fn replay_authority_for_run(
     artifacts: &FsTypedArtifactStore,
-    envelope: &spec::CertifiedSpecEnvelope,
+    envelope: &spec::HashedSpecEnvelope,
     run_id: &RunId,
     stream: &[store::KernelEventEnvelope],
 ) -> Result<ReplayAuthority, AppError> {
@@ -1222,8 +1221,7 @@ pub async fn build_typed_run_start_request(
             error.to_string(),
         )
     })?;
-    let envelope =
-        spec::CertifiedSpecEnvelope::new(spec, spec::TypedExecutionSpecAudit::default())?;
+    let envelope = spec::HashedSpecEnvelope::new(spec, spec::TypedExecutionSpecAudit::default())?;
     let runtime_spec = CertifiedRuntimeSpec::new(envelope.clone())?;
     let spec_artifact = persist_certified_spec_artifact(artifacts, &runtime_spec).await?;
     let config_artifacts = load_config_artifacts_for_spec(artifacts, &runtime_spec).await?;
@@ -1654,7 +1652,7 @@ fn validate_spec_artifact_evidence(
 
 fn validate_run_started_matches_spec(
     run_started: &events::RunStarted,
-    envelope: &spec::CertifiedSpecEnvelope,
+    envelope: &spec::HashedSpecEnvelope,
 ) -> Result<(), AppError> {
     if envelope.spec_hash != run_started.spec_hash
         || envelope.spec.media_type != run_started.spec_media_type
@@ -2211,9 +2209,9 @@ mod tests {
         let draft = mfm_op_proof::proof_program_draft(proof_config.clone()).expect("proof draft");
         persist_draft_config_artifacts(&artifacts, &draft).await;
         let certified = mfm_op_proof::certified_proof_spec(proof_config).expect("proof spec");
-        persist_framework_config_artifacts(&artifacts, &certified.envelope.spec).await;
+        persist_framework_config_artifacts(&artifacts, &certified.envelope().spec).await;
         let spec_bytes = certified
-            .envelope
+            .envelope()
             .spec
             .canonical_json()
             .expect("canonical proof spec");
@@ -2249,7 +2247,7 @@ mod tests {
         let public_output = services
             .typed_public_output(
                 &RunId::parse(&response.run_id).expect("typed run id"),
-                &certified.envelope.spec.public_outputs.public_schema_id,
+                &certified.envelope().spec.public_outputs.public_schema_id,
             )
             .await
             .expect("render proof public output");

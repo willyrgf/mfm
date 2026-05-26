@@ -81,7 +81,7 @@ async fn execute_internal(args: &SnapshotArgs) -> CommandResult<PortfolioSnapsho
     let certified = certified_portfolio_spec(workflow_config)
         .map_err(|error| CommandError::new("TypedPortfolioSpecInvalid", error.to_string()))?;
     let public_schema_id = certified
-        .envelope
+        .envelope()
         .spec
         .public_outputs
         .public_schema_id
@@ -90,13 +90,13 @@ async fn execute_internal(args: &SnapshotArgs) -> CommandResult<PortfolioSnapsho
     let services = make_typed_app_services(&args.stores).await?;
     persist_config_artifacts(
         services.artifacts(),
-        portfolio_config_artifacts_for_spec(&draft, &certified.envelope.spec)
+        portfolio_config_artifacts_for_spec(&draft, &certified.envelope().spec)
             .map_err(|error| CommandError::new("TypedPortfolioConfigInvalid", error.to_string()))?,
     )
     .await?;
 
     let spec_bytes = certified
-        .envelope
+        .envelope()
         .spec
         .canonical_json()
         .map_err(|error| CommandError::new("TypedPortfolioSpecInvalid", error.to_string()))?

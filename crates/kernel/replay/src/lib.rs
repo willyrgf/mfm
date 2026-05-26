@@ -17,7 +17,7 @@ pub mod v1 {
         AdapterKind, AdapterVersion, ArtifactId, AttemptId, CapabilityKind, CapabilityVersion,
         ContentDigest, NodeId, SchemaId, SpecHash,
     };
-    use mfm_spec::v1::{self as spec, CanonicalizerIdentity, CertifiedSpecEnvelope};
+    use mfm_spec::v1::{self as spec, CanonicalizerIdentity, HashedSpecEnvelope};
     use mfm_spec::SpecError;
     use mfm_store::v1::{
         self as store, ArtifactEvidenceRef as StoredArtifactEvidenceRef, KernelEventEnvelope,
@@ -74,7 +74,7 @@ pub mod v1 {
     /// Stable typed replay error category.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub enum ReplayErrorKind {
-        /// The certified spec envelope is invalid.
+        /// The hash-only spec envelope is invalid.
         CertifiedSpec,
         /// No authoritative run-start event was present.
         RunStartedMissing,
@@ -172,7 +172,7 @@ pub mod v1 {
 
         /// Builds authority using the renderer canonicalizer embedded in the certified spec.
         pub fn from_certified_spec(
-            certified_spec: &CertifiedSpecEnvelope,
+            certified_spec: &HashedSpecEnvelope,
             runner_executables: Vec<events::ExecutableIdentity>,
             adapter_executables: Vec<events::ExecutableIdentity>,
             artifact_evidence: Vec<StoredArtifactEvidenceRef>,
@@ -369,7 +369,7 @@ pub mod v1 {
     /// Evidence-only broker for certified typed replay.
     #[derive(Debug, Clone)]
     pub struct ReplayBroker {
-        certified_spec: CertifiedSpecEnvelope,
+        certified_spec: HashedSpecEnvelope,
         run_id: events::RunStarted,
         projection: ProjectionSnapshot,
         retained_artifacts: BTreeMap<ArtifactId, StoredArtifactEvidenceRef>,
@@ -384,7 +384,7 @@ pub mod v1 {
     impl ReplayBroker {
         /// Builds a replay broker from the stored certified spec and authoritative run stream.
         pub fn from_run_stream(
-            certified_spec: CertifiedSpecEnvelope,
+            certified_spec: HashedSpecEnvelope,
             stream: &[KernelEventEnvelope],
             authority: ReplayAuthority,
         ) -> Result<Self> {
@@ -434,7 +434,7 @@ pub mod v1 {
         }
 
         /// Returns the certified spec used as replay authority.
-        pub fn certified_spec(&self) -> &CertifiedSpecEnvelope {
+        pub fn certified_spec(&self) -> &HashedSpecEnvelope {
             &self.certified_spec
         }
 
@@ -1675,7 +1675,7 @@ pub mod v1 {
     }
 
     fn verify_run_start_contract(
-        certified_spec: &CertifiedSpecEnvelope,
+        certified_spec: &HashedSpecEnvelope,
         run_started: &events::RunStarted,
         authority: &ReplayAuthority,
         artifacts: &BTreeMap<ArtifactId, StoredArtifactEvidenceRef>,
@@ -2260,7 +2260,7 @@ pub mod v1 {
         }
 
         struct Fixture {
-            envelope: CertifiedSpecEnvelope,
+            envelope: HashedSpecEnvelope,
             stream: Vec<KernelEventEnvelope>,
             artifacts: Vec<StoredArtifactEvidenceRef>,
             runner: events::ExecutableIdentity,
@@ -2473,7 +2473,7 @@ pub mod v1 {
                 })
                 .expect("typed spec");
                 let envelope =
-                    CertifiedSpecEnvelope::new(spec, spec::TypedExecutionSpecAudit::default())
+                    HashedSpecEnvelope::new(spec, spec::TypedExecutionSpecAudit::default())
                         .expect("envelope");
                 let run_id = RunId::from_digest(DigestAlgorithm::Sha256JcsV1, bytes(0x30));
                 let runner = executable("sidefx");

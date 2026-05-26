@@ -29,7 +29,7 @@ pub async fn run_typed_portfolio_snapshot(
     let draft = portfolio_program_draft(workflow_config.clone()).expect("portfolio draft");
     let certified = certified_portfolio_spec(workflow_config).expect("portfolio certified spec");
     let public_schema_id = certified
-        .envelope
+        .envelope()
         .spec
         .public_outputs
         .public_schema_id
@@ -43,13 +43,13 @@ pub async fn run_typed_portfolio_snapshot(
 
     persist_config_artifacts(
         services.artifacts(),
-        portfolio_config_artifacts_for_spec(&draft, &certified.envelope.spec)
+        portfolio_config_artifacts_for_spec(&draft, &certified.envelope().spec)
             .expect("config artifacts"),
     )
     .await;
 
     let spec_bytes = certified
-        .envelope
+        .envelope()
         .spec
         .canonical_json()
         .expect("canonical spec")
@@ -86,7 +86,7 @@ pub async fn resume_typed_portfolio_snapshot(
     let draft = portfolio_program_draft(workflow_config.clone()).expect("portfolio draft");
     let certified = certified_portfolio_spec(workflow_config).expect("portfolio certified spec");
     let public_schema_id = certified
-        .envelope
+        .envelope()
         .spec
         .public_outputs
         .public_schema_id
@@ -100,13 +100,13 @@ pub async fn resume_typed_portfolio_snapshot(
 
     persist_config_artifacts(
         services.artifacts(),
-        portfolio_config_artifacts_for_spec(&draft, &certified.envelope.spec)
+        portfolio_config_artifacts_for_spec(&draft, &certified.envelope().spec)
             .expect("config artifacts"),
     )
     .await;
 
     let spec_bytes = certified
-        .envelope
+        .envelope()
         .spec
         .canonical_json()
         .expect("canonical spec")
@@ -129,7 +129,7 @@ pub async fn resume_typed_portfolio_snapshot(
         .expect("typed portfolio append-only run");
     let resumed = services
         .resume_certified_run(TypedRunResumeRequest {
-            envelope: certified.envelope.clone(),
+            envelope: certified.envelope().clone(),
             run_id: run_id.clone(),
             drive: DriveMode::UntilBlocked,
         })

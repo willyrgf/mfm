@@ -12,13 +12,26 @@ use mfm_capabilities::{CapabilitySet, CapabilitySetDescriptor, NoCaps};
 use mfm_effects::{ApplySideEffect, EffectClass, EffectSpec, ManagedPlatformWrite, Pure};
 use mfm_ids::{
     ArtifactId, CellId, ContentDigest, DescriptorId, DigestAlgorithm, DigestBytes, EffectKind,
-    NodeId, OperationInstanceId, SchemaId, ScopeId, SemanticTypeId, StateKind, StateVersion,
+    LoweringVersion, NodeId, OperationInstanceId, SchemaId, ScopeId, SemanticTypeId, SpecHash,
+    StateKind, StateVersion,
 };
 use mfm_program as program;
 use mfm_spec::v1 as spec;
 
 /// Result type for typed certification.
 pub type Result<T> = std::result::Result<T, CertifyError>;
+
+/// Version string for the v1 persisted typed-spec certificate.
+pub const CERTIFICATE_VERSION: &str = "mfm.certified_typed_spec_certificate.v1";
+/// Media type for canonical persisted typed-spec certificate JSON.
+pub const CERTIFICATE_MEDIA_TYPE: &str =
+    "application/vnd.mfm.certified-typed-spec-certificate+json;version=1";
+/// Version string for this certifier implementation.
+pub const CERTIFIER_VERSION: &str = "mfm-certify.v1";
+/// Stable identifier for the v1 certification algorithm.
+pub const CERTIFIER_ALGORITHM: &str = "mfm-certify.registry-validation.v1";
+/// Stable identifier for the v1 registry digest payload.
+pub const REGISTRY_DIGEST_ALGORITHM: &str = "mfm-certify.registry-digest.v1";
 
 /// Problem taxonomy class rejected by typed certification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -49,6 +62,17 @@ impl ProblemClass {
             Self::InvalidTerminalShape => "invalid_terminal_shape_rejected",
         }
     }
+
+    fn certificate_key(self) -> &'static str {
+        match self {
+            Self::InvalidTopology => "invalid_topology",
+            Self::InvalidInterfaceWiring => "invalid_interface_wiring",
+            Self::InvalidSemanticTransition => "invalid_semantic_transition",
+            Self::InvalidDataShape => "invalid_data_shape",
+            Self::InvalidDataMeaning => "invalid_data_meaning",
+            Self::InvalidTerminalShape => "invalid_terminal_shape",
+        }
+    }
 }
 
 /// Certification failure.
@@ -67,6 +91,8 @@ pub enum CertifyError {
     Canonical(String),
     /// Spec contract validation failed.
     Spec(String),
+    /// Persisted certificate or bundle verification failed.
+    Certificate(String),
 }
 
 impl CertifyError {
@@ -74,7 +100,7 @@ impl CertifyError {
     pub fn problem_class(&self) -> Option<ProblemClass> {
         match self {
             Self::Problem { class, .. } => Some(*class),
-            Self::Lowering(_) | Self::Canonical(_) | Self::Spec(_) => None,
+            Self::Lowering(_) | Self::Canonical(_) | Self::Spec(_) | Self::Certificate(_) => None,
         }
     }
 }
@@ -88,17 +114,347 @@ impl fmt::Display for CertifyError {
             Self::Lowering(message) => write!(f, "typed lowering failed: {message}"),
             Self::Canonical(message) => write!(f, "canonicalization failed: {message}"),
             Self::Spec(message) => write!(f, "typed spec failed: {message}"),
+            Self::Certificate(message) => write!(f, "typed spec certificate failed: {message}"),
         }
     }
 }
 
 impl std::error::Error for CertifyError {}
 
-/// Certified typed spec ready to become the runtime contract.
+/// Non-forgeable certified typed spec ready to become runtime authority.
+///
+/// The fields are private so only this crate's certifier and verifier can mint the authority.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CertifiedTypedSpec {
-    /// Certified spec envelope.
-    pub envelope: spec::CertifiedSpecEnvelope,
+    envelope: spec::HashedSpecEnvelope,
+    certificate: CertifiedSpecCertificate,
+}
+
+impl CertifiedTypedSpec {
+    /// Returns the hash-only spec envelope carried by this certified authority.
+    pub fn envelope(&self) -> &spec::HashedSpecEnvelope {
+        &self.envelope
+    }
+
+    /// Returns the hash-defining typed execution spec.
+    pub fn spec(&self) -> &spec::TypedExecutionSpec {
+        &self.envelope.spec
+    }
+
+    /// Returns the canonical spec hash.
+    pub fn spec_hash(&self) -> &SpecHash {
+        &self.envelope.spec_hash
+    }
+
+    /// Returns the persisted certificate evidence that was verified or emitted.
+    pub fn certificate(&self) -> &CertifiedSpecCertificate {
+        &self.certificate
+    }
+
+    /// Returns the certificate evidence hash.
+    pub fn certificate_hash(&self) -> &ContentDigest {
+        &self.certificate.certificate_hash
+    }
+
+    /// Consumes the authority and returns the hash-only envelope plus certificate evidence.
+    pub fn into_parts(self) -> (spec::HashedSpecEnvelope, CertifiedSpecCertificate) {
+        (self.envelope, self.certificate)
+    }
+
+    /// Builds canonical persisted spec and certificate bytes for storage.
+    pub fn bundle(&self) -> Result<CertifiedSpecBundle> {
+        CertifiedSpecBundle::from_certified(self)
+    }
+}
+
+/// Persisted typed-spec certificate.
+///
+/// This is durable evidence only. Parsed or constructed certificate data is hostile until
+/// [`verify_certified_bundle`] validates it against a registry and returns [`CertifiedTypedSpec`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CertifiedSpecCertificate {
+    /// Hash of the hash-defining certificate evidence.
+    pub certificate_hash: ContentDigest,
+    /// Hash-defining certificate evidence.
+    pub evidence: CertifiedSpecCertificateEvidence,
+}
+
+impl CertifiedSpecCertificate {
+    /// Builds persisted certificate evidence and computes its deterministic certificate hash.
+    ///
+    /// This does not mint runtime authority. Call [`verify_certified_bundle`] to turn persisted
+    /// bytes into [`CertifiedTypedSpec`].
+    pub fn from_evidence(evidence: CertifiedSpecCertificateEvidence) -> Result<Self> {
+        let certificate_hash = evidence.canonical_json()?.content_digest();
+        Ok(Self {
+            certificate_hash,
+            evidence,
+        })
+    }
+
+    /// Parses persisted certificate JSON as untrusted certificate data.
+    pub fn from_json_slice(input: &[u8]) -> Result<Self> {
+        let input = std::str::from_utf8(input)
+            .map_err(|error| certificate(format!("certificate JSON is not UTF-8: {error}")))?;
+        Self::from_json_str(input)
+    }
+
+    /// Parses persisted certificate JSON as untrusted certificate data.
+    pub fn from_json_str(input: &str) -> Result<Self> {
+        let input_canonical = PlainCanonicalJsonBytes::from_json_str(input)
+            .map_err(|error| certificate(error.to_string()))?;
+        let value: serde_json::Value =
+            serde_json::from_str(input).map_err(|error| certificate(error.to_string()))?;
+        let parsed = parse_certificate(&value)?;
+        parsed.verify_hash()?;
+        if parsed.canonical_json()? != input_canonical {
+            return Err(certificate(
+                "persisted certificate contains unknown or non-normalized fields",
+            ));
+        }
+        Ok(parsed)
+    }
+
+    /// Returns canonical JSON bytes for this persisted certificate.
+    pub fn canonical_json(&self) -> Result<PlainCanonicalJsonBytes> {
+        canonical_json_bytes(self.json())
+    }
+
+    /// Verifies that `certificate_hash` matches the hash-defining evidence.
+    pub fn verify_hash(&self) -> Result<()> {
+        let actual = self.evidence.canonical_json()?.content_digest();
+        if self.certificate_hash != actual {
+            return Err(certificate(format!(
+                "certificate hash mismatch: expected {}, recomputed {}",
+                self.certificate_hash, actual
+            )));
+        }
+        Ok(())
+    }
+
+    fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "certificate_hash": self.certificate_hash.as_str(),
+            "evidence": self.evidence.json(),
+        })
+    }
+}
+
+/// Hash-defining certificate evidence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CertifiedSpecCertificateEvidence {
+    /// Persisted certificate contract version.
+    pub certificate_version: String,
+    /// Persisted certificate media type.
+    pub media_type: String,
+    /// Certifier implementation version.
+    pub certifier_version: String,
+    /// Certifier algorithm identity.
+    pub certifier_algorithm: String,
+    /// Digest algorithm used for certificate canonicalization and hashing.
+    pub certificate_canonicalization: DigestAlgorithm,
+    /// Spec hash that this certificate covers.
+    pub spec_hash: SpecHash,
+    /// Canonicalization algorithm declared by the typed spec.
+    pub spec_canonicalization: DigestAlgorithm,
+    /// Lowering algorithm identity declared by the typed spec.
+    pub lowering_version: LoweringVersion,
+    /// Digest of the certification registry authority.
+    pub registry_digest: ContentDigest,
+    /// Descriptor identities and digests covered by certification.
+    pub descriptor_identities: Vec<CertifiedDescriptorEvidence>,
+    /// Public output schema id covered by certification.
+    pub public_output_schema_id: SchemaId,
+    /// Public output renderer canonicalizer identity covered by certification.
+    pub public_output_canonicalizer_identity: spec::CanonicalizerIdentity,
+    /// Non-semantic audit metadata that explains the certification decision.
+    pub audit: CertifiedSpecAuditMetadata,
+}
+
+impl CertifiedSpecCertificateEvidence {
+    /// Returns canonical JSON bytes for the hash-defining certificate evidence.
+    pub fn canonical_json(&self) -> Result<PlainCanonicalJsonBytes> {
+        canonical_json_bytes(self.json())
+    }
+
+    fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "audit": self.audit.json(),
+            "certificate_canonicalization": self.certificate_canonicalization.as_str(),
+            "certificate_version": self.certificate_version.as_str(),
+            "certifier_algorithm": self.certifier_algorithm.as_str(),
+            "certifier_version": self.certifier_version.as_str(),
+            "descriptor_identities": self
+                .descriptor_identities
+                .iter()
+                .map(CertifiedDescriptorEvidence::json)
+                .collect::<Vec<_>>(),
+            "lowering_version": self.lowering_version.as_str(),
+            "media_type": self.media_type.as_str(),
+            "public_output_canonicalizer_identity": self
+                .public_output_canonicalizer_identity
+                .as_str(),
+            "public_output_schema_id": self.public_output_schema_id.as_str(),
+            "registry_digest": self.registry_digest.as_str(),
+            "spec_canonicalization": self.spec_canonicalization.as_str(),
+            "spec_hash": self.spec_hash.as_str(),
+        })
+    }
+}
+
+/// Descriptor family covered by a certificate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum CertifiedDescriptorFamily {
+    /// State descriptor evidence.
+    State,
+    /// Operation descriptor evidence.
+    Operation,
+    /// Public-output renderer descriptor evidence.
+    Renderer,
+}
+
+impl CertifiedDescriptorFamily {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::State => "state",
+            Self::Operation => "operation",
+            Self::Renderer => "renderer",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "state" => Ok(Self::State),
+            "operation" => Ok(Self::Operation),
+            "renderer" => Ok(Self::Renderer),
+            _ => Err(certificate(format!(
+                "unsupported descriptor family {value:?}"
+            ))),
+        }
+    }
+}
+
+/// Descriptor identity and digest covered by a certificate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CertifiedDescriptorEvidence {
+    /// Descriptor family.
+    pub descriptor_family: CertifiedDescriptorFamily,
+    /// Descriptor identity.
+    pub descriptor_id: DescriptorId,
+    /// Canonical digest of the descriptor identity payload.
+    pub descriptor_digest: ContentDigest,
+}
+
+impl CertifiedDescriptorEvidence {
+    fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "descriptor_digest": self.descriptor_digest.as_str(),
+            "descriptor_family": self.descriptor_family.as_str(),
+            "descriptor_id": self.descriptor_id.as_str(),
+        })
+    }
+}
+
+/// Audit metadata explaining a successful certification decision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CertifiedSpecAuditMetadata {
+    /// Stable names of problem classes covered by the certifier.
+    pub problem_classes_covered: Vec<String>,
+    /// Number of scopes in the certified spec.
+    pub scope_count: u64,
+    /// Number of seed cells in the certified spec.
+    pub seed_count: u64,
+    /// Number of nodes in the certified spec.
+    pub node_count: u64,
+    /// Number of cells in the certified spec.
+    pub cell_count: u64,
+    /// Number of descriptor identities in the certified spec.
+    pub descriptor_count: u64,
+    /// Number of operation lineage frames in the certified spec.
+    pub operation_lineage_count: u64,
+}
+
+impl CertifiedSpecAuditMetadata {
+    fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "cell_count": self.cell_count,
+            "descriptor_count": self.descriptor_count,
+            "node_count": self.node_count,
+            "operation_lineage_count": self.operation_lineage_count,
+            "problem_classes_covered": self.problem_classes_covered,
+            "scope_count": self.scope_count,
+            "seed_count": self.seed_count,
+        })
+    }
+}
+
+/// Canonical persisted bytes for a certified spec and its certificate.
+///
+/// This is a storage/transport container only. Parsing it yields [`UntrustedCertifiedSpecBundle`],
+/// not runtime authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CertifiedSpecBundle {
+    spec_bytes: Vec<u8>,
+    certificate_bytes: Vec<u8>,
+}
+
+impl CertifiedSpecBundle {
+    /// Builds persisted canonical bytes from an in-memory certified authority.
+    pub fn from_certified(certified: &CertifiedTypedSpec) -> Result<Self> {
+        Ok(Self {
+            spec_bytes: certified
+                .spec()
+                .canonical_json()
+                .map_err(|error| CertifyError::Spec(error.to_string()))?
+                .to_vec(),
+            certificate_bytes: certified.certificate.canonical_json()?.to_vec(),
+        })
+    }
+
+    /// Wraps untrusted persisted bytes for parsing and later verification.
+    pub fn from_untrusted_bytes(spec_bytes: Vec<u8>, certificate_bytes: Vec<u8>) -> Self {
+        Self {
+            spec_bytes,
+            certificate_bytes,
+        }
+    }
+
+    /// Returns the persisted spec bytes.
+    pub fn spec_bytes(&self) -> &[u8] {
+        &self.spec_bytes
+    }
+
+    /// Returns the persisted certificate bytes.
+    pub fn certificate_bytes(&self) -> &[u8] {
+        &self.certificate_bytes
+    }
+
+    /// Parses the persisted bytes as hostile data.
+    pub fn parse_untrusted(&self) -> Result<UntrustedCertifiedSpecBundle> {
+        let spec = spec::TypedExecutionSpec::from_json_slice(&self.spec_bytes)
+            .map_err(|error| CertifyError::Spec(error.to_string()))?;
+        let certificate = CertifiedSpecCertificate::from_json_slice(&self.certificate_bytes)?;
+        Ok(UntrustedCertifiedSpecBundle { spec, certificate })
+    }
+}
+
+/// Parsed persisted spec and certificate data that has not been verified.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UntrustedCertifiedSpecBundle {
+    spec: spec::TypedExecutionSpec,
+    certificate: CertifiedSpecCertificate,
+}
+
+impl UntrustedCertifiedSpecBundle {
+    /// Returns the parsed typed spec data.
+    pub fn spec(&self) -> &spec::TypedExecutionSpec {
+        &self.spec
+    }
+
+    /// Returns the parsed certificate data.
+    pub fn certificate(&self) -> &CertifiedSpecCertificate {
+        &self.certificate
+    }
 }
 
 /// Registry authority used when certifying an already-lowered typed spec.
@@ -112,6 +468,23 @@ impl CertificationRegistry {
     /// Creates an empty certification registry.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Returns the deterministic digest of this registry authority.
+    pub fn digest(&self) -> Result<ContentDigest> {
+        content_digest_json(serde_json::json!({
+            "algorithm": REGISTRY_DIGEST_ALGORITHM,
+            "operations": self
+                .operations
+                .values()
+                .map(operation_descriptor_identity_json)
+                .collect::<Vec<_>>(),
+            "states": self
+                .states
+                .values()
+                .map(state_descriptor_identity_json)
+                .collect::<Vec<_>>(),
+        }))
     }
 
     /// Adds a framework-validated registered state descriptor to this registry.
@@ -193,18 +566,177 @@ pub fn certify_typed_spec(
     registry: &CertificationRegistry,
 ) -> Result<CertifiedTypedSpec> {
     validate_typed_spec(&spec, registry)?;
-    let envelope = spec::CertifiedSpecEnvelope::new(spec, spec::TypedExecutionSpecAudit::default())
+    let envelope = spec::HashedSpecEnvelope::new(spec, spec::TypedExecutionSpecAudit::default())
         .map_err(|error| CertifyError::Spec(error.to_string()))?;
     envelope
         .verify_hash()
         .map_err(|error| CertifyError::Spec(error.to_string()))?;
-    Ok(CertifiedTypedSpec { envelope })
+    let certificate = certificate_for_envelope(&envelope, registry)?;
+    Ok(CertifiedTypedSpec {
+        envelope,
+        certificate,
+    })
+}
+
+/// Verifies persisted spec and certificate bytes against a certification registry.
+///
+/// Hash matches alone are insufficient: this parses hostile persisted data, compares spec and
+/// certificate evidence, re-runs registry-backed certification, and only then returns the
+/// non-forgeable in-memory authority.
+pub fn verify_certified_bundle(
+    spec_bytes: &[u8],
+    certificate_bytes: &[u8],
+    registry: &CertificationRegistry,
+) -> Result<CertifiedTypedSpec> {
+    let bundle =
+        CertifiedSpecBundle::from_untrusted_bytes(spec_bytes.to_vec(), certificate_bytes.to_vec());
+    verify_untrusted_bundle(bundle.parse_untrusted()?, registry)
 }
 
 /// Lowers a typed program draft into a v1 spec without skipping validation.
 pub fn lower_program_draft(draft: &program::TypedProgramDraft) -> Result<spec::TypedExecutionSpec> {
     let registry = CertificationRegistry::from_program_draft(draft)?;
     lower_program_draft_with_registry(draft, &registry)
+}
+
+fn verify_untrusted_bundle(
+    bundle: UntrustedCertifiedSpecBundle,
+    registry: &CertificationRegistry,
+) -> Result<CertifiedTypedSpec> {
+    bundle.certificate.verify_hash()?;
+    let actual_spec_hash = bundle
+        .spec
+        .spec_hash()
+        .map_err(|error| CertifyError::Spec(error.to_string()))?;
+    if bundle.certificate.evidence.spec_hash != actual_spec_hash {
+        return Err(certificate(format!(
+            "certificate/spec hash mismatch: certificate {}, recomputed {}",
+            bundle.certificate.evidence.spec_hash, actual_spec_hash
+        )));
+    }
+
+    let expected_registry_digest = registry.digest()?;
+    if bundle.certificate.evidence.registry_digest != expected_registry_digest {
+        return Err(certificate(format!(
+            "registry digest mismatch: certificate {}, current {}",
+            bundle.certificate.evidence.registry_digest, expected_registry_digest
+        )));
+    }
+
+    let expected_descriptor_evidence = descriptor_evidence_for_spec(&bundle.spec)?;
+    if bundle.certificate.evidence.descriptor_identities != expected_descriptor_evidence {
+        return Err(certificate(
+            "descriptor identity evidence does not match persisted spec",
+        ));
+    }
+    if bundle.certificate.evidence.spec_canonicalization != bundle.spec.canonicalization {
+        return Err(certificate("spec canonicalization mismatch"));
+    }
+    if bundle.certificate.evidence.lowering_version != bundle.spec.lowering_version {
+        return Err(certificate("lowering version mismatch"));
+    }
+    if bundle.certificate.evidence.public_output_schema_id
+        != bundle.spec.public_outputs.public_schema_id
+    {
+        return Err(certificate("public output schema mismatch"));
+    }
+    if bundle
+        .certificate
+        .evidence
+        .public_output_canonicalizer_identity
+        != bundle
+            .spec
+            .public_outputs
+            .renderer_descriptor
+            .canonicalizer_identity
+    {
+        return Err(certificate("public output canonicalizer mismatch"));
+    }
+
+    let certified = certify_typed_spec(bundle.spec, registry)?;
+    if certified.certificate != bundle.certificate {
+        return Err(certificate(
+            "persisted certificate does not match registry-backed certification",
+        ));
+    }
+    Ok(certified)
+}
+
+fn certificate_for_envelope(
+    envelope: &spec::HashedSpecEnvelope,
+    registry: &CertificationRegistry,
+) -> Result<CertifiedSpecCertificate> {
+    CertifiedSpecCertificate::from_evidence(CertifiedSpecCertificateEvidence {
+        certificate_version: CERTIFICATE_VERSION.to_owned(),
+        media_type: CERTIFICATE_MEDIA_TYPE.to_owned(),
+        certifier_version: CERTIFIER_VERSION.to_owned(),
+        certifier_algorithm: CERTIFIER_ALGORITHM.to_owned(),
+        certificate_canonicalization: DigestAlgorithm::Sha256JcsV1,
+        spec_hash: envelope.spec_hash.clone(),
+        spec_canonicalization: envelope.spec.canonicalization,
+        lowering_version: envelope.spec.lowering_version.clone(),
+        registry_digest: registry.digest()?,
+        descriptor_identities: descriptor_evidence_for_spec(&envelope.spec)?,
+        public_output_schema_id: envelope.spec.public_outputs.public_schema_id.clone(),
+        public_output_canonicalizer_identity: envelope
+            .spec
+            .public_outputs
+            .renderer_descriptor
+            .canonicalizer_identity
+            .clone(),
+        audit: certificate_audit_for_spec(&envelope.spec),
+    })
+}
+
+fn descriptor_evidence_for_spec(
+    spec: &spec::TypedExecutionSpec,
+) -> Result<Vec<CertifiedDescriptorEvidence>> {
+    let mut evidence = spec
+        .descriptor_identities
+        .iter()
+        .map(|descriptor| {
+            Ok(CertifiedDescriptorEvidence {
+                descriptor_family: certified_descriptor_family(descriptor),
+                descriptor_id: descriptor_id(descriptor).clone(),
+                descriptor_digest: content_digest_json(descriptor_identity_json(descriptor))?,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    evidence.sort_by(|left, right| {
+        (
+            left.descriptor_family,
+            left.descriptor_id.as_str(),
+            left.descriptor_digest.as_str(),
+        )
+            .cmp(&(
+                right.descriptor_family,
+                right.descriptor_id.as_str(),
+                right.descriptor_digest.as_str(),
+            ))
+    });
+    Ok(evidence)
+}
+
+fn certificate_audit_for_spec(spec: &spec::TypedExecutionSpec) -> CertifiedSpecAuditMetadata {
+    CertifiedSpecAuditMetadata {
+        problem_classes_covered: [
+            ProblemClass::InvalidTopology,
+            ProblemClass::InvalidInterfaceWiring,
+            ProblemClass::InvalidSemanticTransition,
+            ProblemClass::InvalidDataShape,
+            ProblemClass::InvalidDataMeaning,
+            ProblemClass::InvalidTerminalShape,
+        ]
+        .into_iter()
+        .map(|class| class.certificate_key().to_owned())
+        .collect(),
+        scope_count: spec.scopes.len() as u64,
+        seed_count: spec.seeds.len() as u64,
+        node_count: spec.nodes.len() as u64,
+        cell_count: spec.cells.len() as u64,
+        descriptor_count: spec.descriptor_identities.len() as u64,
+        operation_lineage_count: spec.planning_lineage.len() as u64,
+    }
 }
 
 fn lower_program_draft_with_registry(
@@ -230,6 +762,10 @@ fn lower(message: impl Into<String>) -> CertifyError {
 
 fn canonical(message: impl Into<String>) -> CertifyError {
     CertifyError::Canonical(message.into())
+}
+
+fn certificate(message: impl Into<String>) -> CertifyError {
+    CertifyError::Certificate(message.into())
 }
 
 #[derive(Debug, Clone)]
@@ -2546,15 +3082,251 @@ fn descriptor_id(descriptor: &spec::DescriptorIdentity) -> &DescriptorId {
     }
 }
 
-fn content_digest_json(value: serde_json::Value) -> Result<ContentDigest> {
+fn certified_descriptor_family(descriptor: &spec::DescriptorIdentity) -> CertifiedDescriptorFamily {
+    match descriptor {
+        spec::DescriptorIdentity::State(_) => CertifiedDescriptorFamily::State,
+        spec::DescriptorIdentity::Operation(_) => CertifiedDescriptorFamily::Operation,
+        spec::DescriptorIdentity::Renderer(_) => CertifiedDescriptorFamily::Renderer,
+    }
+}
+
+fn descriptor_identity_json(descriptor: &spec::DescriptorIdentity) -> serde_json::Value {
+    match descriptor {
+        spec::DescriptorIdentity::State(identity) => {
+            let mut json = state_descriptor_identity_json(identity);
+            json["descriptor_family"] = serde_json::json!("state");
+            json
+        }
+        spec::DescriptorIdentity::Operation(identity) => {
+            let mut json = operation_descriptor_identity_json(identity);
+            json["descriptor_family"] = serde_json::json!("operation");
+            json
+        }
+        spec::DescriptorIdentity::Renderer(identity) => {
+            let mut json = renderer_descriptor_identity_json(identity);
+            json["descriptor_family"] = serde_json::json!("renderer");
+            json
+        }
+    }
+}
+
+fn state_descriptor_identity_json(descriptor: &spec::StateDescriptorIdentity) -> serde_json::Value {
+    serde_json::json!({
+        "capabilities": capability_set_json(&descriptor.capabilities),
+        "config_schema_id": descriptor.config_schema_id.as_str(),
+        "descriptor_id": descriptor.descriptor_id.as_str(),
+        "effect_class": descriptor.effect_class.as_str(),
+        "effect_kind": descriptor.effect_kind.as_str(),
+        "effect_name": descriptor.effect_name.as_str(),
+        "effect_version": descriptor.effect_version.as_str(),
+        "input_schema_id": descriptor.input_schema_id.as_str(),
+        "name": descriptor.name.as_str(),
+        "output_schema_id": descriptor.output_schema_id.as_str(),
+        "output_semantic_type_id": descriptor.output_semantic_type_id.as_str(),
+        "runner": descriptor.runner.as_str(),
+        "side_effect_contract_digest": descriptor
+            .side_effect_contract_digest
+            .as_ref()
+            .map(ContentDigest::as_str),
+        "state_kind": descriptor.state_kind.as_str(),
+        "state_version": descriptor.state_version.as_str(),
+    })
+}
+
+fn operation_descriptor_identity_json(
+    descriptor: &spec::OperationDescriptorIdentity,
+) -> serde_json::Value {
+    serde_json::json!({
+        "config_schema_id": descriptor.config_schema_id.as_str(),
+        "descriptor_id": descriptor.descriptor_id.as_str(),
+        "expansion_abi": descriptor.expansion_abi.as_str(),
+        "input_schema_id": descriptor.input_schema_id.as_str(),
+        "name": descriptor.name.as_str(),
+        "operation_kind": descriptor.operation_kind.as_str(),
+        "operation_version": descriptor.operation_version.as_str(),
+        "output_schema_id": descriptor.output_schema_id.as_str(),
+    })
+}
+
+fn renderer_descriptor_identity_json(
+    descriptor: &spec::RendererDescriptorIdentity,
+) -> serde_json::Value {
+    serde_json::json!({
+        "canonicalizer_identity": descriptor.canonicalizer_identity.as_str(),
+        "descriptor_id": descriptor.descriptor_id.as_str(),
+        "public_schema_id": descriptor.public_schema_id.as_str(),
+        "renderer_kind": descriptor.renderer_kind.as_str(),
+        "renderer_version": descriptor.renderer_version.as_str(),
+    })
+}
+
+fn canonical_json_bytes(value: serde_json::Value) -> Result<PlainCanonicalJsonBytes> {
     let json = serde_json::to_string(&value).map_err(|error| canonical(error.to_string()))?;
-    let canonical_json = PlainCanonicalJsonBytes::from_json_str(&json)
-        .map_err(|error| canonical(error.to_string()))?;
-    Ok(canonical_json.content_digest())
+    PlainCanonicalJsonBytes::from_json_str(&json).map_err(|error| canonical(error.to_string()))
+}
+
+fn content_digest_json(value: serde_json::Value) -> Result<ContentDigest> {
+    Ok(canonical_json_bytes(value)?.content_digest())
 }
 
 fn digest_bytes_json(value: serde_json::Value) -> Result<DigestBytes> {
     Ok(*content_digest_json(value)?.digest())
+}
+
+fn parse_certificate(value: &serde_json::Value) -> Result<CertifiedSpecCertificate> {
+    let object = json_object(value, "typed spec certificate")?;
+    Ok(CertifiedSpecCertificate {
+        certificate_hash: parse_identity(required_str(object, "certificate_hash")?)?,
+        evidence: parse_certificate_evidence(required(object, "evidence")?)?,
+    })
+}
+
+fn parse_certificate_evidence(
+    value: &serde_json::Value,
+) -> Result<CertifiedSpecCertificateEvidence> {
+    let object = json_object(value, "typed spec certificate evidence")?;
+    let certificate_version = required_str(object, "certificate_version")?.to_owned();
+    if certificate_version != CERTIFICATE_VERSION {
+        return Err(certificate(format!(
+            "unsupported certificate_version {certificate_version:?}"
+        )));
+    }
+    let media_type = required_str(object, "media_type")?.to_owned();
+    if media_type != CERTIFICATE_MEDIA_TYPE {
+        return Err(certificate(format!(
+            "unsupported certificate media_type {media_type:?}"
+        )));
+    }
+    let certifier_version = required_str(object, "certifier_version")?.to_owned();
+    let certifier_algorithm = required_str(object, "certifier_algorithm")?.to_owned();
+    if certifier_algorithm != CERTIFIER_ALGORITHM {
+        return Err(certificate(format!(
+            "unsupported certifier_algorithm {certifier_algorithm:?}"
+        )));
+    }
+    Ok(CertifiedSpecCertificateEvidence {
+        certificate_version,
+        media_type,
+        certifier_version,
+        certifier_algorithm,
+        certificate_canonicalization: parse_identity(required_str(
+            object,
+            "certificate_canonicalization",
+        )?)?,
+        spec_hash: parse_identity(required_str(object, "spec_hash")?)?,
+        spec_canonicalization: parse_identity(required_str(object, "spec_canonicalization")?)?,
+        lowering_version: parse_identity(required_str(object, "lowering_version")?)?,
+        registry_digest: parse_identity(required_str(object, "registry_digest")?)?,
+        descriptor_identities: parse_array(
+            required(object, "descriptor_identities")?,
+            parse_descriptor_evidence,
+        )?,
+        public_output_schema_id: parse_identity(required_str(object, "public_output_schema_id")?)?,
+        public_output_canonicalizer_identity: spec::CanonicalizerIdentity::new(required_str(
+            object,
+            "public_output_canonicalizer_identity",
+        )?)
+        .map_err(|error| certificate(error.to_string()))?,
+        audit: parse_certificate_audit(required(object, "audit")?)?,
+    })
+}
+
+fn parse_descriptor_evidence(value: &serde_json::Value) -> Result<CertifiedDescriptorEvidence> {
+    let object = json_object(value, "descriptor certificate evidence")?;
+    Ok(CertifiedDescriptorEvidence {
+        descriptor_family: CertifiedDescriptorFamily::parse(required_str(
+            object,
+            "descriptor_family",
+        )?)?,
+        descriptor_id: parse_identity(required_str(object, "descriptor_id")?)?,
+        descriptor_digest: parse_identity(required_str(object, "descriptor_digest")?)?,
+    })
+}
+
+fn parse_certificate_audit(value: &serde_json::Value) -> Result<CertifiedSpecAuditMetadata> {
+    let object = json_object(value, "certificate audit")?;
+    Ok(CertifiedSpecAuditMetadata {
+        problem_classes_covered: parse_string_array(required(object, "problem_classes_covered")?)?,
+        scope_count: required_u64(object, "scope_count")?,
+        seed_count: required_u64(object, "seed_count")?,
+        node_count: required_u64(object, "node_count")?,
+        cell_count: required_u64(object, "cell_count")?,
+        descriptor_count: required_u64(object, "descriptor_count")?,
+        operation_lineage_count: required_u64(object, "operation_lineage_count")?,
+    })
+}
+
+fn parse_array<T>(
+    value: &serde_json::Value,
+    parser: fn(&serde_json::Value) -> Result<T>,
+) -> Result<Vec<T>> {
+    json_array(value, "array")?.iter().map(parser).collect()
+}
+
+fn parse_string_array(value: &serde_json::Value) -> Result<Vec<String>> {
+    json_array(value, "string array")?
+        .iter()
+        .map(|value| json_string(value, "string array item").map(str::to_owned))
+        .collect::<Result<Vec<_>>>()
+}
+
+fn parse_identity<T>(value: &str) -> Result<T>
+where
+    T: std::str::FromStr,
+    T::Err: fmt::Display,
+{
+    value
+        .parse()
+        .map_err(|error| certificate(format!("identity parse failed: {error}")))
+}
+
+fn json_object<'a>(
+    value: &'a serde_json::Value,
+    context: &'static str,
+) -> Result<&'a serde_json::Map<String, serde_json::Value>> {
+    value
+        .as_object()
+        .ok_or_else(|| certificate(format!("{context} must be a JSON object")))
+}
+
+fn json_array<'a>(
+    value: &'a serde_json::Value,
+    context: &'static str,
+) -> Result<&'a Vec<serde_json::Value>> {
+    value
+        .as_array()
+        .ok_or_else(|| certificate(format!("{context} must be a JSON array")))
+}
+
+fn required<'a>(
+    object: &'a serde_json::Map<String, serde_json::Value>,
+    field: &'static str,
+) -> Result<&'a serde_json::Value> {
+    object
+        .get(field)
+        .ok_or_else(|| certificate(format!("missing required field {field}")))
+}
+
+fn required_str<'a>(
+    object: &'a serde_json::Map<String, serde_json::Value>,
+    field: &'static str,
+) -> Result<&'a str> {
+    json_string(required(object, field)?, field)
+}
+
+fn required_u64(
+    object: &serde_json::Map<String, serde_json::Value>,
+    field: &'static str,
+) -> Result<u64> {
+    required(object, field)?
+        .as_u64()
+        .ok_or_else(|| certificate(format!("{field} must be an unsigned integer")))
+}
+
+fn json_string<'a>(value: &'a serde_json::Value, field: &'static str) -> Result<&'a str> {
+    value
+        .as_str()
+        .ok_or_else(|| certificate(format!("{field} must be a string")))
 }
 
 fn descriptor_id_json(value: serde_json::Value) -> Result<DescriptorId> {
@@ -3406,15 +4178,124 @@ mod tests {
         let draft = reference_draft();
         let expected_public_schema = draft.public_output_spec().public_schema_id().clone();
         let certified = certify_program_draft(&draft).expect("certified");
-        certified.envelope.verify_hash().expect("hash verifies");
+        certified.envelope().verify_hash().expect("hash verifies");
+        certified
+            .certificate()
+            .verify_hash()
+            .expect("certificate hash verifies");
         assert_eq!(
-            certified.envelope.spec.public_outputs.public_schema_id,
+            certified.certificate().evidence.certifier_version,
+            CERTIFIER_VERSION
+        );
+        assert_eq!(
+            certified.certificate().evidence.certifier_algorithm,
+            CERTIFIER_ALGORITHM
+        );
+        assert_eq!(
+            certified.certificate().evidence.spec_hash,
+            *certified.spec_hash()
+        );
+        assert_eq!(
+            certified.certificate_hash().as_str(),
+            "content:sha256-jcs-v1:b271fcbb2f60f572abda9bbc36e7108d1ac9920c5c4b268e1a3aae53ac5e6203"
+        );
+        assert_eq!(
+            certified.envelope().spec.public_outputs.public_schema_id,
             expected_public_schema
         );
-        assert!(certified.envelope.spec.nodes.iter().any(|node| matches!(
+        assert!(certified.envelope().spec.nodes.iter().any(|node| matches!(
             node.framework,
             Some(spec::FrameworkNodeSpec::PublicOutputRender(_))
         )));
+    }
+
+    #[test]
+    fn verifies_persisted_certified_bundle() {
+        let (registry, certified, bundle) = reference_certified_bundle();
+        let verified =
+            verify_certified_bundle(bundle.spec_bytes(), bundle.certificate_bytes(), &registry)
+                .expect("verified bundle");
+        assert_eq!(verified.spec_hash(), certified.spec_hash());
+        assert_eq!(verified.certificate_hash(), certified.certificate_hash());
+    }
+
+    #[test]
+    fn registry_digest_mismatch_rejects_bundle() {
+        let (registry, certified, bundle) = reference_certified_bundle();
+        let mut evidence = certified.certificate().evidence.clone();
+        evidence.registry_digest =
+            ContentDigest::from_digest(DigestAlgorithm::Sha256JcsV1, digest_byte(0x72));
+        let certificate = CertifiedSpecCertificate::from_evidence(evidence).expect("certificate");
+        let error = verify_certified_bundle(
+            bundle.spec_bytes(),
+            &certificate_bytes(&certificate),
+            &registry,
+        )
+        .expect_err("registry mismatch rejects");
+        assert!(matches!(error, CertifyError::Certificate(_)), "{error}");
+    }
+
+    #[test]
+    fn descriptor_identity_or_digest_mismatch_rejects_bundle() {
+        let (registry, certified, bundle) = reference_certified_bundle();
+
+        let mut identity_mismatch = certified.certificate().evidence.clone();
+        identity_mismatch.descriptor_identities[0].descriptor_id =
+            DescriptorId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_byte(0x73));
+        let identity_certificate =
+            CertifiedSpecCertificate::from_evidence(identity_mismatch).expect("certificate");
+        let error = verify_certified_bundle(
+            bundle.spec_bytes(),
+            &certificate_bytes(&identity_certificate),
+            &registry,
+        )
+        .expect_err("descriptor identity mismatch rejects");
+        assert!(matches!(error, CertifyError::Certificate(_)), "{error}");
+
+        let mut digest_mismatch = certified.certificate().evidence.clone();
+        digest_mismatch.descriptor_identities[0].descriptor_digest =
+            ContentDigest::from_digest(DigestAlgorithm::Sha256JcsV1, digest_byte(0x74));
+        let digest_certificate =
+            CertifiedSpecCertificate::from_evidence(digest_mismatch).expect("certificate");
+        let error = verify_certified_bundle(
+            bundle.spec_bytes(),
+            &certificate_bytes(&digest_certificate),
+            &registry,
+        )
+        .expect_err("descriptor digest mismatch rejects");
+        assert!(matches!(error, CertifyError::Certificate(_)), "{error}");
+    }
+
+    #[test]
+    fn certificate_spec_hash_mismatch_rejects_bundle() {
+        let (registry, certified, bundle) = reference_certified_bundle();
+        let mut evidence = certified.certificate().evidence.clone();
+        evidence.spec_hash = SpecHash::from_digest(DigestAlgorithm::Sha256JcsV1, digest_byte(0x75));
+        let certificate = CertifiedSpecCertificate::from_evidence(evidence).expect("certificate");
+        let error = verify_certified_bundle(
+            bundle.spec_bytes(),
+            &certificate_bytes(&certificate),
+            &registry,
+        )
+        .expect_err("spec hash mismatch rejects");
+        assert!(matches!(error, CertifyError::Certificate(_)), "{error}");
+    }
+
+    #[test]
+    fn parsed_bundle_is_untrusted_until_verifier_succeeds() {
+        let (_registry, _certified, bundle) = reference_certified_bundle();
+        let untrusted = bundle.parse_untrusted().expect("parsed untrusted bundle");
+        assert_eq!(
+            untrusted.spec().spec_hash().expect("untrusted spec hash"),
+            untrusted.certificate().evidence.spec_hash
+        );
+        let error = verify_certified_bundle(
+            bundle.spec_bytes(),
+            bundle.certificate_bytes(),
+            &CertificationRegistry::new(),
+        )
+        .expect_err("parsed bundle needs registry-backed verifier success");
+        assert!(matches!(error, CertifyError::Certificate(_)), "{error}");
     }
 
     #[test]
@@ -3423,8 +4304,8 @@ mod tests {
         let registry = CertificationRegistry::from_program_draft(&draft).expect("registry");
         let base = certify_program_draft(&draft)
             .expect("certified")
-            .envelope
-            .spec;
+            .spec()
+            .clone();
 
         assert_rejects(&registry, &base, ProblemClass::InvalidTopology, |spec| {
             spec.cells.push(spec.cells[0].clone());
@@ -3488,8 +4369,8 @@ mod tests {
     fn typed_spec_requires_registry_authority() {
         let spec = certify_program_draft(&reference_draft())
             .expect("certified")
-            .envelope
-            .spec;
+            .spec()
+            .clone();
         let error =
             certify_typed_spec(spec, &CertificationRegistry::new()).expect_err("must reject");
         assert_eq!(
@@ -3504,8 +4385,8 @@ mod tests {
         let registry = CertificationRegistry::from_program_draft(&draft).expect("registry");
         let base = certify_program_draft(&draft)
             .expect("certified")
-            .envelope
-            .spec;
+            .spec()
+            .clone();
 
         assert_rejects(
             &registry,
@@ -3540,8 +4421,8 @@ mod tests {
         let registry = CertificationRegistry::from_program_draft(&draft).expect("registry");
         let base = certify_program_draft(&draft)
             .expect("certified")
-            .envelope
-            .spec;
+            .spec()
+            .clone();
 
         assert_rejects(&registry, &base, ProblemClass::InvalidTopology, |spec| {
             let frame = spec
@@ -3567,8 +4448,8 @@ mod tests {
         let registry = CertificationRegistry::from_program_draft(&draft).expect("registry");
         let base = certify_program_draft(&draft)
             .expect("certified")
-            .envelope
-            .spec;
+            .spec()
+            .clone();
 
         assert_rejects(&registry, &base, ProblemClass::InvalidTopology, |spec| {
             spec.nodes[0].stable_key =
@@ -3585,8 +4466,8 @@ mod tests {
         let registry = CertificationRegistry::from_program_draft(&draft).expect("registry");
         let base = certify_program_draft(&draft)
             .expect("certified")
-            .envelope
-            .spec;
+            .spec()
+            .clone();
 
         assert_rejects(&registry, &base, ProblemClass::InvalidDataMeaning, |spec| {
             let render_node_id = spec
@@ -3618,8 +4499,8 @@ mod tests {
         let registry = CertificationRegistry::from_program_draft(&draft).expect("registry");
         let base = certify_program_draft(&draft)
             .expect("certified")
-            .envelope
-            .spec;
+            .spec()
+            .clone();
 
         assert_rejects(
             &registry,
@@ -3655,6 +4536,29 @@ mod tests {
 
     fn digest_byte(byte: u8) -> DigestBytes {
         DigestBytes::from_array([byte; 32])
+    }
+
+    fn reference_certified_bundle() -> (
+        CertificationRegistry,
+        CertifiedTypedSpec,
+        CertifiedSpecBundle,
+    ) {
+        let draft = reference_draft();
+        let registry = CertificationRegistry::from_program_draft(&draft).expect("registry");
+        let certified = certify_program_draft(&draft).expect("certified");
+        assert_eq!(
+            certified.certificate().evidence.registry_digest,
+            registry.digest().expect("registry digest")
+        );
+        let bundle = certified.bundle().expect("bundle");
+        (registry, certified, bundle)
+    }
+
+    fn certificate_bytes(certificate: &CertifiedSpecCertificate) -> Vec<u8> {
+        certificate
+            .canonical_json()
+            .expect("certificate canonical json")
+            .to_vec()
     }
 
     #[test]

@@ -164,9 +164,9 @@ mod tests {
         );
 
         let certified = certify_program_draft(&draft).expect("certified proof spec");
-        certified.envelope.verify_hash().expect("hash verifies");
+        certified.envelope().verify_hash().expect("hash verifies");
         let side_effect = certified
-            .envelope
+            .envelope()
             .spec
             .nodes
             .iter()

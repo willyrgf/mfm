@@ -287,9 +287,12 @@ pub mod v1 {
         checked_ascii_token
     );
 
-    /// Envelope carrying a certified spec hash and non-semantic audit metadata.
+    /// Hash-only envelope carrying a spec hash and non-semantic audit metadata.
+    ///
+    /// This type is not certification authority. It only proves that `spec_hash` matches
+    /// the canonical bytes of `spec`; runtime authority must come from `mfm-certify`.
     #[derive(Debug, Clone, PartialEq, Eq)]
-    pub struct CertifiedSpecEnvelope {
+    pub struct HashedSpecEnvelope {
         /// Canonical hash of `spec` only.
         pub spec_hash: SpecHash,
         /// Hash-defining typed execution spec.
@@ -298,7 +301,7 @@ pub mod v1 {
         pub audit: TypedExecutionSpecAudit,
     }
 
-    impl CertifiedSpecEnvelope {
+    impl HashedSpecEnvelope {
         /// Builds an envelope by hashing the supplied spec.
         pub fn new(spec: TypedExecutionSpec, audit: TypedExecutionSpecAudit) -> Result<Self> {
             let spec_hash = spec.spec_hash()?;
@@ -2883,7 +2886,7 @@ pub mod v1 {
                 }],
                 ..TypedExecutionSpecAudit::default()
             };
-            let envelope = CertifiedSpecEnvelope::new(spec.clone(), audit).expect("env");
+            let envelope = HashedSpecEnvelope::new(spec.clone(), audit).expect("env");
             assert_eq!(envelope.spec_hash, spec.spec_hash().expect("spec hash"));
             envelope.verify_hash().expect("hash verifies");
 

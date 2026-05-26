@@ -506,7 +506,7 @@ mod tests {
         let certified = certify_program_draft(&draft).expect("certified portfolio spec");
         assert_eq!(
             certified
-                .envelope
+                .envelope()
                 .spec
                 .value_lineages
                 .iter()
@@ -515,9 +515,9 @@ mod tests {
             6,
             "certified portfolio spec must retain value-lineage domain keys"
         );
-        certified.envelope.verify_hash().expect("hash verifies");
+        certified.envelope().verify_hash().expect("hash verifies");
         let spec_json = certified
-            .envelope
+            .envelope()
             .spec
             .canonical_json()
             .expect("canonical spec");

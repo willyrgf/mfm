@@ -383,23 +383,23 @@ mod tests {
         );
 
         let certified = certify_program_draft(&draft).expect("certified EVM DCV spec");
-        certified.envelope.verify_hash().expect("hash verifies");
+        certified.envelope().verify_hash().expect("hash verifies");
         let deploy = certified
-            .envelope
+            .envelope()
             .spec
             .nodes
             .iter()
             .find(|node| node.stable_key.as_str() == "deploy_contract")
             .expect("deploy node");
         let configure = certified
-            .envelope
+            .envelope()
             .spec
             .nodes
             .iter()
             .find(|node| node.stable_key.as_str() == "configure_contract")
             .expect("configure node");
         let validate = certified
-            .envelope
+            .envelope()
             .spec
             .nodes
             .iter()
@@ -427,9 +427,9 @@ mod tests {
     fn config_artifacts_match_certified_spec_refs() {
         let draft = dcv_program_draft(sample_config()).expect("draft");
         let certified = certify_program_draft(&draft).expect("certified");
-        let artifacts = dcv_config_artifacts_for_spec(&draft, &certified.envelope.spec)
+        let artifacts = dcv_config_artifacts_for_spec(&draft, &certified.envelope().spec)
             .expect("config artifacts");
-        assert_eq!(artifacts.len(), certified.envelope.spec.config_refs.len());
+        assert_eq!(artifacts.len(), certified.envelope().spec.config_refs.len());
     }
 
     fn sample_config() -> DeployConfigureValidateCanonicalConfig {

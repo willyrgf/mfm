@@ -3,7 +3,7 @@
 //!
 //! This crate owns the first certified runtime boundary. It derives runnable nodes, materialized
 //! input evidence, runner bindings, and runtime capabilities only from a verified
-//! [`mfm_spec::v1::CertifiedSpecEnvelope`] plus store-owned typed projections.
+//! [`mfm_spec::v1::HashedSpecEnvelope`] plus store-owned typed projections.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
@@ -221,7 +221,7 @@ fn async_store_error(error: impl fmt::Display) -> RuntimeError {
 /// Certified executable runtime spec with indexes used by the serial scheduler.
 #[derive(Debug, Clone)]
 pub struct CertifiedRuntimeSpec {
-    envelope: spec::CertifiedSpecEnvelope,
+    envelope: spec::HashedSpecEnvelope,
     state_descriptors: BTreeMap<DescriptorId, spec::StateDescriptorIdentity>,
     nodes: BTreeMap<NodeId, spec::NodeSpec>,
     cells: BTreeMap<CellId, spec::CellSpec>,
@@ -229,8 +229,8 @@ pub struct CertifiedRuntimeSpec {
 }
 
 impl CertifiedRuntimeSpec {
-    /// Verifies a certified spec envelope and builds deterministic runtime indexes.
-    pub fn new(envelope: spec::CertifiedSpecEnvelope) -> Result<Self> {
+    /// Verifies a hash-only spec envelope and builds deterministic runtime indexes.
+    pub fn new(envelope: spec::HashedSpecEnvelope) -> Result<Self> {
         envelope.verify_hash()?;
         let mut state_descriptors = BTreeMap::new();
         for descriptor in &envelope.spec.descriptor_identities {
@@ -281,8 +281,8 @@ impl CertifiedRuntimeSpec {
         })
     }
 
-    /// Returns the certified spec envelope.
-    pub fn envelope(&self) -> &spec::CertifiedSpecEnvelope {
+    /// Returns the hash-only spec envelope.
+    pub fn envelope(&self) -> &spec::HashedSpecEnvelope {
         &self.envelope
     }
 
@@ -5355,7 +5355,7 @@ mod tests {
             )
         });
         let envelope =
-            spec::CertifiedSpecEnvelope::new(envelope.spec, envelope.audit).expect("rehash");
+            spec::HashedSpecEnvelope::new(envelope.spec, envelope.audit).expect("rehash");
         assert!(matches!(
             CertifiedRuntimeSpec::new(envelope),
             Err(RuntimeError::InvalidSpec(message))
@@ -7681,7 +7681,7 @@ mod tests {
         let mut envelope = fixture.runtime_spec.envelope().clone();
         envelope.spec.nodes.reverse();
         let envelope =
-            spec::CertifiedSpecEnvelope::new(envelope.spec, envelope.audit).expect("rehash");
+            spec::HashedSpecEnvelope::new(envelope.spec, envelope.audit).expect("rehash");
         let runtime = CertifiedRuntimeSpec::new(envelope).expect("runtime");
         assert_eq!(
             runtime.topological_order(),
@@ -8139,7 +8139,7 @@ mod tests {
         })
         .expect("typed spec");
         let envelope =
-            spec::CertifiedSpecEnvelope::new(spec, spec::TypedExecutionSpecAudit::default())
+            spec::HashedSpecEnvelope::new(spec, spec::TypedExecutionSpecAudit::default())
                 .expect("envelope");
         let runtime_spec = CertifiedRuntimeSpec::new(envelope).expect("runtime spec");
         Fixture {
@@ -8201,7 +8201,7 @@ mod tests {
             }
         }
         let envelope =
-            spec::CertifiedSpecEnvelope::new(envelope.spec, envelope.audit).expect("rehash");
+            spec::HashedSpecEnvelope::new(envelope.spec, envelope.audit).expect("rehash");
         fixture.runtime_spec = CertifiedRuntimeSpec::new(envelope).expect("runtime spec");
         fixture
     }
@@ -8249,7 +8249,7 @@ mod tests {
             }
         }
         let envelope =
-            spec::CertifiedSpecEnvelope::new(envelope.spec, envelope.audit).expect("rehash");
+            spec::HashedSpecEnvelope::new(envelope.spec, envelope.audit).expect("rehash");
         fixture.runtime_spec = CertifiedRuntimeSpec::new(envelope).expect("runtime spec");
         fixture
     }
@@ -8292,7 +8292,7 @@ mod tests {
             }
         }
         let envelope =
-            spec::CertifiedSpecEnvelope::new(envelope.spec, envelope.audit).expect("rehash");
+            spec::HashedSpecEnvelope::new(envelope.spec, envelope.audit).expect("rehash");
         fixture.runtime_spec = CertifiedRuntimeSpec::new(envelope).expect("runtime spec");
         fixture
     }

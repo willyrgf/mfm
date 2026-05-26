@@ -210,7 +210,7 @@ async fn parity_reth_deploy_configure_validate_root_op() {
     let draft = dcv_program_draft(canonical.clone()).expect("typed EVM DCV draft");
     let certified = certified_dcv_spec(canonical).expect("typed EVM DCV certified spec");
     let public_schema_id = certified
-        .envelope
+        .envelope()
         .spec
         .public_outputs
         .public_schema_id
@@ -224,13 +224,13 @@ async fn parity_reth_deploy_configure_validate_root_op() {
 
     persist_dcv_config_artifacts(
         services.artifacts(),
-        dcv_config_artifacts_for_spec(&draft, &certified.envelope.spec)
+        dcv_config_artifacts_for_spec(&draft, &certified.envelope().spec)
             .expect("typed EVM DCV config artifacts"),
     )
     .await;
 
     let spec_bytes = certified
-        .envelope
+        .envelope()
         .spec
         .canonical_json()
         .expect("canonical typed spec")
@@ -265,7 +265,7 @@ async fn parity_reth_deploy_configure_validate_root_op() {
         }
         response = services
             .resume_certified_run(TypedRunResumeRequest {
-                envelope: certified.envelope.clone(),
+                envelope: certified.envelope().clone(),
                 run_id: run_id.clone(),
                 drive: DriveMode::Once,
             })
@@ -387,14 +387,14 @@ async fn parity_reth_deploy_configure_validate_root_op() {
     };
     let authority = mfm_app::replay_authority_for_run(
         services.artifacts(),
-        &certified.envelope,
+        certified.envelope(),
         &run_id,
         &stream,
     )
     .await
     .expect("typed EVM DCV replay authority");
     let replay_broker = services
-        .replay_broker(certified.envelope.clone(), &run_id, authority)
+        .replay_broker(certified.envelope().clone(), &run_id, authority)
         .await
         .expect("typed EVM DCV evidence-only replay broker");
     let replay_verified = mfm_transports_evm_dcv::verify_evm_dcv_replay(

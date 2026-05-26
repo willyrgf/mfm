@@ -509,23 +509,24 @@ where
         )
     })?;
     let public_schema_id = certified
-        .envelope
+        .envelope()
         .spec
         .public_outputs
         .public_schema_id
         .clone();
-    let configs =
-        portfolio_config_artifacts_for_spec(&draft, &certified.envelope.spec).map_err(|error| {
+    let configs = portfolio_config_artifacts_for_spec(&draft, &certified.envelope().spec).map_err(
+        |error| {
             ApiError::new(
                 StatusCode::BAD_REQUEST,
                 "TypedPortfolioConfigInvalid",
                 error.to_string(),
             )
-        })?;
+        },
+    )?;
 
     let run_id = parse_optional_run_id(req.run_id)?;
     let spec_bytes = certified
-        .envelope
+        .envelope()
         .spec
         .canonical_json()
         .map_err(|error| {

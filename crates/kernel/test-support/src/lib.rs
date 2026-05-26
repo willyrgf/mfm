@@ -1081,7 +1081,7 @@ fn reference_fixture() -> Result<ReferenceFixture, String> {
     })
     .map_err(display_error)?;
     let envelope =
-        spec::CertifiedSpecEnvelope::new(typed_spec, spec::TypedExecutionSpecAudit::default())
+        spec::HashedSpecEnvelope::new(typed_spec, spec::TypedExecutionSpecAudit::default())
             .map_err(display_error)?;
     let runtime_spec = CertifiedRuntimeSpec::new(envelope).map_err(display_error)?;
     Ok(ReferenceFixture {
