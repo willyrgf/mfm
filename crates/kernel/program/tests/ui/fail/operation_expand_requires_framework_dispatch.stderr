@@ -1,0 +1,15 @@
+error[E0308]: mismatched types
+  --> tests/ui/fail/operation_expand_requires_framework_dispatch.rs:43:50
+   |
+43 |         operation.expand(config, input, builder, dispatch)
+   |                   ------                         ^^^^^^^^ expected `OperationExpansionDispatch<TryOperation>`, found `OperationExpansionDispatch<...>`
+   |                   |
+   |                   arguments to this method are incorrect
+   |
+   = note: expected struct `OperationExpansionDispatch<TryOperation>`
+              found struct `OperationExpansionDispatch<ForwardingOperation>`
+note: method defined here
+  --> src/lib.rs
+   |
+   |     fn expand<'program, 'scope>(
+   |        ^^^^^^

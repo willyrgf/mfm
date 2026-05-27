@@ -103,7 +103,8 @@ impl mfm_program::Operation for TryOperation {
         &self,
         config: Self::Config,
         input: Self::Input<'program, 'scope>,
-        builder: &mut mfm_program::ScopeBuilder<'program, 'scope>,
+        builder: &mut mfm_program::OperationExpansion<'program, 'scope>,
+        _dispatch: mfm_program::OperationExpansionDispatch<Self>,
     ) -> mfm_program::Result<Self::Output<'program, 'scope>> {
         let result = builder.state::<TryPureState, _>(
             mfm_program::StateKey::new("try-operation/state")?,

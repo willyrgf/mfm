@@ -1493,6 +1493,7 @@ fn validate_typed_spec(
         &config_refs,
         &cell_index,
     )?;
+    validate_planning_lineage_authority(spec)?;
     validate_public_outputs(
         &spec.public_outputs,
         &descriptor_index,
@@ -2261,6 +2262,66 @@ fn validate_operation_lineage(
                     "operation frame {} lineage is not content addressed",
                     frame.operation_instance_id
                 ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_planning_lineage_authority(spec: &spec::TypedExecutionSpec) -> Result<()> {
+    let frame_instances = spec
+        .planning_lineage
+        .iter()
+        .map(|frame| frame.operation_instance_id.as_str().to_owned())
+        .collect::<BTreeSet<_>>();
+    let frame_digests = spec
+        .planning_lineage
+        .iter()
+        .map(|frame| frame.lineage_digest.as_str().to_owned())
+        .collect::<BTreeSet<_>>();
+
+    for scope in &spec.scopes {
+        validate_planning_lineage_refs(&scope.planning_lineage, &frame_instances, &frame_digests)?;
+    }
+    for node in &spec.nodes {
+        validate_planning_lineage_refs(&node.planning_lineage, &frame_instances, &frame_digests)?;
+    }
+    for lineage in &spec.value_lineages {
+        validate_planning_lineage_refs(
+            &lineage.planning_lineage,
+            &frame_instances,
+            &frame_digests,
+        )?;
+    }
+    for frame in &spec.planning_lineage {
+        validate_planning_lineage_refs(
+            &frame.parent_planning_lineage,
+            &frame_instances,
+            &frame_digests,
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_planning_lineage_refs(
+    lineage: &spec::PlanningLineage,
+    frame_instances: &BTreeSet<String>,
+    frame_digests: &BTreeSet<String>,
+) -> Result<()> {
+    validate_planning_lineage(lineage)?;
+    for instance in &lineage.active_operation_instances {
+        if !frame_instances.contains(instance.as_str()) {
+            return Err(problem(
+                ProblemClass::InvalidDataMeaning,
+                format!("planning lineage references missing operation instance {instance}"),
+            ));
+        }
+    }
+    for digest in &lineage.completed_operation_frames {
+        if !frame_digests.contains(digest.as_str()) {
+            return Err(problem(
+                ProblemClass::InvalidDataMeaning,
+                format!("planning lineage references missing operation frame {digest}"),
             ));
         }
     }
@@ -4179,7 +4240,8 @@ mod tests {
             &self,
             config: Self::Config,
             input: Self::Input<'p, 's>,
-            builder: &mut mfm_program::ScopeBuilder<'p, 's>,
+            builder: &mut mfm_program::OperationExpansion<'p, 's>,
+            _dispatch: mfm_program::OperationExpansionDispatch<Self>,
         ) -> program::Result<Self::Output<'p, 's>> {
             let result = builder.state::<MultiplyState, _>(
                 StateKey::new("multiply-state")?,
@@ -4551,6 +4613,25 @@ mod tests {
             .spec()
             .clone();
 
+        assert_rejects(&registry, &base, ProblemClass::InvalidDataMeaning, |spec| {
+            spec.planning_lineage.clear();
+        });
+        assert_rejects(&registry, &base, ProblemClass::InvalidDataMeaning, |spec| {
+            let lineage = spec
+                .nodes
+                .first_mut()
+                .expect("node with operation planning lineage");
+            lineage.planning_lineage.active_operation_instances =
+                vec![OperationInstanceId::from_digest(
+                    DigestAlgorithm::Sha256JcsV1,
+                    digest_byte(0x92),
+                )];
+            lineage.planning_lineage.lineage_digest = planning_lineage_digest(
+                &lineage.planning_lineage.active_operation_instances,
+                &lineage.planning_lineage.completed_operation_frames,
+            )
+            .expect("planning lineage digest");
+        });
         assert_rejects(&registry, &base, ProblemClass::InvalidDataMeaning, |spec| {
             let render_node_id = spec
                 .nodes

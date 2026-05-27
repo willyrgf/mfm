@@ -1,0 +1,21 @@
+error[E0061]: this method takes 4 arguments but 3 arguments were supplied
+  --> tests/ui/fail/operation_expand_requires_expansion_context.rs:12:15
+   |
+12 |     operation.expand(TryConfig { multiplier: 2 }, input, builder)
+   |               ^^^^^^---------------------------------------------
+   |                     |                                    |
+   |                     |                                    expected `&mut OperationExpansion<'_, '_>`, found `&mut ScopeBuilder<'_, '_>`
+   |                     argument #4 of type `OperationExpansionDispatch<TryOperation>` is missing
+   |
+   = note: expected mutable reference `&mut OperationExpansion<'_, '_>`
+              found mutable reference `&mut ScopeBuilder<'program, 'scope>`
+note: method defined here
+  --> src/lib.rs
+   |
+   |     fn expand<'program, 'scope>(
+   |        ^^^^^^
+help: provide the argument
+   |
+12 -     operation.expand(TryConfig { multiplier: 2 }, input, builder)
+12 +     operation.expand(TryConfig { multiplier: 2 }, input, /* &mut OperationExpansion<'_, '_> */, /* OperationExpansionDispatch<TryOperation> */)
+   |

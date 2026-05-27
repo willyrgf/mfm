@@ -26,8 +26,9 @@ pub use mfm_collectors_proof::{
 };
 use mfm_ids::{DigestAlgorithm, OperationKind, OperationVersion};
 use mfm_program::{
-    build_root_with_registries, Operation, OperationKey, OperationRegistryBuilder, PublicOutputKey,
-    RootBuilder, ScopeKey, StateKey, StateRegistryBuilder,
+    build_root_with_registries, Operation, OperationExpansion, OperationKey,
+    OperationRegistryBuilder, PublicOutputKey, RootBuilder, ScopeKey, StateKey,
+    StateRegistryBuilder,
 };
 
 const PROOF_OPERATION_KIND_NAME: &str = "workflow";
@@ -67,7 +68,8 @@ impl Operation for ProofWorkflowOperation {
         &self,
         config: Self::Config,
         _input: Self::Input<'program, 'scope>,
-        builder: &mut mfm_program::ScopeBuilder<'program, 'scope>,
+        builder: &mut OperationExpansion<'program, 'scope>,
+        _dispatch: mfm_program::OperationExpansionDispatch<Self>,
     ) -> mfm_program::Result<Self::Output<'program, 'scope>> {
         if config.workflow_version != 1 {
             return Err(mfm_program::PlanError::Key(

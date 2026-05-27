@@ -12,6 +12,7 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::future::Future;
 use std::marker::PhantomData;
+use std::ptr::NonNull;
 
 use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
 use mfm_capabilities::{CapabilitySet, CapabilitySetDescriptor, CapabilitySetFor, NoCaps};
@@ -395,8 +396,32 @@ pub trait Operation: Send + Sync + 'static {
         &self,
         config: Self::Config,
         input: Self::Input<'program, 'scope>,
-        builder: &mut ScopeBuilder<'program, 'scope>,
-    ) -> Result<Self::Output<'program, 'scope>>;
+        builder: &mut OperationExpansion<'program, 'scope>,
+        dispatch: OperationExpansionDispatch<Self>,
+    ) -> Result<Self::Output<'program, 'scope>>
+    where
+        Self: Sized;
+}
+
+/// Operation-specific framework dispatch authority for [`Operation::expand`].
+///
+/// The token is public so downstream crates can implement [`Operation`], but its fields and
+/// constructor are private. Each token is bound to one operation type, so an operation body cannot
+/// forward its own dispatch authority into another operation's `expand` method. Framework code
+/// mints this token only inside [`ScopeBuilder::call_registered`].
+#[doc(hidden)]
+pub struct OperationExpansionDispatch<O: Operation> {
+    _operation: PhantomData<fn() -> O>,
+    _private: (),
+}
+
+impl<O: Operation> OperationExpansionDispatch<O> {
+    fn new() -> Self {
+        Self {
+            _operation: PhantomData,
+            _private: (),
+        }
+    }
 }
 
 /// Typed dynamic fanout key with canonical bytes for stable ordering.
@@ -3378,7 +3403,13 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
         self.active_operation_stack
             .push(operation_instance_id.clone());
 
-        let output = match operation.expand(config, operation_input, self) {
+        let mut expansion = OperationExpansion::new(self);
+        let output = match operation.expand(
+            config,
+            operation_input,
+            &mut expansion,
+            OperationExpansionDispatch::<O>::new(),
+        ) {
             Ok(output) => output,
             Err(error) => {
                 self.restore(checkpoint);
@@ -3451,6 +3482,167 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
         self.child_scope_keys = checkpoint.child_scope_keys;
         self.child_scopes = checkpoint.child_scopes;
         self.bridge_nodes = checkpoint.bridge_nodes;
+    }
+}
+
+/// Operation-local planning context minted only by [`ScopeBuilder::call`] and
+/// [`ScopeBuilder::call_registered`].
+///
+/// The fields are private so downstream crates cannot construct this context or call
+/// [`Operation::expand`] directly. Authoring code inside an operation can compose registered
+/// states, nested operations, and child scopes, but it cannot insert raw graph nodes, raw
+/// dependencies, raw cell ids, or lineage evidence.
+pub struct OperationExpansion<'program, 'scope> {
+    scope: NonNull<ScopeBuilder<'program, 'scope>>,
+    _program: PhantomData<fn(&'program ()) -> &'program ()>,
+    _scope: PhantomData<fn(&'scope ()) -> &'scope ()>,
+    _not_send_sync: PhantomData<*mut ()>,
+}
+
+impl<'program, 'scope> OperationExpansion<'program, 'scope> {
+    fn new(scope: &mut ScopeBuilder<'program, 'scope>) -> Self {
+        Self {
+            scope: NonNull::from(scope),
+            _program: PhantomData,
+            _scope: PhantomData,
+            _not_send_sync: PhantomData,
+        }
+    }
+
+    fn scope_mut(&mut self) -> &mut ScopeBuilder<'program, 'scope> {
+        // SAFETY: OperationExpansion is created only by ScopeBuilder::call_registered from its
+        // exclusive `&mut self`. The raw pointer is never exposed, all mutation goes through
+        // `&mut OperationExpansion`, and call_registered does not touch the ScopeBuilder again
+        // until operation expansion returns.
+        unsafe { self.scope.as_mut() }
+    }
+
+    /// Returns the typed scope id currently being expanded into.
+    pub fn scope_id(&self) -> &ScopeId {
+        // SAFETY: See `scope_mut`; shared access here does not permit mutation or aliasing escape.
+        unsafe { self.scope.as_ref().scope_id() }
+    }
+
+    /// Opens a child scope and returns only values explicitly bridged back to this scope.
+    pub fn child_scope<R>(
+        &mut self,
+        key: ScopeKey,
+        f: impl for<'child> FnOnce(
+            &mut ChildScopeBuilder<'program, 'scope, 'child>,
+        ) -> Result<Bridged<'program, 'scope, R>>,
+    ) -> Result<R> {
+        self.scope_mut().child_scope(key, f)
+    }
+
+    /// Plans a registered typed state by resolving `S` through this expansion's registry.
+    pub fn state<S, I>(
+        &mut self,
+        key: StateKey,
+        config: S::Config,
+        input: I,
+    ) -> Result<Handle<'program, 'scope, S::Output>>
+    where
+        S: StateSpec,
+        S::Effect: EffectRunner<S>,
+        S::Caps: CapabilitySetFor<S::Effect>,
+        I: IntoStateInput<'program, 'scope, S::Input>,
+    {
+        self.scope_mut().state::<S, I>(key, config, input)
+    }
+
+    /// Plans a registered typed state and attaches stable domain-key evidence to its output.
+    pub fn state_with_domain_keys<S, I, K>(
+        &mut self,
+        key: StateKey,
+        config: S::Config,
+        input: I,
+        domain_keys: Vec<K>,
+    ) -> Result<Handle<'program, 'scope, S::Output>>
+    where
+        S: StateSpec,
+        S::Effect: EffectRunner<S>,
+        S::Caps: CapabilitySetFor<S::Effect>,
+        I: IntoStateInput<'program, 'scope, S::Input>,
+        K: StableDomainKey,
+    {
+        self.scope_mut()
+            .state_with_domain_keys::<S, I, K>(key, config, input, domain_keys)
+    }
+
+    /// Plans a typed state from an explicit framework-owned registration token.
+    pub fn state_registered<S, I>(
+        &mut self,
+        key: StateKey,
+        registered: RegisteredState<S>,
+        config: S::Config,
+        input: I,
+    ) -> Result<Handle<'program, 'scope, S::Output>>
+    where
+        S: StateSpec,
+        S::Effect: EffectRunner<S>,
+        S::Caps: CapabilitySetFor<S::Effect>,
+        I: IntoStateInput<'program, 'scope, S::Input>,
+    {
+        self.scope_mut()
+            .state_registered::<S, I>(key, registered, config, input)
+    }
+
+    /// Plans a typed state from an explicit token and attaches stable domain-key evidence.
+    pub fn state_registered_with_domain_keys<S, I, K>(
+        &mut self,
+        key: StateKey,
+        registered: RegisteredState<S>,
+        config: S::Config,
+        input: I,
+        domain_keys: Vec<K>,
+    ) -> Result<Handle<'program, 'scope, S::Output>>
+    where
+        S: StateSpec,
+        S::Effect: EffectRunner<S>,
+        S::Caps: CapabilitySetFor<S::Effect>,
+        I: IntoStateInput<'program, 'scope, S::Input>,
+        K: StableDomainKey,
+    {
+        self.scope_mut()
+            .state_registered_with_domain_keys::<S, I, K>(
+                key,
+                registered,
+                config,
+                input,
+                domain_keys,
+            )
+    }
+
+    /// Expands a registered typed operation by resolving `O` through this expansion's registry.
+    pub fn call<O, I>(
+        &mut self,
+        key: OperationKey,
+        operation: O,
+        config: O::Config,
+        input: I,
+    ) -> Result<O::Output<'program, 'scope>>
+    where
+        O: Operation,
+        I: IntoOperationInput<'program, 'scope, O::Input<'program, 'scope>>,
+    {
+        self.scope_mut().call::<O, I>(key, operation, config, input)
+    }
+
+    /// Expands a typed operation from an explicit framework-owned registration token.
+    pub fn call_registered<O, I>(
+        &mut self,
+        key: OperationKey,
+        registered: RegisteredOperation<O>,
+        operation: O,
+        config: O::Config,
+        input: I,
+    ) -> Result<O::Output<'program, 'scope>>
+    where
+        O: Operation,
+        I: IntoOperationInput<'program, 'scope, O::Input<'program, 'scope>>,
+    {
+        self.scope_mut()
+            .call_registered::<O, I>(key, registered, operation, config, input)
     }
 }
 

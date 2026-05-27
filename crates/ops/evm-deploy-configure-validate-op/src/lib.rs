@@ -41,8 +41,8 @@ use mfm_ids::{
     ArtifactId, ContentDigest, DigestAlgorithm, OperationKind, OperationVersion, SchemaId,
 };
 use mfm_program::{
-    Operation, OperationKey, OperationRegistryBuilder, PublicOutputKey, RootBuilder, ScopeKey,
-    StateKey, StateRegistryBuilder,
+    Operation, OperationExpansion, OperationKey, OperationRegistryBuilder, PublicOutputKey,
+    RootBuilder, ScopeKey, StateKey, StateRegistryBuilder,
 };
 use mfm_spec::v1 as spec;
 pub use mfm_state_evm_dcv::{
@@ -95,7 +95,8 @@ impl Operation for DeployConfigureValidateWorkflowOperation {
         &self,
         config: Self::Config,
         _input: Self::Input<'program, 'scope>,
-        builder: &mut mfm_program::ScopeBuilder<'program, 'scope>,
+        builder: &mut OperationExpansion<'program, 'scope>,
+        _dispatch: mfm_program::OperationExpansionDispatch<Self>,
     ) -> mfm_program::Result<Self::Output<'program, 'scope>> {
         let built = build_deploy_configure_validate_config(config)
             .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?;

@@ -31,8 +31,8 @@ use mfm_portfolio_model::portfolio::{validate_portfolio_bundle, NetworkConfig, P
 use mfm_portfolio_model::symbol::SymbolConfig;
 use mfm_portfolio_model::wallet::WalletConfig;
 use mfm_program::{
-    build_root_with_registries, DomainKeyedNonEmptyHandles, Operation, OperationKey,
-    OperationRegistryBuilder, PublicOutputKey, RootBuilder, ScopeKey, StateKey,
+    build_root_with_registries, DomainKeyedNonEmptyHandles, Operation, OperationExpansion,
+    OperationKey, OperationRegistryBuilder, PublicOutputKey, RootBuilder, ScopeKey, StateKey,
     StateRegistryBuilder,
 };
 use mfm_spec::v1 as spec;
@@ -85,7 +85,8 @@ impl Operation for PortfolioTrackerWorkflowOperation {
         &self,
         config: Self::Config,
         _input: Self::Input<'program, 'scope>,
-        builder: &mut mfm_program::ScopeBuilder<'program, 'scope>,
+        builder: &mut OperationExpansion<'program, 'scope>,
+        _dispatch: mfm_program::OperationExpansionDispatch<Self>,
     ) -> mfm_program::Result<Self::Output<'program, 'scope>> {
         if config.workflow_version != 1 {
             return Err(mfm_program::PlanError::Key(

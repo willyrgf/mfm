@@ -135,7 +135,8 @@ impl Operation for MultiplyOperation {
         &self,
         config: Self::Config,
         input: Self::Input<'program, 'scope>,
-        builder: &mut ScopeBuilder<'program, 'scope>,
+        builder: &mut OperationExpansion<'program, 'scope>,
+        _dispatch: OperationExpansionDispatch<Self>,
     ) -> Result<Self::Output<'program, 'scope>> {
         let result = builder.state::<MultiplyState, _>(
             StateKey::new("multiply-operation/state")?,
@@ -143,6 +144,49 @@ impl Operation for MultiplyOperation {
             input,
         )?;
         Ok(LaunchOperationOutputs { result })
+    }
+}
+
+#[derive(Debug, Clone)]
+struct FailingOperation;
+
+impl Operation for FailingOperation {
+    type Config = LaunchConfig;
+    type Input<'program, 'scope> = Handle<'program, 'scope, LaunchValue>;
+    type Output<'program, 'scope> = LaunchOperationOutputs<'program, 'scope>;
+
+    fn kind() -> Result<OperationKind> {
+        OperationKind::new(
+            "mfm.program.test.operation",
+            "failing",
+            DigestAlgorithm::Sha256JcsV1,
+            sha256_digest_bytes(b"mfm.program.test.operation:failing"),
+        )
+        .map_err(|error| PlanError::Key(error.to_string()))
+    }
+
+    fn version() -> Result<OperationVersion> {
+        OperationVersion::new("mfm.program.test.operation.failing.v1")
+            .map_err(|error| PlanError::Key(error.to_string()))
+    }
+
+    fn name() -> &'static str {
+        "failing"
+    }
+
+    fn expand<'program, 'scope>(
+        &self,
+        config: Self::Config,
+        input: Self::Input<'program, 'scope>,
+        builder: &mut OperationExpansion<'program, 'scope>,
+        _dispatch: OperationExpansionDispatch<Self>,
+    ) -> Result<Self::Output<'program, 'scope>> {
+        let _planned =
+            builder.state::<MultiplyState, _>(StateKey::new("rollback/state")?, config, input)?;
+        builder.child_scope(ScopeKey::new("rollback/child")?, |child| {
+            child.bridge_to_parent(())
+        })?;
+        Err(PlanError::Key("forced expansion failure".to_owned()))
     }
 }
 
@@ -749,6 +793,96 @@ fn explicit_registered_operation_token_calls_without_builder_registry() {
         draft.operation_lineage()[0].key.as_str(),
         "multiply-operation"
     );
+}
+
+#[test]
+fn failed_operation_expansion_rolls_back_scope_mutations_and_lineage() {
+    let mut state_registry = StateRegistryBuilder::new();
+    state_registry
+        .register::<MultiplyState>()
+        .expect("state registers");
+    let mut operation_registry = OperationRegistryBuilder::new();
+    operation_registry
+        .register::<FailingOperation>()
+        .expect("failing operation registers");
+    operation_registry
+        .register::<MultiplyOperation>()
+        .expect("multiply operation registers");
+
+    let draft = build_root_with_registries(
+        ScopeKey::new("root").expect("scope key"),
+        state_registry.into_snapshot(),
+        operation_registry.into_snapshot(),
+        |root| {
+            let seed = CanonicalSeed::from_value(&LaunchValue {
+                amount: 5,
+                label: "rollback".to_owned(),
+            })?;
+            let input = root.seed(SeedKey::new("input")?, seed)?;
+            let failed = root.scope().call::<FailingOperation, _>(
+                OperationKey::new("rollback-operation")?,
+                FailingOperation,
+                LaunchConfig { multiplier: 2 },
+                input.clone(),
+            );
+            let Err(error) = failed else {
+                panic!("expansion should fail before returning outputs");
+            };
+            assert_eq!(error, PlanError::Key("forced expansion failure".to_owned()));
+
+            let _direct = root.scope().state::<MultiplyState, _>(
+                StateKey::new("rollback/state")?,
+                LaunchConfig { multiplier: 3 },
+                input.clone(),
+            )?;
+            root.scope()
+                .child_scope(ScopeKey::new("rollback/child")?, |child| {
+                    child.bridge_to_parent(())
+                })?;
+            let retry = root.scope().call::<MultiplyOperation, _>(
+                OperationKey::new("rollback-operation")?,
+                MultiplyOperation,
+                LaunchConfig { multiplier: 4 },
+                input,
+            )?;
+            root.bind_public_outputs(
+                PublicOutputKey::new("terminal")?,
+                &LaunchPublicOutputs {
+                    result: retry.result,
+                },
+            )
+        },
+    )
+    .expect("root builds after failed expansion rollback");
+
+    assert_eq!(draft.operation_lineage().len(), 1);
+    assert_eq!(
+        draft.operation_lineage()[0].key.as_str(),
+        "rollback-operation"
+    );
+    assert_eq!(
+        draft
+            .scopes()
+            .iter()
+            .filter(|scope| scope.key.as_str() == "rollback/child")
+            .count(),
+        1
+    );
+    assert_eq!(
+        draft
+            .state_nodes()
+            .iter()
+            .filter(|node| node.key.as_str() == "rollback/state")
+            .count(),
+        1
+    );
+    let direct_state = draft
+        .state_nodes()
+        .iter()
+        .find(|node| node.key.as_str() == "rollback/state")
+        .expect("direct state reused failed expansion state key");
+    assert!(direct_state.planning_lineage.active_instances.is_empty());
+    assert!(direct_state.planning_lineage.completed_frames.is_empty());
 }
 
 #[test]
