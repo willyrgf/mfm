@@ -8,16 +8,28 @@ use mfm_op_portfolio_tracker::{
     PortfolioConfigArtifact, PortfolioWorkflowConfig,
 };
 use mfm_portfolio_config::decode_portfolio_snapshot_canonical_config;
+use mfm_store::v1 as store;
+use mfm_store::v1::TypedRunEventStore;
+
+pub struct TypedPortfolioAuthorityEvidence {
+    pub spec_hash: String,
+    pub certificate_hash: String,
+    pub retained_artifacts: usize,
+    pub public_output_event_id: String,
+    pub public_output_rendered_digest: String,
+}
 
 pub struct TypedPortfolioSnapshotResult {
     pub run: TypedRunResponse,
     pub public_output: TypedPublicOutputResponse,
+    pub authority: TypedPortfolioAuthorityEvidence,
 }
 
 pub struct TypedPortfolioResumeResult {
     pub started: TypedRunResponse,
     pub resumed: TypedRunResponse,
     pub public_output: TypedPublicOutputResponse,
+    pub authority: TypedPortfolioAuthorityEvidence,
 }
 
 pub async fn run_typed_portfolio_snapshot(
@@ -78,7 +90,27 @@ pub async fn run_typed_portfolio_snapshot(
         .typed_public_output(&run_id, &public_schema_id)
         .await
         .expect("typed portfolio public output");
-    TypedPortfolioSnapshotResult { run, public_output }
+    let stream = {
+        let store = services.store();
+        let store = store.lock().await;
+        store.load_run_stream(&run_id)
+    };
+    let replay_broker = services
+        .replay_broker(&run_id)
+        .await
+        .expect("typed portfolio replay authority");
+    let retained_artifacts = replay_broker
+        .projection_snapshot()
+        .retention(&run_id)
+        .map(|retention| retention.refs.len())
+        .unwrap_or_default();
+    let authority =
+        authority_evidence_from_stream(&stream, &run, &public_output, retained_artifacts);
+    TypedPortfolioSnapshotResult {
+        run,
+        public_output,
+        authority,
+    }
 }
 
 pub async fn resume_typed_portfolio_snapshot(
@@ -143,10 +175,67 @@ pub async fn resume_typed_portfolio_snapshot(
         .typed_public_output(&run_id, &public_schema_id)
         .await
         .expect("typed portfolio public output");
+    let stream = {
+        let store = services.store();
+        let store = store.lock().await;
+        store.load_run_stream(&run_id)
+    };
+    let replay_broker = services
+        .replay_broker(&run_id)
+        .await
+        .expect("typed portfolio replay authority");
+    let retained_artifacts = replay_broker
+        .projection_snapshot()
+        .retention(&run_id)
+        .map(|retention| retention.refs.len())
+        .unwrap_or_default();
+    let authority =
+        authority_evidence_from_stream(&stream, &resumed, &public_output, retained_artifacts);
     TypedPortfolioResumeResult {
         started,
         resumed,
         public_output,
+        authority,
+    }
+}
+
+fn authority_evidence_from_stream(
+    stream: &[store::KernelEventEnvelope],
+    run: &TypedRunResponse,
+    public_output: &TypedPublicOutputResponse,
+    retained_artifacts: usize,
+) -> TypedPortfolioAuthorityEvidence {
+    let run_started = stream
+        .iter()
+        .find_map(|event| match event.payload() {
+            events::KernelEventPayload::RunStarted(payload) => Some(payload),
+            _ => None,
+        })
+        .expect("RunStarted evidence");
+    assert_eq!(run_started.spec_hash.as_str(), run.spec_hash);
+
+    let (public_output_event, public_output_payload) = stream
+        .iter()
+        .find_map(|event| match event.payload() {
+            events::KernelEventPayload::PublicOutputProduced(payload) => Some((event, payload)),
+            _ => None,
+        })
+        .expect("PublicOutputProduced evidence");
+    assert_eq!(
+        public_output_event.event_id().as_str(),
+        public_output.event_id
+    );
+    assert_eq!(
+        public_output_payload.rendered_digest.as_str(),
+        public_output.rendered_digest
+    );
+
+    TypedPortfolioAuthorityEvidence {
+        spec_hash: run_started.spec_hash.as_str().to_owned(),
+        certificate_hash: run_started.certificate_artifact_digest.as_str().to_owned(),
+        retained_artifacts,
+        public_output_event_id: public_output_event.event_id().as_str().to_owned(),
+        public_output_rendered_digest: public_output_payload.rendered_digest.as_str().to_owned(),
     }
 }
 

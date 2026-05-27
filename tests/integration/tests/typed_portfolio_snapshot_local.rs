@@ -21,6 +21,18 @@ async fn typed_portfolio_snapshot_resumes_from_append_only_start() {
     let result = support::resume_typed_portfolio_snapshot(portfolio_payload()).await;
     assert_eq!(result.started.phase, TypedRunPhase::Started);
     assert_eq!(result.resumed.phase, TypedRunPhase::Completed);
+    assert_eq!(result.started.spec_hash, result.resumed.spec_hash);
+    assert_eq!(result.authority.spec_hash, result.resumed.spec_hash);
+    assert!(!result.authority.certificate_hash.is_empty());
+    assert!(result.authority.retained_artifacts > 0);
+    assert_eq!(
+        result.authority.public_output_event_id,
+        result.public_output.event_id
+    );
+    assert_eq!(
+        result.authority.public_output_rendered_digest,
+        result.public_output.rendered_digest
+    );
 
     let public_output = result
         .public_output
@@ -77,6 +89,17 @@ async fn rest_portfolio_snapshot_matches_typed_public_output() {
     let body = response_json(response).await;
     assert_eq!(body["status"], "success");
     assert_eq!(body["data"]["run"]["phase"], "completed");
+    assert_eq!(body["data"]["run"]["spec_hash"], expected.run.spec_hash);
+    assert!(
+        body["data"]["public_output"]["event_id"]
+            .as_str()
+            .is_some_and(|event_id| event_id.starts_with("event:sha256-jcs-v1:")),
+        "REST public-output response must expose typed event evidence"
+    );
+    assert_eq!(
+        body["data"]["public_output"]["rendered_digest"],
+        expected.authority.public_output_rendered_digest
+    );
     assert_eq!(
         &body["data"]["public_output"]["json"], expected_public_output,
         "REST portfolio route must render the same public JSON as the typed workflow helper"

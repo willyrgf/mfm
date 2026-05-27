@@ -129,3 +129,32 @@ async fn execute_internal(args: &StartArgs) -> CommandResult<TypedRunResponse> {
         .map_err(command_error_from_typed_app_error)?;
     Ok(CommandOutput::new(response))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn start_rejects_invalid_bundle_before_store_connection() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let bundle = tmp.path().join("bundle.json");
+        std::fs::write(&bundle, "{}").expect("write invalid bundle");
+
+        let err = execute_internal(&StartArgs {
+            bundle,
+            run_id: None,
+            seeds: Vec::new(),
+            framework_version: "mfm.cli.test".to_owned(),
+            source_revision: "test-source".to_owned(),
+            drive: TypedDriveArg::AppendOnly,
+            stores: TypedRunStoresArgs {
+                typed_artifact_root: Some(tmp.path().join("artifacts")),
+                database_url: None,
+            },
+        })
+        .await
+        .expect_err("invalid bundle rejects before store construction");
+
+        assert_eq!(err.code, "TypedBundleInvalid");
+    }
+}

@@ -2573,6 +2573,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn app_rejects_certifier_invalid_runtime_shape_valid_bundle_before_run_started() {
+        let root = std::env::temp_dir().join(format!(
+            "mfm-app-certifier-invalid-bundle-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let artifacts = FsTypedArtifactStore::new(&root);
+        let fixture = framework_seed_public_output_fixture();
+        let mut invalid_spec = fixture.certified_spec.spec().clone();
+        invalid_spec.config_refs.clear();
+        let spec_bytes = invalid_spec
+            .canonical_json()
+            .expect("invalid spec remains parseable")
+            .to_vec();
+        let mut evidence = fixture.certified_spec.certificate().evidence.clone();
+        evidence.spec_hash = invalid_spec.spec_hash().expect("invalid spec hash");
+        let certificate =
+            mfm_certify::CertifiedSpecCertificate::from_evidence(evidence).expect("certificate");
+        let certificate_bytes = certificate
+            .canonical_json()
+            .expect("certificate json")
+            .to_vec();
+        let registry =
+            CertificationRegistry::from_program_draft(&fixture.draft).expect("fixture registry");
+        let run_id = fixture.run_id.clone();
+        let err = build_typed_run_start_request(
+            &artifacts,
+            CertifiedBundleRunStartInput {
+                spec_bytes: &spec_bytes,
+                certificate_bytes: &certificate_bytes,
+                registry: &registry,
+                run_id: run_id.clone(),
+                framework_version: "mfm.test.framework",
+                source_revision: "test-source",
+                drive: DriveMode::AppendOnly,
+            },
+            Vec::new(),
+        )
+        .await
+        .expect_err("certifier-invalid bundle must not build a start request");
+        assert_eq!(err.code, "TypedCertificationFailed");
+
+        let services = make_async_typed_services_with_certification_registry(
+            ErasedRunnerRegistry::new(),
+            AsyncInMemoryStore::default(),
+            artifacts,
+            registry,
+        );
+        let stream = services
+            .store()
+            .load_run_stream(&run_id)
+            .await
+            .expect("load stream");
+        assert!(!stream
+            .iter()
+            .any(|event| matches!(event.payload(), events::KernelEventPayload::RunStarted(_))));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
     async fn tampered_stored_spec_artifact_rejects_before_resume() {
         let (root, fixture, services, _started) = start_framework_fixture_run().await;
         let stream = services

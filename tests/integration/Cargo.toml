@@ -25,8 +25,14 @@ mfm-app = { path = "../../crates/app" }
 
 mfm-artifact-store-fs = { path = "../../crates/storages/artifact-store-fs" }
 mfm-events = { path = "../../crates/kernel/events" }
+mfm-ids = { path = "../../crates/kernel/ids" }
+mfm-spec = { path = "../../crates/kernel/spec" }
+mfm-canonical = { path = "../../crates/kernel/canonical" }
+mfm-certify = { path = "../../crates/kernel/certify" }
+mfm-program = { path = "../../crates/kernel/program" }
 mfm-store = { path = "../../crates/kernel/store" }
 mfm-stream-store-postgres = { path = "../../crates/storages/stream-store-postgres" }
+mfm-op-proof = { path = "../../crates/ops/proof-op" }
 mfm-op-evm-deploy-configure-validate = { path = "../../crates/ops/evm-deploy-configure-validate-op" }
 mfm-transports-evm-dcv = { path = "../../crates/transports/evm-dcv" }
 mfm-op-portfolio-tracker = { path = "../../crates/ops/portfolio-tracker-op" }
