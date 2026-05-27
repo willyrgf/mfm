@@ -1674,6 +1674,7 @@ fn parse_run_state(value: &str) -> Result<RunState> {
 fn artifact_role_str(role: ArtifactRole) -> &'static str {
     match role {
         ArtifactRole::TypedExecutionSpec => "typed_execution_spec",
+        ArtifactRole::TypedSpecCertificate => "typed_spec_certificate",
         ArtifactRole::TypedConfig => "typed_config",
         ArtifactRole::SeedInput => "seed_input",
         ArtifactRole::StateOutput => "state_output",
@@ -1695,6 +1696,7 @@ fn artifact_role_str(role: ArtifactRole) -> &'static str {
 fn parse_artifact_role(value: &str) -> Result<ArtifactRole> {
     match value {
         "typed_execution_spec" => Ok(ArtifactRole::TypedExecutionSpec),
+        "typed_spec_certificate" => Ok(ArtifactRole::TypedSpecCertificate),
         "typed_config" => Ok(ArtifactRole::TypedConfig),
         "seed_input" => Ok(ArtifactRole::SeedInput),
         "state_output" => Ok(ArtifactRole::StateOutput),
@@ -1996,6 +1998,11 @@ mod tests {
             spec_hash: spec_hash(1),
             spec_artifact_id: artifact_id(2),
             spec_media_type: media_type("application/vnd.mfm.typed-execution-spec+json;version=1"),
+            certificate_artifact_id: artifact_id(4),
+            certificate_artifact_digest: content_digest(5),
+            certificate_media_type: media_type(
+                "application/vnd.mfm.typed-spec-certificate+json;version=1",
+            ),
             spec_version: SpecVersion::new("mfm.typed.execution_spec.v1").expect("spec version"),
             lowering_version: LoweringVersion::new("mfm.typed.lowering.v1")
                 .expect("lowering version"),

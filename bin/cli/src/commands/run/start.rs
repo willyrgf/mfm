@@ -19,6 +19,10 @@ pub(crate) struct StartArgs {
     #[arg(long, value_name = "PATH")]
     pub spec: PathBuf,
 
+    /// Certified typed spec certificate JSON file.
+    #[arg(long, value_name = "PATH")]
+    pub certificate: PathBuf,
+
     /// Optional typed run id (`run:<algorithm>:<digest>`). Defaults to a generated typed id.
     #[arg(long)]
     pub run_id: Option<String>,
@@ -85,6 +89,15 @@ async fn execute_internal(args: &StartArgs) -> CommandResult<TypedRunResponse> {
             ),
         )
     })?;
+    let certificate_bytes = tokio::fs::read(&args.certificate).await.map_err(|error| {
+        CommandError::new(
+            "TypedCertificateReadFailed",
+            format!(
+                "failed to read typed spec certificate file {}: {error}",
+                args.certificate.display()
+            ),
+        )
+    })?;
     let seed_media_type = mfm_app::json_media_type().map_err(command_error_from_typed_app_error)?;
     let mut seed_inputs = Vec::with_capacity(args.seeds.len());
     for seed in &args.seeds {
@@ -108,12 +121,16 @@ async fn execute_internal(args: &StartArgs) -> CommandResult<TypedRunResponse> {
     let services = make_typed_app_services(&args.stores).await?;
     let request = mfm_app::build_typed_run_start_request(
         services.artifacts(),
-        &spec_bytes,
-        run_id,
-        &args.framework_version,
-        &args.source_revision,
+        mfm_app::CertifiedBundleRunStartInput {
+            spec_bytes: &spec_bytes,
+            certificate_bytes: &certificate_bytes,
+            registry: services.certification_registry(),
+            run_id,
+            framework_version: &args.framework_version,
+            source_revision: &args.source_revision,
+            drive: drive_mode(args.drive),
+        },
         seed_inputs,
-        drive_mode(args.drive),
     )
     .await
     .map_err(command_error_from_typed_app_error)?;

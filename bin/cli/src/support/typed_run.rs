@@ -70,9 +70,16 @@ pub(crate) async fn make_typed_app_services(
     let artifacts = make_typed_artifact_store(args);
     let runners = mfm_app::production_typed_runner_registry(artifacts.clone())
         .map_err(command_error_from_typed_app_error)?;
-    Ok(mfm_app::make_async_typed_services(
-        runners, store, artifacts,
-    ))
+    let certification_registry =
+        mfm_app::production_certification_registry().map_err(command_error_from_typed_app_error)?;
+    Ok(
+        mfm_app::make_async_typed_services_with_certification_registry(
+            runners,
+            store,
+            artifacts,
+            certification_registry,
+        ),
+    )
 }
 
 /// Converts a CLI drive enum into the typed app drive mode.

@@ -16,6 +16,9 @@ mfm-canonical = { path = "../kernel/canonical" }
 mfm-certify = { path = "../kernel/certify" }
 mfm-events = { path = "../kernel/events" }
 mfm-ids = { path = "../kernel/ids" }
+mfm-op-evm-deploy-configure-validate = { path = "../ops/evm-deploy-configure-validate-op" }
+mfm-op-portfolio-tracker = { path = "../ops/portfolio-tracker-op" }
+mfm-op-proof = { path = "../ops/proof-op" }
 mfm-replay = { path = "../kernel/replay" }
 mfm-runtime = { path = "../kernel/runtime" }
 mfm-spec = { path = "../kernel/spec" }
@@ -26,7 +29,6 @@ mfm-transports-proof = { path = "../transports/proof" }
 
 [dev-dependencies]
 mfm-capabilities = { path = "../kernel/capabilities" }
-mfm-op-proof = { path = "../ops/proof-op" }
 mfm-program = { path = "../kernel/program" }
 mfm-program-derive = { path = "../kernel/program-derive" }
 mfm-values = { path = "../kernel/values" }

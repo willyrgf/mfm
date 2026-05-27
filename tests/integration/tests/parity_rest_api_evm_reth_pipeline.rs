@@ -3,7 +3,7 @@
 
 use std::collections::BTreeSet;
 
-use mfm_app::{DriveMode, TypedRunResumeRequest};
+use mfm_app::DriveMode;
 use mfm_artifact_store_fs::{FsTypedArtifactStore, TypedArtifactDescriptor};
 use mfm_events::v1 as typed_events;
 use mfm_op_evm_deploy_configure_validate::{
@@ -220,7 +220,12 @@ async fn parity_reth_deploy_configure_validate_root_op() {
     let typed_artifacts = FsTypedArtifactStore::new(tmp.path());
     let runners =
         mfm_app::production_typed_runner_registry(typed_artifacts.clone()).expect("typed runners");
-    let services = mfm_app::make_in_memory_typed_services(runners, tmp.path());
+    let registry = mfm_app::production_certification_registry().expect("certification registry");
+    let services = mfm_app::make_in_memory_typed_services_with_certification_registry(
+        runners,
+        tmp.path(),
+        registry.clone(),
+    );
 
     persist_dcv_config_artifacts(
         services.artifacts(),
@@ -229,21 +234,20 @@ async fn parity_reth_deploy_configure_validate_root_op() {
     )
     .await;
 
-    let spec_bytes = certified
-        .envelope()
-        .spec
-        .canonical_json()
-        .expect("canonical typed spec")
-        .to_vec();
+    let bundle = certified.bundle().expect("typed EVM DCV certified bundle");
     let run_id = mfm_app::new_run_id();
     let request = mfm_app::build_typed_run_start_request(
         services.artifacts(),
-        &spec_bytes,
-        run_id.clone(),
-        "mfm.integration.evm_dcv.typed.v1",
-        "integration-test",
+        mfm_app::CertifiedBundleRunStartInput {
+            spec_bytes: bundle.spec_bytes(),
+            certificate_bytes: bundle.certificate_bytes(),
+            registry: &registry,
+            run_id: run_id.clone(),
+            framework_version: "mfm.integration.evm_dcv.typed.v1",
+            source_revision: "integration-test",
+            drive: DriveMode::AppendOnly,
+        },
         Vec::new(),
-        DriveMode::AppendOnly,
     )
     .await
     .expect("typed EVM DCV append-only start request");
@@ -264,11 +268,7 @@ async fn parity_reth_deploy_configure_validate_root_op() {
             break;
         }
         response = services
-            .resume_certified_run(TypedRunResumeRequest {
-                certified_spec: certified.clone(),
-                run_id: run_id.clone(),
-                drive: DriveMode::Once,
-            })
+            .resume_stored_run(&run_id, DriveMode::Once)
             .await
             .expect("resume typed EVM DCV run");
         single_step_resumes += 1;
@@ -385,16 +385,8 @@ async fn parity_reth_deploy_configure_validate_root_op() {
         let store = store.lock().await;
         store.load_run_stream(&run_id)
     };
-    let authority = mfm_app::replay_authority_for_run(
-        services.artifacts(),
-        certified.envelope(),
-        &run_id,
-        &stream,
-    )
-    .await
-    .expect("typed EVM DCV replay authority");
     let replay_broker = services
-        .replay_broker(certified.envelope().clone(), &run_id, authority)
+        .replay_broker(&run_id)
         .await
         .expect("typed EVM DCV evidence-only replay broker");
     let replay_verified = mfm_transports_evm_dcv::verify_evm_dcv_replay(

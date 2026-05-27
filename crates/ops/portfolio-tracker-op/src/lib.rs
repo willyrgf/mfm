@@ -242,6 +242,65 @@ pub fn portfolio_operation_registry() -> mfm_program::Result<mfm_program::Operat
     Ok(operations.into_snapshot())
 }
 
+/// Adds portfolio workflow descriptors to a trusted certification registry.
+pub fn register_portfolio_certification_descriptors(
+    registry: &mut mfm_certify::CertificationRegistry,
+) -> mfm_certify::Result<()> {
+    let mut states = StateRegistryBuilder::new();
+    registry.register_state(
+        &states
+            .register::<PrepareSourcesState>()
+            .map_err(|error| mfm_certify::CertifyError::Lowering(error.to_string()))?,
+    )?;
+    registry.register_state(
+        &states
+            .register::<ResolveSubjectsState>()
+            .map_err(|error| mfm_certify::CertifyError::Lowering(error.to_string()))?,
+    )?;
+    registry.register_state(
+        &states
+            .register::<PinViewsState>()
+            .map_err(|error| mfm_certify::CertifyError::Lowering(error.to_string()))?,
+    )?;
+    registry.register_state(
+        &states
+            .register::<ResolveValuationsState>()
+            .map_err(|error| mfm_certify::CertifyError::Lowering(error.to_string()))?,
+    )?;
+    registry.register_state(
+        &states
+            .register::<ObserveBatchState>()
+            .map_err(|error| mfm_certify::CertifyError::Lowering(error.to_string()))?,
+    )?;
+    registry.register_state(
+        &states
+            .register::<MergeObservationsState>()
+            .map_err(|error| mfm_certify::CertifyError::Lowering(error.to_string()))?,
+    )?;
+    registry.register_state(
+        &states
+            .register::<AssembleSnapshotState>()
+            .map_err(|error| mfm_certify::CertifyError::Lowering(error.to_string()))?,
+    )?;
+    registry.register_state(
+        &states
+            .register::<PublishSnapshotState>()
+            .map_err(|error| mfm_certify::CertifyError::Lowering(error.to_string()))?,
+    )?;
+    registry.register_state(
+        &states
+            .register::<ProjectReportState>()
+            .map_err(|error| mfm_certify::CertifyError::Lowering(error.to_string()))?,
+    )?;
+    let mut operations = OperationRegistryBuilder::new();
+    registry.register_operation(
+        &operations
+            .register::<PortfolioTrackerWorkflowOperation>()
+            .map_err(|error| mfm_certify::CertifyError::Lowering(error.to_string()))?,
+    )?;
+    Ok(())
+}
+
 /// Builds a typed portfolio program draft.
 pub fn portfolio_program_draft(
     config: PortfolioWorkflowConfig,

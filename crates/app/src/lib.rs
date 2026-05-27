@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 use mfm_artifact_store_fs::{FsTypedArtifactError, FsTypedArtifactStore, TypedArtifactDescriptor};
 use mfm_canonical::sha256_digest_bytes;
-use mfm_certify::{certify_typed_spec, CertificationRegistry, CertifiedTypedSpec};
+use mfm_certify::{CertificationRegistry, CertifiedTypedSpec};
 use mfm_events::v1 as events;
 use mfm_ids::{ArtifactId, DigestAlgorithm, EventId, RunId, SchemaId, SeedId, SpecHash};
 use mfm_replay::v1::{ReplayAuthority, ReplayBroker, ReplayError};
@@ -217,10 +217,24 @@ pub fn make_in_memory_typed_services(
     runners: ErasedRunnerRegistry,
     artifact_root: impl Into<PathBuf>,
 ) -> TypedAppServices<store::InMemoryTypedRunStore> {
-    TypedAppServices::new(
+    make_in_memory_typed_services_with_certification_registry(
+        runners,
+        artifact_root,
+        CertificationRegistry::new(),
+    )
+}
+
+/// Builds in-memory typed app services with an explicit trusted certification registry.
+pub fn make_in_memory_typed_services_with_certification_registry(
+    runners: ErasedRunnerRegistry,
+    artifact_root: impl Into<PathBuf>,
+    certification_registry: CertificationRegistry,
+) -> TypedAppServices<store::InMemoryTypedRunStore> {
+    TypedAppServices::new_with_certification_registry(
         SerialTypedScheduler::new(runners),
         store::InMemoryTypedRunStore::default(),
         FsTypedArtifactStore::new(artifact_root),
+        certification_registry,
     )
 }
 
@@ -233,7 +247,30 @@ pub fn make_async_typed_services<S>(
 where
     S: store::AsyncTypedRunEventStore + Send + Sync,
 {
-    TypedAsyncAppServices::new(SerialTypedScheduler::new(runners), store, artifacts)
+    make_async_typed_services_with_certification_registry(
+        runners,
+        store,
+        artifacts,
+        CertificationRegistry::new(),
+    )
+}
+
+/// Builds typed async app services with an explicit trusted certification registry.
+pub fn make_async_typed_services_with_certification_registry<S>(
+    runners: ErasedRunnerRegistry,
+    store: S,
+    artifacts: FsTypedArtifactStore,
+    certification_registry: CertificationRegistry,
+) -> TypedAsyncAppServices<S>
+where
+    S: store::AsyncTypedRunEventStore + Send + Sync,
+{
+    TypedAsyncAppServices::new_with_certification_registry(
+        SerialTypedScheduler::new(runners),
+        store,
+        artifacts,
+        certification_registry,
+    )
 }
 
 /// Builds the production typed runner registry for this process.
@@ -253,6 +290,15 @@ pub fn production_typed_runner_registry(
     let proof_artifacts: Arc<dyn mfm_transports_proof::ProofArtifactSink> =
         Arc::new(FsProofArtifactSink { artifacts });
     mfm_transports_proof::register_deterministic_proof_runners(&mut registry, proof_artifacts)?;
+    Ok(registry)
+}
+
+/// Builds the trusted production certification registry for bundled spec verification.
+pub fn production_certification_registry() -> Result<CertificationRegistry, AppError> {
+    let mut registry = CertificationRegistry::new();
+    mfm_op_portfolio_tracker::register_portfolio_certification_descriptors(&mut registry)?;
+    mfm_op_evm_deploy_configure_validate::register_dcv_certification_descriptors(&mut registry)?;
+    mfm_op_proof::register_proof_certification_descriptors(&mut registry)?;
     Ok(registry)
 }
 
@@ -319,17 +365,6 @@ pub struct TypedSeedInput {
     pub bytes: Vec<u8>,
     /// Persisted seed artifact media type.
     pub media_type: spec::MediaType,
-}
-
-/// Request to resume a certified typed run.
-#[derive(Debug, Clone)]
-pub struct TypedRunResumeRequest {
-    /// Certifier-backed typed spec authority bound to the run.
-    pub certified_spec: CertifiedTypedSpec,
-    /// Run id to resume.
-    pub run_id: RunId,
-    /// Scheduler drive policy.
-    pub drive: DriveMode,
 }
 
 /// Stable phase for typed run responses.
@@ -487,6 +522,7 @@ pub struct TypedAppServices<S> {
     scheduler: SerialTypedScheduler,
     store: Arc<Mutex<S>>,
     artifacts: FsTypedArtifactStore,
+    certification_registry: CertificationRegistry,
 }
 
 impl<S> TypedAppServices<S>
@@ -495,10 +531,26 @@ where
 {
     /// Creates typed app services from explicit scheduler, store, and artifact store choices.
     pub fn new(scheduler: SerialTypedScheduler, store: S, artifacts: FsTypedArtifactStore) -> Self {
+        Self::new_with_certification_registry(
+            scheduler,
+            store,
+            artifacts,
+            CertificationRegistry::new(),
+        )
+    }
+
+    /// Creates typed app services with an explicit trusted certification registry.
+    pub fn new_with_certification_registry(
+        scheduler: SerialTypedScheduler,
+        store: S,
+        artifacts: FsTypedArtifactStore,
+        certification_registry: CertificationRegistry,
+    ) -> Self {
         Self {
             scheduler,
             store: Arc::new(Mutex::new(store)),
             artifacts,
+            certification_registry,
         }
     }
 
@@ -510,6 +562,11 @@ where
     /// Returns the typed artifact store.
     pub fn artifacts(&self) -> &FsTypedArtifactStore {
         &self.artifacts
+    }
+
+    /// Returns the trusted certification registry used for stored bundle verification.
+    pub fn certification_registry(&self) -> &CertificationRegistry {
+        &self.certification_registry
     }
 
     /// Persists the certified spec artifact required before `RunStarted`.
@@ -590,25 +647,36 @@ where
         typed_run_response(&*store, &runtime_spec, &req.run_id, status)
     }
 
-    /// Resumes a certified typed run, optionally driving runnable nodes.
-    pub async fn resume_certified_run(
+    /// Resumes a stored typed run after verifying its persisted certified authority.
+    pub async fn resume_stored_run(
         &self,
-        req: TypedRunResumeRequest,
+        run_id: &RunId,
+        drive: DriveMode,
     ) -> Result<TypedRunResponse, AppError> {
-        let runtime_spec = CertifiedRuntimeSpec::new(req.certified_spec)?;
-        let mut store = self.store.lock().await;
-        let stream = store.load_run_stream(&req.run_id);
+        let stream = {
+            let store = self.store.lock().await;
+            store.load_run_stream(run_id)
+        };
         if stream.is_empty() {
             return Err(AppError::not_found(
                 "TypedRunNotFound",
                 "typed run stream was not found",
             ));
         }
-        validate_run_stream(&runtime_spec, &req.run_id, &stream)?;
+        let runtime_spec = load_runtime_spec_for_run(
+            &self.artifacts,
+            &self.certification_registry,
+            run_id,
+            &stream,
+        )
+        .await?;
+        let mut store = self.store.lock().await;
+        let stream = store.load_run_stream(run_id);
+        validate_run_stream(&runtime_spec, run_id, &stream)?;
         let status = self
-            .drive_with_mode(&mut *store, &runtime_spec, &req.run_id, req.drive)
+            .drive_with_mode(&mut *store, &runtime_spec, run_id, drive)
             .await?;
-        typed_run_response(&*store, &runtime_spec, &req.run_id, status)
+        typed_run_response(&*store, &runtime_spec, run_id, status)
     }
 
     /// Returns typed run status by rebuilding projection from the authoritative run stream.
@@ -629,13 +697,8 @@ where
         ))
     }
 
-    /// Builds an evidence-only replay broker from a certified spec and typed run stream.
-    pub async fn replay_broker(
-        &self,
-        envelope: spec::HashedSpecEnvelope,
-        run_id: &RunId,
-        authority: ReplayAuthority,
-    ) -> Result<ReplayBroker, AppError> {
+    /// Builds an evidence-only replay broker from stored certified authority and retained evidence.
+    pub async fn replay_broker(&self, run_id: &RunId) -> Result<ReplayBroker, AppError> {
         let store = self.store.lock().await;
         let stream = store.load_run_stream(run_id);
         if stream.is_empty() {
@@ -644,6 +707,16 @@ where
                 "typed run stream was not found",
             ));
         }
+        let certified = load_certified_spec_for_run(
+            &self.artifacts,
+            &self.certification_registry,
+            run_id,
+            &stream,
+        )
+        .await?;
+        let authority =
+            replay_authority_for_run(&self.artifacts, &certified, run_id, &stream).await?;
+        let envelope = certified.envelope().clone();
         ReplayBroker::from_run_stream(envelope, &stream, authority).map_err(Into::into)
     }
 
@@ -663,7 +736,13 @@ where
                 "typed run stream was not found",
             ));
         }
-        let runtime_spec = load_runtime_spec_for_run(&self.artifacts, run_id, &stream).await?;
+        let runtime_spec = load_runtime_spec_for_run(
+            &self.artifacts,
+            &self.certification_registry,
+            run_id,
+            &stream,
+        )
+        .await?;
         validate_run_stream(&runtime_spec, run_id, &stream)?;
         typed_public_output_from_stream(&self.artifacts, run_id, public_schema_id, &stream).await
     }
@@ -772,6 +851,7 @@ pub struct TypedAsyncAppServices<S> {
     scheduler: SerialTypedScheduler,
     store: S,
     artifacts: FsTypedArtifactStore,
+    certification_registry: CertificationRegistry,
 }
 
 impl<S> TypedAsyncAppServices<S>
@@ -780,10 +860,26 @@ where
 {
     /// Creates typed async app services from explicit scheduler, store, and artifact store choices.
     pub fn new(scheduler: SerialTypedScheduler, store: S, artifacts: FsTypedArtifactStore) -> Self {
+        Self::new_with_certification_registry(
+            scheduler,
+            store,
+            artifacts,
+            CertificationRegistry::new(),
+        )
+    }
+
+    /// Creates typed async app services with an explicit trusted certification registry.
+    pub fn new_with_certification_registry(
+        scheduler: SerialTypedScheduler,
+        store: S,
+        artifacts: FsTypedArtifactStore,
+        certification_registry: CertificationRegistry,
+    ) -> Self {
         Self {
             scheduler,
             store,
             artifacts,
+            certification_registry,
         }
     }
 
@@ -795,6 +891,11 @@ where
     /// Returns the async typed run store.
     pub fn store(&self) -> &S {
         &self.store
+    }
+
+    /// Returns the trusted certification registry used for stored bundle verification.
+    pub fn certification_registry(&self) -> &CertificationRegistry {
+        &self.certification_registry
     }
 
     /// Starts a certified typed run against a durable async typed store.
@@ -835,7 +936,13 @@ where
                 "typed run stream was not found",
             ));
         }
-        let runtime_spec = load_runtime_spec_for_run(&self.artifacts, run_id, &stream).await?;
+        let runtime_spec = load_runtime_spec_for_run(
+            &self.artifacts,
+            &self.certification_registry,
+            run_id,
+            &stream,
+        )
+        .await?;
         validate_run_stream(&runtime_spec, run_id, &stream)?;
         let status = self.drive_with_mode(&runtime_spec, run_id, drive).await?;
         let stream = self
@@ -886,9 +993,16 @@ where
                 "typed run stream was not found",
             ));
         }
-        let envelope = load_certified_spec_for_run(&self.artifacts, run_id, &stream).await?;
+        let certified = load_certified_spec_for_run(
+            &self.artifacts,
+            &self.certification_registry,
+            run_id,
+            &stream,
+        )
+        .await?;
         let authority =
-            replay_authority_for_run(&self.artifacts, &envelope, run_id, &stream).await?;
+            replay_authority_for_run(&self.artifacts, &certified, run_id, &stream).await?;
+        let envelope = certified.envelope().clone();
         let broker = ReplayBroker::from_run_stream(envelope, &stream, authority)?;
         mfm_transports_proof::verify_deterministic_proof_replay(&broker, &stream)?;
         mfm_transports_evm_dcv::verify_evm_dcv_replay(&broker, &stream, &self.artifacts).await?;
@@ -923,7 +1037,13 @@ where
                 "typed run stream was not found",
             ));
         }
-        let runtime_spec = load_runtime_spec_for_run(&self.artifacts, run_id, &stream).await?;
+        let runtime_spec = load_runtime_spec_for_run(
+            &self.artifacts,
+            &self.certification_registry,
+            run_id,
+            &stream,
+        )
+        .await?;
         validate_run_stream(&runtime_spec, run_id, &stream)?;
         typed_public_output_from_stream(&self.artifacts, run_id, public_schema_id, &stream).await
     }
@@ -1015,53 +1135,42 @@ where
 /// Loads and verifies the certified spec artifact bound by a typed run stream.
 pub async fn load_certified_spec_for_run(
     artifacts: &FsTypedArtifactStore,
+    registry: &CertificationRegistry,
     run_id: &RunId,
     stream: &[store::KernelEventEnvelope],
-) -> Result<spec::HashedSpecEnvelope, AppError> {
+) -> Result<CertifiedTypedSpec, AppError> {
     let run_started = run_started_payload(run_id, stream)?;
-    let (bytes, evidence) = artifacts
+    let (spec_bytes, spec_evidence) = artifacts
         .get_artifact_by_id(&run_started.spec_artifact_id)
         .await?;
-    validate_spec_artifact_evidence(run_started, &evidence)?;
-    let spec = spec::TypedExecutionSpec::from_json_slice(&bytes)?;
-    let envelope = spec::HashedSpecEnvelope::new(spec, spec::TypedExecutionSpecAudit::default())?;
-    envelope.verify_hash()?;
-    validate_run_started_matches_spec(run_started, &envelope)?;
-    Ok(envelope)
+    validate_spec_artifact_evidence(run_started, &spec_evidence)?;
+    let (certificate_bytes, certificate_evidence) = artifacts
+        .get_artifact_by_id(&run_started.certificate_artifact_id)
+        .await?;
+    validate_certificate_artifact_evidence(run_started, &certificate_evidence)?;
+    let certified = mfm_certify::verify_certified_bundle_with_trusted_registry(
+        &spec_bytes,
+        &certificate_bytes,
+        registry,
+    )?;
+    validate_run_started_matches_spec(run_started, certified.envelope())?;
+    Ok(certified)
 }
 
 async fn load_runtime_spec_for_run(
     artifacts: &FsTypedArtifactStore,
+    registry: &CertificationRegistry,
     run_id: &RunId,
     stream: &[store::KernelEventEnvelope],
 ) -> Result<CertifiedRuntimeSpec, AppError> {
-    let envelope = load_certified_spec_for_run(artifacts, run_id, stream).await?;
-    let certified = certify_lowered_spec_with_embedded_registry(envelope.spec)?;
+    let certified = load_certified_spec_for_run(artifacts, registry, run_id, stream).await?;
     CertifiedRuntimeSpec::new(certified).map_err(Into::into)
-}
-
-fn certify_lowered_spec_with_embedded_registry(
-    spec: spec::TypedExecutionSpec,
-) -> Result<CertifiedTypedSpec, AppError> {
-    let mut registry = CertificationRegistry::new();
-    for descriptor in &spec.descriptor_identities {
-        match descriptor {
-            spec::DescriptorIdentity::State(identity) => registry
-                .register_state_descriptor((**identity).clone())
-                .map_err(AppError::from)?,
-            spec::DescriptorIdentity::Operation(identity) => registry
-                .register_operation_descriptor((**identity).clone())
-                .map_err(AppError::from)?,
-            spec::DescriptorIdentity::Renderer(_) => {}
-        }
-    }
-    certify_typed_spec(spec, &registry).map_err(AppError::from)
 }
 
 /// Builds replay authority from retained artifact evidence in the run stream.
 pub async fn replay_authority_for_run(
     artifacts: &FsTypedArtifactStore,
-    envelope: &spec::HashedSpecEnvelope,
+    certified: &CertifiedTypedSpec,
     run_id: &RunId,
     stream: &[store::KernelEventEnvelope],
 ) -> Result<ReplayAuthority, AppError> {
@@ -1087,7 +1196,7 @@ pub async fn replay_authority_for_run(
         artifact_evidence.push(evidence);
     }
     Ok(ReplayAuthority::from_certified_spec(
-        envelope,
+        certified.envelope(),
         run_started.runner_executables.clone(),
         run_started.adapter_executables.clone(),
         artifact_evidence,
@@ -1116,6 +1225,45 @@ pub async fn persist_certified_spec_artifact(
                 producer_node_id: None,
                 producer_seed_id: None,
                 artifact_role: events::ArtifactRole::TypedExecutionSpec,
+            },
+        )
+        .await
+        .map_err(Into::into)
+}
+
+/// Persists the certified typed spec certificate artifact for a runtime spec.
+pub async fn persist_certified_spec_certificate_artifact(
+    artifacts: &FsTypedArtifactStore,
+    runtime_spec: &CertifiedRuntimeSpec,
+) -> Result<store::ArtifactEvidenceRef, AppError> {
+    let canonical = runtime_spec
+        .certificate()
+        .canonical_json()
+        .map_err(|error| {
+            AppError::new(
+                ErrorClass::Internal,
+                "TypedCertificateCanonicalError",
+                error.to_string(),
+            )
+        })?;
+    let media_type =
+        spec::MediaType::new(mfm_certify::CERTIFICATE_MEDIA_TYPE).map_err(|error| {
+            AppError::new(
+                ErrorClass::Internal,
+                "TypedCertificateMediaTypeInvalid",
+                error.to_string(),
+            )
+        })?;
+    artifacts
+        .put_artifact(
+            canonical.to_vec(),
+            TypedArtifactDescriptor {
+                media_type,
+                schema_id: None,
+                semantic_type_id: None,
+                producer_node_id: None,
+                producer_seed_id: None,
+                artifact_role: events::ArtifactRole::TypedSpecCertificate,
             },
         )
         .await
@@ -1240,32 +1388,43 @@ pub fn json_media_type() -> Result<spec::MediaType, AppError> {
     })
 }
 
-/// Builds a typed run-start request by certifying persisted spec JSON bytes and launch inputs.
+/// Inputs required to verify persisted certified bundle bytes before starting a typed run.
+pub struct CertifiedBundleRunStartInput<'a> {
+    /// Canonical JSON bytes for the persisted typed execution spec.
+    pub spec_bytes: &'a [u8],
+    /// Canonical JSON bytes for the persisted typed spec certificate.
+    pub certificate_bytes: &'a [u8],
+    /// Trusted registry used to verify descriptor evidence in the certificate.
+    pub registry: &'a CertificationRegistry,
+    /// Run id to record in the started run stream.
+    pub run_id: RunId,
+    /// Framework version evidence to bind to the run start event.
+    pub framework_version: &'a str,
+    /// Source revision evidence to bind to the run start event.
+    pub source_revision: &'a str,
+    /// Drive mode used for the initial scheduler invocation.
+    pub drive: DriveMode,
+}
+
+/// Builds a typed run-start request from persisted certified bundle bytes and launch inputs.
 pub async fn build_typed_run_start_request(
     artifacts: &FsTypedArtifactStore,
-    spec_bytes: &[u8],
-    run_id: RunId,
-    framework_version: &str,
-    source_revision: &str,
+    input: CertifiedBundleRunStartInput<'_>,
     seed_inputs: Vec<TypedSeedInput>,
-    drive: DriveMode,
 ) -> Result<TypedRunStartRequest, AppError> {
-    let spec = spec::TypedExecutionSpec::from_json_slice(spec_bytes).map_err(|error| {
-        AppError::new(
-            ErrorClass::BadRequest,
-            "TypedSpecInvalid",
-            error.to_string(),
-        )
-    })?;
-    let certified_spec = certify_lowered_spec_with_embedded_registry(spec)?;
+    let certified_spec = mfm_certify::verify_certified_bundle_with_trusted_registry(
+        input.spec_bytes,
+        input.certificate_bytes,
+        input.registry,
+    )?;
     build_certified_typed_run_start_request(
         artifacts,
         certified_spec,
-        run_id,
-        framework_version,
-        source_revision,
+        input.run_id,
+        input.framework_version,
+        input.source_revision,
         seed_inputs,
-        drive,
+        input.drive,
     )
     .await
 }
@@ -1282,6 +1441,8 @@ pub async fn build_certified_typed_run_start_request(
 ) -> Result<TypedRunStartRequest, AppError> {
     let runtime_spec = CertifiedRuntimeSpec::new(certified_spec.clone())?;
     let spec_artifact = persist_certified_spec_artifact(artifacts, &runtime_spec).await?;
+    let certificate_artifact =
+        persist_certified_spec_certificate_artifact(artifacts, &runtime_spec).await?;
     let config_artifacts = load_config_artifacts_for_spec(artifacts, &runtime_spec).await?;
     let seed_cells = persist_seed_inputs_for_spec(artifacts, &runtime_spec, seed_inputs).await?;
     Ok(TypedRunStartRequest {
@@ -1289,6 +1450,7 @@ pub async fn build_certified_typed_run_start_request(
         run_id,
         evidence: RunStartEvidence {
             spec_artifact,
+            certificate_artifact,
             config_artifacts,
             framework_version: events::FrameworkVersion::new(framework_version).map_err(
                 |error| {
@@ -1339,6 +1501,26 @@ async fn validate_launch_artifacts(
             ErrorClass::BadRequest,
             "TypedSpecArtifactMismatch",
             "persisted typed execution spec artifact bytes do not match the certified spec",
+        ));
+    }
+    let certificate_bytes = artifacts
+        .get_artifact(&evidence.certificate_artifact)
+        .await?;
+    let certificate_canonical = runtime_spec
+        .certificate()
+        .canonical_json()
+        .map_err(|error| {
+            AppError::new(
+                ErrorClass::Internal,
+                "TypedCertificateCanonicalError",
+                error.to_string(),
+            )
+        })?;
+    if certificate_bytes != certificate_canonical.as_bytes() {
+        return Err(AppError::new(
+            ErrorClass::BadRequest,
+            "TypedCertificateArtifactMismatch",
+            "persisted typed spec certificate artifact bytes do not match the certified spec",
         ));
     }
 
@@ -1708,6 +1890,28 @@ fn validate_spec_artifact_evidence(
     Ok(())
 }
 
+fn validate_certificate_artifact_evidence(
+    run_started: &events::RunStarted,
+    evidence: &store::ArtifactEvidenceRef,
+) -> Result<(), AppError> {
+    if evidence.artifact_id != run_started.certificate_artifact_id
+        || evidence.digest != run_started.certificate_artifact_digest
+        || evidence.media_type != run_started.certificate_media_type
+        || evidence.schema_id.is_some()
+        || evidence.semantic_type_id.is_some()
+        || evidence.producer_node_id.is_some()
+        || evidence.producer_seed_id.is_some()
+        || evidence.artifact_role != events::ArtifactRole::TypedSpecCertificate
+    {
+        return Err(AppError::new(
+            ErrorClass::Internal,
+            "TypedCertificateArtifactMismatch",
+            "typed spec certificate artifact metadata does not match RunStarted evidence",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_run_started_matches_spec(
     run_started: &events::RunStarted,
     envelope: &spec::HashedSpecEnvelope,
@@ -1841,6 +2045,7 @@ mod tests {
     use mfm_store::v1::{AsyncTypedRunEventStore, TypedRunEventStore};
     use serde::{Deserialize, Serialize};
     use std::collections::{BTreeMap, BTreeSet};
+    use std::path::Path;
     use std::sync::Arc;
     use std::sync::Mutex as StdMutex;
 
@@ -1963,6 +2168,21 @@ mod tests {
         store
             .record_artifact_evidence(spec_evidence.clone())
             .expect("record spec evidence");
+        let certificate_evidence = store::ArtifactEvidenceRef {
+            artifact_id: artifact_id(0x13),
+            digest: content_digest(0x13),
+            byte_len: 2,
+            media_type: spec::MediaType::new(mfm_certify::CERTIFICATE_MEDIA_TYPE)
+                .expect("certificate media type"),
+            schema_id: None,
+            semantic_type_id: None,
+            producer_node_id: None,
+            producer_seed_id: None,
+            artifact_role: events::ArtifactRole::TypedSpecCertificate,
+        };
+        store
+            .record_artifact_evidence(certificate_evidence.clone())
+            .expect("record certificate evidence");
         store
             .record_artifact_evidence(source_evidence.clone())
             .expect("record source evidence");
@@ -1975,6 +2195,9 @@ mod tests {
                 run_id: run_id.clone(),
                 spec_hash: spec_hash.clone(),
                 spec_artifact_id: spec_evidence.artifact_id.clone(),
+                certificate_artifact_id: certificate_evidence.artifact_id.clone(),
+                certificate_artifact_digest: certificate_evidence.digest.clone(),
+                certificate_media_type: certificate_evidence.media_type.clone(),
                 spec_media_type: spec_evidence.media_type.clone(),
                 spec_version: SpecVersion::new("mfm.typed.execution_spec.v1")
                     .expect("spec version"),
@@ -1992,7 +2215,7 @@ mod tests {
                     .expect("source revision"),
                 seed_cells: Vec::new(),
             })],
-            vec![spec_evidence],
+            vec![spec_evidence, certificate_evidence],
             store::RequiredRunState::Absent,
         );
 
@@ -2175,7 +2398,9 @@ mod tests {
             .expect("load valid stream");
         let artifacts = services.artifacts().clone();
         let corrupt_stream = corrupt_public_output_history(&artifacts, &valid_stream).await;
-        let corrupt_services = make_async_typed_services(
+        let registry =
+            CertificationRegistry::from_program_draft(&fixture.draft).expect("fixture registry");
+        let corrupt_services = make_async_typed_services_with_certification_registry(
             production_typed_runner_registry(artifacts.clone())
                 .expect("production runner registry"),
             StaticAsyncStore {
@@ -2183,6 +2408,7 @@ mod tests {
                 stream: corrupt_stream,
             },
             artifacts,
+            registry,
         );
 
         let public_output_err = corrupt_services
@@ -2199,6 +2425,201 @@ mod tests {
         assert_eq!(resume_err.code, "TypedRuntimeError");
         assert!(resume_err.message.contains("public-output payload"));
 
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn app_rejects_invalid_bundle_before_run_started() {
+        let root =
+            std::env::temp_dir().join(format!("mfm-app-invalid-bundle-{}", uuid::Uuid::new_v4()));
+        let artifacts = FsTypedArtifactStore::new(&root);
+        let fixture = framework_seed_public_output_fixture();
+        let bundle = fixture.certified_spec.bundle().expect("fixture bundle");
+        let mut bad_spec = bundle.spec_bytes().to_vec();
+        let last = bad_spec.last_mut().expect("non-empty spec bytes");
+        *last = if *last == b'}' { b']' } else { b'}' };
+        let registry =
+            CertificationRegistry::from_program_draft(&fixture.draft).expect("fixture registry");
+        let run_id = fixture.run_id.clone();
+        let err = build_typed_run_start_request(
+            &artifacts,
+            CertifiedBundleRunStartInput {
+                spec_bytes: &bad_spec,
+                certificate_bytes: bundle.certificate_bytes(),
+                registry: &registry,
+                run_id: run_id.clone(),
+                framework_version: "mfm.test.framework",
+                source_revision: "test-source",
+                drive: DriveMode::AppendOnly,
+            },
+            Vec::new(),
+        )
+        .await
+        .expect_err("invalid bundle must not build a start request");
+        assert_eq!(err.code, "TypedCertificationFailed");
+
+        let services = make_async_typed_services_with_certification_registry(
+            ErasedRunnerRegistry::new(),
+            AsyncInMemoryStore::default(),
+            artifacts,
+            registry,
+        );
+        let stream = services
+            .store()
+            .load_run_stream(&run_id)
+            .await
+            .expect("load stream");
+        assert!(!stream
+            .iter()
+            .any(|event| matches!(event.payload(), events::KernelEventPayload::RunStarted(_))));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn tampered_stored_spec_artifact_rejects_before_resume() {
+        let (root, fixture, services, _started) = start_framework_fixture_run().await;
+        let stream = services
+            .store()
+            .load_run_stream(&fixture.run_id)
+            .await
+            .expect("load stream");
+        let started = run_started_payload(&fixture.run_id, &stream)
+            .expect("run started")
+            .clone();
+        std::fs::write(artifact_blob_path(&root, &started.spec_artifact_id), b"{}")
+            .expect("tamper spec artifact");
+
+        let err = services
+            .resume_stored_run(&fixture.run_id, DriveMode::AppendOnly)
+            .await
+            .expect_err("tampered spec rejects before resume");
+        assert_eq!(err.code, "TypedArtifactError");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn tampered_stored_certificate_artifact_rejects_before_resume() {
+        let (root, fixture, services, _started) = start_framework_fixture_run().await;
+        let stream = services
+            .store()
+            .load_run_stream(&fixture.run_id)
+            .await
+            .expect("load stream");
+        let started = run_started_payload(&fixture.run_id, &stream)
+            .expect("run started")
+            .clone();
+        std::fs::write(
+            artifact_blob_path(&root, &started.certificate_artifact_id),
+            b"{}",
+        )
+        .expect("tamper certificate artifact");
+
+        let err = services
+            .resume_stored_run(&fixture.run_id, DriveMode::AppendOnly)
+            .await
+            .expect_err("tampered certificate rejects before resume");
+        assert_eq!(err.code, "TypedArtifactError");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn sync_resume_rebuilds_stored_authority_before_runtime_resume() {
+        let (root, fixture, services, _started) = start_sync_framework_fixture_run().await;
+        let stream = {
+            let store = services.store();
+            let store = store.lock().await;
+            store.load_run_stream(&fixture.run_id)
+        };
+        let started = run_started_payload(&fixture.run_id, &stream)
+            .expect("run started")
+            .clone();
+        std::fs::write(
+            artifact_blob_path(&root, &started.certificate_artifact_id),
+            b"{}",
+        )
+        .expect("tamper certificate artifact");
+
+        let err = services
+            .resume_stored_run(&fixture.run_id, DriveMode::AppendOnly)
+            .await
+            .expect_err("sync resume rejects tampered stored certificate");
+        assert_eq!(err.code, "TypedArtifactError");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn registry_mismatch_rejects_before_replay_broker_construction() {
+        let (root, fixture, services, _started) = start_framework_fixture_run().await;
+        let stream = services
+            .store()
+            .load_run_stream(&fixture.run_id)
+            .await
+            .expect("load stream");
+        let mismatched_services = make_async_typed_services_with_certification_registry(
+            ErasedRunnerRegistry::new(),
+            StaticAsyncStore {
+                run_id: fixture.run_id.clone(),
+                stream,
+            },
+            services.artifacts().clone(),
+            CertificationRegistry::new(),
+        );
+
+        let err = mismatched_services
+            .verify_replay_for_run(&fixture.run_id)
+            .await
+            .expect_err("registry mismatch rejects before replay");
+        assert_eq!(err.code, "TypedCertificationFailed");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn sync_replay_broker_rebuilds_stored_authority_before_construction() {
+        let (root, fixture, services, _started) = start_sync_framework_fixture_run().await;
+        let stream = {
+            let store = services.store();
+            let store = store.lock().await;
+            store.load_run_stream(&fixture.run_id)
+        };
+        let started = run_started_payload(&fixture.run_id, &stream)
+            .expect("run started")
+            .clone();
+        std::fs::write(
+            artifact_blob_path(&root, &started.certificate_artifact_id),
+            b"{}",
+        )
+        .expect("tamper certificate artifact");
+
+        let err = services
+            .replay_broker(&fixture.run_id)
+            .await
+            .expect_err("sync replay broker rejects tampered stored certificate");
+        assert_eq!(err.code, "TypedArtifactError");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn public_output_rejects_tampered_stored_authority_before_rendering() {
+        let (root, fixture, services, _started) = start_framework_fixture_run().await;
+        let stream = services
+            .store()
+            .load_run_stream(&fixture.run_id)
+            .await
+            .expect("load stream");
+        let started = run_started_payload(&fixture.run_id, &stream)
+            .expect("run started")
+            .clone();
+        std::fs::write(
+            artifact_blob_path(&root, &started.certificate_artifact_id),
+            b"{}",
+        )
+        .expect("tamper certificate artifact");
+
+        let err = services
+            .typed_public_output(&fixture.run_id, &fixture.public_schema_id)
+            .await
+            .expect_err("tampered authority rejects before rendering");
+        assert_eq!(err.code, "TypedArtifactError");
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -2262,27 +2683,29 @@ mod tests {
         persist_draft_config_artifacts(&artifacts, &draft).await;
         let certified = mfm_op_proof::certified_proof_spec(proof_config).expect("proof spec");
         persist_framework_config_artifacts(&artifacts, &certified.envelope().spec).await;
-        let spec_bytes = certified
-            .envelope()
-            .spec
-            .canonical_json()
-            .expect("canonical proof spec");
+        let bundle = certified.bundle().expect("proof bundle");
+        let registry = production_certification_registry().expect("production registry");
         let request = build_typed_run_start_request(
             &artifacts,
-            spec_bytes.as_bytes(),
-            new_run_id(),
-            "mfm.test.proof",
-            "test-source",
+            CertifiedBundleRunStartInput {
+                spec_bytes: bundle.spec_bytes(),
+                certificate_bytes: bundle.certificate_bytes(),
+                registry: &registry,
+                run_id: new_run_id(),
+                framework_version: "mfm.test.proof",
+                source_revision: "test-source",
+                drive: DriveMode::UntilBlocked,
+            },
             Vec::new(),
-            DriveMode::UntilBlocked,
         )
         .await
         .expect("typed proof run request");
-        let services = make_async_typed_services(
+        let services = make_async_typed_services_with_certification_registry(
             production_typed_runner_registry(artifacts.clone())
                 .expect("production runner registry"),
             AsyncInMemoryStore::default(),
             artifacts.clone(),
+            registry,
         );
 
         let response = services
@@ -2356,6 +2779,83 @@ mod tests {
         )
         .await
         .expect("typed run request");
+        let runners = framework_fixture_runner_registry(&fixture);
+        let registry =
+            CertificationRegistry::from_program_draft(&fixture.draft).expect("fixture registry");
+        let services = make_async_typed_services_with_certification_registry(
+            runners,
+            AsyncInMemoryStore::default(),
+            artifacts.clone(),
+            registry,
+        );
+
+        let started = services
+            .start_certified_run(request)
+            .await
+            .expect("start typed run");
+        (root, fixture, services, started)
+    }
+
+    async fn start_sync_framework_fixture_run() -> (
+        PathBuf,
+        FrameworkSeedPublicOutputFixture,
+        TypedAppServices<store::InMemoryTypedRunStore>,
+        TypedRunResponse,
+    ) {
+        let root = std::env::temp_dir().join(format!(
+            "mfm-app-sync-framework-run-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let artifacts = FsTypedArtifactStore::new(&root);
+        let fixture = framework_seed_public_output_fixture();
+        persist_draft_config_artifacts(&artifacts, &fixture.draft).await;
+        persist_framework_config_artifacts(&artifacts, &fixture.certified_spec.envelope().spec)
+            .await;
+        artifacts
+            .put_artifact(
+                fixture.output_bytes.clone(),
+                TypedArtifactDescriptor {
+                    media_type: spec::MediaType::new("application/json").expect("media type"),
+                    schema_id: Some(fixture.value_schema_id.clone()),
+                    semantic_type_id: Some(fixture.semantic_type_id.clone()),
+                    producer_node_id: Some(fixture.value_node_id.clone()),
+                    producer_seed_id: None,
+                    artifact_role: events::ArtifactRole::StateOutput,
+                },
+            )
+            .await
+            .expect("persist runner output artifact");
+        let request = build_certified_typed_run_start_request(
+            &artifacts,
+            fixture.certified_spec.clone(),
+            fixture.run_id.clone(),
+            "mfm.test.framework",
+            "test-source",
+            vec![TypedSeedInput {
+                seed_id: fixture.seed_id.clone(),
+                bytes: fixture.seed_bytes.clone(),
+                media_type: spec::MediaType::new("application/json").expect("media type"),
+            }],
+            DriveMode::UntilBlocked,
+        )
+        .await
+        .expect("typed run request");
+        let runners = framework_fixture_runner_registry(&fixture);
+        let registry =
+            CertificationRegistry::from_program_draft(&fixture.draft).expect("fixture registry");
+        let services =
+            make_in_memory_typed_services_with_certification_registry(runners, &root, registry);
+
+        let started = services
+            .start_certified_run(request)
+            .await
+            .expect("start typed run");
+        (root, fixture, services, started)
+    }
+
+    fn framework_fixture_runner_registry(
+        fixture: &FrameworkSeedPublicOutputFixture,
+    ) -> ErasedRunnerRegistry {
         let mut runners = ErasedRunnerRegistry::new();
         let factory_id = fixture.value_runner_factory_id.clone();
         runners
@@ -2371,14 +2871,7 @@ mod tests {
                 .expect("runner binding"),
             )
             .expect("register runner");
-        let services =
-            make_async_typed_services(runners, AsyncInMemoryStore::default(), artifacts.clone());
-
-        let started = services
-            .start_certified_run(request)
-            .await
-            .expect("start typed run");
-        (root, fixture, services, started)
+        runners
     }
 
     async fn persist_draft_config_artifacts(
@@ -2520,6 +3013,7 @@ mod tests {
             match payload {
                 events::KernelEventPayload::RunStarted(started) => {
                     artifact_ids.insert(started.spec_artifact_id.clone());
+                    artifact_ids.insert(started.certificate_artifact_id.clone());
                     artifact_ids.extend(
                         started
                             .seed_cells
@@ -2559,6 +3053,14 @@ mod tests {
             evidence_by_id.insert(artifact_id, evidence);
         }
         evidence_by_id.into_values().collect()
+    }
+
+    fn artifact_blob_path(root: &Path, artifact_id: &ArtifactId) -> PathBuf {
+        let digest = artifact_id.digest().to_string();
+        root.join("typed")
+            .join("blobs")
+            .join(&digest[0..2])
+            .join(artifact_id.as_str())
     }
 
     struct StaticAsyncStore {

@@ -1370,6 +1370,30 @@ async fn persist_conformance_spec_artifact(
         .put_verified_artifact(spec_bytes.to_vec(), evidence)
         .await
         .map_err(|error| mfm_runtime::RuntimeError::Store(error.to_string()))?;
+    let certificate_bytes = runtime_spec
+        .certificate()
+        .canonical_json()
+        .map_err(|error| mfm_runtime::RuntimeError::Canonical(error.to_string()))?;
+    let certificate_digest = certificate_bytes.content_digest();
+    let certificate_media_type = mfm_spec::v1::MediaType::new(mfm_certify::CERTIFICATE_MEDIA_TYPE)?;
+    let certificate_evidence = store::ArtifactEvidenceRef {
+        artifact_id: ArtifactId::from_digest(
+            certificate_digest.algorithm(),
+            *certificate_digest.digest(),
+        ),
+        digest: certificate_digest,
+        byte_len: certificate_bytes.as_bytes().len() as u64,
+        media_type: certificate_media_type,
+        schema_id: None,
+        semantic_type_id: None,
+        producer_node_id: None,
+        producer_seed_id: None,
+        artifact_role: events::ArtifactRole::TypedSpecCertificate,
+    };
+    artifacts
+        .put_verified_artifact(certificate_bytes.to_vec(), certificate_evidence)
+        .await
+        .map_err(|error| mfm_runtime::RuntimeError::Store(error.to_string()))?;
     Ok(())
 }
 
@@ -1478,6 +1502,25 @@ fn run_start_evidence(
         producer_seed_id: None,
         artifact_role: events::ArtifactRole::TypedExecutionSpec,
     };
+    let certificate_bytes = runtime_spec
+        .certificate()
+        .canonical_json()
+        .map_err(|error| mfm_runtime::RuntimeError::Canonical(error.to_string()))?;
+    let certificate_digest = certificate_bytes.content_digest();
+    let certificate_artifact = store::ArtifactEvidenceRef {
+        artifact_id: ArtifactId::from_digest(
+            certificate_digest.algorithm(),
+            *certificate_digest.digest(),
+        ),
+        digest: certificate_digest,
+        byte_len: certificate_bytes.as_bytes().len() as u64,
+        media_type: mfm_spec::v1::MediaType::new(mfm_certify::CERTIFICATE_MEDIA_TYPE)?,
+        schema_id: None,
+        semantic_type_id: None,
+        producer_node_id: None,
+        producer_seed_id: None,
+        artifact_role: events::ArtifactRole::TypedSpecCertificate,
+    };
     let config_artifacts = runtime_spec
         .spec()
         .config_refs
@@ -1496,6 +1539,7 @@ fn run_start_evidence(
         .collect();
     Ok(RunStartEvidence {
         spec_artifact,
+        certificate_artifact,
         config_artifacts,
         framework_version: events::FrameworkVersion::new("mfm.proof.typed.v1")?,
         source_revision: events::SourceRevision::new("mfm-transports-proof")?,

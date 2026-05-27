@@ -110,6 +110,9 @@ fn run_started(run_id: RunId) -> KernelEventPayload {
         run_id,
         spec_hash: spec_hash(1),
         spec_artifact_id: artifact_id(2),
+        certificate_artifact_id: artifact_id(4),
+        certificate_artifact_digest: content_digest(4),
+        certificate_media_type: media_type(mfm_certify::CERTIFICATE_MEDIA_TYPE),
         spec_media_type: media_type(SPEC_MEDIA_TYPE),
         spec_version: SpecVersion::new("mfm.typed.execution_spec.v1").expect("spec version"),
         lowering_version: LoweringVersion::new("mfm.typed.lowering.v1").expect("lowering version"),
@@ -611,10 +614,27 @@ fn spec_artifact_ref() -> ArtifactEvidenceRef {
     }
 }
 
+fn certificate_artifact_ref() -> ArtifactEvidenceRef {
+    ArtifactEvidenceRef {
+        artifact_id: artifact_id(4),
+        digest: content_digest(4),
+        byte_len: 64,
+        media_type: media_type(mfm_certify::CERTIFICATE_MEDIA_TYPE),
+        schema_id: None,
+        semantic_type_id: None,
+        producer_node_id: None,
+        producer_seed_id: None::<SeedId>,
+        artifact_role: ArtifactRole::TypedSpecCertificate,
+    }
+}
+
 fn record_run_start_artifact(store: &mut InMemoryTypedRunStore) {
     store
         .record_artifact_evidence(spec_artifact_ref())
         .expect("record spec artifact");
+    store
+        .record_artifact_evidence(certificate_artifact_ref())
+        .expect("record certificate artifact");
 }
 
 fn run_start_request(run_id: RunId, commit_key: &str) -> TypedCommitRequest {
@@ -623,7 +643,7 @@ fn run_start_request(run_id: RunId, commit_key: &str) -> TypedCommitRequest {
         expected_next_seq: StreamSeq::FIRST,
         commit_key: CommitKey::new(commit_key).expect("commit key"),
         payloads: vec![run_started(run_id)],
-        required_artifacts: vec![spec_artifact_ref()],
+        required_artifacts: vec![spec_artifact_ref(), certificate_artifact_ref()],
         preconditions: CommitPreconditions {
             required_run_state: RequiredRunState::Absent,
             ..CommitPreconditions::default()

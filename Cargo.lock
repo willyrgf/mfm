@@ -1757,6 +1757,8 @@ dependencies = [
  "mfm-certify",
  "mfm-events",
  "mfm-ids",
+ "mfm-op-evm-deploy-configure-validate",
+ "mfm-op-portfolio-tracker",
  "mfm-op-proof",
  "mfm-program",
  "mfm-program-derive",
@@ -1781,6 +1783,7 @@ name = "mfm-artifact-store-fs"
 version = "0.1.0"
 dependencies = [
  "mfm-canonical",
+ "mfm-certify",
  "mfm-events",
  "mfm-ids",
  "mfm-spec",
@@ -2103,6 +2106,7 @@ name = "mfm-replay"
 version = "0.1.0"
 dependencies = [
  "mfm-capabilities",
+ "mfm-certify",
  "mfm-events",
  "mfm-ids",
  "mfm-spec",
@@ -2213,6 +2217,7 @@ version = "0.1.0"
 dependencies = [
  "mfm-canonical",
  "mfm-capabilities",
+ "mfm-certify",
  "mfm-events",
  "mfm-ids",
  "mfm-spec",
@@ -2299,6 +2304,7 @@ version = "0.1.0"
 dependencies = [
  "mfm-canonical",
  "mfm-capabilities",
+ "mfm-certify",
  "mfm-collectors-proof",
  "mfm-events",
  "mfm-ids",

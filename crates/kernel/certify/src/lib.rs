@@ -535,7 +535,8 @@ impl CertificationRegistry {
         self.insert_operation(descriptor)
     }
 
-    fn from_program_draft(draft: &program::TypedProgramDraft) -> Result<Self> {
+    /// Builds the descriptor registry used by a framework-lowered program draft.
+    pub fn from_program_draft(draft: &program::TypedProgramDraft) -> Result<Self> {
         let mut registry = Self::new();
         for node in draft.state_nodes() {
             registry.insert_state(state_descriptor_identity_from_program(node)?)?;
@@ -544,6 +545,47 @@ impl CertificationRegistry {
             registry.insert_operation(operation_descriptor_identity_from_program(frame))?;
         }
         Ok(registry)
+    }
+
+    /// Returns the trusted registry subset named by a parsed spec's descriptor identities.
+    ///
+    /// The parsed spec supplies only selector keys. Operation identities must be present in this
+    /// trusted registry. State identities are copied when the trusted registry owns them; framework
+    /// generated states remain subject to full verifier validation before authority can be minted.
+    pub fn scoped_for_spec(&self, spec: &spec::TypedExecutionSpec) -> Result<Self> {
+        let mut scoped = Self::new();
+        for descriptor in &spec.descriptor_identities {
+            match descriptor {
+                spec::DescriptorIdentity::State(identity) => {
+                    if let Some(trusted) = self.states.get(identity.descriptor_id.as_str()) {
+                        if trusted != identity.as_ref() {
+                            return Err(certificate(format!(
+                                "state descriptor {} does not match the trusted registry",
+                                identity.descriptor_id
+                            )));
+                        }
+                        scoped.insert_state(trusted.clone())?;
+                    }
+                }
+                spec::DescriptorIdentity::Operation(identity) => {
+                    let Some(trusted) = self.operations.get(identity.descriptor_id.as_str()) else {
+                        return Err(certificate(format!(
+                            "operation descriptor {} is not present in the trusted registry",
+                            identity.descriptor_id
+                        )));
+                    };
+                    if trusted != identity.as_ref() {
+                        return Err(certificate(format!(
+                            "operation descriptor {} does not match the trusted registry",
+                            identity.descriptor_id
+                        )));
+                    }
+                    scoped.insert_operation(trusted.clone())?;
+                }
+                spec::DescriptorIdentity::Renderer(_) => {}
+            }
+        }
+        Ok(scoped)
     }
 
     fn insert_state(&mut self, descriptor: spec::StateDescriptorIdentity) -> Result<()> {
@@ -615,6 +657,22 @@ pub fn verify_certified_bundle(
     let bundle =
         CertifiedSpecBundle::from_untrusted_bytes(spec_bytes.to_vec(), certificate_bytes.to_vec());
     verify_untrusted_bundle(bundle.parse_untrusted()?, registry)
+}
+
+/// Verifies persisted spec and certificate bytes against a trusted registry superset.
+///
+/// The parsed spec is used only to select descriptor identities from `trusted_registry`; the
+/// resulting scoped registry must match the certificate's registry digest and descriptor evidence.
+pub fn verify_certified_bundle_with_trusted_registry(
+    spec_bytes: &[u8],
+    certificate_bytes: &[u8],
+    trusted_registry: &CertificationRegistry,
+) -> Result<CertifiedTypedSpec> {
+    let bundle =
+        CertifiedSpecBundle::from_untrusted_bytes(spec_bytes.to_vec(), certificate_bytes.to_vec());
+    let untrusted = bundle.parse_untrusted()?;
+    let scoped = trusted_registry.scoped_for_spec(untrusted.spec())?;
+    verify_untrusted_bundle(untrusted, &scoped)
 }
 
 /// Lowers a typed program draft into a v1 spec without skipping validation.

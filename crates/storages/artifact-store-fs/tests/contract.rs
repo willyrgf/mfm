@@ -143,10 +143,24 @@ fn verified_retention_projection_for(
         producer_seed_id: None,
         artifact_role: ArtifactRole::TypedExecutionSpec,
     };
+    let certificate_evidence = ArtifactEvidenceRef {
+        artifact_id: artifact_id(b"certificate"),
+        digest: content_digest(b"certificate"),
+        byte_len: 64,
+        media_type: MediaType::new(mfm_certify::CERTIFICATE_MEDIA_TYPE).expect("certificate media"),
+        schema_id: None,
+        semantic_type_id: None,
+        producer_node_id: None,
+        producer_seed_id: None,
+        artifact_role: ArtifactRole::TypedSpecCertificate,
+    };
     let mut run_store = InMemoryTypedRunStore::new();
     run_store
         .record_artifact_evidence(spec_evidence.clone())
         .expect("record spec artifact");
+    run_store
+        .record_artifact_evidence(certificate_evidence.clone())
+        .expect("record certificate artifact");
     run_store
         .record_artifact_evidence(evidence.clone())
         .expect("record retained artifact");
@@ -159,6 +173,9 @@ fn verified_retention_projection_for(
                 run_id: run_id.clone(),
                 spec_hash: spec_hash.clone(),
                 spec_artifact_id,
+                certificate_artifact_id: certificate_evidence.artifact_id.clone(),
+                certificate_artifact_digest: certificate_evidence.digest.clone(),
+                certificate_media_type: certificate_evidence.media_type.clone(),
                 spec_media_type: spec_evidence.media_type.clone(),
                 spec_version: SpecVersion::new("mfm.typed.execution_spec.v1")
                     .expect("spec version"),
@@ -174,7 +191,7 @@ fn verified_retention_projection_for(
                 source_revision: SourceRevision::new("test-revision").expect("source revision"),
                 seed_cells: Vec::new(),
             })],
-            required_artifacts: vec![spec_evidence],
+            required_artifacts: vec![spec_evidence, certificate_evidence],
             preconditions: CommitPreconditions {
                 required_run_state: RequiredRunState::Absent,
                 ..CommitPreconditions::default()

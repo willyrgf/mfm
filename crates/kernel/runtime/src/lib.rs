@@ -15,7 +15,7 @@ use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_capabilities::{
     CapabilityDescriptor, CapabilitySetDescriptor, EffectSpec, ManagedPlatformWrite,
 };
-use mfm_certify::CertifiedTypedSpec;
+use mfm_certify::{CertifiedSpecCertificate, CertifiedTypedSpec};
 use mfm_events::v1 as events;
 use mfm_ids::{
     AdapterKind, AdapterVersion, ArtifactId, AttemptId, CapabilityKind, CapabilityVersion, CellId,
@@ -223,6 +223,7 @@ fn async_store_error(error: impl fmt::Display) -> RuntimeError {
 #[derive(Debug, Clone)]
 pub struct CertifiedRuntimeSpec {
     envelope: spec::HashedSpecEnvelope,
+    certificate: CertifiedSpecCertificate,
     state_descriptors: BTreeMap<DescriptorId, spec::StateDescriptorIdentity>,
     nodes: BTreeMap<NodeId, spec::NodeSpec>,
     cells: BTreeMap<CellId, spec::CellSpec>,
@@ -232,11 +233,53 @@ pub struct CertifiedRuntimeSpec {
 impl CertifiedRuntimeSpec {
     /// Builds deterministic runtime indexes from certifier-backed typed-spec authority.
     pub fn new(certified: CertifiedTypedSpec) -> Result<Self> {
-        let (envelope, _certificate) = certified.into_parts();
-        Self::from_verified_envelope(envelope)
+        let (envelope, certificate) = certified.into_parts();
+        Self::from_verified_parts(envelope, certificate)
     }
 
+    #[cfg(test)]
     fn from_verified_envelope(envelope: spec::HashedSpecEnvelope) -> Result<Self> {
+        let certificate = mfm_certify::CertifiedSpecCertificate::from_evidence(
+            mfm_certify::CertifiedSpecCertificateEvidence {
+                certificate_version: mfm_certify::CERTIFICATE_VERSION.to_owned(),
+                media_type: mfm_certify::CERTIFICATE_MEDIA_TYPE.to_owned(),
+                certifier_version: "mfm-runtime-test-placeholder".to_owned(),
+                certifier_algorithm: "mfm-runtime-test-placeholder".to_owned(),
+                certificate_canonicalization: DigestAlgorithm::Sha256JcsV1,
+                spec_hash: envelope.spec_hash.clone(),
+                spec_canonicalization: envelope.spec.canonicalization,
+                registry_digest: ContentDigest::from_digest(
+                    DigestAlgorithm::Sha256JcsV1,
+                    mfm_ids::DigestBytes::from_array([0; 32]),
+                ),
+                descriptor_identities: Vec::new(),
+                lowering_version: envelope.spec.lowering_version.clone(),
+                public_output_schema_id: envelope.spec.public_outputs.public_schema_id.clone(),
+                public_output_canonicalizer_identity: envelope
+                    .spec
+                    .public_outputs
+                    .renderer_descriptor
+                    .canonicalizer_identity
+                    .clone(),
+                audit: mfm_certify::CertifiedSpecAuditMetadata {
+                    problem_classes_covered: Vec::new(),
+                    scope_count: envelope.spec.scopes.len() as u64,
+                    operation_lineage_count: envelope.spec.planning_lineage.len() as u64,
+                    node_count: envelope.spec.nodes.len() as u64,
+                    cell_count: envelope.spec.cells.len() as u64,
+                    seed_count: envelope.spec.seeds.len() as u64,
+                    descriptor_count: envelope.spec.descriptor_identities.len() as u64,
+                },
+            },
+        )
+        .map_err(|error| RuntimeError::InvalidSpec(error.to_string()))?;
+        Self::from_verified_parts(envelope, certificate)
+    }
+
+    fn from_verified_parts(
+        envelope: spec::HashedSpecEnvelope,
+        certificate: CertifiedSpecCertificate,
+    ) -> Result<Self> {
         envelope.verify_hash()?;
         let mut state_descriptors = BTreeMap::new();
         for descriptor in &envelope.spec.descriptor_identities {
@@ -274,6 +317,7 @@ impl CertifiedRuntimeSpec {
 
         let runtime = Self {
             envelope,
+            certificate,
             state_descriptors,
             nodes,
             cells,
@@ -295,6 +339,11 @@ impl CertifiedRuntimeSpec {
     /// Returns the certified spec hash.
     pub fn spec_hash(&self) -> &SpecHash {
         &self.envelope.spec_hash
+    }
+
+    /// Returns the verified certificate evidence used to mint this runtime spec.
+    pub fn certificate(&self) -> &CertifiedSpecCertificate {
+        &self.certificate
     }
 
     /// Returns the hash-defining typed execution spec.
@@ -1059,6 +1108,10 @@ fn retention_manifest_json(
         .canonical_json()
         .map_err(|error| RuntimeError::Canonical(error.to_string()))?;
     let spec_digest = spec_canonical.content_digest();
+    let certificate_canonical = runtime_spec
+        .certificate()
+        .canonical_json()
+        .map_err(|error| RuntimeError::Canonical(error.to_string()))?;
     let event_schema_ids = stream
         .iter()
         .map(|event| event.event_schema_id().as_str())
@@ -1069,6 +1122,12 @@ fn retention_manifest_json(
     canonical_json(serde_json::json!({
         "adapter_executables": run_started.adapter_executables.iter().map(executable_json).collect::<Vec<_>>(),
         "canonicalizer_identity": run_started.canonicalizer_identity.as_str(),
+        "certificate_artifact": {
+            "artifact_id": run_started.certificate_artifact_id.as_str(),
+            "byte_len": certificate_canonical.as_bytes().len(),
+            "content_digest": run_started.certificate_artifact_digest.as_str(),
+            "media_type": run_started.certificate_media_type.as_str(),
+        },
         "config_artifacts": runtime_spec.spec().config_refs.iter().map(config_artifact_json).collect::<Vec<_>>(),
         "descriptor_digests": runtime_spec.spec().descriptor_identities.iter().map(descriptor_digest_json).collect::<Vec<_>>(),
         "descriptor_identities": runtime_spec.spec().descriptor_identities.iter().map(descriptor_identity_json).collect::<Vec<_>>(),
@@ -1127,6 +1186,7 @@ fn retained_refs_by_role(retained_refs: &[&events::RetentionRef]) -> RetainedRef
                 public_output_artifacts.push(retention_ref.artifact_id.as_str().to_owned());
             }
             events::ArtifactRole::TypedExecutionSpec
+            | events::ArtifactRole::TypedSpecCertificate
             | events::ArtifactRole::TypedConfig
             | events::ArtifactRole::SeedInput
             | events::ArtifactRole::RetentionManifest => {}
@@ -1211,6 +1271,7 @@ fn retention_ref_json(retention_ref: &events::RetentionRef) -> serde_json::Value
 fn retention_role_str(role: events::ArtifactRole) -> &'static str {
     match role {
         events::ArtifactRole::TypedExecutionSpec => "typed_execution_spec",
+        events::ArtifactRole::TypedSpecCertificate => "typed_spec_certificate",
         events::ArtifactRole::TypedConfig => "typed_config",
         events::ArtifactRole::SeedInput => "seed_input",
         events::ArtifactRole::StateOutput => "state_output",
@@ -1440,6 +1501,8 @@ pub fn validate_run_stream(
 pub struct RunStartEvidence {
     /// Artifact evidence containing the certified spec bytes.
     pub spec_artifact: store::ArtifactEvidenceRef,
+    /// Artifact evidence containing the certified spec certificate bytes.
+    pub certificate_artifact: store::ArtifactEvidenceRef,
     /// Artifact evidence for every certified config reference.
     pub config_artifacts: Vec<store::ArtifactEvidenceRef>,
     /// Framework build/version identity.
@@ -1511,10 +1574,13 @@ impl SerialTypedScheduler {
         evidence: RunStartEvidence,
     ) -> Result<store::CommitOutcome> {
         let spec_artifact = validate_spec_artifact(runtime_spec, evidence.spec_artifact)?;
+        let certificate_artifact =
+            validate_certificate_artifact(runtime_spec, evidence.certificate_artifact)?;
         let config_artifacts = validate_config_artifacts(runtime_spec, evidence.config_artifacts)?;
         let seed_cells = validate_seed_cells(runtime_spec, &evidence.seed_cells)?;
         let runner_executables = self.runners.executables_for_spec(runtime_spec)?;
         store.record_artifact_evidence(spec_artifact.clone())?;
+        store.record_artifact_evidence(certificate_artifact.clone())?;
         for artifact in &config_artifacts {
             store.record_artifact_evidence(artifact.clone())?;
         }
@@ -1522,8 +1588,9 @@ impl SerialTypedScheduler {
             store.record_artifact_evidence(store_seed_artifact(seed))?;
         }
         let mut required_artifacts =
-            Vec::with_capacity(1 + config_artifacts.len() + seed_cells.len());
+            Vec::with_capacity(2 + config_artifacts.len() + seed_cells.len());
         required_artifacts.push(spec_artifact.clone());
+        required_artifacts.push(certificate_artifact.clone());
         required_artifacts.extend(config_artifacts);
         required_artifacts.extend(seed_cells.values().map(store_seed_artifact));
         let run_started_retention_refs = required_artifacts
@@ -1534,6 +1601,9 @@ impl SerialTypedScheduler {
             run_id: run_id.clone(),
             spec_hash: runtime_spec.spec_hash().clone(),
             spec_artifact_id: spec_artifact.artifact_id,
+            certificate_artifact_id: certificate_artifact.artifact_id,
+            certificate_artifact_digest: certificate_artifact.digest,
+            certificate_media_type: certificate_artifact.media_type,
             spec_media_type: runtime_spec.spec().media_type.clone(),
             spec_version: runtime_spec.spec().spec_version.clone(),
             lowering_version: runtime_spec.spec().lowering_version.clone(),
@@ -1584,11 +1654,17 @@ impl SerialTypedScheduler {
         evidence: RunStartEvidence,
     ) -> Result<store::CommitOutcome> {
         let spec_artifact = validate_spec_artifact(runtime_spec, evidence.spec_artifact)?;
+        let certificate_artifact =
+            validate_certificate_artifact(runtime_spec, evidence.certificate_artifact)?;
         let config_artifacts = validate_config_artifacts(runtime_spec, evidence.config_artifacts)?;
         let seed_cells = validate_seed_cells(runtime_spec, &evidence.seed_cells)?;
         let runner_executables = self.runners.executables_for_spec(runtime_spec)?;
         store
             .record_artifact_evidence(spec_artifact.clone())
+            .await
+            .map_err(async_store_error)?;
+        store
+            .record_artifact_evidence(certificate_artifact.clone())
             .await
             .map_err(async_store_error)?;
         for artifact in &config_artifacts {
@@ -1604,8 +1680,9 @@ impl SerialTypedScheduler {
                 .map_err(async_store_error)?;
         }
         let mut required_artifacts =
-            Vec::with_capacity(1 + config_artifacts.len() + seed_cells.len());
+            Vec::with_capacity(2 + config_artifacts.len() + seed_cells.len());
         required_artifacts.push(spec_artifact.clone());
+        required_artifacts.push(certificate_artifact.clone());
         required_artifacts.extend(config_artifacts);
         required_artifacts.extend(seed_cells.values().map(store_seed_artifact));
         let run_started_retention_refs = required_artifacts
@@ -1616,6 +1693,9 @@ impl SerialTypedScheduler {
             run_id: run_id.clone(),
             spec_hash: runtime_spec.spec_hash().clone(),
             spec_artifact_id: spec_artifact.artifact_id,
+            certificate_artifact_id: certificate_artifact.artifact_id,
+            certificate_artifact_digest: certificate_artifact.digest,
+            certificate_media_type: certificate_artifact.media_type,
             spec_media_type: runtime_spec.spec().media_type.clone(),
             spec_version: runtime_spec.spec().spec_version.clone(),
             lowering_version: runtime_spec.spec().lowering_version.clone(),
@@ -4227,6 +4307,35 @@ fn validate_spec_artifact(
     {
         return Err(RuntimeError::InvalidRunStream(
             "typed execution spec artifact evidence does not match the certified spec".to_owned(),
+        ));
+    }
+    Ok(evidence)
+}
+
+fn validate_certificate_artifact(
+    runtime_spec: &CertifiedRuntimeSpec,
+    evidence: store::ArtifactEvidenceRef,
+) -> Result<store::ArtifactEvidenceRef> {
+    let canonical = runtime_spec
+        .certificate()
+        .canonical_json()
+        .map_err(|error| RuntimeError::Canonical(error.to_string()))?;
+    let digest = canonical.content_digest();
+    let expected_artifact_id = ArtifactId::from_digest(digest.algorithm(), *digest.digest());
+    let media_type = spec::MediaType::new(mfm_certify::CERTIFICATE_MEDIA_TYPE)
+        .map_err(|error| RuntimeError::Identity(error.to_string()))?;
+    if evidence.artifact_id != expected_artifact_id
+        || evidence.digest != digest
+        || evidence.byte_len != canonical.as_bytes().len() as u64
+        || evidence.media_type != media_type
+        || evidence.schema_id.is_some()
+        || evidence.semantic_type_id.is_some()
+        || evidence.producer_node_id.is_some()
+        || evidence.producer_seed_id.is_some()
+        || evidence.artifact_role != events::ArtifactRole::TypedSpecCertificate
+    {
+        return Err(RuntimeError::InvalidRunStream(
+            "typed spec certificate artifact evidence does not match the certified spec".to_owned(),
         ));
     }
     Ok(evidence)
@@ -7382,6 +7491,7 @@ mod tests {
     ) -> RunStartEvidence {
         RunStartEvidence {
             spec_artifact: spec_artifact(&fixture.runtime_spec),
+            certificate_artifact: certificate_artifact(&fixture.runtime_spec),
             config_artifacts: fixture
                 .runtime_spec
                 .spec()
@@ -7412,6 +7522,26 @@ mod tests {
             producer_node_id: None,
             producer_seed_id: None,
             artifact_role: events::ArtifactRole::TypedExecutionSpec,
+        }
+    }
+
+    fn certificate_artifact(runtime_spec: &CertifiedRuntimeSpec) -> store::ArtifactEvidenceRef {
+        let canonical = runtime_spec
+            .certificate()
+            .canonical_json()
+            .expect("canonical certificate");
+        let digest = canonical.content_digest();
+        store::ArtifactEvidenceRef {
+            artifact_id: ArtifactId::from_digest(digest.algorithm(), *digest.digest()),
+            digest,
+            byte_len: canonical.as_bytes().len() as u64,
+            media_type: spec::MediaType::new(mfm_certify::CERTIFICATE_MEDIA_TYPE)
+                .expect("certificate media type"),
+            schema_id: None,
+            semantic_type_id: None,
+            producer_node_id: None,
+            producer_seed_id: None,
+            artifact_role: events::ArtifactRole::TypedSpecCertificate,
         }
     }
 

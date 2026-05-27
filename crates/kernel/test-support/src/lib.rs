@@ -1458,6 +1458,7 @@ fn replay_artifacts(
 ) -> Result<Vec<store::ArtifactEvidenceRef>, String> {
     let mut artifacts = BTreeMap::<ArtifactId, store::ArtifactEvidenceRef>::new();
     insert_artifact(&mut artifacts, spec_artifact(&fixture.runtime_spec)?);
+    insert_artifact(&mut artifacts, certificate_artifact(&fixture.runtime_spec)?);
     for config in &fixture.runtime_spec.spec().config_refs {
         insert_artifact(&mut artifacts, config_artifact(config));
     }
@@ -1674,6 +1675,7 @@ fn run_start_evidence(
 ) -> Result<RunStartEvidence, String> {
     Ok(RunStartEvidence {
         spec_artifact: spec_artifact(&fixture.runtime_spec)?,
+        certificate_artifact: certificate_artifact(&fixture.runtime_spec)?,
         config_artifacts: fixture
             .runtime_spec
             .spec()
@@ -1708,6 +1710,29 @@ fn spec_artifact(
         producer_node_id: None,
         producer_seed_id: None,
         artifact_role: events::ArtifactRole::TypedExecutionSpec,
+    })
+}
+
+fn certificate_artifact(
+    runtime_spec: &CertifiedRuntimeSpec,
+) -> Result<store::ArtifactEvidenceRef, String> {
+    let canonical = runtime_spec
+        .certificate()
+        .canonical_json()
+        .map_err(display_error)?;
+    let digest = canonical.content_digest();
+    let media_type =
+        spec::MediaType::new(mfm_certify::CERTIFICATE_MEDIA_TYPE).map_err(display_error)?;
+    Ok(store::ArtifactEvidenceRef {
+        artifact_id: ArtifactId::from_digest(digest.algorithm(), *digest.digest()),
+        digest,
+        byte_len: canonical.as_bytes().len() as u64,
+        media_type,
+        schema_id: None,
+        semantic_type_id: None,
+        producer_node_id: None,
+        producer_seed_id: None,
+        artifact_role: events::ArtifactRole::TypedSpecCertificate,
     })
 }
 

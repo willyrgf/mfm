@@ -20,6 +20,7 @@ mfm-spec = { path = "../spec" }
 serde_json = { workspace = true }
 
 [dev-dependencies]
+mfm-certify = { path = "../certify" }
 mfm-events = { path = "../events" }
 mfm-ids = { path = "../ids" }
 mfm-spec = { path = "../spec" }

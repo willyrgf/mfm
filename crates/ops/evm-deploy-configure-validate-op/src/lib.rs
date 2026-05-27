@@ -145,6 +145,35 @@ pub fn dcv_operation_registry() -> mfm_program::Result<mfm_program::OperationReg
     Ok(operations.into_snapshot())
 }
 
+/// Adds EVM deploy/configure/validate workflow descriptors to a trusted certification registry.
+pub fn register_dcv_certification_descriptors(
+    registry: &mut mfm_certify::CertificationRegistry,
+) -> mfm_certify::Result<()> {
+    let mut states = StateRegistryBuilder::new();
+    registry.register_state(
+        &states
+            .register::<DeployContractState>()
+            .map_err(|error| mfm_certify::CertifyError::Lowering(error.to_string()))?,
+    )?;
+    registry.register_state(
+        &states
+            .register::<ConfigureContractState>()
+            .map_err(|error| mfm_certify::CertifyError::Lowering(error.to_string()))?,
+    )?;
+    registry.register_state(
+        &states
+            .register::<ValidateContractState>()
+            .map_err(|error| mfm_certify::CertifyError::Lowering(error.to_string()))?,
+    )?;
+    let mut operations = OperationRegistryBuilder::new();
+    registry.register_operation(
+        &operations
+            .register::<DeployConfigureValidateWorkflowOperation>()
+            .map_err(|error| mfm_certify::CertifyError::Lowering(error.to_string()))?,
+    )?;
+    Ok(())
+}
+
 /// Builds a typed EVM deploy/configure/validate program draft.
 pub fn dcv_program_draft(
     config: DeployConfigureValidateCanonicalConfig,

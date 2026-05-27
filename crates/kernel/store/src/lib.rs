@@ -2583,6 +2583,17 @@ pub mod v1 {
                     producer_seed_id: None,
                     artifact_role: Some(ArtifactRole::TypedExecutionSpec),
                 });
+                requirements.push(ArtifactRequirement {
+                    artifact_id: payload.certificate_artifact_id.clone(),
+                    digest: Some(payload.certificate_artifact_digest.clone()),
+                    byte_len: None,
+                    media_type: Some(payload.certificate_media_type.clone()),
+                    schema_id: None,
+                    semantic_type_id: None,
+                    producer_node_id: None,
+                    producer_seed_id: None,
+                    artifact_role: Some(ArtifactRole::TypedSpecCertificate),
+                });
                 for seed in &payload.seed_cells {
                     push_event_artifact(
                         &mut requirements,
@@ -4091,6 +4102,9 @@ pub mod v1 {
         match payload {
             KernelEventPayload::RunStarted(payload) => serde_json::json!({
                 "canonicalizer_identity": payload.canonicalizer_identity.as_str(),
+                "certificate_artifact_digest": payload.certificate_artifact_digest.as_str(),
+                "certificate_artifact_id": payload.certificate_artifact_id.as_str(),
+                "certificate_media_type": payload.certificate_media_type.as_str(),
                 "descriptor_identities": payload.descriptor_identities.iter().map(descriptor_identity_json).collect::<Vec<_>>(),
                 "adapter_executables": payload.adapter_executables.iter().map(executable_identity_json).collect::<Vec<_>>(),
                 "framework_version": payload.framework_version.as_str(),
@@ -4380,6 +4394,19 @@ pub mod v1 {
                 run_id: parse_identity(required_str(json, "run_id")?)?,
                 spec_hash: parse_identity(required_str(json, "spec_hash")?)?,
                 spec_artifact_id: parse_identity(required_str(json, "spec_artifact_id")?)?,
+                certificate_artifact_id: parse_identity(required_str(
+                    json,
+                    "certificate_artifact_id",
+                )?)?,
+                certificate_artifact_digest: parse_identity(required_str(
+                    json,
+                    "certificate_artifact_digest",
+                )?)?,
+                certificate_media_type: MediaType::new(required_str(
+                    json,
+                    "certificate_media_type",
+                )?)
+                .map_err(|error| StoreError::Identity(error.to_string()))?,
                 spec_media_type: MediaType::new(required_str(json, "spec_media_type")?)
                     .map_err(|error| StoreError::Identity(error.to_string()))?,
                 spec_version: parse_identity(required_str(json, "spec_version")?)?,
@@ -5047,6 +5074,7 @@ pub mod v1 {
     fn parse_artifact_role(value: &str) -> Result<ArtifactRole> {
         match value {
             "typed_execution_spec" => Ok(ArtifactRole::TypedExecutionSpec),
+            "typed_spec_certificate" => Ok(ArtifactRole::TypedSpecCertificate),
             "typed_config" => Ok(ArtifactRole::TypedConfig),
             "seed_input" => Ok(ArtifactRole::SeedInput),
             "state_output" => Ok(ArtifactRole::StateOutput),
@@ -5487,6 +5515,7 @@ pub mod v1 {
     fn artifact_role_str(role: ArtifactRole) -> &'static str {
         match role {
             ArtifactRole::TypedExecutionSpec => "typed_execution_spec",
+            ArtifactRole::TypedSpecCertificate => "typed_spec_certificate",
             ArtifactRole::TypedConfig => "typed_config",
             ArtifactRole::SeedInput => "seed_input",
             ArtifactRole::StateOutput => "state_output",

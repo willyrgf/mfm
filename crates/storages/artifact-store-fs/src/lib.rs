@@ -393,6 +393,7 @@ fn validate_evidence_shape(evidence: &ArtifactEvidenceRef) -> TypedArtifactResul
             }
         }
         ArtifactRole::TypedExecutionSpec
+        | ArtifactRole::TypedSpecCertificate
         | ArtifactRole::TypedConfig
         | ArtifactRole::RedactedDiagnostic
         | ArtifactRole::RetentionManifest => {}
@@ -764,6 +765,7 @@ where
 fn artifact_role_str(role: ArtifactRole) -> &'static str {
     match role {
         ArtifactRole::TypedExecutionSpec => "typed_execution_spec",
+        ArtifactRole::TypedSpecCertificate => "typed_spec_certificate",
         ArtifactRole::TypedConfig => "typed_config",
         ArtifactRole::SeedInput => "seed_input",
         ArtifactRole::StateOutput => "state_output",
@@ -785,6 +787,7 @@ fn artifact_role_str(role: ArtifactRole) -> &'static str {
 fn parse_artifact_role(value: &str) -> TypedArtifactResult<ArtifactRole> {
     match value {
         "typed_execution_spec" => Ok(ArtifactRole::TypedExecutionSpec),
+        "typed_spec_certificate" => Ok(ArtifactRole::TypedSpecCertificate),
         "typed_config" => Ok(ArtifactRole::TypedConfig),
         "seed_input" => Ok(ArtifactRole::SeedInput),
         "state_output" => Ok(ArtifactRole::StateOutput),

@@ -17,3 +17,6 @@ mfm-events = { path = "../events" }
 mfm-ids = { path = "../ids" }
 mfm-spec = { path = "../spec" }
 mfm-store = { path = "../store" }
+
+[dev-dependencies]
+mfm-certify = { path = "../certify" }

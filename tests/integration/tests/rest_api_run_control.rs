@@ -171,6 +171,7 @@ async fn start_parses_typed_envelope_and_rejects_invalid_spec() {
                 "kind": "typed_run_start_v1",
                 "run_id": VALID_RUN_ID,
                 "spec": {},
+                "certificate": {},
                 "drive": "append_only"
             }),
         ))
@@ -180,7 +181,7 @@ async fn start_parses_typed_envelope_and_rejects_invalid_spec() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     let v = response_json(resp).await;
     assert_eq!(v["status"], "error");
-    assert_eq!(v["error"]["code"], "TypedSpecInvalid");
+    assert_eq!(v["error"]["code"], "TypedCertificationFailed");
 }
 
 #[tokio::test]

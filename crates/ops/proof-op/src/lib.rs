@@ -113,6 +113,35 @@ pub fn proof_operation_registry() -> mfm_program::Result<mfm_program::OperationR
     Ok(operations.into_snapshot())
 }
 
+/// Adds proof workflow descriptors to a trusted certification registry.
+pub fn register_proof_certification_descriptors(
+    registry: &mut mfm_certify::CertificationRegistry,
+) -> mfm_certify::Result<()> {
+    let mut states = StateRegistryBuilder::new();
+    registry.register_state(
+        &states
+            .register::<ProofReadFactState>()
+            .map_err(|error| mfm_certify::CertifyError::Lowering(error.to_string()))?,
+    )?;
+    registry.register_state(
+        &states
+            .register::<ProofApplySideEffectState>()
+            .map_err(|error| mfm_certify::CertifyError::Lowering(error.to_string()))?,
+    )?;
+    registry.register_state(
+        &states
+            .register::<ProofAssembleOutputState>()
+            .map_err(|error| mfm_certify::CertifyError::Lowering(error.to_string()))?,
+    )?;
+    let mut operations = OperationRegistryBuilder::new();
+    registry.register_operation(
+        &operations
+            .register::<ProofWorkflowOperation>()
+            .map_err(|error| mfm_certify::CertifyError::Lowering(error.to_string()))?,
+    )?;
+    Ok(())
+}
+
 /// Builds a typed proof program draft.
 pub fn proof_program_draft(
     config: ProofWorkflowConfig,

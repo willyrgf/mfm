@@ -1,6 +1,6 @@
 #![allow(clippy::disallowed_methods, dead_code)]
 
-use mfm_app::{DriveMode, TypedPublicOutputResponse, TypedRunResponse, TypedRunResumeRequest};
+use mfm_app::{DriveMode, TypedPublicOutputResponse, TypedRunResponse};
 use mfm_artifact_store_fs::{FsTypedArtifactStore, TypedArtifactDescriptor};
 use mfm_events::v1 as events;
 use mfm_op_portfolio_tracker::{
@@ -39,7 +39,12 @@ pub async fn run_typed_portfolio_snapshot(
     let artifacts = FsTypedArtifactStore::new(tmp.path());
     let runners =
         mfm_app::production_typed_runner_registry(artifacts.clone()).expect("typed runners");
-    let services = mfm_app::make_in_memory_typed_services(runners, tmp.path());
+    let registry = mfm_app::production_certification_registry().expect("certification registry");
+    let services = mfm_app::make_in_memory_typed_services_with_certification_registry(
+        runners,
+        tmp.path(),
+        registry.clone(),
+    );
 
     persist_config_artifacts(
         services.artifacts(),
@@ -48,21 +53,20 @@ pub async fn run_typed_portfolio_snapshot(
     )
     .await;
 
-    let spec_bytes = certified
-        .envelope()
-        .spec
-        .canonical_json()
-        .expect("canonical spec")
-        .to_vec();
+    let bundle = certified.bundle().expect("certified bundle");
     let run_id = mfm_app::new_run_id();
     let request = mfm_app::build_typed_run_start_request(
         services.artifacts(),
-        &spec_bytes,
-        run_id.clone(),
-        "mfm.integration.portfolio.typed.v1",
-        "integration-test",
+        mfm_app::CertifiedBundleRunStartInput {
+            spec_bytes: bundle.spec_bytes(),
+            certificate_bytes: bundle.certificate_bytes(),
+            registry: &registry,
+            run_id: run_id.clone(),
+            framework_version: "mfm.integration.portfolio.typed.v1",
+            source_revision: "integration-test",
+            drive: DriveMode::UntilBlocked,
+        },
         Vec::new(),
-        DriveMode::UntilBlocked,
     )
     .await
     .expect("typed portfolio start request");
@@ -96,7 +100,12 @@ pub async fn resume_typed_portfolio_snapshot(
     let artifacts = FsTypedArtifactStore::new(tmp.path());
     let runners =
         mfm_app::production_typed_runner_registry(artifacts.clone()).expect("typed runners");
-    let services = mfm_app::make_in_memory_typed_services(runners, tmp.path());
+    let registry = mfm_app::production_certification_registry().expect("certification registry");
+    let services = mfm_app::make_in_memory_typed_services_with_certification_registry(
+        runners,
+        tmp.path(),
+        registry.clone(),
+    );
 
     persist_config_artifacts(
         services.artifacts(),
@@ -105,21 +114,20 @@ pub async fn resume_typed_portfolio_snapshot(
     )
     .await;
 
-    let spec_bytes = certified
-        .envelope()
-        .spec
-        .canonical_json()
-        .expect("canonical spec")
-        .to_vec();
+    let bundle = certified.bundle().expect("certified bundle");
     let run_id = mfm_app::new_run_id();
     let request = mfm_app::build_typed_run_start_request(
         services.artifacts(),
-        &spec_bytes,
-        run_id.clone(),
-        "mfm.integration.portfolio.typed.v1",
-        "integration-test",
+        mfm_app::CertifiedBundleRunStartInput {
+            spec_bytes: bundle.spec_bytes(),
+            certificate_bytes: bundle.certificate_bytes(),
+            registry: &registry,
+            run_id: run_id.clone(),
+            framework_version: "mfm.integration.portfolio.typed.v1",
+            source_revision: "integration-test",
+            drive: DriveMode::AppendOnly,
+        },
         Vec::new(),
-        DriveMode::AppendOnly,
     )
     .await
     .expect("typed portfolio append-only start request");
@@ -128,11 +136,7 @@ pub async fn resume_typed_portfolio_snapshot(
         .await
         .expect("typed portfolio append-only run");
     let resumed = services
-        .resume_certified_run(TypedRunResumeRequest {
-            certified_spec: certified,
-            run_id: run_id.clone(),
-            drive: DriveMode::UntilBlocked,
-        })
+        .resume_stored_run(&run_id, DriveMode::UntilBlocked)
         .await
         .expect("typed portfolio resume");
     let public_output = services

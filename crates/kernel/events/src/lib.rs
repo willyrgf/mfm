@@ -287,6 +287,12 @@ pub mod v1 {
         pub spec_hash: SpecHash,
         /// Artifact id containing the certified spec bytes.
         pub spec_artifact_id: ArtifactId,
+        /// Artifact id containing the certified typed spec certificate bytes.
+        pub certificate_artifact_id: ArtifactId,
+        /// Content digest of the persisted certified typed spec certificate artifact.
+        pub certificate_artifact_digest: ContentDigest,
+        /// Certified typed spec certificate media type.
+        pub certificate_media_type: MediaType,
         /// Certified spec media type.
         pub spec_media_type: MediaType,
         /// Certified spec version.
@@ -619,6 +625,8 @@ pub mod v1 {
     pub enum ArtifactRole {
         /// Certified typed execution spec artifact.
         TypedExecutionSpec,
+        /// Certified typed spec certificate artifact.
+        TypedSpecCertificate,
         /// Certified typed config artifact.
         TypedConfig,
         /// Seed input artifact.

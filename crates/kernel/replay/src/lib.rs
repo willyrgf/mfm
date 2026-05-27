@@ -2513,6 +2513,17 @@ pub mod v1 {
                     None,
                 );
                 spec_artifact.media_type = spec::MediaType::new(SPEC_MEDIA_TYPE).expect("media");
+                let certificate_digest = content(0x41);
+                let mut certificate_artifact = stored_artifact(
+                    artifact(0x42),
+                    certificate_digest.clone(),
+                    None,
+                    ArtifactRole::TypedSpecCertificate,
+                    None,
+                );
+                certificate_artifact.media_type =
+                    spec::MediaType::new(mfm_certify::CERTIFICATE_MEDIA_TYPE)
+                        .expect("certificate media");
                 append(
                     &mut store,
                     &mut artifacts,
@@ -2522,6 +2533,9 @@ pub mod v1 {
                         run_id: run_id.clone(),
                         spec_hash: envelope.spec_hash.clone(),
                         spec_artifact_id: spec_artifact.artifact_id.clone(),
+                        certificate_artifact_id: certificate_artifact.artifact_id.clone(),
+                        certificate_artifact_digest: certificate_digest,
+                        certificate_media_type: certificate_artifact.media_type.clone(),
                         spec_media_type: spec::MediaType::new(SPEC_MEDIA_TYPE).expect("media"),
                         spec_version: SpecVersion::new(spec::SPEC_VERSION).expect("spec version"),
                         lowering_version: LoweringVersion::new(spec::LOWERING_VERSION)
@@ -2546,7 +2560,7 @@ pub mod v1 {
                             .expect("source"),
                         seed_cells: Vec::new(),
                     })],
-                    vec![spec_artifact],
+                    vec![spec_artifact, certificate_artifact],
                     CommitPreconditions {
                         required_run_state: RequiredRunState::Absent,
                         ..CommitPreconditions::default()
