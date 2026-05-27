@@ -24,7 +24,9 @@ use mfm_artifact_store_fs::{FsTypedArtifactError, FsTypedArtifactStore, TypedArt
 use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
 use mfm_certify::{CertificationRegistry, CertifiedSpecBundle, CertifiedTypedSpec};
 use mfm_events::v1 as events;
-use mfm_ids::{ArtifactId, DigestAlgorithm, EventId, RunId, SchemaId, SeedId, SpecHash};
+use mfm_ids::{
+    ArtifactId, ContentDigest, DigestAlgorithm, EventId, RunId, SchemaId, SeedId, SpecHash,
+};
 use mfm_replay::v1::{ReplayAuthority, ReplayBroker, ReplayError};
 use mfm_runtime::{
     build_public_output_receipt_artifact, build_retention_manifest_artifact, validate_run_stream,
@@ -451,6 +453,48 @@ impl fmt::Display for TypedPublicOutputResponse {
     }
 }
 
+/// Non-forgeable authority to render one typed public output.
+///
+/// This is minted only after the app verifies certified runtime authority, validates the
+/// authoritative run stream, and rebuilds public-output projection from that stream. Rendered JSON
+/// artifacts are caches only and cannot construct this authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublicOutputReadAuthority {
+    run_id: RunId,
+    public_schema_id: SchemaId,
+    event_id: EventId,
+    rendered_digest: ContentDigest,
+    rendered_artifact_id: Option<ArtifactId>,
+    payload: events::PublicOutputProduced,
+}
+
+impl PublicOutputReadAuthority {
+    /// Returns the run id bound to this read authority.
+    pub fn run_id(&self) -> &RunId {
+        &self.run_id
+    }
+
+    /// Returns the public-output schema id bound to this read authority.
+    pub fn public_schema_id(&self) -> &SchemaId {
+        &self.public_schema_id
+    }
+
+    /// Returns the store-owned event id that produced this public output.
+    pub fn event_id(&self) -> &EventId {
+        &self.event_id
+    }
+
+    /// Returns the canonical digest of the rendered public output.
+    pub fn rendered_digest(&self) -> &ContentDigest {
+        &self.rendered_digest
+    }
+
+    /// Returns the persisted rendered artifact id, when the renderer wrote one.
+    pub fn rendered_artifact_id(&self) -> Option<&ArtifactId> {
+        self.rendered_artifact_id.as_ref()
+    }
+}
+
 /// Typed run event stream response.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TypedRunStreamResponse {
@@ -745,8 +789,9 @@ where
             &stream,
         )
         .await?;
-        validate_run_stream(&runtime_spec, run_id, &stream)?;
-        typed_public_output_from_stream(&self.artifacts, run_id, public_schema_id, &stream).await
+        let authority =
+            verify_public_output_read_authority(&runtime_spec, run_id, public_schema_id, &stream)?;
+        render_typed_public_output(&self.artifacts, &authority).await
     }
 
     async fn drive_with_mode(
@@ -1046,8 +1091,9 @@ where
             &stream,
         )
         .await?;
-        validate_run_stream(&runtime_spec, run_id, &stream)?;
-        typed_public_output_from_stream(&self.artifacts, run_id, public_schema_id, &stream).await
+        let authority =
+            verify_public_output_read_authority(&runtime_spec, run_id, public_schema_id, &stream)?;
+        render_typed_public_output(&self.artifacts, &authority).await
     }
 
     async fn drive_with_mode(
@@ -1693,19 +1739,24 @@ pub fn typed_run_stream_response_from_events(
     }
 }
 
-/// Renders typed public output from a store-owned run stream and typed artifact store.
-pub async fn typed_public_output_from_stream(
-    artifacts: &FsTypedArtifactStore,
+/// Verifies a typed public-output read authority from certified runtime authority and stream data.
+///
+/// The supplied stream is treated as the authoritative event source. This verifier validates that
+/// stream against the certified runtime spec and rebuilds the public-output projection from events
+/// before minting render authority.
+pub fn verify_public_output_read_authority(
+    runtime_spec: &CertifiedRuntimeSpec,
     run_id: &RunId,
     public_schema_id: &SchemaId,
     stream: &[store::KernelEventEnvelope],
-) -> Result<TypedPublicOutputResponse, AppError> {
+) -> Result<PublicOutputReadAuthority, AppError> {
     if stream.is_empty() {
         return Err(AppError::not_found(
             "TypedRunNotFound",
             "typed run stream was not found",
         ));
     }
+    validate_run_stream(runtime_spec, run_id, stream)?;
     let projection = store::ProjectionSnapshot::rebuild_from_run_stream(stream)?;
     let public_output = projection.public_output(public_schema_id).ok_or_else(|| {
         AppError::not_found(
@@ -1727,19 +1778,51 @@ pub async fn typed_public_output_from_stream(
     };
 
     let payload = public_output_payload_from_stream(stream, event_id, public_schema_id)?;
-    let json = match rendered_artifact_id {
-        Some(artifact_id) => {
-            Some(load_public_output_json(artifacts, artifact_id, rendered_digest, payload).await?)
-        }
-        None => Some(render_public_output_json_from_cells(artifacts, &payload.cells).await?),
+    if &payload.spec_hash != runtime_spec.spec_hash()
+        || &payload.public_schema_id != public_schema_id
+        || public_schema_id != &runtime_spec.spec().public_outputs.public_schema_id
+    {
+        return Err(AppError::new(
+            ErrorClass::Internal,
+            "TypedPublicOutputAuthorityMismatch",
+            "typed public-output evidence does not match certified runtime authority",
+        ));
+    }
+
+    Ok(PublicOutputReadAuthority {
+        run_id: run_id.clone(),
+        public_schema_id: public_schema_id.clone(),
+        event_id: event_id.clone(),
+        rendered_digest: rendered_digest.clone(),
+        rendered_artifact_id: rendered_artifact_id.clone(),
+        payload: payload.clone(),
+    })
+}
+
+/// Renders typed public output from app-verified read authority and typed artifact bytes.
+pub async fn render_typed_public_output(
+    artifacts: &FsTypedArtifactStore,
+    authority: &PublicOutputReadAuthority,
+) -> Result<TypedPublicOutputResponse, AppError> {
+    let json = match authority.rendered_artifact_id() {
+        Some(artifact_id) => Some(
+            load_public_output_json(
+                artifacts,
+                artifact_id,
+                authority.rendered_digest(),
+                &authority.payload,
+            )
+            .await?,
+        ),
+        None => Some(render_public_output_json_from_authority(artifacts, authority).await?),
     };
     Ok(TypedPublicOutputResponse {
-        run_id: run_id.as_str().to_owned(),
-        public_schema_id: public_schema_id.as_str().to_owned(),
-        event_id: event_id.as_str().to_owned(),
-        rendered_digest: rendered_digest.as_str().to_owned(),
-        rendered_artifact_id: rendered_artifact_id
-            .as_ref()
+        run_id: authority.run_id().as_str().to_owned(),
+        public_schema_id: authority.public_schema_id().as_str().to_owned(),
+        event_id: authority.event_id().as_str().to_owned(),
+        rendered_digest: authority.rendered_digest().as_str().to_owned(),
+        rendered_artifact_id: authority
+            .rendered_artifact_id()
             .map(|artifact_id| artifact_id.as_str().to_owned()),
         json,
     })
@@ -1774,12 +1857,12 @@ fn public_output_payload_from_stream<'a>(
         })
 }
 
-async fn render_public_output_json_from_cells(
+async fn render_public_output_json_from_authority(
     artifacts: &FsTypedArtifactStore,
-    cells: &[events::NamedTypedCellRef],
+    authority: &PublicOutputReadAuthority,
 ) -> Result<Value, AppError> {
     let mut root = Map::new();
-    for cell in cells {
+    for cell in &authority.payload.cells {
         let (bytes, evidence) = artifacts.get_artifact_by_id(&cell.artifact_id).await?;
         verify_public_output_cell_evidence(cell, &evidence)?;
         let value = serde_json::from_slice(&bytes).map_err(|error| {
@@ -2113,7 +2196,7 @@ fn typed_event_ref(event: &store::KernelEventEnvelope) -> TypedRunEventRef {
 mod tests {
     use super::*;
     use mfm_capabilities::{NoCaps, Pure};
-    use mfm_ids::{AttemptId, DescriptorId, LoweringVersion, SpecVersion, StateKind, StateVersion};
+    use mfm_ids::{AttemptId, DescriptorId, StateKind, StateVersion};
     use mfm_ids::{CellId, ContentDigest, DigestBytes, NodeId, ScopeId, SeedId, SemanticTypeId};
     use mfm_program::{
         build_root_with_registries, CanonicalSeed, PublicOutputKey, PureState, RootBuilder,
@@ -2173,8 +2256,8 @@ mod tests {
         let root =
             std::env::temp_dir().join(format!("mfm-app-public-output-{}", uuid::Uuid::new_v4()));
         let artifacts = FsTypedArtifactStore::new(&root);
-        let node_id = node_id(0x20);
-        let schema_id = schema_id("mfm.test.position", 0x21);
+        let source_node_id = node_id(0x20);
+        let source_schema_id = schema_id("mfm.test.position", 0x21);
         let semantic_type_id = semantic_id("position", 0x22);
         let bytes = br#"{"total":"12.50"}"#.to_vec();
 
@@ -2183,40 +2266,61 @@ mod tests {
                 bytes,
                 TypedArtifactDescriptor {
                     media_type: spec::MediaType::new("application/json").expect("media type"),
-                    schema_id: Some(schema_id.clone()),
+                    schema_id: Some(source_schema_id.clone()),
                     semantic_type_id: Some(semantic_type_id.clone()),
-                    producer_node_id: Some(node_id.clone()),
+                    producer_node_id: Some(source_node_id.clone()),
                     producer_seed_id: None::<SeedId>,
                     artifact_role: events::ArtifactRole::StateOutput,
                 },
             )
             .await
             .expect("persist typed artifact");
+        let public_schema_id = schema_id("mfm.test.public_output", 0x26);
         let cell = events::NamedTypedCellRef {
             public_field_path: spec::PublicFieldPath::new("result").expect("field path"),
             cell_id: cell_id(0x23),
-            producer: spec::CellProducer::Node(node_id),
+            producer: spec::CellProducer::Node(source_node_id),
             scope_id: scope_id(0x24),
             semantic_type_id,
-            schema_id,
+            schema_id: source_schema_id,
             value_lineage: spec::ValueLineageRef {
                 lineage_digest: content_digest(0x25),
             },
             content_digest: evidence.digest,
             artifact_id: evidence.artifact_id,
         };
+        let rendered_digest = content_digest(0x27);
+        let authority = PublicOutputReadAuthority {
+            run_id: RunId::from_digest(DigestAlgorithm::Sha256JcsV1, digest(0x28)),
+            public_schema_id: public_schema_id.clone(),
+            event_id: EventId::from_digest(DigestAlgorithm::Sha256JcsV1, digest(0x29)),
+            rendered_digest,
+            rendered_artifact_id: None,
+            payload: events::PublicOutputProduced {
+                spec_hash: SpecHash::from_digest(DigestAlgorithm::Sha256JcsV1, digest(0x2a)),
+                node_id: node_id(0x2b),
+                attempt_id: attempt_id(0x2c),
+                receipt_cell_id: cell_id(0x2d),
+                public_schema_id,
+                output_spec_digest: content_digest(0x2e),
+                cells: vec![cell],
+                rendered_digest: content_digest(0x27),
+                rendered_artifact_id: None,
+                renderer_descriptor_id: descriptor_id(0x2f),
+            },
+        };
 
-        let rendered = render_public_output_json_from_cells(&artifacts, &[cell])
+        let rendered = render_typed_public_output(&artifacts, &authority)
             .await
             .expect("render public output");
 
         assert_eq!(
-            rendered,
-            serde_json::json!({
+            rendered.json,
+            Some(serde_json::json!({
                 "result": {
                     "total": "12.50"
                 }
-            })
+            }))
         );
 
         let _ = std::fs::remove_dir_all(root);
@@ -2224,216 +2328,30 @@ mod tests {
 
     #[tokio::test]
     async fn public_output_api_renders_from_authoritative_stream_cells() {
-        let root = std::env::temp_dir().join(format!(
-            "mfm-app-public-output-stream-{}",
-            uuid::Uuid::new_v4()
-        ));
-        let artifacts = FsTypedArtifactStore::new(&root);
-        let mut store = store::InMemoryTypedRunStore::new();
-        let run_id = RunId::from_digest(DigestAlgorithm::Sha256JcsV1, digest(0x10));
-        let spec_hash = SpecHash::from_digest(DigestAlgorithm::Sha256JcsV1, digest(0x11));
-        let public_schema_id = schema_id("mfm.test.public_output", 0x12);
-        let source_node = node_id(0x20);
-        let source_attempt = attempt_id(0x21);
-        let source_cell = cell_id(0x22);
-        let source_scope = scope_id(0x23);
-        let source_schema = schema_id("mfm.test.position", 0x24);
-        let source_semantic = semantic_id("position", 0x25);
-        let source_lineage = spec::ValueLineageRef {
-            lineage_digest: content_digest(0x26),
-        };
-        let source_evidence = artifacts
-            .put_artifact(
-                br#"{"total":"12.50"}"#.to_vec(),
-                TypedArtifactDescriptor {
-                    media_type: spec::MediaType::new("application/json").expect("media type"),
-                    schema_id: Some(source_schema.clone()),
-                    semantic_type_id: Some(source_semantic.clone()),
-                    producer_node_id: Some(source_node.clone()),
-                    producer_seed_id: None::<SeedId>,
-                    artifact_role: events::ArtifactRole::StateOutput,
-                },
-            )
+        let (root, fixture, services, _started) = start_framework_fixture_run().await;
+        let stream = services
+            .store()
+            .load_run_stream(&fixture.run_id)
             .await
-            .expect("persist source artifact");
-        let spec_evidence = store::ArtifactEvidenceRef {
-            artifact_id: ArtifactId::from_digest(spec_hash.algorithm(), *spec_hash.digest()),
-            digest: ContentDigest::from_digest(spec_hash.algorithm(), *spec_hash.digest()),
-            byte_len: 2,
-            media_type: spec::MediaType::new(
-                "application/vnd.mfm.typed-execution-spec+json;version=1",
-            )
-            .expect("media type"),
-            schema_id: None,
-            semantic_type_id: None,
-            producer_node_id: None,
-            producer_seed_id: None,
-            artifact_role: events::ArtifactRole::TypedExecutionSpec,
-        };
-        store
-            .record_artifact_evidence(spec_evidence.clone())
-            .expect("record spec evidence");
-        let certificate_evidence = store::ArtifactEvidenceRef {
-            artifact_id: artifact_id(0x13),
-            digest: content_digest(0x13),
-            byte_len: 2,
-            media_type: spec::MediaType::new(mfm_certify::CERTIFICATE_MEDIA_TYPE)
-                .expect("certificate media type"),
-            schema_id: None,
-            semantic_type_id: None,
-            producer_node_id: None,
-            producer_seed_id: None,
-            artifact_role: events::ArtifactRole::TypedSpecCertificate,
-        };
-        store
-            .record_artifact_evidence(certificate_evidence.clone())
-            .expect("record certificate evidence");
-        store
-            .record_artifact_evidence(source_evidence.clone())
-            .expect("record source evidence");
-
-        append_commit(
-            &mut store,
-            &run_id,
-            "start",
-            vec![events::KernelEventPayload::RunStarted(events::RunStarted {
-                run_id: run_id.clone(),
-                spec_hash: spec_hash.clone(),
-                spec_artifact_id: spec_evidence.artifact_id.clone(),
-                certificate_artifact_id: certificate_evidence.artifact_id.clone(),
-                certificate_artifact_digest: certificate_evidence.digest.clone(),
-                certificate_media_type: certificate_evidence.media_type.clone(),
-                spec_media_type: spec_evidence.media_type.clone(),
-                spec_version: SpecVersion::new("mfm.typed.execution_spec.v1")
-                    .expect("spec version"),
-                lowering_version: LoweringVersion::new("mfm.typed.lowering.v1")
-                    .expect("lowering version"),
-                public_output_schema_id: public_schema_id.clone(),
-                descriptor_identities: Vec::new(),
-                runner_executables: Vec::new(),
-                adapter_executables: Vec::new(),
-                canonicalizer_identity: spec::CanonicalizerIdentity::new("mfm.jcs.v1")
-                    .expect("canonicalizer"),
-                framework_version: events::FrameworkVersion::new("mfm.test.1")
-                    .expect("framework version"),
-                source_revision: events::SourceRevision::new("test-revision")
-                    .expect("source revision"),
-                seed_cells: Vec::new(),
-            })],
-            vec![spec_evidence, certificate_evidence],
-            store::RequiredRunState::Absent,
-        );
-
-        append_commit(
-            &mut store,
-            &run_id,
-            "source-terminal",
-            vec![
-                state_attempt_started(&spec_hash, &source_node, &source_attempt, 1),
-                events::KernelEventPayload::CellProduced(events::CellProduced {
-                    spec_hash: spec_hash.clone(),
-                    node_id: source_node.clone(),
-                    cell_id: source_cell.clone(),
-                    scope_id: source_scope.clone(),
-                    attempt_id: source_attempt.clone(),
-                    semantic_type_id: source_semantic.clone(),
-                    schema_id: source_schema.clone(),
-                    value_lineage: source_lineage.clone(),
-                    artifact_id: source_evidence.artifact_id.clone(),
-                    content_digest: source_evidence.digest.clone(),
-                    producer_state_kind: None,
-                    producer_state_version: None,
-                }),
-                events::KernelEventPayload::StateAttemptCompleted(events::StateAttemptCompleted {
-                    spec_hash: spec_hash.clone(),
-                    node_id: source_node.clone(),
-                    attempt_id: source_attempt.clone(),
-                    output_cell_id: source_cell.clone(),
-                }),
-            ],
-            Vec::new(),
-            store::RequiredRunState::Started,
-        );
-
-        let render_node = node_id(0x30);
-        let render_attempt = attempt_id(0x31);
-        let receipt_cell = cell_id(0x32);
-        let receipt_evidence = store::ArtifactEvidenceRef {
-            artifact_id: artifact_id(0x33),
-            digest: content_digest(0x34),
-            byte_len: 128,
-            media_type: spec::MediaType::new("application/json").expect("media type"),
-            schema_id: Some(schema_id("mfm.test.public_output_receipt", 0x35)),
-            semantic_type_id: Some(semantic_id("public-output-receipt", 0x36)),
-            producer_node_id: Some(render_node.clone()),
-            producer_seed_id: None,
-            artifact_role: events::ArtifactRole::StateOutput,
-        };
-        store
-            .record_artifact_evidence(receipt_evidence.clone())
-            .expect("record receipt evidence");
-
-        append_commit(
-            &mut store,
-            &run_id,
-            "public-output",
-            vec![
-                state_attempt_started(&spec_hash, &render_node, &render_attempt, 2),
-                events::KernelEventPayload::CellProduced(events::CellProduced {
-                    spec_hash: spec_hash.clone(),
-                    node_id: render_node.clone(),
-                    cell_id: receipt_cell.clone(),
-                    scope_id: scope_id(0x37),
-                    attempt_id: render_attempt.clone(),
-                    semantic_type_id: receipt_evidence.semantic_type_id.clone().expect("semantic"),
-                    schema_id: receipt_evidence.schema_id.clone().expect("schema"),
-                    value_lineage: spec::ValueLineageRef {
-                        lineage_digest: content_digest(0x38),
-                    },
-                    artifact_id: receipt_evidence.artifact_id.clone(),
-                    content_digest: receipt_evidence.digest.clone(),
-                    producer_state_kind: None,
-                    producer_state_version: None,
-                }),
-                events::KernelEventPayload::PublicOutputProduced(events::PublicOutputProduced {
-                    spec_hash: spec_hash.clone(),
-                    node_id: render_node.clone(),
-                    attempt_id: render_attempt.clone(),
-                    receipt_cell_id: receipt_cell.clone(),
-                    public_schema_id: public_schema_id.clone(),
-                    output_spec_digest: content_digest(0x39),
-                    cells: vec![events::NamedTypedCellRef {
-                        public_field_path: spec::PublicFieldPath::new("result")
-                            .expect("field path"),
-                        cell_id: source_cell.clone(),
-                        producer: spec::CellProducer::Node(source_node.clone()),
-                        scope_id: source_scope,
-                        semantic_type_id: source_semantic,
-                        schema_id: source_schema,
-                        value_lineage: source_lineage,
-                        content_digest: source_evidence.digest,
-                        artifact_id: source_evidence.artifact_id,
-                    }],
-                    rendered_digest: content_digest(0x40),
-                    rendered_artifact_id: None,
-                    renderer_descriptor_id: descriptor_id(0x41),
-                }),
-                events::KernelEventPayload::StateAttemptCompleted(events::StateAttemptCompleted {
-                    spec_hash: spec_hash.clone(),
-                    node_id: render_node,
-                    attempt_id: render_attempt,
-                    output_cell_id: receipt_cell,
-                }),
-            ],
-            Vec::new(),
-            store::RequiredRunState::Started,
-        );
-
-        let stream = store.load_run_stream(&run_id);
-        let response =
-            typed_public_output_from_stream(&artifacts, &run_id, &public_schema_id, &stream)
-                .await
-                .expect("render public output from stream");
+            .expect("load stream");
+        let runtime_spec = load_runtime_spec_for_run(
+            services.artifacts(),
+            services.certification_registry(),
+            &fixture.run_id,
+            &stream,
+        )
+        .await
+        .expect("runtime spec");
+        let authority = verify_public_output_read_authority(
+            &runtime_spec,
+            &fixture.run_id,
+            &fixture.public_schema_id,
+            &stream,
+        )
+        .expect("public-output read authority");
+        let response = render_typed_public_output(services.artifacts(), &authority)
+            .await
+            .expect("render public output from authority");
 
         assert_eq!(
             response.json,
@@ -2530,6 +2448,80 @@ mod tests {
         assert_eq!(resume_err.code, "TypedRuntimeError");
         assert!(resume_err.message.contains("public-output payload"));
 
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn public_output_read_authority_rejects_tampered_stream_projection() {
+        let (root, fixture, services, _started) = start_framework_fixture_run().await;
+        let valid_stream = services
+            .store()
+            .load_run_stream(&fixture.run_id)
+            .await
+            .expect("load valid stream");
+        let runtime_spec = load_runtime_spec_for_run(
+            services.artifacts(),
+            services.certification_registry(),
+            &fixture.run_id,
+            &valid_stream,
+        )
+        .await
+        .expect("runtime spec");
+        let corrupt_stream =
+            corrupt_public_output_history(services.artifacts(), &valid_stream).await;
+
+        let err = verify_public_output_read_authority(
+            &runtime_spec,
+            &fixture.run_id,
+            &fixture.public_schema_id,
+            &corrupt_stream,
+        )
+        .expect_err("tampered stream rejects before render authority");
+
+        assert_eq!(err.code, "TypedRuntimeError");
+        assert!(err.message.contains("public-output payload"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn completed_run_without_public_output_evidence_rejects_render_authority() {
+        let (root, fixture, services, _started) = start_framework_fixture_run().await;
+        let valid_stream = services
+            .store()
+            .load_run_stream(&fixture.run_id)
+            .await
+            .expect("load valid stream");
+        let runtime_spec = load_runtime_spec_for_run(
+            services.artifacts(),
+            services.certification_registry(),
+            &fixture.run_id,
+            &valid_stream,
+        )
+        .await
+        .expect("runtime spec");
+        let stream_without_public_output = valid_stream
+            .iter()
+            .filter(|event| {
+                !matches!(
+                    event.payload(),
+                    events::KernelEventPayload::PublicOutputProduced(_)
+                )
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+
+        let err = verify_public_output_read_authority(
+            &runtime_spec,
+            &fixture.run_id,
+            &fixture.public_schema_id,
+            &stream_without_public_output,
+        )
+        .expect_err("completed run without public output evidence rejects");
+
+        assert!(matches!(
+            err.code.as_str(),
+            "TypedRuntimeError" | "TypedStoreRejected"
+        ));
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -2725,6 +2717,43 @@ mod tests {
             .await
             .expect_err("tampered authority rejects before rendering");
         assert_eq!(err.code, "TypedArtifactError");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn rendered_json_cannot_authorize_resume_or_replay() {
+        let (root, fixture, services, _started) = start_framework_fixture_run().await;
+        let rendered = services
+            .typed_public_output(&fixture.run_id, &fixture.public_schema_id)
+            .await
+            .expect("render public output before tamper");
+        assert!(rendered.json.is_some());
+
+        let stream = services
+            .store()
+            .load_run_stream(&fixture.run_id)
+            .await
+            .expect("load stream");
+        let started = run_started_payload(&fixture.run_id, &stream)
+            .expect("run started")
+            .clone();
+        std::fs::write(
+            artifact_blob_path(&root, &started.certificate_artifact_id),
+            b"{}",
+        )
+        .expect("tamper certificate artifact");
+
+        let resume_err = services
+            .resume_stored_run(&fixture.run_id, DriveMode::AppendOnly)
+            .await
+            .expect_err("rendered JSON must not authorize resume");
+        assert_eq!(resume_err.code, "TypedArtifactError");
+
+        let replay_err = services
+            .verify_replay_for_run(&fixture.run_id)
+            .await
+            .expect_err("rendered JSON must not authorize replay");
+        assert_eq!(replay_err.code, "TypedArtifactError");
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -3512,45 +3541,6 @@ mod tests {
         }
     }
 
-    fn append_commit(
-        store: &mut store::InMemoryTypedRunStore,
-        run_id: &RunId,
-        commit_key: &str,
-        payloads: Vec<events::KernelEventPayload>,
-        required_artifacts: Vec<store::ArtifactEvidenceRef>,
-        required_run_state: store::RequiredRunState,
-    ) {
-        store
-            .append_typed_run_commit(store::TypedCommitRequest {
-                run_id: run_id.clone(),
-                expected_next_seq: store.expected_next_seq(run_id),
-                commit_key: store::CommitKey::new(commit_key).expect("commit key"),
-                payloads,
-                required_artifacts,
-                preconditions: store::CommitPreconditions {
-                    required_run_state,
-                    ..store::CommitPreconditions::default()
-                },
-            })
-            .expect("append commit");
-    }
-
-    fn state_attempt_started(
-        spec_hash: &SpecHash,
-        node_id: &NodeId,
-        attempt_id: &AttemptId,
-        attempt_no: u32,
-    ) -> events::KernelEventPayload {
-        events::KernelEventPayload::StateAttemptStarted(events::StateAttemptStarted {
-            spec_hash: spec_hash.clone(),
-            node_id: node_id.clone(),
-            attempt_id: attempt_id.clone(),
-            attempt_no,
-            state_kind: state_kind(0x42),
-            state_version: StateVersion::new("mfm.test.state.v1").expect("state version"),
-        })
-    }
-
     fn digest(byte: u8) -> DigestBytes {
         DigestBytes::from_array([byte; 32])
     }
@@ -3569,10 +3559,6 @@ mod tests {
 
     fn node_id(byte: u8) -> NodeId {
         NodeId::from_digest(DigestAlgorithm::Sha256JcsV1, digest(byte))
-    }
-
-    fn artifact_id(byte: u8) -> ArtifactId {
-        ArtifactId::from_digest(DigestAlgorithm::Sha256JcsV1, digest(byte))
     }
 
     fn attempt_id(byte: u8) -> AttemptId {
@@ -3604,15 +3590,5 @@ mod tests {
             digest(byte),
         )
         .expect("semantic id")
-    }
-
-    fn state_kind(byte: u8) -> StateKind {
-        StateKind::new(
-            "mfm.test",
-            "state",
-            DigestAlgorithm::Sha256JcsV1,
-            digest(byte),
-        )
-        .expect("state kind")
     }
 }
