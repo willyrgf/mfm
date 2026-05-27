@@ -410,8 +410,7 @@ impl RestDriveMode {
 #[serde(deny_unknown_fields)]
 struct TypedRunStartBody {
     kind: TypedRunStartKind,
-    spec: serde_json::Value,
-    certificate: serde_json::Value,
+    bundle: serde_json::Value,
     #[serde(default)]
     run_id: Option<String>,
     #[serde(default)]
@@ -569,9 +568,7 @@ where
         TypedRunStartKind::TypedRunStartV1 => {}
     }
     let run_id = parse_optional_run_id(req.run_id)?;
-    let spec_bytes = canonical_json_value_bytes(&req.spec, "TypedSpecInvalid")?;
-    let certificate_bytes =
-        canonical_json_value_bytes(&req.certificate, "TypedCertificateInvalid")?;
+    let bundle = mfm_app::parse_certified_spec_bundle_json_value(&req.bundle)?;
     let seed_media_type = mfm_app::json_media_type()?;
     let mut seeds = Vec::with_capacity(req.seeds.len());
     for seed in req.seeds {
@@ -586,8 +583,8 @@ where
     let start = mfm_app::build_typed_run_start_request(
         services.artifacts(),
         mfm_app::CertifiedBundleRunStartInput {
-            spec_bytes: &spec_bytes,
-            certificate_bytes: &certificate_bytes,
+            spec_bytes: bundle.spec_bytes(),
+            certificate_bytes: bundle.certificate_bytes(),
             registry: services.certification_registry(),
             run_id,
             framework_version: &req.framework_version,

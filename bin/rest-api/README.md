@@ -76,13 +76,19 @@ submits old dynamic `portfolio_tracker`, `portfolio_execute`, or `portfolio_conf
 
 ## Start A Typed Run
 
-`POST /v1/runs/start` accepts only a certified typed execution spec request:
+`POST /v1/runs/start` accepts only a certified typed spec bundle request:
 
 ```json
 {
   "kind": "typed_run_start_v1",
-  "spec": {
-    "...": "TypedExecutionSpec JSON"
+  "bundle": {
+    "kind": "certified_typed_spec_bundle_v1",
+    "spec": {
+      "...": "TypedExecutionSpec JSON"
+    },
+    "certificate": {
+      "...": "CertifiedSpecCertificate JSON"
+    }
   },
   "run_id": "run:sha256-jcs-v1:<optional-digest>",
   "seeds": [
@@ -102,12 +108,26 @@ submits old dynamic `portfolio_tracker`, `portfolio_execute`, or `portfolio_conf
 Request notes:
 
 - `kind` must be `typed_run_start_v1`.
-- `spec` is canonicalized and parsed through the typed spec checker before certification.
+- `bundle.kind` must be `certified_typed_spec_bundle_v1`.
+- The bundle is parsed as untrusted transport data. The server verifies the contained spec and
+  certificate against the production certification registry before `RunStarted`.
+- Hash-only spec envelopes, raw typed spec JSON, certificate bytes, and summaries are not runtime
+  authority.
 - `run_id` is optional; the server generates a typed digest run id when omitted.
 - `seeds[*].json` is canonicalized and persisted as JSON seed material.
 - `drive` is `until_blocked` or `append_only`; it defaults to `until_blocked`.
 - Specs that reference unported domain descriptors fail before `RunStarted` with
   `TypedRunnerUnavailable`.
+
+Stable start error codes:
+
+- `InvalidJson`: the request envelope is not accepted by the route schema.
+- `TypedBundleInvalid`: the bundle is malformed, has the wrong kind, is missing fields, contains
+  unknown fields, or cannot be canonicalized.
+- `TypedCertificationFailed`: certificate/spec hash, registry digest, descriptor identity/digest,
+  lowering/canonicalizer identity, public-output schema evidence, or certifier validation failed.
+- `TypedRunnerUnavailable`: the verified spec references a state descriptor without a production
+  runner binding.
 
 ## Resume, Replay, And Public Output
 

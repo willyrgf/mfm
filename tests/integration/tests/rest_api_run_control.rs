@@ -161,17 +161,21 @@ async fn start_rejects_dynamic_single_op_payloads() {
 }
 
 #[tokio::test]
-async fn start_parses_typed_envelope_and_rejects_invalid_spec() {
+async fn start_parses_certified_bundle_and_rejects_invalid_spec() {
     let app = test_app();
 
     let resp = app
+        .clone()
         .oneshot(json_post(
             "/v1/runs/start",
             serde_json::json!({
                 "kind": "typed_run_start_v1",
                 "run_id": VALID_RUN_ID,
-                "spec": {},
-                "certificate": {},
+                "bundle": {
+                    "kind": "certified_typed_spec_bundle_v1",
+                    "spec": {},
+                    "certificate": {}
+                },
                 "drive": "append_only"
             }),
         ))
@@ -182,6 +186,54 @@ async fn start_parses_typed_envelope_and_rejects_invalid_spec() {
     let v = response_json(resp).await;
     assert_eq!(v["status"], "error");
     assert_eq!(v["error"]["code"], "TypedCertificationFailed");
+
+    let status = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v1/runs/{VALID_RUN_ID}/status"))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("status response");
+    assert_eq!(status.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn start_rejects_invalid_certified_bundle_before_stream_creation() {
+    let app = test_app();
+
+    let resp = app
+        .clone()
+        .oneshot(json_post(
+            "/v1/runs/start",
+            serde_json::json!({
+                "kind": "typed_run_start_v1",
+                "run_id": VALID_RUN_ID,
+                "bundle": {},
+                "drive": "append_only"
+            }),
+        ))
+        .await
+        .expect("response");
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let v = response_json(resp).await;
+    assert_eq!(v["status"], "error");
+    assert_eq!(v["error"]["code"], "TypedBundleInvalid");
+
+    let status = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v1/runs/{VALID_RUN_ID}/status"))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("status response");
+    assert_eq!(status.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]

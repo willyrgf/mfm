@@ -266,18 +266,19 @@ or resume certified typed runs, and they do not route through the removed legacy
 
 ### `run start`
 
-Starts a certified typed run from a persisted typed execution spec JSON file. The command persists
-the canonical spec artifact, verifies referenced config artifacts already exist in the typed
-artifact store, persists supplied seed artifacts, appends `RunStarted`, and optionally drives the
-typed scheduler.
+Starts a certified typed run from a certified typed spec bundle JSON file. The command treats the
+bundle as untrusted transport data, verifies the contained spec and certificate against the
+production certification registry, persists the canonical spec and certificate artifacts, verifies
+referenced config artifacts already exist in the typed artifact store, persists supplied seed
+artifacts, appends `RunStarted`, and optionally drives the typed scheduler.
 
 **Usage:**
 ```sh
-mfm_cli run start --spec <PATH> [--seed <SEED_ID=PATH>]... [OPTIONS]
+mfm_cli run start --bundle <PATH> [--seed <SEED_ID=PATH>]... [OPTIONS]
 ```
 
 **Key Options:**
-- `--spec <PATH>`: Certified typed execution spec JSON file.
+- `--bundle <PATH>`: Certified typed spec bundle JSON file.
 - `--run-id <RUN_ID>`: Optional typed run id. If omitted, a new typed digest id is generated.
 - `--seed <SEED_ID=PATH>`: Canonical JSON seed input for a seed declared by the certified spec.
 - `--framework-version <VALUE>`: Framework version evidence recorded in `RunStarted`.
@@ -286,12 +287,36 @@ mfm_cli run start --spec <PATH> [--seed <SEED_ID=PATH>]... [OPTIONS]
 - `--database-url <URL>`: PostgreSQL connection string (default: `$DATABASE_URL`)
 - `--typed-artifact-root <PATH>`: Typed artifact store root directory
 
+Bundle shape:
+
+```json
+{
+  "kind": "certified_typed_spec_bundle_v1",
+  "spec": {
+    "...": "TypedExecutionSpec JSON"
+  },
+  "certificate": {
+    "...": "CertifiedSpecCertificate JSON"
+  }
+}
+```
+
 Run start always resolves runner executable identities before `RunStarted`, because those identities
 are replay authority. `--drive append-only` suppresses post-start execution only; it does not bypass
 runner resolution. Specs that reference unported domain state descriptors fail with
 `TypedRunnerUnavailable` before any typed run event is written. The current production CLI registry
 contains the runtime built-in framework public-output renderer; domain runners are added by their
 typed porting commits.
+
+Stable typed start errors include:
+
+- `TypedBundleReadFailed`: the bundle file could not be read.
+- `TypedBundleInvalid`: the bundle JSON is malformed, has the wrong kind, is missing fields, or has
+  non-canonicalizable spec/certificate values.
+- `TypedCertificationFailed`: certificate/spec evidence, registry digest, descriptor evidence, or
+  certifier validation failed. A hash-only spec envelope is not certification authority.
+- `TypedRunnerUnavailable`: the certified spec references a state descriptor with no production
+  runner binding.
 
 ### `run resume`
 

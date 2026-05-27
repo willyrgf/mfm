@@ -310,7 +310,7 @@ fn test_environment_variable_precedence() {
 }
 
 #[test]
-fn test_run_start_requires_certified_spec_path() {
+fn test_run_start_requires_certified_bundle_path() {
     let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
     let output = cmd
         .env_remove("DATABASE_URL")
@@ -322,7 +322,36 @@ fn test_run_start_requires_certified_spec_path() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     let parsed = verify_error_response(&stderr);
     assert_eq!(parsed.error.code, "CliParseError");
-    assert!(parsed.error.message.contains("--spec"));
+    assert!(parsed.error.message.contains("--bundle"));
+}
+
+#[test]
+fn test_run_start_rejects_invalid_bundle_before_store_access() {
+    let temp_dir = TempDir::new().unwrap();
+    let bundle_path = temp_dir.path().join("bundle.json");
+    std::fs::write(&bundle_path, "{}").expect("bundle fixture");
+
+    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
+    let output = cmd
+        .env_remove("DATABASE_URL")
+        .args([
+            "--output-format",
+            "json",
+            "run",
+            "start",
+            "--bundle",
+            bundle_path.to_str().unwrap(),
+            "--run-id",
+            "run:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000001",
+        ])
+        .output()
+        .expect("Failed to execute command");
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    let parsed = verify_error_response(&stderr);
+    assert_eq!(parsed.error.code, "TypedBundleInvalid");
 }
 
 #[test]

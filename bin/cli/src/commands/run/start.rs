@@ -15,13 +15,9 @@ use mfm_ids::SeedId;
 /// Arguments for `mfm run start`.
 #[derive(Args)]
 pub(crate) struct StartArgs {
-    /// Certified typed execution spec JSON file.
+    /// Certified typed spec bundle JSON file.
     #[arg(long, value_name = "PATH")]
-    pub spec: PathBuf,
-
-    /// Certified typed spec certificate JSON file.
-    #[arg(long, value_name = "PATH")]
-    pub certificate: PathBuf,
+    pub bundle: PathBuf,
 
     /// Optional typed run id (`run:<algorithm>:<digest>`). Defaults to a generated typed id.
     #[arg(long)]
@@ -80,24 +76,17 @@ async fn execute_internal(args: &StartArgs) -> CommandResult<TypedRunResponse> {
         Some(run_id) => parse_typed_run_id(run_id)?,
         None => mfm_app::new_run_id(),
     };
-    let spec_bytes = tokio::fs::read(&args.spec).await.map_err(|error| {
+    let bundle_bytes = tokio::fs::read(&args.bundle).await.map_err(|error| {
         CommandError::new(
-            "TypedSpecReadFailed",
+            "TypedBundleReadFailed",
             format!(
-                "failed to read typed spec file {}: {error}",
-                args.spec.display()
+                "failed to read certified typed spec bundle file {}: {error}",
+                args.bundle.display()
             ),
         )
     })?;
-    let certificate_bytes = tokio::fs::read(&args.certificate).await.map_err(|error| {
-        CommandError::new(
-            "TypedCertificateReadFailed",
-            format!(
-                "failed to read typed spec certificate file {}: {error}",
-                args.certificate.display()
-            ),
-        )
-    })?;
+    let bundle = mfm_app::parse_certified_spec_bundle_json_bytes(&bundle_bytes)
+        .map_err(command_error_from_typed_app_error)?;
     let seed_media_type = mfm_app::json_media_type().map_err(command_error_from_typed_app_error)?;
     let mut seed_inputs = Vec::with_capacity(args.seeds.len());
     for seed in &args.seeds {
@@ -122,8 +111,8 @@ async fn execute_internal(args: &StartArgs) -> CommandResult<TypedRunResponse> {
     let request = mfm_app::build_typed_run_start_request(
         services.artifacts(),
         mfm_app::CertifiedBundleRunStartInput {
-            spec_bytes: &spec_bytes,
-            certificate_bytes: &certificate_bytes,
+            spec_bytes: bundle.spec_bytes(),
+            certificate_bytes: bundle.certificate_bytes(),
             registry: services.certification_registry(),
             run_id,
             framework_version: &args.framework_version,

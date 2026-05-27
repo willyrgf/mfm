@@ -21,8 +21,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use mfm_artifact_store_fs::{FsTypedArtifactError, FsTypedArtifactStore, TypedArtifactDescriptor};
-use mfm_canonical::sha256_digest_bytes;
-use mfm_certify::{CertificationRegistry, CertifiedTypedSpec};
+use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
+use mfm_certify::{CertificationRegistry, CertifiedSpecBundle, CertifiedTypedSpec};
 use mfm_events::v1 as events;
 use mfm_ids::{ArtifactId, DigestAlgorithm, EventId, RunId, SchemaId, SeedId, SpecHash};
 use mfm_replay::v1::{ReplayAuthority, ReplayBroker, ReplayError};
@@ -32,7 +32,7 @@ use mfm_runtime::{
 };
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::map::Entry;
 use serde_json::{Map, Value};
 use tokio::sync::Mutex;
@@ -44,6 +44,8 @@ pub mod observability;
 
 const ENV_TYPED_ARTIFACT_ROOT: &str = "MFM_TYPED_ARTIFACT_ROOT";
 const DEFAULT_TYPED_ARTIFACT_SUBDIR: &str = "typed_run_artifacts";
+/// Transport kind for a certified typed spec bundle accepted by app frontends.
+pub const CERTIFIED_SPEC_BUNDLE_KIND: &str = "certified_typed_spec_bundle_v1";
 
 /// High-level error classes used by typed application-facing APIs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1388,6 +1390,86 @@ pub fn json_media_type() -> Result<spec::MediaType, AppError> {
     })
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CertifiedSpecBundleJson {
+    kind: String,
+    spec: Value,
+    certificate: Value,
+}
+
+/// Parses a certified typed spec bundle transport JSON document as untrusted bytes.
+///
+/// The returned bundle is not runtime authority. Callers must pass its spec and certificate bytes
+/// through the certifier verifier before starting, resuming, replaying, or rendering a run.
+pub fn parse_certified_spec_bundle_json_bytes(
+    bytes: &[u8],
+) -> Result<CertifiedSpecBundle, AppError> {
+    let parsed: CertifiedSpecBundleJson = serde_json::from_slice(bytes).map_err(|error| {
+        AppError::new(
+            ErrorClass::BadRequest,
+            "TypedBundleInvalid",
+            format!("invalid certified typed spec bundle JSON: {error}"),
+        )
+    })?;
+    certified_spec_bundle_from_json(parsed)
+}
+
+/// Parses a certified typed spec bundle JSON value as untrusted bytes.
+///
+/// This helper exists for transports that already parsed the request envelope. It does not mint
+/// certified authority; verification is still required before any runtime contract is constructed.
+pub fn parse_certified_spec_bundle_json_value(
+    value: &Value,
+) -> Result<CertifiedSpecBundle, AppError> {
+    let parsed: CertifiedSpecBundleJson =
+        serde_json::from_value(value.clone()).map_err(|error| {
+            AppError::new(
+                ErrorClass::BadRequest,
+                "TypedBundleInvalid",
+                format!("invalid certified typed spec bundle: {error}"),
+            )
+        })?;
+    certified_spec_bundle_from_json(parsed)
+}
+
+fn certified_spec_bundle_from_json(
+    parsed: CertifiedSpecBundleJson,
+) -> Result<CertifiedSpecBundle, AppError> {
+    if parsed.kind != CERTIFIED_SPEC_BUNDLE_KIND {
+        return Err(AppError::new(
+            ErrorClass::BadRequest,
+            "TypedBundleInvalid",
+            format!("certified typed spec bundle kind must be {CERTIFIED_SPEC_BUNDLE_KIND:?}"),
+        ));
+    }
+    let spec_bytes = canonical_json_value_bytes(&parsed.spec, "spec")?;
+    let certificate_bytes = canonical_json_value_bytes(&parsed.certificate, "certificate")?;
+    Ok(CertifiedSpecBundle::from_untrusted_bytes(
+        spec_bytes,
+        certificate_bytes,
+    ))
+}
+
+fn canonical_json_value_bytes(value: &Value, field: &'static str) -> Result<Vec<u8>, AppError> {
+    let json = serde_json::to_string(value).map_err(|error| {
+        AppError::new(
+            ErrorClass::Internal,
+            "TypedBundleSerializationFailed",
+            format!("failed to serialize {field} JSON value: {error}"),
+        )
+    })?;
+    PlainCanonicalJsonBytes::from_json_str(&json)
+        .map(|canonical| canonical.to_vec())
+        .map_err(|error| {
+            AppError::new(
+                ErrorClass::BadRequest,
+                "TypedBundleInvalid",
+                format!("invalid certified typed spec bundle {field}: {error}"),
+            )
+        })
+}
+
 /// Inputs required to verify persisted certified bundle bytes before starting a typed run.
 pub struct CertifiedBundleRunStartInput<'a> {
     /// Canonical JSON bytes for the persisted typed execution spec.
@@ -2061,6 +2143,29 @@ mod tests {
         assert_eq!(TypedRunPhase::Absent.to_string(), "absent");
         assert_eq!(TypedRunPhase::Started.to_string(), "started");
         assert_eq!(TypedRunPhase::Completed.to_string(), "completed");
+    }
+
+    #[test]
+    fn certified_spec_bundle_parser_rejects_bare_spec_json() {
+        let err = parse_certified_spec_bundle_json_bytes(br#"{"spec_version":"mfm.typed.v1"}"#)
+            .expect_err("bare spec is not a transport bundle");
+
+        assert_eq!(err.code, "TypedBundleInvalid");
+    }
+
+    #[test]
+    fn certified_spec_bundle_parser_returns_untrusted_canonical_bytes() {
+        let bundle = parse_certified_spec_bundle_json_bytes(
+            br#"{
+                "kind": "certified_typed_spec_bundle_v1",
+                "spec": {"b": 2, "a": 1},
+                "certificate": {}
+            }"#,
+        )
+        .expect("bundle transport parses");
+
+        assert_eq!(bundle.spec_bytes(), br#"{"a":1,"b":2}"#);
+        assert_eq!(bundle.certificate_bytes(), br#"{}"#);
     }
 
     #[tokio::test]
