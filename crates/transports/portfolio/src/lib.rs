@@ -23,7 +23,8 @@ use mfm_ids::{ArtifactId, ContentDigest, DescriptorId, NodeId};
 use mfm_program::StateSpec;
 use mfm_runtime::{
     ErasedNodeRunner, ErasedRunCtx, ErasedRunnerBinding, ErasedRunnerFuture, ErasedRunnerOutput,
-    ErasedRunnerRegistry, MaterializedCellTerminal, MaterializedInputNode, StagedRetentionRefs,
+    ErasedRunnerRegistry, MaterializedCellTerminal, MaterializedInputNode, StagedArtifact,
+    StagedRetentionRefs,
 };
 use mfm_spec::v1 as spec;
 use mfm_state_portfolio::{
@@ -441,11 +442,10 @@ where
     )?;
     persist_artifact(artifacts, &response_artifact).await?;
     persist_artifact(artifacts, &output_artifact).await?;
+    let staged_response = staged_attempt_artifact(&ctx, &response_artifact)?;
+    let staged_output = staged_attempt_artifact(&ctx, &output_artifact)?;
     Ok(ErasedRunnerOutput {
-        required_artifacts: vec![
-            response_artifact.evidence.clone(),
-            output_artifact.evidence.clone(),
-        ],
+        staged_artifacts: vec![staged_response, staged_output],
         staged_retention_refs: vec![
             retention(&response_artifact.evidence),
             retention(&output_artifact.evidence),
@@ -491,11 +491,19 @@ where
         Some(ctx.node.node_id.clone()),
     )?;
     persist_artifact(artifacts, &artifact).await?;
+    let staged_artifact = staged_attempt_artifact(&ctx, &artifact)?;
     Ok(ErasedRunnerOutput {
-        required_artifacts: vec![artifact.evidence.clone()],
+        staged_artifacts: vec![staged_artifact],
         staged_retention_refs: vec![retention(&artifact.evidence)],
         payloads: vec![cell_produced(&ctx, &artifact.evidence), completed(&ctx)],
     })
+}
+
+fn staged_attempt_artifact(
+    ctx: &ErasedRunCtx<'_>,
+    artifact: &PortfolioArtifact,
+) -> mfm_runtime::Result<StagedArtifact> {
+    StagedArtifact::inline_attempt_artifact(ctx, artifact.bytes.clone(), artifact.evidence.clone())
 }
 
 async fn load_config<T>(

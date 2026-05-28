@@ -2209,7 +2209,7 @@ mod tests {
     use mfm_program_derive::{MfmConfig, MfmValue, PublicOutputs};
     use mfm_runtime::{
         ErasedNodeRunner, ErasedRunCtx, ErasedRunnerBinding, ErasedRunnerFuture,
-        ErasedRunnerOutput, StagedRetentionRefs,
+        ErasedRunnerOutput, StagedArtifact, StagedRetentionRefs,
     };
     use mfm_store::v1::{AsyncTypedRunEventStore, TypedRunEventStore};
     use serde::{Deserialize, Serialize};
@@ -3442,8 +3442,13 @@ mod tests {
                     producer_seed_id: None,
                     artifact_role: events::ArtifactRole::StateOutput,
                 };
+                let staged_artifact = StagedArtifact::inline_attempt_artifact(
+                    &ctx,
+                    self.output_bytes.clone(),
+                    evidence,
+                )?;
                 Ok(ErasedRunnerOutput {
-                    required_artifacts: vec![evidence],
+                    staged_artifacts: vec![staged_artifact],
                     staged_retention_refs: vec![StagedRetentionRefs {
                         refs: vec![events::RetentionRef {
                             artifact_id: artifact_id.clone(),

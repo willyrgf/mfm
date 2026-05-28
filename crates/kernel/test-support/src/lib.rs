@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use mfm_canonical::PlainCanonicalJsonBytes;
+use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
 use mfm_capabilities::{
     ApplySideEffect, CapabilitySpec, ExternalMutationAuthorityRole, ManagedPlatformWrite,
     ManagedPlatformWriteRole, NoCaps, Pure, ReadExternal, ReadExternalRole,
@@ -29,7 +29,7 @@ use mfm_runtime::{
     build_retention_manifest_artifact, CertifiedRuntimeSpec, ErasedNodeRunner, ErasedRunCtx,
     ErasedRunnerBinding, ErasedRunnerFuture, ErasedRunnerOutput, ErasedRunnerRegistry,
     MaterializedCellTerminal, MaterializedInputNode, RunStartEvidence, RuntimeError,
-    SchedulerStatus, SerialTypedScheduler,
+    SchedulerStatus, SerialTypedScheduler, StagedArtifact,
 };
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
@@ -676,8 +676,7 @@ fn reference_registry_with_side_effect<R: ErasedNodeRunner + 'static>(
             "pure",
             TerminalRunner {
                 expected_caps: Vec::new(),
-                output_artifact: artifact(0xa1),
-                output_digest: content(0xa2),
+                output_label: "pure-output",
             },
         )?)
         .map_err(display_error)?;
@@ -690,8 +689,7 @@ fn reference_registry_with_side_effect<R: ErasedNodeRunner + 'static>(
                 cap_version: fixture.read_cap_version.clone(),
                 adapter_kind: fixture.adapter_kind.clone(),
                 adapter_version: fixture.adapter_version.clone(),
-                output_artifact: artifact(0xb1),
-                output_digest: content(0xb2),
+                output_label: "read-output",
             },
         )?)
         .map_err(display_error)?;
@@ -704,8 +702,7 @@ fn reference_registry_with_side_effect<R: ErasedNodeRunner + 'static>(
                     fixture.managed_cap_kind.clone(),
                     fixture.managed_cap_version.clone(),
                 )],
-                output_artifact: artifact(0xc1),
-                output_digest: content(0xc2),
+                output_label: "managed-output",
             },
         )?)
         .map_err(display_error)?;
@@ -736,8 +733,7 @@ fn binding<R: ErasedNodeRunner + 'static>(
 
 struct TerminalRunner {
     expected_caps: Vec<(CapabilityKind, CapabilityVersion)>,
-    output_artifact: ArtifactId,
-    output_digest: ContentDigest,
+    output_label: &'static str,
 }
 
 impl ErasedNodeRunner for TerminalRunner {
@@ -751,19 +747,15 @@ impl ErasedNodeRunner for TerminalRunner {
                     )));
                 }
             }
-            let artifact = state_output_artifact(
-                ctx.node,
-                ctx.descriptor,
-                self.output_artifact.clone(),
-                self.output_digest.clone(),
-            );
+            let artifact = state_output_artifact(ctx.node, ctx.descriptor, self.output_label);
+            let staged_artifact = staged_attempt_artifact(&ctx, &artifact)?;
             Ok(ErasedRunnerOutput {
-                required_artifacts: vec![artifact],
+                staged_artifacts: vec![staged_artifact],
                 staged_retention_refs: Vec::new(),
                 payloads: terminal_payloads(
                     &ctx,
-                    self.output_artifact.clone(),
-                    self.output_digest.clone(),
+                    artifact.evidence.artifact_id,
+                    artifact.evidence.digest,
                 ),
             })
         })
@@ -775,8 +767,7 @@ struct ReadRunner {
     cap_version: CapabilityVersion,
     adapter_kind: AdapterKind,
     adapter_version: AdapterVersion,
-    output_artifact: ArtifactId,
-    output_digest: ContentDigest,
+    output_label: &'static str,
 }
 
 impl ErasedNodeRunner for ReadRunner {
@@ -789,25 +780,25 @@ impl ErasedNodeRunner for ReadRunner {
                 ));
             }
             let fact_key = events::FactKey::new("reference-read").map_err(RuntimeError::from)?;
-            let fact_artifact = artifact(0xb3);
-            let fact_digest = content(0xb4);
-            let fact_evidence = store::ArtifactEvidenceRef {
-                artifact_id: fact_artifact.clone(),
-                digest: fact_digest.clone(),
-                byte_len: 23,
-                media_type: spec::MediaType::new("application/json")?,
-                schema_id: Some(ctx.node.config_ref.schema_id.clone()),
-                semantic_type_id: None,
-                producer_node_id: Some(ctx.node.node_id.clone()),
-                producer_seed_id: None,
-                artifact_role: events::ArtifactRole::FactResponse,
+            let fact_bytes = test_artifact_bytes("reference-read-fact");
+            let fact_digest = digest_for_bytes(&fact_bytes);
+            let fact_evidence = TestArtifact {
+                bytes: fact_bytes.clone(),
+                evidence: store::ArtifactEvidenceRef {
+                    artifact_id: artifact_id_for_digest(&fact_digest),
+                    digest: fact_digest.clone(),
+                    byte_len: fact_bytes.len() as u64,
+                    media_type: spec::MediaType::new("application/json")?,
+                    schema_id: Some(ctx.node.config_ref.schema_id.clone()),
+                    semantic_type_id: None,
+                    producer_node_id: Some(ctx.node.node_id.clone()),
+                    producer_seed_id: None,
+                    artifact_role: events::ArtifactRole::FactResponse,
+                },
             };
-            let output = state_output_artifact(
-                ctx.node,
-                ctx.descriptor,
-                self.output_artifact.clone(),
-                self.output_digest.clone(),
-            );
+            let output = state_output_artifact(ctx.node, ctx.descriptor, self.output_label);
+            let staged_fact = staged_attempt_artifact(&ctx, &fact_evidence)?;
+            let staged_output = staged_attempt_artifact(&ctx, &output)?;
             let mut payloads = vec![events::KernelEventPayload::FactRecorded(
                 events::FactRecorded {
                     spec_hash: ctx.spec_hash.clone(),
@@ -822,16 +813,16 @@ impl ErasedNodeRunner for ReadRunner {
                     response_schema_id: ctx.node.config_ref.schema_id.clone(),
                     response_hash: fact_digest,
                     fact_key,
-                    artifact_id: fact_artifact,
+                    artifact_id: fact_evidence.evidence.artifact_id.clone(),
                 },
             )];
             payloads.extend(terminal_payloads(
                 &ctx,
-                self.output_artifact.clone(),
-                self.output_digest.clone(),
+                output.evidence.artifact_id,
+                output.evidence.digest,
             ));
             Ok(ErasedRunnerOutput {
-                required_artifacts: vec![fact_evidence, output],
+                staged_artifacts: vec![staged_fact, staged_output],
                 staged_retention_refs: Vec::new(),
                 payloads,
             })
@@ -844,8 +835,7 @@ struct DeterministicSideEffectRunner {
     cap_version: CapabilityVersion,
     adapter_kind: AdapterKind,
     adapter_version: AdapterVersion,
-    output_artifact: ArtifactId,
-    output_digest: ContentDigest,
+    output_label: &'static str,
 }
 
 impl DeterministicSideEffectRunner {
@@ -855,8 +845,7 @@ impl DeterministicSideEffectRunner {
             cap_version: fixture.side_effect_cap_version.clone(),
             adapter_kind: fixture.adapter_kind.clone(),
             adapter_version: fixture.adapter_version.clone(),
-            output_artifact: artifact(0xd1),
-            output_digest: content(0xd2),
+            output_label: "side-effect-output",
         }
     }
 }
@@ -1312,15 +1301,14 @@ impl ErasedNodeRunner for FailingSideEffectRunner {
     fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
         Box::pin(async move {
             let ledger = side_effect_ledger_key(ctx.attempt_no);
-            let intent_artifact_id = artifact(0xf1);
-            let intent_hash = content(0xf2);
+            let artifact = side_effect_artifact(
+                &ctx,
+                "failing-intent",
+                events::ArtifactRole::SideEffectIntent,
+            );
+            let staged_artifact = staged_side_effect_artifact(&ctx, &artifact, ledger.clone(), 1)?;
             Ok(ErasedRunnerOutput {
-                required_artifacts: vec![side_effect_artifact(
-                    &ctx,
-                    intent_artifact_id.clone(),
-                    intent_hash.clone(),
-                    events::ArtifactRole::SideEffectIntent,
-                )],
+                staged_artifacts: vec![staged_artifact],
                 staged_retention_refs: Vec::new(),
                 payloads: vec![
                     events::KernelEventPayload::SideEffectIntentPersisted(
@@ -1332,8 +1320,8 @@ impl ErasedNodeRunner for FailingSideEffectRunner {
                             ledger_key: ledger.clone(),
                             invocation_epoch: 1,
                             intent_schema_id: ctx.node.config_ref.schema_id.clone(),
-                            intent_hash,
-                            intent_artifact_id,
+                            intent_hash: artifact.evidence.digest.clone(),
+                            intent_artifact_id: artifact.evidence.artifact_id.clone(),
                             idempotency_input_schema_id: ctx.node.config_ref.schema_id.clone(),
                             idempotency_input_hash: content(0xf3),
                             idempotency_key: events::IdempotencyKeyRef::new("failing-idem")
@@ -1388,15 +1376,15 @@ impl ErasedNodeRunner for AmbiguousSideEffectRunner {
                 phase.map(|projection| &projection.phase),
                 Some(store::SideEffectPhase::InvocationStarted { .. })
             ) {
-                let artifact_id = artifact(0xe1);
-                let digest = content(0xe2);
+                let artifact = side_effect_artifact(
+                    &ctx,
+                    "ambiguous-evidence",
+                    events::ArtifactRole::AmbiguityEvidence,
+                );
+                let staged_artifact =
+                    staged_side_effect_artifact(&ctx, &artifact, ledger.clone(), 1)?;
                 Ok(ErasedRunnerOutput {
-                    required_artifacts: vec![side_effect_artifact(
-                        &ctx,
-                        artifact_id.clone(),
-                        digest.clone(),
-                        events::ArtifactRole::AmbiguityEvidence,
-                    )],
+                    staged_artifacts: vec![staged_artifact],
                     staged_retention_refs: Vec::new(),
                     payloads: vec![events::KernelEventPayload::SideEffectAmbiguous(
                         events::side_effect::Ambiguous {
@@ -1408,8 +1396,8 @@ impl ErasedNodeRunner for AmbiguousSideEffectRunner {
                             ambiguity_code: events::AmbiguityCode::new("unknown_submission")
                                 .map_err(RuntimeError::from)?,
                             evidence_schema_id: ctx.node.config_ref.schema_id.clone(),
-                            evidence_hash: digest,
-                            evidence_artifact_id: artifact_id,
+                            evidence_hash: artifact.evidence.digest,
+                            evidence_artifact_id: artifact.evidence.artifact_id,
                         },
                     )],
                 })
@@ -1763,42 +1751,84 @@ fn terminal_payloads(
     ]
 }
 
+#[derive(Debug, Clone)]
+struct TestArtifact {
+    bytes: Vec<u8>,
+    evidence: store::ArtifactEvidenceRef,
+}
+
+fn test_artifact_bytes(label: &str) -> Vec<u8> {
+    canonical_json(serde_json::json!({ "typed_slice_artifact": label }))
+        .expect("canonical test artifact")
+        .to_vec()
+}
+
+fn digest_for_bytes(bytes: &[u8]) -> ContentDigest {
+    ContentDigest::from_digest(DigestAlgorithm::Sha256JcsV1, sha256_digest_bytes(bytes))
+}
+
 fn state_output_artifact(
     node: &spec::NodeSpec,
     descriptor: &spec::StateDescriptorIdentity,
-    artifact_id: ArtifactId,
-    digest: ContentDigest,
-) -> store::ArtifactEvidenceRef {
-    store::ArtifactEvidenceRef {
-        artifact_id,
+    label: &str,
+) -> TestArtifact {
+    let bytes = test_artifact_bytes(label);
+    let digest = digest_for_bytes(&bytes);
+    let evidence = store::ArtifactEvidenceRef {
+        artifact_id: artifact_id_for_digest(&digest),
         digest,
-        byte_len: 17,
+        byte_len: bytes.len() as u64,
         media_type: spec::MediaType::new("application/json").expect("valid media"),
         schema_id: Some(descriptor.output_schema_id.clone()),
         semantic_type_id: Some(descriptor.output_semantic_type_id.clone()),
         producer_node_id: Some(node.node_id.clone()),
         producer_seed_id: None,
         artifact_role: events::ArtifactRole::StateOutput,
-    }
+    };
+    TestArtifact { bytes, evidence }
 }
 
 fn side_effect_artifact(
     ctx: &ErasedRunCtx<'_>,
-    artifact_id: ArtifactId,
-    digest: ContentDigest,
+    label: &str,
     role: events::ArtifactRole,
-) -> store::ArtifactEvidenceRef {
-    store::ArtifactEvidenceRef {
-        artifact_id,
+) -> TestArtifact {
+    let bytes = test_artifact_bytes(label);
+    let digest = digest_for_bytes(&bytes);
+    let evidence = store::ArtifactEvidenceRef {
+        artifact_id: artifact_id_for_digest(&digest),
         digest,
-        byte_len: 19,
+        byte_len: bytes.len() as u64,
         media_type: spec::MediaType::new("application/json").expect("valid media"),
         schema_id: Some(ctx.node.config_ref.schema_id.clone()),
         semantic_type_id: None,
         producer_node_id: Some(ctx.node.node_id.clone()),
         producer_seed_id: None,
         artifact_role: role,
-    }
+    };
+    TestArtifact { bytes, evidence }
+}
+
+fn staged_attempt_artifact(
+    ctx: &ErasedRunCtx<'_>,
+    artifact: &TestArtifact,
+) -> mfm_runtime::Result<StagedArtifact> {
+    StagedArtifact::inline_attempt_artifact(ctx, artifact.bytes.clone(), artifact.evidence.clone())
+}
+
+fn staged_side_effect_artifact(
+    ctx: &ErasedRunCtx<'_>,
+    artifact: &TestArtifact,
+    ledger_key: events::SideEffectLedgerKey,
+    invocation_epoch: u32,
+) -> mfm_runtime::Result<StagedArtifact> {
+    StagedArtifact::inline_side_effect_artifact(
+        ctx,
+        artifact.bytes.clone(),
+        artifact.evidence.clone(),
+        ledger_key,
+        invocation_epoch,
+    )
 }
 
 fn side_effect_claimed(
@@ -2109,15 +2139,19 @@ impl ErasedNodeRunner for DeterministicSideEffectRunner {
                         },
                     ..
                 }) => {
-                    let artifact_id = artifact(0xd5);
-                    let digest = content(0xd6);
+                    let artifact = side_effect_artifact(
+                        &ctx,
+                        "submission-unknown",
+                        events::ArtifactRole::SubmissionUnknownEvidence,
+                    );
+                    let staged_artifact = staged_side_effect_artifact(
+                        &ctx,
+                        &artifact,
+                        ledger.clone(),
+                        *invocation_epoch,
+                    )?;
                     Ok(ErasedRunnerOutput {
-                        required_artifacts: vec![side_effect_artifact(
-                            &ctx,
-                            artifact_id.clone(),
-                            digest.clone(),
-                            events::ArtifactRole::SubmissionUnknownEvidence,
-                        )],
+                        staged_artifacts: vec![staged_artifact],
                         staged_retention_refs: Vec::new(),
                         payloads: vec![events::KernelEventPayload::SideEffectSubmissionUnknown(
                             events::side_effect::SubmissionUnknown {
@@ -2127,8 +2161,8 @@ impl ErasedNodeRunner for DeterministicSideEffectRunner {
                                 ledger_key: ledger,
                                 invocation_epoch: *invocation_epoch,
                                 evidence_schema_id: ctx.node.config_ref.schema_id.clone(),
-                                evidence_hash: digest,
-                                evidence_artifact_id: artifact_id,
+                                evidence_hash: artifact.evidence.digest,
+                                evidence_artifact_id: artifact.evidence.artifact_id,
                             },
                         )],
                     })
@@ -2137,22 +2171,23 @@ impl ErasedNodeRunner for DeterministicSideEffectRunner {
                     phase: store::SideEffectPhase::SubmissionUnknown { invocation_epoch },
                     ..
                 }) => {
-                    let artifact_id = artifact(0xd7);
-                    let digest = content(0xd8);
+                    let artifact =
+                        side_effect_artifact(&ctx, "submission", events::ArtifactRole::Submission);
+                    let staged_artifact = staged_side_effect_artifact(
+                        &ctx,
+                        &artifact,
+                        ledger.clone(),
+                        *invocation_epoch,
+                    )?;
                     Ok(ErasedRunnerOutput {
-                        required_artifacts: vec![side_effect_artifact(
-                            &ctx,
-                            artifact_id.clone(),
-                            digest.clone(),
-                            events::ArtifactRole::Submission,
-                        )],
+                        staged_artifacts: vec![staged_artifact],
                         staged_retention_refs: Vec::new(),
                         payloads: vec![side_effect_submission_observed(
                             &ctx,
                             ledger,
                             *invocation_epoch,
-                            artifact_id,
-                            digest,
+                            artifact.evidence.artifact_id,
+                            artifact.evidence.digest,
                         )],
                     })
                 }
@@ -2160,22 +2195,23 @@ impl ErasedNodeRunner for DeterministicSideEffectRunner {
                     phase: store::SideEffectPhase::SubmissionObserved { invocation_epoch },
                     ..
                 }) => {
-                    let artifact_id = artifact(0xd9);
-                    let digest = content(0xda);
+                    let artifact =
+                        side_effect_artifact(&ctx, "receipt", events::ArtifactRole::Receipt);
+                    let staged_artifact = staged_side_effect_artifact(
+                        &ctx,
+                        &artifact,
+                        ledger.clone(),
+                        *invocation_epoch,
+                    )?;
                     Ok(ErasedRunnerOutput {
-                        required_artifacts: vec![side_effect_artifact(
-                            &ctx,
-                            artifact_id.clone(),
-                            digest.clone(),
-                            events::ArtifactRole::Receipt,
-                        )],
+                        staged_artifacts: vec![staged_artifact],
                         staged_retention_refs: Vec::new(),
                         payloads: vec![side_effect_receipt_observed(
                             &ctx,
                             ledger,
                             *invocation_epoch,
-                            artifact_id,
-                            digest,
+                            artifact.evidence.artifact_id,
+                            artifact.evidence.digest,
                         )],
                     })
                 }
@@ -2183,22 +2219,26 @@ impl ErasedNodeRunner for DeterministicSideEffectRunner {
                     phase: store::SideEffectPhase::ReceiptObserved { invocation_epoch },
                     ..
                 }) => {
-                    let artifact_id = artifact(0xdb);
-                    let digest = content(0xdc);
+                    let artifact = side_effect_artifact(
+                        &ctx,
+                        "confirmation",
+                        events::ArtifactRole::Confirmation,
+                    );
+                    let staged_artifact = staged_side_effect_artifact(
+                        &ctx,
+                        &artifact,
+                        ledger.clone(),
+                        *invocation_epoch,
+                    )?;
                     Ok(ErasedRunnerOutput {
-                        required_artifacts: vec![side_effect_artifact(
-                            &ctx,
-                            artifact_id.clone(),
-                            digest.clone(),
-                            events::ArtifactRole::Confirmation,
-                        )],
+                        staged_artifacts: vec![staged_artifact],
                         staged_retention_refs: Vec::new(),
                         payloads: vec![side_effect_confirmation_observed(
                             &ctx,
                             ledger,
                             *invocation_epoch,
-                            artifact_id,
-                            digest,
+                            artifact.evidence.artifact_id,
+                            artifact.evidence.digest,
                         )],
                     })
                 }
@@ -2206,19 +2246,16 @@ impl ErasedNodeRunner for DeterministicSideEffectRunner {
                     phase: store::SideEffectPhase::ConfirmationObserved { .. },
                     ..
                 }) => {
-                    let artifact = state_output_artifact(
-                        ctx.node,
-                        ctx.descriptor,
-                        self.output_artifact.clone(),
-                        self.output_digest.clone(),
-                    );
+                    let artifact =
+                        state_output_artifact(ctx.node, ctx.descriptor, self.output_label);
+                    let staged_artifact = staged_attempt_artifact(&ctx, &artifact)?;
                     Ok(ErasedRunnerOutput {
-                        required_artifacts: vec![artifact],
+                        staged_artifacts: vec![staged_artifact],
                         staged_retention_refs: Vec::new(),
                         payloads: terminal_payloads(
                             &ctx,
-                            self.output_artifact.clone(),
-                            self.output_digest.clone(),
+                            artifact.evidence.artifact_id,
+                            artifact.evidence.digest,
                         ),
                     })
                 }
@@ -2241,15 +2278,14 @@ impl DeterministicSideEffectRunner {
                 "side-effect runner missing certified mutation capability".to_owned(),
             ));
         }
-        let intent_artifact_id = artifact(0xd3);
-        let intent_hash = content(0xd4);
+        let artifact = side_effect_artifact(
+            &ctx,
+            "reference-intent",
+            events::ArtifactRole::SideEffectIntent,
+        );
+        let staged_artifact = staged_side_effect_artifact(&ctx, &artifact, ledger.clone(), 1)?;
         Ok(ErasedRunnerOutput {
-            required_artifacts: vec![side_effect_artifact(
-                &ctx,
-                intent_artifact_id.clone(),
-                intent_hash.clone(),
-                events::ArtifactRole::SideEffectIntent,
-            )],
+            staged_artifacts: vec![staged_artifact],
             staged_retention_refs: Vec::new(),
             payloads: vec![
                 events::KernelEventPayload::SideEffectIntentPersisted(
@@ -2261,8 +2297,8 @@ impl DeterministicSideEffectRunner {
                         ledger_key: ledger.clone(),
                         invocation_epoch: 1,
                         intent_schema_id: ctx.node.config_ref.schema_id.clone(),
-                        intent_hash,
-                        intent_artifact_id,
+                        intent_hash: artifact.evidence.digest.clone(),
+                        intent_artifact_id: artifact.evidence.artifact_id.clone(),
                         idempotency_input_schema_id: ctx.node.config_ref.schema_id.clone(),
                         idempotency_input_hash: content(0xdd),
                         idempotency_key: events::IdempotencyKeyRef::new("reference-idem")

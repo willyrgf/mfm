@@ -11,7 +11,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use mfm_canonical::PlainCanonicalJsonBytes;
+use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
 use mfm_capabilities::{
     CapabilityDescriptor, CapabilitySetDescriptor, EffectSpec, ManagedPlatformWrite,
 };
@@ -19,7 +19,8 @@ use mfm_certify::{CertifiedSpecCertificate, CertifiedTypedSpec};
 use mfm_events::v1 as events;
 use mfm_ids::{
     AdapterKind, AdapterVersion, ArtifactId, AttemptId, CapabilityKind, CapabilityVersion, CellId,
-    ContentDigest, DescriptorId, DigestAlgorithm, NodeId, RunId, SchemaId, SpecHash,
+    ContentDigest, DescriptorId, DigestAlgorithm, NodeId, RunId, SchemaId, SemanticTypeId,
+    SpecHash,
 };
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
@@ -117,8 +118,8 @@ pub struct RecordedFact {
 /// Typed payload batch returned by an erased runner.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ErasedRunnerOutput {
-    /// Artifact evidence written before payload commit.
-    pub required_artifacts: Vec<store::ArtifactEvidenceRef>,
+    /// Staged artifacts or sealed finalized handles referenced by payloads.
+    pub staged_artifacts: Vec<StagedArtifact>,
     /// Retention refs staged by the runner for scheduler-owned event binding.
     pub staged_retention_refs: Vec<StagedRetentionRefs>,
     /// Typed event payloads to commit atomically for this attempt.
@@ -129,10 +130,332 @@ impl ErasedRunnerOutput {
     /// Creates an output batch from payloads with no additional artifact evidence.
     pub fn new(payloads: Vec<events::KernelEventPayload>) -> Self {
         Self {
-            required_artifacts: Vec::new(),
+            staged_artifacts: Vec::new(),
             staged_retention_refs: Vec::new(),
             payloads,
         }
+    }
+}
+
+/// Runtime-owned artifact binding kind for one staged attempt artifact.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StagedArtifactBindingKind {
+    /// Artifact is the terminal output for a state cell.
+    StateOutput,
+    /// Artifact is an external read fact response.
+    FactResponse,
+    /// Artifact is side-effect evidence bound to one ledger phase.
+    SideEffectEvidence {
+        /// Side-effect ledger the evidence belongs to.
+        ledger_key: events::SideEffectLedgerKey,
+        /// Invocation epoch the evidence belongs to.
+        invocation_epoch: u32,
+        /// Side-effect phase the evidence proves.
+        phase: StagedSideEffectArtifactPhase,
+    },
+    /// Artifact is a public-output payload.
+    PublicOutput,
+    /// Artifact is a redacted diagnostic.
+    RedactedDiagnostic,
+}
+
+/// Runtime-owned side-effect phase for one staged side-effect artifact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum StagedSideEffectArtifactPhase {
+    /// Initial side-effect intent persisted before claims and invocation.
+    Intent,
+    /// Prepared invocation payload.
+    PreparedInvocation,
+    /// Proof that the invocation was not submitted.
+    NotSubmittedProof,
+    /// Submission evidence.
+    Submission,
+    /// Evidence that submission status is unknown.
+    SubmissionUnknownEvidence,
+    /// Receipt evidence.
+    Receipt,
+    /// Confirmation evidence.
+    Confirmation,
+    /// Ambiguity evidence.
+    AmbiguityEvidence,
+}
+
+/// Sealed finalized artifact handle bound to one run, node, attempt, and evidence role.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StagedArtifactHandle {
+    run_id: RunId,
+    node_id: NodeId,
+    attempt_id: AttemptId,
+    binding: StagedArtifactBindingKind,
+    evidence: store::ArtifactEvidenceRef,
+}
+
+impl StagedArtifactHandle {
+    fn for_attempt(
+        ctx: &ErasedRunCtx<'_>,
+        evidence: store::ArtifactEvidenceRef,
+        binding: StagedArtifactBindingKind,
+    ) -> Result<Self> {
+        if staged_artifact_binding_role(&binding) != evidence.artifact_role {
+            return Err(RuntimeError::InvalidRunnerOutput(format!(
+                "node {} staged artifact role {} with mismatched binding",
+                ctx.node.node_id,
+                artifact_role_name(evidence.artifact_role)
+            )));
+        }
+        if evidence.producer_node_id.as_ref() != Some(&ctx.node.node_id)
+            || evidence.producer_seed_id.is_some()
+        {
+            return Err(RuntimeError::InvalidRunnerOutput(format!(
+                "node {} staged artifact {} with producer evidence outside its attempt",
+                ctx.node.node_id, evidence.artifact_id
+            )));
+        }
+        Ok(Self {
+            run_id: ctx.run_id.clone(),
+            node_id: ctx.node.node_id.clone(),
+            attempt_id: ctx.attempt_id.clone(),
+            binding,
+            evidence,
+        })
+    }
+
+    /// Returns the run id this handle is sealed to.
+    pub fn run_id(&self) -> &RunId {
+        &self.run_id
+    }
+
+    /// Returns the node id this handle is sealed to.
+    pub fn node_id(&self) -> &NodeId {
+        &self.node_id
+    }
+
+    /// Returns the attempt id this handle is sealed to.
+    pub fn attempt_id(&self) -> &AttemptId {
+        &self.attempt_id
+    }
+
+    /// Returns the artifact binding metadata.
+    pub fn binding(&self) -> &StagedArtifactBindingKind {
+        &self.binding
+    }
+
+    /// Returns the finalized artifact evidence.
+    pub fn evidence(&self) -> &store::ArtifactEvidenceRef {
+        &self.evidence
+    }
+}
+
+/// Attempt artifact staged for runtime middleware admission.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StagedArtifact {
+    handle: StagedArtifactHandle,
+    bytes: Option<Vec<u8>>,
+}
+
+impl StagedArtifact {
+    /// Creates an inline staged artifact bound to the current attempt.
+    pub fn inline_attempt_artifact(
+        ctx: &ErasedRunCtx<'_>,
+        bytes: Vec<u8>,
+        evidence: store::ArtifactEvidenceRef,
+    ) -> Result<Self> {
+        let binding = staged_artifact_binding_kind(evidence.artifact_role).ok_or_else(|| {
+            RuntimeError::InvalidRunnerOutput(format!(
+                "node {} staged artifact role {} outside non-side-effect attempt artifact authority",
+                ctx.node.node_id,
+                artifact_role_name(evidence.artifact_role)
+            ))
+        })?;
+        Self::inline_attempt_artifact_with_binding(ctx, bytes, evidence, binding)
+    }
+
+    /// Creates an inline staged side-effect artifact bound to one ledger phase.
+    pub fn inline_side_effect_artifact(
+        ctx: &ErasedRunCtx<'_>,
+        bytes: Vec<u8>,
+        evidence: store::ArtifactEvidenceRef,
+        ledger_key: events::SideEffectLedgerKey,
+        invocation_epoch: u32,
+    ) -> Result<Self> {
+        let phase = staged_side_effect_artifact_phase(evidence.artifact_role).ok_or_else(|| {
+            RuntimeError::InvalidRunnerOutput(format!(
+                "node {} staged artifact role {} outside side-effect artifact authority",
+                ctx.node.node_id,
+                artifact_role_name(evidence.artifact_role)
+            ))
+        })?;
+        Self::inline_attempt_artifact_with_binding(
+            ctx,
+            bytes,
+            evidence,
+            StagedArtifactBindingKind::SideEffectEvidence {
+                ledger_key,
+                invocation_epoch,
+                phase,
+            },
+        )
+    }
+
+    fn inline_attempt_artifact_with_binding(
+        ctx: &ErasedRunCtx<'_>,
+        bytes: Vec<u8>,
+        evidence: store::ArtifactEvidenceRef,
+        binding: StagedArtifactBindingKind,
+    ) -> Result<Self> {
+        verify_artifact_bytes(&bytes, &evidence)?;
+        Ok(Self {
+            handle: StagedArtifactHandle::for_attempt(ctx, evidence, binding)?,
+            bytes: Some(bytes),
+        })
+    }
+
+    #[cfg(test)]
+    fn finalized_attempt_artifact_for_tests(
+        ctx: &ErasedRunCtx<'_>,
+        evidence: store::ArtifactEvidenceRef,
+        binding: StagedArtifactBindingKind,
+    ) -> Result<Self> {
+        Ok(Self {
+            handle: StagedArtifactHandle::for_attempt(ctx, evidence, binding)?,
+            bytes: None,
+        })
+    }
+
+    /// Returns the sealed handle.
+    pub fn handle(&self) -> &StagedArtifactHandle {
+        &self.handle
+    }
+
+    /// Returns the artifact evidence bound to this staged artifact.
+    pub fn evidence(&self) -> &store::ArtifactEvidenceRef {
+        self.handle().evidence()
+    }
+
+    /// Returns inline bytes when carried by the output.
+    pub fn bytes(&self) -> Option<&[u8]> {
+        self.bytes.as_deref()
+    }
+}
+
+fn staged_artifact_binding_kind(role: events::ArtifactRole) -> Option<StagedArtifactBindingKind> {
+    match role {
+        events::ArtifactRole::StateOutput => Some(StagedArtifactBindingKind::StateOutput),
+        events::ArtifactRole::FactResponse => Some(StagedArtifactBindingKind::FactResponse),
+        events::ArtifactRole::PublicOutput => Some(StagedArtifactBindingKind::PublicOutput),
+        events::ArtifactRole::RedactedDiagnostic => {
+            Some(StagedArtifactBindingKind::RedactedDiagnostic)
+        }
+        events::ArtifactRole::TypedExecutionSpec
+        | events::ArtifactRole::TypedSpecCertificate
+        | events::ArtifactRole::TypedConfig
+        | events::ArtifactRole::SeedInput
+        | events::ArtifactRole::SideEffectIntent
+        | events::ArtifactRole::PreparedInvocation
+        | events::ArtifactRole::NotSubmittedProof
+        | events::ArtifactRole::Submission
+        | events::ArtifactRole::SubmissionUnknownEvidence
+        | events::ArtifactRole::Receipt
+        | events::ArtifactRole::Confirmation
+        | events::ArtifactRole::AmbiguityEvidence
+        | events::ArtifactRole::RetentionManifest => None,
+    }
+}
+
+fn staged_side_effect_artifact_phase(
+    role: events::ArtifactRole,
+) -> Option<StagedSideEffectArtifactPhase> {
+    match role {
+        events::ArtifactRole::SideEffectIntent => Some(StagedSideEffectArtifactPhase::Intent),
+        events::ArtifactRole::PreparedInvocation => {
+            Some(StagedSideEffectArtifactPhase::PreparedInvocation)
+        }
+        events::ArtifactRole::NotSubmittedProof => {
+            Some(StagedSideEffectArtifactPhase::NotSubmittedProof)
+        }
+        events::ArtifactRole::Submission => Some(StagedSideEffectArtifactPhase::Submission),
+        events::ArtifactRole::SubmissionUnknownEvidence => {
+            Some(StagedSideEffectArtifactPhase::SubmissionUnknownEvidence)
+        }
+        events::ArtifactRole::Receipt => Some(StagedSideEffectArtifactPhase::Receipt),
+        events::ArtifactRole::Confirmation => Some(StagedSideEffectArtifactPhase::Confirmation),
+        events::ArtifactRole::AmbiguityEvidence => {
+            Some(StagedSideEffectArtifactPhase::AmbiguityEvidence)
+        }
+        events::ArtifactRole::TypedExecutionSpec
+        | events::ArtifactRole::TypedSpecCertificate
+        | events::ArtifactRole::TypedConfig
+        | events::ArtifactRole::SeedInput
+        | events::ArtifactRole::StateOutput
+        | events::ArtifactRole::FactResponse
+        | events::ArtifactRole::PublicOutput
+        | events::ArtifactRole::RedactedDiagnostic
+        | events::ArtifactRole::RetentionManifest => None,
+    }
+}
+
+fn staged_artifact_binding_role(binding: &StagedArtifactBindingKind) -> events::ArtifactRole {
+    match binding {
+        StagedArtifactBindingKind::StateOutput => events::ArtifactRole::StateOutput,
+        StagedArtifactBindingKind::FactResponse => events::ArtifactRole::FactResponse,
+        StagedArtifactBindingKind::SideEffectEvidence { phase, .. } => match phase {
+            StagedSideEffectArtifactPhase::Intent => events::ArtifactRole::SideEffectIntent,
+            StagedSideEffectArtifactPhase::PreparedInvocation => {
+                events::ArtifactRole::PreparedInvocation
+            }
+            StagedSideEffectArtifactPhase::NotSubmittedProof => {
+                events::ArtifactRole::NotSubmittedProof
+            }
+            StagedSideEffectArtifactPhase::Submission => events::ArtifactRole::Submission,
+            StagedSideEffectArtifactPhase::SubmissionUnknownEvidence => {
+                events::ArtifactRole::SubmissionUnknownEvidence
+            }
+            StagedSideEffectArtifactPhase::Receipt => events::ArtifactRole::Receipt,
+            StagedSideEffectArtifactPhase::Confirmation => events::ArtifactRole::Confirmation,
+            StagedSideEffectArtifactPhase::AmbiguityEvidence => {
+                events::ArtifactRole::AmbiguityEvidence
+            }
+        },
+        StagedArtifactBindingKind::PublicOutput => events::ArtifactRole::PublicOutput,
+        StagedArtifactBindingKind::RedactedDiagnostic => events::ArtifactRole::RedactedDiagnostic,
+    }
+}
+
+fn verify_artifact_bytes(bytes: &[u8], evidence: &store::ArtifactEvidenceRef) -> Result<()> {
+    let digest =
+        ContentDigest::from_digest(DigestAlgorithm::Sha256JcsV1, sha256_digest_bytes(bytes));
+    let artifact_id = ArtifactId::from_digest(digest.algorithm(), *digest.digest());
+    if evidence.digest != digest
+        || evidence.artifact_id != artifact_id
+        || evidence.byte_len != bytes.len() as u64
+    {
+        return Err(RuntimeError::InvalidRunnerOutput(format!(
+            "staged artifact {} bytes do not match typed evidence",
+            evidence.artifact_id
+        )));
+    }
+    Ok(())
+}
+
+fn artifact_role_name(role: events::ArtifactRole) -> &'static str {
+    match role {
+        events::ArtifactRole::TypedExecutionSpec => "typed_execution_spec",
+        events::ArtifactRole::TypedSpecCertificate => "typed_spec_certificate",
+        events::ArtifactRole::TypedConfig => "typed_config",
+        events::ArtifactRole::SeedInput => "seed_input",
+        events::ArtifactRole::StateOutput => "state_output",
+        events::ArtifactRole::FactResponse => "fact_response",
+        events::ArtifactRole::SideEffectIntent => "side_effect_intent",
+        events::ArtifactRole::PreparedInvocation => "prepared_invocation",
+        events::ArtifactRole::NotSubmittedProof => "not_submitted_proof",
+        events::ArtifactRole::Submission => "submission",
+        events::ArtifactRole::SubmissionUnknownEvidence => "submission_unknown_evidence",
+        events::ArtifactRole::Receipt => "receipt",
+        events::ArtifactRole::Confirmation => "confirmation",
+        events::ArtifactRole::AmbiguityEvidence => "ambiguity_evidence",
+        events::ArtifactRole::PublicOutput => "public_output",
+        events::ArtifactRole::RedactedDiagnostic => "redacted_diagnostic",
+        events::ArtifactRole::RetentionManifest => "retention_manifest",
     }
 }
 
@@ -915,23 +1238,19 @@ fn render_public_output(ctx: ErasedRunCtx<'_>) -> Result<ErasedRunnerOutput> {
     }
     let rendered_digest = public_output_rendered_digest(render, &cells)?;
     let rendered_artifact_id = None;
-    let receipt_digest = public_output_receipt_digest(
+    let receipt_bytes = public_output_receipt_json(
         render,
         &cells,
         &rendered_digest,
         rendered_artifact_id.as_ref(),
     )?;
+    let receipt_digest = receipt_bytes.content_digest();
     let receipt_artifact_id =
         ArtifactId::from_digest(receipt_digest.algorithm(), *receipt_digest.digest());
     let receipt_artifact = store::ArtifactEvidenceRef {
         artifact_id: receipt_artifact_id.clone(),
         digest: receipt_digest.clone(),
-        byte_len: public_output_receipt_len(
-            render,
-            &cells,
-            &rendered_digest,
-            rendered_artifact_id.as_ref(),
-        )?,
+        byte_len: receipt_bytes.as_bytes().len() as u64,
         media_type: spec::MediaType::new("application/json")?,
         schema_id: Some(ctx.output_cell.schema_id.clone()),
         semantic_type_id: Some(ctx.output_cell.semantic_type_id.clone()),
@@ -939,9 +1258,13 @@ fn render_public_output(ctx: ErasedRunCtx<'_>) -> Result<ErasedRunnerOutput> {
         producer_seed_id: None,
         artifact_role: events::ArtifactRole::StateOutput,
     };
+    let receipt_artifact =
+        StagedArtifact::inline_attempt_artifact(&ctx, receipt_bytes.to_vec(), receipt_artifact)?;
+    let receipt_retention_ref = retention_ref_for_artifact(receipt_artifact.evidence());
     Ok(ErasedRunnerOutput {
+        staged_artifacts: vec![receipt_artifact],
         staged_retention_refs: vec![StagedRetentionRefs {
-            refs: vec![retention_ref_for_artifact(&receipt_artifact)],
+            refs: vec![receipt_retention_ref],
             reason: events::RetentionReason::PublicOutput,
         }],
         payloads: vec![
@@ -978,7 +1301,6 @@ fn render_public_output(ctx: ErasedRunCtx<'_>) -> Result<ErasedRunnerOutput> {
                 output_cell_id: ctx.node.output_cell.clone(),
             }),
         ],
-        required_artifacts: vec![receipt_artifact],
     })
 }
 
@@ -1004,19 +1326,6 @@ fn public_output_receipt_digest(
         public_output_receipt_json(render, cells, rendered_digest, rendered_artifact_id)?
             .content_digest(),
     )
-}
-
-fn public_output_receipt_len(
-    render: &spec::PublicOutputRenderNodeSpec,
-    cells: &[events::NamedTypedCellRef],
-    rendered_digest: &ContentDigest,
-    rendered_artifact_id: Option<&ArtifactId>,
-) -> Result<u64> {
-    let len = public_output_receipt_json(render, cells, rendered_digest, rendered_artifact_id)?
-        .as_bytes()
-        .len();
-    u64::try_from(len)
-        .map_err(|_| RuntimeError::Canonical("public output receipt length overflowed".to_owned()))
 }
 
 fn public_output_receipt_json(
@@ -1713,15 +2022,36 @@ impl RuntimeMutationMiddleware {
             &input.view.projections,
             &input.output,
         )?;
-        let mut payloads = input.output.payloads;
+        let ErasedRunnerOutput {
+            staged_artifacts,
+            staged_retention_refs,
+            payloads: runner_payloads,
+        } = input.output;
+        let staged_artifacts = validate_staged_artifacts(
+            input.run_id,
+            input.node,
+            input.attempt_id,
+            &staged_artifacts,
+        )?;
+        validate_staged_artifact_payload_bindings(
+            input.node,
+            input.attempt_id,
+            &runner_payloads,
+            &staged_artifacts,
+        )?;
+        let required_artifacts = staged_artifacts
+            .iter()
+            .map(|artifact| artifact.evidence.clone())
+            .collect::<Vec<_>>();
+        let mut payloads = runner_payloads;
         payloads.extend(bind_staged_retention_refs(
             input.runtime_spec,
             input.run_id,
             input.node,
-            &input.output.required_artifacts,
-            input.output.staged_retention_refs,
+            &required_artifacts,
+            staged_retention_refs,
         )?);
-        let admitted_artifacts = input.output.required_artifacts.clone();
+        let admitted_artifacts = required_artifacts.clone();
         let preconditions = runner_output_preconditions(
             input.node,
             input.attempt_id,
@@ -1733,7 +2063,7 @@ impl RuntimeMutationMiddleware {
             expected_next_seq: input.view.next_seq,
             commit_key: runner_output_commit_key(input.node, input.attempt_id, &payloads)?,
             payloads,
-            required_artifacts: input.output.required_artifacts,
+            required_artifacts,
             preconditions,
         };
         store::PreparedTypedCommit::new(request, admitted_artifacts).map_err(RuntimeError::from)
@@ -2420,6 +2750,443 @@ fn runner_output_commit_fragment(payload: &events::KernelEventPayload) -> String
         | events::KernelEventPayload::RetentionRefsAppended(_)
         | events::KernelEventPayload::RetentionManifestProjected(_)
         | events::KernelEventPayload::StateAttemptStarted(_) => "scheduler-owned".to_owned(),
+    }
+}
+
+fn validate_staged_artifacts(
+    run_id: &RunId,
+    node: &spec::NodeSpec,
+    attempt_id: &AttemptId,
+    staged_artifacts: &[StagedArtifact],
+) -> Result<Vec<ValidatedStagedArtifact>> {
+    let mut by_artifact = BTreeMap::<ArtifactId, ValidatedStagedArtifact>::new();
+    for staged in staged_artifacts {
+        let handle = staged.handle();
+        if handle.run_id() != run_id
+            || handle.node_id() != &node.node_id
+            || handle.attempt_id() != attempt_id
+        {
+            return Err(RuntimeError::InvalidRunnerOutput(format!(
+                "node {} staged artifact {} outside its sealed attempt",
+                node.node_id,
+                handle.evidence().artifact_id
+            )));
+        }
+        if let Some(bytes) = staged.bytes() {
+            verify_artifact_bytes(bytes, handle.evidence())?;
+        }
+        if let Some(existing) = by_artifact.get(&handle.evidence().artifact_id) {
+            if existing.evidence != *handle.evidence() || existing.binding != *handle.binding() {
+                return Err(RuntimeError::InvalidRunnerOutput(format!(
+                    "node {} staged conflicting evidence for artifact {}",
+                    node.node_id,
+                    handle.evidence().artifact_id
+                )));
+            }
+            continue;
+        }
+        by_artifact.insert(
+            handle.evidence().artifact_id.clone(),
+            ValidatedStagedArtifact {
+                evidence: handle.evidence().clone(),
+                binding: handle.binding().clone(),
+            },
+        );
+    }
+    Ok(by_artifact.into_values().collect())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ValidatedStagedArtifact {
+    evidence: store::ArtifactEvidenceRef,
+    binding: StagedArtifactBindingKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StagedArtifactRequirement {
+    artifact_id: ArtifactId,
+    digest: ContentDigest,
+    byte_len: Option<u64>,
+    media_type: Option<spec::MediaType>,
+    schema_id: Option<SchemaId>,
+    semantic_type_id: Option<SemanticTypeId>,
+    role: events::ArtifactRole,
+    binding: StagedArtifactBindingKind,
+}
+
+fn validate_staged_artifact_payload_bindings(
+    node: &spec::NodeSpec,
+    attempt_id: &AttemptId,
+    payloads: &[events::KernelEventPayload],
+    staged_artifacts: &[ValidatedStagedArtifact],
+) -> Result<()> {
+    let requirements = staged_payload_artifact_requirements(node, attempt_id, payloads)?;
+    let mut requirements_by_artifact: BTreeMap<ArtifactId, &StagedArtifactRequirement> =
+        BTreeMap::new();
+    for requirement in &requirements {
+        if let Some(existing) = requirements_by_artifact.get(&requirement.artifact_id) {
+            if !staged_artifact_requirements_are_compatible(existing, requirement) {
+                return Err(RuntimeError::InvalidRunnerOutput(format!(
+                    "node {} returned conflicting typed payload requirements for artifact {}",
+                    node.node_id, requirement.artifact_id
+                )));
+            }
+        }
+        requirements_by_artifact.insert(requirement.artifact_id.clone(), requirement);
+    }
+    let staged_by_artifact = staged_artifacts
+        .iter()
+        .map(|artifact| (artifact.evidence.artifact_id.clone(), artifact))
+        .collect::<BTreeMap<_, _>>();
+
+    for staged in staged_artifacts {
+        let Some(requirement) = requirements_by_artifact.get(&staged.evidence.artifact_id) else {
+            return Err(RuntimeError::InvalidRunnerOutput(format!(
+                "node {} staged artifact {} without typed payload reference",
+                node.node_id, staged.evidence.artifact_id
+            )));
+        };
+        validate_staged_artifact_requirement(node, &staged.evidence, &staged.binding, requirement)?;
+    }
+
+    for requirement in requirements {
+        let Some(staged) = staged_by_artifact.get(&requirement.artifact_id) else {
+            return Err(RuntimeError::InvalidRunnerOutput(format!(
+                "node {} referenced artifact {} without staged artifact",
+                node.node_id, requirement.artifact_id
+            )));
+        };
+        validate_staged_artifact_requirement(
+            node,
+            &staged.evidence,
+            &staged.binding,
+            &requirement,
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_staged_artifact_requirement(
+    node: &spec::NodeSpec,
+    evidence: &store::ArtifactEvidenceRef,
+    binding: &StagedArtifactBindingKind,
+    requirement: &StagedArtifactRequirement,
+) -> Result<()> {
+    if evidence.artifact_id != requirement.artifact_id
+        || evidence.digest != requirement.digest
+        || requirement
+            .byte_len
+            .is_some_and(|byte_len| evidence.byte_len != byte_len)
+        || requirement
+            .media_type
+            .as_ref()
+            .is_some_and(|media_type| &evidence.media_type != media_type)
+        || requirement
+            .schema_id
+            .as_ref()
+            .is_some_and(|schema_id| evidence.schema_id.as_ref() != Some(schema_id))
+        || requirement
+            .semantic_type_id
+            .as_ref()
+            .is_some_and(|semantic_type_id| {
+                evidence.semantic_type_id.as_ref() != Some(semantic_type_id)
+            })
+        || evidence.producer_node_id.as_ref() != Some(&node.node_id)
+        || evidence.producer_seed_id.is_some()
+        || evidence.artifact_role != requirement.role
+        || binding != &requirement.binding
+    {
+        return Err(RuntimeError::InvalidRunnerOutput(format!(
+            "node {} staged artifact {} does not match typed payload binding",
+            node.node_id, evidence.artifact_id
+        )));
+    }
+    Ok(())
+}
+
+fn staged_artifact_requirements_are_compatible(
+    left: &StagedArtifactRequirement,
+    right: &StagedArtifactRequirement,
+) -> bool {
+    left.artifact_id == right.artifact_id
+        && left.digest == right.digest
+        && optional_requirements_are_compatible(left.byte_len.as_ref(), right.byte_len.as_ref())
+        && optional_requirements_are_compatible(left.media_type.as_ref(), right.media_type.as_ref())
+        && optional_requirements_are_compatible(left.schema_id.as_ref(), right.schema_id.as_ref())
+        && optional_requirements_are_compatible(
+            left.semantic_type_id.as_ref(),
+            right.semantic_type_id.as_ref(),
+        )
+        && left.role == right.role
+        && left.binding == right.binding
+}
+
+fn optional_requirements_are_compatible<T: Eq>(left: Option<&T>, right: Option<&T>) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => left == right,
+        _ => true,
+    }
+}
+
+fn staged_payload_artifact_requirements(
+    node: &spec::NodeSpec,
+    attempt_id: &AttemptId,
+    payloads: &[events::KernelEventPayload],
+) -> Result<Vec<StagedArtifactRequirement>> {
+    let mut requirements = Vec::new();
+    for payload in payloads {
+        match payload {
+            events::KernelEventPayload::FactRecorded(payload) => {
+                require_attempt(node, attempt_id, &payload.node_id, &payload.attempt_id)?;
+                requirements.push(StagedArtifactRequirement {
+                    artifact_id: payload.artifact_id.clone(),
+                    digest: payload.response_hash.clone(),
+                    byte_len: None,
+                    media_type: None,
+                    schema_id: Some(payload.response_schema_id.clone()),
+                    semantic_type_id: None,
+                    role: events::ArtifactRole::FactResponse,
+                    binding: StagedArtifactBindingKind::FactResponse,
+                });
+            }
+            events::KernelEventPayload::CellProduced(payload) => {
+                require_attempt(node, attempt_id, &payload.node_id, &payload.attempt_id)?;
+                requirements.push(StagedArtifactRequirement {
+                    artifact_id: payload.artifact_id.clone(),
+                    digest: payload.content_digest.clone(),
+                    byte_len: None,
+                    media_type: None,
+                    schema_id: Some(payload.schema_id.clone()),
+                    semantic_type_id: Some(payload.semantic_type_id.clone()),
+                    role: events::ArtifactRole::StateOutput,
+                    binding: StagedArtifactBindingKind::StateOutput,
+                });
+            }
+            events::KernelEventPayload::ArtifactReferenced(payload) => {
+                if payload.node_id.as_ref() == Some(&node.node_id)
+                    && payload.attempt_id.as_ref() == Some(attempt_id)
+                {
+                    requirements.push(StagedArtifactRequirement {
+                        artifact_id: payload.artifact_ref.artifact_id.clone(),
+                        digest: payload.artifact_ref.content_digest.clone(),
+                        byte_len: Some(payload.artifact_ref.byte_len),
+                        media_type: Some(payload.artifact_ref.media_type.clone()),
+                        schema_id: Some(payload.artifact_ref.schema_id.clone()),
+                        semantic_type_id: payload.artifact_ref.semantic_type_id.clone(),
+                        role: payload.artifact_ref.role,
+                        binding: staged_artifact_binding_kind(payload.artifact_ref.role)
+                            .ok_or_else(|| {
+                                RuntimeError::InvalidRunnerOutput(format!(
+                                    "node {} referenced unstaged artifact role {}",
+                                    node.node_id,
+                                    artifact_role_name(payload.artifact_ref.role)
+                                ))
+                            })?,
+                    });
+                }
+            }
+            events::KernelEventPayload::PublicOutputProduced(payload) => {
+                require_attempt(node, attempt_id, &payload.node_id, &payload.attempt_id)?;
+                if let Some(artifact_id) = &payload.rendered_artifact_id {
+                    requirements.push(StagedArtifactRequirement {
+                        artifact_id: artifact_id.clone(),
+                        digest: payload.rendered_digest.clone(),
+                        byte_len: None,
+                        media_type: None,
+                        schema_id: Some(payload.public_schema_id.clone()),
+                        semantic_type_id: None,
+                        role: events::ArtifactRole::PublicOutput,
+                        binding: StagedArtifactBindingKind::PublicOutput,
+                    });
+                }
+            }
+            events::KernelEventPayload::PublicOutputRenderFailed(payload) => {
+                require_attempt(node, attempt_id, &payload.node_id, &payload.attempt_id)?;
+                if let Some(ref diagnostic) = payload.error.diagnostic_ref {
+                    push_staged_event_artifact_requirement(
+                        node,
+                        diagnostic,
+                        StagedArtifactBindingKind::RedactedDiagnostic,
+                        &mut requirements,
+                    )?;
+                }
+            }
+            events::KernelEventPayload::StateAttemptFailed(payload) => {
+                require_attempt(node, attempt_id, &payload.node_id, &payload.attempt_id)?;
+                if let Some(ref diagnostic) = payload.error.diagnostic_ref {
+                    push_staged_event_artifact_requirement(
+                        node,
+                        diagnostic,
+                        StagedArtifactBindingKind::RedactedDiagnostic,
+                        &mut requirements,
+                    )?;
+                }
+            }
+            events::KernelEventPayload::SideEffectIntentPersisted(payload) => {
+                require_attempt(node, attempt_id, &payload.node_id, &payload.attempt_id)?;
+                requirements.push(side_effect_artifact_requirement(
+                    payload.intent_artifact_id.clone(),
+                    payload.intent_hash.clone(),
+                    Some(payload.intent_schema_id.clone()),
+                    events::ArtifactRole::SideEffectIntent,
+                    payload.ledger_key.clone(),
+                    payload.invocation_epoch,
+                    StagedSideEffectArtifactPhase::Intent,
+                ));
+            }
+            events::KernelEventPayload::SideEffectInvocationPrepared(payload) => {
+                require_attempt(node, attempt_id, &payload.node_id, &payload.attempt_id)?;
+                if let (Some(artifact_id), Some(hash)) =
+                    (&payload.prepared_artifact_id, &payload.prepared_hash)
+                {
+                    requirements.push(side_effect_artifact_requirement(
+                        artifact_id.clone(),
+                        hash.clone(),
+                        None,
+                        events::ArtifactRole::PreparedInvocation,
+                        payload.ledger_key.clone(),
+                        payload.invocation_epoch,
+                        StagedSideEffectArtifactPhase::PreparedInvocation,
+                    ));
+                }
+            }
+            events::KernelEventPayload::SideEffectNotSubmittedProven(payload) => {
+                require_attempt(node, attempt_id, &payload.node_id, &payload.attempt_id)?;
+                requirements.push(side_effect_artifact_requirement(
+                    payload.proof_artifact_id.clone(),
+                    payload.proof_hash.clone(),
+                    Some(payload.proof_schema_id.clone()),
+                    events::ArtifactRole::NotSubmittedProof,
+                    payload.ledger_key.clone(),
+                    payload.invocation_epoch,
+                    StagedSideEffectArtifactPhase::NotSubmittedProof,
+                ));
+            }
+            events::KernelEventPayload::SideEffectSubmissionObserved(payload) => {
+                require_attempt(node, attempt_id, &payload.node_id, &payload.attempt_id)?;
+                requirements.push(side_effect_artifact_requirement(
+                    payload.submission_artifact_id.clone(),
+                    payload.submission_hash.clone(),
+                    Some(payload.submission_schema_id.clone()),
+                    events::ArtifactRole::Submission,
+                    payload.ledger_key.clone(),
+                    payload.invocation_epoch,
+                    StagedSideEffectArtifactPhase::Submission,
+                ));
+            }
+            events::KernelEventPayload::SideEffectSubmissionUnknown(payload) => {
+                require_attempt(node, attempt_id, &payload.node_id, &payload.attempt_id)?;
+                requirements.push(side_effect_artifact_requirement(
+                    payload.evidence_artifact_id.clone(),
+                    payload.evidence_hash.clone(),
+                    Some(payload.evidence_schema_id.clone()),
+                    events::ArtifactRole::SubmissionUnknownEvidence,
+                    payload.ledger_key.clone(),
+                    payload.invocation_epoch,
+                    StagedSideEffectArtifactPhase::SubmissionUnknownEvidence,
+                ));
+            }
+            events::KernelEventPayload::SideEffectReceiptObserved(payload) => {
+                require_attempt(node, attempt_id, &payload.node_id, &payload.attempt_id)?;
+                requirements.push(side_effect_artifact_requirement(
+                    payload.receipt_artifact_id.clone(),
+                    payload.receipt_hash.clone(),
+                    Some(payload.receipt_schema_id.clone()),
+                    events::ArtifactRole::Receipt,
+                    payload.ledger_key.clone(),
+                    payload.invocation_epoch,
+                    StagedSideEffectArtifactPhase::Receipt,
+                ));
+            }
+            events::KernelEventPayload::SideEffectConfirmationObserved(payload) => {
+                require_attempt(node, attempt_id, &payload.node_id, &payload.attempt_id)?;
+                requirements.push(side_effect_artifact_requirement(
+                    payload.confirmation_artifact_id.clone(),
+                    payload.confirmation_hash.clone(),
+                    Some(payload.confirmation_schema_id.clone()),
+                    events::ArtifactRole::Confirmation,
+                    payload.ledger_key.clone(),
+                    payload.invocation_epoch,
+                    StagedSideEffectArtifactPhase::Confirmation,
+                ));
+            }
+            events::KernelEventPayload::SideEffectAmbiguous(payload) => {
+                require_attempt(node, attempt_id, &payload.node_id, &payload.attempt_id)?;
+                requirements.push(side_effect_artifact_requirement(
+                    payload.evidence_artifact_id.clone(),
+                    payload.evidence_hash.clone(),
+                    Some(payload.evidence_schema_id.clone()),
+                    events::ArtifactRole::AmbiguityEvidence,
+                    payload.ledger_key.clone(),
+                    payload.invocation_epoch,
+                    StagedSideEffectArtifactPhase::AmbiguityEvidence,
+                ));
+            }
+            events::KernelEventPayload::RunStarted(_)
+            | events::KernelEventPayload::RunCompleted(_)
+            | events::KernelEventPayload::RetentionRefsAppended(_)
+            | events::KernelEventPayload::RetentionManifestProjected(_)
+            | events::KernelEventPayload::StateAttemptStarted(_)
+            | events::KernelEventPayload::StateAttemptCompleted(_)
+            | events::KernelEventPayload::CellSkipped(_)
+            | events::KernelEventPayload::SideEffectClaimed(_)
+            | events::KernelEventPayload::SideEffectClaimTakenOver(_)
+            | events::KernelEventPayload::SideEffectInvocationStarted(_)
+            | events::KernelEventPayload::SideEffectFailed(_) => {}
+        }
+    }
+    Ok(requirements)
+}
+
+fn push_staged_event_artifact_requirement(
+    node: &spec::NodeSpec,
+    artifact: &events::ArtifactEvidenceRef,
+    binding: StagedArtifactBindingKind,
+    requirements: &mut Vec<StagedArtifactRequirement>,
+) -> Result<()> {
+    let role = staged_artifact_binding_role(&binding);
+    if artifact.role != role {
+        return Err(RuntimeError::InvalidRunnerOutput(format!(
+            "node {} diagnostic artifact role {} does not match staged binding",
+            node.node_id,
+            artifact_role_name(artifact.role)
+        )));
+    }
+    requirements.push(StagedArtifactRequirement {
+        artifact_id: artifact.artifact_id.clone(),
+        digest: artifact.content_digest.clone(),
+        byte_len: Some(artifact.byte_len),
+        media_type: Some(artifact.media_type.clone()),
+        schema_id: Some(artifact.schema_id.clone()),
+        semantic_type_id: artifact.semantic_type_id.clone(),
+        role: artifact.role,
+        binding,
+    });
+    Ok(())
+}
+
+fn side_effect_artifact_requirement(
+    artifact_id: ArtifactId,
+    digest: ContentDigest,
+    schema_id: Option<SchemaId>,
+    role: events::ArtifactRole,
+    ledger_key: events::SideEffectLedgerKey,
+    invocation_epoch: u32,
+    phase: StagedSideEffectArtifactPhase,
+) -> StagedArtifactRequirement {
+    StagedArtifactRequirement {
+        artifact_id,
+        digest,
+        byte_len: None,
+        media_type: None,
+        schema_id,
+        semantic_type_id: None,
+        role,
+        binding: StagedArtifactBindingKind::SideEffectEvidence {
+            ledger_key,
+            invocation_epoch,
+            phase,
+        },
     }
 }
 
@@ -5223,8 +5990,9 @@ mod tests {
                     producer_seed_id: None,
                     artifact_role: events::ArtifactRole::StateOutput,
                 };
+                let staged_artifact = staged_attempt_artifact(&ctx, artifact)?;
                 Ok(ErasedRunnerOutput {
-                    required_artifacts: vec![artifact],
+                    staged_artifacts: vec![staged_artifact],
                     staged_retention_refs: Vec::new(),
                     payloads: vec![
                         events::KernelEventPayload::CellProduced(events::CellProduced {
@@ -5934,6 +6702,534 @@ mod tests {
                 .await,
             Err(RuntimeError::InvalidRunnerOutput(message))
                 if message.contains("scheduler-owned payload")
+        ));
+    }
+
+    #[tokio::test]
+    async fn runner_cannot_stage_artifact_with_foreign_producer() {
+        struct ForeignProducerArtifactRunner {
+            foreign_node_id: NodeId,
+            output_artifact: ArtifactId,
+            output_digest: ContentDigest,
+        }
+
+        impl ErasedNodeRunner for ForeignProducerArtifactRunner {
+            fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
+                Box::pin(async move {
+                    let mut artifact = state_output_artifact(
+                        ctx.node,
+                        ctx.descriptor,
+                        self.output_artifact.clone(),
+                        self.output_digest.clone(),
+                    );
+                    artifact.producer_node_id = Some(self.foreign_node_id.clone());
+                    let staged_artifact = staged_attempt_artifact(&ctx, artifact)?;
+                    Ok(ErasedRunnerOutput {
+                        staged_artifacts: vec![staged_artifact],
+                        staged_retention_refs: Vec::new(),
+                        payloads: terminal_payloads(
+                            &ctx,
+                            self.output_artifact.clone(),
+                            self.output_digest.clone(),
+                        ),
+                    })
+                })
+            }
+        }
+
+        let fixture = fixture();
+        let foreign_node_id = node_by_output(&fixture, &fixture.cell_b).node_id.clone();
+        let mut registry = ErasedRunnerRegistry::new();
+        registry
+            .register(binding(
+                fixture.descriptor_a.clone(),
+                "pure",
+                ForeignProducerArtifactRunner {
+                    foreign_node_id,
+                    output_artifact: artifact(0xa1),
+                    output_digest: content(0xa2),
+                },
+            ))
+            .expect("binding a");
+        registry
+            .register(binding(
+                fixture.descriptor_b.clone(),
+                "read",
+                RecordingRunner {
+                    expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
+                    output_artifact: artifact(0xb1),
+                    output_digest: content(0xb2),
+                },
+            ))
+            .expect("binding b");
+        let scheduler = SerialTypedScheduler::new(registry);
+        let mut store = store::InMemoryTypedRunStore::new();
+        scheduler
+            .start_run(
+                &mut store,
+                &fixture.runtime_spec,
+                fixture.run_id.clone(),
+                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
+            )
+            .expect("start run");
+
+        assert!(matches!(
+            scheduler
+                .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+                .await,
+            Err(RuntimeError::InvalidRunnerOutput(message))
+                if message.contains("producer evidence outside its attempt")
+        ));
+    }
+
+    #[tokio::test]
+    async fn runner_cannot_stage_inline_artifact_with_mismatched_bytes() {
+        struct BadInlineArtifactRunner {
+            output_artifact: ArtifactId,
+            output_digest: ContentDigest,
+        }
+
+        impl ErasedNodeRunner for BadInlineArtifactRunner {
+            fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
+                Box::pin(async move {
+                    let artifact = state_output_artifact(
+                        ctx.node,
+                        ctx.descriptor,
+                        self.output_artifact.clone(),
+                        self.output_digest.clone(),
+                    );
+                    let staged_artifact = StagedArtifact::inline_attempt_artifact(
+                        &ctx,
+                        b"mismatched".to_vec(),
+                        artifact,
+                    )?;
+                    Ok(ErasedRunnerOutput {
+                        staged_artifacts: vec![staged_artifact],
+                        staged_retention_refs: Vec::new(),
+                        payloads: terminal_payloads(
+                            &ctx,
+                            self.output_artifact.clone(),
+                            self.output_digest.clone(),
+                        ),
+                    })
+                })
+            }
+        }
+
+        let fixture = fixture();
+        let mut registry = ErasedRunnerRegistry::new();
+        registry
+            .register(binding(
+                fixture.descriptor_a.clone(),
+                "pure",
+                BadInlineArtifactRunner {
+                    output_artifact: artifact(0xa1),
+                    output_digest: content(0xa2),
+                },
+            ))
+            .expect("binding a");
+        registry
+            .register(binding(
+                fixture.descriptor_b.clone(),
+                "read",
+                RecordingRunner {
+                    expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
+                    output_artifact: artifact(0xb1),
+                    output_digest: content(0xb2),
+                },
+            ))
+            .expect("binding b");
+        let scheduler = SerialTypedScheduler::new(registry);
+        let mut store = store::InMemoryTypedRunStore::new();
+        scheduler
+            .start_run(
+                &mut store,
+                &fixture.runtime_spec,
+                fixture.run_id.clone(),
+                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
+            )
+            .expect("start run");
+
+        assert!(matches!(
+            scheduler
+                .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+                .await,
+            Err(RuntimeError::InvalidRunnerOutput(message))
+                if message.contains("bytes do not match typed evidence")
+        ));
+    }
+
+    #[tokio::test]
+    async fn runner_can_commit_inline_state_output_artifact() {
+        struct InlineArtifactRunner {
+            output_bytes: Vec<u8>,
+        }
+
+        impl ErasedNodeRunner for InlineArtifactRunner {
+            fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
+                Box::pin(async move {
+                    let artifact = state_output_artifact_for_bytes(
+                        ctx.node,
+                        ctx.descriptor,
+                        &self.output_bytes,
+                    );
+                    let staged_artifact = StagedArtifact::inline_attempt_artifact(
+                        &ctx,
+                        self.output_bytes.clone(),
+                        artifact.clone(),
+                    )?;
+                    Ok(ErasedRunnerOutput {
+                        staged_artifacts: vec![staged_artifact],
+                        staged_retention_refs: Vec::new(),
+                        payloads: terminal_payloads(
+                            &ctx,
+                            artifact.artifact_id.clone(),
+                            artifact.digest.clone(),
+                        ),
+                    })
+                })
+            }
+        }
+
+        let fixture = fixture();
+        let output_bytes = br#"{"inline":true}"#.to_vec();
+        let output_digest = digest_for_bytes(&output_bytes);
+        let output_artifact =
+            ArtifactId::from_digest(output_digest.algorithm(), *output_digest.digest());
+        let mut registry = ErasedRunnerRegistry::new();
+        registry
+            .register(binding(
+                fixture.descriptor_a.clone(),
+                "pure",
+                InlineArtifactRunner { output_bytes },
+            ))
+            .expect("binding a");
+        registry
+            .register(binding(
+                fixture.descriptor_b.clone(),
+                "read",
+                RecordingRunner {
+                    expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
+                    output_artifact: artifact(0xb1),
+                    output_digest: content(0xb2),
+                },
+            ))
+            .expect("binding b");
+        let scheduler = SerialTypedScheduler::new(registry);
+        let mut store = store::InMemoryTypedRunStore::new();
+        scheduler
+            .start_run(
+                &mut store,
+                &fixture.runtime_spec,
+                fixture.run_id.clone(),
+                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
+            )
+            .expect("start run");
+
+        assert_eq!(
+            scheduler
+                .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+                .await
+                .expect("drive inline output"),
+            SchedulerStatus::Advanced
+        );
+        assert!(matches!(
+            store.projection_snapshot().cell_terminal(&fixture.cell_a),
+            Some(store::CellTerminalProjection::Produced {
+                artifact_id,
+                content_digest,
+                ..
+            }) if artifact_id == &output_artifact && content_digest == &output_digest
+        ));
+    }
+
+    #[tokio::test]
+    async fn staged_artifact_must_match_payload_reference_metadata() {
+        struct MismatchedPayloadReferenceRunner {
+            output_bytes: Vec<u8>,
+        }
+
+        impl ErasedNodeRunner for MismatchedPayloadReferenceRunner {
+            fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
+                Box::pin(async move {
+                    let artifact = state_output_artifact_for_bytes(
+                        ctx.node,
+                        ctx.descriptor,
+                        &self.output_bytes,
+                    );
+                    let staged_artifact = StagedArtifact::inline_attempt_artifact(
+                        &ctx,
+                        self.output_bytes.clone(),
+                        artifact.clone(),
+                    )?;
+                    let mut artifact_ref = event_artifact_ref_from_store(&artifact);
+                    artifact_ref.byte_len += 1;
+                    let mut payloads = terminal_payloads(
+                        &ctx,
+                        artifact.artifact_id.clone(),
+                        artifact.digest.clone(),
+                    );
+                    payloads.push(events::KernelEventPayload::ArtifactReferenced(
+                        events::ArtifactReferenced {
+                            spec_hash: ctx.spec_hash.clone(),
+                            node_id: Some(ctx.node.node_id.clone()),
+                            attempt_id: Some(ctx.attempt_id.clone()),
+                            artifact_ref,
+                        },
+                    ));
+                    Ok(ErasedRunnerOutput {
+                        staged_artifacts: vec![staged_artifact],
+                        staged_retention_refs: Vec::new(),
+                        payloads,
+                    })
+                })
+            }
+        }
+
+        let fixture = fixture();
+        let mut registry = ErasedRunnerRegistry::new();
+        registry
+            .register(binding(
+                fixture.descriptor_a.clone(),
+                "pure",
+                MismatchedPayloadReferenceRunner {
+                    output_bytes: br#"{"metadata":"payload"}"#.to_vec(),
+                },
+            ))
+            .expect("binding a");
+        registry
+            .register(binding(
+                fixture.descriptor_b.clone(),
+                "read",
+                RecordingRunner {
+                    expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
+                    output_artifact: artifact(0xb1),
+                    output_digest: content(0xb2),
+                },
+            ))
+            .expect("binding b");
+        let scheduler = SerialTypedScheduler::new(registry);
+        let mut store = store::InMemoryTypedRunStore::new();
+        scheduler
+            .start_run(
+                &mut store,
+                &fixture.runtime_spec,
+                fixture.run_id.clone(),
+                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
+            )
+            .expect("start run");
+
+        assert!(matches!(
+            scheduler
+                .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+                .await,
+            Err(RuntimeError::InvalidRunnerOutput(message))
+                if message.contains("does not match typed payload binding")
+        ));
+    }
+
+    #[tokio::test]
+    async fn runner_output_requires_payload_bound_staged_artifact() {
+        struct MissingStagedArtifactRunner {
+            output_artifact: ArtifactId,
+            output_digest: ContentDigest,
+        }
+
+        impl ErasedNodeRunner for MissingStagedArtifactRunner {
+            fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
+                Box::pin(async move {
+                    Ok(ErasedRunnerOutput {
+                        staged_artifacts: Vec::new(),
+                        staged_retention_refs: Vec::new(),
+                        payloads: terminal_payloads(
+                            &ctx,
+                            self.output_artifact.clone(),
+                            self.output_digest.clone(),
+                        ),
+                    })
+                })
+            }
+        }
+
+        let fixture = fixture();
+        let mut registry = ErasedRunnerRegistry::new();
+        registry
+            .register(binding(
+                fixture.descriptor_a.clone(),
+                "pure",
+                MissingStagedArtifactRunner {
+                    output_artifact: artifact(0xa1),
+                    output_digest: content(0xa2),
+                },
+            ))
+            .expect("binding a");
+        registry
+            .register(binding(
+                fixture.descriptor_b.clone(),
+                "read",
+                RecordingRunner {
+                    expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
+                    output_artifact: artifact(0xb1),
+                    output_digest: content(0xb2),
+                },
+            ))
+            .expect("binding b");
+        let scheduler = SerialTypedScheduler::new(registry);
+        let mut store = store::InMemoryTypedRunStore::new();
+        scheduler
+            .start_run(
+                &mut store,
+                &fixture.runtime_spec,
+                fixture.run_id.clone(),
+                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
+            )
+            .expect("start run");
+
+        assert!(matches!(
+            scheduler
+                .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+                .await,
+            Err(RuntimeError::InvalidRunnerOutput(message))
+                if message.contains("without staged artifact")
+        ));
+    }
+
+    #[tokio::test]
+    async fn rejected_staged_payload_mismatch_does_not_admit_artifact_evidence() {
+        struct MismatchedStagedArtifactRunner {
+            staged_artifact: ArtifactId,
+            staged_digest: ContentDigest,
+            payload_artifact: ArtifactId,
+            payload_digest: ContentDigest,
+        }
+
+        impl ErasedNodeRunner for MismatchedStagedArtifactRunner {
+            fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
+                Box::pin(async move {
+                    let artifact = state_output_artifact(
+                        ctx.node,
+                        ctx.descriptor,
+                        self.staged_artifact.clone(),
+                        self.staged_digest.clone(),
+                    );
+                    let staged_artifact = staged_attempt_artifact(&ctx, artifact)?;
+                    Ok(ErasedRunnerOutput {
+                        staged_artifacts: vec![staged_artifact],
+                        staged_retention_refs: Vec::new(),
+                        payloads: terminal_payloads(
+                            &ctx,
+                            self.payload_artifact.clone(),
+                            self.payload_digest.clone(),
+                        ),
+                    })
+                })
+            }
+        }
+
+        let fixture = fixture();
+        let node = node_by_output(&fixture, &fixture.cell_a).clone();
+        let staged_artifact = artifact(0xa1);
+        let staged_digest = content(0xa2);
+        let payload_artifact = artifact(0xa3);
+        let payload_digest = content(0xa4);
+        let mut registry = ErasedRunnerRegistry::new();
+        registry
+            .register(binding(
+                fixture.descriptor_a.clone(),
+                "pure",
+                MismatchedStagedArtifactRunner {
+                    staged_artifact: staged_artifact.clone(),
+                    staged_digest: staged_digest.clone(),
+                    payload_artifact,
+                    payload_digest,
+                },
+            ))
+            .expect("binding a");
+        registry
+            .register(binding(
+                fixture.descriptor_b.clone(),
+                "read",
+                RecordingRunner {
+                    expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
+                    output_artifact: artifact(0xb1),
+                    output_digest: content(0xb2),
+                },
+            ))
+            .expect("binding b");
+        let scheduler = SerialTypedScheduler::new(registry);
+        let mut store = store::InMemoryTypedRunStore::new();
+        scheduler
+            .start_run(
+                &mut store,
+                &fixture.runtime_spec,
+                fixture.run_id.clone(),
+                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
+            )
+            .expect("start run");
+        let attempt_id = append_attempt_start(&mut store, &fixture, &node, 1);
+
+        assert!(matches!(
+            scheduler
+                .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+                .await,
+            Err(RuntimeError::InvalidRunnerOutput(message))
+                if message.contains("without typed payload reference")
+        ));
+
+        let descriptor = fixture
+            .runtime_spec
+            .state_descriptor_for_node(&node)
+            .expect("descriptor");
+        let output_cell = fixture
+            .runtime_spec
+            .cell(&node.output_cell)
+            .expect("output cell");
+        let attempt_logical_key =
+            store::LogicalEventKey::new(format!("attempt:{}:{}", node.node_id, attempt_id))
+                .expect("attempt key");
+        let leaked_artifact_request = store::TypedCommitRequest {
+            run_id: fixture.run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&fixture.run_id),
+            commit_key: store::CommitKey::new("missing-leaked-staged-artifact")
+                .expect("commit key"),
+            payloads: vec![
+                events::KernelEventPayload::CellProduced(events::CellProduced {
+                    spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                    node_id: node.node_id.clone(),
+                    cell_id: node.output_cell.clone(),
+                    scope_id: node.scope_id.clone(),
+                    attempt_id: attempt_id.clone(),
+                    semantic_type_id: descriptor.output_semantic_type_id.clone(),
+                    schema_id: descriptor.output_schema_id.clone(),
+                    value_lineage: output_cell.value_lineage.clone(),
+                    artifact_id: staged_artifact.clone(),
+                    content_digest: staged_digest,
+                    producer_state_kind: Some(node.state_kind.clone()),
+                    producer_state_version: Some(node.state_version.clone()),
+                }),
+                events::KernelEventPayload::StateAttemptCompleted(events::StateAttemptCompleted {
+                    spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                    node_id: node.node_id.clone(),
+                    attempt_id: attempt_id.clone(),
+                    output_cell_id: node.output_cell.clone(),
+                }),
+            ],
+            required_artifacts: Vec::new(),
+            preconditions: store::CommitPreconditions {
+                required_run_state: store::RequiredRunState::NotCompleted,
+                required_present_logical_keys: vec![attempt_logical_key],
+                required_cell_states: vec![store::CellStatePrecondition {
+                    cell_id: node.output_cell.clone(),
+                    required: store::RequiredCellState::Absent,
+                }],
+                ..store::CommitPreconditions::default()
+            },
+        };
+        let commit = store::PreparedTypedCommit::new(leaked_artifact_request, Vec::new())
+            .expect("prepare leak probe");
+        assert!(matches!(
+            store.append_prepared_typed_commit(commit),
+            Err(store::StoreError::MissingArtifact { artifact_id }) if artifact_id == staged_artifact
         ));
     }
 
@@ -6713,8 +8009,9 @@ mod tests {
                         producer_seed_id: None,
                         artifact_role: events::ArtifactRole::StateOutput,
                     };
+                    let staged_artifact = staged_attempt_artifact(&ctx, artifact)?;
                     Ok(ErasedRunnerOutput {
-                        required_artifacts: vec![artifact],
+                        staged_artifacts: vec![staged_artifact],
                         staged_retention_refs: Vec::new(),
                         payloads: terminal_payloads(
                             &ctx,
@@ -7068,6 +8365,125 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn side_effect_staged_artifact_must_match_payload_ledger_binding() {
+        struct WrongLedgerStagedSideEffectRunner {
+            cap_kind: CapabilityKind,
+            cap_version: CapabilityVersion,
+            adapter_kind: AdapterKind,
+            adapter_version: AdapterVersion,
+        }
+
+        impl ErasedNodeRunner for WrongLedgerStagedSideEffectRunner {
+            fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
+                Box::pin(async move {
+                    let ledger = side_effect_ledger_key(ctx.attempt_no);
+                    let staged_ledger =
+                        events::SideEffectLedgerKey::new("wrong-ledger").expect("ledger key");
+                    let intent_bytes = br#"{"intent":"wrong-ledger"}"#.to_vec();
+                    let intent_hash = digest_for_bytes(&intent_bytes);
+                    let intent_artifact_id =
+                        ArtifactId::from_digest(intent_hash.algorithm(), *intent_hash.digest());
+                    let evidence = store::ArtifactEvidenceRef {
+                        artifact_id: intent_artifact_id.clone(),
+                        digest: intent_hash.clone(),
+                        byte_len: intent_bytes.len() as u64,
+                        media_type: spec::MediaType::new("application/json").expect("media"),
+                        schema_id: Some(ctx.node.config_ref.schema_id.clone()),
+                        semantic_type_id: None,
+                        producer_node_id: Some(ctx.node.node_id.clone()),
+                        producer_seed_id: None,
+                        artifact_role: events::ArtifactRole::SideEffectIntent,
+                    };
+                    let staged_artifact = StagedArtifact::inline_side_effect_artifact(
+                        &ctx,
+                        intent_bytes,
+                        evidence,
+                        staged_ledger,
+                        1,
+                    )?;
+                    Ok(ErasedRunnerOutput {
+                        staged_artifacts: vec![staged_artifact],
+                        staged_retention_refs: Vec::new(),
+                        payloads: vec![
+                            events::KernelEventPayload::SideEffectIntentPersisted(
+                                events::side_effect::IntentPersisted {
+                                    spec_hash: ctx.spec_hash.clone(),
+                                    node_id: ctx.node.node_id.clone(),
+                                    scope_id: ctx.node.scope_id.clone(),
+                                    attempt_id: ctx.attempt_id.clone(),
+                                    ledger_key: ledger.clone(),
+                                    invocation_epoch: 1,
+                                    intent_schema_id: ctx.node.config_ref.schema_id.clone(),
+                                    intent_hash,
+                                    intent_artifact_id,
+                                    idempotency_input_schema_id: ctx
+                                        .node
+                                        .config_ref
+                                        .schema_id
+                                        .clone(),
+                                    idempotency_input_hash: content(0xc3),
+                                    idempotency_key: events::IdempotencyKeyRef::new("idem-1")
+                                        .expect("idempotency key"),
+                                    capability_kind: self.cap_kind.clone(),
+                                    capability_version: self.cap_version.clone(),
+                                    adapter_kind: self.adapter_kind.clone(),
+                                    adapter_version: self.adapter_version.clone(),
+                                },
+                            ),
+                            side_effect_claimed(&ctx, ledger.clone(), 1, 1),
+                            side_effect_prepared(&ctx, ledger, 1, 1),
+                        ],
+                    })
+                })
+            }
+        }
+
+        let fixture = fixture_with_first_side_effect_state();
+        let mut registry = ErasedRunnerRegistry::new();
+        registry
+            .register(binding(
+                fixture.descriptor_a.clone(),
+                "sidefx",
+                WrongLedgerStagedSideEffectRunner {
+                    cap_kind: side_effect_capability_kind(),
+                    cap_version: side_effect_capability_version(),
+                    adapter_kind: fixture.adapter_kind.clone(),
+                    adapter_version: fixture.adapter_version.clone(),
+                },
+            ))
+            .expect("binding a");
+        registry
+            .register(binding(
+                fixture.descriptor_b.clone(),
+                "read",
+                RecordingRunner {
+                    expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
+                    output_artifact: artifact(0xb1),
+                    output_digest: content(0xb2),
+                },
+            ))
+            .expect("binding b");
+        let scheduler = SerialTypedScheduler::new(registry);
+        let mut store = store::InMemoryTypedRunStore::new();
+        scheduler
+            .start_run(
+                &mut store,
+                &fixture.runtime_spec,
+                fixture.run_id.clone(),
+                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
+            )
+            .expect("start run");
+
+        assert!(matches!(
+            scheduler
+                .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+                .await,
+            Err(RuntimeError::InvalidRunnerOutput(message))
+                if message.contains("does not match typed payload binding")
+        ));
+    }
+
+    #[tokio::test]
     async fn side_effect_ambiguous_phase_blocks_resume() {
         let fixture = fixture_with_first_side_effect_state();
         let mut registry = ErasedRunnerRegistry::new();
@@ -7313,13 +8729,19 @@ mod tests {
                     }) => {
                         let artifact_id = artifact(0xc5);
                         let digest = content(0xc4);
-                        Ok(ErasedRunnerOutput {
-                            required_artifacts: vec![side_effect_artifact(
+                        let staged_artifact = staged_side_effect_artifact(
+                            &ctx,
+                            side_effect_artifact(
                                 &ctx,
                                 artifact_id.clone(),
                                 digest.clone(),
                                 events::ArtifactRole::Submission,
-                            )],
+                            ),
+                            ledger.clone(),
+                            *invocation_epoch,
+                        )?;
+                        Ok(ErasedRunnerOutput {
+                            staged_artifacts: vec![staged_artifact],
                             staged_retention_refs: Vec::new(),
                             payloads: vec![side_effect_submission_observed(
                                 &ctx,
@@ -7355,13 +8777,19 @@ mod tests {
                     }) => {
                         let artifact_id = artifact(0xc7);
                         let digest = content(0xc6);
-                        Ok(ErasedRunnerOutput {
-                            required_artifacts: vec![side_effect_artifact(
+                        let staged_artifact = staged_side_effect_artifact(
+                            &ctx,
+                            side_effect_artifact(
                                 &ctx,
                                 artifact_id.clone(),
                                 digest.clone(),
                                 events::ArtifactRole::Receipt,
-                            )],
+                            ),
+                            ledger.clone(),
+                            *invocation_epoch,
+                        )?;
+                        Ok(ErasedRunnerOutput {
+                            staged_artifacts: vec![staged_artifact],
                             staged_retention_refs: Vec::new(),
                             payloads: vec![side_effect_receipt_observed(
                                 &ctx,
@@ -7378,13 +8806,19 @@ mod tests {
                     }) => {
                         let artifact_id = artifact(0xc9);
                         let digest = content(0xc8);
-                        Ok(ErasedRunnerOutput {
-                            required_artifacts: vec![side_effect_artifact(
+                        let staged_artifact = staged_side_effect_artifact(
+                            &ctx,
+                            side_effect_artifact(
                                 &ctx,
                                 artifact_id.clone(),
                                 digest.clone(),
                                 events::ArtifactRole::Confirmation,
-                            )],
+                            ),
+                            ledger.clone(),
+                            *invocation_epoch,
+                        )?;
+                        Ok(ErasedRunnerOutput {
+                            staged_artifacts: vec![staged_artifact],
                             staged_retention_refs: Vec::new(),
                             payloads: vec![side_effect_confirmation_observed(
                                 &ctx,
@@ -7405,8 +8839,9 @@ mod tests {
                             self.output_artifact.clone(),
                             self.output_digest.clone(),
                         );
+                        let staged_artifact = staged_attempt_artifact(&ctx, artifact)?;
                         Ok(ErasedRunnerOutput {
-                            required_artifacts: vec![artifact],
+                            staged_artifacts: vec![staged_artifact],
                             staged_retention_refs: Vec::new(),
                             payloads: terminal_payloads(
                                 &ctx,
@@ -7432,13 +8867,19 @@ mod tests {
             assert!(ctx.caps.contains(&self.cap_kind, &self.cap_version));
             let intent_artifact_id = artifact(0xc2);
             let intent_hash = content(0xc1);
-            Ok(ErasedRunnerOutput {
-                required_artifacts: vec![side_effect_artifact(
+            let staged_artifact = staged_side_effect_artifact(
+                &ctx,
+                side_effect_artifact(
                     &ctx,
                     intent_artifact_id.clone(),
                     intent_hash.clone(),
                     events::ArtifactRole::SideEffectIntent,
-                )],
+                ),
+                ledger.clone(),
+                1,
+            )?;
+            Ok(ErasedRunnerOutput {
+                staged_artifacts: vec![staged_artifact],
                 staged_retention_refs: Vec::new(),
                 payloads: vec![
                     events::KernelEventPayload::SideEffectIntentPersisted(
@@ -7493,13 +8934,19 @@ mod tests {
                 ) {
                     let artifact_id = artifact(0xcb);
                     let digest = content(0xca);
-                    Ok(ErasedRunnerOutput {
-                        required_artifacts: vec![side_effect_artifact(
+                    let staged_artifact = staged_side_effect_artifact(
+                        &ctx,
+                        side_effect_artifact(
                             &ctx,
                             artifact_id.clone(),
                             digest.clone(),
                             events::ArtifactRole::AmbiguityEvidence,
-                        )],
+                        ),
+                        ledger.clone(),
+                        1,
+                    )?;
+                    Ok(ErasedRunnerOutput {
+                        staged_artifacts: vec![staged_artifact],
                         staged_retention_refs: Vec::new(),
                         payloads: vec![events::KernelEventPayload::SideEffectAmbiguous(
                             events::side_effect::Ambiguous {
@@ -7537,8 +8984,9 @@ mod tests {
                     self.output_artifact.clone(),
                     self.output_digest.clone(),
                 );
+                let staged_artifact = staged_attempt_artifact(&ctx, artifact)?;
                 Ok(ErasedRunnerOutput {
-                    required_artifacts: vec![artifact],
+                    staged_artifacts: vec![staged_artifact],
                     staged_retention_refs: Vec::new(),
                     payloads: terminal_payloads(
                         &ctx,
@@ -7816,6 +9264,71 @@ mod tests {
             producer_seed_id: None,
             artifact_role: events::ArtifactRole::StateOutput,
         }
+    }
+
+    fn state_output_artifact_for_bytes(
+        node: &spec::NodeSpec,
+        descriptor: &spec::StateDescriptorIdentity,
+        bytes: &[u8],
+    ) -> store::ArtifactEvidenceRef {
+        let digest = digest_for_bytes(bytes);
+        let artifact_id = ArtifactId::from_digest(digest.algorithm(), *digest.digest());
+        store::ArtifactEvidenceRef {
+            artifact_id,
+            digest,
+            byte_len: bytes.len() as u64,
+            media_type: spec::MediaType::new("application/json").expect("media"),
+            schema_id: Some(descriptor.output_schema_id.clone()),
+            semantic_type_id: Some(descriptor.output_semantic_type_id.clone()),
+            producer_node_id: Some(node.node_id.clone()),
+            producer_seed_id: None,
+            artifact_role: events::ArtifactRole::StateOutput,
+        }
+    }
+
+    fn event_artifact_ref_from_store(
+        artifact: &store::ArtifactEvidenceRef,
+    ) -> events::ArtifactEvidenceRef {
+        events::ArtifactEvidenceRef {
+            artifact_id: artifact.artifact_id.clone(),
+            role: artifact.artifact_role,
+            schema_id: artifact.schema_id.clone().expect("schema-bearing artifact"),
+            semantic_type_id: artifact.semantic_type_id.clone(),
+            content_digest: artifact.digest.clone(),
+            byte_len: artifact.byte_len,
+            media_type: artifact.media_type.clone(),
+        }
+    }
+
+    fn digest_for_bytes(bytes: &[u8]) -> ContentDigest {
+        ContentDigest::from_digest(DigestAlgorithm::Sha256JcsV1, sha256_digest_bytes(bytes))
+    }
+
+    fn staged_attempt_artifact(
+        ctx: &ErasedRunCtx<'_>,
+        evidence: store::ArtifactEvidenceRef,
+    ) -> Result<StagedArtifact> {
+        let binding = staged_artifact_binding_kind(evidence.artifact_role).expect("staged role");
+        StagedArtifact::finalized_attempt_artifact_for_tests(ctx, evidence, binding)
+    }
+
+    fn staged_side_effect_artifact(
+        ctx: &ErasedRunCtx<'_>,
+        evidence: store::ArtifactEvidenceRef,
+        ledger_key: events::SideEffectLedgerKey,
+        invocation_epoch: u32,
+    ) -> Result<StagedArtifact> {
+        let phase = staged_side_effect_artifact_phase(evidence.artifact_role)
+            .expect("staged side-effect role");
+        StagedArtifact::finalized_attempt_artifact_for_tests(
+            ctx,
+            evidence,
+            StagedArtifactBindingKind::SideEffectEvidence {
+                ledger_key,
+                invocation_epoch,
+                phase,
+            },
+        )
     }
 
     fn node_by_output<'a>(fixture: &'a Fixture, cell_id: &CellId) -> &'a spec::NodeSpec {

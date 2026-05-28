@@ -28,7 +28,8 @@ use mfm_program::{SideEffectState, StateSpec};
 use mfm_replay::v1 as replay;
 use mfm_runtime::{
     ErasedNodeRunner, ErasedRunCtx, ErasedRunnerBinding, ErasedRunnerFuture, ErasedRunnerOutput,
-    ErasedRunnerRegistry, MaterializedCellTerminal, MaterializedInputNode, StagedRetentionRefs,
+    ErasedRunnerRegistry, MaterializedCellTerminal, MaterializedInputNode, StagedArtifact,
+    StagedRetentionRefs,
 };
 use mfm_spec::v1 as spec;
 use mfm_state_evm_dcv::{
@@ -381,8 +382,10 @@ where
     let idem_hash = digest_value(&idem_input)?;
     let idempotency_key =
         events::IdempotencyKeyRef::new(format!("idem-{}", short_digest(&idem_hash)))?;
+    let staged_artifact =
+        staged_side_effect_artifact(&ctx, &intent_artifact, ledger_key.clone(), 1)?;
     Ok(ErasedRunnerOutput {
-        required_artifacts: vec![intent_artifact.evidence.clone()],
+        staged_artifacts: vec![staged_artifact],
         staged_retention_refs: vec![retention(&intent_artifact.evidence)],
         payloads: vec![events::KernelEventPayload::SideEffectIntentPersisted(
             side_effect::IntentPersisted {
@@ -493,8 +496,14 @@ async fn prepare_invocation(
         Some(ctx.node.node_id.clone()),
     )?;
     persist_artifact(artifacts, &prepared_artifact).await?;
+    let staged_artifact = staged_side_effect_artifact(
+        &ctx,
+        &prepared_artifact,
+        ledger_key.clone(),
+        claim.invocation_epoch,
+    )?;
     Ok(ErasedRunnerOutput {
-        required_artifacts: vec![prepared_artifact.evidence.clone()],
+        staged_artifacts: vec![staged_artifact],
         staged_retention_refs: vec![retention(&prepared_artifact.evidence)],
         payloads: vec![events::KernelEventPayload::SideEffectInvocationPrepared(
             side_effect::InvocationPrepared {
@@ -642,8 +651,10 @@ where
         Some(ctx.node.node_id.clone()),
     )?;
     persist_artifact(artifacts, &artifact).await?;
+    let staged_artifact =
+        staged_side_effect_artifact(&ctx, &artifact, ledger_key.clone(), invocation_epoch)?;
     Ok(ErasedRunnerOutput {
-        required_artifacts: vec![artifact.evidence.clone()],
+        staged_artifacts: vec![staged_artifact],
         staged_retention_refs: vec![retention(&artifact.evidence)],
         payloads: vec![events::KernelEventPayload::SideEffectSubmissionObserved(
             side_effect::SubmissionObserved {
@@ -673,8 +684,10 @@ async fn observe_submission_unknown(
         Some(ctx.node.node_id.clone()),
     )?;
     persist_artifact(artifacts, &artifact).await?;
+    let staged_artifact =
+        staged_side_effect_artifact(&ctx, &artifact, ledger_key.clone(), invocation_epoch)?;
     Ok(ErasedRunnerOutput {
-        required_artifacts: vec![artifact.evidence.clone()],
+        staged_artifacts: vec![staged_artifact],
         staged_retention_refs: vec![retention(&artifact.evidence)],
         payloads: vec![events::KernelEventPayload::SideEffectSubmissionUnknown(
             side_effect::SubmissionUnknown {
@@ -778,8 +791,10 @@ where
         Some(ctx.node.node_id.clone()),
     )?;
     persist_artifact(artifacts, &artifact).await?;
+    let staged_artifact =
+        staged_side_effect_artifact(&ctx, &artifact, ledger_key.clone(), invocation_epoch)?;
     Ok(ErasedRunnerOutput {
-        required_artifacts: vec![artifact.evidence.clone()],
+        staged_artifacts: vec![staged_artifact],
         staged_retention_refs: vec![retention(&artifact.evidence)],
         payloads: vec![events::KernelEventPayload::SideEffectReceiptObserved(
             side_effect::ReceiptObserved {
@@ -900,8 +915,10 @@ where
         Some(ctx.node.node_id.clone()),
     )?;
     persist_artifact(artifacts, &artifact).await?;
+    let staged_artifact =
+        staged_side_effect_artifact(&ctx, &artifact, ledger_key.clone(), invocation_epoch)?;
     Ok(ErasedRunnerOutput {
-        required_artifacts: vec![artifact.evidence.clone()],
+        staged_artifacts: vec![staged_artifact],
         staged_retention_refs: vec![retention(&artifact.evidence)],
         payloads: vec![events::KernelEventPayload::SideEffectConfirmationObserved(
             side_effect::ConfirmationObserved {
@@ -1740,11 +1757,10 @@ async fn validate_read_output(
     )?;
     persist_artifact(artifacts, &response_artifact).await?;
     persist_artifact(artifacts, &output_artifact).await?;
+    let staged_response = staged_attempt_artifact(&ctx, &response_artifact)?;
+    let staged_output = staged_attempt_artifact(&ctx, &output_artifact)?;
     Ok(ErasedRunnerOutput {
-        required_artifacts: vec![
-            response_artifact.evidence.clone(),
-            output_artifact.evidence.clone(),
-        ],
+        staged_artifacts: vec![staged_response, staged_output],
         staged_retention_refs: vec![
             retention(&response_artifact.evidence),
             retention(&output_artifact.evidence),
@@ -1848,11 +1864,34 @@ where
         Some(ctx.node.node_id.clone()),
     )?;
     persist_artifact(artifacts, &artifact).await?;
+    let staged_artifact = staged_attempt_artifact(&ctx, &artifact)?;
     Ok(ErasedRunnerOutput {
-        required_artifacts: vec![artifact.evidence.clone()],
+        staged_artifacts: vec![staged_artifact],
         staged_retention_refs: vec![retention(&artifact.evidence)],
         payloads: vec![cell_produced(&ctx, &artifact.evidence), completed(&ctx)],
     })
+}
+
+fn staged_attempt_artifact(
+    ctx: &ErasedRunCtx<'_>,
+    artifact: &EvmDcvArtifact,
+) -> mfm_runtime::Result<StagedArtifact> {
+    StagedArtifact::inline_attempt_artifact(ctx, artifact.bytes.clone(), artifact.evidence.clone())
+}
+
+fn staged_side_effect_artifact(
+    ctx: &ErasedRunCtx<'_>,
+    artifact: &EvmDcvArtifact,
+    ledger_key: events::SideEffectLedgerKey,
+    invocation_epoch: u32,
+) -> mfm_runtime::Result<StagedArtifact> {
+    StagedArtifact::inline_side_effect_artifact(
+        ctx,
+        artifact.bytes.clone(),
+        artifact.evidence.clone(),
+        ledger_key,
+        invocation_epoch,
+    )
 }
 
 fn side_effect_projection<'a>(
