@@ -1577,22 +1577,17 @@ impl SerialTypedScheduler {
         let certificate_artifact =
             validate_certificate_artifact(runtime_spec, evidence.certificate_artifact)?;
         let config_artifacts = validate_config_artifacts(runtime_spec, evidence.config_artifacts)?;
+        let config_reference_payloads =
+            config_artifact_reference_payloads(runtime_spec.spec_hash(), &config_artifacts)?;
         let seed_cells = validate_seed_cells(runtime_spec, &evidence.seed_cells)?;
         let runner_executables = self.runners.executables_for_spec(runtime_spec)?;
-        store.record_artifact_evidence(spec_artifact.clone())?;
-        store.record_artifact_evidence(certificate_artifact.clone())?;
-        for artifact in &config_artifacts {
-            store.record_artifact_evidence(artifact.clone())?;
-        }
-        for seed in seed_cells.values() {
-            store.record_artifact_evidence(store_seed_artifact(seed))?;
-        }
         let mut required_artifacts =
             Vec::with_capacity(2 + config_artifacts.len() + seed_cells.len());
         required_artifacts.push(spec_artifact.clone());
         required_artifacts.push(certificate_artifact.clone());
         required_artifacts.extend(config_artifacts);
         required_artifacts.extend(seed_cells.values().map(store_seed_artifact));
+        let admitted_artifacts = required_artifacts.clone();
         let run_started_retention_refs = required_artifacts
             .iter()
             .map(retention_ref_for_artifact)
@@ -1628,6 +1623,10 @@ impl SerialTypedScheduler {
                 refs: run_started_retention_refs,
                 reason: events::RetentionReason::RunStarted,
             });
+        let mut payloads = Vec::with_capacity(2 + config_reference_payloads.len());
+        payloads.push(payload);
+        payloads.extend(config_reference_payloads);
+        payloads.push(retention_payload);
         let request = store::TypedCommitRequest {
             run_id: run_id.clone(),
             expected_next_seq: store.expected_next_seq(&run_id),
@@ -1635,14 +1634,15 @@ impl SerialTypedScheduler {
                 "run-start:{}",
                 runtime_spec.spec_hash().as_str()
             ))?,
-            payloads: vec![payload, retention_payload],
+            payloads,
             required_artifacts,
             preconditions: store::CommitPreconditions {
                 required_run_state: store::RequiredRunState::Absent,
                 ..store::CommitPreconditions::default()
             },
         };
-        Ok(store.append_typed_run_commit(request)?)
+        let commit = store::PreparedTypedCommit::new(request, admitted_artifacts)?;
+        Ok(store.append_prepared_typed_commit(commit)?)
     }
 
     /// Appends the typed `RunStarted` event through an async typed store.
@@ -1657,34 +1657,17 @@ impl SerialTypedScheduler {
         let certificate_artifact =
             validate_certificate_artifact(runtime_spec, evidence.certificate_artifact)?;
         let config_artifacts = validate_config_artifacts(runtime_spec, evidence.config_artifacts)?;
+        let config_reference_payloads =
+            config_artifact_reference_payloads(runtime_spec.spec_hash(), &config_artifacts)?;
         let seed_cells = validate_seed_cells(runtime_spec, &evidence.seed_cells)?;
         let runner_executables = self.runners.executables_for_spec(runtime_spec)?;
-        store
-            .record_artifact_evidence(spec_artifact.clone())
-            .await
-            .map_err(async_store_error)?;
-        store
-            .record_artifact_evidence(certificate_artifact.clone())
-            .await
-            .map_err(async_store_error)?;
-        for artifact in &config_artifacts {
-            store
-                .record_artifact_evidence(artifact.clone())
-                .await
-                .map_err(async_store_error)?;
-        }
-        for seed in seed_cells.values() {
-            store
-                .record_artifact_evidence(store_seed_artifact(seed))
-                .await
-                .map_err(async_store_error)?;
-        }
         let mut required_artifacts =
             Vec::with_capacity(2 + config_artifacts.len() + seed_cells.len());
         required_artifacts.push(spec_artifact.clone());
         required_artifacts.push(certificate_artifact.clone());
         required_artifacts.extend(config_artifacts);
         required_artifacts.extend(seed_cells.values().map(store_seed_artifact));
+        let admitted_artifacts = required_artifacts.clone();
         let run_started_retention_refs = required_artifacts
             .iter()
             .map(retention_ref_for_artifact)
@@ -1720,6 +1703,10 @@ impl SerialTypedScheduler {
                 refs: run_started_retention_refs,
                 reason: events::RetentionReason::RunStarted,
             });
+        let mut payloads = Vec::with_capacity(2 + config_reference_payloads.len());
+        payloads.push(payload);
+        payloads.extend(config_reference_payloads);
+        payloads.push(retention_payload);
         let request = store::TypedCommitRequest {
             run_id: run_id.clone(),
             expected_next_seq: store
@@ -1730,15 +1717,16 @@ impl SerialTypedScheduler {
                 "run-start:{}",
                 runtime_spec.spec_hash().as_str()
             ))?,
-            payloads: vec![payload, retention_payload],
+            payloads,
             required_artifacts,
             preconditions: store::CommitPreconditions {
                 required_run_state: store::RequiredRunState::Absent,
                 ..store::CommitPreconditions::default()
             },
         };
+        let commit = store::PreparedTypedCommit::new(request, admitted_artifacts)?;
         store
-            .append_typed_run_commit(request)
+            .append_prepared_typed_commit(commit)
             .await
             .map_err(async_store_error)
     }
@@ -1888,7 +1876,8 @@ impl SerialTypedScheduler {
                     required_artifacts: Vec::new(),
                     preconditions,
                 };
-                store.append_typed_run_commit(start_request)?;
+                let start_commit = store::PreparedTypedCommit::new(start_request, Vec::new())?;
+                store.append_prepared_typed_commit(start_commit)?;
                 (attempt_id, attempt_no)
             }
             AttemptPlan::Continue {
@@ -1933,9 +1922,7 @@ impl SerialTypedScheduler {
             &output.required_artifacts,
             output.staged_retention_refs,
         )?);
-        for artifact in &output.required_artifacts {
-            store.record_artifact_evidence(artifact.clone())?;
-        }
+        let admitted_artifacts = output.required_artifacts.clone();
         let preconditions =
             runner_output_preconditions(node, &attempt_id, &latest_projection, &payloads)?;
         let terminal_request = store::TypedCommitRequest {
@@ -1946,7 +1933,9 @@ impl SerialTypedScheduler {
             required_artifacts: output.required_artifacts,
             preconditions,
         };
-        store.append_typed_run_commit(terminal_request)?;
+        let terminal_commit =
+            store::PreparedTypedCommit::new(terminal_request, admitted_artifacts)?;
+        store.append_prepared_typed_commit(terminal_commit)?;
         Ok(())
     }
 
@@ -2011,8 +2000,9 @@ impl SerialTypedScheduler {
                     required_artifacts: Vec::new(),
                     preconditions,
                 };
+                let start_commit = store::PreparedTypedCommit::new(start_request, Vec::new())?;
                 store
-                    .append_typed_run_commit(start_request)
+                    .append_prepared_typed_commit(start_commit)
                     .await
                     .map_err(async_store_error)?;
                 (attempt_id, attempt_no)
@@ -2064,12 +2054,7 @@ impl SerialTypedScheduler {
             &output.required_artifacts,
             output.staged_retention_refs,
         )?);
-        for artifact in &output.required_artifacts {
-            store
-                .record_artifact_evidence(artifact.clone())
-                .await
-                .map_err(async_store_error)?;
-        }
+        let admitted_artifacts = output.required_artifacts.clone();
         let preconditions =
             runner_output_preconditions(node, &attempt_id, &latest_projection, &payloads)?;
         let terminal_request = store::TypedCommitRequest {
@@ -2083,8 +2068,10 @@ impl SerialTypedScheduler {
             required_artifacts: output.required_artifacts,
             preconditions,
         };
+        let terminal_commit =
+            store::PreparedTypedCommit::new(terminal_request, admitted_artifacts)?;
         store
-            .append_typed_run_commit(terminal_request)
+            .append_prepared_typed_commit(terminal_commit)
             .await
             .map_err(async_store_error)?;
         Ok(())
@@ -2122,7 +2109,8 @@ impl SerialTypedScheduler {
                 ..store::CommitPreconditions::default()
             },
         };
-        store.append_typed_run_commit(request)?;
+        let commit = store::PreparedTypedCommit::new(request, Vec::new())?;
+        store.append_prepared_typed_commit(commit)?;
         Ok(())
     }
 
@@ -2161,8 +2149,9 @@ impl SerialTypedScheduler {
                 ..store::CommitPreconditions::default()
             },
         };
+        let commit = store::PreparedTypedCommit::new(request, Vec::new())?;
         store
-            .append_typed_run_commit(request)
+            .append_prepared_typed_commit(commit)
             .await
             .map_err(async_store_error)?;
         Ok(())
@@ -2198,8 +2187,8 @@ impl SerialTypedScheduler {
                 "retention manifest artifact does not match current run stream".to_owned(),
             ));
         }
-        store.record_artifact_evidence(manifest.evidence.clone())?;
         let manifest_ref = retention_ref_for_artifact(&manifest.evidence);
+        let admitted_artifacts = vec![manifest.evidence.clone()];
         let request = store::TypedCommitRequest {
             run_id: run_id.clone(),
             expected_next_seq: store.expected_next_seq(run_id),
@@ -2231,7 +2220,8 @@ impl SerialTypedScheduler {
                 ..store::CommitPreconditions::default()
             },
         };
-        Ok(store.append_typed_run_commit(request)?)
+        let commit = store::PreparedTypedCommit::new(request, admitted_artifacts)?;
+        Ok(store.append_prepared_typed_commit(commit)?)
     }
 
     /// Appends a retention-manifest projection to an async durable typed store.
@@ -2266,11 +2256,8 @@ impl SerialTypedScheduler {
                 "retention manifest artifact does not match current run stream".to_owned(),
             ));
         }
-        store
-            .record_artifact_evidence(manifest.evidence.clone())
-            .await
-            .map_err(async_store_error)?;
         let manifest_ref = retention_ref_for_artifact(&manifest.evidence);
+        let admitted_artifacts = vec![manifest.evidence.clone()];
         let request = store::TypedCommitRequest {
             run_id: run_id.clone(),
             expected_next_seq: store
@@ -2305,8 +2292,9 @@ impl SerialTypedScheduler {
                 ..store::CommitPreconditions::default()
             },
         };
+        let commit = store::PreparedTypedCommit::new(request, admitted_artifacts)?;
         store
-            .append_typed_run_commit(request)
+            .append_prepared_typed_commit(commit)
             .await
             .map_err(async_store_error)
     }
@@ -5030,6 +5018,39 @@ fn store_seed_artifact(seed: &events::SeedCellRef) -> store::ArtifactEvidenceRef
     }
 }
 
+fn config_artifact_reference_payloads(
+    spec_hash: &SpecHash,
+    artifacts: &[store::ArtifactEvidenceRef],
+) -> Result<Vec<events::KernelEventPayload>> {
+    artifacts
+        .iter()
+        .map(|artifact| {
+            let schema_id = artifact.schema_id.clone().ok_or_else(|| {
+                RuntimeError::InvalidRunStream(format!(
+                    "config artifact {} is missing schema id",
+                    artifact.artifact_id
+                ))
+            })?;
+            Ok(events::KernelEventPayload::ArtifactReferenced(
+                events::ArtifactReferenced {
+                    spec_hash: spec_hash.clone(),
+                    node_id: None,
+                    attempt_id: None,
+                    artifact_ref: events::ArtifactEvidenceRef {
+                        artifact_id: artifact.artifact_id.clone(),
+                        role: artifact.artifact_role,
+                        schema_id,
+                        semantic_type_id: artifact.semantic_type_id.clone(),
+                        content_digest: artifact.digest.clone(),
+                        byte_len: artifact.byte_len,
+                        media_type: artifact.media_type.clone(),
+                    },
+                },
+            ))
+        })
+        .collect()
+}
+
 fn retention_ref_for_artifact(artifact: &store::ArtifactEvidenceRef) -> events::RetentionRef {
     events::RetentionRef {
         artifact_id: artifact.artifact_id.clone(),
@@ -5079,6 +5100,24 @@ mod tests {
     const D7: DigestBytes = DigestBytes::from_array([0x17; 32]);
     const D8: DigestBytes = DigestBytes::from_array([0x18; 32]);
     const D9: DigestBytes = DigestBytes::from_array([0x19; 32]);
+
+    trait TestPreparedCommitExt {
+        fn append_prepared_commit(
+            &mut self,
+            request: store::TypedCommitRequest,
+        ) -> store::Result<store::CommitOutcome>;
+    }
+
+    impl TestPreparedCommitExt for store::InMemoryTypedRunStore {
+        fn append_prepared_commit(
+            &mut self,
+            request: store::TypedCommitRequest,
+        ) -> store::Result<store::CommitOutcome> {
+            let admitted_artifacts = request.required_artifacts.clone();
+            let commit = store::PreparedTypedCommit::new(request, admitted_artifacts)?;
+            self.append_prepared_typed_commit(commit)
+        }
+    }
 
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
     #[mfm(
@@ -5624,7 +5663,7 @@ mod tests {
             )
             .expect("start run");
         store
-            .append_typed_run_commit(store::TypedCommitRequest {
+            .append_prepared_commit(store::TypedCommitRequest {
                 run_id: fixture.run_id.clone(),
                 expected_next_seq: store.expected_next_seq(&fixture.run_id),
                 commit_key: store::CommitKey::new("forged-complete-without-public-output")
@@ -5814,21 +5853,19 @@ mod tests {
         );
         let artifact_id = artifact(0xfa);
         let artifact_digest = content(0xfb);
+        let forged_artifact = store::ArtifactEvidenceRef {
+            artifact_id: artifact_id.clone(),
+            digest: artifact_digest.clone(),
+            byte_len: 10,
+            media_type: spec::MediaType::new("application/json").expect("media"),
+            schema_id: Some(certified_cell.schema_id.clone()),
+            semantic_type_id: Some(certified_cell.semantic_type_id.clone()),
+            producer_node_id: Some(forged_node.node_id.clone()),
+            producer_seed_id: None,
+            artifact_role: events::ArtifactRole::StateOutput,
+        };
         store
-            .record_artifact_evidence(store::ArtifactEvidenceRef {
-                artifact_id: artifact_id.clone(),
-                digest: artifact_digest.clone(),
-                byte_len: 10,
-                media_type: spec::MediaType::new("application/json").expect("media"),
-                schema_id: Some(certified_cell.schema_id.clone()),
-                semantic_type_id: Some(certified_cell.semantic_type_id.clone()),
-                producer_node_id: Some(forged_node.node_id.clone()),
-                producer_seed_id: None,
-                artifact_role: events::ArtifactRole::StateOutput,
-            })
-            .expect("record forged artifact");
-        store
-            .append_typed_run_commit(store::TypedCommitRequest {
+            .append_prepared_commit(store::TypedCommitRequest {
                 run_id: fixture.run_id.clone(),
                 expected_next_seq: store.expected_next_seq(&fixture.run_id),
                 commit_key: store::CommitKey::new("forged-attempt-start").expect("commit key"),
@@ -5850,7 +5887,7 @@ mod tests {
             })
             .expect("append forged attempt start");
         store
-            .append_typed_run_commit(store::TypedCommitRequest {
+            .append_prepared_commit(store::TypedCommitRequest {
                 run_id: fixture.run_id.clone(),
                 expected_next_seq: store.expected_next_seq(&fixture.run_id),
                 commit_key: store::CommitKey::new("forged-terminal").expect("commit key"),
@@ -5878,7 +5915,7 @@ mod tests {
                         },
                     ),
                 ],
-                required_artifacts: Vec::new(),
+                required_artifacts: vec![forged_artifact],
                 preconditions: store::CommitPreconditions {
                     required_run_state: store::RequiredRunState::NotCompleted,
                     ..store::CommitPreconditions::default()
@@ -5918,21 +5955,19 @@ mod tests {
         let fact_artifact = artifact(0xd1);
         let fact_digest = content(0xd2);
         let fact_schema = node.config_ref.schema_id.clone();
-        store
-            .record_artifact_evidence(store::ArtifactEvidenceRef {
-                artifact_id: fact_artifact.clone(),
-                digest: fact_digest.clone(),
-                byte_len: 10,
-                media_type: spec::MediaType::new("application/json").expect("media"),
-                schema_id: Some(fact_schema.clone()),
-                semantic_type_id: None,
-                producer_node_id: Some(node.node_id.clone()),
-                producer_seed_id: None,
-                artifact_role: events::ArtifactRole::FactResponse,
-            })
-            .expect("record fact artifact");
+        let fact_evidence = store::ArtifactEvidenceRef {
+            artifact_id: fact_artifact.clone(),
+            digest: fact_digest.clone(),
+            byte_len: 10,
+            media_type: spec::MediaType::new("application/json").expect("media"),
+            schema_id: Some(fact_schema.clone()),
+            semantic_type_id: None,
+            producer_node_id: Some(node.node_id.clone()),
+            producer_seed_id: None,
+            artifact_role: events::ArtifactRole::FactResponse,
+        };
         assert!(store
-            .append_typed_run_commit(store::TypedCommitRequest {
+            .append_prepared_commit(store::TypedCommitRequest {
                 run_id: fixture.run_id.clone(),
                 expected_next_seq: store.expected_next_seq(&fixture.run_id),
                 commit_key: store::CommitKey::new("forged-fact").expect("commit key"),
@@ -5956,7 +5991,7 @@ mod tests {
                         artifact_id: fact_artifact,
                     },
                 )],
-                required_artifacts: Vec::new(),
+                required_artifacts: vec![fact_evidence],
                 preconditions: store::CommitPreconditions {
                     required_run_state: store::RequiredRunState::NotCompleted,
                     ..store::CommitPreconditions::default()
@@ -6000,19 +6035,17 @@ mod tests {
             spec::CellProducer::Node(node_id) => Some(node_id.clone()),
             spec::CellProducer::Seed(_) => None,
         };
-        store
-            .record_artifact_evidence(store::ArtifactEvidenceRef {
-                artifact_id: source_artifact.clone(),
-                digest: source_digest.clone(),
-                byte_len: 10,
-                media_type: spec::MediaType::new("application/json").expect("media"),
-                schema_id: Some(public_cell.schema_id.clone()),
-                semantic_type_id: Some(public_cell.semantic_type_id.clone()),
-                producer_node_id,
-                producer_seed_id: None,
-                artifact_role: events::ArtifactRole::StateOutput,
-            })
-            .expect("record source artifact");
+        let source_evidence = store::ArtifactEvidenceRef {
+            artifact_id: source_artifact.clone(),
+            digest: source_digest.clone(),
+            byte_len: 10,
+            media_type: spec::MediaType::new("application/json").expect("media"),
+            schema_id: Some(public_cell.schema_id.clone()),
+            semantic_type_id: Some(public_cell.semantic_type_id.clone()),
+            producer_node_id,
+            producer_seed_id: None,
+            artifact_role: events::ArtifactRole::StateOutput,
+        };
         let forged_attempt = append_attempt_start(&mut store, &fixture, &non_render_node, 1);
         let output_cell = fixture
             .runtime_spec
@@ -6021,21 +6054,19 @@ mod tests {
             .clone();
         let receipt_artifact = artifact(0xe3);
         let receipt_digest = content(0xe4);
+        let receipt_evidence = store::ArtifactEvidenceRef {
+            artifact_id: receipt_artifact.clone(),
+            digest: receipt_digest.clone(),
+            byte_len: 10,
+            media_type: spec::MediaType::new("application/json").expect("media"),
+            schema_id: Some(output_cell.schema_id.clone()),
+            semantic_type_id: Some(output_cell.semantic_type_id.clone()),
+            producer_node_id: Some(non_render_node.node_id.clone()),
+            producer_seed_id: None,
+            artifact_role: events::ArtifactRole::StateOutput,
+        };
         store
-            .record_artifact_evidence(store::ArtifactEvidenceRef {
-                artifact_id: receipt_artifact.clone(),
-                digest: receipt_digest.clone(),
-                byte_len: 10,
-                media_type: spec::MediaType::new("application/json").expect("media"),
-                schema_id: Some(output_cell.schema_id.clone()),
-                semantic_type_id: Some(output_cell.semantic_type_id.clone()),
-                producer_node_id: Some(non_render_node.node_id.clone()),
-                producer_seed_id: None,
-                artifact_role: events::ArtifactRole::StateOutput,
-            })
-            .expect("record forged receipt artifact");
-        store
-            .append_typed_run_commit(store::TypedCommitRequest {
+            .append_prepared_commit(store::TypedCommitRequest {
                 run_id: fixture.run_id.clone(),
                 expected_next_seq: store.expected_next_seq(&fixture.run_id),
                 commit_key: store::CommitKey::new("forged-public-output").expect("commit key"),
@@ -6103,7 +6134,7 @@ mod tests {
                         },
                     ),
                 ],
-                required_artifacts: Vec::new(),
+                required_artifacts: vec![source_evidence, receipt_evidence],
                 preconditions: store::CommitPreconditions {
                     required_run_state: store::RequiredRunState::NotCompleted,
                     required_present_logical_keys: vec![store::LogicalEventKey::new(format!(
@@ -6161,19 +6192,17 @@ mod tests {
         let bad_receipt_digest = content(0xf2);
         let bad_receipt_artifact =
             ArtifactId::from_digest(bad_receipt_digest.algorithm(), *bad_receipt_digest.digest());
-        store
-            .record_artifact_evidence(store::ArtifactEvidenceRef {
-                artifact_id: bad_receipt_artifact.clone(),
-                digest: bad_receipt_digest.clone(),
-                byte_len: 17,
-                media_type: spec::MediaType::new("application/json").expect("media"),
-                schema_id: Some(output_cell.schema_id.clone()),
-                semantic_type_id: Some(output_cell.semantic_type_id.clone()),
-                producer_node_id: Some(render_node.node_id.clone()),
-                producer_seed_id: None,
-                artifact_role: events::ArtifactRole::StateOutput,
-            })
-            .expect("record bad receipt");
+        let bad_receipt_evidence = store::ArtifactEvidenceRef {
+            artifact_id: bad_receipt_artifact.clone(),
+            digest: bad_receipt_digest.clone(),
+            byte_len: 17,
+            media_type: spec::MediaType::new("application/json").expect("media"),
+            schema_id: Some(output_cell.schema_id.clone()),
+            semantic_type_id: Some(output_cell.semantic_type_id.clone()),
+            producer_node_id: Some(render_node.node_id.clone()),
+            producer_seed_id: None,
+            artifact_role: events::ArtifactRole::StateOutput,
+        };
         let public_cells = fixture
             .runtime_spec
             .spec()
@@ -6209,7 +6238,7 @@ mod tests {
             panic!("expected render node");
         };
         store
-            .append_typed_run_commit(store::TypedCommitRequest {
+            .append_prepared_commit(store::TypedCommitRequest {
                 run_id: fixture.run_id.clone(),
                 expected_next_seq: store.expected_next_seq(&fixture.run_id),
                 commit_key: store::CommitKey::new("forged-public-output-rendered-digest")
@@ -6255,7 +6284,7 @@ mod tests {
                         },
                     ),
                 ],
-                required_artifacts: Vec::new(),
+                required_artifacts: vec![bad_receipt_evidence],
                 preconditions: store::CommitPreconditions {
                     required_run_state: store::RequiredRunState::NotCompleted,
                     required_present_logical_keys: vec![store::LogicalEventKey::new(format!(
@@ -6752,18 +6781,6 @@ mod tests {
             )
             .expect("start run");
         let attempt_id = append_attempt_start(&mut store, &fixture, node, 1);
-        let descriptor = fixture
-            .runtime_spec
-            .state_descriptor_for_node(node)
-            .expect("descriptor");
-        store
-            .record_artifact_evidence(state_output_artifact(
-                node,
-                descriptor,
-                output_artifact,
-                output_digest,
-            ))
-            .expect("stage managed artifact");
         assert!(store
             .projection_snapshot()
             .cell_terminal(&fixture.cell_a)
@@ -7420,18 +7437,9 @@ mod tests {
     }
 
     impl store::TypedRunEventStore for ReadOnlyCorruptStore {
-        fn record_artifact_evidence(
+        fn append_prepared_typed_commit(
             &mut self,
-            _evidence: store::ArtifactEvidenceRef,
-        ) -> store::Result<()> {
-            Err(store::StoreError::Identity(
-                "corrupt test store is read-only".to_owned(),
-            ))
-        }
-
-        fn append_typed_run_commit(
-            &mut self,
-            _request: store::TypedCommitRequest,
+            _commit: store::PreparedTypedCommit,
         ) -> store::Result<store::CommitOutcome> {
             Err(store::StoreError::Identity(
                 "corrupt test store is read-only".to_owned(),
@@ -7631,7 +7639,7 @@ mod tests {
         )
         .expect("attempt id");
         store
-            .append_typed_run_commit(store::TypedCommitRequest {
+            .append_prepared_commit(store::TypedCommitRequest {
                 run_id: fixture.run_id.clone(),
                 expected_next_seq: store.expected_next_seq(&fixture.run_id),
                 commit_key: store::CommitKey::new(format!(
@@ -7685,10 +7693,7 @@ mod tests {
             artifact_role: events::ArtifactRole::FactResponse,
         };
         store
-            .record_artifact_evidence(evidence.clone())
-            .expect("record fact artifact");
-        store
-            .append_typed_run_commit(store::TypedCommitRequest {
+            .append_prepared_commit(store::TypedCommitRequest {
                 run_id: fixture.run_id.clone(),
                 expected_next_seq: store.expected_next_seq(&fixture.run_id),
                 commit_key: store::CommitKey::new(format!(
@@ -7746,10 +7751,7 @@ mod tests {
         let evidence =
             state_output_artifact(node, descriptor, artifact_id.clone(), output_digest.clone());
         store
-            .record_artifact_evidence(evidence.clone())
-            .expect("record output artifact");
-        store
-            .append_typed_run_commit(store::TypedCommitRequest {
+            .append_prepared_commit(store::TypedCommitRequest {
                 run_id: fixture.run_id.clone(),
                 expected_next_seq: store.expected_next_seq(&fixture.run_id),
                 commit_key: store::CommitKey::new(format!(
@@ -7810,7 +7812,7 @@ mod tests {
         };
         let error = public_output_error();
         store
-            .append_typed_run_commit(store::TypedCommitRequest {
+            .append_prepared_commit(store::TypedCommitRequest {
                 run_id: fixture.run_id.clone(),
                 expected_next_seq: store.expected_next_seq(&fixture.run_id),
                 commit_key: store::CommitKey::new(format!(
@@ -7880,10 +7882,7 @@ mod tests {
             artifact_role: events::ArtifactRole::NotSubmittedProof,
         };
         store
-            .record_artifact_evidence(evidence.clone())
-            .expect("record proof artifact");
-        store
-            .append_typed_run_commit(store::TypedCommitRequest {
+            .append_prepared_commit(store::TypedCommitRequest {
                 run_id: fixture.run_id.clone(),
                 expected_next_seq: store.expected_next_seq(&fixture.run_id),
                 commit_key: store::CommitKey::new(format!(

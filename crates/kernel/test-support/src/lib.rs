@@ -1119,34 +1119,30 @@ fn duplicate_submit_rejected(run: &mut ReferenceRun) -> Result<bool, String> {
         producer_seed_id: None,
         artifact_role: events::ArtifactRole::Submission,
     };
-    run.store
-        .record_artifact_evidence(evidence.clone())
-        .map_err(display_error)?;
-    let result = run
-        .store
-        .append_typed_run_commit(store::TypedCommitRequest {
-            run_id: run.fixture.run_id.clone(),
-            expected_next_seq: run.store.expected_next_seq(&run.fixture.run_id),
-            commit_key: store::CommitKey::new("duplicate-submit-conflict")
-                .map_err(display_error)?,
-            payloads: vec![events::KernelEventPayload::SideEffectSubmissionObserved(
-                events::side_effect::SubmissionObserved {
-                    spec_hash: run.fixture.runtime_spec.spec_hash().clone(),
-                    node_id: submission.node_id,
-                    attempt_id: submission.attempt_id,
-                    ledger_key: submission.ledger_key,
-                    invocation_epoch: submission.invocation_epoch,
-                    submission_schema_id: submission.submission_schema_id,
-                    submission_hash: duplicate_digest,
-                    submission_artifact_id: duplicate_artifact,
-                },
-            )],
-            required_artifacts: vec![evidence],
-            preconditions: store::CommitPreconditions {
-                required_run_state: store::RequiredRunState::Any,
-                ..store::CommitPreconditions::default()
+    let request = store::TypedCommitRequest {
+        run_id: run.fixture.run_id.clone(),
+        expected_next_seq: run.store.expected_next_seq(&run.fixture.run_id),
+        commit_key: store::CommitKey::new("duplicate-submit-conflict").map_err(display_error)?,
+        payloads: vec![events::KernelEventPayload::SideEffectSubmissionObserved(
+            events::side_effect::SubmissionObserved {
+                spec_hash: run.fixture.runtime_spec.spec_hash().clone(),
+                node_id: submission.node_id,
+                attempt_id: submission.attempt_id,
+                ledger_key: submission.ledger_key,
+                invocation_epoch: submission.invocation_epoch,
+                submission_schema_id: submission.submission_schema_id,
+                submission_hash: duplicate_digest,
+                submission_artifact_id: duplicate_artifact,
             },
-        });
+        )],
+        required_artifacts: vec![evidence.clone()],
+        preconditions: store::CommitPreconditions {
+            required_run_state: store::RequiredRunState::Any,
+            ..store::CommitPreconditions::default()
+        },
+    };
+    let result = store::PreparedTypedCommit::new(request, vec![evidence])
+        .and_then(|commit| run.store.append_prepared_typed_commit(commit));
     Ok(matches!(
         result,
         Err(store::StoreError::LogicalKeyConflict { .. })
@@ -1608,35 +1604,37 @@ fn append_attempt_started(
         &node.node_id,
         attempt_no,
     )?;
-    store
-        .append_typed_run_commit(store::TypedCommitRequest {
-            run_id: fixture.run_id.clone(),
-            expected_next_seq: store.expected_next_seq(&fixture.run_id),
-            commit_key: store::CommitKey::new(format!(
-                "drift-attempt-start:{}:{}",
-                node.node_id, attempt_id
-            ))
-            .map_err(display_error)?,
-            payloads: vec![events::KernelEventPayload::StateAttemptStarted(
-                events::StateAttemptStarted {
-                    spec_hash: fixture.runtime_spec.spec_hash().clone(),
-                    node_id: node.node_id.clone(),
-                    attempt_id: attempt_id.clone(),
-                    attempt_no,
-                    state_kind: node.state_kind.clone(),
-                    state_version: node.state_version.clone(),
-                },
-            )],
-            required_artifacts: Vec::new(),
-            preconditions: store::CommitPreconditions {
-                required_run_state: store::RequiredRunState::NotCompleted,
-                required_cell_states: vec![store::CellStatePrecondition {
-                    cell_id: node.output_cell.clone(),
-                    required: store::RequiredCellState::Absent,
-                }],
-                ..store::CommitPreconditions::default()
+    let request = store::TypedCommitRequest {
+        run_id: fixture.run_id.clone(),
+        expected_next_seq: store.expected_next_seq(&fixture.run_id),
+        commit_key: store::CommitKey::new(format!(
+            "drift-attempt-start:{}:{}",
+            node.node_id, attempt_id
+        ))
+        .map_err(display_error)?,
+        payloads: vec![events::KernelEventPayload::StateAttemptStarted(
+            events::StateAttemptStarted {
+                spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                node_id: node.node_id.clone(),
+                attempt_id: attempt_id.clone(),
+                attempt_no,
+                state_kind: node.state_kind.clone(),
+                state_version: node.state_version.clone(),
             },
-        })
+        )],
+        required_artifacts: Vec::new(),
+        preconditions: store::CommitPreconditions {
+            required_run_state: store::RequiredRunState::NotCompleted,
+            required_cell_states: vec![store::CellStatePrecondition {
+                cell_id: node.output_cell.clone(),
+                required: store::RequiredCellState::Absent,
+            }],
+            ..store::CommitPreconditions::default()
+        },
+    };
+    let commit = store::PreparedTypedCommit::new(request, Vec::new()).map_err(display_error)?;
+    store
+        .append_prepared_typed_commit(commit)
         .map_err(display_error)?;
     Ok(attempt_id)
 }

@@ -10,8 +10,9 @@ use mfm_ids::{
 };
 use mfm_spec::v1::{CanonicalizerIdentity, MediaType};
 use mfm_store::v1::{
-    ArtifactEvidenceRef, CommitKey, CommitPreconditions, InMemoryTypedRunStore, RequiredRunState,
-    StreamSeq, TypedCommitRequest, TypedRunEventStore, VerifiedRetentionProjectionSet,
+    ArtifactEvidenceRef, CommitKey, CommitPreconditions, InMemoryTypedRunStore,
+    PreparedTypedCommit, RequiredRunState, StreamSeq, TypedCommitRequest, TypedRunEventStore,
+    VerifiedRetentionProjectionSet,
 };
 use std::path::{Path, PathBuf};
 
@@ -155,72 +156,71 @@ fn verified_retention_projection_for(
         artifact_role: ArtifactRole::TypedSpecCertificate,
     };
     let mut run_store = InMemoryTypedRunStore::new();
-    run_store
-        .record_artifact_evidence(spec_evidence.clone())
-        .expect("record spec artifact");
-    run_store
-        .record_artifact_evidence(certificate_evidence.clone())
-        .expect("record certificate artifact");
-    run_store
-        .record_artifact_evidence(evidence.clone())
-        .expect("record retained artifact");
-    run_store
-        .append_typed_run_commit(TypedCommitRequest {
+    let run_start_request = TypedCommitRequest {
+        run_id: run_id.clone(),
+        expected_next_seq: StreamSeq::FIRST,
+        commit_key: CommitKey::new("run-start").expect("commit key"),
+        payloads: vec![KernelEventPayload::RunStarted(mfm_events::v1::RunStarted {
             run_id: run_id.clone(),
-            expected_next_seq: StreamSeq::FIRST,
-            commit_key: CommitKey::new("run-start").expect("commit key"),
-            payloads: vec![KernelEventPayload::RunStarted(mfm_events::v1::RunStarted {
-                run_id: run_id.clone(),
-                spec_hash: spec_hash.clone(),
-                spec_artifact_id,
-                certificate_artifact_id: certificate_evidence.artifact_id.clone(),
-                certificate_artifact_digest: certificate_evidence.digest.clone(),
-                certificate_media_type: certificate_evidence.media_type.clone(),
-                spec_media_type: spec_evidence.media_type.clone(),
-                spec_version: SpecVersion::new("mfm.typed.execution_spec.v1")
-                    .expect("spec version"),
-                lowering_version: LoweringVersion::new("mfm.typed.lowering.v1")
-                    .expect("lowering version"),
-                public_output_schema_id: schema_id("mfm.test.public_output", 82),
-                descriptor_identities: Vec::new(),
-                runner_executables: Vec::new(),
-                adapter_executables: Vec::new(),
-                canonicalizer_identity: CanonicalizerIdentity::new("mfm.jcs.v1")
-                    .expect("canonicalizer"),
-                framework_version: FrameworkVersion::new("mfm.test.1").expect("framework version"),
-                source_revision: SourceRevision::new("test-revision").expect("source revision"),
-                seed_cells: Vec::new(),
-            })],
-            required_artifacts: vec![spec_evidence, certificate_evidence],
-            preconditions: CommitPreconditions {
-                required_run_state: RequiredRunState::Absent,
-                ..CommitPreconditions::default()
-            },
-        })
+            spec_hash: spec_hash.clone(),
+            spec_artifact_id,
+            certificate_artifact_id: certificate_evidence.artifact_id.clone(),
+            certificate_artifact_digest: certificate_evidence.digest.clone(),
+            certificate_media_type: certificate_evidence.media_type.clone(),
+            spec_media_type: spec_evidence.media_type.clone(),
+            spec_version: SpecVersion::new("mfm.typed.execution_spec.v1").expect("spec version"),
+            lowering_version: LoweringVersion::new("mfm.typed.lowering.v1")
+                .expect("lowering version"),
+            public_output_schema_id: schema_id("mfm.test.public_output", 82),
+            descriptor_identities: Vec::new(),
+            runner_executables: Vec::new(),
+            adapter_executables: Vec::new(),
+            canonicalizer_identity: CanonicalizerIdentity::new("mfm.jcs.v1")
+                .expect("canonicalizer"),
+            framework_version: FrameworkVersion::new("mfm.test.1").expect("framework version"),
+            source_revision: SourceRevision::new("test-revision").expect("source revision"),
+            seed_cells: Vec::new(),
+        })],
+        required_artifacts: vec![spec_evidence, certificate_evidence],
+        preconditions: CommitPreconditions {
+            required_run_state: RequiredRunState::Absent,
+            ..CommitPreconditions::default()
+        },
+    };
+    let run_start_artifacts = run_start_request.required_artifacts.clone();
+    run_store
+        .append_prepared_typed_commit(
+            PreparedTypedCommit::new(run_start_request, run_start_artifacts)
+                .expect("prepare run start"),
+        )
         .expect("append run start");
-    run_store
-        .append_typed_run_commit(TypedCommitRequest {
-            run_id: run_id.clone(),
-            expected_next_seq: run_store.expected_next_seq(&run_id),
-            commit_key: CommitKey::new("retain-artifact").expect("commit key"),
-            payloads: vec![KernelEventPayload::RetentionRefsAppended(
-                mfm_events::v1::RetentionRefsAppended {
-                    run_id: run_id.clone(),
-                    spec_hash,
-                    refs: vec![mfm_events::v1::RetentionRef {
-                        artifact_id: evidence.artifact_id.clone(),
-                        role: evidence.artifact_role,
-                        content_digest: evidence.digest.clone(),
-                    }],
-                    reason: RetentionReason::RuntimeEvidence,
-                },
-            )],
-            required_artifacts: Vec::new(),
-            preconditions: CommitPreconditions {
-                required_run_state: RequiredRunState::Started,
-                ..CommitPreconditions::default()
+    let retention_request = TypedCommitRequest {
+        run_id: run_id.clone(),
+        expected_next_seq: run_store.expected_next_seq(&run_id),
+        commit_key: CommitKey::new("retain-artifact").expect("commit key"),
+        payloads: vec![KernelEventPayload::RetentionRefsAppended(
+            mfm_events::v1::RetentionRefsAppended {
+                run_id: run_id.clone(),
+                spec_hash,
+                refs: vec![mfm_events::v1::RetentionRef {
+                    artifact_id: evidence.artifact_id.clone(),
+                    role: evidence.artifact_role,
+                    content_digest: evidence.digest.clone(),
+                }],
+                reason: RetentionReason::RuntimeEvidence,
             },
-        })
+        )],
+        required_artifacts: Vec::new(),
+        preconditions: CommitPreconditions {
+            required_run_state: RequiredRunState::Started,
+            ..CommitPreconditions::default()
+        },
+    };
+    run_store
+        .append_prepared_typed_commit(
+            PreparedTypedCommit::new(retention_request, vec![evidence.clone()])
+                .expect("prepare retention refs"),
+        )
         .expect("append retention refs");
     let stream = run_store.load_run_stream(&run_id);
     VerifiedRetentionProjectionSet::from_run_streams(vec![(run_id, stream.as_slice())])

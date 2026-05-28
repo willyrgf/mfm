@@ -3169,30 +3169,29 @@ mod tests {
                 }
             }
             let required_artifacts = required_artifacts_for_payloads(artifacts, &payloads).await;
-            for evidence in &required_artifacts {
-                corrupt_store
-                    .record_artifact_evidence(evidence.clone())
-                    .expect("record required artifact");
-            }
+            let admitted_artifacts = required_artifacts.clone();
             let contains_run_started = payloads
                 .iter()
                 .any(|payload| matches!(payload, events::KernelEventPayload::RunStarted(_)));
-            corrupt_store
-                .append_typed_run_commit(store::TypedCommitRequest {
-                    run_id: run_id.clone(),
-                    expected_next_seq: corrupt_store.expected_next_seq(&run_id),
-                    commit_key: group[0].commit_key().clone(),
-                    payloads,
-                    required_artifacts,
-                    preconditions: store::CommitPreconditions {
-                        required_run_state: if contains_run_started {
-                            store::RequiredRunState::Absent
-                        } else {
-                            store::RequiredRunState::NotCompleted
-                        },
-                        ..store::CommitPreconditions::default()
+            let request = store::TypedCommitRequest {
+                run_id: run_id.clone(),
+                expected_next_seq: corrupt_store.expected_next_seq(&run_id),
+                commit_key: group[0].commit_key().clone(),
+                payloads,
+                required_artifacts,
+                preconditions: store::CommitPreconditions {
+                    required_run_state: if contains_run_started {
+                        store::RequiredRunState::Absent
+                    } else {
+                        store::RequiredRunState::NotCompleted
                     },
-                })
+                    ..store::CommitPreconditions::default()
+                },
+            };
+            let commit = store::PreparedTypedCommit::new(request, admitted_artifacts)
+                .expect("prepare corrupt-history test commit");
+            corrupt_store
+                .append_prepared_typed_commit(commit)
                 .expect("append corrupt-history test commit");
             if contains_public_output {
                 break;
@@ -3268,18 +3267,9 @@ mod tests {
     impl store::AsyncTypedRunEventStore for StaticAsyncStore {
         type Error = store::StoreError;
 
-        fn record_artifact_evidence<'a>(
+        fn append_prepared_typed_commit<'a>(
             &'a self,
-            _evidence: store::ArtifactEvidenceRef,
-        ) -> store::AsyncStoreFuture<'a, (), Self::Error> {
-            Box::pin(std::future::ready(Err(store::StoreError::Event(
-                "static test store is read-only".to_owned(),
-            ))))
-        }
-
-        fn append_typed_run_commit<'a>(
-            &'a self,
-            _request: store::TypedCommitRequest,
+            _commit: store::PreparedTypedCommit,
         ) -> store::AsyncStoreFuture<'a, store::CommitOutcome, Self::Error> {
             Box::pin(std::future::ready(Err(store::StoreError::Event(
                 "static test store is read-only".to_owned(),
@@ -3312,27 +3302,15 @@ mod tests {
     impl store::AsyncTypedRunEventStore for AsyncInMemoryStore {
         type Error = store::StoreError;
 
-        fn record_artifact_evidence<'a>(
+        fn append_prepared_typed_commit<'a>(
             &'a self,
-            evidence: store::ArtifactEvidenceRef,
-        ) -> store::AsyncStoreFuture<'a, (), Self::Error> {
-            let result = self
-                .0
-                .lock()
-                .expect("store lock")
-                .record_artifact_evidence(evidence);
-            Box::pin(std::future::ready(result))
-        }
-
-        fn append_typed_run_commit<'a>(
-            &'a self,
-            request: store::TypedCommitRequest,
+            commit: store::PreparedTypedCommit,
         ) -> store::AsyncStoreFuture<'a, store::CommitOutcome, Self::Error> {
             let result = self
                 .0
                 .lock()
                 .expect("store lock")
-                .append_typed_run_commit(request);
+                .append_prepared_typed_commit(commit);
             Box::pin(std::future::ready(result))
         }
 

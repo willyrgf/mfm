@@ -117,6 +117,12 @@ pub mod v1 {
             /// Mismatched field label.
             field: &'static str,
         },
+        /// A prepared commit tried to admit artifact evidence that no event in the commit
+        /// references.
+        UnreferencedArtifactEvidence {
+            /// Unreferenced artifact id.
+            artifact_id: ArtifactId,
+        },
         /// A logical key that must be unique already exists.
         DuplicateLogicalKey {
             /// Duplicate logical key.
@@ -206,6 +212,12 @@ pub mod v1 {
                     write!(
                         f,
                         "artifact evidence mismatch for {artifact_id} field {field}"
+                    )
+                }
+                Self::UnreferencedArtifactEvidence { artifact_id } => {
+                    write!(
+                        f,
+                        "prepared commit admitted unreferenced artifact evidence {artifact_id}"
                     )
                 }
                 Self::DuplicateLogicalKey { logical_key } => {
@@ -730,6 +742,76 @@ pub mod v1 {
         pub required_artifacts: Vec<ArtifactEvidenceRef>,
         /// Atomic commit preconditions.
         pub preconditions: CommitPreconditions,
+    }
+
+    /// Runtime-prepared atomic store mutation for typed run streams.
+    ///
+    /// A prepared commit carries both the event payload batch and the artifact evidence that must
+    /// become run authority with that batch. Stores admit the artifact evidence and append the
+    /// referencing events in one atomic mutation.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct PreparedTypedCommit {
+        request: TypedCommitRequest,
+        admitted_artifacts: Vec<ArtifactEvidenceRef>,
+    }
+
+    impl PreparedTypedCommit {
+        /// Prepares an atomic typed commit from a validated payload request and artifact evidence.
+        ///
+        /// Every admitted artifact must be referenced by the commit request. The store still owns
+        /// final validation against existing artifact evidence, logical keys, preconditions, and
+        /// projection transitions.
+        pub fn new(
+            request: TypedCommitRequest,
+            admitted_artifacts: Vec<ArtifactEvidenceRef>,
+        ) -> Result<Self> {
+            let referenced_artifacts = referenced_artifact_ids(&request);
+            for evidence in &request.required_artifacts {
+                if !referenced_artifacts.contains(&evidence.artifact_id) {
+                    return Err(StoreError::UnreferencedArtifactEvidence {
+                        artifact_id: evidence.artifact_id.clone(),
+                    });
+                }
+            }
+            let mut deduped = BTreeMap::<ArtifactId, ArtifactEvidenceRef>::new();
+            for evidence in admitted_artifacts {
+                if !referenced_artifacts.contains(&evidence.artifact_id) {
+                    return Err(StoreError::UnreferencedArtifactEvidence {
+                        artifact_id: evidence.artifact_id,
+                    });
+                }
+                if let Some(existing) = deduped.get(&evidence.artifact_id) {
+                    if existing != &evidence {
+                        return Err(StoreError::ArtifactEvidenceMismatch {
+                            artifact_id: evidence.artifact_id,
+                            field: "artifact",
+                        });
+                    }
+                    continue;
+                }
+                deduped.insert(evidence.artifact_id.clone(), evidence);
+            }
+
+            Ok(Self {
+                request,
+                admitted_artifacts: deduped.into_values().collect(),
+            })
+        }
+
+        /// Returns the typed commit request bound to this prepared mutation.
+        pub fn request(&self) -> &TypedCommitRequest {
+            &self.request
+        }
+
+        /// Returns artifact evidence to admit atomically with the event batch.
+        pub fn admitted_artifacts(&self) -> &[ArtifactEvidenceRef] {
+            &self.admitted_artifacts
+        }
+
+        /// Consumes the prepared commit into owned parts.
+        pub fn into_parts(self) -> (TypedCommitRequest, Vec<ArtifactEvidenceRef>) {
+            (self.request, self.admitted_artifacts)
+        }
     }
 
     /// Batch of events committed atomically by the store.
@@ -1428,12 +1510,12 @@ pub mod v1 {
 
     /// Typed run event store commit contract.
     pub trait TypedRunEventStore: TypedProjectionRead {
-        /// Records artifact evidence before events reference that artifact.
-        fn record_artifact_evidence(&mut self, evidence: ArtifactEvidenceRef) -> Result<()>;
-
-        /// Appends one typed run commit or returns an idempotent previous batch.
-        fn append_typed_run_commit(&mut self, request: TypedCommitRequest)
-            -> Result<CommitOutcome>;
+        /// Atomically admits artifact evidence and appends one typed run commit, or returns an
+        /// idempotent previous batch.
+        fn append_prepared_typed_commit(
+            &mut self,
+            commit: PreparedTypedCommit,
+        ) -> Result<CommitOutcome>;
 
         /// Loads the authoritative run stream.
         fn load_run_stream(&self, run_id: &RunId) -> Vec<KernelEventEnvelope>;
@@ -1451,16 +1533,11 @@ pub mod v1 {
         /// Store-specific error type.
         type Error: fmt::Display + Send + Sync + 'static;
 
-        /// Records artifact evidence before events reference that artifact.
-        fn record_artifact_evidence<'a>(
+        /// Atomically admits artifact evidence and appends one typed run commit, or returns an
+        /// idempotent previous batch.
+        fn append_prepared_typed_commit<'a>(
             &'a self,
-            evidence: ArtifactEvidenceRef,
-        ) -> AsyncStoreFuture<'a, (), Self::Error>;
-
-        /// Appends one typed run commit or returns an idempotent previous batch.
-        fn append_typed_run_commit<'a>(
-            &'a self,
-            request: TypedCommitRequest,
+            commit: PreparedTypedCommit,
         ) -> AsyncStoreFuture<'a, CommitOutcome, Self::Error>;
 
         /// Loads the authoritative run stream.
@@ -1803,6 +1880,27 @@ pub mod v1 {
         base: &TypedCommitBase,
         request: &TypedCommitRequest,
     ) -> Result<StagedTypedCommit> {
+        let fingerprint = commit_fingerprint(request)?;
+        stage_typed_run_commit_with_fingerprint(base, request, fingerprint)
+    }
+
+    /// Validates and stages a prepared typed commit after commit-key idempotency handling.
+    ///
+    /// The returned batch fingerprint covers the full prepared mutation, including the artifact
+    /// evidence admitted atomically with the event payloads.
+    pub fn stage_prepared_typed_run_commit(
+        base: &TypedCommitBase,
+        commit: &PreparedTypedCommit,
+    ) -> Result<StagedTypedCommit> {
+        let fingerprint = prepared_commit_fingerprint(commit)?;
+        stage_typed_run_commit_with_fingerprint(base, commit.request(), fingerprint)
+    }
+
+    fn stage_typed_run_commit_with_fingerprint(
+        base: &TypedCommitBase,
+        request: &TypedCommitRequest,
+        fingerprint: CommitFingerprint,
+    ) -> Result<StagedTypedCommit> {
         if request.expected_next_seq != base.actual_next_seq {
             return Err(StoreError::StaleExpectedNextSeq {
                 expected: request.expected_next_seq,
@@ -1834,7 +1932,6 @@ pub mod v1 {
             }
         }
 
-        let fingerprint = commit_fingerprint(request)?;
         let mut staged_projections = base.projections.clone();
         let mut staged_logical_keys = base.logical_keys.clone();
         let mut staged_unique_payloads = base.unique_logical_payloads.clone();
@@ -1922,11 +2019,31 @@ pub mod v1 {
         request: &TypedCommitRequest,
         committed_seq: StreamSeq,
     ) -> Result<CommittedBatch> {
+        let fingerprint = commit_fingerprint(request)?;
+        build_committed_batch_with_fingerprint(request, committed_seq, fingerprint)
+    }
+
+    /// Builds a store-owned committed batch for an already persisted prepared commit.
+    ///
+    /// Durable stores use this after a same-fingerprint prepared commit-key hit so the idempotent
+    /// result can return the original sequence even when the caller's `expected_next_seq` is stale.
+    pub fn build_prepared_committed_batch(
+        commit: &PreparedTypedCommit,
+        committed_seq: StreamSeq,
+    ) -> Result<CommittedBatch> {
+        let fingerprint = prepared_commit_fingerprint(commit)?;
+        build_committed_batch_with_fingerprint(commit.request(), committed_seq, fingerprint)
+    }
+
+    fn build_committed_batch_with_fingerprint(
+        request: &TypedCommitRequest,
+        committed_seq: StreamSeq,
+        fingerprint: CommitFingerprint,
+    ) -> Result<CommittedBatch> {
         validate_payload_run_and_spec(&request.run_id, &request.payloads)?;
         validate_terminal_attempt_cell_pairs(&request.payloads)?;
         validate_retention_manifest_pairs(&request.payloads)?;
 
-        let fingerprint = commit_fingerprint(request)?;
         let mut events = Vec::with_capacity(request.payloads.len());
         for (index, payload) in request.payloads.iter().cloned().enumerate() {
             let canonical_payload = payload_canonical_json(&payload)?;
@@ -1973,26 +2090,12 @@ pub mod v1 {
     }
 
     impl TypedRunEventStore for InMemoryTypedRunStore {
-        fn record_artifact_evidence(&mut self, evidence: ArtifactEvidenceRef) -> Result<()> {
-            if let Some(existing) = self.artifacts.get(&evidence.artifact_id) {
-                if existing != &evidence {
-                    return Err(StoreError::ArtifactEvidenceMismatch {
-                        artifact_id: evidence.artifact_id,
-                        field: "artifact",
-                    });
-                }
-                return Ok(());
-            }
-            self.artifacts
-                .insert(evidence.artifact_id.clone(), evidence);
-            Ok(())
-        }
-
-        fn append_typed_run_commit(
+        fn append_prepared_typed_commit(
             &mut self,
-            request: TypedCommitRequest,
+            commit: PreparedTypedCommit,
         ) -> Result<CommitOutcome> {
-            let fingerprint = commit_fingerprint(&request)?;
+            let request = commit.request();
+            let fingerprint = prepared_commit_fingerprint(&commit)?;
 
             if let Some(record) = self
                 .commit_keys
@@ -2002,18 +2105,20 @@ pub mod v1 {
                     return Ok(CommitOutcome::Idempotent(record.batch.clone()));
                 }
                 return Err(StoreError::CommitConflict {
-                    commit_key: request.commit_key,
+                    commit_key: request.commit_key.clone(),
                 });
             }
 
+            let mut artifacts = self.artifacts.clone();
+            admit_artifact_evidence(&mut artifacts, commit.admitted_artifacts())?;
             let base = TypedCommitBase {
-                artifacts: self.artifacts.clone(),
+                artifacts,
                 logical_keys: self.logical_keys.clone(),
                 unique_logical_payloads: self.unique_logical_payloads.clone(),
                 projections: self.projections.clone(),
                 actual_next_seq: self.expected_next_seq(&request.run_id),
             };
-            let staged = stage_typed_run_commit(&base, &request)?;
+            let staged = stage_prepared_typed_run_commit(&base, &commit)?;
             let (batch, staged_logical_keys, staged_unique_payloads, staged_projections) =
                 staged.into_parts();
             self.streams
@@ -2021,12 +2126,13 @@ pub mod v1 {
                 .or_default()
                 .push(batch.clone());
             self.commit_keys.insert(
-                (request.run_id, request.commit_key),
+                (request.run_id.clone(), request.commit_key.clone()),
                 CommitKeyRecord {
                     fingerprint,
                     batch: batch.clone(),
                 },
             );
+            self.artifacts = base.artifacts;
             self.logical_keys = staged_logical_keys;
             self.unique_logical_payloads = staged_unique_payloads;
             self.projections = staged_projections;
@@ -2046,6 +2152,25 @@ pub mod v1 {
                 .map(|batch| batch.seq.checked_next().unwrap_or(StreamSeq(u64::MAX)))
                 .unwrap_or(StreamSeq::FIRST)
         }
+    }
+
+    fn admit_artifact_evidence(
+        artifacts: &mut BTreeMap<ArtifactId, ArtifactEvidenceRef>,
+        admitted_artifacts: &[ArtifactEvidenceRef],
+    ) -> Result<()> {
+        for evidence in admitted_artifacts {
+            if let Some(existing) = artifacts.get(&evidence.artifact_id) {
+                if existing != evidence {
+                    return Err(StoreError::ArtifactEvidenceMismatch {
+                        artifact_id: evidence.artifact_id.clone(),
+                        field: "artifact",
+                    });
+                }
+                continue;
+            }
+            artifacts.insert(evidence.artifact_id.clone(), evidence.clone());
+        }
+        Ok(())
     }
 
     fn compare_artifact_field<T: PartialEq>(
@@ -2371,21 +2496,41 @@ pub mod v1 {
     /// The fingerprint intentionally excludes `expected_next_seq`, so idempotent retries can be
     /// recognized before stale sequence checks as required by the store contract.
     pub fn commit_fingerprint(request: &TypedCommitRequest) -> Result<CommitFingerprint> {
-        let mut required_artifacts = request
-            .required_artifacts
-            .iter()
-            .map(store_artifact_json)
-            .collect::<Vec<_>>();
-        required_artifacts.sort_by_key(serde_json::Value::to_string);
-
         let canonical = canonical_json(serde_json::json!({
             "commit_key": request.commit_key.as_str(),
             "payloads": request.payloads.iter().map(payload_json).collect::<Vec<_>>(),
             "preconditions": preconditions_json(&request.preconditions),
-            "required_artifacts": required_artifacts,
+            "required_artifacts": sorted_store_artifacts_json(&request.required_artifacts),
             "run_id": request.run_id.as_str(),
         }))?;
         Ok(CommitFingerprint(canonical.content_digest()))
+    }
+
+    /// Computes the canonical idempotency fingerprint for a prepared typed commit.
+    ///
+    /// The fingerprint intentionally excludes `expected_next_seq`, so idempotent retries can be
+    /// recognized before stale sequence checks as required by the store contract. Unlike
+    /// [`commit_fingerprint`], this covers the artifact evidence admitted atomically with the commit.
+    pub fn prepared_commit_fingerprint(commit: &PreparedTypedCommit) -> Result<CommitFingerprint> {
+        let request = commit.request();
+        let canonical = canonical_json(serde_json::json!({
+            "admitted_artifacts": sorted_store_artifacts_json(commit.admitted_artifacts()),
+            "commit_key": request.commit_key.as_str(),
+            "payloads": request.payloads.iter().map(payload_json).collect::<Vec<_>>(),
+            "preconditions": preconditions_json(&request.preconditions),
+            "required_artifacts": sorted_store_artifacts_json(&request.required_artifacts),
+            "run_id": request.run_id.as_str(),
+        }))?;
+        Ok(CommitFingerprint(canonical.content_digest()))
+    }
+
+    fn sorted_store_artifacts_json(artifacts: &[ArtifactEvidenceRef]) -> Vec<serde_json::Value> {
+        let mut artifacts = artifacts
+            .iter()
+            .map(store_artifact_json)
+            .collect::<Vec<_>>();
+        artifacts.sort_by_key(serde_json::Value::to_string);
+        artifacts
     }
 
     fn derive_event_id(
@@ -2846,6 +2991,16 @@ pub mod v1 {
             | KernelEventPayload::StateAttemptCompleted(_) => {}
         }
         requirements
+    }
+
+    fn referenced_artifact_ids(request: &TypedCommitRequest) -> BTreeSet<ArtifactId> {
+        let mut artifact_ids = BTreeSet::new();
+        for payload in &request.payloads {
+            for requirement in artifact_requirements(payload) {
+                artifact_ids.insert(requirement.artifact_id);
+            }
+        }
+        artifact_ids
     }
 
     fn push_event_artifact(

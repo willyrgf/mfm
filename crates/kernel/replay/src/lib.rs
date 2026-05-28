@@ -1797,7 +1797,8 @@ pub mod v1 {
         };
         use mfm_store::v1::{
             build_committed_batch, CommitKey, CommitPreconditions, InMemoryTypedRunStore,
-            RequiredRunState, StreamSeq, TypedCommitRequest, TypedRunEventStore,
+            PreparedTypedCommit, RequiredRunState, StreamSeq, TypedCommitRequest,
+            TypedRunEventStore,
         };
 
         const SPEC_MEDIA_TYPE: &str = "application/vnd.mfm.typed-execution-spec+json;version=1";
@@ -2877,21 +2878,19 @@ pub mod v1 {
             artifacts: Vec<StoredArtifactEvidenceRef>,
             preconditions: CommitPreconditions,
         ) {
-            for artifact in &artifacts {
-                store
-                    .record_artifact_evidence(artifact.clone())
-                    .expect("record artifact");
-            }
             retained_artifacts.extend(artifacts.iter().cloned());
+            let request = TypedCommitRequest {
+                run_id: run_id.clone(),
+                expected_next_seq: store.expected_next_seq(run_id),
+                commit_key: CommitKey::new(commit_key).expect("commit key"),
+                payloads,
+                required_artifacts: artifacts.clone(),
+                preconditions,
+            };
+            let commit =
+                PreparedTypedCommit::new(request, artifacts).expect("prepare typed commit");
             store
-                .append_typed_run_commit(TypedCommitRequest {
-                    run_id: run_id.clone(),
-                    expected_next_seq: store.expected_next_seq(run_id),
-                    commit_key: CommitKey::new(commit_key).expect("commit key"),
-                    payloads,
-                    required_artifacts: artifacts,
-                    preconditions,
-                })
+                .append_prepared_typed_commit(commit)
                 .expect("append typed commit");
         }
 

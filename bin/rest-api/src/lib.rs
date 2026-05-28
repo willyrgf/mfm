@@ -151,27 +151,15 @@ pub struct InMemoryAsyncTypedRunStore {
 impl AsyncTypedRunEventStore for InMemoryAsyncTypedRunStore {
     type Error = store::StoreError;
 
-    fn record_artifact_evidence<'a>(
+    fn append_prepared_typed_commit<'a>(
         &'a self,
-        evidence: store::ArtifactEvidenceRef,
-    ) -> AsyncStoreFuture<'a, (), Self::Error> {
-        let result = self
-            .inner
-            .lock()
-            .expect("typed run store lock")
-            .record_artifact_evidence(evidence);
-        Box::pin(std::future::ready(result))
-    }
-
-    fn append_typed_run_commit<'a>(
-        &'a self,
-        request: store::TypedCommitRequest,
+        commit: store::PreparedTypedCommit,
     ) -> AsyncStoreFuture<'a, store::CommitOutcome, Self::Error> {
         let result = self
             .inner
             .lock()
             .expect("typed run store lock")
-            .append_typed_run_commit(request);
+            .append_prepared_typed_commit(commit);
         Box::pin(std::future::ready(result))
     }
 

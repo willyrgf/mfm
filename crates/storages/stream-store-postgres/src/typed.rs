@@ -10,14 +10,14 @@ use mfm_ids::{
 };
 use mfm_spec::v1::MediaType;
 use mfm_store::v1::{
-    build_committed_batch, commit_fingerprint, payload_from_json_value, ArtifactEvidenceRef,
-    AsyncStoreFuture, AsyncTypedRunEventStore, AttemptProjection, AttemptStatus,
-    CellTerminalProjection, CommitKey, CommitOrdinal, CommitOutcome, FactProjection,
-    KernelEventEnvelope, LogicalEventKey, PersistedKernelEventRecord, ProjectionSnapshot,
-    PublicOutputProjection, RetentionManifestProjection, RetentionProjection, RunState,
-    SideEffectArtifactProjection, SideEffectClaimProjection, SideEffectIntentProjection,
-    SideEffectPhase, SideEffectProjection, StoreError, StreamSeq, TypedCommitBase,
-    TypedCommitRequest, VerifiedRetentionProjection,
+    build_prepared_committed_batch, payload_from_json_value, prepared_commit_fingerprint,
+    stage_prepared_typed_run_commit, ArtifactEvidenceRef, AsyncStoreFuture,
+    AsyncTypedRunEventStore, AttemptProjection, AttemptStatus, CellTerminalProjection, CommitKey,
+    CommitOrdinal, CommitOutcome, FactProjection, KernelEventEnvelope, LogicalEventKey,
+    PersistedKernelEventRecord, PreparedTypedCommit, ProjectionSnapshot, PublicOutputProjection,
+    RetentionManifestProjection, RetentionProjection, RunState, SideEffectArtifactProjection,
+    SideEffectClaimProjection, SideEffectIntentProjection, SideEffectPhase, SideEffectProjection,
+    StoreError, StreamSeq, TypedCommitBase, VerifiedRetentionProjection,
 };
 use serde_json::Value;
 use tokio::sync::Mutex;
@@ -262,20 +262,6 @@ COMMIT;
         Ok(())
     }
 
-    /// Records artifact evidence before typed run events reference that artifact.
-    pub async fn record_artifact_evidence(&self, evidence: ArtifactEvidenceRef) -> Result<()> {
-        let mut client = self.client.lock().await;
-        let tx = client
-            .transaction()
-            .await
-            .map_err(|_| PostgresTypedStoreError::Database("failed to start transaction"))?;
-        record_artifact_evidence_tx(&tx, &evidence).await?;
-        tx.commit()
-            .await
-            .map_err(|_| PostgresTypedStoreError::Database("failed to commit transaction"))?;
-        Ok(())
-    }
-
     /// Returns the next store-owned stream sequence for a run.
     pub async fn expected_next_seq(&self, run_id: &RunId) -> Result<StreamSeq> {
         let client = self.client.lock().await;
@@ -283,12 +269,13 @@ COMMIT;
         next_seq_from_head(head)
     }
 
-    /// Appends one typed run commit atomically.
-    pub async fn append_typed_run_commit(
+    /// Atomically admits artifact evidence and appends one typed run commit.
+    pub async fn append_prepared_typed_commit(
         &self,
-        request: TypedCommitRequest,
+        commit: PreparedTypedCommit,
     ) -> Result<CommitOutcome> {
-        let fingerprint = commit_fingerprint(&request)?;
+        let request = commit.request();
+        let fingerprint = prepared_commit_fingerprint(&commit)?;
         let fingerprint_text = fingerprint.as_digest().as_str().to_owned();
 
         let mut client = self.client.lock().await;
@@ -301,14 +288,14 @@ COMMIT;
             read_commit_key(&tx, &request.run_id, request.commit_key.as_str()).await?
         {
             if stored_fingerprint == fingerprint_text {
-                let batch = build_committed_batch(&request, stored_seq)?;
+                let batch = build_prepared_committed_batch(&commit, stored_seq)?;
                 tx.commit().await.map_err(|_| {
                     PostgresTypedStoreError::Database("failed to commit transaction")
                 })?;
                 return Ok(CommitOutcome::Idempotent(batch));
             }
             return Err(StoreError::CommitConflict {
-                commit_key: request.commit_key,
+                commit_key: request.commit_key.clone(),
             }
             .into());
         }
@@ -323,28 +310,34 @@ COMMIT;
             read_commit_key(&tx, &request.run_id, request.commit_key.as_str()).await?
         {
             if stored_fingerprint == fingerprint_text {
-                let batch = build_committed_batch(&request, stored_seq)?;
+                let batch = build_prepared_committed_batch(&commit, stored_seq)?;
                 tx.commit().await.map_err(|_| {
                     PostgresTypedStoreError::Database("failed to commit transaction")
                 })?;
                 return Ok(CommitOutcome::Idempotent(batch));
             }
             return Err(StoreError::CommitConflict {
-                commit_key: request.commit_key,
+                commit_key: request.commit_key.clone(),
             }
             .into());
         }
 
+        let mut artifacts = load_artifacts(&tx).await?;
+        admit_artifact_evidence(&mut artifacts, commit.admitted_artifacts())?;
         let base = TypedCommitBase {
-            artifacts: load_artifacts(&tx).await?,
+            artifacts,
             logical_keys: load_logical_keys(&tx, &request.run_id).await?,
             unique_logical_payloads: load_unique_logical_payloads(&tx, &request.run_id).await?,
             projections: load_projection_snapshot_tx(&tx, &request.run_id).await?,
             actual_next_seq: next_seq_from_head(head)?,
         };
-        let staged = mfm_store::v1::stage_typed_run_commit(&base, &request)?;
+        let staged = stage_prepared_typed_run_commit(&base, &commit)?;
         let batch = staged.batch().clone();
         let staged_projections = staged.projections().clone();
+
+        for evidence in commit.admitted_artifacts() {
+            admit_artifact_evidence_tx(&tx, evidence).await?;
+        }
 
         for event in batch.events() {
             let payload_json = canonical_payload_value(event.payload())?;
@@ -475,22 +468,13 @@ COMMIT;
 impl AsyncTypedRunEventStore for PostgresTypedRunEventStore {
     type Error = PostgresTypedStoreError;
 
-    fn record_artifact_evidence<'a>(
+    fn append_prepared_typed_commit<'a>(
         &'a self,
-        evidence: ArtifactEvidenceRef,
-    ) -> AsyncStoreFuture<'a, (), Self::Error> {
-        Box::pin(async move {
-            PostgresTypedRunEventStore::record_artifact_evidence(self, evidence).await
-        })
-    }
-
-    fn append_typed_run_commit<'a>(
-        &'a self,
-        request: TypedCommitRequest,
+        commit: PreparedTypedCommit,
     ) -> AsyncStoreFuture<'a, CommitOutcome, Self::Error> {
-        Box::pin(
-            async move { PostgresTypedRunEventStore::append_typed_run_commit(self, request).await },
-        )
+        Box::pin(async move {
+            PostgresTypedRunEventStore::append_prepared_typed_commit(self, commit).await
+        })
     }
 
     fn load_run_stream<'a>(
@@ -508,7 +492,27 @@ impl AsyncTypedRunEventStore for PostgresTypedRunEventStore {
     }
 }
 
-async fn record_artifact_evidence_tx(
+fn admit_artifact_evidence(
+    artifacts: &mut BTreeMap<ArtifactId, ArtifactEvidenceRef>,
+    admitted_artifacts: &[ArtifactEvidenceRef],
+) -> Result<()> {
+    for evidence in admitted_artifacts {
+        if let Some(existing) = artifacts.get(&evidence.artifact_id) {
+            if existing != evidence {
+                return Err(StoreError::ArtifactEvidenceMismatch {
+                    artifact_id: evidence.artifact_id.clone(),
+                    field: "artifact",
+                }
+                .into());
+            }
+            continue;
+        }
+        artifacts.insert(evidence.artifact_id.clone(), evidence.clone());
+    }
+    Ok(())
+}
+
+async fn admit_artifact_evidence_tx(
     tx: &Transaction<'_>,
     evidence: &ArtifactEvidenceRef,
 ) -> Result<()> {
@@ -2264,6 +2268,24 @@ mod tests {
         }
     }
 
+    fn retention_refs_appended(
+        run_id: RunId,
+        artifact_id: ArtifactId,
+        digest: ContentDigest,
+        role: ArtifactRole,
+    ) -> KernelEventPayload {
+        KernelEventPayload::RetentionRefsAppended(events::RetentionRefsAppended {
+            run_id,
+            spec_hash: spec_hash(1),
+            refs: vec![events::RetentionRef {
+                artifact_id,
+                role,
+                content_digest: digest,
+            }],
+            reason: events::RetentionReason::RuntimeEvidence,
+        })
+    }
+
     fn side_effect_artifact_ref(
         artifact_id: ArtifactId,
         digest: ContentDigest,
@@ -2328,47 +2350,91 @@ mod tests {
         }
     }
 
+    async fn append_prepared(
+        store: &PostgresTypedRunEventStore,
+        request: mfm_store::v1::TypedCommitRequest,
+        artifacts: Vec<ArtifactEvidenceRef>,
+    ) -> Result<CommitOutcome> {
+        let commit = PreparedTypedCommit::new(request, artifacts)?;
+        store.append_prepared_typed_commit(commit).await
+    }
+
+    #[tokio::test]
+    async fn typed_prepared_commit_idempotency_fingerprint_includes_admitted_artifacts() {
+        let (store, schema) = test_store().await;
+        let run = run_id(120);
+        let artifact = artifact_id(121);
+        let digest = content_digest(122);
+        let evidence =
+            store_artifact_ref(artifact.clone(), digest.clone(), ArtifactRole::StateOutput);
+        let mut conflicting_evidence = evidence.clone();
+        conflicting_evidence.byte_len += 1;
+        append_prepared(
+            &store,
+            request(run.clone(), 1, "run-start", vec![run_started(run.clone())]),
+            vec![spec_artifact_ref(), certificate_artifact_ref()],
+        )
+        .await
+        .expect("run start");
+        let request = mfm_store::v1::TypedCommitRequest {
+            run_id: run.clone(),
+            expected_next_seq: store.expected_next_seq(&run).await.expect("next seq"),
+            commit_key: CommitKey::new("prepared-fingerprint").expect("commit key"),
+            payloads: vec![retention_refs_appended(
+                run.clone(),
+                artifact,
+                digest,
+                ArtifactRole::StateOutput,
+            )],
+            required_artifacts: vec![evidence.clone()],
+            preconditions: CommitPreconditions {
+                required_run_state: RequiredRunState::Started,
+                ..CommitPreconditions::default()
+            },
+        };
+
+        append_prepared(&store, request.clone(), vec![evidence])
+            .await
+            .expect("append initial prepared commit");
+        let mut retry = request;
+        retry.expected_next_seq = StreamSeq::new(99).expect("stale seq");
+        let error = append_prepared(&store, retry, vec![conflicting_evidence])
+            .await
+            .expect_err("same request with different admitted evidence is not idempotent");
+        assert!(matches!(
+            error,
+            PostgresTypedStoreError::Store(StoreError::CommitConflict { .. })
+        ));
+
+        drop_schema(&store, &schema).await;
+    }
+
     #[tokio::test]
     async fn typed_commit_key_sequence_and_projection_rebuild_contract() {
         let (store, schema) = test_store().await;
         let run = run_id(7);
         let artifact = artifact_id(8);
         let digest = content_digest(9);
-        store
-            .record_artifact_evidence(store_artifact_ref(
-                artifact.clone(),
-                digest.clone(),
-                ArtifactRole::StateOutput,
-            ))
-            .await
-            .expect("artifact evidence");
-        store
-            .record_artifact_evidence(spec_artifact_ref())
-            .await
-            .expect("spec artifact evidence");
-        store
-            .record_artifact_evidence(certificate_artifact_ref())
-            .await
-            .expect("certificate artifact evidence");
 
-        store
-            .append_typed_run_commit(request(
-                run.clone(),
-                1,
-                "run-start",
-                vec![run_started(run.clone())],
-            ))
-            .await
-            .expect("run start");
-        store
-            .append_typed_run_commit(request(
+        append_prepared(
+            &store,
+            request(run.clone(), 1, "run-start", vec![run_started(run.clone())]),
+            vec![spec_artifact_ref(), certificate_artifact_ref()],
+        )
+        .await
+        .expect("run start");
+        append_prepared(
+            &store,
+            request(
                 run.clone(),
                 2,
                 "attempt-start",
                 vec![state_attempt_started()],
-            ))
-            .await
-            .expect("attempt start");
+            ),
+            Vec::new(),
+        )
+        .await
+        .expect("attempt start");
         let terminal_request = request(
             run.clone(),
             3,
@@ -2378,18 +2444,32 @@ mod tests {
                 state_attempt_completed(),
             ],
         );
-        let appended = store
-            .append_typed_run_commit(terminal_request.clone())
-            .await
-            .expect("terminal commit");
+        let appended = append_prepared(
+            &store,
+            terminal_request.clone(),
+            vec![store_artifact_ref(
+                artifact.clone(),
+                digest.clone(),
+                ArtifactRole::StateOutput,
+            )],
+        )
+        .await
+        .expect("terminal commit");
         assert!(matches!(appended, CommitOutcome::Appended(_)));
 
         let mut stale_retry = terminal_request;
         stale_retry.expected_next_seq = StreamSeq::new(1).expect("stale seq");
-        let idempotent = store
-            .append_typed_run_commit(stale_retry)
-            .await
-            .expect("idempotent retry before stale seq");
+        let idempotent = append_prepared(
+            &store,
+            stale_retry,
+            vec![store_artifact_ref(
+                artifact,
+                digest,
+                ArtifactRole::StateOutput,
+            )],
+        )
+        .await
+        .expect("idempotent retry before stale seq");
         assert!(matches!(idempotent, CommitOutcome::Idempotent(_)));
         assert_eq!(
             store.expected_next_seq(&run).await.expect("next seq"),
@@ -2437,32 +2517,25 @@ mod tests {
     async fn typed_required_artifacts_and_fact_projection_are_atomic() {
         let (store, schema) = test_store().await;
         let run = run_id(10);
-        store
-            .record_artifact_evidence(spec_artifact_ref())
-            .await
-            .expect("spec artifact evidence");
-        store
-            .record_artifact_evidence(certificate_artifact_ref())
-            .await
-            .expect("certificate artifact evidence");
-        store
-            .append_typed_run_commit(request(
-                run.clone(),
-                1,
-                "run-start",
-                vec![run_started(run.clone())],
-            ))
-            .await
-            .expect("run start");
-        store
-            .append_typed_run_commit(request(
+        append_prepared(
+            &store,
+            request(run.clone(), 1, "run-start", vec![run_started(run.clone())]),
+            vec![spec_artifact_ref(), certificate_artifact_ref()],
+        )
+        .await
+        .expect("run start");
+        append_prepared(
+            &store,
+            request(
                 run.clone(),
                 2,
                 "fact-attempt-start",
                 vec![fact_attempt_started()],
-            ))
-            .await
-            .expect("fact attempt start");
+            ),
+            Vec::new(),
+        )
+        .await
+        .expect("fact attempt start");
 
         let missing_artifact = artifact_id(11);
         let missing_digest = content_digest(12);
@@ -2476,8 +2549,7 @@ mod tests {
             )],
         );
         fact_request.preconditions.required_run_state = RequiredRunState::Started;
-        let err = store
-            .append_typed_run_commit(fact_request.clone())
+        let err = append_prepared(&store, fact_request.clone(), Vec::new())
             .await
             .expect_err("missing fact artifact");
         assert!(matches!(
@@ -2489,18 +2561,17 @@ mod tests {
             StreamSeq::new(3).expect("seq")
         );
 
-        store
-            .record_artifact_evidence(store_artifact_ref(
+        append_prepared(
+            &store,
+            fact_request,
+            vec![store_artifact_ref(
                 missing_artifact.clone(),
                 missing_digest,
                 ArtifactRole::FactResponse,
-            ))
-            .await
-            .expect("fact artifact evidence");
-        store
-            .append_typed_run_commit(fact_request)
-            .await
-            .expect("fact commit after artifact");
+            )],
+        )
+        .await
+        .expect("fact commit after artifact");
         let projection = store.projection_snapshot(&run).await.expect("projection");
         assert!(projection
             .fact(
@@ -2520,72 +2591,76 @@ mod tests {
 
         let intent_artifact = artifact_id(14);
         let intent_digest = content_digest(15);
-        store
-            .record_artifact_evidence(side_effect_artifact_ref(
-                intent_artifact.clone(),
-                intent_digest.clone(),
-                schema_id("mfm.test.side_effect_intent", 70),
-                ArtifactRole::SideEffectIntent,
-            ))
-            .await
-            .expect("intent artifact evidence");
-        store
-            .append_typed_run_commit(request(
+        append_prepared(
+            &store,
+            request(
                 run.clone(),
                 1,
                 "sidefx-attempt-start",
                 vec![side_effect_attempt_started()],
-            ))
-            .await
-            .expect("attempt start");
-        store
-            .append_typed_run_commit(request(
+            ),
+            Vec::new(),
+        )
+        .await
+        .expect("attempt start");
+        append_prepared(
+            &store,
+            request(
                 run.clone(),
                 2,
                 "sidefx-prepare",
                 vec![
-                    side_effect_intent(intent_artifact, intent_digest),
+                    side_effect_intent(intent_artifact.clone(), intent_digest.clone()),
                     side_effect_claim(),
                     side_effect_prepared(),
                 ],
-            ))
-            .await
-            .expect("prepare");
-        store
-            .append_typed_run_commit(request(
+            ),
+            vec![side_effect_artifact_ref(
+                intent_artifact,
+                intent_digest,
+                schema_id("mfm.test.side_effect_intent", 70),
+                ArtifactRole::SideEffectIntent,
+            )],
+        )
+        .await
+        .expect("prepare");
+        append_prepared(
+            &store,
+            request(
                 run.clone(),
                 3,
                 "sidefx-started",
                 vec![side_effect_started()],
-            ))
-            .await
-            .expect("started");
+            ),
+            Vec::new(),
+        )
+        .await
+        .expect("started");
 
         let unknown_artifact = artifact_id(16);
         let unknown_digest = content_digest(17);
-        store
-            .record_artifact_evidence(side_effect_artifact_ref(
-                unknown_artifact.clone(),
-                unknown_digest.clone(),
-                unknown_schema(),
-                ArtifactRole::SubmissionUnknownEvidence,
-            ))
-            .await
-            .expect("unknown artifact evidence");
-        let unknown = store
-            .append_typed_run_commit(request(
+        let unknown = append_prepared(
+            &store,
+            request(
                 run.clone(),
                 4,
                 "sidefx-submission-unknown",
                 vec![side_effect_submission_unknown(
-                    unknown_artifact,
-                    unknown_digest,
+                    unknown_artifact.clone(),
+                    unknown_digest.clone(),
                 )],
-            ))
-            .await
-            .expect("submission unknown")
-            .batch()
-            .clone();
+            ),
+            vec![side_effect_artifact_ref(
+                unknown_artifact,
+                unknown_digest,
+                unknown_schema(),
+                ArtifactRole::SubmissionUnknownEvidence,
+            )],
+        )
+        .await
+        .expect("submission unknown")
+        .batch()
+        .clone();
         let submission_result_key = format!(
             "sidefx:{}:invocation:1:submission_result",
             side_effect_ledger_key()
@@ -2597,29 +2672,28 @@ mod tests {
 
         let submission_artifact = artifact_id(18);
         let submission_digest = content_digest(19);
-        store
-            .record_artifact_evidence(side_effect_artifact_ref(
-                submission_artifact.clone(),
-                submission_digest.clone(),
-                submission_schema(),
-                ArtifactRole::Submission,
-            ))
-            .await
-            .expect("submission artifact evidence");
-        let observed = store
-            .append_typed_run_commit(request(
+        let observed = append_prepared(
+            &store,
+            request(
                 run.clone(),
                 5,
                 "sidefx-submission-observed-after-unknown",
                 vec![side_effect_submission_observed(
-                    submission_artifact,
-                    submission_digest,
+                    submission_artifact.clone(),
+                    submission_digest.clone(),
                 )],
-            ))
-            .await
-            .expect("submission observed recovery")
-            .batch()
-            .clone();
+            ),
+            vec![side_effect_artifact_ref(
+                submission_artifact,
+                submission_digest,
+                submission_schema(),
+                ArtifactRole::Submission,
+            )],
+        )
+        .await
+        .expect("submission observed recovery")
+        .batch()
+        .clone();
         assert_eq!(
             observed.events()[0].logical_key().as_str(),
             submission_result_key
