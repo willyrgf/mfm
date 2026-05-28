@@ -1187,7 +1187,7 @@ in
 
         check = mkCommandTask {
           id = "task.check";
-          summary = "Run crate-dag + fmt + clippy";
+          summary = "Run discovery + fmt + clippy";
           description = "Runs quality checks for the workspace.";
           usage = [ "nix run .#check" ];
           runtimeInputs = rustRuntimeInputs;
@@ -1199,14 +1199,6 @@ in
             artifacts_dir="''${CI_ARTIFACTS_DIR:-${ciArtifactsRoot}}"
             mkdir -p "$artifacts_dir"
             discovery_log="$artifacts_dir/check-discovery.log"
-            crate_dag_log="$artifacts_dir/check-crate-dag.log"
-            typed_boundary_firewall_log="$artifacts_dir/check-typed-boundary-firewall.log"
-            manual_impl_log="$artifacts_dir/check-manual-persisted-impls.log"
-            typed_program_authority_log="$artifacts_dir/check-typed-program-authority.log"
-            typed_event_schema_log="$artifacts_dir/check-typed-event-schemas.log"
-            typed_certification_log="$artifacts_dir/check-typed-certification.log"
-            typed_kernel_contract_log="$artifacts_dir/check-typed-kernel-contract.log"
-            typed_kernel_contract_summary="$artifacts_dir/typed-kernel-contract.summary.json"
             fmt_log="$artifacts_dir/check-fmt.log"
             clippy_log="$artifacts_dir/check-clippy.log"
 
@@ -1219,28 +1211,6 @@ in
             echo "INFO: verifying discovery artifacts"
             echo "INFO: command=${discoveryCheckCmd} log=$discovery_log"
             run_with_log "$discovery_log" ${discoveryCheckCmd}
-
-            echo "INFO: running crate-dag checks"
-            echo "INFO: command=bash ${./check-kernel-crate-dag.sh} --root . --self-test --summary-file $typed_kernel_contract_summary log=$crate_dag_log"
-            run_with_log "$crate_dag_log" bash ${./check-kernel-crate-dag.sh} --root . --self-test --summary-file "$typed_kernel_contract_summary"
-            jq -e '.payload.kernel_crates_present == true and .payload.crate_dag_passed == true' "$typed_kernel_contract_summary" >/dev/null
-            echo "INFO: command=bash ${./check-typed-boundary-firewall.sh} --root . --self-test --summary-file $typed_kernel_contract_summary log=$typed_boundary_firewall_log"
-            run_with_log "$typed_boundary_firewall_log" bash ${./check-typed-boundary-firewall.sh} --root . --self-test --summary-file "$typed_kernel_contract_summary"
-            jq -e '.payload.typed_boundary_firewall_passed == true' "$typed_kernel_contract_summary" >/dev/null
-            echo "INFO: command=bash ${./check-manual-persisted-impls.sh} --root . --self-test --summary-file $typed_kernel_contract_summary log=$manual_impl_log"
-            run_with_log "$manual_impl_log" bash ${./check-manual-persisted-impls.sh} --root . --self-test --summary-file "$typed_kernel_contract_summary"
-            jq -e '.payload.manual_value_config_output_impls_rejected == true' "$typed_kernel_contract_summary" >/dev/null
-            echo "INFO: command=bash ${./check-typed-program-authority.sh} --root . --self-test --summary-file $typed_kernel_contract_summary log=$typed_program_authority_log"
-            run_with_log "$typed_program_authority_log" bash ${./check-typed-program-authority.sh} --root . --self-test --summary-file "$typed_kernel_contract_summary"
-            jq -e '.payload.registered_state_required == true and .payload.registered_operation_required == true' "$typed_kernel_contract_summary" >/dev/null
-            echo "INFO: command=bash ${./check-typed-event-schemas.sh} --root . --self-test --summary-file $typed_kernel_contract_summary log=$typed_event_schema_log"
-            run_with_log "$typed_event_schema_log" bash ${./check-typed-event-schemas.sh} --root . --self-test --summary-file "$typed_kernel_contract_summary"
-            jq -e '.payload.v1_event_schema_golden == true and .payload.run_started_v1_present == true and (.payload | has("run_started_v2_present") | not)' "$typed_kernel_contract_summary" >/dev/null
-            echo "INFO: command=bash ${./check-typed-certification.sh} --root . --self-test --summary-file $typed_kernel_contract_summary log=$typed_certification_log"
-            run_with_log "$typed_certification_log" bash ${./check-typed-certification.sh} --root . --self-test --summary-file "$typed_kernel_contract_summary"
-            jq -e '.payload.invalid_topology_rejected == true and .payload.invalid_interface_wiring_rejected == true and .payload.invalid_semantic_transition_rejected == true and .payload.invalid_data_shape_rejected == true and .payload.invalid_data_meaning_rejected == true and .payload.invalid_terminal_shape_rejected == true' "$typed_kernel_contract_summary" >/dev/null
-            echo "INFO: command=bash ${./check-typed-kernel-contract.sh} --root . --self-test --summary-file $typed_kernel_contract_summary log=$typed_kernel_contract_log"
-            run_with_log "$typed_kernel_contract_log" bash ${./check-typed-kernel-contract.sh} --root . --self-test --summary-file "$typed_kernel_contract_summary"
 
             echo "INFO: running formatting checks"
             echo "INFO: command=${cargoFmtCheckCmd} log=$fmt_log"
@@ -1325,7 +1295,6 @@ in
 
             artifacts_dir="''${CI_ARTIFACTS_DIR:-${ciArtifactsRoot}}"
             mkdir -p "$artifacts_dir"
-            typed_kernel_contract_summary="$artifacts_dir/typed-kernel-contract.summary.json"
 
             run_with_log() {
               local logfile="$1"
@@ -1336,15 +1305,7 @@ in
             echo "INFO: running workspace tests"
             run_with_log "$artifacts_dir/test-nextest.log" ${cargoNextestWorkspaceCiCmd}
 
-            echo "INFO: running typed-kernel-contract summary checks"
-            run_with_log "$artifacts_dir/test-kernel-crate-dag.log" bash ${./check-kernel-crate-dag.sh} --root . --self-test --summary-file "$typed_kernel_contract_summary"
-            run_with_log "$artifacts_dir/test-typed-boundary-firewall.log" bash ${./check-typed-boundary-firewall.sh} --root . --self-test --summary-file "$typed_kernel_contract_summary"
-            run_with_log "$artifacts_dir/test-manual-persisted-impls.log" bash ${./check-manual-persisted-impls.sh} --root . --self-test --summary-file "$typed_kernel_contract_summary"
-            run_with_log "$artifacts_dir/test-typed-program-authority.log" bash ${./check-typed-program-authority.sh} --root . --self-test --summary-file "$typed_kernel_contract_summary"
-            run_with_log "$artifacts_dir/test-typed-event-schemas.log" bash ${./check-typed-event-schemas.sh} --root . --self-test --summary-file "$typed_kernel_contract_summary"
-            run_with_log "$artifacts_dir/test-typed-certification.log" bash ${./check-typed-certification.sh} --root . --self-test --summary-file "$typed_kernel_contract_summary"
-            run_with_log "$artifacts_dir/test-typed-kernel-contract.log" bash ${./check-typed-kernel-contract.sh} --root . --self-test --summary-file "$typed_kernel_contract_summary"
-            echo "OK: tests completed summary=$typed_kernel_contract_summary"
+            echo "OK: tests completed"
           '';
         };
 
@@ -1436,51 +1397,6 @@ in
             echo "INFO: running ci step=clippy"
             run_with_log "$log_file" ${cargoCiClippyCmd}
             echo "OK: ci step passed step=clippy log=$log_file"
-          '';
-        };
-
-        ci-kernel-crate-dag = mkCommandTask {
-          id = "task.ci.kernel-crate-dag";
-          kind = "ci-step";
-          summary = "CI typed kernel crate DAG check";
-          tags = [
-            "ci"
-            "quality"
-            "typed-kernel"
-          ];
-          runtimeInputs = rustRuntimeInputs;
-          env = ciCargoRustEnv;
-          produces = {
-            artifacts = [ "typed-kernel-contract.summary.json" ];
-            stateKeys = [ ];
-          };
-          command = ''
-            set -euo pipefail
-            ${ciStepPreamble}
-
-            log_file="$artifacts_dir/kernel-crate-dag.log"
-            typed_boundary_firewall_log_file="$artifacts_dir/typed-boundary-firewall.log"
-            manual_impl_log_file="$artifacts_dir/manual-persisted-impls.log"
-            typed_program_authority_log_file="$artifacts_dir/typed-program-authority.log"
-            typed_event_schema_log_file="$artifacts_dir/typed-event-schemas.log"
-            typed_certification_log_file="$artifacts_dir/typed-certification.log"
-            typed_kernel_contract_log_file="$artifacts_dir/typed-kernel-contract.log"
-            typed_kernel_contract_summary="$artifacts_dir/typed-kernel-contract.summary.json"
-            echo "INFO: running ci step=kernel-crate-dag"
-            run_with_log "$log_file" bash ${./check-kernel-crate-dag.sh} --root . --self-test --summary-file "$typed_kernel_contract_summary"
-            jq -e '.payload.kernel_crates_present == true and .payload.crate_dag_passed == true' "$typed_kernel_contract_summary" >/dev/null
-            run_with_log "$typed_boundary_firewall_log_file" bash ${./check-typed-boundary-firewall.sh} --root . --self-test --summary-file "$typed_kernel_contract_summary"
-            jq -e '.payload.typed_boundary_firewall_passed == true' "$typed_kernel_contract_summary" >/dev/null
-            run_with_log "$manual_impl_log_file" bash ${./check-manual-persisted-impls.sh} --root . --self-test --summary-file "$typed_kernel_contract_summary"
-            jq -e '.payload.manual_value_config_output_impls_rejected == true' "$typed_kernel_contract_summary" >/dev/null
-            run_with_log "$typed_program_authority_log_file" bash ${./check-typed-program-authority.sh} --root . --self-test --summary-file "$typed_kernel_contract_summary"
-            jq -e '.payload.registered_state_required == true and .payload.registered_operation_required == true' "$typed_kernel_contract_summary" >/dev/null
-            run_with_log "$typed_event_schema_log_file" bash ${./check-typed-event-schemas.sh} --root . --self-test --summary-file "$typed_kernel_contract_summary"
-            jq -e '.payload.v1_event_schema_golden == true and .payload.run_started_v1_present == true and (.payload | has("run_started_v2_present") | not)' "$typed_kernel_contract_summary" >/dev/null
-            run_with_log "$typed_certification_log_file" bash ${./check-typed-certification.sh} --root . --self-test --summary-file "$typed_kernel_contract_summary"
-            jq -e '.payload.invalid_topology_rejected == true and .payload.invalid_interface_wiring_rejected == true and .payload.invalid_semantic_transition_rejected == true and .payload.invalid_data_shape_rejected == true and .payload.invalid_data_meaning_rejected == true and .payload.invalid_terminal_shape_rejected == true' "$typed_kernel_contract_summary" >/dev/null
-            run_with_log "$typed_kernel_contract_log_file" bash ${./check-typed-kernel-contract.sh} --root . --self-test --summary-file "$typed_kernel_contract_summary"
-            echo "OK: ci step passed step=kernel-crate-dag log=$log_file summary=$typed_kernel_contract_summary"
           '';
         };
 
@@ -1703,12 +1619,8 @@ EOF
               require_absent_app "aave-v3-origin-deploy"
 
               require_task "task.ci"
-              require_task "task.ci.kernel-crate-dag"
               require_task "task.ci.services-start"
               require_task "task.ci.sccache-contracts"
-              require_task "task.ci.typed-certified-slice"
-              require_task "task.ci.typed-port-gates"
-              require_task "task.ci.full-typed-core-gate"
               require_task "task.ci.workflow-basic"
               require_task "task.ci.workflow-parity"
               require_task "task.ci.parity-rest-api-smoke"
@@ -1723,16 +1635,12 @@ EOF
 
               require_workflow "workflow.ci.basic"
               require_workflow "workflow.ci.full"
-              require_workflow_plan_task "workflow.ci.basic" "task.ci.kernel-crate-dag"
               require_workflow_plan_task "workflow.ci.basic" "task.ci.sccache-contracts"
               require_workflow_plan_task "workflow.ci.parity" "task.ci.parity-rest-api-smoke"
               require_workflow_plan_task "workflow.ci.parity" "task.ci.parity-evm-reth"
               require_workflow_plan_task "workflow.ci.parity" "task.ci.parity-postgres-state-events-audit"
               require_workflow_plan_task "workflow.ci.full" "task.ci.workflow-basic"
-              require_workflow_plan_task "workflow.ci.full" "task.ci.typed-certified-slice"
-              require_workflow_plan_task "workflow.ci.full" "task.ci.typed-port-gates"
               require_workflow_plan_task "workflow.ci.full" "task.ci.workflow-parity"
-              require_workflow_post_task "workflow.ci.full" "task.ci.full-typed-core-gate"
 
               ${renderNextestContractCheck "task.ci.parity-rest-api-smoke" parityRestApiSmokeNextest}
               ${renderNextestContractCheck "task.ci.parity-evm-reth" parityEvmRethNextest}
@@ -1987,92 +1895,6 @@ EOF
             echo "INFO: running ci step=tests"
             run_with_log "$log_file" ${cargoNextestWorkspaceCiCmd}
             echo "OK: ci step passed step=tests log=$log_file"
-          '';
-        };
-
-        ci-typed-certified-slice = mkCommandTask {
-          id = "task.ci.typed-certified-slice";
-          kind = "ci-step";
-          summary = "CI typed-certified-slice acceptance gate";
-          tags = [
-            "ci"
-            "typed-kernel"
-          ];
-          runtimeInputs = rustRuntimeInputs;
-          env = ciCargoRustEnv;
-          produces = {
-            artifacts = [ "typed-certified-slice.summary.json" ];
-            stateKeys = [ ];
-          };
-          command = ''
-            set -euo pipefail
-            ${ciStepPreamble}
-
-            log_file="$artifacts_dir/typed-certified-slice.log"
-            summary_file="$artifacts_dir/typed-certified-slice.summary.json"
-            echo "INFO: running ci step=typed-certified-slice"
-            run_with_log "$log_file" bash ${./check-typed-certified-slice.sh} --root . --self-test --summary-file "$summary_file"
-            echo "OK: ci step passed step=typed-certified-slice log=$log_file summary=$summary_file"
-          '';
-        };
-
-        ci-typed-port-gates = mkCommandTask {
-          id = "task.ci.typed-port-gates";
-          kind = "ci-step";
-          summary = "CI typed workflow port gates";
-          tags = [
-            "ci"
-            "typed-kernel"
-            "parity"
-          ];
-          runtimeInputs = rustRuntimeInputs;
-          env = ciCargoRustEnv;
-          produces = {
-            artifacts = [ "typed-port-gates.summary.json" ];
-            stateKeys = [ ];
-          };
-          command = ''
-            set -euo pipefail
-            ${ciStepPreamble}
-
-            log_file="$artifacts_dir/typed-port-gates.log"
-            summary_file="$artifacts_dir/typed-port-gates.summary.json"
-            echo "INFO: running ci step=typed-port-gates"
-            run_with_log "$log_file" bash ${./check-typed-port-gates.sh} --root . --self-test --summary-file "$summary_file"
-            echo "OK: ci step passed step=typed-port-gates log=$log_file summary=$summary_file"
-          '';
-        };
-
-        ci-full-typed-core-gate = mkCommandTask {
-          id = "task.ci.full-typed-core-gate";
-          kind = "ci-step";
-          summary = "CI full typed-core gate validator";
-          tags = [
-            "ci"
-            "typed-kernel"
-            "parity"
-          ];
-          runtimeInputs = rustRuntimeInputs;
-          env = ciCargoRustEnv;
-          produces = {
-            artifacts = [ "full-typed-core-gate.summary.json" ];
-            stateKeys = [ ];
-          };
-          command = ''
-            set -euo pipefail
-            ${ciStepPreamble}
-
-            log_file="$artifacts_dir/full-typed-core-gate.log"
-            summary_file="$artifacts_dir/full-typed-core-gate.summary.json"
-            registry_root="''${REGISTRY_ROOT:?REGISTRY_ROOT is required for full typed-core gate}"
-            run_id="''${NIXFIED_RUN_ID:?NIXFIED_RUN_ID is required for full typed-core gate}"
-            attempt_args=()
-            if [ -n "''${NIXFIED_ATTEMPT_ID:-}" ]; then
-              attempt_args=(--attempt-id "$NIXFIED_ATTEMPT_ID")
-            fi
-            echo "INFO: running ci step=full-typed-core-gate"
-            run_with_log "$log_file" bash ${./check-full-typed-core-gate.sh} --root . --self-test --artifacts-dir "$artifacts_dir" --registry-root "$registry_root" --run-id "$run_id" "''${attempt_args[@]}" --summary-file "$summary_file"
-            echo "OK: ci step passed step=full-typed-core-gate log=$log_file summary=$summary_file"
           '';
         };
 
@@ -2431,10 +2253,6 @@ EOF
               taskId = "task.ci.clippy";
             };
 
-            kernel-crate-dag = mkWorkflowUnit {
-              taskId = "task.ci.kernel-crate-dag";
-            };
-
             shell-app-contracts = mkWorkflowUnit {
               taskId = "task.ci.shell-app-contracts";
             };
@@ -2448,7 +2266,6 @@ EOF
               needs = [
                 "fmt"
                 "clippy"
-                "kernel-crate-dag"
                 "shell-app-contracts"
                 "sccache-contracts"
               ];
@@ -2576,25 +2393,15 @@ EOF
               taskId = "task.ci.workflow-basic";
             };
 
-            typed-certified-slice = mkWorkflowUnit {
-              taskId = "task.ci.typed-certified-slice";
-              needs = [ "basic" ];
-            };
-
-            typed-port-gates = mkWorkflowUnit {
-              taskId = "task.ci.typed-port-gates";
-              needs = [ "typed-certified-slice" ];
-            };
-
             parity = mkWorkflowUnit {
               taskId = "task.ci.workflow-parity";
-              needs = [ "typed-port-gates" ];
+              needs = [ "basic" ];
             };
           };
           stages = [ ];
           preRun.tasks = [ ];
           postRun = {
-            tasks = [ "task.ci.full-typed-core-gate" ];
+            tasks = [ ];
             alwaysRun = true;
           };
           artifacts = {

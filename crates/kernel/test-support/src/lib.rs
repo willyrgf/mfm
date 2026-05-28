@@ -36,9 +36,9 @@ use mfm_store::v1 as store;
 use mfm_store::v1::{TypedProjectionRead, TypedRunEventStore};
 use serde::{Deserialize, Serialize};
 
-/// Summary emitted by the `typed-certified-slice` CI acceptance gate.
+/// Coverage produced by the synthetic typed certified slice acceptance fixture.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TypedCertifiedSliceSummary {
+pub struct TypedCertifiedSliceCoverage {
     typed_spec_hash_persisted: bool,
     run_started_v1_present: bool,
     seed_material_persisted: bool,
@@ -59,35 +59,7 @@ pub struct TypedCertifiedSliceSummary {
     retention_projection_complete: bool,
 }
 
-impl TypedCertifiedSliceSummary {
-    /// Converts the acceptance summary into the stable CI summary document.
-    pub fn to_summary_document(&self) -> serde_json::Value {
-        serde_json::json!({
-            "kind": "typed-certified-slice-summary",
-            "version": 1,
-            "payload": {
-                "typed_spec_hash_persisted": self.typed_spec_hash_persisted,
-                "run_started_v1_present": self.run_started_v1_present,
-                "seed_material_persisted": self.seed_material_persisted,
-                "cell_events_count": self.cell_events_count,
-                "side_effect_ledger_complete": self.side_effect_ledger_complete,
-                "side_effect_invocation_started_before_submit": self.side_effect_invocation_started_before_submit,
-                "side_effect_crash_cases_passed": self.side_effect_crash_cases_passed,
-                "side_effect_no_duplicate_submit": self.side_effect_no_duplicate_submit,
-                "side_effect_submission_unknown_recovered": self.side_effect_submission_unknown_recovered,
-                "side_effect_failed_semantics_covered": self.side_effect_failed_semantics_covered,
-                "side_effect_logical_key_conflicts_rejected": self.side_effect_logical_key_conflicts_rejected,
-                "managed_platform_outputs_committed": self.managed_platform_outputs_committed,
-                "public_output_before_run_completed": self.public_output_before_run_completed,
-                "public_output_event_id": self.public_output_event_id,
-                "replay_live_cap_requests_count": self.replay_live_cap_requests_count,
-                "resume_drift_fixture_count": self.resume_drift_fixture_count,
-                "resume_drift_rejected": self.resume_drift_rejected,
-                "retention_projection_complete": self.retention_projection_complete,
-            }
-        })
-    }
-
+impl TypedCertifiedSliceCoverage {
     fn validate_required_contract(&self) -> Result<(), String> {
         let true_keys = [
             ("typed_spec_hash_persisted", self.typed_spec_hash_persisted),
@@ -161,8 +133,8 @@ impl TypedCertifiedSliceSummary {
     }
 }
 
-/// Runs the full synthetic typed certified slice and returns its CI summary.
-pub async fn typed_certified_slice_summary() -> Result<TypedCertifiedSliceSummary, String> {
+/// Runs the full synthetic typed certified slice and returns its coverage result.
+pub async fn typed_certified_slice_coverage() -> Result<TypedCertifiedSliceCoverage, String> {
     let mut run = run_reference_certified_workflow().await?;
     let side_effect_logical_key_conflicts_rejected = duplicate_submit_rejected(&mut run)?;
     let replay_live_cap_requests_count = replay_without_live_capabilities(&run)?;
@@ -193,7 +165,7 @@ pub async fn typed_certified_slice_summary() -> Result<TypedCertifiedSliceSummar
         }
     };
 
-    let summary = TypedCertifiedSliceSummary {
+    let summary = TypedCertifiedSliceCoverage {
         typed_spec_hash_persisted: typed_spec_hash_persisted(&run, &stream),
         run_started_v1_present: stream
             .iter()
@@ -2315,8 +2287,8 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn typed_certified_slice_acceptance_summary_passes_required_contract() {
-        let summary = typed_certified_slice_summary()
+    async fn typed_certified_slice_acceptance_passes_required_contract() {
+        let summary = typed_certified_slice_coverage()
             .await
             .expect("typed certified slice summary");
         summary

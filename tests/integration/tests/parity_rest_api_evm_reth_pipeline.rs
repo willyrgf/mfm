@@ -421,7 +421,7 @@ async fn parity_reth_deploy_configure_validate_root_op() {
     )
     .await
     .expect_err("tampered fact artifact rejects replay");
-    assert_eq!(fact_err.code(), "artifact_mismatch");
+    assert_eq!(fact_err.code(), "MFM_REPLAY_ARTIFACT_MISMATCH");
 
     let output_err = mfm_transports_evm_dcv::verify_evm_dcv_replay(
         &replay_broker,
@@ -434,7 +434,7 @@ async fn parity_reth_deploy_configure_validate_root_op() {
     )
     .await
     .expect_err("tampered validate output artifact rejects replay");
-    assert_eq!(output_err.code(), "artifact_mismatch");
+    assert_eq!(output_err.code(), "MFM_REPLAY_ARTIFACT_MISMATCH");
 
     let configured_bytes =
         tampered_configured_contract_bytes(services.artifacts(), &configured_input_artifact).await;
@@ -449,7 +449,7 @@ async fn parity_reth_deploy_configure_validate_root_op() {
     )
     .await
     .expect_err("tampered configured-contract domain evidence rejects replay");
-    assert_eq!(domain_err.code(), "fact_mismatch");
+    assert_eq!(domain_err.code(), "MFM_REPLAY_FACT_MISMATCH");
 
     let receipt_tampered_stream = stream_with_tampered_receipt_hash(&stream);
     let receipt_err = mfm_transports_evm_dcv::verify_evm_dcv_replay(
@@ -459,7 +459,7 @@ async fn parity_reth_deploy_configure_validate_root_op() {
     )
     .await
     .expect_err("tampered side-effect receipt evidence rejects replay");
-    assert_eq!(receipt_err.code(), "side_effect_mismatch");
+    assert_eq!(receipt_err.code(), "MFM_REPLAY_SIDE_EFFECT_MISMATCH");
 }
 
 struct ReplacementArtifactStore<'a> {

@@ -2298,6 +2298,20 @@ mod tests {
         }
     }
 
+    fn certificate_artifact_ref() -> ArtifactEvidenceRef {
+        ArtifactEvidenceRef {
+            artifact_id: artifact_id(4),
+            digest: content_digest(5),
+            byte_len: 128,
+            media_type: media_type("application/vnd.mfm.typed-spec-certificate+json;version=1"),
+            schema_id: None,
+            semantic_type_id: None,
+            producer_node_id: None,
+            producer_seed_id: None,
+            artifact_role: ArtifactRole::TypedSpecCertificate,
+        }
+    }
+
     fn request(
         run_id: RunId,
         seq: u64,
@@ -2332,6 +2346,10 @@ mod tests {
             .record_artifact_evidence(spec_artifact_ref())
             .await
             .expect("spec artifact evidence");
+        store
+            .record_artifact_evidence(certificate_artifact_ref())
+            .await
+            .expect("certificate artifact evidence");
 
         store
             .append_typed_run_commit(request(
@@ -2423,6 +2441,10 @@ mod tests {
             .record_artifact_evidence(spec_artifact_ref())
             .await
             .expect("spec artifact evidence");
+        store
+            .record_artifact_evidence(certificate_artifact_ref())
+            .await
+            .expect("certificate artifact evidence");
         store
             .append_typed_run_commit(request(
                 run.clone(),
