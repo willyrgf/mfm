@@ -1417,6 +1417,7 @@ pub enum MaterializedCellTerminal {
 struct RuntimeRunView {
     projections: store::ProjectionSnapshot,
     seed_cells: BTreeMap<CellId, events::SeedCellRef>,
+    next_seq: store::StreamSeq,
 }
 
 impl RuntimeRunView {
@@ -1435,6 +1436,7 @@ impl RuntimeRunView {
         stream: &[store::KernelEventEnvelope],
     ) -> Result<Self> {
         store::ProjectionSnapshot::validate_run_stream(stream)?;
+        let next_seq = next_seq_after_stream(stream)?;
         let projections = store::ProjectionSnapshot::rebuild_from_run_stream(stream)?;
         let mut run_started = None;
         for event in stream {
@@ -1479,8 +1481,20 @@ impl RuntimeRunView {
         Ok(Self {
             projections,
             seed_cells,
+            next_seq,
         })
     }
+}
+
+fn next_seq_after_stream(stream: &[store::KernelEventEnvelope]) -> Result<store::StreamSeq> {
+    let Some(event) = stream.last() else {
+        return Ok(store::StreamSeq::FIRST);
+    };
+    let next =
+        event.seq().as_u64().checked_add(1).ok_or_else(|| {
+            RuntimeError::InvalidRunStream("run stream sequence overflow".to_owned())
+        })?;
+    store::StreamSeq::new(next).map_err(RuntimeError::from)
 }
 
 /// Validates a stored typed run stream against the certified runtime spec without executing work.
@@ -1553,6 +1567,293 @@ enum AttemptPlan {
     },
 }
 
+struct RunnerOutputCommitInput<'a> {
+    runtime_spec: &'a CertifiedRuntimeSpec,
+    run_id: &'a RunId,
+    node: &'a spec::NodeSpec,
+    attempt_id: &'a AttemptId,
+    caps: &'a CertifiedRuntimeCapabilities,
+    recorded_facts: &'a RecordedFacts,
+    view: &'a RuntimeRunView,
+    output: ErasedRunnerOutput,
+}
+
+struct RuntimeMutationMiddleware;
+
+impl RuntimeMutationMiddleware {
+    fn prepare_run_start(
+        runners: &ErasedRunnerRegistry,
+        runtime_spec: &CertifiedRuntimeSpec,
+        run_id: RunId,
+        evidence: RunStartEvidence,
+        expected_next_seq: store::StreamSeq,
+    ) -> Result<store::PreparedTypedCommit> {
+        let spec_artifact = validate_spec_artifact(runtime_spec, evidence.spec_artifact)?;
+        let certificate_artifact =
+            validate_certificate_artifact(runtime_spec, evidence.certificate_artifact)?;
+        let config_artifacts = validate_config_artifacts(runtime_spec, evidence.config_artifacts)?;
+        let config_reference_payloads =
+            config_artifact_reference_payloads(runtime_spec.spec_hash(), &config_artifacts)?;
+        let seed_cells = validate_seed_cells(runtime_spec, &evidence.seed_cells)?;
+        let runner_executables = runners.executables_for_spec(runtime_spec)?;
+        let mut required_artifacts =
+            Vec::with_capacity(2 + config_artifacts.len() + seed_cells.len());
+        required_artifacts.push(spec_artifact.clone());
+        required_artifacts.push(certificate_artifact.clone());
+        required_artifacts.extend(config_artifacts);
+        required_artifacts.extend(seed_cells.values().map(store_seed_artifact));
+        let admitted_artifacts = required_artifacts.clone();
+        let run_started_retention_refs = required_artifacts
+            .iter()
+            .map(retention_ref_for_artifact)
+            .collect::<Vec<_>>();
+        let payload = events::KernelEventPayload::RunStarted(events::RunStarted {
+            run_id: run_id.clone(),
+            spec_hash: runtime_spec.spec_hash().clone(),
+            spec_artifact_id: spec_artifact.artifact_id,
+            certificate_artifact_id: certificate_artifact.artifact_id,
+            certificate_artifact_digest: certificate_artifact.digest,
+            certificate_media_type: certificate_artifact.media_type,
+            spec_media_type: runtime_spec.spec().media_type.clone(),
+            spec_version: runtime_spec.spec().spec_version.clone(),
+            lowering_version: runtime_spec.spec().lowering_version.clone(),
+            public_output_schema_id: runtime_spec.spec().public_outputs.public_schema_id.clone(),
+            descriptor_identities: runtime_spec.spec().descriptor_identities.clone(),
+            runner_executables,
+            adapter_executables: evidence.adapter_executables,
+            canonicalizer_identity: runtime_spec
+                .spec()
+                .public_outputs
+                .renderer_descriptor
+                .canonicalizer_identity
+                .clone(),
+            framework_version: evidence.framework_version,
+            source_revision: evidence.source_revision,
+            seed_cells: evidence.seed_cells,
+        });
+        let retention_payload =
+            events::KernelEventPayload::RetentionRefsAppended(events::RetentionRefsAppended {
+                run_id: run_id.clone(),
+                spec_hash: runtime_spec.spec_hash().clone(),
+                refs: run_started_retention_refs,
+                reason: events::RetentionReason::RunStarted,
+            });
+        let mut payloads = Vec::with_capacity(2 + config_reference_payloads.len());
+        payloads.push(payload);
+        payloads.extend(config_reference_payloads);
+        payloads.push(retention_payload);
+        let request = store::TypedCommitRequest {
+            run_id,
+            expected_next_seq,
+            commit_key: store::CommitKey::new(format!(
+                "run-start:{}",
+                runtime_spec.spec_hash().as_str()
+            ))?,
+            payloads,
+            required_artifacts,
+            preconditions: store::CommitPreconditions {
+                required_run_state: store::RequiredRunState::Absent,
+                ..store::CommitPreconditions::default()
+            },
+        };
+        store::PreparedTypedCommit::new(request, admitted_artifacts).map_err(RuntimeError::from)
+    }
+
+    fn prepare_attempt_start(
+        runtime_spec: &CertifiedRuntimeSpec,
+        run_id: &RunId,
+        node: &spec::NodeSpec,
+        attempt_id: &AttemptId,
+        attempt_no: u32,
+        view: &RuntimeRunView,
+    ) -> Result<store::PreparedTypedCommit> {
+        let start_payload =
+            events::KernelEventPayload::StateAttemptStarted(events::StateAttemptStarted {
+                spec_hash: runtime_spec.spec_hash().clone(),
+                node_id: node.node_id.clone(),
+                attempt_id: attempt_id.clone(),
+                attempt_no,
+                state_kind: node.state_kind.clone(),
+                state_version: node.state_version.clone(),
+            });
+        let mut preconditions = store::CommitPreconditions {
+            required_run_state: store::RequiredRunState::NotCompleted,
+            required_cell_states: vec![store::CellStatePrecondition {
+                cell_id: node.output_cell.clone(),
+                required: store::RequiredCellState::Absent,
+            }],
+            ..store::CommitPreconditions::default()
+        };
+        preconditions
+            .required_cell_states
+            .extend(node_cell_preconditions(runtime_spec, node)?);
+        let request = store::TypedCommitRequest {
+            run_id: run_id.clone(),
+            expected_next_seq: view.next_seq,
+            commit_key: store::CommitKey::new(format!(
+                "attempt-start:{}:{}",
+                node.node_id, attempt_id
+            ))?,
+            payloads: vec![start_payload],
+            required_artifacts: Vec::new(),
+            preconditions,
+        };
+        store::PreparedTypedCommit::new(request, Vec::new()).map_err(RuntimeError::from)
+    }
+
+    fn prepare_runner_output(
+        input: RunnerOutputCommitInput<'_>,
+    ) -> Result<store::PreparedTypedCommit> {
+        validate_runner_output(
+            input.runtime_spec,
+            input.node,
+            input.attempt_id,
+            input.caps,
+            input.recorded_facts,
+            &input.view.projections,
+            &input.output,
+        )?;
+        let mut payloads = input.output.payloads;
+        payloads.extend(bind_staged_retention_refs(
+            input.runtime_spec,
+            input.run_id,
+            input.node,
+            &input.output.required_artifacts,
+            input.output.staged_retention_refs,
+        )?);
+        let admitted_artifacts = input.output.required_artifacts.clone();
+        let preconditions = runner_output_preconditions(
+            input.node,
+            input.attempt_id,
+            &input.view.projections,
+            &payloads,
+        )?;
+        let request = store::TypedCommitRequest {
+            run_id: input.run_id.clone(),
+            expected_next_seq: input.view.next_seq,
+            commit_key: runner_output_commit_key(input.node, input.attempt_id, &payloads)?,
+            payloads,
+            required_artifacts: input.output.required_artifacts,
+            preconditions,
+        };
+        store::PreparedTypedCommit::new(request, admitted_artifacts).map_err(RuntimeError::from)
+    }
+
+    fn prepare_run_completion(
+        runtime_spec: &CertifiedRuntimeSpec,
+        run_id: &RunId,
+        view: &RuntimeRunView,
+    ) -> Result<store::PreparedTypedCommit> {
+        if view.projections.run_state(run_id) != store::RunState::Started {
+            return Err(RuntimeError::InvalidRunStream(
+                "run completion requires a started non-terminal run".to_owned(),
+            ));
+        }
+        let public_schema_id = runtime_spec.spec().public_outputs.public_schema_id.clone();
+        let completion = match view.projections.public_output(&public_schema_id) {
+            Some(store::PublicOutputProjection::Produced { event_id, .. }) => {
+                events::PublicOutputCompletionEvidence {
+                    public_output_schema_id: public_schema_id,
+                    public_output_event_id: event_id.clone(),
+                }
+            }
+            Some(store::PublicOutputProjection::RenderFailed { .. }) | None => {
+                return Err(RuntimeError::InvalidRunStream(
+                    "run completion requires projected public output evidence".to_owned(),
+                ));
+            }
+        };
+        let public_output_key = store::LogicalEventKey::new(format!(
+            "public_output:{}",
+            completion.public_output_schema_id
+        ))?;
+        let request = store::TypedCommitRequest {
+            run_id: run_id.clone(),
+            expected_next_seq: view.next_seq,
+            commit_key: store::CommitKey::new(format!(
+                "run-completed:{}:{}",
+                completion.public_output_schema_id, completion.public_output_event_id
+            ))?,
+            payloads: vec![events::KernelEventPayload::RunCompleted(
+                events::RunCompleted {
+                    run_id: run_id.clone(),
+                    spec_hash: runtime_spec.spec_hash().clone(),
+                    outcome: events::RunCompletionOutcome::Completed(completion),
+                },
+            )],
+            required_artifacts: Vec::new(),
+            preconditions: store::CommitPreconditions {
+                required_run_state: store::RequiredRunState::NotCompleted,
+                required_present_logical_keys: vec![public_output_key],
+                ..store::CommitPreconditions::default()
+            },
+        };
+        store::PreparedTypedCommit::new(request, Vec::new()).map_err(RuntimeError::from)
+    }
+
+    fn prepare_retention_manifest_projection(
+        runtime_spec: &CertifiedRuntimeSpec,
+        run_id: &RunId,
+        run_stream: &[store::KernelEventEnvelope],
+        view: &RuntimeRunView,
+        manifest: RetentionManifestArtifact,
+    ) -> Result<store::PreparedTypedCommit> {
+        if manifest.evidence.artifact_role != events::ArtifactRole::RetentionManifest
+            || manifest.evidence.digest != manifest.bytes.content_digest()
+            || manifest.evidence.byte_len != manifest.bytes.as_bytes().len() as u64
+            || manifest.evidence.schema_id.is_some()
+            || manifest.evidence.semantic_type_id.is_some()
+            || manifest.evidence.producer_node_id.is_some()
+            || manifest.evidence.producer_seed_id.is_some()
+        {
+            return Err(RuntimeError::InvalidRunStream(
+                "retention manifest artifact evidence does not match manifest bytes".to_owned(),
+            ));
+        }
+        let expected_manifest =
+            build_retention_manifest_artifact(runtime_spec, run_id, run_stream)?;
+        if manifest != expected_manifest {
+            return Err(RuntimeError::InvalidRunStream(
+                "retention manifest artifact does not match current run stream".to_owned(),
+            ));
+        }
+        let manifest_ref = retention_ref_for_artifact(&manifest.evidence);
+        let admitted_artifacts = vec![manifest.evidence.clone()];
+        let request = store::TypedCommitRequest {
+            run_id: run_id.clone(),
+            expected_next_seq: view.next_seq,
+            commit_key: store::CommitKey::new(format!(
+                "retention-manifest:{}:{}",
+                manifest.manifest_seq, manifest.evidence.digest
+            ))?,
+            payloads: vec![
+                events::KernelEventPayload::RetentionManifestProjected(
+                    events::RetentionManifestProjected {
+                        run_id: run_id.clone(),
+                        spec_hash: runtime_spec.spec_hash().clone(),
+                        manifest_seq: manifest.manifest_seq,
+                        manifest_digest: manifest.evidence.digest.clone(),
+                        previous_manifest_digest: manifest.previous_manifest_digest,
+                        manifest_artifact_id: manifest.evidence.artifact_id.clone(),
+                    },
+                ),
+                events::KernelEventPayload::RetentionRefsAppended(events::RetentionRefsAppended {
+                    run_id: run_id.clone(),
+                    spec_hash: runtime_spec.spec_hash().clone(),
+                    refs: vec![manifest_ref],
+                    reason: events::RetentionReason::ManifestProjection,
+                }),
+            ],
+            required_artifacts: vec![manifest.evidence],
+            preconditions: store::CommitPreconditions {
+                required_run_state: store::RequiredRunState::Started,
+                ..store::CommitPreconditions::default()
+            },
+        };
+        store::PreparedTypedCommit::new(request, admitted_artifacts).map_err(RuntimeError::from)
+    }
+}
+
 /// Serial typed scheduler.
 #[derive(Clone)]
 pub struct SerialTypedScheduler {
@@ -1573,75 +1874,14 @@ impl SerialTypedScheduler {
         run_id: RunId,
         evidence: RunStartEvidence,
     ) -> Result<store::CommitOutcome> {
-        let spec_artifact = validate_spec_artifact(runtime_spec, evidence.spec_artifact)?;
-        let certificate_artifact =
-            validate_certificate_artifact(runtime_spec, evidence.certificate_artifact)?;
-        let config_artifacts = validate_config_artifacts(runtime_spec, evidence.config_artifacts)?;
-        let config_reference_payloads =
-            config_artifact_reference_payloads(runtime_spec.spec_hash(), &config_artifacts)?;
-        let seed_cells = validate_seed_cells(runtime_spec, &evidence.seed_cells)?;
-        let runner_executables = self.runners.executables_for_spec(runtime_spec)?;
-        let mut required_artifacts =
-            Vec::with_capacity(2 + config_artifacts.len() + seed_cells.len());
-        required_artifacts.push(spec_artifact.clone());
-        required_artifacts.push(certificate_artifact.clone());
-        required_artifacts.extend(config_artifacts);
-        required_artifacts.extend(seed_cells.values().map(store_seed_artifact));
-        let admitted_artifacts = required_artifacts.clone();
-        let run_started_retention_refs = required_artifacts
-            .iter()
-            .map(retention_ref_for_artifact)
-            .collect::<Vec<_>>();
-        let payload = events::KernelEventPayload::RunStarted(events::RunStarted {
-            run_id: run_id.clone(),
-            spec_hash: runtime_spec.spec_hash().clone(),
-            spec_artifact_id: spec_artifact.artifact_id,
-            certificate_artifact_id: certificate_artifact.artifact_id,
-            certificate_artifact_digest: certificate_artifact.digest,
-            certificate_media_type: certificate_artifact.media_type,
-            spec_media_type: runtime_spec.spec().media_type.clone(),
-            spec_version: runtime_spec.spec().spec_version.clone(),
-            lowering_version: runtime_spec.spec().lowering_version.clone(),
-            public_output_schema_id: runtime_spec.spec().public_outputs.public_schema_id.clone(),
-            descriptor_identities: runtime_spec.spec().descriptor_identities.clone(),
-            runner_executables,
-            adapter_executables: evidence.adapter_executables,
-            canonicalizer_identity: runtime_spec
-                .spec()
-                .public_outputs
-                .renderer_descriptor
-                .canonicalizer_identity
-                .clone(),
-            framework_version: evidence.framework_version,
-            source_revision: evidence.source_revision,
-            seed_cells: evidence.seed_cells,
-        });
-        let retention_payload =
-            events::KernelEventPayload::RetentionRefsAppended(events::RetentionRefsAppended {
-                run_id: run_id.clone(),
-                spec_hash: runtime_spec.spec_hash().clone(),
-                refs: run_started_retention_refs,
-                reason: events::RetentionReason::RunStarted,
-            });
-        let mut payloads = Vec::with_capacity(2 + config_reference_payloads.len());
-        payloads.push(payload);
-        payloads.extend(config_reference_payloads);
-        payloads.push(retention_payload);
-        let request = store::TypedCommitRequest {
-            run_id: run_id.clone(),
-            expected_next_seq: store.expected_next_seq(&run_id),
-            commit_key: store::CommitKey::new(format!(
-                "run-start:{}",
-                runtime_spec.spec_hash().as_str()
-            ))?,
-            payloads,
-            required_artifacts,
-            preconditions: store::CommitPreconditions {
-                required_run_state: store::RequiredRunState::Absent,
-                ..store::CommitPreconditions::default()
-            },
-        };
-        let commit = store::PreparedTypedCommit::new(request, admitted_artifacts)?;
+        let expected_next_seq = store.expected_next_seq(&run_id);
+        let commit = RuntimeMutationMiddleware::prepare_run_start(
+            &self.runners,
+            runtime_spec,
+            run_id,
+            evidence,
+            expected_next_seq,
+        )?;
         Ok(store.append_prepared_typed_commit(commit)?)
     }
 
@@ -1653,78 +1893,17 @@ impl SerialTypedScheduler {
         run_id: RunId,
         evidence: RunStartEvidence,
     ) -> Result<store::CommitOutcome> {
-        let spec_artifact = validate_spec_artifact(runtime_spec, evidence.spec_artifact)?;
-        let certificate_artifact =
-            validate_certificate_artifact(runtime_spec, evidence.certificate_artifact)?;
-        let config_artifacts = validate_config_artifacts(runtime_spec, evidence.config_artifacts)?;
-        let config_reference_payloads =
-            config_artifact_reference_payloads(runtime_spec.spec_hash(), &config_artifacts)?;
-        let seed_cells = validate_seed_cells(runtime_spec, &evidence.seed_cells)?;
-        let runner_executables = self.runners.executables_for_spec(runtime_spec)?;
-        let mut required_artifacts =
-            Vec::with_capacity(2 + config_artifacts.len() + seed_cells.len());
-        required_artifacts.push(spec_artifact.clone());
-        required_artifacts.push(certificate_artifact.clone());
-        required_artifacts.extend(config_artifacts);
-        required_artifacts.extend(seed_cells.values().map(store_seed_artifact));
-        let admitted_artifacts = required_artifacts.clone();
-        let run_started_retention_refs = required_artifacts
-            .iter()
-            .map(retention_ref_for_artifact)
-            .collect::<Vec<_>>();
-        let payload = events::KernelEventPayload::RunStarted(events::RunStarted {
-            run_id: run_id.clone(),
-            spec_hash: runtime_spec.spec_hash().clone(),
-            spec_artifact_id: spec_artifact.artifact_id,
-            certificate_artifact_id: certificate_artifact.artifact_id,
-            certificate_artifact_digest: certificate_artifact.digest,
-            certificate_media_type: certificate_artifact.media_type,
-            spec_media_type: runtime_spec.spec().media_type.clone(),
-            spec_version: runtime_spec.spec().spec_version.clone(),
-            lowering_version: runtime_spec.spec().lowering_version.clone(),
-            public_output_schema_id: runtime_spec.spec().public_outputs.public_schema_id.clone(),
-            descriptor_identities: runtime_spec.spec().descriptor_identities.clone(),
-            runner_executables,
-            adapter_executables: evidence.adapter_executables,
-            canonicalizer_identity: runtime_spec
-                .spec()
-                .public_outputs
-                .renderer_descriptor
-                .canonicalizer_identity
-                .clone(),
-            framework_version: evidence.framework_version,
-            source_revision: evidence.source_revision,
-            seed_cells: evidence.seed_cells,
-        });
-        let retention_payload =
-            events::KernelEventPayload::RetentionRefsAppended(events::RetentionRefsAppended {
-                run_id: run_id.clone(),
-                spec_hash: runtime_spec.spec_hash().clone(),
-                refs: run_started_retention_refs,
-                reason: events::RetentionReason::RunStarted,
-            });
-        let mut payloads = Vec::with_capacity(2 + config_reference_payloads.len());
-        payloads.push(payload);
-        payloads.extend(config_reference_payloads);
-        payloads.push(retention_payload);
-        let request = store::TypedCommitRequest {
-            run_id: run_id.clone(),
-            expected_next_seq: store
-                .expected_next_seq(&run_id)
-                .await
-                .map_err(async_store_error)?,
-            commit_key: store::CommitKey::new(format!(
-                "run-start:{}",
-                runtime_spec.spec_hash().as_str()
-            ))?,
-            payloads,
-            required_artifacts,
-            preconditions: store::CommitPreconditions {
-                required_run_state: store::RequiredRunState::Absent,
-                ..store::CommitPreconditions::default()
-            },
-        };
-        let commit = store::PreparedTypedCommit::new(request, admitted_artifacts)?;
+        let expected_next_seq = store
+            .expected_next_seq(&run_id)
+            .await
+            .map_err(async_store_error)?;
+        let commit = RuntimeMutationMiddleware::prepare_run_start(
+            &self.runners,
+            runtime_spec,
+            run_id,
+            evidence,
+            expected_next_seq,
+        )?;
         store
             .append_prepared_typed_commit(commit)
             .await
@@ -1739,10 +1918,9 @@ impl SerialTypedScheduler {
         run_id: &RunId,
     ) -> Result<SchedulerStatus> {
         let view = RuntimeRunView::from_store(runtime_spec, run_id, store)?;
-        if let Some(completion) = public_output_completion_evidence(runtime_spec, &view.projections)
-        {
+        if public_output_is_produced(runtime_spec, &view.projections) {
             if view.projections.run_state(run_id) == store::RunState::Started {
-                self.complete_run(store, runtime_spec, run_id, completion)?;
+                self.complete_run(store, runtime_spec, run_id, &view)?;
                 return Ok(SchedulerStatus::Advanced);
             }
             return Ok(SchedulerStatus::PublicOutputProjected);
@@ -1784,10 +1962,9 @@ impl SerialTypedScheduler {
             .await
             .map_err(async_store_error)?;
         let view = RuntimeRunView::from_stream(runtime_spec, run_id, &stream)?;
-        if let Some(completion) = public_output_completion_evidence(runtime_spec, &view.projections)
-        {
+        if public_output_is_produced(runtime_spec, &view.projections) {
             if view.projections.run_state(run_id) == store::RunState::Started {
-                self.complete_run_async(store, runtime_spec, run_id, completion)
+                self.complete_run_async(store, runtime_spec, run_id, &view)
                     .await?;
                 return Ok(SchedulerStatus::Advanced);
             }
@@ -1845,38 +2022,14 @@ impl SerialTypedScheduler {
                 let attempt_no = next_attempt_no(&view.projections, &node.node_id)?;
                 let attempt_id =
                     attempt_id(run_id, runtime_spec.spec_hash(), &node.node_id, attempt_no)?;
-                let start_payload =
-                    events::KernelEventPayload::StateAttemptStarted(events::StateAttemptStarted {
-                        spec_hash: runtime_spec.spec_hash().clone(),
-                        node_id: node.node_id.clone(),
-                        attempt_id: attempt_id.clone(),
-                        attempt_no,
-                        state_kind: node.state_kind.clone(),
-                        state_version: node.state_version.clone(),
-                    });
-                let mut preconditions = store::CommitPreconditions {
-                    required_run_state: store::RequiredRunState::NotCompleted,
-                    required_cell_states: vec![store::CellStatePrecondition {
-                        cell_id: node.output_cell.clone(),
-                        required: store::RequiredCellState::Absent,
-                    }],
-                    ..store::CommitPreconditions::default()
-                };
-                preconditions
-                    .required_cell_states
-                    .extend(node_cell_preconditions(runtime_spec, node)?);
-                let start_request = store::TypedCommitRequest {
-                    run_id: run_id.clone(),
-                    expected_next_seq: store.expected_next_seq(run_id),
-                    commit_key: store::CommitKey::new(format!(
-                        "attempt-start:{}:{}",
-                        node.node_id, attempt_id
-                    ))?,
-                    payloads: vec![start_payload],
-                    required_artifacts: Vec::new(),
-                    preconditions,
-                };
-                let start_commit = store::PreparedTypedCommit::new(start_request, Vec::new())?;
+                let start_commit = RuntimeMutationMiddleware::prepare_attempt_start(
+                    runtime_spec,
+                    run_id,
+                    node,
+                    &attempt_id,
+                    attempt_no,
+                    view,
+                )?;
                 store.append_prepared_typed_commit(start_commit)?;
                 (attempt_id, attempt_no)
             }
@@ -1886,9 +2039,11 @@ impl SerialTypedScheduler {
             } => (attempt_id, attempt_no),
         };
 
-        let latest_projection = store.projection_snapshot().clone();
+        let latest_stream = store.load_run_stream(run_id);
+        let latest_view = RuntimeRunView::from_stream(runtime_spec, run_id, &latest_stream)?;
+        let latest_projection = &latest_view.projections;
         let recorded_facts =
-            recorded_facts_for_attempt(&latest_projection, &node.node_id, &attempt_id)?;
+            recorded_facts_for_attempt(latest_projection, &node.node_id, &attempt_id)?;
         let output = binding
             .runner
             .run_erased(ErasedRunCtx {
@@ -1905,36 +2060,17 @@ impl SerialTypedScheduler {
                 projections: &latest_projection,
             })
             .await?;
-        validate_runner_output(
-            runtime_spec,
-            node,
-            &attempt_id,
-            &caps,
-            &recorded_facts,
-            &latest_projection,
-            &output,
-        )?;
-        let mut payloads = output.payloads;
-        payloads.extend(bind_staged_retention_refs(
-            runtime_spec,
-            run_id,
-            node,
-            &output.required_artifacts,
-            output.staged_retention_refs,
-        )?);
-        let admitted_artifacts = output.required_artifacts.clone();
-        let preconditions =
-            runner_output_preconditions(node, &attempt_id, &latest_projection, &payloads)?;
-        let terminal_request = store::TypedCommitRequest {
-            run_id: run_id.clone(),
-            expected_next_seq: store.expected_next_seq(run_id),
-            commit_key: runner_output_commit_key(node, &attempt_id, &payloads)?,
-            payloads,
-            required_artifacts: output.required_artifacts,
-            preconditions,
-        };
         let terminal_commit =
-            store::PreparedTypedCommit::new(terminal_request, admitted_artifacts)?;
+            RuntimeMutationMiddleware::prepare_runner_output(RunnerOutputCommitInput {
+                runtime_spec,
+                run_id,
+                node,
+                attempt_id: &attempt_id,
+                caps: &caps,
+                recorded_facts: &recorded_facts,
+                view: &latest_view,
+                output,
+            })?;
         store.append_prepared_typed_commit(terminal_commit)?;
         Ok(())
     }
@@ -1966,41 +2102,14 @@ impl SerialTypedScheduler {
                 let attempt_no = next_attempt_no(&view.projections, &node.node_id)?;
                 let attempt_id =
                     attempt_id(run_id, runtime_spec.spec_hash(), &node.node_id, attempt_no)?;
-                let start_payload =
-                    events::KernelEventPayload::StateAttemptStarted(events::StateAttemptStarted {
-                        spec_hash: runtime_spec.spec_hash().clone(),
-                        node_id: node.node_id.clone(),
-                        attempt_id: attempt_id.clone(),
-                        attempt_no,
-                        state_kind: node.state_kind.clone(),
-                        state_version: node.state_version.clone(),
-                    });
-                let mut preconditions = store::CommitPreconditions {
-                    required_run_state: store::RequiredRunState::NotCompleted,
-                    required_cell_states: vec![store::CellStatePrecondition {
-                        cell_id: node.output_cell.clone(),
-                        required: store::RequiredCellState::Absent,
-                    }],
-                    ..store::CommitPreconditions::default()
-                };
-                preconditions
-                    .required_cell_states
-                    .extend(node_cell_preconditions(runtime_spec, node)?);
-                let start_request = store::TypedCommitRequest {
-                    run_id: run_id.clone(),
-                    expected_next_seq: store
-                        .expected_next_seq(run_id)
-                        .await
-                        .map_err(async_store_error)?,
-                    commit_key: store::CommitKey::new(format!(
-                        "attempt-start:{}:{}",
-                        node.node_id, attempt_id
-                    ))?,
-                    payloads: vec![start_payload],
-                    required_artifacts: Vec::new(),
-                    preconditions,
-                };
-                let start_commit = store::PreparedTypedCommit::new(start_request, Vec::new())?;
+                let start_commit = RuntimeMutationMiddleware::prepare_attempt_start(
+                    runtime_spec,
+                    run_id,
+                    node,
+                    &attempt_id,
+                    attempt_no,
+                    view,
+                )?;
                 store
                     .append_prepared_typed_commit(start_commit)
                     .await
@@ -2018,9 +2127,9 @@ impl SerialTypedScheduler {
             .await
             .map_err(async_store_error)?;
         let latest_view = RuntimeRunView::from_stream(runtime_spec, run_id, &latest_stream)?;
-        let latest_projection = latest_view.projections;
+        let latest_projection = &latest_view.projections;
         let recorded_facts =
-            recorded_facts_for_attempt(&latest_projection, &node.node_id, &attempt_id)?;
+            recorded_facts_for_attempt(latest_projection, &node.node_id, &attempt_id)?;
         let output = binding
             .runner
             .run_erased(ErasedRunCtx {
@@ -2037,39 +2146,17 @@ impl SerialTypedScheduler {
                 projections: &latest_projection,
             })
             .await?;
-        validate_runner_output(
-            runtime_spec,
-            node,
-            &attempt_id,
-            &caps,
-            &recorded_facts,
-            &latest_projection,
-            &output,
-        )?;
-        let mut payloads = output.payloads;
-        payloads.extend(bind_staged_retention_refs(
-            runtime_spec,
-            run_id,
-            node,
-            &output.required_artifacts,
-            output.staged_retention_refs,
-        )?);
-        let admitted_artifacts = output.required_artifacts.clone();
-        let preconditions =
-            runner_output_preconditions(node, &attempt_id, &latest_projection, &payloads)?;
-        let terminal_request = store::TypedCommitRequest {
-            run_id: run_id.clone(),
-            expected_next_seq: store
-                .expected_next_seq(run_id)
-                .await
-                .map_err(async_store_error)?,
-            commit_key: runner_output_commit_key(node, &attempt_id, &payloads)?,
-            payloads,
-            required_artifacts: output.required_artifacts,
-            preconditions,
-        };
         let terminal_commit =
-            store::PreparedTypedCommit::new(terminal_request, admitted_artifacts)?;
+            RuntimeMutationMiddleware::prepare_runner_output(RunnerOutputCommitInput {
+                runtime_spec,
+                run_id,
+                node,
+                attempt_id: &attempt_id,
+                caps: &caps,
+                recorded_facts: &recorded_facts,
+                view: &latest_view,
+                output,
+            })?;
         store
             .append_prepared_typed_commit(terminal_commit)
             .await
@@ -2082,34 +2169,9 @@ impl SerialTypedScheduler {
         store: &mut S,
         runtime_spec: &CertifiedRuntimeSpec,
         run_id: &RunId,
-        completion: events::PublicOutputCompletionEvidence,
+        view: &RuntimeRunView,
     ) -> Result<()> {
-        let public_output_key = store::LogicalEventKey::new(format!(
-            "public_output:{}",
-            completion.public_output_schema_id
-        ))?;
-        let request = store::TypedCommitRequest {
-            run_id: run_id.clone(),
-            expected_next_seq: store.expected_next_seq(run_id),
-            commit_key: store::CommitKey::new(format!(
-                "run-completed:{}:{}",
-                completion.public_output_schema_id, completion.public_output_event_id
-            ))?,
-            payloads: vec![events::KernelEventPayload::RunCompleted(
-                events::RunCompleted {
-                    run_id: run_id.clone(),
-                    spec_hash: runtime_spec.spec_hash().clone(),
-                    outcome: events::RunCompletionOutcome::Completed(completion),
-                },
-            )],
-            required_artifacts: Vec::new(),
-            preconditions: store::CommitPreconditions {
-                required_run_state: store::RequiredRunState::NotCompleted,
-                required_present_logical_keys: vec![public_output_key],
-                ..store::CommitPreconditions::default()
-            },
-        };
-        let commit = store::PreparedTypedCommit::new(request, Vec::new())?;
+        let commit = RuntimeMutationMiddleware::prepare_run_completion(runtime_spec, run_id, view)?;
         store.append_prepared_typed_commit(commit)?;
         Ok(())
     }
@@ -2119,37 +2181,9 @@ impl SerialTypedScheduler {
         store: &S,
         runtime_spec: &CertifiedRuntimeSpec,
         run_id: &RunId,
-        completion: events::PublicOutputCompletionEvidence,
+        view: &RuntimeRunView,
     ) -> Result<()> {
-        let public_output_key = store::LogicalEventKey::new(format!(
-            "public_output:{}",
-            completion.public_output_schema_id
-        ))?;
-        let request = store::TypedCommitRequest {
-            run_id: run_id.clone(),
-            expected_next_seq: store
-                .expected_next_seq(run_id)
-                .await
-                .map_err(async_store_error)?,
-            commit_key: store::CommitKey::new(format!(
-                "run-completed:{}:{}",
-                completion.public_output_schema_id, completion.public_output_event_id
-            ))?,
-            payloads: vec![events::KernelEventPayload::RunCompleted(
-                events::RunCompleted {
-                    run_id: run_id.clone(),
-                    spec_hash: runtime_spec.spec_hash().clone(),
-                    outcome: events::RunCompletionOutcome::Completed(completion),
-                },
-            )],
-            required_artifacts: Vec::new(),
-            preconditions: store::CommitPreconditions {
-                required_run_state: store::RequiredRunState::NotCompleted,
-                required_present_logical_keys: vec![public_output_key],
-                ..store::CommitPreconditions::default()
-            },
-        };
-        let commit = store::PreparedTypedCommit::new(request, Vec::new())?;
+        let commit = RuntimeMutationMiddleware::prepare_run_completion(runtime_spec, run_id, view)?;
         store
             .append_prepared_typed_commit(commit)
             .await
@@ -2165,62 +2199,15 @@ impl SerialTypedScheduler {
         run_id: &RunId,
         manifest: RetentionManifestArtifact,
     ) -> Result<store::CommitOutcome> {
-        if manifest.evidence.artifact_role != events::ArtifactRole::RetentionManifest
-            || manifest.evidence.digest != manifest.bytes.content_digest()
-            || manifest.evidence.byte_len != manifest.bytes.as_bytes().len() as u64
-            || manifest.evidence.schema_id.is_some()
-            || manifest.evidence.semantic_type_id.is_some()
-            || manifest.evidence.producer_node_id.is_some()
-            || manifest.evidence.producer_seed_id.is_some()
-        {
-            return Err(RuntimeError::InvalidRunStream(
-                "retention manifest artifact evidence does not match manifest bytes".to_owned(),
-            ));
-        }
-        let expected_manifest = build_retention_manifest_artifact(
+        let stream = store.load_run_stream(run_id);
+        let view = RuntimeRunView::from_stream(runtime_spec, run_id, &stream)?;
+        let commit = RuntimeMutationMiddleware::prepare_retention_manifest_projection(
             runtime_spec,
             run_id,
-            &store.load_run_stream(run_id),
+            &stream,
+            &view,
+            manifest,
         )?;
-        if manifest != expected_manifest {
-            return Err(RuntimeError::InvalidRunStream(
-                "retention manifest artifact does not match current run stream".to_owned(),
-            ));
-        }
-        let manifest_ref = retention_ref_for_artifact(&manifest.evidence);
-        let admitted_artifacts = vec![manifest.evidence.clone()];
-        let request = store::TypedCommitRequest {
-            run_id: run_id.clone(),
-            expected_next_seq: store.expected_next_seq(run_id),
-            commit_key: store::CommitKey::new(format!(
-                "retention-manifest:{}:{}",
-                manifest.manifest_seq, manifest.evidence.digest
-            ))?,
-            payloads: vec![
-                events::KernelEventPayload::RetentionManifestProjected(
-                    events::RetentionManifestProjected {
-                        run_id: run_id.clone(),
-                        spec_hash: runtime_spec.spec_hash().clone(),
-                        manifest_seq: manifest.manifest_seq,
-                        manifest_digest: manifest.evidence.digest.clone(),
-                        previous_manifest_digest: manifest.previous_manifest_digest,
-                        manifest_artifact_id: manifest.evidence.artifact_id.clone(),
-                    },
-                ),
-                events::KernelEventPayload::RetentionRefsAppended(events::RetentionRefsAppended {
-                    run_id: run_id.clone(),
-                    spec_hash: runtime_spec.spec_hash().clone(),
-                    refs: vec![manifest_ref],
-                    reason: events::RetentionReason::ManifestProjection,
-                }),
-            ],
-            required_artifacts: vec![manifest.evidence],
-            preconditions: store::CommitPreconditions {
-                required_run_state: store::RequiredRunState::Started,
-                ..store::CommitPreconditions::default()
-            },
-        };
-        let commit = store::PreparedTypedCommit::new(request, admitted_artifacts)?;
         Ok(store.append_prepared_typed_commit(commit)?)
     }
 
@@ -2234,65 +2221,18 @@ impl SerialTypedScheduler {
         run_id: &RunId,
         manifest: RetentionManifestArtifact,
     ) -> Result<store::CommitOutcome> {
-        if manifest.evidence.artifact_role != events::ArtifactRole::RetentionManifest
-            || manifest.evidence.digest != manifest.bytes.content_digest()
-            || manifest.evidence.byte_len != manifest.bytes.as_bytes().len() as u64
-            || manifest.evidence.schema_id.is_some()
-            || manifest.evidence.semantic_type_id.is_some()
-            || manifest.evidence.producer_node_id.is_some()
-            || manifest.evidence.producer_seed_id.is_some()
-        {
-            return Err(RuntimeError::InvalidRunStream(
-                "retention manifest artifact evidence does not match manifest bytes".to_owned(),
-            ));
-        }
         let stream = store
             .load_run_stream(run_id)
             .await
             .map_err(async_store_error)?;
-        let expected_manifest = build_retention_manifest_artifact(runtime_spec, run_id, &stream)?;
-        if manifest != expected_manifest {
-            return Err(RuntimeError::InvalidRunStream(
-                "retention manifest artifact does not match current run stream".to_owned(),
-            ));
-        }
-        let manifest_ref = retention_ref_for_artifact(&manifest.evidence);
-        let admitted_artifacts = vec![manifest.evidence.clone()];
-        let request = store::TypedCommitRequest {
-            run_id: run_id.clone(),
-            expected_next_seq: store
-                .expected_next_seq(run_id)
-                .await
-                .map_err(async_store_error)?,
-            commit_key: store::CommitKey::new(format!(
-                "retention-manifest:{}:{}",
-                manifest.manifest_seq, manifest.evidence.digest
-            ))?,
-            payloads: vec![
-                events::KernelEventPayload::RetentionManifestProjected(
-                    events::RetentionManifestProjected {
-                        run_id: run_id.clone(),
-                        spec_hash: runtime_spec.spec_hash().clone(),
-                        manifest_seq: manifest.manifest_seq,
-                        manifest_digest: manifest.evidence.digest.clone(),
-                        previous_manifest_digest: manifest.previous_manifest_digest,
-                        manifest_artifact_id: manifest.evidence.artifact_id.clone(),
-                    },
-                ),
-                events::KernelEventPayload::RetentionRefsAppended(events::RetentionRefsAppended {
-                    run_id: run_id.clone(),
-                    spec_hash: runtime_spec.spec_hash().clone(),
-                    refs: vec![manifest_ref],
-                    reason: events::RetentionReason::ManifestProjection,
-                }),
-            ],
-            required_artifacts: vec![manifest.evidence],
-            preconditions: store::CommitPreconditions {
-                required_run_state: store::RequiredRunState::Started,
-                ..store::CommitPreconditions::default()
-            },
-        };
-        let commit = store::PreparedTypedCommit::new(request, admitted_artifacts)?;
+        let view = RuntimeRunView::from_stream(runtime_spec, run_id, &stream)?;
+        let commit = RuntimeMutationMiddleware::prepare_retention_manifest_projection(
+            runtime_spec,
+            run_id,
+            &stream,
+            &view,
+            manifest,
+        )?;
         store
             .append_prepared_typed_commit(commit)
             .await
@@ -2300,20 +2240,15 @@ impl SerialTypedScheduler {
     }
 }
 
-fn public_output_completion_evidence(
+fn public_output_is_produced(
     runtime_spec: &CertifiedRuntimeSpec,
     projections: &store::ProjectionSnapshot,
-) -> Option<events::PublicOutputCompletionEvidence> {
+) -> bool {
     let public_schema_id = &runtime_spec.spec().public_outputs.public_schema_id;
-    match projections.public_output(public_schema_id) {
-        Some(store::PublicOutputProjection::Produced { event_id, .. }) => {
-            Some(events::PublicOutputCompletionEvidence {
-                public_output_schema_id: public_schema_id.clone(),
-                public_output_event_id: event_id.clone(),
-            })
-        }
-        Some(store::PublicOutputProjection::RenderFailed { .. }) | None => None,
-    }
+    matches!(
+        projections.public_output(public_schema_id),
+        Some(store::PublicOutputProjection::Produced { .. })
+    )
 }
 
 /// Builds the next canonical retention manifest artifact from an authoritative run stream.
@@ -5545,6 +5480,149 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn retention_manifest_projection_rejects_stale_stream_sequence() {
+        let fixture = fixture();
+        let scheduler = SerialTypedScheduler::new(registered_fixture_runners(&fixture));
+        let mut store = store::InMemoryTypedRunStore::new();
+        scheduler
+            .start_run(
+                &mut store,
+                &fixture.runtime_spec,
+                fixture.run_id.clone(),
+                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
+            )
+            .expect("start run");
+
+        for _ in 0..8 {
+            scheduler
+                .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+                .await
+                .expect("drive until public output");
+            let projections = store.projection_snapshot();
+            if projections.run_state(&fixture.run_id) == store::RunState::Started
+                && matches!(
+                    projections.public_output(
+                        &fixture.runtime_spec.spec().public_outputs.public_schema_id
+                    ),
+                    Some(store::PublicOutputProjection::Produced { .. })
+                )
+            {
+                break;
+            }
+        }
+        assert_eq!(
+            store.projection_snapshot().run_state(&fixture.run_id),
+            store::RunState::Started
+        );
+
+        let stale_stream = store.load_run_stream(&fixture.run_id);
+        let stale_manifest = build_retention_manifest_artifact(
+            &fixture.runtime_spec,
+            &fixture.run_id,
+            &stale_stream,
+        )
+        .expect("build manifest from stale stream");
+
+        scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("advance current store");
+        assert_eq!(
+            store.projection_snapshot().run_state(&fixture.run_id),
+            store::RunState::Completed
+        );
+
+        let mut stale_store = StaleStreamStore {
+            inner: &mut store,
+            stream: stale_stream,
+        };
+        assert!(matches!(
+            scheduler.append_retention_manifest_projection(
+                &mut stale_store,
+                &fixture.runtime_spec,
+                &fixture.run_id,
+                stale_manifest,
+            ),
+            Err(RuntimeError::Store(message)) if message.contains("stale expected_next_seq")
+        ));
+    }
+
+    #[tokio::test]
+    async fn retention_manifest_projection_rejects_corrupt_stream_before_commit() {
+        let fixture = fixture();
+        let scheduler = SerialTypedScheduler::new(registered_fixture_runners(&fixture));
+        let mut store = store::InMemoryTypedRunStore::new();
+        scheduler
+            .start_run(
+                &mut store,
+                &fixture.runtime_spec,
+                fixture.run_id.clone(),
+                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
+            )
+            .expect("start run");
+
+        for _ in 0..8 {
+            scheduler
+                .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+                .await
+                .expect("drive until public output");
+            if matches!(
+                store
+                    .projection_snapshot()
+                    .public_output(&fixture.runtime_spec.spec().public_outputs.public_schema_id),
+                Some(store::PublicOutputProjection::Produced { .. })
+            ) {
+                break;
+            }
+        }
+
+        let mut corrupt_stream = store.load_run_stream(&fixture.run_id);
+        let corrupt_pos = corrupt_stream
+            .iter()
+            .position(|event| {
+                event.ordinal() == store::CommitOrdinal::new(0)
+                    && matches!(
+                        event.payload(),
+                        events::KernelEventPayload::StateAttemptStarted(_)
+                    )
+            })
+            .expect("attempt-start event");
+        let mut corrupt_payload = match corrupt_stream[corrupt_pos].payload().clone() {
+            events::KernelEventPayload::StateAttemptStarted(payload) => payload,
+            _ => unreachable!("position checked"),
+        };
+        corrupt_payload.spec_hash = SpecHash::from_digest(DigestAlgorithm::Sha256JcsV1, D9);
+        corrupt_stream[corrupt_pos] = rewrite_single_payload_envelope(
+            &corrupt_stream[corrupt_pos],
+            events::KernelEventPayload::StateAttemptStarted(corrupt_payload),
+        );
+
+        let manifest = build_retention_manifest_artifact(
+            &fixture.runtime_spec,
+            &fixture.run_id,
+            &corrupt_stream,
+        )
+        .expect("legacy manifest builder accepts ordered corrupt stream");
+        let projection = store::ProjectionSnapshot::rebuild_from_run_stream(&corrupt_stream)
+            .expect("projection rebuild accepts ordered corrupt stream");
+        let mut corrupt_store = ReadOnlyCorruptStore {
+            stream: corrupt_stream,
+            projection,
+        };
+
+        assert!(matches!(
+            scheduler.append_retention_manifest_projection(
+                &mut corrupt_store,
+                &fixture.runtime_spec,
+                &fixture.run_id,
+                manifest,
+            ),
+            Err(RuntimeError::InvalidRunStream(message))
+                if message.contains("event payload spec hash")
+        ));
+    }
+
+    #[tokio::test]
     async fn public_output_render_failure_resumes_and_completes() {
         let fixture = fixture();
         let scheduler = SerialTypedScheduler::new(registered_fixture_runners(&fixture));
@@ -5781,6 +5859,81 @@ mod tests {
                 .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
                 .await,
             Err(RuntimeError::InvalidRunnerOutput(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn runner_cannot_return_scheduler_owned_lifecycle_payload() {
+        struct SchedulerOwnedPayloadRunner {
+            public_schema_id: SchemaId,
+        }
+
+        impl ErasedNodeRunner for SchedulerOwnedPayloadRunner {
+            fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
+                Box::pin(async move {
+                    Ok(ErasedRunnerOutput::new(vec![
+                        events::KernelEventPayload::RunCompleted(events::RunCompleted {
+                            run_id: ctx.run_id.clone(),
+                            spec_hash: ctx.spec_hash.clone(),
+                            outcome: events::RunCompletionOutcome::Completed(
+                                events::PublicOutputCompletionEvidence {
+                                    public_output_schema_id: self.public_schema_id.clone(),
+                                    public_output_event_id: EventId::from_digest(
+                                        DigestAlgorithm::Sha256JcsV1,
+                                        D9,
+                                    ),
+                                },
+                            ),
+                        }),
+                    ]))
+                })
+            }
+        }
+
+        let fixture = fixture();
+        let mut registry = ErasedRunnerRegistry::new();
+        registry
+            .register(binding(
+                fixture.descriptor_a.clone(),
+                "pure",
+                SchedulerOwnedPayloadRunner {
+                    public_schema_id: fixture
+                        .runtime_spec
+                        .spec()
+                        .public_outputs
+                        .public_schema_id
+                        .clone(),
+                },
+            ))
+            .expect("binding a");
+        registry
+            .register(binding(
+                fixture.descriptor_b.clone(),
+                "read",
+                RecordingRunner {
+                    expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
+                    output_artifact: artifact(0xb1),
+                    output_digest: content(0xb2),
+                },
+            ))
+            .expect("binding b");
+        let scheduler = SerialTypedScheduler::new(registry);
+        let mut store = store::InMemoryTypedRunStore::new();
+        scheduler
+            .start_run(
+                &mut store,
+                &fixture.runtime_spec,
+                fixture.run_id.clone(),
+                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
+            )
+            .expect("start run");
+
+        assert!(matches!(
+            scheduler
+                .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+                .await,
+            Err(RuntimeError::InvalidRunnerOutput(message))
+                if message.contains("scheduler-owned payload")
         ));
     }
 
@@ -7425,6 +7578,34 @@ mod tests {
         }
     }
 
+    struct StaleStreamStore<'a> {
+        inner: &'a mut store::InMemoryTypedRunStore,
+        stream: Vec<store::KernelEventEnvelope>,
+    }
+
+    impl store::TypedProjectionRead for StaleStreamStore<'_> {
+        fn projection_snapshot(&self) -> &store::ProjectionSnapshot {
+            self.inner.projection_snapshot()
+        }
+    }
+
+    impl store::TypedRunEventStore for StaleStreamStore<'_> {
+        fn append_prepared_typed_commit(
+            &mut self,
+            commit: store::PreparedTypedCommit,
+        ) -> store::Result<store::CommitOutcome> {
+            self.inner.append_prepared_typed_commit(commit)
+        }
+
+        fn load_run_stream(&self, _run_id: &RunId) -> Vec<store::KernelEventEnvelope> {
+            self.stream.clone()
+        }
+
+        fn expected_next_seq(&self, run_id: &RunId) -> store::StreamSeq {
+            self.inner.expected_next_seq(run_id)
+        }
+    }
+
     struct ReadOnlyCorruptStore {
         stream: Vec<store::KernelEventEnvelope>,
         projection: store::ProjectionSnapshot,
@@ -7475,6 +7656,28 @@ mod tests {
             payload_canonical_byte_len: event.audit().payload_canonical_byte_len(),
         })
         .expect("rewritten envelope")
+    }
+
+    fn rewrite_single_payload_envelope(
+        event: &store::KernelEventEnvelope,
+        payload: events::KernelEventPayload,
+    ) -> store::KernelEventEnvelope {
+        assert_eq!(event.ordinal(), store::CommitOrdinal::new(0));
+        let request = store::TypedCommitRequest {
+            run_id: event.run_id().clone(),
+            expected_next_seq: event.seq(),
+            commit_key: event.commit_key().clone(),
+            payloads: vec![payload],
+            required_artifacts: Vec::new(),
+            preconditions: store::CommitPreconditions::default(),
+        };
+        let batch =
+            store::build_committed_batch(&request, event.seq()).expect("rewritten payload batch");
+        batch
+            .events()
+            .first()
+            .expect("rewritten payload event")
+            .clone()
     }
 
     fn event_id_for(
