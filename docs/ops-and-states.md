@@ -32,6 +32,21 @@ Typed run start surfaces accept certified typed execution specs. Workflow-specif
 compile authored JSON/TOML into a certified spec before start, but they still submit through the
 typed runtime/store path.
 
+## Authority And Evidence
+
+Workflow surfaces use the same authority contract:
+
+- authored domain JSON/TOML and parsed typed spec JSON are input data only
+- certified bundles are parsed as untrusted spec/certificate evidence
+- `mfm-certify` must verify a bundle against the production registry before app/runtime start
+- `RunStarted` records both spec and certificate artifact evidence
+- resume, replay, and public-output rendering reload and verify stored spec/certificate artifacts
+  before constructing runtime, replay, or render authority
+- rendered public-output JSON is a cache/output surface, not replay or resume authority
+
+No active workflow uses hash-only envelopes, summaries, source scans, or route naming conventions as
+runtime authority.
+
 ## Typed Operation Planners
 
 | Crate | Certified operation | Purpose |

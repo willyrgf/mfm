@@ -152,8 +152,10 @@ curl -s "http://127.0.0.1:3001/v1/runs/$RUN_ID/public-output/$SCHEMA_ID"
 ```
 
 The status and stream endpoints are typed inspection views over the authoritative typed run stream.
-The public-output endpoint and append-only resume validate the stored stream against the persisted
-certified spec before returning semantic output.
+Resume, replay, and public-output rendering load the stored spec/certificate artifacts, verify them
+against the production registry, compare their evidence to `RunStarted`, and rebuild stream evidence
+before constructing runtime, replay, or render authority. Rendered public-output JSON is an
+output/cache surface only.
 
 ## Removed Dynamic Surfaces
 

@@ -24,6 +24,23 @@ typed or authored input
 The certified typed execution spec is the runtime contract. Any runner plan is an implementation
 detail that must be derivable from that spec.
 
+## Authority Contract
+
+The typed boundary separates transport data from authority:
+
+- parsed typed spec JSON is data only
+- `HashedSpecEnvelope` is a hash-only envelope only
+- persisted `CertifiedSpecCertificate` bytes are evidence only until verified
+- `CertifiedTypedSpec` is the non-forgeable authority returned by `mfm-certify`
+- `CertifiedRuntimeSpec` is runtime authority derived only from `CertifiedTypedSpec`
+- erased runner plans are implementation artifacts
+- rendered public-output JSON is an output/cache surface only
+
+Start, resume, replay, and public-output rendering must verify stored spec/certificate artifacts
+against the production registry and compare stream evidence before constructing runtime, replay, or
+render authority. Hash matches, certificate bytes, stored summaries, source scans, and naming
+conventions are not semantic authority.
+
 ## Layers
 
 | Layer | Crates | Owns |
@@ -127,6 +144,8 @@ replay, retention, public output, or side-effect status.
 
 `bin/cli` and `bin/rest-api` stay transport-only. They may expose stable JSON/text/HTTP surfaces,
 but all semantic work flows through typed operations, app services, runtime, store, and replay.
+Generic start accepts certified bundles. Domain start routes may accept domain inputs, but they must
+certify typed specs internally before `RunStarted`.
 
 ## Active Workflow Ports
 
@@ -167,6 +186,14 @@ Before merging a change, verify:
 - resume validates stored stream evidence against the certified spec
 - app/bin changes do not embed planner or state behavior
 - docs and tests are updated in the same change
+- source scans or CI summary keys are not used as typed-core proof
+
+## CI Ownership
+
+Typed-core guarantees are owned by Rust type/API boundaries, compile-fail fixtures, cargo metadata
+tests, schema golden tests, and production-path integration tests. The former typed-core
+source-scan gates and summary-key validators have been deleted from Nixfied CI and are historical
+only.
 
 ## Companion Docs
 

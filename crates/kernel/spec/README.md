@@ -6,6 +6,10 @@ Typed kernel crate for typed execution spec data contracts.
 non-semantic audit metadata. It is not certification authority; callers must use
 `mfm-certify` to obtain or verify a non-forgeable certified typed-spec authority.
 
-`RFC_TYPED_CORE_PROPOSAL_1.md` is the authority for this crate during the typed-core rewrite.
-This crate is framework-owned and must remain domain-free. It must not depend on old dynamic
-machine or SDK crates.
+Parsed persisted typed spec bytes are typed data only and remain hostile until verified by
+`mfm-certify` against a registry and certificate. Hash matches, audit metadata, summaries, or
+source scans do not certify this data.
+
+`docs/design.md` is the normative typed-core authority contract; `RFC_TYPED_CORE_PROPOSAL_1.md` is
+historical. This crate is framework-owned and must remain domain-free. It must not depend on old
+dynamic machine or SDK crates.

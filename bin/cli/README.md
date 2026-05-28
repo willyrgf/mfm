@@ -320,8 +320,9 @@ Stable typed start errors include:
 
 ### `run resume`
 
-Resumes a certified typed run by loading the spec artifact bound by `RunStarted` and driving the
-typed scheduler according to `--drive`.
+Resumes a certified typed run by loading the spec and certificate artifacts bound by `RunStarted`,
+verifying them against the production registry, rebuilding stream evidence, and driving the typed
+scheduler according to `--drive`.
 
 **Usage:**
 ```sh
@@ -355,8 +356,9 @@ mfm_cli run stream <RUN_ID> [OPTIONS]
 
 ### `run public-output`
 
-Renders a typed public output by schema id from store-owned public-output projection evidence and
-typed artifact bytes.
+Renders a typed public output by schema id through app-owned render authority minted from verified
+stored spec/certificate artifacts, rebuilt stream evidence, store-owned public-output projection
+evidence, and typed artifact bytes. Rendered JSON is not resume, replay, or render authority.
 
 **Usage:**
 ```sh
@@ -365,11 +367,12 @@ mfm_cli run public-output <RUN_ID> --schema-id <SCHEMA_ID> [OPTIONS]
 
 ### `run replay`
 
-Verifies replay authority for a certified typed run by loading the stored certified spec artifact
-and retained artifact evidence, then constructing the typed replay broker. The command rejects
-missing retained evidence, executable identity drift, and live-capability fallback. Domain replay
-execution is available only after the corresponding typed runner/replay adapter is registered by a
-domain port.
+Verifies replay authority for a certified typed run by loading the stored certified spec and
+certificate artifacts, comparing them to `RunStarted`, verifying them against the production
+registry, loading retained artifact evidence, and then constructing the typed replay broker. The
+command rejects missing retained evidence, executable identity drift, and live-capability fallback.
+Domain replay execution is available only after the corresponding typed runner/replay adapter is
+registered by a domain port.
 
 **Usage:**
 ```sh

@@ -36,6 +36,26 @@ they do not own workflow semantics.
   or recovery evidence.
 - Public output JSON is a render surface. Typed terminal cells plus public-output specs and events
   are the authority.
+- Source scans, naming conventions, hash-only envelopes, persisted summaries, and CI summary keys
+  are not typed-core architectural proof or runtime authority.
+
+## Authority Surfaces
+
+Typed-core code distinguishes data, evidence, authority, and implementation artifacts:
+
+| Surface | Runtime authority? | Contract |
+|---|---:|---|
+| Parsed `TypedExecutionSpec` data | no | Persisted/user bytes decoded into typed Rust data. Hostile until certification verifies the spec against the registry. |
+| `mfm_spec::v1::HashedSpecEnvelope` | no | Hash-only envelope for canonical spec bytes and non-semantic audit metadata. It cannot certify a spec. |
+| `CertifiedSpecCertificate` bytes/evidence | no | Persisted certificate evidence. Hostile until the bundle verifier checks spec hash, certificate hash, registry digest, descriptor identities/digests, lowering/canonicalizer identity, public-output schema id, and audit metadata. |
+| `mfm_certify::CertifiedTypedSpec` | yes | Non-forgeable in-memory authority minted only by registry-backed certification or verified persisted bundle input. |
+| `mfm_runtime::CertifiedRuntimeSpec` | yes, runtime-only | Runtime wrapper derived only from `CertifiedTypedSpec`; owns scheduler indexes and erased runner derivation. |
+| Erased runner plans | no | Runtime implementation artifacts reproducibly derived from certified authority and runner registry. |
+| `PublicOutputReadAuthority` | yes, render-only | App authority minted after certified spec/certificate verification and projection rebuild from the authoritative stream. |
+| Rendered public-output JSON/artifacts | no | Output/cache material for users and integrations. They cannot authorize resume, replay, or another render. |
+
+Persisted spec bytes, persisted certificate bytes, rendered JSON, and projection rows must be
+validated or rebuilt before they influence semantic execution.
 
 ## Crate Layout
 
@@ -216,8 +236,9 @@ history fail before semantic execution advances.
 Resume loads the stored certified spec, rebuilds projections from the run stream, verifies completed
 cell and side-effect evidence against the spec, then advances only from a type-valid frontier.
 
-Replay loads the stored certified spec and uses replay adapters only. Live capability construction
-during replay is a contract violation.
+Replay loads the stored certified spec and certificate artifacts, verifies them against the
+production registry, compares the hashes to `RunStarted`, rebuilds stream evidence, and uses replay
+adapters only. Live capability construction during replay is a contract violation.
 
 ## Side Effects
 
@@ -244,6 +265,10 @@ legal recovery transitions enforced by the store.
 Public-output specs are part of the certified spec. Runtime public output is produced by typed
 render states and events. Rendered JSON artifacts are cache material and must be checked against
 typed output evidence before use.
+
+Rendering helpers require `PublicOutputReadAuthority`, which `mfm-app` mints only after verifying
+stored certified authority and rebuilding the projection from the authoritative run stream.
+Rendered JSON cannot be used as resume, replay, certification, or render authority.
 
 CLI and REST outputs are public API surfaces, but they are not semantic execution authority.
 
@@ -292,3 +317,7 @@ Update this document when a change alters:
 
 Use `docs/architecture.md` for the short contributor map and `RFC_TYPED_CORE_PROPOSAL_1.md` for the
 historical proposal that introduced this rewrite.
+
+The former typed-core source-scan gates and summary-key CI scripts have been deleted. Real
+guarantees now live in typed APIs, private constructors, crate dependency boundaries, Rust tests,
+trybuild fixtures, cargo-metadata checks, and production-path integration tests.
