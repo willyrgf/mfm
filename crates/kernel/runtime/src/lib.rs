@@ -32,6 +32,23 @@ pub type Result<T> = std::result::Result<T, RuntimeError>;
 pub type ErasedRunnerFuture<'a> =
     Pin<Box<dyn Future<Output = Result<ErasedRunnerOutput>> + Send + 'a>>;
 
+/// Boxed future returned by runtime-owned artifact staging.
+pub type RuntimeArtifactStageFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
+
+/// Runtime-owned artifact staging capability used before admitting run authority.
+///
+/// This capability is held by the scheduler/middleware boundary, not by domain runners. Failed
+/// store commits may leave bytes staged here, but run-store artifact evidence is admitted only by
+/// the prepared typed commit that references the artifact.
+pub trait RuntimeArtifactStager: Send + Sync {
+    /// Stages verified artifact bytes for middleware-owned promotion before the run commit.
+    fn stage_verified_artifact<'a>(
+        &'a self,
+        bytes: Vec<u8>,
+        evidence: store::ArtifactEvidenceRef,
+    ) -> RuntimeArtifactStageFuture<'a>;
+}
+
 /// Object-safe erased runner boundary used after typed spec certification.
 ///
 /// Runner selection is keyed by the certified node descriptor id. The runner receives only
@@ -1887,6 +1904,16 @@ struct RunnerOutputCommitInput<'a> {
     output: ErasedRunnerOutput,
 }
 
+struct PreparedRunnerOutput {
+    commit: store::PreparedTypedCommit,
+    artifacts_to_stage: Vec<PreparedStagedArtifact>,
+}
+
+struct PreparedStagedArtifact {
+    bytes: Vec<u8>,
+    evidence: store::ArtifactEvidenceRef,
+}
+
 struct RuntimeMutationMiddleware;
 
 impl RuntimeMutationMiddleware {
@@ -2010,9 +2037,7 @@ impl RuntimeMutationMiddleware {
         store::PreparedTypedCommit::new(request, Vec::new()).map_err(RuntimeError::from)
     }
 
-    fn prepare_runner_output(
-        input: RunnerOutputCommitInput<'_>,
-    ) -> Result<store::PreparedTypedCommit> {
+    fn prepare_runner_output(input: RunnerOutputCommitInput<'_>) -> Result<PreparedRunnerOutput> {
         validate_runner_output(
             input.runtime_spec,
             input.node,
@@ -2039,6 +2064,15 @@ impl RuntimeMutationMiddleware {
             &runner_payloads,
             &staged_artifacts,
         )?;
+        let artifacts_to_stage = staged_artifacts
+            .iter()
+            .filter_map(|artifact| {
+                artifact.bytes.as_ref().map(|bytes| PreparedStagedArtifact {
+                    bytes: bytes.clone(),
+                    evidence: artifact.evidence.clone(),
+                })
+            })
+            .collect::<Vec<_>>();
         let required_artifacts = staged_artifacts
             .iter()
             .map(|artifact| artifact.evidence.clone())
@@ -2066,7 +2100,11 @@ impl RuntimeMutationMiddleware {
             required_artifacts,
             preconditions,
         };
-        store::PreparedTypedCommit::new(request, admitted_artifacts).map_err(RuntimeError::from)
+        let commit = store::PreparedTypedCommit::new(request, admitted_artifacts)?;
+        Ok(PreparedRunnerOutput {
+            commit,
+            artifacts_to_stage,
+        })
     }
 
     fn prepare_run_completion(
@@ -2188,12 +2226,19 @@ impl RuntimeMutationMiddleware {
 #[derive(Clone)]
 pub struct SerialTypedScheduler {
     runners: ErasedRunnerRegistry,
+    artifact_stager: Arc<dyn RuntimeArtifactStager>,
 }
 
 impl SerialTypedScheduler {
-    /// Creates a scheduler using a certified runner registry.
-    pub fn new(runners: ErasedRunnerRegistry) -> Self {
-        Self { runners }
+    /// Creates a scheduler using a certified runner registry and runtime artifact stager.
+    pub fn new(
+        runners: ErasedRunnerRegistry,
+        artifact_stager: Arc<dyn RuntimeArtifactStager>,
+    ) -> Self {
+        Self {
+            runners,
+            artifact_stager,
+        }
     }
 
     /// Appends the typed `RunStarted` event after validating seed and runner executable evidence.
@@ -2390,7 +2435,7 @@ impl SerialTypedScheduler {
                 projections: &latest_projection,
             })
             .await?;
-        let terminal_commit =
+        let terminal_output =
             RuntimeMutationMiddleware::prepare_runner_output(RunnerOutputCommitInput {
                 runtime_spec,
                 run_id,
@@ -2401,7 +2446,9 @@ impl SerialTypedScheduler {
                 view: &latest_view,
                 output,
             })?;
-        store.append_prepared_typed_commit(terminal_commit)?;
+        self.stage_prepared_artifacts(&terminal_output.artifacts_to_stage)
+            .await?;
+        store.append_prepared_typed_commit(terminal_output.commit)?;
         Ok(())
     }
 
@@ -2476,7 +2523,7 @@ impl SerialTypedScheduler {
                 projections: &latest_projection,
             })
             .await?;
-        let terminal_commit =
+        let terminal_output =
             RuntimeMutationMiddleware::prepare_runner_output(RunnerOutputCommitInput {
                 runtime_spec,
                 run_id,
@@ -2487,10 +2534,21 @@ impl SerialTypedScheduler {
                 view: &latest_view,
                 output,
             })?;
+        self.stage_prepared_artifacts(&terminal_output.artifacts_to_stage)
+            .await?;
         store
-            .append_prepared_typed_commit(terminal_commit)
+            .append_prepared_typed_commit(terminal_output.commit)
             .await
             .map_err(async_store_error)?;
+        Ok(())
+    }
+
+    async fn stage_prepared_artifacts(&self, artifacts: &[PreparedStagedArtifact]) -> Result<()> {
+        for artifact in artifacts {
+            self.artifact_stager
+                .stage_verified_artifact(artifact.bytes.clone(), artifact.evidence.clone())
+                .await?;
+        }
         Ok(())
     }
 
@@ -2790,6 +2848,7 @@ fn validate_staged_artifacts(
             ValidatedStagedArtifact {
                 evidence: handle.evidence().clone(),
                 binding: handle.binding().clone(),
+                bytes: staged.bytes().map(ToOwned::to_owned),
             },
         );
     }
@@ -2800,6 +2859,7 @@ fn validate_staged_artifacts(
 struct ValidatedStagedArtifact {
     evidence: store::ArtifactEvidenceRef,
     binding: StagedArtifactBindingKind,
+    bytes: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -5821,6 +5881,50 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct TestRuntimeArtifactStager;
+
+    impl RuntimeArtifactStager for TestRuntimeArtifactStager {
+        fn stage_verified_artifact<'a>(
+            &'a self,
+            bytes: Vec<u8>,
+            evidence: store::ArtifactEvidenceRef,
+        ) -> RuntimeArtifactStageFuture<'a> {
+            Box::pin(async move {
+                verify_artifact_bytes(&bytes, &evidence)?;
+                Ok(())
+            })
+        }
+    }
+
+    #[derive(Clone)]
+    struct FailingRuntimeArtifactStager;
+
+    impl RuntimeArtifactStager for FailingRuntimeArtifactStager {
+        fn stage_verified_artifact<'a>(
+            &'a self,
+            _bytes: Vec<u8>,
+            _evidence: store::ArtifactEvidenceRef,
+        ) -> RuntimeArtifactStageFuture<'a> {
+            Box::pin(async move {
+                Err(RuntimeError::Store(
+                    "test artifact staging failure".to_owned(),
+                ))
+            })
+        }
+    }
+
+    fn test_scheduler(registry: ErasedRunnerRegistry) -> SerialTypedScheduler {
+        test_scheduler_with_stager(registry, Arc::new(TestRuntimeArtifactStager))
+    }
+
+    fn test_scheduler_with_stager(
+        registry: ErasedRunnerRegistry,
+        artifact_stager: Arc<dyn RuntimeArtifactStager>,
+    ) -> SerialTypedScheduler {
+        SerialTypedScheduler::new(registry, artifact_stager)
+    }
+
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
     #[mfm(
         namespace = "mfm.runtime.test",
@@ -6049,7 +6153,7 @@ mod tests {
                 },
             ))
             .expect("binding b");
-        let scheduler = SerialTypedScheduler::new(registry);
+        let scheduler = test_scheduler(registry);
         let mut store = store::InMemoryTypedRunStore::new();
         scheduler
             .start_run(
@@ -6091,7 +6195,7 @@ mod tests {
     #[tokio::test]
     async fn scheduler_completes_run_after_public_output_evidence() {
         let fixture = fixture();
-        let scheduler = SerialTypedScheduler::new(registered_fixture_runners(&fixture));
+        let scheduler = test_scheduler(registered_fixture_runners(&fixture));
         let mut store = store::InMemoryTypedRunStore::new();
         scheduler
             .start_run(
@@ -6164,9 +6268,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn public_output_receipt_staging_failure_prevents_commit() {
+        let fixture = fixture();
+        let scheduler = test_scheduler_with_stager(
+            registered_fixture_runners(&fixture),
+            Arc::new(FailingRuntimeArtifactStager),
+        );
+        let mut store = store::InMemoryTypedRunStore::new();
+        scheduler
+            .start_run(
+                &mut store,
+                &fixture.runtime_spec,
+                fixture.run_id.clone(),
+                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
+            )
+            .expect("start run");
+        scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("drive a");
+        scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("drive b");
+
+        assert!(matches!(
+            scheduler
+                .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+                .await,
+            Err(RuntimeError::Store(message))
+                if message.contains("test artifact staging failure")
+        ));
+        assert!(store
+            .projection_snapshot()
+            .cell_terminal(&fixture.render_cell)
+            .is_none());
+        assert!(store.load_run_stream(&fixture.run_id).iter().all(|event| {
+            !matches!(
+                event.payload(),
+                events::KernelEventPayload::PublicOutputProduced(_)
+            )
+        }));
+    }
+
+    #[tokio::test]
     async fn scheduler_binds_staged_retention_refs_and_projects_manifest() {
         let fixture = fixture();
-        let scheduler = SerialTypedScheduler::new(registered_fixture_runners(&fixture));
+        let scheduler = test_scheduler(registered_fixture_runners(&fixture));
         let mut store = store::InMemoryTypedRunStore::new();
         scheduler
             .start_run(
@@ -6250,7 +6398,7 @@ mod tests {
     #[tokio::test]
     async fn retention_manifest_projection_rejects_stale_stream_sequence() {
         let fixture = fixture();
-        let scheduler = SerialTypedScheduler::new(registered_fixture_runners(&fixture));
+        let scheduler = test_scheduler(registered_fixture_runners(&fixture));
         let mut store = store::InMemoryTypedRunStore::new();
         scheduler
             .start_run(
@@ -6318,7 +6466,7 @@ mod tests {
     #[tokio::test]
     async fn retention_manifest_projection_rejects_corrupt_stream_before_commit() {
         let fixture = fixture();
-        let scheduler = SerialTypedScheduler::new(registered_fixture_runners(&fixture));
+        let scheduler = test_scheduler(registered_fixture_runners(&fixture));
         let mut store = store::InMemoryTypedRunStore::new();
         scheduler
             .start_run(
@@ -6393,7 +6541,7 @@ mod tests {
     #[tokio::test]
     async fn public_output_render_failure_resumes_and_completes() {
         let fixture = fixture();
-        let scheduler = SerialTypedScheduler::new(registered_fixture_runners(&fixture));
+        let scheduler = test_scheduler(registered_fixture_runners(&fixture));
         let mut store = store::InMemoryTypedRunStore::new();
         scheduler
             .start_run(
@@ -6498,7 +6646,7 @@ mod tests {
     #[tokio::test]
     async fn replay_rejects_run_completed_without_public_output_evidence() {
         let fixture = fixture();
-        let scheduler = SerialTypedScheduler::new(registered_fixture_runners(&fixture));
+        let scheduler = test_scheduler(registered_fixture_runners(&fixture));
         let mut store = store::InMemoryTypedRunStore::new();
         scheduler
             .start_run(
@@ -6612,7 +6760,7 @@ mod tests {
                 },
             ))
             .expect("binding b");
-        let scheduler = SerialTypedScheduler::new(registry);
+        let scheduler = test_scheduler(registry);
         let mut store = store::InMemoryTypedRunStore::new();
         scheduler
             .start_run(
@@ -6685,7 +6833,7 @@ mod tests {
                 },
             ))
             .expect("binding b");
-        let scheduler = SerialTypedScheduler::new(registry);
+        let scheduler = test_scheduler(registry);
         let mut store = store::InMemoryTypedRunStore::new();
         scheduler
             .start_run(
@@ -6762,7 +6910,7 @@ mod tests {
                 },
             ))
             .expect("binding b");
-        let scheduler = SerialTypedScheduler::new(registry);
+        let scheduler = test_scheduler(registry);
         let mut store = store::InMemoryTypedRunStore::new();
         scheduler
             .start_run(
@@ -6839,7 +6987,7 @@ mod tests {
                 },
             ))
             .expect("binding b");
-        let scheduler = SerialTypedScheduler::new(registry);
+        let scheduler = test_scheduler(registry);
         let mut store = store::InMemoryTypedRunStore::new();
         scheduler
             .start_run(
@@ -6915,7 +7063,7 @@ mod tests {
                 },
             ))
             .expect("binding b");
-        let scheduler = SerialTypedScheduler::new(registry);
+        let scheduler = test_scheduler(registry);
         let mut store = store::InMemoryTypedRunStore::new();
         scheduler
             .start_run(
@@ -7008,7 +7156,7 @@ mod tests {
                 },
             ))
             .expect("binding b");
-        let scheduler = SerialTypedScheduler::new(registry);
+        let scheduler = test_scheduler(registry);
         let mut store = store::InMemoryTypedRunStore::new();
         scheduler
             .start_run(
@@ -7074,7 +7222,7 @@ mod tests {
                 },
             ))
             .expect("binding b");
-        let scheduler = SerialTypedScheduler::new(registry);
+        let scheduler = test_scheduler(registry);
         let mut store = store::InMemoryTypedRunStore::new();
         scheduler
             .start_run(
@@ -7156,7 +7304,7 @@ mod tests {
                 },
             ))
             .expect("binding b");
-        let scheduler = SerialTypedScheduler::new(registry);
+        let scheduler = test_scheduler(registry);
         let mut store = store::InMemoryTypedRunStore::new();
         scheduler
             .start_run(
@@ -7238,7 +7386,7 @@ mod tests {
         let fixture = fixture();
         let mut seed = fixture.seed_ref.clone();
         seed.digest = content(0xee);
-        let scheduler = SerialTypedScheduler::new(registered_fixture_runners(&fixture));
+        let scheduler = test_scheduler(registered_fixture_runners(&fixture));
         let mut store = store::InMemoryTypedRunStore::new();
         assert!(matches!(
             scheduler.start_run(
@@ -7254,7 +7402,7 @@ mod tests {
     #[test]
     fn run_start_rejects_missing_config_artifact_evidence() {
         let fixture = fixture();
-        let scheduler = SerialTypedScheduler::new(registered_fixture_runners(&fixture));
+        let scheduler = test_scheduler(registered_fixture_runners(&fixture));
         let mut store = store::InMemoryTypedRunStore::new();
         let mut evidence = run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]);
         evidence.config_artifacts.clear();
@@ -7272,7 +7420,7 @@ mod tests {
     #[tokio::test]
     async fn replay_rejects_terminal_cell_producer_outside_certified_spec() {
         let fixture = fixture();
-        let scheduler = SerialTypedScheduler::new(registered_fixture_runners(&fixture));
+        let scheduler = test_scheduler(registered_fixture_runners(&fixture));
         let mut store = store::InMemoryTypedRunStore::new();
         scheduler
             .start_run(
@@ -7383,7 +7531,7 @@ mod tests {
     #[test]
     fn store_rejects_fact_without_started_attempt() {
         let fixture = fixture();
-        let scheduler = SerialTypedScheduler::new(registered_fixture_runners(&fixture));
+        let scheduler = test_scheduler(registered_fixture_runners(&fixture));
         let mut store = store::InMemoryTypedRunStore::new();
         scheduler
             .start_run(
@@ -7452,7 +7600,7 @@ mod tests {
     #[tokio::test]
     async fn replay_rejects_public_output_without_render_attempt() {
         let fixture = fixture();
-        let scheduler = SerialTypedScheduler::new(registered_fixture_runners(&fixture));
+        let scheduler = test_scheduler(registered_fixture_runners(&fixture));
         let mut store = store::InMemoryTypedRunStore::new();
         scheduler
             .start_run(
@@ -7611,7 +7759,7 @@ mod tests {
     #[tokio::test]
     async fn replay_rejects_public_output_with_forged_rendered_digest() {
         let fixture = fixture();
-        let scheduler = SerialTypedScheduler::new(registered_fixture_runners(&fixture));
+        let scheduler = test_scheduler(registered_fixture_runners(&fixture));
         let mut store = store::InMemoryTypedRunStore::new();
         scheduler
             .start_run(
@@ -7763,7 +7911,7 @@ mod tests {
     #[tokio::test]
     async fn replay_rejects_split_public_output_terminal_commit() {
         let fixture = fixture();
-        let scheduler = SerialTypedScheduler::new(registered_fixture_runners(&fixture));
+        let scheduler = test_scheduler(registered_fixture_runners(&fixture));
         let mut store = store::InMemoryTypedRunStore::new();
         scheduler
             .start_run(
@@ -7869,7 +8017,7 @@ mod tests {
     #[tokio::test]
     async fn recovery_continues_started_pure_attempt_with_same_attempt_id() {
         let fixture = fixture();
-        let scheduler = SerialTypedScheduler::new(registered_fixture_runners(&fixture));
+        let scheduler = test_scheduler(registered_fixture_runners(&fixture));
         let mut store = store::InMemoryTypedRunStore::new();
         scheduler
             .start_run(
@@ -7909,7 +8057,7 @@ mod tests {
     #[tokio::test]
     async fn recovery_rejects_split_terminal_cell_and_attempt_completion() {
         let fixture = fixture();
-        let scheduler = SerialTypedScheduler::new(registered_fixture_runners(&fixture));
+        let scheduler = test_scheduler(registered_fixture_runners(&fixture));
         let mut store = store::InMemoryTypedRunStore::new();
         scheduler
             .start_run(
@@ -7949,7 +8097,7 @@ mod tests {
     #[tokio::test]
     async fn recovery_rejects_attempt_started_before_inputs_were_terminal() {
         let fixture = fixture();
-        let scheduler = SerialTypedScheduler::new(registered_fixture_runners(&fixture));
+        let scheduler = test_scheduler(registered_fixture_runners(&fixture));
         let mut store = store::InMemoryTypedRunStore::new();
         scheduler
             .start_run(
@@ -8048,7 +8196,7 @@ mod tests {
                 },
             ))
             .expect("binding b");
-        let scheduler = SerialTypedScheduler::new(registry);
+        let scheduler = test_scheduler(registry);
         let mut store = store::InMemoryTypedRunStore::new();
         scheduler
             .start_run(
@@ -8150,7 +8298,7 @@ mod tests {
                 },
             ))
             .expect("binding b");
-        let scheduler = SerialTypedScheduler::new(registry);
+        let scheduler = test_scheduler(registry);
         let mut store = store::InMemoryTypedRunStore::new();
         scheduler
             .start_run(
@@ -8220,7 +8368,7 @@ mod tests {
                 },
             ))
             .expect("binding b");
-        let scheduler = SerialTypedScheduler::new(registry);
+        let scheduler = test_scheduler(registry);
         let mut store = store::InMemoryTypedRunStore::new();
         scheduler
             .start_run(
@@ -8260,7 +8408,7 @@ mod tests {
     #[tokio::test]
     async fn side_effect_scheduler_commits_durable_ledger_phases_before_output() {
         let fixture = fixture_with_first_side_effect_state();
-        let scheduler = SerialTypedScheduler::new(registered_side_effect_fixture_runners(&fixture));
+        let scheduler = test_scheduler(registered_side_effect_fixture_runners(&fixture));
         let mut store = store::InMemoryTypedRunStore::new();
         scheduler
             .start_run(
@@ -8317,7 +8465,7 @@ mod tests {
     #[tokio::test]
     async fn side_effect_not_submitted_resume_claims_next_epoch() {
         let fixture = fixture_with_first_side_effect_state();
-        let scheduler = SerialTypedScheduler::new(registered_side_effect_fixture_runners(&fixture));
+        let scheduler = test_scheduler(registered_side_effect_fixture_runners(&fixture));
         let mut store = store::InMemoryTypedRunStore::new();
         scheduler
             .start_run(
@@ -8463,7 +8611,7 @@ mod tests {
                 },
             ))
             .expect("binding b");
-        let scheduler = SerialTypedScheduler::new(registry);
+        let scheduler = test_scheduler(registry);
         let mut store = store::InMemoryTypedRunStore::new();
         scheduler
             .start_run(
@@ -8505,7 +8653,7 @@ mod tests {
                 },
             ))
             .expect("binding b");
-        let scheduler = SerialTypedScheduler::new(registry);
+        let scheduler = test_scheduler(registry);
         let mut store = store::InMemoryTypedRunStore::new();
         scheduler
             .start_run(
@@ -8560,7 +8708,7 @@ mod tests {
                 },
             ))
             .expect("binding b");
-        let scheduler = SerialTypedScheduler::new(registry);
+        let scheduler = test_scheduler(registry);
         let mut store = store::InMemoryTypedRunStore::new();
         scheduler
             .start_run(
@@ -8615,7 +8763,7 @@ mod tests {
                 },
             ))
             .expect("binding b");
-        let scheduler = SerialTypedScheduler::new(registry);
+        let scheduler = test_scheduler(registry);
         let mut store = store::InMemoryTypedRunStore::new();
         scheduler
             .start_run(
@@ -8656,7 +8804,7 @@ mod tests {
                 },
             ))
             .expect("binding b");
-        let scheduler = SerialTypedScheduler::new(registry);
+        let scheduler = test_scheduler(registry);
         let mut store = store::InMemoryTypedRunStore::new();
         scheduler
             .start_run(

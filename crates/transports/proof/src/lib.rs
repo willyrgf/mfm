@@ -27,9 +27,9 @@ use mfm_ids::{
 use mfm_op_proof::{certified_proof_spec, proof_program_draft};
 use mfm_replay::v1 as replay;
 use mfm_runtime::{
-    build_public_output_receipt_artifact, CertifiedRuntimeSpec, ErasedNodeRunner, ErasedRunCtx,
-    ErasedRunnerBinding, ErasedRunnerFuture, ErasedRunnerOutput, ErasedRunnerRegistry,
-    MaterializedCellTerminal, MaterializedInputNode, RunStartEvidence, SchedulerStatus,
+    CertifiedRuntimeSpec, ErasedNodeRunner, ErasedRunCtx, ErasedRunnerBinding, ErasedRunnerFuture,
+    ErasedRunnerOutput, ErasedRunnerRegistry, MaterializedCellTerminal, MaterializedInputNode,
+    RunStartEvidence, RuntimeArtifactStageFuture, RuntimeArtifactStager, SchedulerStatus,
     SerialTypedScheduler, StagedArtifact, StagedRetentionRefs,
 };
 use mfm_spec::v1 as spec;
@@ -110,6 +110,16 @@ impl ProofArtifactSink for InMemoryProofArtifactSink {
             artifacts.insert(evidence.artifact_id.clone(), (bytes, evidence));
             Ok(())
         })
+    }
+}
+
+impl RuntimeArtifactStager for InMemoryProofArtifactSink {
+    fn stage_verified_artifact<'a>(
+        &'a self,
+        bytes: Vec<u8>,
+        evidence: store::ArtifactEvidenceRef,
+    ) -> RuntimeArtifactStageFuture<'a> {
+        self.put_verified_artifact(bytes, evidence)
     }
 }
 
@@ -1238,8 +1248,10 @@ pub async fn proof_implementation_conformance_summary(
         .map_err(|error| error.to_string())?;
     let mut store = store::InMemoryTypedRunStore::new();
     let artifact_sink: Arc<dyn ProofArtifactSink> = Arc::new(artifacts.clone());
+    let artifact_stager: Arc<dyn RuntimeArtifactStager> = Arc::new(artifacts.clone());
     let scheduler = SerialTypedScheduler::new(
         deterministic_proof_runner_registry(artifact_sink).map_err(|error| error.to_string())?,
+        artifact_stager,
     );
     let run_id = RunId::from_digest(
         DigestAlgorithm::Sha256JcsV1,
@@ -1267,9 +1279,6 @@ pub async fn proof_implementation_conformance_summary(
     }
 
     let stream = store.load_run_stream(&run_id);
-    persist_conformance_public_output_receipts(&artifacts, &runtime_spec, &stream)
-        .await
-        .map_err(|error| error.to_string())?;
     let verifier = DeterministicProofReplayVerifier::new().map_err(|error| error.to_string())?;
     let facts = RecordedProofFacts { fact: proof_fact() };
     let mut facts_valid = false;
@@ -1487,24 +1496,6 @@ async fn persist_conformance_config_artifacts(
             producer_seed_id: None,
             artifact_role: events::ArtifactRole::TypedConfig,
         };
-        artifacts
-            .put_verified_artifact(bytes.to_vec(), evidence)
-            .await
-            .map_err(|error| mfm_runtime::RuntimeError::Store(error.to_string()))?;
-    }
-    Ok(())
-}
-
-async fn persist_conformance_public_output_receipts(
-    artifacts: &dyn ProofArtifactSink,
-    runtime_spec: &CertifiedRuntimeSpec,
-    stream: &[store::KernelEventEnvelope],
-) -> mfm_runtime::Result<()> {
-    for event in stream {
-        let events::KernelEventPayload::PublicOutputProduced(payload) = event.payload() else {
-            continue;
-        };
-        let (bytes, evidence) = build_public_output_receipt_artifact(runtime_spec, payload)?;
         artifacts
             .put_verified_artifact(bytes.to_vec(), evidence)
             .await

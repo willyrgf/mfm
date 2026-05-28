@@ -29,8 +29,8 @@ use mfm_ids::{
 };
 use mfm_replay::v1::{ReplayAuthority, ReplayBroker, ReplayError};
 use mfm_runtime::{
-    build_public_output_receipt_artifact, build_retention_manifest_artifact, validate_run_stream,
-    CertifiedRuntimeSpec, RunStartEvidence, SchedulerStatus, SerialTypedScheduler,
+    build_retention_manifest_artifact, validate_run_stream, CertifiedRuntimeSpec, RunStartEvidence,
+    RuntimeArtifactStageFuture, RuntimeArtifactStager, SchedulerStatus, SerialTypedScheduler,
 };
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
@@ -234,10 +234,16 @@ pub fn make_in_memory_typed_services_with_certification_registry(
     artifact_root: impl Into<PathBuf>,
     certification_registry: CertificationRegistry,
 ) -> TypedAppServices<store::InMemoryTypedRunStore> {
+    let artifacts = FsTypedArtifactStore::new(artifact_root);
     TypedAppServices::new_with_certification_registry(
-        SerialTypedScheduler::new(runners),
+        SerialTypedScheduler::new(
+            runners,
+            Arc::new(FsRuntimeArtifactStager {
+                artifacts: artifacts.clone(),
+            }),
+        ),
         store::InMemoryTypedRunStore::default(),
-        FsTypedArtifactStore::new(artifact_root),
+        artifacts,
         certification_registry,
     )
 }
@@ -269,8 +275,11 @@ pub fn make_async_typed_services_with_certification_registry<S>(
 where
     S: store::AsyncTypedRunEventStore + Send + Sync,
 {
+    let artifact_stager = Arc::new(FsRuntimeArtifactStager {
+        artifacts: artifacts.clone(),
+    });
     TypedAsyncAppServices::new_with_certification_registry(
-        SerialTypedScheduler::new(runners),
+        SerialTypedScheduler::new(runners, artifact_stager),
         store,
         artifacts,
         certification_registry,
@@ -309,6 +318,27 @@ pub fn production_certification_registry() -> Result<CertificationRegistry, AppE
 #[derive(Clone)]
 struct FsProofArtifactSink {
     artifacts: FsTypedArtifactStore,
+}
+
+#[derive(Clone)]
+struct FsRuntimeArtifactStager {
+    artifacts: FsTypedArtifactStore,
+}
+
+impl RuntimeArtifactStager for FsRuntimeArtifactStager {
+    fn stage_verified_artifact<'a>(
+        &'a self,
+        bytes: Vec<u8>,
+        evidence: store::ArtifactEvidenceRef,
+    ) -> RuntimeArtifactStageFuture<'a> {
+        Box::pin(async move {
+            self.artifacts
+                .put_verified_artifact(bytes, evidence)
+                .await
+                .map_err(|error| mfm_runtime::RuntimeError::Store(error.to_string()))?;
+            Ok(())
+        })
+    }
 }
 
 impl mfm_transports_proof::ProofArtifactSink for FsProofArtifactSink {
@@ -877,7 +907,6 @@ where
         if !retention_manifest_should_project(runtime_spec, run_id, &stream)? {
             return Ok(false);
         }
-        persist_framework_public_output_receipts(&self.artifacts, runtime_spec, &stream).await?;
         let manifest = build_retention_manifest_artifact(runtime_spec, run_id, &stream)?;
         self.artifacts
             .put_verified_artifact(manifest.bytes.to_vec(), manifest.evidence.clone())
@@ -1168,7 +1197,6 @@ where
         if !retention_manifest_should_project(runtime_spec, run_id, &stream)? {
             return Ok(false);
         }
-        persist_framework_public_output_receipts(&self.artifacts, runtime_spec, &stream).await?;
         let manifest = build_retention_manifest_artifact(runtime_spec, run_id, &stream)?;
         self.artifacts
             .put_verified_artifact(manifest.bytes.to_vec(), manifest.evidence.clone())
@@ -1663,22 +1691,6 @@ async fn validate_launch_artifacts(
         artifacts
             .get_artifact(&seed_artifact_evidence(seed))
             .await?;
-    }
-    Ok(())
-}
-
-async fn persist_framework_public_output_receipts(
-    artifacts: &FsTypedArtifactStore,
-    runtime_spec: &CertifiedRuntimeSpec,
-    stream: &[store::KernelEventEnvelope],
-) -> Result<(), AppError> {
-    for event in stream {
-        if let events::KernelEventPayload::PublicOutputProduced(payload) = event.payload() {
-            let (bytes, evidence) = build_public_output_receipt_artifact(runtime_spec, payload)?;
-            artifacts
-                .put_verified_artifact(bytes.to_vec(), evidence)
-                .await?;
-        }
     }
     Ok(())
 }
@@ -2401,6 +2413,36 @@ mod tests {
                     "total": "12.50"
                 }
             }))
+        );
+
+        let stream = services
+            .store()
+            .load_run_stream(&fixture.run_id)
+            .await
+            .expect("load stream");
+        let receipt_artifact_id = stream
+            .iter()
+            .find_map(|event| match event.payload() {
+                events::KernelEventPayload::CellProduced(payload)
+                    if payload.node_id != fixture.value_node_id =>
+                {
+                    Some(payload.artifact_id.clone())
+                }
+                _ => None,
+            })
+            .expect("public-output receipt cell");
+        let (_receipt_bytes, receipt_evidence) = services
+            .artifacts()
+            .get_artifact_by_id(&receipt_artifact_id)
+            .await
+            .expect("runtime-staged public-output receipt artifact");
+        assert_eq!(
+            receipt_evidence.artifact_role,
+            events::ArtifactRole::StateOutput
+        );
+        assert_eq!(
+            receipt_evidence.semantic_type_id.as_ref(),
+            Some(&spec::public_output_receipt_semantic_type_id().expect("receipt semantic"))
         );
 
         let stream = services

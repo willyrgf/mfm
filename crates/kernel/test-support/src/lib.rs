@@ -28,13 +28,45 @@ use mfm_replay::v1 as replay;
 use mfm_runtime::{
     build_retention_manifest_artifact, CertifiedRuntimeSpec, ErasedNodeRunner, ErasedRunCtx,
     ErasedRunnerBinding, ErasedRunnerFuture, ErasedRunnerOutput, ErasedRunnerRegistry,
-    MaterializedCellTerminal, MaterializedInputNode, RunStartEvidence, RuntimeError,
-    SchedulerStatus, SerialTypedScheduler, StagedArtifact,
+    MaterializedCellTerminal, MaterializedInputNode, RunStartEvidence, RuntimeArtifactStageFuture,
+    RuntimeArtifactStager, RuntimeError, SchedulerStatus, SerialTypedScheduler, StagedArtifact,
 };
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
 use mfm_store::v1::{TypedProjectionRead, TypedRunEventStore};
 use serde::{Deserialize, Serialize};
+
+#[derive(Clone)]
+struct TestRuntimeArtifactStager;
+
+impl RuntimeArtifactStager for TestRuntimeArtifactStager {
+    fn stage_verified_artifact<'a>(
+        &'a self,
+        bytes: Vec<u8>,
+        evidence: store::ArtifactEvidenceRef,
+    ) -> RuntimeArtifactStageFuture<'a> {
+        Box::pin(async move {
+            let digest = ContentDigest::from_digest(
+                DigestAlgorithm::Sha256JcsV1,
+                sha256_digest_bytes(&bytes),
+            );
+            let artifact_id = ArtifactId::from_digest(digest.algorithm(), *digest.digest());
+            if evidence.digest != digest
+                || evidence.artifact_id != artifact_id
+                || evidence.byte_len != bytes.len() as u64
+            {
+                return Err(RuntimeError::Store(
+                    "staged artifact bytes do not match evidence".to_owned(),
+                ));
+            }
+            Ok(())
+        })
+    }
+}
+
+fn test_scheduler(registry: ErasedRunnerRegistry) -> SerialTypedScheduler {
+    SerialTypedScheduler::new(registry, Arc::new(TestRuntimeArtifactStager))
+}
 
 /// Coverage produced by the synthetic typed certified slice acceptance fixture.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -602,7 +634,7 @@ impl SideEffectState for ReferenceSideEffectState {
 
 async fn run_reference_certified_workflow() -> Result<ReferenceRun, String> {
     let fixture = reference_fixture()?;
-    let scheduler = SerialTypedScheduler::new(reference_registry(&fixture)?);
+    let scheduler = test_scheduler(reference_registry(&fixture)?);
     let mut store = store::InMemoryTypedRunStore::new();
     let mut manifest_appended = false;
     scheduler
@@ -1066,7 +1098,7 @@ fn retention_projection_complete(
 
 fn incomplete_retention_projection_is_rejected() -> Result<bool, String> {
     let fixture = reference_fixture()?;
-    let scheduler = SerialTypedScheduler::new(reference_registry(&fixture)?);
+    let scheduler = test_scheduler(reference_registry(&fixture)?);
     let mut store = store::InMemoryTypedRunStore::new();
     scheduler
         .start_run(
@@ -1177,7 +1209,7 @@ fn replay_without_live_capabilities(run: &ReferenceRun) -> Result<u64, String> {
 
 async fn resume_drift_is_rejected() -> Result<bool, String> {
     let fixture = reference_fixture()?;
-    let scheduler = SerialTypedScheduler::new(reference_registry(&fixture)?);
+    let scheduler = test_scheduler(reference_registry(&fixture)?);
     let mut store = store::InMemoryTypedRunStore::new();
     scheduler
         .start_run(
@@ -1204,7 +1236,7 @@ async fn side_effect_failure_semantics_are_covered() -> Result<bool, String> {
         "apply_side_effect",
         FailingSideEffectRunner::new(&fixture),
     )?;
-    let scheduler = SerialTypedScheduler::new(registry);
+    let scheduler = test_scheduler(registry);
     let mut store = store::InMemoryTypedRunStore::new();
     scheduler
         .start_run(
@@ -1237,7 +1269,7 @@ async fn side_effect_ambiguity_blocks_completion() -> Result<bool, String> {
         "apply_side_effect",
         AmbiguousSideEffectRunner::new(&fixture),
     )?;
-    let scheduler = SerialTypedScheduler::new(registry);
+    let scheduler = test_scheduler(registry);
     let mut store = store::InMemoryTypedRunStore::new();
     scheduler
         .start_run(
