@@ -1516,8 +1516,8 @@ fn canonical_json_value_bytes(value: &Value, field: &'static str) -> Result<Vec<
         })
 }
 
-/// Inputs required to verify persisted certified bundle bytes before starting a typed run.
-pub struct CertifiedBundleRunStartInput<'a> {
+/// Untrusted persisted certified bundle bytes plus launch inputs for a typed run start.
+pub struct UntrustedCertifiedSpecBundleStartInput<'a> {
     /// Canonical JSON bytes for the persisted typed execution spec.
     pub spec_bytes: &'a [u8],
     /// Canonical JSON bytes for the persisted typed spec certificate.
@@ -1534,10 +1534,14 @@ pub struct CertifiedBundleRunStartInput<'a> {
     pub drive: DriveMode,
 }
 
-/// Builds a typed run-start request from persisted certified bundle bytes and launch inputs.
-pub async fn build_typed_run_start_request(
+/// Verifies untrusted persisted certified bundle bytes and builds a typed run-start request.
+///
+/// This helper is for transport and storage boundaries that receive serialized bundle data. It
+/// verifies the spec and certificate against the trusted registry before producing a request that
+/// can reach the runtime boundary.
+pub async fn verify_certified_bundle_run_start_request(
     artifacts: &FsTypedArtifactStore,
-    input: CertifiedBundleRunStartInput<'_>,
+    input: UntrustedCertifiedSpecBundleStartInput<'_>,
     seed_inputs: Vec<TypedSeedInput>,
 ) -> Result<TypedRunStartRequest, AppError> {
     let certified_spec = mfm_certify::verify_certified_bundle_with_trusted_registry(
@@ -2538,9 +2542,9 @@ mod tests {
         let registry =
             CertificationRegistry::from_program_draft(&fixture.draft).expect("fixture registry");
         let run_id = fixture.run_id.clone();
-        let err = build_typed_run_start_request(
+        let err = verify_certified_bundle_run_start_request(
             &artifacts,
-            CertifiedBundleRunStartInput {
+            UntrustedCertifiedSpecBundleStartInput {
                 spec_bytes: &bad_spec,
                 certificate_bytes: bundle.certificate_bytes(),
                 registry: &registry,
@@ -2597,9 +2601,9 @@ mod tests {
         let registry =
             CertificationRegistry::from_program_draft(&fixture.draft).expect("fixture registry");
         let run_id = fixture.run_id.clone();
-        let err = build_typed_run_start_request(
+        let err = verify_certified_bundle_run_start_request(
             &artifacts,
-            CertifiedBundleRunStartInput {
+            UntrustedCertifiedSpecBundleStartInput {
                 spec_bytes: &spec_bytes,
                 certificate_bytes: &certificate_bytes,
                 registry: &registry,
@@ -2878,9 +2882,9 @@ mod tests {
         persist_framework_config_artifacts(&artifacts, &certified.envelope().spec).await;
         let bundle = certified.bundle().expect("proof bundle");
         let registry = production_certification_registry().expect("production registry");
-        let request = build_typed_run_start_request(
+        let request = verify_certified_bundle_run_start_request(
             &artifacts,
-            CertifiedBundleRunStartInput {
+            UntrustedCertifiedSpecBundleStartInput {
                 spec_bytes: bundle.spec_bytes(),
                 certificate_bytes: bundle.certificate_bytes(),
                 registry: &registry,

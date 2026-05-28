@@ -239,9 +239,9 @@ async fn parity_reth_deploy_configure_validate_root_op() {
 
     let bundle = certified.bundle().expect("typed EVM DCV certified bundle");
     let run_id = mfm_app::new_run_id();
-    let request = mfm_app::build_typed_run_start_request(
+    let request = mfm_app::verify_certified_bundle_run_start_request(
         services.artifacts(),
-        mfm_app::CertifiedBundleRunStartInput {
+        mfm_app::UntrustedCertifiedSpecBundleStartInput {
             spec_bytes: bundle.spec_bytes(),
             certificate_bytes: bundle.certificate_bytes(),
             registry: &registry,

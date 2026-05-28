@@ -67,9 +67,9 @@ pub async fn run_typed_portfolio_snapshot(
 
     let bundle = certified.bundle().expect("certified bundle");
     let run_id = mfm_app::new_run_id();
-    let request = mfm_app::build_typed_run_start_request(
+    let request = mfm_app::verify_certified_bundle_run_start_request(
         services.artifacts(),
-        mfm_app::CertifiedBundleRunStartInput {
+        mfm_app::UntrustedCertifiedSpecBundleStartInput {
             spec_bytes: bundle.spec_bytes(),
             certificate_bytes: bundle.certificate_bytes(),
             registry: &registry,
@@ -148,9 +148,9 @@ pub async fn resume_typed_portfolio_snapshot(
 
     let bundle = certified.bundle().expect("certified bundle");
     let run_id = mfm_app::new_run_id();
-    let request = mfm_app::build_typed_run_start_request(
+    let request = mfm_app::verify_certified_bundle_run_start_request(
         services.artifacts(),
-        mfm_app::CertifiedBundleRunStartInput {
+        mfm_app::UntrustedCertifiedSpecBundleStartInput {
             spec_bytes: bundle.spec_bytes(),
             certificate_bytes: bundle.certificate_bytes(),
             registry: &registry,

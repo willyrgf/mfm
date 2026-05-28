@@ -108,9 +108,9 @@ async fn execute_internal(args: &StartArgs) -> CommandResult<TypedRunResponse> {
     }
 
     let services = make_typed_app_services(&args.stores).await?;
-    let request = mfm_app::build_typed_run_start_request(
+    let request = mfm_app::verify_certified_bundle_run_start_request(
         services.artifacts(),
-        mfm_app::CertifiedBundleRunStartInput {
+        mfm_app::UntrustedCertifiedSpecBundleStartInput {
             spec_bytes: bundle.spec_bytes(),
             certificate_bytes: bundle.certificate_bytes(),
             registry: services.certification_registry(),

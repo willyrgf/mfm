@@ -580,9 +580,9 @@ where
     }
 
     let services = state.services()?;
-    let start = mfm_app::build_typed_run_start_request(
+    let start = mfm_app::verify_certified_bundle_run_start_request(
         services.artifacts(),
-        mfm_app::CertifiedBundleRunStartInput {
+        mfm_app::UntrustedCertifiedSpecBundleStartInput {
             spec_bytes: bundle.spec_bytes(),
             certificate_bytes: bundle.certificate_bytes(),
             registry: services.certification_registry(),
