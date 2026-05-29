@@ -1191,8 +1191,15 @@ pub mod v1 {
     }
 
     impl VerifiedRetentionProjection {
-        /// Rebuilds and verifies retention projection state from committed run events only.
-        pub fn from_run_stream(run_id: RunId, events: &[KernelEventEnvelope]) -> Result<Self> {
+        /// Rebuilds retention projection state from raw committed run events for synthetic
+        /// test, migration, or repair tooling.
+        ///
+        /// Production replay/read authority must validate the stream against certified runtime
+        /// authority before trusting retention evidence.
+        pub fn from_synthetic_run_stream(
+            run_id: RunId,
+            events: &[KernelEventEnvelope],
+        ) -> Result<Self> {
             if let Some(event) = events.iter().find(|event| event.run_id() != &run_id) {
                 return Err(StoreError::PersistedEventMismatch {
                     field: "run_id",
@@ -1231,19 +1238,20 @@ pub mod v1 {
     }
 
     impl VerifiedRetentionProjectionSet {
-        /// Rebuilds retention projections for all supplied run streams.
+        /// Rebuilds retention projections for all supplied raw run streams for synthetic test,
+        /// migration, or repair tooling.
         ///
         /// Callers must pass the complete authoritative run-stream set for the artifact store
-        /// scope. The type then guarantees every member projection was rebuilt from contiguous
-        /// typed run events rather than mutable projection tables.
-        pub fn from_run_streams<'a, I>(streams: I) -> Result<Self>
+        /// scope. This helper verifies only store-level stream shape; production replay/read
+        /// authority must validate each stream against certified runtime authority first.
+        pub fn from_synthetic_run_streams<'a, I>(streams: I) -> Result<Self>
         where
             I: IntoIterator<Item = (RunId, &'a [KernelEventEnvelope])>,
         {
             let mut projections = BTreeMap::new();
             for (run_id, events) in streams {
                 let verified =
-                    VerifiedRetentionProjection::from_run_stream(run_id.clone(), events)?;
+                    VerifiedRetentionProjection::from_synthetic_run_stream(run_id.clone(), events)?;
                 projections.insert(run_id, verified.projection);
             }
             if projections.is_empty() {
@@ -1438,6 +1446,7 @@ pub mod v1 {
     fn validate_run_stream_order(events: &[KernelEventEnvelope]) -> Result<()> {
         let mut stream_run_id: Option<RunId> = None;
         let mut current_seq: Option<StreamSeq> = None;
+        let mut current_commit_key: Option<CommitKey> = None;
         let mut expected_ordinal = 0_u32;
 
         for event in events {
@@ -1454,7 +1463,17 @@ pub mod v1 {
             }
 
             match current_seq {
-                Some(seq) if event.seq() == seq => {}
+                Some(seq) if event.seq() == seq => {
+                    if current_commit_key.as_ref() != Some(event.commit_key()) {
+                        return Err(StoreError::PersistedEventMismatch {
+                            field: "commit_key",
+                            message: format!(
+                                "persisted run stream seq {} contains multiple commit keys",
+                                event.seq()
+                            ),
+                        });
+                    }
+                }
                 Some(seq) => {
                     let expected_next = seq.checked_next()?;
                     if event.seq() != expected_next {
@@ -1467,6 +1486,7 @@ pub mod v1 {
                         });
                     }
                     current_seq = Some(expected_next);
+                    current_commit_key = Some(event.commit_key().clone());
                     expected_ordinal = 0;
                 }
                 None => {
@@ -1481,6 +1501,7 @@ pub mod v1 {
                         });
                     }
                     current_seq = Some(StreamSeq::FIRST);
+                    current_commit_key = Some(event.commit_key().clone());
                 }
             }
 

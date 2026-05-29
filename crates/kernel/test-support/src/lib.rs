@@ -26,10 +26,10 @@ use mfm_program::{
 use mfm_program_derive::{MfmConfig, MfmValue, PublicOutputs};
 use mfm_replay::v1 as replay;
 use mfm_runtime::{
-    build_retention_manifest_artifact, CertifiedRuntimeSpec, ErasedNodeRunner, ErasedRunCtx,
-    ErasedRunnerBinding, ErasedRunnerFuture, ErasedRunnerOutput, ErasedRunnerRegistry,
-    MaterializedCellTerminal, MaterializedInputNode, RunStartEvidence, RuntimeArtifactStageFuture,
-    RuntimeArtifactStager, RuntimeError, SchedulerStatus, SerialTypedScheduler, StagedArtifact,
+    CertifiedRuntimeSpec, ErasedNodeRunner, ErasedRunCtx, ErasedRunnerBinding, ErasedRunnerFuture,
+    ErasedRunnerOutput, ErasedRunnerRegistry, MaterializedCellTerminal, MaterializedInputNode,
+    RunStartEvidence, RuntimeArtifactStageFuture, RuntimeArtifactStager, RuntimeError,
+    SchedulerStatus, SerialTypedScheduler, StagedArtifact,
 };
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
@@ -636,7 +636,6 @@ async fn run_reference_certified_workflow() -> Result<ReferenceRun, String> {
     let fixture = reference_fixture()?;
     let scheduler = test_scheduler(reference_registry(&fixture)?);
     let mut store = store::InMemoryTypedRunStore::new();
-    let mut manifest_appended = false;
     scheduler
         .start_run(
             &mut store,
@@ -647,31 +646,6 @@ async fn run_reference_certified_workflow() -> Result<ReferenceRun, String> {
         .map_err(display_error)?;
 
     for _ in 0..32 {
-        if !manifest_appended
-            && store
-                .projection_snapshot()
-                .public_output(&fixture.public_schema)
-                .is_some()
-            && store.projection_snapshot().run_state(&fixture.run_id) == store::RunState::Started
-        {
-            let manifest = build_retention_manifest_artifact(
-                &fixture.runtime_spec,
-                &fixture.run_id,
-                &store.load_run_stream(&fixture.run_id),
-            )
-            .map_err(display_error)?;
-            scheduler
-                .append_retention_manifest_projection(
-                    &mut store,
-                    &fixture.runtime_spec,
-                    &fixture.run_id,
-                    manifest,
-                )
-                .map_err(display_error)?;
-            manifest_appended = true;
-            continue;
-        }
-
         match scheduler
             .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
             .await
@@ -1083,7 +1057,7 @@ fn retention_projection_complete(
     run: &ReferenceRun,
     stream: &[store::KernelEventEnvelope],
 ) -> Result<bool, String> {
-    let verified = store::VerifiedRetentionProjectionSet::from_run_streams([(
+    let verified = store::VerifiedRetentionProjectionSet::from_synthetic_run_streams([(
         run.fixture.run_id.clone(),
         stream,
     )])
@@ -1110,7 +1084,7 @@ fn incomplete_retention_projection_is_rejected() -> Result<bool, String> {
         .map_err(display_error)?;
     let stream = store.load_run_stream(&fixture.run_id);
     Ok(
-        store::VerifiedRetentionProjectionSet::from_run_streams(std::iter::empty::<(
+        store::VerifiedRetentionProjectionSet::from_synthetic_run_streams(std::iter::empty::<(
             RunId,
             &[store::KernelEventEnvelope],
         )>())
@@ -1187,8 +1161,8 @@ fn replay_without_live_capabilities(run: &ReferenceRun) -> Result<u64, String> {
         run_started.adapter_executables,
         artifacts,
     );
-    let broker = replay::ReplayBroker::from_run_stream(
-        run.fixture.runtime_spec.envelope().clone(),
+    let broker = replay::ReplayBroker::from_runtime_validated_stream(
+        &run.fixture.runtime_spec,
         &stream,
         authority,
     )

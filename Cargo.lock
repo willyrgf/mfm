@@ -2115,6 +2115,7 @@ dependencies = [
  "mfm-certify",
  "mfm-events",
  "mfm-ids",
+ "mfm-runtime",
  "mfm-spec",
  "mfm-store",
 ]

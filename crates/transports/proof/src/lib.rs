@@ -679,14 +679,11 @@ where
 }
 
 fn retention(artifact: &store::ArtifactEvidenceRef) -> StagedRetentionRefs {
-    StagedRetentionRefs {
-        refs: vec![events::RetentionRef {
-            artifact_id: artifact.artifact_id.clone(),
-            role: artifact.artifact_role,
-            content_digest: artifact.digest.clone(),
-        }],
-        reason: events::RetentionReason::RuntimeEvidence,
-    }
+    StagedRetentionRefs::runtime_evidence(vec![events::RetentionRef {
+        artifact_id: artifact.artifact_id.clone(),
+        role: artifact.artifact_role,
+        content_digest: artifact.digest.clone(),
+    }])
 }
 
 fn ensure_config<T>(config: &spec::ConfigRef, expected: &T) -> mfm_runtime::Result<()>
@@ -1245,7 +1242,7 @@ pub async fn proof_implementation_conformance_summary(
             _ => {}
         }
     }
-    let replay_valid = verify_conformance_replay(certified.envelope(), &stream, &artifacts)
+    let replay_valid = verify_conformance_replay(&runtime_spec, &stream, &artifacts)
         .await
         .map_err(|error| error.to_string())?;
     let summary = ProofImplementationConformanceSummary {
@@ -1261,7 +1258,7 @@ pub async fn proof_implementation_conformance_summary(
 }
 
 async fn verify_conformance_replay(
-    envelope: &spec::HashedSpecEnvelope,
+    runtime_spec: &CertifiedRuntimeSpec,
     stream: &[store::KernelEventEnvelope],
     artifacts: &InMemoryProofArtifacts,
 ) -> replay::Result<bool> {
@@ -1277,6 +1274,11 @@ async fn verify_conformance_replay(
                 "proof conformance stream has no run-start event",
             )
         })?;
+    mfm_runtime::validate_run_stream(runtime_spec, &run_started.run_id, stream).map_err(
+        |error| {
+            replay::ReplayError::new(replay::ReplayErrorKind::InvalidRunStream, error.to_string())
+        },
+    )?;
     let projection =
         store::ProjectionSnapshot::rebuild_from_run_stream(stream).map_err(replay_store_error)?;
     let retention = projection.retention(&run_started.run_id).ok_or_else(|| {
@@ -1298,12 +1300,13 @@ async fn verify_conformance_replay(
         artifact_evidence.push(evidence);
     }
     let authority = replay::ReplayAuthority::from_certified_spec(
-        envelope,
+        runtime_spec.envelope(),
         run_started.runner_executables.clone(),
         run_started.adapter_executables.clone(),
         artifact_evidence,
     );
-    let broker = replay::ReplayBroker::from_run_stream(envelope.clone(), stream, authority)?;
+    let broker =
+        replay::ReplayBroker::from_runtime_validated_stream(runtime_spec, stream, authority)?;
     let proof_verified = verify_deterministic_proof_replay(&broker, stream)?;
     Ok(proof_verified
         && broker.projection_snapshot().run_state(&run_started.run_id)
@@ -1485,6 +1488,7 @@ fn run_start_evidence(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mfm_ids::EventId;
 
     #[tokio::test]
     async fn deterministic_proof_implementation_conforms() {
@@ -1496,5 +1500,639 @@ mod tests {
             summary.to_summary_document()["kind"],
             "proof-implementation-conformance"
         );
+    }
+
+    #[tokio::test]
+    async fn conformance_replay_rejects_standalone_retention_projection_history() {
+        let (runtime_spec, stream, artifacts) = conformance_stream().await;
+        let corrupt = standalone_retention_projection_history(&stream);
+
+        let error = verify_conformance_replay(&runtime_spec, &corrupt, &artifacts)
+            .await
+            .expect_err("standalone retention projection history must reject");
+
+        assert_eq!(error.kind, replay::ReplayErrorKind::InvalidRunStream);
+    }
+
+    #[tokio::test]
+    async fn conformance_replay_rejects_completed_history_without_retention_projection() {
+        let (runtime_spec, stream, artifacts) = conformance_stream().await;
+        let corrupt = remove_retention_projection_commit(&stream);
+
+        let error = verify_conformance_replay(&runtime_spec, &corrupt, &artifacts)
+            .await
+            .expect_err("completed history without retention projection must reject");
+
+        assert_eq!(error.kind, replay::ReplayErrorKind::InvalidRunStream);
+    }
+
+    #[tokio::test]
+    async fn conformance_replay_rejects_failed_completion_without_framework_authority() {
+        let (runtime_spec, stream, artifacts) = conformance_stream().await;
+        let corrupt = failed_completion_after_run_start(&stream);
+
+        let error = verify_conformance_replay(&runtime_spec, &corrupt, &artifacts)
+            .await
+            .expect_err("failed completion without framework authority must reject");
+
+        assert_eq!(error.kind, replay::ReplayErrorKind::InvalidRunStream);
+    }
+
+    #[tokio::test]
+    async fn conformance_replay_rejects_post_completion_retention_refs() {
+        let (runtime_spec, stream, artifacts) = conformance_stream().await;
+        let corrupt = append_post_completion_retention_refs(&stream);
+
+        let error = verify_conformance_replay(&runtime_spec, &corrupt, &artifacts)
+            .await
+            .expect_err("post-completion retention refs must reject");
+
+        assert_eq!(error.kind, replay::ReplayErrorKind::InvalidRunStream);
+    }
+
+    #[tokio::test]
+    async fn conformance_replay_rejects_post_projection_retention_refs_before_completion() {
+        let (runtime_spec, stream, artifacts) = conformance_stream().await;
+        let corrupt = append_post_projection_retention_refs_before_completion(&stream);
+
+        let error = verify_conformance_replay(&runtime_spec, &corrupt, &artifacts)
+            .await
+            .expect_err("post-projection retention refs before completion must reject");
+
+        assert_eq!(error.kind, replay::ReplayErrorKind::InvalidRunStream);
+    }
+
+    #[tokio::test]
+    async fn conformance_replay_rejects_extra_payload_in_retention_projection_commit() {
+        let (runtime_spec, stream, artifacts) = conformance_stream().await;
+        let corrupt = append_extra_retention_ref_to_projection_commit(&stream);
+
+        let error = verify_conformance_replay(&runtime_spec, &corrupt, &artifacts)
+            .await
+            .expect_err("extra retention projection commit payload must reject");
+
+        assert_eq!(error.kind, replay::ReplayErrorKind::InvalidRunStream);
+    }
+
+    #[tokio::test]
+    async fn conformance_replay_rejects_same_sequence_sidecar_retention_projection_payload() {
+        let (runtime_spec, stream, artifacts) = conformance_stream().await;
+        let corrupt = append_same_sequence_sidecar_to_retention_projection(&stream);
+
+        let error = verify_conformance_replay(&runtime_spec, &corrupt, &artifacts)
+            .await
+            .expect_err("same-sequence sidecar retention payload must reject");
+
+        assert_eq!(error.kind, replay::ReplayErrorKind::InvalidRunStream);
+    }
+
+    async fn conformance_stream() -> (
+        CertifiedRuntimeSpec,
+        Vec<store::KernelEventEnvelope>,
+        InMemoryProofArtifacts,
+    ) {
+        let config = ProofWorkflowConfig::default();
+        let draft = proof_program_draft(config.clone()).expect("proof draft");
+        let certified = certified_proof_spec(config).expect("certified proof spec");
+        let runtime_spec = CertifiedRuntimeSpec::new(certified).expect("runtime spec");
+        let artifacts = InMemoryProofArtifacts::default();
+        persist_conformance_config_artifacts(&artifacts, &draft, runtime_spec.spec())
+            .await
+            .expect("persist config artifacts");
+        persist_conformance_spec_artifact(&artifacts, &runtime_spec)
+            .await
+            .expect("persist spec artifact");
+
+        let mut store = store::InMemoryTypedRunStore::new();
+        let artifact_stager: Arc<dyn RuntimeArtifactStager> = Arc::new(artifacts.clone());
+        let scheduler = SerialTypedScheduler::new(
+            deterministic_proof_runner_registry().expect("runner registry"),
+            artifact_stager,
+        );
+        let run_id = RunId::from_digest(
+            DigestAlgorithm::Sha256JcsV1,
+            DigestBytes::from_array([0x34; 32]),
+        );
+        scheduler
+            .start_run(
+                &mut store,
+                &runtime_spec,
+                run_id.clone(),
+                run_start_evidence(&runtime_spec).expect("run-start evidence"),
+            )
+            .expect("start run");
+
+        for _ in 0..16 {
+            match scheduler
+                .drive_until_blocked(&mut store, &runtime_spec, &run_id)
+                .await
+                .expect("drive conformance run")
+            {
+                SchedulerStatus::PublicOutputProjected | SchedulerStatus::Blocked => break,
+                SchedulerStatus::Advanced => continue,
+            }
+        }
+
+        let stream = store.load_run_stream(&run_id);
+        (runtime_spec, stream, artifacts)
+    }
+
+    fn standalone_retention_projection_history(
+        valid_stream: &[store::KernelEventEnvelope],
+    ) -> Vec<store::KernelEventEnvelope> {
+        let run_id = valid_stream
+            .first()
+            .expect("valid stream is non-empty")
+            .run_id()
+            .clone();
+        let retention_seq = valid_stream
+            .iter()
+            .find_map(|event| {
+                matches!(
+                    event.payload(),
+                    events::KernelEventPayload::RetentionManifestProjected(_)
+                )
+                .then_some(event.seq())
+            })
+            .expect("retention projection event");
+        let mut rewritten = Vec::new();
+        let mut index = 0;
+        while index < valid_stream.len() {
+            let seq = valid_stream[index].seq();
+            let commit_key = valid_stream[index].commit_key().clone();
+            let mut end = index + 1;
+            while end < valid_stream.len()
+                && valid_stream[end].seq() == seq
+                && valid_stream[end].commit_key() == &commit_key
+            {
+                end += 1;
+            }
+            let payloads = valid_stream[index..end]
+                .iter()
+                .filter(|event| {
+                    if event.seq() != retention_seq {
+                        return true;
+                    }
+                    matches!(
+                        event.payload(),
+                        events::KernelEventPayload::RetentionManifestProjected(_)
+                            | events::KernelEventPayload::RetentionRefsAppended(
+                                events::RetentionRefsAppended {
+                                    reason: events::RetentionReason::ManifestProjection,
+                                    ..
+                                }
+                            )
+                    )
+                })
+                .map(|event| event.payload().clone())
+                .collect::<Vec<_>>();
+            if !payloads.is_empty() {
+                let request = store::TypedCommitRequest {
+                    run_id: run_id.clone(),
+                    expected_next_seq: seq,
+                    commit_key,
+                    payloads,
+                    required_artifacts: Vec::new(),
+                    preconditions: store::CommitPreconditions::default(),
+                };
+                let batch =
+                    store::build_committed_batch(&request, seq).expect("rewritten commit batch");
+                rewritten.extend(batch.events().iter().cloned());
+            }
+            index = end;
+        }
+        rewritten
+    }
+
+    fn remove_retention_projection_commit(
+        stream: &[store::KernelEventEnvelope],
+    ) -> Vec<store::KernelEventEnvelope> {
+        let mut rewritten = Vec::with_capacity(stream.len());
+        let mut index = 0;
+        while index < stream.len() {
+            let first = &stream[index];
+            let original_seq = first.seq();
+            let commit_key = first.commit_key().clone();
+            let mut end = index + 1;
+            while end < stream.len()
+                && stream[end].seq() == original_seq
+                && stream[end].commit_key() == &commit_key
+            {
+                end += 1;
+            }
+            let commit = &stream[index..end];
+            if commit.iter().any(|event| {
+                matches!(
+                    event.payload(),
+                    events::KernelEventPayload::RetentionManifestProjected(_)
+                )
+            }) {
+                index = end;
+                continue;
+            }
+            let seq = rewritten
+                .last()
+                .map(|event: &store::KernelEventEnvelope| {
+                    store::StreamSeq::new(event.seq().as_u64() + 1).expect("next stream seq")
+                })
+                .unwrap_or(store::StreamSeq::FIRST);
+            let request = store::TypedCommitRequest {
+                run_id: first.run_id().clone(),
+                expected_next_seq: seq,
+                commit_key,
+                payloads: commit
+                    .iter()
+                    .map(|event| event.payload().clone())
+                    .collect::<Vec<_>>(),
+                required_artifacts: Vec::new(),
+                preconditions: store::CommitPreconditions::default(),
+            };
+            let batch =
+                store::build_committed_batch(&request, seq).expect("rewritten commit batch");
+            rewritten.extend(batch.events().iter().cloned());
+            index = end;
+        }
+        rewritten
+    }
+
+    fn failed_completion_after_run_start(
+        stream: &[store::KernelEventEnvelope],
+    ) -> Vec<store::KernelEventEnvelope> {
+        let first = stream.first().expect("stream is non-empty");
+        let start_seq = first.seq();
+        let start_key = first.commit_key().clone();
+        let mut rewritten = stream
+            .iter()
+            .take_while(|event| event.seq() == start_seq && event.commit_key() == &start_key)
+            .cloned()
+            .collect::<Vec<_>>();
+        let run_started = rewritten
+            .iter()
+            .find_map(|event| match event.payload() {
+                events::KernelEventPayload::RunStarted(payload) => Some(payload),
+                _ => None,
+            })
+            .expect("run started");
+        let seq = store::StreamSeq::new(start_seq.as_u64() + 1).expect("next stream seq");
+        let request = store::TypedCommitRequest {
+            run_id: run_started.run_id.clone(),
+            expected_next_seq: seq,
+            commit_key: store::CommitKey::new("failed-completion-without-framework")
+                .expect("commit key"),
+            payloads: vec![events::KernelEventPayload::RunCompleted(
+                events::RunCompleted {
+                    run_id: run_started.run_id.clone(),
+                    spec_hash: run_started.spec_hash.clone(),
+                    outcome: events::RunCompletionOutcome::Failed(test_error()),
+                },
+            )],
+            required_artifacts: Vec::new(),
+            preconditions: store::CommitPreconditions::default(),
+        };
+        let batch = store::build_committed_batch(&request, seq).expect("failed completion batch");
+        rewritten.extend(batch.events().iter().cloned());
+        rewritten
+    }
+
+    fn test_error() -> events::MfmErrorInfo {
+        events::MfmErrorInfo {
+            code: events::ErrorCode::new("test_failure").expect("error code"),
+            category: events::ErrorCategory::Runtime,
+            retryable: false,
+            safe_message: "test failure".to_owned(),
+            public_details: None,
+            diagnostic_ref: None,
+        }
+    }
+
+    fn append_post_completion_retention_refs(
+        stream: &[store::KernelEventEnvelope],
+    ) -> Vec<store::KernelEventEnvelope> {
+        let run_started = stream
+            .iter()
+            .find_map(|event| match event.payload() {
+                events::KernelEventPayload::RunStarted(payload) => Some(payload),
+                _ => None,
+            })
+            .expect("run started");
+        let retention = store::ProjectionSnapshot::rebuild_from_run_stream(stream)
+            .expect("valid projection")
+            .retention(&run_started.run_id)
+            .and_then(|projection| projection.refs.values().next().cloned())
+            .expect("retention ref");
+        let seq = stream
+            .last()
+            .map(|event| store::StreamSeq::new(event.seq().as_u64() + 1).expect("next stream seq"))
+            .unwrap_or(store::StreamSeq::FIRST);
+        let request = store::TypedCommitRequest {
+            run_id: run_started.run_id.clone(),
+            expected_next_seq: seq,
+            commit_key: store::CommitKey::new("post-completion-retention-ref").expect("commit key"),
+            payloads: vec![events::KernelEventPayload::RetentionRefsAppended(
+                events::RetentionRefsAppended {
+                    run_id: run_started.run_id.clone(),
+                    spec_hash: run_started.spec_hash.clone(),
+                    refs: vec![retention],
+                    reason: events::RetentionReason::RuntimeEvidence,
+                },
+            )],
+            required_artifacts: Vec::new(),
+            preconditions: store::CommitPreconditions::default(),
+        };
+        let batch = store::build_committed_batch(&request, seq).expect("retention refs batch");
+        let mut rewritten = stream.to_vec();
+        rewritten.extend(batch.events().iter().cloned());
+        rewritten
+    }
+
+    fn append_post_projection_retention_refs_before_completion(
+        stream: &[store::KernelEventEnvelope],
+    ) -> Vec<store::KernelEventEnvelope> {
+        let run_started = stream
+            .iter()
+            .find_map(|event| match event.payload() {
+                events::KernelEventPayload::RunStarted(payload) => Some(payload),
+                _ => None,
+            })
+            .expect("run started");
+        let completion = stream
+            .iter()
+            .find_map(|event| match event.payload() {
+                events::KernelEventPayload::RunCompleted(payload) => Some(payload.clone()),
+                _ => None,
+            })
+            .expect("run completed");
+        let retention = store::ProjectionSnapshot::rebuild_from_run_stream(stream)
+            .expect("valid projection")
+            .retention(&run_started.run_id)
+            .and_then(|projection| projection.refs.values().next().cloned())
+            .expect("retention ref");
+        let mut rewritten = remove_completion_commit(stream);
+        let retention_seq = next_seq(&rewritten);
+        let retention_request = store::TypedCommitRequest {
+            run_id: run_started.run_id.clone(),
+            expected_next_seq: retention_seq,
+            commit_key: store::CommitKey::new("post-projection-retention-ref").expect("commit key"),
+            payloads: vec![events::KernelEventPayload::RetentionRefsAppended(
+                events::RetentionRefsAppended {
+                    run_id: run_started.run_id.clone(),
+                    spec_hash: run_started.spec_hash.clone(),
+                    refs: vec![retention],
+                    reason: events::RetentionReason::RuntimeEvidence,
+                },
+            )],
+            required_artifacts: Vec::new(),
+            preconditions: store::CommitPreconditions::default(),
+        };
+        let retention_batch = store::build_committed_batch(&retention_request, retention_seq)
+            .expect("retention refs batch");
+        rewritten.extend(retention_batch.events().iter().cloned());
+
+        let completion_seq = next_seq(&rewritten);
+        let completion_request = store::TypedCommitRequest {
+            run_id: run_started.run_id.clone(),
+            expected_next_seq: completion_seq,
+            commit_key: store::CommitKey::new("completion-after-post-projection-retention")
+                .expect("commit key"),
+            payloads: vec![events::KernelEventPayload::RunCompleted(completion)],
+            required_artifacts: Vec::new(),
+            preconditions: store::CommitPreconditions::default(),
+        };
+        let completion_batch = store::build_committed_batch(&completion_request, completion_seq)
+            .expect("completion batch");
+        rewritten.extend(completion_batch.events().iter().cloned());
+        rewritten
+    }
+
+    fn append_extra_retention_ref_to_projection_commit(
+        stream: &[store::KernelEventEnvelope],
+    ) -> Vec<store::KernelEventEnvelope> {
+        let mut rewritten = Vec::with_capacity(stream.len() + 1);
+        let mut inserted = false;
+        let mut index = 0;
+        while index < stream.len() {
+            let first = &stream[index];
+            let seq = first.seq();
+            let commit_key = first.commit_key().clone();
+            let mut end = index + 1;
+            while end < stream.len()
+                && stream[end].seq() == seq
+                && stream[end].commit_key() == &commit_key
+            {
+                end += 1;
+            }
+            let commit = &stream[index..end];
+            if commit.iter().any(|event| {
+                matches!(
+                    event.payload(),
+                    events::KernelEventPayload::RetentionManifestProjected(_)
+                )
+            }) {
+                let runtime_evidence = commit
+                    .iter()
+                    .find_map(|event| match event.payload() {
+                        events::KernelEventPayload::RetentionRefsAppended(payload)
+                            if payload.reason == events::RetentionReason::RuntimeEvidence =>
+                        {
+                            Some(payload)
+                        }
+                        _ => None,
+                    })
+                    .expect("projection commit runtime evidence retention refs");
+                let mut payloads = commit
+                    .iter()
+                    .map(|event| event.payload().clone())
+                    .collect::<Vec<_>>();
+                payloads.push(events::KernelEventPayload::RetentionRefsAppended(
+                    events::RetentionRefsAppended {
+                        run_id: runtime_evidence.run_id.clone(),
+                        spec_hash: runtime_evidence.spec_hash.clone(),
+                        refs: runtime_evidence.refs.clone(),
+                        reason: events::RetentionReason::RuntimeEvidence,
+                    },
+                ));
+                let request = store::TypedCommitRequest {
+                    run_id: first.run_id().clone(),
+                    expected_next_seq: seq,
+                    commit_key,
+                    payloads,
+                    required_artifacts: Vec::new(),
+                    preconditions: store::CommitPreconditions::default(),
+                };
+                let batch = store::build_committed_batch(&request, seq).expect("rewritten commit");
+                rewritten.extend(batch.events().iter().cloned());
+                inserted = true;
+            } else {
+                rewritten.extend(commit.iter().cloned());
+            }
+            index = end;
+        }
+        assert!(inserted, "retention projection commit exists");
+        rewritten
+    }
+
+    fn append_same_sequence_sidecar_to_retention_projection(
+        stream: &[store::KernelEventEnvelope],
+    ) -> Vec<store::KernelEventEnvelope> {
+        let mut rewritten = Vec::with_capacity(stream.len() + 1);
+        let mut inserted = false;
+        let mut index = 0;
+        while index < stream.len() {
+            let first = &stream[index];
+            let seq = first.seq();
+            let commit_key = first.commit_key().clone();
+            let mut end = index + 1;
+            while end < stream.len()
+                && stream[end].seq() == seq
+                && stream[end].commit_key() == &commit_key
+            {
+                end += 1;
+            }
+            let commit = &stream[index..end];
+            rewritten.extend(commit.iter().cloned());
+            if commit.iter().any(|event| {
+                matches!(
+                    event.payload(),
+                    events::KernelEventPayload::RetentionManifestProjected(_)
+                )
+            }) {
+                let runtime_evidence = commit
+                    .iter()
+                    .find_map(|event| match event.payload() {
+                        events::KernelEventPayload::RetentionRefsAppended(payload)
+                            if payload.reason == events::RetentionReason::RuntimeEvidence =>
+                        {
+                            Some(payload)
+                        }
+                        _ => None,
+                    })
+                    .expect("projection runtime evidence retention refs");
+                let sidecar_key =
+                    store::CommitKey::new("forged-same-seq-retention-sidecar").expect("commit key");
+                let request = store::TypedCommitRequest {
+                    run_id: first.run_id().clone(),
+                    expected_next_seq: seq,
+                    commit_key: sidecar_key.clone(),
+                    payloads: vec![events::KernelEventPayload::RetentionRefsAppended(
+                        events::RetentionRefsAppended {
+                            run_id: runtime_evidence.run_id.clone(),
+                            spec_hash: runtime_evidence.spec_hash.clone(),
+                            refs: runtime_evidence.refs.clone(),
+                            reason: events::RetentionReason::RuntimeEvidence,
+                        },
+                    )],
+                    required_artifacts: Vec::new(),
+                    preconditions: store::CommitPreconditions::default(),
+                };
+                let batch =
+                    store::build_committed_batch(&request, seq).expect("sidecar commit batch");
+                let next_ordinal =
+                    u32::try_from(commit.len()).expect("retention commit ordinal count");
+                for (offset, event) in batch.events().iter().enumerate() {
+                    rewritten.push(rewrite_envelope(
+                        event,
+                        seq,
+                        store::CommitOrdinal::new(
+                            next_ordinal
+                                .checked_add(u32::try_from(offset).expect("sidecar ordinal offset"))
+                                .expect("sidecar ordinal"),
+                        ),
+                        sidecar_key.clone(),
+                    ));
+                }
+                inserted = true;
+            }
+            index = end;
+        }
+        assert!(inserted, "retention projection commit exists");
+        rewritten
+    }
+
+    fn rewrite_envelope(
+        event: &store::KernelEventEnvelope,
+        seq: store::StreamSeq,
+        ordinal: store::CommitOrdinal,
+        commit_key: store::CommitKey,
+    ) -> store::KernelEventEnvelope {
+        store::KernelEventEnvelope::from_persisted_record(store::PersistedKernelEventRecord {
+            event_id: event_id_for(event, seq, ordinal),
+            event_schema_id: event.event_schema_id().clone(),
+            run_id: event.run_id().clone(),
+            seq,
+            ordinal,
+            spec_hash: event.spec_hash().clone(),
+            commit_key,
+            logical_key: event.logical_key().clone(),
+            payload_hash: event.payload_hash().clone(),
+            payload: event.payload().clone(),
+            payload_canonical_byte_len: event.audit().payload_canonical_byte_len(),
+        })
+        .expect("rewritten envelope")
+    }
+
+    fn event_id_for(
+        event: &store::KernelEventEnvelope,
+        seq: store::StreamSeq,
+        ordinal: store::CommitOrdinal,
+    ) -> EventId {
+        let canonical = PlainCanonicalJsonBytes::from_json_str(
+            &serde_json::json!({
+                "event_schema_id": event.event_schema_id().as_str(),
+                "ordinal": ordinal.as_u32(),
+                "payload_hash": event.payload_hash().as_str(),
+                "run_id": event.run_id().as_str(),
+                "seq": seq.as_u64(),
+            })
+            .to_string(),
+        )
+        .expect("event id canonical");
+        EventId::from_digest(DigestAlgorithm::Sha256JcsV1, canonical.digest_bytes())
+    }
+
+    fn remove_completion_commit(
+        stream: &[store::KernelEventEnvelope],
+    ) -> Vec<store::KernelEventEnvelope> {
+        let mut rewritten = Vec::with_capacity(stream.len());
+        let mut index = 0;
+        while index < stream.len() {
+            let first = &stream[index];
+            let original_seq = first.seq();
+            let commit_key = first.commit_key().clone();
+            let mut end = index + 1;
+            while end < stream.len()
+                && stream[end].seq() == original_seq
+                && stream[end].commit_key() == &commit_key
+            {
+                end += 1;
+            }
+            let commit = &stream[index..end];
+            if commit
+                .iter()
+                .any(|event| matches!(event.payload(), events::KernelEventPayload::RunCompleted(_)))
+            {
+                index = end;
+                continue;
+            }
+            let seq = next_seq(&rewritten);
+            let request = store::TypedCommitRequest {
+                run_id: first.run_id().clone(),
+                expected_next_seq: seq,
+                commit_key,
+                payloads: commit.iter().map(|event| event.payload().clone()).collect(),
+                required_artifacts: Vec::new(),
+                preconditions: store::CommitPreconditions::default(),
+            };
+            let batch = store::build_committed_batch(&request, seq).expect("rewritten commit");
+            rewritten.extend(batch.events().iter().cloned());
+            index = end;
+        }
+        rewritten
+    }
+
+    fn next_seq(stream: &[store::KernelEventEnvelope]) -> store::StreamSeq {
+        stream
+            .last()
+            .map(|event| store::StreamSeq::new(event.seq().as_u64() + 1).expect("next stream seq"))
+            .unwrap_or(store::StreamSeq::FIRST)
     }
 }

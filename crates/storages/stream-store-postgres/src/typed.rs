@@ -17,7 +17,7 @@ use mfm_store::v1::{
     PersistedKernelEventRecord, PreparedTypedCommit, ProjectionSnapshot, PublicOutputProjection,
     RetentionManifestProjection, RetentionProjection, RunState, SideEffectArtifactProjection,
     SideEffectClaimProjection, SideEffectIntentProjection, SideEffectPhase, SideEffectProjection,
-    StoreError, StreamSeq, TypedCommitBase, VerifiedRetentionProjection,
+    StoreError, StreamSeq, TypedCommitBase,
 };
 use serde_json::Value;
 use tokio::sync::Mutex;
@@ -1080,11 +1080,8 @@ async fn retention_projection_from_run_stream_tx(
     run_id: &RunId,
 ) -> Result<RetentionProjection> {
     let stream = load_run_stream_tx(tx, run_id).await?;
-    Ok(
-        VerifiedRetentionProjection::from_run_stream(run_id.clone(), &stream)?
-            .projection()
-            .clone(),
-    )
+    let snapshot = ProjectionSnapshot::rebuild_from_run_stream(&stream)?;
+    Ok(snapshot.retention(run_id).cloned().unwrap_or_default())
 }
 
 fn canonical_payload_value(payload: &events::KernelEventPayload) -> Result<Value> {

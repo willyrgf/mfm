@@ -29,8 +29,8 @@ use mfm_ids::{
 };
 use mfm_replay::v1::{ReplayAuthority, ReplayBroker, ReplayError};
 use mfm_runtime::{
-    build_retention_manifest_artifact, validate_run_stream, CertifiedRuntimeSpec, RunStartEvidence,
-    RuntimeArtifactStageFuture, RuntimeArtifactStager, SchedulerStatus, SerialTypedScheduler,
+    validate_run_stream, CertifiedRuntimeSpec, RunStartEvidence, RuntimeArtifactStageFuture,
+    RuntimeArtifactStager, SchedulerStatus, SerialTypedScheduler,
 };
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
@@ -769,8 +769,9 @@ where
         .await?;
         let authority =
             replay_authority_for_run(&self.artifacts, &certified, run_id, &stream).await?;
-        let envelope = certified.envelope().clone();
-        ReplayBroker::from_run_stream(envelope, &stream, authority).map_err(Into::into)
+        let runtime_spec = CertifiedRuntimeSpec::new(certified)?;
+        ReplayBroker::from_runtime_validated_stream(&runtime_spec, &stream, authority)
+            .map_err(Into::into)
     }
 
     /// Renders typed public output from store-owned projection and typed artifact bytes.
@@ -810,32 +811,15 @@ where
     ) -> Result<SchedulerStatus, AppError> {
         match drive {
             DriveMode::AppendOnly => Ok(SchedulerStatus::Blocked),
-            DriveMode::Once => {
-                self.drive_once_with_retention(store, runtime_spec, run_id)
-                    .await
-            }
-            DriveMode::UntilBlocked => {
-                self.drive_until_blocked_with_retention(store, runtime_spec, run_id)
-                    .await
-            }
+            DriveMode::Once => Ok(self
+                .scheduler
+                .drive_once(store, runtime_spec, run_id)
+                .await?),
+            DriveMode::UntilBlocked => Ok(self
+                .scheduler
+                .drive_until_blocked(store, runtime_spec, run_id)
+                .await?),
         }
-    }
-
-    async fn drive_once_with_retention(
-        &self,
-        store: &mut S,
-        runtime_spec: &CertifiedRuntimeSpec,
-        run_id: &RunId,
-    ) -> Result<SchedulerStatus, AppError> {
-        let status = self
-            .scheduler
-            .drive_once(store, runtime_spec, run_id)
-            .await?;
-        if status == SchedulerStatus::Advanced {
-            self.project_retention_manifest_if_ready(store, runtime_spec, run_id)
-                .await?;
-        }
-        Ok(status)
     }
 
     async fn validate_launch_artifacts(
@@ -844,57 +828,6 @@ where
         evidence: &RunStartEvidence,
     ) -> Result<(), AppError> {
         validate_launch_artifacts(&self.artifacts, runtime_spec, evidence).await
-    }
-
-    async fn drive_until_blocked_with_retention(
-        &self,
-        store: &mut S,
-        runtime_spec: &CertifiedRuntimeSpec,
-        run_id: &RunId,
-    ) -> Result<SchedulerStatus, AppError> {
-        let mut advanced = false;
-        loop {
-            match self
-                .scheduler
-                .drive_once(store, runtime_spec, run_id)
-                .await?
-            {
-                SchedulerStatus::Advanced => {
-                    advanced = true;
-                    if self
-                        .project_retention_manifest_if_ready(store, runtime_spec, run_id)
-                        .await?
-                    {
-                        continue;
-                    }
-                }
-                SchedulerStatus::Blocked if advanced => return Ok(SchedulerStatus::Advanced),
-                status => return Ok(status),
-            }
-        }
-    }
-
-    async fn project_retention_manifest_if_ready(
-        &self,
-        store: &mut S,
-        runtime_spec: &CertifiedRuntimeSpec,
-        run_id: &RunId,
-    ) -> Result<bool, AppError> {
-        let stream = store.load_run_stream(run_id);
-        if !retention_manifest_should_project(runtime_spec, run_id, &stream)? {
-            return Ok(false);
-        }
-        let manifest = build_retention_manifest_artifact(runtime_spec, run_id, &stream)?;
-        self.artifacts
-            .put_verified_artifact(manifest.bytes.to_vec(), manifest.evidence.clone())
-            .await?;
-        self.scheduler.append_retention_manifest_projection(
-            store,
-            runtime_spec,
-            run_id,
-            manifest,
-        )?;
-        Ok(true)
     }
 }
 
@@ -1055,8 +988,9 @@ where
         .await?;
         let authority =
             replay_authority_for_run(&self.artifacts, &certified, run_id, &stream).await?;
-        let envelope = certified.envelope().clone();
-        let broker = ReplayBroker::from_run_stream(envelope, &stream, authority)?;
+        let runtime_spec = CertifiedRuntimeSpec::new(certified)?;
+        let broker =
+            ReplayBroker::from_runtime_validated_stream(&runtime_spec, &stream, authority)?;
         mfm_transports_proof::verify_deterministic_proof_replay(&broker, &stream)?;
         mfm_transports_evm_dcv::verify_evm_dcv_replay(&broker, &stream, &self.artifacts).await?;
         let projection = broker.projection_snapshot();
@@ -1110,78 +1044,15 @@ where
     ) -> Result<SchedulerStatus, AppError> {
         match drive {
             DriveMode::AppendOnly => Ok(SchedulerStatus::Blocked),
-            DriveMode::Once => self.drive_once_with_retention(runtime_spec, run_id).await,
-            DriveMode::UntilBlocked => {
-                self.drive_until_blocked_with_retention(runtime_spec, run_id)
-                    .await
-            }
-        }
-    }
-
-    async fn drive_once_with_retention(
-        &self,
-        runtime_spec: &CertifiedRuntimeSpec,
-        run_id: &RunId,
-    ) -> Result<SchedulerStatus, AppError> {
-        let status = self
-            .scheduler
-            .drive_once_async(&self.store, runtime_spec, run_id)
-            .await?;
-        if status == SchedulerStatus::Advanced {
-            self.project_retention_manifest_if_ready(runtime_spec, run_id)
-                .await?;
-        }
-        Ok(status)
-    }
-
-    async fn drive_until_blocked_with_retention(
-        &self,
-        runtime_spec: &CertifiedRuntimeSpec,
-        run_id: &RunId,
-    ) -> Result<SchedulerStatus, AppError> {
-        let mut advanced = false;
-        loop {
-            match self
+            DriveMode::Once => Ok(self
                 .scheduler
                 .drive_once_async(&self.store, runtime_spec, run_id)
-                .await?
-            {
-                SchedulerStatus::Advanced => {
-                    advanced = true;
-                    if self
-                        .project_retention_manifest_if_ready(runtime_spec, run_id)
-                        .await?
-                    {
-                        continue;
-                    }
-                }
-                SchedulerStatus::Blocked if advanced => return Ok(SchedulerStatus::Advanced),
-                status => return Ok(status),
-            }
+                .await?),
+            DriveMode::UntilBlocked => Ok(self
+                .scheduler
+                .drive_until_blocked_async(&self.store, runtime_spec, run_id)
+                .await?),
         }
-    }
-
-    async fn project_retention_manifest_if_ready(
-        &self,
-        runtime_spec: &CertifiedRuntimeSpec,
-        run_id: &RunId,
-    ) -> Result<bool, AppError> {
-        let stream = self
-            .store
-            .load_run_stream(run_id)
-            .await
-            .map_err(async_app_store_error)?;
-        if !retention_manifest_should_project(runtime_spec, run_id, &stream)? {
-            return Ok(false);
-        }
-        let manifest = build_retention_manifest_artifact(runtime_spec, run_id, &stream)?;
-        self.artifacts
-            .put_verified_artifact(manifest.bytes.to_vec(), manifest.evidence.clone())
-            .await?;
-        self.scheduler
-            .append_retention_manifest_projection_async(&self.store, runtime_spec, run_id, manifest)
-            .await?;
-        Ok(true)
     }
 }
 
@@ -1228,6 +1099,8 @@ pub async fn replay_authority_for_run(
     stream: &[store::KernelEventEnvelope],
 ) -> Result<ReplayAuthority, AppError> {
     let run_started = run_started_payload(run_id, stream)?;
+    let runtime_spec = CertifiedRuntimeSpec::new(certified.clone())?;
+    validate_run_stream(&runtime_spec, run_id, stream)?;
     let projection = store::ProjectionSnapshot::rebuild_from_run_stream(stream)?;
     let Some(retention) = projection.retention(run_id) else {
         return Err(AppError::new(
@@ -1670,31 +1543,6 @@ async fn validate_launch_artifacts(
             .await?;
     }
     Ok(())
-}
-
-fn retention_manifest_should_project(
-    runtime_spec: &CertifiedRuntimeSpec,
-    run_id: &RunId,
-    stream: &[store::KernelEventEnvelope],
-) -> Result<bool, AppError> {
-    if stream.is_empty() {
-        return Ok(false);
-    }
-    let projection = store::ProjectionSnapshot::rebuild_from_run_stream(stream)?;
-    if projection.run_state(run_id) != store::RunState::Started
-        || stream.iter().any(|event| {
-            matches!(
-                event.payload(),
-                events::KernelEventPayload::RetentionManifestProjected(_)
-            )
-        })
-    {
-        return Ok(false);
-    }
-    Ok(matches!(
-        projection.public_output(&runtime_spec.spec().public_outputs.public_schema_id),
-        Some(store::PublicOutputProjection::Produced { .. })
-    ))
 }
 
 /// Derives typed run status from an authoritative store-owned run stream.
@@ -2475,6 +2323,85 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn replay_authority_rejects_standalone_retention_projection_history() {
+        let (root, fixture, services, _started) = start_framework_fixture_run().await;
+        let valid_stream = services
+            .store()
+            .load_run_stream(&fixture.run_id)
+            .await
+            .expect("load valid stream");
+        let corrupt_stream = standalone_retention_projection_history(&valid_stream);
+        let artifacts = services.artifacts().clone();
+        let registry =
+            CertificationRegistry::from_program_draft(&fixture.draft).expect("fixture registry");
+        let corrupt_services = make_async_typed_services_with_certification_registry(
+            production_typed_runner_registry(artifacts.clone())
+                .expect("production runner registry"),
+            StaticAsyncStore {
+                run_id: fixture.run_id.clone(),
+                stream: corrupt_stream,
+            },
+            artifacts,
+            registry,
+        );
+
+        let replay_err = corrupt_services
+            .verify_replay_for_run(&fixture.run_id)
+            .await
+            .expect_err("replay rejects standalone retention projection");
+        assert!(matches!(
+            replay_err.code.as_str(),
+            "TypedRuntimeError" | "TypedStoreRejected"
+        ));
+        assert!(
+            replay_err.message.contains("retention")
+                || replay_err.message.contains("attempt")
+                || replay_err.message.contains("terminal"),
+            "{}",
+            replay_err.message
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn replay_authority_rejects_post_completion_retention_refs() {
+        let (root, fixture, services, _started) = start_framework_fixture_run().await;
+        let valid_stream = services
+            .store()
+            .load_run_stream(&fixture.run_id)
+            .await
+            .expect("load valid stream");
+        let corrupt_stream = append_post_completion_retention_refs_history(&valid_stream);
+        let artifacts = services.artifacts().clone();
+        let registry =
+            CertificationRegistry::from_program_draft(&fixture.draft).expect("fixture registry");
+        let corrupt_services = make_async_typed_services_with_certification_registry(
+            production_typed_runner_registry(artifacts.clone())
+                .expect("production runner registry"),
+            StaticAsyncStore {
+                run_id: fixture.run_id.clone(),
+                stream: corrupt_stream,
+            },
+            artifacts,
+            registry,
+        );
+
+        let replay_err = corrupt_services
+            .verify_replay_for_run(&fixture.run_id)
+            .await
+            .expect_err("replay rejects post-completion retention refs");
+        assert_eq!(replay_err.code, "TypedRuntimeError");
+        assert!(
+            replay_err.message.contains("RunCompleted") || replay_err.message.contains("retention"),
+            "{}",
+            replay_err.message
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
     async fn public_output_read_authority_rejects_tampered_stream_projection() {
         let (root, fixture, services, _started) = start_framework_fixture_run().await;
         let valid_stream = services
@@ -3211,6 +3138,113 @@ mod tests {
         corrupt_store.load_run_stream(&run_id)
     }
 
+    fn standalone_retention_projection_history(
+        valid_stream: &[store::KernelEventEnvelope],
+    ) -> Vec<store::KernelEventEnvelope> {
+        let run_id = valid_stream
+            .first()
+            .expect("valid stream is non-empty")
+            .run_id()
+            .clone();
+        let retention_seq = valid_stream
+            .iter()
+            .find_map(|event| {
+                matches!(
+                    event.payload(),
+                    events::KernelEventPayload::RetentionManifestProjected(_)
+                )
+                .then_some(event.seq())
+            })
+            .expect("retention projection event");
+        let mut rewritten = Vec::new();
+        let mut index = 0;
+        while index < valid_stream.len() {
+            let seq = valid_stream[index].seq();
+            let commit_key = valid_stream[index].commit_key().clone();
+            let mut end = index + 1;
+            while end < valid_stream.len()
+                && valid_stream[end].seq() == seq
+                && valid_stream[end].commit_key() == &commit_key
+            {
+                end += 1;
+            }
+            let payloads = valid_stream[index..end]
+                .iter()
+                .filter(|event| {
+                    if event.seq() != retention_seq {
+                        return true;
+                    }
+                    matches!(
+                        event.payload(),
+                        events::KernelEventPayload::RetentionManifestProjected(_)
+                            | events::KernelEventPayload::RetentionRefsAppended(
+                                events::RetentionRefsAppended {
+                                    reason: events::RetentionReason::ManifestProjection,
+                                    ..
+                                }
+                            )
+                    )
+                })
+                .map(|event| event.payload().clone())
+                .collect::<Vec<_>>();
+            if !payloads.is_empty() {
+                let request = store::TypedCommitRequest {
+                    run_id: run_id.clone(),
+                    expected_next_seq: seq,
+                    commit_key,
+                    payloads,
+                    required_artifacts: Vec::new(),
+                    preconditions: store::CommitPreconditions::default(),
+                };
+                let batch =
+                    store::build_committed_batch(&request, seq).expect("rewritten commit batch");
+                rewritten.extend(batch.events().iter().cloned());
+            }
+            index = end;
+        }
+        rewritten
+    }
+
+    fn append_post_completion_retention_refs_history(
+        stream: &[store::KernelEventEnvelope],
+    ) -> Vec<store::KernelEventEnvelope> {
+        let run_started = stream
+            .iter()
+            .find_map(|event| match event.payload() {
+                events::KernelEventPayload::RunStarted(payload) => Some(payload),
+                _ => None,
+            })
+            .expect("run started");
+        let retention = store::ProjectionSnapshot::rebuild_from_run_stream(stream)
+            .expect("valid projection")
+            .retention(&run_started.run_id)
+            .and_then(|projection| projection.refs.values().next().cloned())
+            .expect("retention ref");
+        let seq = stream
+            .last()
+            .map(|event| store::StreamSeq::new(event.seq().as_u64() + 1).expect("next stream seq"))
+            .unwrap_or(store::StreamSeq::FIRST);
+        let request = store::TypedCommitRequest {
+            run_id: run_started.run_id.clone(),
+            expected_next_seq: seq,
+            commit_key: store::CommitKey::new("post-completion-retention-ref").expect("commit key"),
+            payloads: vec![events::KernelEventPayload::RetentionRefsAppended(
+                events::RetentionRefsAppended {
+                    run_id: run_started.run_id.clone(),
+                    spec_hash: run_started.spec_hash.clone(),
+                    refs: vec![retention],
+                    reason: events::RetentionReason::RuntimeEvidence,
+                },
+            )],
+            required_artifacts: Vec::new(),
+            preconditions: store::CommitPreconditions::default(),
+        };
+        let batch = store::build_committed_batch(&request, seq).expect("retention refs batch");
+        let mut rewritten = stream.to_vec();
+        rewritten.extend(batch.events().iter().cloned());
+        rewritten
+    }
+
     async fn required_artifacts_for_payloads(
         artifacts: &FsTypedArtifactStore,
         payloads: &[events::KernelEventPayload],
@@ -3460,14 +3494,13 @@ mod tests {
                 )?;
                 Ok(ErasedRunnerOutput {
                     staged_artifacts: vec![staged_artifact],
-                    staged_retention_refs: vec![StagedRetentionRefs {
-                        refs: vec![events::RetentionRef {
+                    staged_retention_refs: vec![StagedRetentionRefs::runtime_evidence(vec![
+                        events::RetentionRef {
                             artifact_id: artifact_id.clone(),
                             role: events::ArtifactRole::StateOutput,
                             content_digest: output_digest.clone(),
-                        }],
-                        reason: events::RetentionReason::PublicOutput,
-                    }],
+                        },
+                    ])],
                     payloads: vec![
                         events::KernelEventPayload::CellProduced(events::CellProduced {
                             spec_hash: ctx.spec_hash().clone(),

@@ -223,7 +223,7 @@ fn verified_retention_projection_for(
         )
         .expect("append retention refs");
     let stream = run_store.load_run_stream(&run_id);
-    VerifiedRetentionProjectionSet::from_run_streams(vec![(run_id, stream.as_slice())])
+    VerifiedRetentionProjectionSet::from_synthetic_run_streams(vec![(run_id, stream.as_slice())])
         .expect("verified retention projection")
 }
 

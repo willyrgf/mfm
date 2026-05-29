@@ -1,18 +1,20 @@
+use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_events::v1::{self as events, side_effect, ArtifactRole, KernelEventPayload};
 use mfm_ids::{
     AdapterKind, AdapterVersion, ArtifactId, AttemptId, CapabilityKind, CapabilityVersion, CellId,
-    ContentDigest, DescriptorId, DigestAlgorithm, DigestBytes, LoweringVersion, NodeId, RunId,
-    SchemaId, ScopeId, SeedId, SemanticTypeId, SpecHash, SpecVersion, StateKind, StateVersion,
+    ContentDigest, DescriptorId, DigestAlgorithm, DigestBytes, EventId, LoweringVersion, NodeId,
+    RunId, SchemaId, ScopeId, SeedId, SemanticTypeId, SpecHash, SpecVersion, StateKind,
+    StateVersion,
 };
 use mfm_spec::v1::{
     CanonicalizerIdentity, CellProducer, MediaType, PublicFieldPath, ValueLineageRef,
 };
 use mfm_store::v1::{
-    build_committed_batch, ArtifactEvidenceRef, CellTerminalProjection, CommitKey, CommitOutcome,
-    CommitPreconditions, InMemoryTypedRunStore, PreparedTypedCommit, ProjectionSnapshot,
-    RequiredRunState, SideEffectPhase, StoreError, StreamSeq, TypedCommitRequest,
-    TypedProjectionRead, TypedRunEventStore, VerifiedRetentionProjection,
-    VerifiedRetentionProjectionSet,
+    build_committed_batch, ArtifactEvidenceRef, CellTerminalProjection, CommitKey, CommitOrdinal,
+    CommitOutcome, CommitPreconditions, InMemoryTypedRunStore, KernelEventEnvelope,
+    PersistedKernelEventRecord, PreparedTypedCommit, ProjectionSnapshot, RequiredRunState,
+    SideEffectPhase, StoreError, StreamSeq, TypedCommitRequest, TypedProjectionRead,
+    TypedRunEventStore, VerifiedRetentionProjection, VerifiedRetentionProjectionSet,
 };
 
 const SPEC_MEDIA_TYPE: &str = "application/vnd.mfm.typed-execution-spec+json;version=1";
@@ -839,6 +841,45 @@ fn projection_rebuild_rejects_gapped_persisted_run_stream() {
 }
 
 #[test]
+fn projection_rebuild_rejects_mixed_commit_keys_for_one_sequence() {
+    let run_id = run_id(44);
+    let first = build_committed_batch(
+        &run_start_request(run_id.clone(), "run-start"),
+        StreamSeq::FIRST,
+    )
+    .expect("first batch");
+    let sidecar = build_committed_batch(
+        &TypedCommitRequest {
+            run_id,
+            expected_next_seq: StreamSeq::FIRST,
+            commit_key: CommitKey::new("same-seq-sidecar").expect("commit key"),
+            payloads: vec![state_attempt_started()],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions::default(),
+        },
+        StreamSeq::FIRST,
+    )
+    .expect("sidecar batch");
+    let mut events = first.events().to_vec();
+    events.push(rewrite_envelope(
+        &sidecar.events()[0],
+        StreamSeq::FIRST,
+        CommitOrdinal::new(1),
+        CommitKey::new("same-seq-sidecar").expect("commit key"),
+    ));
+
+    let error = ProjectionSnapshot::rebuild_from_run_stream(&events)
+        .expect_err("mixed commit keys for one sequence reject");
+    assert!(matches!(
+        error,
+        StoreError::PersistedEventMismatch {
+            field: "commit_key",
+            ..
+        }
+    ));
+}
+
+#[test]
 fn required_artifact_precondition_is_atomic_with_append() {
     let artifact_id = artifact_id(50);
     let artifact_digest = content_digest(51);
@@ -871,6 +912,43 @@ fn required_artifact_precondition_is_atomic_with_append() {
     assert!(matches!(error, StoreError::MissingArtifact { .. }));
     assert!(store.load_run_stream(&run_id).is_empty());
     assert_eq!(store.expected_next_seq(&run_id), StreamSeq::FIRST);
+}
+
+fn rewrite_envelope(
+    event: &KernelEventEnvelope,
+    seq: StreamSeq,
+    ordinal: CommitOrdinal,
+    commit_key: CommitKey,
+) -> KernelEventEnvelope {
+    KernelEventEnvelope::from_persisted_record(PersistedKernelEventRecord {
+        event_id: event_id_for(event, seq, ordinal),
+        event_schema_id: event.event_schema_id().clone(),
+        run_id: event.run_id().clone(),
+        seq,
+        ordinal,
+        spec_hash: event.spec_hash().clone(),
+        commit_key,
+        logical_key: event.logical_key().clone(),
+        payload_hash: event.payload_hash().clone(),
+        payload: event.payload().clone(),
+        payload_canonical_byte_len: event.audit().payload_canonical_byte_len(),
+    })
+    .expect("rewritten envelope")
+}
+
+fn event_id_for(event: &KernelEventEnvelope, seq: StreamSeq, ordinal: CommitOrdinal) -> EventId {
+    let canonical = PlainCanonicalJsonBytes::from_json_str(
+        &serde_json::json!({
+            "event_schema_id": event.event_schema_id().as_str(),
+            "ordinal": ordinal.as_u32(),
+            "payload_hash": event.payload_hash().as_str(),
+            "run_id": event.run_id().as_str(),
+            "seq": seq.as_u64(),
+        })
+        .to_string(),
+    )
+    .expect("event id canonical");
+    EventId::from_digest(DigestAlgorithm::Sha256JcsV1, canonical.digest_bytes())
 }
 
 #[test]
@@ -1796,7 +1874,7 @@ fn retention_refs_are_projected_from_authoritative_stream() {
         .expect("append retention refs");
 
     let stream = store.load_run_stream(&run_id);
-    let verified = VerifiedRetentionProjection::from_run_stream(run_id.clone(), &stream)
+    let verified = VerifiedRetentionProjection::from_synthetic_run_stream(run_id.clone(), &stream)
         .expect("verified retention");
     assert!(verified.retains_artifact(&evidence));
     assert_eq!(
@@ -1928,9 +2006,11 @@ fn retention_manifest_projection_must_chain_append_only() {
         Some(first_digest)
     );
     let stream = store.load_run_stream(&run_id);
-    let verified =
-        VerifiedRetentionProjectionSet::from_run_streams(vec![(run_id.clone(), stream.as_slice())])
-            .expect("verified retention set");
+    let verified = VerifiedRetentionProjectionSet::from_synthetic_run_streams(vec![(
+        run_id.clone(),
+        stream.as_slice(),
+    )])
+    .expect("verified retention set");
     assert!(verified.retains_artifact(&retention_manifest_artifact_ref(
         artifact_id(125),
         second_digest,

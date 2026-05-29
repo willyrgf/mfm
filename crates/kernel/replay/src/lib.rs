@@ -382,8 +382,20 @@ pub mod v1 {
     }
 
     impl ReplayBroker {
-        /// Builds a replay broker from the stored certified spec and authoritative run stream.
-        pub fn from_run_stream(
+        /// Builds a replay broker from runtime-validated certified stream authority.
+        pub fn from_runtime_validated_stream(
+            runtime_spec: &mfm_runtime::CertifiedRuntimeSpec,
+            stream: &[KernelEventEnvelope],
+            authority: ReplayAuthority,
+        ) -> Result<Self> {
+            let run_started = run_started_payload(stream)?;
+            mfm_runtime::validate_run_stream(runtime_spec, &run_started.run_id, stream).map_err(
+                |error| ReplayError::new(ReplayErrorKind::InvalidRunStream, error.to_string()),
+            )?;
+            Self::from_validated_parts(runtime_spec.envelope().clone(), stream, authority)
+        }
+
+        fn from_validated_parts(
             certified_spec: HashedSpecEnvelope,
             stream: &[KernelEventEnvelope],
             authority: ReplayAuthority,
@@ -1918,7 +1930,7 @@ pub mod v1 {
             let mut authority = fixture.authority();
             authority.runner_executables = vec![executable("different-runner")];
             assert_eq!(
-                ReplayBroker::from_run_stream(
+                ReplayBroker::from_validated_parts(
                     fixture.envelope.clone(),
                     &fixture.stream,
                     authority,
@@ -1932,7 +1944,7 @@ pub mod v1 {
             authority.canonicalizer_identity =
                 CanonicalizerIdentity::new("different-canonicalizer").expect("canonicalizer");
             assert_eq!(
-                ReplayBroker::from_run_stream(
+                ReplayBroker::from_validated_parts(
                     fixture.envelope.clone(),
                     &fixture.stream,
                     authority,
@@ -1967,7 +1979,7 @@ pub mod v1 {
                 .expect("receipt artifact");
             receipt_artifact.digest = content(0xfb);
             assert_eq!(
-                ReplayBroker::from_run_stream(
+                ReplayBroker::from_validated_parts(
                     fixture.envelope.clone(),
                     &fixture.stream,
                     authority,
@@ -1986,7 +1998,7 @@ pub mod v1 {
                 .artifact_evidence
                 .retain(|artifact| artifact.artifact_id != fixture.fact_artifact);
             assert_eq!(
-                ReplayBroker::from_run_stream(
+                ReplayBroker::from_validated_parts(
                     fixture.envelope.clone(),
                     &fixture.stream,
                     authority,
@@ -2009,9 +2021,12 @@ pub mod v1 {
                 Some(fixture.node_id.clone()),
             );
             authority.artifact_evidence.push(extra_artifact.clone());
-            let broker =
-                ReplayBroker::from_run_stream(fixture.envelope.clone(), &fixture.stream, authority)
-                    .expect("broker");
+            let broker = ReplayBroker::from_validated_parts(
+                fixture.envelope.clone(),
+                &fixture.stream,
+                authority,
+            )
+            .expect("broker");
 
             assert_eq!(
                 broker
@@ -2060,7 +2075,7 @@ pub mod v1 {
             stream[fact_index] = batch.events()[0].clone();
 
             assert_eq!(
-                ReplayBroker::from_run_stream(
+                ReplayBroker::from_validated_parts(
                     fixture.envelope.clone(),
                     &stream,
                     fixture.authority(),
@@ -2142,7 +2157,7 @@ pub mod v1 {
             );
 
             assert_eq!(
-                ReplayBroker::from_run_stream(
+                ReplayBroker::from_validated_parts(
                     fixture.envelope.clone(),
                     &stream,
                     ReplayAuthority::from_certified_spec(
@@ -2195,7 +2210,7 @@ pub mod v1 {
             );
 
             assert_eq!(
-                ReplayBroker::from_run_stream(
+                ReplayBroker::from_validated_parts(
                     fixture.envelope.clone(),
                     &stream,
                     fixture.authority(),
@@ -2800,8 +2815,12 @@ pub mod v1 {
             }
 
             fn broker(&self) -> ReplayBroker {
-                ReplayBroker::from_run_stream(self.envelope.clone(), &self.stream, self.authority())
-                    .expect("broker")
+                ReplayBroker::from_validated_parts(
+                    self.envelope.clone(),
+                    &self.stream,
+                    self.authority(),
+                )
+                .expect("broker")
             }
 
             fn fact_request(&self) -> FactReplayRequest {

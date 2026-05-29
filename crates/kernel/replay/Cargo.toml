@@ -15,6 +15,7 @@ path = "src/lib.rs"
 mfm-capabilities = { path = "../capabilities" }
 mfm-events = { path = "../events" }
 mfm-ids = { path = "../ids" }
+mfm-runtime = { path = "../runtime" }
 mfm-spec = { path = "../spec" }
 mfm-store = { path = "../store" }
 

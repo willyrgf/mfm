@@ -695,14 +695,11 @@ where
 }
 
 fn retention(artifact: &store::ArtifactEvidenceRef) -> StagedRetentionRefs {
-    StagedRetentionRefs {
-        refs: vec![events::RetentionRef {
-            artifact_id: artifact.artifact_id.clone(),
-            role: artifact.artifact_role,
-            content_digest: artifact.digest.clone(),
-        }],
-        reason: events::RetentionReason::RuntimeEvidence,
-    }
+    StagedRetentionRefs::runtime_evidence(vec![events::RetentionRef {
+        artifact_id: artifact.artifact_id.clone(),
+        role: artifact.artifact_role,
+        content_digest: artifact.digest.clone(),
+    }])
 }
 
 fn canonical_value<T: Serialize>(value: &T) -> mfm_runtime::Result<PlainCanonicalJsonBytes> {
