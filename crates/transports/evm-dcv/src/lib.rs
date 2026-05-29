@@ -54,48 +54,28 @@ const SIDE_EFFECT_FACTORY: &str = "apply_side_effect";
 const ENV_EVM_RPC_SOURCES_JSON: &str = "MFM_EVM_RPC_SOURCES_JSON";
 const REPLAY_VERIFIER_ID: &str = "mfm.evm.dcv.replay.v1";
 
-/// Future returned by typed EVM DCV artifact stores.
-pub type EvmDcvArtifactStoreFuture<'a, T> =
+/// Future returned by typed EVM DCV artifact readers.
+pub type EvmDcvArtifactReaderFuture<'a, T> =
     Pin<Box<dyn Future<Output = mfm_runtime::Result<T>> + Send + 'a>>;
 
-/// Artifact store boundary used by typed EVM DCV runners.
-pub trait EvmDcvArtifactStore: Send + Sync {
+/// Read-only artifact boundary used by typed EVM DCV runners.
+pub trait EvmDcvArtifactReader: Send + Sync {
     /// Loads verified typed artifact bytes by id.
     fn get_artifact_by_id<'a>(
         &'a self,
         artifact_id: &'a ArtifactId,
-    ) -> EvmDcvArtifactStoreFuture<'a, (Vec<u8>, store::ArtifactEvidenceRef)>;
-
-    /// Persists bytes after validating they match the supplied typed evidence.
-    fn put_verified_artifact<'a>(
-        &'a self,
-        bytes: Vec<u8>,
-        evidence: store::ArtifactEvidenceRef,
-    ) -> EvmDcvArtifactStoreFuture<'a, ()>;
+    ) -> EvmDcvArtifactReaderFuture<'a, (Vec<u8>, store::ArtifactEvidenceRef)>;
 }
 
-impl EvmDcvArtifactStore for FsTypedArtifactStore {
+impl EvmDcvArtifactReader for FsTypedArtifactStore {
     fn get_artifact_by_id<'a>(
         &'a self,
         artifact_id: &'a ArtifactId,
-    ) -> EvmDcvArtifactStoreFuture<'a, (Vec<u8>, store::ArtifactEvidenceRef)> {
+    ) -> EvmDcvArtifactReaderFuture<'a, (Vec<u8>, store::ArtifactEvidenceRef)> {
         Box::pin(async move {
             self.get_artifact_by_id(artifact_id)
                 .await
                 .map_err(|error| mfm_runtime::RuntimeError::Store(error.to_string()))
-        })
-    }
-
-    fn put_verified_artifact<'a>(
-        &'a self,
-        bytes: Vec<u8>,
-        evidence: store::ArtifactEvidenceRef,
-    ) -> EvmDcvArtifactStoreFuture<'a, ()> {
-        Box::pin(async move {
-            self.put_verified_artifact(bytes, evidence)
-                .await
-                .map_err(|error| mfm_runtime::RuntimeError::Store(error.to_string()))?;
-            Ok(())
         })
     }
 }
@@ -103,7 +83,7 @@ impl EvmDcvArtifactStore for FsTypedArtifactStore {
 /// Registers typed EVM deploy/configure/validate runners.
 pub fn register_evm_dcv_runners(
     registry: &mut ErasedRunnerRegistry,
-    artifacts: Arc<dyn EvmDcvArtifactStore>,
+    artifacts: Arc<dyn EvmDcvArtifactReader>,
 ) -> mfm_runtime::Result<()> {
     registry.register(binding(
         registered_descriptor::<DeployContractState>()?,
@@ -182,7 +162,7 @@ fn executable(
 }
 
 struct DeployRunner {
-    artifacts: Arc<dyn EvmDcvArtifactStore>,
+    artifacts: Arc<dyn EvmDcvArtifactReader>,
     rpc: EvmDcvRpcClient,
 }
 
@@ -195,7 +175,7 @@ impl ErasedNodeRunner for DeployRunner {
 }
 
 struct ConfigureRunner {
-    artifacts: Arc<dyn EvmDcvArtifactStore>,
+    artifacts: Arc<dyn EvmDcvArtifactReader>,
     rpc: EvmDcvRpcClient,
 }
 
@@ -208,7 +188,7 @@ impl ErasedNodeRunner for ConfigureRunner {
 }
 
 struct ValidateRunner {
-    artifacts: Arc<dyn EvmDcvArtifactStore>,
+    artifacts: Arc<dyn EvmDcvArtifactReader>,
     rpc: EvmDcvRpcClient,
 }
 
@@ -222,7 +202,7 @@ impl ErasedNodeRunner for ValidateRunner {
 
 async fn run_deploy(
     ctx: ErasedRunCtx<'_>,
-    artifacts: &dyn EvmDcvArtifactStore,
+    artifacts: &dyn EvmDcvArtifactReader,
     rpc: &EvmDcvRpcClient,
 ) -> mfm_runtime::Result<ErasedRunnerOutput> {
     let ledger_key = ledger_key(&ctx, "deploy")?;
@@ -269,7 +249,7 @@ async fn run_deploy(
 
 async fn run_configure(
     ctx: ErasedRunCtx<'_>,
-    artifacts: &dyn EvmDcvArtifactStore,
+    artifacts: &dyn EvmDcvArtifactReader,
     rpc: &EvmDcvRpcClient,
 ) -> mfm_runtime::Result<ErasedRunnerOutput> {
     let ledger_key = ledger_key(&ctx, "configure")?;
@@ -317,7 +297,7 @@ async fn run_configure(
 async fn deploy_persist_intent(
     ctx: ErasedRunCtx<'_>,
     ledger_key: events::SideEffectLedgerKey,
-    artifacts: &dyn EvmDcvArtifactStore,
+    artifacts: &dyn EvmDcvArtifactReader,
 ) -> mfm_runtime::Result<ErasedRunnerOutput> {
     let config = load_config::<DeployConfigureValidateDeployConfig>(&ctx, artifacts).await?;
     let intent = deploy_intent_from_config(&config).map_err(runtime_invalid)?;
@@ -327,7 +307,6 @@ async fn deploy_persist_intent(
     persist_side_effect_intent::<EvmDcvDeployIntent, EvmDcvDeployIdempotencyInput>(
         ctx,
         ledger_key,
-        artifacts,
         intent,
         idem_input,
         EvmDcvTransactionSubmitCapability::kind().map_err(runtime_capability_error)?,
@@ -339,7 +318,7 @@ async fn deploy_persist_intent(
 async fn configure_persist_intent(
     ctx: ErasedRunCtx<'_>,
     ledger_key: events::SideEffectLedgerKey,
-    artifacts: &dyn EvmDcvArtifactStore,
+    artifacts: &dyn EvmDcvArtifactReader,
 ) -> mfm_runtime::Result<ErasedRunnerOutput> {
     let config = load_config::<DeployConfigureValidateConfigureConfig>(&ctx, artifacts).await?;
     let deployed = load_input_cell::<DeployedContract>(ctx.inputs, artifacts).await?;
@@ -351,7 +330,6 @@ async fn configure_persist_intent(
     persist_side_effect_intent::<EvmDcvConfigureIntent, EvmDcvConfigureIdempotencyInput>(
         ctx,
         ledger_key,
-        artifacts,
         intent,
         idem_input,
         EvmDcvTransactionSubmitCapability::kind().map_err(runtime_capability_error)?,
@@ -363,7 +341,6 @@ async fn configure_persist_intent(
 async fn persist_side_effect_intent<I, D>(
     ctx: ErasedRunCtx<'_>,
     ledger_key: events::SideEffectLedgerKey,
-    artifacts: &dyn EvmDcvArtifactStore,
     intent: I,
     idem_input: D,
     capability_kind: mfm_ids::CapabilityKind,
@@ -378,7 +355,6 @@ where
         events::ArtifactRole::SideEffectIntent,
         Some(ctx.node.node_id.clone()),
     )?;
-    persist_artifact(artifacts, &intent_artifact).await?;
     let idem_hash = digest_value(&idem_input)?;
     let idempotency_key =
         events::IdempotencyKeyRef::new(format!("idem-{}", short_digest(&idem_hash)))?;
@@ -441,7 +417,7 @@ async fn deploy_prepare_invocation(
     ctx: ErasedRunCtx<'_>,
     ledger_key: events::SideEffectLedgerKey,
     projection: &store::SideEffectProjection,
-    artifacts: &dyn EvmDcvArtifactStore,
+    artifacts: &dyn EvmDcvArtifactReader,
     rpc: &EvmDcvRpcClient,
 ) -> mfm_runtime::Result<ErasedRunnerOutput> {
     let config = load_config::<DeployConfigureValidateDeployConfig>(&ctx, artifacts).await?;
@@ -456,14 +432,14 @@ async fn deploy_prepare_invocation(
             config.max_receipt_polls,
         )
         .await?;
-    prepare_invocation(ctx, ledger_key, projection, artifacts, prepared).await
+    prepare_invocation(ctx, ledger_key, projection, prepared).await
 }
 
 async fn configure_prepare_invocation(
     ctx: ErasedRunCtx<'_>,
     ledger_key: events::SideEffectLedgerKey,
     projection: &store::SideEffectProjection,
-    artifacts: &dyn EvmDcvArtifactStore,
+    artifacts: &dyn EvmDcvArtifactReader,
     rpc: &EvmDcvRpcClient,
 ) -> mfm_runtime::Result<ErasedRunnerOutput> {
     let config = load_config::<DeployConfigureValidateConfigureConfig>(&ctx, artifacts).await?;
@@ -479,14 +455,13 @@ async fn configure_prepare_invocation(
             config.max_receipt_polls,
         )
         .await?;
-    prepare_invocation(ctx, ledger_key, projection, artifacts, prepared).await
+    prepare_invocation(ctx, ledger_key, projection, prepared).await
 }
 
 async fn prepare_invocation(
     ctx: ErasedRunCtx<'_>,
     ledger_key: events::SideEffectLedgerKey,
     projection: &store::SideEffectProjection,
-    artifacts: &dyn EvmDcvArtifactStore,
     prepared: PreparedTransactions,
 ) -> mfm_runtime::Result<ErasedRunnerOutput> {
     let claim = active_claim(projection)?;
@@ -495,7 +470,6 @@ async fn prepare_invocation(
         events::ArtifactRole::PreparedInvocation,
         Some(ctx.node.node_id.clone()),
     )?;
-    persist_artifact(artifacts, &prepared_artifact).await?;
     let staged_artifact = staged_side_effect_artifact(
         &ctx,
         &prepared_artifact,
@@ -545,7 +519,7 @@ async fn deploy_submission(
     ctx: ErasedRunCtx<'_>,
     ledger_key: events::SideEffectLedgerKey,
     invocation_epoch: u32,
-    artifacts: &dyn EvmDcvArtifactStore,
+    artifacts: &dyn EvmDcvArtifactReader,
     rpc: &EvmDcvRpcClient,
 ) -> mfm_runtime::Result<ErasedRunnerOutput> {
     let projection = side_effect_projection(ctx.projections, &ledger_key)?;
@@ -553,14 +527,7 @@ async fn deploy_submission(
     match rpc.submit_prepared(&prepared).await? {
         PreparedSubmissionOutcome::Observed => {}
         PreparedSubmissionOutcome::Unknown(evidence) => {
-            return observe_submission_unknown(
-                ctx,
-                ledger_key,
-                invocation_epoch,
-                artifacts,
-                evidence,
-            )
-            .await;
+            return observe_submission_unknown(ctx, ledger_key, invocation_epoch, evidence).await;
         }
     }
     let tx = prepared.transactions.first().ok_or_else(|| {
@@ -577,21 +544,15 @@ async fn deploy_submission(
             .as_str()
             .to_owned(),
     };
-    observe_submission::<EvmDcvDeploySubmission>(
-        ctx,
-        ledger_key,
-        invocation_epoch,
-        artifacts,
-        submission,
-    )
-    .await
+    observe_submission::<EvmDcvDeploySubmission>(ctx, ledger_key, invocation_epoch, submission)
+        .await
 }
 
 async fn configure_submission(
     ctx: ErasedRunCtx<'_>,
     ledger_key: events::SideEffectLedgerKey,
     invocation_epoch: u32,
-    artifacts: &dyn EvmDcvArtifactStore,
+    artifacts: &dyn EvmDcvArtifactReader,
     rpc: &EvmDcvRpcClient,
 ) -> mfm_runtime::Result<ErasedRunnerOutput> {
     let projection = side_effect_projection(ctx.projections, &ledger_key)?;
@@ -599,14 +560,7 @@ async fn configure_submission(
     match rpc.submit_prepared(&prepared).await? {
         PreparedSubmissionOutcome::Observed => {}
         PreparedSubmissionOutcome::Unknown(evidence) => {
-            return observe_submission_unknown(
-                ctx,
-                ledger_key,
-                invocation_epoch,
-                artifacts,
-                evidence,
-            )
-            .await;
+            return observe_submission_unknown(ctx, ledger_key, invocation_epoch, evidence).await;
         }
     }
     let prepared_id = projection
@@ -625,21 +579,14 @@ async fn configure_submission(
         idempotency_digest: projection.intent.idempotency_input_hash.as_str().to_owned(),
         protected_raw_transaction_artifact_ids: vec![prepared_id; prepared.transactions.len()],
     };
-    observe_submission::<EvmDcvConfigureSubmission>(
-        ctx,
-        ledger_key,
-        invocation_epoch,
-        artifacts,
-        submission,
-    )
-    .await
+    observe_submission::<EvmDcvConfigureSubmission>(ctx, ledger_key, invocation_epoch, submission)
+        .await
 }
 
 async fn observe_submission<T>(
     ctx: ErasedRunCtx<'_>,
     ledger_key: events::SideEffectLedgerKey,
     invocation_epoch: u32,
-    artifacts: &dyn EvmDcvArtifactStore,
     submission: T,
 ) -> mfm_runtime::Result<ErasedRunnerOutput>
 where
@@ -650,7 +597,6 @@ where
         events::ArtifactRole::Submission,
         Some(ctx.node.node_id.clone()),
     )?;
-    persist_artifact(artifacts, &artifact).await?;
     let staged_artifact =
         staged_side_effect_artifact(&ctx, &artifact, ledger_key.clone(), invocation_epoch)?;
     Ok(ErasedRunnerOutput {
@@ -675,7 +621,6 @@ async fn observe_submission_unknown(
     ctx: ErasedRunCtx<'_>,
     ledger_key: events::SideEffectLedgerKey,
     invocation_epoch: u32,
-    artifacts: &dyn EvmDcvArtifactStore,
     evidence: EvmDcvSubmissionUnknownEvidence,
 ) -> mfm_runtime::Result<ErasedRunnerOutput> {
     let artifact = artifact_for_value(
@@ -683,7 +628,6 @@ async fn observe_submission_unknown(
         events::ArtifactRole::SubmissionUnknownEvidence,
         Some(ctx.node.node_id.clone()),
     )?;
-    persist_artifact(artifacts, &artifact).await?;
     let staged_artifact =
         staged_side_effect_artifact(&ctx, &artifact, ledger_key.clone(), invocation_epoch)?;
     Ok(ErasedRunnerOutput {
@@ -709,7 +653,7 @@ async fn deploy_receipt(
     ctx: ErasedRunCtx<'_>,
     ledger_key: events::SideEffectLedgerKey,
     invocation_epoch: u32,
-    artifacts: &dyn EvmDcvArtifactStore,
+    artifacts: &dyn EvmDcvArtifactReader,
     rpc: &EvmDcvRpcClient,
 ) -> mfm_runtime::Result<ErasedRunnerOutput> {
     let projection = side_effect_projection(ctx.projections, &ledger_key)?;
@@ -736,15 +680,14 @@ async fn deploy_receipt(
         block_number: receipt.block_number,
         status: receipt.status,
     };
-    observe_receipt::<EvmDcvDeployReceipt>(ctx, ledger_key, invocation_epoch, artifacts, receipt)
-        .await
+    observe_receipt::<EvmDcvDeployReceipt>(ctx, ledger_key, invocation_epoch, receipt).await
 }
 
 async fn configure_receipt(
     ctx: ErasedRunCtx<'_>,
     ledger_key: events::SideEffectLedgerKey,
     invocation_epoch: u32,
-    artifacts: &dyn EvmDcvArtifactStore,
+    artifacts: &dyn EvmDcvArtifactReader,
     rpc: &EvmDcvRpcClient,
 ) -> mfm_runtime::Result<ErasedRunnerOutput> {
     let projection = side_effect_projection(ctx.projections, &ledger_key)?;
@@ -769,7 +712,6 @@ async fn configure_receipt(
         ctx,
         ledger_key,
         invocation_epoch,
-        artifacts,
         EvmDcvConfigureReceipt { receipts },
     )
     .await
@@ -779,7 +721,6 @@ async fn observe_receipt<T>(
     ctx: ErasedRunCtx<'_>,
     ledger_key: events::SideEffectLedgerKey,
     invocation_epoch: u32,
-    artifacts: &dyn EvmDcvArtifactStore,
     receipt: T,
 ) -> mfm_runtime::Result<ErasedRunnerOutput>
 where
@@ -790,7 +731,6 @@ where
         events::ArtifactRole::Receipt,
         Some(ctx.node.node_id.clone()),
     )?;
-    persist_artifact(artifacts, &artifact).await?;
     let staged_artifact =
         staged_side_effect_artifact(&ctx, &artifact, ledger_key.clone(), invocation_epoch)?;
     Ok(ErasedRunnerOutput {
@@ -816,7 +756,7 @@ async fn deploy_confirmation(
     ctx: ErasedRunCtx<'_>,
     ledger_key: events::SideEffectLedgerKey,
     invocation_epoch: u32,
-    artifacts: &dyn EvmDcvArtifactStore,
+    artifacts: &dyn EvmDcvArtifactReader,
     rpc: &EvmDcvRpcClient,
 ) -> mfm_runtime::Result<ErasedRunnerOutput> {
     let projection = side_effect_projection(ctx.projections, &ledger_key)?;
@@ -846,7 +786,6 @@ async fn deploy_confirmation(
         ctx,
         ledger_key,
         invocation_epoch,
-        artifacts,
         confirmation,
     )
     .await
@@ -856,7 +795,7 @@ async fn configure_confirmation(
     ctx: ErasedRunCtx<'_>,
     ledger_key: events::SideEffectLedgerKey,
     invocation_epoch: u32,
-    artifacts: &dyn EvmDcvArtifactStore,
+    artifacts: &dyn EvmDcvArtifactReader,
     rpc: &EvmDcvRpcClient,
 ) -> mfm_runtime::Result<ErasedRunnerOutput> {
     let projection = side_effect_projection(ctx.projections, &ledger_key)?;
@@ -893,7 +832,6 @@ async fn configure_confirmation(
         ctx,
         ledger_key,
         invocation_epoch,
-        artifacts,
         confirmation,
     )
     .await
@@ -903,7 +841,6 @@ async fn observe_confirmation<T>(
     ctx: ErasedRunCtx<'_>,
     ledger_key: events::SideEffectLedgerKey,
     invocation_epoch: u32,
-    artifacts: &dyn EvmDcvArtifactStore,
     confirmation: T,
 ) -> mfm_runtime::Result<ErasedRunnerOutput>
 where
@@ -914,7 +851,6 @@ where
         events::ArtifactRole::Confirmation,
         Some(ctx.node.node_id.clone()),
     )?;
-    persist_artifact(artifacts, &artifact).await?;
     let staged_artifact =
         staged_side_effect_artifact(&ctx, &artifact, ledger_key.clone(), invocation_epoch)?;
     Ok(ErasedRunnerOutput {
@@ -1010,7 +946,7 @@ impl replay::SideEffectReplayVerifier for EvmDcvReplayVerifier {
 pub async fn verify_evm_dcv_replay(
     broker: &replay::ReplayBroker,
     stream: &[store::KernelEventEnvelope],
-    artifacts: &dyn EvmDcvArtifactStore,
+    artifacts: &dyn EvmDcvArtifactReader,
 ) -> replay::Result<bool> {
     let frames = evm_dcv_replay_frames(stream)?;
     if !frames.is_empty() {
@@ -1268,7 +1204,7 @@ fn side_effect_replay_request(
 
 async fn verify_evm_dcv_fact_replay(
     broker: &replay::ReplayBroker,
-    artifacts: &dyn EvmDcvArtifactStore,
+    artifacts: &dyn EvmDcvArtifactReader,
 ) -> replay::Result<bool> {
     let mut verified = false;
     for node in broker.certified_spec().spec.nodes.iter() {
@@ -1356,7 +1292,7 @@ fn validate_node_is_terminal(
 
 async fn load_replay_config<T>(
     broker: &replay::ReplayBroker,
-    artifacts: &dyn EvmDcvArtifactStore,
+    artifacts: &dyn EvmDcvArtifactReader,
     node: &spec::NodeSpec,
 ) -> replay::Result<T>
 where
@@ -1374,7 +1310,7 @@ where
 
 async fn load_replay_validate_input(
     broker: &replay::ReplayBroker,
-    artifacts: &dyn EvmDcvArtifactStore,
+    artifacts: &dyn EvmDcvArtifactReader,
     node: &spec::NodeSpec,
 ) -> replay::Result<ConfiguredContract> {
     let input_cell = validate_input_cell(node)?;
@@ -1420,7 +1356,7 @@ async fn load_replay_validate_input(
 
 async fn load_replay_validate_output(
     broker: &replay::ReplayBroker,
-    artifacts: &dyn EvmDcvArtifactStore,
+    artifacts: &dyn EvmDcvArtifactReader,
     node: &spec::NodeSpec,
 ) -> replay::Result<ValidationReport> {
     let Some(store::CellTerminalProjection::Produced {
@@ -1463,7 +1399,7 @@ async fn load_replay_validate_output(
 
 async fn load_replay_seed_validate_input(
     broker: &replay::ReplayBroker,
-    artifacts: &dyn EvmDcvArtifactStore,
+    artifacts: &dyn EvmDcvArtifactReader,
     input_cell: &spec::InputBindingCellSpec,
 ) -> replay::Result<ConfiguredContract> {
     let seed = broker
@@ -1512,7 +1448,7 @@ fn validate_input_cell(node: &spec::NodeSpec) -> replay::Result<&spec::InputBind
 }
 
 async fn load_replay_artifact_value<T>(
-    artifacts: &dyn EvmDcvArtifactStore,
+    artifacts: &dyn EvmDcvArtifactReader,
     expected: &store::ArtifactEvidenceRef,
 ) -> replay::Result<T>
 where
@@ -1645,7 +1581,7 @@ fn replay_value_error(error: mfm_values::ValueError) -> replay::ReplayError {
 async fn deploy_output(
     ctx: ErasedRunCtx<'_>,
     ledger_key: events::SideEffectLedgerKey,
-    artifacts: &dyn EvmDcvArtifactStore,
+    artifacts: &dyn EvmDcvArtifactReader,
 ) -> mfm_runtime::Result<ErasedRunnerOutput> {
     let config = load_config::<DeployConfigureValidateDeployConfig>(&ctx, artifacts).await?;
     let state = DeployContractState::new(config)
@@ -1665,13 +1601,13 @@ async fn deploy_output(
     let output = state
         .output_from_confirmation(&(), &intent, &confirmation)
         .map_err(|error| mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string()))?;
-    state_output(ctx, artifacts, &output).await
+    state_output(ctx, &output).await
 }
 
 async fn configure_output(
     ctx: ErasedRunCtx<'_>,
     ledger_key: events::SideEffectLedgerKey,
-    artifacts: &dyn EvmDcvArtifactStore,
+    artifacts: &dyn EvmDcvArtifactReader,
 ) -> mfm_runtime::Result<ErasedRunnerOutput> {
     let config = load_config::<DeployConfigureValidateConfigureConfig>(&ctx, artifacts).await?;
     let input = load_input_cell::<DeployedContract>(ctx.inputs, artifacts).await?;
@@ -1696,12 +1632,12 @@ async fn configure_output(
     let output = state
         .output_from_confirmation(&input, &intent, &confirmation)
         .map_err(|error| mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string()))?;
-    state_output(ctx, artifacts, &output).await
+    state_output(ctx, &output).await
 }
 
 async fn run_validate(
     ctx: ErasedRunCtx<'_>,
-    artifacts: &dyn EvmDcvArtifactStore,
+    artifacts: &dyn EvmDcvArtifactReader,
     rpc: &EvmDcvRpcClient,
 ) -> mfm_runtime::Result<ErasedRunnerOutput> {
     let config = load_config::<DeployConfigureValidateValidateConfig>(&ctx, artifacts).await?;
@@ -1713,14 +1649,14 @@ async fn run_validate(
         let response =
             load_recorded_validate_response(fact, &request_hash, &ctx.node.node_id, artifacts)
                 .await?;
-        return state_output(ctx, artifacts, &response.report).await;
+        return state_output(ctx, &response.report).await;
     }
 
     let report = validate_configured_contract_with_backend(&config, &input, rpc)
         .await
         .map_err(|error| mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string()))?;
     let response = EvmDcvValidateReadResponse { report };
-    validate_read_output(ctx, artifacts, request_hash, fact_key, &response).await
+    validate_read_output(ctx, request_hash, fact_key, &response).await
 }
 
 fn validate_read_request(
@@ -1740,7 +1676,6 @@ fn validate_read_request(
 
 async fn validate_read_output(
     ctx: ErasedRunCtx<'_>,
-    artifacts: &dyn EvmDcvArtifactStore,
     request_hash: ContentDigest,
     fact_key: events::FactKey,
     response: &EvmDcvValidateReadResponse,
@@ -1755,8 +1690,6 @@ async fn validate_read_output(
         events::ArtifactRole::StateOutput,
         Some(ctx.node.node_id.clone()),
     )?;
-    persist_artifact(artifacts, &response_artifact).await?;
-    persist_artifact(artifacts, &output_artifact).await?;
     let staged_response = staged_attempt_artifact(&ctx, &response_artifact)?;
     let staged_output = staged_attempt_artifact(&ctx, &output_artifact)?;
     Ok(ErasedRunnerOutput {
@@ -1794,7 +1727,7 @@ async fn load_recorded_validate_response(
     fact: &mfm_runtime::RecordedFact,
     request_hash: &ContentDigest,
     node_id: &NodeId,
-    artifacts: &dyn EvmDcvArtifactStore,
+    artifacts: &dyn EvmDcvArtifactReader,
 ) -> mfm_runtime::Result<EvmDcvValidateReadResponse> {
     validate_recorded_validate_fact(fact, request_hash)?;
     let (bytes, evidence) = artifacts.get_artifact_by_id(&fact.artifact_id).await?;
@@ -1852,7 +1785,6 @@ fn validate_fact_key_for_node(node_id: &NodeId) -> mfm_runtime::Result<events::F
 
 async fn state_output<T>(
     ctx: ErasedRunCtx<'_>,
-    artifacts: &dyn EvmDcvArtifactStore,
     output: &T,
 ) -> mfm_runtime::Result<ErasedRunnerOutput>
 where
@@ -1863,7 +1795,6 @@ where
         events::ArtifactRole::StateOutput,
         Some(ctx.node.node_id.clone()),
     )?;
-    persist_artifact(artifacts, &artifact).await?;
     let staged_artifact = staged_attempt_artifact(&ctx, &artifact)?;
     Ok(ErasedRunnerOutput {
         staged_artifacts: vec![staged_artifact],
@@ -2005,18 +1936,9 @@ where
     })
 }
 
-async fn persist_artifact(
-    artifacts: &dyn EvmDcvArtifactStore,
-    artifact: &EvmDcvArtifact,
-) -> mfm_runtime::Result<()> {
-    artifacts
-        .put_verified_artifact(artifact.bytes.clone(), artifact.evidence.clone())
-        .await
-}
-
 async fn load_config<T>(
     ctx: &ErasedRunCtx<'_>,
-    artifacts: &dyn EvmDcvArtifactStore,
+    artifacts: &dyn EvmDcvArtifactReader,
 ) -> mfm_runtime::Result<T>
 where
     T: MfmConfig + DeserializeOwned,
@@ -2041,7 +1963,7 @@ where
 
 async fn load_input_cell<T>(
     inputs: &mfm_runtime::MaterializedInputs,
-    artifacts: &dyn EvmDcvArtifactStore,
+    artifacts: &dyn EvmDcvArtifactReader,
 ) -> mfm_runtime::Result<T>
 where
     T: MfmValue + DeserializeOwned,
@@ -2079,7 +2001,7 @@ where
 
 async fn load_artifact_value<T>(
     artifact_id: &ArtifactId,
-    artifacts: &dyn EvmDcvArtifactStore,
+    artifacts: &dyn EvmDcvArtifactReader,
 ) -> mfm_runtime::Result<T>
 where
     T: DeserializeOwned,
@@ -2091,7 +2013,7 @@ where
 
 async fn load_intent_from_projection<T>(
     projection: &store::SideEffectProjection,
-    artifacts: &dyn EvmDcvArtifactStore,
+    artifacts: &dyn EvmDcvArtifactReader,
 ) -> mfm_runtime::Result<T>
 where
     T: MfmValue + DeserializeOwned,
@@ -2125,7 +2047,7 @@ fn active_claim(
 
 async fn load_prepared_transactions(
     projection: &store::SideEffectProjection,
-    artifacts: &dyn EvmDcvArtifactStore,
+    artifacts: &dyn EvmDcvArtifactReader,
 ) -> mfm_runtime::Result<PreparedTransactions> {
     let prepared = projection.prepared_invocation.as_ref().ok_or_else(|| {
         mfm_runtime::RuntimeError::InvalidRunnerOutput(

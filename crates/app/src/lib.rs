@@ -294,15 +294,13 @@ pub fn production_typed_runner_registry(
     artifacts: FsTypedArtifactStore,
 ) -> Result<ErasedRunnerRegistry, AppError> {
     let mut registry = ErasedRunnerRegistry::new();
-    let portfolio_artifacts: Arc<dyn mfm_transports_portfolio::PortfolioArtifactStore> =
+    let portfolio_artifacts: Arc<dyn mfm_transports_portfolio::PortfolioArtifactReader> =
         Arc::new(artifacts.clone());
     mfm_transports_portfolio::register_portfolio_runners(&mut registry, portfolio_artifacts)?;
-    let evm_dcv_artifacts: Arc<dyn mfm_transports_evm_dcv::EvmDcvArtifactStore> =
+    let evm_dcv_artifacts: Arc<dyn mfm_transports_evm_dcv::EvmDcvArtifactReader> =
         Arc::new(artifacts.clone());
     mfm_transports_evm_dcv::register_evm_dcv_runners(&mut registry, evm_dcv_artifacts)?;
-    let proof_artifacts: Arc<dyn mfm_transports_proof::ProofArtifactSink> =
-        Arc::new(FsProofArtifactSink { artifacts });
-    mfm_transports_proof::register_deterministic_proof_runners(&mut registry, proof_artifacts)?;
+    mfm_transports_proof::register_deterministic_proof_runners(&mut registry)?;
     Ok(registry)
 }
 
@@ -316,11 +314,6 @@ pub fn production_certification_registry() -> Result<CertificationRegistry, AppE
 }
 
 #[derive(Clone)]
-struct FsProofArtifactSink {
-    artifacts: FsTypedArtifactStore,
-}
-
-#[derive(Clone)]
 struct FsRuntimeArtifactStager {
     artifacts: FsTypedArtifactStore,
 }
@@ -331,22 +324,6 @@ impl RuntimeArtifactStager for FsRuntimeArtifactStager {
         bytes: Vec<u8>,
         evidence: store::ArtifactEvidenceRef,
     ) -> RuntimeArtifactStageFuture<'a> {
-        Box::pin(async move {
-            self.artifacts
-                .put_verified_artifact(bytes, evidence)
-                .await
-                .map_err(|error| mfm_runtime::RuntimeError::Store(error.to_string()))?;
-            Ok(())
-        })
-    }
-}
-
-impl mfm_transports_proof::ProofArtifactSink for FsProofArtifactSink {
-    fn put_verified_artifact<'a>(
-        &'a self,
-        bytes: Vec<u8>,
-        evidence: store::ArtifactEvidenceRef,
-    ) -> mfm_transports_proof::ProofArtifactSinkFuture<'a> {
         Box::pin(async move {
             self.artifacts
                 .put_verified_artifact(bytes, evidence)

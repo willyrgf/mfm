@@ -13,7 +13,7 @@ use mfm_op_evm_deploy_configure_validate::{
 };
 use mfm_store::v1 as typed_store;
 use mfm_store::v1::TypedRunEventStore;
-use mfm_transports_evm_dcv::EvmDcvArtifactStore;
+use mfm_transports_evm_dcv::EvmDcvArtifactReader;
 use serde::Deserialize;
 
 const NETWORK_ID: &str = "ethereum-mainnet";
@@ -413,7 +413,7 @@ async fn parity_reth_deploy_configure_validate_root_op() {
     let fact_err = mfm_transports_evm_dcv::verify_evm_dcv_replay(
         &replay_broker,
         &stream,
-        &ReplacementArtifactStore {
+        &ReplacementArtifactReader {
             inner: services.artifacts(),
             target: fact_artifact,
             replacement: b"not json".to_vec(),
@@ -426,7 +426,7 @@ async fn parity_reth_deploy_configure_validate_root_op() {
     let output_err = mfm_transports_evm_dcv::verify_evm_dcv_replay(
         &replay_broker,
         &stream,
-        &ReplacementArtifactStore {
+        &ReplacementArtifactReader {
             inner: services.artifacts(),
             target: output_artifact,
             replacement: b"not json".to_vec(),
@@ -441,7 +441,7 @@ async fn parity_reth_deploy_configure_validate_root_op() {
     let domain_err = mfm_transports_evm_dcv::verify_evm_dcv_replay(
         &replay_broker,
         &stream,
-        &ReplacementArtifactStore {
+        &ReplacementArtifactReader {
             inner: services.artifacts(),
             target: configured_input_artifact,
             replacement: configured_bytes,
@@ -462,23 +462,23 @@ async fn parity_reth_deploy_configure_validate_root_op() {
     assert_eq!(receipt_err.code(), "MFM_REPLAY_SIDE_EFFECT_MISMATCH");
 }
 
-struct ReplacementArtifactStore<'a> {
+struct ReplacementArtifactReader<'a> {
     inner: &'a FsTypedArtifactStore,
     target: ArtifactId,
     replacement: Vec<u8>,
 }
 
-impl EvmDcvArtifactStore for ReplacementArtifactStore<'_> {
+impl EvmDcvArtifactReader for ReplacementArtifactReader<'_> {
     fn get_artifact_by_id<'a>(
         &'a self,
         artifact_id: &'a ArtifactId,
-    ) -> mfm_transports_evm_dcv::EvmDcvArtifactStoreFuture<
+    ) -> mfm_transports_evm_dcv::EvmDcvArtifactReaderFuture<
         'a,
         (Vec<u8>, typed_store::ArtifactEvidenceRef),
     > {
         Box::pin(async move {
             let (bytes, evidence) =
-                <FsTypedArtifactStore as EvmDcvArtifactStore>::get_artifact_by_id(
+                <FsTypedArtifactStore as EvmDcvArtifactReader>::get_artifact_by_id(
                     self.inner,
                     artifact_id,
                 )
@@ -489,16 +489,6 @@ impl EvmDcvArtifactStore for ReplacementArtifactStore<'_> {
                 Ok((bytes, evidence))
             }
         })
-    }
-
-    fn put_verified_artifact<'a>(
-        &'a self,
-        bytes: Vec<u8>,
-        evidence: typed_store::ArtifactEvidenceRef,
-    ) -> mfm_transports_evm_dcv::EvmDcvArtifactStoreFuture<'a, ()> {
-        <FsTypedArtifactStore as EvmDcvArtifactStore>::put_verified_artifact(
-            self.inner, bytes, evidence,
-        )
     }
 }
 

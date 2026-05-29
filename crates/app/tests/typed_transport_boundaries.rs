@@ -51,6 +51,15 @@ fn typed_transport_sources_exclude_legacy_io_surfaces() {
             concat!("Planned", "Op"),
             concat!("Port", "Key"),
             concat!("request: serde_json::", "Value"),
+            "ProofArtifactSink",
+            "ProofArtifactSinkFuture",
+            "PortfolioArtifactStore",
+            "PortfolioArtifactStoreFuture",
+            "EvmDcvArtifactStore",
+            "EvmDcvArtifactStoreFuture",
+            "put_artifact(",
+            "put_verified_artifact(",
+            "persist_artifact(",
         ] {
             assert!(
                 !source.contains(banned),

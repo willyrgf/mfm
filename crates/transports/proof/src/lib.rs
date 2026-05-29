@@ -6,8 +6,6 @@
 //! legacy live-IO transports or generic request/response namespaces.
 
 use std::collections::BTreeMap;
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
@@ -45,26 +43,12 @@ const REPLAY_VERIFIER_ID: &str = "mfm.proof.replay.deterministic.v1";
 type ProofArtifactRecord = (Vec<u8>, store::ArtifactEvidenceRef);
 type ProofArtifactMap = BTreeMap<ArtifactId, ProofArtifactRecord>;
 
-/// Future returned by proof artifact sinks.
-pub type ProofArtifactSinkFuture<'a> =
-    Pin<Box<dyn Future<Output = mfm_runtime::Result<()>> + Send + 'a>>;
-
-/// Stores artifact bytes before proof runners commit typed evidence.
-pub trait ProofArtifactSink: Send + Sync {
-    /// Persists bytes after validating they match the supplied typed evidence.
-    fn put_verified_artifact<'a>(
-        &'a self,
-        bytes: Vec<u8>,
-        evidence: store::ArtifactEvidenceRef,
-    ) -> ProofArtifactSinkFuture<'a>;
-}
-
 #[derive(Clone, Default)]
-struct InMemoryProofArtifactSink {
+struct InMemoryProofArtifacts {
     artifacts: Arc<Mutex<ProofArtifactMap>>,
 }
 
-impl InMemoryProofArtifactSink {
+impl InMemoryProofArtifacts {
     fn evidence_for(&self, artifact_id: &ArtifactId) -> Option<store::ArtifactEvidenceRef> {
         self.artifacts.lock().ok().and_then(|artifacts| {
             artifacts
@@ -72,54 +56,46 @@ impl InMemoryProofArtifactSink {
                 .map(|(_, evidence)| evidence.clone())
         })
     }
-}
 
-impl ProofArtifactSink for InMemoryProofArtifactSink {
-    fn put_verified_artifact<'a>(
-        &'a self,
+    async fn store_verified_artifact(
+        &self,
         bytes: Vec<u8>,
         evidence: store::ArtifactEvidenceRef,
-    ) -> ProofArtifactSinkFuture<'a> {
-        Box::pin(async move {
-            let digest = ContentDigest::from_digest(
-                DigestAlgorithm::Sha256JcsV1,
-                sha256_digest_bytes(&bytes),
-            );
-            if evidence.digest != digest
-                || evidence.byte_len != bytes.len() as u64
-                || evidence.artifact_id
-                    != ArtifactId::from_digest(digest.algorithm(), *digest.digest())
-            {
-                return Err(mfm_runtime::RuntimeError::Store(
-                    "proof artifact bytes do not match typed evidence".to_owned(),
-                ));
+    ) -> mfm_runtime::Result<()> {
+        let digest =
+            ContentDigest::from_digest(DigestAlgorithm::Sha256JcsV1, sha256_digest_bytes(&bytes));
+        if evidence.digest != digest
+            || evidence.byte_len != bytes.len() as u64
+            || evidence.artifact_id != ArtifactId::from_digest(digest.algorithm(), *digest.digest())
+        {
+            return Err(mfm_runtime::RuntimeError::Store(
+                "proof artifact bytes do not match typed evidence".to_owned(),
+            ));
+        }
+        let mut artifacts = self.artifacts.lock().map_err(|_| {
+            mfm_runtime::RuntimeError::Store("proof artifact store lock was poisoned".to_owned())
+        })?;
+        if let Some((existing_bytes, existing_evidence)) = artifacts.get(&evidence.artifact_id) {
+            if existing_bytes != &bytes || existing_evidence != &evidence {
+                return Err(mfm_runtime::RuntimeError::Store(format!(
+                    "conflicting proof artifact evidence for {}",
+                    evidence.artifact_id
+                )));
             }
-            let mut artifacts = self.artifacts.lock().map_err(|_| {
-                mfm_runtime::RuntimeError::Store("proof artifact sink lock was poisoned".to_owned())
-            })?;
-            if let Some((existing_bytes, existing_evidence)) = artifacts.get(&evidence.artifact_id)
-            {
-                if existing_bytes != &bytes || existing_evidence != &evidence {
-                    return Err(mfm_runtime::RuntimeError::Store(format!(
-                        "conflicting proof artifact evidence for {}",
-                        evidence.artifact_id
-                    )));
-                }
-                return Ok(());
-            }
-            artifacts.insert(evidence.artifact_id.clone(), (bytes, evidence));
-            Ok(())
-        })
+            return Ok(());
+        }
+        artifacts.insert(evidence.artifact_id.clone(), (bytes, evidence));
+        Ok(())
     }
 }
 
-impl RuntimeArtifactStager for InMemoryProofArtifactSink {
+impl RuntimeArtifactStager for InMemoryProofArtifacts {
     fn stage_verified_artifact<'a>(
         &'a self,
         bytes: Vec<u8>,
         evidence: store::ArtifactEvidenceRef,
     ) -> RuntimeArtifactStageFuture<'a> {
-        self.put_verified_artifact(bytes, evidence)
+        Box::pin(async move { self.store_verified_artifact(bytes, evidence).await })
     }
 }
 
@@ -178,40 +154,29 @@ impl ProofImplementationConformanceSummary {
 /// Registers deterministic typed proof runners.
 pub fn register_deterministic_proof_runners(
     registry: &mut ErasedRunnerRegistry,
-    artifacts: Arc<dyn ProofArtifactSink>,
 ) -> mfm_runtime::Result<()> {
     let read = registered_descriptor::<ProofReadFactState>()?;
     let side_effect = registered_descriptor::<ProofApplySideEffectState>()?;
     let assemble = registered_descriptor::<ProofAssembleOutputState>()?;
 
-    registry.register(binding(
-        read,
-        READ_FACTORY,
-        Arc::new(ProofReadRunner {
-            artifacts: artifacts.clone(),
-        }),
-    )?)?;
+    registry.register(binding(read, READ_FACTORY, Arc::new(ProofReadRunner))?)?;
     registry.register(binding(
         side_effect,
         SIDE_EFFECT_FACTORY,
-        Arc::new(ProofSideEffectRunner {
-            artifacts: artifacts.clone(),
-        }),
+        Arc::new(ProofSideEffectRunner),
     )?)?;
     registry.register(binding(
         assemble,
         PURE_FACTORY,
-        Arc::new(ProofAssembleRunner { artifacts }),
+        Arc::new(ProofAssembleRunner),
     )?)?;
     Ok(())
 }
 
 /// Builds a runner registry containing only the deterministic proof implementation.
-pub fn deterministic_proof_runner_registry(
-    artifacts: Arc<dyn ProofArtifactSink>,
-) -> mfm_runtime::Result<ErasedRunnerRegistry> {
+pub fn deterministic_proof_runner_registry() -> mfm_runtime::Result<ErasedRunnerRegistry> {
     let mut registry = ErasedRunnerRegistry::new();
-    register_deterministic_proof_runners(&mut registry, artifacts)?;
+    register_deterministic_proof_runners(&mut registry)?;
     Ok(registry)
 }
 
@@ -264,43 +229,31 @@ fn executable(
     })
 }
 
-struct ProofReadRunner {
-    artifacts: Arc<dyn ProofArtifactSink>,
-}
+struct ProofReadRunner;
 
 impl ErasedNodeRunner for ProofReadRunner {
     fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
-        let artifacts = self.artifacts.clone();
-        Box::pin(async move { run_read(ctx, artifacts.as_ref()).await })
+        Box::pin(async move { run_read(ctx).await })
     }
 }
 
-struct ProofSideEffectRunner {
-    artifacts: Arc<dyn ProofArtifactSink>,
-}
+struct ProofSideEffectRunner;
 
 impl ErasedNodeRunner for ProofSideEffectRunner {
     fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
-        let artifacts = self.artifacts.clone();
-        Box::pin(async move { run_side_effect(ctx, artifacts.as_ref()).await })
+        Box::pin(async move { run_side_effect(ctx).await })
     }
 }
 
-struct ProofAssembleRunner {
-    artifacts: Arc<dyn ProofArtifactSink>,
-}
+struct ProofAssembleRunner;
 
 impl ErasedNodeRunner for ProofAssembleRunner {
     fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
-        let artifacts = self.artifacts.clone();
-        Box::pin(async move { run_assemble(ctx, artifacts.as_ref()).await })
+        Box::pin(async move { run_assemble(ctx).await })
     }
 }
 
-async fn run_read(
-    ctx: ErasedRunCtx<'_>,
-    artifacts: &dyn ProofArtifactSink,
-) -> mfm_runtime::Result<ErasedRunnerOutput> {
+async fn run_read(ctx: ErasedRunCtx<'_>) -> mfm_runtime::Result<ErasedRunnerOutput> {
     ensure_config::<ProofReadConfig>(&ctx.node.config_ref, &ProofReadConfig { fact_n: 1 })?;
     let fact = ProofFact { n: 1 };
     let request = ProofFactRequest {
@@ -318,8 +271,6 @@ async fn run_read(
         events::ArtifactRole::StateOutput,
         Some(ctx.node.node_id.clone()),
     )?;
-    persist_artifact(artifacts, &response_artifact).await?;
-    persist_artifact(artifacts, &output_artifact).await?;
     let staged_response = staged_attempt_artifact(&ctx, &response_artifact)?;
     let staged_output = staged_attempt_artifact(&ctx, &output_artifact)?;
     Ok(ErasedRunnerOutput {
@@ -351,10 +302,7 @@ async fn run_read(
     })
 }
 
-async fn run_side_effect(
-    ctx: ErasedRunCtx<'_>,
-    artifacts: &dyn ProofArtifactSink,
-) -> mfm_runtime::Result<ErasedRunnerOutput> {
+async fn run_side_effect(ctx: ErasedRunCtx<'_>) -> mfm_runtime::Result<ErasedRunnerOutput> {
     ensure_config::<ProofApplyConfig>(
         &ctx.node.config_ref,
         &ProofApplyConfig {
@@ -364,22 +312,20 @@ async fn run_side_effect(
     let ledger_key = events::SideEffectLedgerKey::new("mfm.proof.ledger.default")?;
     let projection = ctx.projections.side_effect(&ledger_key);
     match projection.map(|projection| &projection.phase) {
-        None => side_effect_prepare(ctx, ledger_key, artifacts).await,
+        None => side_effect_prepare(ctx, ledger_key).await,
         Some(store::SideEffectPhase::InvocationStarted {
             invocation_epoch, ..
         })
         | Some(store::SideEffectPhase::SubmissionUnknown { invocation_epoch }) => {
-            side_effect_submission(ctx, ledger_key, *invocation_epoch, artifacts).await
+            side_effect_submission(ctx, ledger_key, *invocation_epoch).await
         }
         Some(store::SideEffectPhase::SubmissionObserved { invocation_epoch }) => {
-            side_effect_receipt(ctx, ledger_key, *invocation_epoch, artifacts).await
+            side_effect_receipt(ctx, ledger_key, *invocation_epoch).await
         }
         Some(store::SideEffectPhase::ReceiptObserved { invocation_epoch }) => {
-            side_effect_confirmation(ctx, ledger_key, *invocation_epoch, artifacts).await
+            side_effect_confirmation(ctx, ledger_key, *invocation_epoch).await
         }
-        Some(store::SideEffectPhase::ConfirmationObserved { .. }) => {
-            side_effect_output(ctx, artifacts).await
-        }
+        Some(store::SideEffectPhase::ConfirmationObserved { .. }) => side_effect_output(ctx).await,
         Some(store::SideEffectPhase::Ambiguous { .. }) => Ok(ErasedRunnerOutput::new(Vec::new())),
         Some(other) => Err(mfm_runtime::RuntimeError::InvalidRunnerOutput(format!(
             "unsupported proof side-effect phase: {other:?}"
@@ -390,7 +336,6 @@ async fn run_side_effect(
 async fn side_effect_prepare(
     ctx: ErasedRunCtx<'_>,
     ledger_key: events::SideEffectLedgerKey,
-    artifacts: &dyn ProofArtifactSink,
 ) -> mfm_runtime::Result<ErasedRunnerOutput> {
     let intent = proof_intent();
     let idem_input = proof_idempotency_input();
@@ -399,7 +344,6 @@ async fn side_effect_prepare(
         events::ArtifactRole::SideEffectIntent,
         Some(ctx.node.node_id.clone()),
     )?;
-    persist_artifact(artifacts, &intent_artifact).await?;
     let idem_hash = digest_value(&idem_input)?;
     let idempotency_key =
         events::IdempotencyKeyRef::new(format!("idem-{}", short_digest(&idem_hash)))?;
@@ -475,7 +419,6 @@ async fn side_effect_submission(
     ctx: ErasedRunCtx<'_>,
     ledger_key: events::SideEffectLedgerKey,
     invocation_epoch: u32,
-    artifacts: &dyn ProofArtifactSink,
 ) -> mfm_runtime::Result<ErasedRunnerOutput> {
     let submission = proof_submission()?;
     let artifact = artifact_for_value(
@@ -483,7 +426,6 @@ async fn side_effect_submission(
         events::ArtifactRole::Submission,
         Some(ctx.node.node_id.clone()),
     )?;
-    persist_artifact(artifacts, &artifact).await?;
     let staged_artifact =
         staged_side_effect_artifact(&ctx, &artifact, ledger_key.clone(), invocation_epoch)?;
     Ok(ErasedRunnerOutput {
@@ -508,7 +450,6 @@ async fn side_effect_receipt(
     ctx: ErasedRunCtx<'_>,
     ledger_key: events::SideEffectLedgerKey,
     invocation_epoch: u32,
-    artifacts: &dyn ProofArtifactSink,
 ) -> mfm_runtime::Result<ErasedRunnerOutput> {
     let receipt = proof_receipt()?;
     let artifact = artifact_for_value(
@@ -516,7 +457,6 @@ async fn side_effect_receipt(
         events::ArtifactRole::Receipt,
         Some(ctx.node.node_id.clone()),
     )?;
-    persist_artifact(artifacts, &artifact).await?;
     let staged_artifact =
         staged_side_effect_artifact(&ctx, &artifact, ledger_key.clone(), invocation_epoch)?;
     Ok(ErasedRunnerOutput {
@@ -542,7 +482,6 @@ async fn side_effect_confirmation(
     ctx: ErasedRunCtx<'_>,
     ledger_key: events::SideEffectLedgerKey,
     invocation_epoch: u32,
-    artifacts: &dyn ProofArtifactSink,
 ) -> mfm_runtime::Result<ErasedRunnerOutput> {
     let confirmation = proof_confirmation()?;
     let artifact = artifact_for_value(
@@ -550,7 +489,6 @@ async fn side_effect_confirmation(
         events::ArtifactRole::Confirmation,
         Some(ctx.node.node_id.clone()),
     )?;
-    persist_artifact(artifacts, &artifact).await?;
     let staged_artifact =
         staged_side_effect_artifact(&ctx, &artifact, ledger_key.clone(), invocation_epoch)?;
     Ok(ErasedRunnerOutput {
@@ -573,17 +511,13 @@ async fn side_effect_confirmation(
     })
 }
 
-async fn side_effect_output(
-    ctx: ErasedRunCtx<'_>,
-    artifacts: &dyn ProofArtifactSink,
-) -> mfm_runtime::Result<ErasedRunnerOutput> {
+async fn side_effect_output(ctx: ErasedRunCtx<'_>) -> mfm_runtime::Result<ErasedRunnerOutput> {
     let output = proof_side_effect_result()?;
     let artifact = artifact_for_value(
         &output,
         events::ArtifactRole::StateOutput,
         Some(ctx.node.node_id.clone()),
     )?;
-    persist_artifact(artifacts, &artifact).await?;
     let staged_artifact = staged_attempt_artifact(&ctx, &artifact)?;
     Ok(ErasedRunnerOutput {
         staged_artifacts: vec![staged_artifact],
@@ -592,10 +526,7 @@ async fn side_effect_output(
     })
 }
 
-async fn run_assemble(
-    ctx: ErasedRunCtx<'_>,
-    artifacts: &dyn ProofArtifactSink,
-) -> mfm_runtime::Result<ErasedRunnerOutput> {
+async fn run_assemble(ctx: ErasedRunCtx<'_>) -> mfm_runtime::Result<ErasedRunnerOutput> {
     ensure_config::<ProofAssembleConfig>(
         &ctx.node.config_ref,
         &ProofAssembleConfig { output_version: 1 },
@@ -615,7 +546,6 @@ async fn run_assemble(
         events::ArtifactRole::StateOutput,
         Some(ctx.node.node_id.clone()),
     )?;
-    persist_artifact(artifacts, &artifact).await?;
     let staged_artifact = staged_attempt_artifact(&ctx, &artifact)?;
     Ok(ErasedRunnerOutput {
         staged_artifacts: vec![staged_artifact],
@@ -743,17 +673,6 @@ where
         bytes: bytes.to_vec(),
         evidence,
     })
-}
-
-async fn persist_artifact(
-    artifacts: &dyn ProofArtifactSink,
-    artifact: &ProofArtifact,
-) -> mfm_runtime::Result<()> {
-    artifacts
-        .put_verified_artifact(artifact.bytes.clone(), artifact.evidence.clone())
-        .await
-        .map_err(|error| mfm_runtime::RuntimeError::Store(error.to_string()))?;
-    Ok(())
 }
 
 fn retention(artifact: &store::ArtifactEvidenceRef) -> StagedRetentionRefs {
@@ -1239,7 +1158,7 @@ pub async fn proof_implementation_conformance_summary(
     let certified = certified_proof_spec(config).map_err(|error| error.to_string())?;
     let runtime_spec =
         CertifiedRuntimeSpec::new(certified.clone()).map_err(|error| error.to_string())?;
-    let artifacts = InMemoryProofArtifactSink::default();
+    let artifacts = InMemoryProofArtifacts::default();
     persist_conformance_config_artifacts(&artifacts, &draft, runtime_spec.spec())
         .await
         .map_err(|error| error.to_string())?;
@@ -1247,10 +1166,9 @@ pub async fn proof_implementation_conformance_summary(
         .await
         .map_err(|error| error.to_string())?;
     let mut store = store::InMemoryTypedRunStore::new();
-    let artifact_sink: Arc<dyn ProofArtifactSink> = Arc::new(artifacts.clone());
     let artifact_stager: Arc<dyn RuntimeArtifactStager> = Arc::new(artifacts.clone());
     let scheduler = SerialTypedScheduler::new(
-        deterministic_proof_runner_registry(artifact_sink).map_err(|error| error.to_string())?,
+        deterministic_proof_runner_registry().map_err(|error| error.to_string())?,
         artifact_stager,
     );
     let run_id = RunId::from_digest(
@@ -1342,7 +1260,7 @@ pub async fn proof_implementation_conformance_summary(
 async fn verify_conformance_replay(
     envelope: &spec::HashedSpecEnvelope,
     stream: &[store::KernelEventEnvelope],
-    artifacts: &InMemoryProofArtifactSink,
+    artifacts: &InMemoryProofArtifacts,
 ) -> replay::Result<bool> {
     let run_started = stream
         .iter()
@@ -1390,7 +1308,7 @@ async fn verify_conformance_replay(
 }
 
 async fn persist_conformance_spec_artifact(
-    artifacts: &dyn ProofArtifactSink,
+    artifacts: &InMemoryProofArtifacts,
     runtime_spec: &CertifiedRuntimeSpec,
 ) -> mfm_runtime::Result<()> {
     let spec_bytes = runtime_spec.spec().canonical_json()?;
@@ -1407,7 +1325,7 @@ async fn persist_conformance_spec_artifact(
         artifact_role: events::ArtifactRole::TypedExecutionSpec,
     };
     artifacts
-        .put_verified_artifact(spec_bytes.to_vec(), evidence)
+        .store_verified_artifact(spec_bytes.to_vec(), evidence)
         .await
         .map_err(|error| mfm_runtime::RuntimeError::Store(error.to_string()))?;
     let certificate_bytes = runtime_spec
@@ -1431,14 +1349,14 @@ async fn persist_conformance_spec_artifact(
         artifact_role: events::ArtifactRole::TypedSpecCertificate,
     };
     artifacts
-        .put_verified_artifact(certificate_bytes.to_vec(), certificate_evidence)
+        .store_verified_artifact(certificate_bytes.to_vec(), certificate_evidence)
         .await
         .map_err(|error| mfm_runtime::RuntimeError::Store(error.to_string()))?;
     Ok(())
 }
 
 async fn persist_conformance_config_artifacts(
-    artifacts: &dyn ProofArtifactSink,
+    artifacts: &InMemoryProofArtifacts,
     draft: &mfm_program::TypedProgramDraft,
     typed_spec: &spec::TypedExecutionSpec,
 ) -> mfm_runtime::Result<()> {
@@ -1463,7 +1381,7 @@ async fn persist_conformance_config_artifacts(
             artifact_role: events::ArtifactRole::TypedConfig,
         };
         artifacts
-            .put_verified_artifact(config.canonical_json.to_vec(), evidence)
+            .store_verified_artifact(config.canonical_json.to_vec(), evidence)
             .await
             .map_err(|error| mfm_runtime::RuntimeError::Store(error.to_string()))?;
     }
@@ -1497,7 +1415,7 @@ async fn persist_conformance_config_artifacts(
             artifact_role: events::ArtifactRole::TypedConfig,
         };
         artifacts
-            .put_verified_artifact(bytes.to_vec(), evidence)
+            .store_verified_artifact(bytes.to_vec(), evidence)
             .await
             .map_err(|error| mfm_runtime::RuntimeError::Store(error.to_string()))?;
     }

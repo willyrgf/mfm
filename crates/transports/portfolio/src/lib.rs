@@ -49,48 +49,28 @@ const READ_FACTORY: &str = "read_external";
 const PURE_FACTORY: &str = "pure";
 const ENV_EVM_RPC_SOURCES_JSON: &str = "MFM_EVM_RPC_SOURCES_JSON";
 
-/// Future returned by typed portfolio artifact stores.
-pub type PortfolioArtifactStoreFuture<'a, T> =
+/// Future returned by typed portfolio artifact readers.
+pub type PortfolioArtifactReaderFuture<'a, T> =
     Pin<Box<dyn Future<Output = mfm_runtime::Result<T>> + Send + 'a>>;
 
-/// Artifact store boundary used by typed portfolio runners.
-pub trait PortfolioArtifactStore: Send + Sync {
+/// Read-only artifact boundary used by typed portfolio runners.
+pub trait PortfolioArtifactReader: Send + Sync {
     /// Loads verified typed artifact bytes by id.
     fn get_artifact_by_id<'a>(
         &'a self,
         artifact_id: &'a ArtifactId,
-    ) -> PortfolioArtifactStoreFuture<'a, (Vec<u8>, store::ArtifactEvidenceRef)>;
-
-    /// Persists bytes after validating they match the supplied typed evidence.
-    fn put_verified_artifact<'a>(
-        &'a self,
-        bytes: Vec<u8>,
-        evidence: store::ArtifactEvidenceRef,
-    ) -> PortfolioArtifactStoreFuture<'a, ()>;
+    ) -> PortfolioArtifactReaderFuture<'a, (Vec<u8>, store::ArtifactEvidenceRef)>;
 }
 
-impl PortfolioArtifactStore for FsTypedArtifactStore {
+impl PortfolioArtifactReader for FsTypedArtifactStore {
     fn get_artifact_by_id<'a>(
         &'a self,
         artifact_id: &'a ArtifactId,
-    ) -> PortfolioArtifactStoreFuture<'a, (Vec<u8>, store::ArtifactEvidenceRef)> {
+    ) -> PortfolioArtifactReaderFuture<'a, (Vec<u8>, store::ArtifactEvidenceRef)> {
         Box::pin(async move {
             self.get_artifact_by_id(artifact_id)
                 .await
                 .map_err(|error| mfm_runtime::RuntimeError::Store(error.to_string()))
-        })
-    }
-
-    fn put_verified_artifact<'a>(
-        &'a self,
-        bytes: Vec<u8>,
-        evidence: store::ArtifactEvidenceRef,
-    ) -> PortfolioArtifactStoreFuture<'a, ()> {
-        Box::pin(async move {
-            self.put_verified_artifact(bytes, evidence)
-                .await
-                .map_err(|error| mfm_runtime::RuntimeError::Store(error.to_string()))?;
-            Ok(())
         })
     }
 }
@@ -98,7 +78,7 @@ impl PortfolioArtifactStore for FsTypedArtifactStore {
 /// Registers typed portfolio runners.
 pub fn register_portfolio_runners(
     registry: &mut ErasedRunnerRegistry,
-    artifacts: Arc<dyn PortfolioArtifactStore>,
+    artifacts: Arc<dyn PortfolioArtifactReader>,
 ) -> mfm_runtime::Result<()> {
     registry.register(binding(
         registered_descriptor::<PrepareSourcesState>()?,
@@ -216,7 +196,7 @@ fn executable(
 }
 
 struct PrepareSourcesRunner {
-    artifacts: Arc<dyn PortfolioArtifactStore>,
+    artifacts: Arc<dyn PortfolioArtifactReader>,
 }
 
 impl ErasedNodeRunner for PrepareSourcesRunner {
@@ -234,13 +214,13 @@ impl ErasedNodeRunner for PrepareSourcesRunner {
             let response = SourcePreparationResponse {
                 prepared: prepared.clone(),
             };
-            read_output(ctx, self.artifacts.as_ref(), request, response, prepared).await
+            read_output(ctx, request, response, prepared).await
         })
     }
 }
 
 struct ResolveSubjectsRunner {
-    artifacts: Arc<dyn PortfolioArtifactStore>,
+    artifacts: Arc<dyn PortfolioArtifactReader>,
 }
 
 impl ErasedNodeRunner for ResolveSubjectsRunner {
@@ -254,13 +234,13 @@ impl ErasedNodeRunner for ResolveSubjectsRunner {
             )
             .await?;
             let output = resolve_subjects_from_config(&config);
-            state_output(ctx, self.artifacts.as_ref(), &output).await
+            state_output(ctx, &output).await
         })
     }
 }
 
 struct PinViewsRunner {
-    artifacts: Arc<dyn PortfolioArtifactStore>,
+    artifacts: Arc<dyn PortfolioArtifactReader>,
     rpc: PortfolioRpcClient,
 }
 
@@ -286,13 +266,13 @@ impl ErasedNodeRunner for PinViewsRunner {
             let response = ViewPinResponse {
                 views: output.clone(),
             };
-            read_output(ctx, self.artifacts.as_ref(), request, response, output).await
+            read_output(ctx, request, response, output).await
         })
     }
 }
 
 struct ResolveValuationsRunner {
-    artifacts: Arc<dyn PortfolioArtifactStore>,
+    artifacts: Arc<dyn PortfolioArtifactReader>,
 }
 
 impl ErasedNodeRunner for ResolveValuationsRunner {
@@ -306,13 +286,13 @@ impl ErasedNodeRunner for ResolveValuationsRunner {
             )
             .await?;
             let output = resolve_valuations_from_config(&config, &views);
-            state_output(ctx, self.artifacts.as_ref(), &output).await
+            state_output(ctx, &output).await
         })
     }
 }
 
 struct ObserveBatchRunner {
-    artifacts: Arc<dyn PortfolioArtifactStore>,
+    artifacts: Arc<dyn PortfolioArtifactReader>,
     rpc: PortfolioRpcClient,
 }
 
@@ -334,13 +314,13 @@ impl ErasedNodeRunner for ObserveBatchRunner {
             let response = ObservationResponse {
                 batch: output.clone(),
             };
-            read_output(ctx, self.artifacts.as_ref(), request, response, output).await
+            read_output(ctx, request, response, output).await
         })
     }
 }
 
 struct MergeObservationsRunner {
-    artifacts: Arc<dyn PortfolioArtifactStore>,
+    artifacts: Arc<dyn PortfolioArtifactReader>,
 }
 
 impl ErasedNodeRunner for MergeObservationsRunner {
@@ -352,13 +332,13 @@ impl ErasedNodeRunner for MergeObservationsRunner {
                 load_non_empty_input::<ObservationBatch>(ctx.inputs, self.artifacts.as_ref())
                     .await?;
             let output = mfm_state_portfolio::merge_observation_batches(batches);
-            state_output(ctx, self.artifacts.as_ref(), &output).await
+            state_output(ctx, &output).await
         })
     }
 }
 
 struct AssembleSnapshotRunner {
-    artifacts: Arc<dyn PortfolioArtifactStore>,
+    artifacts: Arc<dyn PortfolioArtifactReader>,
 }
 
 impl ErasedNodeRunner for AssembleSnapshotRunner {
@@ -370,13 +350,13 @@ impl ErasedNodeRunner for AssembleSnapshotRunner {
                 load_struct_input::<AssembleSnapshotInput>(ctx.inputs, self.artifacts.as_ref())
                     .await?;
             let output = mfm_state_portfolio::assemble_snapshot(&config, input, 0);
-            state_output(ctx, self.artifacts.as_ref(), &output).await
+            state_output(ctx, &output).await
         })
     }
 }
 
 struct PublishSnapshotRunner {
-    artifacts: Arc<dyn PortfolioArtifactStore>,
+    artifacts: Arc<dyn PortfolioArtifactReader>,
 }
 
 impl ErasedNodeRunner for PublishSnapshotRunner {
@@ -391,13 +371,13 @@ impl ErasedNodeRunner for PublishSnapshotRunner {
                 publish_version: config.publish_version,
                 snapshot: input.snapshot,
             };
-            state_output(ctx, self.artifacts.as_ref(), &output).await
+            state_output(ctx, &output).await
         })
     }
 }
 
 struct ProjectReportRunner {
-    artifacts: Arc<dyn PortfolioArtifactStore>,
+    artifacts: Arc<dyn PortfolioArtifactReader>,
 }
 
 impl ErasedNodeRunner for ProjectReportRunner {
@@ -412,14 +392,13 @@ impl ErasedNodeRunner for ProjectReportRunner {
                 config.report_version,
             )
             .map_err(|error| mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string()))?;
-            state_output(ctx, self.artifacts.as_ref(), &output).await
+            state_output(ctx, &output).await
         })
     }
 }
 
 async fn read_output<Request, Response, Output>(
     ctx: ErasedRunCtx<'_>,
-    artifacts: &dyn PortfolioArtifactStore,
     request: Request,
     response: Response,
     output: Output,
@@ -440,8 +419,6 @@ where
         events::ArtifactRole::StateOutput,
         Some(ctx.node.node_id.clone()),
     )?;
-    persist_artifact(artifacts, &response_artifact).await?;
-    persist_artifact(artifacts, &output_artifact).await?;
     let staged_response = staged_attempt_artifact(&ctx, &response_artifact)?;
     let staged_output = staged_attempt_artifact(&ctx, &output_artifact)?;
     Ok(ErasedRunnerOutput {
@@ -479,7 +456,6 @@ where
 
 async fn state_output<T>(
     ctx: ErasedRunCtx<'_>,
-    artifacts: &dyn PortfolioArtifactStore,
     value: &T,
 ) -> mfm_runtime::Result<ErasedRunnerOutput>
 where
@@ -490,7 +466,6 @@ where
         events::ArtifactRole::StateOutput,
         Some(ctx.node.node_id.clone()),
     )?;
-    persist_artifact(artifacts, &artifact).await?;
     let staged_artifact = staged_attempt_artifact(&ctx, &artifact)?;
     Ok(ErasedRunnerOutput {
         staged_artifacts: vec![staged_artifact],
@@ -508,7 +483,7 @@ fn staged_attempt_artifact(
 
 async fn load_config<T>(
     ctx: &ErasedRunCtx<'_>,
-    artifacts: &dyn PortfolioArtifactStore,
+    artifacts: &dyn PortfolioArtifactReader,
 ) -> mfm_runtime::Result<T>
 where
     T: MfmConfig + DeserializeOwned,
@@ -533,7 +508,7 @@ where
 
 async fn load_input_cell<T>(
     inputs: &mfm_runtime::MaterializedInputs,
-    artifacts: &dyn PortfolioArtifactStore,
+    artifacts: &dyn PortfolioArtifactReader,
 ) -> mfm_runtime::Result<T>
 where
     T: MfmValue + DeserializeOwned,
@@ -543,7 +518,7 @@ where
 
 async fn load_struct_input<T>(
     inputs: &mfm_runtime::MaterializedInputs,
-    artifacts: &dyn PortfolioArtifactStore,
+    artifacts: &dyn PortfolioArtifactReader,
 ) -> mfm_runtime::Result<T>
 where
     T: DeserializeOwned,
@@ -555,7 +530,7 @@ where
 
 async fn load_non_empty_input<T>(
     inputs: &mfm_runtime::MaterializedInputs,
-    artifacts: &dyn PortfolioArtifactStore,
+    artifacts: &dyn PortfolioArtifactReader,
 ) -> mfm_runtime::Result<NonEmpty<T>>
 where
     T: MfmValue + DeserializeOwned,
@@ -575,7 +550,7 @@ where
 
 async fn materialized_node_json(
     node: &MaterializedInputNode,
-    artifacts: &dyn PortfolioArtifactStore,
+    artifacts: &dyn PortfolioArtifactReader,
 ) -> mfm_runtime::Result<serde_json::Value> {
     match node {
         MaterializedInputNode::Unit => Ok(serde_json::Value::Null),
@@ -613,7 +588,7 @@ async fn materialized_node_json(
 
 async fn load_value_from_node<T>(
     node: &MaterializedInputNode,
-    artifacts: &dyn PortfolioArtifactStore,
+    artifacts: &dyn PortfolioArtifactReader,
 ) -> mfm_runtime::Result<T>
 where
     T: MfmValue + DeserializeOwned,
@@ -625,7 +600,7 @@ where
 
 async fn load_cell_bytes(
     node: &MaterializedInputNode,
-    artifacts: &dyn PortfolioArtifactStore,
+    artifacts: &dyn PortfolioArtifactReader,
 ) -> mfm_runtime::Result<Vec<u8>> {
     let MaterializedInputNode::Cell(cell) = node else {
         return Err(mfm_runtime::RuntimeError::InvalidRunnerOutput(
@@ -716,15 +691,6 @@ where
         bytes: bytes.to_vec(),
         evidence,
     })
-}
-
-async fn persist_artifact(
-    artifacts: &dyn PortfolioArtifactStore,
-    artifact: &PortfolioArtifact,
-) -> mfm_runtime::Result<()> {
-    artifacts
-        .put_verified_artifact(artifact.bytes.clone(), artifact.evidence.clone())
-        .await
 }
 
 fn retention(artifact: &store::ArtifactEvidenceRef) -> StagedRetentionRefs {
