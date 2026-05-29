@@ -206,36 +206,39 @@ async fn run_deploy(
     rpc: &EvmDcvRpcClient,
 ) -> mfm_runtime::Result<ErasedRunnerOutput> {
     let ledger_key = ledger_key(&ctx, "deploy")?;
-    let projection = ctx.projections.side_effect(&ledger_key);
-    match projection.map(|projection| &projection.phase) {
+    let projection = ctx.projections().side_effect(&ledger_key).cloned();
+    let phase = projection
+        .as_ref()
+        .map(|projection| projection.phase.clone());
+    match phase {
         None => deploy_persist_intent(ctx, ledger_key, artifacts).await,
         Some(store::SideEffectPhase::IntentPersisted { .. }) => {
-            claim_side_effect(ctx, ledger_key, projection.expect("projection"))
+            claim_side_effect(ctx, ledger_key, projection.as_ref().expect("projection"))
         }
         Some(store::SideEffectPhase::Claimed { .. }) => {
             deploy_prepare_invocation(
                 ctx,
                 ledger_key,
-                projection.expect("projection"),
+                projection.as_ref().expect("projection"),
                 artifacts,
                 rpc,
             )
             .await
         }
         Some(store::SideEffectPhase::InvocationPrepared { .. }) => {
-            start_invocation(ctx, ledger_key, projection.expect("projection"))
+            start_invocation(ctx, ledger_key, projection.as_ref().expect("projection"))
         }
         Some(store::SideEffectPhase::InvocationStarted {
             invocation_epoch, ..
         })
         | Some(store::SideEffectPhase::SubmissionUnknown { invocation_epoch }) => {
-            deploy_submission(ctx, ledger_key, *invocation_epoch, artifacts, rpc).await
+            deploy_submission(ctx, ledger_key, invocation_epoch, artifacts, rpc).await
         }
         Some(store::SideEffectPhase::SubmissionObserved { invocation_epoch }) => {
-            deploy_receipt(ctx, ledger_key, *invocation_epoch, artifacts, rpc).await
+            deploy_receipt(ctx, ledger_key, invocation_epoch, artifacts, rpc).await
         }
         Some(store::SideEffectPhase::ReceiptObserved { invocation_epoch }) => {
-            deploy_confirmation(ctx, ledger_key, *invocation_epoch, artifacts, rpc).await
+            deploy_confirmation(ctx, ledger_key, invocation_epoch, artifacts, rpc).await
         }
         Some(store::SideEffectPhase::ConfirmationObserved { .. }) => {
             deploy_output(ctx, ledger_key, artifacts).await
@@ -253,36 +256,39 @@ async fn run_configure(
     rpc: &EvmDcvRpcClient,
 ) -> mfm_runtime::Result<ErasedRunnerOutput> {
     let ledger_key = ledger_key(&ctx, "configure")?;
-    let projection = ctx.projections.side_effect(&ledger_key);
-    match projection.map(|projection| &projection.phase) {
+    let projection = ctx.projections().side_effect(&ledger_key).cloned();
+    let phase = projection
+        .as_ref()
+        .map(|projection| projection.phase.clone());
+    match phase {
         None => configure_persist_intent(ctx, ledger_key, artifacts).await,
         Some(store::SideEffectPhase::IntentPersisted { .. }) => {
-            claim_side_effect(ctx, ledger_key, projection.expect("projection"))
+            claim_side_effect(ctx, ledger_key, projection.as_ref().expect("projection"))
         }
         Some(store::SideEffectPhase::Claimed { .. }) => {
             configure_prepare_invocation(
                 ctx,
                 ledger_key,
-                projection.expect("projection"),
+                projection.as_ref().expect("projection"),
                 artifacts,
                 rpc,
             )
             .await
         }
         Some(store::SideEffectPhase::InvocationPrepared { .. }) => {
-            start_invocation(ctx, ledger_key, projection.expect("projection"))
+            start_invocation(ctx, ledger_key, projection.as_ref().expect("projection"))
         }
         Some(store::SideEffectPhase::InvocationStarted {
             invocation_epoch, ..
         })
         | Some(store::SideEffectPhase::SubmissionUnknown { invocation_epoch }) => {
-            configure_submission(ctx, ledger_key, *invocation_epoch, artifacts, rpc).await
+            configure_submission(ctx, ledger_key, invocation_epoch, artifacts, rpc).await
         }
         Some(store::SideEffectPhase::SubmissionObserved { invocation_epoch }) => {
-            configure_receipt(ctx, ledger_key, *invocation_epoch, artifacts, rpc).await
+            configure_receipt(ctx, ledger_key, invocation_epoch, artifacts, rpc).await
         }
         Some(store::SideEffectPhase::ReceiptObserved { invocation_epoch }) => {
-            configure_confirmation(ctx, ledger_key, *invocation_epoch, artifacts, rpc).await
+            configure_confirmation(ctx, ledger_key, invocation_epoch, artifacts, rpc).await
         }
         Some(store::SideEffectPhase::ConfirmationObserved { .. }) => {
             configure_output(ctx, ledger_key, artifacts).await
@@ -321,7 +327,7 @@ async fn configure_persist_intent(
     artifacts: &dyn EvmDcvArtifactReader,
 ) -> mfm_runtime::Result<ErasedRunnerOutput> {
     let config = load_config::<DeployConfigureValidateConfigureConfig>(&ctx, artifacts).await?;
-    let deployed = load_input_cell::<DeployedContract>(ctx.inputs, artifacts).await?;
+    let deployed = load_input_cell::<DeployedContract>(ctx.inputs(), artifacts).await?;
     let intent = configure_intent_from_config(&config, &deployed).map_err(runtime_invalid)?;
     let idem_input = EvmDcvConfigureIdempotencyInput {
         deployed: intent.deployed.clone(),
@@ -353,7 +359,7 @@ where
     let intent_artifact = artifact_for_value(
         &intent,
         events::ArtifactRole::SideEffectIntent,
-        Some(ctx.node.node_id.clone()),
+        Some(ctx.node().node_id.clone()),
     )?;
     let idem_hash = digest_value(&idem_input)?;
     let idempotency_key =
@@ -365,10 +371,10 @@ where
         staged_retention_refs: vec![retention(&intent_artifact.evidence)],
         payloads: vec![events::KernelEventPayload::SideEffectIntentPersisted(
             side_effect::IntentPersisted {
-                spec_hash: ctx.spec_hash.clone(),
-                node_id: ctx.node.node_id.clone(),
-                scope_id: ctx.node.scope_id.clone(),
-                attempt_id: ctx.attempt_id.clone(),
+                spec_hash: ctx.spec_hash().clone(),
+                node_id: ctx.node().node_id.clone(),
+                scope_id: ctx.node().scope_id.clone(),
+                attempt_id: ctx.attempt_id().clone(),
                 ledger_key: ledger_key.clone(),
                 invocation_epoch: 1,
                 intent_schema_id: I::schema_id().map_err(runtime_value_error)?,
@@ -401,9 +407,9 @@ fn claim_side_effect(
     };
     Ok(ErasedRunnerOutput::new(vec![
         events::KernelEventPayload::SideEffectClaimed(side_effect::Claimed {
-            spec_hash: ctx.spec_hash.clone(),
-            node_id: ctx.node.node_id.clone(),
-            attempt_id: ctx.attempt_id.clone(),
+            spec_hash: ctx.spec_hash().clone(),
+            node_id: ctx.node().node_id.clone(),
+            attempt_id: ctx.attempt_id().clone(),
             ledger_key: ledger_key.clone(),
             claim_owner: events::RunnerInvocationId::new("mfm.evm.dcv.owner.1")?,
             invocation_epoch,
@@ -468,7 +474,7 @@ async fn prepare_invocation(
     let prepared_artifact = artifact_for_json(
         &prepared,
         events::ArtifactRole::PreparedInvocation,
-        Some(ctx.node.node_id.clone()),
+        Some(ctx.node().node_id.clone()),
     )?;
     let staged_artifact = staged_side_effect_artifact(
         &ctx,
@@ -481,9 +487,9 @@ async fn prepare_invocation(
         staged_retention_refs: vec![retention(&prepared_artifact.evidence)],
         payloads: vec![events::KernelEventPayload::SideEffectInvocationPrepared(
             side_effect::InvocationPrepared {
-                spec_hash: ctx.spec_hash.clone(),
-                node_id: ctx.node.node_id.clone(),
-                attempt_id: ctx.attempt_id.clone(),
+                spec_hash: ctx.spec_hash().clone(),
+                node_id: ctx.node().node_id.clone(),
+                attempt_id: ctx.attempt_id().clone(),
                 ledger_key,
                 invocation_epoch: claim.invocation_epoch,
                 claim_generation: claim.claim_generation,
@@ -503,9 +509,9 @@ fn start_invocation(
     let claim = active_claim(projection)?;
     Ok(ErasedRunnerOutput::new(vec![
         events::KernelEventPayload::SideEffectInvocationStarted(side_effect::InvocationStarted {
-            spec_hash: ctx.spec_hash.clone(),
-            node_id: ctx.node.node_id.clone(),
-            attempt_id: ctx.attempt_id.clone(),
+            spec_hash: ctx.spec_hash().clone(),
+            node_id: ctx.node().node_id.clone(),
+            attempt_id: ctx.attempt_id().clone(),
             ledger_key,
             invocation_epoch: claim.invocation_epoch,
             claim_owner: claim.claim_owner.clone(),
@@ -522,7 +528,7 @@ async fn deploy_submission(
     artifacts: &dyn EvmDcvArtifactReader,
     rpc: &EvmDcvRpcClient,
 ) -> mfm_runtime::Result<ErasedRunnerOutput> {
-    let projection = side_effect_projection(ctx.projections, &ledger_key)?;
+    let projection = side_effect_projection(ctx.projections(), &ledger_key)?;
     let prepared = load_prepared_transactions(projection, artifacts).await?;
     match rpc.submit_prepared(&prepared).await? {
         PreparedSubmissionOutcome::Observed => {}
@@ -555,7 +561,7 @@ async fn configure_submission(
     artifacts: &dyn EvmDcvArtifactReader,
     rpc: &EvmDcvRpcClient,
 ) -> mfm_runtime::Result<ErasedRunnerOutput> {
-    let projection = side_effect_projection(ctx.projections, &ledger_key)?;
+    let projection = side_effect_projection(ctx.projections(), &ledger_key)?;
     let prepared = load_prepared_transactions(projection, artifacts).await?;
     match rpc.submit_prepared(&prepared).await? {
         PreparedSubmissionOutcome::Observed => {}
@@ -595,7 +601,7 @@ where
     let artifact = artifact_for_value(
         &submission,
         events::ArtifactRole::Submission,
-        Some(ctx.node.node_id.clone()),
+        Some(ctx.node().node_id.clone()),
     )?;
     let staged_artifact =
         staged_side_effect_artifact(&ctx, &artifact, ledger_key.clone(), invocation_epoch)?;
@@ -604,9 +610,9 @@ where
         staged_retention_refs: vec![retention(&artifact.evidence)],
         payloads: vec![events::KernelEventPayload::SideEffectSubmissionObserved(
             side_effect::SubmissionObserved {
-                spec_hash: ctx.spec_hash.clone(),
-                node_id: ctx.node.node_id.clone(),
-                attempt_id: ctx.attempt_id.clone(),
+                spec_hash: ctx.spec_hash().clone(),
+                node_id: ctx.node().node_id.clone(),
+                attempt_id: ctx.attempt_id().clone(),
                 ledger_key,
                 invocation_epoch,
                 submission_schema_id: T::schema_id().map_err(runtime_value_error)?,
@@ -626,7 +632,7 @@ async fn observe_submission_unknown(
     let artifact = artifact_for_value(
         &evidence,
         events::ArtifactRole::SubmissionUnknownEvidence,
-        Some(ctx.node.node_id.clone()),
+        Some(ctx.node().node_id.clone()),
     )?;
     let staged_artifact =
         staged_side_effect_artifact(&ctx, &artifact, ledger_key.clone(), invocation_epoch)?;
@@ -635,9 +641,9 @@ async fn observe_submission_unknown(
         staged_retention_refs: vec![retention(&artifact.evidence)],
         payloads: vec![events::KernelEventPayload::SideEffectSubmissionUnknown(
             side_effect::SubmissionUnknown {
-                spec_hash: ctx.spec_hash.clone(),
-                node_id: ctx.node.node_id.clone(),
-                attempt_id: ctx.attempt_id.clone(),
+                spec_hash: ctx.spec_hash().clone(),
+                node_id: ctx.node().node_id.clone(),
+                attempt_id: ctx.attempt_id().clone(),
                 ledger_key,
                 invocation_epoch,
                 evidence_schema_id: EvmDcvSubmissionUnknownEvidence::schema_id()
@@ -656,7 +662,7 @@ async fn deploy_receipt(
     artifacts: &dyn EvmDcvArtifactReader,
     rpc: &EvmDcvRpcClient,
 ) -> mfm_runtime::Result<ErasedRunnerOutput> {
-    let projection = side_effect_projection(ctx.projections, &ledger_key)?;
+    let projection = side_effect_projection(ctx.projections(), &ledger_key)?;
     let prepared = load_prepared_transactions(projection, artifacts).await?;
     let tx = prepared.transactions.first().ok_or_else(|| {
         mfm_runtime::RuntimeError::InvalidRunnerOutput("deploy prepared no transaction".to_owned())
@@ -690,7 +696,7 @@ async fn configure_receipt(
     artifacts: &dyn EvmDcvArtifactReader,
     rpc: &EvmDcvRpcClient,
 ) -> mfm_runtime::Result<ErasedRunnerOutput> {
-    let projection = side_effect_projection(ctx.projections, &ledger_key)?;
+    let projection = side_effect_projection(ctx.projections(), &ledger_key)?;
     let prepared = load_prepared_transactions(projection, artifacts).await?;
     let mut receipts = Vec::with_capacity(prepared.transactions.len());
     for tx in &prepared.transactions {
@@ -729,7 +735,7 @@ where
     let artifact = artifact_for_value(
         &receipt,
         events::ArtifactRole::Receipt,
-        Some(ctx.node.node_id.clone()),
+        Some(ctx.node().node_id.clone()),
     )?;
     let staged_artifact =
         staged_side_effect_artifact(&ctx, &artifact, ledger_key.clone(), invocation_epoch)?;
@@ -738,9 +744,9 @@ where
         staged_retention_refs: vec![retention(&artifact.evidence)],
         payloads: vec![events::KernelEventPayload::SideEffectReceiptObserved(
             side_effect::ReceiptObserved {
-                spec_hash: ctx.spec_hash.clone(),
-                node_id: ctx.node.node_id.clone(),
-                attempt_id: ctx.attempt_id.clone(),
+                spec_hash: ctx.spec_hash().clone(),
+                node_id: ctx.node().node_id.clone(),
+                attempt_id: ctx.attempt_id().clone(),
                 ledger_key,
                 invocation_epoch,
                 receipt_schema_id: T::schema_id().map_err(runtime_value_error)?,
@@ -759,7 +765,7 @@ async fn deploy_confirmation(
     artifacts: &dyn EvmDcvArtifactReader,
     rpc: &EvmDcvRpcClient,
 ) -> mfm_runtime::Result<ErasedRunnerOutput> {
-    let projection = side_effect_projection(ctx.projections, &ledger_key)?;
+    let projection = side_effect_projection(ctx.projections(), &ledger_key)?;
     let receipt_ref = projection.receipt.as_ref().ok_or_else(|| {
         mfm_runtime::RuntimeError::InvalidRunnerOutput(
             "deploy receipt projection missing".to_owned(),
@@ -798,7 +804,7 @@ async fn configure_confirmation(
     artifacts: &dyn EvmDcvArtifactReader,
     rpc: &EvmDcvRpcClient,
 ) -> mfm_runtime::Result<ErasedRunnerOutput> {
-    let projection = side_effect_projection(ctx.projections, &ledger_key)?;
+    let projection = side_effect_projection(ctx.projections(), &ledger_key)?;
     let receipt_ref = projection.receipt.as_ref().ok_or_else(|| {
         mfm_runtime::RuntimeError::InvalidRunnerOutput(
             "configure receipt projection missing".to_owned(),
@@ -849,7 +855,7 @@ where
     let artifact = artifact_for_value(
         &confirmation,
         events::ArtifactRole::Confirmation,
-        Some(ctx.node.node_id.clone()),
+        Some(ctx.node().node_id.clone()),
     )?;
     let staged_artifact =
         staged_side_effect_artifact(&ctx, &artifact, ledger_key.clone(), invocation_epoch)?;
@@ -858,9 +864,9 @@ where
         staged_retention_refs: vec![retention(&artifact.evidence)],
         payloads: vec![events::KernelEventPayload::SideEffectConfirmationObserved(
             side_effect::ConfirmationObserved {
-                spec_hash: ctx.spec_hash.clone(),
-                node_id: ctx.node.node_id.clone(),
-                attempt_id: ctx.attempt_id.clone(),
+                spec_hash: ctx.spec_hash().clone(),
+                node_id: ctx.node().node_id.clone(),
+                attempt_id: ctx.attempt_id().clone(),
                 ledger_key,
                 invocation_epoch,
                 confirmation_schema_id: T::schema_id().map_err(runtime_value_error)?,
@@ -1586,7 +1592,7 @@ async fn deploy_output(
     let config = load_config::<DeployConfigureValidateDeployConfig>(&ctx, artifacts).await?;
     let state = DeployContractState::new(config)
         .map_err(|error| mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string()))?;
-    let projection = side_effect_projection(ctx.projections, &ledger_key)?;
+    let projection = side_effect_projection(ctx.projections(), &ledger_key)?;
     let intent =
         load_artifact_value::<EvmDcvDeployIntent>(&projection.intent.intent_artifact_id, artifacts)
             .await?;
@@ -1610,10 +1616,10 @@ async fn configure_output(
     artifacts: &dyn EvmDcvArtifactReader,
 ) -> mfm_runtime::Result<ErasedRunnerOutput> {
     let config = load_config::<DeployConfigureValidateConfigureConfig>(&ctx, artifacts).await?;
-    let input = load_input_cell::<DeployedContract>(ctx.inputs, artifacts).await?;
+    let input = load_input_cell::<DeployedContract>(ctx.inputs(), artifacts).await?;
     let state = ConfigureContractState::new(config)
         .map_err(|error| mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string()))?;
-    let projection = side_effect_projection(ctx.projections, &ledger_key)?;
+    let projection = side_effect_projection(ctx.projections(), &ledger_key)?;
     let intent = load_artifact_value::<EvmDcvConfigureIntent>(
         &projection.intent.intent_artifact_id,
         artifacts,
@@ -1641,13 +1647,13 @@ async fn run_validate(
     rpc: &EvmDcvRpcClient,
 ) -> mfm_runtime::Result<ErasedRunnerOutput> {
     let config = load_config::<DeployConfigureValidateValidateConfig>(&ctx, artifacts).await?;
-    let input = load_input_cell::<ConfiguredContract>(ctx.inputs, artifacts).await?;
+    let input = load_input_cell::<ConfiguredContract>(ctx.inputs(), artifacts).await?;
     let request = validate_read_request(&config, &input)?;
     let request_hash = digest_value(&request)?;
     let fact_key = validate_fact_key(&ctx)?;
-    if let Some(fact) = ctx.recorded_facts.get(&fact_key) {
+    if let Some(fact) = ctx.recorded_facts().get(&fact_key) {
         let response =
-            load_recorded_validate_response(fact, &request_hash, &ctx.node.node_id, artifacts)
+            load_recorded_validate_response(fact, &request_hash, &ctx.node().node_id, artifacts)
                 .await?;
         return state_output(ctx, &response.report).await;
     }
@@ -1683,12 +1689,12 @@ async fn validate_read_output(
     let response_artifact = artifact_for_value(
         response,
         events::ArtifactRole::FactResponse,
-        Some(ctx.node.node_id.clone()),
+        Some(ctx.node().node_id.clone()),
     )?;
     let output_artifact = artifact_for_value(
         &response.report,
         events::ArtifactRole::StateOutput,
-        Some(ctx.node.node_id.clone()),
+        Some(ctx.node().node_id.clone()),
     )?;
     let staged_response = staged_attempt_artifact(&ctx, &response_artifact)?;
     let staged_output = staged_attempt_artifact(&ctx, &output_artifact)?;
@@ -1700,9 +1706,9 @@ async fn validate_read_output(
         ],
         payloads: vec![
             events::KernelEventPayload::FactRecorded(events::FactRecorded {
-                spec_hash: ctx.spec_hash.clone(),
-                node_id: ctx.node.node_id.clone(),
-                attempt_id: ctx.attempt_id.clone(),
+                spec_hash: ctx.spec_hash().clone(),
+                node_id: ctx.node().node_id.clone(),
+                attempt_id: ctx.attempt_id().clone(),
                 capability_kind: EvmDcvReadCapability::kind().map_err(runtime_capability_error)?,
                 capability_version: EvmDcvReadCapability::version()
                     .map_err(runtime_capability_error)?,
@@ -1773,7 +1779,7 @@ fn validate_recorded_validate_fact(
 }
 
 fn validate_fact_key(ctx: &ErasedRunCtx<'_>) -> mfm_runtime::Result<events::FactKey> {
-    validate_fact_key_for_node(&ctx.node.node_id)
+    validate_fact_key_for_node(&ctx.node().node_id)
 }
 
 fn validate_fact_key_for_node(node_id: &NodeId) -> mfm_runtime::Result<events::FactKey> {
@@ -1793,7 +1799,7 @@ where
     let artifact = artifact_for_value(
         output,
         events::ArtifactRole::StateOutput,
-        Some(ctx.node.node_id.clone()),
+        Some(ctx.node().node_id.clone()),
     )?;
     let staged_artifact = staged_attempt_artifact(&ctx, &artifact)?;
     Ok(ErasedRunnerOutput {
@@ -1843,7 +1849,7 @@ fn ledger_key(
     events::SideEffectLedgerKey::new(format!(
         "mfm.evm.dcv.{}.{}",
         phase,
-        short_digest(&ctx.node.node_id)
+        short_digest(&ctx.node().node_id)
     ))
     .map_err(Into::into)
 }
@@ -1853,27 +1859,27 @@ fn cell_produced(
     artifact: &store::ArtifactEvidenceRef,
 ) -> events::KernelEventPayload {
     events::KernelEventPayload::CellProduced(events::CellProduced {
-        spec_hash: ctx.spec_hash.clone(),
-        node_id: ctx.node.node_id.clone(),
-        cell_id: ctx.node.output_cell.clone(),
-        scope_id: ctx.output_cell.scope_id.clone(),
-        attempt_id: ctx.attempt_id.clone(),
-        semantic_type_id: ctx.output_cell.semantic_type_id.clone(),
-        schema_id: ctx.output_cell.schema_id.clone(),
-        value_lineage: ctx.output_cell.value_lineage.clone(),
+        spec_hash: ctx.spec_hash().clone(),
+        node_id: ctx.node().node_id.clone(),
+        cell_id: ctx.node().output_cell.clone(),
+        scope_id: ctx.output_cell().scope_id.clone(),
+        attempt_id: ctx.attempt_id().clone(),
+        semantic_type_id: ctx.output_cell().semantic_type_id.clone(),
+        schema_id: ctx.output_cell().schema_id.clone(),
+        value_lineage: ctx.output_cell().value_lineage.clone(),
         artifact_id: artifact.artifact_id.clone(),
         content_digest: artifact.digest.clone(),
-        producer_state_kind: Some(ctx.node.state_kind.clone()),
-        producer_state_version: Some(ctx.node.state_version.clone()),
+        producer_state_kind: Some(ctx.node().state_kind.clone()),
+        producer_state_version: Some(ctx.node().state_version.clone()),
     })
 }
 
 fn completed(ctx: &ErasedRunCtx<'_>) -> events::KernelEventPayload {
     events::KernelEventPayload::StateAttemptCompleted(events::StateAttemptCompleted {
-        spec_hash: ctx.spec_hash.clone(),
-        node_id: ctx.node.node_id.clone(),
-        attempt_id: ctx.attempt_id.clone(),
-        output_cell_id: ctx.node.output_cell.clone(),
+        spec_hash: ctx.spec_hash().clone(),
+        node_id: ctx.node().node_id.clone(),
+        attempt_id: ctx.attempt_id().clone(),
+        output_cell_id: ctx.node().output_cell.clone(),
     })
 }
 
@@ -1944,17 +1950,17 @@ where
     T: MfmConfig + DeserializeOwned,
 {
     let (bytes, evidence) = artifacts
-        .get_artifact_by_id(&ctx.node.config_ref.artifact_id)
+        .get_artifact_by_id(&ctx.node().config_ref.artifact_id)
         .await?;
-    if evidence.digest != ctx.node.config_ref.digest
-        || evidence.byte_len != ctx.node.config_ref.byte_len
-        || evidence.media_type != ctx.node.config_ref.media_type
-        || evidence.schema_id.as_ref() != Some(&ctx.node.config_ref.schema_id)
+    if evidence.digest != ctx.node().config_ref.digest
+        || evidence.byte_len != ctx.node().config_ref.byte_len
+        || evidence.media_type != ctx.node().config_ref.media_type
+        || evidence.schema_id.as_ref() != Some(&ctx.node().config_ref.schema_id)
         || evidence.artifact_role != events::ArtifactRole::TypedConfig
     {
         return Err(mfm_runtime::RuntimeError::InvalidRunnerOutput(format!(
             "EVM DCV config artifact did not match certified config ref for node {}",
-            ctx.node.node_id
+            ctx.node().node_id
         )));
     }
     serde_json::from_slice(&bytes)

@@ -58,30 +58,163 @@ pub trait ErasedNodeRunner: Send + Sync {
     fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a>;
 }
 
+/// Prepared, store-verified invocation supplied to an erased node runner.
+///
+/// The runtime constructs this value only after revalidating the latest run stream against the
+/// certified spec. It carries committed config evidence, materialized input evidence, certified
+/// capability descriptors, and recovery facts into the runner without exposing a public
+/// constructor.
+pub struct PreparedRunnerInvocation<'a> {
+    run_id: &'a RunId,
+    spec_hash: &'a SpecHash,
+    node: &'a spec::NodeSpec,
+    descriptor: &'a spec::StateDescriptorIdentity,
+    output_cell: &'a spec::CellSpec,
+    attempt_id: &'a AttemptId,
+    attempt_no: u32,
+    config_artifact: store::ArtifactEvidenceRef,
+    inputs: MaterializedInputs,
+    caps: CertifiedRuntimeCapabilities,
+    recorded_facts: RecordedFacts,
+    projections: &'a store::ProjectionSnapshot,
+}
+
+impl<'a> PreparedRunnerInvocation<'a> {
+    /// Run id being executed.
+    pub fn run_id(&self) -> &'a RunId {
+        self.run_id
+    }
+
+    /// Certified typed spec hash.
+    pub fn spec_hash(&self) -> &'a SpecHash {
+        self.spec_hash
+    }
+
+    /// Certified node spec.
+    pub fn node(&self) -> &'a spec::NodeSpec {
+        self.node
+    }
+
+    /// Certified state descriptor identity for the node.
+    pub fn descriptor(&self) -> &'a spec::StateDescriptorIdentity {
+        self.descriptor
+    }
+
+    /// Certified output cell spec for the node.
+    pub fn output_cell(&self) -> &'a spec::CellSpec {
+        self.output_cell
+    }
+
+    /// Store-owned attempt id minted by the scheduler.
+    pub fn attempt_id(&self) -> &'a AttemptId {
+        self.attempt_id
+    }
+
+    /// Attempt number for this node.
+    pub const fn attempt_no(&self) -> u32 {
+        self.attempt_no
+    }
+
+    /// Store-committed typed config artifact evidence matching the certified config ref.
+    pub fn config_artifact(&self) -> &store::ArtifactEvidenceRef {
+        &self.config_artifact
+    }
+
+    /// Materialized input evidence derived only from certified cells and validated stream state.
+    pub fn inputs(&self) -> &MaterializedInputs {
+        &self.inputs
+    }
+
+    /// Runtime capabilities minted only from the certified node capability set.
+    pub fn caps(&self) -> &CertifiedRuntimeCapabilities {
+        &self.caps
+    }
+
+    /// Facts already committed for this attempt and therefore reusable after recovery.
+    pub fn recorded_facts(&self) -> &RecordedFacts {
+        &self.recorded_facts
+    }
+
+    /// Store-owned projection snapshot observed before the runner invocation.
+    pub fn projections(&self) -> &store::ProjectionSnapshot {
+        self.projections
+    }
+}
+
 /// Context supplied to an erased node runner.
 pub struct ErasedRunCtx<'a> {
+    invocation: &'a PreparedRunnerInvocation<'a>,
+}
+
+impl<'a> ErasedRunCtx<'a> {
+    fn from_prepared(invocation: &'a PreparedRunnerInvocation<'a>) -> Self {
+        Self { invocation }
+    }
+
+    /// Prepared runner invocation backing this context.
+    pub fn invocation(&self) -> &'a PreparedRunnerInvocation<'a> {
+        self.invocation
+    }
+
     /// Run id being executed.
-    pub run_id: &'a RunId,
+    pub fn run_id(&self) -> &'a RunId {
+        self.invocation.run_id()
+    }
+
     /// Certified typed spec hash.
-    pub spec_hash: &'a SpecHash,
+    pub fn spec_hash(&self) -> &'a SpecHash {
+        self.invocation.spec_hash()
+    }
+
     /// Certified node spec.
-    pub node: &'a spec::NodeSpec,
+    pub fn node(&self) -> &'a spec::NodeSpec {
+        self.invocation.node()
+    }
+
     /// Certified state descriptor identity for the node.
-    pub descriptor: &'a spec::StateDescriptorIdentity,
+    pub fn descriptor(&self) -> &'a spec::StateDescriptorIdentity {
+        self.invocation.descriptor()
+    }
+
     /// Certified output cell spec for the node.
-    pub output_cell: &'a spec::CellSpec,
+    pub fn output_cell(&self) -> &'a spec::CellSpec {
+        self.invocation.output_cell()
+    }
+
     /// Store-owned attempt id minted by the scheduler.
-    pub attempt_id: &'a AttemptId,
+    pub fn attempt_id(&self) -> &'a AttemptId {
+        self.invocation.attempt_id()
+    }
+
     /// Attempt number for this node.
-    pub attempt_no: u32,
-    /// Materialized input evidence derived only from certified cells.
-    pub inputs: &'a MaterializedInputs,
+    pub const fn attempt_no(&self) -> u32 {
+        self.invocation.attempt_no()
+    }
+
+    /// Store-committed typed config artifact evidence matching the certified config ref.
+    pub fn config_artifact(&self) -> &store::ArtifactEvidenceRef {
+        self.invocation.config_artifact()
+    }
+
+    /// Materialized input evidence derived only from certified cells and validated stream state.
+    pub fn inputs(&self) -> &MaterializedInputs {
+        self.invocation.inputs()
+    }
+
     /// Runtime capabilities minted only from the certified node capability set.
-    pub caps: &'a CertifiedRuntimeCapabilities,
+    pub fn caps(&self) -> &CertifiedRuntimeCapabilities {
+        self.invocation.caps()
+    }
+
     /// Facts already committed for this attempt and therefore reusable after recovery.
-    pub recorded_facts: &'a RecordedFacts,
-    /// Store-owned projection snapshot observed before the attempt.
-    pub projections: &'a store::ProjectionSnapshot,
+    pub fn recorded_facts(&self) -> &RecordedFacts {
+        self.invocation.recorded_facts()
+    }
+
+    /// Store-owned projection snapshot observed before the runner invocation.
+    pub fn projections(&self) -> &store::ProjectionSnapshot {
+        self.invocation.projections()
+    }
 }
 
 /// Facts committed for one node attempt before recovery resumed execution.
@@ -216,22 +349,23 @@ impl StagedArtifactHandle {
         if staged_artifact_binding_role(&binding) != evidence.artifact_role {
             return Err(RuntimeError::InvalidRunnerOutput(format!(
                 "node {} staged artifact role {} with mismatched binding",
-                ctx.node.node_id,
+                ctx.node().node_id,
                 artifact_role_name(evidence.artifact_role)
             )));
         }
-        if evidence.producer_node_id.as_ref() != Some(&ctx.node.node_id)
+        if evidence.producer_node_id.as_ref() != Some(&ctx.node().node_id)
             || evidence.producer_seed_id.is_some()
         {
             return Err(RuntimeError::InvalidRunnerOutput(format!(
                 "node {} staged artifact {} with producer evidence outside its attempt",
-                ctx.node.node_id, evidence.artifact_id
+                ctx.node().node_id,
+                evidence.artifact_id
             )));
         }
         Ok(Self {
-            run_id: ctx.run_id.clone(),
-            node_id: ctx.node.node_id.clone(),
-            attempt_id: ctx.attempt_id.clone(),
+            run_id: ctx.run_id().clone(),
+            node_id: ctx.node().node_id.clone(),
+            attempt_id: ctx.attempt_id().clone(),
             binding,
             evidence,
         })
@@ -280,7 +414,7 @@ impl StagedArtifact {
         let binding = staged_artifact_binding_kind(evidence.artifact_role).ok_or_else(|| {
             RuntimeError::InvalidRunnerOutput(format!(
                 "node {} staged artifact role {} outside non-side-effect attempt artifact authority",
-                ctx.node.node_id,
+                ctx.node().node_id,
                 artifact_role_name(evidence.artifact_role)
             ))
         })?;
@@ -298,7 +432,7 @@ impl StagedArtifact {
         let phase = staged_side_effect_artifact_phase(evidence.artifact_role).ok_or_else(|| {
             RuntimeError::InvalidRunnerOutput(format!(
                 "node {} staged artifact role {} outside side-effect artifact authority",
-                ctx.node.node_id,
+                ctx.node().node_id,
                 artifact_role_name(evidence.artifact_role)
             ))
         })?;
@@ -1222,10 +1356,10 @@ impl ErasedNodeRunner for FrameworkPublicOutputRunner {
 }
 
 fn render_public_output(ctx: ErasedRunCtx<'_>) -> Result<ErasedRunnerOutput> {
-    let Some(spec::FrameworkNodeSpec::PublicOutputRender(render)) = &ctx.node.framework else {
+    let Some(spec::FrameworkNodeSpec::PublicOutputRender(render)) = &ctx.node().framework else {
         return Err(RuntimeError::InvalidRunnerOutput(format!(
             "node {} is not a public-output render node",
-            ctx.node.node_id
+            ctx.node().node_id
         )));
     };
     let mut cells = Vec::with_capacity(render.required_cells.len());
@@ -1234,11 +1368,12 @@ fn render_public_output(ctx: ErasedRunCtx<'_>) -> Result<ErasedRunnerOutput> {
             artifact_id,
             content_digest,
             ..
-        }) = ctx.projections.cell_terminal(&required.cell_id)
+        }) = ctx.projections().cell_terminal(&required.cell_id)
         else {
             return Err(RuntimeError::InvalidRunnerOutput(format!(
                 "public-output render node {} required incomplete cell {}",
-                ctx.node.node_id, required.cell_id
+                ctx.node().node_id,
+                required.cell_id
             )));
         };
         cells.push(events::NamedTypedCellRef {
@@ -1269,9 +1404,9 @@ fn render_public_output(ctx: ErasedRunCtx<'_>) -> Result<ErasedRunnerOutput> {
         digest: receipt_digest.clone(),
         byte_len: receipt_bytes.as_bytes().len() as u64,
         media_type: spec::MediaType::new("application/json")?,
-        schema_id: Some(ctx.output_cell.schema_id.clone()),
-        semantic_type_id: Some(ctx.output_cell.semantic_type_id.clone()),
-        producer_node_id: Some(ctx.node.node_id.clone()),
+        schema_id: Some(ctx.output_cell().schema_id.clone()),
+        semantic_type_id: Some(ctx.output_cell().semantic_type_id.clone()),
+        producer_node_id: Some(ctx.node().node_id.clone()),
         producer_seed_id: None,
         artifact_role: events::ArtifactRole::StateOutput,
     };
@@ -1286,24 +1421,24 @@ fn render_public_output(ctx: ErasedRunCtx<'_>) -> Result<ErasedRunnerOutput> {
         }],
         payloads: vec![
             events::KernelEventPayload::CellProduced(events::CellProduced {
-                spec_hash: ctx.spec_hash.clone(),
-                node_id: ctx.node.node_id.clone(),
-                cell_id: ctx.node.output_cell.clone(),
-                scope_id: ctx.output_cell.scope_id.clone(),
-                attempt_id: ctx.attempt_id.clone(),
-                semantic_type_id: ctx.output_cell.semantic_type_id.clone(),
-                schema_id: ctx.output_cell.schema_id.clone(),
-                value_lineage: ctx.output_cell.value_lineage.clone(),
+                spec_hash: ctx.spec_hash().clone(),
+                node_id: ctx.node().node_id.clone(),
+                cell_id: ctx.node().output_cell.clone(),
+                scope_id: ctx.output_cell().scope_id.clone(),
+                attempt_id: ctx.attempt_id().clone(),
+                semantic_type_id: ctx.output_cell().semantic_type_id.clone(),
+                schema_id: ctx.output_cell().schema_id.clone(),
+                value_lineage: ctx.output_cell().value_lineage.clone(),
                 artifact_id: receipt_artifact_id,
                 content_digest: receipt_digest,
-                producer_state_kind: Some(ctx.node.state_kind.clone()),
-                producer_state_version: Some(ctx.node.state_version.clone()),
+                producer_state_kind: Some(ctx.node().state_kind.clone()),
+                producer_state_version: Some(ctx.node().state_version.clone()),
             }),
             events::KernelEventPayload::PublicOutputProduced(events::PublicOutputProduced {
-                spec_hash: ctx.spec_hash.clone(),
-                node_id: ctx.node.node_id.clone(),
-                attempt_id: ctx.attempt_id.clone(),
-                receipt_cell_id: ctx.node.output_cell.clone(),
+                spec_hash: ctx.spec_hash().clone(),
+                node_id: ctx.node().node_id.clone(),
+                attempt_id: ctx.attempt_id().clone(),
+                receipt_cell_id: ctx.node().output_cell.clone(),
                 public_schema_id: render.public_schema_id.clone(),
                 output_spec_digest: render.output_spec_digest.clone(),
                 cells,
@@ -1312,10 +1447,10 @@ fn render_public_output(ctx: ErasedRunCtx<'_>) -> Result<ErasedRunnerOutput> {
                 renderer_descriptor_id: render.renderer_descriptor.descriptor_id.clone(),
             }),
             events::KernelEventPayload::StateAttemptCompleted(events::StateAttemptCompleted {
-                spec_hash: ctx.spec_hash.clone(),
-                node_id: ctx.node.node_id.clone(),
-                attempt_id: ctx.attempt_id.clone(),
-                output_cell_id: ctx.node.output_cell.clone(),
+                spec_hash: ctx.spec_hash().clone(),
+                node_id: ctx.node().node_id.clone(),
+                attempt_id: ctx.attempt_id().clone(),
+                output_cell_id: ctx.node().output_cell.clone(),
             }),
         ],
     })
@@ -1743,7 +1878,17 @@ pub enum MaterializedCellTerminal {
 struct RuntimeRunView {
     projections: store::ProjectionSnapshot,
     seed_cells: BTreeMap<CellId, events::SeedCellRef>,
+    config_artifacts: BTreeMap<String, store::ArtifactEvidenceRef>,
+    artifact_refs: BTreeMap<ArtifactId, CommittedArtifactReference>,
     next_seq: store::StreamSeq,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CommittedArtifactReference {
+    evidence: store::ArtifactEvidenceRef,
+    attempt_id: Option<AttemptId>,
+    commit_seq: store::StreamSeq,
+    commit_key: store::CommitKey,
 }
 
 impl RuntimeRunView {
@@ -1804,9 +1949,13 @@ impl RuntimeRunView {
         };
         validate_historical_run_stream(runtime_spec, stream, &projections)?;
         let seed_cells = validate_seed_cells(runtime_spec, &run_started.seed_cells)?;
+        let config_artifacts = config_artifacts_from_stream(runtime_spec, stream)?;
+        let artifact_refs = artifact_refs_from_stream(stream)?;
         Ok(Self {
             projections,
             seed_cells,
+            config_artifacts,
+            artifact_refs,
             next_seq,
         })
     }
@@ -1912,6 +2061,37 @@ struct PreparedRunnerOutput {
 struct PreparedStagedArtifact {
     bytes: Vec<u8>,
     evidence: store::ArtifactEvidenceRef,
+}
+
+fn prepare_runner_invocation<'a>(
+    runtime_spec: &'a CertifiedRuntimeSpec,
+    run_id: &'a RunId,
+    node: &'a spec::NodeSpec,
+    descriptor: &'a spec::StateDescriptorIdentity,
+    output_cell: &'a spec::CellSpec,
+    attempt_id: &'a AttemptId,
+    attempt_no: u32,
+    view: &'a RuntimeRunView,
+) -> Result<PreparedRunnerInvocation<'a>> {
+    let config_artifact = committed_config_artifact(node, view)?;
+    let inputs = materialize_inputs(runtime_spec, node, view)?;
+    let caps =
+        CertifiedRuntimeCapabilities::new(node.node_id.clone(), node.capability_bindings.clone());
+    let recorded_facts = recorded_facts_for_attempt(&view.projections, &node.node_id, attempt_id)?;
+    Ok(PreparedRunnerInvocation {
+        run_id,
+        spec_hash: runtime_spec.spec_hash(),
+        node,
+        descriptor,
+        output_cell,
+        attempt_id,
+        attempt_no,
+        config_artifact,
+        inputs,
+        caps,
+        recorded_facts,
+        projections: &view.projections,
+    })
 }
 
 struct RuntimeMutationMiddleware;
@@ -2064,6 +2244,14 @@ impl RuntimeMutationMiddleware {
             &runner_payloads,
             &staged_artifacts,
         )?;
+        let mut payloads = runner_payloads;
+        payloads.extend(staged_artifact_reference_payloads(
+            input.runtime_spec.spec_hash(),
+            input.node,
+            input.attempt_id,
+            &payloads,
+            &staged_artifacts,
+        ));
         let artifacts_to_stage = staged_artifacts
             .iter()
             .filter_map(|artifact| {
@@ -2077,7 +2265,6 @@ impl RuntimeMutationMiddleware {
             .iter()
             .map(|artifact| artifact.evidence.clone())
             .collect::<Vec<_>>();
-        let mut payloads = runner_payloads;
         payloads.extend(bind_staged_retention_refs(
             input.runtime_spec,
             input.run_id,
@@ -2387,16 +2574,21 @@ impl SerialTypedScheduler {
             ))
         })?;
         let binding = self.runners.resolve(node, descriptor)?;
-        let inputs = materialize_inputs(runtime_spec, node, view)?;
-        let caps = CertifiedRuntimeCapabilities::new(
-            node.node_id.clone(),
-            node.capability_bindings.clone(),
-        );
         let (attempt_id, attempt_no) = match runnable.attempt {
             AttemptPlan::StartNew => {
                 let attempt_no = next_attempt_no(&view.projections, &node.node_id)?;
                 let attempt_id =
                     attempt_id(run_id, runtime_spec.spec_hash(), &node.node_id, attempt_no)?;
+                prepare_runner_invocation(
+                    runtime_spec,
+                    run_id,
+                    node,
+                    descriptor,
+                    output_cell,
+                    &attempt_id,
+                    attempt_no,
+                    view,
+                )?;
                 let start_commit = RuntimeMutationMiddleware::prepare_attempt_start(
                     runtime_spec,
                     run_id,
@@ -2416,24 +2608,19 @@ impl SerialTypedScheduler {
 
         let latest_stream = store.load_run_stream(run_id);
         let latest_view = RuntimeRunView::from_stream(runtime_spec, run_id, &latest_stream)?;
-        let latest_projection = &latest_view.projections;
-        let recorded_facts =
-            recorded_facts_for_attempt(latest_projection, &node.node_id, &attempt_id)?;
+        let invocation = prepare_runner_invocation(
+            runtime_spec,
+            run_id,
+            node,
+            descriptor,
+            output_cell,
+            &attempt_id,
+            attempt_no,
+            &latest_view,
+        )?;
         let output = binding
             .runner
-            .run_erased(ErasedRunCtx {
-                run_id,
-                spec_hash: runtime_spec.spec_hash(),
-                node,
-                descriptor,
-                output_cell,
-                attempt_id: &attempt_id,
-                attempt_no,
-                inputs: &inputs,
-                caps: &caps,
-                recorded_facts: &recorded_facts,
-                projections: &latest_projection,
-            })
+            .run_erased(ErasedRunCtx::from_prepared(&invocation))
             .await?;
         let terminal_output =
             RuntimeMutationMiddleware::prepare_runner_output(RunnerOutputCommitInput {
@@ -2441,8 +2628,8 @@ impl SerialTypedScheduler {
                 run_id,
                 node,
                 attempt_id: &attempt_id,
-                caps: &caps,
-                recorded_facts: &recorded_facts,
+                caps: invocation.caps(),
+                recorded_facts: invocation.recorded_facts(),
                 view: &latest_view,
                 output,
             })?;
@@ -2469,16 +2656,21 @@ impl SerialTypedScheduler {
             ))
         })?;
         let binding = self.runners.resolve(node, descriptor)?;
-        let inputs = materialize_inputs(runtime_spec, node, view)?;
-        let caps = CertifiedRuntimeCapabilities::new(
-            node.node_id.clone(),
-            node.capability_bindings.clone(),
-        );
         let (attempt_id, attempt_no) = match runnable.attempt {
             AttemptPlan::StartNew => {
                 let attempt_no = next_attempt_no(&view.projections, &node.node_id)?;
                 let attempt_id =
                     attempt_id(run_id, runtime_spec.spec_hash(), &node.node_id, attempt_no)?;
+                prepare_runner_invocation(
+                    runtime_spec,
+                    run_id,
+                    node,
+                    descriptor,
+                    output_cell,
+                    &attempt_id,
+                    attempt_no,
+                    view,
+                )?;
                 let start_commit = RuntimeMutationMiddleware::prepare_attempt_start(
                     runtime_spec,
                     run_id,
@@ -2504,24 +2696,19 @@ impl SerialTypedScheduler {
             .await
             .map_err(async_store_error)?;
         let latest_view = RuntimeRunView::from_stream(runtime_spec, run_id, &latest_stream)?;
-        let latest_projection = &latest_view.projections;
-        let recorded_facts =
-            recorded_facts_for_attempt(latest_projection, &node.node_id, &attempt_id)?;
+        let invocation = prepare_runner_invocation(
+            runtime_spec,
+            run_id,
+            node,
+            descriptor,
+            output_cell,
+            &attempt_id,
+            attempt_no,
+            &latest_view,
+        )?;
         let output = binding
             .runner
-            .run_erased(ErasedRunCtx {
-                run_id,
-                spec_hash: runtime_spec.spec_hash(),
-                node,
-                descriptor,
-                output_cell,
-                attempt_id: &attempt_id,
-                attempt_no,
-                inputs: &inputs,
-                caps: &caps,
-                recorded_facts: &recorded_facts,
-                projections: &latest_projection,
-            })
+            .run_erased(ErasedRunCtx::from_prepared(&invocation))
             .await?;
         let terminal_output =
             RuntimeMutationMiddleware::prepare_runner_output(RunnerOutputCommitInput {
@@ -2529,8 +2716,8 @@ impl SerialTypedScheduler {
                 run_id,
                 node,
                 attempt_id: &attempt_id,
-                caps: &caps,
-                recorded_facts: &recorded_facts,
+                caps: invocation.caps(),
+                recorded_facts: invocation.recorded_facts(),
                 view: &latest_view,
                 output,
             })?;
@@ -3022,29 +3209,6 @@ fn staged_payload_artifact_requirements(
                     binding: StagedArtifactBindingKind::StateOutput,
                 });
             }
-            events::KernelEventPayload::ArtifactReferenced(payload) => {
-                if payload.node_id.as_ref() == Some(&node.node_id)
-                    && payload.attempt_id.as_ref() == Some(attempt_id)
-                {
-                    requirements.push(StagedArtifactRequirement {
-                        artifact_id: payload.artifact_ref.artifact_id.clone(),
-                        digest: payload.artifact_ref.content_digest.clone(),
-                        byte_len: Some(payload.artifact_ref.byte_len),
-                        media_type: Some(payload.artifact_ref.media_type.clone()),
-                        schema_id: Some(payload.artifact_ref.schema_id.clone()),
-                        semantic_type_id: payload.artifact_ref.semantic_type_id.clone(),
-                        role: payload.artifact_ref.role,
-                        binding: staged_artifact_binding_kind(payload.artifact_ref.role)
-                            .ok_or_else(|| {
-                                RuntimeError::InvalidRunnerOutput(format!(
-                                    "node {} referenced unstaged artifact role {}",
-                                    node.node_id,
-                                    artifact_role_name(payload.artifact_ref.role)
-                                ))
-                            })?,
-                    });
-                }
-            }
             events::KernelEventPayload::PublicOutputProduced(payload) => {
                 require_attempt(node, attempt_id, &payload.node_id, &payload.attempt_id)?;
                 if let Some(artifact_id) = &payload.rendered_artifact_id {
@@ -3183,6 +3347,7 @@ fn staged_payload_artifact_requirements(
                 ));
             }
             events::KernelEventPayload::RunStarted(_)
+            | events::KernelEventPayload::ArtifactReferenced(_)
             | events::KernelEventPayload::RunCompleted(_)
             | events::KernelEventPayload::RetentionRefsAppended(_)
             | events::KernelEventPayload::RetentionManifestProjected(_)
@@ -3196,6 +3361,56 @@ fn staged_payload_artifact_requirements(
         }
     }
     Ok(requirements)
+}
+
+fn staged_artifact_reference_payloads(
+    spec_hash: &SpecHash,
+    node: &spec::NodeSpec,
+    attempt_id: &AttemptId,
+    payloads: &[events::KernelEventPayload],
+    staged_artifacts: &[ValidatedStagedArtifact],
+) -> Vec<events::KernelEventPayload> {
+    let existing_refs = payloads
+        .iter()
+        .filter_map(|payload| match payload {
+            events::KernelEventPayload::ArtifactReferenced(payload)
+                if payload.node_id.as_ref() == Some(&node.node_id)
+                    && payload.attempt_id.as_ref() == Some(attempt_id) =>
+            {
+                Some(payload.artifact_ref.artifact_id.clone())
+            }
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    let mut refs = Vec::new();
+    for artifact in staged_artifacts {
+        if staged_artifact_binding_kind(artifact.evidence.artifact_role).is_none() {
+            continue;
+        }
+        if existing_refs.contains(&artifact.evidence.artifact_id) {
+            continue;
+        }
+        let Some(schema_id) = artifact.evidence.schema_id.clone() else {
+            continue;
+        };
+        refs.push(events::KernelEventPayload::ArtifactReferenced(
+            events::ArtifactReferenced {
+                spec_hash: spec_hash.clone(),
+                node_id: Some(node.node_id.clone()),
+                attempt_id: Some(attempt_id.clone()),
+                artifact_ref: events::ArtifactEvidenceRef {
+                    artifact_id: artifact.evidence.artifact_id.clone(),
+                    role: artifact.evidence.artifact_role,
+                    schema_id,
+                    semantic_type_id: artifact.evidence.semantic_type_id.clone(),
+                    content_digest: artifact.evidence.digest.clone(),
+                    byte_len: artifact.evidence.byte_len,
+                    media_type: artifact.evidence.media_type.clone(),
+                },
+            },
+        ));
+    }
+    refs
 }
 
 fn push_staged_event_artifact_requirement(
@@ -3840,6 +4055,22 @@ fn materialize_cell(
                     cell.cell_id
                 ))
             })?;
+            let seed_artifact =
+                committed_input_artifact(view, &cell.cell_id, &seed.seed_artifact.artifact_id)?;
+            if seed_artifact.evidence.digest != seed.digest
+                || seed_artifact.evidence.byte_len != seed.seed_artifact.byte_len
+                || seed_artifact.evidence.media_type != seed.seed_artifact.media_type
+                || seed_artifact.evidence.schema_id.as_ref() != Some(&seed.schema_id)
+                || seed_artifact.evidence.semantic_type_id.as_ref() != Some(&seed.semantic_type_id)
+                || seed_artifact.evidence.producer_node_id.is_some()
+                || seed_artifact.evidence.producer_seed_id.as_ref() != Some(seed_id)
+                || seed_artifact.evidence.artifact_role != events::ArtifactRole::SeedInput
+            {
+                return Err(RuntimeError::InputMaterialization(format!(
+                    "seed cell {} committed artifact evidence does not match certified seed",
+                    cell.cell_id
+                )));
+            }
             MaterializedCellTerminal::Seed {
                 seed_id: seed_id.clone(),
                 artifact_id: seed.seed_artifact.artifact_id.clone(),
@@ -3858,15 +4089,46 @@ fn materialize_cell(
                 })?;
             match projection {
                 store::CellTerminalProjection::Produced {
+                    node_id,
+                    attempt_id,
                     schema_id,
                     semantic_type_id,
                     artifact_id,
                     content_digest,
                     ..
                 } => {
-                    if schema_id != &cell.schema_id || semantic_type_id != &cell.semantic_type_id {
+                    if certified.producer != spec::CellProducer::Node(node_id.clone())
+                        || schema_id != &cell.schema_id
+                        || semantic_type_id != &cell.semantic_type_id
+                    {
                         return Err(RuntimeError::InputMaterialization(format!(
                             "produced cell {} projection metadata mismatch",
+                            cell.cell_id
+                        )));
+                    }
+                    match view.projections.attempt(node_id, attempt_id) {
+                        Some(store::AttemptProjection {
+                            status: store::AttemptStatus::Completed { output_cell_id },
+                            ..
+                        }) if output_cell_id == &cell.cell_id => {}
+                        _ => {
+                            return Err(RuntimeError::InputMaterialization(format!(
+                                "produced cell {} is not backed by a completed producer attempt",
+                                cell.cell_id
+                            )));
+                        }
+                    }
+                    let artifact = committed_input_artifact(view, &cell.cell_id, artifact_id)?;
+                    if artifact.evidence.digest != *content_digest
+                        || artifact.evidence.schema_id.as_ref() != Some(schema_id)
+                        || artifact.evidence.semantic_type_id.as_ref() != Some(semantic_type_id)
+                        || artifact.evidence.producer_node_id.as_ref() != Some(node_id)
+                        || artifact.evidence.producer_seed_id.is_some()
+                        || artifact.evidence.artifact_role != events::ArtifactRole::StateOutput
+                        || artifact.attempt_id.as_ref() != Some(attempt_id)
+                    {
+                        return Err(RuntimeError::InputMaterialization(format!(
+                            "produced cell {} committed artifact evidence does not match terminal projection",
                             cell.cell_id
                         )));
                     }
@@ -3876,6 +4138,8 @@ fn materialize_cell(
                     }
                 }
                 store::CellTerminalProjection::Skipped {
+                    node_id,
+                    attempt_id,
                     schema_id,
                     semantic_type_id,
                     skip_reason,
@@ -3887,11 +4151,26 @@ fn materialize_cell(
                             cell.cell_id
                         )));
                     }
-                    if schema_id != &cell.schema_id || semantic_type_id != &cell.semantic_type_id {
+                    if certified.producer != spec::CellProducer::Node(node_id.clone())
+                        || schema_id != &cell.schema_id
+                        || semantic_type_id != &cell.semantic_type_id
+                    {
                         return Err(RuntimeError::InputMaterialization(format!(
                             "skipped cell {} projection metadata mismatch",
                             cell.cell_id
                         )));
+                    }
+                    match view.projections.attempt(node_id, attempt_id) {
+                        Some(store::AttemptProjection {
+                            status: store::AttemptStatus::Completed { output_cell_id },
+                            ..
+                        }) if output_cell_id == &cell.cell_id => {}
+                        _ => {
+                            return Err(RuntimeError::InputMaterialization(format!(
+                                "skipped cell {} is not backed by a completed producer attempt",
+                                cell.cell_id
+                            )));
+                        }
                     }
                     MaterializedCellTerminal::Skipped {
                         skip_reason: skip_reason.clone(),
@@ -5149,6 +5428,293 @@ fn validate_config_artifacts(
     Ok(validated)
 }
 
+fn config_artifacts_from_stream(
+    runtime_spec: &CertifiedRuntimeSpec,
+    stream: &[store::KernelEventEnvelope],
+) -> Result<BTreeMap<String, store::ArtifactEvidenceRef>> {
+    let (start_seq, start_commit_key) = stream
+        .iter()
+        .find(|event| matches!(event.payload(), events::KernelEventPayload::RunStarted(_)))
+        .map(|event| (event.seq(), event.commit_key().clone()))
+        .ok_or_else(|| {
+            RuntimeError::InvalidRunStream(
+                "run has not started with certified RunStarted evidence".to_owned(),
+            )
+        })?;
+    let mut referenced = Vec::new();
+    for event in stream {
+        let events::KernelEventPayload::ArtifactReferenced(payload) = event.payload() else {
+            continue;
+        };
+        if payload.artifact_ref.role != events::ArtifactRole::TypedConfig {
+            continue;
+        }
+        if payload.node_id.is_some() || payload.attempt_id.is_some() {
+            return Err(RuntimeError::InvalidRunStream(
+                "typed config artifact references must not be scoped to a runner attempt"
+                    .to_owned(),
+            ));
+        }
+        if event.seq() != start_seq || event.commit_key() != &start_commit_key {
+            return Err(RuntimeError::InvalidRunStream(
+                "typed config artifact references must be part of the RunStarted commit".to_owned(),
+            ));
+        }
+        referenced.push(store_artifact_from_event_ref(
+            &payload.artifact_ref,
+            None,
+            None,
+        ));
+    }
+    let validated = validate_config_artifacts(runtime_spec, referenced)?;
+    Ok(validated
+        .into_iter()
+        .map(|artifact| {
+            let key = format!(
+                "{}:{}",
+                artifact
+                    .schema_id
+                    .as_ref()
+                    .expect("validated config artifact has schema id"),
+                artifact.digest
+            );
+            (key, artifact)
+        })
+        .collect())
+}
+
+fn artifact_refs_from_stream(
+    stream: &[store::KernelEventEnvelope],
+) -> Result<BTreeMap<ArtifactId, CommittedArtifactReference>> {
+    let mut artifacts = BTreeMap::new();
+    let mut index = 0;
+    while index < stream.len() {
+        let first = &stream[index];
+        let seq = first.seq();
+        let commit_key = first.commit_key().clone();
+        let mut end = index + 1;
+        while end < stream.len()
+            && stream[end].seq() == seq
+            && stream[end].commit_key() == &commit_key
+        {
+            end += 1;
+        }
+        let commit = &stream[index..end];
+        for event in commit {
+            match event.payload() {
+                events::KernelEventPayload::RunStarted(payload) => {
+                    for seed in &payload.seed_cells {
+                        insert_committed_artifact(
+                            &mut artifacts,
+                            CommittedArtifactReference {
+                                evidence: store_seed_artifact(seed),
+                                attempt_id: None,
+                                commit_seq: event.seq(),
+                                commit_key: event.commit_key().clone(),
+                            },
+                        )?;
+                    }
+                }
+                events::KernelEventPayload::ArtifactReferenced(payload)
+                    if staged_artifact_binding_kind(payload.artifact_ref.role).is_some() =>
+                {
+                    let (Some(node_id), Some(attempt_id)) =
+                        (payload.node_id.clone(), payload.attempt_id.clone())
+                    else {
+                        return Err(RuntimeError::InvalidRunStream(format!(
+                            "staged artifact reference {} must be scoped to a producer attempt",
+                            payload.artifact_ref.artifact_id
+                        )));
+                    };
+                    if !artifact_reference_matches_same_commit_payload(commit, payload) {
+                        return Err(RuntimeError::InvalidRunStream(format!(
+                            "staged artifact reference {} is not bound to a same-commit typed payload",
+                            payload.artifact_ref.artifact_id
+                        )));
+                    }
+                    if payload.artifact_ref.role == events::ArtifactRole::StateOutput {
+                        insert_committed_artifact(
+                            &mut artifacts,
+                            CommittedArtifactReference {
+                                evidence: store_artifact_from_event_ref(
+                                    &payload.artifact_ref,
+                                    Some(node_id),
+                                    None,
+                                ),
+                                attempt_id: Some(attempt_id),
+                                commit_seq: event.seq(),
+                                commit_key: event.commit_key().clone(),
+                            },
+                        )?;
+                    }
+                }
+                events::KernelEventPayload::ArtifactReferenced(payload)
+                    if payload.artifact_ref.role != events::ArtifactRole::TypedConfig =>
+                {
+                    return Err(RuntimeError::InvalidRunStream(format!(
+                        "unsupported artifact reference role {} for {}",
+                        artifact_role_name(payload.artifact_ref.role),
+                        payload.artifact_ref.artifact_id
+                    )));
+                }
+                _ => {}
+            }
+        }
+        index = end;
+    }
+    Ok(artifacts)
+}
+
+fn artifact_reference_matches_same_commit_payload(
+    commit: &[store::KernelEventEnvelope],
+    reference: &events::ArtifactReferenced,
+) -> bool {
+    let (Some(reference_node_id), Some(reference_attempt_id)) =
+        (&reference.node_id, &reference.attempt_id)
+    else {
+        return false;
+    };
+    commit.iter().any(|event| match event.payload() {
+        events::KernelEventPayload::CellProduced(payload) => {
+            reference.artifact_ref.role == events::ArtifactRole::StateOutput
+                && &payload.node_id == reference_node_id
+                && &payload.attempt_id == reference_attempt_id
+                && payload.artifact_id == reference.artifact_ref.artifact_id
+                && payload.content_digest == reference.artifact_ref.content_digest
+                && payload.schema_id == reference.artifact_ref.schema_id
+                && reference.artifact_ref.semantic_type_id.as_ref()
+                    == Some(&payload.semantic_type_id)
+        }
+        events::KernelEventPayload::FactRecorded(payload) => {
+            reference.artifact_ref.role == events::ArtifactRole::FactResponse
+                && &payload.node_id == reference_node_id
+                && &payload.attempt_id == reference_attempt_id
+                && payload.artifact_id == reference.artifact_ref.artifact_id
+                && payload.response_hash == reference.artifact_ref.content_digest
+                && payload.response_schema_id == reference.artifact_ref.schema_id
+        }
+        events::KernelEventPayload::PublicOutputProduced(payload) => {
+            reference.artifact_ref.role == events::ArtifactRole::PublicOutput
+                && &payload.node_id == reference_node_id
+                && &payload.attempt_id == reference_attempt_id
+                && payload.rendered_artifact_id.as_ref()
+                    == Some(&reference.artifact_ref.artifact_id)
+                && payload.rendered_digest == reference.artifact_ref.content_digest
+                && payload.public_schema_id == reference.artifact_ref.schema_id
+        }
+        events::KernelEventPayload::PublicOutputRenderFailed(payload) => {
+            reference.artifact_ref.role == events::ArtifactRole::RedactedDiagnostic
+                && &payload.node_id == reference_node_id
+                && &payload.attempt_id == reference_attempt_id
+                && payload
+                    .error
+                    .diagnostic_ref
+                    .as_ref()
+                    .is_some_and(|diagnostic| event_artifact_refs_match(diagnostic, reference))
+        }
+        events::KernelEventPayload::StateAttemptFailed(payload) => {
+            reference.artifact_ref.role == events::ArtifactRole::RedactedDiagnostic
+                && &payload.node_id == reference_node_id
+                && &payload.attempt_id == reference_attempt_id
+                && payload
+                    .error
+                    .diagnostic_ref
+                    .as_ref()
+                    .is_some_and(|diagnostic| event_artifact_refs_match(diagnostic, reference))
+        }
+        _ => false,
+    })
+}
+
+fn event_artifact_refs_match(
+    diagnostic: &events::ArtifactEvidenceRef,
+    reference: &events::ArtifactReferenced,
+) -> bool {
+    diagnostic.artifact_id == reference.artifact_ref.artifact_id
+        && diagnostic.role == reference.artifact_ref.role
+        && diagnostic.schema_id == reference.artifact_ref.schema_id
+        && diagnostic.semantic_type_id == reference.artifact_ref.semantic_type_id
+        && diagnostic.content_digest == reference.artifact_ref.content_digest
+        && diagnostic.byte_len == reference.artifact_ref.byte_len
+        && diagnostic.media_type == reference.artifact_ref.media_type
+}
+
+fn insert_committed_artifact(
+    artifacts: &mut BTreeMap<ArtifactId, CommittedArtifactReference>,
+    artifact: CommittedArtifactReference,
+) -> Result<()> {
+    if let Some(existing) = artifacts.get(&artifact.evidence.artifact_id) {
+        if existing != &artifact {
+            return Err(RuntimeError::InvalidRunStream(format!(
+                "conflicting committed artifact evidence for {}",
+                artifact.evidence.artifact_id
+            )));
+        }
+        return Ok(());
+    }
+    artifacts.insert(artifact.evidence.artifact_id.clone(), artifact);
+    Ok(())
+}
+
+fn committed_config_artifact(
+    node: &spec::NodeSpec,
+    view: &RuntimeRunView,
+) -> Result<store::ArtifactEvidenceRef> {
+    let key = config_ref_key(&node.config_ref);
+    let artifact = view.config_artifacts.get(&key).ok_or_else(|| {
+        RuntimeError::InputMaterialization(format!(
+            "node {} config artifact {} is not committed in the run stream",
+            node.node_id, node.config_ref.artifact_id
+        ))
+    })?;
+    if artifact.artifact_id != node.config_ref.artifact_id
+        || artifact.digest != node.config_ref.digest
+        || artifact.byte_len != node.config_ref.byte_len
+        || artifact.media_type != node.config_ref.media_type
+        || artifact.schema_id.as_ref() != Some(&node.config_ref.schema_id)
+        || artifact.semantic_type_id.is_some()
+        || artifact.producer_node_id.is_some()
+        || artifact.producer_seed_id.is_some()
+        || artifact.artifact_role != events::ArtifactRole::TypedConfig
+    {
+        return Err(RuntimeError::InputMaterialization(format!(
+            "node {} committed config artifact evidence does not match certified config ref",
+            node.node_id
+        )));
+    }
+    Ok(artifact.clone())
+}
+
+fn committed_input_artifact(
+    view: &RuntimeRunView,
+    cell_id: &CellId,
+    artifact_id: &ArtifactId,
+) -> Result<CommittedArtifactReference> {
+    view.artifact_refs.get(artifact_id).cloned().ok_or_else(|| {
+        RuntimeError::InputMaterialization(format!(
+            "input cell {cell_id} artifact {artifact_id} is not committed in the run stream",
+        ))
+    })
+}
+
+fn store_artifact_from_event_ref(
+    evidence: &events::ArtifactEvidenceRef,
+    producer_node_id: Option<NodeId>,
+    producer_seed_id: Option<mfm_ids::SeedId>,
+) -> store::ArtifactEvidenceRef {
+    store::ArtifactEvidenceRef {
+        artifact_id: evidence.artifact_id.clone(),
+        digest: evidence.content_digest.clone(),
+        byte_len: evidence.byte_len,
+        media_type: evidence.media_type.clone(),
+        schema_id: Some(evidence.schema_id.clone()),
+        semantic_type_id: evidence.semantic_type_id.clone(),
+        producer_node_id,
+        producer_seed_id,
+        artifact_role: evidence.role,
+    }
+}
+
 fn validate_runner_output(
     runtime_spec: &CertifiedRuntimeSpec,
     node: &spec::NodeSpec,
@@ -5264,14 +5830,10 @@ fn validate_runner_output(
                 require_adapter(node, &payload.adapter_kind, &payload.adapter_version)?;
             }
             events::KernelEventPayload::ArtifactReferenced(payload) => {
-                if payload.node_id.as_ref() != Some(&node.node_id)
-                    || payload.attempt_id.as_ref() != Some(attempt_id)
-                {
-                    return Err(RuntimeError::InvalidRunnerOutput(format!(
-                        "node {} referenced artifact outside its attempt",
-                        node.node_id
-                    )));
-                }
+                return Err(RuntimeError::InvalidRunnerOutput(format!(
+                    "runner for node {} returned artifact reference payload for {}",
+                    node.node_id, payload.artifact_ref.artifact_id
+                )));
             }
             events::KernelEventPayload::PublicOutputProduced(payload) => {
                 require_attempt(node, attempt_id, &payload.node_id, &payload.attempt_id)?;
@@ -6063,10 +6625,10 @@ mod tests {
         fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
             Box::pin(async move {
                 for (kind, version) in &self.expected_caps {
-                    assert!(ctx.caps.contains(kind, version));
+                    assert!(ctx.caps().contains(kind, version));
                 }
-                let output_cell = ctx.node.output_cell.clone();
-                let cell = match ctx.inputs.root.clone() {
+                let output_cell = ctx.node().output_cell.clone();
+                let cell = match ctx.inputs().root.clone() {
                     MaterializedInputNode::Cell(cell) => cell,
                     MaterializedInputNode::Unit
                     | MaterializedInputNode::Tuple(_)
@@ -6081,16 +6643,16 @@ mod tests {
                     MaterializedCellTerminal::Seed { .. }
                         | MaterializedCellTerminal::Produced { .. }
                 ));
-                let certified_cell = ctx.projections.cell_terminal(&output_cell).is_none();
+                let certified_cell = ctx.projections().cell_terminal(&output_cell).is_none();
                 assert!(certified_cell);
                 let artifact = store::ArtifactEvidenceRef {
                     artifact_id: self.output_artifact.clone(),
                     digest: self.output_digest.clone(),
                     byte_len: 17,
                     media_type: spec::MediaType::new("application/json").expect("media"),
-                    schema_id: Some(ctx.descriptor.output_schema_id.clone()),
-                    semantic_type_id: Some(ctx.descriptor.output_semantic_type_id.clone()),
-                    producer_node_id: Some(ctx.node.node_id.clone()),
+                    schema_id: Some(ctx.descriptor().output_schema_id.clone()),
+                    semantic_type_id: Some(ctx.descriptor().output_semantic_type_id.clone()),
+                    producer_node_id: Some(ctx.node().node_id.clone()),
                     producer_seed_id: None,
                     artifact_role: events::ArtifactRole::StateOutput,
                 };
@@ -6100,25 +6662,25 @@ mod tests {
                     staged_retention_refs: Vec::new(),
                     payloads: vec![
                         events::KernelEventPayload::CellProduced(events::CellProduced {
-                            spec_hash: ctx.spec_hash.clone(),
-                            node_id: ctx.node.node_id.clone(),
-                            cell_id: ctx.node.output_cell.clone(),
-                            scope_id: ctx.node.scope_id.clone(),
-                            attempt_id: ctx.attempt_id.clone(),
-                            semantic_type_id: ctx.descriptor.output_semantic_type_id.clone(),
-                            schema_id: ctx.descriptor.output_schema_id.clone(),
-                            value_lineage: ctx.output_cell.value_lineage.clone(),
+                            spec_hash: ctx.spec_hash().clone(),
+                            node_id: ctx.node().node_id.clone(),
+                            cell_id: ctx.node().output_cell.clone(),
+                            scope_id: ctx.node().scope_id.clone(),
+                            attempt_id: ctx.attempt_id().clone(),
+                            semantic_type_id: ctx.descriptor().output_semantic_type_id.clone(),
+                            schema_id: ctx.descriptor().output_schema_id.clone(),
+                            value_lineage: ctx.output_cell().value_lineage.clone(),
                             artifact_id: self.output_artifact.clone(),
                             content_digest: self.output_digest.clone(),
-                            producer_state_kind: Some(ctx.node.state_kind.clone()),
-                            producer_state_version: Some(ctx.node.state_version.clone()),
+                            producer_state_kind: Some(ctx.node().state_kind.clone()),
+                            producer_state_version: Some(ctx.node().state_version.clone()),
                         }),
                         events::KernelEventPayload::StateAttemptCompleted(
                             events::StateAttemptCompleted {
-                                spec_hash: ctx.spec_hash.clone(),
-                                node_id: ctx.node.node_id.clone(),
-                                attempt_id: ctx.attempt_id.clone(),
-                                output_cell_id: ctx.node.output_cell.clone(),
+                                spec_hash: ctx.spec_hash().clone(),
+                                node_id: ctx.node().node_id.clone(),
+                                attempt_id: ctx.attempt_id().clone(),
+                                output_cell_id: ctx.node().output_cell.clone(),
                             },
                         ),
                     ],
@@ -6711,9 +7273,9 @@ mod tests {
                 Box::pin(async move {
                     Ok(ErasedRunnerOutput::new(vec![
                         events::KernelEventPayload::FactRecorded(events::FactRecorded {
-                            spec_hash: ctx.spec_hash.clone(),
-                            node_id: ctx.node.node_id.clone(),
-                            attempt_id: ctx.attempt_id.clone(),
+                            spec_hash: ctx.spec_hash().clone(),
+                            node_id: ctx.node().node_id.clone(),
+                            attempt_id: ctx.attempt_id().clone(),
                             capability_kind: self.cap_kind.clone(),
                             capability_version: self.cap_version.clone(),
                             adapter_kind: AdapterKind::new(
@@ -6725,9 +7287,9 @@ mod tests {
                             .expect("adapter"),
                             adapter_version: AdapterVersion::new("mfm.adapter.v1")
                                 .expect("adapter version"),
-                            request_schema_id: ctx.node.config_ref.schema_id.clone(),
+                            request_schema_id: ctx.node().config_ref.schema_id.clone(),
                             request_hash: content(0xc1),
-                            response_schema_id: ctx.node.config_ref.schema_id.clone(),
+                            response_schema_id: ctx.node().config_ref.schema_id.clone(),
                             response_hash: content(0xc2),
                             fact_key: events::FactKey::new("bad-fact").expect("fact key"),
                             artifact_id: artifact(0xc3),
@@ -6789,8 +7351,8 @@ mod tests {
                 Box::pin(async move {
                     Ok(ErasedRunnerOutput::new(vec![
                         events::KernelEventPayload::RunCompleted(events::RunCompleted {
-                            run_id: ctx.run_id.clone(),
-                            spec_hash: ctx.spec_hash.clone(),
+                            run_id: ctx.run_id().clone(),
+                            spec_hash: ctx.spec_hash().clone(),
                             outcome: events::RunCompletionOutcome::Completed(
                                 events::PublicOutputCompletionEvidence {
                                     public_output_schema_id: self.public_schema_id.clone(),
@@ -6865,8 +7427,8 @@ mod tests {
             fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
                 Box::pin(async move {
                     let mut artifact = state_output_artifact(
-                        ctx.node,
-                        ctx.descriptor,
+                        ctx.node(),
+                        ctx.descriptor(),
                         self.output_artifact.clone(),
                         self.output_digest.clone(),
                     );
@@ -6941,8 +7503,8 @@ mod tests {
             fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
                 Box::pin(async move {
                     let artifact = state_output_artifact(
-                        ctx.node,
-                        ctx.descriptor,
+                        ctx.node(),
+                        ctx.descriptor(),
                         self.output_artifact.clone(),
                         self.output_digest.clone(),
                     );
@@ -7017,8 +7579,8 @@ mod tests {
             fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
                 Box::pin(async move {
                     let artifact = state_output_artifact_for_bytes(
-                        ctx.node,
-                        ctx.descriptor,
+                        ctx.node(),
+                        ctx.descriptor(),
                         &self.output_bytes,
                     );
                     let staged_artifact = StagedArtifact::inline_attempt_artifact(
@@ -7092,17 +7654,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn staged_artifact_must_match_payload_reference_metadata() {
-        struct MismatchedPayloadReferenceRunner {
+    async fn runner_cannot_return_artifact_reference_payload() {
+        struct ArtifactReferencePayloadRunner {
             output_bytes: Vec<u8>,
         }
 
-        impl ErasedNodeRunner for MismatchedPayloadReferenceRunner {
+        impl ErasedNodeRunner for ArtifactReferencePayloadRunner {
             fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
                 Box::pin(async move {
                     let artifact = state_output_artifact_for_bytes(
-                        ctx.node,
-                        ctx.descriptor,
+                        ctx.node(),
+                        ctx.descriptor(),
                         &self.output_bytes,
                     );
                     let staged_artifact = StagedArtifact::inline_attempt_artifact(
@@ -7119,9 +7681,9 @@ mod tests {
                     );
                     payloads.push(events::KernelEventPayload::ArtifactReferenced(
                         events::ArtifactReferenced {
-                            spec_hash: ctx.spec_hash.clone(),
-                            node_id: Some(ctx.node.node_id.clone()),
-                            attempt_id: Some(ctx.attempt_id.clone()),
+                            spec_hash: ctx.spec_hash().clone(),
+                            node_id: Some(ctx.node().node_id.clone()),
+                            attempt_id: Some(ctx.attempt_id().clone()),
                             artifact_ref,
                         },
                     ));
@@ -7140,7 +7702,7 @@ mod tests {
             .register(binding(
                 fixture.descriptor_a.clone(),
                 "pure",
-                MismatchedPayloadReferenceRunner {
+                ArtifactReferencePayloadRunner {
                     output_bytes: br#"{"metadata":"payload"}"#.to_vec(),
                 },
             ))
@@ -7172,8 +7734,117 @@ mod tests {
                 .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
                 .await,
             Err(RuntimeError::InvalidRunnerOutput(message))
-                if message.contains("does not match typed payload binding")
+                if message.contains("returned artifact reference payload")
         ));
+    }
+
+    #[tokio::test]
+    async fn runner_cannot_bind_extra_staged_artifact_with_artifact_reference_only() {
+        struct ExtraReferencedArtifactRunner {
+            output_bytes: Vec<u8>,
+            extra_bytes: Vec<u8>,
+        }
+
+        impl ErasedNodeRunner for ExtraReferencedArtifactRunner {
+            fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
+                Box::pin(async move {
+                    let output_artifact = state_output_artifact_for_bytes(
+                        ctx.node(),
+                        ctx.descriptor(),
+                        &self.output_bytes,
+                    );
+                    let output_staged_artifact = StagedArtifact::inline_attempt_artifact(
+                        &ctx,
+                        self.output_bytes.clone(),
+                        output_artifact.clone(),
+                    )?;
+                    let extra_digest = digest_for_bytes(&self.extra_bytes);
+                    let extra_artifact = store::ArtifactEvidenceRef {
+                        artifact_id: ArtifactId::from_digest(
+                            extra_digest.algorithm(),
+                            *extra_digest.digest(),
+                        ),
+                        digest: extra_digest,
+                        byte_len: self.extra_bytes.len() as u64,
+                        media_type: spec::MediaType::new("application/json").expect("media"),
+                        schema_id: Some(ctx.node().config_ref.schema_id.clone()),
+                        semantic_type_id: None,
+                        producer_node_id: Some(ctx.node().node_id.clone()),
+                        producer_seed_id: None,
+                        artifact_role: events::ArtifactRole::FactResponse,
+                    };
+                    let extra_staged_artifact = StagedArtifact::inline_attempt_artifact(
+                        &ctx,
+                        self.extra_bytes.clone(),
+                        extra_artifact.clone(),
+                    )?;
+                    let mut payloads = terminal_payloads(
+                        &ctx,
+                        output_artifact.artifact_id.clone(),
+                        output_artifact.digest.clone(),
+                    );
+                    payloads.push(events::KernelEventPayload::ArtifactReferenced(
+                        events::ArtifactReferenced {
+                            spec_hash: ctx.spec_hash().clone(),
+                            node_id: Some(ctx.node().node_id.clone()),
+                            attempt_id: Some(ctx.attempt_id().clone()),
+                            artifact_ref: event_artifact_ref_from_store(&extra_artifact),
+                        },
+                    ));
+                    Ok(ErasedRunnerOutput {
+                        staged_artifacts: vec![output_staged_artifact, extra_staged_artifact],
+                        staged_retention_refs: Vec::new(),
+                        payloads,
+                    })
+                })
+            }
+        }
+
+        let fixture = fixture();
+        let mut registry = ErasedRunnerRegistry::new();
+        registry
+            .register(binding(
+                fixture.descriptor_a.clone(),
+                "pure",
+                ExtraReferencedArtifactRunner {
+                    output_bytes: br#"{"terminal":"output"}"#.to_vec(),
+                    extra_bytes: br#"{"extra":"artifact"}"#.to_vec(),
+                },
+            ))
+            .expect("binding a");
+        registry
+            .register(binding(
+                fixture.descriptor_b.clone(),
+                "read",
+                RecordingRunner {
+                    expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
+                    output_artifact: artifact(0xb1),
+                    output_digest: content(0xb2),
+                },
+            ))
+            .expect("binding b");
+        let scheduler = test_scheduler(registry);
+        let mut store = store::InMemoryTypedRunStore::new();
+        scheduler
+            .start_run(
+                &mut store,
+                &fixture.runtime_spec,
+                fixture.run_id.clone(),
+                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
+            )
+            .expect("start run");
+
+        assert!(matches!(
+            scheduler
+                .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+                .await,
+            Err(RuntimeError::InvalidRunnerOutput(message))
+                if message.contains("returned artifact reference payload")
+        ));
+        assert!(store
+            .projection_snapshot()
+            .cell_terminal(&fixture.cell_a)
+            .is_none());
     }
 
     #[tokio::test]
@@ -7255,8 +7926,8 @@ mod tests {
             fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
                 Box::pin(async move {
                     let artifact = state_output_artifact(
-                        ctx.node,
-                        ctx.descriptor,
+                        ctx.node(),
+                        ctx.descriptor(),
                         self.staged_artifact.clone(),
                         self.staged_digest.clone(),
                     );
@@ -7414,6 +8085,272 @@ mod tests {
                 evidence,
             ),
             Err(RuntimeError::InvalidRunStream(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn runner_invocation_requires_committed_config_reference() {
+        let fixture = fixture();
+        let scheduler = test_scheduler(registered_fixture_runners(&fixture));
+        let mut store = store::InMemoryTypedRunStore::new();
+        scheduler
+            .start_run(
+                &mut store,
+                &fixture.runtime_spec,
+                fixture.run_id.clone(),
+                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
+            )
+            .expect("start run");
+
+        let valid_stream = store.load_run_stream(&fixture.run_id);
+        let config_ref_pos = valid_stream
+            .iter()
+            .position(|event| {
+                matches!(
+                    event.payload(),
+                    events::KernelEventPayload::ArtifactReferenced(payload)
+                        if payload.artifact_ref.role == events::ArtifactRole::TypedConfig
+                )
+            })
+            .expect("config artifact reference");
+        let mut corrupt_payload = match valid_stream[config_ref_pos].payload().clone() {
+            events::KernelEventPayload::ArtifactReferenced(payload) => payload,
+            _ => unreachable!("position checked"),
+        };
+        corrupt_payload.artifact_ref.role = events::ArtifactRole::StateOutput;
+        let corrupt_stream = rewrite_commit_payload(
+            &valid_stream,
+            config_ref_pos,
+            events::KernelEventPayload::ArtifactReferenced(corrupt_payload),
+        );
+        let mut corrupt_store = StaleStreamStore {
+            inner: &mut store,
+            stream: corrupt_stream,
+        };
+
+        assert!(matches!(
+            scheduler
+                .drive_once(&mut corrupt_store, &fixture.runtime_spec, &fixture.run_id)
+                .await,
+            Err(RuntimeError::InvalidRunStream(message))
+                if message.contains("missing typed config artifact evidence")
+        ));
+    }
+
+    #[tokio::test]
+    async fn runner_invocation_rejects_config_reference_outside_run_start_commit() {
+        let fixture = fixture();
+        let scheduler = test_scheduler(registered_fixture_runners(&fixture));
+        let mut store = store::InMemoryTypedRunStore::new();
+        scheduler
+            .start_run(
+                &mut store,
+                &fixture.runtime_spec,
+                fixture.run_id.clone(),
+                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
+            )
+            .expect("start run");
+
+        let valid_stream = store.load_run_stream(&fixture.run_id);
+        let config_ref = valid_stream
+            .iter()
+            .find_map(|event| match event.payload() {
+                events::KernelEventPayload::ArtifactReferenced(payload)
+                    if payload.artifact_ref.role == events::ArtifactRole::TypedConfig =>
+                {
+                    Some(event.payload().clone())
+                }
+                _ => None,
+            })
+            .expect("config artifact reference");
+        let mut corrupt_stream = rewrite_stream_without_payloads(&valid_stream, |payload| {
+            matches!(
+                payload,
+                events::KernelEventPayload::ArtifactReferenced(payload)
+                    if payload.artifact_ref.role == events::ArtifactRole::TypedConfig
+            )
+        });
+        append_payload_commit_for_tests(
+            &mut corrupt_stream,
+            &fixture.run_id,
+            "late-config-reference",
+            config_ref,
+        );
+        let mut corrupt_store = StaleStreamStore {
+            inner: &mut store,
+            stream: corrupt_stream,
+        };
+
+        assert!(matches!(
+            scheduler
+                .drive_once(&mut corrupt_store, &fixture.runtime_spec, &fixture.run_id)
+                .await,
+            Err(RuntimeError::InvalidRunStream(message))
+                if message.contains("RunStarted commit")
+        ));
+    }
+
+    #[tokio::test]
+    async fn runner_invocation_requires_committed_produced_input_artifact_reference() {
+        let fixture = fixture();
+        let scheduler = test_scheduler(registered_fixture_runners(&fixture));
+        let mut store = store::InMemoryTypedRunStore::new();
+        scheduler
+            .start_run(
+                &mut store,
+                &fixture.runtime_spec,
+                fixture.run_id.clone(),
+                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
+            )
+            .expect("start run");
+        scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("produce first cell");
+
+        let producer_node_id = node_by_output(&fixture, &fixture.cell_a).node_id.clone();
+        let consumer_node_id = node_by_output(&fixture, &fixture.cell_b).node_id.clone();
+        let valid_stream = store.load_run_stream(&fixture.run_id);
+        let corrupt_stream = rewrite_stream_without_payloads(&valid_stream, |payload| {
+            matches!(
+                payload,
+                events::KernelEventPayload::ArtifactReferenced(payload)
+                    if payload.artifact_ref.role == events::ArtifactRole::StateOutput
+                        && payload.node_id.as_ref() == Some(&producer_node_id)
+            )
+        });
+        let mut corrupt_store = StaleStreamStore {
+            inner: &mut store,
+            stream: corrupt_stream,
+        };
+
+        assert!(matches!(
+            scheduler
+                .drive_once(&mut corrupt_store, &fixture.runtime_spec, &fixture.run_id)
+                .await,
+            Err(RuntimeError::InputMaterialization(message))
+                if message.contains("is not committed in the run stream")
+        ));
+        assert_eq!(
+            attempt_started_count(&store, &fixture.run_id, &consumer_node_id),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn runner_invocation_rejects_late_produced_input_artifact_reference() {
+        let fixture = fixture();
+        let scheduler = test_scheduler(registered_fixture_runners(&fixture));
+        let mut store = store::InMemoryTypedRunStore::new();
+        scheduler
+            .start_run(
+                &mut store,
+                &fixture.runtime_spec,
+                fixture.run_id.clone(),
+                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
+            )
+            .expect("start run");
+        scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("produce first cell");
+
+        let producer_node_id = node_by_output(&fixture, &fixture.cell_a).node_id.clone();
+        let consumer_node_id = node_by_output(&fixture, &fixture.cell_b).node_id.clone();
+        let valid_stream = store.load_run_stream(&fixture.run_id);
+        let output_ref = valid_stream
+            .iter()
+            .find_map(|event| match event.payload() {
+                events::KernelEventPayload::ArtifactReferenced(payload)
+                    if payload.artifact_ref.role == events::ArtifactRole::StateOutput
+                        && payload.node_id.as_ref() == Some(&producer_node_id) =>
+                {
+                    Some(event.payload().clone())
+                }
+                _ => None,
+            })
+            .expect("state output artifact reference");
+        let mut corrupt_stream = rewrite_stream_without_payloads(&valid_stream, |payload| {
+            matches!(
+                payload,
+                events::KernelEventPayload::ArtifactReferenced(payload)
+                    if payload.artifact_ref.role == events::ArtifactRole::StateOutput
+                        && payload.node_id.as_ref() == Some(&producer_node_id)
+            )
+        });
+        append_payload_commit_for_tests(
+            &mut corrupt_stream,
+            &fixture.run_id,
+            "late-state-output-reference",
+            output_ref,
+        );
+        let mut corrupt_store = StaleStreamStore {
+            inner: &mut store,
+            stream: corrupt_stream,
+        };
+
+        assert!(matches!(
+            scheduler
+                .drive_once(&mut corrupt_store, &fixture.runtime_spec, &fixture.run_id)
+                .await,
+            Err(RuntimeError::InvalidRunStream(message))
+                if message.contains("same-commit typed payload")
+        ));
+        assert_eq!(
+            attempt_started_count(&store, &fixture.run_id, &consumer_node_id),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn runner_invocation_rejects_unsupported_artifact_reference_role() {
+        let fixture = fixture();
+        let scheduler = test_scheduler(registered_fixture_runners(&fixture));
+        let mut store = store::InMemoryTypedRunStore::new();
+        scheduler
+            .start_run(
+                &mut store,
+                &fixture.runtime_spec,
+                fixture.run_id.clone(),
+                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
+            )
+            .expect("start run");
+
+        let node = node_by_output(&fixture, &fixture.cell_a);
+        let artifact = store::ArtifactEvidenceRef {
+            artifact_id: artifact(0xe1),
+            digest: content(0xe2),
+            byte_len: 17,
+            media_type: spec::MediaType::new("application/json").expect("media"),
+            schema_id: Some(node.config_ref.schema_id.clone()),
+            semantic_type_id: None,
+            producer_node_id: Some(node.node_id.clone()),
+            producer_seed_id: None,
+            artifact_role: events::ArtifactRole::SideEffectIntent,
+        };
+        let mut corrupt_stream = store.load_run_stream(&fixture.run_id);
+        append_payload_commit_for_tests(
+            &mut corrupt_stream,
+            &fixture.run_id,
+            "unsupported-artifact-reference",
+            events::KernelEventPayload::ArtifactReferenced(events::ArtifactReferenced {
+                spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                node_id: Some(node.node_id.clone()),
+                attempt_id: None,
+                artifact_ref: event_artifact_ref_from_store(&artifact),
+            }),
+        );
+        let mut corrupt_store = StaleStreamStore {
+            inner: &mut store,
+            stream: corrupt_stream,
+        };
+
+        assert!(matches!(
+            scheduler
+                .drive_once(&mut corrupt_store, &fixture.runtime_spec, &fixture.run_id)
+                .await,
+            Err(RuntimeError::InvalidRunStream(message))
+                if message.contains("unsupported artifact reference role")
         ));
     }
 
@@ -8071,19 +9008,17 @@ mod tests {
             .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
             .await
             .expect("produce first cell");
-        let mut corrupt_stream = store.load_run_stream(&fixture.run_id);
-        corrupt_stream.retain(|event| {
-            !matches!(
-                event.payload(),
+        let valid_stream = store.load_run_stream(&fixture.run_id);
+        let corrupt_stream = rewrite_stream_without_payloads(&valid_stream, |payload| {
+            matches!(
+                payload,
                 events::KernelEventPayload::StateAttemptCompleted(payload)
                     if payload.output_cell_id == fixture.cell_a
             )
         });
-        let projection =
-            store::ProjectionSnapshot::rebuild_from_run_stream(&corrupt_stream).expect("rebuild");
-        let mut corrupt_store = ReadOnlyCorruptStore {
+        let mut corrupt_store = StaleStreamStore {
+            inner: &mut store,
             stream: corrupt_stream,
-            projection,
         };
 
         assert!(matches!(
@@ -8140,20 +9075,20 @@ mod tests {
             fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
                 Box::pin(async move {
                     let fact = ctx
-                        .recorded_facts
+                        .recorded_facts()
                         .get(&self.fact_key)
                         .expect("recorded fact");
                     assert_eq!(fact.fact_key, self.fact_key);
-                    assert_eq!(fact.request_schema_id, ctx.node.config_ref.schema_id);
-                    assert_eq!(ctx.recorded_facts.iter().count(), 1);
+                    assert_eq!(fact.request_schema_id, ctx.node().config_ref.schema_id);
+                    assert_eq!(ctx.recorded_facts().iter().count(), 1);
                     let artifact = store::ArtifactEvidenceRef {
                         artifact_id: self.output_artifact.clone(),
                         digest: self.output_digest.clone(),
                         byte_len: 17,
                         media_type: spec::MediaType::new("application/json").expect("media"),
-                        schema_id: Some(ctx.descriptor.output_schema_id.clone()),
-                        semantic_type_id: Some(ctx.descriptor.output_semantic_type_id.clone()),
-                        producer_node_id: Some(ctx.node.node_id.clone()),
+                        schema_id: Some(ctx.descriptor().output_schema_id.clone()),
+                        semantic_type_id: Some(ctx.descriptor().output_semantic_type_id.clone()),
+                        producer_node_id: Some(ctx.node().node_id.clone()),
                         producer_seed_id: None,
                         artifact_role: events::ArtifactRole::StateOutput,
                     };
@@ -8254,16 +9189,16 @@ mod tests {
                 Box::pin(async move {
                     Ok(ErasedRunnerOutput::new(vec![
                         events::KernelEventPayload::FactRecorded(events::FactRecorded {
-                            spec_hash: ctx.spec_hash.clone(),
-                            node_id: ctx.node.node_id.clone(),
-                            attempt_id: ctx.attempt_id.clone(),
+                            spec_hash: ctx.spec_hash().clone(),
+                            node_id: ctx.node().node_id.clone(),
+                            attempt_id: ctx.attempt_id().clone(),
                             capability_kind: self.cap_kind.clone(),
                             capability_version: self.cap_version.clone(),
                             adapter_kind: self.adapter_kind.clone(),
                             adapter_version: self.adapter_version.clone(),
-                            request_schema_id: ctx.node.config_ref.schema_id.clone(),
+                            request_schema_id: ctx.node().config_ref.schema_id.clone(),
                             request_hash: content(0xe1),
-                            response_schema_id: ctx.node.config_ref.schema_id.clone(),
+                            response_schema_id: ctx.node().config_ref.schema_id.clone(),
                             response_hash: content(0xe2),
                             fact_key: events::FactKey::new("new-fact").expect("fact key"),
                             artifact_id: artifact(0xe3),
@@ -8524,7 +9459,7 @@ mod tests {
         impl ErasedNodeRunner for WrongLedgerStagedSideEffectRunner {
             fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
                 Box::pin(async move {
-                    let ledger = side_effect_ledger_key(ctx.attempt_no);
+                    let ledger = side_effect_ledger_key(ctx.attempt_no());
                     let staged_ledger =
                         events::SideEffectLedgerKey::new("wrong-ledger").expect("ledger key");
                     let intent_bytes = br#"{"intent":"wrong-ledger"}"#.to_vec();
@@ -8536,9 +9471,9 @@ mod tests {
                         digest: intent_hash.clone(),
                         byte_len: intent_bytes.len() as u64,
                         media_type: spec::MediaType::new("application/json").expect("media"),
-                        schema_id: Some(ctx.node.config_ref.schema_id.clone()),
+                        schema_id: Some(ctx.node().config_ref.schema_id.clone()),
                         semantic_type_id: None,
-                        producer_node_id: Some(ctx.node.node_id.clone()),
+                        producer_node_id: Some(ctx.node().node_id.clone()),
                         producer_seed_id: None,
                         artifact_role: events::ArtifactRole::SideEffectIntent,
                     };
@@ -8555,17 +9490,17 @@ mod tests {
                         payloads: vec![
                             events::KernelEventPayload::SideEffectIntentPersisted(
                                 events::side_effect::IntentPersisted {
-                                    spec_hash: ctx.spec_hash.clone(),
-                                    node_id: ctx.node.node_id.clone(),
-                                    scope_id: ctx.node.scope_id.clone(),
-                                    attempt_id: ctx.attempt_id.clone(),
+                                    spec_hash: ctx.spec_hash().clone(),
+                                    node_id: ctx.node().node_id.clone(),
+                                    scope_id: ctx.node().scope_id.clone(),
+                                    attempt_id: ctx.attempt_id().clone(),
                                     ledger_key: ledger.clone(),
                                     invocation_epoch: 1,
-                                    intent_schema_id: ctx.node.config_ref.schema_id.clone(),
+                                    intent_schema_id: ctx.node().config_ref.schema_id.clone(),
                                     intent_hash,
                                     intent_artifact_id,
                                     idempotency_input_schema_id: ctx
-                                        .node
+                                        .node()
                                         .config_ref
                                         .schema_id
                                         .clone(),
@@ -8848,9 +9783,12 @@ mod tests {
     impl ErasedNodeRunner for DeterministicSideEffectRunner {
         fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
             Box::pin(async move {
-                let ledger = side_effect_ledger_key(ctx.attempt_no);
-                let phase =
-                    side_effect_projection_for_attempt(ctx.projections, ctx.node, ctx.attempt_id)?;
+                let ledger = side_effect_ledger_key(ctx.attempt_no());
+                let phase = side_effect_projection_for_attempt(
+                    ctx.projections(),
+                    ctx.node(),
+                    ctx.attempt_id(),
+                )?;
                 match phase {
                     None => self.prepare(ctx, ledger),
                     Some(projection)
@@ -8982,8 +9920,8 @@ mod tests {
                         ..
                     }) => {
                         let artifact = state_output_artifact(
-                            ctx.node,
-                            ctx.descriptor,
+                            ctx.node(),
+                            ctx.descriptor(),
                             self.output_artifact.clone(),
                             self.output_digest.clone(),
                         );
@@ -9012,7 +9950,7 @@ mod tests {
             ctx: ErasedRunCtx<'_>,
             ledger: events::SideEffectLedgerKey,
         ) -> Result<ErasedRunnerOutput> {
-            assert!(ctx.caps.contains(&self.cap_kind, &self.cap_version));
+            assert!(ctx.caps().contains(&self.cap_kind, &self.cap_version));
             let intent_artifact_id = artifact(0xc2);
             let intent_hash = content(0xc1);
             let staged_artifact = staged_side_effect_artifact(
@@ -9032,16 +9970,16 @@ mod tests {
                 payloads: vec![
                     events::KernelEventPayload::SideEffectIntentPersisted(
                         events::side_effect::IntentPersisted {
-                            spec_hash: ctx.spec_hash.clone(),
-                            node_id: ctx.node.node_id.clone(),
-                            scope_id: ctx.node.scope_id.clone(),
-                            attempt_id: ctx.attempt_id.clone(),
+                            spec_hash: ctx.spec_hash().clone(),
+                            node_id: ctx.node().node_id.clone(),
+                            scope_id: ctx.node().scope_id.clone(),
+                            attempt_id: ctx.attempt_id().clone(),
                             ledger_key: ledger.clone(),
                             invocation_epoch: 1,
-                            intent_schema_id: ctx.node.config_ref.schema_id.clone(),
+                            intent_schema_id: ctx.node().config_ref.schema_id.clone(),
                             intent_hash,
                             intent_artifact_id,
-                            idempotency_input_schema_id: ctx.node.config_ref.schema_id.clone(),
+                            idempotency_input_schema_id: ctx.node().config_ref.schema_id.clone(),
                             idempotency_input_hash: content(0xc3),
                             idempotency_key: events::IdempotencyKeyRef::new("idem-1")
                                 .expect("idempotency key"),
@@ -9073,9 +10011,12 @@ mod tests {
     impl ErasedNodeRunner for AmbiguousSideEffectRunner {
         fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
             Box::pin(async move {
-                let ledger = side_effect_ledger_key(ctx.attempt_no);
-                let phase =
-                    side_effect_projection_for_attempt(ctx.projections, ctx.node, ctx.attempt_id)?;
+                let ledger = side_effect_ledger_key(ctx.attempt_no());
+                let phase = side_effect_projection_for_attempt(
+                    ctx.projections(),
+                    ctx.node(),
+                    ctx.attempt_id(),
+                )?;
                 if matches!(
                     phase.map(|projection| &projection.phase),
                     Some(store::SideEffectPhase::InvocationStarted { .. })
@@ -9098,14 +10039,14 @@ mod tests {
                         staged_retention_refs: Vec::new(),
                         payloads: vec![events::KernelEventPayload::SideEffectAmbiguous(
                             events::side_effect::Ambiguous {
-                                spec_hash: ctx.spec_hash.clone(),
-                                node_id: ctx.node.node_id.clone(),
-                                attempt_id: ctx.attempt_id.clone(),
+                                spec_hash: ctx.spec_hash().clone(),
+                                node_id: ctx.node().node_id.clone(),
+                                attempt_id: ctx.attempt_id().clone(),
                                 ledger_key: ledger,
                                 invocation_epoch: 1,
                                 ambiguity_code: events::AmbiguityCode::new("unknown_submission")
                                     .expect("ambiguity code"),
-                                evidence_schema_id: ctx.node.config_ref.schema_id.clone(),
+                                evidence_schema_id: ctx.node().config_ref.schema_id.clone(),
                                 evidence_hash: digest,
                                 evidence_artifact_id: artifact_id,
                             },
@@ -9127,8 +10068,8 @@ mod tests {
         fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
             Box::pin(async move {
                 let artifact = state_output_artifact(
-                    ctx.node,
-                    ctx.descriptor,
+                    ctx.node(),
+                    ctx.descriptor(),
                     self.output_artifact.clone(),
                     self.output_digest.clone(),
                 );
@@ -9153,19 +10094,19 @@ mod tests {
             Box::pin(async move {
                 Ok(ErasedRunnerOutput::new(vec![
                     events::KernelEventPayload::SideEffectFailed(events::side_effect::Failed {
-                        spec_hash: ctx.spec_hash.clone(),
-                        node_id: ctx.node.node_id.clone(),
-                        attempt_id: ctx.attempt_id.clone(),
-                        ledger_key: side_effect_ledger_key(ctx.attempt_no),
+                        spec_hash: ctx.spec_hash().clone(),
+                        node_id: ctx.node().node_id.clone(),
+                        attempt_id: ctx.attempt_id().clone(),
+                        ledger_key: side_effect_ledger_key(ctx.attempt_no()),
                         invocation_epoch: 1,
                         failure_phase: events::side_effect::FailurePhase::BeforeInvocationStarted,
                         retryable: false,
                         error: side_effect_error(false),
                     }),
                     events::KernelEventPayload::StateAttemptFailed(events::StateAttemptFailed {
-                        spec_hash: ctx.spec_hash.clone(),
-                        node_id: ctx.node.node_id.clone(),
-                        attempt_id: ctx.attempt_id.clone(),
+                        spec_hash: ctx.spec_hash().clone(),
+                        node_id: ctx.node().node_id.clone(),
+                        attempt_id: ctx.attempt_id().clone(),
                         retryable: true,
                         error: side_effect_error(true),
                     }),
@@ -9252,6 +10193,118 @@ mod tests {
             payload_canonical_byte_len: event.audit().payload_canonical_byte_len(),
         })
         .expect("rewritten envelope")
+    }
+
+    fn rewrite_commit_payload(
+        stream: &[store::KernelEventEnvelope],
+        target_pos: usize,
+        payload: events::KernelEventPayload,
+    ) -> Vec<store::KernelEventEnvelope> {
+        let target = &stream[target_pos];
+        let seq = target.seq();
+        let commit_key = target.commit_key().clone();
+        let mut positions = stream
+            .iter()
+            .enumerate()
+            .filter_map(|(index, event)| {
+                (event.seq() == seq && event.commit_key() == &commit_key).then_some(index)
+            })
+            .collect::<Vec<_>>();
+        positions.sort_by_key(|index| stream[*index].ordinal().as_u32());
+        let target_ordinal = target.ordinal().as_u32() as usize;
+        assert_eq!(positions[target_ordinal], target_pos);
+        let mut payloads = positions
+            .iter()
+            .map(|index| stream[*index].payload().clone())
+            .collect::<Vec<_>>();
+        payloads[target_ordinal] = payload;
+        let request = store::TypedCommitRequest {
+            run_id: target.run_id().clone(),
+            expected_next_seq: seq,
+            commit_key,
+            payloads,
+            required_artifacts: Vec::new(),
+            preconditions: store::CommitPreconditions::default(),
+        };
+        let batch =
+            store::build_committed_batch(&request, seq).expect("rewritten commit payload batch");
+        let mut rewritten = stream.to_vec();
+        for (position, event) in positions.into_iter().zip(batch.events().iter().cloned()) {
+            rewritten[position] = event;
+        }
+        rewritten
+    }
+
+    fn rewrite_stream_without_payloads<F>(
+        stream: &[store::KernelEventEnvelope],
+        mut should_remove: F,
+    ) -> Vec<store::KernelEventEnvelope>
+    where
+        F: FnMut(&events::KernelEventPayload) -> bool,
+    {
+        let mut rewritten = Vec::with_capacity(stream.len());
+        let mut index = 0;
+        while index < stream.len() {
+            let first = &stream[index];
+            let seq = first.seq();
+            let commit_key = first.commit_key().clone();
+            let mut end = index + 1;
+            while end < stream.len()
+                && stream[end].seq() == seq
+                && stream[end].commit_key() == &commit_key
+            {
+                end += 1;
+            }
+            let commit = &stream[index..end];
+            let payloads = commit
+                .iter()
+                .filter(|event| !should_remove(event.payload()))
+                .map(|event| event.payload().clone())
+                .collect::<Vec<_>>();
+            assert!(
+                !payloads.is_empty(),
+                "test corruption helper must not remove an entire commit"
+            );
+            if payloads.len() == commit.len() {
+                rewritten.extend(commit.iter().cloned());
+            } else {
+                let mut ordinal = 0;
+                for event in commit {
+                    if should_remove(event.payload()) {
+                        continue;
+                    }
+                    rewritten.push(rewrite_envelope(
+                        event,
+                        seq,
+                        store::CommitOrdinal::new(ordinal),
+                        commit_key.clone(),
+                    ));
+                    ordinal += 1;
+                }
+            }
+            index = end;
+        }
+        rewritten
+    }
+
+    fn append_payload_commit_for_tests(
+        stream: &mut Vec<store::KernelEventEnvelope>,
+        run_id: &RunId,
+        commit_key: &str,
+        payload: events::KernelEventPayload,
+    ) {
+        let seq = next_seq_after_stream(stream).expect("next stream seq");
+        let request = store::TypedCommitRequest {
+            run_id: run_id.clone(),
+            expected_next_seq: seq,
+            commit_key: store::CommitKey::new(commit_key).expect("commit key"),
+            payloads: vec![payload],
+            required_artifacts: Vec::new(),
+            preconditions: store::CommitPreconditions::default(),
+        };
+        let batch = store::build_committed_batch(&request, seq)
+            .expect("appended corrupt payload commit batch");
+        stream.extend(batch.events().iter().cloned());
     }
 
     fn rewrite_single_payload_envelope(
@@ -9373,24 +10426,24 @@ mod tests {
     ) -> Vec<events::KernelEventPayload> {
         vec![
             events::KernelEventPayload::CellProduced(events::CellProduced {
-                spec_hash: ctx.spec_hash.clone(),
-                node_id: ctx.node.node_id.clone(),
-                cell_id: ctx.node.output_cell.clone(),
-                scope_id: ctx.node.scope_id.clone(),
-                attempt_id: ctx.attempt_id.clone(),
-                semantic_type_id: ctx.descriptor.output_semantic_type_id.clone(),
-                schema_id: ctx.descriptor.output_schema_id.clone(),
-                value_lineage: ctx.output_cell.value_lineage.clone(),
+                spec_hash: ctx.spec_hash().clone(),
+                node_id: ctx.node().node_id.clone(),
+                cell_id: ctx.node().output_cell.clone(),
+                scope_id: ctx.node().scope_id.clone(),
+                attempt_id: ctx.attempt_id().clone(),
+                semantic_type_id: ctx.descriptor().output_semantic_type_id.clone(),
+                schema_id: ctx.descriptor().output_schema_id.clone(),
+                value_lineage: ctx.output_cell().value_lineage.clone(),
                 artifact_id: output_artifact,
                 content_digest: output_digest,
-                producer_state_kind: Some(ctx.node.state_kind.clone()),
-                producer_state_version: Some(ctx.node.state_version.clone()),
+                producer_state_kind: Some(ctx.node().state_kind.clone()),
+                producer_state_version: Some(ctx.node().state_version.clone()),
             }),
             events::KernelEventPayload::StateAttemptCompleted(events::StateAttemptCompleted {
-                spec_hash: ctx.spec_hash.clone(),
-                node_id: ctx.node.node_id.clone(),
-                attempt_id: ctx.attempt_id.clone(),
-                output_cell_id: ctx.node.output_cell.clone(),
+                spec_hash: ctx.spec_hash().clone(),
+                node_id: ctx.node().node_id.clone(),
+                attempt_id: ctx.attempt_id().clone(),
+                output_cell_id: ctx.node().output_cell.clone(),
             }),
         ]
     }
@@ -10657,9 +11710,9 @@ mod tests {
             digest,
             byte_len: 19,
             media_type: spec::MediaType::new("application/json").expect("media"),
-            schema_id: Some(ctx.node.config_ref.schema_id.clone()),
+            schema_id: Some(ctx.node().config_ref.schema_id.clone()),
             semantic_type_id: None,
-            producer_node_id: Some(ctx.node.node_id.clone()),
+            producer_node_id: Some(ctx.node().node_id.clone()),
             producer_seed_id: None,
             artifact_role: role,
         }
@@ -10672,14 +11725,14 @@ mod tests {
         claim_generation: u32,
     ) -> events::KernelEventPayload {
         events::KernelEventPayload::SideEffectClaimed(events::side_effect::Claimed {
-            spec_hash: ctx.spec_hash.clone(),
-            node_id: ctx.node.node_id.clone(),
-            attempt_id: ctx.attempt_id.clone(),
+            spec_hash: ctx.spec_hash().clone(),
+            node_id: ctx.node().node_id.clone(),
+            attempt_id: ctx.attempt_id().clone(),
             ledger_key: ledger,
-            claim_owner: side_effect_claim_owner(ctx.attempt_no, claim_generation),
+            claim_owner: side_effect_claim_owner(ctx.attempt_no(), claim_generation),
             invocation_epoch,
             claim_generation,
-            claim_fencing_token: side_effect_fencing_token(ctx.attempt_no, claim_generation),
+            claim_fencing_token: side_effect_fencing_token(ctx.attempt_no(), claim_generation),
         })
     }
 
@@ -10690,16 +11743,16 @@ mod tests {
         claim_generation: u32,
     ) -> events::KernelEventPayload {
         events::KernelEventPayload::SideEffectClaimTakenOver(events::side_effect::ClaimTakenOver {
-            spec_hash: ctx.spec_hash.clone(),
-            node_id: ctx.node.node_id.clone(),
-            attempt_id: ctx.attempt_id.clone(),
+            spec_hash: ctx.spec_hash().clone(),
+            node_id: ctx.node().node_id.clone(),
+            attempt_id: ctx.attempt_id().clone(),
             ledger_key: ledger,
             previous_claim_owner: previous.claim_owner.clone(),
-            new_claim_owner: side_effect_claim_owner(ctx.attempt_no, claim_generation),
+            new_claim_owner: side_effect_claim_owner(ctx.attempt_no(), claim_generation),
             invocation_epoch: previous.invocation_epoch,
             previous_claim_generation: previous.claim_generation,
             claim_generation,
-            claim_fencing_token: side_effect_fencing_token(ctx.attempt_no, claim_generation),
+            claim_fencing_token: side_effect_fencing_token(ctx.attempt_no(), claim_generation),
         })
     }
 
@@ -10711,13 +11764,13 @@ mod tests {
     ) -> events::KernelEventPayload {
         events::KernelEventPayload::SideEffectInvocationPrepared(
             events::side_effect::InvocationPrepared {
-                spec_hash: ctx.spec_hash.clone(),
-                node_id: ctx.node.node_id.clone(),
-                attempt_id: ctx.attempt_id.clone(),
+                spec_hash: ctx.spec_hash().clone(),
+                node_id: ctx.node().node_id.clone(),
+                attempt_id: ctx.attempt_id().clone(),
                 ledger_key: ledger,
                 invocation_epoch,
                 claim_generation,
-                claim_fencing_token: side_effect_fencing_token(ctx.attempt_no, claim_generation),
+                claim_fencing_token: side_effect_fencing_token(ctx.attempt_no(), claim_generation),
                 prepared_artifact_id: None,
                 prepared_hash: None,
             },
@@ -10732,14 +11785,14 @@ mod tests {
     ) -> events::KernelEventPayload {
         events::KernelEventPayload::SideEffectInvocationStarted(
             events::side_effect::InvocationStarted {
-                spec_hash: ctx.spec_hash.clone(),
-                node_id: ctx.node.node_id.clone(),
-                attempt_id: ctx.attempt_id.clone(),
+                spec_hash: ctx.spec_hash().clone(),
+                node_id: ctx.node().node_id.clone(),
+                attempt_id: ctx.attempt_id().clone(),
                 ledger_key: ledger,
                 invocation_epoch,
-                claim_owner: side_effect_claim_owner(ctx.attempt_no, claim_generation),
+                claim_owner: side_effect_claim_owner(ctx.attempt_no(), claim_generation),
                 claim_generation,
-                claim_fencing_token: side_effect_fencing_token(ctx.attempt_no, claim_generation),
+                claim_fencing_token: side_effect_fencing_token(ctx.attempt_no(), claim_generation),
             },
         )
     }
@@ -10753,12 +11806,12 @@ mod tests {
     ) -> events::KernelEventPayload {
         events::KernelEventPayload::SideEffectSubmissionObserved(
             events::side_effect::SubmissionObserved {
-                spec_hash: ctx.spec_hash.clone(),
-                node_id: ctx.node.node_id.clone(),
-                attempt_id: ctx.attempt_id.clone(),
+                spec_hash: ctx.spec_hash().clone(),
+                node_id: ctx.node().node_id.clone(),
+                attempt_id: ctx.attempt_id().clone(),
                 ledger_key: ledger,
                 invocation_epoch,
-                submission_schema_id: ctx.node.config_ref.schema_id.clone(),
+                submission_schema_id: ctx.node().config_ref.schema_id.clone(),
                 submission_hash: digest,
                 submission_artifact_id: artifact_id,
             },
@@ -10774,12 +11827,12 @@ mod tests {
     ) -> events::KernelEventPayload {
         events::KernelEventPayload::SideEffectReceiptObserved(
             events::side_effect::ReceiptObserved {
-                spec_hash: ctx.spec_hash.clone(),
-                node_id: ctx.node.node_id.clone(),
-                attempt_id: ctx.attempt_id.clone(),
+                spec_hash: ctx.spec_hash().clone(),
+                node_id: ctx.node().node_id.clone(),
+                attempt_id: ctx.attempt_id().clone(),
                 ledger_key: ledger,
                 invocation_epoch,
-                receipt_schema_id: ctx.node.config_ref.schema_id.clone(),
+                receipt_schema_id: ctx.node().config_ref.schema_id.clone(),
                 receipt_hash: digest,
                 receipt_artifact_id: artifact_id,
                 replay_verifier_id: events::ReplayVerifierId::new("verifier-1").expect("verifier"),
@@ -10796,12 +11849,12 @@ mod tests {
     ) -> events::KernelEventPayload {
         events::KernelEventPayload::SideEffectConfirmationObserved(
             events::side_effect::ConfirmationObserved {
-                spec_hash: ctx.spec_hash.clone(),
-                node_id: ctx.node.node_id.clone(),
-                attempt_id: ctx.attempt_id.clone(),
+                spec_hash: ctx.spec_hash().clone(),
+                node_id: ctx.node().node_id.clone(),
+                attempt_id: ctx.attempt_id().clone(),
                 ledger_key: ledger,
                 invocation_epoch,
-                confirmation_schema_id: ctx.node.config_ref.schema_id.clone(),
+                confirmation_schema_id: ctx.node().config_ref.schema_id.clone(),
                 confirmation_hash: digest,
                 confirmation_artifact_id: artifact_id,
                 replay_verifier_id: events::ReplayVerifierId::new("verifier-1").expect("verifier"),

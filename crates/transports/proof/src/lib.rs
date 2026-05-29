@@ -254,7 +254,7 @@ impl ErasedNodeRunner for ProofAssembleRunner {
 }
 
 async fn run_read(ctx: ErasedRunCtx<'_>) -> mfm_runtime::Result<ErasedRunnerOutput> {
-    ensure_config::<ProofReadConfig>(&ctx.node.config_ref, &ProofReadConfig { fact_n: 1 })?;
+    ensure_config::<ProofReadConfig>(&ctx.node().config_ref, &ProofReadConfig { fact_n: 1 })?;
     let fact = ProofFact { n: 1 };
     let request = ProofFactRequest {
         source: "deterministic-proof".to_owned(),
@@ -264,12 +264,12 @@ async fn run_read(ctx: ErasedRunCtx<'_>) -> mfm_runtime::Result<ErasedRunnerOutp
     let response_artifact = artifact_for_value(
         &response,
         events::ArtifactRole::FactResponse,
-        Some(ctx.node.node_id.clone()),
+        Some(ctx.node().node_id.clone()),
     )?;
     let output_artifact = artifact_for_value(
         &fact,
         events::ArtifactRole::StateOutput,
-        Some(ctx.node.node_id.clone()),
+        Some(ctx.node().node_id.clone()),
     )?;
     let staged_response = staged_attempt_artifact(&ctx, &response_artifact)?;
     let staged_output = staged_attempt_artifact(&ctx, &output_artifact)?;
@@ -281,9 +281,9 @@ async fn run_read(ctx: ErasedRunCtx<'_>) -> mfm_runtime::Result<ErasedRunnerOutp
         ],
         payloads: vec![
             events::KernelEventPayload::FactRecorded(events::FactRecorded {
-                spec_hash: ctx.spec_hash.clone(),
-                node_id: ctx.node.node_id.clone(),
-                attempt_id: ctx.attempt_id.clone(),
+                spec_hash: ctx.spec_hash().clone(),
+                node_id: ctx.node().node_id.clone(),
+                attempt_id: ctx.attempt_id().clone(),
                 capability_kind: ProofReadCapability::kind().map_err(runtime_capability_error)?,
                 capability_version: ProofReadCapability::version()
                     .map_err(runtime_capability_error)?,
@@ -304,26 +304,29 @@ async fn run_read(ctx: ErasedRunCtx<'_>) -> mfm_runtime::Result<ErasedRunnerOutp
 
 async fn run_side_effect(ctx: ErasedRunCtx<'_>) -> mfm_runtime::Result<ErasedRunnerOutput> {
     ensure_config::<ProofApplyConfig>(
-        &ctx.node.config_ref,
+        &ctx.node().config_ref,
         &ProofApplyConfig {
             action: "accept".to_owned(),
         },
     )?;
     let ledger_key = events::SideEffectLedgerKey::new("mfm.proof.ledger.default")?;
-    let projection = ctx.projections.side_effect(&ledger_key);
-    match projection.map(|projection| &projection.phase) {
+    let phase = ctx
+        .projections()
+        .side_effect(&ledger_key)
+        .map(|projection| projection.phase.clone());
+    match phase {
         None => side_effect_prepare(ctx, ledger_key).await,
         Some(store::SideEffectPhase::InvocationStarted {
             invocation_epoch, ..
         })
         | Some(store::SideEffectPhase::SubmissionUnknown { invocation_epoch }) => {
-            side_effect_submission(ctx, ledger_key, *invocation_epoch).await
+            side_effect_submission(ctx, ledger_key, invocation_epoch).await
         }
         Some(store::SideEffectPhase::SubmissionObserved { invocation_epoch }) => {
-            side_effect_receipt(ctx, ledger_key, *invocation_epoch).await
+            side_effect_receipt(ctx, ledger_key, invocation_epoch).await
         }
         Some(store::SideEffectPhase::ReceiptObserved { invocation_epoch }) => {
-            side_effect_confirmation(ctx, ledger_key, *invocation_epoch).await
+            side_effect_confirmation(ctx, ledger_key, invocation_epoch).await
         }
         Some(store::SideEffectPhase::ConfirmationObserved { .. }) => side_effect_output(ctx).await,
         Some(store::SideEffectPhase::Ambiguous { .. }) => Ok(ErasedRunnerOutput::new(Vec::new())),
@@ -342,7 +345,7 @@ async fn side_effect_prepare(
     let intent_artifact = artifact_for_value(
         &intent,
         events::ArtifactRole::SideEffectIntent,
-        Some(ctx.node.node_id.clone()),
+        Some(ctx.node().node_id.clone()),
     )?;
     let idem_hash = digest_value(&idem_input)?;
     let idempotency_key =
@@ -356,10 +359,10 @@ async fn side_effect_prepare(
         staged_retention_refs: vec![retention(&intent_artifact.evidence)],
         payloads: vec![
             events::KernelEventPayload::SideEffectIntentPersisted(side_effect::IntentPersisted {
-                spec_hash: ctx.spec_hash.clone(),
-                node_id: ctx.node.node_id.clone(),
-                scope_id: ctx.node.scope_id.clone(),
-                attempt_id: ctx.attempt_id.clone(),
+                spec_hash: ctx.spec_hash().clone(),
+                node_id: ctx.node().node_id.clone(),
+                scope_id: ctx.node().scope_id.clone(),
+                attempt_id: ctx.attempt_id().clone(),
                 ledger_key: ledger_key.clone(),
                 invocation_epoch: 1,
                 intent_schema_id: ProofIntent::schema_id().map_err(runtime_value_error)?,
@@ -377,9 +380,9 @@ async fn side_effect_prepare(
                 adapter_version: proof_adapter_version()?,
             }),
             events::KernelEventPayload::SideEffectClaimed(side_effect::Claimed {
-                spec_hash: ctx.spec_hash.clone(),
-                node_id: ctx.node.node_id.clone(),
-                attempt_id: ctx.attempt_id.clone(),
+                spec_hash: ctx.spec_hash().clone(),
+                node_id: ctx.node().node_id.clone(),
+                attempt_id: ctx.attempt_id().clone(),
                 ledger_key: ledger_key.clone(),
                 claim_owner: owner.clone(),
                 invocation_epoch: 1,
@@ -388,9 +391,9 @@ async fn side_effect_prepare(
             }),
             events::KernelEventPayload::SideEffectInvocationPrepared(
                 side_effect::InvocationPrepared {
-                    spec_hash: ctx.spec_hash.clone(),
-                    node_id: ctx.node.node_id.clone(),
-                    attempt_id: ctx.attempt_id.clone(),
+                    spec_hash: ctx.spec_hash().clone(),
+                    node_id: ctx.node().node_id.clone(),
+                    attempt_id: ctx.attempt_id().clone(),
                     ledger_key: ledger_key.clone(),
                     invocation_epoch: 1,
                     claim_generation: 1,
@@ -401,9 +404,9 @@ async fn side_effect_prepare(
             ),
             events::KernelEventPayload::SideEffectInvocationStarted(
                 side_effect::InvocationStarted {
-                    spec_hash: ctx.spec_hash.clone(),
-                    node_id: ctx.node.node_id.clone(),
-                    attempt_id: ctx.attempt_id.clone(),
+                    spec_hash: ctx.spec_hash().clone(),
+                    node_id: ctx.node().node_id.clone(),
+                    attempt_id: ctx.attempt_id().clone(),
                     ledger_key,
                     invocation_epoch: 1,
                     claim_owner: owner,
@@ -424,7 +427,7 @@ async fn side_effect_submission(
     let artifact = artifact_for_value(
         &submission,
         events::ArtifactRole::Submission,
-        Some(ctx.node.node_id.clone()),
+        Some(ctx.node().node_id.clone()),
     )?;
     let staged_artifact =
         staged_side_effect_artifact(&ctx, &artifact, ledger_key.clone(), invocation_epoch)?;
@@ -433,9 +436,9 @@ async fn side_effect_submission(
         staged_retention_refs: vec![retention(&artifact.evidence)],
         payloads: vec![events::KernelEventPayload::SideEffectSubmissionObserved(
             side_effect::SubmissionObserved {
-                spec_hash: ctx.spec_hash.clone(),
-                node_id: ctx.node.node_id.clone(),
-                attempt_id: ctx.attempt_id.clone(),
+                spec_hash: ctx.spec_hash().clone(),
+                node_id: ctx.node().node_id.clone(),
+                attempt_id: ctx.attempt_id().clone(),
                 ledger_key,
                 invocation_epoch,
                 submission_schema_id: ProofSubmission::schema_id().map_err(runtime_value_error)?,
@@ -455,7 +458,7 @@ async fn side_effect_receipt(
     let artifact = artifact_for_value(
         &receipt,
         events::ArtifactRole::Receipt,
-        Some(ctx.node.node_id.clone()),
+        Some(ctx.node().node_id.clone()),
     )?;
     let staged_artifact =
         staged_side_effect_artifact(&ctx, &artifact, ledger_key.clone(), invocation_epoch)?;
@@ -464,9 +467,9 @@ async fn side_effect_receipt(
         staged_retention_refs: vec![retention(&artifact.evidence)],
         payloads: vec![events::KernelEventPayload::SideEffectReceiptObserved(
             side_effect::ReceiptObserved {
-                spec_hash: ctx.spec_hash.clone(),
-                node_id: ctx.node.node_id.clone(),
-                attempt_id: ctx.attempt_id.clone(),
+                spec_hash: ctx.spec_hash().clone(),
+                node_id: ctx.node().node_id.clone(),
+                attempt_id: ctx.attempt_id().clone(),
                 ledger_key,
                 invocation_epoch,
                 receipt_schema_id: ProofReceipt::schema_id().map_err(runtime_value_error)?,
@@ -487,7 +490,7 @@ async fn side_effect_confirmation(
     let artifact = artifact_for_value(
         &confirmation,
         events::ArtifactRole::Confirmation,
-        Some(ctx.node.node_id.clone()),
+        Some(ctx.node().node_id.clone()),
     )?;
     let staged_artifact =
         staged_side_effect_artifact(&ctx, &artifact, ledger_key.clone(), invocation_epoch)?;
@@ -496,9 +499,9 @@ async fn side_effect_confirmation(
         staged_retention_refs: vec![retention(&artifact.evidence)],
         payloads: vec![events::KernelEventPayload::SideEffectConfirmationObserved(
             side_effect::ConfirmationObserved {
-                spec_hash: ctx.spec_hash.clone(),
-                node_id: ctx.node.node_id.clone(),
-                attempt_id: ctx.attempt_id.clone(),
+                spec_hash: ctx.spec_hash().clone(),
+                node_id: ctx.node().node_id.clone(),
+                attempt_id: ctx.attempt_id().clone(),
                 ledger_key,
                 invocation_epoch,
                 confirmation_schema_id: ProofConfirmation::schema_id()
@@ -516,7 +519,7 @@ async fn side_effect_output(ctx: ErasedRunCtx<'_>) -> mfm_runtime::Result<Erased
     let artifact = artifact_for_value(
         &output,
         events::ArtifactRole::StateOutput,
-        Some(ctx.node.node_id.clone()),
+        Some(ctx.node().node_id.clone()),
     )?;
     let staged_artifact = staged_attempt_artifact(&ctx, &artifact)?;
     Ok(ErasedRunnerOutput {
@@ -528,12 +531,12 @@ async fn side_effect_output(ctx: ErasedRunCtx<'_>) -> mfm_runtime::Result<Erased
 
 async fn run_assemble(ctx: ErasedRunCtx<'_>) -> mfm_runtime::Result<ErasedRunnerOutput> {
     ensure_config::<ProofAssembleConfig>(
-        &ctx.node.config_ref,
+        &ctx.node().config_ref,
         &ProofAssembleConfig { output_version: 1 },
     )?;
-    ensure_struct_input_digest(ctx.inputs, "fact", &digest_value(&proof_fact())?)?;
+    ensure_struct_input_digest(ctx.inputs(), "fact", &digest_value(&proof_fact())?)?;
     ensure_struct_input_digest(
-        ctx.inputs,
+        ctx.inputs(),
         "side_effect",
         &digest_value(&proof_side_effect_result()?)?,
     )?;
@@ -544,7 +547,7 @@ async fn run_assemble(ctx: ErasedRunCtx<'_>) -> mfm_runtime::Result<ErasedRunner
     let artifact = artifact_for_value(
         &output,
         events::ArtifactRole::StateOutput,
-        Some(ctx.node.node_id.clone()),
+        Some(ctx.node().node_id.clone()),
     )?;
     let staged_artifact = staged_attempt_artifact(&ctx, &artifact)?;
     Ok(ErasedRunnerOutput {
@@ -619,27 +622,27 @@ fn cell_produced(
     artifact: &store::ArtifactEvidenceRef,
 ) -> events::KernelEventPayload {
     events::KernelEventPayload::CellProduced(events::CellProduced {
-        spec_hash: ctx.spec_hash.clone(),
-        node_id: ctx.node.node_id.clone(),
-        cell_id: ctx.node.output_cell.clone(),
-        scope_id: ctx.output_cell.scope_id.clone(),
-        attempt_id: ctx.attempt_id.clone(),
-        semantic_type_id: ctx.output_cell.semantic_type_id.clone(),
-        schema_id: ctx.output_cell.schema_id.clone(),
-        value_lineage: ctx.output_cell.value_lineage.clone(),
+        spec_hash: ctx.spec_hash().clone(),
+        node_id: ctx.node().node_id.clone(),
+        cell_id: ctx.node().output_cell.clone(),
+        scope_id: ctx.output_cell().scope_id.clone(),
+        attempt_id: ctx.attempt_id().clone(),
+        semantic_type_id: ctx.output_cell().semantic_type_id.clone(),
+        schema_id: ctx.output_cell().schema_id.clone(),
+        value_lineage: ctx.output_cell().value_lineage.clone(),
         artifact_id: artifact.artifact_id.clone(),
         content_digest: artifact.digest.clone(),
-        producer_state_kind: Some(ctx.node.state_kind.clone()),
-        producer_state_version: Some(ctx.node.state_version.clone()),
+        producer_state_kind: Some(ctx.node().state_kind.clone()),
+        producer_state_version: Some(ctx.node().state_version.clone()),
     })
 }
 
 fn completed(ctx: &ErasedRunCtx<'_>) -> events::KernelEventPayload {
     events::KernelEventPayload::StateAttemptCompleted(events::StateAttemptCompleted {
-        spec_hash: ctx.spec_hash.clone(),
-        node_id: ctx.node.node_id.clone(),
-        attempt_id: ctx.attempt_id.clone(),
-        output_cell_id: ctx.node.output_cell.clone(),
+        spec_hash: ctx.spec_hash().clone(),
+        node_id: ctx.node().node_id.clone(),
+        attempt_id: ctx.attempt_id().clone(),
+        output_cell_id: ctx.node().output_cell.clone(),
     })
 }
 

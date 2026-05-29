@@ -229,7 +229,7 @@ impl ErasedNodeRunner for ResolveSubjectsRunner {
             let config =
                 load_config::<ResolveSubjectsConfig>(&ctx, self.artifacts.as_ref()).await?;
             let _prepared = load_input_cell::<mfm_state_portfolio::PreparedSources>(
-                ctx.inputs,
+                ctx.inputs(),
                 self.artifacts.as_ref(),
             )
             .await?;
@@ -249,7 +249,7 @@ impl ErasedNodeRunner for PinViewsRunner {
         Box::pin(async move {
             let config = load_config::<PinViewsConfig>(&ctx, self.artifacts.as_ref()).await?;
             let _prepared = load_input_cell::<mfm_state_portfolio::PreparedSources>(
-                ctx.inputs,
+                ctx.inputs(),
                 self.artifacts.as_ref(),
             )
             .await?;
@@ -281,7 +281,7 @@ impl ErasedNodeRunner for ResolveValuationsRunner {
             let config =
                 load_config::<ResolveValuationsConfig>(&ctx, self.artifacts.as_ref()).await?;
             let views = load_input_cell::<mfm_state_portfolio::PinnedViews>(
-                ctx.inputs,
+                ctx.inputs(),
                 self.artifacts.as_ref(),
             )
             .await?;
@@ -301,7 +301,8 @@ impl ErasedNodeRunner for ObserveBatchRunner {
         Box::pin(async move {
             let config = load_config::<ObserveBatchConfig>(&ctx, self.artifacts.as_ref()).await?;
             let input =
-                load_struct_input::<ObserveBatchInput>(ctx.inputs, self.artifacts.as_ref()).await?;
+                load_struct_input::<ObserveBatchInput>(ctx.inputs(), self.artifacts.as_ref())
+                    .await?;
             let block_number = evm_block_number_for(&input.views, &config.network.network_id);
             let output = observe_batch_with_backend(&config, &input, &self.rpc).await;
             let request = ObservationRequest {
@@ -329,7 +330,7 @@ impl ErasedNodeRunner for MergeObservationsRunner {
             let _config =
                 load_config::<MergeObservationsConfig>(&ctx, self.artifacts.as_ref()).await?;
             let batches =
-                load_non_empty_input::<ObservationBatch>(ctx.inputs, self.artifacts.as_ref())
+                load_non_empty_input::<ObservationBatch>(ctx.inputs(), self.artifacts.as_ref())
                     .await?;
             let output = mfm_state_portfolio::merge_observation_batches(batches);
             state_output(ctx, &output).await
@@ -347,7 +348,7 @@ impl ErasedNodeRunner for AssembleSnapshotRunner {
             let config =
                 load_config::<AssembleSnapshotConfig>(&ctx, self.artifacts.as_ref()).await?;
             let input =
-                load_struct_input::<AssembleSnapshotInput>(ctx.inputs, self.artifacts.as_ref())
+                load_struct_input::<AssembleSnapshotInput>(ctx.inputs(), self.artifacts.as_ref())
                     .await?;
             let output = mfm_state_portfolio::assemble_snapshot(&config, input, 0);
             state_output(ctx, &output).await
@@ -365,7 +366,7 @@ impl ErasedNodeRunner for PublishSnapshotRunner {
             let config =
                 load_config::<PublishSnapshotConfig>(&ctx, self.artifacts.as_ref()).await?;
             let input =
-                load_struct_input::<PublishSnapshotInput>(ctx.inputs, self.artifacts.as_ref())
+                load_struct_input::<PublishSnapshotInput>(ctx.inputs(), self.artifacts.as_ref())
                     .await?;
             let output = mfm_state_portfolio::PublishedPortfolioSnapshot {
                 publish_version: config.publish_version,
@@ -385,7 +386,7 @@ impl ErasedNodeRunner for ProjectReportRunner {
         Box::pin(async move {
             let config = load_config::<ProjectReportConfig>(&ctx, self.artifacts.as_ref()).await?;
             let input =
-                load_struct_input::<ProjectReportInput>(ctx.inputs, self.artifacts.as_ref())
+                load_struct_input::<ProjectReportInput>(ctx.inputs(), self.artifacts.as_ref())
                     .await?;
             let output = mfm_state_portfolio::project_report_from_snapshot(
                 input.snapshot.snapshot,
@@ -412,12 +413,12 @@ where
     let response_artifact = artifact_for_value(
         &response,
         events::ArtifactRole::FactResponse,
-        Some(ctx.node.node_id.clone()),
+        Some(ctx.node().node_id.clone()),
     )?;
     let output_artifact = artifact_for_value(
         &output,
         events::ArtifactRole::StateOutput,
-        Some(ctx.node.node_id.clone()),
+        Some(ctx.node().node_id.clone()),
     )?;
     let staged_response = staged_attempt_artifact(&ctx, &response_artifact)?;
     let staged_output = staged_attempt_artifact(&ctx, &output_artifact)?;
@@ -429,9 +430,9 @@ where
         ],
         payloads: vec![
             events::KernelEventPayload::FactRecorded(events::FactRecorded {
-                spec_hash: ctx.spec_hash.clone(),
-                node_id: ctx.node.node_id.clone(),
-                attempt_id: ctx.attempt_id.clone(),
+                spec_hash: ctx.spec_hash().clone(),
+                node_id: ctx.node().node_id.clone(),
+                attempt_id: ctx.attempt_id().clone(),
                 capability_kind: PortfolioReadCapability::kind()
                     .map_err(runtime_capability_error)?,
                 capability_version: PortfolioReadCapability::version()
@@ -444,7 +445,7 @@ where
                 response_hash: response_artifact.evidence.digest.clone(),
                 fact_key: events::FactKey::new(format!(
                     "mfm.portfolio.fact.{}",
-                    ctx.node.node_id.as_str()
+                    ctx.node().node_id.as_str()
                 ))?,
                 artifact_id: response_artifact.evidence.artifact_id.clone(),
             }),
@@ -464,7 +465,7 @@ where
     let artifact = artifact_for_value(
         value,
         events::ArtifactRole::StateOutput,
-        Some(ctx.node.node_id.clone()),
+        Some(ctx.node().node_id.clone()),
     )?;
     let staged_artifact = staged_attempt_artifact(&ctx, &artifact)?;
     Ok(ErasedRunnerOutput {
@@ -489,17 +490,17 @@ where
     T: MfmConfig + DeserializeOwned,
 {
     let (bytes, evidence) = artifacts
-        .get_artifact_by_id(&ctx.node.config_ref.artifact_id)
+        .get_artifact_by_id(&ctx.node().config_ref.artifact_id)
         .await?;
-    if evidence.digest != ctx.node.config_ref.digest
-        || evidence.byte_len != ctx.node.config_ref.byte_len
-        || evidence.media_type != ctx.node.config_ref.media_type
-        || evidence.schema_id.as_ref() != Some(&ctx.node.config_ref.schema_id)
+    if evidence.digest != ctx.node().config_ref.digest
+        || evidence.byte_len != ctx.node().config_ref.byte_len
+        || evidence.media_type != ctx.node().config_ref.media_type
+        || evidence.schema_id.as_ref() != Some(&ctx.node().config_ref.schema_id)
         || evidence.artifact_role != events::ArtifactRole::TypedConfig
     {
         return Err(mfm_runtime::RuntimeError::InvalidRunnerOutput(format!(
             "portfolio config artifact did not match certified config ref for node {}",
-            ctx.node.node_id
+            ctx.node().node_id
         )));
     }
     serde_json::from_slice(&bytes)
@@ -637,27 +638,27 @@ fn cell_produced(
     artifact: &store::ArtifactEvidenceRef,
 ) -> events::KernelEventPayload {
     events::KernelEventPayload::CellProduced(events::CellProduced {
-        spec_hash: ctx.spec_hash.clone(),
-        node_id: ctx.node.node_id.clone(),
-        cell_id: ctx.node.output_cell.clone(),
-        scope_id: ctx.output_cell.scope_id.clone(),
-        attempt_id: ctx.attempt_id.clone(),
-        semantic_type_id: ctx.output_cell.semantic_type_id.clone(),
-        schema_id: ctx.output_cell.schema_id.clone(),
-        value_lineage: ctx.output_cell.value_lineage.clone(),
+        spec_hash: ctx.spec_hash().clone(),
+        node_id: ctx.node().node_id.clone(),
+        cell_id: ctx.node().output_cell.clone(),
+        scope_id: ctx.output_cell().scope_id.clone(),
+        attempt_id: ctx.attempt_id().clone(),
+        semantic_type_id: ctx.output_cell().semantic_type_id.clone(),
+        schema_id: ctx.output_cell().schema_id.clone(),
+        value_lineage: ctx.output_cell().value_lineage.clone(),
         artifact_id: artifact.artifact_id.clone(),
         content_digest: artifact.digest.clone(),
-        producer_state_kind: Some(ctx.node.state_kind.clone()),
-        producer_state_version: Some(ctx.node.state_version.clone()),
+        producer_state_kind: Some(ctx.node().state_kind.clone()),
+        producer_state_version: Some(ctx.node().state_version.clone()),
     })
 }
 
 fn completed(ctx: &ErasedRunCtx<'_>) -> events::KernelEventPayload {
     events::KernelEventPayload::StateAttemptCompleted(events::StateAttemptCompleted {
-        spec_hash: ctx.spec_hash.clone(),
-        node_id: ctx.node.node_id.clone(),
-        attempt_id: ctx.attempt_id.clone(),
-        output_cell_id: ctx.node.output_cell.clone(),
+        spec_hash: ctx.spec_hash().clone(),
+        node_id: ctx.node().node_id.clone(),
+        attempt_id: ctx.attempt_id().clone(),
+        output_cell_id: ctx.node().output_cell.clone(),
     })
 }
 
