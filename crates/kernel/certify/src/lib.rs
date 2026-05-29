@@ -1149,7 +1149,9 @@ impl<'a> DraftLowerer<'a> {
             renderer_descriptor,
         };
         let render_receipt_cell = self.lower_public_output_render_node(&public_outputs)?;
-        self.lower_project_retention_manifest_node(&public_outputs, render_receipt_cell)?;
+        let retention_receipt_cell =
+            self.lower_project_retention_manifest_node(&public_outputs, render_receipt_cell)?;
+        self.lower_complete_run_node(&public_outputs, retention_receipt_cell)?;
         Ok(public_outputs)
     }
 
@@ -1286,7 +1288,7 @@ impl<'a> DraftLowerer<'a> {
         &mut self,
         public_outputs: &spec::PublicOutputSpec,
         public_output_receipt_cell: CellId,
-    ) -> Result<()> {
+    ) -> Result<CellId> {
         let stable_key = stable_author_key("framework/project-retention-manifest")?;
         let retention = spec::ProjectRetentionManifestNodeSpec {
             public_schema_id: public_outputs.public_schema_id.clone(),
@@ -1376,7 +1378,7 @@ impl<'a> DraftLowerer<'a> {
             descriptor_id: descriptor.descriptor_id,
             config_ref,
             input_bindings: input_binding,
-            output_cell,
+            output_cell: output_cell.clone(),
             effect_kind: descriptor.effect_kind,
             capability_bindings: descriptor.capabilities,
             adapter_bindings: Vec::new(),
@@ -1386,7 +1388,114 @@ impl<'a> DraftLowerer<'a> {
             deterministic_predecessors: self
                 .predecessors_for_inputs(std::slice::from_ref(&public_output_receipt_cell))?,
         });
-        Ok(())
+        Ok(output_cell)
+    }
+
+    fn lower_complete_run_node(
+        &mut self,
+        public_outputs: &spec::PublicOutputSpec,
+        retention_manifest_receipt_cell: CellId,
+    ) -> Result<CellId> {
+        let stable_key = stable_author_key("framework/complete-run")?;
+        let complete = spec::CompleteRunNodeSpec {
+            public_schema_id: public_outputs.public_schema_id.clone(),
+            retention_manifest_receipt_cell: retention_manifest_receipt_cell.clone(),
+        };
+        let node_id = complete_run_node_id_from_spec(
+            self.draft.root_scope_id(),
+            stable_key.as_str(),
+            &complete,
+        )?;
+        let semantic_type_id = spec::complete_run_receipt_semantic_type_id()
+            .map_err(|error| CertifyError::Spec(error.to_string()))?;
+        let receipt_schema_id = spec::complete_run_receipt_schema_id()
+            .map_err(|error| CertifyError::Spec(error.to_string()))?;
+        let output_cell = framework_cell_id(
+            self.draft.root_scope_id(),
+            &node_id,
+            &semantic_type_id,
+            &receipt_schema_id,
+        )?;
+        let planning_lineage = final_planning_lineage(self.draft.operation_lineage())?;
+        let config_ref = framework_config_ref("complete_run", &node_id)?;
+        let config_ref_digest = config_ref_digest(&config_ref)?;
+        let input_cell = self
+            .cells
+            .iter()
+            .find(|cell| cell.cell_id == retention_manifest_receipt_cell)
+            .cloned()
+            .ok_or_else(|| {
+                problem(
+                    ProblemClass::InvalidTopology,
+                    format!(
+                        "complete lifecycle node input cell {retention_manifest_receipt_cell} is missing"
+                    ),
+                )
+            })?;
+        let input_binding = spec::framework_lifecycle_receipt_input_binding(
+            "complete_run",
+            "retention_manifest_receipt",
+            &input_cell,
+        )
+        .map_err(|error| CertifyError::Spec(error.to_string()))?;
+        let descriptor = framework_complete_run_descriptor(
+            &receipt_schema_id,
+            &semantic_type_id,
+            &config_ref.schema_id,
+            &input_binding.input_schema_id,
+        )?;
+        let lineage_ref = render_value_lineage_ref(
+            self.draft.root_scope_id(),
+            &node_id,
+            std::slice::from_ref(&retention_manifest_receipt_cell),
+            &planning_lineage,
+            &config_ref_digest,
+        )?;
+        self.insert_config_ref(config_ref.clone())?;
+        self.insert_descriptor(spec::DescriptorIdentity::State(Box::new(
+            descriptor.clone(),
+        )))?;
+        self.insert_value_lineage(spec::ValueLineage {
+            lineage_ref: lineage_ref.clone(),
+            scope_id: self.draft.root_scope_id().clone(),
+            producer: spec::CellProducer::Node(node_id.clone()),
+            input_cells: vec![retention_manifest_receipt_cell.clone()],
+            config_ref_digest: Some(config_ref_digest),
+            planning_lineage: planning_lineage.clone(),
+            domain_keys: Vec::new(),
+            transform_policy: spec::LineageTransformPolicy::StateOutput,
+        })?;
+        self.insert_cell(spec::CellSpec {
+            cell_id: output_cell.clone(),
+            producer: spec::CellProducer::Node(node_id.clone()),
+            scope_id: self.draft.root_scope_id().clone(),
+            semantic_type_id,
+            schema_id: receipt_schema_id,
+            value_lineage: lineage_ref,
+            terminal_policy: spec::CellTerminalPolicy::ProducedOnly,
+            storage_policy: spec::StoragePolicy::ContentAddressed,
+            redaction_policy: spec::RedactionPolicy::Public,
+        })?;
+        self.nodes.push(spec::NodeSpec {
+            node_id,
+            stable_key,
+            scope_id: self.draft.root_scope_id().clone(),
+            state_kind: descriptor.state_kind,
+            state_version: descriptor.state_version,
+            descriptor_id: descriptor.descriptor_id,
+            config_ref,
+            input_bindings: input_binding,
+            output_cell: output_cell.clone(),
+            effect_kind: descriptor.effect_kind,
+            capability_bindings: descriptor.capabilities,
+            adapter_bindings: Vec::new(),
+            side_effect: None,
+            framework: Some(spec::FrameworkNodeSpec::CompleteRun(complete)),
+            planning_lineage,
+            deterministic_predecessors: self
+                .predecessors_for_inputs(std::slice::from_ref(&retention_manifest_receipt_cell))?,
+        });
+        Ok(output_cell)
     }
 
     fn lower_operation_lineage(&mut self) -> Result<Vec<spec::OperationLineageFrameSpec>> {
@@ -2904,11 +3013,83 @@ fn validate_framework_nodes(
             ),
         ));
     }
-    if bootstrap_count > 1 || completion_count > 1 {
+    if completion_count != 1 {
+        return Err(problem(
+            ProblemClass::InvalidTopology,
+            format!(
+                "expected exactly one completion lifecycle framework node, found {completion_count}"
+            ),
+        ));
+    }
+    if bootstrap_count > 1 {
         return Err(problem(
             ProblemClass::InvalidTopology,
             "duplicate lifecycle framework nodes are not allowed".to_owned(),
         ));
+    }
+    validate_lifecycle_tail_finality(nodes, &nodes_by_id)?;
+    Ok(())
+}
+
+fn validate_lifecycle_tail_finality(
+    nodes: &[spec::NodeSpec],
+    nodes_by_id: &BTreeMap<NodeId, &spec::NodeSpec>,
+) -> Result<()> {
+    let render_node = nodes
+        .iter()
+        .find(|node| {
+            matches!(
+                node.framework,
+                Some(spec::FrameworkNodeSpec::PublicOutputRender(_))
+            )
+        })
+        .ok_or_else(|| {
+            problem(
+                ProblemClass::InvalidTopology,
+                "missing public-output render node".to_owned(),
+            )
+        })?;
+    let mut render_ancestors = BTreeSet::new();
+    collect_deterministic_ancestors(render_node, nodes_by_id, &mut render_ancestors)?;
+    for node in nodes {
+        if node.node_id == render_node.node_id || render_ancestors.contains(&node.node_id) {
+            continue;
+        }
+        match &node.framework {
+            Some(
+                spec::FrameworkNodeSpec::BootstrapRun(_)
+                | spec::FrameworkNodeSpec::ProjectRetentionManifest(_)
+                | spec::FrameworkNodeSpec::CompleteRun(_),
+            ) => {}
+            _ => {
+                return Err(problem(
+                    ProblemClass::InvalidTopology,
+                    format!(
+                        "node {} is outside the certified public-output lifecycle tail",
+                        node.node_id
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn collect_deterministic_ancestors(
+    node: &spec::NodeSpec,
+    nodes_by_id: &BTreeMap<NodeId, &spec::NodeSpec>,
+    ancestors: &mut BTreeSet<NodeId>,
+) -> Result<()> {
+    for predecessor_id in &node.deterministic_predecessors {
+        if ancestors.insert(predecessor_id.clone()) {
+            let predecessor = nodes_by_id.get(predecessor_id).ok_or_else(|| {
+                problem(
+                    ProblemClass::InvalidTopology,
+                    format!("node graph references missing predecessor {predecessor_id}"),
+                )
+            })?;
+            collect_deterministic_ancestors(predecessor, nodes_by_id, ancestors)?;
+        }
     }
     Ok(())
 }
@@ -5095,7 +5276,7 @@ mod tests {
         );
         assert_eq!(
             certified.certificate_hash().as_str(),
-            "content:sha256-jcs-v1:ebbc3af2752e589e5af0ceabc946305cfde811e40dc021be0ad28dc159cd182b"
+            "content:sha256-jcs-v1:de6e1449420492c1391281d6898b9cf0ee3af3c81821d66c448f549075f7a4b7"
         );
         assert_eq!(
             certified.envelope().spec.public_outputs.public_schema_id,
@@ -5104,6 +5285,14 @@ mod tests {
         assert!(certified.envelope().spec.nodes.iter().any(|node| matches!(
             node.framework,
             Some(spec::FrameworkNodeSpec::PublicOutputRender(_))
+        )));
+        assert!(certified.envelope().spec.nodes.iter().any(|node| matches!(
+            node.framework,
+            Some(spec::FrameworkNodeSpec::ProjectRetentionManifest(_))
+        )));
+        assert!(certified.envelope().spec.nodes.iter().any(|node| matches!(
+            node.framework,
+            Some(spec::FrameworkNodeSpec::CompleteRun(_))
         )));
     }
 
@@ -5323,8 +5512,6 @@ mod tests {
             .clone();
 
         append_bootstrap_lifecycle_node(&mut spec);
-        let retention_receipt = lifecycle_retention_receipt_cell(&spec);
-        append_complete_lifecycle_node(&mut spec, retention_receipt);
 
         certify_typed_spec(spec, &registry).expect("lifecycle framework nodes certify");
     }
@@ -5499,6 +5686,20 @@ mod tests {
     }
 
     #[test]
+    fn certification_rejects_executable_nodes_outside_lifecycle_tail() {
+        let draft = reference_draft();
+        let registry = CertificationRegistry::from_program_draft(&draft).expect("registry");
+        let base = certify_program_draft(&draft)
+            .expect("certified")
+            .spec()
+            .clone();
+
+        assert_rejects(&registry, &base, ProblemClass::InvalidTopology, |spec| {
+            append_independent_user_node(spec, "user/outside-lifecycle-tail");
+        });
+    }
+
+    #[test]
     fn certification_rejects_forged_lifecycle_config_ref() {
         let draft = reference_draft();
         let registry = CertificationRegistry::from_program_draft(&draft).expect("registry");
@@ -5551,8 +5752,6 @@ mod tests {
             &base,
             ProblemClass::InvalidSemanticTransition,
             |spec| {
-                let render_receipt = lifecycle_render_receipt_cell(spec);
-                append_retention_lifecycle_node(spec, render_receipt);
                 clear_lifecycle_framework_metadata::<spec::ProjectRetentionManifestNodeSpec>(spec);
             },
         );
@@ -5561,9 +5760,6 @@ mod tests {
             &base,
             ProblemClass::InvalidSemanticTransition,
             |spec| {
-                let render_receipt = lifecycle_render_receipt_cell(spec);
-                let retention_receipt = append_retention_lifecycle_node(spec, render_receipt);
-                append_complete_lifecycle_node(spec, retention_receipt);
                 clear_lifecycle_framework_metadata::<spec::CompleteRunNodeSpec>(spec);
             },
         );
@@ -5615,8 +5811,6 @@ mod tests {
             &base,
             ProblemClass::InvalidInterfaceWiring,
             |spec| {
-                let retention_receipt = lifecycle_retention_receipt_cell(spec);
-                append_complete_lifecycle_node(spec, retention_receipt);
                 let node = find_lifecycle_node_mut::<spec::CompleteRunNodeSpec>(spec);
                 let current = match &node.input_bindings.root {
                     spec::InputBindingNodeSpec::Cell(cell) => cell.clone(),
@@ -5966,74 +6160,6 @@ mod tests {
         output_cell
     }
 
-    fn append_complete_lifecycle_node(
-        typed: &mut spec::TypedExecutionSpec,
-        retention_manifest_receipt_cell: CellId,
-    ) -> CellId {
-        let scope_id = typed.scopes[0].scope_id.clone();
-        let stable_key =
-            spec::StableAuthorKey::new("framework/complete-run").expect("complete stable key");
-        let complete = spec::CompleteRunNodeSpec {
-            public_schema_id: typed.public_outputs.public_schema_id.clone(),
-            retention_manifest_receipt_cell: retention_manifest_receipt_cell.clone(),
-        };
-        let node_id = complete_run_node_id_from_spec(&scope_id, stable_key.as_str(), &complete)
-            .expect("complete node id");
-        let receipt_schema = spec::complete_run_receipt_schema_id().expect("complete schema");
-        let receipt_semantic =
-            spec::complete_run_receipt_semantic_type_id().expect("complete semantic");
-        let output_cell =
-            framework_cell_id(&scope_id, &node_id, &receipt_semantic, &receipt_schema)
-                .expect("complete output cell");
-        let config_ref = framework_config_ref("complete_run", &node_id).expect("config ref");
-        let config_digest = config_ref_digest(&config_ref).expect("config digest");
-        let input_cell = typed
-            .cells
-            .iter()
-            .find(|cell| cell.cell_id == retention_manifest_receipt_cell)
-            .expect("retention receipt cell");
-        let input_binding = spec::framework_lifecycle_receipt_input_binding(
-            "complete_run",
-            "retention_manifest_receipt",
-            input_cell,
-        )
-        .expect("input binding");
-        let descriptor = framework_complete_run_descriptor(
-            &receipt_schema,
-            &receipt_semantic,
-            &config_ref.schema_id,
-            &input_binding.input_schema_id,
-        )
-        .expect("complete descriptor");
-        let planning_lineage = typed.scopes[0].planning_lineage.clone();
-        let lineage = render_value_lineage_ref(
-            &scope_id,
-            &node_id,
-            std::slice::from_ref(&retention_manifest_receipt_cell),
-            &planning_lineage,
-            &config_digest,
-        )
-        .expect("complete lineage");
-
-        push_lifecycle_node(LifecycleNodeParts {
-            typed,
-            node_id,
-            stable_key,
-            scope_id,
-            descriptor,
-            config_ref,
-            input_binding,
-            output_cell: output_cell.clone(),
-            receipt_schema,
-            receipt_semantic,
-            framework: spec::FrameworkNodeSpec::CompleteRun(complete),
-            planning_lineage,
-            lineage,
-            input_cells: vec![retention_manifest_receipt_cell],
-        });
-        output_cell
-    }
-
     struct LifecycleNodeParts<'a> {
         typed: &'a mut spec::TypedExecutionSpec,
         node_id: NodeId,
@@ -6236,6 +6362,90 @@ mod tests {
             scope_id: node.scope_id.clone(),
             producer: spec::CellProducer::Node(node.node_id.clone()),
             input_cells: vec![receipt_cell],
+            config_ref_digest: Some(config_digest),
+            planning_lineage: node.planning_lineage.clone(),
+            domain_keys: Vec::new(),
+            transform_policy: spec::LineageTransformPolicy::StateOutput,
+        });
+        let node_id = node.node_id.clone();
+        typed.nodes.push(node);
+        node_id
+    }
+
+    fn append_independent_user_node(
+        typed: &mut spec::TypedExecutionSpec,
+        stable_key: &str,
+    ) -> NodeId {
+        let template = typed
+            .nodes
+            .iter()
+            .find(|node| node.framework.is_none())
+            .expect("user node template")
+            .clone();
+        let descriptor = typed
+            .descriptor_identities
+            .iter()
+            .find_map(|descriptor| match descriptor {
+                spec::DescriptorIdentity::State(state)
+                    if state.descriptor_id == template.descriptor_id =>
+                {
+                    Some(state.as_ref().clone())
+                }
+                _ => None,
+            })
+            .expect("template descriptor");
+        let input_cells = collect_input_cells(&template.input_bindings.root);
+        let config_digest = config_ref_digest(&template.config_ref).expect("config digest");
+        let mut node = spec::NodeSpec {
+            node_id: NodeId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_byte(0xe0)),
+            stable_key: spec::StableAuthorKey::new(stable_key).expect("stable key"),
+            scope_id: template.scope_id.clone(),
+            state_kind: descriptor.state_kind.clone(),
+            state_version: descriptor.state_version.clone(),
+            descriptor_id: descriptor.descriptor_id.clone(),
+            config_ref: template.config_ref.clone(),
+            input_bindings: template.input_bindings.clone(),
+            output_cell: CellId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_byte(0xe1)),
+            effect_kind: descriptor.effect_kind.clone(),
+            capability_bindings: descriptor.capabilities.clone(),
+            adapter_bindings: template.adapter_bindings.clone(),
+            side_effect: template.side_effect.clone(),
+            framework: None,
+            planning_lineage: template.planning_lineage.clone(),
+            deterministic_predecessors: predecessors_for_test_inputs(typed, &input_cells),
+        };
+        node.node_id = state_node_id_from_spec(&node, &config_digest).expect("node id");
+        node.output_cell = cell_id_from_parts(
+            &node.scope_id,
+            &spec::CellProducer::Node(node.node_id.clone()),
+            &descriptor.output_semantic_type_id,
+            &descriptor.output_schema_id,
+        )
+        .expect("output cell");
+        let lineage = render_value_lineage_ref(
+            &node.scope_id,
+            &node.node_id,
+            &input_cells,
+            &node.planning_lineage,
+            &config_digest,
+        )
+        .expect("lineage");
+        typed.cells.push(spec::CellSpec {
+            cell_id: node.output_cell.clone(),
+            producer: spec::CellProducer::Node(node.node_id.clone()),
+            scope_id: node.scope_id.clone(),
+            semantic_type_id: descriptor.output_semantic_type_id,
+            schema_id: descriptor.output_schema_id,
+            value_lineage: lineage.clone(),
+            terminal_policy: spec::CellTerminalPolicy::ProducedOnly,
+            storage_policy: spec::StoragePolicy::ContentAddressed,
+            redaction_policy: spec::RedactionPolicy::Public,
+        });
+        typed.value_lineages.push(spec::ValueLineage {
+            lineage_ref: lineage,
+            scope_id: node.scope_id.clone(),
+            producer: spec::CellProducer::Node(node.node_id.clone()),
+            input_cells,
             config_ref_digest: Some(config_digest),
             planning_lineage: node.planning_lineage.clone(),
             domain_keys: Vec::new(),

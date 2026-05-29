@@ -762,6 +762,9 @@ pub mod v1 {
                     KernelEventPayload::ArtifactReferenced(payload) => {
                         if let Some(node_id) = &payload.node_id {
                             self.node(node_id)?;
+                            if self.is_complete_run_receipt_ref(node_id, &payload.artifact_ref)? {
+                                continue;
+                            }
                         }
                         self.authorize_event_artifact_ref(
                             &payload.artifact_ref,
@@ -942,6 +945,13 @@ pub mod v1 {
                     }
                     KernelEventPayload::CellProduced(payload) => {
                         self.verify_cell_produced_against_spec(payload)?;
+                        if self.is_complete_run_receipt_artifact(
+                            &payload.node_id,
+                            &payload.artifact_id,
+                            &payload.content_digest,
+                        )? {
+                            continue;
+                        }
                         self.authorize_artifact(
                             &payload.artifact_id,
                             &payload.content_digest,
@@ -1207,6 +1217,59 @@ pub mod v1 {
                         format!("cell {cell_id} is not present in certified spec"),
                     )
                 })
+        }
+
+        fn is_complete_run_receipt_ref(
+            &self,
+            node_id: &NodeId,
+            event_ref: &events::ArtifactEvidenceRef,
+        ) -> Result<bool> {
+            // CompleteRun receipts are deterministic post-manifest lifecycle evidence. Runtime
+            // validation verifies the receipt digest, and no replayed node can consume the cell.
+            if event_ref.role != ArtifactRole::StateOutput {
+                return Ok(false);
+            }
+            let node = self.node(node_id)?;
+            if !matches!(
+                &node.framework,
+                Some(spec::FrameworkNodeSpec::CompleteRun(_))
+            ) {
+                return Ok(false);
+            }
+            let cell = self.cell(&node.output_cell)?;
+            if event_ref.schema_id != cell.schema_id
+                || event_ref.semantic_type_id.as_ref() != Some(&cell.semantic_type_id)
+            {
+                return Ok(false);
+            }
+            self.is_complete_run_receipt_artifact(
+                node_id,
+                &event_ref.artifact_id,
+                &event_ref.content_digest,
+            )
+        }
+
+        fn is_complete_run_receipt_artifact(
+            &self,
+            node_id: &NodeId,
+            artifact_id: &ArtifactId,
+            digest: &ContentDigest,
+        ) -> Result<bool> {
+            let node = self.node(node_id)?;
+            if !matches!(
+                &node.framework,
+                Some(spec::FrameworkNodeSpec::CompleteRun(_))
+            ) {
+                return Ok(false);
+            }
+            Ok(matches!(
+                self.projection.cell_terminal(&node.output_cell),
+                Some(store::CellTerminalProjection::Produced {
+                    artifact_id: projected_artifact_id,
+                    content_digest,
+                    ..
+                }) if projected_artifact_id == artifact_id && content_digest == digest
+            ))
         }
 
         fn verify_seed_against_spec(&self, seed: &events::SeedCellRef) -> Result<()> {
