@@ -123,6 +123,115 @@ pub fn public_output_receipt_semantic_type_id() -> Result<SemanticTypeId> {
     )?)
 }
 
+/// Returns the framework-owned schema id for bootstrap-run receipts.
+pub fn bootstrap_run_receipt_schema_id() -> Result<SchemaId> {
+    let digest = content_digest(serde_json::json!({
+        "fields": [
+            "spec_hash",
+            "typed_spec_artifact_id",
+            "typed_spec_certificate_artifact_id",
+            "seed_cells",
+            "config_artifacts",
+        ],
+        "name": "mfm.framework.bootstrap_run_receipt",
+        "version": "1",
+    }))?;
+    Ok(SchemaId::new(
+        "mfm.framework.bootstrap_run_receipt",
+        "1",
+        DigestAlgorithm::Sha256JcsV1,
+        *digest.digest(),
+    )?)
+}
+
+/// Returns the framework-owned semantic type id for bootstrap-run receipts.
+pub fn bootstrap_run_receipt_semantic_type_id() -> Result<SemanticTypeId> {
+    let digest = content_digest(serde_json::json!({
+        "meaning": "framework bootstrap run receipt",
+        "schema_id": bootstrap_run_receipt_schema_id()?.as_str(),
+        "version": "1",
+    }))?;
+    Ok(SemanticTypeId::new(
+        "mfm.framework.bootstrap_run",
+        "receipt",
+        "1",
+        DigestAlgorithm::Sha256JcsV1,
+        *digest.digest(),
+    )?)
+}
+
+/// Returns the framework-owned schema id for retention-manifest projection receipts.
+pub fn retention_manifest_receipt_schema_id() -> Result<SchemaId> {
+    let digest = content_digest(serde_json::json!({
+        "fields": [
+            "manifest_seq",
+            "manifest_digest",
+            "previous_manifest_digest",
+            "manifest_artifact_id",
+            "pre_projection_stream_seq",
+        ],
+        "name": "mfm.framework.retention_manifest_receipt",
+        "version": "1",
+    }))?;
+    Ok(SchemaId::new(
+        "mfm.framework.retention_manifest_receipt",
+        "1",
+        DigestAlgorithm::Sha256JcsV1,
+        *digest.digest(),
+    )?)
+}
+
+/// Returns the framework-owned semantic type id for retention-manifest projection receipts.
+pub fn retention_manifest_receipt_semantic_type_id() -> Result<SemanticTypeId> {
+    let digest = content_digest(serde_json::json!({
+        "meaning": "framework retention manifest projection receipt",
+        "schema_id": retention_manifest_receipt_schema_id()?.as_str(),
+        "version": "1",
+    }))?;
+    Ok(SemanticTypeId::new(
+        "mfm.framework.retention_manifest",
+        "receipt",
+        "1",
+        DigestAlgorithm::Sha256JcsV1,
+        *digest.digest(),
+    )?)
+}
+
+/// Returns the framework-owned schema id for complete-run receipts.
+pub fn complete_run_receipt_schema_id() -> Result<SchemaId> {
+    let digest = content_digest(serde_json::json!({
+        "fields": [
+            "public_output_schema_id",
+            "public_output_event_id",
+            "completion_outcome",
+        ],
+        "name": "mfm.framework.complete_run_receipt",
+        "version": "1",
+    }))?;
+    Ok(SchemaId::new(
+        "mfm.framework.complete_run_receipt",
+        "1",
+        DigestAlgorithm::Sha256JcsV1,
+        *digest.digest(),
+    )?)
+}
+
+/// Returns the framework-owned semantic type id for complete-run receipts.
+pub fn complete_run_receipt_semantic_type_id() -> Result<SemanticTypeId> {
+    let digest = content_digest(serde_json::json!({
+        "meaning": "framework complete run receipt",
+        "schema_id": complete_run_receipt_schema_id()?.as_str(),
+        "version": "1",
+    }))?;
+    Ok(SemanticTypeId::new(
+        "mfm.framework.complete_run",
+        "receipt",
+        "1",
+        DigestAlgorithm::Sha256JcsV1,
+        *digest.digest(),
+    )?)
+}
+
 fn spec_hash_from_canonical(canonical: &PlainCanonicalJsonBytes) -> SpecHash {
     SpecHash::from_digest(DigestAlgorithm::Sha256JcsV1, canonical.digest_bytes())
 }
@@ -248,6 +357,213 @@ pub mod v1 {
     /// Returns the v1 framework-owned semantic type id for public-output render receipts.
     pub fn public_output_receipt_semantic_type_id() -> Result<SemanticTypeId> {
         super::public_output_receipt_semantic_type_id()
+    }
+
+    /// Returns the v1 framework-owned schema id for bootstrap-run receipts.
+    pub fn bootstrap_run_receipt_schema_id() -> Result<SchemaId> {
+        super::bootstrap_run_receipt_schema_id()
+    }
+
+    /// Returns the v1 framework-owned semantic type id for bootstrap-run receipts.
+    pub fn bootstrap_run_receipt_semantic_type_id() -> Result<SemanticTypeId> {
+        super::bootstrap_run_receipt_semantic_type_id()
+    }
+
+    /// Returns the v1 framework-owned schema id for retention-manifest projection receipts.
+    pub fn retention_manifest_receipt_schema_id() -> Result<SchemaId> {
+        super::retention_manifest_receipt_schema_id()
+    }
+
+    /// Returns the v1 framework-owned semantic type id for retention-manifest projection receipts.
+    pub fn retention_manifest_receipt_semantic_type_id() -> Result<SemanticTypeId> {
+        super::retention_manifest_receipt_semantic_type_id()
+    }
+
+    /// Returns the v1 framework-owned schema id for complete-run receipts.
+    pub fn complete_run_receipt_schema_id() -> Result<SchemaId> {
+        super::complete_run_receipt_schema_id()
+    }
+
+    /// Returns the v1 framework-owned semantic type id for complete-run receipts.
+    pub fn complete_run_receipt_semantic_type_id() -> Result<SemanticTypeId> {
+        super::complete_run_receipt_semantic_type_id()
+    }
+
+    /// Returns canonical JSON bytes for a framework-owned config artifact.
+    pub fn framework_config_canonical_json(
+        kind: &str,
+        node_id: &NodeId,
+    ) -> Result<PlainCanonicalJsonBytes> {
+        canonical_json(serde_json::json!({
+            "framework": kind,
+            "node_id": node_id.as_str(),
+        }))
+    }
+
+    /// Returns the deterministic framework-owned config reference for a framework node.
+    pub fn framework_config_ref(kind: &str, node_id: &NodeId) -> Result<ConfigRef> {
+        let bytes = framework_config_canonical_json(kind, node_id)?;
+        let digest = bytes.content_digest();
+        let schema_digest = content_digest(serde_json::json!({ "framework": kind }))?;
+        Ok(ConfigRef {
+            schema_id: SchemaId::new(
+                "mfm.framework.config",
+                "1",
+                DigestAlgorithm::Sha256JcsV1,
+                *schema_digest.digest(),
+            )?,
+            artifact_id: ArtifactId::from_digest(DigestAlgorithm::Sha256JcsV1, *digest.digest()),
+            digest,
+            byte_len: bytes.as_bytes().len() as u64,
+            media_type: MediaType::new("application/json")?,
+        })
+    }
+
+    /// Returns the deterministic unit input binding for a lifecycle framework node.
+    pub fn framework_lifecycle_unit_input_binding(kind: &str) -> Result<InputBindingSpec> {
+        let root = InputBindingNodeSpec::Unit;
+        Ok(InputBindingSpec {
+            input_schema_id: framework_lifecycle_unit_input_schema_id(kind)?,
+            input_descriptor_id: framework_lifecycle_input_descriptor_id(
+                kind,
+                serde_json::json!({ "input": "unit" }),
+            )?,
+            digest: framework_lifecycle_input_digest(&root)?,
+            root,
+        })
+    }
+
+    /// Returns the deterministic receipt-cell input binding for a lifecycle framework node.
+    pub fn framework_lifecycle_receipt_input_binding(
+        kind: &str,
+        field_path: &str,
+        cell: &CellSpec,
+    ) -> Result<InputBindingSpec> {
+        let field_path = PublicFieldPath::new(field_path)?;
+        let root = InputBindingNodeSpec::Cell(Box::new(InputBindingCellSpec {
+            field_path: field_path.clone(),
+            cell_id: cell.cell_id.clone(),
+            semantic_type_id: cell.semantic_type_id.clone(),
+            schema_id: cell.schema_id.clone(),
+            required_terminal: RequiredTerminal::ProducedOnly,
+            value_lineage: cell.value_lineage.clone(),
+        }));
+        Ok(InputBindingSpec {
+            input_schema_id: cell.schema_id.clone(),
+            input_descriptor_id: framework_lifecycle_input_descriptor_id(
+                kind,
+                serde_json::json!({
+                    "cell_id": cell.cell_id.as_str(),
+                    "field_path": field_path.as_str(),
+                    "input": "receipt_cell",
+                    "schema_id": cell.schema_id.as_str(),
+                    "semantic_type_id": cell.semantic_type_id.as_str(),
+                }),
+            )?,
+            digest: framework_lifecycle_input_digest(&root)?,
+            root,
+        })
+    }
+
+    fn framework_lifecycle_input_digest(root: &InputBindingNodeSpec) -> Result<ContentDigest> {
+        content_digest(framework_lifecycle_input_digest_json(root))
+    }
+
+    fn framework_lifecycle_input_digest_json(root: &InputBindingNodeSpec) -> serde_json::Value {
+        match root {
+            InputBindingNodeSpec::Unit => serde_json::json!({ "kind": "unit" }),
+            InputBindingNodeSpec::Cell(cell) => serde_json::json!({
+                "cell_id": cell.cell_id.as_str(),
+                "field_path": cell.field_path.as_str(),
+                "kind": "cell",
+                "required_terminal": cell.required_terminal.as_str(),
+                "schema_id": cell.schema_id.as_str(),
+                "semantic_type_id": cell.semantic_type_id.as_str(),
+                "value_lineage": cell.value_lineage.lineage_digest.as_str(),
+            }),
+            InputBindingNodeSpec::Tuple(elements) => serde_json::json!({
+                "elements": elements
+                    .iter()
+                    .map(framework_lifecycle_input_digest_json)
+                    .collect::<Vec<_>>(),
+                "kind": "tuple",
+            }),
+            InputBindingNodeSpec::Struct(fields) => serde_json::json!({
+                "fields": fields
+                    .iter()
+                    .map(|field| serde_json::json!({
+                        "field_path": field.field_path.as_str(),
+                        "node": framework_lifecycle_input_digest_json(&field.node),
+                    }))
+                    .collect::<Vec<_>>(),
+                "kind": "struct",
+            }),
+            InputBindingNodeSpec::Vec {
+                elements,
+                ordering,
+                domain_keys,
+            } => serde_json::json!({
+                "domain_keys": domain_keys
+                    .iter()
+                    .map(|key| serde_json::json!({
+                        "content_digest": key.content_digest.as_str(),
+                        "schema_id": key.schema_id.as_str(),
+                    }))
+                    .collect::<Vec<_>>(),
+                "elements": elements
+                    .iter()
+                    .map(framework_lifecycle_input_digest_json)
+                    .collect::<Vec<_>>(),
+                "kind": "vec",
+                "ordering": ordering.as_str(),
+            }),
+            InputBindingNodeSpec::NonEmptyVec {
+                elements,
+                ordering,
+                domain_keys,
+            } => serde_json::json!({
+                "domain_keys": domain_keys
+                    .iter()
+                    .map(|key| serde_json::json!({
+                        "content_digest": key.content_digest.as_str(),
+                        "schema_id": key.schema_id.as_str(),
+                    }))
+                    .collect::<Vec<_>>(),
+                "elements": elements
+                    .iter()
+                    .map(framework_lifecycle_input_digest_json)
+                    .collect::<Vec<_>>(),
+                "kind": "non_empty_vec",
+                "ordering": ordering.as_str(),
+            }),
+        }
+    }
+
+    fn framework_lifecycle_unit_input_schema_id(kind: &str) -> Result<SchemaId> {
+        let digest = content_digest(serde_json::json!({
+            "framework": kind,
+            "input": "unit",
+        }))?;
+        Ok(SchemaId::new(
+            "mfm.framework.lifecycle_unit_input",
+            "1",
+            DigestAlgorithm::Sha256JcsV1,
+            *digest.digest(),
+        )?)
+    }
+
+    fn framework_lifecycle_input_descriptor_id(
+        kind: &str,
+        input: serde_json::Value,
+    ) -> Result<DescriptorId> {
+        Ok(DescriptorId::from_digest(
+            DigestAlgorithm::Sha256JcsV1,
+            *content_digest(serde_json::json!({
+                "framework": kind,
+                "input": input,
+            }))?
+            .digest(),
+        ))
     }
 
     checked_string_type!(
@@ -952,15 +1268,36 @@ pub mod v1 {
     /// Framework node metadata.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub enum FrameworkNodeSpec {
+        /// Bootstrap run lifecycle framework node.
+        BootstrapRun(BootstrapRunNodeSpec),
         /// Same-value bridge framework node.
         Bridge(BridgeNodeSpec),
         /// Public-output render framework node.
         PublicOutputRender(PublicOutputRenderNodeSpec),
+        /// Retention-manifest projection lifecycle framework node.
+        ProjectRetentionManifest(ProjectRetentionManifestNodeSpec),
+        /// Complete-run lifecycle framework node.
+        CompleteRun(CompleteRunNodeSpec),
     }
 
     impl FrameworkNodeSpec {
+        /// Returns the deterministic framework config kind persisted for this node.
+        pub fn config_kind(&self) -> &'static str {
+            match self {
+                Self::BootstrapRun(_) => "bootstrap_run",
+                Self::Bridge(_) => "bridge_same_value",
+                Self::PublicOutputRender(_) => "public_output_render",
+                Self::ProjectRetentionManifest(_) => "project_retention_manifest",
+                Self::CompleteRun(_) => "complete_run",
+            }
+        }
+
         fn json(&self) -> serde_json::Value {
             match self {
+                Self::BootstrapRun(spec) => serde_json::json!({
+                    "bootstrap_run": spec.json(),
+                    "kind": "bootstrap_run",
+                }),
                 Self::Bridge(spec) => serde_json::json!({
                     "bridge": spec.json(),
                     "kind": "bridge",
@@ -969,7 +1306,25 @@ pub mod v1 {
                     "kind": "public_output_render",
                     "public_output_render": spec.json(),
                 }),
+                Self::ProjectRetentionManifest(spec) => serde_json::json!({
+                    "kind": "project_retention_manifest",
+                    "project_retention_manifest": spec.json(),
+                }),
+                Self::CompleteRun(spec) => serde_json::json!({
+                    "complete_run": spec.json(),
+                    "kind": "complete_run",
+                }),
             }
+        }
+    }
+
+    /// Bootstrap run lifecycle framework node metadata.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct BootstrapRunNodeSpec {}
+
+    impl BootstrapRunNodeSpec {
+        fn json(&self) -> serde_json::Value {
+            serde_json::json!({})
         }
     }
 
@@ -1080,6 +1435,42 @@ pub mod v1 {
                 "public_schema_id": self.public_schema_id.as_str(),
                 "renderer_descriptor": self.renderer_descriptor.json(),
                 "required_cells": self.required_cells.iter().map(PublicOutputCell::json).collect::<Vec<_>>(),
+            })
+        }
+    }
+
+    /// Retention-manifest projection lifecycle framework node metadata.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct ProjectRetentionManifestNodeSpec {
+        /// Public output schema whose retained stream evidence is projected.
+        pub public_schema_id: SchemaId,
+        /// Public-output render receipt cell that orders this projection after rendering.
+        pub public_output_receipt_cell: CellId,
+    }
+
+    impl ProjectRetentionManifestNodeSpec {
+        fn json(&self) -> serde_json::Value {
+            serde_json::json!({
+                "public_output_receipt_cell": self.public_output_receipt_cell.as_str(),
+                "public_schema_id": self.public_schema_id.as_str(),
+            })
+        }
+    }
+
+    /// Complete-run lifecycle framework node metadata.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct CompleteRunNodeSpec {
+        /// Public output schema whose completion evidence terminates the run.
+        pub public_schema_id: SchemaId,
+        /// Retention-manifest projection receipt cell that orders completion after retention.
+        pub retention_manifest_receipt_cell: CellId,
+    }
+
+    impl CompleteRunNodeSpec {
+        fn json(&self) -> serde_json::Value {
+            serde_json::json!({
+                "public_schema_id": self.public_schema_id.as_str(),
+                "retention_manifest_receipt_cell": self.retention_manifest_receipt_cell.as_str(),
             })
         }
     }
@@ -1860,14 +2251,31 @@ pub mod v1 {
     fn parse_framework_node(value: &serde_json::Value) -> Result<FrameworkNodeSpec> {
         let object = object(value, "framework node")?;
         match required_str(object, "kind")? {
+            "bootstrap_run" => Ok(FrameworkNodeSpec::BootstrapRun(parse_bootstrap_run_node(
+                required(object, "bootstrap_run")?,
+            )?)),
             "bridge" => Ok(FrameworkNodeSpec::Bridge(parse_bridge_node(required(
                 object, "bridge",
             )?)?)),
             "public_output_render" => Ok(FrameworkNodeSpec::PublicOutputRender(
                 parse_public_output_render_node(required(object, "public_output_render")?)?,
             )),
+            "project_retention_manifest" => Ok(FrameworkNodeSpec::ProjectRetentionManifest(
+                parse_project_retention_manifest_node(required(
+                    object,
+                    "project_retention_manifest",
+                )?)?,
+            )),
+            "complete_run" => Ok(FrameworkNodeSpec::CompleteRun(parse_complete_run_node(
+                required(object, "complete_run")?,
+            )?)),
             kind => Err(json_error(format!("unsupported framework kind {kind:?}"))),
         }
+    }
+
+    fn parse_bootstrap_run_node(value: &serde_json::Value) -> Result<BootstrapRunNodeSpec> {
+        object(value, "bootstrap-run node")?;
+        Ok(BootstrapRunNodeSpec {})
     }
 
     fn parse_bridge_node(value: &serde_json::Value) -> Result<BridgeNodeSpec> {
@@ -1897,6 +2305,30 @@ pub mod v1 {
                 "renderer_descriptor",
             )?)?,
             required_cells: parse_vec(required(object, "required_cells")?, parse_public_cell)?,
+        })
+    }
+
+    fn parse_project_retention_manifest_node(
+        value: &serde_json::Value,
+    ) -> Result<ProjectRetentionManifestNodeSpec> {
+        let object = object(value, "project-retention-manifest node")?;
+        Ok(ProjectRetentionManifestNodeSpec {
+            public_schema_id: identity(required_str(object, "public_schema_id")?)?,
+            public_output_receipt_cell: identity(required_str(
+                object,
+                "public_output_receipt_cell",
+            )?)?,
+        })
+    }
+
+    fn parse_complete_run_node(value: &serde_json::Value) -> Result<CompleteRunNodeSpec> {
+        let object = object(value, "complete-run node")?;
+        Ok(CompleteRunNodeSpec {
+            public_schema_id: identity(required_str(object, "public_schema_id")?)?,
+            retention_manifest_receipt_cell: identity(required_str(
+                object,
+                "retention_manifest_receipt_cell",
+            )?)?,
         })
     }
 
@@ -2914,6 +3346,55 @@ pub mod v1 {
                 parsed.spec_hash().expect("parsed hash"),
                 spec.spec_hash().expect("spec hash")
             );
+        }
+
+        #[test]
+        fn lifecycle_framework_node_json_round_trips_through_checked_parser() {
+            let mut variants = Vec::new();
+            variants.push(FrameworkNodeSpec::BootstrapRun(BootstrapRunNodeSpec {}));
+            variants.push(FrameworkNodeSpec::ProjectRetentionManifest(
+                ProjectRetentionManifestNodeSpec {
+                    public_schema_id: schema("mfm.spec.test.lifecycle_public", 0x70),
+                    public_output_receipt_cell: cell(0x71),
+                },
+            ));
+            variants.push(FrameworkNodeSpec::CompleteRun(CompleteRunNodeSpec {
+                public_schema_id: schema("mfm.spec.test.lifecycle_complete", 0x72),
+                retention_manifest_receipt_cell: cell(0x73),
+            }));
+
+            for framework in variants {
+                let mut spec = test_spec();
+                spec.nodes[0].framework = Some(framework);
+                let canonical = spec.canonical_json().expect("canonical spec");
+                let parsed = TypedExecutionSpec::from_json_slice(canonical.as_bytes())
+                    .expect("parse lifecycle framework node");
+
+                assert_eq!(parsed, spec);
+            }
+        }
+
+        #[test]
+        fn bootstrap_framework_json_rejects_post_hash_fields() {
+            let mut spec = test_spec();
+            spec.nodes[0].framework =
+                Some(FrameworkNodeSpec::BootstrapRun(BootstrapRunNodeSpec {}));
+            let mut value: serde_json::Value =
+                serde_json::from_str(spec.canonical_json().expect("canonical spec").as_str())
+                    .expect("spec JSON");
+            value["nodes"][0]["framework"]["bootstrap_run"]
+                .as_object_mut()
+                .expect("bootstrap framework object")
+                .insert(
+                    "run_id".to_owned(),
+                    serde_json::json!("run:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000000"),
+                );
+            let input = serde_json::to_string(&value).expect("JSON");
+
+            let err = TypedExecutionSpec::from_json_str(&input)
+                .expect_err("post-hash bootstrap field rejects");
+
+            assert!(matches!(err, SpecError::Json(message) if message.contains("unknown")));
         }
 
         #[test]

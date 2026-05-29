@@ -384,17 +384,7 @@ pub fn portfolio_framework_config_artifacts(
         let Some(framework) = &node.framework else {
             continue;
         };
-        let framework_kind = match framework {
-            spec::FrameworkNodeSpec::Bridge(_) => "bridge_same_value",
-            spec::FrameworkNodeSpec::PublicOutputRender(_) => "public_output_render",
-        };
-        let payload = serde_json::json!({
-            "framework": framework_kind,
-            "node_id": node.node_id.as_str(),
-        });
-        let json = serde_json::to_string(&payload)
-            .map_err(|error| mfm_program::PlanError::Serialize(error.to_string()))?;
-        let bytes = mfm_canonical::PlainCanonicalJsonBytes::from_json_str(&json)
+        let bytes = spec::framework_config_canonical_json(framework.config_kind(), &node.node_id)
             .map_err(|error| mfm_program::PlanError::Canonical(error.to_string()))?;
         if bytes.content_digest() != node.config_ref.digest
             || bytes.as_bytes().len() as u64 != node.config_ref.byte_len

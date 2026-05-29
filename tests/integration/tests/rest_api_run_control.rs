@@ -521,16 +521,7 @@ async fn persist_framework_config_artifacts(
         let Some(framework) = &node.framework else {
             continue;
         };
-        let framework_kind = match framework {
-            spec::FrameworkNodeSpec::Bridge(_) => "bridge_same_value",
-            spec::FrameworkNodeSpec::PublicOutputRender(_) => "public_output_render",
-        };
-        let payload = serde_json::json!({
-            "framework": framework_kind,
-            "node_id": node.node_id.as_str(),
-        });
-        let json = serde_json::to_string(&payload).expect("framework config json");
-        let bytes = mfm_canonical::PlainCanonicalJsonBytes::from_json_str(&json)
+        let bytes = spec::framework_config_canonical_json(framework.config_kind(), &node.node_id)
             .expect("canonical framework config");
         assert_eq!(
             bytes.content_digest(),

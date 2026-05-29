@@ -884,6 +884,7 @@ impl CertifiedRuntimeSpec {
 
         for node in self.nodes.values() {
             let descriptor = self.state_descriptor_for_node(node)?;
+            self.validate_framework_descriptor_variant(node, descriptor)?;
             if descriptor.state_kind != node.state_kind
                 || descriptor.state_version != node.state_version
                 || descriptor.config_schema_id != node.config_ref.schema_id
@@ -978,6 +979,7 @@ impl CertifiedRuntimeSpec {
             }
         }
         self.validate_public_output_render_contract()?;
+        self.validate_lifecycle_framework_contract()?;
 
         Ok(())
     }
@@ -1051,6 +1053,388 @@ impl CertifiedRuntimeSpec {
         if node.deterministic_predecessors != expected_predecessors {
             return Err(RuntimeError::InvalidSpec(format!(
                 "public-output render node {} predecessors do not match public cells",
+                node.node_id
+            )));
+        }
+        Ok(())
+    }
+
+    fn validate_lifecycle_framework_contract(&self) -> Result<()> {
+        let mut bootstrap_count = 0_usize;
+        let mut retention_count = 0_usize;
+        let mut completion_count = 0_usize;
+        let mut lifecycle_outputs = BTreeMap::<CellId, &spec::NodeSpec>::new();
+        let mut input_consumers = BTreeMap::<CellId, Vec<NodeId>>::new();
+        for node in self.nodes.values() {
+            for cell_id in self.validate_input_binding(&node.input_bindings.root)? {
+                input_consumers
+                    .entry(cell_id)
+                    .or_default()
+                    .push(node.node_id.clone());
+            }
+            if matches!(
+                &node.framework,
+                Some(
+                    spec::FrameworkNodeSpec::BootstrapRun(_)
+                        | spec::FrameworkNodeSpec::ProjectRetentionManifest(_)
+                        | spec::FrameworkNodeSpec::CompleteRun(_)
+                )
+            ) {
+                lifecycle_outputs.insert(node.output_cell.clone(), node);
+            }
+        }
+
+        for node in self.nodes.values() {
+            if let Some(framework) = &node.framework {
+                self.validate_framework_permissions(node)?;
+                self.validate_framework_config_ref(node, framework.config_kind())?;
+            }
+            match &node.framework {
+                Some(spec::FrameworkNodeSpec::BootstrapRun(_)) => {
+                    bootstrap_count += 1;
+                    self.validate_framework_descriptor(node, "mfm.framework.bootstrap_run")?;
+                    self.validate_framework_output_cell(
+                        node,
+                        &spec::bootstrap_run_receipt_schema_id()?,
+                        &spec::bootstrap_run_receipt_semantic_type_id()?,
+                        spec::StoragePolicy::ContentAddressed,
+                    )?;
+                    self.validate_framework_input_binding(
+                        node,
+                        &spec::framework_lifecycle_unit_input_binding("bootstrap_run")?,
+                    )?;
+                    let input_cells = self.validate_input_binding(&node.input_bindings.root)?;
+                    if !input_cells.is_empty() || !node.deterministic_predecessors.is_empty() {
+                        return Err(RuntimeError::InvalidSpec(format!(
+                            "bootstrap lifecycle node {} must not have inputs",
+                            node.node_id
+                        )));
+                    }
+                    self.validate_no_framework_receipt_consumers(node, &input_consumers)?;
+                }
+                Some(spec::FrameworkNodeSpec::PublicOutputRender(_)) => {
+                    self.validate_framework_receipt_consumers(
+                        node,
+                        &input_consumers,
+                        "project-retention-manifest lifecycle node",
+                        |consumer| {
+                            matches!(
+                                &consumer.framework,
+                                Some(spec::FrameworkNodeSpec::ProjectRetentionManifest(retention))
+                                    if retention.public_output_receipt_cell == node.output_cell
+                            )
+                        },
+                    )?;
+                }
+                Some(spec::FrameworkNodeSpec::ProjectRetentionManifest(retention)) => {
+                    retention_count += 1;
+                    self.validate_framework_descriptor(
+                        node,
+                        "mfm.framework.project_retention_manifest",
+                    )?;
+                    if retention.public_schema_id != self.spec().public_outputs.public_schema_id {
+                        return Err(RuntimeError::InvalidSpec(format!(
+                            "retention lifecycle node {} public schema mismatch",
+                            node.node_id
+                        )));
+                    }
+                    self.validate_framework_output_cell(
+                        node,
+                        &spec::retention_manifest_receipt_schema_id()?,
+                        &spec::retention_manifest_receipt_semantic_type_id()?,
+                        spec::StoragePolicy::ContentAddressed,
+                    )?;
+                    let public_output_receipt_cell = self
+                        .cells
+                        .get(&retention.public_output_receipt_cell)
+                        .ok_or_else(|| {
+                            RuntimeError::InvalidSpec(format!(
+                                "retention lifecycle node {} missing public-output receipt cell",
+                                node.node_id
+                            ))
+                        })?;
+                    self.validate_framework_input_binding(
+                        node,
+                        &spec::framework_lifecycle_receipt_input_binding(
+                            "project_retention_manifest",
+                            "public_output_receipt",
+                            public_output_receipt_cell,
+                        )?,
+                    )?;
+                    let input_cells = self.validate_input_binding(&node.input_bindings.root)?;
+                    if input_cells != vec![retention.public_output_receipt_cell.clone()] {
+                        return Err(RuntimeError::InvalidSpec(format!(
+                            "retention lifecycle node {} must depend on the public-output receipt cell",
+                            node.node_id
+                        )));
+                    }
+                    let render_node = self.nodes.values().find(|candidate| {
+                        candidate.output_cell == retention.public_output_receipt_cell
+                            && matches!(
+                                &candidate.framework,
+                                Some(spec::FrameworkNodeSpec::PublicOutputRender(render))
+                                    if render.public_schema_id == retention.public_schema_id
+                            )
+                    });
+                    if render_node.is_none() {
+                        return Err(RuntimeError::InvalidSpec(format!(
+                            "retention lifecycle node {} is not ordered after public-output render",
+                            node.node_id
+                        )));
+                    }
+                    self.validate_framework_receipt_consumers(
+                        node,
+                        &input_consumers,
+                        "complete-run lifecycle node",
+                        |consumer| {
+                            matches!(
+                                &consumer.framework,
+                                Some(spec::FrameworkNodeSpec::CompleteRun(complete))
+                                    if complete.retention_manifest_receipt_cell == node.output_cell
+                            )
+                        },
+                    )?;
+                }
+                Some(spec::FrameworkNodeSpec::CompleteRun(complete)) => {
+                    completion_count += 1;
+                    self.validate_framework_descriptor(node, "mfm.framework.complete_run")?;
+                    if complete.public_schema_id != self.spec().public_outputs.public_schema_id {
+                        return Err(RuntimeError::InvalidSpec(format!(
+                            "completion lifecycle node {} public schema mismatch",
+                            node.node_id
+                        )));
+                    }
+                    self.validate_framework_output_cell(
+                        node,
+                        &spec::complete_run_receipt_schema_id()?,
+                        &spec::complete_run_receipt_semantic_type_id()?,
+                        spec::StoragePolicy::ContentAddressed,
+                    )?;
+                    let retention_manifest_receipt_cell = self
+                        .cells
+                        .get(&complete.retention_manifest_receipt_cell)
+                        .ok_or_else(|| {
+                            RuntimeError::InvalidSpec(format!(
+                                "completion lifecycle node {} missing retention receipt cell",
+                                node.node_id
+                            ))
+                        })?;
+                    self.validate_framework_input_binding(
+                        node,
+                        &spec::framework_lifecycle_receipt_input_binding(
+                            "complete_run",
+                            "retention_manifest_receipt",
+                            retention_manifest_receipt_cell,
+                        )?,
+                    )?;
+                    let input_cells = self.validate_input_binding(&node.input_bindings.root)?;
+                    if input_cells != vec![complete.retention_manifest_receipt_cell.clone()] {
+                        return Err(RuntimeError::InvalidSpec(format!(
+                            "completion lifecycle node {} must depend on the retention receipt cell",
+                            node.node_id
+                        )));
+                    }
+                    let retention_node = lifecycle_outputs
+                        .get(&complete.retention_manifest_receipt_cell)
+                        .filter(|candidate| {
+                            matches!(
+                                &candidate.framework,
+                                Some(spec::FrameworkNodeSpec::ProjectRetentionManifest(retention))
+                                    if retention.public_schema_id == complete.public_schema_id
+                            )
+                        });
+                    if retention_node.is_none() {
+                        return Err(RuntimeError::InvalidSpec(format!(
+                            "completion lifecycle node {} is not ordered after retention projection",
+                            node.node_id
+                        )));
+                    }
+                    self.validate_no_framework_receipt_consumers(node, &input_consumers)?;
+                }
+                Some(spec::FrameworkNodeSpec::Bridge(_)) | None => {}
+            }
+        }
+
+        if bootstrap_count > 1 || retention_count > 1 || completion_count > 1 {
+            return Err(RuntimeError::InvalidSpec(
+                "duplicate lifecycle framework nodes are not allowed".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_framework_permissions(&self, node: &spec::NodeSpec) -> Result<()> {
+        if node.side_effect.is_some()
+            || !node.adapter_bindings.is_empty()
+            || !node.capability_bindings.capabilities.is_empty()
+        {
+            return Err(RuntimeError::InvalidSpec(format!(
+                "framework node {} carries user-controlled execution permissions",
+                node.node_id
+            )));
+        }
+        Ok(())
+    }
+
+    fn validate_framework_config_ref(&self, node: &spec::NodeSpec, kind: &str) -> Result<()> {
+        let expected = spec::framework_config_ref(kind, &node.node_id)?;
+        if node.config_ref != expected {
+            return Err(RuntimeError::InvalidSpec(format!(
+                "framework node {} config ref is not deterministic for {kind}",
+                node.node_id
+            )));
+        }
+        Ok(())
+    }
+
+    fn validate_framework_input_binding(
+        &self,
+        node: &spec::NodeSpec,
+        expected: &spec::InputBindingSpec,
+    ) -> Result<()> {
+        if &node.input_bindings != expected {
+            return Err(RuntimeError::InvalidSpec(format!(
+                "framework node {} input binding is not deterministic",
+                node.node_id
+            )));
+        }
+        Ok(())
+    }
+
+    fn validate_framework_descriptor_variant(
+        &self,
+        node: &spec::NodeSpec,
+        descriptor: &spec::StateDescriptorIdentity,
+    ) -> Result<()> {
+        let matches_variant = match descriptor.name.as_str() {
+            "mfm.framework.bootstrap_run" => {
+                matches!(
+                    &node.framework,
+                    Some(spec::FrameworkNodeSpec::BootstrapRun(_))
+                )
+            }
+            "mfm.framework.bridge_same_value" => {
+                matches!(&node.framework, Some(spec::FrameworkNodeSpec::Bridge(_)))
+            }
+            "mfm.framework.render_public_outputs" => {
+                matches!(
+                    &node.framework,
+                    Some(spec::FrameworkNodeSpec::PublicOutputRender(_))
+                )
+            }
+            "mfm.framework.project_retention_manifest" => {
+                matches!(
+                    &node.framework,
+                    Some(spec::FrameworkNodeSpec::ProjectRetentionManifest(_))
+                )
+            }
+            "mfm.framework.complete_run" => {
+                matches!(
+                    &node.framework,
+                    Some(spec::FrameworkNodeSpec::CompleteRun(_))
+                )
+            }
+            _ => return Ok(()),
+        };
+        if !matches_variant {
+            return Err(RuntimeError::InvalidSpec(format!(
+                "node {} uses built-in framework descriptor {} without matching framework metadata",
+                node.node_id, descriptor.name
+            )));
+        }
+        Ok(())
+    }
+
+    fn validate_no_framework_receipt_consumers(
+        &self,
+        node: &spec::NodeSpec,
+        consumers_by_cell: &BTreeMap<CellId, Vec<NodeId>>,
+    ) -> Result<()> {
+        if consumers_by_cell
+            .get(&node.output_cell)
+            .map(|consumers| !consumers.is_empty())
+            .unwrap_or(false)
+        {
+            return Err(RuntimeError::InvalidSpec(format!(
+                "framework receipt cell {} must not be consumed",
+                node.output_cell
+            )));
+        }
+        Ok(())
+    }
+
+    fn validate_framework_receipt_consumers(
+        &self,
+        node: &spec::NodeSpec,
+        consumers_by_cell: &BTreeMap<CellId, Vec<NodeId>>,
+        expected_consumer: &str,
+        mut allowed: impl FnMut(&spec::NodeSpec) -> bool,
+    ) -> Result<()> {
+        for consumer_id in consumers_by_cell
+            .get(&node.output_cell)
+            .into_iter()
+            .flatten()
+        {
+            let consumer = self.nodes.get(consumer_id).ok_or_else(|| {
+                RuntimeError::InvalidSpec(format!(
+                    "framework receipt cell {} has missing consumer node {}",
+                    node.output_cell, consumer_id
+                ))
+            })?;
+            if !allowed(consumer) {
+                return Err(RuntimeError::InvalidSpec(format!(
+                    "framework receipt cell {} may only feed {expected_consumer}",
+                    node.output_cell
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_framework_descriptor(
+        &self,
+        node: &spec::NodeSpec,
+        expected_name: &str,
+    ) -> Result<()> {
+        let descriptor = self.state_descriptor_for_node(node)?;
+        let managed_effect = ManagedPlatformWrite::descriptor()
+            .map_err(|error| RuntimeError::InvalidSpec(error.to_string()))?;
+        if descriptor.name != expected_name
+            || descriptor.runner != "managed_platform_write"
+            || descriptor.effect_kind != managed_effect.kind
+            || descriptor.effect_class != managed_effect.class.as_str()
+            || descriptor.effect_name != managed_effect.name
+            || !descriptor.capabilities.capabilities.is_empty()
+        {
+            return Err(RuntimeError::InvalidSpec(format!(
+                "framework node {} is not bound to {expected_name}",
+                node.node_id
+            )));
+        }
+        Ok(())
+    }
+
+    fn validate_framework_output_cell(
+        &self,
+        node: &spec::NodeSpec,
+        expected_schema_id: &SchemaId,
+        expected_semantic_type_id: &SemanticTypeId,
+        expected_storage_policy: spec::StoragePolicy,
+    ) -> Result<()> {
+        let output = self.cells.get(&node.output_cell).ok_or_else(|| {
+            RuntimeError::InvalidSpec(format!(
+                "framework node {} output cell {} is missing",
+                node.node_id, node.output_cell
+            ))
+        })?;
+        if output.schema_id != *expected_schema_id
+            || output.semantic_type_id != *expected_semantic_type_id
+            || output.terminal_policy != spec::CellTerminalPolicy::ProducedOnly
+            || output.storage_policy != expected_storage_policy
+            || output.redaction_policy != spec::RedactionPolicy::Public
+        {
+            return Err(RuntimeError::InvalidSpec(format!(
+                "framework node {} output cell contract mismatch",
                 node.node_id
             )));
         }
@@ -7205,6 +7589,380 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn certified_runtime_spec_rejects_forged_lifecycle_framework_variant() {
+        let fixture = fixture();
+        let mut envelope = fixture.runtime_spec.envelope().clone();
+        let node = envelope
+            .spec
+            .nodes
+            .iter_mut()
+            .find(|node| node.framework.is_none())
+            .expect("user node");
+        node.framework = Some(spec::FrameworkNodeSpec::BootstrapRun(
+            spec::BootstrapRunNodeSpec {},
+        ));
+        let envelope =
+            spec::HashedSpecEnvelope::new(envelope.spec, envelope.audit).expect("rehash");
+
+        assert!(matches!(
+            CertifiedRuntimeSpec::from_verified_envelope(envelope),
+            Err(RuntimeError::InvalidSpec(_))
+        ));
+    }
+
+    #[test]
+    fn certified_runtime_spec_rejects_lifecycle_ordering() {
+        let fixture = fixture();
+        let mut envelope = fixture.runtime_spec.envelope().clone();
+        let public_cell = envelope
+            .spec
+            .public_outputs
+            .outputs
+            .first()
+            .expect("public output")
+            .cell_id
+            .clone();
+        append_runtime_retention_lifecycle_node(&mut envelope.spec, public_cell, false);
+        let envelope =
+            spec::HashedSpecEnvelope::new(envelope.spec, envelope.audit).expect("rehash");
+
+        assert!(matches!(
+            CertifiedRuntimeSpec::from_verified_envelope(envelope),
+            Err(RuntimeError::InvalidSpec(message))
+                if message.contains("not ordered after public-output render")
+        ));
+    }
+
+    #[test]
+    fn certified_runtime_spec_rejects_lifecycle_framework_permissions() {
+        let fixture = fixture();
+        let mut envelope = fixture.runtime_spec.envelope().clone();
+        let render_receipt = envelope
+            .spec
+            .nodes
+            .iter()
+            .find(|node| {
+                matches!(
+                    node.framework,
+                    Some(spec::FrameworkNodeSpec::PublicOutputRender(_))
+                )
+            })
+            .expect("render node")
+            .output_cell
+            .clone();
+        let retention_node =
+            append_runtime_retention_lifecycle_node(&mut envelope.spec, render_receipt, true);
+        envelope
+            .spec
+            .nodes
+            .iter_mut()
+            .find(|node| node.node_id == retention_node)
+            .expect("retention node")
+            .adapter_bindings
+            .push(spec::AdapterBinding {
+                adapter_kind: AdapterKind::new(
+                    "mfm.runtime.test",
+                    "forged-adapter",
+                    DigestAlgorithm::Sha256JcsV1,
+                    DigestBytes::from_array([0xf7; 32]),
+                )
+                .expect("adapter kind"),
+                adapter_version: AdapterVersion::new("mfm.runtime.test.adapter.v1")
+                    .expect("adapter version"),
+                binding_digest: None,
+            });
+        let envelope =
+            spec::HashedSpecEnvelope::new(envelope.spec, envelope.audit).expect("rehash");
+
+        assert!(matches!(
+            CertifiedRuntimeSpec::from_verified_envelope(envelope),
+            Err(RuntimeError::InvalidSpec(message))
+                if message.contains("user-controlled execution permissions")
+        ));
+    }
+
+    #[test]
+    fn certified_runtime_spec_rejects_user_consumers_of_lifecycle_receipts() {
+        let fixture = fixture();
+
+        let mut bootstrap_envelope = fixture.runtime_spec.envelope().clone();
+        let bootstrap_receipt =
+            append_runtime_bootstrap_lifecycle_node(&mut bootstrap_envelope.spec);
+        append_runtime_user_receipt_consumer(
+            &mut bootstrap_envelope.spec,
+            bootstrap_receipt,
+            "user/bootstrap-receipt",
+        );
+        let bootstrap_envelope =
+            spec::HashedSpecEnvelope::new(bootstrap_envelope.spec, bootstrap_envelope.audit)
+                .expect("rehash");
+        assert!(matches!(
+            CertifiedRuntimeSpec::from_verified_envelope(bootstrap_envelope),
+            Err(RuntimeError::InvalidSpec(message))
+                if message.contains("must not be consumed")
+        ));
+
+        let mut render_envelope = fixture.runtime_spec.envelope().clone();
+        let render_receipt = runtime_render_receipt_cell(&render_envelope.spec);
+        append_runtime_user_receipt_consumer(
+            &mut render_envelope.spec,
+            render_receipt,
+            "user/render-receipt",
+        );
+        let render_envelope =
+            spec::HashedSpecEnvelope::new(render_envelope.spec, render_envelope.audit)
+                .expect("rehash");
+        assert!(matches!(
+            CertifiedRuntimeSpec::from_verified_envelope(render_envelope),
+            Err(RuntimeError::InvalidSpec(message))
+                if message.contains("project-retention-manifest")
+        ));
+
+        let mut retention_envelope = fixture.runtime_spec.envelope().clone();
+        let render_receipt = runtime_render_receipt_cell(&retention_envelope.spec);
+        let retention_node = append_runtime_retention_lifecycle_node(
+            &mut retention_envelope.spec,
+            render_receipt,
+            true,
+        );
+        let retention_receipt = retention_envelope
+            .spec
+            .nodes
+            .iter()
+            .find(|node| node.node_id == retention_node)
+            .expect("retention node")
+            .output_cell
+            .clone();
+        append_runtime_user_receipt_consumer(
+            &mut retention_envelope.spec,
+            retention_receipt,
+            "user/retention-receipt",
+        );
+        let retention_envelope =
+            spec::HashedSpecEnvelope::new(retention_envelope.spec, retention_envelope.audit)
+                .expect("rehash");
+        assert!(matches!(
+            CertifiedRuntimeSpec::from_verified_envelope(retention_envelope),
+            Err(RuntimeError::InvalidSpec(message)) if message.contains("complete-run")
+        ));
+    }
+
+    #[test]
+    fn certified_runtime_spec_rejects_forged_lifecycle_config_ref() {
+        let fixture = fixture();
+        let mut envelope = fixture.runtime_spec.envelope().clone();
+        let render_receipt = runtime_render_receipt_cell(&envelope.spec);
+        let retention_node =
+            append_runtime_retention_lifecycle_node(&mut envelope.spec, render_receipt, true);
+        envelope
+            .spec
+            .nodes
+            .iter_mut()
+            .find(|node| node.node_id == retention_node)
+            .expect("retention node")
+            .config_ref
+            .byte_len += 1;
+        let envelope =
+            spec::HashedSpecEnvelope::new(envelope.spec, envelope.audit).expect("rehash");
+
+        assert!(matches!(
+            CertifiedRuntimeSpec::from_verified_envelope(envelope),
+            Err(RuntimeError::InvalidSpec(message))
+                if message.contains("config ref is not deterministic")
+        ));
+    }
+
+    #[test]
+    fn certified_runtime_spec_accepts_lifecycle_framework_node_chain() {
+        let fixture = fixture();
+        let mut envelope = fixture.runtime_spec.envelope().clone();
+        append_runtime_bootstrap_lifecycle_node(&mut envelope.spec);
+        let render_receipt = runtime_render_receipt_cell(&envelope.spec);
+        let retention_node =
+            append_runtime_retention_lifecycle_node(&mut envelope.spec, render_receipt, true);
+        let retention_receipt = envelope
+            .spec
+            .nodes
+            .iter()
+            .find(|node| node.node_id == retention_node)
+            .expect("retention node")
+            .output_cell
+            .clone();
+        append_runtime_complete_lifecycle_node(&mut envelope.spec, retention_receipt, true);
+        let envelope =
+            spec::HashedSpecEnvelope::new(envelope.spec, envelope.audit).expect("rehash");
+
+        CertifiedRuntimeSpec::from_verified_envelope(envelope)
+            .expect("lifecycle framework chain is valid runtime authority");
+    }
+
+    #[test]
+    fn certified_runtime_spec_rejects_builtin_lifecycle_descriptors_without_framework_metadata() {
+        let fixture = fixture();
+
+        let mut bootstrap_envelope = fixture.runtime_spec.envelope().clone();
+        append_runtime_bootstrap_lifecycle_node(&mut bootstrap_envelope.spec);
+        clear_runtime_framework_metadata(
+            &mut bootstrap_envelope.spec,
+            RuntimeLifecycleVariant::BootstrapRun,
+        );
+        let bootstrap_envelope =
+            spec::HashedSpecEnvelope::new(bootstrap_envelope.spec, bootstrap_envelope.audit)
+                .expect("rehash");
+        assert!(matches!(
+            CertifiedRuntimeSpec::from_verified_envelope(bootstrap_envelope),
+            Err(RuntimeError::InvalidSpec(message))
+                if message.contains("without matching framework metadata")
+        ));
+
+        let mut retention_envelope = fixture.runtime_spec.envelope().clone();
+        let render_receipt = runtime_render_receipt_cell(&retention_envelope.spec);
+        append_runtime_retention_lifecycle_node(&mut retention_envelope.spec, render_receipt, true);
+        clear_runtime_framework_metadata(
+            &mut retention_envelope.spec,
+            RuntimeLifecycleVariant::ProjectRetentionManifest,
+        );
+        let retention_envelope =
+            spec::HashedSpecEnvelope::new(retention_envelope.spec, retention_envelope.audit)
+                .expect("rehash");
+        assert!(matches!(
+            CertifiedRuntimeSpec::from_verified_envelope(retention_envelope),
+            Err(RuntimeError::InvalidSpec(message))
+                if message.contains("without matching framework metadata")
+        ));
+
+        let mut complete_envelope = fixture.runtime_spec.envelope().clone();
+        let render_receipt = runtime_render_receipt_cell(&complete_envelope.spec);
+        let retention_node = append_runtime_retention_lifecycle_node(
+            &mut complete_envelope.spec,
+            render_receipt,
+            true,
+        );
+        let retention_receipt = complete_envelope
+            .spec
+            .nodes
+            .iter()
+            .find(|node| node.node_id == retention_node)
+            .expect("retention node")
+            .output_cell
+            .clone();
+        append_runtime_complete_lifecycle_node(
+            &mut complete_envelope.spec,
+            retention_receipt,
+            true,
+        );
+        clear_runtime_framework_metadata(
+            &mut complete_envelope.spec,
+            RuntimeLifecycleVariant::CompleteRun,
+        );
+        let complete_envelope =
+            spec::HashedSpecEnvelope::new(complete_envelope.spec, complete_envelope.audit)
+                .expect("rehash");
+        assert!(matches!(
+            CertifiedRuntimeSpec::from_verified_envelope(complete_envelope),
+            Err(RuntimeError::InvalidSpec(message))
+                if message.contains("without matching framework metadata")
+        ));
+    }
+
+    #[test]
+    fn certified_runtime_spec_rejects_forged_lifecycle_input_binding() {
+        let fixture = fixture();
+
+        let mut bootstrap_envelope = fixture.runtime_spec.envelope().clone();
+        append_runtime_bootstrap_lifecycle_node(&mut bootstrap_envelope.spec);
+        let node = find_runtime_lifecycle_node_mut(
+            &mut bootstrap_envelope.spec,
+            RuntimeLifecycleVariant::BootstrapRun,
+        );
+        node.input_bindings.input_descriptor_id = DescriptorId::from_digest(
+            DigestAlgorithm::Sha256JcsV1,
+            DigestBytes::from_array([0xb1; 32]),
+        );
+        let bootstrap_envelope =
+            spec::HashedSpecEnvelope::new(bootstrap_envelope.spec, bootstrap_envelope.audit)
+                .expect("rehash");
+        assert!(matches!(
+            CertifiedRuntimeSpec::from_verified_envelope(bootstrap_envelope),
+            Err(RuntimeError::InvalidSpec(message))
+                if message.contains("input binding is not deterministic")
+        ));
+
+        let mut retention_envelope = fixture.runtime_spec.envelope().clone();
+        let render_receipt = runtime_render_receipt_cell(&retention_envelope.spec);
+        append_runtime_retention_lifecycle_node(&mut retention_envelope.spec, render_receipt, true);
+        let node = find_runtime_lifecycle_node_mut(
+            &mut retention_envelope.spec,
+            RuntimeLifecycleVariant::ProjectRetentionManifest,
+        );
+        let current = match &node.input_bindings.root {
+            spec::InputBindingNodeSpec::Cell(cell) => cell.clone(),
+            _ => panic!("expected cell input"),
+        };
+        node.input_bindings.root =
+            spec::InputBindingNodeSpec::Struct(vec![spec::NamedInputBindingSpec {
+                field_path: spec::PublicFieldPath::new("public_output_receipt")
+                    .expect("field path"),
+                node: spec::InputBindingNodeSpec::Cell(current),
+            }]);
+        node.input_bindings.digest =
+            content_digest_json(input_node_json(&node.input_bindings.root)).expect("input digest");
+        let retention_envelope =
+            spec::HashedSpecEnvelope::new(retention_envelope.spec, retention_envelope.audit)
+                .expect("rehash");
+        assert!(matches!(
+            CertifiedRuntimeSpec::from_verified_envelope(retention_envelope),
+            Err(RuntimeError::InvalidSpec(message))
+                if message.contains("input binding is not deterministic")
+        ));
+
+        let mut complete_envelope = fixture.runtime_spec.envelope().clone();
+        let render_receipt = runtime_render_receipt_cell(&complete_envelope.spec);
+        let retention_node = append_runtime_retention_lifecycle_node(
+            &mut complete_envelope.spec,
+            render_receipt,
+            true,
+        );
+        let retention_receipt = complete_envelope
+            .spec
+            .nodes
+            .iter()
+            .find(|node| node.node_id == retention_node)
+            .expect("retention node")
+            .output_cell
+            .clone();
+        append_runtime_complete_lifecycle_node(
+            &mut complete_envelope.spec,
+            retention_receipt,
+            true,
+        );
+        let node = find_runtime_lifecycle_node_mut(
+            &mut complete_envelope.spec,
+            RuntimeLifecycleVariant::CompleteRun,
+        );
+        let current = match &node.input_bindings.root {
+            spec::InputBindingNodeSpec::Cell(cell) => cell.clone(),
+            _ => panic!("expected cell input"),
+        };
+        node.input_bindings.root =
+            spec::InputBindingNodeSpec::Struct(vec![spec::NamedInputBindingSpec {
+                field_path: spec::PublicFieldPath::new("retention_manifest_receipt")
+                    .expect("field path"),
+                node: spec::InputBindingNodeSpec::Cell(current),
+            }]);
+        node.input_bindings.digest =
+            content_digest_json(input_node_json(&node.input_bindings.root)).expect("input digest");
+        let complete_envelope =
+            spec::HashedSpecEnvelope::new(complete_envelope.spec, complete_envelope.audit)
+                .expect("rehash");
+        assert!(matches!(
+            CertifiedRuntimeSpec::from_verified_envelope(complete_envelope),
+            Err(RuntimeError::InvalidSpec(message))
+                if message.contains("input binding is not deterministic")
+        ));
+    }
+
     #[tokio::test]
     async fn replay_rejects_run_completed_without_public_output_evidence() {
         let fixture = fixture();
@@ -10947,6 +11705,486 @@ mod tests {
         .expect("runner binding")
     }
 
+    fn runtime_render_receipt_cell(typed: &spec::TypedExecutionSpec) -> CellId {
+        typed
+            .nodes
+            .iter()
+            .find(|node| {
+                matches!(
+                    node.framework,
+                    Some(spec::FrameworkNodeSpec::PublicOutputRender(_))
+                )
+            })
+            .expect("render node")
+            .output_cell
+            .clone()
+    }
+
+    #[derive(Clone, Copy)]
+    enum RuntimeLifecycleVariant {
+        BootstrapRun,
+        ProjectRetentionManifest,
+        CompleteRun,
+    }
+
+    impl RuntimeLifecycleVariant {
+        fn matches(self, framework: &spec::FrameworkNodeSpec) -> bool {
+            match self {
+                Self::BootstrapRun => {
+                    matches!(framework, spec::FrameworkNodeSpec::BootstrapRun(_))
+                }
+                Self::ProjectRetentionManifest => {
+                    matches!(
+                        framework,
+                        spec::FrameworkNodeSpec::ProjectRetentionManifest(_)
+                    )
+                }
+                Self::CompleteRun => {
+                    matches!(framework, spec::FrameworkNodeSpec::CompleteRun(_))
+                }
+            }
+        }
+    }
+
+    fn find_runtime_lifecycle_node_mut(
+        typed: &mut spec::TypedExecutionSpec,
+        variant: RuntimeLifecycleVariant,
+    ) -> &mut spec::NodeSpec {
+        typed
+            .nodes
+            .iter_mut()
+            .find(|node| {
+                node.framework
+                    .as_ref()
+                    .is_some_and(|framework| variant.matches(framework))
+            })
+            .expect("runtime lifecycle node")
+    }
+
+    fn clear_runtime_framework_metadata(
+        typed: &mut spec::TypedExecutionSpec,
+        variant: RuntimeLifecycleVariant,
+    ) {
+        find_runtime_lifecycle_node_mut(typed, variant).framework = None;
+    }
+
+    fn append_runtime_bootstrap_lifecycle_node(typed: &mut spec::TypedExecutionSpec) -> CellId {
+        let node_id = NodeId::from_digest(
+            DigestAlgorithm::Sha256JcsV1,
+            DigestBytes::from_array([0xe8; 32]),
+        );
+        let output_cell = CellId::from_digest(
+            DigestAlgorithm::Sha256JcsV1,
+            DigestBytes::from_array([0xe9; 32]),
+        );
+        let descriptor_id = DescriptorId::from_digest(
+            DigestAlgorithm::Sha256JcsV1,
+            DigestBytes::from_array([0xea; 32]),
+        );
+        let config_ref =
+            spec::framework_config_ref("bootstrap_run", &node_id).expect("bootstrap config ref");
+        let input_binding =
+            spec::framework_lifecycle_unit_input_binding("bootstrap_run").expect("input binding");
+        let managed = ManagedPlatformWrite::descriptor().expect("managed effect");
+        let receipt_schema =
+            spec::bootstrap_run_receipt_schema_id().expect("bootstrap receipt schema");
+        let receipt_semantic =
+            spec::bootstrap_run_receipt_semantic_type_id().expect("bootstrap receipt semantic");
+        let no_caps = CapabilitySetDescriptor::new(Vec::new()).expect("no caps");
+        let state_kind = StateKind::new(
+            "mfm.framework",
+            "bootstrap_run",
+            DigestAlgorithm::Sha256JcsV1,
+            DigestBytes::from_array([0xed; 32]),
+        )
+        .expect("state kind");
+        let state_version =
+            StateVersion::new("mfm.framework.state.bootstrap_run.v1").expect("state version");
+        typed
+            .descriptor_identities
+            .push(spec::DescriptorIdentity::State(Box::new(
+                spec::StateDescriptorIdentity {
+                    descriptor_id: descriptor_id.clone(),
+                    name: "mfm.framework.bootstrap_run".to_owned(),
+                    state_kind: state_kind.clone(),
+                    state_version: state_version.clone(),
+                    config_schema_id: config_ref.schema_id.clone(),
+                    input_schema_id: input_binding.input_schema_id.clone(),
+                    output_schema_id: receipt_schema.clone(),
+                    output_semantic_type_id: receipt_semantic.clone(),
+                    effect_kind: managed.kind.clone(),
+                    effect_class: managed.class.as_str().to_owned(),
+                    effect_name: managed.name.to_owned(),
+                    effect_version: managed.version,
+                    capabilities: no_caps.clone(),
+                    runner: "managed_platform_write".to_owned(),
+                    side_effect_contract_digest: None,
+                },
+            )));
+        typed.config_refs.push(config_ref.clone());
+        typed.cells.push(spec::CellSpec {
+            cell_id: output_cell.clone(),
+            producer: spec::CellProducer::Node(node_id.clone()),
+            scope_id: typed.scopes[0].scope_id.clone(),
+            semantic_type_id: receipt_semantic,
+            schema_id: receipt_schema,
+            value_lineage: spec::ValueLineageRef {
+                lineage_digest: content(0xee),
+            },
+            terminal_policy: spec::CellTerminalPolicy::ProducedOnly,
+            storage_policy: spec::StoragePolicy::ContentAddressed,
+            redaction_policy: spec::RedactionPolicy::Public,
+        });
+        typed.nodes.push(spec::NodeSpec {
+            node_id: node_id.clone(),
+            stable_key: spec::StableAuthorKey::new("framework/bootstrap-run").expect("stable key"),
+            scope_id: typed.scopes[0].scope_id.clone(),
+            state_kind,
+            state_version,
+            descriptor_id,
+            config_ref,
+            input_bindings: input_binding,
+            output_cell: output_cell.clone(),
+            effect_kind: managed.kind,
+            capability_bindings: no_caps,
+            adapter_bindings: Vec::new(),
+            side_effect: None,
+            framework: Some(spec::FrameworkNodeSpec::BootstrapRun(
+                spec::BootstrapRunNodeSpec {},
+            )),
+            planning_lineage: typed.scopes[0].planning_lineage.clone(),
+            deterministic_predecessors: Vec::new(),
+        });
+        output_cell
+    }
+
+    fn append_runtime_retention_lifecycle_node(
+        typed: &mut spec::TypedExecutionSpec,
+        public_output_receipt_cell: CellId,
+        valid_ordering: bool,
+    ) -> NodeId {
+        let node_id = NodeId::from_digest(
+            DigestAlgorithm::Sha256JcsV1,
+            DigestBytes::from_array([0xf1; 32]),
+        );
+        let output_cell = CellId::from_digest(
+            DigestAlgorithm::Sha256JcsV1,
+            DigestBytes::from_array([0xf2; 32]),
+        );
+        let descriptor_id = DescriptorId::from_digest(
+            DigestAlgorithm::Sha256JcsV1,
+            DigestBytes::from_array([0xf3; 32]),
+        );
+        let config_ref = spec::framework_config_ref("project_retention_manifest", &node_id)
+            .expect("retention config ref");
+        let input_cell = typed
+            .cells
+            .iter()
+            .find(|cell| cell.cell_id == public_output_receipt_cell)
+            .expect("input cell")
+            .clone();
+        let input_binding = spec::framework_lifecycle_receipt_input_binding(
+            "project_retention_manifest",
+            "public_output_receipt",
+            &input_cell,
+        )
+        .expect("input binding");
+        let managed = ManagedPlatformWrite::descriptor().expect("managed effect");
+        let receipt_schema =
+            spec::retention_manifest_receipt_schema_id().expect("retention receipt schema");
+        let receipt_semantic = spec::retention_manifest_receipt_semantic_type_id()
+            .expect("retention receipt semantic");
+        let no_caps = CapabilitySetDescriptor::new(Vec::new()).expect("no caps");
+        let state_kind = StateKind::new(
+            "mfm.framework",
+            "project_retention_manifest",
+            DigestAlgorithm::Sha256JcsV1,
+            DigestBytes::from_array([0xf9; 32]),
+        )
+        .expect("state kind");
+        let state_version = StateVersion::new("mfm.framework.state.project_retention_manifest.v1")
+            .expect("state version");
+        typed
+            .descriptor_identities
+            .push(spec::DescriptorIdentity::State(Box::new(
+                spec::StateDescriptorIdentity {
+                    descriptor_id: descriptor_id.clone(),
+                    name: "mfm.framework.project_retention_manifest".to_owned(),
+                    state_kind: state_kind.clone(),
+                    state_version: state_version.clone(),
+                    config_schema_id: config_ref.schema_id.clone(),
+                    input_schema_id: input_binding.input_schema_id.clone(),
+                    output_schema_id: receipt_schema.clone(),
+                    output_semantic_type_id: receipt_semantic.clone(),
+                    effect_kind: managed.kind.clone(),
+                    effect_class: managed.class.as_str().to_owned(),
+                    effect_name: managed.name.to_owned(),
+                    effect_version: managed.version,
+                    capabilities: no_caps.clone(),
+                    runner: "managed_platform_write".to_owned(),
+                    side_effect_contract_digest: None,
+                },
+            )));
+        typed.config_refs.push(config_ref.clone());
+        typed.cells.push(spec::CellSpec {
+            cell_id: output_cell.clone(),
+            producer: spec::CellProducer::Node(node_id.clone()),
+            scope_id: input_cell.scope_id.clone(),
+            semantic_type_id: receipt_semantic,
+            schema_id: receipt_schema,
+            value_lineage: spec::ValueLineageRef {
+                lineage_digest: content(0xfa),
+            },
+            terminal_policy: spec::CellTerminalPolicy::ProducedOnly,
+            storage_policy: spec::StoragePolicy::ContentAddressed,
+            redaction_policy: spec::RedactionPolicy::Public,
+        });
+        let predecessors = match &input_cell.producer {
+            spec::CellProducer::Node(producer) => vec![producer.clone()],
+            spec::CellProducer::Seed(_) => Vec::new(),
+        };
+        let framework_receipt = if valid_ordering {
+            public_output_receipt_cell
+        } else {
+            input_cell.cell_id.clone()
+        };
+        typed.nodes.push(spec::NodeSpec {
+            node_id: node_id.clone(),
+            stable_key: spec::StableAuthorKey::new("framework/project-retention-manifest")
+                .expect("stable key"),
+            scope_id: input_cell.scope_id,
+            state_kind,
+            state_version,
+            descriptor_id,
+            config_ref,
+            input_bindings: input_binding,
+            output_cell,
+            effect_kind: managed.kind,
+            capability_bindings: no_caps,
+            adapter_bindings: Vec::new(),
+            side_effect: None,
+            framework: Some(spec::FrameworkNodeSpec::ProjectRetentionManifest(
+                spec::ProjectRetentionManifestNodeSpec {
+                    public_schema_id: typed.public_outputs.public_schema_id.clone(),
+                    public_output_receipt_cell: framework_receipt,
+                },
+            )),
+            planning_lineage: typed.scopes[0].planning_lineage.clone(),
+            deterministic_predecessors: predecessors,
+        });
+        node_id
+    }
+
+    fn append_runtime_complete_lifecycle_node(
+        typed: &mut spec::TypedExecutionSpec,
+        retention_manifest_receipt_cell: CellId,
+        valid_ordering: bool,
+    ) -> NodeId {
+        let node_id = NodeId::from_digest(
+            DigestAlgorithm::Sha256JcsV1,
+            DigestBytes::from_array([0xb2; 32]),
+        );
+        let output_cell = CellId::from_digest(
+            DigestAlgorithm::Sha256JcsV1,
+            DigestBytes::from_array([0xb3; 32]),
+        );
+        let descriptor_id = DescriptorId::from_digest(
+            DigestAlgorithm::Sha256JcsV1,
+            DigestBytes::from_array([0xb4; 32]),
+        );
+        let config_ref =
+            spec::framework_config_ref("complete_run", &node_id).expect("complete config ref");
+        let input_cell = typed
+            .cells
+            .iter()
+            .find(|cell| cell.cell_id == retention_manifest_receipt_cell)
+            .expect("input cell")
+            .clone();
+        let input_binding = spec::framework_lifecycle_receipt_input_binding(
+            "complete_run",
+            "retention_manifest_receipt",
+            &input_cell,
+        )
+        .expect("input binding");
+        let managed = ManagedPlatformWrite::descriptor().expect("managed effect");
+        let receipt_schema =
+            spec::complete_run_receipt_schema_id().expect("complete receipt schema");
+        let receipt_semantic =
+            spec::complete_run_receipt_semantic_type_id().expect("complete receipt semantic");
+        let no_caps = CapabilitySetDescriptor::new(Vec::new()).expect("no caps");
+        let state_kind = StateKind::new(
+            "mfm.framework",
+            "complete_run",
+            DigestAlgorithm::Sha256JcsV1,
+            DigestBytes::from_array([0xb8; 32]),
+        )
+        .expect("state kind");
+        let state_version =
+            StateVersion::new("mfm.framework.state.complete_run.v1").expect("state version");
+        typed
+            .descriptor_identities
+            .push(spec::DescriptorIdentity::State(Box::new(
+                spec::StateDescriptorIdentity {
+                    descriptor_id: descriptor_id.clone(),
+                    name: "mfm.framework.complete_run".to_owned(),
+                    state_kind: state_kind.clone(),
+                    state_version: state_version.clone(),
+                    config_schema_id: config_ref.schema_id.clone(),
+                    input_schema_id: input_binding.input_schema_id.clone(),
+                    output_schema_id: receipt_schema.clone(),
+                    output_semantic_type_id: receipt_semantic.clone(),
+                    effect_kind: managed.kind.clone(),
+                    effect_class: managed.class.as_str().to_owned(),
+                    effect_name: managed.name.to_owned(),
+                    effect_version: managed.version,
+                    capabilities: no_caps.clone(),
+                    runner: "managed_platform_write".to_owned(),
+                    side_effect_contract_digest: None,
+                },
+            )));
+        typed.config_refs.push(config_ref.clone());
+        typed.cells.push(spec::CellSpec {
+            cell_id: output_cell.clone(),
+            producer: spec::CellProducer::Node(node_id.clone()),
+            scope_id: input_cell.scope_id.clone(),
+            semantic_type_id: receipt_semantic,
+            schema_id: receipt_schema,
+            value_lineage: spec::ValueLineageRef {
+                lineage_digest: content(0xbb),
+            },
+            terminal_policy: spec::CellTerminalPolicy::ProducedOnly,
+            storage_policy: spec::StoragePolicy::ContentAddressed,
+            redaction_policy: spec::RedactionPolicy::Public,
+        });
+        let predecessors = match &input_cell.producer {
+            spec::CellProducer::Node(producer) => vec![producer.clone()],
+            spec::CellProducer::Seed(_) => Vec::new(),
+        };
+        let framework_receipt = if valid_ordering {
+            retention_manifest_receipt_cell
+        } else {
+            typed
+                .public_outputs
+                .outputs
+                .first()
+                .expect("public output")
+                .cell_id
+                .clone()
+        };
+        typed.nodes.push(spec::NodeSpec {
+            node_id: node_id.clone(),
+            stable_key: spec::StableAuthorKey::new("framework/complete-run").expect("stable key"),
+            scope_id: input_cell.scope_id,
+            state_kind,
+            state_version,
+            descriptor_id,
+            config_ref,
+            input_bindings: input_binding,
+            output_cell,
+            effect_kind: managed.kind,
+            capability_bindings: no_caps,
+            adapter_bindings: Vec::new(),
+            side_effect: None,
+            framework: Some(spec::FrameworkNodeSpec::CompleteRun(
+                spec::CompleteRunNodeSpec {
+                    public_schema_id: typed.public_outputs.public_schema_id.clone(),
+                    retention_manifest_receipt_cell: framework_receipt,
+                },
+            )),
+            planning_lineage: typed.scopes[0].planning_lineage.clone(),
+            deterministic_predecessors: predecessors,
+        });
+        node_id
+    }
+
+    fn append_runtime_user_receipt_consumer(
+        typed: &mut spec::TypedExecutionSpec,
+        receipt_cell: CellId,
+        stable_key: &str,
+    ) -> NodeId {
+        let template = typed
+            .nodes
+            .iter()
+            .find(|node| node.framework.is_none())
+            .expect("user node template")
+            .clone();
+        let input_cell = typed
+            .cells
+            .iter()
+            .find(|cell| cell.cell_id == receipt_cell)
+            .expect("receipt cell")
+            .clone();
+        let output_cell = CellId::from_digest(
+            DigestAlgorithm::Sha256JcsV1,
+            DigestBytes::from_array([0xfb; 32]),
+        );
+        let node_id = NodeId::from_digest(
+            DigestAlgorithm::Sha256JcsV1,
+            DigestBytes::from_array([0xfc; 32]),
+        );
+        let field_path = spec::PublicFieldPath::new("receipt").expect("field path");
+        let input_root = spec::InputBindingNodeSpec::Cell(Box::new(spec::InputBindingCellSpec {
+            field_path,
+            cell_id: input_cell.cell_id.clone(),
+            semantic_type_id: input_cell.semantic_type_id.clone(),
+            schema_id: input_cell.schema_id.clone(),
+            required_terminal: spec::RequiredTerminal::ProducedOnly,
+            value_lineage: input_cell.value_lineage.clone(),
+        }));
+        let mut input_bindings = template.input_bindings.clone();
+        input_bindings.root = input_root;
+        input_bindings.digest =
+            content_digest_json(input_node_json(&input_bindings.root)).expect("input digest");
+        let predecessors = match &input_cell.producer {
+            spec::CellProducer::Node(producer) => vec![producer.clone()],
+            spec::CellProducer::Seed(_) => Vec::new(),
+        };
+        typed.cells.push(spec::CellSpec {
+            cell_id: output_cell.clone(),
+            producer: spec::CellProducer::Node(node_id.clone()),
+            scope_id: template.scope_id.clone(),
+            semantic_type_id: typed
+                .cells
+                .iter()
+                .find(|cell| cell.cell_id == template.output_cell)
+                .expect("template output")
+                .semantic_type_id
+                .clone(),
+            schema_id: typed
+                .cells
+                .iter()
+                .find(|cell| cell.cell_id == template.output_cell)
+                .expect("template output")
+                .schema_id
+                .clone(),
+            value_lineage: spec::ValueLineageRef {
+                lineage_digest: content(0xfd),
+            },
+            terminal_policy: spec::CellTerminalPolicy::ProducedOnly,
+            storage_policy: spec::StoragePolicy::ContentAddressed,
+            redaction_policy: spec::RedactionPolicy::Public,
+        });
+        typed.nodes.push(spec::NodeSpec {
+            node_id: node_id.clone(),
+            stable_key: spec::StableAuthorKey::new(stable_key).expect("stable key"),
+            scope_id: template.scope_id,
+            state_kind: template.state_kind,
+            state_version: template.state_version,
+            descriptor_id: template.descriptor_id,
+            config_ref: template.config_ref,
+            input_bindings,
+            output_cell,
+            effect_kind: template.effect_kind,
+            capability_bindings: template.capability_bindings,
+            adapter_bindings: Vec::new(),
+            side_effect: None,
+            framework: None,
+            planning_lineage: template.planning_lineage,
+            deterministic_predecessors: predecessors,
+        });
+        node_id
+    }
+
     fn fixture() -> Fixture {
         let scope = ScopeId::from_digest(DigestAlgorithm::Sha256JcsV1, D0);
         let seed_id = SeedId::from_digest(DigestAlgorithm::Sha256JcsV1, D1);
@@ -11052,6 +12290,8 @@ mod tests {
         };
         let output_spec_digest = public_outputs.digest().expect("public output digest");
         let render_node = NodeId::from_digest(DigestAlgorithm::Sha256JcsV1, D8);
+        let render_config_ref = spec::framework_config_ref("public_output_render", &render_node)
+            .expect("render config ref");
         let render_cell = CellId::from_digest(DigestAlgorithm::Sha256JcsV1, D9);
         let render_descriptor = DescriptorId::from_digest(DigestAlgorithm::Sha256JcsV1, DA);
         let receipt_schema = spec::public_output_receipt_schema_id().expect("receipt schema");
@@ -11143,7 +12383,7 @@ mod tests {
             state_kind: render_state_kind.clone(),
             state_version: render_state_version.clone(),
             descriptor_id: render_descriptor.clone(),
-            config_ref: config_ref.clone(),
+            config_ref: render_config_ref.clone(),
             input_bindings: render_input_binding,
             output_cell: render_cell.clone(),
             effect_kind: managed_effect.kind.clone(),
@@ -11207,7 +12447,7 @@ mod tests {
                     name: "mfm.framework.render_public_outputs".to_owned(),
                     state_kind: render_state_kind,
                     state_version: render_state_version,
-                    config_schema_id: config_schema.clone(),
+                    config_schema_id: render_config_ref.schema_id.clone(),
                     input_schema_id: public_schema.clone(),
                     output_schema_id: receipt_schema.clone(),
                     output_semantic_type_id: receipt_semantic.clone(),
@@ -11221,7 +12461,7 @@ mod tests {
                 })),
                 spec::DescriptorIdentity::Renderer(Box::new(renderer.clone())),
             ],
-            config_refs: vec![config_ref.clone()],
+            config_refs: vec![config_ref.clone(), render_config_ref],
             nodes: vec![
                 render_node_spec.clone(),
                 node_b_spec.clone(),
