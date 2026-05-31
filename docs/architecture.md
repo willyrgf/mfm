@@ -15,9 +15,10 @@ semantics.
 typed or authored input
   -> operation crate builds typed program draft
   -> mfm-certify emits certified typed execution spec
-  -> app persists spec/config/seed artifacts
-  -> runtime lowers certified spec through registered runners
-  -> store appends typed events and projections
+  -> app verifies the certified bundle and assembles typed launch material
+  -> runtime middleware stages artifacts and builds PreparedTypedCommit
+  -> store atomically admits artifact evidence and appends typed events
+  -> projections rebuild from the append-only run stream
   -> replay/resume/public-output read from certified spec + run stream
 ```
 
@@ -105,8 +106,9 @@ assembly, not through ambient access.
 ## Transport Boundary
 
 Transport crates bind certified state descriptors to runtime runners and live/replay capability
-backends. They may persist typed facts or artifacts through boundaries supplied by app/runtime, but
-they do not become semantic authority by themselves.
+backends. Runners return typed payloads plus staged artifacts or sealed handles; runtime middleware
+is the only execution path that persists required runtime artifacts and admits their evidence to the
+run stream. Transport crates do not become semantic authority by themselves.
 
 Active typed transports:
 
@@ -119,9 +121,13 @@ Replay implementations must answer from recorded evidence only.
 
 ## Store Boundary
 
-`mfm-store` defines the commit contract. Implementations accept typed commit payloads and
-preconditions; they construct envelopes, assign sequence/ordinal/event identities, enforce logical
-keys, and maintain projections.
+`mfm-store` defines the production commit contract. Implementations accept only
+`PreparedTypedCommit` for execution mutation; each prepared commit carries both typed payloads and
+the artifact evidence to admit atomically with those payloads. Stores construct envelopes, assign
+sequence/ordinal/event identities, enforce logical keys and preconditions, and maintain
+projections. Synthetic store mutation is reserved for explicitly named non-execution
+test/migration/repair/corruption fixtures, not app, CLI, REST, transport, scheduler, replay, or
+public-output paths.
 
 Active storage implementations:
 

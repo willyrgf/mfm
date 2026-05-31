@@ -358,9 +358,9 @@ mfm_cli run stream <RUN_ID> [OPTIONS]
 
 ### `run public-output`
 
-Renders a typed public output by schema id through app-owned render authority minted from verified
-stored spec/certificate artifacts, rebuilt stream evidence, store-owned public-output projection
-evidence, and typed artifact bytes. Rendered JSON is not resume, replay, or render authority.
+Renders a typed public output by schema id through sealed read authority minted from verified stored
+spec/certificate artifacts, rebuilt stream evidence, store-owned public-output projection evidence,
+and typed artifact bytes. Rendered JSON is not resume, replay, or render authority.
 
 **Usage:**
 ```sh

@@ -191,8 +191,11 @@ against a registry and returns `CertifiedTypedSpec`.
 
 ## Store And Events
 
-`mfm-store` is the only semantic commit contract for certified typed runs. Callers submit typed event
-payloads and commit preconditions. The store constructs envelopes and maintains projections.
+`mfm-store` is the only semantic commit contract for certified typed runs. Production execution
+callers submit `PreparedTypedCommit`, which carries typed event payloads, commit preconditions, and
+the artifact evidence that becomes run authority in the same atomic append. The store constructs
+envelopes and maintains projections. Synthetic direct mutation is confined to explicitly named
+non-execution test, migration, repair, corruption, or low-level storage contract fixtures.
 
 The authoritative event stream contains:
 
@@ -223,15 +226,24 @@ The runtime authority contract starts from `CertifiedTypedSpec`, not from parsed
 hash-only envelope. Before `RunStarted`, the assembly/runtime boundary verifies:
 
 - spec hash and schema/version fields
-- seed/config artifact evidence
+- staged spec/certificate/config/seed artifact bytes and typed evidence
 - descriptor identities and executable identity requirements
 - runner registry availability
 - capability registry availability
 
+Runtime mutation middleware owns all execution appends. Bootstrap verifies and stages launch
+material, executes the sealed `BootstrapRun` genesis state, and commits `RunStarted`, bootstrap
+attempt lifecycle, launch artifact references, retention refs, and admitted artifact evidence in one
+prepared store commit. Ordinary states, `PublicOutputRender`, `ProjectRetentionManifest`, and
+`CompleteRun` use the same middleware path: staged artifacts are persisted before the prepared
+commit, and run-store artifact evidence is admitted only in the commit that first references it.
+Failed commits may leave orphan artifact-store bytes, but orphan run-store evidence is not
+authority.
+
 The scheduler materializes state inputs from certified binding trees and prior typed cell evidence.
-It executes states in certified topological order and commits terminal evidence through the typed
-store. Missing runners, missing capabilities, mismatched specs, missing inputs, and malformed
-history fail before semantic execution advances.
+It executes states in certified topological order and commits terminal evidence only through runtime
+middleware and the prepared typed store boundary. Missing runners, missing capabilities, mismatched
+specs, missing inputs, and malformed history fail before semantic execution advances.
 
 Resume loads the stored certified spec, rebuilds projections from the run stream, verifies completed
 cell and side-effect evidence against the spec, then advances only from a type-valid frontier.

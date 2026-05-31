@@ -123,7 +123,7 @@ Request notes:
   authority.
 - `run_id` is optional; the server generates a typed digest run id when omitted.
 - `configs[*].json` and `seeds[*].json` are canonicalized and staged by runtime middleware before
-  their evidence is admitted with the start commit.
+  their evidence is admitted by the same prepared start commit that first references it.
 - `drive` is `until_blocked` or `append_only`; it defaults to `until_blocked`.
 - Specs that reference unported domain descriptors fail before `RunStarted` with
   `TypedRunnerUnavailable`.
@@ -135,6 +135,7 @@ Stable start error codes:
   unknown fields, or cannot be canonicalized.
 - `TypedCertificationFailed`: certificate/spec hash, registry digest, descriptor identity/digest,
   lowering/canonicalizer identity, public-output schema evidence, or certifier validation failed.
+- `MissingTypedConfigInput`: a certified config reference was not supplied in `configs`.
 - `TypedRunnerUnavailable`: the verified spec references a state descriptor without a production
   runner binding.
 

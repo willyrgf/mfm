@@ -15,3 +15,10 @@ bytes must pass through the certifier verifier before they can reach this crate.
 The runner plan is not authority by itself. Runtime-only checks remain runtime-owned: runner
 availability, capability availability, seed/config evidence, stream drift, and execution contract
 validation.
+
+Runtime mutation middleware is the only production execution writer. Launch, ordinary state
+attempts, public-output rendering, retention projection, and completion all produce staged artifacts
+or sealed handles plus typed payload intent; middleware verifies bindings, stages bytes, builds
+`PreparedTypedCommit`, and calls `append_prepared_typed_commit`. `RunStarted` is emitted only by the
+sealed `BootstrapRun` genesis batch, and `RunCompleted` is derived only from the sealed
+`CompleteRun` framework state.
