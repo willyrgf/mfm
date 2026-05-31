@@ -9624,6 +9624,61 @@ mod tests {
         }
     }
 
+    struct RecordedPreparedCommit {
+        seq: store::StreamSeq,
+        commit_key: store::CommitKey,
+        payloads: Vec<events::KernelEventPayload>,
+        admitted_artifacts: Vec<store::ArtifactEvidenceRef>,
+    }
+
+    struct RecordingTypedRunStore {
+        inner: store::InMemoryTypedRunStore,
+        commits: Vec<RecordedPreparedCommit>,
+    }
+
+    impl RecordingTypedRunStore {
+        fn new() -> Self {
+            Self {
+                inner: store::InMemoryTypedRunStore::new(),
+                commits: Vec::new(),
+            }
+        }
+    }
+
+    impl store::TypedProjectionRead for RecordingTypedRunStore {
+        fn projection_snapshot(&self) -> &store::ProjectionSnapshot {
+            self.inner.projection_snapshot()
+        }
+    }
+
+    impl store::TypedRunEventStore for RecordingTypedRunStore {
+        fn append_prepared_typed_commit(
+            &mut self,
+            commit: store::PreparedTypedCommit,
+        ) -> store::Result<store::CommitOutcome> {
+            let payloads = commit.request().payloads.clone();
+            let admitted_artifacts = commit.admitted_artifacts().to_vec();
+            let outcome = self.inner.append_prepared_typed_commit(commit)?;
+            if let store::CommitOutcome::Appended(batch) = &outcome {
+                self.commits.push(RecordedPreparedCommit {
+                    seq: batch.seq(),
+                    commit_key: batch.commit_key().clone(),
+                    payloads,
+                    admitted_artifacts,
+                });
+            }
+            Ok(outcome)
+        }
+
+        fn load_run_stream(&self, run_id: &RunId) -> Vec<store::KernelEventEnvelope> {
+            self.inner.load_run_stream(run_id)
+        }
+
+        fn expected_next_seq(&self, run_id: &RunId) -> store::StreamSeq {
+            self.inner.expected_next_seq(run_id)
+        }
+    }
+
     #[derive(Clone)]
     struct TestRuntimeArtifactStager;
 
@@ -10106,6 +10161,174 @@ mod tests {
             SchedulerStatus::PublicOutputProjected
         );
         assert_eq!(store.load_run_stream(&fixture.run_id).len(), stream_len);
+    }
+
+    #[tokio::test]
+    async fn no_second_authority_full_run_stages_and_admits_first_artifact_references() {
+        struct InlineRecordingRunner {
+            expected_caps: Vec<(CapabilityKind, CapabilityVersion)>,
+            output_bytes: Vec<u8>,
+        }
+
+        impl ErasedNodeRunner for InlineRecordingRunner {
+            fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
+                Box::pin(async move {
+                    for (kind, version) in &self.expected_caps {
+                        assert!(ctx.caps().contains(kind, version));
+                    }
+                    let artifact = state_output_artifact_for_bytes(
+                        ctx.node(),
+                        ctx.descriptor(),
+                        &self.output_bytes,
+                    );
+                    let staged_artifact = StagedArtifact::inline_attempt_artifact(
+                        &ctx,
+                        self.output_bytes.clone(),
+                        artifact.clone(),
+                    )?;
+                    Ok(ErasedRunnerOutput {
+                        staged_artifacts: vec![staged_artifact],
+                        staged_retention_refs: Vec::new(),
+                        payloads: terminal_payloads(
+                            &ctx,
+                            artifact.artifact_id.clone(),
+                            artifact.digest.clone(),
+                        ),
+                    })
+                })
+            }
+        }
+
+        let fixture = fixture();
+        let mut registry = ErasedRunnerRegistry::new();
+        registry
+            .register(binding(
+                fixture.descriptor_a.clone(),
+                "pure",
+                InlineRecordingRunner {
+                    expected_caps: Vec::new(),
+                    output_bytes: br#"{"node":"a"}"#.to_vec(),
+                },
+            ))
+            .expect("binding a");
+        registry
+            .register(binding(
+                fixture.descriptor_b.clone(),
+                "read",
+                InlineRecordingRunner {
+                    expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
+                    output_bytes: br#"{"node":"b"}"#.to_vec(),
+                },
+            ))
+            .expect("binding b");
+        let staged = Arc::new(Mutex::new(Vec::new()));
+        let scheduler = test_scheduler_with_stager(
+            registry,
+            Arc::new(RecordingRuntimeArtifactStager {
+                staged: Arc::clone(&staged),
+            }),
+        );
+        let mut store = RecordingTypedRunStore::new();
+        start_fixture_run(
+            &scheduler,
+            &mut store,
+            &fixture,
+            vec![fixture.seed_ref.clone()],
+        )
+        .await
+        .expect("start run");
+
+        assert_eq!(
+            scheduler
+                .drive_until_blocked(&mut store, &fixture.runtime_spec, &fixture.run_id)
+                .await
+                .expect("drive full representative run"),
+            SchedulerStatus::PublicOutputProjected
+        );
+        assert_eq!(
+            store.projection_snapshot().run_state(&fixture.run_id),
+            store::RunState::Completed
+        );
+
+        let stream = store.load_run_stream(&fixture.run_id);
+        validate_run_stream(&fixture.runtime_spec, &fixture.run_id, &stream)
+            .expect("representative stream validates");
+        assert_every_certified_node_has_attempt(&fixture.runtime_spec, &stream);
+        assert!(node_by_output(&fixture, &fixture.cell_a)
+            .framework
+            .is_none());
+        assert!(matches!(
+            &certified_bootstrap_run_node(&fixture.runtime_spec)
+                .expect("bootstrap node")
+                .framework,
+            Some(spec::FrameworkNodeSpec::BootstrapRun(_))
+        ));
+        assert!(matches!(
+            &node_by_output(&fixture, &fixture.render_cell).framework,
+            Some(spec::FrameworkNodeSpec::PublicOutputRender(_))
+        ));
+        assert!(matches!(
+            &certified_retention_manifest_node(&fixture.runtime_spec)
+                .expect("retention node")
+                .framework,
+            Some(spec::FrameworkNodeSpec::ProjectRetentionManifest(_))
+        ));
+        assert!(matches!(
+            &certified_complete_run_node(&fixture.runtime_spec)
+                .expect("complete node")
+                .framework,
+            Some(spec::FrameworkNodeSpec::CompleteRun(_))
+        ));
+
+        let staged_artifacts = staged.lock().expect("staged artifact lock").clone();
+        let mut first_reference_by_artifact = BTreeMap::<ArtifactId, usize>::new();
+        for (commit_index, commit) in store.commits.iter().enumerate() {
+            let commit_references = commit
+                .payloads
+                .iter()
+                .flat_map(referenced_artifact_ids_for_payload)
+                .collect::<BTreeSet<_>>();
+            assert!(
+                !commit_references.is_empty() || commit.admitted_artifacts.is_empty(),
+                "commit {} admitted artifacts without same-commit references",
+                commit.commit_key
+            );
+            for admitted in &commit.admitted_artifacts {
+                assert!(
+                    commit_references.contains(&admitted.artifact_id),
+                    "commit {} admitted unreferenced artifact {}",
+                    commit.commit_key,
+                    admitted.artifact_id
+                );
+                assert!(
+                    staged_artifacts.contains(admitted),
+                    "artifact {} was admitted without runtime staging",
+                    admitted.artifact_id
+                );
+            }
+            for artifact_id in commit_references {
+                first_reference_by_artifact
+                    .entry(artifact_id)
+                    .or_insert(commit_index);
+            }
+        }
+
+        assert!(
+            !first_reference_by_artifact.is_empty(),
+            "representative run should reference artifacts"
+        );
+        for (artifact_id, commit_index) in first_reference_by_artifact {
+            let commit = &store.commits[commit_index];
+            assert!(
+                commit
+                    .admitted_artifacts
+                    .iter()
+                    .any(|admitted| admitted.artifact_id == artifact_id),
+                "artifact {artifact_id} was first referenced by {} at seq {} but not admitted there",
+                commit.commit_key,
+                commit.seq.as_u64()
+            );
+        }
     }
 
     #[tokio::test]
@@ -15106,9 +15329,141 @@ mod tests {
         EventId::from_digest(DigestAlgorithm::Sha256JcsV1, canonical.digest_bytes())
     }
 
-    fn prepare_fixture_launch(
+    fn assert_every_certified_node_has_attempt(
+        runtime_spec: &CertifiedRuntimeSpec,
+        stream: &[store::KernelEventEnvelope],
+    ) {
+        let mut started = BTreeSet::new();
+        let mut completed = BTreeSet::new();
+        for event in stream {
+            match event.payload() {
+                events::KernelEventPayload::StateAttemptStarted(payload) => {
+                    started.insert(payload.node_id.clone());
+                }
+                events::KernelEventPayload::StateAttemptCompleted(payload) => {
+                    completed.insert(payload.node_id.clone());
+                }
+                _ => {}
+            }
+        }
+        for node in &runtime_spec.spec().nodes {
+            assert!(
+                started.contains(&node.node_id),
+                "node {} has no StateAttemptStarted",
+                node.node_id
+            );
+            assert!(
+                completed.contains(&node.node_id),
+                "node {} has no StateAttemptCompleted",
+                node.node_id
+            );
+        }
+    }
+
+    fn referenced_artifact_ids_for_payload(
+        payload: &events::KernelEventPayload,
+    ) -> Vec<ArtifactId> {
+        let mut artifacts = Vec::new();
+        match payload {
+            events::KernelEventPayload::RunStarted(payload) => {
+                artifacts.push(payload.spec_artifact_id.clone());
+                artifacts.push(payload.certificate_artifact_id.clone());
+                artifacts.extend(
+                    payload
+                        .seed_cells
+                        .iter()
+                        .map(|seed| seed.seed_artifact.artifact_id.clone()),
+                );
+            }
+            events::KernelEventPayload::FactRecorded(payload) => {
+                artifacts.push(payload.artifact_id.clone());
+            }
+            events::KernelEventPayload::ArtifactReferenced(payload) => {
+                artifacts.push(payload.artifact_ref.artifact_id.clone());
+            }
+            events::KernelEventPayload::CellProduced(payload) => {
+                artifacts.push(payload.artifact_id.clone());
+            }
+            events::KernelEventPayload::PublicOutputProduced(payload) => {
+                artifacts.extend(payload.cells.iter().map(|cell| cell.artifact_id.clone()));
+                if let Some(artifact_id) = &payload.rendered_artifact_id {
+                    artifacts.push(artifact_id.clone());
+                }
+            }
+            events::KernelEventPayload::PublicOutputRenderFailed(payload) => {
+                if let Some(evidence) = &payload.error.diagnostic_ref {
+                    artifacts.push(evidence.artifact_id.clone());
+                }
+            }
+            events::KernelEventPayload::StateAttemptFailed(payload) => {
+                if let Some(evidence) = &payload.error.diagnostic_ref {
+                    artifacts.push(evidence.artifact_id.clone());
+                }
+            }
+            events::KernelEventPayload::RunCompleted(payload) => match &payload.outcome {
+                events::RunCompletionOutcome::Failed(error)
+                | events::RunCompletionOutcome::Cancelled(error) => {
+                    if let Some(evidence) = &error.diagnostic_ref {
+                        artifacts.push(evidence.artifact_id.clone());
+                    }
+                }
+                events::RunCompletionOutcome::Completed(_) => {}
+            },
+            events::KernelEventPayload::SideEffectIntentPersisted(payload) => {
+                artifacts.push(payload.intent_artifact_id.clone());
+            }
+            events::KernelEventPayload::SideEffectInvocationPrepared(payload) => {
+                if let Some(artifact_id) = &payload.prepared_artifact_id {
+                    artifacts.push(artifact_id.clone());
+                }
+            }
+            events::KernelEventPayload::SideEffectNotSubmittedProven(payload) => {
+                artifacts.push(payload.proof_artifact_id.clone());
+            }
+            events::KernelEventPayload::SideEffectSubmissionObserved(payload) => {
+                artifacts.push(payload.submission_artifact_id.clone());
+            }
+            events::KernelEventPayload::SideEffectSubmissionUnknown(payload) => {
+                artifacts.push(payload.evidence_artifact_id.clone());
+            }
+            events::KernelEventPayload::SideEffectReceiptObserved(payload) => {
+                artifacts.push(payload.receipt_artifact_id.clone());
+            }
+            events::KernelEventPayload::SideEffectConfirmationObserved(payload) => {
+                artifacts.push(payload.confirmation_artifact_id.clone());
+            }
+            events::KernelEventPayload::SideEffectAmbiguous(payload) => {
+                artifacts.push(payload.evidence_artifact_id.clone());
+            }
+            events::KernelEventPayload::SideEffectFailed(payload) => {
+                if let Some(evidence) = &payload.error.diagnostic_ref {
+                    artifacts.push(evidence.artifact_id.clone());
+                }
+            }
+            events::KernelEventPayload::RetentionRefsAppended(payload) => {
+                artifacts.extend(
+                    payload
+                        .refs
+                        .iter()
+                        .map(|reference| reference.artifact_id.clone()),
+                );
+            }
+            events::KernelEventPayload::RetentionManifestProjected(payload) => {
+                artifacts.push(payload.manifest_artifact_id.clone());
+            }
+            events::KernelEventPayload::StateAttemptStarted(_)
+            | events::KernelEventPayload::CellSkipped(_)
+            | events::KernelEventPayload::SideEffectClaimed(_)
+            | events::KernelEventPayload::SideEffectClaimTakenOver(_)
+            | events::KernelEventPayload::SideEffectInvocationStarted(_)
+            | events::KernelEventPayload::StateAttemptCompleted(_) => {}
+        }
+        artifacts
+    }
+
+    fn prepare_fixture_launch<S: store::TypedRunEventStore + ?Sized>(
         scheduler: &SerialTypedScheduler,
-        store: &store::InMemoryTypedRunStore,
+        store: &S,
         fixture: &Fixture,
         seed_cells: Vec<events::SeedCellRef>,
     ) -> Result<PreparedRunLaunch> {
@@ -15120,9 +15475,9 @@ mod tests {
         )
     }
 
-    async fn start_fixture_run(
+    async fn start_fixture_run<S: store::TypedRunEventStore + ?Sized>(
         scheduler: &SerialTypedScheduler,
-        store: &mut store::InMemoryTypedRunStore,
+        store: &mut S,
         fixture: &Fixture,
         seed_cells: Vec<events::SeedCellRef>,
     ) -> Result<store::CommitOutcome> {
