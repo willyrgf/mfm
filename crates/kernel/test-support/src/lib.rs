@@ -28,8 +28,8 @@ use mfm_replay::v1 as replay;
 use mfm_runtime::{
     CertifiedRuntimeSpec, ErasedNodeRunner, ErasedRunCtx, ErasedRunnerBinding, ErasedRunnerFuture,
     ErasedRunnerOutput, ErasedRunnerRegistry, MaterializedCellTerminal, MaterializedInputNode,
-    RunLaunchEvidence, RuntimeArtifactStageFuture, RuntimeArtifactStager, RuntimeError,
-    SchedulerStatus, SerialTypedScheduler, StagedArtifact,
+    RunLaunchEvidence, RunnerEventPayload, RuntimeArtifactStageFuture, RuntimeArtifactStager,
+    RuntimeError, SchedulerStatus, SerialTypedScheduler, StagedArtifact,
 };
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
@@ -798,23 +798,21 @@ impl ErasedNodeRunner for ReadRunner {
             let output = state_output_artifact(ctx.node(), ctx.descriptor(), self.output_label);
             let staged_fact = staged_attempt_artifact(&ctx, &fact_evidence)?;
             let staged_output = staged_attempt_artifact(&ctx, &output)?;
-            let mut payloads = vec![events::KernelEventPayload::FactRecorded(
-                events::FactRecorded {
-                    spec_hash: ctx.spec_hash().clone(),
-                    node_id: ctx.node().node_id.clone(),
-                    attempt_id: ctx.attempt_id().clone(),
-                    capability_kind: self.cap_kind.clone(),
-                    capability_version: self.cap_version.clone(),
-                    adapter_kind: self.adapter_kind.clone(),
-                    adapter_version: self.adapter_version.clone(),
-                    request_schema_id: ctx.node().config_ref.schema_id.clone(),
-                    request_hash: content(0xb5),
-                    response_schema_id: ctx.node().config_ref.schema_id.clone(),
-                    response_hash: fact_digest,
-                    fact_key,
-                    artifact_id: fact_evidence.evidence.artifact_id.clone(),
-                },
-            )];
+            let mut payloads = vec![RunnerEventPayload::FactRecorded(events::FactRecorded {
+                spec_hash: ctx.spec_hash().clone(),
+                node_id: ctx.node().node_id.clone(),
+                attempt_id: ctx.attempt_id().clone(),
+                capability_kind: self.cap_kind.clone(),
+                capability_version: self.cap_version.clone(),
+                adapter_kind: self.adapter_kind.clone(),
+                adapter_version: self.adapter_version.clone(),
+                request_schema_id: ctx.node().config_ref.schema_id.clone(),
+                request_hash: content(0xb5),
+                response_schema_id: ctx.node().config_ref.schema_id.clone(),
+                response_hash: fact_digest,
+                fact_key,
+                artifact_id: fact_evidence.evidence.artifact_id.clone(),
+            })];
             payloads.extend(terminal_payloads(
                 &ctx,
                 output.evidence.artifact_id,
@@ -1282,7 +1280,7 @@ impl ErasedNodeRunner for FailingSideEffectRunner {
                 staged_artifacts: vec![staged_artifact],
                 staged_retention_refs: Vec::new(),
                 payloads: vec![
-                    events::KernelEventPayload::SideEffectIntentPersisted(
+                    RunnerEventPayload::SideEffectIntentPersisted(
                         events::side_effect::IntentPersisted {
                             spec_hash: ctx.spec_hash().clone(),
                             node_id: ctx.node().node_id.clone(),
@@ -1303,20 +1301,13 @@ impl ErasedNodeRunner for FailingSideEffectRunner {
                             adapter_version: self.adapter_version.clone(),
                         },
                     ),
-                    events::KernelEventPayload::SideEffectFailed(events::side_effect::Failed {
+                    RunnerEventPayload::SideEffectFailed(events::side_effect::Failed {
                         spec_hash: ctx.spec_hash().clone(),
                         node_id: ctx.node().node_id.clone(),
                         attempt_id: ctx.attempt_id().clone(),
                         ledger_key: ledger,
                         invocation_epoch: 1,
                         failure_phase: events::side_effect::FailurePhase::BeforeInvocationStarted,
-                        retryable: false,
-                        error: side_effect_error(false),
-                    }),
-                    events::KernelEventPayload::StateAttemptFailed(events::StateAttemptFailed {
-                        spec_hash: ctx.spec_hash().clone(),
-                        node_id: ctx.node().node_id.clone(),
-                        attempt_id: ctx.attempt_id().clone(),
                         retryable: false,
                         error: side_effect_error(false),
                     }),
@@ -1357,7 +1348,7 @@ impl ErasedNodeRunner for AmbiguousSideEffectRunner {
                 Ok(ErasedRunnerOutput {
                     staged_artifacts: vec![staged_artifact],
                     staged_retention_refs: Vec::new(),
-                    payloads: vec![events::KernelEventPayload::SideEffectAmbiguous(
+                    payloads: vec![RunnerEventPayload::SideEffectAmbiguous(
                         events::side_effect::Ambiguous {
                             spec_hash: ctx.spec_hash().clone(),
                             node_id: ctx.node().node_id.clone(),
@@ -2015,29 +2006,21 @@ fn terminal_payloads(
     ctx: &ErasedRunCtx<'_>,
     output_artifact: ArtifactId,
     output_digest: ContentDigest,
-) -> Vec<events::KernelEventPayload> {
-    vec![
-        events::KernelEventPayload::CellProduced(events::CellProduced {
-            spec_hash: ctx.spec_hash().clone(),
-            node_id: ctx.node().node_id.clone(),
-            cell_id: ctx.node().output_cell.clone(),
-            scope_id: ctx.node().scope_id.clone(),
-            attempt_id: ctx.attempt_id().clone(),
-            semantic_type_id: ctx.descriptor().output_semantic_type_id.clone(),
-            schema_id: ctx.descriptor().output_schema_id.clone(),
-            value_lineage: ctx.output_cell().value_lineage.clone(),
-            artifact_id: output_artifact,
-            content_digest: output_digest,
-            producer_state_kind: Some(ctx.node().state_kind.clone()),
-            producer_state_version: Some(ctx.node().state_version.clone()),
-        }),
-        events::KernelEventPayload::StateAttemptCompleted(events::StateAttemptCompleted {
-            spec_hash: ctx.spec_hash().clone(),
-            node_id: ctx.node().node_id.clone(),
-            attempt_id: ctx.attempt_id().clone(),
-            output_cell_id: ctx.node().output_cell.clone(),
-        }),
-    ]
+) -> Vec<RunnerEventPayload> {
+    vec![RunnerEventPayload::CellProduced(events::CellProduced {
+        spec_hash: ctx.spec_hash().clone(),
+        node_id: ctx.node().node_id.clone(),
+        cell_id: ctx.node().output_cell.clone(),
+        scope_id: ctx.node().scope_id.clone(),
+        attempt_id: ctx.attempt_id().clone(),
+        semantic_type_id: ctx.descriptor().output_semantic_type_id.clone(),
+        schema_id: ctx.descriptor().output_schema_id.clone(),
+        value_lineage: ctx.output_cell().value_lineage.clone(),
+        artifact_id: output_artifact,
+        content_digest: output_digest,
+        producer_state_kind: Some(ctx.node().state_kind.clone()),
+        producer_state_version: Some(ctx.node().state_version.clone()),
+    })]
 }
 
 #[derive(Debug, Clone)]
@@ -2125,8 +2108,8 @@ fn side_effect_claimed(
     ledger: events::SideEffectLedgerKey,
     invocation_epoch: u32,
     claim_generation: u32,
-) -> events::KernelEventPayload {
-    events::KernelEventPayload::SideEffectClaimed(events::side_effect::Claimed {
+) -> RunnerEventPayload {
+    RunnerEventPayload::SideEffectClaimed(events::side_effect::Claimed {
         spec_hash: ctx.spec_hash().clone(),
         node_id: ctx.node().node_id.clone(),
         attempt_id: ctx.attempt_id().clone(),
@@ -2143,8 +2126,8 @@ fn side_effect_claim_taken_over(
     ledger: events::SideEffectLedgerKey,
     previous: &store::SideEffectClaimProjection,
     claim_generation: u32,
-) -> events::KernelEventPayload {
-    events::KernelEventPayload::SideEffectClaimTakenOver(events::side_effect::ClaimTakenOver {
+) -> RunnerEventPayload {
+    RunnerEventPayload::SideEffectClaimTakenOver(events::side_effect::ClaimTakenOver {
         spec_hash: ctx.spec_hash().clone(),
         node_id: ctx.node().node_id.clone(),
         attempt_id: ctx.attempt_id().clone(),
@@ -2163,20 +2146,18 @@ fn side_effect_prepared(
     ledger: events::SideEffectLedgerKey,
     invocation_epoch: u32,
     claim_generation: u32,
-) -> events::KernelEventPayload {
-    events::KernelEventPayload::SideEffectInvocationPrepared(
-        events::side_effect::InvocationPrepared {
-            spec_hash: ctx.spec_hash().clone(),
-            node_id: ctx.node().node_id.clone(),
-            attempt_id: ctx.attempt_id().clone(),
-            ledger_key: ledger,
-            invocation_epoch,
-            claim_generation,
-            claim_fencing_token: side_effect_fencing_token(ctx.attempt_no(), claim_generation),
-            prepared_artifact_id: None,
-            prepared_hash: None,
-        },
-    )
+) -> RunnerEventPayload {
+    RunnerEventPayload::SideEffectInvocationPrepared(events::side_effect::InvocationPrepared {
+        spec_hash: ctx.spec_hash().clone(),
+        node_id: ctx.node().node_id.clone(),
+        attempt_id: ctx.attempt_id().clone(),
+        ledger_key: ledger,
+        invocation_epoch,
+        claim_generation,
+        claim_fencing_token: side_effect_fencing_token(ctx.attempt_no(), claim_generation),
+        prepared_artifact_id: None,
+        prepared_hash: None,
+    })
 }
 
 fn side_effect_invocation_started(
@@ -2184,19 +2165,17 @@ fn side_effect_invocation_started(
     ledger: events::SideEffectLedgerKey,
     invocation_epoch: u32,
     claim_generation: u32,
-) -> events::KernelEventPayload {
-    events::KernelEventPayload::SideEffectInvocationStarted(
-        events::side_effect::InvocationStarted {
-            spec_hash: ctx.spec_hash().clone(),
-            node_id: ctx.node().node_id.clone(),
-            attempt_id: ctx.attempt_id().clone(),
-            ledger_key: ledger,
-            invocation_epoch,
-            claim_owner: side_effect_claim_owner(ctx.attempt_no(), claim_generation),
-            claim_generation,
-            claim_fencing_token: side_effect_fencing_token(ctx.attempt_no(), claim_generation),
-        },
-    )
+) -> RunnerEventPayload {
+    RunnerEventPayload::SideEffectInvocationStarted(events::side_effect::InvocationStarted {
+        spec_hash: ctx.spec_hash().clone(),
+        node_id: ctx.node().node_id.clone(),
+        attempt_id: ctx.attempt_id().clone(),
+        ledger_key: ledger,
+        invocation_epoch,
+        claim_owner: side_effect_claim_owner(ctx.attempt_no(), claim_generation),
+        claim_generation,
+        claim_fencing_token: side_effect_fencing_token(ctx.attempt_no(), claim_generation),
+    })
 }
 
 fn side_effect_submission_observed(
@@ -2205,19 +2184,17 @@ fn side_effect_submission_observed(
     invocation_epoch: u32,
     artifact_id: ArtifactId,
     digest: ContentDigest,
-) -> events::KernelEventPayload {
-    events::KernelEventPayload::SideEffectSubmissionObserved(
-        events::side_effect::SubmissionObserved {
-            spec_hash: ctx.spec_hash().clone(),
-            node_id: ctx.node().node_id.clone(),
-            attempt_id: ctx.attempt_id().clone(),
-            ledger_key: ledger,
-            invocation_epoch,
-            submission_schema_id: ctx.node().config_ref.schema_id.clone(),
-            submission_hash: digest,
-            submission_artifact_id: artifact_id,
-        },
-    )
+) -> RunnerEventPayload {
+    RunnerEventPayload::SideEffectSubmissionObserved(events::side_effect::SubmissionObserved {
+        spec_hash: ctx.spec_hash().clone(),
+        node_id: ctx.node().node_id.clone(),
+        attempt_id: ctx.attempt_id().clone(),
+        ledger_key: ledger,
+        invocation_epoch,
+        submission_schema_id: ctx.node().config_ref.schema_id.clone(),
+        submission_hash: digest,
+        submission_artifact_id: artifact_id,
+    })
 }
 
 fn side_effect_receipt_observed(
@@ -2226,8 +2203,8 @@ fn side_effect_receipt_observed(
     invocation_epoch: u32,
     artifact_id: ArtifactId,
     digest: ContentDigest,
-) -> events::KernelEventPayload {
-    events::KernelEventPayload::SideEffectReceiptObserved(events::side_effect::ReceiptObserved {
+) -> RunnerEventPayload {
+    RunnerEventPayload::SideEffectReceiptObserved(events::side_effect::ReceiptObserved {
         spec_hash: ctx.spec_hash().clone(),
         node_id: ctx.node().node_id.clone(),
         attempt_id: ctx.attempt_id().clone(),
@@ -2247,21 +2224,19 @@ fn side_effect_confirmation_observed(
     invocation_epoch: u32,
     artifact_id: ArtifactId,
     digest: ContentDigest,
-) -> events::KernelEventPayload {
-    events::KernelEventPayload::SideEffectConfirmationObserved(
-        events::side_effect::ConfirmationObserved {
-            spec_hash: ctx.spec_hash().clone(),
-            node_id: ctx.node().node_id.clone(),
-            attempt_id: ctx.attempt_id().clone(),
-            ledger_key: ledger,
-            invocation_epoch,
-            confirmation_schema_id: ctx.node().config_ref.schema_id.clone(),
-            confirmation_hash: digest,
-            confirmation_artifact_id: artifact_id,
-            replay_verifier_id: events::ReplayVerifierId::new("typed-slice-verifier")
-                .expect("valid verifier"),
-        },
-    )
+) -> RunnerEventPayload {
+    RunnerEventPayload::SideEffectConfirmationObserved(events::side_effect::ConfirmationObserved {
+        spec_hash: ctx.spec_hash().clone(),
+        node_id: ctx.node().node_id.clone(),
+        attempt_id: ctx.attempt_id().clone(),
+        ledger_key: ledger,
+        invocation_epoch,
+        confirmation_schema_id: ctx.node().config_ref.schema_id.clone(),
+        confirmation_hash: digest,
+        confirmation_artifact_id: artifact_id,
+        replay_verifier_id: events::ReplayVerifierId::new("typed-slice-verifier")
+            .expect("valid verifier"),
+    })
 }
 
 fn assert_cell_input_terminal(input: &MaterializedInputNode) -> mfm_runtime::Result<()> {
@@ -2442,7 +2417,7 @@ impl ErasedNodeRunner for DeterministicSideEffectRunner {
                     Ok(ErasedRunnerOutput {
                         staged_artifacts: vec![staged_artifact],
                         staged_retention_refs: Vec::new(),
-                        payloads: vec![events::KernelEventPayload::SideEffectSubmissionUnknown(
+                        payloads: vec![RunnerEventPayload::SideEffectSubmissionUnknown(
                             events::side_effect::SubmissionUnknown {
                                 spec_hash: ctx.spec_hash().clone(),
                                 node_id: ctx.node().node_id.clone(),
@@ -2577,7 +2552,7 @@ impl DeterministicSideEffectRunner {
             staged_artifacts: vec![staged_artifact],
             staged_retention_refs: Vec::new(),
             payloads: vec![
-                events::KernelEventPayload::SideEffectIntentPersisted(
+                RunnerEventPayload::SideEffectIntentPersisted(
                     events::side_effect::IntentPersisted {
                         spec_hash: ctx.spec_hash().clone(),
                         node_id: ctx.node().node_id.clone(),

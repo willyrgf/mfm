@@ -1,0 +1,5 @@
+error[E0599]: no variant or associated item named `ArtifactReferenced` found for enum `RunnerEventPayload` in the current scope
+ --> tests/ui/fail/artifact_reference_not_runner_payload.rs:9:33
+  |
+9 |     let _ = RunnerEventPayload::ArtifactReferenced(artifact_reference());
+  |                                 ^^^^^^^^^^^^^^^^^^ variant or associated item not found in `RunnerEventPayload`

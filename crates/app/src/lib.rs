@@ -2110,7 +2110,7 @@ mod tests {
     use mfm_program_derive::{MfmConfig, MfmValue, PublicOutputs};
     use mfm_runtime::{
         ErasedNodeRunner, ErasedRunCtx, ErasedRunnerBinding, ErasedRunnerFuture,
-        ErasedRunnerOutput, StagedArtifact, StagedRetentionRefs,
+        ErasedRunnerOutput, RunnerEventPayload, StagedArtifact, StagedRetentionRefs,
     };
     use mfm_store::v1::{AsyncTypedRunEventStore, TypedRunEventStore};
     use serde::{Deserialize, Serialize};
@@ -3684,30 +3684,20 @@ mod tests {
                             content_digest: output_digest.clone(),
                         },
                     ])],
-                    payloads: vec![
-                        events::KernelEventPayload::CellProduced(events::CellProduced {
-                            spec_hash: ctx.spec_hash().clone(),
-                            node_id: ctx.node().node_id.clone(),
-                            cell_id: ctx.node().output_cell.clone(),
-                            scope_id: ctx.output_cell().scope_id.clone(),
-                            attempt_id: ctx.attempt_id().clone(),
-                            semantic_type_id: ctx.output_cell().semantic_type_id.clone(),
-                            schema_id: ctx.output_cell().schema_id.clone(),
-                            value_lineage: ctx.output_cell().value_lineage.clone(),
-                            artifact_id,
-                            content_digest: output_digest,
-                            producer_state_kind: Some(ctx.node().state_kind.clone()),
-                            producer_state_version: Some(ctx.node().state_version.clone()),
-                        }),
-                        events::KernelEventPayload::StateAttemptCompleted(
-                            events::StateAttemptCompleted {
-                                spec_hash: ctx.spec_hash().clone(),
-                                node_id: ctx.node().node_id.clone(),
-                                attempt_id: ctx.attempt_id().clone(),
-                                output_cell_id: ctx.node().output_cell.clone(),
-                            },
-                        ),
-                    ],
+                    payloads: vec![RunnerEventPayload::CellProduced(events::CellProduced {
+                        spec_hash: ctx.spec_hash().clone(),
+                        node_id: ctx.node().node_id.clone(),
+                        cell_id: ctx.node().output_cell.clone(),
+                        scope_id: ctx.output_cell().scope_id.clone(),
+                        attempt_id: ctx.attempt_id().clone(),
+                        semantic_type_id: ctx.output_cell().semantic_type_id.clone(),
+                        schema_id: ctx.output_cell().schema_id.clone(),
+                        value_lineage: ctx.output_cell().value_lineage.clone(),
+                        artifact_id,
+                        content_digest: output_digest,
+                        producer_state_kind: Some(ctx.node().state_kind.clone()),
+                        producer_state_version: Some(ctx.node().state_version.clone()),
+                    })],
                 })
             })
         }

@@ -23,8 +23,8 @@ use mfm_ids::{ArtifactId, ContentDigest, DescriptorId, NodeId};
 use mfm_program::StateSpec;
 use mfm_runtime::{
     ErasedNodeRunner, ErasedRunCtx, ErasedRunnerBinding, ErasedRunnerFuture, ErasedRunnerOutput,
-    ErasedRunnerRegistry, MaterializedCellTerminal, MaterializedInputNode, StagedArtifact,
-    StagedRetentionRefs,
+    ErasedRunnerRegistry, MaterializedCellTerminal, MaterializedInputNode, RunnerEventPayload,
+    StagedArtifact, StagedRetentionRefs,
 };
 use mfm_spec::v1 as spec;
 use mfm_state_portfolio::{
@@ -429,7 +429,7 @@ where
             retention(&output_artifact.evidence),
         ],
         payloads: vec![
-            events::KernelEventPayload::FactRecorded(events::FactRecorded {
+            RunnerEventPayload::FactRecorded(events::FactRecorded {
                 spec_hash: ctx.spec_hash().clone(),
                 node_id: ctx.node().node_id.clone(),
                 attempt_id: ctx.attempt_id().clone(),
@@ -450,7 +450,6 @@ where
                 artifact_id: response_artifact.evidence.artifact_id.clone(),
             }),
             cell_produced(&ctx, &output_artifact.evidence),
-            completed(&ctx),
         ],
     })
 }
@@ -471,7 +470,7 @@ where
     Ok(ErasedRunnerOutput {
         staged_artifacts: vec![staged_artifact],
         staged_retention_refs: vec![retention(&artifact.evidence)],
-        payloads: vec![cell_produced(&ctx, &artifact.evidence), completed(&ctx)],
+        payloads: vec![cell_produced(&ctx, &artifact.evidence)],
     })
 }
 
@@ -636,8 +635,8 @@ async fn load_cell_bytes(
 fn cell_produced(
     ctx: &ErasedRunCtx<'_>,
     artifact: &store::ArtifactEvidenceRef,
-) -> events::KernelEventPayload {
-    events::KernelEventPayload::CellProduced(events::CellProduced {
+) -> RunnerEventPayload {
+    RunnerEventPayload::CellProduced(events::CellProduced {
         spec_hash: ctx.spec_hash().clone(),
         node_id: ctx.node().node_id.clone(),
         cell_id: ctx.node().output_cell.clone(),
@@ -650,15 +649,6 @@ fn cell_produced(
         content_digest: artifact.digest.clone(),
         producer_state_kind: Some(ctx.node().state_kind.clone()),
         producer_state_version: Some(ctx.node().state_version.clone()),
-    })
-}
-
-fn completed(ctx: &ErasedRunCtx<'_>) -> events::KernelEventPayload {
-    events::KernelEventPayload::StateAttemptCompleted(events::StateAttemptCompleted {
-        spec_hash: ctx.spec_hash().clone(),
-        node_id: ctx.node().node_id.clone(),
-        attempt_id: ctx.attempt_id().clone(),
-        output_cell_id: ctx.node().output_cell.clone(),
     })
 }
 

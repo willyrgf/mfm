@@ -1,0 +1,41 @@
+error[E0599]: no variant or associated item named `RunStarted` found for enum `RunnerEventPayload` in the current scope
+  --> tests/ui/fail/lifecycle_payload_not_runner_payload.rs:33:33
+   |
+33 |     let _ = RunnerEventPayload::RunStarted(run_started());
+   |                                 ^^^^^^^^^^ variant or associated item not found in `RunnerEventPayload`
+
+error[E0599]: no variant or associated item named `StateAttemptStarted` found for enum `RunnerEventPayload` in the current scope
+  --> tests/ui/fail/lifecycle_payload_not_runner_payload.rs:34:33
+   |
+34 |     let _ = RunnerEventPayload::StateAttemptStarted(attempt_started());
+   |                                 ^^^^^^^^^^^^^^^^^^^ variant or associated item not found in `RunnerEventPayload`
+
+error[E0599]: no variant or associated item named `StateAttemptCompleted` found for enum `RunnerEventPayload` in the current scope
+  --> tests/ui/fail/lifecycle_payload_not_runner_payload.rs:35:33
+   |
+35 |     let _ = RunnerEventPayload::StateAttemptCompleted(completed());
+   |                                 ^^^^^^^^^^^^^^^^^^^^^ variant or associated item not found in `RunnerEventPayload`
+
+error[E0599]: no variant or associated item named `StateAttemptFailed` found for enum `RunnerEventPayload` in the current scope
+  --> tests/ui/fail/lifecycle_payload_not_runner_payload.rs:36:33
+   |
+36 |     let _ = RunnerEventPayload::StateAttemptFailed(failed());
+   |                                 ^^^^^^^^^^^^^^^^^^ variant or associated item not found in `RunnerEventPayload`
+
+error[E0599]: no variant or associated item named `RunCompleted` found for enum `RunnerEventPayload` in the current scope
+  --> tests/ui/fail/lifecycle_payload_not_runner_payload.rs:37:33
+   |
+37 |     let _ = RunnerEventPayload::RunCompleted(run_completed());
+   |                                 ^^^^^^^^^^^^ variant or associated item not found in `RunnerEventPayload`
+
+error[E0599]: no variant or associated item named `RetentionRefsAppended` found for enum `RunnerEventPayload` in the current scope
+  --> tests/ui/fail/lifecycle_payload_not_runner_payload.rs:38:33
+   |
+38 |     let _ = RunnerEventPayload::RetentionRefsAppended(retention_refs());
+   |                                 ^^^^^^^^^^^^^^^^^^^^^ variant or associated item not found in `RunnerEventPayload`
+
+error[E0599]: no variant or associated item named `RetentionManifestProjected` found for enum `RunnerEventPayload` in the current scope
+  --> tests/ui/fail/lifecycle_payload_not_runner_payload.rs:39:33
+   |
+39 |     let _ = RunnerEventPayload::RetentionManifestProjected(retention_manifest());
+   |                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^ variant or associated item not found in `RunnerEventPayload`

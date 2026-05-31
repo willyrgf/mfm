@@ -283,6 +283,95 @@ pub struct RecordedFact {
     pub adapter_version: AdapterVersion,
 }
 
+/// Runner-owned payloads that may be proposed by domain execution.
+///
+/// Scheduler, framework lifecycle, artifact reference, retention, and run lifecycle events are
+/// intentionally absent. The runtime middleware derives those authoritative payloads after
+/// validating this runner-facing payload set against the certified spec and store projections.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunnerEventPayload {
+    /// Recorded read fact event.
+    FactRecorded(events::FactRecorded),
+    /// Cell produced terminal event.
+    CellProduced(events::CellProduced),
+    /// Cell skipped terminal event.
+    CellSkipped(events::CellSkipped),
+    /// Side-effect intent persisted event.
+    SideEffectIntentPersisted(events::side_effect::IntentPersisted),
+    /// Side-effect claim acquired event.
+    SideEffectClaimed(events::side_effect::Claimed),
+    /// Side-effect claim takeover event.
+    SideEffectClaimTakenOver(events::side_effect::ClaimTakenOver),
+    /// Side-effect invocation prepared event.
+    SideEffectInvocationPrepared(events::side_effect::InvocationPrepared),
+    /// Side-effect invocation started event.
+    SideEffectInvocationStarted(events::side_effect::InvocationStarted),
+    /// Side-effect not-submitted proof event.
+    SideEffectNotSubmittedProven(events::side_effect::NotSubmittedProven),
+    /// Side-effect submission observed event.
+    SideEffectSubmissionObserved(events::side_effect::SubmissionObserved),
+    /// Side-effect submission unknown event.
+    SideEffectSubmissionUnknown(events::side_effect::SubmissionUnknown),
+    /// Side-effect receipt observed event.
+    SideEffectReceiptObserved(events::side_effect::ReceiptObserved),
+    /// Side-effect confirmation observed event.
+    SideEffectConfirmationObserved(events::side_effect::ConfirmationObserved),
+    /// Side-effect ambiguity event.
+    SideEffectAmbiguous(events::side_effect::Ambiguous),
+    /// Side-effect failure event.
+    SideEffectFailed(events::side_effect::Failed),
+    /// Public output produced event.
+    PublicOutputProduced(events::PublicOutputProduced),
+    /// Public output render failure audit event.
+    PublicOutputRenderFailed(events::PublicOutputRenderFailed),
+}
+
+impl From<RunnerEventPayload> for events::KernelEventPayload {
+    fn from(payload: RunnerEventPayload) -> Self {
+        match payload {
+            RunnerEventPayload::FactRecorded(payload) => Self::FactRecorded(payload),
+            RunnerEventPayload::CellProduced(payload) => Self::CellProduced(payload),
+            RunnerEventPayload::CellSkipped(payload) => Self::CellSkipped(payload),
+            RunnerEventPayload::SideEffectIntentPersisted(payload) => {
+                Self::SideEffectIntentPersisted(payload)
+            }
+            RunnerEventPayload::SideEffectClaimed(payload) => Self::SideEffectClaimed(payload),
+            RunnerEventPayload::SideEffectClaimTakenOver(payload) => {
+                Self::SideEffectClaimTakenOver(payload)
+            }
+            RunnerEventPayload::SideEffectInvocationPrepared(payload) => {
+                Self::SideEffectInvocationPrepared(payload)
+            }
+            RunnerEventPayload::SideEffectInvocationStarted(payload) => {
+                Self::SideEffectInvocationStarted(payload)
+            }
+            RunnerEventPayload::SideEffectNotSubmittedProven(payload) => {
+                Self::SideEffectNotSubmittedProven(payload)
+            }
+            RunnerEventPayload::SideEffectSubmissionObserved(payload) => {
+                Self::SideEffectSubmissionObserved(payload)
+            }
+            RunnerEventPayload::SideEffectSubmissionUnknown(payload) => {
+                Self::SideEffectSubmissionUnknown(payload)
+            }
+            RunnerEventPayload::SideEffectReceiptObserved(payload) => {
+                Self::SideEffectReceiptObserved(payload)
+            }
+            RunnerEventPayload::SideEffectConfirmationObserved(payload) => {
+                Self::SideEffectConfirmationObserved(payload)
+            }
+            RunnerEventPayload::SideEffectAmbiguous(payload) => Self::SideEffectAmbiguous(payload),
+            RunnerEventPayload::SideEffectFailed(payload) => Self::SideEffectFailed(payload),
+            RunnerEventPayload::PublicOutputProduced(payload) => {
+                Self::PublicOutputProduced(payload)
+            }
+            RunnerEventPayload::PublicOutputRenderFailed(payload) => {
+                Self::PublicOutputRenderFailed(payload)
+            }
+        }
+    }
+}
+
 /// Typed payload batch returned by an erased runner.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ErasedRunnerOutput {
@@ -290,13 +379,13 @@ pub struct ErasedRunnerOutput {
     pub staged_artifacts: Vec<StagedArtifact>,
     /// Retention refs staged by the runner for scheduler-owned event binding.
     pub staged_retention_refs: Vec<StagedRetentionRefs>,
-    /// Typed event payloads to commit atomically for this attempt.
-    pub payloads: Vec<events::KernelEventPayload>,
+    /// Runner-owned typed payloads to validate before runtime lifecycle derivation.
+    pub payloads: Vec<RunnerEventPayload>,
 }
 
 impl ErasedRunnerOutput {
     /// Creates an output batch from payloads with no additional artifact evidence.
-    pub fn new(payloads: Vec<events::KernelEventPayload>) -> Self {
+    pub fn new(payloads: Vec<RunnerEventPayload>) -> Self {
         Self {
             staged_artifacts: Vec::new(),
             staged_retention_refs: Vec::new(),
@@ -2128,7 +2217,7 @@ fn render_public_output(ctx: ErasedRunCtx<'_>) -> Result<ErasedRunnerOutput> {
             receipt_retention_ref,
         ])],
         payloads: vec![
-            events::KernelEventPayload::CellProduced(events::CellProduced {
+            RunnerEventPayload::CellProduced(events::CellProduced {
                 spec_hash: ctx.spec_hash().clone(),
                 node_id: ctx.node().node_id.clone(),
                 cell_id: ctx.node().output_cell.clone(),
@@ -2142,7 +2231,7 @@ fn render_public_output(ctx: ErasedRunCtx<'_>) -> Result<ErasedRunnerOutput> {
                 producer_state_kind: Some(ctx.node().state_kind.clone()),
                 producer_state_version: Some(ctx.node().state_version.clone()),
             }),
-            events::KernelEventPayload::PublicOutputProduced(events::PublicOutputProduced {
+            RunnerEventPayload::PublicOutputProduced(events::PublicOutputProduced {
                 spec_hash: ctx.spec_hash().clone(),
                 node_id: ctx.node().node_id.clone(),
                 attempt_id: ctx.attempt_id().clone(),
@@ -2153,12 +2242,6 @@ fn render_public_output(ctx: ErasedRunCtx<'_>) -> Result<ErasedRunnerOutput> {
                 rendered_digest,
                 rendered_artifact_id,
                 renderer_descriptor_id: render.renderer_descriptor.descriptor_id.clone(),
-            }),
-            events::KernelEventPayload::StateAttemptCompleted(events::StateAttemptCompleted {
-                spec_hash: ctx.spec_hash().clone(),
-                node_id: ctx.node().node_id.clone(),
-                attempt_id: ctx.attempt_id().clone(),
-                output_cell_id: ctx.node().output_cell.clone(),
             }),
         ],
     })
@@ -2205,28 +2288,20 @@ fn project_retention_manifest(ctx: ErasedRunCtx<'_>) -> Result<ErasedRunnerOutpu
         staged_retention_refs: vec![StagedRetentionRefs::runtime_evidence(vec![
             receipt_retention_ref,
         ])],
-        payloads: vec![
-            events::KernelEventPayload::CellProduced(events::CellProduced {
-                spec_hash: ctx.spec_hash().clone(),
-                node_id: ctx.node().node_id.clone(),
-                cell_id: ctx.node().output_cell.clone(),
-                scope_id: ctx.output_cell().scope_id.clone(),
-                attempt_id: ctx.attempt_id().clone(),
-                semantic_type_id: ctx.output_cell().semantic_type_id.clone(),
-                schema_id: ctx.output_cell().schema_id.clone(),
-                value_lineage: ctx.output_cell().value_lineage.clone(),
-                artifact_id: receipt_artifact_id,
-                content_digest: receipt_digest,
-                producer_state_kind: Some(ctx.node().state_kind.clone()),
-                producer_state_version: Some(ctx.node().state_version.clone()),
-            }),
-            events::KernelEventPayload::StateAttemptCompleted(events::StateAttemptCompleted {
-                spec_hash: ctx.spec_hash().clone(),
-                node_id: ctx.node().node_id.clone(),
-                attempt_id: ctx.attempt_id().clone(),
-                output_cell_id: ctx.node().output_cell.clone(),
-            }),
-        ],
+        payloads: vec![RunnerEventPayload::CellProduced(events::CellProduced {
+            spec_hash: ctx.spec_hash().clone(),
+            node_id: ctx.node().node_id.clone(),
+            cell_id: ctx.node().output_cell.clone(),
+            scope_id: ctx.output_cell().scope_id.clone(),
+            attempt_id: ctx.attempt_id().clone(),
+            semantic_type_id: ctx.output_cell().semantic_type_id.clone(),
+            schema_id: ctx.output_cell().schema_id.clone(),
+            value_lineage: ctx.output_cell().value_lineage.clone(),
+            artifact_id: receipt_artifact_id,
+            content_digest: receipt_digest,
+            producer_state_kind: Some(ctx.node().state_kind.clone()),
+            producer_state_version: Some(ctx.node().state_version.clone()),
+        })],
     })
 }
 
@@ -2260,28 +2335,20 @@ fn complete_run_framework(ctx: ErasedRunCtx<'_>) -> Result<ErasedRunnerOutput> {
     Ok(ErasedRunnerOutput {
         staged_artifacts: vec![receipt_artifact],
         staged_retention_refs: Vec::new(),
-        payloads: vec![
-            events::KernelEventPayload::CellProduced(events::CellProduced {
-                spec_hash: ctx.spec_hash().clone(),
-                node_id: ctx.node().node_id.clone(),
-                cell_id: ctx.node().output_cell.clone(),
-                scope_id: ctx.output_cell().scope_id.clone(),
-                attempt_id: ctx.attempt_id().clone(),
-                semantic_type_id: ctx.output_cell().semantic_type_id.clone(),
-                schema_id: ctx.output_cell().schema_id.clone(),
-                value_lineage: ctx.output_cell().value_lineage.clone(),
-                artifact_id: receipt_artifact_id,
-                content_digest: receipt_digest,
-                producer_state_kind: Some(ctx.node().state_kind.clone()),
-                producer_state_version: Some(ctx.node().state_version.clone()),
-            }),
-            events::KernelEventPayload::StateAttemptCompleted(events::StateAttemptCompleted {
-                spec_hash: ctx.spec_hash().clone(),
-                node_id: ctx.node().node_id.clone(),
-                attempt_id: ctx.attempt_id().clone(),
-                output_cell_id: ctx.node().output_cell.clone(),
-            }),
-        ],
+        payloads: vec![RunnerEventPayload::CellProduced(events::CellProduced {
+            spec_hash: ctx.spec_hash().clone(),
+            node_id: ctx.node().node_id.clone(),
+            cell_id: ctx.node().output_cell.clone(),
+            scope_id: ctx.output_cell().scope_id.clone(),
+            attempt_id: ctx.attempt_id().clone(),
+            semantic_type_id: ctx.output_cell().semantic_type_id.clone(),
+            schema_id: ctx.output_cell().schema_id.clone(),
+            value_lineage: ctx.output_cell().value_lineage.clone(),
+            artifact_id: receipt_artifact_id,
+            content_digest: receipt_digest,
+            producer_state_kind: Some(ctx.node().state_kind.clone()),
+            producer_state_version: Some(ctx.node().state_version.clone()),
+        })],
     })
 }
 
@@ -3378,6 +3445,17 @@ impl RuntimeMutationMiddleware {
         input: RunnerOutputCommitInput<'_>,
         started_in_same_commit: Option<u32>,
     ) -> Result<PreparedRunnerOutput> {
+        let ErasedRunnerOutput {
+            staged_artifacts,
+            staged_retention_refs,
+            payloads: runner_payloads,
+        } = input.output;
+        let runner_payloads = runner_payloads_with_derived_lifecycle(
+            input.runtime_spec,
+            input.node,
+            input.attempt_id,
+            runner_payloads,
+        )?;
         validate_runner_output(
             input.runtime_spec,
             input.node,
@@ -3385,13 +3463,8 @@ impl RuntimeMutationMiddleware {
             input.caps,
             input.recorded_facts,
             &input.view.projections,
-            &input.output,
+            &runner_payloads,
         )?;
-        let ErasedRunnerOutput {
-            staged_artifacts,
-            staged_retention_refs,
-            payloads: runner_payloads,
-        } = input.output;
         if matches!(
             &input.node.framework,
             Some(spec::FrameworkNodeSpec::CompleteRun(_))
@@ -8556,6 +8629,74 @@ fn event_artifact_ref_from_store(
     })
 }
 
+fn runner_payloads_with_derived_lifecycle(
+    runtime_spec: &CertifiedRuntimeSpec,
+    node: &spec::NodeSpec,
+    attempt_id: &AttemptId,
+    runner_payloads: Vec<RunnerEventPayload>,
+) -> Result<Vec<events::KernelEventPayload>> {
+    let mut payloads = runner_payloads
+        .into_iter()
+        .map(events::KernelEventPayload::from)
+        .collect::<Vec<_>>();
+    let mut terminal_cell = false;
+    let mut failure: Option<(bool, events::MfmErrorInfo)> = None;
+    for payload in &payloads {
+        match payload {
+            events::KernelEventPayload::CellProduced(_)
+            | events::KernelEventPayload::CellSkipped(_) => {
+                terminal_cell = true;
+            }
+            events::KernelEventPayload::SideEffectFailed(payload) => {
+                if failure
+                    .replace((payload.retryable, payload.error.clone()))
+                    .is_some()
+                {
+                    return Err(RuntimeError::InvalidRunnerOutput(format!(
+                        "runner for node {} returned multiple failure payloads",
+                        node.node_id
+                    )));
+                }
+            }
+            events::KernelEventPayload::PublicOutputRenderFailed(payload) => {
+                if failure
+                    .replace((payload.error.retryable, payload.error.clone()))
+                    .is_some()
+                {
+                    return Err(RuntimeError::InvalidRunnerOutput(format!(
+                        "runner for node {} returned multiple failure payloads",
+                        node.node_id
+                    )));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if let Some((retryable, error)) = failure {
+        payloads.push(events::KernelEventPayload::StateAttemptFailed(
+            events::StateAttemptFailed {
+                spec_hash: runtime_spec.spec_hash().clone(),
+                node_id: node.node_id.clone(),
+                attempt_id: attempt_id.clone(),
+                retryable,
+                error,
+            },
+        ));
+    } else if terminal_cell {
+        payloads.push(events::KernelEventPayload::StateAttemptCompleted(
+            events::StateAttemptCompleted {
+                spec_hash: runtime_spec.spec_hash().clone(),
+                node_id: node.node_id.clone(),
+                attempt_id: attempt_id.clone(),
+                output_cell_id: node.output_cell.clone(),
+            },
+        ));
+    }
+
+    Ok(payloads)
+}
+
 fn validate_runner_output(
     runtime_spec: &CertifiedRuntimeSpec,
     node: &spec::NodeSpec,
@@ -8563,9 +8704,9 @@ fn validate_runner_output(
     caps: &CertifiedRuntimeCapabilities,
     recorded_facts: &RecordedFacts,
     projections: &store::ProjectionSnapshot,
-    output: &ErasedRunnerOutput,
+    payloads: &[events::KernelEventPayload],
 ) -> Result<()> {
-    if output.payloads.is_empty() {
+    if payloads.is_empty() {
         return Err(RuntimeError::InvalidRunnerOutput(format!(
             "runner for node {} returned no typed payloads",
             node.node_id
@@ -8580,7 +8721,7 @@ fn validate_runner_output(
     let mut side_effect_failed = false;
     let mut attempt_failure_retryable = None;
     let mut side_effect_failure_retryable = None;
-    for payload in &output.payloads {
+    for payload in payloads {
         if payload_spec_hash(payload) != *runtime_spec.spec_hash() {
             return Err(RuntimeError::InvalidRunnerOutput(format!(
                 "runner for node {} returned payload with mismatched spec hash",
@@ -8723,7 +8864,7 @@ fn validate_runner_output(
         }
     }
     if node.side_effect.is_some() {
-        validate_side_effect_resume_output(projections, node, attempt_id, &output.payloads)?;
+        validate_side_effect_resume_output(projections, node, attempt_id, payloads)?;
         if failed {
             if !side_effect_failed {
                 return Err(RuntimeError::InvalidRunnerOutput(format!(
@@ -9546,30 +9687,20 @@ mod tests {
                 Ok(ErasedRunnerOutput {
                     staged_artifacts: vec![staged_artifact],
                     staged_retention_refs: Vec::new(),
-                    payloads: vec![
-                        events::KernelEventPayload::CellProduced(events::CellProduced {
-                            spec_hash: ctx.spec_hash().clone(),
-                            node_id: ctx.node().node_id.clone(),
-                            cell_id: ctx.node().output_cell.clone(),
-                            scope_id: ctx.node().scope_id.clone(),
-                            attempt_id: ctx.attempt_id().clone(),
-                            semantic_type_id: ctx.descriptor().output_semantic_type_id.clone(),
-                            schema_id: ctx.descriptor().output_schema_id.clone(),
-                            value_lineage: ctx.output_cell().value_lineage.clone(),
-                            artifact_id: self.output_artifact.clone(),
-                            content_digest: self.output_digest.clone(),
-                            producer_state_kind: Some(ctx.node().state_kind.clone()),
-                            producer_state_version: Some(ctx.node().state_version.clone()),
-                        }),
-                        events::KernelEventPayload::StateAttemptCompleted(
-                            events::StateAttemptCompleted {
-                                spec_hash: ctx.spec_hash().clone(),
-                                node_id: ctx.node().node_id.clone(),
-                                attempt_id: ctx.attempt_id().clone(),
-                                output_cell_id: ctx.node().output_cell.clone(),
-                            },
-                        ),
-                    ],
+                    payloads: vec![RunnerEventPayload::CellProduced(events::CellProduced {
+                        spec_hash: ctx.spec_hash().clone(),
+                        node_id: ctx.node().node_id.clone(),
+                        cell_id: ctx.node().output_cell.clone(),
+                        scope_id: ctx.node().scope_id.clone(),
+                        attempt_id: ctx.attempt_id().clone(),
+                        semantic_type_id: ctx.descriptor().output_semantic_type_id.clone(),
+                        schema_id: ctx.descriptor().output_schema_id.clone(),
+                        value_lineage: ctx.output_cell().value_lineage.clone(),
+                        artifact_id: self.output_artifact.clone(),
+                        content_digest: self.output_digest.clone(),
+                        producer_state_kind: Some(ctx.node().state_kind.clone()),
+                        producer_state_version: Some(ctx.node().state_version.clone()),
+                    })],
                 })
             })
         }
@@ -11486,7 +11617,7 @@ mod tests {
             fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
                 Box::pin(async move {
                     Ok(ErasedRunnerOutput::new(vec![
-                        events::KernelEventPayload::FactRecorded(events::FactRecorded {
+                        RunnerEventPayload::FactRecorded(events::FactRecorded {
                             spec_hash: ctx.spec_hash().clone(),
                             node_id: ctx.node().node_id.clone(),
                             attempt_id: ctx.attempt_id().clone(),
@@ -11551,81 +11682,6 @@ mod tests {
                 .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
                 .await,
             Err(RuntimeError::InvalidRunnerOutput(_))
-        ));
-    }
-
-    #[tokio::test]
-    async fn runner_cannot_return_scheduler_owned_lifecycle_payload() {
-        struct SchedulerOwnedPayloadRunner {
-            public_schema_id: SchemaId,
-        }
-
-        impl ErasedNodeRunner for SchedulerOwnedPayloadRunner {
-            fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
-                Box::pin(async move {
-                    Ok(ErasedRunnerOutput::new(vec![
-                        events::KernelEventPayload::RunCompleted(events::RunCompleted {
-                            run_id: ctx.run_id().clone(),
-                            spec_hash: ctx.spec_hash().clone(),
-                            outcome: events::RunCompletionOutcome::Completed(
-                                events::PublicOutputCompletionEvidence {
-                                    public_output_schema_id: self.public_schema_id.clone(),
-                                    public_output_event_id: EventId::from_digest(
-                                        DigestAlgorithm::Sha256JcsV1,
-                                        D9,
-                                    ),
-                                },
-                            ),
-                        }),
-                    ]))
-                })
-            }
-        }
-
-        let fixture = fixture();
-        let mut registry = ErasedRunnerRegistry::new();
-        registry
-            .register(binding(
-                fixture.descriptor_a.clone(),
-                "pure",
-                SchedulerOwnedPayloadRunner {
-                    public_schema_id: fixture
-                        .runtime_spec
-                        .spec()
-                        .public_outputs
-                        .public_schema_id
-                        .clone(),
-                },
-            ))
-            .expect("binding a");
-        registry
-            .register(binding(
-                fixture.descriptor_b.clone(),
-                "read",
-                RecordingRunner {
-                    expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
-                    output_artifact: artifact(0xb1),
-                    output_digest: content(0xb2),
-                },
-            ))
-            .expect("binding b");
-        let scheduler = test_scheduler(registry);
-        let mut store = store::InMemoryTypedRunStore::new();
-        start_fixture_run(
-            &scheduler,
-            &mut store,
-            &fixture,
-            vec![fixture.seed_ref.clone()],
-        )
-        .await
-        .expect("start run");
-
-        assert!(matches!(
-            scheduler
-                .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-                .await,
-            Err(RuntimeError::InvalidRunnerOutput(message))
-                if message.contains("scheduler-owned payload")
         ));
     }
 
@@ -12069,200 +12125,6 @@ mod tests {
             Err(RuntimeError::InvalidRunStream(message))
                 if message.contains("public-output retention refs must be appended")
         ));
-    }
-
-    #[tokio::test]
-    async fn runner_cannot_return_artifact_reference_payload() {
-        struct ArtifactReferencePayloadRunner {
-            output_bytes: Vec<u8>,
-        }
-
-        impl ErasedNodeRunner for ArtifactReferencePayloadRunner {
-            fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
-                Box::pin(async move {
-                    let artifact = state_output_artifact_for_bytes(
-                        ctx.node(),
-                        ctx.descriptor(),
-                        &self.output_bytes,
-                    );
-                    let staged_artifact = StagedArtifact::inline_attempt_artifact(
-                        &ctx,
-                        self.output_bytes.clone(),
-                        artifact.clone(),
-                    )?;
-                    let mut artifact_ref = event_artifact_ref_from_store(&artifact);
-                    artifact_ref.byte_len += 1;
-                    let mut payloads = terminal_payloads(
-                        &ctx,
-                        artifact.artifact_id.clone(),
-                        artifact.digest.clone(),
-                    );
-                    payloads.push(events::KernelEventPayload::ArtifactReferenced(
-                        events::ArtifactReferenced {
-                            spec_hash: ctx.spec_hash().clone(),
-                            node_id: Some(ctx.node().node_id.clone()),
-                            attempt_id: Some(ctx.attempt_id().clone()),
-                            artifact_ref,
-                        },
-                    ));
-                    Ok(ErasedRunnerOutput {
-                        staged_artifacts: vec![staged_artifact],
-                        staged_retention_refs: Vec::new(),
-                        payloads,
-                    })
-                })
-            }
-        }
-
-        let fixture = fixture();
-        let mut registry = ErasedRunnerRegistry::new();
-        registry
-            .register(binding(
-                fixture.descriptor_a.clone(),
-                "pure",
-                ArtifactReferencePayloadRunner {
-                    output_bytes: br#"{"metadata":"payload"}"#.to_vec(),
-                },
-            ))
-            .expect("binding a");
-        registry
-            .register(binding(
-                fixture.descriptor_b.clone(),
-                "read",
-                RecordingRunner {
-                    expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
-                    output_artifact: artifact(0xb1),
-                    output_digest: content(0xb2),
-                },
-            ))
-            .expect("binding b");
-        let scheduler = test_scheduler(registry);
-        let mut store = store::InMemoryTypedRunStore::new();
-        start_fixture_run(
-            &scheduler,
-            &mut store,
-            &fixture,
-            vec![fixture.seed_ref.clone()],
-        )
-        .await
-        .expect("start run");
-
-        assert!(matches!(
-            scheduler
-                .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-                .await,
-            Err(RuntimeError::InvalidRunnerOutput(message))
-                if message.contains("returned artifact reference payload")
-        ));
-    }
-
-    #[tokio::test]
-    async fn runner_cannot_bind_extra_staged_artifact_with_artifact_reference_only() {
-        struct ExtraReferencedArtifactRunner {
-            output_bytes: Vec<u8>,
-            extra_bytes: Vec<u8>,
-        }
-
-        impl ErasedNodeRunner for ExtraReferencedArtifactRunner {
-            fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
-                Box::pin(async move {
-                    let output_artifact = state_output_artifact_for_bytes(
-                        ctx.node(),
-                        ctx.descriptor(),
-                        &self.output_bytes,
-                    );
-                    let output_staged_artifact = StagedArtifact::inline_attempt_artifact(
-                        &ctx,
-                        self.output_bytes.clone(),
-                        output_artifact.clone(),
-                    )?;
-                    let extra_digest = digest_for_bytes(&self.extra_bytes);
-                    let extra_artifact = store::ArtifactEvidenceRef {
-                        artifact_id: ArtifactId::from_digest(
-                            extra_digest.algorithm(),
-                            *extra_digest.digest(),
-                        ),
-                        digest: extra_digest,
-                        byte_len: self.extra_bytes.len() as u64,
-                        media_type: spec::MediaType::new("application/json").expect("media"),
-                        schema_id: Some(ctx.node().config_ref.schema_id.clone()),
-                        semantic_type_id: None,
-                        producer_node_id: Some(ctx.node().node_id.clone()),
-                        producer_seed_id: None,
-                        artifact_role: events::ArtifactRole::FactResponse,
-                    };
-                    let extra_staged_artifact = StagedArtifact::inline_attempt_artifact(
-                        &ctx,
-                        self.extra_bytes.clone(),
-                        extra_artifact.clone(),
-                    )?;
-                    let mut payloads = terminal_payloads(
-                        &ctx,
-                        output_artifact.artifact_id.clone(),
-                        output_artifact.digest.clone(),
-                    );
-                    payloads.push(events::KernelEventPayload::ArtifactReferenced(
-                        events::ArtifactReferenced {
-                            spec_hash: ctx.spec_hash().clone(),
-                            node_id: Some(ctx.node().node_id.clone()),
-                            attempt_id: Some(ctx.attempt_id().clone()),
-                            artifact_ref: event_artifact_ref_from_store(&extra_artifact),
-                        },
-                    ));
-                    Ok(ErasedRunnerOutput {
-                        staged_artifacts: vec![output_staged_artifact, extra_staged_artifact],
-                        staged_retention_refs: Vec::new(),
-                        payloads,
-                    })
-                })
-            }
-        }
-
-        let fixture = fixture();
-        let mut registry = ErasedRunnerRegistry::new();
-        registry
-            .register(binding(
-                fixture.descriptor_a.clone(),
-                "pure",
-                ExtraReferencedArtifactRunner {
-                    output_bytes: br#"{"terminal":"output"}"#.to_vec(),
-                    extra_bytes: br#"{"extra":"artifact"}"#.to_vec(),
-                },
-            ))
-            .expect("binding a");
-        registry
-            .register(binding(
-                fixture.descriptor_b.clone(),
-                "read",
-                RecordingRunner {
-                    expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
-                    output_artifact: artifact(0xb1),
-                    output_digest: content(0xb2),
-                },
-            ))
-            .expect("binding b");
-        let scheduler = test_scheduler(registry);
-        let mut store = store::InMemoryTypedRunStore::new();
-        start_fixture_run(
-            &scheduler,
-            &mut store,
-            &fixture,
-            vec![fixture.seed_ref.clone()],
-        )
-        .await
-        .expect("start run");
-
-        assert!(matches!(
-            scheduler
-                .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-                .await,
-            Err(RuntimeError::InvalidRunnerOutput(message))
-                if message.contains("returned artifact reference payload")
-        ));
-        assert!(store
-            .projection_snapshot()
-            .cell_terminal(&fixture.cell_a)
-            .is_none());
     }
 
     #[tokio::test]
@@ -13539,7 +13401,7 @@ mod tests {
             fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
                 Box::pin(async move {
                     Ok(ErasedRunnerOutput::new(vec![
-                        events::KernelEventPayload::FactRecorded(events::FactRecorded {
+                        RunnerEventPayload::FactRecorded(events::FactRecorded {
                             spec_hash: ctx.spec_hash().clone(),
                             node_id: ctx.node().node_id.clone(),
                             attempt_id: ctx.attempt_id().clone(),
@@ -13839,7 +13701,7 @@ mod tests {
                         staged_artifacts: vec![staged_artifact],
                         staged_retention_refs: Vec::new(),
                         payloads: vec![
-                            events::KernelEventPayload::SideEffectIntentPersisted(
+                            RunnerEventPayload::SideEffectIntentPersisted(
                                 events::side_effect::IntentPersisted {
                                     spec_hash: ctx.spec_hash().clone(),
                                     node_id: ctx.node().node_id.clone(),
@@ -14068,45 +13930,47 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
-    async fn side_effect_failure_retryability_must_match_attempt_failure() {
+    #[test]
+    fn side_effect_failure_derives_attempt_failure_payload() {
         let fixture = fixture_with_first_side_effect_state();
-        let mut registry = ErasedRunnerRegistry::new();
-        registry
-            .register(binding(
-                fixture.descriptor_a.clone(),
-                "sidefx",
-                MismatchedSideEffectFailureRunner,
-            ))
-            .expect("binding a");
-        registry
-            .register(binding(
-                fixture.descriptor_b.clone(),
-                "read",
-                RecordingRunner {
-                    expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
-                    output_artifact: artifact(0xb1),
-                    output_digest: content(0xb2),
-                },
-            ))
-            .expect("binding b");
-        let scheduler = test_scheduler(registry);
-        let mut store = store::InMemoryTypedRunStore::new();
-        start_fixture_run(
-            &scheduler,
-            &mut store,
-            &fixture,
-            vec![fixture.seed_ref.clone()],
+        let node = node_by_output(&fixture, &fixture.cell_a);
+        let attempt_id = attempt_id(
+            &fixture.run_id,
+            fixture.runtime_spec.spec_hash(),
+            &node.node_id,
+            1,
         )
-        .await
-        .expect("start run");
-
-        assert!(matches!(
-            scheduler
-                .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-                .await,
-            Err(RuntimeError::InvalidRunnerOutput(_))
-        ));
+        .expect("attempt id");
+        let payloads = runner_payloads_with_derived_lifecycle(
+            &fixture.runtime_spec,
+            node,
+            &attempt_id,
+            vec![RunnerEventPayload::SideEffectFailed(
+                events::side_effect::Failed {
+                    spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                    node_id: node.node_id.clone(),
+                    attempt_id: attempt_id.clone(),
+                    ledger_key: side_effect_ledger_key(1),
+                    invocation_epoch: 1,
+                    failure_phase: events::side_effect::FailurePhase::BeforeInvocationStarted,
+                    retryable: false,
+                    error: side_effect_error(false),
+                },
+            )],
+        );
+        let payloads = payloads.expect("derive lifecycle");
+        assert!(
+            payloads.iter().any(|payload| {
+                matches!(
+                    payload,
+                    events::KernelEventPayload::StateAttemptFailed(events::StateAttemptFailed {
+                        retryable: false,
+                        ..
+                    })
+                )
+            }),
+            "side-effect failure payloads should include middleware-derived StateAttemptFailed"
+        );
     }
 
     struct DeterministicSideEffectRunner {
@@ -14319,7 +14183,7 @@ mod tests {
                 staged_artifacts: vec![staged_artifact],
                 staged_retention_refs: Vec::new(),
                 payloads: vec![
-                    events::KernelEventPayload::SideEffectIntentPersisted(
+                    RunnerEventPayload::SideEffectIntentPersisted(
                         events::side_effect::IntentPersisted {
                             spec_hash: ctx.spec_hash().clone(),
                             node_id: ctx.node().node_id.clone(),
@@ -14388,7 +14252,7 @@ mod tests {
                     Ok(ErasedRunnerOutput {
                         staged_artifacts: vec![staged_artifact],
                         staged_retention_refs: Vec::new(),
-                        payloads: vec![events::KernelEventPayload::SideEffectAmbiguous(
+                        payloads: vec![RunnerEventPayload::SideEffectAmbiguous(
                             events::side_effect::Ambiguous {
                                 spec_hash: ctx.spec_hash().clone(),
                                 node_id: ctx.node().node_id.clone(),
@@ -14434,34 +14298,6 @@ mod tests {
                         self.output_digest.clone(),
                     ),
                 })
-            })
-        }
-    }
-
-    struct MismatchedSideEffectFailureRunner;
-
-    impl ErasedNodeRunner for MismatchedSideEffectFailureRunner {
-        fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
-            Box::pin(async move {
-                Ok(ErasedRunnerOutput::new(vec![
-                    events::KernelEventPayload::SideEffectFailed(events::side_effect::Failed {
-                        spec_hash: ctx.spec_hash().clone(),
-                        node_id: ctx.node().node_id.clone(),
-                        attempt_id: ctx.attempt_id().clone(),
-                        ledger_key: side_effect_ledger_key(ctx.attempt_no()),
-                        invocation_epoch: 1,
-                        failure_phase: events::side_effect::FailurePhase::BeforeInvocationStarted,
-                        retryable: false,
-                        error: side_effect_error(false),
-                    }),
-                    events::KernelEventPayload::StateAttemptFailed(events::StateAttemptFailed {
-                        spec_hash: ctx.spec_hash().clone(),
-                        node_id: ctx.node().node_id.clone(),
-                        attempt_id: ctx.attempt_id().clone(),
-                        retryable: true,
-                        error: side_effect_error(true),
-                    }),
-                ]))
             })
         }
     }
@@ -15066,29 +14902,21 @@ mod tests {
         ctx: &ErasedRunCtx<'_>,
         output_artifact: ArtifactId,
         output_digest: ContentDigest,
-    ) -> Vec<events::KernelEventPayload> {
-        vec![
-            events::KernelEventPayload::CellProduced(events::CellProduced {
-                spec_hash: ctx.spec_hash().clone(),
-                node_id: ctx.node().node_id.clone(),
-                cell_id: ctx.node().output_cell.clone(),
-                scope_id: ctx.node().scope_id.clone(),
-                attempt_id: ctx.attempt_id().clone(),
-                semantic_type_id: ctx.descriptor().output_semantic_type_id.clone(),
-                schema_id: ctx.descriptor().output_schema_id.clone(),
-                value_lineage: ctx.output_cell().value_lineage.clone(),
-                artifact_id: output_artifact,
-                content_digest: output_digest,
-                producer_state_kind: Some(ctx.node().state_kind.clone()),
-                producer_state_version: Some(ctx.node().state_version.clone()),
-            }),
-            events::KernelEventPayload::StateAttemptCompleted(events::StateAttemptCompleted {
-                spec_hash: ctx.spec_hash().clone(),
-                node_id: ctx.node().node_id.clone(),
-                attempt_id: ctx.attempt_id().clone(),
-                output_cell_id: ctx.node().output_cell.clone(),
-            }),
-        ]
+    ) -> Vec<RunnerEventPayload> {
+        vec![RunnerEventPayload::CellProduced(events::CellProduced {
+            spec_hash: ctx.spec_hash().clone(),
+            node_id: ctx.node().node_id.clone(),
+            cell_id: ctx.node().output_cell.clone(),
+            scope_id: ctx.node().scope_id.clone(),
+            attempt_id: ctx.attempt_id().clone(),
+            semantic_type_id: ctx.descriptor().output_semantic_type_id.clone(),
+            schema_id: ctx.descriptor().output_schema_id.clone(),
+            value_lineage: ctx.output_cell().value_lineage.clone(),
+            artifact_id: output_artifact,
+            content_digest: output_digest,
+            producer_state_kind: Some(ctx.node().state_kind.clone()),
+            producer_state_version: Some(ctx.node().state_version.clone()),
+        })]
     }
 
     fn state_output_artifact(
@@ -17090,8 +16918,8 @@ mod tests {
         ledger: events::SideEffectLedgerKey,
         invocation_epoch: u32,
         claim_generation: u32,
-    ) -> events::KernelEventPayload {
-        events::KernelEventPayload::SideEffectClaimed(events::side_effect::Claimed {
+    ) -> RunnerEventPayload {
+        RunnerEventPayload::SideEffectClaimed(events::side_effect::Claimed {
             spec_hash: ctx.spec_hash().clone(),
             node_id: ctx.node().node_id.clone(),
             attempt_id: ctx.attempt_id().clone(),
@@ -17108,8 +16936,8 @@ mod tests {
         ledger: events::SideEffectLedgerKey,
         previous: &store::SideEffectClaimProjection,
         claim_generation: u32,
-    ) -> events::KernelEventPayload {
-        events::KernelEventPayload::SideEffectClaimTakenOver(events::side_effect::ClaimTakenOver {
+    ) -> RunnerEventPayload {
+        RunnerEventPayload::SideEffectClaimTakenOver(events::side_effect::ClaimTakenOver {
             spec_hash: ctx.spec_hash().clone(),
             node_id: ctx.node().node_id.clone(),
             attempt_id: ctx.attempt_id().clone(),
@@ -17128,20 +16956,18 @@ mod tests {
         ledger: events::SideEffectLedgerKey,
         invocation_epoch: u32,
         claim_generation: u32,
-    ) -> events::KernelEventPayload {
-        events::KernelEventPayload::SideEffectInvocationPrepared(
-            events::side_effect::InvocationPrepared {
-                spec_hash: ctx.spec_hash().clone(),
-                node_id: ctx.node().node_id.clone(),
-                attempt_id: ctx.attempt_id().clone(),
-                ledger_key: ledger,
-                invocation_epoch,
-                claim_generation,
-                claim_fencing_token: side_effect_fencing_token(ctx.attempt_no(), claim_generation),
-                prepared_artifact_id: None,
-                prepared_hash: None,
-            },
-        )
+    ) -> RunnerEventPayload {
+        RunnerEventPayload::SideEffectInvocationPrepared(events::side_effect::InvocationPrepared {
+            spec_hash: ctx.spec_hash().clone(),
+            node_id: ctx.node().node_id.clone(),
+            attempt_id: ctx.attempt_id().clone(),
+            ledger_key: ledger,
+            invocation_epoch,
+            claim_generation,
+            claim_fencing_token: side_effect_fencing_token(ctx.attempt_no(), claim_generation),
+            prepared_artifact_id: None,
+            prepared_hash: None,
+        })
     }
 
     fn side_effect_invocation_started(
@@ -17149,19 +16975,17 @@ mod tests {
         ledger: events::SideEffectLedgerKey,
         invocation_epoch: u32,
         claim_generation: u32,
-    ) -> events::KernelEventPayload {
-        events::KernelEventPayload::SideEffectInvocationStarted(
-            events::side_effect::InvocationStarted {
-                spec_hash: ctx.spec_hash().clone(),
-                node_id: ctx.node().node_id.clone(),
-                attempt_id: ctx.attempt_id().clone(),
-                ledger_key: ledger,
-                invocation_epoch,
-                claim_owner: side_effect_claim_owner(ctx.attempt_no(), claim_generation),
-                claim_generation,
-                claim_fencing_token: side_effect_fencing_token(ctx.attempt_no(), claim_generation),
-            },
-        )
+    ) -> RunnerEventPayload {
+        RunnerEventPayload::SideEffectInvocationStarted(events::side_effect::InvocationStarted {
+            spec_hash: ctx.spec_hash().clone(),
+            node_id: ctx.node().node_id.clone(),
+            attempt_id: ctx.attempt_id().clone(),
+            ledger_key: ledger,
+            invocation_epoch,
+            claim_owner: side_effect_claim_owner(ctx.attempt_no(), claim_generation),
+            claim_generation,
+            claim_fencing_token: side_effect_fencing_token(ctx.attempt_no(), claim_generation),
+        })
     }
 
     fn side_effect_submission_observed(
@@ -17170,19 +16994,17 @@ mod tests {
         invocation_epoch: u32,
         artifact_id: ArtifactId,
         digest: ContentDigest,
-    ) -> events::KernelEventPayload {
-        events::KernelEventPayload::SideEffectSubmissionObserved(
-            events::side_effect::SubmissionObserved {
-                spec_hash: ctx.spec_hash().clone(),
-                node_id: ctx.node().node_id.clone(),
-                attempt_id: ctx.attempt_id().clone(),
-                ledger_key: ledger,
-                invocation_epoch,
-                submission_schema_id: ctx.node().config_ref.schema_id.clone(),
-                submission_hash: digest,
-                submission_artifact_id: artifact_id,
-            },
-        )
+    ) -> RunnerEventPayload {
+        RunnerEventPayload::SideEffectSubmissionObserved(events::side_effect::SubmissionObserved {
+            spec_hash: ctx.spec_hash().clone(),
+            node_id: ctx.node().node_id.clone(),
+            attempt_id: ctx.attempt_id().clone(),
+            ledger_key: ledger,
+            invocation_epoch,
+            submission_schema_id: ctx.node().config_ref.schema_id.clone(),
+            submission_hash: digest,
+            submission_artifact_id: artifact_id,
+        })
     }
 
     fn side_effect_receipt_observed(
@@ -17191,20 +17013,18 @@ mod tests {
         invocation_epoch: u32,
         artifact_id: ArtifactId,
         digest: ContentDigest,
-    ) -> events::KernelEventPayload {
-        events::KernelEventPayload::SideEffectReceiptObserved(
-            events::side_effect::ReceiptObserved {
-                spec_hash: ctx.spec_hash().clone(),
-                node_id: ctx.node().node_id.clone(),
-                attempt_id: ctx.attempt_id().clone(),
-                ledger_key: ledger,
-                invocation_epoch,
-                receipt_schema_id: ctx.node().config_ref.schema_id.clone(),
-                receipt_hash: digest,
-                receipt_artifact_id: artifact_id,
-                replay_verifier_id: events::ReplayVerifierId::new("verifier-1").expect("verifier"),
-            },
-        )
+    ) -> RunnerEventPayload {
+        RunnerEventPayload::SideEffectReceiptObserved(events::side_effect::ReceiptObserved {
+            spec_hash: ctx.spec_hash().clone(),
+            node_id: ctx.node().node_id.clone(),
+            attempt_id: ctx.attempt_id().clone(),
+            ledger_key: ledger,
+            invocation_epoch,
+            receipt_schema_id: ctx.node().config_ref.schema_id.clone(),
+            receipt_hash: digest,
+            receipt_artifact_id: artifact_id,
+            replay_verifier_id: events::ReplayVerifierId::new("verifier-1").expect("verifier"),
+        })
     }
 
     fn side_effect_confirmation_observed(
@@ -17213,8 +17033,8 @@ mod tests {
         invocation_epoch: u32,
         artifact_id: ArtifactId,
         digest: ContentDigest,
-    ) -> events::KernelEventPayload {
-        events::KernelEventPayload::SideEffectConfirmationObserved(
+    ) -> RunnerEventPayload {
+        RunnerEventPayload::SideEffectConfirmationObserved(
             events::side_effect::ConfirmationObserved {
                 spec_hash: ctx.spec_hash().clone(),
                 node_id: ctx.node().node_id.clone(),

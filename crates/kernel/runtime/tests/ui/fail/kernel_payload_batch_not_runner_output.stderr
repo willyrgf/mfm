@@ -1,0 +1,8 @@
+error[E0308]: mismatched types
+  --> tests/ui/fail/kernel_payload_batch_not_runner_output.rs:9:42
+   |
+ 9 |       let _ = ErasedRunnerOutput::new(vec![events::KernelEventPayload::RunCompleted(
+   |  __________________________________________^
+10 | |         run_completed(),
+11 | |     )]);
+   | |_____^ expected `RunnerEventPayload`, found `KernelEventPayload`

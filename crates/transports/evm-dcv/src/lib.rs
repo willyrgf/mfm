@@ -28,8 +28,8 @@ use mfm_program::{SideEffectState, StateSpec};
 use mfm_replay::v1 as replay;
 use mfm_runtime::{
     ErasedNodeRunner, ErasedRunCtx, ErasedRunnerBinding, ErasedRunnerFuture, ErasedRunnerOutput,
-    ErasedRunnerRegistry, MaterializedCellTerminal, MaterializedInputNode, StagedArtifact,
-    StagedRetentionRefs,
+    ErasedRunnerRegistry, MaterializedCellTerminal, MaterializedInputNode, RunnerEventPayload,
+    StagedArtifact, StagedRetentionRefs,
 };
 use mfm_spec::v1 as spec;
 use mfm_state_evm_dcv::{
@@ -369,7 +369,7 @@ where
     Ok(ErasedRunnerOutput {
         staged_artifacts: vec![staged_artifact],
         staged_retention_refs: vec![retention(&intent_artifact.evidence)],
-        payloads: vec![events::KernelEventPayload::SideEffectIntentPersisted(
+        payloads: vec![RunnerEventPayload::SideEffectIntentPersisted(
             side_effect::IntentPersisted {
                 spec_hash: ctx.spec_hash().clone(),
                 node_id: ctx.node().node_id.clone(),
@@ -406,7 +406,7 @@ fn claim_side_effect(
         }
     };
     Ok(ErasedRunnerOutput::new(vec![
-        events::KernelEventPayload::SideEffectClaimed(side_effect::Claimed {
+        RunnerEventPayload::SideEffectClaimed(side_effect::Claimed {
             spec_hash: ctx.spec_hash().clone(),
             node_id: ctx.node().node_id.clone(),
             attempt_id: ctx.attempt_id().clone(),
@@ -485,7 +485,7 @@ async fn prepare_invocation(
     Ok(ErasedRunnerOutput {
         staged_artifacts: vec![staged_artifact],
         staged_retention_refs: vec![retention(&prepared_artifact.evidence)],
-        payloads: vec![events::KernelEventPayload::SideEffectInvocationPrepared(
+        payloads: vec![RunnerEventPayload::SideEffectInvocationPrepared(
             side_effect::InvocationPrepared {
                 spec_hash: ctx.spec_hash().clone(),
                 node_id: ctx.node().node_id.clone(),
@@ -508,7 +508,7 @@ fn start_invocation(
 ) -> mfm_runtime::Result<ErasedRunnerOutput> {
     let claim = active_claim(projection)?;
     Ok(ErasedRunnerOutput::new(vec![
-        events::KernelEventPayload::SideEffectInvocationStarted(side_effect::InvocationStarted {
+        RunnerEventPayload::SideEffectInvocationStarted(side_effect::InvocationStarted {
             spec_hash: ctx.spec_hash().clone(),
             node_id: ctx.node().node_id.clone(),
             attempt_id: ctx.attempt_id().clone(),
@@ -608,7 +608,7 @@ where
     Ok(ErasedRunnerOutput {
         staged_artifacts: vec![staged_artifact],
         staged_retention_refs: vec![retention(&artifact.evidence)],
-        payloads: vec![events::KernelEventPayload::SideEffectSubmissionObserved(
+        payloads: vec![RunnerEventPayload::SideEffectSubmissionObserved(
             side_effect::SubmissionObserved {
                 spec_hash: ctx.spec_hash().clone(),
                 node_id: ctx.node().node_id.clone(),
@@ -639,7 +639,7 @@ async fn observe_submission_unknown(
     Ok(ErasedRunnerOutput {
         staged_artifacts: vec![staged_artifact],
         staged_retention_refs: vec![retention(&artifact.evidence)],
-        payloads: vec![events::KernelEventPayload::SideEffectSubmissionUnknown(
+        payloads: vec![RunnerEventPayload::SideEffectSubmissionUnknown(
             side_effect::SubmissionUnknown {
                 spec_hash: ctx.spec_hash().clone(),
                 node_id: ctx.node().node_id.clone(),
@@ -742,7 +742,7 @@ where
     Ok(ErasedRunnerOutput {
         staged_artifacts: vec![staged_artifact],
         staged_retention_refs: vec![retention(&artifact.evidence)],
-        payloads: vec![events::KernelEventPayload::SideEffectReceiptObserved(
+        payloads: vec![RunnerEventPayload::SideEffectReceiptObserved(
             side_effect::ReceiptObserved {
                 spec_hash: ctx.spec_hash().clone(),
                 node_id: ctx.node().node_id.clone(),
@@ -862,7 +862,7 @@ where
     Ok(ErasedRunnerOutput {
         staged_artifacts: vec![staged_artifact],
         staged_retention_refs: vec![retention(&artifact.evidence)],
-        payloads: vec![events::KernelEventPayload::SideEffectConfirmationObserved(
+        payloads: vec![RunnerEventPayload::SideEffectConfirmationObserved(
             side_effect::ConfirmationObserved {
                 spec_hash: ctx.spec_hash().clone(),
                 node_id: ctx.node().node_id.clone(),
@@ -1705,7 +1705,7 @@ async fn validate_read_output(
             retention(&output_artifact.evidence),
         ],
         payloads: vec![
-            events::KernelEventPayload::FactRecorded(events::FactRecorded {
+            RunnerEventPayload::FactRecorded(events::FactRecorded {
                 spec_hash: ctx.spec_hash().clone(),
                 node_id: ctx.node().node_id.clone(),
                 attempt_id: ctx.attempt_id().clone(),
@@ -1724,7 +1724,6 @@ async fn validate_read_output(
                 artifact_id: response_artifact.evidence.artifact_id.clone(),
             }),
             cell_produced(&ctx, &output_artifact.evidence),
-            completed(&ctx),
         ],
     })
 }
@@ -1805,7 +1804,7 @@ where
     Ok(ErasedRunnerOutput {
         staged_artifacts: vec![staged_artifact],
         staged_retention_refs: vec![retention(&artifact.evidence)],
-        payloads: vec![cell_produced(&ctx, &artifact.evidence), completed(&ctx)],
+        payloads: vec![cell_produced(&ctx, &artifact.evidence)],
     })
 }
 
@@ -1857,8 +1856,8 @@ fn ledger_key(
 fn cell_produced(
     ctx: &ErasedRunCtx<'_>,
     artifact: &store::ArtifactEvidenceRef,
-) -> events::KernelEventPayload {
-    events::KernelEventPayload::CellProduced(events::CellProduced {
+) -> RunnerEventPayload {
+    RunnerEventPayload::CellProduced(events::CellProduced {
         spec_hash: ctx.spec_hash().clone(),
         node_id: ctx.node().node_id.clone(),
         cell_id: ctx.node().output_cell.clone(),
@@ -1871,15 +1870,6 @@ fn cell_produced(
         content_digest: artifact.digest.clone(),
         producer_state_kind: Some(ctx.node().state_kind.clone()),
         producer_state_version: Some(ctx.node().state_version.clone()),
-    })
-}
-
-fn completed(ctx: &ErasedRunCtx<'_>) -> events::KernelEventPayload {
-    events::KernelEventPayload::StateAttemptCompleted(events::StateAttemptCompleted {
-        spec_hash: ctx.spec_hash().clone(),
-        node_id: ctx.node().node_id.clone(),
-        attempt_id: ctx.attempt_id().clone(),
-        output_cell_id: ctx.node().output_cell.clone(),
     })
 }
 
