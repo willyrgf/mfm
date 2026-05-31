@@ -2118,6 +2118,7 @@ dependencies = [
  "mfm-runtime",
  "mfm-spec",
  "mfm-store",
+ "trybuild",
 ]
 
 [[package]]

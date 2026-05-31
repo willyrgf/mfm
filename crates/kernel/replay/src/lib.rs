@@ -141,53 +141,48 @@ pub mod v1 {
         }
     }
 
-    /// Replay authority supplied by the caller from retained run evidence.
+    /// Sealed replay read authority minted from certified spec and verified stream evidence.
     #[derive(Debug, Clone, PartialEq, Eq)]
-    pub struct ReplayAuthority {
-        /// Canonicalizer identity expected for this replay.
-        pub canonicalizer_identity: CanonicalizerIdentity,
-        /// Runner executable identities retained for the run.
-        pub runner_executables: Vec<events::ExecutableIdentity>,
-        /// Adapter executable identities retained for the run.
-        pub adapter_executables: Vec<events::ExecutableIdentity>,
-        /// Retained artifact evidence available to replay brokers.
-        pub artifact_evidence: Vec<StoredArtifactEvidenceRef>,
+    pub struct ReplayReadAuthority {
+        certified_spec: HashedSpecEnvelope,
+        stream: Vec<KernelEventEnvelope>,
+        canonicalizer_identity: CanonicalizerIdentity,
+        runner_executables: Vec<events::ExecutableIdentity>,
+        adapter_executables: Vec<events::ExecutableIdentity>,
+        artifact_evidence: Vec<StoredArtifactEvidenceRef>,
     }
 
-    impl ReplayAuthority {
-        /// Builds replay authority from retained executable and artifact evidence.
-        pub fn new(
-            canonicalizer_identity: CanonicalizerIdentity,
-            runner_executables: Vec<events::ExecutableIdentity>,
-            adapter_executables: Vec<events::ExecutableIdentity>,
+    impl ReplayReadAuthority {
+        /// Mints replay read authority from certifier-backed runtime authority, verified stream
+        /// evidence, and retained artifacts from committed retention projection history.
+        pub fn from_verified_run_stream(
+            runtime_spec: &mfm_runtime::CertifiedRuntimeSpec,
+            verified_stream: &mfm_runtime::VerifiedRunStream,
             artifact_evidence: Vec<StoredArtifactEvidenceRef>,
-        ) -> Self {
-            Self {
-                canonicalizer_identity,
-                runner_executables,
-                adapter_executables,
-                artifact_evidence,
+        ) -> Result<Self> {
+            if runtime_spec.spec_hash() != verified_stream.spec_hash() {
+                return Err(ReplayError::new(
+                    ReplayErrorKind::SpecHashMismatch,
+                    "verified stream spec hash does not match certified runtime spec",
+                ));
             }
-        }
-
-        /// Builds authority using the renderer canonicalizer embedded in the certified spec.
-        pub fn from_certified_spec(
-            certified_spec: &HashedSpecEnvelope,
-            runner_executables: Vec<events::ExecutableIdentity>,
-            adapter_executables: Vec<events::ExecutableIdentity>,
-            artifact_evidence: Vec<StoredArtifactEvidenceRef>,
-        ) -> Self {
-            Self {
-                canonicalizer_identity: certified_spec
+            let run_started = run_started_payload(verified_stream.events())?;
+            let artifacts = artifact_map(artifact_evidence.clone())?;
+            verify_retained_artifacts(verified_stream, &artifacts)?;
+            Ok(Self {
+                certified_spec: runtime_spec.envelope().clone(),
+                stream: verified_stream.events().to_vec(),
+                canonicalizer_identity: runtime_spec
+                    .envelope()
                     .spec
                     .public_outputs
                     .renderer_descriptor
                     .canonicalizer_identity
                     .clone(),
-                runner_executables,
-                adapter_executables,
+                runner_executables: run_started.runner_executables,
+                adapter_executables: run_started.adapter_executables,
                 artifact_evidence,
-            }
+            })
         }
     }
 
@@ -370,6 +365,7 @@ pub mod v1 {
     #[derive(Debug, Clone)]
     pub struct ReplayBroker {
         certified_spec: HashedSpecEnvelope,
+        stream: Vec<KernelEventEnvelope>,
         run_id: events::RunStarted,
         projection: ProjectionSnapshot,
         retained_artifacts: BTreeMap<ArtifactId, StoredArtifactEvidenceRef>,
@@ -382,29 +378,19 @@ pub mod v1 {
     }
 
     impl ReplayBroker {
-        /// Builds a replay broker from runtime-validated certified stream authority.
-        pub fn from_runtime_validated_stream(
-            runtime_spec: &mfm_runtime::CertifiedRuntimeSpec,
-            stream: &[KernelEventEnvelope],
-            authority: ReplayAuthority,
-        ) -> Result<Self> {
-            let run_started = run_started_payload(stream)?;
-            mfm_runtime::validate_run_stream(runtime_spec, &run_started.run_id, stream).map_err(
-                |error| ReplayError::new(ReplayErrorKind::InvalidRunStream, error.to_string()),
-            )?;
-            Self::from_validated_parts(runtime_spec.envelope().clone(), stream, authority)
+        /// Builds a replay broker from sealed replay read authority.
+        pub fn from_read_authority(authority: ReplayReadAuthority) -> Result<Self> {
+            Self::from_validated_parts(authority)
         }
 
-        fn from_validated_parts(
-            certified_spec: HashedSpecEnvelope,
-            stream: &[KernelEventEnvelope],
-            authority: ReplayAuthority,
-        ) -> Result<Self> {
+        fn from_validated_parts(authority: ReplayReadAuthority) -> Result<Self> {
+            let certified_spec = authority.certified_spec.clone();
+            let stream = authority.stream.clone();
             certified_spec.verify_hash()?;
-            ProjectionSnapshot::validate_run_stream(stream)?;
-            let projection = ProjectionSnapshot::rebuild_from_run_stream(stream)?;
+            ProjectionSnapshot::validate_run_stream(&stream)?;
+            let projection = ProjectionSnapshot::rebuild_from_run_stream(&stream)?;
             let retained_artifacts = artifact_map(authority.artifact_evidence.clone())?;
-            let run_started = run_started_payload(stream)?;
+            let run_started = run_started_payload(&stream)?;
 
             if run_started.spec_hash != certified_spec.spec_hash {
                 return Err(ReplayError::new(
@@ -430,6 +416,7 @@ pub mod v1 {
 
             let mut broker = Self {
                 certified_spec,
+                stream: stream.clone(),
                 run_id: run_started,
                 projection,
                 retained_artifacts,
@@ -441,7 +428,7 @@ pub mod v1 {
                 confirmations: BTreeMap::new(),
             };
             broker.authorize_certified_spec_artifacts()?;
-            broker.index_stream(stream)?;
+            broker.index_stream(&stream)?;
             Ok(broker)
         }
 
@@ -453,6 +440,11 @@ pub mod v1 {
         /// Returns the run-start payload bound to this replay broker.
         pub fn run_started(&self) -> &events::RunStarted {
             &self.run_id
+        }
+
+        /// Returns the broker-owned verified run stream used for replay evidence.
+        pub fn events(&self) -> &[KernelEventEnvelope] {
+            &self.stream
         }
 
         /// Returns the projection rebuilt from the authoritative run stream.
@@ -1701,6 +1693,51 @@ pub mod v1 {
         Ok(map)
     }
 
+    fn verify_retained_artifacts(
+        verified_stream: &mfm_runtime::VerifiedRunStream,
+        artifacts: &BTreeMap<ArtifactId, StoredArtifactEvidenceRef>,
+    ) -> Result<()> {
+        let retention = verified_stream
+            .projection_snapshot()
+            .retention(verified_stream.run_id())
+            .ok_or_else(|| {
+                ReplayError::new(
+                    ReplayErrorKind::ArtifactMissing,
+                    "replay read authority requires committed retention evidence",
+                )
+            })?;
+        for retained in retention.refs.values() {
+            let evidence = artifacts.get(&retained.artifact_id).ok_or_else(|| {
+                ReplayError::new(
+                    ReplayErrorKind::ArtifactMissing,
+                    format!(
+                        "missing retained artifact evidence for {}",
+                        retained.artifact_id
+                    ),
+                )
+            })?;
+            if evidence.digest != retained.content_digest || evidence.artifact_role != retained.role
+            {
+                return Err(ReplayError::new(
+                    ReplayErrorKind::ArtifactMismatch,
+                    format!(
+                        "retained artifact evidence mismatch for {}",
+                        retained.artifact_id
+                    ),
+                ));
+            }
+        }
+        for artifact_id in artifacts.keys() {
+            if !retention.refs.contains_key(artifact_id) {
+                return Err(ReplayError::new(
+                    ReplayErrorKind::ArtifactMismatch,
+                    format!("unretained artifact evidence supplied for {artifact_id}"),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     fn verify_artifact_fields(
         evidence: &StoredArtifactEvidenceRef,
         digest: &ContentDigest,
@@ -1752,7 +1789,7 @@ pub mod v1 {
     fn verify_run_start_contract(
         certified_spec: &HashedSpecEnvelope,
         run_started: &events::RunStarted,
-        authority: &ReplayAuthority,
+        authority: &ReplayReadAuthority,
         artifacts: &BTreeMap<ArtifactId, StoredArtifactEvidenceRef>,
     ) -> Result<()> {
         if run_started.spec_version != certified_spec.spec.spec_version
@@ -1993,13 +2030,9 @@ pub mod v1 {
             let mut authority = fixture.authority();
             authority.runner_executables = vec![executable("different-runner")];
             assert_eq!(
-                ReplayBroker::from_validated_parts(
-                    fixture.envelope.clone(),
-                    &fixture.stream,
-                    authority,
-                )
-                .expect_err("runner mismatch")
-                .kind,
+                ReplayBroker::from_validated_parts(authority)
+                    .expect_err("runner mismatch")
+                    .kind,
                 ReplayErrorKind::ExecutableIdentityMismatch
             );
 
@@ -2007,13 +2040,9 @@ pub mod v1 {
             authority.canonicalizer_identity =
                 CanonicalizerIdentity::new("different-canonicalizer").expect("canonicalizer");
             assert_eq!(
-                ReplayBroker::from_validated_parts(
-                    fixture.envelope.clone(),
-                    &fixture.stream,
-                    authority,
-                )
-                .expect_err("canonicalizer mismatch")
-                .kind,
+                ReplayBroker::from_validated_parts(authority)
+                    .expect_err("canonicalizer mismatch")
+                    .kind,
                 ReplayErrorKind::CanonicalizerMismatch
             );
         }
@@ -2042,13 +2071,9 @@ pub mod v1 {
                 .expect("receipt artifact");
             receipt_artifact.digest = content(0xfb);
             assert_eq!(
-                ReplayBroker::from_validated_parts(
-                    fixture.envelope.clone(),
-                    &fixture.stream,
-                    authority,
-                )
-                .expect_err("artifact mismatch")
-                .kind,
+                ReplayBroker::from_validated_parts(authority)
+                    .expect_err("artifact mismatch")
+                    .kind,
                 ReplayErrorKind::ArtifactMismatch
             );
         }
@@ -2061,13 +2086,9 @@ pub mod v1 {
                 .artifact_evidence
                 .retain(|artifact| artifact.artifact_id != fixture.fact_artifact);
             assert_eq!(
-                ReplayBroker::from_validated_parts(
-                    fixture.envelope.clone(),
-                    &fixture.stream,
-                    authority,
-                )
-                .expect_err("missing artifact")
-                .kind,
+                ReplayBroker::from_validated_parts(authority)
+                    .expect_err("missing artifact")
+                    .kind,
                 ReplayErrorKind::ArtifactMissing
             );
         }
@@ -2084,12 +2105,7 @@ pub mod v1 {
                 Some(fixture.node_id.clone()),
             );
             authority.artifact_evidence.push(extra_artifact.clone());
-            let broker = ReplayBroker::from_validated_parts(
-                fixture.envelope.clone(),
-                &fixture.stream,
-                authority,
-            )
-            .expect("broker");
+            let broker = ReplayBroker::from_validated_parts(authority).expect("broker");
 
             assert_eq!(
                 broker
@@ -2138,13 +2154,9 @@ pub mod v1 {
             stream[fact_index] = batch.events()[0].clone();
 
             assert_eq!(
-                ReplayBroker::from_validated_parts(
-                    fixture.envelope.clone(),
-                    &stream,
-                    fixture.authority(),
-                )
-                .expect_err("uncertified fact capability")
-                .kind,
+                ReplayBroker::from_validated_parts(fixture.authority_for_stream(&stream))
+                    .expect_err("uncertified fact capability")
+                    .kind,
                 ReplayErrorKind::UnsupportedCapability
             );
         }
@@ -2220,26 +2232,20 @@ pub mod v1 {
             );
 
             assert_eq!(
-                ReplayBroker::from_validated_parts(
-                    fixture.envelope.clone(),
+                ReplayBroker::from_validated_parts(fixture.authority_for_stream_and_artifacts(
                     &stream,
-                    ReplayAuthority::from_certified_spec(
-                        &fixture.envelope,
-                        vec![fixture.runner.clone()],
-                        vec![fixture.adapter_exec.clone()],
-                        {
-                            let mut artifacts = fixture.artifacts.clone();
-                            artifacts.push(stored_artifact(
-                                artifact_id,
-                                content_digest,
-                                Some(cell.schema_id),
-                                ArtifactRole::StateOutput,
-                                Some(node.node_id.clone()),
-                            ));
-                            artifacts
-                        },
-                    ),
-                )
+                    {
+                        let mut artifacts = fixture.artifacts.clone();
+                        artifacts.push(stored_artifact(
+                            artifact_id,
+                            content_digest,
+                            Some(cell.schema_id),
+                            ArtifactRole::StateOutput,
+                            Some(node.node_id.clone()),
+                        ));
+                        artifacts
+                    }
+                ),)
                 .expect_err("uncertified public output")
                 .kind,
                 ReplayErrorKind::CertifiedEvidenceMismatch
@@ -2273,13 +2279,9 @@ pub mod v1 {
             );
 
             assert_eq!(
-                ReplayBroker::from_validated_parts(
-                    fixture.envelope.clone(),
-                    &stream,
-                    fixture.authority(),
-                )
-                .expect_err("missing public output projection")
-                .kind,
+                ReplayBroker::from_validated_parts(fixture.authority_for_stream(&stream))
+                    .expect_err("missing public output projection")
+                    .kind,
                 ReplayErrorKind::CertifiedEvidenceMismatch
             );
         }
@@ -2868,22 +2870,37 @@ pub mod v1 {
                 }
             }
 
-            fn authority(&self) -> ReplayAuthority {
-                ReplayAuthority::from_certified_spec(
-                    &self.envelope,
-                    vec![self.runner.clone()],
-                    vec![self.adapter_exec.clone()],
-                    self.artifacts.clone(),
-                )
+            fn authority(&self) -> ReplayReadAuthority {
+                self.authority_for_stream(&self.stream)
+            }
+
+            fn authority_for_stream(&self, stream: &[KernelEventEnvelope]) -> ReplayReadAuthority {
+                self.authority_for_stream_and_artifacts(stream, self.artifacts.clone())
+            }
+
+            fn authority_for_stream_and_artifacts(
+                &self,
+                stream: &[KernelEventEnvelope],
+                artifacts: Vec<StoredArtifactEvidenceRef>,
+            ) -> ReplayReadAuthority {
+                ReplayReadAuthority {
+                    certified_spec: self.envelope.clone(),
+                    stream: stream.to_vec(),
+                    canonicalizer_identity: self
+                        .envelope
+                        .spec
+                        .public_outputs
+                        .renderer_descriptor
+                        .canonicalizer_identity
+                        .clone(),
+                    runner_executables: vec![self.runner.clone()],
+                    adapter_executables: vec![self.adapter_exec.clone()],
+                    artifact_evidence: artifacts,
+                }
             }
 
             fn broker(&self) -> ReplayBroker {
-                ReplayBroker::from_validated_parts(
-                    self.envelope.clone(),
-                    &self.stream,
-                    self.authority(),
-                )
-                .expect("broker")
+                ReplayBroker::from_validated_parts(self.authority()).expect("broker")
             }
 
             fn fact_request(&self) -> FactReplayRequest {

@@ -944,17 +944,16 @@ impl replay::SideEffectReplayVerifier for EvmDcvReplayVerifier {
     }
 }
 
-/// Verifies all typed EVM DCV replay evidence in a run stream.
+/// Verifies all typed EVM DCV replay evidence in a broker-owned run stream.
 ///
-/// Returns `Ok(false)` when the stream does not contain EVM DCV side-effect or validation
+/// Returns `Ok(false)` when the broker stream does not contain EVM DCV side-effect or validation
 /// evidence. Validation read facts are checked against a request recomputed from the certified
 /// validate config and configured-contract input artifact.
 pub async fn verify_evm_dcv_replay(
     broker: &replay::ReplayBroker,
-    stream: &[store::KernelEventEnvelope],
     artifacts: &dyn EvmDcvArtifactReader,
 ) -> replay::Result<bool> {
-    let frames = evm_dcv_replay_frames(stream)?;
+    let frames = evm_dcv_replay_frames(broker.events())?;
     if !frames.is_empty() {
         let verifier = EvmDcvReplayVerifier::new()?;
         for frame in frames.iter() {

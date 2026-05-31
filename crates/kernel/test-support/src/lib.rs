@@ -29,7 +29,7 @@ use mfm_runtime::{
     CertifiedRuntimeSpec, ErasedNodeRunner, ErasedRunCtx, ErasedRunnerBinding, ErasedRunnerFuture,
     ErasedRunnerOutput, ErasedRunnerRegistry, MaterializedCellTerminal, MaterializedInputNode,
     RunLaunchEvidence, RunnerEventPayload, RuntimeArtifactStageFuture, RuntimeArtifactStager,
-    RuntimeError, SchedulerStatus, SerialTypedScheduler, StagedArtifact,
+    RuntimeError, SchedulerStatus, SerialTypedScheduler, StagedArtifact, StagedRetentionRefs,
 };
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
@@ -750,7 +750,7 @@ impl ErasedNodeRunner for TerminalRunner {
             let staged_artifact = staged_attempt_artifact(&ctx, &artifact)?;
             Ok(ErasedRunnerOutput {
                 staged_artifacts: vec![staged_artifact],
-                staged_retention_refs: Vec::new(),
+                staged_retention_refs: retain_artifacts([&artifact.evidence]),
                 payloads: terminal_payloads(
                     &ctx,
                     artifact.evidence.artifact_id,
@@ -815,12 +815,15 @@ impl ErasedNodeRunner for ReadRunner {
             })];
             payloads.extend(terminal_payloads(
                 &ctx,
-                output.evidence.artifact_id,
-                output.evidence.digest,
+                output.evidence.artifact_id.clone(),
+                output.evidence.digest.clone(),
             ));
             Ok(ErasedRunnerOutput {
                 staged_artifacts: vec![staged_fact, staged_output],
-                staged_retention_refs: Vec::new(),
+                staged_retention_refs: retain_artifacts([
+                    &fact_evidence.evidence,
+                    &output.evidence,
+                ]),
                 payloads,
             })
         })
@@ -1138,19 +1141,25 @@ fn replay_without_live_capabilities(run: &ReferenceRun) -> Result<u64, String> {
             _ => None,
         })
         .ok_or_else(|| "missing RunStarted for replay fixture".to_owned())?;
-    let artifacts = replay_artifacts(&run.fixture, &stream)?;
-    let authority = replay::ReplayAuthority::from_certified_spec(
-        run.fixture.runtime_spec.envelope(),
-        run_started.runner_executables,
-        run_started.adapter_executables,
-        artifacts,
-    );
-    let broker = replay::ReplayBroker::from_runtime_validated_stream(
+    let verified_stream = mfm_runtime::VerifiedRunStream::from_store(
         &run.fixture.runtime_spec,
-        &stream,
-        authority,
+        &run_started.run_id,
+        &run.store,
     )
     .map_err(display_error)?;
+    let artifacts = retained_replay_artifacts(
+        &run.fixture,
+        &stream,
+        verified_stream.projection_snapshot(),
+        &run_started.run_id,
+    )?;
+    let authority = replay::ReplayReadAuthority::from_verified_run_stream(
+        &run.fixture.runtime_spec,
+        &verified_stream,
+        artifacts,
+    )
+    .map_err(display_error)?;
+    let broker = replay::ReplayBroker::from_read_authority(authority).map_err(display_error)?;
     let live_cap_rejected = matches!(
         broker.reject_live_capability_request(),
         Err(replay::ReplayError {
@@ -1278,7 +1287,7 @@ impl ErasedNodeRunner for FailingSideEffectRunner {
             let staged_artifact = staged_side_effect_artifact(&ctx, &artifact, ledger.clone(), 1)?;
             Ok(ErasedRunnerOutput {
                 staged_artifacts: vec![staged_artifact],
-                staged_retention_refs: Vec::new(),
+                staged_retention_refs: retain_artifacts([&artifact.evidence]),
                 payloads: vec![
                     RunnerEventPayload::SideEffectIntentPersisted(
                         events::side_effect::IntentPersisted {
@@ -1347,7 +1356,7 @@ impl ErasedNodeRunner for AmbiguousSideEffectRunner {
                     staged_side_effect_artifact(&ctx, &artifact, ledger.clone(), 1)?;
                 Ok(ErasedRunnerOutput {
                     staged_artifacts: vec![staged_artifact],
-                    staged_retention_refs: Vec::new(),
+                    staged_retention_refs: retain_artifacts([&artifact.evidence]),
                     payloads: vec![RunnerEventPayload::SideEffectAmbiguous(
                         events::side_effect::Ambiguous {
                             spec_hash: ctx.spec_hash().clone(),
@@ -1489,6 +1498,43 @@ fn replay_artifacts(
         }
     }
     Ok(artifacts.into_values().collect())
+}
+
+fn retained_replay_artifacts(
+    fixture: &ReferenceFixture,
+    stream: &[store::KernelEventEnvelope],
+    projection: &store::ProjectionSnapshot,
+    run_id: &RunId,
+) -> Result<Vec<store::ArtifactEvidenceRef>, String> {
+    let mut discovered = replay_artifacts(fixture, stream)?
+        .into_iter()
+        .map(|artifact| (artifact.artifact_id.clone(), artifact))
+        .collect::<BTreeMap<_, _>>();
+    let retention = projection
+        .retention(run_id)
+        .ok_or_else(|| "missing retained artifact evidence for replay fixture".to_owned())?;
+    let mut retained = Vec::with_capacity(retention.refs.len());
+    for retention_ref in retention.refs.values() {
+        let artifact = discovered
+            .remove(&retention_ref.artifact_id)
+            .unwrap_or_else(|| retention_artifact_evidence(retention_ref));
+        retained.push(artifact);
+    }
+    Ok(retained)
+}
+
+fn retention_artifact_evidence(retention_ref: &events::RetentionRef) -> store::ArtifactEvidenceRef {
+    store::ArtifactEvidenceRef {
+        artifact_id: retention_ref.artifact_id.clone(),
+        digest: retention_ref.content_digest.clone(),
+        byte_len: 0,
+        media_type: spec::MediaType::new("application/octet-stream").expect("media"),
+        schema_id: None,
+        semantic_type_id: None,
+        producer_node_id: None,
+        producer_seed_id: None,
+        artifact_role: retention_ref.role,
+    }
 }
 
 fn referenced_artifacts_from_stream(
@@ -2103,6 +2149,21 @@ fn staged_side_effect_artifact(
     )
 }
 
+fn retain_artifacts<'a>(
+    artifacts: impl IntoIterator<Item = &'a store::ArtifactEvidenceRef>,
+) -> Vec<StagedRetentionRefs> {
+    vec![StagedRetentionRefs::runtime_evidence(
+        artifacts
+            .into_iter()
+            .map(|artifact| events::RetentionRef {
+                artifact_id: artifact.artifact_id.clone(),
+                role: artifact.artifact_role,
+                content_digest: artifact.digest.clone(),
+            })
+            .collect(),
+    )]
+}
+
 fn side_effect_claimed(
     ctx: &ErasedRunCtx<'_>,
     ledger: events::SideEffectLedgerKey,
@@ -2416,7 +2477,7 @@ impl ErasedNodeRunner for DeterministicSideEffectRunner {
                     )?;
                     Ok(ErasedRunnerOutput {
                         staged_artifacts: vec![staged_artifact],
-                        staged_retention_refs: Vec::new(),
+                        staged_retention_refs: retain_artifacts([&artifact.evidence]),
                         payloads: vec![RunnerEventPayload::SideEffectSubmissionUnknown(
                             events::side_effect::SubmissionUnknown {
                                 spec_hash: ctx.spec_hash().clone(),
@@ -2445,7 +2506,7 @@ impl ErasedNodeRunner for DeterministicSideEffectRunner {
                     )?;
                     Ok(ErasedRunnerOutput {
                         staged_artifacts: vec![staged_artifact],
-                        staged_retention_refs: Vec::new(),
+                        staged_retention_refs: retain_artifacts([&artifact.evidence]),
                         payloads: vec![side_effect_submission_observed(
                             &ctx,
                             ledger,
@@ -2469,7 +2530,7 @@ impl ErasedNodeRunner for DeterministicSideEffectRunner {
                     )?;
                     Ok(ErasedRunnerOutput {
                         staged_artifacts: vec![staged_artifact],
-                        staged_retention_refs: Vec::new(),
+                        staged_retention_refs: retain_artifacts([&artifact.evidence]),
                         payloads: vec![side_effect_receipt_observed(
                             &ctx,
                             ledger,
@@ -2496,7 +2557,7 @@ impl ErasedNodeRunner for DeterministicSideEffectRunner {
                     )?;
                     Ok(ErasedRunnerOutput {
                         staged_artifacts: vec![staged_artifact],
-                        staged_retention_refs: Vec::new(),
+                        staged_retention_refs: retain_artifacts([&artifact.evidence]),
                         payloads: vec![side_effect_confirmation_observed(
                             &ctx,
                             ledger,
@@ -2515,7 +2576,7 @@ impl ErasedNodeRunner for DeterministicSideEffectRunner {
                     let staged_artifact = staged_attempt_artifact(&ctx, &artifact)?;
                     Ok(ErasedRunnerOutput {
                         staged_artifacts: vec![staged_artifact],
-                        staged_retention_refs: Vec::new(),
+                        staged_retention_refs: retain_artifacts([&artifact.evidence]),
                         payloads: terminal_payloads(
                             &ctx,
                             artifact.evidence.artifact_id,
@@ -2550,7 +2611,7 @@ impl DeterministicSideEffectRunner {
         let staged_artifact = staged_side_effect_artifact(&ctx, &artifact, ledger.clone(), 1)?;
         Ok(ErasedRunnerOutput {
             staged_artifacts: vec![staged_artifact],
-            staged_retention_refs: Vec::new(),
+            staged_retention_refs: retain_artifacts([&artifact.evidence]),
             payloads: vec![
                 RunnerEventPayload::SideEffectIntentPersisted(
                     events::side_effect::IntentPersisted {

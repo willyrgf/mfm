@@ -1,0 +1,5 @@
+error[E0599]: no function or associated item named `new` found for struct `VerifiedRunStream` in the current scope
+ --> tests/ui/fail/raw_verified_run_stream_constructor.rs:2:45
+  |
+2 |     let _ = mfm_runtime::VerifiedRunStream::new;
+  |                                             ^^^ function or associated item not found in `VerifiedRunStream`

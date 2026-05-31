@@ -976,12 +976,9 @@ impl replay::SideEffectReplayVerifier for DeterministicProofReplayVerifier {
 /// Verifies deterministic proof side-effect replay evidence when a run stream contains proof
 /// events.
 ///
-/// Returns `Ok(false)` when the stream contains no deterministic proof side-effect intent.
-pub fn verify_deterministic_proof_replay(
-    broker: &replay::ReplayBroker,
-    stream: &[store::KernelEventEnvelope],
-) -> replay::Result<bool> {
-    let Some(frames) = proof_side_effect_replay_frames(stream)? else {
+/// Returns `Ok(false)` when the broker stream contains no deterministic proof side-effect intent.
+pub fn verify_deterministic_proof_replay(broker: &replay::ReplayBroker) -> replay::Result<bool> {
+    let Some(frames) = proof_side_effect_replay_frames(broker.events())? else {
         return Ok(false);
     };
     let verifier = DeterministicProofReplayVerifier::new().map_err(replay_runtime_error)?;
@@ -1223,7 +1220,7 @@ pub async fn proof_implementation_conformance_summary(
             _ => {}
         }
     }
-    let replay_valid = verify_conformance_replay(&runtime_spec, &stream, &artifacts)
+    let replay_valid = verify_conformance_replay(&runtime_spec, &run_id, &store, &artifacts)
         .await
         .map_err(|error| error.to_string())?;
     let summary = ProofImplementationConformanceSummary {
@@ -1240,10 +1237,16 @@ pub async fn proof_implementation_conformance_summary(
 
 async fn verify_conformance_replay(
     runtime_spec: &CertifiedRuntimeSpec,
-    stream: &[store::KernelEventEnvelope],
+    run_id: &RunId,
+    store: &impl store::TypedRunEventStore,
     artifacts: &InMemoryProofArtifacts,
 ) -> replay::Result<bool> {
-    let run_started = stream
+    let verified_stream = mfm_runtime::VerifiedRunStream::from_store(runtime_spec, run_id, store)
+        .map_err(|error| {
+        replay::ReplayError::new(replay::ReplayErrorKind::InvalidRunStream, error.to_string())
+    })?;
+    let run_started = verified_stream
+        .events()
         .iter()
         .find_map(|event| match event.payload() {
             events::KernelEventPayload::RunStarted(payload) => Some(payload),
@@ -1255,13 +1258,7 @@ async fn verify_conformance_replay(
                 "proof conformance stream has no run-start event",
             )
         })?;
-    mfm_runtime::validate_run_stream(runtime_spec, &run_started.run_id, stream).map_err(
-        |error| {
-            replay::ReplayError::new(replay::ReplayErrorKind::InvalidRunStream, error.to_string())
-        },
-    )?;
-    let projection =
-        store::ProjectionSnapshot::rebuild_from_run_stream(stream).map_err(replay_store_error)?;
+    let projection = verified_stream.projection_snapshot();
     let retention = projection.retention(&run_started.run_id).ok_or_else(|| {
         replay::ReplayError::new(
             replay::ReplayErrorKind::ArtifactMissing,
@@ -1280,15 +1277,13 @@ async fn verify_conformance_replay(
             })?;
         artifact_evidence.push(evidence);
     }
-    let authority = replay::ReplayAuthority::from_certified_spec(
-        runtime_spec.envelope(),
-        run_started.runner_executables.clone(),
-        run_started.adapter_executables.clone(),
+    let authority = replay::ReplayReadAuthority::from_verified_run_stream(
+        runtime_spec,
+        &verified_stream,
         artifact_evidence,
-    );
-    let broker =
-        replay::ReplayBroker::from_runtime_validated_stream(runtime_spec, stream, authority)?;
-    let proof_verified = verify_deterministic_proof_replay(&broker, stream)?;
+    )?;
+    let broker = replay::ReplayBroker::from_read_authority(authority)?;
+    let proof_verified = verify_deterministic_proof_replay(&broker)?;
     Ok(proof_verified
         && broker.projection_snapshot().run_state(&run_started.run_id)
             == store::RunState::Completed)
@@ -1398,10 +1393,6 @@ async fn persist_conformance_config_artifacts(
     Ok(())
 }
 
-fn replay_store_error(error: store::StoreError) -> replay::ReplayError {
-    replay::ReplayError::new(replay::ReplayErrorKind::InvalidRunStream, error.to_string())
-}
-
 async fn start_proof_run(
     scheduler: &SerialTypedScheduler,
     store: &mut store::InMemoryTypedRunStore,
@@ -1504,7 +1495,7 @@ mod tests {
         let (runtime_spec, stream, artifacts) = conformance_stream().await;
         let corrupt = standalone_retention_projection_history(&stream);
 
-        let error = verify_conformance_replay(&runtime_spec, &corrupt, &artifacts)
+        let error = verify_conformance_replay_stream(&runtime_spec, corrupt, &artifacts)
             .await
             .expect_err("standalone retention projection history must reject");
 
@@ -1516,7 +1507,7 @@ mod tests {
         let (runtime_spec, stream, artifacts) = conformance_stream().await;
         let corrupt = remove_retention_projection_commit(&stream);
 
-        let error = verify_conformance_replay(&runtime_spec, &corrupt, &artifacts)
+        let error = verify_conformance_replay_stream(&runtime_spec, corrupt, &artifacts)
             .await
             .expect_err("completed history without retention projection must reject");
 
@@ -1528,7 +1519,7 @@ mod tests {
         let (runtime_spec, stream, artifacts) = conformance_stream().await;
         let corrupt = failed_completion_after_run_start(&stream);
 
-        let error = verify_conformance_replay(&runtime_spec, &corrupt, &artifacts)
+        let error = verify_conformance_replay_stream(&runtime_spec, corrupt, &artifacts)
             .await
             .expect_err("failed completion without framework authority must reject");
 
@@ -1540,7 +1531,7 @@ mod tests {
         let (runtime_spec, stream, artifacts) = conformance_stream().await;
         let corrupt = append_post_completion_retention_refs(&stream);
 
-        let error = verify_conformance_replay(&runtime_spec, &corrupt, &artifacts)
+        let error = verify_conformance_replay_stream(&runtime_spec, corrupt, &artifacts)
             .await
             .expect_err("post-completion retention refs must reject");
 
@@ -1552,7 +1543,7 @@ mod tests {
         let (runtime_spec, stream, artifacts) = conformance_stream().await;
         let corrupt = append_post_projection_retention_refs_before_completion(&stream);
 
-        let error = verify_conformance_replay(&runtime_spec, &corrupt, &artifacts)
+        let error = verify_conformance_replay_stream(&runtime_spec, corrupt, &artifacts)
             .await
             .expect_err("post-projection retention refs before completion must reject");
 
@@ -1564,7 +1555,7 @@ mod tests {
         let (runtime_spec, stream, artifacts) = conformance_stream().await;
         let corrupt = append_extra_retention_ref_to_projection_commit(&stream);
 
-        let error = verify_conformance_replay(&runtime_spec, &corrupt, &artifacts)
+        let error = verify_conformance_replay_stream(&runtime_spec, corrupt, &artifacts)
             .await
             .expect_err("extra retention projection commit payload must reject");
 
@@ -1576,11 +1567,62 @@ mod tests {
         let (runtime_spec, stream, artifacts) = conformance_stream().await;
         let corrupt = append_same_sequence_sidecar_to_retention_projection(&stream);
 
-        let error = verify_conformance_replay(&runtime_spec, &corrupt, &artifacts)
+        let error = verify_conformance_replay_stream(&runtime_spec, corrupt, &artifacts)
             .await
             .expect_err("same-sequence sidecar retention payload must reject");
 
         assert_eq!(error.kind, replay::ReplayErrorKind::InvalidRunStream);
+    }
+
+    async fn verify_conformance_replay_stream(
+        runtime_spec: &CertifiedRuntimeSpec,
+        stream: Vec<store::KernelEventEnvelope>,
+        artifacts: &InMemoryProofArtifacts,
+    ) -> replay::Result<bool> {
+        let run_id = stream
+            .first()
+            .map(|event| event.run_id().clone())
+            .ok_or_else(|| {
+                replay::ReplayError::new(
+                    replay::ReplayErrorKind::RunStartedMissing,
+                    "proof conformance stream is empty",
+                )
+            })?;
+        let store = StaticRunStore {
+            stream,
+            projection: store::ProjectionSnapshot::default(),
+        };
+        verify_conformance_replay(runtime_spec, &run_id, &store, artifacts).await
+    }
+
+    struct StaticRunStore {
+        stream: Vec<store::KernelEventEnvelope>,
+        projection: store::ProjectionSnapshot,
+    }
+
+    impl store::TypedProjectionRead for StaticRunStore {
+        fn projection_snapshot(&self) -> &store::ProjectionSnapshot {
+            &self.projection
+        }
+    }
+
+    impl store::TypedRunEventStore for StaticRunStore {
+        fn append_prepared_typed_commit(
+            &mut self,
+            _commit: store::PreparedTypedCommit,
+        ) -> store::Result<store::CommitOutcome> {
+            Err(store::StoreError::Event(
+                "static replay test store is read-only".to_owned(),
+            ))
+        }
+
+        fn load_run_stream(&self, _run_id: &RunId) -> Vec<store::KernelEventEnvelope> {
+            self.stream.clone()
+        }
+
+        fn expected_next_seq(&self, _run_id: &RunId) -> store::StreamSeq {
+            store::StreamSeq::FIRST
+        }
     }
 
     async fn conformance_stream() -> (

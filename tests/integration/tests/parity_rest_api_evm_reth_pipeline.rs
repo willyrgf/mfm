@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 use mfm_app::DriveMode;
 use mfm_artifact_store_fs::{FsTypedArtifactStore, TypedArtifactDescriptor};
 use mfm_events::v1 as typed_events;
-use mfm_ids::{ArtifactId, ContentDigest, DigestAlgorithm, DigestBytes};
+use mfm_ids::ArtifactId;
 use mfm_op_evm_deploy_configure_validate::{
     certified_dcv_spec, dcv_config_artifacts_for_spec, dcv_program_draft,
     decode_deploy_configure_validate_canonical_config, DcvConfigArtifact,
@@ -392,13 +392,10 @@ async fn parity_reth_deploy_configure_validate_root_op() {
         .replay_broker(&run_id)
         .await
         .expect("typed EVM DCV evidence-only replay broker");
-    let replay_verified = mfm_transports_evm_dcv::verify_evm_dcv_replay(
-        &replay_broker,
-        &stream,
-        services.artifacts(),
-    )
-    .await
-    .expect("typed EVM DCV replay verifier");
+    let replay_verified =
+        mfm_transports_evm_dcv::verify_evm_dcv_replay(&replay_broker, services.artifacts())
+            .await
+            .expect("typed EVM DCV replay verifier");
     assert!(
         replay_verified,
         "typed EVM DCV replay evidence was verified"
@@ -412,7 +409,6 @@ async fn parity_reth_deploy_configure_validate_root_op() {
 
     let fact_err = mfm_transports_evm_dcv::verify_evm_dcv_replay(
         &replay_broker,
-        &stream,
         &ReplacementArtifactReader {
             inner: services.artifacts(),
             target: fact_artifact,
@@ -425,7 +421,6 @@ async fn parity_reth_deploy_configure_validate_root_op() {
 
     let output_err = mfm_transports_evm_dcv::verify_evm_dcv_replay(
         &replay_broker,
-        &stream,
         &ReplacementArtifactReader {
             inner: services.artifacts(),
             target: output_artifact,
@@ -440,7 +435,6 @@ async fn parity_reth_deploy_configure_validate_root_op() {
         tampered_configured_contract_bytes(services.artifacts(), &configured_input_artifact).await;
     let domain_err = mfm_transports_evm_dcv::verify_evm_dcv_replay(
         &replay_broker,
-        &stream,
         &ReplacementArtifactReader {
             inner: services.artifacts(),
             target: configured_input_artifact,
@@ -450,16 +444,6 @@ async fn parity_reth_deploy_configure_validate_root_op() {
     .await
     .expect_err("tampered configured-contract domain evidence rejects replay");
     assert_eq!(domain_err.code(), "MFM_REPLAY_FACT_MISMATCH");
-
-    let receipt_tampered_stream = stream_with_tampered_receipt_hash(&stream);
-    let receipt_err = mfm_transports_evm_dcv::verify_evm_dcv_replay(
-        &replay_broker,
-        &receipt_tampered_stream,
-        services.artifacts(),
-    )
-    .await
-    .expect_err("tampered side-effect receipt evidence rejects replay");
-    assert_eq!(receipt_err.code(), "MFM_REPLAY_SIDE_EFFECT_MISMATCH");
 }
 
 struct ReplacementArtifactReader<'a> {
@@ -560,71 +544,6 @@ async fn tampered_configured_contract_bytes(
         serde_json::from_slice(&bytes).expect("configured-contract JSON");
     value["deployed"]["control_scope"] = serde_json::json!("tampered-control-scope");
     serde_json::to_vec(&value).expect("tampered configured-contract JSON")
-}
-
-fn stream_with_tampered_receipt_hash(
-    stream: &[typed_store::KernelEventEnvelope],
-) -> Vec<typed_store::KernelEventEnvelope> {
-    let mut rewritten = Vec::with_capacity(stream.len());
-    let mut index = 0usize;
-    let mut tampered = false;
-    while index < stream.len() {
-        let seq = stream[index].seq();
-        let start = index;
-        while index < stream.len() && stream[index].seq() == seq {
-            index += 1;
-        }
-        let group = &stream[start..index];
-        let mut payloads = group
-            .iter()
-            .map(|event| event.payload().clone())
-            .collect::<Vec<_>>();
-        if !tampered {
-            for payload in &mut payloads {
-                if let typed_events::KernelEventPayload::SideEffectReceiptObserved(receipt) =
-                    payload
-                {
-                    receipt.receipt_hash = digest_byte(0x99);
-                    tampered = true;
-                    break;
-                }
-            }
-        }
-        if tampered
-            && payloads
-                .iter()
-                .zip(group.iter())
-                .any(|(payload, event)| payload != event.payload())
-        {
-            let batch = typed_store::build_committed_batch(
-                &typed_store::TypedCommitRequest {
-                    run_id: group[0].run_id().clone(),
-                    expected_next_seq: seq,
-                    commit_key: group[0].commit_key().clone(),
-                    payloads,
-                    required_artifacts: Vec::new(),
-                    preconditions: typed_store::CommitPreconditions::default(),
-                },
-                seq,
-            )
-            .expect("rebuild tampered receipt batch");
-            rewritten.extend(batch.events().iter().cloned());
-        } else {
-            rewritten.extend(group.iter().cloned());
-        }
-    }
-    assert!(
-        tampered,
-        "typed DCV replay fixture observes side-effect receipts"
-    );
-    rewritten
-}
-
-fn digest_byte(byte: u8) -> ContentDigest {
-    ContentDigest::from_digest(
-        DigestAlgorithm::Sha256JcsV1,
-        DigestBytes::from_array([byte; 32]),
-    )
 }
 
 fn typed_payload_name(payload: &typed_events::KernelEventPayload) -> &'static str {

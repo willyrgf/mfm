@@ -27,10 +27,10 @@ use mfm_events::v1 as events;
 use mfm_ids::{
     ArtifactId, ContentDigest, DigestAlgorithm, EventId, RunId, SchemaId, SeedId, SpecHash,
 };
-use mfm_replay::v1::{ReplayAuthority, ReplayBroker, ReplayError};
+use mfm_replay::v1::{ReplayBroker, ReplayError, ReplayReadAuthority};
 use mfm_runtime::{
     validate_run_stream, CertifiedRuntimeSpec, RunLaunchEvidence, RuntimeArtifactStageFuture,
-    RuntimeArtifactStager, SchedulerStatus, SerialTypedScheduler,
+    RuntimeArtifactStager, SchedulerStatus, SerialTypedScheduler, VerifiedRunStream,
 };
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
@@ -791,11 +791,11 @@ where
             &stream,
         )
         .await?;
-        let authority =
-            replay_authority_for_run(&self.artifacts, &certified, run_id, &stream).await?;
         let runtime_spec = CertifiedRuntimeSpec::new(certified)?;
-        ReplayBroker::from_runtime_validated_stream(&runtime_spec, &stream, authority)
-            .map_err(Into::into)
+        let verified_stream = VerifiedRunStream::from_store(&runtime_spec, run_id, &*store)?;
+        let authority =
+            replay_read_authority_for_run(&self.artifacts, &runtime_spec, &verified_stream).await?;
+        ReplayBroker::from_read_authority(authority).map_err(Into::into)
     }
 
     /// Renders typed public output from store-owned projection and typed artifact bytes.
@@ -1033,13 +1033,15 @@ where
             &stream,
         )
         .await?;
-        let authority =
-            replay_authority_for_run(&self.artifacts, &certified, run_id, &stream).await?;
         let runtime_spec = CertifiedRuntimeSpec::new(certified)?;
-        let broker =
-            ReplayBroker::from_runtime_validated_stream(&runtime_spec, &stream, authority)?;
-        mfm_transports_proof::verify_deterministic_proof_replay(&broker, &stream)?;
-        mfm_transports_evm_dcv::verify_evm_dcv_replay(&broker, &stream, &self.artifacts).await?;
+        let verified_stream =
+            VerifiedRunStream::from_async_store(&runtime_spec, run_id, &self.store).await?;
+        let authority =
+            replay_read_authority_for_run(&self.artifacts, &runtime_spec, &verified_stream).await?;
+        let broker = ReplayBroker::from_read_authority(authority)?;
+        let stream = verified_stream.events();
+        mfm_transports_proof::verify_deterministic_proof_replay(&broker)?;
+        mfm_transports_evm_dcv::verify_evm_dcv_replay(&broker, &self.artifacts).await?;
         let projection = broker.projection_snapshot();
         let retained_artifacts = projection
             .retention(run_id)
@@ -1049,7 +1051,7 @@ where
             run_id: run_id.as_str().to_owned(),
             spec_hash: broker.certified_spec().spec_hash.as_str().to_owned(),
             phase: typed_phase(projection.run_state(run_id)),
-            head_seq: stream_head(&stream),
+            head_seq: stream_head(stream),
             retained_artifacts,
         })
     }
@@ -1155,18 +1157,16 @@ async fn validate_stored_run_stream_for_read(
     Ok(())
 }
 
-/// Builds replay authority from retained artifact evidence in the run stream.
-pub async fn replay_authority_for_run(
+/// Builds sealed replay read authority from retained artifact evidence in a verified run stream.
+pub async fn replay_read_authority_for_run(
     artifacts: &FsTypedArtifactStore,
-    certified: &CertifiedTypedSpec,
-    run_id: &RunId,
-    stream: &[store::KernelEventEnvelope],
-) -> Result<ReplayAuthority, AppError> {
-    let run_started = run_started_payload(run_id, stream)?;
-    let runtime_spec = CertifiedRuntimeSpec::new(certified.clone())?;
-    validate_run_stream(&runtime_spec, run_id, stream)?;
-    let projection = store::ProjectionSnapshot::rebuild_from_run_stream(stream)?;
-    let Some(retention) = projection.retention(run_id) else {
+    runtime_spec: &CertifiedRuntimeSpec,
+    verified_stream: &VerifiedRunStream,
+) -> Result<ReplayReadAuthority, AppError> {
+    let Some(retention) = verified_stream
+        .projection_snapshot()
+        .retention(verified_stream.run_id())
+    else {
         return Err(AppError::new(
             ErrorClass::Internal,
             "TypedReplayRetentionMissing",
@@ -1185,12 +1185,8 @@ pub async fn replay_authority_for_run(
         }
         artifact_evidence.push(evidence);
     }
-    Ok(ReplayAuthority::from_certified_spec(
-        certified.envelope(),
-        run_started.runner_executables.clone(),
-        run_started.adapter_executables.clone(),
-        artifact_evidence,
-    ))
+    ReplayReadAuthority::from_verified_run_stream(runtime_spec, verified_stream, artifact_evidence)
+        .map_err(Into::into)
 }
 
 /// Persists the certified typed execution spec artifact for a runtime spec.
@@ -2807,6 +2803,80 @@ mod tests {
             .await
             .expect_err("registry mismatch rejects before replay");
         assert_eq!(err.code, "TypedCertificationFailed");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn replay_read_authority_rejects_invalid_retained_artifact_evidence() {
+        let (root, fixture, services, _started) = start_framework_fixture_run().await;
+        let stream = services
+            .store()
+            .load_run_stream(&fixture.run_id)
+            .await
+            .expect("load stream");
+        let runtime_spec = load_runtime_spec_for_run(
+            services.artifacts(),
+            services.certification_registry(),
+            &fixture.run_id,
+            &stream,
+        )
+        .await
+        .expect("runtime spec");
+        let verified_stream =
+            VerifiedRunStream::from_async_store(&runtime_spec, &fixture.run_id, services.store())
+                .await
+                .expect("verified stream");
+        let retention = verified_stream
+            .projection_snapshot()
+            .retention(&fixture.run_id)
+            .expect("retention projection");
+        let mut artifact_evidence = Vec::with_capacity(retention.refs.len() + 1);
+        for retained in retention.refs.values() {
+            let (_, evidence) = services
+                .artifacts()
+                .get_artifact_by_id(&retained.artifact_id)
+                .await
+                .expect("retained artifact evidence");
+            artifact_evidence.push(evidence);
+        }
+        let mut missing = artifact_evidence.clone();
+        let removed = missing.pop().expect("retained artifact evidence");
+        let err =
+            ReplayReadAuthority::from_verified_run_stream(&runtime_spec, &verified_stream, missing)
+                .expect_err("missing retained artifact evidence rejects replay authority");
+        assert_eq!(err.kind, mfm_replay::v1::ReplayErrorKind::ArtifactMissing);
+        assert!(err.message.contains(&removed.artifact_id.to_string()));
+
+        let mut mismatched = artifact_evidence.clone();
+        mismatched[0].digest = content_digest(0xfc);
+        let err = ReplayReadAuthority::from_verified_run_stream(
+            &runtime_spec,
+            &verified_stream,
+            mismatched,
+        )
+        .expect_err("mismatched retained artifact evidence rejects replay authority");
+        assert_eq!(err.kind, mfm_replay::v1::ReplayErrorKind::ArtifactMismatch);
+        assert!(err.message.contains("retained artifact evidence mismatch"));
+
+        let mut extra = artifact_evidence;
+        extra.push(store::ArtifactEvidenceRef {
+            artifact_id: ArtifactId::from_digest(DigestAlgorithm::Sha256JcsV1, digest(0xfa)),
+            digest: content_digest(0xfb),
+            byte_len: 1,
+            media_type: spec::MediaType::new("application/octet-stream").expect("media"),
+            schema_id: None,
+            semantic_type_id: None,
+            producer_node_id: None,
+            producer_seed_id: None,
+            artifact_role: events::ArtifactRole::FactResponse,
+        });
+
+        let err =
+            ReplayReadAuthority::from_verified_run_stream(&runtime_spec, &verified_stream, extra)
+                .expect_err("extra unretained artifact evidence rejects replay authority");
+
+        assert_eq!(err.kind, mfm_replay::v1::ReplayErrorKind::ArtifactMismatch);
+        assert!(err.message.contains("unretained artifact evidence"));
         let _ = std::fs::remove_dir_all(root);
     }
 

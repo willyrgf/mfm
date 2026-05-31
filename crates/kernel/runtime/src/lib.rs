@@ -2976,6 +2976,82 @@ struct CommittedArtifactReference {
     commit_key: store::CommitKey,
 }
 
+/// Store-owned run stream validated against certified runtime authority.
+#[derive(Debug, Clone)]
+pub struct VerifiedRunStream {
+    run_id: RunId,
+    spec_hash: SpecHash,
+    stream: Vec<store::KernelEventEnvelope>,
+    projection: store::ProjectionSnapshot,
+}
+
+impl VerifiedRunStream {
+    /// Loads the authoritative run stream from a typed store and validates it against certified
+    /// runtime authority.
+    pub fn from_store<S>(
+        runtime_spec: &CertifiedRuntimeSpec,
+        run_id: &RunId,
+        store: &S,
+    ) -> Result<Self>
+    where
+        S: store::TypedRunEventStore + ?Sized,
+    {
+        let stream = store.load_run_stream(run_id);
+        Self::from_stream(runtime_spec, run_id, &stream)
+    }
+
+    /// Loads the authoritative run stream from an async typed store and validates it against
+    /// certified runtime authority.
+    pub async fn from_async_store<S>(
+        runtime_spec: &CertifiedRuntimeSpec,
+        run_id: &RunId,
+        store: &S,
+    ) -> Result<Self>
+    where
+        S: store::AsyncTypedRunEventStore + ?Sized,
+    {
+        let stream = store
+            .load_run_stream(run_id)
+            .await
+            .map_err(async_store_error)?;
+        Self::from_stream(runtime_spec, run_id, &stream)
+    }
+
+    fn from_stream(
+        runtime_spec: &CertifiedRuntimeSpec,
+        run_id: &RunId,
+        stream: &[store::KernelEventEnvelope],
+    ) -> Result<Self> {
+        let view = RuntimeRunView::from_stream(runtime_spec, run_id, stream)?;
+        Ok(Self {
+            run_id: run_id.clone(),
+            spec_hash: runtime_spec.spec_hash().clone(),
+            stream: view.stream,
+            projection: view.projections,
+        })
+    }
+
+    /// Run id covered by this verified stream.
+    pub fn run_id(&self) -> &RunId {
+        &self.run_id
+    }
+
+    /// Certified spec hash covered by this verified stream.
+    pub fn spec_hash(&self) -> &SpecHash {
+        &self.spec_hash
+    }
+
+    /// Authoritative committed event envelopes covered by this verified stream.
+    pub fn events(&self) -> &[store::KernelEventEnvelope] {
+        &self.stream
+    }
+
+    /// Projection rebuilt from the verified committed stream.
+    pub fn projection_snapshot(&self) -> &store::ProjectionSnapshot {
+        &self.projection
+    }
+}
+
 impl RuntimeRunView {
     fn from_store<S: store::TypedRunEventStore + ?Sized>(
         runtime_spec: &CertifiedRuntimeSpec,
@@ -3068,7 +3144,7 @@ pub fn validate_run_stream(
     run_id: &RunId,
     stream: &[store::KernelEventEnvelope],
 ) -> Result<()> {
-    RuntimeRunView::from_stream(runtime_spec, run_id, stream).map(|_| ())
+    VerifiedRunStream::from_stream(runtime_spec, run_id, stream).map(|_| ())
 }
 
 /// Launch evidence needed to prepare a typed run genesis commit.

@@ -1,0 +1,10 @@
+error[E0412]: cannot find type `ReplayAuthority` in module `mfm_replay::v1`
+ --> tests/ui/fail/old_replay_authority_removed.rs:2:49
+  |
+2 |     let _ = std::mem::size_of::<mfm_replay::v1::ReplayAuthority>();
+  |                                                 ^^^^^^^^^^^^^^^ help: a struct with a similar name exists: `ReplayReadAuthority`
+  |
+ ::: src/lib.rs
+  |
+  |     pub struct ReplayReadAuthority {
+  |     ------------------------------ similarly named struct `ReplayReadAuthority` defined here

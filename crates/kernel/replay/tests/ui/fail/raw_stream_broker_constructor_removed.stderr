@@ -1,0 +1,5 @@
+error[E0599]: no function or associated item named `from_runtime_validated_stream` found for struct `ReplayBroker` in the current scope
+ --> tests/ui/fail/raw_stream_broker_constructor_removed.rs:2:43
+  |
+2 |     let _ = mfm_replay::v1::ReplayBroker::from_runtime_validated_stream;
+  |                                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ function or associated item not found in `ReplayBroker`
