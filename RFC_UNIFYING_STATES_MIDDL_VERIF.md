@@ -750,133 +750,133 @@ no compatibility shims, no dual production paths, and no temporary public wrappe
 callers to keep mutating runs. A step is complete only when old production call sites either use
 the new authority boundary or no longer compile.
 
-- [ ] Commit 1: `store: replace execution commits with prepared typed commits`
-  - [ ] Add the private-field `PreparedTypedCommit` authority type.
-  - [ ] Replace production store mutation with
+- [x] Commit 1: `store: replace execution commits with prepared typed commits`
+  - [x] Add the private-field `PreparedTypedCommit` authority type.
+  - [x] Replace production store mutation with
     `append_prepared_typed_commit(PreparedTypedCommit)`.
-  - [ ] Remove `record_artifact_evidence` and direct `append_typed_run_commit` from
+  - [x] Remove `record_artifact_evidence` and direct `append_typed_run_commit` from
     execution-facing store traits.
-  - [ ] Move synthetic evidence/history construction to a separate non-execution test/tool surface
+  - [x] Move synthetic evidence/history construction to a separate non-execution test/tool surface
     that runtime, app, CLI, REST, transports, and positive conformance cannot call.
-  - [ ] Update in-memory and durable stores in the same commit so there is no split production
+  - [x] Update in-memory and durable stores in the same commit so there is no split production
     store contract left behind.
 
-- [ ] Commit 2: `runtime: introduce mutation middleware commit builder`
-  - [ ] Add the runtime-owned builder that converts sealed execution intent into
+- [x] Commit 2: `runtime: introduce mutation middleware commit builder`
+  - [x] Add the runtime-owned builder that converts sealed execution intent into
     `PreparedTypedCommit`.
-  - [ ] Move existing terminal payload validation, precondition assembly, required artifact
+  - [x] Move existing terminal payload validation, precondition assembly, required artifact
     admission, and retention-ref derivation behind that builder.
-  - [ ] Ensure user/domain code cannot construct `PreparedTypedCommit` or scheduler-owned payloads.
+  - [x] Ensure user/domain code cannot construct `PreparedTypedCommit` or scheduler-owned payloads.
 
-- [ ] Commit 3: `runtime: add staged artifact model`
-  - [ ] Replace runner-returned artifact evidence-only outputs with staged artifacts or sealed
+- [x] Commit 3: `runtime: add staged artifact model`
+  - [x] Replace runner-returned artifact evidence-only outputs with staged artifacts or sealed
     staged handles.
-  - [ ] Bind each staged artifact to run id, node id, attempt id, role, binding kind,
+  - [x] Bind each staged artifact to run id, node id, attempt id, role, binding kind,
     schema/semantic identity, producer evidence, digest, and byte length.
-  - [ ] Ensure failed commits can leave only orphan artifact-store bytes, never admitted run-store
+  - [x] Ensure failed commits can leave only orphan artifact-store bytes, never admitted run-store
     evidence.
 
-- [ ] Commit 4: `public-output: stage receipt artifacts in framework middleware`
-  - [ ] Make the sealed `PublicOutputRender` runner return staged receipt bytes or a sealed handle.
-  - [ ] Persist/promote receipt bytes only from runtime middleware before the prepared commit.
-  - [ ] Delete app-side public-output receipt repair from the normal path.
+- [x] Commit 4: `public-output: stage receipt artifacts in framework middleware`
+  - [x] Make the sealed `PublicOutputRender` runner return staged receipt bytes or a sealed handle.
+  - [x] Persist/promote receipt bytes only from runtime middleware before the prepared commit.
+  - [x] Delete app-side public-output receipt repair from the normal path.
 
-- [ ] Commit 5: `transports: remove write-capable artifact sinks from runners`
-  - [ ] Remove production `put_artifact`, `put_verified_artifact`, and equivalent sink capabilities
+- [x] Commit 5: `transports: remove write-capable artifact sinks from runners`
+  - [x] Remove production `put_artifact`, `put_verified_artifact`, and equivalent sink capabilities
     from transport runner inputs.
-  - [ ] Convert proof, portfolio, and EVM DCV runners to return staged artifacts or sealed handles
+  - [x] Convert proof, portfolio, and EVM DCV runners to return staged artifacts or sealed handles
     for fact, output, diagnostic, side-effect intent, receipt, and confirmation bytes.
-  - [ ] Keep artifact-store writes available only through runtime-owned staging/finalization.
+  - [x] Keep artifact-store writes available only through runtime-owned staging/finalization.
 
-- [ ] Commit 6: `runtime: add prepared runner invocation materialization`
-  - [ ] Add `PreparedRunnerInvocation` or an equivalent private-field adapter input.
-  - [ ] Move generic config/input artifact checks before runner invocation: config refs, digest,
+- [x] Commit 6: `runtime: add prepared runner invocation materialization`
+  - [x] Add `PreparedRunnerInvocation` or an equivalent private-field adapter input.
+  - [x] Move generic config/input artifact checks before runner invocation: config refs, digest,
     length, media/schema ids, input cell terminal evidence, producer role, and committed evidence.
-  - [ ] Leave domain semantic validation, hostile external-data validation, side-effect protocol
+  - [x] Leave domain semantic validation, hostile external-data validation, side-effect protocol
     checks, and replay-specific external evidence checks in domain runners.
 
-- [ ] Commit 7: `framework: certify lifecycle framework nodes`
-  - [ ] Extend framework node certification for `BootstrapRun`, `ProjectRetentionManifest`, and
+- [x] Commit 7: `framework: certify lifecycle framework nodes`
+  - [x] Extend framework node certification for `BootstrapRun`, `ProjectRetentionManifest`, and
     `CompleteRun`.
-  - [ ] Reject serialized forged lifecycle variants, invalid framework descriptors, invalid
+  - [x] Reject serialized forged lifecycle variants, invalid framework descriptors, invalid
     lifecycle ordering, and framework-only payload permissions in certification.
-  - [ ] Repeat runtime framework-node contract checks when constructing `CertifiedRuntimeSpec`.
+  - [x] Repeat runtime framework-node contract checks when constructing `CertifiedRuntimeSpec`.
 
-- [ ] Commit 8: `retention: execute manifest projection as a framework state`
-  - [ ] Add `ProjectRetentionManifest` runtime execution using sealed runtime projection input.
-  - [ ] Build and stage the retention manifest from the authoritative pre-projection stream.
-  - [ ] Commit `StateAttemptStarted`, `CellProduced`, `StateAttemptCompleted`,
+- [x] Commit 8: `retention: execute manifest projection as a framework state`
+  - [x] Add `ProjectRetentionManifest` runtime execution using sealed runtime projection input.
+  - [x] Build and stage the retention manifest from the authoritative pre-projection stream.
+  - [x] Commit `StateAttemptStarted`, `CellProduced`, `StateAttemptCompleted`,
     `RetentionManifestProjected`, and `RetentionRefsAppended` through
     `append_prepared_typed_commit`.
-  - [ ] Delete standalone retention projection append APIs from execution.
+  - [x] Delete standalone retention projection append APIs from execution.
 
-- [ ] Commit 9: `completion: derive run completion from completer state`
-  - [ ] Add `CompleteRun` as the final lifecycle framework state.
-  - [ ] Commit its attempt lifecycle and `RunCompleted` in the same prepared commit.
-  - [ ] Delete scheduler-only `complete_run` execution paths.
-  - [ ] Enforce `PublicOutputRender -> ProjectRetentionManifest -> CompleteRun` as the certified
+- [x] Commit 9: `completion: derive run completion from completer state`
+  - [x] Add `CompleteRun` as the final lifecycle framework state.
+  - [x] Commit its attempt lifecycle and `RunCompleted` in the same prepared commit.
+  - [x] Delete scheduler-only `complete_run` execution paths.
+  - [x] Enforce `PublicOutputRender -> ProjectRetentionManifest -> CompleteRun` as the certified
     lifecycle tail.
 
-- [ ] Commit 10: `bootstrap: execute run start through genesis middleware`
-  - [ ] Add `BootstrapRun`, `GenesisContext`, and `PreparedRunLaunch`.
-  - [ ] Normalize bootstrap as a sealed framework state with certified node identity, attempt
+- [x] Commit 10: `bootstrap: execute run start through genesis middleware`
+  - [x] Add `BootstrapRun`, `GenesisContext`, and `PreparedRunLaunch`.
+  - [x] Normalize bootstrap as a sealed framework state with certified node identity, attempt
     lifecycle, receipt cell, artifact bindings, and middleware-owned commit.
-  - [ ] Keep the only genesis-specific behavior in pre-execution middleware:
+  - [x] Keep the only genesis-specific behavior in pre-execution middleware:
     `RequiredRunState::Absent`, launch artifact materialization, and `RunStarted` ordinal 0.
-  - [ ] Delete standalone scheduler `start_run` execution paths and caller-assembled
+  - [x] Delete standalone scheduler `start_run` execution paths and caller-assembled
     `RunStartEvidence`.
 
-- [ ] Commit 11: `runtime: seal lifecycle payload authority`
-  - [ ] Make scheduler-owned lifecycle payloads and framework lifecycle outputs unconstructable by
+- [x] Commit 11: `runtime: seal lifecycle payload authority`
+  - [x] Make scheduler-owned lifecycle payloads and framework lifecycle outputs unconstructable by
     user/domain runners.
-  - [ ] Require runtime middleware to derive `RunStarted`, `RunCompleted`,
+  - [x] Require runtime middleware to derive `RunStarted`, `RunCompleted`,
     `RetentionManifestProjected`, `RetentionRefsAppended`, and attempt lifecycle payloads.
-  - [ ] Add compile-fail coverage for lifecycle payload construction outside the runtime boundary.
+  - [x] Add compile-fail coverage for lifecycle payload construction outside the runtime boundary.
 
-- [ ] Commit 12: `replay: require sealed replay read authority`
-  - [ ] Replace public production replay constructors that accept raw stream/spec evidence with
+- [x] Commit 12: `replay: require sealed replay read authority`
+  - [x] Replace public production replay constructors that accept raw stream/spec evidence with
     `ReplayReadAuthority`.
-  - [ ] Mint replay authority only from certifier-backed spec authority, `VerifiedRunStream`, and
+  - [x] Mint replay authority only from certifier-backed spec authority, `VerifiedRunStream`, and
     retained evidence from committed stream/projection history.
-  - [ ] Ensure replay cannot construct live capabilities.
+  - [x] Ensure replay cannot construct live capabilities.
 
-- [ ] Commit 13: `public-output: require sealed read authority`
-  - [ ] Mint `PublicOutputReadAuthority` only after certified spec/certificate verification,
+- [x] Commit 13: `public-output: require sealed read authority`
+  - [x] Mint `PublicOutputReadAuthority` only after certified spec/certificate verification,
     `VerifiedRunStream` validation, projection rebuild, and artifact evidence checks.
-  - [ ] Ensure rendered JSON and raw status/stream DTOs cannot authorize another render, resume, or
+  - [x] Ensure rendered JSON and raw status/stream DTOs cannot authorize another render, resume, or
     replay.
 
-- [ ] Commit 14: `app cli rest: migrate positive paths to unified authority`
-  - [ ] Update app, CLI, REST, and domain start flows to call only certified authority,
+- [x] Commit 14: `app cli rest: migrate positive paths to unified authority`
+  - [x] Update app, CLI, REST, and domain start flows to call only certified authority,
     `PreparedRunLaunch`, runtime middleware, and prepared store commit APIs.
-  - [ ] Remove app-owned mandatory runtime artifact persistence from normal execution.
-  - [ ] Ensure generic and domain starts, resume, replay, public-output reads, retention, and
+  - [x] Remove app-owned mandatory runtime artifact persistence from normal execution.
+  - [x] Ensure generic and domain starts, resume, replay, public-output reads, retention, and
     completion cannot call deleted execution surfaces.
 
-- [ ] Commit 15: `conformance: remove second runtime model from positive tests`
-  - [ ] Update positive conformance and integration helpers to use the same app-agnostic
+- [x] Commit 15: `conformance: remove second runtime model from positive tests`
+  - [x] Update positive conformance and integration helpers to use the same app-agnostic
     runtime/framework primitives as production.
-  - [ ] Keep direct store mutation only in explicitly named negative, corruption, migration, repair,
+  - [x] Keep direct store mutation only in explicitly named negative, corruption, migration, repair,
     or low-level storage contract fixtures.
-  - [ ] Ensure synthetic fixture output re-enters through certified-spec and `VerifiedRunStream`
+  - [x] Ensure synthetic fixture output re-enters through certified-spec and `VerifiedRunStream`
     authority constructors before it can influence replay/read/runtime behavior.
 
-- [ ] Commit 16: `tests: add no-second-authority coverage`
-  - [ ] Add the representative architectural coverage test with `BootstrapRun`, one ordinary state,
+- [x] Commit 16: `tests: add no-second-authority coverage`
+  - [x] Add the representative architectural coverage test with `BootstrapRun`, one ordinary state,
     `PublicOutputRender`, `ProjectRetentionManifest`, and `CompleteRun`.
-  - [ ] Assert every executable unit appears as an attempt, every referenced artifact was staged
+  - [x] Assert every executable unit appears as an attempt, every referenced artifact was staged
     through middleware, and every artifact evidence row was admitted in the same commit that first
     referenced it.
-  - [ ] Add negative tests for forged framework lifecycle nodes, standalone lifecycle events,
+  - [x] Add negative tests for forged framework lifecycle nodes, standalone lifecycle events,
     mismatched staged artifact bindings, orphan run-store evidence, tampered spec/certificate
     artifacts, and raw stream/status replay or public-output construction.
 
-- [ ] Commit 17: `docs: update contracts after execution api replacement`
-  - [ ] Update `docs/design.md`, `docs/architecture.md`, runtime/replay/store READMEs, CLI docs,
+- [x] Commit 17: `docs: update contracts after execution api replacement`
+  - [x] Update `docs/design.md`, `docs/architecture.md`, runtime/replay/store READMEs, CLI docs,
     and REST docs to describe the single execution mutation path.
-  - [ ] Remove wording that implies compatibility with split evidence admission, app-owned runtime
+  - [x] Remove wording that implies compatibility with split evidence admission, app-owned runtime
     artifact persistence, scheduler lifecycle transitions, or write-capable runner artifact sinks.
-  - [ ] Document synthetic store mutation only as non-execution test/migration/repair tooling.
+  - [x] Document synthetic store mutation only as non-execution test/migration/repair tooling.
 
 ## Acceptance Criteria
 
