@@ -1775,6 +1775,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "trybuild",
  "uuid",
 ]
 

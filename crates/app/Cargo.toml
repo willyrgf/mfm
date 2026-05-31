@@ -32,3 +32,4 @@ mfm-capabilities = { path = "../kernel/capabilities" }
 mfm-program = { path = "../kernel/program" }
 mfm-program-derive = { path = "../kernel/program-derive" }
 mfm-values = { path = "../kernel/values" }
+trybuild = "1.0"

@@ -1,0 +1,5 @@
+error[E0425]: cannot find value `verify_public_output_read_authority` in crate `mfm_app`
+ --> tests/ui/fail/raw_public_output_read_authority_constructor_removed.rs:2:22
+  |
+2 |     let _ = mfm_app::verify_public_output_read_authority;
+  |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ not found in `mfm_app`

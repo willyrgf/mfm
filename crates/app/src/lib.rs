@@ -821,8 +821,17 @@ where
             &stream,
         )
         .await?;
-        let authority =
-            verify_public_output_read_authority(&runtime_spec, run_id, public_schema_id, &stream)?;
+        let verified_stream = {
+            let store = self.store.lock().await;
+            VerifiedRunStream::from_store(&runtime_spec, run_id, &*store)?
+        };
+        let authority = public_output_read_authority_for_run(
+            &self.artifacts,
+            &runtime_spec,
+            &verified_stream,
+            public_schema_id,
+        )
+        .await?;
         render_typed_public_output(&self.artifacts, &authority).await
     }
 
@@ -1080,8 +1089,15 @@ where
             &stream,
         )
         .await?;
-        let authority =
-            verify_public_output_read_authority(&runtime_spec, run_id, public_schema_id, &stream)?;
+        let verified_stream =
+            VerifiedRunStream::from_async_store(&runtime_spec, run_id, &self.store).await?;
+        let authority = public_output_read_authority_for_run(
+            &self.artifacts,
+            &runtime_spec,
+            &verified_stream,
+            public_schema_id,
+        )
+        .await?;
         render_typed_public_output(&self.artifacts, &authority).await
     }
 
@@ -1640,25 +1656,22 @@ pub fn typed_run_stream_response_from_events(
     }
 }
 
-/// Verifies a typed public-output read authority from certified runtime authority and stream data.
-///
-/// The supplied stream is treated as the authoritative event source. This verifier validates that
-/// stream against the certified runtime spec and rebuilds the public-output projection from events
-/// before minting render authority.
-pub fn verify_public_output_read_authority(
+/// Builds typed public-output read authority from certified runtime authority, a store-verified
+/// run stream, rebuilt projection, and verified typed artifact evidence.
+pub async fn public_output_read_authority_for_run(
+    artifacts: &FsTypedArtifactStore,
     runtime_spec: &CertifiedRuntimeSpec,
-    run_id: &RunId,
+    verified_stream: &VerifiedRunStream,
     public_schema_id: &SchemaId,
-    stream: &[store::KernelEventEnvelope],
 ) -> Result<PublicOutputReadAuthority, AppError> {
-    if stream.is_empty() {
-        return Err(AppError::not_found(
-            "TypedRunNotFound",
-            "typed run stream was not found",
+    if runtime_spec.spec_hash() != verified_stream.spec_hash() {
+        return Err(AppError::new(
+            ErrorClass::Internal,
+            "TypedPublicOutputAuthorityMismatch",
+            "verified stream spec hash does not match certified runtime authority",
         ));
     }
-    validate_run_stream(runtime_spec, run_id, stream)?;
-    let projection = store::ProjectionSnapshot::rebuild_from_run_stream(stream)?;
+    let projection = verified_stream.projection_snapshot();
     let public_output = projection.public_output(public_schema_id).ok_or_else(|| {
         AppError::not_found(
             "TypedPublicOutputNotFound",
@@ -1678,7 +1691,8 @@ pub fn verify_public_output_read_authority(
         ));
     };
 
-    let payload = public_output_payload_from_stream(stream, event_id, public_schema_id)?;
+    let payload =
+        public_output_payload_from_stream(verified_stream.events(), event_id, public_schema_id)?;
     if &payload.spec_hash != runtime_spec.spec_hash()
         || &payload.public_schema_id != public_schema_id
         || public_schema_id != &runtime_spec.spec().public_outputs.public_schema_id
@@ -1689,15 +1703,44 @@ pub fn verify_public_output_read_authority(
             "typed public-output evidence does not match certified runtime authority",
         ));
     }
+    verify_public_output_authority_artifacts(
+        artifacts,
+        payload,
+        rendered_artifact_id.as_ref(),
+        rendered_digest,
+    )
+    .await?;
 
     Ok(PublicOutputReadAuthority {
-        run_id: run_id.clone(),
+        run_id: verified_stream.run_id().clone(),
         public_schema_id: public_schema_id.clone(),
         event_id: event_id.clone(),
         rendered_digest: rendered_digest.clone(),
         rendered_artifact_id: rendered_artifact_id.clone(),
         payload: payload.clone(),
     })
+}
+
+async fn verify_public_output_authority_artifacts(
+    artifacts: &FsTypedArtifactStore,
+    payload: &events::PublicOutputProduced,
+    rendered_artifact_id: Option<&ArtifactId>,
+    rendered_digest: &ContentDigest,
+) -> Result<(), AppError> {
+    for cell in &payload.cells {
+        let (_, evidence) = artifacts.get_artifact_by_id(&cell.artifact_id).await?;
+        verify_public_output_cell_evidence(cell, &evidence)?;
+    }
+    if let Some(artifact_id) = rendered_artifact_id {
+        let (_, evidence) = artifacts.get_artifact_by_id(artifact_id).await?;
+        verify_public_output_rendered_artifact_evidence(
+            &evidence,
+            artifact_id,
+            rendered_digest,
+            payload,
+        )?;
+    }
+    Ok(())
 }
 
 /// Renders typed public output from app-verified read authority and typed artifact bytes.
@@ -1865,6 +1908,27 @@ async fn load_public_output_json(
     payload: &events::PublicOutputProduced,
 ) -> Result<serde_json::Value, AppError> {
     let (bytes, evidence) = artifacts.get_artifact_by_id(artifact_id).await?;
+    verify_public_output_rendered_artifact_evidence(
+        &evidence,
+        artifact_id,
+        rendered_digest,
+        payload,
+    )?;
+    serde_json::from_slice(&bytes).map_err(|error| {
+        AppError::new(
+            ErrorClass::Internal,
+            "TypedPublicOutputDecodeFailed",
+            format!("typed public-output artifact was not JSON: {error}"),
+        )
+    })
+}
+
+fn verify_public_output_rendered_artifact_evidence(
+    evidence: &store::ArtifactEvidenceRef,
+    artifact_id: &ArtifactId,
+    rendered_digest: &ContentDigest,
+    payload: &events::PublicOutputProduced,
+) -> Result<(), AppError> {
     let json_media_type = spec::MediaType::new("application/json").map_err(|error| {
         AppError::new(
             ErrorClass::Internal,
@@ -1885,13 +1949,7 @@ async fn load_public_output_json(
             "typed public-output cache artifact evidence does not match the produced event",
         ));
     }
-    serde_json::from_slice(&bytes).map_err(|error| {
-        AppError::new(
-            ErrorClass::Internal,
-            "TypedPublicOutputDecodeFailed",
-            format!("typed public-output artifact was not JSON: {error}"),
-        )
-    })
+    Ok(())
 }
 
 fn public_output_artifact_mismatch(message: &'static str) -> AppError {
@@ -2243,12 +2301,17 @@ mod tests {
         )
         .await
         .expect("runtime spec");
-        let authority = verify_public_output_read_authority(
+        let verified_stream =
+            VerifiedRunStream::from_async_store(&runtime_spec, &fixture.run_id, services.store())
+                .await
+                .expect("verified stream");
+        let authority = public_output_read_authority_for_run(
+            services.artifacts(),
             &runtime_spec,
-            &fixture.run_id,
+            &verified_stream,
             &fixture.public_schema_id,
-            &stream,
         )
+        .await
         .expect("public-output read authority");
         let response = render_typed_public_output(services.artifacts(), &authority)
             .await
@@ -2547,12 +2610,23 @@ mod tests {
         let corrupt_stream =
             corrupt_public_output_history(services.artifacts(), &valid_stream).await;
 
-        let err = verify_public_output_read_authority(
-            &runtime_spec,
-            &fixture.run_id,
-            &fixture.public_schema_id,
-            &corrupt_stream,
-        )
+        let corrupt_store = StaticAsyncStore {
+            run_id: fixture.run_id.clone(),
+            stream: corrupt_stream,
+        };
+        let err = async {
+            let verified_stream =
+                VerifiedRunStream::from_async_store(&runtime_spec, &fixture.run_id, &corrupt_store)
+                    .await?;
+            public_output_read_authority_for_run(
+                services.artifacts(),
+                &runtime_spec,
+                &verified_stream,
+                &fixture.public_schema_id,
+            )
+            .await
+        }
+        .await
         .expect_err("tampered stream rejects before render authority");
 
         assert_eq!(err.code, "TypedRuntimeError");
@@ -2587,12 +2661,23 @@ mod tests {
             .cloned()
             .collect::<Vec<_>>();
 
-        let err = verify_public_output_read_authority(
-            &runtime_spec,
-            &fixture.run_id,
-            &fixture.public_schema_id,
-            &stream_without_public_output,
-        )
+        let corrupt_store = StaticAsyncStore {
+            run_id: fixture.run_id.clone(),
+            stream: stream_without_public_output,
+        };
+        let err = async {
+            let verified_stream =
+                VerifiedRunStream::from_async_store(&runtime_spec, &fixture.run_id, &corrupt_store)
+                    .await?;
+            public_output_read_authority_for_run(
+                services.artifacts(),
+                &runtime_spec,
+                &verified_stream,
+                &fixture.public_schema_id,
+            )
+            .await
+        }
+        .await
         .expect_err("completed run without public output evidence rejects");
 
         assert!(matches!(
