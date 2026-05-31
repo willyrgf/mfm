@@ -27,7 +27,7 @@ use mfm_replay::v1 as replay;
 use mfm_runtime::{
     CertifiedRuntimeSpec, ErasedNodeRunner, ErasedRunCtx, ErasedRunnerBinding, ErasedRunnerFuture,
     ErasedRunnerOutput, ErasedRunnerRegistry, MaterializedCellTerminal, MaterializedInputNode,
-    RunStartEvidence, RuntimeArtifactStageFuture, RuntimeArtifactStager, SchedulerStatus,
+    RunLaunchEvidence, RuntimeArtifactStageFuture, RuntimeArtifactStager, SchedulerStatus,
     SerialTypedScheduler, StagedArtifact, StagedRetentionRefs,
 };
 use mfm_spec::v1 as spec;
@@ -1175,13 +1175,8 @@ pub async fn proof_implementation_conformance_summary(
         DigestAlgorithm::Sha256JcsV1,
         DigestBytes::from_array([0x34; 32]),
     );
-    scheduler
-        .start_run(
-            &mut store,
-            &runtime_spec,
-            run_id.clone(),
-            run_start_evidence(&runtime_spec).map_err(|error| error.to_string())?,
-        )
+    start_proof_run(&scheduler, &mut store, &runtime_spec, run_id.clone())
+        .await
         .map_err(|error| error.to_string())?;
 
     for _ in 0..16 {
@@ -1421,9 +1416,25 @@ fn replay_store_error(error: store::StoreError) -> replay::ReplayError {
     replay::ReplayError::new(replay::ReplayErrorKind::InvalidRunStream, error.to_string())
 }
 
+async fn start_proof_run(
+    scheduler: &SerialTypedScheduler,
+    store: &mut store::InMemoryTypedRunStore,
+    runtime_spec: &CertifiedRuntimeSpec,
+    run_id: RunId,
+) -> mfm_runtime::Result<()> {
+    let launch = scheduler.prepare_run_launch(
+        runtime_spec,
+        run_id.clone(),
+        run_start_evidence(runtime_spec)?,
+        store.expected_next_seq(&run_id),
+    )?;
+    scheduler.start_run(store, launch).await?;
+    Ok(())
+}
+
 fn run_start_evidence(
     runtime_spec: &CertifiedRuntimeSpec,
-) -> mfm_runtime::Result<RunStartEvidence> {
+) -> mfm_runtime::Result<RunLaunchEvidence> {
     let spec_bytes = runtime_spec.spec().canonical_json()?;
     let spec_digest = spec_bytes.content_digest();
     let spec_artifact = store::ArtifactEvidenceRef {
@@ -1472,7 +1483,7 @@ fn run_start_evidence(
             artifact_role: events::ArtifactRole::TypedConfig,
         })
         .collect();
-    Ok(RunStartEvidence {
+    Ok(RunLaunchEvidence {
         spec_artifact,
         certificate_artifact,
         config_artifacts,
@@ -1613,13 +1624,8 @@ mod tests {
             DigestAlgorithm::Sha256JcsV1,
             DigestBytes::from_array([0x34; 32]),
         );
-        scheduler
-            .start_run(
-                &mut store,
-                &runtime_spec,
-                run_id.clone(),
-                run_start_evidence(&runtime_spec).expect("run-start evidence"),
-            )
+        start_proof_run(&scheduler, &mut store, &runtime_spec, run_id.clone())
+            .await
             .expect("start run");
 
         for _ in 0..16 {

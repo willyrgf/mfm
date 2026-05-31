@@ -29,7 +29,7 @@ use mfm_ids::{
 };
 use mfm_replay::v1::{ReplayAuthority, ReplayBroker, ReplayError};
 use mfm_runtime::{
-    validate_run_stream, CertifiedRuntimeSpec, RunStartEvidence, RuntimeArtifactStageFuture,
+    validate_run_stream, CertifiedRuntimeSpec, RunLaunchEvidence, RuntimeArtifactStageFuture,
     RuntimeArtifactStager, SchedulerStatus, SerialTypedScheduler,
 };
 use mfm_spec::v1 as spec;
@@ -361,8 +361,8 @@ pub struct TypedRunStartRequest {
     pub certified_spec: CertifiedTypedSpec,
     /// Store-owned run id to bind.
     pub run_id: RunId,
-    /// Run-start evidence whose artifacts must already be persisted in the typed artifact store.
-    pub evidence: RunStartEvidence,
+    /// Launch evidence whose caller-supplied artifacts must already be persisted.
+    pub evidence: RunLaunchEvidence,
     /// Scheduler drive policy after start.
     pub drive: DriveMode,
 }
@@ -692,8 +692,14 @@ where
         self.validate_launch_artifacts(&runtime_spec, &req.evidence)
             .await?;
         let mut store = self.store.lock().await;
-        self.scheduler
-            .start_run(&mut *store, &runtime_spec, req.run_id.clone(), req.evidence)?;
+        let expected_next_seq = store.expected_next_seq(&req.run_id);
+        let launch = self.scheduler.prepare_run_launch(
+            &runtime_spec,
+            req.run_id.clone(),
+            req.evidence,
+            expected_next_seq,
+        )?;
+        self.scheduler.start_run(&mut *store, launch).await?;
         let status = self
             .drive_with_mode(&mut *store, &runtime_spec, &req.run_id, req.drive)
             .await?;
@@ -734,15 +740,33 @@ where
 
     /// Returns typed run status by rebuilding projection from the authoritative run stream.
     pub async fn run_status(&self, run_id: &RunId) -> Result<TypedRunResponse, AppError> {
-        let store = self.store.lock().await;
-        let stream = store.load_run_stream(run_id);
+        let stream = {
+            let store = self.store.lock().await;
+            store.load_run_stream(run_id)
+        };
+        validate_stored_run_stream_for_read(
+            &self.artifacts,
+            &self.certification_registry,
+            run_id,
+            &stream,
+        )
+        .await?;
         typed_run_status_from_stream(run_id, &stream)
     }
 
     /// Returns the authoritative typed run stream.
     pub async fn run_stream(&self, run_id: &RunId) -> Result<TypedRunStreamResponse, AppError> {
-        let store = self.store.lock().await;
-        let events = store.load_run_stream(run_id);
+        let events = {
+            let store = self.store.lock().await;
+            store.load_run_stream(run_id)
+        };
+        validate_stored_run_stream_for_read(
+            &self.artifacts,
+            &self.certification_registry,
+            run_id,
+            &events,
+        )
+        .await?;
         Ok(typed_run_stream_response_from_events(
             run_id,
             stream_head(&events),
@@ -825,7 +849,7 @@ where
     async fn validate_launch_artifacts(
         &self,
         runtime_spec: &CertifiedRuntimeSpec,
-        evidence: &RunStartEvidence,
+        evidence: &RunLaunchEvidence,
     ) -> Result<(), AppError> {
         validate_launch_artifacts(&self.artifacts, runtime_spec, evidence).await
     }
@@ -891,9 +915,18 @@ where
     ) -> Result<TypedRunResponse, AppError> {
         let runtime_spec = CertifiedRuntimeSpec::new(req.certified_spec)?;
         validate_launch_artifacts(&self.artifacts, &runtime_spec, &req.evidence).await?;
-        self.scheduler
-            .start_run_async(&self.store, &runtime_spec, req.run_id.clone(), req.evidence)
-            .await?;
+        let expected_next_seq = self
+            .store
+            .expected_next_seq(&req.run_id)
+            .await
+            .map_err(async_app_store_error)?;
+        let launch = self.scheduler.prepare_run_launch(
+            &runtime_spec,
+            req.run_id.clone(),
+            req.evidence,
+            expected_next_seq,
+        )?;
+        self.scheduler.start_run_async(&self.store, launch).await?;
         let status = self
             .drive_with_mode(&runtime_spec, &req.run_id, req.drive)
             .await?;
@@ -946,6 +979,13 @@ where
             .load_run_stream(run_id)
             .await
             .map_err(async_app_store_error)?;
+        validate_stored_run_stream_for_read(
+            &self.artifacts,
+            &self.certification_registry,
+            run_id,
+            &stream,
+        )
+        .await?;
         typed_run_status_from_stream(run_id, &stream)
     }
 
@@ -956,6 +996,13 @@ where
             .load_run_stream(run_id)
             .await
             .map_err(async_app_store_error)?;
+        validate_stored_run_stream_for_read(
+            &self.artifacts,
+            &self.certification_registry,
+            run_id,
+            &events,
+        )
+        .await?;
         Ok(typed_run_stream_response_from_events(
             run_id,
             stream_head(&events),
@@ -1089,6 +1136,23 @@ async fn load_runtime_spec_for_run(
 ) -> Result<CertifiedRuntimeSpec, AppError> {
     let certified = load_certified_spec_for_run(artifacts, registry, run_id, stream).await?;
     CertifiedRuntimeSpec::new(certified).map_err(Into::into)
+}
+
+async fn validate_stored_run_stream_for_read(
+    artifacts: &FsTypedArtifactStore,
+    registry: &CertificationRegistry,
+    run_id: &RunId,
+    stream: &[store::KernelEventEnvelope],
+) -> Result<(), AppError> {
+    if stream.is_empty() {
+        return Err(AppError::not_found(
+            "TypedRunNotFound",
+            "typed run stream was not found",
+        ));
+    }
+    let runtime_spec = load_runtime_spec_for_run(artifacts, registry, run_id, stream).await?;
+    validate_run_stream(&runtime_spec, run_id, stream)?;
+    Ok(())
 }
 
 /// Builds replay authority from retained artifact evidence in the run stream.
@@ -1458,7 +1522,7 @@ pub async fn build_certified_typed_run_start_request(
     Ok(TypedRunStartRequest {
         certified_spec,
         run_id,
-        evidence: RunStartEvidence {
+        evidence: RunLaunchEvidence {
             spec_artifact,
             certificate_artifact,
             config_artifacts,
@@ -1496,7 +1560,7 @@ fn async_app_store_error(error: impl fmt::Display) -> AppError {
 async fn validate_launch_artifacts(
     artifacts: &FsTypedArtifactStore,
     runtime_spec: &CertifiedRuntimeSpec,
-    evidence: &RunStartEvidence,
+    evidence: &RunLaunchEvidence,
 ) -> Result<(), AppError> {
     let spec_bytes = artifacts.get_artifact(&evidence.spec_artifact).await?;
     let canonical = runtime_spec.spec().canonical_json().map_err(|error| {
@@ -2245,11 +2309,20 @@ mod tests {
             .load_run_stream(&fixture.run_id)
             .await
             .expect("load stream");
+        let public_output = stream
+            .iter()
+            .find_map(|event| match event.payload() {
+                events::KernelEventPayload::PublicOutputProduced(payload) => Some(payload),
+                _ => None,
+            })
+            .expect("public output produced");
         let receipt_artifact_id = stream
             .iter()
             .find_map(|event| match event.payload() {
                 events::KernelEventPayload::CellProduced(payload)
-                    if payload.node_id != fixture.value_node_id =>
+                    if payload.node_id == public_output.node_id
+                        && payload.attempt_id == public_output.attempt_id
+                        && payload.cell_id == public_output.receipt_cell_id =>
                 {
                     Some(payload.artifact_id.clone())
                 }
@@ -2318,6 +2391,64 @@ mod tests {
             .expect_err("append-only resume rejects uncertified history");
         assert_eq!(resume_err.code, "TypedRuntimeError");
         assert!(resume_err.message.contains("public-output payload"));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn app_read_paths_reject_tampered_bootstrap_genesis_history() {
+        let (root, fixture, services, _started) = start_framework_fixture_run().await;
+        let valid_stream = services
+            .store()
+            .load_run_stream(&fixture.run_id)
+            .await
+            .expect("load valid stream");
+        let corrupt_stream = tamper_bootstrap_receipt_reference_history(&valid_stream);
+        let artifacts = services.artifacts().clone();
+        let registry =
+            CertificationRegistry::from_program_draft(&fixture.draft).expect("fixture registry");
+        let corrupt_services = make_async_typed_services_with_certification_registry(
+            production_typed_runner_registry(artifacts.clone())
+                .expect("production runner registry"),
+            StaticAsyncStore {
+                run_id: fixture.run_id.clone(),
+                stream: corrupt_stream,
+            },
+            artifacts,
+            registry,
+        );
+
+        for error in [
+            corrupt_services
+                .run_status(&fixture.run_id)
+                .await
+                .expect_err("status rejects tampered bootstrap"),
+            corrupt_services
+                .run_stream(&fixture.run_id)
+                .await
+                .expect_err("stream read rejects tampered bootstrap"),
+            corrupt_services
+                .resume_stored_run(&fixture.run_id, DriveMode::AppendOnly)
+                .await
+                .expect_err("resume rejects tampered bootstrap"),
+            corrupt_services
+                .typed_public_output(&fixture.run_id, &fixture.public_schema_id)
+                .await
+                .expect_err("public output rejects tampered bootstrap"),
+            corrupt_services
+                .verify_replay_for_run(&fixture.run_id)
+                .await
+                .expect_err("replay rejects tampered bootstrap"),
+        ] {
+            assert_eq!(error.code, "TypedRuntimeError");
+            assert!(
+                error.message.contains("BootstrapRun")
+                    || error.message.contains("bootstrap")
+                    || error.message.contains("genesis"),
+                "{}",
+                error.message
+            );
+        }
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -2810,6 +2941,11 @@ mod tests {
             .await
             .expect_err("run was not started");
         assert_eq!(status.code, "TypedRunNotFound");
+        let stream = services
+            .run_stream(&fixture.run_id)
+            .await
+            .expect_err("run stream was not started");
+        assert_eq!(stream.code, "TypedRunNotFound");
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -3242,6 +3378,53 @@ mod tests {
         let batch = store::build_committed_batch(&request, seq).expect("retention refs batch");
         let mut rewritten = stream.to_vec();
         rewritten.extend(batch.events().iter().cloned());
+        rewritten
+    }
+
+    fn tamper_bootstrap_receipt_reference_history(
+        stream: &[store::KernelEventEnvelope],
+    ) -> Vec<store::KernelEventEnvelope> {
+        let first = stream.first().expect("valid stream is non-empty");
+        let run_id = first.run_id().clone();
+        let first_seq = first.seq();
+        let first_key = first.commit_key().clone();
+        let mut payloads = stream
+            .iter()
+            .take_while(|event| event.seq() == first_seq && event.commit_key() == &first_key)
+            .map(|event| event.payload().clone())
+            .collect::<Vec<_>>();
+        let mut tampered = false;
+        for payload in &mut payloads {
+            if let events::KernelEventPayload::ArtifactReferenced(reference) = payload {
+                if reference.node_id.is_some()
+                    && reference.artifact_ref.role == events::ArtifactRole::StateOutput
+                {
+                    reference.artifact_ref.byte_len += 1;
+                    tampered = true;
+                    break;
+                }
+            }
+        }
+        assert!(tampered, "bootstrap receipt artifact reference exists");
+        let request = store::TypedCommitRequest {
+            run_id,
+            expected_next_seq: first_seq,
+            commit_key: first_key,
+            payloads,
+            required_artifacts: Vec::new(),
+            preconditions: store::CommitPreconditions::default(),
+        };
+        let batch =
+            store::build_committed_batch(&request, first_seq).expect("tampered bootstrap batch");
+        let mut rewritten = batch.events().to_vec();
+        rewritten.extend(
+            stream
+                .iter()
+                .filter(|event| {
+                    !(event.seq() == first_seq && event.commit_key() == &request.commit_key)
+                })
+                .cloned(),
+        );
         rewritten
     }
 

@@ -1324,10 +1324,10 @@ impl CertifiedRuntimeSpec {
                 "expected exactly one completion lifecycle framework node, found {completion_count}"
             )));
         }
-        if bootstrap_count > 1 {
-            return Err(RuntimeError::InvalidSpec(
-                "duplicate lifecycle framework nodes are not allowed".to_owned(),
-            ));
+        if bootstrap_count != 1 {
+            return Err(RuntimeError::InvalidSpec(format!(
+                "expected exactly one bootstrap lifecycle framework node, found {bootstrap_count}"
+            )));
         }
         self.validate_lifecycle_tail_finality()?;
         Ok(())
@@ -1761,6 +1761,12 @@ impl ErasedRunnerRegistry {
     ) -> Result<ErasedRunnerBinding> {
         if matches!(
             &node.framework,
+            Some(spec::FrameworkNodeSpec::BootstrapRun(_))
+        ) {
+            return framework_bootstrap_run_binding(node, descriptor);
+        }
+        if matches!(
+            &node.framework,
             Some(spec::FrameworkNodeSpec::PublicOutputRender(_))
         ) {
             return framework_public_output_binding(node, descriptor);
@@ -1814,6 +1820,70 @@ impl ErasedRunnerRegistry {
             }
         }
         Ok(executables)
+    }
+}
+
+fn framework_bootstrap_run_binding(
+    node: &spec::NodeSpec,
+    descriptor: &spec::StateDescriptorIdentity,
+) -> Result<ErasedRunnerBinding> {
+    let Some(spec::FrameworkNodeSpec::BootstrapRun(_)) = &node.framework else {
+        return Err(RuntimeError::RunnerBinding(format!(
+            "node {} is not a bootstrap framework node",
+            node.node_id
+        )));
+    };
+    if descriptor.name != "mfm.framework.bootstrap_run" {
+        return Err(RuntimeError::RunnerBinding(format!(
+            "bootstrap node {} has non-framework descriptor {}",
+            node.node_id, descriptor.name
+        )));
+    }
+    let factory_id = events::RunnerFactoryId::new(descriptor.runner.as_str())?;
+    ErasedRunnerBinding::new(
+        node.descriptor_id.clone(),
+        factory_id.clone(),
+        framework_bootstrap_run_executable(factory_id)?,
+        Arc::new(FrameworkBootstrapRunner),
+    )
+}
+
+fn framework_bootstrap_run_executable(
+    factory_id: events::RunnerFactoryId,
+) -> Result<events::ExecutableIdentity> {
+    let package_digest = content_digest_json(serde_json::json!({
+        "crate": "mfm-runtime",
+        "runner": "framework_bootstrap_run",
+        "version": env!("CARGO_PKG_VERSION"),
+    }))?;
+    let binary_digest = content_digest_json(serde_json::json!({
+        "crate": "mfm-runtime",
+        "factory_id": factory_id.as_str(),
+        "runner": "framework_bootstrap_run",
+        "version": env!("CARGO_PKG_VERSION"),
+    }))?;
+    Ok(events::ExecutableIdentity {
+        factory_id,
+        source_revision: events::SourceRevision::new("mfm-runtime-built-in")?,
+        cargo_package_name: events::PackageName::new("mfm-runtime")?,
+        cargo_package_version: events::PackageVersion::new(env!("CARGO_PKG_VERSION"))?,
+        cargo_package_digest: package_digest,
+        binary_digest,
+        nix_derivation_hash: None,
+        nix_output_hash: None,
+    })
+}
+
+struct FrameworkBootstrapRunner;
+
+impl ErasedNodeRunner for FrameworkBootstrapRunner {
+    fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
+        Box::pin(async move {
+            Err(RuntimeError::InvalidRunnerOutput(format!(
+                "bootstrap node {} must execute through genesis middleware",
+                ctx.node().node_id
+            )))
+        })
     }
 }
 
@@ -2324,6 +2394,86 @@ fn framework_run_completed_payload(
             outcome: events::RunCompletionOutcome::Completed(completion),
         },
     )))
+}
+
+fn bootstrap_run_receipt_artifact(
+    ctx: &GenesisContext<'_>,
+) -> Result<(PlainCanonicalJsonBytes, store::ArtifactEvidenceRef)> {
+    let bytes = bootstrap_run_receipt_json(ctx)?;
+    let digest = bytes.content_digest();
+    let evidence = store::ArtifactEvidenceRef {
+        artifact_id: ArtifactId::from_digest(digest.algorithm(), *digest.digest()),
+        digest,
+        byte_len: bytes.as_bytes().len() as u64,
+        media_type: spec::MediaType::new("application/json")?,
+        schema_id: Some(ctx.output_cell.schema_id.clone()),
+        semantic_type_id: Some(ctx.output_cell.semantic_type_id.clone()),
+        producer_node_id: Some(ctx.node.node_id.clone()),
+        producer_seed_id: None,
+        artifact_role: events::ArtifactRole::StateOutput,
+    };
+    Ok((bytes, evidence))
+}
+
+fn bootstrap_run_receipt_json(ctx: &GenesisContext<'_>) -> Result<PlainCanonicalJsonBytes> {
+    canonical_json(serde_json::json!({
+        "adapter_executables": ctx.run_started.adapter_executables.iter().map(executable_json).collect::<Vec<_>>(),
+        "attempt_id": ctx.attempt_id.as_str(),
+        "canonicalizer_identity": ctx.run_started.canonicalizer_identity.as_str(),
+        "certificate_artifact": {
+            "artifact_id": ctx.run_started.certificate_artifact_id.as_str(),
+            "content_digest": ctx.run_started.certificate_artifact_digest.as_str(),
+            "media_type": ctx.run_started.certificate_media_type.as_str(),
+        },
+        "config_artifacts": ctx.config_artifacts.iter().map(config_evidence_json).collect::<Vec<_>>(),
+        "framework_version": ctx.run_started.framework_version.as_str(),
+        "node_id": ctx.node.node_id.as_str(),
+        "output_cell": ctx.node.output_cell.as_str(),
+        "public_output_schema_id": ctx.run_started.public_output_schema_id.as_str(),
+        "run_id": ctx.run_id.as_str(),
+        "runner_executables": ctx.run_started.runner_executables.iter().map(executable_json).collect::<Vec<_>>(),
+        "seed_cells": ctx.run_started.seed_cells.iter().map(seed_cell_json).collect::<Vec<_>>(),
+        "source_revision": ctx.run_started.source_revision.as_str(),
+        "spec_artifact": {
+            "artifact_id": ctx.run_started.spec_artifact_id.as_str(),
+            "media_type": ctx.run_started.spec_media_type.as_str(),
+        },
+        "spec_hash": ctx.runtime_spec.spec_hash().as_str(),
+    }))
+}
+
+fn seed_cell_json(seed: &events::SeedCellRef) -> serde_json::Value {
+    serde_json::json!({
+        "artifact": artifact_evidence_ref_json(&seed.seed_artifact),
+        "cell_id": seed.cell_id.as_str(),
+        "content_digest": seed.digest.as_str(),
+        "schema_id": seed.schema_id.as_str(),
+        "scope_id": seed.scope_id.as_str(),
+        "seed_id": seed.seed_id.as_str(),
+        "semantic_type_id": seed.semantic_type_id.as_str(),
+    })
+}
+
+fn config_evidence_json(config: &store::ArtifactEvidenceRef) -> serde_json::Value {
+    serde_json::json!({
+        "artifact_id": config.artifact_id.as_str(),
+        "byte_len": config.byte_len,
+        "content_digest": config.digest.as_str(),
+        "media_type": config.media_type.as_str(),
+        "schema_id": config.schema_id.as_ref().map(SchemaId::as_str),
+    })
+}
+
+fn artifact_evidence_ref_json(artifact: &events::ArtifactEvidenceRef) -> serde_json::Value {
+    serde_json::json!({
+        "artifact_id": artifact.artifact_id.as_str(),
+        "byte_len": artifact.byte_len,
+        "content_digest": artifact.content_digest.as_str(),
+        "media_type": artifact.media_type.as_str(),
+        "role": artifact_role_name(artifact.role),
+        "schema_id": artifact.schema_id.as_str(),
+        "semantic_type_id": artifact.semantic_type_id.as_ref().map(SemanticTypeId::as_str),
+    })
 }
 
 fn public_output_receipt_digest(
@@ -2854,9 +3004,9 @@ pub fn validate_run_stream(
     RuntimeRunView::from_stream(runtime_spec, run_id, stream).map(|_| ())
 }
 
-/// Evidence needed to append `RunStarted`.
+/// Launch evidence needed to prepare a typed run genesis commit.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RunStartEvidence {
+pub struct RunLaunchEvidence {
     /// Artifact evidence containing the certified spec bytes.
     pub spec_artifact: store::ArtifactEvidenceRef,
     /// Artifact evidence containing the certified spec certificate bytes.
@@ -2871,6 +3021,22 @@ pub struct RunStartEvidence {
     pub adapter_executables: Vec<events::ExecutableIdentity>,
     /// Seed cells materialized at run start.
     pub seed_cells: Vec<events::SeedCellRef>,
+}
+
+/// Prepared genesis launch authority accepted by runtime-owned start middleware.
+pub struct PreparedRunLaunch {
+    commit: store::PreparedTypedCommit,
+    artifacts_to_stage: Vec<PreparedStagedArtifact>,
+}
+
+struct GenesisContext<'a> {
+    runtime_spec: &'a CertifiedRuntimeSpec,
+    run_id: &'a RunId,
+    node: &'a spec::NodeSpec,
+    output_cell: &'a spec::CellSpec,
+    attempt_id: &'a AttemptId,
+    run_started: &'a events::RunStarted,
+    config_artifacts: &'a [store::ArtifactEvidenceRef],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2917,6 +3083,39 @@ struct RunnerOutputCommitInput<'a> {
     output: ErasedRunnerOutput,
 }
 
+struct RunnerInvocationInput<'a> {
+    runtime_spec: &'a CertifiedRuntimeSpec,
+    run_id: &'a RunId,
+    node: &'a spec::NodeSpec,
+    descriptor: &'a spec::StateDescriptorIdentity,
+    output_cell: &'a spec::CellSpec,
+    attempt_id: &'a AttemptId,
+    attempt_no: u32,
+    view: &'a RuntimeRunView,
+}
+
+struct FrameworkNodeAttemptInput<'a> {
+    runtime_spec: &'a CertifiedRuntimeSpec,
+    run_id: &'a RunId,
+    view: &'a RuntimeRunView,
+    runnable: RunnableNode<'a>,
+    descriptor: &'a spec::StateDescriptorIdentity,
+    output_cell: &'a spec::CellSpec,
+    binding: ErasedRunnerBinding,
+}
+
+struct CompleteRunCommitValidation<'a> {
+    run_id: &'a RunId,
+    spec_hash: &'a SpecHash,
+    completion: &'a events::PublicOutputCompletionEvidence,
+    completion_node_id: &'a NodeId,
+    attempt_id: &'a AttemptId,
+    receipt_cell_id: &'a CellId,
+    receipt_artifact_id: &'a ArtifactId,
+    receipt_digest: &'a ContentDigest,
+    expected_receipt_ref: &'a events::ArtifactEvidenceRef,
+}
+
 struct PreparedRunnerOutput {
     commit: store::PreparedTypedCommit,
     artifacts_to_stage: Vec<PreparedStagedArtifact>,
@@ -2928,15 +3127,18 @@ struct PreparedStagedArtifact {
 }
 
 fn prepare_runner_invocation<'a>(
-    runtime_spec: &'a CertifiedRuntimeSpec,
-    run_id: &'a RunId,
-    node: &'a spec::NodeSpec,
-    descriptor: &'a spec::StateDescriptorIdentity,
-    output_cell: &'a spec::CellSpec,
-    attempt_id: &'a AttemptId,
-    attempt_no: u32,
-    view: &'a RuntimeRunView,
+    input: RunnerInvocationInput<'a>,
 ) -> Result<PreparedRunnerInvocation<'a>> {
+    let RunnerInvocationInput {
+        runtime_spec,
+        run_id,
+        node,
+        descriptor,
+        output_cell,
+        attempt_id,
+        attempt_no,
+        view,
+    } = input;
     let config_artifact = committed_config_artifact(node, view)?;
     let inputs = materialize_inputs(runtime_spec, node, view)?;
     let caps =
@@ -2963,13 +3165,13 @@ fn prepare_runner_invocation<'a>(
 struct RuntimeMutationMiddleware;
 
 impl RuntimeMutationMiddleware {
-    fn prepare_run_start(
+    fn prepare_run_launch(
         runners: &ErasedRunnerRegistry,
         runtime_spec: &CertifiedRuntimeSpec,
         run_id: RunId,
-        evidence: RunStartEvidence,
+        evidence: RunLaunchEvidence,
         expected_next_seq: store::StreamSeq,
-    ) -> Result<store::PreparedTypedCommit> {
+    ) -> Result<PreparedRunLaunch> {
         let spec_artifact = validate_spec_artifact(runtime_spec, evidence.spec_artifact)?;
         let certificate_artifact =
             validate_certificate_artifact(runtime_spec, evidence.certificate_artifact)?;
@@ -2978,18 +3180,29 @@ impl RuntimeMutationMiddleware {
             config_artifact_reference_payloads(runtime_spec.spec_hash(), &config_artifacts)?;
         let seed_cells = validate_seed_cells(runtime_spec, &evidence.seed_cells)?;
         let runner_executables = runners.executables_for_spec(runtime_spec)?;
+        let bootstrap_node = certified_bootstrap_run_node(runtime_spec)?;
+        let bootstrap_output_cell =
+            runtime_spec
+                .cell(&bootstrap_node.output_cell)
+                .ok_or_else(|| {
+                    RuntimeError::InvalidSpec(format!(
+                        "bootstrap lifecycle node {} output cell {} is missing",
+                        bootstrap_node.node_id, bootstrap_node.output_cell
+                    ))
+                })?;
+        let bootstrap_attempt_id = attempt_id(
+            &run_id,
+            runtime_spec.spec_hash(),
+            &bootstrap_node.node_id,
+            1,
+        )?;
         let mut required_artifacts =
             Vec::with_capacity(2 + config_artifacts.len() + seed_cells.len());
         required_artifacts.push(spec_artifact.clone());
         required_artifacts.push(certificate_artifact.clone());
-        required_artifacts.extend(config_artifacts);
+        required_artifacts.extend(config_artifacts.iter().cloned());
         required_artifacts.extend(seed_cells.values().map(store_seed_artifact));
-        let admitted_artifacts = required_artifacts.clone();
-        let run_started_retention_refs = required_artifacts
-            .iter()
-            .map(retention_ref_for_artifact)
-            .collect::<Vec<_>>();
-        let payload = events::KernelEventPayload::RunStarted(events::RunStarted {
+        let run_started = events::RunStarted {
             run_id: run_id.clone(),
             spec_hash: runtime_spec.spec_hash().clone(),
             spec_artifact_id: spec_artifact.artifact_id,
@@ -3012,7 +3225,63 @@ impl RuntimeMutationMiddleware {
             framework_version: evidence.framework_version,
             source_revision: evidence.source_revision,
             seed_cells: evidence.seed_cells,
+        };
+        let genesis = GenesisContext {
+            runtime_spec,
+            run_id: &run_id,
+            node: bootstrap_node,
+            output_cell: bootstrap_output_cell,
+            attempt_id: &bootstrap_attempt_id,
+            run_started: &run_started,
+            config_artifacts: &config_artifacts,
+        };
+        let (bootstrap_receipt_bytes, bootstrap_receipt_artifact) =
+            bootstrap_run_receipt_artifact(&genesis)?;
+        let mut run_started_retention_refs = required_artifacts
+            .iter()
+            .map(retention_ref_for_artifact)
+            .collect::<Vec<_>>();
+        run_started_retention_refs.push(retention_ref_for_artifact(&bootstrap_receipt_artifact));
+        required_artifacts.push(bootstrap_receipt_artifact.clone());
+        let admitted_artifacts = required_artifacts.clone();
+        let start_payload = events::KernelEventPayload::RunStarted(run_started);
+        let bootstrap_start =
+            events::KernelEventPayload::StateAttemptStarted(events::StateAttemptStarted {
+                spec_hash: runtime_spec.spec_hash().clone(),
+                node_id: bootstrap_node.node_id.clone(),
+                attempt_id: bootstrap_attempt_id.clone(),
+                attempt_no: 1,
+                state_kind: bootstrap_node.state_kind.clone(),
+                state_version: bootstrap_node.state_version.clone(),
+            });
+        let bootstrap_cell = events::KernelEventPayload::CellProduced(events::CellProduced {
+            spec_hash: runtime_spec.spec_hash().clone(),
+            node_id: bootstrap_node.node_id.clone(),
+            cell_id: bootstrap_node.output_cell.clone(),
+            scope_id: bootstrap_output_cell.scope_id.clone(),
+            attempt_id: bootstrap_attempt_id.clone(),
+            semantic_type_id: bootstrap_output_cell.semantic_type_id.clone(),
+            schema_id: bootstrap_output_cell.schema_id.clone(),
+            value_lineage: bootstrap_output_cell.value_lineage.clone(),
+            artifact_id: bootstrap_receipt_artifact.artifact_id.clone(),
+            content_digest: bootstrap_receipt_artifact.digest.clone(),
+            producer_state_kind: Some(bootstrap_node.state_kind.clone()),
+            producer_state_version: Some(bootstrap_node.state_version.clone()),
         });
+        let bootstrap_completed =
+            events::KernelEventPayload::StateAttemptCompleted(events::StateAttemptCompleted {
+                spec_hash: runtime_spec.spec_hash().clone(),
+                node_id: bootstrap_node.node_id.clone(),
+                attempt_id: bootstrap_attempt_id.clone(),
+                output_cell_id: bootstrap_node.output_cell.clone(),
+            });
+        let bootstrap_ref =
+            events::KernelEventPayload::ArtifactReferenced(events::ArtifactReferenced {
+                spec_hash: runtime_spec.spec_hash().clone(),
+                node_id: Some(bootstrap_node.node_id.clone()),
+                attempt_id: Some(bootstrap_attempt_id.clone()),
+                artifact_ref: event_artifact_ref_from_store(&bootstrap_receipt_artifact)?,
+            });
         let retention_payload =
             events::KernelEventPayload::RetentionRefsAppended(events::RetentionRefsAppended {
                 run_id: run_id.clone(),
@@ -3020,9 +3289,13 @@ impl RuntimeMutationMiddleware {
                 refs: run_started_retention_refs,
                 reason: events::RetentionReason::RunStarted,
             });
-        let mut payloads = Vec::with_capacity(2 + config_reference_payloads.len());
-        payloads.push(payload);
+        let mut payloads = Vec::with_capacity(6 + config_reference_payloads.len());
+        payloads.push(start_payload);
         payloads.extend(config_reference_payloads);
+        payloads.push(bootstrap_start);
+        payloads.push(bootstrap_cell);
+        payloads.push(bootstrap_completed);
+        payloads.push(bootstrap_ref);
         payloads.push(retention_payload);
         let request = store::TypedCommitRequest {
             run_id,
@@ -3038,7 +3311,14 @@ impl RuntimeMutationMiddleware {
                 ..store::CommitPreconditions::default()
             },
         };
-        store::PreparedTypedCommit::new(request, admitted_artifacts).map_err(RuntimeError::from)
+        let commit = store::PreparedTypedCommit::new(request, admitted_artifacts)?;
+        Ok(PreparedRunLaunch {
+            commit,
+            artifacts_to_stage: vec![PreparedStagedArtifact {
+                bytes: bootstrap_receipt_bytes.to_vec(),
+                evidence: bootstrap_receipt_artifact,
+            }],
+        })
     }
 
     fn prepare_attempt_start(
@@ -3248,46 +3528,44 @@ impl SerialTypedScheduler {
         }
     }
 
-    /// Appends the typed `RunStarted` event after validating seed and runner executable evidence.
-    pub fn start_run<S: store::TypedRunEventStore + ?Sized>(
+    /// Prepares sealed genesis launch authority for a certified run.
+    pub fn prepare_run_launch(
         &self,
-        store: &mut S,
         runtime_spec: &CertifiedRuntimeSpec,
         run_id: RunId,
-        evidence: RunStartEvidence,
-    ) -> Result<store::CommitOutcome> {
-        let expected_next_seq = store.expected_next_seq(&run_id);
-        let commit = RuntimeMutationMiddleware::prepare_run_start(
+        evidence: RunLaunchEvidence,
+        expected_next_seq: store::StreamSeq,
+    ) -> Result<PreparedRunLaunch> {
+        RuntimeMutationMiddleware::prepare_run_launch(
             &self.runners,
             runtime_spec,
             run_id,
             evidence,
             expected_next_seq,
-        )?;
-        Ok(store.append_prepared_typed_commit(commit)?)
+        )
     }
 
-    /// Appends the typed `RunStarted` event through an async typed store.
+    /// Appends the prepared typed genesis commit after staging middleware-owned artifacts.
+    pub async fn start_run<S: store::TypedRunEventStore + ?Sized>(
+        &self,
+        store: &mut S,
+        launch: PreparedRunLaunch,
+    ) -> Result<store::CommitOutcome> {
+        self.stage_prepared_artifacts(&launch.artifacts_to_stage)
+            .await?;
+        Ok(store.append_prepared_typed_commit(launch.commit)?)
+    }
+
+    /// Appends the prepared typed genesis commit through an async typed store.
     pub async fn start_run_async<S: store::AsyncTypedRunEventStore + ?Sized>(
         &self,
         store: &S,
-        runtime_spec: &CertifiedRuntimeSpec,
-        run_id: RunId,
-        evidence: RunStartEvidence,
+        launch: PreparedRunLaunch,
     ) -> Result<store::CommitOutcome> {
-        let expected_next_seq = store
-            .expected_next_seq(&run_id)
-            .await
-            .map_err(async_store_error)?;
-        let commit = RuntimeMutationMiddleware::prepare_run_start(
-            &self.runners,
-            runtime_spec,
-            run_id,
-            evidence,
-            expected_next_seq,
-        )?;
+        self.stage_prepared_artifacts(&launch.artifacts_to_stage)
+            .await?;
         store
-            .append_prepared_typed_commit(commit)
+            .append_prepared_typed_commit(launch.commit)
             .await
             .map_err(async_store_error)
     }
@@ -3410,13 +3688,15 @@ impl SerialTypedScheduler {
         ) {
             self.run_started_framework_node_attempt(
                 store,
-                runtime_spec,
-                run_id,
-                view,
-                runnable,
-                descriptor,
-                output_cell,
-                binding,
+                FrameworkNodeAttemptInput {
+                    runtime_spec,
+                    run_id,
+                    view,
+                    runnable,
+                    descriptor,
+                    output_cell,
+                    binding,
+                },
             )
             .await?;
             return Ok(());
@@ -3426,16 +3706,16 @@ impl SerialTypedScheduler {
                 let attempt_no = next_attempt_no(&view.projections, &node.node_id)?;
                 let attempt_id =
                     attempt_id(run_id, runtime_spec.spec_hash(), &node.node_id, attempt_no)?;
-                prepare_runner_invocation(
+                prepare_runner_invocation(RunnerInvocationInput {
                     runtime_spec,
                     run_id,
                     node,
                     descriptor,
                     output_cell,
-                    &attempt_id,
+                    attempt_id: &attempt_id,
                     attempt_no,
                     view,
-                )?;
+                })?;
                 let start_commit = RuntimeMutationMiddleware::prepare_attempt_start(
                     runtime_spec,
                     run_id,
@@ -3455,16 +3735,16 @@ impl SerialTypedScheduler {
 
         let latest_stream = store.load_run_stream(run_id);
         let latest_view = RuntimeRunView::from_stream(runtime_spec, run_id, &latest_stream)?;
-        let invocation = prepare_runner_invocation(
+        let invocation = prepare_runner_invocation(RunnerInvocationInput {
             runtime_spec,
             run_id,
             node,
             descriptor,
             output_cell,
-            &attempt_id,
+            attempt_id: &attempt_id,
             attempt_no,
-            &latest_view,
-        )?;
+            view: &latest_view,
+        })?;
         let output = binding
             .runner
             .run_erased(ErasedRunCtx::from_prepared(&invocation))
@@ -3489,14 +3769,17 @@ impl SerialTypedScheduler {
     async fn run_started_framework_node_attempt<S: store::TypedRunEventStore + ?Sized>(
         &self,
         store: &mut S,
-        runtime_spec: &CertifiedRuntimeSpec,
-        run_id: &RunId,
-        view: &RuntimeRunView,
-        runnable: RunnableNode<'_>,
-        descriptor: &spec::StateDescriptorIdentity,
-        output_cell: &spec::CellSpec,
-        binding: ErasedRunnerBinding,
+        input: FrameworkNodeAttemptInput<'_>,
     ) -> Result<()> {
+        let FrameworkNodeAttemptInput {
+            runtime_spec,
+            run_id,
+            view,
+            runnable,
+            descriptor,
+            output_cell,
+            binding,
+        } = input;
         let node = runnable.node;
         let AttemptPlan::StartNew = runnable.attempt else {
             return Err(RuntimeError::InvalidRunStream(format!(
@@ -3506,16 +3789,16 @@ impl SerialTypedScheduler {
         };
         let attempt_no = next_attempt_no(&view.projections, &node.node_id)?;
         let attempt_id = attempt_id(run_id, runtime_spec.spec_hash(), &node.node_id, attempt_no)?;
-        let invocation = prepare_runner_invocation(
+        let invocation = prepare_runner_invocation(RunnerInvocationInput {
             runtime_spec,
             run_id,
             node,
             descriptor,
             output_cell,
-            &attempt_id,
+            attempt_id: &attempt_id,
             attempt_no,
             view,
-        )?;
+        })?;
         let output = binding
             .runner
             .run_erased(ErasedRunCtx::from_prepared(&invocation))
@@ -3565,13 +3848,15 @@ impl SerialTypedScheduler {
         ) {
             self.run_started_framework_node_attempt_async(
                 store,
-                runtime_spec,
-                run_id,
-                view,
-                runnable,
-                descriptor,
-                output_cell,
-                binding,
+                FrameworkNodeAttemptInput {
+                    runtime_spec,
+                    run_id,
+                    view,
+                    runnable,
+                    descriptor,
+                    output_cell,
+                    binding,
+                },
             )
             .await?;
             return Ok(());
@@ -3581,16 +3866,16 @@ impl SerialTypedScheduler {
                 let attempt_no = next_attempt_no(&view.projections, &node.node_id)?;
                 let attempt_id =
                     attempt_id(run_id, runtime_spec.spec_hash(), &node.node_id, attempt_no)?;
-                prepare_runner_invocation(
+                prepare_runner_invocation(RunnerInvocationInput {
                     runtime_spec,
                     run_id,
                     node,
                     descriptor,
                     output_cell,
-                    &attempt_id,
+                    attempt_id: &attempt_id,
                     attempt_no,
                     view,
-                )?;
+                })?;
                 let start_commit = RuntimeMutationMiddleware::prepare_attempt_start(
                     runtime_spec,
                     run_id,
@@ -3616,16 +3901,16 @@ impl SerialTypedScheduler {
             .await
             .map_err(async_store_error)?;
         let latest_view = RuntimeRunView::from_stream(runtime_spec, run_id, &latest_stream)?;
-        let invocation = prepare_runner_invocation(
+        let invocation = prepare_runner_invocation(RunnerInvocationInput {
             runtime_spec,
             run_id,
             node,
             descriptor,
             output_cell,
-            &attempt_id,
+            attempt_id: &attempt_id,
             attempt_no,
-            &latest_view,
-        )?;
+            view: &latest_view,
+        })?;
         let output = binding
             .runner
             .run_erased(ErasedRunCtx::from_prepared(&invocation))
@@ -3655,14 +3940,17 @@ impl SerialTypedScheduler {
     >(
         &self,
         store: &S,
-        runtime_spec: &CertifiedRuntimeSpec,
-        run_id: &RunId,
-        view: &RuntimeRunView,
-        runnable: RunnableNode<'_>,
-        descriptor: &spec::StateDescriptorIdentity,
-        output_cell: &spec::CellSpec,
-        binding: ErasedRunnerBinding,
+        input: FrameworkNodeAttemptInput<'_>,
     ) -> Result<()> {
+        let FrameworkNodeAttemptInput {
+            runtime_spec,
+            run_id,
+            view,
+            runnable,
+            descriptor,
+            output_cell,
+            binding,
+        } = input;
         let node = runnable.node;
         let AttemptPlan::StartNew = runnable.attempt else {
             return Err(RuntimeError::InvalidRunStream(format!(
@@ -3672,16 +3960,16 @@ impl SerialTypedScheduler {
         };
         let attempt_no = next_attempt_no(&view.projections, &node.node_id)?;
         let attempt_id = attempt_id(run_id, runtime_spec.spec_hash(), &node.node_id, attempt_no)?;
-        let invocation = prepare_runner_invocation(
+        let invocation = prepare_runner_invocation(RunnerInvocationInput {
             runtime_spec,
             run_id,
             node,
             descriptor,
             output_cell,
-            &attempt_id,
+            attempt_id: &attempt_id,
             attempt_no,
             view,
-        )?;
+        })?;
         let output = binding
             .runner
             .run_erased(ErasedRunCtx::from_prepared(&invocation))
@@ -5650,6 +5938,7 @@ fn validate_historical_run_stream(
         }
     }
     validate_atomic_terminal_pairs(runtime_spec, stream)?;
+    validate_historical_bootstrap_run_batch(runtime_spec, run_id, stream)?;
     validate_historical_retention_ref_batches(runtime_spec, stream)?;
     validate_historical_retention_manifest_batches(runtime_spec, stream)?;
     validate_historical_complete_run_tail(runtime_spec, run_id, stream)?;
@@ -6065,6 +6354,291 @@ fn validate_historical_retention_ref_batches(
     Ok(())
 }
 
+fn validate_historical_bootstrap_run_batch(
+    runtime_spec: &CertifiedRuntimeSpec,
+    run_id: &RunId,
+    stream: &[store::KernelEventEnvelope],
+) -> Result<()> {
+    let Some(first) = stream.first() else {
+        return Err(RuntimeError::InvalidRunStream(
+            "run stream is missing sealed BootstrapRun genesis commit".to_owned(),
+        ));
+    };
+    if first.seq() != store::StreamSeq::FIRST || first.ordinal() != store::CommitOrdinal::new(0) {
+        return Err(RuntimeError::InvalidRunStream(
+            "RunStarted must be the first event in the sealed BootstrapRun genesis commit"
+                .to_owned(),
+        ));
+    }
+    let first_seq = first.seq();
+    let first_commit_key = first.commit_key().clone();
+    let mut end = 1;
+    while end < stream.len()
+        && stream[end].seq() == first_seq
+        && stream[end].commit_key() == &first_commit_key
+    {
+        end += 1;
+    }
+    validate_bootstrap_run_commit_payload_set(runtime_spec, run_id, &stream[..end])
+}
+
+fn validate_bootstrap_run_commit_payload_set(
+    runtime_spec: &CertifiedRuntimeSpec,
+    run_id: &RunId,
+    commit: &[store::KernelEventEnvelope],
+) -> Result<()> {
+    let run_started = match commit.first().map(store::KernelEventEnvelope::payload) {
+        Some(events::KernelEventPayload::RunStarted(payload)) => payload,
+        _ => {
+            return Err(RuntimeError::InvalidRunStream(
+                "sealed BootstrapRun genesis commit must start with RunStarted".to_owned(),
+            ));
+        }
+    };
+    validate_run_started_matches_certified_spec(runtime_spec, run_id, run_started)?;
+
+    let config_count = runtime_spec.spec().config_refs.len();
+    let expected_len = config_count + 6;
+    if commit.len() != expected_len {
+        return Err(RuntimeError::InvalidRunStream(
+            "sealed BootstrapRun genesis commit has unexpected payload count".to_owned(),
+        ));
+    }
+
+    let mut config_artifacts = Vec::with_capacity(config_count);
+    for event in &commit[1..1 + config_count] {
+        let events::KernelEventPayload::ArtifactReferenced(payload) = event.payload() else {
+            return Err(RuntimeError::InvalidRunStream(
+                "sealed BootstrapRun genesis commit has non-config payload in config slot"
+                    .to_owned(),
+            ));
+        };
+        if payload.spec_hash != *runtime_spec.spec_hash()
+            || payload.node_id.is_some()
+            || payload.attempt_id.is_some()
+            || payload.artifact_ref.role != events::ArtifactRole::TypedConfig
+        {
+            return Err(RuntimeError::InvalidRunStream(
+                "sealed BootstrapRun genesis commit has invalid config artifact reference"
+                    .to_owned(),
+            ));
+        }
+        config_artifacts.push(store_artifact_from_event_ref(
+            &payload.artifact_ref,
+            None,
+            None,
+        ));
+    }
+    let config_artifacts = validate_config_artifacts(runtime_spec, config_artifacts)?;
+    let expected_config_payloads =
+        config_artifact_reference_payloads(runtime_spec.spec_hash(), &config_artifacts)?;
+    for (event, expected) in commit[1..1 + config_count]
+        .iter()
+        .zip(expected_config_payloads)
+    {
+        if event.payload() != &expected {
+            return Err(RuntimeError::InvalidRunStream(
+                "sealed BootstrapRun genesis commit config references do not match certified config refs"
+                    .to_owned(),
+            ));
+        }
+    }
+
+    let bootstrap_node = certified_bootstrap_run_node(runtime_spec)?;
+    let bootstrap_output_cell =
+        runtime_spec
+            .cell(&bootstrap_node.output_cell)
+            .ok_or_else(|| {
+                RuntimeError::InvalidSpec(format!(
+                    "bootstrap lifecycle node {} output cell {} is missing",
+                    bootstrap_node.node_id, bootstrap_node.output_cell
+                ))
+            })?;
+    let bootstrap_attempt_id =
+        attempt_id(run_id, runtime_spec.spec_hash(), &bootstrap_node.node_id, 1)?;
+    let genesis = GenesisContext {
+        runtime_spec,
+        run_id,
+        node: bootstrap_node,
+        output_cell: bootstrap_output_cell,
+        attempt_id: &bootstrap_attempt_id,
+        run_started,
+        config_artifacts: &config_artifacts,
+    };
+    let (bootstrap_receipt_bytes, bootstrap_receipt_artifact) =
+        bootstrap_run_receipt_artifact(&genesis)?;
+    let expected_receipt_ref = event_artifact_ref_from_store(&bootstrap_receipt_artifact)?;
+    let expected_refs = run_started_retention_refs(
+        runtime_spec,
+        run_started,
+        &config_artifacts,
+        &bootstrap_receipt_artifact,
+    )?;
+
+    let mut pos = 1 + config_count;
+    let expected_start =
+        events::KernelEventPayload::StateAttemptStarted(events::StateAttemptStarted {
+            spec_hash: runtime_spec.spec_hash().clone(),
+            node_id: bootstrap_node.node_id.clone(),
+            attempt_id: bootstrap_attempt_id.clone(),
+            attempt_no: 1,
+            state_kind: bootstrap_node.state_kind.clone(),
+            state_version: bootstrap_node.state_version.clone(),
+        });
+    if commit[pos].payload() != &expected_start {
+        return Err(RuntimeError::InvalidRunStream(
+            "sealed BootstrapRun genesis commit lacks matching StateAttemptStarted".to_owned(),
+        ));
+    }
+    pos += 1;
+
+    let expected_cell = events::KernelEventPayload::CellProduced(events::CellProduced {
+        spec_hash: runtime_spec.spec_hash().clone(),
+        node_id: bootstrap_node.node_id.clone(),
+        cell_id: bootstrap_node.output_cell.clone(),
+        scope_id: bootstrap_output_cell.scope_id.clone(),
+        attempt_id: bootstrap_attempt_id.clone(),
+        semantic_type_id: bootstrap_output_cell.semantic_type_id.clone(),
+        schema_id: bootstrap_output_cell.schema_id.clone(),
+        value_lineage: bootstrap_output_cell.value_lineage.clone(),
+        artifact_id: bootstrap_receipt_artifact.artifact_id.clone(),
+        content_digest: bootstrap_receipt_artifact.digest.clone(),
+        producer_state_kind: Some(bootstrap_node.state_kind.clone()),
+        producer_state_version: Some(bootstrap_node.state_version.clone()),
+    });
+    if commit[pos].payload() != &expected_cell {
+        return Err(RuntimeError::InvalidRunStream(
+            "sealed BootstrapRun genesis commit lacks matching receipt cell".to_owned(),
+        ));
+    }
+    pos += 1;
+
+    let expected_completed =
+        events::KernelEventPayload::StateAttemptCompleted(events::StateAttemptCompleted {
+            spec_hash: runtime_spec.spec_hash().clone(),
+            node_id: bootstrap_node.node_id.clone(),
+            attempt_id: bootstrap_attempt_id.clone(),
+            output_cell_id: bootstrap_node.output_cell.clone(),
+        });
+    if commit[pos].payload() != &expected_completed {
+        return Err(RuntimeError::InvalidRunStream(
+            "sealed BootstrapRun genesis commit lacks matching StateAttemptCompleted".to_owned(),
+        ));
+    }
+    pos += 1;
+
+    let expected_ref = events::KernelEventPayload::ArtifactReferenced(events::ArtifactReferenced {
+        spec_hash: runtime_spec.spec_hash().clone(),
+        node_id: Some(bootstrap_node.node_id.clone()),
+        attempt_id: Some(bootstrap_attempt_id.clone()),
+        artifact_ref: expected_receipt_ref,
+    });
+    if commit[pos].payload() != &expected_ref {
+        return Err(RuntimeError::InvalidRunStream(
+            "sealed BootstrapRun genesis commit lacks matching bootstrap receipt artifact reference"
+                .to_owned(),
+        ));
+    }
+    pos += 1;
+
+    match commit[pos].payload() {
+        events::KernelEventPayload::RetentionRefsAppended(payload)
+            if payload.run_id == *run_id
+                && payload.spec_hash == *runtime_spec.spec_hash()
+                && payload.reason == events::RetentionReason::RunStarted
+                && payload.refs == expected_refs =>
+        {
+            verify_artifact_bytes(
+                bootstrap_receipt_bytes.as_bytes(),
+                &bootstrap_receipt_artifact,
+            )?;
+            Ok(())
+        }
+        _ => Err(RuntimeError::InvalidRunStream(
+            "sealed BootstrapRun genesis commit lacks matching run-start retention refs".to_owned(),
+        )),
+    }
+}
+
+fn validate_run_started_matches_certified_spec(
+    runtime_spec: &CertifiedRuntimeSpec,
+    run_id: &RunId,
+    run_started: &events::RunStarted,
+) -> Result<()> {
+    if run_started.run_id != *run_id
+        || run_started.spec_hash != *runtime_spec.spec_hash()
+        || run_started.spec_artifact_id
+            != ArtifactId::from_digest(
+                runtime_spec.spec_hash().algorithm(),
+                *runtime_spec.spec_hash().digest(),
+            )
+        || run_started.spec_media_type != runtime_spec.spec().media_type
+        || run_started.spec_version != runtime_spec.spec().spec_version
+        || run_started.lowering_version != runtime_spec.spec().lowering_version
+        || run_started.public_output_schema_id
+            != runtime_spec.spec().public_outputs.public_schema_id
+        || run_started.canonicalizer_identity
+            != runtime_spec
+                .spec()
+                .public_outputs
+                .renderer_descriptor
+                .canonicalizer_identity
+        || run_started.descriptor_identities != runtime_spec.spec().descriptor_identities
+    {
+        return Err(RuntimeError::InvalidRunStream(
+            "RunStarted payload does not match the certified runtime spec".to_owned(),
+        ));
+    }
+    let certificate_canonical = runtime_spec
+        .certificate()
+        .canonical_json()
+        .map_err(|error| RuntimeError::Canonical(error.to_string()))?;
+    let certificate_digest = certificate_canonical.content_digest();
+    if run_started.certificate_artifact_id
+        != ArtifactId::from_digest(certificate_digest.algorithm(), *certificate_digest.digest())
+        || run_started.certificate_artifact_digest != certificate_digest
+        || run_started.certificate_media_type
+            != spec::MediaType::new(mfm_certify::CERTIFICATE_MEDIA_TYPE)?
+    {
+        return Err(RuntimeError::InvalidRunStream(
+            "RunStarted certificate evidence does not match the certified runtime spec".to_owned(),
+        ));
+    }
+    validate_seed_cells(runtime_spec, &run_started.seed_cells)?;
+    Ok(())
+}
+
+fn run_started_retention_refs(
+    runtime_spec: &CertifiedRuntimeSpec,
+    run_started: &events::RunStarted,
+    config_artifacts: &[store::ArtifactEvidenceRef],
+    bootstrap_receipt_artifact: &store::ArtifactEvidenceRef,
+) -> Result<Vec<events::RetentionRef>> {
+    let mut refs = Vec::with_capacity(3 + config_artifacts.len() + run_started.seed_cells.len());
+    refs.push(events::RetentionRef {
+        artifact_id: run_started.spec_artifact_id.clone(),
+        content_digest: ContentDigest::from_digest(
+            run_started.spec_hash.algorithm(),
+            *run_started.spec_hash.digest(),
+        ),
+        role: events::ArtifactRole::TypedExecutionSpec,
+    });
+    refs.push(events::RetentionRef {
+        artifact_id: run_started.certificate_artifact_id.clone(),
+        content_digest: run_started.certificate_artifact_digest.clone(),
+        role: events::ArtifactRole::TypedSpecCertificate,
+    });
+    refs.extend(config_artifacts.iter().map(retention_ref_for_artifact));
+    let seed_cells = validate_seed_cells(runtime_spec, &run_started.seed_cells)?;
+    refs.extend(seed_cells.values().map(|seed| events::RetentionRef {
+        artifact_id: seed.seed_artifact.artifact_id.clone(),
+        content_digest: seed.seed_artifact.content_digest.clone(),
+        role: seed.seed_artifact.role,
+    }));
+    refs.push(retention_ref_for_artifact(bootstrap_receipt_artifact));
+    Ok(refs)
+}
+
 fn validate_historical_retention_ref_batch(
     runtime_spec: &CertifiedRuntimeSpec,
     commit: &[store::KernelEventEnvelope],
@@ -6139,7 +6713,8 @@ fn validate_historical_retention_ref_batch(
                             .to_owned(),
                     ));
                 }
-                let expected = run_started_retention_ref_keys(run_started[0], commit);
+                let expected =
+                    run_started_retention_ref_keys(runtime_spec, run_started[0], commit)?;
                 let actual = payload
                     .refs
                     .iter()
@@ -6430,9 +7005,10 @@ fn insert_error_diagnostic_key(error: &events::MfmErrorInfo, keys: &mut BTreeSet
 }
 
 fn run_started_retention_ref_keys(
+    runtime_spec: &CertifiedRuntimeSpec,
     run_started: &events::RunStarted,
     commit: &[store::KernelEventEnvelope],
-) -> BTreeSet<RetentionRefKey> {
+) -> Result<BTreeSet<RetentionRefKey>> {
     let mut keys = BTreeSet::new();
     keys.insert((
         run_started.spec_artifact_id.clone(),
@@ -6457,7 +7033,21 @@ fn run_started_retention_ref_keys(
             }
         }
     }
-    keys
+    let bootstrap_node = certified_bootstrap_run_node(runtime_spec)?;
+    for event in commit {
+        if let events::KernelEventPayload::CellProduced(payload) = event.payload() {
+            if payload.node_id == bootstrap_node.node_id
+                && payload.cell_id == bootstrap_node.output_cell
+            {
+                keys.insert((
+                    payload.artifact_id.clone(),
+                    payload.content_digest.clone(),
+                    events::ArtifactRole::StateOutput,
+                ));
+            }
+        }
+    }
+    Ok(keys)
 }
 
 fn validate_historical_retention_manifest_batch(
@@ -6951,30 +7541,35 @@ fn validate_historical_complete_run_batch(
 
     validate_complete_run_commit_payload_set(
         commit,
-        run_id,
-        runtime_spec.spec_hash(),
-        &completion,
-        &completion_node.node_id,
-        &produced.attempt_id,
-        &completion_node.output_cell,
-        &receipt_artifact_id,
-        &receipt_digest,
-        &expected_receipt_ref,
+        CompleteRunCommitValidation {
+            run_id,
+            spec_hash: runtime_spec.spec_hash(),
+            completion: &completion,
+            completion_node_id: &completion_node.node_id,
+            attempt_id: &produced.attempt_id,
+            receipt_cell_id: &completion_node.output_cell,
+            receipt_artifact_id: &receipt_artifact_id,
+            receipt_digest: &receipt_digest,
+            expected_receipt_ref: &expected_receipt_ref,
+        },
     )
 }
 
 fn validate_complete_run_commit_payload_set(
     commit: &[store::KernelEventEnvelope],
-    run_id: &RunId,
-    spec_hash: &SpecHash,
-    completion: &events::PublicOutputCompletionEvidence,
-    completion_node_id: &NodeId,
-    attempt_id: &AttemptId,
-    receipt_cell_id: &CellId,
-    receipt_artifact_id: &ArtifactId,
-    receipt_digest: &ContentDigest,
-    expected_receipt_ref: &events::ArtifactEvidenceRef,
+    expected: CompleteRunCommitValidation<'_>,
 ) -> Result<()> {
+    let CompleteRunCommitValidation {
+        run_id,
+        spec_hash,
+        completion,
+        completion_node_id,
+        attempt_id,
+        receipt_cell_id,
+        receipt_artifact_id,
+        receipt_digest,
+        expected_receipt_ref,
+    } = expected;
     if commit.len() != 5 {
         return Err(RuntimeError::InvalidRunStream(
             "CompleteRun commit does not match the sealed framework batch".to_owned(),
@@ -7039,6 +7634,27 @@ fn validate_complete_run_commit_payload_set(
     }
 }
 
+fn certified_bootstrap_run_node(runtime_spec: &CertifiedRuntimeSpec) -> Result<&spec::NodeSpec> {
+    let mut bootstrap_node = None;
+    for node_id in runtime_spec.topological_order() {
+        let node = runtime_spec.node(node_id).expect("topological node exists");
+        if matches!(
+            &node.framework,
+            Some(spec::FrameworkNodeSpec::BootstrapRun(_))
+        ) && bootstrap_node.replace(node).is_some()
+        {
+            return Err(RuntimeError::InvalidRunStream(
+                "multiple certified bootstrap framework nodes".to_owned(),
+            ));
+        }
+    }
+    bootstrap_node.ok_or_else(|| {
+        RuntimeError::InvalidRunStream(
+            "RunStarted lacks a certified BootstrapRun framework node".to_owned(),
+        )
+    })
+}
+
 fn certified_retention_manifest_node(
     runtime_spec: &CertifiedRuntimeSpec,
 ) -> Result<&spec::NodeSpec> {
@@ -7048,12 +7664,11 @@ fn certified_retention_manifest_node(
         if matches!(
             &node.framework,
             Some(spec::FrameworkNodeSpec::ProjectRetentionManifest(_))
-        ) {
-            if retention_node.replace(node).is_some() {
-                return Err(RuntimeError::InvalidRunStream(
-                    "multiple certified retention manifest framework nodes".to_owned(),
-                ));
-            }
+        ) && retention_node.replace(node).is_some()
+        {
+            return Err(RuntimeError::InvalidRunStream(
+                "multiple certified retention manifest framework nodes".to_owned(),
+            ));
         }
     }
     retention_node.ok_or_else(|| {
@@ -7070,12 +7685,11 @@ fn certified_complete_run_node(runtime_spec: &CertifiedRuntimeSpec) -> Result<&s
         if matches!(
             &node.framework,
             Some(spec::FrameworkNodeSpec::CompleteRun(_))
-        ) {
-            if completion_node.replace(node).is_some() {
-                return Err(RuntimeError::InvalidRunStream(
-                    "multiple certified completion framework nodes".to_owned(),
-                ));
-            }
+        ) && completion_node.replace(node).is_some()
+        {
+            return Err(RuntimeError::InvalidRunStream(
+                "multiple certified completion framework nodes".to_owned(),
+            ));
         }
     }
     completion_node.ok_or_else(|| {
@@ -7922,6 +8536,26 @@ fn store_artifact_from_event_ref(
     }
 }
 
+fn event_artifact_ref_from_store(
+    artifact: &store::ArtifactEvidenceRef,
+) -> Result<events::ArtifactEvidenceRef> {
+    let schema_id = artifact.schema_id.clone().ok_or_else(|| {
+        RuntimeError::InvalidRunStream(format!(
+            "artifact {} cannot be referenced without schema id",
+            artifact.artifact_id
+        ))
+    })?;
+    Ok(events::ArtifactEvidenceRef {
+        artifact_id: artifact.artifact_id.clone(),
+        role: artifact.artifact_role,
+        schema_id,
+        semantic_type_id: artifact.semantic_type_id.clone(),
+        content_digest: artifact.digest.clone(),
+        byte_len: artifact.byte_len,
+        media_type: artifact.media_type.clone(),
+    })
+}
+
 fn validate_runner_output(
     runtime_spec: &CertifiedRuntimeSpec,
     node: &spec::NodeSpec,
@@ -8608,6 +9242,9 @@ fn config_ref_key(config_ref: &spec::ConfigRef) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+
     use mfm_capabilities::CapabilityRole;
     use mfm_ids::{
         DigestBytes, EffectKind, EffectVersion, EventId, ScopeId, SeedId, SemanticTypeId,
@@ -8667,18 +9304,60 @@ mod tests {
     }
 
     #[derive(Clone)]
-    struct FailingRuntimeArtifactStager;
+    struct RecordingRuntimeArtifactStager {
+        staged: Arc<Mutex<Vec<store::ArtifactEvidenceRef>>>,
+    }
 
-    impl RuntimeArtifactStager for FailingRuntimeArtifactStager {
+    impl RuntimeArtifactStager for RecordingRuntimeArtifactStager {
         fn stage_verified_artifact<'a>(
             &'a self,
-            _bytes: Vec<u8>,
-            _evidence: store::ArtifactEvidenceRef,
+            bytes: Vec<u8>,
+            evidence: store::ArtifactEvidenceRef,
         ) -> RuntimeArtifactStageFuture<'a> {
             Box::pin(async move {
-                Err(RuntimeError::Store(
-                    "test artifact staging failure".to_owned(),
-                ))
+                verify_artifact_bytes(&bytes, &evidence)?;
+                self.staged
+                    .lock()
+                    .expect("recording stager lock")
+                    .push(evidence);
+                Ok(())
+            })
+        }
+    }
+
+    struct FailingAfterRuntimeArtifactStager {
+        remaining_successes: AtomicUsize,
+    }
+
+    impl FailingAfterRuntimeArtifactStager {
+        fn after(successes: usize) -> Self {
+            Self {
+                remaining_successes: AtomicUsize::new(successes),
+            }
+        }
+    }
+
+    impl RuntimeArtifactStager for FailingAfterRuntimeArtifactStager {
+        fn stage_verified_artifact<'a>(
+            &'a self,
+            bytes: Vec<u8>,
+            evidence: store::ArtifactEvidenceRef,
+        ) -> RuntimeArtifactStageFuture<'a> {
+            Box::pin(async move {
+                verify_artifact_bytes(&bytes, &evidence)?;
+                if self
+                    .remaining_successes
+                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                        remaining.checked_sub(1)
+                    })
+                    .is_ok()
+                {
+                    Ok(())
+                } else {
+                    Err(RuntimeError::Store(
+                        "test artifact staging failure".to_owned(),
+                    ))
+                }
             })
         }
     }
@@ -8924,14 +9603,14 @@ mod tests {
             .expect("binding b");
         let scheduler = test_scheduler(registry);
         let mut store = store::InMemoryTypedRunStore::new();
-        scheduler
-            .start_run(
-                &mut store,
-                &fixture.runtime_spec,
-                fixture.run_id.clone(),
-                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
-            )
-            .expect("start run");
+        start_fixture_run(
+            &scheduler,
+            &mut store,
+            &fixture,
+            vec![fixture.seed_ref.clone()],
+        )
+        .await
+        .expect("start run");
 
         assert_eq!(
             scheduler
@@ -8966,14 +9645,14 @@ mod tests {
         let fixture = fixture();
         let scheduler = test_scheduler(registered_fixture_runners(&fixture));
         let mut store = store::InMemoryTypedRunStore::new();
-        scheduler
-            .start_run(
-                &mut store,
-                &fixture.runtime_spec,
-                fixture.run_id.clone(),
-                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
-            )
-            .expect("start run");
+        start_fixture_run(
+            &scheduler,
+            &mut store,
+            &fixture,
+            vec![fixture.seed_ref.clone()],
+        )
+        .await
+        .expect("start run");
 
         assert_eq!(
             scheduler
@@ -9101,21 +9780,212 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn run_launch_executes_bootstrap_genesis_batch_and_stages_receipt() {
+        let fixture = fixture();
+        let staged = Arc::new(Mutex::new(Vec::new()));
+        let scheduler = test_scheduler_with_stager(
+            registered_fixture_runners(&fixture),
+            Arc::new(RecordingRuntimeArtifactStager {
+                staged: Arc::clone(&staged),
+            }),
+        );
+        let mut store = store::InMemoryTypedRunStore::new();
+
+        start_fixture_run(
+            &scheduler,
+            &mut store,
+            &fixture,
+            vec![fixture.seed_ref.clone()],
+        )
+        .await
+        .expect("start run");
+
+        let stream = store.load_run_stream(&fixture.run_id);
+        let bootstrap_node =
+            certified_bootstrap_run_node(&fixture.runtime_spec).expect("bootstrap node");
+        let first = stream.first().expect("stream event");
+        let genesis_commit = stream
+            .iter()
+            .take_while(|event| {
+                event.seq() == first.seq() && event.commit_key() == first.commit_key()
+            })
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            genesis_commit[0].payload(),
+            events::KernelEventPayload::RunStarted(_)
+        ));
+        assert_eq!(genesis_commit[0].ordinal(), store::CommitOrdinal::new(0));
+        let bootstrap_cell = genesis_commit
+            .iter()
+            .find_map(|event| match event.payload() {
+                events::KernelEventPayload::CellProduced(payload)
+                    if payload.node_id == bootstrap_node.node_id =>
+                {
+                    Some(payload)
+                }
+                _ => None,
+            })
+            .expect("bootstrap receipt cell");
+        assert_eq!(bootstrap_cell.cell_id, bootstrap_node.output_cell);
+        assert!(genesis_commit.iter().any(|event| {
+            matches!(
+                event.payload(),
+                events::KernelEventPayload::StateAttemptStarted(payload)
+                    if payload.node_id == bootstrap_node.node_id && payload.attempt_no == 1
+            )
+        }));
+        assert!(genesis_commit.iter().any(|event| {
+            matches!(
+                event.payload(),
+                events::KernelEventPayload::StateAttemptCompleted(payload)
+                    if payload.node_id == bootstrap_node.node_id
+                        && payload.attempt_id == bootstrap_cell.attempt_id
+                        && payload.output_cell_id == bootstrap_node.output_cell
+            )
+        }));
+        assert!(genesis_commit.iter().any(|event| {
+            matches!(
+                event.payload(),
+                events::KernelEventPayload::ArtifactReferenced(payload)
+                    if payload.node_id.as_ref() == Some(&bootstrap_node.node_id)
+                        && payload.attempt_id.as_ref() == Some(&bootstrap_cell.attempt_id)
+                        && payload.artifact_ref.artifact_id == bootstrap_cell.artifact_id
+                        && payload.artifact_ref.content_digest == bootstrap_cell.content_digest
+            )
+        }));
+        assert!(genesis_commit.iter().any(|event| {
+            matches!(
+                event.payload(),
+                events::KernelEventPayload::RetentionRefsAppended(payload)
+                    if payload.reason == events::RetentionReason::RunStarted
+                        && payload.refs.iter().any(|reference|
+                            reference.artifact_id == bootstrap_cell.artifact_id
+                                && reference.content_digest == bootstrap_cell.content_digest
+                                && reference.role == events::ArtifactRole::StateOutput)
+            )
+        }));
+
+        let staged = staged.lock().expect("recording stager lock");
+        assert!(staged.iter().any(|evidence| {
+            evidence.artifact_id == bootstrap_cell.artifact_id
+                && evidence.digest == bootstrap_cell.content_digest
+                && evidence.producer_node_id.as_ref() == Some(&bootstrap_node.node_id)
+                && evidence.artifact_role == events::ArtifactRole::StateOutput
+        }));
+    }
+
+    #[tokio::test]
+    async fn runtime_rejects_bootstrap_receipt_artifact_ref_metadata_tampering() {
+        let fixture = fixture();
+        let scheduler = test_scheduler(registered_fixture_runners(&fixture));
+        let mut store = store::InMemoryTypedRunStore::new();
+        start_fixture_run(
+            &scheduler,
+            &mut store,
+            &fixture,
+            vec![fixture.seed_ref.clone()],
+        )
+        .await
+        .expect("start run");
+
+        let bootstrap_node =
+            certified_bootstrap_run_node(&fixture.runtime_spec).expect("bootstrap node");
+        let valid_stream = store.load_run_stream(&fixture.run_id);
+        let artifact_ref_pos = valid_stream
+            .iter()
+            .position(|event| {
+                matches!(
+                    event.payload(),
+                    events::KernelEventPayload::ArtifactReferenced(payload)
+                        if payload.node_id.as_ref() == Some(&bootstrap_node.node_id)
+                )
+            })
+            .expect("bootstrap artifact ref");
+        let mut payload = match valid_stream[artifact_ref_pos].payload().clone() {
+            events::KernelEventPayload::ArtifactReferenced(payload) => payload,
+            _ => unreachable!("position checked"),
+        };
+        payload.artifact_ref.byte_len += 1;
+        let corrupt_stream = rewrite_commit_payload(
+            &valid_stream,
+            artifact_ref_pos,
+            events::KernelEventPayload::ArtifactReferenced(payload),
+        );
+
+        assert!(matches!(
+            validate_run_stream(&fixture.runtime_spec, &fixture.run_id, &corrupt_stream),
+            Err(RuntimeError::InvalidRunStream(message))
+                if message.contains("bootstrap receipt artifact reference")
+                    || message.contains("sealed BootstrapRun genesis commit")
+        ));
+    }
+
+    #[tokio::test]
+    async fn runtime_rejects_run_start_without_bootstrap_attempt() {
+        let fixture = fixture();
+        let scheduler = test_scheduler(registered_fixture_runners(&fixture));
+        let mut store = store::InMemoryTypedRunStore::new();
+        start_fixture_run(
+            &scheduler,
+            &mut store,
+            &fixture,
+            vec![fixture.seed_ref.clone()],
+        )
+        .await
+        .expect("start run");
+        let bootstrap_node =
+            certified_bootstrap_run_node(&fixture.runtime_spec).expect("bootstrap node");
+        let valid_stream = store.load_run_stream(&fixture.run_id);
+        assert_eq!(
+            valid_stream
+                .iter()
+                .filter(|event| matches!(
+                    event.payload(),
+                    events::KernelEventPayload::StateAttemptStarted(payload)
+                        if payload.node_id == bootstrap_node.node_id
+                ))
+                .count(),
+            1
+        );
+        let corrupt_stream = rewrite_stream_without_payloads(&valid_stream, |payload| {
+            matches!(
+                payload,
+                events::KernelEventPayload::StateAttemptStarted(payload)
+                    if payload.node_id == bootstrap_node.node_id
+            )
+        });
+        assert_eq!(corrupt_stream.len(), valid_stream.len() - 1);
+
+        assert!(matches!(
+            validate_historical_bootstrap_run_batch(
+                &fixture.runtime_spec,
+                &fixture.run_id,
+                &corrupt_stream
+            ),
+            Err(RuntimeError::InvalidRunStream(message))
+                if message.contains("unexpected payload count")
+        ));
+        assert!(
+            validate_run_stream(&fixture.runtime_spec, &fixture.run_id, &corrupt_stream).is_err()
+        );
+    }
+
+    #[tokio::test]
     async fn public_output_receipt_staging_failure_prevents_commit() {
         let fixture = fixture();
         let scheduler = test_scheduler_with_stager(
             registered_fixture_runners(&fixture),
-            Arc::new(FailingRuntimeArtifactStager),
+            Arc::new(FailingAfterRuntimeArtifactStager::after(1)),
         );
         let mut store = store::InMemoryTypedRunStore::new();
-        scheduler
-            .start_run(
-                &mut store,
-                &fixture.runtime_spec,
-                fixture.run_id.clone(),
-                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
-            )
-            .expect("start run");
+        start_fixture_run(
+            &scheduler,
+            &mut store,
+            &fixture,
+            vec![fixture.seed_ref.clone()],
+        )
+        .await
+        .expect("start run");
         scheduler
             .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
             .await
@@ -9149,14 +10019,14 @@ mod tests {
         let fixture = fixture_with_retention_lifecycle_node();
         let scheduler = test_scheduler(registered_fixture_runners(&fixture));
         let mut store = store::InMemoryTypedRunStore::new();
-        scheduler
-            .start_run(
-                &mut store,
-                &fixture.runtime_spec,
-                fixture.run_id.clone(),
-                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
-            )
-            .expect("start run");
+        start_fixture_run(
+            &scheduler,
+            &mut store,
+            &fixture,
+            vec![fixture.seed_ref.clone()],
+        )
+        .await
+        .expect("start run");
 
         let start_retention = store
             .projection_snapshot()
@@ -9263,14 +10133,14 @@ mod tests {
         let fixture = fixture_with_retention_lifecycle_node();
         let scheduler = test_scheduler(registered_fixture_runners(&fixture));
         let mut store = store::InMemoryTypedRunStore::new();
-        scheduler
-            .start_run(
-                &mut store,
-                &fixture.runtime_spec,
-                fixture.run_id.clone(),
-                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
-            )
-            .expect("start run");
+        start_fixture_run(
+            &scheduler,
+            &mut store,
+            &fixture,
+            vec![fixture.seed_ref.clone()],
+        )
+        .await
+        .expect("start run");
 
         drive_until_public_output_produced(&scheduler, &mut store, &fixture).await;
         let stale_stream = store.load_run_stream(&fixture.run_id);
@@ -9303,14 +10173,14 @@ mod tests {
         let fixture = fixture_with_retention_lifecycle_node();
         let scheduler = test_scheduler(registered_fixture_runners(&fixture));
         let mut store = store::InMemoryTypedRunStore::new();
-        scheduler
-            .start_run(
-                &mut store,
-                &fixture.runtime_spec,
-                fixture.run_id.clone(),
-                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
-            )
-            .expect("start run");
+        start_fixture_run(
+            &scheduler,
+            &mut store,
+            &fixture,
+            vec![fixture.seed_ref.clone()],
+        )
+        .await
+        .expect("start run");
 
         drive_until_public_output_produced(&scheduler, &mut store, &fixture).await;
 
@@ -9356,14 +10226,14 @@ mod tests {
         let fixture = fixture_with_retention_lifecycle_node();
         let scheduler = test_scheduler(registered_fixture_runners(&fixture));
         let mut store = store::InMemoryTypedRunStore::new();
-        scheduler
-            .start_run(
-                &mut store,
-                &fixture.runtime_spec,
-                fixture.run_id.clone(),
-                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
-            )
-            .expect("start run");
+        start_fixture_run(
+            &scheduler,
+            &mut store,
+            &fixture,
+            vec![fixture.seed_ref.clone()],
+        )
+        .await
+        .expect("start run");
         drive_until_public_output_produced(&scheduler, &mut store, &fixture).await;
 
         let retention_node =
@@ -9401,14 +10271,14 @@ mod tests {
         let fixture = fixture();
         let scheduler = test_scheduler(registered_fixture_runners(&fixture));
         let mut store = store::InMemoryTypedRunStore::new();
-        scheduler
-            .start_run(
-                &mut store,
-                &fixture.runtime_spec,
-                fixture.run_id.clone(),
-                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
-            )
-            .expect("start run");
+        start_fixture_run(
+            &scheduler,
+            &mut store,
+            &fixture,
+            vec![fixture.seed_ref.clone()],
+        )
+        .await
+        .expect("start run");
         assert_eq!(
             scheduler
                 .drive_until_blocked(&mut store, &fixture.runtime_spec, &fixture.run_id)
@@ -9441,14 +10311,14 @@ mod tests {
         let fixture = fixture();
         let scheduler = test_scheduler(registered_fixture_runners(&fixture));
         let mut store = store::InMemoryTypedRunStore::new();
-        scheduler
-            .start_run(
-                &mut store,
-                &fixture.runtime_spec,
-                fixture.run_id.clone(),
-                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
-            )
-            .expect("start run");
+        start_fixture_run(
+            &scheduler,
+            &mut store,
+            &fixture,
+            vec![fixture.seed_ref.clone()],
+        )
+        .await
+        .expect("start run");
         scheduler
             .drive_until_blocked(&mut store, &fixture.runtime_spec, &fixture.run_id)
             .await
@@ -9485,14 +10355,14 @@ mod tests {
         let fixture = fixture();
         let scheduler = test_scheduler(registered_fixture_runners(&fixture));
         let mut store = store::InMemoryTypedRunStore::new();
-        scheduler
-            .start_run(
-                &mut store,
-                &fixture.runtime_spec,
-                fixture.run_id.clone(),
-                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
-            )
-            .expect("start run");
+        start_fixture_run(
+            &scheduler,
+            &mut store,
+            &fixture,
+            vec![fixture.seed_ref.clone()],
+        )
+        .await
+        .expect("start run");
         scheduler
             .drive_until_blocked(&mut store, &fixture.runtime_spec, &fixture.run_id)
             .await
@@ -9516,14 +10386,14 @@ mod tests {
             let fixture = fixture();
             let scheduler = test_scheduler(registered_fixture_runners(&fixture));
             let mut store = store::InMemoryTypedRunStore::new();
-            scheduler
-                .start_run(
-                    &mut store,
-                    &fixture.runtime_spec,
-                    fixture.run_id.clone(),
-                    run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
-                )
-                .expect("start run");
+            start_fixture_run(
+                &scheduler,
+                &mut store,
+                &fixture,
+                vec![fixture.seed_ref.clone()],
+            )
+            .await
+            .expect("start run");
             scheduler
                 .drive_until_blocked(&mut store, &fixture.runtime_spec, &fixture.run_id)
                 .await
@@ -9573,14 +10443,14 @@ mod tests {
         let fixture = fixture();
         let scheduler = test_scheduler(registered_fixture_runners(&fixture));
         let mut store = store::InMemoryTypedRunStore::new();
-        scheduler
-            .start_run(
-                &mut store,
-                &fixture.runtime_spec,
-                fixture.run_id.clone(),
-                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
-            )
-            .expect("start run");
+        start_fixture_run(
+            &scheduler,
+            &mut store,
+            &fixture,
+            vec![fixture.seed_ref.clone()],
+        )
+        .await
+        .expect("start run");
         let mut corrupt_stream = store.load_run_stream(&fixture.run_id);
         append_payload_commit_for_tests(
             &mut corrupt_stream,
@@ -9610,14 +10480,14 @@ mod tests {
         let fixture = fixture();
         let scheduler = test_scheduler(registered_fixture_runners(&fixture));
         let mut store = store::InMemoryTypedRunStore::new();
-        scheduler
-            .start_run(
-                &mut store,
-                &fixture.runtime_spec,
-                fixture.run_id.clone(),
-                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
-            )
-            .expect("start run");
+        start_fixture_run(
+            &scheduler,
+            &mut store,
+            &fixture,
+            vec![fixture.seed_ref.clone()],
+        )
+        .await
+        .expect("start run");
 
         let valid_stream = store.load_run_stream(&fixture.run_id);
         let corrupt_stream = rewrite_stream_without_payloads(&valid_stream, |payload| {
@@ -9633,7 +10503,7 @@ mod tests {
         assert!(matches!(
             validate_run_stream(&fixture.runtime_spec, &fixture.run_id, &corrupt_stream),
             Err(RuntimeError::InvalidRunStream(message))
-                if message.contains("RunStarted commit must include")
+                if message.contains("sealed BootstrapRun genesis commit")
         ));
     }
 
@@ -9652,14 +10522,14 @@ mod tests {
             let fixture = fixture();
             let scheduler = test_scheduler(registered_fixture_runners(&fixture));
             let mut store = store::InMemoryTypedRunStore::new();
-            scheduler
-                .start_run(
-                    &mut store,
-                    &fixture.runtime_spec,
-                    fixture.run_id.clone(),
-                    run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
-                )
-                .expect("start run");
+            start_fixture_run(
+                &scheduler,
+                &mut store,
+                &fixture,
+                vec![fixture.seed_ref.clone()],
+            )
+            .await
+            .expect("start run");
             store
                 .append_prepared_commit(store::TypedCommitRequest {
                     run_id: fixture.run_id.clone(),
@@ -9698,14 +10568,14 @@ mod tests {
         let fixture = fixture();
         let scheduler = test_scheduler(registered_fixture_runners(&fixture));
         let mut store = store::InMemoryTypedRunStore::new();
-        scheduler
-            .start_run(
-                &mut store,
-                &fixture.runtime_spec,
-                fixture.run_id.clone(),
-                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
-            )
-            .expect("start run");
+        start_fixture_run(
+            &scheduler,
+            &mut store,
+            &fixture,
+            vec![fixture.seed_ref.clone()],
+        )
+        .await
+        .expect("start run");
         assert_eq!(
             scheduler
                 .drive_until_blocked(&mut store, &fixture.runtime_spec, &fixture.run_id)
@@ -9743,14 +10613,14 @@ mod tests {
         let fixture = fixture();
         let scheduler = test_scheduler(registered_fixture_runners(&fixture));
         let mut store = store::InMemoryTypedRunStore::new();
-        scheduler
-            .start_run(
-                &mut store,
-                &fixture.runtime_spec,
-                fixture.run_id.clone(),
-                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
-            )
-            .expect("start run");
+        start_fixture_run(
+            &scheduler,
+            &mut store,
+            &fixture,
+            vec![fixture.seed_ref.clone()],
+        )
+        .await
+        .expect("start run");
         drive_until_public_output_produced(&scheduler, &mut store, &fixture).await;
 
         let retention_node =
@@ -9813,14 +10683,14 @@ mod tests {
         let fixture = fixture();
         let scheduler = test_scheduler(registered_fixture_runners(&fixture));
         let mut store = store::InMemoryTypedRunStore::new();
-        scheduler
-            .start_run(
-                &mut store,
-                &fixture.runtime_spec,
-                fixture.run_id.clone(),
-                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
-            )
-            .expect("start run");
+        start_fixture_run(
+            &scheduler,
+            &mut store,
+            &fixture,
+            vec![fixture.seed_ref.clone()],
+        )
+        .await
+        .expect("start run");
         scheduler
             .drive_until_blocked(&mut store, &fixture.runtime_spec, &fixture.run_id)
             .await
@@ -9916,14 +10786,14 @@ mod tests {
         let fixture = fixture();
         let scheduler = test_scheduler(registered_fixture_runners(&fixture));
         let mut store = store::InMemoryTypedRunStore::new();
-        scheduler
-            .start_run(
-                &mut store,
-                &fixture.runtime_spec,
-                fixture.run_id.clone(),
-                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
-            )
-            .expect("start run");
+        start_fixture_run(
+            &scheduler,
+            &mut store,
+            &fixture,
+            vec![fixture.seed_ref.clone()],
+        )
+        .await
+        .expect("start run");
         scheduler
             .drive_until_blocked(&mut store, &fixture.runtime_spec, &fixture.run_id)
             .await
@@ -9992,14 +10862,14 @@ mod tests {
         let fixture = fixture();
         let scheduler = test_scheduler(registered_fixture_runners(&fixture));
         let mut store = store::InMemoryTypedRunStore::new();
-        scheduler
-            .start_run(
-                &mut store,
-                &fixture.runtime_spec,
-                fixture.run_id.clone(),
-                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
-            )
-            .expect("start run");
+        start_fixture_run(
+            &scheduler,
+            &mut store,
+            &fixture,
+            vec![fixture.seed_ref.clone()],
+        )
+        .await
+        .expect("start run");
         scheduler
             .drive_until_blocked(&mut store, &fixture.runtime_spec, &fixture.run_id)
             .await
@@ -10020,14 +10890,14 @@ mod tests {
         let fixture = fixture();
         let scheduler = test_scheduler(registered_fixture_runners(&fixture));
         let mut store = store::InMemoryTypedRunStore::new();
-        scheduler
-            .start_run(
-                &mut store,
-                &fixture.runtime_spec,
-                fixture.run_id.clone(),
-                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
-            )
-            .expect("start run");
+        start_fixture_run(
+            &scheduler,
+            &mut store,
+            &fixture,
+            vec![fixture.seed_ref.clone()],
+        )
+        .await
+        .expect("start run");
         assert_eq!(
             scheduler
                 .drive_until_blocked(&mut store, &fixture.runtime_spec, &fixture.run_id)
@@ -10065,14 +10935,14 @@ mod tests {
         let fixture = fixture();
         let scheduler = test_scheduler(registered_fixture_runners(&fixture));
         let mut store = store::InMemoryTypedRunStore::new();
-        scheduler
-            .start_run(
-                &mut store,
-                &fixture.runtime_spec,
-                fixture.run_id.clone(),
-                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
-            )
-            .expect("start run");
+        start_fixture_run(
+            &scheduler,
+            &mut store,
+            &fixture,
+            vec![fixture.seed_ref.clone()],
+        )
+        .await
+        .expect("start run");
         scheduler
             .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
             .await
@@ -10109,14 +10979,14 @@ mod tests {
         let fixture = fixture();
         let scheduler = test_scheduler(registered_fixture_runners(&fixture));
         let mut store = store::InMemoryTypedRunStore::new();
-        scheduler
-            .start_run(
-                &mut store,
-                &fixture.runtime_spec,
-                fixture.run_id.clone(),
-                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
-            )
-            .expect("start run");
+        start_fixture_run(
+            &scheduler,
+            &mut store,
+            &fixture,
+            vec![fixture.seed_ref.clone()],
+        )
+        .await
+        .expect("start run");
         scheduler
             .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
             .await
@@ -10295,8 +11165,7 @@ mod tests {
         let fixture = fixture();
 
         let mut bootstrap_envelope = fixture.runtime_spec.envelope().clone();
-        let bootstrap_receipt =
-            append_runtime_bootstrap_lifecycle_node(&mut bootstrap_envelope.spec);
+        let bootstrap_receipt = runtime_bootstrap_receipt_cell(&bootstrap_envelope.spec);
         append_runtime_user_receipt_consumer(
             &mut bootstrap_envelope.spec,
             bootstrap_receipt,
@@ -10381,10 +11250,7 @@ mod tests {
     #[test]
     fn certified_runtime_spec_accepts_lifecycle_framework_node_chain() {
         let fixture = fixture();
-        let mut envelope = fixture.runtime_spec.envelope().clone();
-        append_runtime_bootstrap_lifecycle_node(&mut envelope.spec);
-        let envelope =
-            spec::HashedSpecEnvelope::new(envelope.spec, envelope.audit).expect("rehash");
+        let envelope = fixture.runtime_spec.envelope().clone();
 
         CertifiedRuntimeSpec::from_verified_envelope(envelope)
             .expect("lifecycle framework chain is valid runtime authority");
@@ -10412,11 +11278,30 @@ mod tests {
     }
 
     #[test]
+    fn certified_runtime_spec_rejects_missing_bootstrap_lifecycle_node() {
+        let fixture = fixture();
+        let mut envelope = fixture.runtime_spec.envelope().clone();
+        envelope.spec.nodes.retain(|node| {
+            !matches!(
+                node.framework,
+                Some(spec::FrameworkNodeSpec::BootstrapRun(_))
+            )
+        });
+        let envelope =
+            spec::HashedSpecEnvelope::new(envelope.spec, envelope.audit).expect("rehash");
+
+        assert!(matches!(
+            CertifiedRuntimeSpec::from_verified_envelope(envelope),
+            Err(RuntimeError::InvalidSpec(message))
+                if message.contains("bootstrap")
+        ));
+    }
+
+    #[test]
     fn certified_runtime_spec_rejects_builtin_lifecycle_descriptors_without_framework_metadata() {
         let fixture = fixture();
 
         let mut bootstrap_envelope = fixture.runtime_spec.envelope().clone();
-        append_runtime_bootstrap_lifecycle_node(&mut bootstrap_envelope.spec);
         clear_runtime_framework_metadata(
             &mut bootstrap_envelope.spec,
             RuntimeLifecycleVariant::BootstrapRun,
@@ -10464,7 +11349,6 @@ mod tests {
         let fixture = fixture();
 
         let mut bootstrap_envelope = fixture.runtime_spec.envelope().clone();
-        append_runtime_bootstrap_lifecycle_node(&mut bootstrap_envelope.spec);
         let node = find_runtime_lifecycle_node_mut(
             &mut bootstrap_envelope.spec,
             RuntimeLifecycleVariant::BootstrapRun,
@@ -10540,14 +11424,14 @@ mod tests {
         let fixture = fixture();
         let scheduler = test_scheduler(registered_fixture_runners(&fixture));
         let mut store = store::InMemoryTypedRunStore::new();
-        scheduler
-            .start_run(
-                &mut store,
-                &fixture.runtime_spec,
-                fixture.run_id.clone(),
-                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
-            )
-            .expect("start run");
+        start_fixture_run(
+            &scheduler,
+            &mut store,
+            &fixture,
+            vec![fixture.seed_ref.clone()],
+        )
+        .await
+        .expect("start run");
         store
             .append_prepared_commit(store::TypedCommitRequest {
                 run_id: fixture.run_id.clone(),
@@ -10654,14 +11538,14 @@ mod tests {
             .expect("binding b");
         let scheduler = test_scheduler(registry);
         let mut store = store::InMemoryTypedRunStore::new();
-        scheduler
-            .start_run(
-                &mut store,
-                &fixture.runtime_spec,
-                fixture.run_id.clone(),
-                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
-            )
-            .expect("start run");
+        start_fixture_run(
+            &scheduler,
+            &mut store,
+            &fixture,
+            vec![fixture.seed_ref.clone()],
+        )
+        .await
+        .expect("start run");
         assert!(matches!(
             scheduler
                 .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
@@ -10727,14 +11611,14 @@ mod tests {
             .expect("binding b");
         let scheduler = test_scheduler(registry);
         let mut store = store::InMemoryTypedRunStore::new();
-        scheduler
-            .start_run(
-                &mut store,
-                &fixture.runtime_spec,
-                fixture.run_id.clone(),
-                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
-            )
-            .expect("start run");
+        start_fixture_run(
+            &scheduler,
+            &mut store,
+            &fixture,
+            vec![fixture.seed_ref.clone()],
+        )
+        .await
+        .expect("start run");
 
         assert!(matches!(
             scheduler
@@ -10804,14 +11688,14 @@ mod tests {
             .expect("binding b");
         let scheduler = test_scheduler(registry);
         let mut store = store::InMemoryTypedRunStore::new();
-        scheduler
-            .start_run(
-                &mut store,
-                &fixture.runtime_spec,
-                fixture.run_id.clone(),
-                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
-            )
-            .expect("start run");
+        start_fixture_run(
+            &scheduler,
+            &mut store,
+            &fixture,
+            vec![fixture.seed_ref.clone()],
+        )
+        .await
+        .expect("start run");
 
         assert!(matches!(
             scheduler
@@ -10881,14 +11765,14 @@ mod tests {
             .expect("binding b");
         let scheduler = test_scheduler(registry);
         let mut store = store::InMemoryTypedRunStore::new();
-        scheduler
-            .start_run(
-                &mut store,
-                &fixture.runtime_spec,
-                fixture.run_id.clone(),
-                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
-            )
-            .expect("start run");
+        start_fixture_run(
+            &scheduler,
+            &mut store,
+            &fixture,
+            vec![fixture.seed_ref.clone()],
+        )
+        .await
+        .expect("start run");
 
         assert!(matches!(
             scheduler
@@ -10957,14 +11841,14 @@ mod tests {
             .expect("binding b");
         let scheduler = test_scheduler(registry);
         let mut store = store::InMemoryTypedRunStore::new();
-        scheduler
-            .start_run(
-                &mut store,
-                &fixture.runtime_spec,
-                fixture.run_id.clone(),
-                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
-            )
-            .expect("start run");
+        start_fixture_run(
+            &scheduler,
+            &mut store,
+            &fixture,
+            vec![fixture.seed_ref.clone()],
+        )
+        .await
+        .expect("start run");
 
         assert_eq!(
             scheduler
@@ -11053,14 +11937,14 @@ mod tests {
                 .expect("binding b");
             let scheduler = test_scheduler(registry);
             let mut store = store::InMemoryTypedRunStore::new();
-            scheduler
-                .start_run(
-                    &mut store,
-                    &fixture.runtime_spec,
-                    fixture.run_id.clone(),
-                    run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
-                )
-                .expect("start run");
+            start_fixture_run(
+                &scheduler,
+                &mut store,
+                &fixture,
+                vec![fixture.seed_ref.clone()],
+            )
+            .await
+            .expect("start run");
             append_attempt_start(&mut store, &fixture, &node, 1);
             let stream_before = store.load_run_stream(&fixture.run_id);
 
@@ -11138,14 +12022,14 @@ mod tests {
             .expect("binding b");
         let scheduler = test_scheduler(registry);
         let mut store = store::InMemoryTypedRunStore::new();
-        scheduler
-            .start_run(
-                &mut store,
-                &fixture.runtime_spec,
-                fixture.run_id.clone(),
-                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
-            )
-            .expect("start run");
+        start_fixture_run(
+            &scheduler,
+            &mut store,
+            &fixture,
+            vec![fixture.seed_ref.clone()],
+        )
+        .await
+        .expect("start run");
         assert_eq!(
             scheduler
                 .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
@@ -11254,14 +12138,14 @@ mod tests {
             .expect("binding b");
         let scheduler = test_scheduler(registry);
         let mut store = store::InMemoryTypedRunStore::new();
-        scheduler
-            .start_run(
-                &mut store,
-                &fixture.runtime_spec,
-                fixture.run_id.clone(),
-                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
-            )
-            .expect("start run");
+        start_fixture_run(
+            &scheduler,
+            &mut store,
+            &fixture,
+            vec![fixture.seed_ref.clone()],
+        )
+        .await
+        .expect("start run");
 
         assert!(matches!(
             scheduler
@@ -11359,14 +12243,14 @@ mod tests {
             .expect("binding b");
         let scheduler = test_scheduler(registry);
         let mut store = store::InMemoryTypedRunStore::new();
-        scheduler
-            .start_run(
-                &mut store,
-                &fixture.runtime_spec,
-                fixture.run_id.clone(),
-                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
-            )
-            .expect("start run");
+        start_fixture_run(
+            &scheduler,
+            &mut store,
+            &fixture,
+            vec![fixture.seed_ref.clone()],
+        )
+        .await
+        .expect("start run");
 
         assert!(matches!(
             scheduler
@@ -11429,14 +12313,14 @@ mod tests {
             .expect("binding b");
         let scheduler = test_scheduler(registry);
         let mut store = store::InMemoryTypedRunStore::new();
-        scheduler
-            .start_run(
-                &mut store,
-                &fixture.runtime_spec,
-                fixture.run_id.clone(),
-                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
-            )
-            .expect("start run");
+        start_fixture_run(
+            &scheduler,
+            &mut store,
+            &fixture,
+            vec![fixture.seed_ref.clone()],
+        )
+        .await
+        .expect("start run");
 
         assert!(matches!(
             scheduler
@@ -11511,14 +12395,14 @@ mod tests {
             .expect("binding b");
         let scheduler = test_scheduler(registry);
         let mut store = store::InMemoryTypedRunStore::new();
-        scheduler
-            .start_run(
-                &mut store,
-                &fixture.runtime_spec,
-                fixture.run_id.clone(),
-                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
-            )
-            .expect("start run");
+        start_fixture_run(
+            &scheduler,
+            &mut store,
+            &fixture,
+            vec![fixture.seed_ref.clone()],
+        )
+        .await
+        .expect("start run");
         let attempt_id = append_attempt_start(&mut store, &fixture, &node, 1);
 
         assert!(matches!(
@@ -11592,14 +12476,9 @@ mod tests {
         let mut seed = fixture.seed_ref.clone();
         seed.digest = content(0xee);
         let scheduler = test_scheduler(registered_fixture_runners(&fixture));
-        let mut store = store::InMemoryTypedRunStore::new();
+        let store = store::InMemoryTypedRunStore::new();
         assert!(matches!(
-            scheduler.start_run(
-                &mut store,
-                &fixture.runtime_spec,
-                fixture.run_id.clone(),
-                run_start_evidence(&fixture, vec![seed]),
-            ),
+            prepare_fixture_launch(&scheduler, &store, &fixture, vec![seed],),
             Err(RuntimeError::InvalidRunStream(_))
         ));
     }
@@ -11608,15 +12487,15 @@ mod tests {
     fn run_start_rejects_missing_config_artifact_evidence() {
         let fixture = fixture();
         let scheduler = test_scheduler(registered_fixture_runners(&fixture));
-        let mut store = store::InMemoryTypedRunStore::new();
+        let store = store::InMemoryTypedRunStore::new();
         let mut evidence = run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]);
         evidence.config_artifacts.clear();
         assert!(matches!(
-            scheduler.start_run(
-                &mut store,
+            scheduler.prepare_run_launch(
                 &fixture.runtime_spec,
                 fixture.run_id.clone(),
                 evidence,
+                store.expected_next_seq(&fixture.run_id),
             ),
             Err(RuntimeError::InvalidRunStream(_))
         ));
@@ -11627,14 +12506,14 @@ mod tests {
         let fixture = fixture();
         let scheduler = test_scheduler(registered_fixture_runners(&fixture));
         let mut store = store::InMemoryTypedRunStore::new();
-        scheduler
-            .start_run(
-                &mut store,
-                &fixture.runtime_spec,
-                fixture.run_id.clone(),
-                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
-            )
-            .expect("start run");
+        start_fixture_run(
+            &scheduler,
+            &mut store,
+            &fixture,
+            vec![fixture.seed_ref.clone()],
+        )
+        .await
+        .expect("start run");
 
         let valid_stream = store.load_run_stream(&fixture.run_id);
         let config_ref_pos = valid_stream
@@ -11667,7 +12546,7 @@ mod tests {
                 .drive_once(&mut corrupt_store, &fixture.runtime_spec, &fixture.run_id)
                 .await,
             Err(RuntimeError::InvalidRunStream(message))
-                if message.contains("run-start retention refs")
+                if message.contains("sealed BootstrapRun genesis commit")
         ));
     }
 
@@ -11676,14 +12555,14 @@ mod tests {
         let fixture = fixture();
         let scheduler = test_scheduler(registered_fixture_runners(&fixture));
         let mut store = store::InMemoryTypedRunStore::new();
-        scheduler
-            .start_run(
-                &mut store,
-                &fixture.runtime_spec,
-                fixture.run_id.clone(),
-                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
-            )
-            .expect("start run");
+        start_fixture_run(
+            &scheduler,
+            &mut store,
+            &fixture,
+            vec![fixture.seed_ref.clone()],
+        )
+        .await
+        .expect("start run");
 
         let valid_stream = store.load_run_stream(&fixture.run_id);
         let config_ref = valid_stream
@@ -11720,7 +12599,7 @@ mod tests {
                 .drive_once(&mut corrupt_store, &fixture.runtime_spec, &fixture.run_id)
                 .await,
             Err(RuntimeError::InvalidRunStream(message))
-                if message.contains("run-start retention refs")
+                if message.contains("sealed BootstrapRun genesis commit")
         ));
     }
 
@@ -11729,14 +12608,14 @@ mod tests {
         let fixture = fixture();
         let scheduler = test_scheduler(registered_fixture_runners(&fixture));
         let mut store = store::InMemoryTypedRunStore::new();
-        scheduler
-            .start_run(
-                &mut store,
-                &fixture.runtime_spec,
-                fixture.run_id.clone(),
-                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
-            )
-            .expect("start run");
+        start_fixture_run(
+            &scheduler,
+            &mut store,
+            &fixture,
+            vec![fixture.seed_ref.clone()],
+        )
+        .await
+        .expect("start run");
         scheduler
             .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
             .await
@@ -11776,14 +12655,14 @@ mod tests {
         let fixture = fixture();
         let scheduler = test_scheduler(registered_fixture_runners(&fixture));
         let mut store = store::InMemoryTypedRunStore::new();
-        scheduler
-            .start_run(
-                &mut store,
-                &fixture.runtime_spec,
-                fixture.run_id.clone(),
-                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
-            )
-            .expect("start run");
+        start_fixture_run(
+            &scheduler,
+            &mut store,
+            &fixture,
+            vec![fixture.seed_ref.clone()],
+        )
+        .await
+        .expect("start run");
         scheduler
             .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
             .await
@@ -11841,14 +12720,14 @@ mod tests {
         let fixture = fixture();
         let scheduler = test_scheduler(registered_fixture_runners(&fixture));
         let mut store = store::InMemoryTypedRunStore::new();
-        scheduler
-            .start_run(
-                &mut store,
-                &fixture.runtime_spec,
-                fixture.run_id.clone(),
-                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
-            )
-            .expect("start run");
+        start_fixture_run(
+            &scheduler,
+            &mut store,
+            &fixture,
+            vec![fixture.seed_ref.clone()],
+        )
+        .await
+        .expect("start run");
 
         let node = node_by_output(&fixture, &fixture.cell_a);
         let artifact = store::ArtifactEvidenceRef {
@@ -11893,14 +12772,14 @@ mod tests {
         let fixture = fixture();
         let scheduler = test_scheduler(registered_fixture_runners(&fixture));
         let mut store = store::InMemoryTypedRunStore::new();
-        scheduler
-            .start_run(
-                &mut store,
-                &fixture.runtime_spec,
-                fixture.run_id.clone(),
-                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
-            )
-            .expect("start run");
+        start_fixture_run(
+            &scheduler,
+            &mut store,
+            &fixture,
+            vec![fixture.seed_ref.clone()],
+        )
+        .await
+        .expect("start run");
 
         let forged_node = fixture
             .runtime_spec
@@ -11999,19 +12878,19 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn store_rejects_fact_without_started_attempt() {
+    #[tokio::test]
+    async fn store_rejects_fact_without_started_attempt() {
         let fixture = fixture();
         let scheduler = test_scheduler(registered_fixture_runners(&fixture));
         let mut store = store::InMemoryTypedRunStore::new();
-        scheduler
-            .start_run(
-                &mut store,
-                &fixture.runtime_spec,
-                fixture.run_id.clone(),
-                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
-            )
-            .expect("start run");
+        start_fixture_run(
+            &scheduler,
+            &mut store,
+            &fixture,
+            vec![fixture.seed_ref.clone()],
+        )
+        .await
+        .expect("start run");
         let node = fixture
             .runtime_spec
             .topological_order()
@@ -12073,14 +12952,14 @@ mod tests {
         let fixture = fixture();
         let scheduler = test_scheduler(registered_fixture_runners(&fixture));
         let mut store = store::InMemoryTypedRunStore::new();
-        scheduler
-            .start_run(
-                &mut store,
-                &fixture.runtime_spec,
-                fixture.run_id.clone(),
-                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
-            )
-            .expect("start run");
+        start_fixture_run(
+            &scheduler,
+            &mut store,
+            &fixture,
+            vec![fixture.seed_ref.clone()],
+        )
+        .await
+        .expect("start run");
         let non_render_node = fixture
             .runtime_spec
             .topological_order()
@@ -12232,14 +13111,14 @@ mod tests {
         let fixture = fixture();
         let scheduler = test_scheduler(registered_fixture_runners(&fixture));
         let mut store = store::InMemoryTypedRunStore::new();
-        scheduler
-            .start_run(
-                &mut store,
-                &fixture.runtime_spec,
-                fixture.run_id.clone(),
-                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
-            )
-            .expect("start run");
+        start_fixture_run(
+            &scheduler,
+            &mut store,
+            &fixture,
+            vec![fixture.seed_ref.clone()],
+        )
+        .await
+        .expect("start run");
         scheduler
             .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
             .await
@@ -12384,14 +13263,14 @@ mod tests {
         let fixture = fixture();
         let scheduler = test_scheduler(registered_fixture_runners(&fixture));
         let mut store = store::InMemoryTypedRunStore::new();
-        scheduler
-            .start_run(
-                &mut store,
-                &fixture.runtime_spec,
-                fixture.run_id.clone(),
-                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
-            )
-            .expect("start run");
+        start_fixture_run(
+            &scheduler,
+            &mut store,
+            &fixture,
+            vec![fixture.seed_ref.clone()],
+        )
+        .await
+        .expect("start run");
         scheduler
             .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
             .await
@@ -12428,14 +13307,14 @@ mod tests {
         let fixture = fixture();
         let scheduler = test_scheduler(registered_fixture_runners(&fixture));
         let mut store = store::InMemoryTypedRunStore::new();
-        scheduler
-            .start_run(
-                &mut store,
-                &fixture.runtime_spec,
-                fixture.run_id.clone(),
-                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
-            )
-            .expect("start run");
+        start_fixture_run(
+            &scheduler,
+            &mut store,
+            &fixture,
+            vec![fixture.seed_ref.clone()],
+        )
+        .await
+        .expect("start run");
         let node = node_by_output(&fixture, &fixture.cell_a);
         let attempt_id = append_attempt_start(&mut store, &fixture, node, 1);
 
@@ -12468,14 +13347,14 @@ mod tests {
         let fixture = fixture();
         let scheduler = test_scheduler(registered_fixture_runners(&fixture));
         let mut store = store::InMemoryTypedRunStore::new();
-        scheduler
-            .start_run(
-                &mut store,
-                &fixture.runtime_spec,
-                fixture.run_id.clone(),
-                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
-            )
-            .expect("start run");
+        start_fixture_run(
+            &scheduler,
+            &mut store,
+            &fixture,
+            vec![fixture.seed_ref.clone()],
+        )
+        .await
+        .expect("start run");
         scheduler
             .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
             .await
@@ -12506,14 +13385,14 @@ mod tests {
         let fixture = fixture();
         let scheduler = test_scheduler(registered_fixture_runners(&fixture));
         let mut store = store::InMemoryTypedRunStore::new();
-        scheduler
-            .start_run(
-                &mut store,
-                &fixture.runtime_spec,
-                fixture.run_id.clone(),
-                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
-            )
-            .expect("start run");
+        start_fixture_run(
+            &scheduler,
+            &mut store,
+            &fixture,
+            vec![fixture.seed_ref.clone()],
+        )
+        .await
+        .expect("start run");
         let node_a = node_by_output(&fixture, &fixture.cell_a);
         let node_b = node_by_output(&fixture, &fixture.cell_b);
         append_attempt_start(&mut store, &fixture, node_b, 1);
@@ -12605,14 +13484,14 @@ mod tests {
             .expect("binding b");
         let scheduler = test_scheduler(registry);
         let mut store = store::InMemoryTypedRunStore::new();
-        scheduler
-            .start_run(
-                &mut store,
-                &fixture.runtime_spec,
-                fixture.run_id.clone(),
-                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
-            )
-            .expect("start run");
+        start_fixture_run(
+            &scheduler,
+            &mut store,
+            &fixture,
+            vec![fixture.seed_ref.clone()],
+        )
+        .await
+        .expect("start run");
         scheduler
             .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
             .await
@@ -12707,14 +13586,14 @@ mod tests {
             .expect("binding b");
         let scheduler = test_scheduler(registry);
         let mut store = store::InMemoryTypedRunStore::new();
-        scheduler
-            .start_run(
-                &mut store,
-                &fixture.runtime_spec,
-                fixture.run_id.clone(),
-                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
-            )
-            .expect("start run");
+        start_fixture_run(
+            &scheduler,
+            &mut store,
+            &fixture,
+            vec![fixture.seed_ref.clone()],
+        )
+        .await
+        .expect("start run");
         scheduler
             .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
             .await
@@ -12777,14 +13656,14 @@ mod tests {
             .expect("binding b");
         let scheduler = test_scheduler(registry);
         let mut store = store::InMemoryTypedRunStore::new();
-        scheduler
-            .start_run(
-                &mut store,
-                &fixture.runtime_spec,
-                fixture.run_id.clone(),
-                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
-            )
-            .expect("start run");
+        start_fixture_run(
+            &scheduler,
+            &mut store,
+            &fixture,
+            vec![fixture.seed_ref.clone()],
+        )
+        .await
+        .expect("start run");
         let attempt_id = append_attempt_start(&mut store, &fixture, node, 1);
         assert!(store
             .projection_snapshot()
@@ -12817,14 +13696,14 @@ mod tests {
         let fixture = fixture_with_first_side_effect_state();
         let scheduler = test_scheduler(registered_side_effect_fixture_runners(&fixture));
         let mut store = store::InMemoryTypedRunStore::new();
-        scheduler
-            .start_run(
-                &mut store,
-                &fixture.runtime_spec,
-                fixture.run_id.clone(),
-                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
-            )
-            .expect("start run");
+        start_fixture_run(
+            &scheduler,
+            &mut store,
+            &fixture,
+            vec![fixture.seed_ref.clone()],
+        )
+        .await
+        .expect("start run");
 
         for _ in 0..6 {
             assert_eq!(
@@ -12874,14 +13753,14 @@ mod tests {
         let fixture = fixture_with_first_side_effect_state();
         let scheduler = test_scheduler(registered_side_effect_fixture_runners(&fixture));
         let mut store = store::InMemoryTypedRunStore::new();
-        scheduler
-            .start_run(
-                &mut store,
-                &fixture.runtime_spec,
-                fixture.run_id.clone(),
-                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
-            )
-            .expect("start run");
+        start_fixture_run(
+            &scheduler,
+            &mut store,
+            &fixture,
+            vec![fixture.seed_ref.clone()],
+        )
+        .await
+        .expect("start run");
         scheduler
             .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
             .await
@@ -13020,14 +13899,14 @@ mod tests {
             .expect("binding b");
         let scheduler = test_scheduler(registry);
         let mut store = store::InMemoryTypedRunStore::new();
-        scheduler
-            .start_run(
-                &mut store,
-                &fixture.runtime_spec,
-                fixture.run_id.clone(),
-                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
-            )
-            .expect("start run");
+        start_fixture_run(
+            &scheduler,
+            &mut store,
+            &fixture,
+            vec![fixture.seed_ref.clone()],
+        )
+        .await
+        .expect("start run");
 
         assert!(matches!(
             scheduler
@@ -13062,14 +13941,14 @@ mod tests {
             .expect("binding b");
         let scheduler = test_scheduler(registry);
         let mut store = store::InMemoryTypedRunStore::new();
-        scheduler
-            .start_run(
-                &mut store,
-                &fixture.runtime_spec,
-                fixture.run_id.clone(),
-                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
-            )
-            .expect("start run");
+        start_fixture_run(
+            &scheduler,
+            &mut store,
+            &fixture,
+            vec![fixture.seed_ref.clone()],
+        )
+        .await
+        .expect("start run");
 
         for _ in 0..3 {
             assert_eq!(
@@ -13117,14 +13996,14 @@ mod tests {
             .expect("binding b");
         let scheduler = test_scheduler(registry);
         let mut store = store::InMemoryTypedRunStore::new();
-        scheduler
-            .start_run(
-                &mut store,
-                &fixture.runtime_spec,
-                fixture.run_id.clone(),
-                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
-            )
-            .expect("start run");
+        start_fixture_run(
+            &scheduler,
+            &mut store,
+            &fixture,
+            vec![fixture.seed_ref.clone()],
+        )
+        .await
+        .expect("start run");
 
         for _ in 0..3 {
             scheduler
@@ -13172,14 +14051,14 @@ mod tests {
             .expect("binding b");
         let scheduler = test_scheduler(registry);
         let mut store = store::InMemoryTypedRunStore::new();
-        scheduler
-            .start_run(
-                &mut store,
-                &fixture.runtime_spec,
-                fixture.run_id.clone(),
-                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
-            )
-            .expect("start run");
+        start_fixture_run(
+            &scheduler,
+            &mut store,
+            &fixture,
+            vec![fixture.seed_ref.clone()],
+        )
+        .await
+        .expect("start run");
 
         assert!(matches!(
             scheduler
@@ -13213,14 +14092,14 @@ mod tests {
             .expect("binding b");
         let scheduler = test_scheduler(registry);
         let mut store = store::InMemoryTypedRunStore::new();
-        scheduler
-            .start_run(
-                &mut store,
-                &fixture.runtime_spec,
-                fixture.run_id.clone(),
-                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
-            )
-            .expect("start run");
+        start_fixture_run(
+            &scheduler,
+            &mut store,
+            &fixture,
+            vec![fixture.seed_ref.clone()],
+        )
+        .await
+        .expect("start run");
 
         assert!(matches!(
             scheduler
@@ -14085,11 +14964,35 @@ mod tests {
         EventId::from_digest(DigestAlgorithm::Sha256JcsV1, canonical.digest_bytes())
     }
 
+    fn prepare_fixture_launch(
+        scheduler: &SerialTypedScheduler,
+        store: &store::InMemoryTypedRunStore,
+        fixture: &Fixture,
+        seed_cells: Vec<events::SeedCellRef>,
+    ) -> Result<PreparedRunLaunch> {
+        scheduler.prepare_run_launch(
+            &fixture.runtime_spec,
+            fixture.run_id.clone(),
+            run_start_evidence(fixture, seed_cells),
+            store.expected_next_seq(&fixture.run_id),
+        )
+    }
+
+    async fn start_fixture_run(
+        scheduler: &SerialTypedScheduler,
+        store: &mut store::InMemoryTypedRunStore,
+        fixture: &Fixture,
+        seed_cells: Vec<events::SeedCellRef>,
+    ) -> Result<store::CommitOutcome> {
+        let launch = prepare_fixture_launch(scheduler, store, fixture, seed_cells)?;
+        scheduler.start_run(store, launch).await
+    }
+
     fn run_start_evidence(
         fixture: &Fixture,
         seed_cells: Vec<events::SeedCellRef>,
-    ) -> RunStartEvidence {
-        RunStartEvidence {
+    ) -> RunLaunchEvidence {
+        RunLaunchEvidence {
             spec_artifact: spec_artifact(&fixture.runtime_spec),
             certificate_artifact: certificate_artifact(&fixture.runtime_spec),
             config_artifacts: fixture
@@ -14698,6 +15601,21 @@ mod tests {
                 )
             })
             .expect("render node")
+            .output_cell
+            .clone()
+    }
+
+    fn runtime_bootstrap_receipt_cell(typed: &spec::TypedExecutionSpec) -> CellId {
+        typed
+            .nodes
+            .iter()
+            .find(|node| {
+                matches!(
+                    node.framework,
+                    Some(spec::FrameworkNodeSpec::BootstrapRun(_))
+                )
+            })
+            .expect("bootstrap node")
             .output_cell
             .clone()
     }
@@ -15668,6 +16586,7 @@ mod tests {
             public_outputs,
         })
         .expect("typed spec");
+        append_runtime_bootstrap_lifecycle_node(&mut spec);
         append_runtime_retention_lifecycle_node(&mut spec, render_cell.clone(), true);
         let retention_receipt = runtime_retention_receipt_cell(&spec);
         append_runtime_complete_lifecycle_node(&mut spec, retention_receipt, true);

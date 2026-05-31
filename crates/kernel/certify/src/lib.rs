@@ -884,6 +884,7 @@ impl<'a> DraftLowerer<'a> {
     fn lower(&mut self) -> Result<spec::TypedExecutionSpec> {
         let scopes = self.lower_scopes()?;
         let seeds = self.lower_seeds()?;
+        self.lower_bootstrap_run_node()?;
         self.lower_state_nodes()?;
         self.lower_bridge_nodes()?;
         let public_outputs = self.lower_public_outputs()?;
@@ -902,6 +903,86 @@ impl<'a> DraftLowerer<'a> {
             public_outputs,
         })
         .map_err(|error| CertifyError::Spec(error.to_string()))
+    }
+
+    fn lower_bootstrap_run_node(&mut self) -> Result<CellId> {
+        let stable_key = stable_author_key("framework/bootstrap-run")?;
+        let node_id =
+            bootstrap_run_node_id_from_spec(self.draft.root_scope_id(), stable_key.as_str())?;
+        let semantic_type_id = spec::bootstrap_run_receipt_semantic_type_id()
+            .map_err(|error| CertifyError::Spec(error.to_string()))?;
+        let receipt_schema_id = spec::bootstrap_run_receipt_schema_id()
+            .map_err(|error| CertifyError::Spec(error.to_string()))?;
+        let output_cell = framework_cell_id(
+            self.draft.root_scope_id(),
+            &node_id,
+            &semantic_type_id,
+            &receipt_schema_id,
+        )?;
+        let config_ref = framework_config_ref("bootstrap_run", &node_id)?;
+        let config_ref_digest = config_ref_digest(&config_ref)?;
+        let input_binding = spec::framework_lifecycle_unit_input_binding("bootstrap_run")
+            .map_err(|error| CertifyError::Spec(error.to_string()))?;
+        let descriptor = framework_bootstrap_run_descriptor(
+            &receipt_schema_id,
+            &semantic_type_id,
+            &config_ref.schema_id,
+            &input_binding.input_schema_id,
+        )?;
+        let planning_lineage = empty_planning_lineage()?;
+        let lineage_ref = render_value_lineage_ref(
+            self.draft.root_scope_id(),
+            &node_id,
+            &[],
+            &planning_lineage,
+            &config_ref_digest,
+        )?;
+        self.insert_config_ref(config_ref.clone())?;
+        self.insert_descriptor(spec::DescriptorIdentity::State(Box::new(
+            descriptor.clone(),
+        )))?;
+        self.insert_value_lineage(spec::ValueLineage {
+            lineage_ref: lineage_ref.clone(),
+            scope_id: self.draft.root_scope_id().clone(),
+            producer: spec::CellProducer::Node(node_id.clone()),
+            input_cells: Vec::new(),
+            config_ref_digest: Some(config_ref_digest),
+            planning_lineage: planning_lineage.clone(),
+            domain_keys: Vec::new(),
+            transform_policy: spec::LineageTransformPolicy::StateOutput,
+        })?;
+        self.insert_cell(spec::CellSpec {
+            cell_id: output_cell.clone(),
+            producer: spec::CellProducer::Node(node_id.clone()),
+            scope_id: self.draft.root_scope_id().clone(),
+            semantic_type_id,
+            schema_id: receipt_schema_id,
+            value_lineage: lineage_ref,
+            terminal_policy: spec::CellTerminalPolicy::ProducedOnly,
+            storage_policy: spec::StoragePolicy::ContentAddressed,
+            redaction_policy: spec::RedactionPolicy::Public,
+        })?;
+        self.nodes.push(spec::NodeSpec {
+            node_id,
+            stable_key,
+            scope_id: self.draft.root_scope_id().clone(),
+            state_kind: descriptor.state_kind,
+            state_version: descriptor.state_version,
+            descriptor_id: descriptor.descriptor_id,
+            config_ref,
+            input_bindings: input_binding,
+            output_cell: output_cell.clone(),
+            effect_kind: descriptor.effect_kind,
+            capability_bindings: descriptor.capabilities,
+            adapter_bindings: Vec::new(),
+            side_effect: None,
+            framework: Some(spec::FrameworkNodeSpec::BootstrapRun(
+                spec::BootstrapRunNodeSpec {},
+            )),
+            planning_lineage,
+            deterministic_predecessors: Vec::new(),
+        });
+        Ok(output_cell)
     }
 
     fn lower_scopes(&self) -> Result<Vec<spec::ScopeSpec>> {
@@ -3021,10 +3102,12 @@ fn validate_framework_nodes(
             ),
         ));
     }
-    if bootstrap_count > 1 {
+    if bootstrap_count != 1 {
         return Err(problem(
             ProblemClass::InvalidTopology,
-            "duplicate lifecycle framework nodes are not allowed".to_owned(),
+            format!(
+                "expected exactly one bootstrap lifecycle framework node, found {bootstrap_count}"
+            ),
         ));
     }
     validate_lifecycle_tail_finality(nodes, &nodes_by_id)?;
@@ -5276,12 +5359,16 @@ mod tests {
         );
         assert_eq!(
             certified.certificate_hash().as_str(),
-            "content:sha256-jcs-v1:de6e1449420492c1391281d6898b9cf0ee3af3c81821d66c448f549075f7a4b7"
+            "content:sha256-jcs-v1:4495a24765acf313c10e43fbf7a9b85f6b3a1b3b6023905e9d99e7d41cdeaba2"
         );
         assert_eq!(
             certified.envelope().spec.public_outputs.public_schema_id,
             expected_public_schema
         );
+        assert!(certified.envelope().spec.nodes.iter().any(|node| matches!(
+            node.framework,
+            Some(spec::FrameworkNodeSpec::BootstrapRun(_))
+        )));
         assert!(certified.envelope().spec.nodes.iter().any(|node| matches!(
             node.framework,
             Some(spec::FrameworkNodeSpec::PublicOutputRender(_))
@@ -5402,7 +5489,17 @@ mod tests {
             &base,
             ProblemClass::InvalidInterfaceWiring,
             |spec| {
-                let first_input = match &mut spec.nodes[0].input_bindings.root {
+                let node = spec
+                    .nodes
+                    .iter_mut()
+                    .find(|node| {
+                        matches!(
+                            node.input_bindings.root,
+                            spec::InputBindingNodeSpec::Cell(_)
+                        )
+                    })
+                    .expect("cell-input node");
+                let first_input = match &mut node.input_bindings.root {
                     spec::InputBindingNodeSpec::Cell(cell) => cell,
                     _ => panic!("expected cell input"),
                 };
@@ -5413,8 +5510,8 @@ mod tests {
                     digest_byte(0x44),
                 )
                 .expect("schema id");
-                spec.nodes[0].input_bindings.digest =
-                    content_digest_json(input_node_json(&spec.nodes[0].input_bindings.root))
+                node.input_bindings.digest =
+                    content_digest_json(input_node_json(&node.input_bindings.root))
                         .expect("input digest");
             },
         );
@@ -5506,12 +5603,10 @@ mod tests {
     fn certification_accepts_valid_lifecycle_framework_node_shapes() {
         let draft = reference_draft();
         let registry = CertificationRegistry::from_program_draft(&draft).expect("registry");
-        let mut spec = certify_program_draft(&draft)
+        let spec = certify_program_draft(&draft)
             .expect("certified")
             .spec()
             .clone();
-
-        append_bootstrap_lifecycle_node(&mut spec);
 
         certify_typed_spec(spec, &registry).expect("lifecycle framework nodes certify");
     }
@@ -5530,6 +5625,25 @@ mod tests {
                 !matches!(
                     node.framework,
                     Some(spec::FrameworkNodeSpec::ProjectRetentionManifest(_))
+                )
+            });
+        });
+    }
+
+    #[test]
+    fn certification_rejects_missing_bootstrap_lifecycle_node() {
+        let draft = reference_draft();
+        let registry = CertificationRegistry::from_program_draft(&draft).expect("registry");
+        let base = certify_program_draft(&draft)
+            .expect("certified")
+            .spec()
+            .clone();
+
+        assert_rejects(&registry, &base, ProblemClass::InvalidTopology, |spec| {
+            spec.nodes.retain(|node| {
+                !matches!(
+                    node.framework,
+                    Some(spec::FrameworkNodeSpec::BootstrapRun(_))
                 )
             });
         });
@@ -5635,7 +5749,6 @@ mod tests {
             &base,
             ProblemClass::InvalidSemanticTransition,
             |spec| {
-                append_bootstrap_lifecycle_node(spec);
                 let node = spec
                     .nodes
                     .iter_mut()
@@ -5672,7 +5785,7 @@ mod tests {
             .clone();
 
         assert_rejects(&registry, &base, ProblemClass::InvalidTopology, |spec| {
-            let bootstrap_receipt = append_bootstrap_lifecycle_node(spec);
+            let bootstrap_receipt = lifecycle_bootstrap_receipt_cell(spec);
             append_user_receipt_consumer(spec, bootstrap_receipt, "user/bootstrap-receipt");
         });
         assert_rejects(&registry, &base, ProblemClass::InvalidTopology, |spec| {
@@ -5713,7 +5826,6 @@ mod tests {
             &base,
             ProblemClass::InvalidSemanticTransition,
             |spec| {
-                append_bootstrap_lifecycle_node(spec);
                 let node = spec
                     .nodes
                     .iter_mut()
@@ -5743,7 +5855,6 @@ mod tests {
             &base,
             ProblemClass::InvalidSemanticTransition,
             |spec| {
-                append_bootstrap_lifecycle_node(spec);
                 clear_lifecycle_framework_metadata::<spec::BootstrapRunNodeSpec>(spec);
             },
         );
@@ -5779,7 +5890,6 @@ mod tests {
             &base,
             ProblemClass::InvalidInterfaceWiring,
             |spec| {
-                append_bootstrap_lifecycle_node(spec);
                 let node = find_lifecycle_node_mut::<spec::BootstrapRunNodeSpec>(spec);
                 node.input_bindings.input_descriptor_id =
                     DescriptorId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_byte(0xa2));
@@ -5982,6 +6092,21 @@ mod tests {
             .clone()
     }
 
+    fn lifecycle_bootstrap_receipt_cell(typed: &spec::TypedExecutionSpec) -> CellId {
+        typed
+            .nodes
+            .iter()
+            .find(|node| {
+                matches!(
+                    node.framework,
+                    Some(spec::FrameworkNodeSpec::BootstrapRun(_))
+                )
+            })
+            .expect("bootstrap node")
+            .output_cell
+            .clone()
+    }
+
     fn lifecycle_retention_receipt_cell(typed: &spec::TypedExecutionSpec) -> CellId {
         typed
             .nodes
@@ -6036,54 +6161,6 @@ mod tests {
         typed: &mut spec::TypedExecutionSpec,
     ) {
         find_lifecycle_node_mut::<T>(typed).framework = None;
-    }
-
-    fn append_bootstrap_lifecycle_node(typed: &mut spec::TypedExecutionSpec) -> CellId {
-        let scope_id = typed.scopes[0].scope_id.clone();
-        let stable_key =
-            spec::StableAuthorKey::new("framework/bootstrap-run").expect("bootstrap stable key");
-        let node_id =
-            bootstrap_run_node_id_from_spec(&scope_id, stable_key.as_str()).expect("node id");
-        let receipt_schema =
-            spec::bootstrap_run_receipt_schema_id().expect("bootstrap receipt schema");
-        let receipt_semantic =
-            spec::bootstrap_run_receipt_semantic_type_id().expect("bootstrap receipt semantic");
-        let output_cell =
-            framework_cell_id(&scope_id, &node_id, &receipt_semantic, &receipt_schema)
-                .expect("bootstrap output cell");
-        let config_ref = framework_config_ref("bootstrap_run", &node_id).expect("config ref");
-        let config_digest = config_ref_digest(&config_ref).expect("config digest");
-        let input_binding =
-            spec::framework_lifecycle_unit_input_binding("bootstrap_run").expect("input binding");
-        let descriptor = framework_bootstrap_run_descriptor(
-            &receipt_schema,
-            &receipt_semantic,
-            &config_ref.schema_id,
-            &input_binding.input_schema_id,
-        )
-        .expect("bootstrap descriptor");
-        let planning_lineage = typed.scopes[0].planning_lineage.clone();
-        let lineage =
-            render_value_lineage_ref(&scope_id, &node_id, &[], &planning_lineage, &config_digest)
-                .expect("bootstrap lineage");
-
-        push_lifecycle_node(LifecycleNodeParts {
-            typed,
-            node_id,
-            stable_key,
-            scope_id,
-            descriptor,
-            config_ref,
-            input_binding,
-            output_cell: output_cell.clone(),
-            receipt_schema,
-            receipt_semantic,
-            framework: spec::FrameworkNodeSpec::BootstrapRun(spec::BootstrapRunNodeSpec {}),
-            planning_lineage,
-            lineage,
-            input_cells: Vec::new(),
-        });
-        output_cell
     }
 
     fn append_retention_lifecycle_node(

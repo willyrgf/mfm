@@ -28,7 +28,7 @@ use mfm_replay::v1 as replay;
 use mfm_runtime::{
     CertifiedRuntimeSpec, ErasedNodeRunner, ErasedRunCtx, ErasedRunnerBinding, ErasedRunnerFuture,
     ErasedRunnerOutput, ErasedRunnerRegistry, MaterializedCellTerminal, MaterializedInputNode,
-    RunStartEvidence, RuntimeArtifactStageFuture, RuntimeArtifactStager, RuntimeError,
+    RunLaunchEvidence, RuntimeArtifactStageFuture, RuntimeArtifactStager, RuntimeError,
     SchedulerStatus, SerialTypedScheduler, StagedArtifact,
 };
 use mfm_spec::v1 as spec;
@@ -175,7 +175,7 @@ pub async fn typed_certified_slice_coverage() -> Result<TypedCertifiedSliceCover
         return Err("typed-certified-slice ambiguity fixture did not block completion".to_owned());
     }
     let side_effect_failed_semantics_covered = side_effect_failure_semantics_are_covered().await?;
-    let incomplete_retention_rejected = incomplete_retention_projection_is_rejected()?;
+    let incomplete_retention_rejected = incomplete_retention_projection_is_rejected().await?;
 
     let stream = run.store.load_run_stream(&run.fixture.run_id);
     let projection =
@@ -636,14 +636,7 @@ async fn run_reference_certified_workflow() -> Result<ReferenceRun, String> {
     let fixture = reference_fixture()?;
     let scheduler = test_scheduler(reference_registry(&fixture)?);
     let mut store = store::InMemoryTypedRunStore::new();
-    scheduler
-        .start_run(
-            &mut store,
-            &fixture.runtime_spec,
-            fixture.run_id.clone(),
-            run_start_evidence(&fixture, vec![fixture.seed_ref.clone()])?,
-        )
-        .map_err(display_error)?;
+    start_reference_run(&scheduler, &mut store, &fixture).await?;
 
     for _ in 0..32 {
         match scheduler
@@ -1070,18 +1063,11 @@ fn retention_projection_complete(
         && !projection.refs.is_empty())
 }
 
-fn incomplete_retention_projection_is_rejected() -> Result<bool, String> {
+async fn incomplete_retention_projection_is_rejected() -> Result<bool, String> {
     let fixture = reference_fixture()?;
     let scheduler = test_scheduler(reference_registry(&fixture)?);
     let mut store = store::InMemoryTypedRunStore::new();
-    scheduler
-        .start_run(
-            &mut store,
-            &fixture.runtime_spec,
-            fixture.run_id.clone(),
-            run_start_evidence(&fixture, vec![fixture.seed_ref.clone()])?,
-        )
-        .map_err(display_error)?;
+    start_reference_run(&scheduler, &mut store, &fixture).await?;
     let stream = store.load_run_stream(&fixture.run_id);
     Ok(
         store::VerifiedRetentionProjectionSet::from_synthetic_run_streams(std::iter::empty::<(
@@ -1185,14 +1171,7 @@ async fn resume_drift_is_rejected() -> Result<bool, String> {
     let fixture = reference_fixture()?;
     let scheduler = test_scheduler(reference_registry(&fixture)?);
     let mut store = store::InMemoryTypedRunStore::new();
-    scheduler
-        .start_run(
-            &mut store,
-            &fixture.runtime_spec,
-            fixture.run_id.clone(),
-            run_start_evidence(&fixture, vec![fixture.seed_ref.clone()])?,
-        )
-        .map_err(display_error)?;
+    start_reference_run(&scheduler, &mut store, &fixture).await?;
     let read_node = node_by_output(&fixture, &fixture.read_cell).clone();
     append_attempt_started(&mut store, &fixture, &read_node, 1)?;
     Ok(matches!(
@@ -1212,14 +1191,7 @@ async fn side_effect_failure_semantics_are_covered() -> Result<bool, String> {
     )?;
     let scheduler = test_scheduler(registry);
     let mut store = store::InMemoryTypedRunStore::new();
-    scheduler
-        .start_run(
-            &mut store,
-            &fixture.runtime_spec,
-            fixture.run_id.clone(),
-            run_start_evidence(&fixture, vec![fixture.seed_ref.clone()])?,
-        )
-        .map_err(display_error)?;
+    start_reference_run(&scheduler, &mut store, &fixture).await?;
     for _ in 0..4 {
         scheduler
             .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
@@ -1245,14 +1217,7 @@ async fn side_effect_ambiguity_blocks_completion() -> Result<bool, String> {
     )?;
     let scheduler = test_scheduler(registry);
     let mut store = store::InMemoryTypedRunStore::new();
-    scheduler
-        .start_run(
-            &mut store,
-            &fixture.runtime_spec,
-            fixture.run_id.clone(),
-            run_start_evidence(&fixture, vec![fixture.seed_ref.clone()])?,
-        )
-        .map_err(display_error)?;
+    start_reference_run(&scheduler, &mut store, &fixture).await?;
 
     for _ in 0..16 {
         match scheduler
@@ -1927,11 +1892,31 @@ fn append_attempt_started(
     Ok(attempt_id)
 }
 
+async fn start_reference_run(
+    scheduler: &SerialTypedScheduler,
+    store: &mut store::InMemoryTypedRunStore,
+    fixture: &ReferenceFixture,
+) -> Result<(), String> {
+    let launch = scheduler
+        .prepare_run_launch(
+            &fixture.runtime_spec,
+            fixture.run_id.clone(),
+            run_start_evidence(fixture, vec![fixture.seed_ref.clone()])?,
+            store.expected_next_seq(&fixture.run_id),
+        )
+        .map_err(display_error)?;
+    scheduler
+        .start_run(store, launch)
+        .await
+        .map_err(display_error)?;
+    Ok(())
+}
+
 fn run_start_evidence(
     fixture: &ReferenceFixture,
     seed_cells: Vec<events::SeedCellRef>,
-) -> Result<RunStartEvidence, String> {
-    Ok(RunStartEvidence {
+) -> Result<RunLaunchEvidence, String> {
+    Ok(RunLaunchEvidence {
         spec_artifact: spec_artifact(&fixture.runtime_spec)?,
         certificate_artifact: certificate_artifact(&fixture.runtime_spec)?,
         config_artifacts: fixture
@@ -2639,14 +2624,8 @@ mod tests {
         let fixture = reference_fixture().expect("fixture");
         let scheduler = test_scheduler(reference_registry(&fixture).expect("registry"));
         let mut store = store::InMemoryTypedRunStore::new();
-        scheduler
-            .start_run(
-                &mut store,
-                &fixture.runtime_spec,
-                fixture.run_id.clone(),
-                run_start_evidence(&fixture, vec![fixture.seed_ref.clone()])
-                    .expect("start evidence"),
-            )
+        start_reference_run(&scheduler, &mut store, &fixture)
+            .await
             .expect("start run");
 
         let stream = store.load_run_stream(&fixture.run_id);
