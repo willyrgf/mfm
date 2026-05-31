@@ -268,18 +268,19 @@ or resume certified typed runs, and they do not route through the removed legacy
 
 Starts a certified typed run from a certified typed spec bundle JSON file. The command treats the
 bundle as untrusted transport data, verifies the contained spec and certificate against the
-production certification registry, persists the canonical spec and certificate artifacts, verifies
-referenced config artifacts already exist in the typed artifact store, persists supplied seed
-artifacts, appends `RunStarted`, and optionally drives the typed scheduler.
+production certification registry, canonicalizes supplied config and seed JSON, hands launch bytes
+to runtime middleware for staging, appends `RunStarted` through the prepared commit boundary, and
+optionally drives the typed scheduler.
 
 **Usage:**
 ```sh
-mfm_cli run start --bundle <PATH> [--seed <SEED_ID=PATH>]... [OPTIONS]
+mfm_cli run start --bundle <PATH> [--config <SCHEMA_ID=PATH>]... [--seed <SEED_ID=PATH>]... [OPTIONS]
 ```
 
 **Key Options:**
 - `--bundle <PATH>`: Certified typed spec bundle JSON file.
 - `--run-id <RUN_ID>`: Optional typed run id. If omitted, a new typed digest id is generated.
+- `--config <SCHEMA_ID=PATH>`: JSON config input for a config reference declared by the certified spec.
 - `--seed <SEED_ID=PATH>`: Canonical JSON seed input for a seed declared by the certified spec.
 - `--framework-version <VALUE>`: Framework version evidence recorded in `RunStarted`.
 - `--source-revision <VALUE>`: Source revision evidence recorded in `RunStarted` (or `MFM_SOURCE_REVISION`).
@@ -315,6 +316,7 @@ Stable typed start errors include:
   non-canonicalizable spec/certificate values.
 - `TypedCertificationFailed`: certificate/spec evidence, registry digest, descriptor evidence, or
   certifier validation failed. A hash-only spec envelope is not certification authority.
+- `MissingTypedConfigInput`: a certified config reference was not supplied with `--config`.
 - `TypedRunnerUnavailable`: the certified spec references a state descriptor with no production
   runner binding.
 
@@ -388,8 +390,8 @@ Validates and canonicalizes the portfolio snapshot request object containing:
 - `valuation_source_registry`
 
 The command compiles the canonical request into a certified typed portfolio execution spec,
-persists typed config/spec evidence, starts a typed run, and renders the typed public output when
-the scheduler completes.
+passes typed config/spec launch material to runtime middleware, starts a typed run, and renders the
+typed public output when the scheduler completes.
 
 **Usage:**
 ```sh

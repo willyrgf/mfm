@@ -3150,12 +3150,12 @@ pub fn validate_run_stream(
 /// Launch evidence needed to prepare a typed run genesis commit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunLaunchEvidence {
-    /// Artifact evidence containing the certified spec bytes.
-    pub spec_artifact: store::ArtifactEvidenceRef,
-    /// Artifact evidence containing the certified spec certificate bytes.
-    pub certificate_artifact: store::ArtifactEvidenceRef,
-    /// Artifact evidence for every certified config reference.
-    pub config_artifacts: Vec<store::ArtifactEvidenceRef>,
+    /// Staged certified spec bytes and the evidence to admit with `RunStarted`.
+    pub spec_artifact: RunLaunchArtifact,
+    /// Staged certified spec certificate bytes and the evidence to admit with `RunStarted`.
+    pub certificate_artifact: RunLaunchArtifact,
+    /// Staged config artifacts for every certified config reference.
+    pub config_artifacts: Vec<RunLaunchArtifact>,
     /// Framework build/version identity.
     pub framework_version: events::FrameworkVersion,
     /// Source revision identity.
@@ -3163,7 +3163,25 @@ pub struct RunLaunchEvidence {
     /// Adapter executable identities bound to the run.
     pub adapter_executables: Vec<events::ExecutableIdentity>,
     /// Seed cells materialized at run start.
-    pub seed_cells: Vec<events::SeedCellRef>,
+    pub seed_cells: Vec<RunLaunchSeedCell>,
+}
+
+/// Staged launch artifact bytes plus typed evidence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunLaunchArtifact {
+    /// Artifact bytes to stage through runtime middleware before the genesis commit.
+    pub bytes: Vec<u8>,
+    /// Typed artifact evidence to admit atomically with the genesis commit.
+    pub evidence: store::ArtifactEvidenceRef,
+}
+
+/// Staged launch seed bytes plus the seed cell authority bound into `RunStarted`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunLaunchSeedCell {
+    /// Seed artifact bytes to stage through runtime middleware before the genesis commit.
+    pub bytes: Vec<u8>,
+    /// Seed cell reference to persist in `RunStarted`.
+    pub cell: events::SeedCellRef,
 }
 
 /// Prepared genesis launch authority accepted by runtime-owned start middleware.
@@ -3315,13 +3333,35 @@ impl RuntimeMutationMiddleware {
         evidence: RunLaunchEvidence,
         expected_next_seq: store::StreamSeq,
     ) -> Result<PreparedRunLaunch> {
-        let spec_artifact = validate_spec_artifact(runtime_spec, evidence.spec_artifact)?;
+        let spec_input = evidence.spec_artifact;
+        verify_artifact_bytes(&spec_input.bytes, &spec_input.evidence)?;
+        let spec_artifact = validate_spec_artifact(runtime_spec, spec_input.evidence.clone())?;
+        let certificate_input = evidence.certificate_artifact;
+        verify_artifact_bytes(&certificate_input.bytes, &certificate_input.evidence)?;
         let certificate_artifact =
-            validate_certificate_artifact(runtime_spec, evidence.certificate_artifact)?;
-        let config_artifacts = validate_config_artifacts(runtime_spec, evidence.config_artifacts)?;
+            validate_certificate_artifact(runtime_spec, certificate_input.evidence.clone())?;
+        let config_inputs = evidence.config_artifacts;
+        let config_artifacts = validate_config_artifacts(
+            runtime_spec,
+            config_inputs
+                .iter()
+                .map(|artifact| {
+                    verify_artifact_bytes(&artifact.bytes, &artifact.evidence)?;
+                    Ok(artifact.evidence.clone())
+                })
+                .collect::<Result<Vec<_>>>()?,
+        )?;
+        let mut config_staged_artifacts = launch_artifacts_by_id(config_inputs, "config")?;
         let config_reference_payloads =
             config_artifact_reference_payloads(runtime_spec.spec_hash(), &config_artifacts)?;
-        let seed_cells = validate_seed_cells(runtime_spec, &evidence.seed_cells)?;
+        let seed_inputs = evidence.seed_cells;
+        let seed_cell_refs = seed_inputs
+            .iter()
+            .map(|seed| seed.cell.clone())
+            .collect::<Vec<_>>();
+        let seed_cells = validate_seed_cells(runtime_spec, &seed_cell_refs)?;
+        let seed_staged_artifacts =
+            validate_launch_seed_artifacts(seed_inputs, seed_cells.values())?;
         let runner_executables = runners.executables_for_spec(runtime_spec)?;
         let bootstrap_node = certified_bootstrap_run_node(runtime_spec)?;
         let bootstrap_output_cell =
@@ -3348,10 +3388,10 @@ impl RuntimeMutationMiddleware {
         let run_started = events::RunStarted {
             run_id: run_id.clone(),
             spec_hash: runtime_spec.spec_hash().clone(),
-            spec_artifact_id: spec_artifact.artifact_id,
-            certificate_artifact_id: certificate_artifact.artifact_id,
-            certificate_artifact_digest: certificate_artifact.digest,
-            certificate_media_type: certificate_artifact.media_type,
+            spec_artifact_id: spec_artifact.artifact_id.clone(),
+            certificate_artifact_id: certificate_artifact.artifact_id.clone(),
+            certificate_artifact_digest: certificate_artifact.digest.clone(),
+            certificate_media_type: certificate_artifact.media_type.clone(),
             spec_media_type: runtime_spec.spec().media_type.clone(),
             spec_version: runtime_spec.spec().spec_version.clone(),
             lowering_version: runtime_spec.spec().lowering_version.clone(),
@@ -3367,7 +3407,7 @@ impl RuntimeMutationMiddleware {
                 .clone(),
             framework_version: evidence.framework_version,
             source_revision: evidence.source_revision,
-            seed_cells: evidence.seed_cells,
+            seed_cells: seed_cell_refs,
         };
         let genesis = GenesisContext {
             runtime_spec,
@@ -3455,12 +3495,38 @@ impl RuntimeMutationMiddleware {
             },
         };
         let commit = store::PreparedTypedCommit::new(request, admitted_artifacts)?;
+        let mut artifacts_to_stage =
+            Vec::with_capacity(3 + config_artifacts.len() + seed_staged_artifacts.len());
+        artifacts_to_stage.push(PreparedStagedArtifact {
+            bytes: spec_input.bytes,
+            evidence: spec_artifact,
+        });
+        artifacts_to_stage.push(PreparedStagedArtifact {
+            bytes: certificate_input.bytes,
+            evidence: certificate_artifact,
+        });
+        for artifact in &config_artifacts {
+            let staged = config_staged_artifacts
+                .remove(&artifact.artifact_id)
+                .ok_or_else(|| {
+                    RuntimeError::InvalidRunStream(format!(
+                        "missing staged config artifact bytes for {}",
+                        artifact.artifact_id
+                    ))
+                })?;
+            artifacts_to_stage.push(PreparedStagedArtifact {
+                bytes: staged.bytes,
+                evidence: artifact.clone(),
+            });
+        }
+        artifacts_to_stage.extend(seed_staged_artifacts);
+        artifacts_to_stage.push(PreparedStagedArtifact {
+            bytes: bootstrap_receipt_bytes.to_vec(),
+            evidence: bootstrap_receipt_artifact,
+        });
         Ok(PreparedRunLaunch {
             commit,
-            artifacts_to_stage: vec![PreparedStagedArtifact {
-                bytes: bootstrap_receipt_bytes.to_vec(),
-                evidence: bootstrap_receipt_artifact,
-            }],
+            artifacts_to_stage,
         })
     }
 
@@ -3656,6 +3722,60 @@ impl RuntimeMutationMiddleware {
             artifacts_to_stage,
         })
     }
+}
+
+fn launch_artifacts_by_id(
+    artifacts: Vec<RunLaunchArtifact>,
+    kind: &'static str,
+) -> Result<BTreeMap<ArtifactId, RunLaunchArtifact>> {
+    let mut by_artifact = BTreeMap::new();
+    for artifact in artifacts {
+        verify_artifact_bytes(&artifact.bytes, &artifact.evidence)?;
+        if by_artifact
+            .insert(artifact.evidence.artifact_id.clone(), artifact)
+            .is_some()
+        {
+            return Err(RuntimeError::InvalidRunStream(format!(
+                "duplicate staged {kind} launch artifact"
+            )));
+        }
+    }
+    Ok(by_artifact)
+}
+
+fn validate_launch_seed_artifacts<'a>(
+    seeds: Vec<RunLaunchSeedCell>,
+    validated_cells: impl IntoIterator<Item = &'a events::SeedCellRef>,
+) -> Result<Vec<PreparedStagedArtifact>> {
+    let mut by_cell = BTreeMap::new();
+    for seed in seeds {
+        if by_cell.insert(seed.cell.cell_id.clone(), seed).is_some() {
+            return Err(RuntimeError::InvalidRunStream(
+                "duplicate staged seed launch artifact".to_owned(),
+            ));
+        }
+    }
+    let mut staged = Vec::with_capacity(by_cell.len());
+    for cell in validated_cells {
+        let seed = by_cell.remove(&cell.cell_id).ok_or_else(|| {
+            RuntimeError::InvalidRunStream(format!(
+                "missing staged seed bytes for cell {}",
+                cell.cell_id
+            ))
+        })?;
+        let evidence = store_seed_artifact(cell);
+        verify_artifact_bytes(&seed.bytes, &evidence)?;
+        staged.push(PreparedStagedArtifact {
+            bytes: seed.bytes,
+            evidence,
+        });
+    }
+    if !by_cell.is_empty() {
+        return Err(RuntimeError::InvalidRunStream(
+            "staged seed launch artifacts contain entries not certified by the spec".to_owned(),
+        ));
+    }
+    Ok(staged)
 }
 
 /// Serial typed scheduler.
@@ -9700,6 +9820,8 @@ mod tests {
     const DD: DigestBytes = DigestBytes::from_array([0x1d; 32]);
     const DE: DigestBytes = DigestBytes::from_array([0x1e; 32]);
     const DF: DigestBytes = DigestBytes::from_array([0x1f; 32]);
+    const TEST_CONFIG_BYTES: &[u8] = b"{}";
+    const TEST_SEED_BYTES: &[u8] = br#"{"seed":true}"#;
 
     #[derive(Clone)]
     struct Fixture {
@@ -9987,7 +10109,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_launch_executes_bootstrap_genesis_batch_and_stages_receipt() {
+    async fn run_launch_executes_bootstrap_genesis_batch_and_stages_launch_artifacts() {
         let fixture = fixture();
         let staged = Arc::new(Mutex::new(Vec::new()));
         let scheduler = test_scheduler_with_stager(
@@ -10079,6 +10201,44 @@ mod tests {
                 && evidence.producer_node_id.as_ref() == Some(&bootstrap_node.node_id)
                 && evidence.artifact_role == events::ArtifactRole::StateOutput
         }));
+        let run_started = match genesis_commit[0].payload() {
+            events::KernelEventPayload::RunStarted(payload) => payload,
+            _ => panic!("first genesis event must be RunStarted"),
+        };
+        assert!(staged.iter().any(|evidence| {
+            evidence.artifact_id == run_started.spec_artifact_id
+                && evidence.artifact_role == events::ArtifactRole::TypedExecutionSpec
+        }));
+        assert!(staged.iter().any(|evidence| {
+            evidence.artifact_id == run_started.certificate_artifact_id
+                && evidence.artifact_role == events::ArtifactRole::TypedSpecCertificate
+        }));
+        assert!(staged.iter().any(|evidence| {
+            evidence.artifact_id == fixture.seed_ref.seed_artifact.artifact_id
+                && evidence.artifact_role == events::ArtifactRole::SeedInput
+        }));
+    }
+
+    #[tokio::test]
+    async fn run_launch_staging_failure_prevents_start_commit() {
+        let fixture = fixture();
+        let scheduler = test_scheduler_with_stager(
+            registered_fixture_runners(&fixture),
+            Arc::new(FailingAfterRuntimeArtifactStager::after(0)),
+        );
+        let mut store = store::InMemoryTypedRunStore::new();
+        assert!(matches!(
+            start_fixture_run(
+                &scheduler,
+                &mut store,
+                &fixture,
+                vec![fixture.seed_ref.clone()],
+            )
+            .await,
+            Err(RuntimeError::Store(message))
+                if message.contains("test artifact staging failure")
+        ));
+        assert!(store.load_run_stream(&fixture.run_id).is_empty());
     }
 
     #[tokio::test]
@@ -10180,9 +10340,12 @@ mod tests {
     #[tokio::test]
     async fn public_output_receipt_staging_failure_prevents_commit() {
         let fixture = fixture();
+        let launch_artifact_count = 3 + fixture.runtime_spec.spec().config_refs.len() + 1;
         let scheduler = test_scheduler_with_stager(
             registered_fixture_runners(&fixture),
-            Arc::new(FailingAfterRuntimeArtifactStager::after(1)),
+            Arc::new(FailingAfterRuntimeArtifactStager::after(
+                launch_artifact_count,
+            )),
         );
         let mut store = store::InMemoryTypedRunStore::new();
         start_fixture_run(
@@ -12437,6 +12600,73 @@ mod tests {
             ),
             Err(RuntimeError::InvalidRunStream(_))
         ));
+    }
+
+    #[test]
+    fn run_start_rejects_mismatched_staged_launch_bytes() {
+        let fixture = fixture();
+        let scheduler = test_scheduler(registered_fixture_runners(&fixture));
+        let store = store::InMemoryTypedRunStore::new();
+        let base = run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]);
+
+        let mut bad_spec = base.clone();
+        bad_spec.spec_artifact.bytes.push(b'\n');
+        assert!(matches!(
+            scheduler.prepare_run_launch(
+                &fixture.runtime_spec,
+                fixture.run_id.clone(),
+                bad_spec,
+                store.expected_next_seq(&fixture.run_id),
+            ),
+            Err(RuntimeError::InvalidRunnerOutput(_))
+        ));
+
+        let mut bad_certificate = base.clone();
+        bad_certificate.certificate_artifact.bytes.push(b'\n');
+        assert!(matches!(
+            scheduler.prepare_run_launch(
+                &fixture.runtime_spec,
+                fixture.run_id.clone(),
+                bad_certificate,
+                store.expected_next_seq(&fixture.run_id),
+            ),
+            Err(RuntimeError::InvalidRunnerOutput(_))
+        ));
+
+        let mut bad_config = base.clone();
+        bad_config
+            .config_artifacts
+            .first_mut()
+            .expect("config artifact")
+            .bytes
+            .push(b'\n');
+        assert!(matches!(
+            scheduler.prepare_run_launch(
+                &fixture.runtime_spec,
+                fixture.run_id.clone(),
+                bad_config,
+                store.expected_next_seq(&fixture.run_id),
+            ),
+            Err(RuntimeError::InvalidRunnerOutput(_))
+        ));
+
+        let mut bad_seed = base;
+        bad_seed
+            .seed_cells
+            .first_mut()
+            .expect("seed cell")
+            .bytes
+            .push(b'\n');
+        assert!(matches!(
+            scheduler.prepare_run_launch(
+                &fixture.runtime_spec,
+                fixture.run_id.clone(),
+                bad_seed,
+                store.expected_next_seq(&fixture.run_id),
+            ),
+            Err(RuntimeError::InvalidRunnerOutput(_))
+        ));
+        assert!(store.load_run_stream(&fixture.run_id).is_empty());
     }
 
     #[tokio::test]
@@ -14912,65 +15142,98 @@ mod tests {
                 .spec()
                 .config_refs
                 .iter()
-                .map(config_artifact)
+                .map(|config| config_artifact(&fixture.runtime_spec, config))
                 .collect(),
             framework_version: events::FrameworkVersion::new("mfm.test.1").expect("framework"),
             source_revision: events::SourceRevision::new("test-rev").expect("source"),
             adapter_executables: Vec::new(),
-            seed_cells,
+            seed_cells: seed_cells.into_iter().map(seed_launch_cell).collect(),
         }
     }
 
-    fn spec_artifact(runtime_spec: &CertifiedRuntimeSpec) -> store::ArtifactEvidenceRef {
+    fn spec_artifact(runtime_spec: &CertifiedRuntimeSpec) -> RunLaunchArtifact {
         let canonical = runtime_spec
             .spec()
             .canonical_json()
             .expect("canonical spec");
         let digest = canonical.content_digest();
-        store::ArtifactEvidenceRef {
-            artifact_id: ArtifactId::from_digest(digest.algorithm(), *digest.digest()),
-            digest,
-            byte_len: canonical.as_bytes().len() as u64,
-            media_type: runtime_spec.spec().media_type.clone(),
-            schema_id: None,
-            semantic_type_id: None,
-            producer_node_id: None,
-            producer_seed_id: None,
-            artifact_role: events::ArtifactRole::TypedExecutionSpec,
+        RunLaunchArtifact {
+            bytes: canonical.to_vec(),
+            evidence: store::ArtifactEvidenceRef {
+                artifact_id: ArtifactId::from_digest(digest.algorithm(), *digest.digest()),
+                digest,
+                byte_len: canonical.as_bytes().len() as u64,
+                media_type: runtime_spec.spec().media_type.clone(),
+                schema_id: None,
+                semantic_type_id: None,
+                producer_node_id: None,
+                producer_seed_id: None,
+                artifact_role: events::ArtifactRole::TypedExecutionSpec,
+            },
         }
     }
 
-    fn certificate_artifact(runtime_spec: &CertifiedRuntimeSpec) -> store::ArtifactEvidenceRef {
+    fn certificate_artifact(runtime_spec: &CertifiedRuntimeSpec) -> RunLaunchArtifact {
         let canonical = runtime_spec
             .certificate()
             .canonical_json()
             .expect("canonical certificate");
         let digest = canonical.content_digest();
-        store::ArtifactEvidenceRef {
-            artifact_id: ArtifactId::from_digest(digest.algorithm(), *digest.digest()),
-            digest,
-            byte_len: canonical.as_bytes().len() as u64,
-            media_type: spec::MediaType::new(mfm_certify::CERTIFICATE_MEDIA_TYPE)
-                .expect("certificate media type"),
-            schema_id: None,
-            semantic_type_id: None,
-            producer_node_id: None,
-            producer_seed_id: None,
-            artifact_role: events::ArtifactRole::TypedSpecCertificate,
+        RunLaunchArtifact {
+            bytes: canonical.to_vec(),
+            evidence: store::ArtifactEvidenceRef {
+                artifact_id: ArtifactId::from_digest(digest.algorithm(), *digest.digest()),
+                digest,
+                byte_len: canonical.as_bytes().len() as u64,
+                media_type: spec::MediaType::new(mfm_certify::CERTIFICATE_MEDIA_TYPE)
+                    .expect("certificate media type"),
+                schema_id: None,
+                semantic_type_id: None,
+                producer_node_id: None,
+                producer_seed_id: None,
+                artifact_role: events::ArtifactRole::TypedSpecCertificate,
+            },
         }
     }
 
-    fn config_artifact(config: &spec::ConfigRef) -> store::ArtifactEvidenceRef {
-        store::ArtifactEvidenceRef {
-            artifact_id: config.artifact_id.clone(),
-            digest: config.digest.clone(),
-            byte_len: config.byte_len,
-            media_type: config.media_type.clone(),
-            schema_id: Some(config.schema_id.clone()),
-            semantic_type_id: None,
-            producer_node_id: None,
-            producer_seed_id: None,
-            artifact_role: events::ArtifactRole::TypedConfig,
+    fn config_artifact(
+        runtime_spec: &CertifiedRuntimeSpec,
+        config: &spec::ConfigRef,
+    ) -> RunLaunchArtifact {
+        let bytes = runtime_spec
+            .spec()
+            .nodes
+            .iter()
+            .find(|node| node.config_ref == *config && node.framework.is_some())
+            .and_then(|node| {
+                node.framework.as_ref().map(|framework| {
+                    spec::framework_config_canonical_json(framework.config_kind(), &node.node_id)
+                        .expect("framework config")
+                        .to_vec()
+                })
+            })
+            .unwrap_or_else(|| TEST_CONFIG_BYTES.to_vec());
+        assert_eq!(digest_for_bytes(&bytes), config.digest);
+        RunLaunchArtifact {
+            bytes,
+            evidence: store::ArtifactEvidenceRef {
+                artifact_id: config.artifact_id.clone(),
+                digest: config.digest.clone(),
+                byte_len: config.byte_len,
+                media_type: config.media_type.clone(),
+                schema_id: Some(config.schema_id.clone()),
+                semantic_type_id: None,
+                producer_node_id: None,
+                producer_seed_id: None,
+                artifact_role: events::ArtifactRole::TypedConfig,
+            },
+        }
+    }
+
+    fn seed_launch_cell(seed: events::SeedCellRef) -> RunLaunchSeedCell {
+        RunLaunchSeedCell {
+            bytes: TEST_SEED_BYTES.to_vec(),
+            cell: seed,
         }
     }
 
@@ -16154,11 +16417,15 @@ mod tests {
         .expect("capability");
         let no_caps = CapabilitySetDescriptor::new(Vec::new()).expect("no caps");
         let read_caps = CapabilitySetDescriptor::new(vec![read_cap]).expect("read caps");
+        let config_digest = digest_for_bytes(TEST_CONFIG_BYTES);
         let config_ref = spec::ConfigRef {
             schema_id: config_schema.clone(),
-            artifact_id: artifact(0x31),
-            digest: content(0x32),
-            byte_len: 2,
+            artifact_id: ArtifactId::from_digest(
+                config_digest.algorithm(),
+                *config_digest.digest(),
+            ),
+            digest: config_digest,
+            byte_len: TEST_CONFIG_BYTES.len() as u64,
             media_type: spec::MediaType::new("application/json").expect("media"),
         };
         let lineage_seed = spec::ValueLineageRef {
@@ -16175,20 +16442,24 @@ mod tests {
             completed_operation_frames: Vec::new(),
             lineage_digest: content(0x44),
         };
+        let seed_digest = digest_for_bytes(TEST_SEED_BYTES);
         let seed_ref = events::SeedCellRef {
             seed_id: seed_id.clone(),
             cell_id: seed_cell.clone(),
             scope_id: scope.clone(),
             semantic_type_id: semantic.clone(),
             schema_id: value_schema.clone(),
-            digest: content(0x51),
+            digest: seed_digest.clone(),
             seed_artifact: events::ArtifactEvidenceRef {
-                artifact_id: artifact(0x52),
+                artifact_id: ArtifactId::from_digest(
+                    seed_digest.algorithm(),
+                    *seed_digest.digest(),
+                ),
                 role: events::ArtifactRole::SeedInput,
                 schema_id: value_schema.clone(),
                 semantic_type_id: Some(semantic.clone()),
-                content_digest: content(0x51),
-                byte_len: 11,
+                content_digest: seed_digest.clone(),
+                byte_len: TEST_SEED_BYTES.len() as u64,
                 media_type: spec::MediaType::new("application/json").expect("media"),
             },
         };
@@ -16351,7 +16622,7 @@ mod tests {
                 scope_id: scope.clone(),
                 semantic_type_id: semantic.clone(),
                 schema_id: value_schema.clone(),
-                required_digest: Some(content(0x51)),
+                required_digest: Some(seed_digest),
             }],
             descriptor_identities: vec![
                 spec::DescriptorIdentity::State(Box::new(state_descriptor(

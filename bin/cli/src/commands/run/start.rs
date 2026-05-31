@@ -9,8 +9,9 @@ use crate::support::typed_run::{
     TypedDriveArg, TypedRunStoresArgs,
 };
 use clap::Args;
-use mfm_app::{TypedRunResponse, TypedSeedInput};
-use mfm_ids::SeedId;
+use mfm_app::{TypedConfigInput, TypedRunResponse, TypedSeedInput};
+use mfm_canonical::PlainCanonicalJsonBytes;
+use mfm_ids::{SchemaId, SeedId};
 
 /// Arguments for `mfm run start`.
 #[derive(Args)]
@@ -26,6 +27,10 @@ pub(crate) struct StartArgs {
     /// Seed input as `seed:<algorithm>:<digest>=/path/to/canonical-seed.json`.
     #[arg(long = "seed", value_name = "SEED_ID=PATH")]
     pub seeds: Vec<SeedInputArg>,
+
+    /// Config input as `schema:<name>:<version>:<algorithm>:<digest>=/path/to/config.json`.
+    #[arg(long = "config", value_name = "SCHEMA_ID=PATH")]
+    pub configs: Vec<ConfigInputArg>,
 
     /// Framework version evidence recorded in RunStarted.
     #[arg(long, default_value = "mfm.cli.typed.v1")]
@@ -50,6 +55,12 @@ pub(crate) struct SeedInputArg {
     path: PathBuf,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct ConfigInputArg {
+    schema_id: SchemaId,
+    path: PathBuf,
+}
+
 impl FromStr for SeedInputArg {
     type Err = String;
 
@@ -60,6 +71,21 @@ impl FromStr for SeedInputArg {
         Ok(Self {
             seed_id: SeedId::parse(seed_id)
                 .map_err(|_| "seed id must use the typed seed identity format".to_owned())?,
+            path: PathBuf::from(path),
+        })
+    }
+}
+
+impl FromStr for ConfigInputArg {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let (schema_id, path) = value
+            .split_once('=')
+            .ok_or_else(|| "config input must use SCHEMA_ID=PATH".to_owned())?;
+        Ok(Self {
+            schema_id: SchemaId::parse(schema_id)
+                .map_err(|_| "schema id must use the typed schema identity format".to_owned())?,
             path: PathBuf::from(path),
         })
     }
@@ -87,47 +113,85 @@ async fn execute_internal(args: &StartArgs) -> CommandResult<TypedRunResponse> {
     })?;
     let bundle = mfm_app::parse_certified_spec_bundle_json_bytes(&bundle_bytes)
         .map_err(command_error_from_typed_app_error)?;
-    let seed_media_type = mfm_app::json_media_type().map_err(command_error_from_typed_app_error)?;
+    let registry =
+        mfm_app::production_certification_registry().map_err(command_error_from_typed_app_error)?;
+    let media_type = mfm_app::json_media_type().map_err(command_error_from_typed_app_error)?;
+    let mut config_inputs = Vec::with_capacity(args.configs.len());
+    for config in &args.configs {
+        let bytes = read_canonical_json_file(
+            &config.path,
+            "TypedConfigReadFailed",
+            "TypedConfigInvalid",
+            format!("config input {}", config.schema_id),
+        )
+        .await?;
+        config_inputs.push(TypedConfigInput {
+            schema_id: config.schema_id.clone(),
+            bytes,
+            media_type: media_type.clone(),
+        });
+    }
     let mut seed_inputs = Vec::with_capacity(args.seeds.len());
     for seed in &args.seeds {
-        let bytes = tokio::fs::read(&seed.path).await.map_err(|error| {
-            CommandError::new(
-                "TypedSeedReadFailed",
-                format!(
-                    "failed to read seed input {} for {}: {error}",
-                    seed.path.display(),
-                    seed.seed_id
-                ),
-            )
-        })?;
+        let bytes = read_canonical_json_file(
+            &seed.path,
+            "TypedSeedReadFailed",
+            "TypedSeedInvalid",
+            format!("seed input {}", seed.seed_id),
+        )
+        .await?;
         seed_inputs.push(TypedSeedInput {
             seed_id: seed.seed_id.clone(),
             bytes,
-            media_type: seed_media_type.clone(),
+            media_type: media_type.clone(),
         });
     }
 
-    let services = make_typed_app_services(&args.stores).await?;
     let request = mfm_app::verify_certified_bundle_run_start_request(
-        services.artifacts(),
         mfm_app::UntrustedCertifiedSpecBundleStartInput {
             spec_bytes: bundle.spec_bytes(),
             certificate_bytes: bundle.certificate_bytes(),
-            registry: services.certification_registry(),
+            registry: &registry,
             run_id,
             framework_version: &args.framework_version,
             source_revision: &args.source_revision,
             drive: drive_mode(args.drive),
         },
+        config_inputs,
         seed_inputs,
     )
-    .await
     .map_err(command_error_from_typed_app_error)?;
+    let services = make_typed_app_services(&args.stores).await?;
     let response = services
         .start_certified_run(request)
         .await
         .map_err(command_error_from_typed_app_error)?;
     Ok(CommandOutput::new(response))
+}
+
+async fn read_canonical_json_file(
+    path: &PathBuf,
+    read_code: &'static str,
+    parse_code: &'static str,
+    label: String,
+) -> Result<Vec<u8>, CommandError> {
+    let raw = tokio::fs::read_to_string(path).await.map_err(|error| {
+        CommandError::new(
+            read_code,
+            format!("failed to read {label} from {}: {error}", path.display()),
+        )
+    })?;
+    PlainCanonicalJsonBytes::from_json_str(&raw)
+        .map(|canonical| canonical.to_vec())
+        .map_err(|error| {
+            CommandError::new(
+                parse_code,
+                format!(
+                    "failed to canonicalize {label} from {}: {error}",
+                    path.display()
+                ),
+            )
+        })
 }
 
 #[cfg(test)]
@@ -144,6 +208,7 @@ mod tests {
             bundle,
             run_id: None,
             seeds: Vec::new(),
+            configs: Vec::new(),
             framework_version: "mfm.cli.test".to_owned(),
             source_revision: "test-source".to_owned(),
             drive: TypedDriveArg::AppendOnly,
@@ -156,5 +221,109 @@ mod tests {
         .expect_err("invalid bundle rejects before store construction");
 
         assert_eq!(err.code, "TypedBundleInvalid");
+    }
+
+    #[tokio::test]
+    async fn start_rejects_missing_config_inputs_before_store_connection() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (bundle, _configs) = proof_bundle_and_configs(tmp.path());
+
+        let err = execute_internal(&StartArgs {
+            bundle,
+            run_id: None,
+            seeds: Vec::new(),
+            configs: Vec::new(),
+            framework_version: "mfm.cli.test".to_owned(),
+            source_revision: "test-source".to_owned(),
+            drive: TypedDriveArg::AppendOnly,
+            stores: TypedRunStoresArgs {
+                typed_artifact_root: Some(tmp.path().join("artifacts")),
+                database_url: None,
+            },
+        })
+        .await
+        .expect_err("missing config inputs reject before store construction");
+
+        assert_eq!(err.code, "MissingTypedConfigInput");
+    }
+
+    #[tokio::test]
+    async fn start_accepts_config_inputs_before_store_connection() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (bundle, configs) = proof_bundle_and_configs(tmp.path());
+
+        let err = execute_internal(&StartArgs {
+            bundle,
+            run_id: None,
+            seeds: Vec::new(),
+            configs,
+            framework_version: "mfm.cli.test".to_owned(),
+            source_revision: "test-source".to_owned(),
+            drive: TypedDriveArg::AppendOnly,
+            stores: TypedRunStoresArgs {
+                typed_artifact_root: Some(tmp.path().join("artifacts")),
+                database_url: None,
+            },
+        })
+        .await
+        .expect_err("valid launch material proceeds to store construction");
+
+        assert_eq!(err.code, "MissingDatabaseUrl");
+    }
+
+    fn proof_bundle_and_configs(root: &std::path::Path) -> (PathBuf, Vec<ConfigInputArg>) {
+        let proof_config = mfm_op_proof::ProofWorkflowConfig::default();
+        let draft = mfm_op_proof::proof_program_draft(proof_config.clone()).expect("proof draft");
+        let certified = mfm_op_proof::certified_proof_spec(proof_config).expect("proof spec");
+        let bundle = certified.bundle().expect("proof bundle");
+        let bundle_json = serde_json::json!({
+            "kind": "certified_typed_spec_bundle_v1",
+            "spec": serde_json::from_slice::<serde_json::Value>(bundle.spec_bytes())
+                .expect("spec JSON"),
+            "certificate": serde_json::from_slice::<serde_json::Value>(bundle.certificate_bytes())
+                .expect("certificate JSON"),
+        });
+        let bundle_path = root.join("bundle.json");
+        std::fs::write(
+            &bundle_path,
+            serde_json::to_vec(&bundle_json).expect("bundle JSON"),
+        )
+        .expect("write bundle");
+
+        let mut configs = Vec::new();
+        let mut index = 0usize;
+        for config in draft
+            .state_nodes()
+            .iter()
+            .map(|node| &node.config)
+            .chain(draft.operation_lineage().iter().map(|frame| &frame.config))
+        {
+            let path = root.join(format!("config-{index}.json"));
+            index += 1;
+            std::fs::write(&path, config.canonical_json.as_bytes()).expect("write config");
+            configs.push(ConfigInputArg {
+                schema_id: config.schema_id.clone(),
+                path,
+            });
+        }
+        for node in &certified.envelope().spec.nodes {
+            let Some(framework) = &node.framework else {
+                continue;
+            };
+            let bytes = mfm_spec::v1::framework_config_canonical_json(
+                framework.config_kind(),
+                &node.node_id,
+            )
+            .expect("framework config");
+            let path = root.join(format!("config-{index}.json"));
+            index += 1;
+            std::fs::write(&path, bytes.as_bytes()).expect("write framework config");
+            configs.push(ConfigInputArg {
+                schema_id: node.config_ref.schema_id.clone(),
+                path,
+            });
+        }
+
+        (bundle_path, configs)
     }
 }

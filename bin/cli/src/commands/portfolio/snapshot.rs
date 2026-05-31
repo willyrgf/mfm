@@ -2,9 +2,7 @@ use std::fmt;
 use std::path::PathBuf;
 
 use clap::Args;
-use mfm_app::{TypedPublicOutputResponse, TypedRunPhase, TypedRunResponse};
-use mfm_artifact_store_fs::{FsTypedArtifactStore, TypedArtifactDescriptor};
-use mfm_events::v1 as events;
+use mfm_app::{TypedConfigInput, TypedPublicOutputResponse, TypedRunPhase, TypedRunResponse};
 use mfm_op_portfolio_tracker::{
     certified_portfolio_spec, portfolio_config_artifacts_for_spec, portfolio_program_draft,
     PortfolioConfigArtifact, PortfolioWorkflowConfig,
@@ -88,24 +86,21 @@ async fn execute_internal(args: &SnapshotArgs) -> CommandResult<PortfolioSnapsho
         .clone();
 
     let services = make_typed_app_services(&args.stores).await?;
-    persist_config_artifacts(
-        services.artifacts(),
+    let config_inputs = typed_config_inputs(
         portfolio_config_artifacts_for_spec(&draft, &certified.envelope().spec)
             .map_err(|error| CommandError::new("TypedPortfolioConfigInvalid", error.to_string()))?,
-    )
-    .await?;
+    );
 
     let run_id = mfm_app::new_run_id();
     let request = mfm_app::build_certified_typed_run_start_request(
-        services.artifacts(),
         certified,
         run_id.clone(),
         &args.framework_version,
         &args.source_revision,
+        config_inputs,
         Vec::new(),
         drive_mode(args.drive),
     )
-    .await
     .map_err(command_error_from_typed_app_error)?;
     let run = services
         .start_certified_run(request)
@@ -162,29 +157,15 @@ fn parse_and_canonicalize_json(
         .map_err(command_error_from_portfolio_snapshot_config_error)
 }
 
-async fn persist_config_artifacts(
-    artifacts: &FsTypedArtifactStore,
-    configs: Vec<PortfolioConfigArtifact>,
-) -> Result<(), CommandError> {
-    for config in configs {
-        artifacts
-            .put_artifact(
-                config.bytes,
-                TypedArtifactDescriptor {
-                    media_type: config.media_type,
-                    schema_id: Some(config.schema_id),
-                    semantic_type_id: None,
-                    producer_node_id: None,
-                    producer_seed_id: None,
-                    artifact_role: events::ArtifactRole::TypedConfig,
-                },
-            )
-            .await
-            .map_err(|error| {
-                CommandError::new("TypedPortfolioConfigPersistFailed", error.to_string())
-            })?;
-    }
-    Ok(())
+fn typed_config_inputs(configs: Vec<PortfolioConfigArtifact>) -> Vec<TypedConfigInput> {
+    configs
+        .into_iter()
+        .map(|config| TypedConfigInput {
+            schema_id: config.schema_id,
+            bytes: config.bytes,
+            media_type: config.media_type,
+        })
+        .collect()
 }
 
 fn command_error_from_portfolio_snapshot_config_error(

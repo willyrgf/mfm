@@ -2,8 +2,6 @@
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use mfm_artifact_store_fs::{FsTypedArtifactStore, TypedArtifactDescriptor};
-use mfm_events::v1 as events;
 use mfm_spec::v1 as spec;
 use tower::ServiceExt;
 
@@ -303,16 +301,55 @@ async fn start_rejects_certifier_invalid_runtime_shape_valid_bundle_before_strea
 }
 
 #[tokio::test]
+async fn start_rejects_missing_config_inputs_before_stream_creation() {
+    let app = test_app();
+    let certified =
+        mfm_op_proof::certified_proof_spec(mfm_op_proof::ProofWorkflowConfig::default())
+            .expect("proof spec");
+    let bundle = certified.bundle().expect("proof bundle");
+    let bundle_json = certified_bundle_json(bundle.spec_bytes(), bundle.certificate_bytes());
+
+    let resp = app
+        .clone()
+        .oneshot(json_post(
+            "/v1/runs/start",
+            serde_json::json!({
+                "kind": "typed_run_start_v1",
+                "run_id": VALID_RUN_ID,
+                "bundle": bundle_json,
+                "drive": "append_only"
+            }),
+        ))
+        .await
+        .expect("response");
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let v = response_json(resp).await;
+    assert_eq!(v["status"], "error");
+    assert_eq!(v["error"]["code"], "MissingTypedConfigInput");
+
+    let status = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v1/runs/{VALID_RUN_ID}/status"))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("status response");
+    assert_eq!(status.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn proof_http_start_replay_uses_certified_bundle_evidence() {
     let root = std::env::temp_dir().join(format!("mfm-rest-proof-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&root).expect("artifact root");
     let state = mfm_rest_api::make_in_memory_app_state(root.clone());
-    let artifacts = state.artifacts.clone();
     let proof_config = mfm_op_proof::ProofWorkflowConfig::default();
     let draft = mfm_op_proof::proof_program_draft(proof_config.clone()).expect("proof draft");
-    persist_program_config_artifacts(&artifacts, &draft).await;
     let certified = mfm_op_proof::certified_proof_spec(proof_config).expect("proof spec");
-    persist_framework_config_artifacts(&artifacts, &certified.envelope().spec).await;
+    let configs = config_bodies_for_draft_and_spec(&draft, &certified.envelope().spec);
     let public_schema_id = certified
         .envelope()
         .spec
@@ -333,6 +370,7 @@ async fn proof_http_start_replay_uses_certified_bundle_evidence() {
                 "kind": "typed_run_start_v1",
                 "run_id": run_id,
                 "bundle": bundle_json,
+                "configs": configs,
                 "framework_version": "mfm.integration.rest.proof.typed.v1",
                 "source_revision": "integration-test",
                 "drive": "until_blocked"
@@ -486,37 +524,17 @@ async fn stream_validates_sequence_range_before_reading() {
     assert_eq!(v["error"]["code"], "InvalidSequenceRange");
 }
 
-async fn persist_program_config_artifacts(
-    artifacts: &FsTypedArtifactStore,
+fn config_bodies_for_draft_and_spec(
     draft: &mfm_program::TypedProgramDraft,
-) {
-    for config in draft
+    typed_spec: &spec::TypedExecutionSpec,
+) -> Vec<serde_json::Value> {
+    let mut configs = draft
         .state_nodes()
         .iter()
         .map(|node| &node.config)
         .chain(draft.operation_lineage().iter().map(|frame| &frame.config))
-    {
-        artifacts
-            .put_artifact(
-                config.canonical_json.to_vec(),
-                TypedArtifactDescriptor {
-                    media_type: spec::MediaType::new("application/json").expect("media type"),
-                    schema_id: Some(config.schema_id.clone()),
-                    semantic_type_id: None,
-                    producer_node_id: None,
-                    producer_seed_id: None,
-                    artifact_role: events::ArtifactRole::TypedConfig,
-                },
-            )
-            .await
-            .expect("persist program config artifact");
-    }
-}
-
-async fn persist_framework_config_artifacts(
-    artifacts: &FsTypedArtifactStore,
-    typed_spec: &spec::TypedExecutionSpec,
-) {
+        .map(|config| config_body(config.schema_id.as_str(), config.canonical_json.as_bytes()))
+        .collect::<Vec<_>>();
     for node in &typed_spec.nodes {
         let Some(framework) = &node.framework else {
             continue;
@@ -528,19 +546,17 @@ async fn persist_framework_config_artifacts(
             node.config_ref.digest,
             "framework config helper must match certified config ref"
         );
-        artifacts
-            .put_artifact(
-                bytes.to_vec(),
-                TypedArtifactDescriptor {
-                    media_type: node.config_ref.media_type.clone(),
-                    schema_id: Some(node.config_ref.schema_id.clone()),
-                    semantic_type_id: None,
-                    producer_node_id: None,
-                    producer_seed_id: None,
-                    artifact_role: events::ArtifactRole::TypedConfig,
-                },
-            )
-            .await
-            .expect("persist framework config artifact");
+        configs.push(config_body(
+            node.config_ref.schema_id.as_str(),
+            bytes.as_bytes(),
+        ));
     }
+    configs
+}
+
+fn config_body(schema_id: &str, bytes: &[u8]) -> serde_json::Value {
+    serde_json::json!({
+        "schema_id": schema_id,
+        "json": serde_json::from_slice::<serde_json::Value>(bytes).expect("config JSON"),
+    })
 }

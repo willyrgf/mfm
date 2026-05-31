@@ -28,8 +28,9 @@ use mfm_replay::v1 as replay;
 use mfm_runtime::{
     CertifiedRuntimeSpec, ErasedNodeRunner, ErasedRunCtx, ErasedRunnerBinding, ErasedRunnerFuture,
     ErasedRunnerOutput, ErasedRunnerRegistry, MaterializedCellTerminal, MaterializedInputNode,
-    RunLaunchEvidence, RunnerEventPayload, RuntimeArtifactStageFuture, RuntimeArtifactStager,
-    RuntimeError, SchedulerStatus, SerialTypedScheduler, StagedArtifact, StagedRetentionRefs,
+    RunLaunchArtifact, RunLaunchEvidence, RunLaunchSeedCell, RunnerEventPayload,
+    RuntimeArtifactStageFuture, RuntimeArtifactStager, RuntimeError, SchedulerStatus,
+    SerialTypedScheduler, StagedArtifact, StagedRetentionRefs,
 };
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
@@ -325,6 +326,8 @@ struct ReferenceFixture {
     runtime_spec: CertifiedRuntimeSpec,
     run_id: RunId,
     seed_ref: events::SeedCellRef,
+    seed_bytes: Vec<u8>,
+    config_bytes: BTreeMap<String, Vec<u8>>,
     pure_descriptor: DescriptorId,
     read_descriptor: DescriptorId,
     managed_descriptor: DescriptorId,
@@ -903,6 +906,8 @@ fn reference_fixture() -> Result<ReferenceFixture, String> {
     let certified = mfm_certify::certify_program_draft(&draft).map_err(display_error)?;
     let runtime_spec = CertifiedRuntimeSpec::new(certified).map_err(display_error)?;
     let spec = runtime_spec.spec();
+    let config_bytes = config_bytes_for_draft_and_spec(&draft, spec)?;
+    let seed_bytes = seed.canonical_json().to_vec();
     let node_by_key = |key: &str| -> Result<&spec::NodeSpec, String> {
         spec.nodes
             .iter()
@@ -966,6 +971,8 @@ fn reference_fixture() -> Result<ReferenceFixture, String> {
         runtime_spec,
         run_id: run_id(0x42),
         seed_ref,
+        seed_bytes,
+        config_bytes,
         pure_descriptor,
         read_descriptor,
         managed_descriptor,
@@ -1384,10 +1391,16 @@ fn replay_artifacts(
     stream: &[store::KernelEventEnvelope],
 ) -> Result<Vec<store::ArtifactEvidenceRef>, String> {
     let mut artifacts = BTreeMap::<ArtifactId, store::ArtifactEvidenceRef>::new();
-    insert_artifact(&mut artifacts, spec_artifact(&fixture.runtime_spec)?);
-    insert_artifact(&mut artifacts, certificate_artifact(&fixture.runtime_spec)?);
+    insert_artifact(
+        &mut artifacts,
+        spec_artifact(&fixture.runtime_spec)?.evidence,
+    );
+    insert_artifact(
+        &mut artifacts,
+        certificate_artifact(&fixture.runtime_spec)?.evidence,
+    );
     for config in &fixture.runtime_spec.spec().config_refs {
-        insert_artifact(&mut artifacts, config_artifact(config));
+        insert_artifact(&mut artifacts, config_artifact_evidence(config));
     }
     for artifact in referenced_artifacts_from_stream(fixture, stream)? {
         insert_artifact(&mut artifacts, artifact);
@@ -1637,7 +1650,7 @@ fn validate_referenced_config_artifacts(
         .spec()
         .config_refs
         .iter()
-        .map(|config| (config_ref_key(config), config_artifact(config)))
+        .map(|config| (config_ref_key(config), config_artifact_evidence(config)))
         .collect::<BTreeMap<_, _>>();
     let mut validated = BTreeMap::new();
     for artifact in artifacts {
@@ -1961,41 +1974,46 @@ fn run_start_evidence(
             .spec()
             .config_refs
             .iter()
-            .map(config_artifact)
-            .collect(),
+            .map(|config| config_artifact(fixture, config))
+            .collect::<Result<Vec<_>, _>>()?,
         framework_version: events::FrameworkVersion::new("mfm.typed_slice.framework.v1")
             .map_err(display_error)?,
         source_revision: events::SourceRevision::new("typed-certified-slice")
             .map_err(display_error)?,
         adapter_executables: vec![executable("deterministic-local-adapter")?],
-        seed_cells,
+        seed_cells: seed_cells
+            .into_iter()
+            .map(|cell| RunLaunchSeedCell {
+                bytes: fixture.seed_bytes.clone(),
+                cell,
+            })
+            .collect(),
     })
 }
 
-fn spec_artifact(
-    runtime_spec: &CertifiedRuntimeSpec,
-) -> Result<store::ArtifactEvidenceRef, String> {
+fn spec_artifact(runtime_spec: &CertifiedRuntimeSpec) -> Result<RunLaunchArtifact, String> {
     let canonical = runtime_spec
         .spec()
         .canonical_json()
         .map_err(display_error)?;
     let digest = canonical.content_digest();
-    Ok(store::ArtifactEvidenceRef {
-        artifact_id: ArtifactId::from_digest(digest.algorithm(), *digest.digest()),
-        digest,
-        byte_len: canonical.as_bytes().len() as u64,
-        media_type: runtime_spec.spec().media_type.clone(),
-        schema_id: None,
-        semantic_type_id: None,
-        producer_node_id: None,
-        producer_seed_id: None,
-        artifact_role: events::ArtifactRole::TypedExecutionSpec,
+    Ok(RunLaunchArtifact {
+        bytes: canonical.to_vec(),
+        evidence: store::ArtifactEvidenceRef {
+            artifact_id: ArtifactId::from_digest(digest.algorithm(), *digest.digest()),
+            digest,
+            byte_len: canonical.as_bytes().len() as u64,
+            media_type: runtime_spec.spec().media_type.clone(),
+            schema_id: None,
+            semantic_type_id: None,
+            producer_node_id: None,
+            producer_seed_id: None,
+            artifact_role: events::ArtifactRole::TypedExecutionSpec,
+        },
     })
 }
 
-fn certificate_artifact(
-    runtime_spec: &CertifiedRuntimeSpec,
-) -> Result<store::ArtifactEvidenceRef, String> {
+fn certificate_artifact(runtime_spec: &CertifiedRuntimeSpec) -> Result<RunLaunchArtifact, String> {
     let canonical = runtime_spec
         .certificate()
         .canonical_json()
@@ -2003,20 +2021,38 @@ fn certificate_artifact(
     let digest = canonical.content_digest();
     let media_type =
         spec::MediaType::new(mfm_certify::CERTIFICATE_MEDIA_TYPE).map_err(display_error)?;
-    Ok(store::ArtifactEvidenceRef {
-        artifact_id: ArtifactId::from_digest(digest.algorithm(), *digest.digest()),
-        digest,
-        byte_len: canonical.as_bytes().len() as u64,
-        media_type,
-        schema_id: None,
-        semantic_type_id: None,
-        producer_node_id: None,
-        producer_seed_id: None,
-        artifact_role: events::ArtifactRole::TypedSpecCertificate,
+    Ok(RunLaunchArtifact {
+        bytes: canonical.to_vec(),
+        evidence: store::ArtifactEvidenceRef {
+            artifact_id: ArtifactId::from_digest(digest.algorithm(), *digest.digest()),
+            digest,
+            byte_len: canonical.as_bytes().len() as u64,
+            media_type,
+            schema_id: None,
+            semantic_type_id: None,
+            producer_node_id: None,
+            producer_seed_id: None,
+            artifact_role: events::ArtifactRole::TypedSpecCertificate,
+        },
     })
 }
 
-fn config_artifact(config: &spec::ConfigRef) -> store::ArtifactEvidenceRef {
+fn config_artifact(
+    fixture: &ReferenceFixture,
+    config: &spec::ConfigRef,
+) -> Result<RunLaunchArtifact, String> {
+    let bytes = fixture
+        .config_bytes
+        .get(&config_ref_key(config))
+        .ok_or_else(|| format!("missing config bytes for {}", config.artifact_id))?
+        .clone();
+    Ok(RunLaunchArtifact {
+        bytes,
+        evidence: config_artifact_evidence(config),
+    })
+}
+
+fn config_artifact_evidence(config: &spec::ConfigRef) -> store::ArtifactEvidenceRef {
     store::ArtifactEvidenceRef {
         artifact_id: config.artifact_id.clone(),
         digest: config.digest.clone(),
@@ -2032,6 +2068,34 @@ fn config_artifact(config: &spec::ConfigRef) -> store::ArtifactEvidenceRef {
 
 fn config_ref_key(config: &spec::ConfigRef) -> String {
     format!("{}:{}", config.schema_id, config.digest)
+}
+
+fn config_bytes_for_draft_and_spec(
+    draft: &mfm_program::TypedProgramDraft,
+    typed_spec: &spec::TypedExecutionSpec,
+) -> Result<BTreeMap<String, Vec<u8>>, String> {
+    let mut configs = BTreeMap::new();
+    for config in draft
+        .state_nodes()
+        .iter()
+        .map(|node| &node.config)
+        .chain(draft.operation_lineage().iter().map(|frame| &frame.config))
+    {
+        let digest = config.canonical_json.content_digest();
+        configs.insert(
+            format!("{}:{}", config.schema_id, digest),
+            config.canonical_json.to_vec(),
+        );
+    }
+    for node in &typed_spec.nodes {
+        let Some(framework) = &node.framework else {
+            continue;
+        };
+        let bytes = spec::framework_config_canonical_json(framework.config_kind(), &node.node_id)
+            .map_err(display_error)?;
+        configs.insert(config_ref_key(&node.config_ref), bytes.to_vec());
+    }
+    Ok(configs)
 }
 
 fn seed_artifact(seed: &events::SeedCellRef) -> store::ArtifactEvidenceRef {

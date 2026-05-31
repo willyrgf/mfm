@@ -27,8 +27,9 @@ use mfm_replay::v1 as replay;
 use mfm_runtime::{
     CertifiedRuntimeSpec, ErasedNodeRunner, ErasedRunCtx, ErasedRunnerBinding, ErasedRunnerFuture,
     ErasedRunnerOutput, ErasedRunnerRegistry, MaterializedCellTerminal, MaterializedInputNode,
-    RunLaunchEvidence, RunnerEventPayload, RuntimeArtifactStageFuture, RuntimeArtifactStager,
-    SchedulerStatus, SerialTypedScheduler, StagedArtifact, StagedRetentionRefs,
+    RunLaunchArtifact, RunLaunchEvidence, RunnerEventPayload, RuntimeArtifactStageFuture,
+    RuntimeArtifactStager, SchedulerStatus, SerialTypedScheduler, StagedArtifact,
+    StagedRetentionRefs,
 };
 use mfm_spec::v1 as spec;
 use mfm_store::v1::{self as store, TypedRunEventStore};
@@ -54,6 +55,17 @@ impl InMemoryProofArtifacts {
             artifacts
                 .get(artifact_id)
                 .map(|(_, evidence)| evidence.clone())
+        })
+    }
+
+    fn artifact_for(&self, artifact_id: &ArtifactId) -> Option<RunLaunchArtifact> {
+        self.artifacts.lock().ok().and_then(|artifacts| {
+            artifacts
+                .get(artifact_id)
+                .map(|(bytes, evidence)| RunLaunchArtifact {
+                    bytes: bytes.clone(),
+                    evidence: evidence.clone(),
+                })
         })
     }
 
@@ -1158,9 +1170,15 @@ pub async fn proof_implementation_conformance_summary(
         DigestAlgorithm::Sha256JcsV1,
         DigestBytes::from_array([0x34; 32]),
     );
-    start_proof_run(&scheduler, &mut store, &runtime_spec, run_id.clone())
-        .await
-        .map_err(|error| error.to_string())?;
+    start_proof_run(
+        &scheduler,
+        &mut store,
+        &artifacts,
+        &runtime_spec,
+        run_id.clone(),
+    )
+    .await
+    .map_err(|error| error.to_string())?;
 
     for _ in 0..16 {
         match scheduler
@@ -1396,13 +1414,14 @@ async fn persist_conformance_config_artifacts(
 async fn start_proof_run(
     scheduler: &SerialTypedScheduler,
     store: &mut store::InMemoryTypedRunStore,
+    artifacts: &InMemoryProofArtifacts,
     runtime_spec: &CertifiedRuntimeSpec,
     run_id: RunId,
 ) -> mfm_runtime::Result<()> {
     let launch = scheduler.prepare_run_launch(
         runtime_spec,
         run_id.clone(),
-        run_start_evidence(runtime_spec)?,
+        run_start_evidence(runtime_spec, artifacts)?,
         store.expected_next_seq(&run_id),
     )?;
     scheduler.start_run(store, launch).await?;
@@ -1411,55 +1430,59 @@ async fn start_proof_run(
 
 fn run_start_evidence(
     runtime_spec: &CertifiedRuntimeSpec,
+    artifacts: &InMemoryProofArtifacts,
 ) -> mfm_runtime::Result<RunLaunchEvidence> {
     let spec_bytes = runtime_spec.spec().canonical_json()?;
     let spec_digest = spec_bytes.content_digest();
-    let spec_artifact = store::ArtifactEvidenceRef {
-        artifact_id: ArtifactId::from_digest(spec_digest.algorithm(), *spec_digest.digest()),
-        digest: spec_digest,
-        byte_len: spec_bytes.as_bytes().len() as u64,
-        media_type: runtime_spec.spec().media_type.clone(),
-        schema_id: None,
-        semantic_type_id: None,
-        producer_node_id: None,
-        producer_seed_id: None,
-        artifact_role: events::ArtifactRole::TypedExecutionSpec,
+    let spec_artifact = RunLaunchArtifact {
+        bytes: spec_bytes.to_vec(),
+        evidence: store::ArtifactEvidenceRef {
+            artifact_id: ArtifactId::from_digest(spec_digest.algorithm(), *spec_digest.digest()),
+            digest: spec_digest,
+            byte_len: spec_bytes.as_bytes().len() as u64,
+            media_type: runtime_spec.spec().media_type.clone(),
+            schema_id: None,
+            semantic_type_id: None,
+            producer_node_id: None,
+            producer_seed_id: None,
+            artifact_role: events::ArtifactRole::TypedExecutionSpec,
+        },
     };
     let certificate_bytes = runtime_spec
         .certificate()
         .canonical_json()
         .map_err(|error| mfm_runtime::RuntimeError::Canonical(error.to_string()))?;
     let certificate_digest = certificate_bytes.content_digest();
-    let certificate_artifact = store::ArtifactEvidenceRef {
-        artifact_id: ArtifactId::from_digest(
-            certificate_digest.algorithm(),
-            *certificate_digest.digest(),
-        ),
-        digest: certificate_digest,
-        byte_len: certificate_bytes.as_bytes().len() as u64,
-        media_type: mfm_spec::v1::MediaType::new(mfm_certify::CERTIFICATE_MEDIA_TYPE)?,
-        schema_id: None,
-        semantic_type_id: None,
-        producer_node_id: None,
-        producer_seed_id: None,
-        artifact_role: events::ArtifactRole::TypedSpecCertificate,
+    let certificate_artifact = RunLaunchArtifact {
+        bytes: certificate_bytes.to_vec(),
+        evidence: store::ArtifactEvidenceRef {
+            artifact_id: ArtifactId::from_digest(
+                certificate_digest.algorithm(),
+                *certificate_digest.digest(),
+            ),
+            digest: certificate_digest,
+            byte_len: certificate_bytes.as_bytes().len() as u64,
+            media_type: mfm_spec::v1::MediaType::new(mfm_certify::CERTIFICATE_MEDIA_TYPE)?,
+            schema_id: None,
+            semantic_type_id: None,
+            producer_node_id: None,
+            producer_seed_id: None,
+            artifact_role: events::ArtifactRole::TypedSpecCertificate,
+        },
     };
     let config_artifacts = runtime_spec
         .spec()
         .config_refs
         .iter()
-        .map(|config| store::ArtifactEvidenceRef {
-            artifact_id: config.artifact_id.clone(),
-            digest: config.digest.clone(),
-            byte_len: config.byte_len,
-            media_type: config.media_type.clone(),
-            schema_id: Some(config.schema_id.clone()),
-            semantic_type_id: None,
-            producer_node_id: None,
-            producer_seed_id: None,
-            artifact_role: events::ArtifactRole::TypedConfig,
+        .map(|config| {
+            artifacts.artifact_for(&config.artifact_id).ok_or_else(|| {
+                mfm_runtime::RuntimeError::Store(format!(
+                    "missing conformance config artifact {}",
+                    config.artifact_id
+                ))
+            })
         })
-        .collect();
+        .collect::<mfm_runtime::Result<Vec<_>>>()?;
     Ok(RunLaunchEvidence {
         spec_artifact,
         certificate_artifact,
@@ -1652,9 +1675,15 @@ mod tests {
             DigestAlgorithm::Sha256JcsV1,
             DigestBytes::from_array([0x34; 32]),
         );
-        start_proof_run(&scheduler, &mut store, &runtime_spec, run_id.clone())
-            .await
-            .expect("start run");
+        start_proof_run(
+            &scheduler,
+            &mut store,
+            &artifacts,
+            &runtime_spec,
+            run_id.clone(),
+        )
+        .await
+        .expect("start run");
 
         for _ in 0..16 {
             match scheduler

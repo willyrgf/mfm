@@ -3,7 +3,7 @@
 //!
 //! `mfm-app` is the typed boundary used by binaries and process adapters. It does not plan old
 //! dynamic DAGs, own workflow semantics, or expose `mfm-machine`/`mfm-sdk` execution authority.
-//! Callers supply a certified typed spec, a runner registry, typed artifact evidence, and a typed
+//! Callers supply a certified typed spec, a runner registry, staged launch material, and a typed
 //! run store; this crate wires those parts into start, resume, replay, and public-output rendering
 //! helpers.
 //!
@@ -16,21 +16,24 @@
 //! let _services = make_in_memory_typed_services(runners, "/tmp/mfm-typed-artifacts");
 //! ```
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use mfm_artifact_store_fs::{FsTypedArtifactError, FsTypedArtifactStore, TypedArtifactDescriptor};
+use mfm_artifact_store_fs::{FsTypedArtifactError, FsTypedArtifactStore};
 use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
 use mfm_certify::{CertificationRegistry, CertifiedSpecBundle, CertifiedTypedSpec};
 use mfm_events::v1 as events;
 use mfm_ids::{
-    ArtifactId, ContentDigest, DigestAlgorithm, EventId, RunId, SchemaId, SeedId, SpecHash,
+    ArtifactId, ContentDigest, DigestAlgorithm, EventId, RunId, SchemaId, SeedId, SemanticTypeId,
+    SpecHash,
 };
 use mfm_replay::v1::{ReplayBroker, ReplayError, ReplayReadAuthority};
 use mfm_runtime::{
-    validate_run_stream, CertifiedRuntimeSpec, RunLaunchEvidence, RuntimeArtifactStageFuture,
-    RuntimeArtifactStager, SchedulerStatus, SerialTypedScheduler, VerifiedRunStream,
+    validate_run_stream, CertifiedRuntimeSpec, RunLaunchArtifact, RunLaunchEvidence,
+    RunLaunchSeedCell, RuntimeArtifactStageFuture, RuntimeArtifactStager, SchedulerStatus,
+    SerialTypedScheduler, VerifiedRunStream,
 };
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
@@ -361,10 +364,21 @@ pub struct TypedRunStartRequest {
     pub certified_spec: CertifiedTypedSpec,
     /// Store-owned run id to bind.
     pub run_id: RunId,
-    /// Launch evidence whose caller-supplied artifacts must already be persisted.
+    /// Launch material that runtime middleware stages and admits with the genesis commit.
     pub evidence: RunLaunchEvidence,
     /// Scheduler drive policy after start.
     pub drive: DriveMode,
+}
+
+/// Config bytes supplied to a typed run start request.
+#[derive(Debug, Clone)]
+pub struct TypedConfigInput {
+    /// Certified config schema id.
+    pub schema_id: SchemaId,
+    /// Canonical config artifact bytes.
+    pub bytes: Vec<u8>,
+    /// Config artifact media type.
+    pub media_type: spec::MediaType,
 }
 
 /// Seed bytes supplied to a typed run start request.
@@ -622,75 +636,12 @@ where
         &self.certification_registry
     }
 
-    /// Persists the certified spec artifact required before `RunStarted`.
-    pub async fn persist_certified_spec(
-        &self,
-        runtime_spec: &CertifiedRuntimeSpec,
-    ) -> Result<store::ArtifactEvidenceRef, AppError> {
-        let canonical = runtime_spec.spec().canonical_json().map_err(|error| {
-            AppError::new(
-                ErrorClass::Internal,
-                "TypedSpecCanonicalError",
-                error.to_string(),
-            )
-        })?;
-        self.artifacts
-            .put_artifact(
-                canonical.to_vec(),
-                TypedArtifactDescriptor {
-                    media_type: runtime_spec.spec().media_type.clone(),
-                    schema_id: None,
-                    semantic_type_id: None,
-                    producer_node_id: None,
-                    producer_seed_id: None,
-                    artifact_role: events::ArtifactRole::TypedExecutionSpec,
-                },
-            )
-            .await
-            .map_err(Into::into)
-    }
-
-    /// Persists a certified config artifact and verifies it matches the spec config reference.
-    pub async fn persist_config_artifact(
-        &self,
-        config_ref: &spec::ConfigRef,
-        bytes: Vec<u8>,
-    ) -> Result<store::ArtifactEvidenceRef, AppError> {
-        let evidence = self
-            .artifacts
-            .put_artifact(
-                bytes,
-                TypedArtifactDescriptor {
-                    media_type: config_ref.media_type.clone(),
-                    schema_id: Some(config_ref.schema_id.clone()),
-                    semantic_type_id: None,
-                    producer_node_id: None,
-                    producer_seed_id: None,
-                    artifact_role: events::ArtifactRole::TypedConfig,
-                },
-            )
-            .await?;
-        if evidence.artifact_id != config_ref.artifact_id
-            || evidence.digest != config_ref.digest
-            || evidence.byte_len != config_ref.byte_len
-        {
-            return Err(AppError::new(
-                ErrorClass::BadRequest,
-                "TypedConfigArtifactMismatch",
-                "persisted config artifact does not match certified config ref",
-            ));
-        }
-        Ok(evidence)
-    }
-
     /// Starts a certified typed run, optionally driving runnable nodes.
     pub async fn start_certified_run(
         &self,
         req: TypedRunStartRequest,
     ) -> Result<TypedRunResponse, AppError> {
         let runtime_spec = CertifiedRuntimeSpec::new(req.certified_spec)?;
-        self.validate_launch_artifacts(&runtime_spec, &req.evidence)
-            .await?;
         let mut store = self.store.lock().await;
         let expected_next_seq = store.expected_next_seq(&req.run_id);
         let launch = self.scheduler.prepare_run_launch(
@@ -854,14 +805,6 @@ where
                 .await?),
         }
     }
-
-    async fn validate_launch_artifacts(
-        &self,
-        runtime_spec: &CertifiedRuntimeSpec,
-        evidence: &RunLaunchEvidence,
-    ) -> Result<(), AppError> {
-        validate_launch_artifacts(&self.artifacts, runtime_spec, evidence).await
-    }
 }
 
 /// Application facade for durable async certified typed runtime dispatch.
@@ -923,7 +866,6 @@ where
         req: TypedRunStartRequest,
     ) -> Result<TypedRunResponse, AppError> {
         let runtime_spec = CertifiedRuntimeSpec::new(req.certified_spec)?;
-        validate_launch_artifacts(&self.artifacts, &runtime_spec, &req.evidence).await?;
         let expected_next_seq = self
             .store
             .expected_next_seq(&req.run_id)
@@ -1205,11 +1147,9 @@ pub async fn replay_read_authority_for_run(
         .map_err(Into::into)
 }
 
-/// Persists the certified typed execution spec artifact for a runtime spec.
-pub async fn persist_certified_spec_artifact(
-    artifacts: &FsTypedArtifactStore,
+fn certified_spec_launch_artifact(
     runtime_spec: &CertifiedRuntimeSpec,
-) -> Result<store::ArtifactEvidenceRef, AppError> {
+) -> Result<RunLaunchArtifact, AppError> {
     let canonical = runtime_spec.spec().canonical_json().map_err(|error| {
         AppError::new(
             ErrorClass::Internal,
@@ -1217,27 +1157,19 @@ pub async fn persist_certified_spec_artifact(
             error.to_string(),
         )
     })?;
-    artifacts
-        .put_artifact(
-            canonical.to_vec(),
-            TypedArtifactDescriptor {
-                media_type: runtime_spec.spec().media_type.clone(),
-                schema_id: None,
-                semantic_type_id: None,
-                producer_node_id: None,
-                producer_seed_id: None,
-                artifact_role: events::ArtifactRole::TypedExecutionSpec,
-            },
-        )
-        .await
-        .map_err(Into::into)
+    Ok(launch_artifact(
+        canonical.to_vec(),
+        runtime_spec.spec().media_type.clone(),
+        None,
+        None,
+        None,
+        events::ArtifactRole::TypedExecutionSpec,
+    ))
 }
 
-/// Persists the certified typed spec certificate artifact for a runtime spec.
-pub async fn persist_certified_spec_certificate_artifact(
-    artifacts: &FsTypedArtifactStore,
+fn certified_spec_certificate_launch_artifact(
     runtime_spec: &CertifiedRuntimeSpec,
-) -> Result<store::ArtifactEvidenceRef, AppError> {
+) -> Result<RunLaunchArtifact, AppError> {
     let canonical = runtime_spec
         .certificate()
         .canonical_json()
@@ -1256,59 +1188,92 @@ pub async fn persist_certified_spec_certificate_artifact(
                 error.to_string(),
             )
         })?;
-    artifacts
-        .put_artifact(
-            canonical.to_vec(),
-            TypedArtifactDescriptor {
-                media_type,
-                schema_id: None,
-                semantic_type_id: None,
-                producer_node_id: None,
-                producer_seed_id: None,
-                artifact_role: events::ArtifactRole::TypedSpecCertificate,
-            },
-        )
-        .await
-        .map_err(Into::into)
+    Ok(launch_artifact(
+        canonical.to_vec(),
+        media_type,
+        None,
+        None,
+        None,
+        events::ArtifactRole::TypedSpecCertificate,
+    ))
 }
 
-/// Loads and verifies config artifact evidence required by a certified spec.
-pub async fn load_config_artifacts_for_spec(
-    artifacts: &FsTypedArtifactStore,
+fn config_launch_artifacts_for_spec(
     runtime_spec: &CertifiedRuntimeSpec,
-) -> Result<Vec<store::ArtifactEvidenceRef>, AppError> {
-    let mut evidence = Vec::with_capacity(runtime_spec.spec().config_refs.len());
+    configs: Vec<TypedConfigInput>,
+) -> Result<Vec<RunLaunchArtifact>, AppError> {
+    let mut supplied = BTreeMap::new();
+    for config in configs {
+        let artifact = launch_artifact(
+            config.bytes,
+            config.media_type,
+            Some(config.schema_id.clone()),
+            None,
+            None,
+            events::ArtifactRole::TypedConfig,
+        );
+        let key = config_input_key(&config.schema_id, &artifact.evidence.digest);
+        if let Some(existing) = supplied.get(&key) {
+            if existing != &artifact {
+                return Err(AppError::new(
+                    ErrorClass::BadRequest,
+                    "DuplicateTypedConfigInput",
+                    "config input was supplied more than once with conflicting bytes",
+                ));
+            }
+            continue;
+        }
+        if supplied.insert(key, artifact).is_some() {
+            return Err(AppError::new(
+                ErrorClass::BadRequest,
+                "DuplicateTypedConfigInput",
+                "config input was supplied more than once",
+            ));
+        }
+    }
+
+    let mut validated = Vec::with_capacity(runtime_spec.spec().config_refs.len());
     for config_ref in &runtime_spec.spec().config_refs {
-        let (_, artifact) = artifacts
-            .get_artifact_by_id(&config_ref.artifact_id)
-            .await?;
-        if artifact.artifact_id != config_ref.artifact_id
-            || artifact.digest != config_ref.digest
-            || artifact.byte_len != config_ref.byte_len
-            || artifact.media_type != config_ref.media_type
-            || artifact.schema_id.as_ref() != Some(&config_ref.schema_id)
-            || artifact.semantic_type_id.is_some()
-            || artifact.producer_node_id.is_some()
-            || artifact.producer_seed_id.is_some()
-            || artifact.artifact_role != events::ArtifactRole::TypedConfig
+        let key = config_input_key(&config_ref.schema_id, &config_ref.digest);
+        let artifact = supplied.remove(&key).ok_or_else(|| {
+            AppError::new(
+                ErrorClass::BadRequest,
+                "MissingTypedConfigInput",
+                format!("missing config input for {}", config_ref.schema_id),
+            )
+        })?;
+        if artifact.evidence.artifact_id != config_ref.artifact_id
+            || artifact.evidence.digest != config_ref.digest
+            || artifact.evidence.byte_len != config_ref.byte_len
+            || artifact.evidence.media_type != config_ref.media_type
+            || artifact.evidence.schema_id.as_ref() != Some(&config_ref.schema_id)
+            || artifact.evidence.semantic_type_id.is_some()
+            || artifact.evidence.producer_node_id.is_some()
+            || artifact.evidence.producer_seed_id.is_some()
+            || artifact.evidence.artifact_role != events::ArtifactRole::TypedConfig
         {
             return Err(AppError::new(
                 ErrorClass::BadRequest,
                 "TypedConfigArtifactMismatch",
-                "typed config artifact metadata does not match the certified spec",
+                "typed config input does not match the certified spec",
             ));
         }
-        evidence.push(artifact);
+        validated.push(artifact);
     }
-    Ok(evidence)
+    if !supplied.is_empty() {
+        return Err(AppError::new(
+            ErrorClass::BadRequest,
+            "UnknownTypedConfigInput",
+            "config input was supplied for a config not present in the certified spec",
+        ));
+    }
+    Ok(validated)
 }
 
-/// Persists and verifies launch seed artifacts for a certified spec.
-pub async fn persist_seed_inputs_for_spec(
-    artifacts: &FsTypedArtifactStore,
+fn seed_launch_cells_for_spec(
     runtime_spec: &CertifiedRuntimeSpec,
     seeds: Vec<TypedSeedInput>,
-) -> Result<Vec<events::SeedCellRef>, AppError> {
+) -> Result<Vec<RunLaunchSeedCell>, AppError> {
     let mut supplied = std::collections::BTreeMap::new();
     for seed in seeds {
         if supplied.insert(seed.seed_id.clone(), seed).is_some() {
@@ -1329,21 +1294,16 @@ pub async fn persist_seed_inputs_for_spec(
                 format!("missing seed input for {}", seed_spec.seed_id),
             )
         })?;
-        let evidence = artifacts
-            .put_artifact(
-                input.bytes,
-                TypedArtifactDescriptor {
-                    media_type: input.media_type,
-                    schema_id: Some(seed_spec.schema_id.clone()),
-                    semantic_type_id: Some(seed_spec.semantic_type_id.clone()),
-                    producer_node_id: None,
-                    producer_seed_id: Some(seed_spec.seed_id.clone()),
-                    artifact_role: events::ArtifactRole::SeedInput,
-                },
-            )
-            .await?;
+        let artifact = launch_artifact(
+            input.bytes,
+            input.media_type,
+            Some(seed_spec.schema_id.clone()),
+            Some(seed_spec.semantic_type_id.clone()),
+            Some(seed_spec.seed_id.clone()),
+            events::ArtifactRole::SeedInput,
+        );
         if let Some(required_digest) = &seed_spec.required_digest {
-            if &evidence.digest != required_digest {
+            if &artifact.evidence.digest != required_digest {
                 return Err(AppError::new(
                     ErrorClass::BadRequest,
                     "TypedSeedDigestMismatch",
@@ -1351,21 +1311,24 @@ pub async fn persist_seed_inputs_for_spec(
                 ));
             }
         }
-        seed_refs.push(events::SeedCellRef {
-            seed_id: seed_spec.seed_id.clone(),
-            cell_id: seed_spec.cell_id.clone(),
-            scope_id: seed_spec.scope_id.clone(),
-            semantic_type_id: seed_spec.semantic_type_id.clone(),
-            schema_id: seed_spec.schema_id.clone(),
-            digest: evidence.digest.clone(),
-            seed_artifact: events::ArtifactEvidenceRef {
-                artifact_id: evidence.artifact_id.clone(),
-                role: evidence.artifact_role,
+        seed_refs.push(RunLaunchSeedCell {
+            bytes: artifact.bytes,
+            cell: events::SeedCellRef {
+                seed_id: seed_spec.seed_id.clone(),
+                cell_id: seed_spec.cell_id.clone(),
+                scope_id: seed_spec.scope_id.clone(),
+                semantic_type_id: seed_spec.semantic_type_id.clone(),
                 schema_id: seed_spec.schema_id.clone(),
-                semantic_type_id: evidence.semantic_type_id.clone(),
-                content_digest: evidence.digest,
-                byte_len: evidence.byte_len,
-                media_type: evidence.media_type,
+                digest: artifact.evidence.digest.clone(),
+                seed_artifact: events::ArtifactEvidenceRef {
+                    artifact_id: artifact.evidence.artifact_id.clone(),
+                    role: artifact.evidence.artifact_role,
+                    schema_id: seed_spec.schema_id.clone(),
+                    semantic_type_id: artifact.evidence.semantic_type_id.clone(),
+                    content_digest: artifact.evidence.digest,
+                    byte_len: artifact.evidence.byte_len,
+                    media_type: artifact.evidence.media_type,
+                },
             },
         });
     }
@@ -1377,6 +1340,44 @@ pub async fn persist_seed_inputs_for_spec(
         ));
     }
     Ok(seed_refs)
+}
+
+fn launch_artifact(
+    bytes: Vec<u8>,
+    media_type: spec::MediaType,
+    schema_id: Option<SchemaId>,
+    semantic_type_id: Option<SemanticTypeId>,
+    producer_seed_id: Option<SeedId>,
+    artifact_role: events::ArtifactRole,
+) -> RunLaunchArtifact {
+    let byte_len = bytes.len() as u64;
+    let digest = content_digest_for_bytes(&bytes);
+    RunLaunchArtifact {
+        bytes,
+        evidence: store::ArtifactEvidenceRef {
+            artifact_id: artifact_id_for_digest(&digest),
+            digest,
+            byte_len,
+            media_type,
+            schema_id,
+            semantic_type_id,
+            producer_node_id: None,
+            producer_seed_id,
+            artifact_role,
+        },
+    }
+}
+
+fn content_digest_for_bytes(bytes: &[u8]) -> ContentDigest {
+    ContentDigest::from_digest(DigestAlgorithm::Sha256JcsV1, sha256_digest_bytes(bytes))
+}
+
+fn artifact_id_for_digest(digest: &ContentDigest) -> ArtifactId {
+    ArtifactId::from_digest(digest.algorithm(), *digest.digest())
+}
+
+fn config_input_key(schema_id: &SchemaId, digest: &ContentDigest) -> String {
+    format!("{schema_id}:{digest}")
 }
 
 /// Returns the default JSON media type used by typed CLI seed inputs.
@@ -1493,9 +1494,9 @@ pub struct UntrustedCertifiedSpecBundleStartInput<'a> {
 /// This helper is for transport and storage boundaries that receive serialized bundle data. It
 /// verifies the spec and certificate against the trusted registry before producing a request that
 /// can reach the runtime boundary.
-pub async fn verify_certified_bundle_run_start_request(
-    artifacts: &FsTypedArtifactStore,
+pub fn verify_certified_bundle_run_start_request(
     input: UntrustedCertifiedSpecBundleStartInput<'_>,
+    config_inputs: Vec<TypedConfigInput>,
     seed_inputs: Vec<TypedSeedInput>,
 ) -> Result<TypedRunStartRequest, AppError> {
     let certified_spec = mfm_certify::verify_certified_bundle_with_trusted_registry(
@@ -1504,33 +1505,31 @@ pub async fn verify_certified_bundle_run_start_request(
         input.registry,
     )?;
     build_certified_typed_run_start_request(
-        artifacts,
         certified_spec,
         input.run_id,
         input.framework_version,
         input.source_revision,
+        config_inputs,
         seed_inputs,
         input.drive,
     )
-    .await
 }
 
 /// Builds a typed run-start request from certifier-backed typed spec authority and launch inputs.
-pub async fn build_certified_typed_run_start_request(
-    artifacts: &FsTypedArtifactStore,
+pub fn build_certified_typed_run_start_request(
     certified_spec: CertifiedTypedSpec,
     run_id: RunId,
     framework_version: &str,
     source_revision: &str,
+    config_inputs: Vec<TypedConfigInput>,
     seed_inputs: Vec<TypedSeedInput>,
     drive: DriveMode,
 ) -> Result<TypedRunStartRequest, AppError> {
     let runtime_spec = CertifiedRuntimeSpec::new(certified_spec.clone())?;
-    let spec_artifact = persist_certified_spec_artifact(artifacts, &runtime_spec).await?;
-    let certificate_artifact =
-        persist_certified_spec_certificate_artifact(artifacts, &runtime_spec).await?;
-    let config_artifacts = load_config_artifacts_for_spec(artifacts, &runtime_spec).await?;
-    let seed_cells = persist_seed_inputs_for_spec(artifacts, &runtime_spec, seed_inputs).await?;
+    let spec_artifact = certified_spec_launch_artifact(&runtime_spec)?;
+    let certificate_artifact = certified_spec_certificate_launch_artifact(&runtime_spec)?;
+    let config_artifacts = config_launch_artifacts_for_spec(&runtime_spec, config_inputs)?;
+    let seed_cells = seed_launch_cells_for_spec(&runtime_spec, seed_inputs)?;
     Ok(TypedRunStartRequest {
         certified_spec,
         run_id,
@@ -1567,58 +1566,6 @@ fn async_app_store_error(error: impl fmt::Display) -> AppError {
         "TypedStoreRejected",
         error.to_string(),
     )
-}
-
-async fn validate_launch_artifacts(
-    artifacts: &FsTypedArtifactStore,
-    runtime_spec: &CertifiedRuntimeSpec,
-    evidence: &RunLaunchEvidence,
-) -> Result<(), AppError> {
-    let spec_bytes = artifacts.get_artifact(&evidence.spec_artifact).await?;
-    let canonical = runtime_spec.spec().canonical_json().map_err(|error| {
-        AppError::new(
-            ErrorClass::Internal,
-            "TypedSpecCanonicalError",
-            error.to_string(),
-        )
-    })?;
-    if spec_bytes != canonical.as_bytes() {
-        return Err(AppError::new(
-            ErrorClass::BadRequest,
-            "TypedSpecArtifactMismatch",
-            "persisted typed execution spec artifact bytes do not match the certified spec",
-        ));
-    }
-    let certificate_bytes = artifacts
-        .get_artifact(&evidence.certificate_artifact)
-        .await?;
-    let certificate_canonical = runtime_spec
-        .certificate()
-        .canonical_json()
-        .map_err(|error| {
-            AppError::new(
-                ErrorClass::Internal,
-                "TypedCertificateCanonicalError",
-                error.to_string(),
-            )
-        })?;
-    if certificate_bytes != certificate_canonical.as_bytes() {
-        return Err(AppError::new(
-            ErrorClass::BadRequest,
-            "TypedCertificateArtifactMismatch",
-            "persisted typed spec certificate artifact bytes do not match the certified spec",
-        ));
-    }
-
-    for config_artifact in &evidence.config_artifacts {
-        artifacts.get_artifact(config_artifact).await?;
-    }
-    for seed in &evidence.seed_cells {
-        artifacts
-            .get_artifact(&seed_artifact_evidence(seed))
-            .await?;
-    }
-    Ok(())
 }
 
 /// Derives typed run status from an authoritative store-owned run stream.
@@ -2108,20 +2055,6 @@ fn run_started_spec_hash(stream: &[store::KernelEventEnvelope]) -> Result<SpecHa
         })
 }
 
-fn seed_artifact_evidence(seed: &events::SeedCellRef) -> store::ArtifactEvidenceRef {
-    store::ArtifactEvidenceRef {
-        artifact_id: seed.seed_artifact.artifact_id.clone(),
-        digest: seed.seed_artifact.content_digest.clone(),
-        byte_len: seed.seed_artifact.byte_len,
-        media_type: seed.seed_artifact.media_type.clone(),
-        schema_id: Some(seed.seed_artifact.schema_id.clone()),
-        semantic_type_id: seed.seed_artifact.semantic_type_id.clone(),
-        producer_node_id: None,
-        producer_seed_id: Some(seed.seed_id.clone()),
-        artifact_role: seed.seed_artifact.role,
-    }
-}
-
 fn typed_phase(state: store::RunState) -> TypedRunPhase {
     match state {
         store::RunState::Absent => TypedRunPhase::Absent,
@@ -2154,6 +2087,7 @@ fn typed_event_ref(event: &store::KernelEventEnvelope) -> TypedRunEventRef {
 #[allow(clippy::disallowed_methods)]
 mod tests {
     use super::*;
+    use mfm_artifact_store_fs::TypedArtifactDescriptor;
     use mfm_capabilities::{NoCaps, Pure};
     use mfm_ids::{AttemptId, DescriptorId, StateKind, StateVersion};
     use mfm_ids::{CellId, ContentDigest, DigestBytes, NodeId, ScopeId, SeedId, SemanticTypeId};
@@ -2701,7 +2635,6 @@ mod tests {
             CertificationRegistry::from_program_draft(&fixture.draft).expect("fixture registry");
         let run_id = fixture.run_id.clone();
         let err = verify_certified_bundle_run_start_request(
-            &artifacts,
             UntrustedCertifiedSpecBundleStartInput {
                 spec_bytes: &bad_spec,
                 certificate_bytes: bundle.certificate_bytes(),
@@ -2712,8 +2645,8 @@ mod tests {
                 drive: DriveMode::AppendOnly,
             },
             Vec::new(),
+            Vec::new(),
         )
-        .await
         .expect_err("invalid bundle must not build a start request");
         assert_eq!(err.code, "TypedCertificationFailed");
 
@@ -2760,7 +2693,6 @@ mod tests {
             CertificationRegistry::from_program_draft(&fixture.draft).expect("fixture registry");
         let run_id = fixture.run_id.clone();
         let err = verify_certified_bundle_run_start_request(
-            &artifacts,
             UntrustedCertifiedSpecBundleStartInput {
                 spec_bytes: &spec_bytes,
                 certificate_bytes: &certificate_bytes,
@@ -2771,8 +2703,8 @@ mod tests {
                 drive: DriveMode::AppendOnly,
             },
             Vec::new(),
+            Vec::new(),
         )
-        .await
         .expect_err("certifier-invalid bundle must not build a start request");
         assert_eq!(err.code, "TypedCertificationFailed");
 
@@ -3060,15 +2992,13 @@ mod tests {
         ));
         let artifacts = FsTypedArtifactStore::new(&root);
         let fixture = framework_seed_public_output_fixture();
-        persist_draft_config_artifacts(&artifacts, &fixture.draft).await;
-        persist_framework_config_artifacts(&artifacts, &fixture.certified_spec.envelope().spec)
-            .await;
+        let config_inputs = config_inputs_for_fixture(&fixture);
         let request = build_certified_typed_run_start_request(
-            &artifacts,
             fixture.certified_spec.clone(),
             fixture.run_id.clone(),
             "mfm.test.framework",
             "test-source",
+            config_inputs,
             vec![TypedSeedInput {
                 seed_id: fixture.seed_id.clone(),
                 bytes: fixture.seed_bytes.clone(),
@@ -3076,7 +3006,6 @@ mod tests {
             }],
             DriveMode::UntilBlocked,
         )
-        .await
         .expect("typed run request");
         let services = make_async_typed_services(
             production_typed_runner_registry(artifacts.clone())
@@ -3114,13 +3043,11 @@ mod tests {
         let artifacts = FsTypedArtifactStore::new(&root);
         let proof_config = mfm_op_proof::ProofWorkflowConfig::default();
         let draft = mfm_op_proof::proof_program_draft(proof_config.clone()).expect("proof draft");
-        persist_draft_config_artifacts(&artifacts, &draft).await;
         let certified = mfm_op_proof::certified_proof_spec(proof_config).expect("proof spec");
-        persist_framework_config_artifacts(&artifacts, &certified.envelope().spec).await;
+        let config_inputs = config_inputs_for_draft_and_spec(&draft, &certified.envelope().spec);
         let bundle = certified.bundle().expect("proof bundle");
         let registry = production_certification_registry().expect("production registry");
         let request = verify_certified_bundle_run_start_request(
-            &artifacts,
             UntrustedCertifiedSpecBundleStartInput {
                 spec_bytes: bundle.spec_bytes(),
                 certificate_bytes: bundle.certificate_bytes(),
@@ -3130,9 +3057,9 @@ mod tests {
                 source_revision: "test-source",
                 drive: DriveMode::UntilBlocked,
             },
+            config_inputs,
             Vec::new(),
         )
-        .await
         .expect("typed proof run request");
         let services = make_async_typed_services_with_certification_registry(
             production_typed_runner_registry(artifacts.clone())
@@ -3181,9 +3108,7 @@ mod tests {
         ));
         let artifacts = FsTypedArtifactStore::new(&root);
         let fixture = framework_seed_public_output_fixture();
-        persist_draft_config_artifacts(&artifacts, &fixture.draft).await;
-        persist_framework_config_artifacts(&artifacts, &fixture.certified_spec.envelope().spec)
-            .await;
+        let config_inputs = config_inputs_for_fixture(&fixture);
         artifacts
             .put_artifact(
                 fixture.output_bytes.clone(),
@@ -3199,11 +3124,11 @@ mod tests {
             .await
             .expect("persist runner output artifact");
         let request = build_certified_typed_run_start_request(
-            &artifacts,
             fixture.certified_spec.clone(),
             fixture.run_id.clone(),
             "mfm.test.framework",
             "test-source",
+            config_inputs,
             vec![TypedSeedInput {
                 seed_id: fixture.seed_id.clone(),
                 bytes: fixture.seed_bytes.clone(),
@@ -3211,7 +3136,6 @@ mod tests {
             }],
             DriveMode::UntilBlocked,
         )
-        .await
         .expect("typed run request");
         let runners = framework_fixture_runner_registry(&fixture);
         let registry =
@@ -3242,9 +3166,7 @@ mod tests {
         ));
         let artifacts = FsTypedArtifactStore::new(&root);
         let fixture = framework_seed_public_output_fixture();
-        persist_draft_config_artifacts(&artifacts, &fixture.draft).await;
-        persist_framework_config_artifacts(&artifacts, &fixture.certified_spec.envelope().spec)
-            .await;
+        let config_inputs = config_inputs_for_fixture(&fixture);
         artifacts
             .put_artifact(
                 fixture.output_bytes.clone(),
@@ -3260,11 +3182,11 @@ mod tests {
             .await
             .expect("persist runner output artifact");
         let request = build_certified_typed_run_start_request(
-            &artifacts,
             fixture.certified_spec.clone(),
             fixture.run_id.clone(),
             "mfm.test.framework",
             "test-source",
+            config_inputs,
             vec![TypedSeedInput {
                 seed_id: fixture.seed_id.clone(),
                 bytes: fixture.seed_bytes.clone(),
@@ -3272,7 +3194,6 @@ mod tests {
             }],
             DriveMode::UntilBlocked,
         )
-        .await
         .expect("typed run request");
         let runners = framework_fixture_runner_registry(&fixture);
         let registry =
@@ -3308,37 +3229,29 @@ mod tests {
         runners
     }
 
-    async fn persist_draft_config_artifacts(
-        artifacts: &FsTypedArtifactStore,
-        draft: &mfm_program::TypedProgramDraft,
-    ) {
-        for config in draft
-            .state_nodes()
-            .iter()
-            .map(|node| &node.config)
-            .chain(draft.operation_lineage().iter().map(|frame| &frame.config))
-        {
-            artifacts
-                .put_artifact(
-                    config.canonical_json.to_vec(),
-                    TypedArtifactDescriptor {
-                        media_type: spec::MediaType::new("application/json").expect("media type"),
-                        schema_id: Some(config.schema_id.clone()),
-                        semantic_type_id: None,
-                        producer_node_id: None,
-                        producer_seed_id: None,
-                        artifact_role: events::ArtifactRole::TypedConfig,
-                    },
-                )
-                .await
-                .expect("persist draft config artifact");
-        }
+    fn config_inputs_for_fixture(
+        fixture: &FrameworkSeedPublicOutputFixture,
+    ) -> Vec<TypedConfigInput> {
+        config_inputs_for_draft_and_spec(&fixture.draft, &fixture.certified_spec.envelope().spec)
     }
 
-    async fn persist_framework_config_artifacts(
-        artifacts: &FsTypedArtifactStore,
+    fn config_inputs_for_draft_and_spec(
+        draft: &mfm_program::TypedProgramDraft,
         typed_spec: &spec::TypedExecutionSpec,
-    ) {
+    ) -> Vec<TypedConfigInput> {
+        let mut inputs = Vec::new();
+        inputs.extend(
+            draft
+                .state_nodes()
+                .iter()
+                .map(|node| &node.config)
+                .chain(draft.operation_lineage().iter().map(|frame| &frame.config))
+                .map(|config| TypedConfigInput {
+                    schema_id: config.schema_id.clone(),
+                    bytes: config.canonical_json.to_vec(),
+                    media_type: spec::MediaType::new("application/json").expect("media type"),
+                }),
+        );
         for node in &typed_spec.nodes {
             let Some(framework) = &node.framework else {
                 continue;
@@ -3351,21 +3264,13 @@ mod tests {
                 node.config_ref.digest,
                 "framework config helper must match certified config ref"
             );
-            artifacts
-                .put_artifact(
-                    bytes.to_vec(),
-                    TypedArtifactDescriptor {
-                        media_type: node.config_ref.media_type.clone(),
-                        schema_id: Some(node.config_ref.schema_id.clone()),
-                        semantic_type_id: None,
-                        producer_node_id: None,
-                        producer_seed_id: None,
-                        artifact_role: events::ArtifactRole::TypedConfig,
-                    },
-                )
-                .await
-                .expect("persist framework config artifact");
+            inputs.push(TypedConfigInput {
+                schema_id: node.config_ref.schema_id.clone(),
+                bytes: bytes.to_vec(),
+                media_type: node.config_ref.media_type.clone(),
+            });
         }
+        inputs
     }
 
     async fn corrupt_public_output_history(

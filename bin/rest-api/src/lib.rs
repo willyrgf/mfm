@@ -29,10 +29,11 @@ use axum::Json;
 use axum::Router;
 use http::header::HeaderName;
 use mfm_app::{
-    AppError, DriveMode, ErrorClass, TypedAsyncAppServices, TypedPublicOutputResponse,
-    TypedRunPhase, TypedRunResponse, TypedRunStreamResponse, TypedSeedInput,
+    AppError, DriveMode, ErrorClass, TypedAsyncAppServices, TypedConfigInput,
+    TypedPublicOutputResponse, TypedRunPhase, TypedRunResponse, TypedRunStreamResponse,
+    TypedSeedInput,
 };
-use mfm_artifact_store_fs::{FsTypedArtifactError, FsTypedArtifactStore, TypedArtifactDescriptor};
+use mfm_artifact_store_fs::{FsTypedArtifactError, FsTypedArtifactStore};
 use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
 use mfm_events::v1::ArtifactRole;
 use mfm_ids::{ArtifactId, ContentDigest, DigestAlgorithm, RunId, SchemaId, SeedId};
@@ -402,6 +403,8 @@ struct TypedRunStartBody {
     #[serde(default)]
     run_id: Option<String>,
     #[serde(default)]
+    configs: Vec<TypedConfigBody>,
+    #[serde(default)]
     seeds: Vec<TypedSeedBody>,
     #[serde(default = "default_framework_version")]
     framework_version: String,
@@ -409,6 +412,13 @@ struct TypedRunStartBody {
     source_revision: String,
     #[serde(default)]
     drive: RestDriveMode,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TypedConfigBody {
+    schema_id: String,
+    json: serde_json::Value,
 }
 
 #[derive(Debug, Deserialize)]
@@ -518,17 +528,16 @@ where
 
     let run_id = parse_optional_run_id(req.run_id)?;
     let services = state.services()?;
-    persist_portfolio_config_artifacts(services.artifacts(), configs).await?;
+    let config_inputs = typed_config_inputs(configs);
     let start = mfm_app::build_certified_typed_run_start_request(
-        services.artifacts(),
         certified,
         run_id.clone(),
         &req.framework_version,
         &req.source_revision,
+        config_inputs,
         Vec::new(),
         req.drive.into_app(),
-    )
-    .await?;
+    )?;
     let run = services.start_certified_run(start).await?;
     let public_output = if run.phase == TypedRunPhase::Completed {
         Some(
@@ -557,6 +566,21 @@ where
     }
     let run_id = parse_optional_run_id(req.run_id)?;
     let bundle = mfm_app::parse_certified_spec_bundle_json_value(&req.bundle)?;
+    let config_media_type = mfm_app::json_media_type()?;
+    let mut configs = Vec::with_capacity(req.configs.len());
+    for config in req.configs {
+        configs.push(TypedConfigInput {
+            schema_id: SchemaId::parse(&config.schema_id).map_err(|_| {
+                ApiError::new(
+                    StatusCode::BAD_REQUEST,
+                    "TypedConfigSchemaInvalid",
+                    "typed config schema id is invalid",
+                )
+            })?,
+            bytes: canonical_json_value_bytes(&config.json, "TypedConfigInvalid")?,
+            media_type: config_media_type.clone(),
+        });
+    }
     let seed_media_type = mfm_app::json_media_type()?;
     let mut seeds = Vec::with_capacity(req.seeds.len());
     for seed in req.seeds {
@@ -569,7 +593,6 @@ where
 
     let services = state.services()?;
     let start = mfm_app::verify_certified_bundle_run_start_request(
-        services.artifacts(),
         mfm_app::UntrustedCertifiedSpecBundleStartInput {
             spec_bytes: bundle.spec_bytes(),
             certificate_bytes: bundle.certificate_bytes(),
@@ -579,9 +602,9 @@ where
             source_revision: &req.source_revision,
             drive: req.drive.into_app(),
         },
+        configs,
         seeds,
-    )
-    .await?;
+    )?;
     let data = services.start_certified_run(start).await?;
 
     json_ok(data)
@@ -778,27 +801,15 @@ fn parse_portfolio_snapshot_request(
         .map_err(api_error_from_portfolio_config_error)
 }
 
-async fn persist_portfolio_config_artifacts(
-    artifacts: &FsTypedArtifactStore,
-    configs: Vec<PortfolioConfigArtifact>,
-) -> Result<(), ApiError> {
-    for config in configs {
-        artifacts
-            .put_artifact(
-                config.bytes,
-                TypedArtifactDescriptor {
-                    media_type: config.media_type,
-                    schema_id: Some(config.schema_id),
-                    semantic_type_id: None,
-                    producer_node_id: None,
-                    producer_seed_id: None,
-                    artifact_role: ArtifactRole::TypedConfig,
-                },
-            )
-            .await
-            .map_err(api_error_from_typed_artifact_error)?;
-    }
-    Ok(())
+fn typed_config_inputs(configs: Vec<PortfolioConfigArtifact>) -> Vec<TypedConfigInput> {
+    configs
+        .into_iter()
+        .map(|config| TypedConfigInput {
+            schema_id: config.schema_id,
+            bytes: config.bytes,
+            media_type: config.media_type,
+        })
+        .collect()
 }
 
 fn api_error_from_portfolio_config_error(error: PortfolioSnapshotConfigError) -> ApiError {

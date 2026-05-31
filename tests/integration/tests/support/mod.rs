@@ -1,7 +1,7 @@
 #![allow(clippy::disallowed_methods, dead_code)]
 
-use mfm_app::{DriveMode, TypedPublicOutputResponse, TypedRunResponse};
-use mfm_artifact_store_fs::{FsTypedArtifactStore, TypedArtifactDescriptor};
+use mfm_app::{DriveMode, TypedConfigInput, TypedPublicOutputResponse, TypedRunResponse};
+use mfm_artifact_store_fs::FsTypedArtifactStore;
 use mfm_events::v1 as events;
 use mfm_op_portfolio_tracker::{
     certified_portfolio_spec, portfolio_config_artifacts_for_spec, portfolio_program_draft,
@@ -58,17 +58,14 @@ pub async fn run_typed_portfolio_snapshot(
         registry.clone(),
     );
 
-    persist_config_artifacts(
-        services.artifacts(),
+    let config_inputs = typed_config_inputs(
         portfolio_config_artifacts_for_spec(&draft, &certified.envelope().spec)
             .expect("config artifacts"),
-    )
-    .await;
+    );
 
     let bundle = certified.bundle().expect("certified bundle");
     let run_id = mfm_app::new_run_id();
     let request = mfm_app::verify_certified_bundle_run_start_request(
-        services.artifacts(),
         mfm_app::UntrustedCertifiedSpecBundleStartInput {
             spec_bytes: bundle.spec_bytes(),
             certificate_bytes: bundle.certificate_bytes(),
@@ -78,9 +75,9 @@ pub async fn run_typed_portfolio_snapshot(
             source_revision: "integration-test",
             drive: DriveMode::UntilBlocked,
         },
+        config_inputs,
         Vec::new(),
     )
-    .await
     .expect("typed portfolio start request");
     let run = services
         .start_certified_run(request)
@@ -139,17 +136,14 @@ pub async fn resume_typed_portfolio_snapshot(
         registry.clone(),
     );
 
-    persist_config_artifacts(
-        services.artifacts(),
+    let config_inputs = typed_config_inputs(
         portfolio_config_artifacts_for_spec(&draft, &certified.envelope().spec)
             .expect("config artifacts"),
-    )
-    .await;
+    );
 
     let bundle = certified.bundle().expect("certified bundle");
     let run_id = mfm_app::new_run_id();
     let request = mfm_app::verify_certified_bundle_run_start_request(
-        services.artifacts(),
         mfm_app::UntrustedCertifiedSpecBundleStartInput {
             spec_bytes: bundle.spec_bytes(),
             certificate_bytes: bundle.certificate_bytes(),
@@ -159,9 +153,9 @@ pub async fn resume_typed_portfolio_snapshot(
             source_revision: "integration-test",
             drive: DriveMode::AppendOnly,
         },
+        config_inputs,
         Vec::new(),
     )
-    .await
     .expect("typed portfolio append-only start request");
     let started = services
         .start_certified_run(request)
@@ -239,24 +233,13 @@ fn authority_evidence_from_stream(
     }
 }
 
-async fn persist_config_artifacts(
-    artifacts: &FsTypedArtifactStore,
-    configs: Vec<PortfolioConfigArtifact>,
-) {
-    for config in configs {
-        artifacts
-            .put_artifact(
-                config.bytes,
-                TypedArtifactDescriptor {
-                    media_type: config.media_type,
-                    schema_id: Some(config.schema_id),
-                    semantic_type_id: None,
-                    producer_node_id: None,
-                    producer_seed_id: None,
-                    artifact_role: events::ArtifactRole::TypedConfig,
-                },
-            )
-            .await
-            .expect("persist typed config artifact");
-    }
+fn typed_config_inputs(configs: Vec<PortfolioConfigArtifact>) -> Vec<TypedConfigInput> {
+    configs
+        .into_iter()
+        .map(|config| TypedConfigInput {
+            schema_id: config.schema_id,
+            bytes: config.bytes,
+            media_type: config.media_type,
+        })
+        .collect()
 }

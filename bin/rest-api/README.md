@@ -53,8 +53,8 @@ Probe semantics:
 ## Start A Portfolio Snapshot
 
 `POST /v1/portfolio/snapshot` accepts the same documented portfolio snapshot request JSON as
-`mfm_cli portfolio snapshot`, compiles it into a certified typed portfolio spec, persists the
-required typed config artifacts, and starts the certified run:
+`mfm_cli portfolio snapshot`, compiles it into a certified typed portfolio spec, passes the
+required typed config launch material to runtime middleware, and starts the certified run:
 
 ```json
 {
@@ -91,6 +91,14 @@ submits old dynamic `portfolio_tracker`, `portfolio_execute`, or `portfolio_conf
     }
   },
   "run_id": "run:sha256-jcs-v1:<optional-digest>",
+  "configs": [
+    {
+      "schema_id": "schema:<name>:<version>:<algorithm>:<digest>",
+      "json": {
+        "...": "canonical config value"
+      }
+    }
+  ],
   "seeds": [
     {
       "seed_id": "seed:sha256-jcs-v1:<digest>",
@@ -114,7 +122,8 @@ Request notes:
 - Hash-only spec envelopes, raw typed spec JSON, certificate bytes, and summaries are not runtime
   authority.
 - `run_id` is optional; the server generates a typed digest run id when omitted.
-- `seeds[*].json` is canonicalized and persisted as JSON seed material.
+- `configs[*].json` and `seeds[*].json` are canonicalized and staged by runtime middleware before
+  their evidence is admitted with the start commit.
 - `drive` is `until_blocked` or `append_only`; it defaults to `until_blocked`.
 - Specs that reference unported domain descriptors fail before `RunStarted` with
   `TypedRunnerUnavailable`.
