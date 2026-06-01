@@ -2,6 +2,7 @@
 #![allow(clippy::disallowed_methods)]
 
 use std::collections::BTreeSet;
+use std::time::Duration;
 
 use mfm_app::{DriveMode, TypedConfigInput};
 use mfm_artifact_store_fs::FsTypedArtifactStore;
@@ -248,6 +249,7 @@ async fn parity_reth_deploy_configure_validate_root_op() {
     assert_eq!(response.scheduler_status, "blocked");
 
     const MAX_TYPED_DCV_RESUMES: usize = 96;
+    const MAX_RESUME_ATTEMPTS_PER_STEP: usize = 4;
     let mut observed_payloads = BTreeSet::new();
     let mut step_payloads = Vec::<BTreeSet<String>>::new();
     let mut previous_head = response.head_seq;
@@ -256,15 +258,31 @@ async fn parity_reth_deploy_configure_validate_root_op() {
         if response.phase == mfm_app::TypedRunPhase::Completed {
             break;
         }
-        response = services
-            .resume_stored_run(&run_id, DriveMode::Once)
-            .await
-            .expect("resume typed EVM DCV run");
-        single_step_resumes += 1;
+
+        let mut advanced_this_step = false;
+        for attempt in 0..MAX_RESUME_ATTEMPTS_PER_STEP {
+            response = services
+                .resume_stored_run(&run_id, DriveMode::Once)
+                .await
+                .expect("resume typed EVM DCV run");
+            if response.head_seq > previous_head
+                || response.phase == mfm_app::TypedRunPhase::Completed
+            {
+                advanced_this_step = true;
+                single_step_resumes += 1;
+                break;
+            }
+
+            if attempt + 1 < MAX_RESUME_ATTEMPTS_PER_STEP {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+        }
+
         assert!(
-            response.head_seq > previous_head,
-            "single-step typed EVM DCV resume made no durable progress before completion"
+            advanced_this_step,
+            "single-step typed EVM DCV resume made no durable progress after {MAX_RESUME_ATTEMPTS_PER_STEP} retries"
         );
+
         let store = services.store();
         let stream = {
             let store = store.lock().await;

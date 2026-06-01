@@ -191,7 +191,7 @@ async fn parity_portfolio_snapshot_feature_against_reth_eth_only() {
     assert_eq!(
         out["wallets"][0]["observations"]
             .as_array()
-            .map(|v| v.len()),
+            .map(|v: &Vec<serde_json::Value>| v.len()),
         Some(1)
     );
     assert_eq!(

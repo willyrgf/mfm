@@ -22,6 +22,7 @@ mfm-spec = { path = "../../crates/kernel/spec" }
 mfm-certify = { path = "../../crates/kernel/certify" }
 mfm-program = { path = "../../crates/kernel/program" }
 mfm-program-derive = { path = "../../crates/kernel/program-derive" }
+mfm-values = { path = "../../crates/kernel/values" }
 mfm-store = { path = "../../crates/kernel/store" }
 mfm-stream-store-postgres = { path = "../../crates/storages/stream-store-postgres" }
 mfm-op-proof = { path = "../../crates/ops/proof-op" }
