@@ -576,8 +576,9 @@ remember.
 
 Secret-bearing wrapper types should avoid `Serialize`, `MfmValue`, `MfmConfig`, and public output
 implementations entirely. If a secret type needs `Debug`, it must be redacted. Keystore capabilities
-should return non-secret signatures, receipts, protected artifact references, or typed authority
-references, never raw private keys, mnemonics, passwords, or decrypted secret bytes.
+should return receipts, non-secret references, or typed authority references, never raw private keys,
+mnemonics, passwords, decrypted secret bytes, or signed raw transactions retained as normal MFM
+artifacts.
 
 ### Typed Planning Config
 
@@ -3640,8 +3641,9 @@ output cell before RunCompleted
 ```
 
 Fixtures must prove no duplicate mutation occurs, replay confirms from recorded evidence without
-reapplying, protected raw transaction artifacts remain non-public and redacted, and validation
-before configuration remains a compile-fail typestate error.
+reapplying, prepared invocation artifacts retain only unsigned plans and expected hashes, signed raw
+transactions remain transient submit-time bytes, and validation before configuration remains a
+compile-fail typestate error.
 
 ### Plugin And Third-Party Workflows
 

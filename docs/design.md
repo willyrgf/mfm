@@ -107,6 +107,8 @@ outside app/runtime assembly.
 
 Typed configs are deterministic planning inputs. They are decoded at boundaries, validated,
 canonicalized, and retained by value or content-addressed reference in certified specs.
+Run-start rejects config artifacts that match certified metadata but cannot be decoded and validated
+through the trusted certification registry or an exact framework-owned config reference.
 
 Typed runtime values cross state boundaries through typed cells and handles. A runtime value cannot
 change the topology of the same certified run. If produced data must select future topology, the
@@ -118,9 +120,9 @@ derive path or framework-owned generic constructors. Manual descriptor implement
 framework boundary are rejected by checks because they bypass schema, no-float, and no-secret policy.
 
 Secrets remain below the typed semantic boundary. Private keys, mnemonics, passwords, decrypted
-bytes, and raw signing material must not be typed values, configs, facts, artifacts, events, public
-outputs, error details, or fixtures. States refer to secret-bearing systems through non-secret
-labels, references, and capabilities.
+bytes, raw signing material, and signed raw transactions must not be typed values, configs, facts,
+artifacts, events, public outputs, error details, or fixtures. States refer to secret-bearing systems
+through non-secret labels, references, and capabilities.
 
 ## Typed Program Authoring
 
@@ -267,6 +269,10 @@ Side-effect states are multi-commit protocols. The scheduler/store own:
 The durable uncertainty boundary is the invocation-started event. After that boundary, resume must
 recover or block using typed evidence; it must not duplicate an external mutation or guess from
 unstored state.
+
+Prepared-invocation artifacts may retain unsigned mutation plans, expected hashes, and non-secret
+signer references. Signed raw transactions are bearer mutation material and remain transient
+submit-time bytes inside the mutation adapter.
 
 Submission observed, submission unknown, and not-submitted-proven evidence share one logical
 submission-result slot for an invocation epoch. Unknown submission can be superseded only by the

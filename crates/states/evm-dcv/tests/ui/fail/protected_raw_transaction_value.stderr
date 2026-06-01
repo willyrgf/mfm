@@ -1,11 +1,5 @@
-error[E0599]: no function or associated item named `schema_id` found for struct `ProtectedRawTransaction` in the current scope
- --> tests/ui/fail/protected_raw_transaction_value.rs:5:38
+error[E0432]: unresolved import `mfm_state_evm_dcv::ProtectedRawTransaction`
+ --> tests/ui/fail/protected_raw_transaction_value.rs:1:5
   |
-5 |     let _ = ProtectedRawTransaction::schema_id();
-  |                                      ^^^^^^^^^ function or associated item not found in `ProtectedRawTransaction`
-  |
-note: if you're trying to build a new `ProtectedRawTransaction`, consider using `ProtectedRawTransaction::new` which returns `ProtectedRawTransaction`
- --> src/lib.rs
-  |
-  |     pub fn new(raw_transaction_hex: impl Into<String>) -> Self {
-  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+1 | use mfm_state_evm_dcv::ProtectedRawTransaction;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no `ProtectedRawTransaction` in the root

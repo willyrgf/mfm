@@ -18,9 +18,9 @@ mfm-effects = { path = "../effects" }
 mfm-ids = { path = "../ids" }
 mfm-program = { path = "../program" }
 mfm-spec = { path = "../spec" }
+mfm-values = { path = "../values" }
 serde_json = { workspace = true }
 
 [dev-dependencies]
 mfm-program-derive = { path = "../program-derive" }
-mfm-values = { path = "../values" }
 serde = { workspace = true }

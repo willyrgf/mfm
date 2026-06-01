@@ -55,7 +55,7 @@ pub use mfm_state_evm_dcv::{
     EvmDcvDeployIdempotencyInput, EvmDcvDeployIntent, EvmDcvDeployReceipt, EvmDcvDeploySubmission,
     EvmDcvReadBackend, EvmDcvReadCapability, EvmDcvReadError, EvmDcvReadFuture,
     EvmDcvSignerCapability, EvmDcvTransactionIntent, EvmDcvTransactionSubmitCapability,
-    ProtectedRawTransaction, ValidateContractState, ValidationReport,
+    ValidateContractState, ValidationReport,
 };
 
 const DCV_OPERATION_KIND_NAME: &str = "deploy_configure_validate_workflow";

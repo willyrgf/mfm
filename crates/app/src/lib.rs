@@ -1200,6 +1200,7 @@ fn certified_spec_certificate_launch_artifact(
 
 fn config_launch_artifacts_for_spec(
     runtime_spec: &CertifiedRuntimeSpec,
+    registry: &CertificationRegistry,
     configs: Vec<TypedConfigInput>,
 ) -> Result<Vec<RunLaunchArtifact>, AppError> {
     let mut supplied = BTreeMap::new();
@@ -1258,6 +1259,20 @@ fn config_launch_artifacts_for_spec(
                 "typed config input does not match the certified spec",
             ));
         }
+        if registry
+            .validate_config_ref_bytes(config_ref, &artifact.bytes)?
+            .is_none()
+            && !framework_config_matches_ref(runtime_spec.spec(), config_ref, &artifact.bytes)?
+        {
+            return Err(AppError::new(
+                ErrorClass::BadRequest,
+                "TypedConfigValidatorMissing",
+                format!(
+                    "no trusted typed config validator was registered for {}",
+                    config_ref.schema_id
+                ),
+            ));
+        }
         validated.push(artifact);
     }
     if !supplied.is_empty() {
@@ -1268,6 +1283,33 @@ fn config_launch_artifacts_for_spec(
         ));
     }
     Ok(validated)
+}
+
+fn framework_config_matches_ref(
+    typed_spec: &spec::TypedExecutionSpec,
+    config_ref: &spec::ConfigRef,
+    bytes: &[u8],
+) -> Result<bool, AppError> {
+    for node in &typed_spec.nodes {
+        if &node.config_ref != config_ref {
+            continue;
+        }
+        let Some(framework) = &node.framework else {
+            continue;
+        };
+        let expected =
+            spec::framework_config_canonical_json(framework.config_kind(), &node.node_id).map_err(
+                |error| {
+                    AppError::new(
+                        ErrorClass::Internal,
+                        "TypedFrameworkConfigInvalid",
+                        error.to_string(),
+                    )
+                },
+            )?;
+        return Ok(expected.as_bytes() == bytes);
+    }
+    Ok(false)
 }
 
 fn seed_launch_cells_for_spec(
@@ -1489,6 +1531,22 @@ pub struct UntrustedCertifiedSpecBundleStartInput<'a> {
     pub drive: DriveMode,
 }
 
+/// Certifier-backed typed spec authority plus launch metadata for a typed run start.
+pub struct CertifiedTypedRunStartInput<'a> {
+    /// Certifier-backed typed spec authority.
+    pub certified_spec: CertifiedTypedSpec,
+    /// Trusted registry used to validate launch config artifacts.
+    pub registry: &'a CertificationRegistry,
+    /// Run id to record in the started run stream.
+    pub run_id: RunId,
+    /// Framework version evidence to bind to the run start event.
+    pub framework_version: &'a str,
+    /// Source revision evidence to bind to the run start event.
+    pub source_revision: &'a str,
+    /// Drive mode used for the initial scheduler invocation.
+    pub drive: DriveMode,
+}
+
 /// Verifies untrusted persisted certified bundle bytes and builds a typed run-start request.
 ///
 /// This helper is for transport and storage boundaries that receive serialized bundle data. It
@@ -1505,39 +1563,39 @@ pub fn verify_certified_bundle_run_start_request(
         input.registry,
     )?;
     build_certified_typed_run_start_request(
-        certified_spec,
-        input.run_id,
-        input.framework_version,
-        input.source_revision,
+        CertifiedTypedRunStartInput {
+            certified_spec,
+            registry: input.registry,
+            run_id: input.run_id,
+            framework_version: input.framework_version,
+            source_revision: input.source_revision,
+            drive: input.drive,
+        },
         config_inputs,
         seed_inputs,
-        input.drive,
     )
 }
 
 /// Builds a typed run-start request from certifier-backed typed spec authority and launch inputs.
 pub fn build_certified_typed_run_start_request(
-    certified_spec: CertifiedTypedSpec,
-    run_id: RunId,
-    framework_version: &str,
-    source_revision: &str,
+    input: CertifiedTypedRunStartInput<'_>,
     config_inputs: Vec<TypedConfigInput>,
     seed_inputs: Vec<TypedSeedInput>,
-    drive: DriveMode,
 ) -> Result<TypedRunStartRequest, AppError> {
-    let runtime_spec = CertifiedRuntimeSpec::new(certified_spec.clone())?;
+    let runtime_spec = CertifiedRuntimeSpec::new(input.certified_spec.clone())?;
     let spec_artifact = certified_spec_launch_artifact(&runtime_spec)?;
     let certificate_artifact = certified_spec_certificate_launch_artifact(&runtime_spec)?;
-    let config_artifacts = config_launch_artifacts_for_spec(&runtime_spec, config_inputs)?;
+    let config_artifacts =
+        config_launch_artifacts_for_spec(&runtime_spec, input.registry, config_inputs)?;
     let seed_cells = seed_launch_cells_for_spec(&runtime_spec, seed_inputs)?;
     Ok(TypedRunStartRequest {
-        certified_spec,
-        run_id,
+        certified_spec: input.certified_spec,
+        run_id: input.run_id,
         evidence: RunLaunchEvidence {
             spec_artifact,
             certificate_artifact,
             config_artifacts,
-            framework_version: events::FrameworkVersion::new(framework_version).map_err(
+            framework_version: events::FrameworkVersion::new(input.framework_version).map_err(
                 |error| {
                     AppError::new(
                         ErrorClass::BadRequest,
@@ -1546,17 +1604,19 @@ pub fn build_certified_typed_run_start_request(
                     )
                 },
             )?,
-            source_revision: events::SourceRevision::new(source_revision).map_err(|error| {
-                AppError::new(
-                    ErrorClass::BadRequest,
-                    "TypedSourceRevisionInvalid",
-                    error.to_string(),
-                )
-            })?,
+            source_revision: events::SourceRevision::new(input.source_revision).map_err(
+                |error| {
+                    AppError::new(
+                        ErrorClass::BadRequest,
+                        "TypedSourceRevisionInvalid",
+                        error.to_string(),
+                    )
+                },
+            )?,
             adapter_executables: Vec::new(),
             seed_cells,
         },
-        drive,
+        drive: input.drive,
     })
 }
 
@@ -2142,6 +2202,31 @@ mod tests {
 
         assert_eq!(bundle.spec_bytes(), br#"{"a":1,"b":2}"#);
         assert_eq!(bundle.certificate_bytes(), br#"{}"#);
+    }
+
+    #[test]
+    fn typed_run_start_rejects_config_without_validator_or_exact_trust() {
+        let fixture = framework_seed_public_output_fixture();
+        let config_inputs = config_inputs_for_fixture(&fixture);
+        let err = build_certified_typed_run_start_request(
+            CertifiedTypedRunStartInput {
+                certified_spec: fixture.certified_spec.clone(),
+                registry: &CertificationRegistry::new(),
+                run_id: fixture.run_id.clone(),
+                framework_version: "mfm.test.framework",
+                source_revision: "test-source",
+                drive: DriveMode::AppendOnly,
+            },
+            config_inputs,
+            vec![TypedSeedInput {
+                seed_id: fixture.seed_id.clone(),
+                bytes: fixture.seed_bytes.clone(),
+                media_type: spec::MediaType::new("application/json").expect("media type"),
+            }],
+        )
+        .expect_err("unvalidated config must not start");
+
+        assert_eq!(err.code, "TypedConfigValidatorMissing");
     }
 
     #[tokio::test]
@@ -2993,18 +3078,23 @@ mod tests {
         let artifacts = FsTypedArtifactStore::new(&root);
         let fixture = framework_seed_public_output_fixture();
         let config_inputs = config_inputs_for_fixture(&fixture);
+        let registry =
+            CertificationRegistry::from_program_draft(&fixture.draft).expect("fixture registry");
         let request = build_certified_typed_run_start_request(
-            fixture.certified_spec.clone(),
-            fixture.run_id.clone(),
-            "mfm.test.framework",
-            "test-source",
+            CertifiedTypedRunStartInput {
+                certified_spec: fixture.certified_spec.clone(),
+                registry: &registry,
+                run_id: fixture.run_id.clone(),
+                framework_version: "mfm.test.framework",
+                source_revision: "test-source",
+                drive: DriveMode::UntilBlocked,
+            },
             config_inputs,
             vec![TypedSeedInput {
                 seed_id: fixture.seed_id.clone(),
                 bytes: fixture.seed_bytes.clone(),
                 media_type: spec::MediaType::new("application/json").expect("media type"),
             }],
-            DriveMode::UntilBlocked,
         )
         .expect("typed run request");
         let services = make_async_typed_services(
@@ -3109,6 +3199,8 @@ mod tests {
         let artifacts = FsTypedArtifactStore::new(&root);
         let fixture = framework_seed_public_output_fixture();
         let config_inputs = config_inputs_for_fixture(&fixture);
+        let registry =
+            CertificationRegistry::from_program_draft(&fixture.draft).expect("fixture registry");
         artifacts
             .put_artifact(
                 fixture.output_bytes.clone(),
@@ -3124,22 +3216,23 @@ mod tests {
             .await
             .expect("persist runner output artifact");
         let request = build_certified_typed_run_start_request(
-            fixture.certified_spec.clone(),
-            fixture.run_id.clone(),
-            "mfm.test.framework",
-            "test-source",
+            CertifiedTypedRunStartInput {
+                certified_spec: fixture.certified_spec.clone(),
+                registry: &registry,
+                run_id: fixture.run_id.clone(),
+                framework_version: "mfm.test.framework",
+                source_revision: "test-source",
+                drive: DriveMode::UntilBlocked,
+            },
             config_inputs,
             vec![TypedSeedInput {
                 seed_id: fixture.seed_id.clone(),
                 bytes: fixture.seed_bytes.clone(),
                 media_type: spec::MediaType::new("application/json").expect("media type"),
             }],
-            DriveMode::UntilBlocked,
         )
         .expect("typed run request");
         let runners = framework_fixture_runner_registry(&fixture);
-        let registry =
-            CertificationRegistry::from_program_draft(&fixture.draft).expect("fixture registry");
         let services = make_async_typed_services_with_certification_registry(
             runners,
             AsyncInMemoryStore::default(),
@@ -3167,6 +3260,8 @@ mod tests {
         let artifacts = FsTypedArtifactStore::new(&root);
         let fixture = framework_seed_public_output_fixture();
         let config_inputs = config_inputs_for_fixture(&fixture);
+        let registry =
+            CertificationRegistry::from_program_draft(&fixture.draft).expect("fixture registry");
         artifacts
             .put_artifact(
                 fixture.output_bytes.clone(),
@@ -3182,22 +3277,23 @@ mod tests {
             .await
             .expect("persist runner output artifact");
         let request = build_certified_typed_run_start_request(
-            fixture.certified_spec.clone(),
-            fixture.run_id.clone(),
-            "mfm.test.framework",
-            "test-source",
+            CertifiedTypedRunStartInput {
+                certified_spec: fixture.certified_spec.clone(),
+                registry: &registry,
+                run_id: fixture.run_id.clone(),
+                framework_version: "mfm.test.framework",
+                source_revision: "test-source",
+                drive: DriveMode::UntilBlocked,
+            },
             config_inputs,
             vec![TypedSeedInput {
                 seed_id: fixture.seed_id.clone(),
                 bytes: fixture.seed_bytes.clone(),
                 media_type: spec::MediaType::new("application/json").expect("media type"),
             }],
-            DriveMode::UntilBlocked,
         )
         .expect("typed run request");
         let runners = framework_fixture_runner_registry(&fixture);
-        let registry =
-            CertificationRegistry::from_program_draft(&fixture.draft).expect("fixture registry");
         let services =
             make_in_memory_typed_services_with_certification_registry(runners, &root, registry);
 

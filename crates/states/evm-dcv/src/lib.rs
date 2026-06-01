@@ -338,8 +338,8 @@ pub struct EvmDcvDeploySubmission {
     pub transaction_hash: String,
     /// Idempotency digest used for submission.
     pub idempotency_digest: String,
-    /// Managed protected raw transaction artifact id.
-    pub protected_raw_transaction_artifact_id: String,
+    /// Managed prepared invocation plan artifact id.
+    pub prepared_invocation_artifact_id: String,
 }
 
 /// Deployment receipt evidence.
@@ -425,8 +425,8 @@ pub struct EvmDcvConfigureSubmission {
     pub transaction_hashes: Vec<String>,
     /// Idempotency digest used for submission.
     pub idempotency_digest: String,
-    /// Managed protected raw transaction artifact ids.
-    pub protected_raw_transaction_artifact_ids: Vec<String>,
+    /// Managed prepared invocation plan artifact id.
+    pub prepared_invocation_artifact_id: String,
 }
 
 /// Durable evidence that transaction submission may have reached the remote EVM node but could not
@@ -534,38 +534,6 @@ pub struct EvmDcvConfigureConfirmation {
     pub configured_block_number: Option<u64>,
     /// Number of confirmations checked by the runner.
     pub confirmations: u64,
-}
-
-/// Contract for protected raw transaction artifacts.
-///
-/// This type intentionally does not implement `MfmValue`, `PublicOutputs`, or any public-output
-/// wrapper trait. Runners may store it as a managed prepared-invocation artifact, but certified
-/// state programs cannot expose it as a typed semantic value.
-#[derive(Clone, PartialEq, Eq)]
-pub struct ProtectedRawTransaction {
-    raw_transaction_hex: String,
-}
-
-impl std::fmt::Debug for ProtectedRawTransaction {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ProtectedRawTransaction")
-            .field("raw_transaction_hex", &"<redacted>")
-            .finish()
-    }
-}
-
-impl ProtectedRawTransaction {
-    /// Builds a protected raw transaction wrapper.
-    pub fn new(raw_transaction_hex: impl Into<String>) -> Self {
-        Self {
-            raw_transaction_hex: raw_transaction_hex.into(),
-        }
-    }
-
-    /// Returns the raw transaction hex for mutation-capable transports.
-    pub fn raw_transaction_hex(&self) -> &str {
-        &self.raw_transaction_hex
-    }
 }
 
 /// Public output contract for typed EVM DCV workflows.

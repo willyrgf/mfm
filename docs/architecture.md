@@ -187,7 +187,8 @@ Before merging a change, verify:
 
 - typed specs remain the only runtime contract
 - new public values/configs use typed descriptors and no floats/secrets
-- side effects have typed intent, idempotency, receipt/recovery, and one mutation authority
+- side effects have typed intent, idempotency, receipt/recovery, one mutation authority, and no
+  retained signed raw transactions
 - replay paths cannot construct live capabilities
 - resume validates stored stream evidence against the certified spec
 - app/bin changes do not embed planner or state behavior

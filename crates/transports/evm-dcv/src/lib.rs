@@ -2,8 +2,9 @@
 //! Typed EVM deploy/configure/validate workflow runners.
 //!
 //! This crate binds certified typed EVM DCV state descriptors to concrete live runners. It
-//! persists intent, prepared invocation, submission, receipt, confirmation, and state-output
-//! artifacts through the typed artifact store and never exposes legacy dynamic IO surfaces.
+//! persists intent, prepared invocation plans, submission, receipt, confirmation, and state-output
+//! artifacts through the typed artifact store. Signed raw transactions remain transient submit-time
+//! bytes and are never retained as normal MFM artifacts.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -15,6 +16,7 @@ use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_capabilities::CapabilitySpec;
 use mfm_core::crypto::EthereumPrivateKey;
 use mfm_events::v1::{self as events, side_effect};
+use mfm_evm_core::hex::bytes_to_hex_prefixed;
 use mfm_evm_core::tx::{
     encode_signed_legacy_tx_hex, legacy_signing_hash, parse_address, parse_data_hex,
     parse_u128_quantity, parse_u64_quantity, raw_transaction_hash, LegacyTxToSign,
@@ -471,11 +473,8 @@ async fn prepare_invocation(
     prepared: PreparedTransactions,
 ) -> mfm_runtime::Result<ErasedRunnerOutput> {
     let claim = active_claim(projection)?;
-    let prepared_artifact = artifact_for_json(
-        &prepared,
-        events::ArtifactRole::PreparedInvocation,
-        Some(ctx.node().node_id.clone()),
-    )?;
+    let prepared_artifact =
+        artifact_for_prepared_invocation(&prepared, Some(ctx.node().node_id.clone()))?;
     let staged_artifact = staged_side_effect_artifact(
         &ctx,
         &prepared_artifact,
@@ -542,7 +541,7 @@ async fn deploy_submission(
     let submission = EvmDcvDeploySubmission {
         transaction_hash: tx.transaction_hash.clone(),
         idempotency_digest: projection.intent.idempotency_input_hash.as_str().to_owned(),
-        protected_raw_transaction_artifact_id: projection
+        prepared_invocation_artifact_id: projection
             .prepared_invocation
             .as_ref()
             .expect("prepared projection")
@@ -583,7 +582,7 @@ async fn configure_submission(
             .map(|tx| tx.transaction_hash.clone())
             .collect(),
         idempotency_digest: projection.intent.idempotency_input_hash.as_str().to_owned(),
-        protected_raw_transaction_artifact_ids: vec![prepared_id; prepared.transactions.len()],
+        prepared_invocation_artifact_id: prepared_id,
     };
     observe_submission::<EvmDcvConfigureSubmission>(ctx, ledger_key, invocation_epoch, submission)
         .await
@@ -1904,15 +1903,11 @@ where
     })
 }
 
-fn artifact_for_json<T>(
-    value: &T,
-    role: events::ArtifactRole,
+fn artifact_for_prepared_invocation(
+    prepared: &PreparedTransactions,
     producer_node_id: Option<NodeId>,
-) -> mfm_runtime::Result<EvmDcvArtifact>
-where
-    T: Serialize,
-{
-    let bytes = canonical_value(value)?;
+) -> mfm_runtime::Result<EvmDcvArtifact> {
+    let bytes = canonical_value(prepared)?;
     let digest = bytes.content_digest();
     let evidence = store::ArtifactEvidenceRef {
         artifact_id: ArtifactId::from_digest(digest.algorithm(), *digest.digest()),
@@ -1923,7 +1918,7 @@ where
         semantic_type_id: None,
         producer_node_id,
         producer_seed_id: None,
-        artifact_role: role,
+        artifact_role: events::ArtifactRole::PreparedInvocation,
     };
     Ok(EvmDcvArtifact {
         bytes: bytes.to_vec(),
@@ -2116,6 +2111,8 @@ fn runtime_invalid(message: String) -> mfm_runtime::RuntimeError {
 #[derive(Clone, Serialize, Deserialize)]
 struct PreparedTransactions {
     network_id: String,
+    signing_key_env: String,
+    expected_from: String,
     poll_interval_ms: u64,
     max_receipt_polls: u64,
     transactions: Vec<PreparedTransaction>,
@@ -2124,8 +2121,57 @@ struct PreparedTransactions {
 #[derive(Clone, Serialize, Deserialize)]
 struct PreparedTransaction {
     transaction_index: u64,
-    raw_transaction_hex: String,
+    legacy: PreparedLegacyTransaction,
     transaction_hash: String,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct PreparedLegacyTransaction {
+    to: Option<String>,
+    value_hex: String,
+    chain_id: u64,
+    nonce: u64,
+    gas_price_hex: String,
+    gas_limit: u64,
+    data_hex: String,
+}
+
+impl PreparedLegacyTransaction {
+    fn from_legacy(tx: &LegacyTxToSign) -> Self {
+        Self {
+            to: tx.to.map(|address| format!("{address:?}")),
+            value_hex: format!("0x{:x}", tx.value_wei),
+            chain_id: tx.chain_id,
+            nonce: tx.nonce,
+            gas_price_hex: format!("0x{:x}", tx.gas_price_wei),
+            gas_limit: tx.gas_limit,
+            data_hex: bytes_to_hex_prefixed(&tx.data),
+        }
+    }
+
+    fn to_legacy(&self) -> mfm_runtime::Result<LegacyTxToSign> {
+        let to = self
+            .to
+            .as_deref()
+            .map(|address| parse_address(address, "to"))
+            .transpose()
+            .map_err(|error| mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string()))?;
+        let value_wei = parse_u128_quantity(&self.value_hex, "value")
+            .map_err(|error| mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string()))?;
+        let gas_price_wei = parse_u128_quantity(&self.gas_price_hex, "gas_price")
+            .map_err(|error| mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string()))?;
+        let data = parse_data_hex(&self.data_hex)
+            .map_err(|error| mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string()))?;
+        Ok(LegacyTxToSign {
+            to,
+            value_wei,
+            chain_id: self.chain_id,
+            nonce: self.nonce,
+            gas_price_wei,
+            gas_limit: self.gas_limit,
+            data,
+        })
+    }
 }
 
 #[derive(Clone, Deserialize)]
@@ -2149,9 +2195,64 @@ struct EvmDcvRpcClient {
     sources: Vec<RpcSource>,
 }
 
+#[derive(Debug)]
 enum PreparedSubmissionOutcome {
     Observed,
     Unknown(EvmDcvSubmissionUnknownEvidence),
+}
+
+struct SignedPreparedTransaction {
+    raw_transaction_hex: String,
+    transaction_hash: String,
+}
+
+fn signing_key_from_env(
+    signing_key_env: &str,
+    expected_from: &str,
+) -> mfm_runtime::Result<EthereumPrivateKey> {
+    let raw_key = Zeroizing::new(std::env::var(signing_key_env).map_err(|_| {
+        mfm_runtime::RuntimeError::InvalidRunnerOutput(
+            "configured EVM signing key environment variable was not available".to_owned(),
+        )
+    })?);
+    let key = EthereumPrivateKey::from_hex_secret(raw_key.as_str()).map_err(|_| {
+        mfm_runtime::RuntimeError::InvalidRunnerOutput(
+            "configured EVM signing key was invalid".to_owned(),
+        )
+    })?;
+    let derived = format!(
+        "{:?}",
+        key.address().map_err(|_| {
+            mfm_runtime::RuntimeError::InvalidRunnerOutput(
+                "configured EVM signing key address derivation failed".to_owned(),
+            )
+        })?
+    );
+    if !derived.eq_ignore_ascii_case(expected_from) {
+        return Err(mfm_runtime::RuntimeError::InvalidRunnerOutput(
+            "configured EVM signing key did not match from address".to_owned(),
+        ));
+    }
+    Ok(key)
+}
+
+fn sign_legacy_transaction(
+    key: &EthereumPrivateKey,
+    tx: &LegacyTxToSign,
+) -> mfm_runtime::Result<SignedPreparedTransaction> {
+    let signing_hash = legacy_signing_hash(tx);
+    let mut hash = [0u8; 32];
+    hash.copy_from_slice(signing_hash.as_slice());
+    let signature = key.sign_hash_recoverable(&hash).map_err(|_| {
+        mfm_runtime::RuntimeError::InvalidRunnerOutput("failed to sign EVM transaction".to_owned())
+    })?;
+    let raw_transaction_hex = encode_signed_legacy_tx_hex(tx, signature);
+    let transaction_hash = raw_transaction_hash(&raw_transaction_hex)
+        .map_err(|error| mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string()))?;
+    Ok(SignedPreparedTransaction {
+        raw_transaction_hex,
+        transaction_hash,
+    })
 }
 
 impl EvmDcvRpcClient {
@@ -2199,29 +2300,7 @@ impl EvmDcvRpcClient {
                 "typed EVM DCV side effects require signing_key_env".to_owned(),
             )
         })?;
-        let raw_key = Zeroizing::new(std::env::var(signing_key_env).map_err(|_| {
-            mfm_runtime::RuntimeError::InvalidRunnerOutput(
-                "configured EVM signing key environment variable was not available".to_owned(),
-            )
-        })?);
-        let key = EthereumPrivateKey::from_hex_secret(raw_key.as_str()).map_err(|_| {
-            mfm_runtime::RuntimeError::InvalidRunnerOutput(
-                "configured EVM signing key was invalid".to_owned(),
-            )
-        })?;
-        let derived = format!(
-            "{:?}",
-            key.address().map_err(|_| {
-                mfm_runtime::RuntimeError::InvalidRunnerOutput(
-                    "configured EVM signing key address derivation failed".to_owned(),
-                )
-            })?
-        );
-        if !derived.eq_ignore_ascii_case(expected_from) {
-            return Err(mfm_runtime::RuntimeError::InvalidRunnerOutput(
-                "configured EVM signing key did not match from address".to_owned(),
-            ));
-        }
+        let key = signing_key_from_env(signing_key_env, expected_from)?;
 
         let chain_id = self.chain_id(network_id).await?;
         let mut nonce = self.transaction_count(network_id, expected_from).await?;
@@ -2231,28 +2310,19 @@ impl EvmDcvRpcClient {
             let tx = self
                 .legacy_transaction(network_id, intent, chain_id, nonce, gas_price_wei)
                 .await?;
-            let signing_hash = legacy_signing_hash(&tx);
-            let mut hash = [0u8; 32];
-            hash.copy_from_slice(signing_hash.as_slice());
-            let signature = key.sign_hash_recoverable(&hash).map_err(|_| {
-                mfm_runtime::RuntimeError::InvalidRunnerOutput(
-                    "failed to sign EVM transaction".to_owned(),
-                )
-            })?;
-            let raw_transaction_hex = encode_signed_legacy_tx_hex(&tx, signature);
-            let transaction_hash = raw_transaction_hash(&raw_transaction_hex).map_err(|error| {
-                mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
-            })?;
+            let signed = sign_legacy_transaction(&key, &tx)?;
             prepared.push(PreparedTransaction {
                 transaction_index: intent.transaction_index,
-                raw_transaction_hex,
-                transaction_hash,
+                legacy: PreparedLegacyTransaction::from_legacy(&tx),
+                transaction_hash: signed.transaction_hash,
             });
             nonce = nonce.saturating_add(1);
         }
 
         Ok(PreparedTransactions {
             network_id: network_id.to_owned(),
+            signing_key_env: signing_key_env.to_owned(),
+            expected_from: expected_from.to_owned(),
             poll_interval_ms,
             max_receipt_polls,
             transactions: prepared,
@@ -2293,12 +2363,24 @@ impl EvmDcvRpcClient {
         &self,
         prepared: &PreparedTransactions,
     ) -> mfm_runtime::Result<PreparedSubmissionOutcome> {
+        let key = signing_key_from_env(&prepared.signing_key_env, &prepared.expected_from)?;
         for tx in &prepared.transactions {
+            let legacy = tx.legacy.to_legacy()?;
+            let signed = sign_legacy_transaction(&key, &legacy)?;
+            if !signed
+                .transaction_hash
+                .eq_ignore_ascii_case(&tx.transaction_hash)
+            {
+                return Err(mfm_runtime::RuntimeError::InvalidRunnerOutput(
+                    "regenerated EVM raw transaction hash did not match prepared invocation"
+                        .to_owned(),
+                ));
+            }
             match self
                 .call(
                     &prepared.network_id,
                     "eth_sendRawTransaction",
-                    serde_json::json!([tx.raw_transaction_hex]),
+                    serde_json::json!([signed.raw_transaction_hex]),
                 )
                 .await
             {
@@ -2690,26 +2772,116 @@ mod tests {
     }
 
     #[test]
-    fn prepared_invocation_artifact_is_non_semantic() {
+    fn prepared_invocation_artifact_excludes_signed_raw_transaction() {
         let prepared = PreparedTransactions {
             network_id: "local".to_owned(),
+            signing_key_env: "MFM_TEST_SIGNING_KEY".to_owned(),
+            expected_from: "0x0000000000000000000000000000000000000000".to_owned(),
             poll_interval_ms: 1,
             max_receipt_polls: 1,
             transactions: vec![PreparedTransaction {
                 transaction_index: 0,
-                raw_transaction_hex: "0xdeadbeef".to_owned(),
+                legacy: PreparedLegacyTransaction {
+                    to: None,
+                    value_hex: "0x0".to_owned(),
+                    chain_id: 1,
+                    nonce: 0,
+                    gas_price_hex: "0x1".to_owned(),
+                    gas_limit: 21_000,
+                    data_hex: "0xdeadbeef".to_owned(),
+                },
                 transaction_hash: "0xhash".to_owned(),
             }],
         };
 
-        let artifact = artifact_for_json(&prepared, events::ArtifactRole::PreparedInvocation, None)
-            .expect("prepared artifact");
+        let artifact =
+            artifact_for_prepared_invocation(&prepared, None).expect("prepared artifact");
         assert_eq!(
             artifact.evidence.artifact_role,
             events::ArtifactRole::PreparedInvocation
         );
         assert!(artifact.evidence.schema_id.is_none());
         assert!(artifact.evidence.semantic_type_id.is_none());
+        let json: serde_json::Value =
+            serde_json::from_slice(&artifact.bytes).expect("prepared json");
+        assert!(json.get("raw_transaction_hex").is_none());
+        let rendered = String::from_utf8(artifact.bytes).expect("prepared json utf8");
+        assert!(!rendered.contains("raw_transaction_hex"));
+        assert!(!rendered.contains("signature"));
+        assert!(!rendered.contains("\"r\""));
+        assert!(!rendered.contains("\"s\""));
+        assert!(!rendered.contains("\"v\""));
+    }
+
+    #[test]
+    fn prepared_legacy_transaction_regenerates_expected_hash() {
+        let key = EthereumPrivateKey::from_hex_secret(
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        )
+        .expect("test key");
+        let legacy = LegacyTxToSign {
+            to: None,
+            value_wei: 0,
+            chain_id: 1,
+            nonce: 7,
+            gas_price_wei: 1,
+            gas_limit: 21_000,
+            data: vec![0xde, 0xad, 0xbe, 0xef],
+        };
+        let expected = sign_legacy_transaction(&key, &legacy).expect("sign original");
+        let prepared = PreparedLegacyTransaction::from_legacy(&legacy);
+        let regenerated = prepared.to_legacy().expect("prepared to legacy");
+        let actual = sign_legacy_transaction(&key, &regenerated).expect("sign regenerated");
+
+        assert_eq!(actual.transaction_hash, expected.transaction_hash);
+        assert_eq!(actual.raw_transaction_hex, expected.raw_transaction_hex);
+    }
+
+    #[tokio::test]
+    async fn submit_prepared_rejects_hash_mismatch_before_rpc() {
+        let key_env = "MFM_EVM_DCV_TEST_SIGNING_KEY";
+        std::env::set_var(
+            key_env,
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        );
+        let key = EthereumPrivateKey::from_hex_secret(
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        )
+        .expect("test key");
+        let expected_from = format!("{:?}", key.address().expect("test address"));
+        let client = EvmDcvRpcClient {
+            client: reqwest::Client::new(),
+            sources: Vec::new(),
+        };
+        let prepared = PreparedTransactions {
+            network_id: "local".to_owned(),
+            signing_key_env: key_env.to_owned(),
+            expected_from,
+            poll_interval_ms: 1,
+            max_receipt_polls: 1,
+            transactions: vec![PreparedTransaction {
+                transaction_index: 0,
+                legacy: PreparedLegacyTransaction {
+                    to: None,
+                    value_hex: "0x0".to_owned(),
+                    chain_id: 1,
+                    nonce: 0,
+                    gas_price_hex: "0x1".to_owned(),
+                    gas_limit: 21_000,
+                    data_hex: "0xdeadbeef".to_owned(),
+                },
+                transaction_hash:
+                    "0x0000000000000000000000000000000000000000000000000000000000000000".to_owned(),
+            }],
+        };
+
+        let err = client
+            .submit_prepared(&prepared)
+            .await
+            .expect_err("hash mismatch rejects before RPC");
+        assert!(err
+            .to_string()
+            .contains("regenerated EVM raw transaction hash did not match prepared invocation"));
     }
 
     #[test]

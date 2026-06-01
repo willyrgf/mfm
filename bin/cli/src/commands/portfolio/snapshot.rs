@@ -93,13 +93,16 @@ async fn execute_internal(args: &SnapshotArgs) -> CommandResult<PortfolioSnapsho
 
     let run_id = mfm_app::new_run_id();
     let request = mfm_app::build_certified_typed_run_start_request(
-        certified,
-        run_id.clone(),
-        &args.framework_version,
-        &args.source_revision,
+        mfm_app::CertifiedTypedRunStartInput {
+            certified_spec: certified,
+            registry: services.certification_registry(),
+            run_id: run_id.clone(),
+            framework_version: &args.framework_version,
+            source_revision: &args.source_revision,
+            drive: drive_mode(args.drive),
+        },
         config_inputs,
         Vec::new(),
-        drive_mode(args.drive),
     )
     .map_err(command_error_from_typed_app_error)?;
     let run = services

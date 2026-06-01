@@ -17,6 +17,7 @@ use mfm_ids::{
 };
 use mfm_program as program;
 use mfm_spec::v1 as spec;
+use mfm_values::MfmConfig;
 
 /// Result type for typed certification.
 pub type Result<T> = std::result::Result<T, CertifyError>;
@@ -457,11 +458,51 @@ impl UntrustedCertifiedSpecBundle {
     }
 }
 
+/// Source that validated supplied typed config bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigValidationSource {
+    /// A registered typed config validator decoded and validated the bytes.
+    RegisteredValidator,
+    /// A trusted draft config reference matched the bytes exactly.
+    TrustedExactRef,
+}
+
+#[derive(Clone)]
+struct ConfigValidator {
+    schema_id: SchemaId,
+    validate: fn(&[u8]) -> Result<()>,
+}
+
+impl fmt::Debug for ConfigValidator {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ConfigValidator")
+            .field("schema_id", &self.schema_id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for ConfigValidator {
+    fn eq(&self, other: &Self) -> bool {
+        self.schema_id == other.schema_id
+    }
+}
+
+impl Eq for ConfigValidator {}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TrustedConfigRef {
+    schema_id: SchemaId,
+    digest: ContentDigest,
+    byte_len: u64,
+}
+
 /// Registry authority used when certifying an already-lowered typed spec.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CertificationRegistry {
     states: BTreeMap<String, spec::StateDescriptorIdentity>,
     operations: BTreeMap<String, spec::OperationDescriptorIdentity>,
+    config_validators: BTreeMap<String, ConfigValidator>,
+    trusted_config_refs: BTreeMap<String, TrustedConfigRef>,
 }
 
 impl CertificationRegistry {
@@ -495,7 +536,8 @@ impl CertificationRegistry {
         self.insert_state(state_descriptor_identity_from_registered(
             registered.descriptor(),
             registered.runner(),
-        )?)
+        )?)?;
+        self.insert_config_validator(config_validator_for::<S::Config>()?)
     }
 
     /// Adds a framework-validated registered operation descriptor to this registry.
@@ -508,7 +550,8 @@ impl CertificationRegistry {
     {
         self.insert_operation(operation_descriptor_identity_from_registered(
             registered.descriptor(),
-        ))
+        ))?;
+        self.insert_config_validator(config_validator_for::<O::Config>()?)
     }
 
     /// Adds a trusted already-lowered state descriptor identity to this registry.
@@ -540,9 +583,11 @@ impl CertificationRegistry {
         let mut registry = Self::new();
         for node in draft.state_nodes() {
             registry.insert_state(state_descriptor_identity_from_program(node)?)?;
+            registry.insert_trusted_config_binding(&node.config)?;
         }
         for frame in draft.operation_lineage() {
             registry.insert_operation(operation_descriptor_identity_from_program(frame))?;
+            registry.insert_trusted_config_binding(&frame.config)?;
         }
         Ok(registry)
     }
@@ -565,6 +610,12 @@ impl CertificationRegistry {
                             )));
                         }
                         scoped.insert_state(trusted.clone())?;
+                        if let Some(validator) = self
+                            .config_validators
+                            .get(trusted.config_schema_id.as_str())
+                        {
+                            scoped.insert_config_validator(validator.clone())?;
+                        }
                     }
                 }
                 spec::DescriptorIdentity::Operation(identity) => {
@@ -581,11 +632,51 @@ impl CertificationRegistry {
                         )));
                     }
                     scoped.insert_operation(trusted.clone())?;
+                    if let Some(validator) = self
+                        .config_validators
+                        .get(trusted.config_schema_id.as_str())
+                    {
+                        scoped.insert_config_validator(validator.clone())?;
+                    }
                 }
                 spec::DescriptorIdentity::Renderer(_) => {}
             }
         }
+        for config_ref in &spec.config_refs {
+            let key = config_ref_key(config_ref);
+            if let Some(trusted) = self.trusted_config_refs.get(&key) {
+                if trusted.schema_id != config_ref.schema_id
+                    || trusted.digest != config_ref.digest
+                    || trusted.byte_len != config_ref.byte_len
+                {
+                    return Err(certificate(format!(
+                        "trusted config ref {} does not match parsed spec",
+                        config_ref.digest
+                    )));
+                }
+                scoped.trusted_config_refs.insert(key, trusted.clone());
+            }
+        }
         Ok(scoped)
+    }
+
+    /// Validates supplied config bytes for a certified config reference when this registry owns
+    /// either a typed config validator or an exact trusted draft reference.
+    pub fn validate_config_ref_bytes(
+        &self,
+        config_ref: &spec::ConfigRef,
+        bytes: &[u8],
+    ) -> Result<Option<ConfigValidationSource>> {
+        let canonical = canonical_config_bytes_for_ref(config_ref, bytes)?;
+        if let Some(validator) = self.config_validators.get(config_ref.schema_id.as_str()) {
+            (validator.validate)(canonical.as_bytes())?;
+            return Ok(Some(ConfigValidationSource::RegisteredValidator));
+        }
+        let key = config_ref_key(config_ref);
+        if self.trusted_config_refs.contains_key(&key) {
+            return Ok(Some(ConfigValidationSource::TrustedExactRef));
+        }
+        Ok(None)
     }
 
     fn insert_state(&mut self, descriptor: spec::StateDescriptorIdentity) -> Result<()> {
@@ -617,6 +708,138 @@ impl CertificationRegistry {
         }
         Ok(())
     }
+
+    fn insert_config_validator(&mut self, validator: ConfigValidator) -> Result<()> {
+        let key = validator.schema_id.as_str().to_owned();
+        if let Some(existing) = self.config_validators.get(&key) {
+            if existing != &validator {
+                return Err(problem(
+                    ProblemClass::InvalidSemanticTransition,
+                    format!("conflicting registered config validator {key}"),
+                ));
+            }
+        } else {
+            self.config_validators.insert(key, validator);
+        }
+        Ok(())
+    }
+
+    fn insert_trusted_config_binding(
+        &mut self,
+        binding: &program::ConfigBindingSpec,
+    ) -> Result<()> {
+        let trusted = TrustedConfigRef {
+            schema_id: binding.schema_id.clone(),
+            digest: binding.content_digest.clone(),
+            byte_len: binding.byte_len as u64,
+        };
+        let key = format!("{}:{}", trusted.schema_id, trusted.digest);
+        if let Some(existing) = self.trusted_config_refs.get(&key) {
+            if existing != &trusted {
+                return Err(problem(
+                    ProblemClass::InvalidDataShape,
+                    format!("conflicting trusted config ref {key}"),
+                ));
+            }
+        } else {
+            self.trusted_config_refs.insert(key, trusted);
+        }
+        Ok(())
+    }
+}
+
+fn config_validator_for<C: MfmConfig>() -> Result<ConfigValidator> {
+    let schema_id = C::schema_id().map_err(|error| {
+        problem(
+            ProblemClass::InvalidDataShape,
+            format!("config schema descriptor invalid: {error}"),
+        )
+    })?;
+    Ok(ConfigValidator {
+        schema_id,
+        validate: validate_config_bytes_for::<C>,
+    })
+}
+
+fn validate_config_bytes_for<C: MfmConfig>(bytes: &[u8]) -> Result<()> {
+    let config: C = serde_json::from_slice(bytes).map_err(|error| {
+        problem(
+            ProblemClass::InvalidDataShape,
+            format!("typed config did not match registered schema: {error}"),
+        )
+    })?;
+    config.validate().map_err(|error| {
+        problem(
+            ProblemClass::InvalidDataShape,
+            format!("typed config failed validation: {error}"),
+        )
+    })?;
+    let encoded = serde_json::to_string(&config).map_err(|error| {
+        problem(
+            ProblemClass::InvalidDataShape,
+            format!("typed config could not be serialized canonically: {error}"),
+        )
+    })?;
+    let expected = PlainCanonicalJsonBytes::from_json_str(&encoded).map_err(|error| {
+        problem(
+            ProblemClass::InvalidDataShape,
+            format!("typed config canonical encoding was invalid: {error}"),
+        )
+    })?;
+    if expected.as_bytes() != bytes {
+        return Err(problem(
+            ProblemClass::InvalidDataShape,
+            "typed config did not match registered canonical encoding",
+        ));
+    }
+    Ok(())
+}
+
+fn canonical_config_bytes_for_ref(
+    config_ref: &spec::ConfigRef,
+    bytes: &[u8],
+) -> Result<PlainCanonicalJsonBytes> {
+    let raw = std::str::from_utf8(bytes).map_err(|error| {
+        problem(
+            ProblemClass::InvalidDataShape,
+            format!("typed config {} is not UTF-8: {error}", config_ref.digest),
+        )
+    })?;
+    let canonical = PlainCanonicalJsonBytes::from_json_str(raw).map_err(|error| {
+        problem(
+            ProblemClass::InvalidDataShape,
+            format!(
+                "typed config {} is not canonical JSON: {error}",
+                config_ref.digest
+            ),
+        )
+    })?;
+    if canonical.as_bytes() != bytes {
+        return Err(problem(
+            ProblemClass::InvalidDataShape,
+            format!(
+                "typed config {} is not normalized canonical JSON",
+                config_ref.digest
+            ),
+        ));
+    }
+    if canonical.as_bytes().len() as u64 != config_ref.byte_len {
+        return Err(problem(
+            ProblemClass::InvalidDataShape,
+            format!("typed config {} byte length mismatch", config_ref.digest),
+        ));
+    }
+    let actual = canonical.content_digest();
+    if actual != config_ref.digest {
+        return Err(problem(
+            ProblemClass::InvalidDataShape,
+            format!(
+                "typed config digest mismatch: expected {}, recomputed {}",
+                config_ref.digest, actual
+            ),
+        ));
+    }
+    Ok(canonical)
 }
 
 /// Lowers and certifies a typed program draft.
@@ -5072,6 +5295,12 @@ mod tests {
         multiplier: u64,
     }
 
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmConfig)]
+    struct DefaultedConfig {
+        #[serde(default)]
+        multiplier: Option<u64>,
+    }
+
     #[derive(PublicOutputs)]
     #[mfm(schema = "mfm.certify.test.public_outputs")]
     struct TestPublicOutputs<'p, 's> {
@@ -5333,6 +5562,108 @@ mod tests {
             },
         )
         .expect("side effect draft")
+    }
+
+    fn config_ref_for_bytes<C: mfm_values::MfmConfig>(
+        bytes: &PlainCanonicalJsonBytes,
+    ) -> spec::ConfigRef {
+        let digest = bytes.content_digest();
+        spec::ConfigRef {
+            schema_id: C::schema_id().expect("config schema"),
+            artifact_id: ArtifactId::from_digest(digest.algorithm(), *digest.digest()),
+            digest,
+            byte_len: bytes.as_bytes().len() as u64,
+            media_type: spec::MediaType::new("application/json").expect("media type"),
+        }
+    }
+
+    #[test]
+    fn registered_config_validator_rejects_schema_shape_mismatch() {
+        let mut states = StateRegistryBuilder::new();
+        let registered = states
+            .register::<MultiplyState>()
+            .expect("state registration");
+        let mut registry = CertificationRegistry::new();
+        registry
+            .register_state(&registered)
+            .expect("certification state registration");
+        let invalid = PlainCanonicalJsonBytes::from_json_str(r#"{"multiplier":"bad"}"#)
+            .expect("canonical invalid config");
+        let config_ref = config_ref_for_bytes::<TestConfig>(&invalid);
+
+        let err = registry
+            .validate_config_ref_bytes(&config_ref, invalid.as_bytes())
+            .expect_err("invalid typed config shape rejects");
+        assert!(err
+            .to_string()
+            .contains("typed config did not match registered schema"));
+    }
+
+    #[test]
+    fn registered_config_validator_rejects_noncanonical_bytes() {
+        let mut states = StateRegistryBuilder::new();
+        let registered = states
+            .register::<MultiplyState>()
+            .expect("state registration");
+        let mut registry = CertificationRegistry::new();
+        registry
+            .register_state(&registered)
+            .expect("certification state registration");
+        let canonical = PlainCanonicalJsonBytes::from_json_str(r#"{"multiplier":2}"#)
+            .expect("canonical config");
+        let config_ref = config_ref_for_bytes::<TestConfig>(&canonical);
+
+        let err = registry
+            .validate_config_ref_bytes(&config_ref, br#"{ "multiplier": 2 }"#)
+            .expect_err("noncanonical config rejects");
+        let rendered = err.to_string();
+        assert!(rendered.contains("typed config"));
+        assert!(rendered.contains("not normalized canonical JSON"));
+    }
+
+    #[test]
+    fn registered_config_validator_rejects_non_authoritative_canonical_encoding() {
+        let mut registry = CertificationRegistry::new();
+        registry
+            .insert_config_validator(config_validator_for::<DefaultedConfig>().expect("validator"))
+            .expect("insert validator");
+        let supplied = PlainCanonicalJsonBytes::from_json_str(r#"{}"#)
+            .expect("canonical but not authoritative config");
+        let config_ref = config_ref_for_bytes::<DefaultedConfig>(&supplied);
+
+        let err = registry
+            .validate_config_ref_bytes(&config_ref, supplied.as_bytes())
+            .expect_err("non-authoritative canonical config rejects");
+        assert!(err
+            .to_string()
+            .contains("did not match registered canonical encoding"));
+    }
+
+    #[test]
+    fn trusted_draft_config_ref_accepts_exact_bytes_without_descriptor_validator() {
+        let draft = reference_draft();
+        let registry = CertificationRegistry::from_program_draft(&draft).expect("draft registry");
+        let config = draft
+            .state_nodes()
+            .first()
+            .expect("state node")
+            .config
+            .clone();
+        let config_ref = spec::ConfigRef {
+            schema_id: config.schema_id.clone(),
+            artifact_id: ArtifactId::from_digest(
+                DigestAlgorithm::Sha256JcsV1,
+                *config.content_digest.digest(),
+            ),
+            digest: config.content_digest.clone(),
+            byte_len: config.byte_len as u64,
+            media_type: spec::MediaType::new("application/json").expect("media type"),
+        };
+
+        let source = registry
+            .validate_config_ref_bytes(&config_ref, config.canonical_json.as_bytes())
+            .expect("trusted exact config validates");
+        assert_eq!(source, Some(ConfigValidationSource::TrustedExactRef));
     }
 
     #[test]

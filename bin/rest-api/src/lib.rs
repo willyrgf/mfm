@@ -530,13 +530,16 @@ where
     let services = state.services()?;
     let config_inputs = typed_config_inputs(configs);
     let start = mfm_app::build_certified_typed_run_start_request(
-        certified,
-        run_id.clone(),
-        &req.framework_version,
-        &req.source_revision,
+        mfm_app::CertifiedTypedRunStartInput {
+            certified_spec: certified,
+            registry: services.certification_registry(),
+            run_id: run_id.clone(),
+            framework_version: &req.framework_version,
+            source_revision: &req.source_revision,
+            drive: req.drive.into_app(),
+        },
         config_inputs,
         Vec::new(),
-        req.drive.into_app(),
     )?;
     let run = services.start_certified_run(start).await?;
     let public_output = if run.phase == TypedRunPhase::Completed {
