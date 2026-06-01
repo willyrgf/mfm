@@ -11,4 +11,3 @@ mfm-effects = { path = "../../kernel/effects" }
 mfm-ids = { path = "../../kernel/ids" }
 mfm-program = { path = "../../kernel/program" }
 mfm-program-derive = { path = "../../kernel/program-derive" }
-mfm-values = { path = "../../kernel/values" }

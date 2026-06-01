@@ -25,7 +25,6 @@ serde_json = { workspace = true }
 mfm-effects = { path = "../effects" }
 mfm-program = { path = "../program" }
 mfm-program-derive = { path = "../program-derive" }
-mfm-values = { path = "../values" }
 serde = { workspace = true }
 tokio = { workspace = true }
 trybuild = "1.0"

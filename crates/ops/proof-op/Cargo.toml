@@ -11,4 +11,3 @@ mfm-ids = { path = "../../kernel/ids" }
 mfm-program = { path = "../../kernel/program" }
 
 [dev-dependencies]
-tokio = { workspace = true }

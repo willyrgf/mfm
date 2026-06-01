@@ -4,7 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-serde = { workspace = true }
 serde_json = { workspace = true }
 
 mfm-canonical = { path = "../../kernel/canonical" }
@@ -17,5 +16,4 @@ mfm-spec = { path = "../../kernel/spec" }
 mfm-state-evm-dcv = { path = "../../states/evm-dcv" }
 
 [dev-dependencies]
-tokio = { workspace = true }
 trybuild = "1.0"

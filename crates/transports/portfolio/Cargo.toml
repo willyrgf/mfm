@@ -11,7 +11,6 @@ alloy-primitives = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
-tokio = { workspace = true }
 
 mfm-artifact-store-fs = { path = "../../storages/artifact-store-fs", default-features = false }
 mfm-canonical = { path = "../../kernel/canonical" }
@@ -28,4 +27,3 @@ mfm-store = { path = "../../kernel/store" }
 mfm-values = { path = "../../kernel/values" }
 
 [dev-dependencies]
-mfm-op-portfolio-tracker = { path = "../../ops/portfolio-tracker-op" }

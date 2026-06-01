@@ -19,7 +19,6 @@ mfm-events = { path = "../events" }
 mfm-ids = { path = "../ids" }
 mfm-program = { path = "../program" }
 mfm-program-derive = { path = "../program-derive" }
-mfm-values = { path = "../values" }
 mfm-replay = { path = "../replay" }
 mfm-runtime = { path = "../runtime" }
 mfm-spec = { path = "../spec" }
