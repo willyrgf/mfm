@@ -1728,13 +1728,11 @@ dependencies = [
  "mfm-app",
  "mfm-artifact-store-fs",
  "mfm-canonical",
- "mfm-events",
  "mfm-evm-core",
  "mfm-ids",
  "mfm-op-portfolio-tracker",
  "mfm-op-proof",
  "mfm-portfolio-config",
- "mfm-portfolio-model",
  "mfm-spec",
  "mfm-stream-store-postgres",
  "mfm_core",
@@ -1772,11 +1770,9 @@ dependencies = [
  "mfm-transports-evm-dcv",
  "mfm-transports-portfolio",
  "mfm-transports-proof",
- "mfm-values",
  "serde",
  "serde_json",
  "tokio",
- "tracing",
  "tracing-subscriber",
  "trybuild",
  "uuid",
@@ -1856,7 +1852,6 @@ dependencies = [
  "mfm-ids",
  "mfm-program",
  "mfm-program-derive",
- "mfm-values",
  "serde",
 ]
 
@@ -1930,11 +1925,11 @@ version = "0.1.0"
 name = "mfm-integration-tests"
 version = "0.1.0"
 dependencies = [
- "async-trait",
  "axum",
  "mfm-app",
  "mfm-artifact-store-fs",
  "mfm-canonical",
+ "mfm-capabilities",
  "mfm-certify",
  "mfm-events",
  "mfm-ids",
@@ -1943,7 +1938,10 @@ dependencies = [
  "mfm-op-proof",
  "mfm-portfolio-config",
  "mfm-program",
+ "mfm-program-derive",
+ "mfm-replay",
  "mfm-rest-api",
+ "mfm-runtime",
  "mfm-spec",
  "mfm-store",
  "mfm-stream-store-postgres",
@@ -1954,29 +1952,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tower",
- "tracing",
  "uuid",
-]
-
-[[package]]
-name = "mfm-kernel-test-support"
-version = "0.1.0"
-dependencies = [
- "mfm-canonical",
- "mfm-capabilities",
- "mfm-certify",
- "mfm-events",
- "mfm-ids",
- "mfm-program",
- "mfm-program-derive",
- "mfm-replay",
- "mfm-runtime",
- "mfm-spec",
- "mfm-store",
- "mfm-values",
- "serde",
- "serde_json",
- "tokio",
 ]
 
 [[package]]
@@ -1991,9 +1967,7 @@ dependencies = [
  "mfm-program",
  "mfm-spec",
  "mfm-state-evm-dcv",
- "serde",
  "serde_json",
- "tokio",
  "trybuild",
 ]
 
@@ -2004,14 +1978,11 @@ dependencies = [
  "mfm-canonical",
  "mfm-certify",
  "mfm-ids",
- "mfm-portfolio-config",
  "mfm-portfolio-model",
  "mfm-program",
  "mfm-spec",
  "mfm-state-portfolio",
- "serde",
  "serde_json",
- "tokio",
 ]
 
 [[package]]
@@ -2023,7 +1994,6 @@ dependencies = [
  "mfm-collectors-proof",
  "mfm-ids",
  "mfm-program",
- "tokio",
 ]
 
 [[package]]
@@ -2035,7 +2005,6 @@ dependencies = [
  "mfm-ids",
  "mfm-portfolio-model",
  "mfm-program-derive",
- "mfm-values",
  "serde",
  "serde_json",
  "thiserror",
@@ -2049,7 +2018,6 @@ dependencies = [
  "bs58",
  "mfm-canonical",
  "mfm-evm-core",
- "mfm-ids",
  "mfm-program",
  "mfm-program-derive",
  "mfm-values",
@@ -2129,7 +2097,6 @@ dependencies = [
 name = "mfm-rest-api"
 version = "0.1.0"
 dependencies = [
- "async-trait",
  "axum",
  "http",
  "mfm-app",
@@ -2148,7 +2115,6 @@ dependencies = [
  "tokio",
  "tower-http",
  "tracing",
- "uuid",
 ]
 
 [[package]]
@@ -2165,7 +2131,6 @@ dependencies = [
  "mfm-program-derive",
  "mfm-spec",
  "mfm-store",
- "mfm-values",
  "serde",
  "serde_json",
  "tokio",
@@ -2219,8 +2184,6 @@ dependencies = [
  "num-bigint",
  "num-traits",
  "serde",
- "serde_json",
- "tokio",
 ]
 
 [[package]]
@@ -2247,14 +2210,12 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-postgres",
- "tracing",
 ]
 
 [[package]]
 name = "mfm-transports-evm-dcv"
 version = "0.1.0"
 dependencies = [
- "alloy-primitives",
  "mfm-artifact-store-fs",
  "mfm-canonical",
  "mfm-capabilities",
@@ -2288,7 +2249,6 @@ dependencies = [
  "mfm-events",
  "mfm-evm-core",
  "mfm-ids",
- "mfm-op-portfolio-tracker",
  "mfm-portfolio-model",
  "mfm-program",
  "mfm-runtime",
@@ -2299,7 +2259,6 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
- "tokio",
 ]
 
 [[package]]

@@ -74,12 +74,6 @@
       "docs_rs": "https://docs.rs/mfm-replay"
     },
     {
-      "name": "mfm-kernel-test-support",
-      "group": "typed-kernel",
-      "workspace_path": "crates/kernel/test-support",
-      "docs_rs": "https://docs.rs/mfm-kernel-test-support"
-    },
-    {
       "name": "mfm_core",
       "group": "foundation",
       "workspace_path": "crates/core",

@@ -23,7 +23,6 @@ members = [
 	"crates/kernel/runtime",
 	"crates/kernel/spec",
 	"crates/kernel/store",
-	"crates/kernel/test-support",
 	"crates/kernel/values",
 	"crates/evm-dcv-model",
 	"crates/evm-core",

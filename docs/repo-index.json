@@ -185,11 +185,6 @@
       "kind": "rust-cargo"
     },
     {
-      "name": "test-support",
-      "path": "crates/kernel/test-support/Cargo.toml",
-      "kind": "rust-cargo"
-    },
-    {
       "name": "values",
       "path": "crates/kernel/values/Cargo.toml",
       "kind": "rust-cargo"

@@ -18,7 +18,6 @@ const EXPECTED_KERNEL_MANIFESTS: &[&str] = &[
     "crates/kernel/certify/Cargo.toml",
     "crates/kernel/events/Cargo.toml",
     "crates/kernel/store/Cargo.toml",
-    "crates/kernel/test-support/Cargo.toml",
 ];
 
 #[test]

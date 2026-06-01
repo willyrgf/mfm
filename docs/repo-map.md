@@ -39,7 +39,6 @@ Generated from `docs/repo-index.json`.
 - `crates/kernel/runtime/Cargo.toml` (rust-cargo)
 - `crates/kernel/spec/Cargo.toml` (rust-cargo)
 - `crates/kernel/store/Cargo.toml` (rust-cargo)
-- `crates/kernel/test-support/Cargo.toml` (rust-cargo)
 - `crates/kernel/values/Cargo.toml` (rust-cargo)
 - `crates/ops/evm-deploy-configure-validate-op/Cargo.toml` (rust-cargo)
 - `crates/ops/portfolio-tracker-op/Cargo.toml` (rust-cargo)

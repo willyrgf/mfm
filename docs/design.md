@@ -76,7 +76,6 @@ Typed kernel crates are framework-owned and domain-free:
 | `crates/kernel/store` | Typed commit API, side-effect ledger rules, projection contract, and retention refs |
 | `crates/kernel/runtime` | Certified typed scheduler and erased runner boundary |
 | `crates/kernel/replay` | Replay authority, brokers, and verifier contracts |
-| `crates/kernel/test-support` | Shared typed-kernel acceptance fixtures |
 
 Domain and product crates sit outside the kernel:
 

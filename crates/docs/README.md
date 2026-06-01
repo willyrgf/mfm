@@ -39,7 +39,6 @@ The live runtime inventory still lives in the repository docs:
 | `mfm-evm-dcv-model` | Pure EVM deploy/configure/validate model and ABI preparation helpers. | pending | `crates/evm-dcv-model` |
 | `mfm-evm-deploy-configure-validate-config` | Shared deploy/configure/validate config pipeline. | pending | `crates/evm-deploy-configure-validate-config` |
 | `mfm-ids` | Strong typed identity primitives for the typed kernel. | pending | `crates/kernel/ids` |
-| `mfm-kernel-test-support` | Shared test support for typed kernel contract fixtures. | pending | `crates/kernel/test-support` |
 | `mfm-portfolio-config` | Shared portfolio snapshot config pipeline. | pending | `crates/portfolio-config` |
 | `mfm-portfolio-model` | Pure canonical portfolio, symbol, and wallet models. | pending | `crates/portfolio/model` |
 | `mfm-program` | Typed state-program authoring API and lowering evidence. | pending | `crates/kernel/program` |

@@ -2420,14 +2420,14 @@ fn executable(factory: &str) -> Result<events::ExecutableIdentity, String> {
         factory_id: events::RunnerFactoryId::new(factory).map_err(display_error)?,
         source_revision: events::SourceRevision::new("typed-certified-slice")
             .map_err(display_error)?,
-        cargo_package_name: events::PackageName::new("mfm-kernel-test-support")
+        cargo_package_name: events::PackageName::new("mfm-integration-tests")
             .map_err(display_error)?,
         cargo_package_version: events::PackageVersion::new(env!("CARGO_PKG_VERSION"))
             .map_err(display_error)?,
         cargo_package_digest: content(0xf8),
         binary_digest: content_digest_json(serde_json::json!({
             "factory": factory,
-            "package": "mfm-kernel-test-support",
+            "package": "mfm-integration-tests",
             "version": env!("CARGO_PKG_VERSION"),
         }))?,
         nix_derivation_hash: None,

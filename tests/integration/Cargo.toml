@@ -11,26 +11,29 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { version = "1.0", features = ["v4"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
+mfm-rest-api = { path = "../../bin/rest-api" }
+mfm-app = { path = "../../crates/app" }
+mfm-artifact-store-fs = { path = "../../crates/storages/artifact-store-fs" }
+mfm-events = { path = "../../crates/kernel/events" }
+mfm-ids = { path = "../../crates/kernel/ids" }
+mfm-canonical = { path = "../../crates/kernel/canonical" }
+mfm-capabilities = { path = "../../crates/kernel/capabilities" }
+mfm-spec = { path = "../../crates/kernel/spec" }
+mfm-certify = { path = "../../crates/kernel/certify" }
+mfm-program = { path = "../../crates/kernel/program" }
+mfm-program-derive = { path = "../../crates/kernel/program-derive" }
+mfm-store = { path = "../../crates/kernel/store" }
+mfm-stream-store-postgres = { path = "../../crates/storages/stream-store-postgres" }
+mfm-op-proof = { path = "../../crates/ops/proof-op" }
+mfm-op-evm-deploy-configure-validate = { path = "../../crates/ops/evm-deploy-configure-validate-op" }
+mfm-transports-evm-dcv = { path = "../../crates/transports/evm-dcv" }
+mfm-replay = { path = "../../crates/kernel/replay" }
+mfm-runtime = { path = "../../crates/kernel/runtime" }
+mfm-op-portfolio-tracker = { path = "../../crates/ops/portfolio-tracker-op" }
+mfm-portfolio-config = { path = "../../crates/portfolio-config" }
 
 [dev-dependencies]
 tokio = { workspace = true }
 axum = "0.7"
 tower = "0.5"
 tempfile = "3.0"
-
-mfm-rest-api = { path = "../../bin/rest-api" }
-mfm-app = { path = "../../crates/app" }
-
-mfm-artifact-store-fs = { path = "../../crates/storages/artifact-store-fs" }
-mfm-events = { path = "../../crates/kernel/events" }
-mfm-ids = { path = "../../crates/kernel/ids" }
-mfm-spec = { path = "../../crates/kernel/spec" }
-mfm-certify = { path = "../../crates/kernel/certify" }
-mfm-program = { path = "../../crates/kernel/program" }
-mfm-store = { path = "../../crates/kernel/store" }
-mfm-stream-store-postgres = { path = "../../crates/storages/stream-store-postgres" }
-mfm-op-proof = { path = "../../crates/ops/proof-op" }
-mfm-op-evm-deploy-configure-validate = { path = "../../crates/ops/evm-deploy-configure-validate-op" }
-mfm-transports-evm-dcv = { path = "../../crates/transports/evm-dcv" }
-mfm-op-portfolio-tracker = { path = "../../crates/ops/portfolio-tracker-op" }
-mfm-portfolio-config = { path = "../../crates/portfolio-config" }

@@ -25,7 +25,7 @@ The first docs.rs wave contains:
 
 | Group | Packages |
 |---|---|
-| typed kernel | `mfm-ids`, `mfm-canonical`, `mfm-values`, `mfm-effects`, `mfm-capabilities`, `mfm-program`, `mfm-program-derive`, `mfm-spec`, `mfm-certify`, `mfm-events`, `mfm-store`, `mfm-replay`, `mfm-kernel-test-support` |
+| typed kernel | `mfm-ids`, `mfm-canonical`, `mfm-values`, `mfm-effects`, `mfm-capabilities`, `mfm-program`, `mfm-program-derive`, `mfm-spec`, `mfm-certify`, `mfm-events`, `mfm-store`, `mfm-replay` |
 | foundation | `mfm_core`, `mfm-evm-core` |
 | umbrella | `mfm-docs` |
 
