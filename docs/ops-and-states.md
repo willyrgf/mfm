@@ -85,7 +85,6 @@ Owner: `crates/states/portfolio`
 | `ObserveBatchState` | read | Reads configured observations through typed portfolio backends |
 | `MergeObservationsState` | pure | Merges domain-keyed observation batches |
 | `AssembleSnapshotState` | pure | Produces the canonical portfolio snapshot |
-| `PublishSnapshotState` | pure | Produces a typed published snapshot value |
 | `ProjectReportState` | pure | Produces the typed public report |
 
 Portfolio fanout/fanin uses stable domain keys and non-empty observation batches so duplicate or

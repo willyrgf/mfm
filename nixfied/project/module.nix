@@ -861,6 +861,7 @@ in
           sources = minioSources;
           sourceKeys = minioService.sourceKeys or builtins.attrNames minioSources;
           defaultSource = minioService.defaultSource or "local";
+          probes = minioService.probes or { };
         };
 
         reth = {

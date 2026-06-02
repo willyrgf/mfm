@@ -118,10 +118,10 @@ impl From<mfm_runtime::RuntimeError> for AppError {
     fn from(error: mfm_runtime::RuntimeError) -> Self {
         match error {
             mfm_runtime::RuntimeError::Store(message) => {
-                Self::new(ErrorClass::Conflict, "TypedStoreRejected", message)
+                Self::new(ErrorClass::Conflict, "RunStoreRejected", message)
             }
             mfm_runtime::RuntimeError::RunnerBinding(message) => {
-                Self::new(ErrorClass::BadRequest, "TypedRunnerUnavailable", message)
+                Self::new(ErrorClass::BadRequest, "LaunchRunnerUnavailable", message)
             }
             mfm_runtime::RuntimeError::SpecHash(message)
             | mfm_runtime::RuntimeError::InvalidSpec(message)
@@ -131,7 +131,7 @@ impl From<mfm_runtime::RuntimeError> for AppError {
             | mfm_runtime::RuntimeError::InvalidRunnerOutput(message)
             | mfm_runtime::RuntimeError::Identity(message)
             | mfm_runtime::RuntimeError::Canonical(message) => {
-                Self::new(ErrorClass::Internal, "TypedRuntimeError", message)
+                Self::new(ErrorClass::Internal, "LaunchRuntimeError", message)
             }
         }
     }
@@ -139,11 +139,7 @@ impl From<mfm_runtime::RuntimeError> for AppError {
 
 impl From<store::StoreError> for AppError {
     fn from(error: store::StoreError) -> Self {
-        Self::new(
-            ErrorClass::Conflict,
-            "TypedStoreRejected",
-            error.to_string(),
-        )
+        Self::new(ErrorClass::Conflict, "RunStoreRejected", error.to_string())
     }
 }
 
@@ -151,23 +147,21 @@ impl From<FsTypedArtifactError> for AppError {
     fn from(error: FsTypedArtifactError) -> Self {
         match error {
             FsTypedArtifactError::NotFound { artifact_id } => Self::not_found(
-                "TypedArtifactNotFound",
+                "ArtifactNotFound",
                 format!("typed artifact {artifact_id} was not found"),
             ),
             FsTypedArtifactError::RetainedArtifactRefused { artifact_id } => Self::new(
                 ErrorClass::Conflict,
-                "TypedArtifactRetained",
+                "ArtifactRetained",
                 format!("typed artifact {artifact_id} is retained"),
             ),
             FsTypedArtifactError::Corruption { .. }
             | FsTypedArtifactError::EvidenceMismatch { .. }
             | FsTypedArtifactError::InvalidEvidence { .. }
             | FsTypedArtifactError::InvalidIdentity { .. }
-            | FsTypedArtifactError::Io { .. } => Self::new(
-                ErrorClass::Internal,
-                "TypedArtifactError",
-                error.to_string(),
-            ),
+            | FsTypedArtifactError::Io { .. } => {
+                Self::new(ErrorClass::Internal, "ArtifactError", error.to_string())
+            }
         }
     }
 }
@@ -180,7 +174,11 @@ impl From<ReplayError> for AppError {
 
 impl From<mfm_spec::SpecError> for AppError {
     fn from(error: mfm_spec::SpecError) -> Self {
-        Self::new(ErrorClass::Internal, "TypedSpecInvalid", error.to_string())
+        Self::new(
+            ErrorClass::Internal,
+            "CertifiedSpecInvalid",
+            error.to_string(),
+        )
     }
 }
 
@@ -188,7 +186,7 @@ impl From<mfm_certify::CertifyError> for AppError {
     fn from(error: mfm_certify::CertifyError) -> Self {
         Self::new(
             ErrorClass::BadRequest,
-            "TypedCertificationFailed",
+            "CertifiedBundleVerificationFailed",
             error.to_string(),
         )
     }
@@ -223,7 +221,7 @@ pub fn make_in_memory_typed_run_store() -> store::InMemoryTypedRunStore {
 pub fn make_in_memory_typed_services(
     runners: ErasedRunnerRegistry,
     artifact_root: impl Into<PathBuf>,
-) -> TypedAppServices<store::InMemoryTypedRunStore> {
+) -> RunServices<store::InMemoryTypedRunStore> {
     make_in_memory_typed_services_with_certification_registry(
         runners,
         artifact_root,
@@ -236,9 +234,9 @@ pub fn make_in_memory_typed_services_with_certification_registry(
     runners: ErasedRunnerRegistry,
     artifact_root: impl Into<PathBuf>,
     certification_registry: CertificationRegistry,
-) -> TypedAppServices<store::InMemoryTypedRunStore> {
+) -> RunServices<store::InMemoryTypedRunStore> {
     let artifacts = FsTypedArtifactStore::new(artifact_root);
-    TypedAppServices::new_with_certification_registry(
+    RunServices::new_with_certification_registry(
         SerialTypedScheduler::new(
             runners,
             Arc::new(FsRuntimeArtifactStager {
@@ -256,7 +254,7 @@ pub fn make_async_typed_services<S>(
     runners: ErasedRunnerRegistry,
     store: S,
     artifacts: FsTypedArtifactStore,
-) -> TypedAsyncAppServices<S>
+) -> AsyncRunServices<S>
 where
     S: store::AsyncTypedRunEventStore + Send + Sync,
 {
@@ -274,14 +272,14 @@ pub fn make_async_typed_services_with_certification_registry<S>(
     store: S,
     artifacts: FsTypedArtifactStore,
     certification_registry: CertificationRegistry,
-) -> TypedAsyncAppServices<S>
+) -> AsyncRunServices<S>
 where
     S: store::AsyncTypedRunEventStore + Send + Sync,
 {
     let artifact_stager = Arc::new(FsRuntimeArtifactStager {
         artifacts: artifacts.clone(),
     });
-    TypedAsyncAppServices::new_with_certification_registry(
+    AsyncRunServices::new_with_certification_registry(
         SerialTypedScheduler::new(runners, artifact_stager),
         store,
         artifacts,
@@ -359,7 +357,7 @@ pub enum DriveMode {
 
 /// Request to start a certified typed run.
 #[derive(Debug, Clone)]
-pub struct TypedRunStartRequest {
+pub struct RunLaunchRequest {
     /// Certifier-backed typed spec authority.
     pub certified_spec: CertifiedTypedSpec,
     /// Store-owned run id to bind.
@@ -372,7 +370,7 @@ pub struct TypedRunStartRequest {
 
 /// Config bytes supplied to a typed run start request.
 #[derive(Debug, Clone)]
-pub struct TypedConfigInput {
+pub struct RunLaunchConfigArtifact {
     /// Certified config schema id.
     pub schema_id: SchemaId,
     /// Canonical config artifact bytes.
@@ -383,7 +381,7 @@ pub struct TypedConfigInput {
 
 /// Seed bytes supplied to a typed run start request.
 #[derive(Debug, Clone)]
-pub struct TypedSeedInput {
+pub struct RunLaunchSeedArtifact {
     /// Seed id from the certified spec.
     pub seed_id: SeedId,
     /// Canonical seed value bytes.
@@ -585,14 +583,14 @@ impl fmt::Display for TypedReplayResponse {
 
 /// Application service facade for certified typed runtime dispatch.
 #[derive(Clone)]
-pub struct TypedAppServices<S> {
+pub struct RunServices<S> {
     scheduler: SerialTypedScheduler,
     store: Arc<Mutex<S>>,
     artifacts: FsTypedArtifactStore,
     certification_registry: CertificationRegistry,
 }
 
-impl<S> TypedAppServices<S>
+impl<S> RunServices<S>
 where
     S: store::TypedRunEventStore + Send,
 {
@@ -637,10 +635,7 @@ where
     }
 
     /// Starts a certified typed run, optionally driving runnable nodes.
-    pub async fn start_certified_run(
-        &self,
-        req: TypedRunStartRequest,
-    ) -> Result<TypedRunResponse, AppError> {
+    pub async fn launch_run(&self, req: RunLaunchRequest) -> Result<TypedRunResponse, AppError> {
         let runtime_spec = CertifiedRuntimeSpec::new(req.certified_spec)?;
         let mut store = self.store.lock().await;
         let expected_next_seq = store.expected_next_seq(&req.run_id);
@@ -669,7 +664,7 @@ where
         };
         if stream.is_empty() {
             return Err(AppError::not_found(
-                "TypedRunNotFound",
+                "RunNotFound",
                 "typed run stream was not found",
             ));
         }
@@ -731,7 +726,7 @@ where
         let stream = store.load_run_stream(run_id);
         if stream.is_empty() {
             return Err(AppError::not_found(
-                "TypedRunNotFound",
+                "RunNotFound",
                 "typed run stream was not found",
             ));
         }
@@ -761,7 +756,7 @@ where
         };
         if stream.is_empty() {
             return Err(AppError::not_found(
-                "TypedRunNotFound",
+                "RunNotFound",
                 "typed run stream was not found",
             ));
         }
@@ -809,14 +804,14 @@ where
 
 /// Application facade for durable async certified typed runtime dispatch.
 #[derive(Clone)]
-pub struct TypedAsyncAppServices<S> {
+pub struct AsyncRunServices<S> {
     scheduler: SerialTypedScheduler,
     store: S,
     artifacts: FsTypedArtifactStore,
     certification_registry: CertificationRegistry,
 }
 
-impl<S> TypedAsyncAppServices<S>
+impl<S> AsyncRunServices<S>
 where
     S: store::AsyncTypedRunEventStore + Send + Sync,
 {
@@ -861,10 +856,7 @@ where
     }
 
     /// Starts a certified typed run against a durable async typed store.
-    pub async fn start_certified_run(
-        &self,
-        req: TypedRunStartRequest,
-    ) -> Result<TypedRunResponse, AppError> {
+    pub async fn launch_run(&self, req: RunLaunchRequest) -> Result<TypedRunResponse, AppError> {
         let runtime_spec = CertifiedRuntimeSpec::new(req.certified_spec)?;
         let expected_next_seq = self
             .store
@@ -902,7 +894,7 @@ where
             .map_err(async_app_store_error)?;
         if stream.is_empty() {
             return Err(AppError::not_found(
-                "TypedRunNotFound",
+                "RunNotFound",
                 "typed run stream was not found",
             ));
         }
@@ -973,7 +965,7 @@ where
             .map_err(async_app_store_error)?;
         if stream.is_empty() {
             return Err(AppError::not_found(
-                "TypedRunNotFound",
+                "RunNotFound",
                 "typed run stream was not found",
             ));
         }
@@ -1020,7 +1012,7 @@ where
             .map_err(async_app_store_error)?;
         if stream.is_empty() {
             return Err(AppError::not_found(
-                "TypedRunNotFound",
+                "RunNotFound",
                 "typed run stream was not found",
             ));
         }
@@ -1106,7 +1098,7 @@ async fn validate_stored_run_stream_for_read(
 ) -> Result<(), AppError> {
     if stream.is_empty() {
         return Err(AppError::not_found(
-            "TypedRunNotFound",
+            "RunNotFound",
             "typed run stream was not found",
         ));
     }
@@ -1127,7 +1119,7 @@ pub async fn replay_read_authority_for_run(
     else {
         return Err(AppError::new(
             ErrorClass::Internal,
-            "TypedReplayRetentionMissing",
+            "ReplayRetentionMissing",
             "typed replay requires retained artifact evidence",
         ));
     };
@@ -1137,7 +1129,7 @@ pub async fn replay_read_authority_for_run(
         if evidence.digest != retained.content_digest || evidence.artifact_role != retained.role {
             return Err(AppError::new(
                 ErrorClass::Internal,
-                "TypedReplayArtifactMismatch",
+                "ReplayArtifactMismatch",
                 "retained artifact metadata does not match retention evidence",
             ));
         }
@@ -1153,7 +1145,7 @@ fn certified_spec_launch_artifact(
     let canonical = runtime_spec.spec().canonical_json().map_err(|error| {
         AppError::new(
             ErrorClass::Internal,
-            "TypedSpecCanonicalError",
+            "CertifiedSpecCanonicalError",
             error.to_string(),
         )
     })?;
@@ -1176,7 +1168,7 @@ fn certified_spec_certificate_launch_artifact(
         .map_err(|error| {
             AppError::new(
                 ErrorClass::Internal,
-                "TypedCertificateCanonicalError",
+                "CertifiedCertificateCanonicalError",
                 error.to_string(),
             )
         })?;
@@ -1184,7 +1176,7 @@ fn certified_spec_certificate_launch_artifact(
         spec::MediaType::new(mfm_certify::CERTIFICATE_MEDIA_TYPE).map_err(|error| {
             AppError::new(
                 ErrorClass::Internal,
-                "TypedCertificateMediaTypeInvalid",
+                "CertifiedCertificateMediaTypeInvalid",
                 error.to_string(),
             )
         })?;
@@ -1201,7 +1193,7 @@ fn certified_spec_certificate_launch_artifact(
 fn config_launch_artifacts_for_spec(
     runtime_spec: &CertifiedRuntimeSpec,
     registry: &CertificationRegistry,
-    configs: Vec<TypedConfigInput>,
+    configs: Vec<RunLaunchConfigArtifact>,
 ) -> Result<Vec<RunLaunchArtifact>, AppError> {
     let mut supplied = BTreeMap::new();
     for config in configs {
@@ -1218,7 +1210,7 @@ fn config_launch_artifacts_for_spec(
             if existing != &artifact {
                 return Err(AppError::new(
                     ErrorClass::BadRequest,
-                    "DuplicateTypedConfigInput",
+                    "DuplicateLaunchConfigArtifact",
                     "config input was supplied more than once with conflicting bytes",
                 ));
             }
@@ -1227,7 +1219,7 @@ fn config_launch_artifacts_for_spec(
         if supplied.insert(key, artifact).is_some() {
             return Err(AppError::new(
                 ErrorClass::BadRequest,
-                "DuplicateTypedConfigInput",
+                "DuplicateLaunchConfigArtifact",
                 "config input was supplied more than once",
             ));
         }
@@ -1239,7 +1231,7 @@ fn config_launch_artifacts_for_spec(
         let artifact = supplied.remove(&key).ok_or_else(|| {
             AppError::new(
                 ErrorClass::BadRequest,
-                "MissingTypedConfigInput",
+                "MissingLaunchConfigArtifact",
                 format!("missing config input for {}", config_ref.schema_id),
             )
         })?;
@@ -1255,7 +1247,7 @@ fn config_launch_artifacts_for_spec(
         {
             return Err(AppError::new(
                 ErrorClass::BadRequest,
-                "TypedConfigArtifactMismatch",
+                "LaunchConfigArtifactMismatch",
                 "typed config input does not match the certified spec",
             ));
         }
@@ -1266,7 +1258,7 @@ fn config_launch_artifacts_for_spec(
         {
             return Err(AppError::new(
                 ErrorClass::BadRequest,
-                "TypedConfigValidatorMissing",
+                "LaunchConfigValidatorMissing",
                 format!(
                     "no trusted typed config validator was registered for {}",
                     config_ref.schema_id
@@ -1278,7 +1270,7 @@ fn config_launch_artifacts_for_spec(
     if !supplied.is_empty() {
         return Err(AppError::new(
             ErrorClass::BadRequest,
-            "UnknownTypedConfigInput",
+            "UnknownLaunchConfigArtifact",
             "config input was supplied for a config not present in the certified spec",
         ));
     }
@@ -1302,7 +1294,7 @@ fn framework_config_matches_ref(
                 |error| {
                     AppError::new(
                         ErrorClass::Internal,
-                        "TypedFrameworkConfigInvalid",
+                        "LaunchFrameworkConfigInvalid",
                         error.to_string(),
                     )
                 },
@@ -1314,14 +1306,14 @@ fn framework_config_matches_ref(
 
 fn seed_launch_cells_for_spec(
     runtime_spec: &CertifiedRuntimeSpec,
-    seeds: Vec<TypedSeedInput>,
+    seeds: Vec<RunLaunchSeedArtifact>,
 ) -> Result<Vec<RunLaunchSeedCell>, AppError> {
     let mut supplied = std::collections::BTreeMap::new();
     for seed in seeds {
         if supplied.insert(seed.seed_id.clone(), seed).is_some() {
             return Err(AppError::new(
                 ErrorClass::BadRequest,
-                "DuplicateTypedSeedInput",
+                "DuplicateLaunchSeedArtifact",
                 "seed input was supplied more than once",
             ));
         }
@@ -1332,7 +1324,7 @@ fn seed_launch_cells_for_spec(
         let input = supplied.remove(&seed_spec.seed_id).ok_or_else(|| {
             AppError::new(
                 ErrorClass::BadRequest,
-                "MissingTypedSeedInput",
+                "MissingLaunchSeedArtifact",
                 format!("missing seed input for {}", seed_spec.seed_id),
             )
         })?;
@@ -1348,7 +1340,7 @@ fn seed_launch_cells_for_spec(
             if &artifact.evidence.digest != required_digest {
                 return Err(AppError::new(
                     ErrorClass::BadRequest,
-                    "TypedSeedDigestMismatch",
+                    "LaunchSeedDigestMismatch",
                     "seed input digest does not match the certified spec",
                 ));
             }
@@ -1377,7 +1369,7 @@ fn seed_launch_cells_for_spec(
     if !supplied.is_empty() {
         return Err(AppError::new(
             ErrorClass::BadRequest,
-            "UnknownTypedSeedInput",
+            "UnknownLaunchSeedArtifact",
             "seed input was supplied for a seed not present in the certified spec",
         ));
     }
@@ -1427,7 +1419,7 @@ pub fn json_media_type() -> Result<spec::MediaType, AppError> {
     spec::MediaType::new("application/json").map_err(|error| {
         AppError::new(
             ErrorClass::Internal,
-            "TypedJsonMediaTypeInvalid",
+            "JsonMediaTypeInvalid",
             error.to_string(),
         )
     })
@@ -1451,7 +1443,7 @@ pub fn parse_certified_spec_bundle_json_bytes(
     let parsed: CertifiedSpecBundleJson = serde_json::from_slice(bytes).map_err(|error| {
         AppError::new(
             ErrorClass::BadRequest,
-            "TypedBundleInvalid",
+            "CertifiedBundleInvalid",
             format!("invalid certified typed spec bundle JSON: {error}"),
         )
     })?;
@@ -1469,7 +1461,7 @@ pub fn parse_certified_spec_bundle_json_value(
         serde_json::from_value(value.clone()).map_err(|error| {
             AppError::new(
                 ErrorClass::BadRequest,
-                "TypedBundleInvalid",
+                "CertifiedBundleInvalid",
                 format!("invalid certified typed spec bundle: {error}"),
             )
         })?;
@@ -1482,7 +1474,7 @@ fn certified_spec_bundle_from_json(
     if parsed.kind != CERTIFIED_SPEC_BUNDLE_KIND {
         return Err(AppError::new(
             ErrorClass::BadRequest,
-            "TypedBundleInvalid",
+            "CertifiedBundleInvalid",
             format!("certified typed spec bundle kind must be {CERTIFIED_SPEC_BUNDLE_KIND:?}"),
         ));
     }
@@ -1498,7 +1490,7 @@ fn canonical_json_value_bytes(value: &Value, field: &'static str) -> Result<Vec<
     let json = serde_json::to_string(value).map_err(|error| {
         AppError::new(
             ErrorClass::Internal,
-            "TypedBundleSerializationFailed",
+            "CertifiedBundleSerializationFailed",
             format!("failed to serialize {field} JSON value: {error}"),
         )
     })?;
@@ -1507,14 +1499,14 @@ fn canonical_json_value_bytes(value: &Value, field: &'static str) -> Result<Vec<
         .map_err(|error| {
             AppError::new(
                 ErrorClass::BadRequest,
-                "TypedBundleInvalid",
+                "CertifiedBundleInvalid",
                 format!("invalid certified typed spec bundle {field}: {error}"),
             )
         })
 }
 
 /// Untrusted persisted certified bundle bytes plus launch inputs for a typed run start.
-pub struct UntrustedCertifiedSpecBundleStartInput<'a> {
+pub struct UntrustedCertifiedBundleLaunchInput<'a> {
     /// Canonical JSON bytes for the persisted typed execution spec.
     pub spec_bytes: &'a [u8],
     /// Canonical JSON bytes for the persisted typed spec certificate.
@@ -1532,7 +1524,7 @@ pub struct UntrustedCertifiedSpecBundleStartInput<'a> {
 }
 
 /// Certifier-backed typed spec authority plus launch metadata for a typed run start.
-pub struct CertifiedTypedRunStartInput<'a> {
+pub struct CertifiedRunLaunchInput<'a> {
     /// Certifier-backed typed spec authority.
     pub certified_spec: CertifiedTypedSpec,
     /// Trusted registry used to validate launch config artifacts.
@@ -1552,18 +1544,18 @@ pub struct CertifiedTypedRunStartInput<'a> {
 /// This helper is for transport and storage boundaries that receive serialized bundle data. It
 /// verifies the spec and certificate against the trusted registry before producing a request that
 /// can reach the runtime boundary.
-pub fn verify_certified_bundle_run_start_request(
-    input: UntrustedCertifiedSpecBundleStartInput<'_>,
-    config_inputs: Vec<TypedConfigInput>,
-    seed_inputs: Vec<TypedSeedInput>,
-) -> Result<TypedRunStartRequest, AppError> {
+pub fn prepare_verified_bundle_launch(
+    input: UntrustedCertifiedBundleLaunchInput<'_>,
+    config_inputs: Vec<RunLaunchConfigArtifact>,
+    seed_inputs: Vec<RunLaunchSeedArtifact>,
+) -> Result<RunLaunchRequest, AppError> {
     let certified_spec = mfm_certify::verify_certified_bundle_with_trusted_registry(
         input.spec_bytes,
         input.certificate_bytes,
         input.registry,
     )?;
-    build_certified_typed_run_start_request(
-        CertifiedTypedRunStartInput {
+    prepare_certified_run_launch(
+        CertifiedRunLaunchInput {
             certified_spec,
             registry: input.registry,
             run_id: input.run_id,
@@ -1577,18 +1569,18 @@ pub fn verify_certified_bundle_run_start_request(
 }
 
 /// Builds a typed run-start request from certifier-backed typed spec authority and launch inputs.
-pub fn build_certified_typed_run_start_request(
-    input: CertifiedTypedRunStartInput<'_>,
-    config_inputs: Vec<TypedConfigInput>,
-    seed_inputs: Vec<TypedSeedInput>,
-) -> Result<TypedRunStartRequest, AppError> {
+pub fn prepare_certified_run_launch(
+    input: CertifiedRunLaunchInput<'_>,
+    config_inputs: Vec<RunLaunchConfigArtifact>,
+    seed_inputs: Vec<RunLaunchSeedArtifact>,
+) -> Result<RunLaunchRequest, AppError> {
     let runtime_spec = CertifiedRuntimeSpec::new(input.certified_spec.clone())?;
     let spec_artifact = certified_spec_launch_artifact(&runtime_spec)?;
     let certificate_artifact = certified_spec_certificate_launch_artifact(&runtime_spec)?;
     let config_artifacts =
         config_launch_artifacts_for_spec(&runtime_spec, input.registry, config_inputs)?;
     let seed_cells = seed_launch_cells_for_spec(&runtime_spec, seed_inputs)?;
-    Ok(TypedRunStartRequest {
+    Ok(RunLaunchRequest {
         certified_spec: input.certified_spec,
         run_id: input.run_id,
         evidence: RunLaunchEvidence {
@@ -1599,7 +1591,7 @@ pub fn build_certified_typed_run_start_request(
                 |error| {
                     AppError::new(
                         ErrorClass::BadRequest,
-                        "TypedFrameworkVersionInvalid",
+                        "FrameworkVersionInvalid",
                         error.to_string(),
                     )
                 },
@@ -1608,7 +1600,7 @@ pub fn build_certified_typed_run_start_request(
                 |error| {
                     AppError::new(
                         ErrorClass::BadRequest,
-                        "TypedSourceRevisionInvalid",
+                        "SourceRevisionInvalid",
                         error.to_string(),
                     )
                 },
@@ -1621,11 +1613,7 @@ pub fn build_certified_typed_run_start_request(
 }
 
 fn async_app_store_error(error: impl fmt::Display) -> AppError {
-    AppError::new(
-        ErrorClass::Conflict,
-        "TypedStoreRejected",
-        error.to_string(),
-    )
+    AppError::new(ErrorClass::Conflict, "RunStoreRejected", error.to_string())
 }
 
 /// Derives typed run status from an authoritative store-owned run stream.
@@ -1635,7 +1623,7 @@ pub fn typed_run_status_from_stream(
 ) -> Result<TypedRunResponse, AppError> {
     if stream.is_empty() {
         return Err(AppError::not_found(
-            "TypedRunNotFound",
+            "RunNotFound",
             "typed run stream was not found",
         ));
     }
@@ -1674,14 +1662,14 @@ pub async fn public_output_read_authority_for_run(
     if runtime_spec.spec_hash() != verified_stream.spec_hash() {
         return Err(AppError::new(
             ErrorClass::Internal,
-            "TypedPublicOutputAuthorityMismatch",
+            "PublicOutputAuthorityMismatch",
             "verified stream spec hash does not match certified runtime authority",
         ));
     }
     let projection = verified_stream.projection_snapshot();
     let public_output = projection.public_output(public_schema_id).ok_or_else(|| {
         AppError::not_found(
-            "TypedPublicOutputNotFound",
+            "PublicOutputNotFound",
             "typed public output was not found for the requested schema",
         )
     })?;
@@ -1693,7 +1681,7 @@ pub async fn public_output_read_authority_for_run(
     else {
         return Err(AppError::new(
             ErrorClass::Conflict,
-            "TypedPublicOutputRenderFailed",
+            "PublicOutputRenderFailed",
             "typed public output render failed",
         ));
     };
@@ -1706,7 +1694,7 @@ pub async fn public_output_read_authority_for_run(
     {
         return Err(AppError::new(
             ErrorClass::Internal,
-            "TypedPublicOutputAuthorityMismatch",
+            "PublicOutputAuthorityMismatch",
             "typed public-output evidence does not match certified runtime authority",
         ));
     }
@@ -1802,7 +1790,7 @@ fn public_output_payload_from_stream<'a>(
         .ok_or_else(|| {
             AppError::new(
                 ErrorClass::Internal,
-                "TypedPublicOutputProjectionMismatch",
+                "PublicOutputProjectionMismatch",
                 "typed public-output projection does not match the authoritative run stream",
             )
         })
@@ -1819,7 +1807,7 @@ async fn render_public_output_json_from_authority(
         let value = serde_json::from_slice(&bytes).map_err(|error| {
             AppError::new(
                 ErrorClass::Internal,
-                "TypedPublicOutputDecodeFailed",
+                "PublicOutputDecodeFailed",
                 format!("typed public-output cell artifact was not JSON: {error}"),
             )
         })?;
@@ -1924,7 +1912,7 @@ async fn load_public_output_json(
     serde_json::from_slice(&bytes).map_err(|error| {
         AppError::new(
             ErrorClass::Internal,
-            "TypedPublicOutputDecodeFailed",
+            "PublicOutputDecodeFailed",
             format!("typed public-output artifact was not JSON: {error}"),
         )
     })
@@ -1939,7 +1927,7 @@ fn verify_public_output_rendered_artifact_evidence(
     let json_media_type = spec::MediaType::new("application/json").map_err(|error| {
         AppError::new(
             ErrorClass::Internal,
-            "TypedPublicOutputMediaTypeInvalid",
+            "PublicOutputMediaTypeInvalid",
             error.to_string(),
         )
     })?;
@@ -1962,7 +1950,7 @@ fn verify_public_output_rendered_artifact_evidence(
 fn public_output_artifact_mismatch(message: &'static str) -> AppError {
     AppError::new(
         ErrorClass::Internal,
-        "TypedPublicOutputArtifactMismatch",
+        "PublicOutputArtifactMismatch",
         message,
     )
 }
@@ -1980,7 +1968,7 @@ fn run_started_payload<'a>(
         .ok_or_else(|| {
             AppError::new(
                 ErrorClass::Internal,
-                "TypedRunStartedMissing",
+                "RunStartedMissing",
                 "typed run stream is missing RunStarted evidence",
             )
         })
@@ -1990,7 +1978,7 @@ fn run_started_payload<'a>(
             } else {
                 Err(AppError::new(
                     ErrorClass::Internal,
-                    "TypedRunStartedMismatch",
+                    "RunStartedMismatch",
                     "typed run stream RunStarted evidence is bound to a different run id",
                 ))
             }
@@ -2014,7 +2002,7 @@ fn validate_spec_artifact_evidence(
     {
         return Err(AppError::new(
             ErrorClass::Internal,
-            "TypedSpecArtifactMismatch",
+            "CertifiedSpecArtifactMismatch",
             "typed execution spec artifact metadata does not match RunStarted evidence",
         ));
     }
@@ -2036,7 +2024,7 @@ fn validate_certificate_artifact_evidence(
     {
         return Err(AppError::new(
             ErrorClass::Internal,
-            "TypedCertificateArtifactMismatch",
+            "CertifiedCertificateArtifactMismatch",
             "typed spec certificate artifact metadata does not match RunStarted evidence",
         ));
     }
@@ -2062,7 +2050,7 @@ fn validate_run_started_matches_spec(
     {
         return Err(AppError::new(
             ErrorClass::Internal,
-            "TypedRunStartedSpecMismatch",
+            "RunStartedSpecMismatch",
             "RunStarted evidence does not match the stored certified spec artifact",
         ));
     }
@@ -2109,7 +2097,7 @@ fn run_started_spec_hash(stream: &[store::KernelEventEnvelope]) -> Result<SpecHa
         .ok_or_else(|| {
             AppError::new(
                 ErrorClass::Internal,
-                "TypedRunStartedMissing",
+                "RunStartedMissing",
                 "typed run stream is missing RunStarted evidence",
             )
         })
@@ -2186,7 +2174,7 @@ mod tests {
         let err = parse_certified_spec_bundle_json_bytes(br#"{"spec_version":"mfm.typed.v1"}"#)
             .expect_err("bare spec is not a transport bundle");
 
-        assert_eq!(err.code, "TypedBundleInvalid");
+        assert_eq!(err.code, "CertifiedBundleInvalid");
     }
 
     #[test]
@@ -2208,8 +2196,8 @@ mod tests {
     fn typed_run_start_rejects_config_without_validator_or_exact_trust() {
         let fixture = framework_seed_public_output_fixture();
         let config_inputs = config_inputs_for_fixture(&fixture);
-        let err = build_certified_typed_run_start_request(
-            CertifiedTypedRunStartInput {
+        let err = prepare_certified_run_launch(
+            CertifiedRunLaunchInput {
                 certified_spec: fixture.certified_spec.clone(),
                 registry: &CertificationRegistry::new(),
                 run_id: fixture.run_id.clone(),
@@ -2218,7 +2206,7 @@ mod tests {
                 drive: DriveMode::AppendOnly,
             },
             config_inputs,
-            vec![TypedSeedInput {
+            vec![RunLaunchSeedArtifact {
                 seed_id: fixture.seed_id.clone(),
                 bytes: fixture.seed_bytes.clone(),
                 media_type: spec::MediaType::new("application/json").expect("media type"),
@@ -2226,7 +2214,7 @@ mod tests {
         )
         .expect_err("unvalidated config must not start");
 
-        assert_eq!(err.code, "TypedConfigValidatorMissing");
+        assert_eq!(err.code, "LaunchConfigValidatorMissing");
     }
 
     #[tokio::test]
@@ -2460,14 +2448,14 @@ mod tests {
             .typed_public_output(&fixture.run_id, &fixture.public_schema_id)
             .await
             .expect_err("public output rejects uncertified history");
-        assert_eq!(public_output_err.code, "TypedRuntimeError");
+        assert_eq!(public_output_err.code, "LaunchRuntimeError");
         assert!(public_output_err.message.contains("public-output payload"));
 
         let resume_err = corrupt_services
             .resume_stored_run(&fixture.run_id, DriveMode::AppendOnly)
             .await
             .expect_err("append-only resume rejects uncertified history");
-        assert_eq!(resume_err.code, "TypedRuntimeError");
+        assert_eq!(resume_err.code, "LaunchRuntimeError");
         assert!(resume_err.message.contains("public-output payload"));
 
         let _ = std::fs::remove_dir_all(root);
@@ -2518,7 +2506,7 @@ mod tests {
                 .await
                 .expect_err("replay rejects tampered bootstrap"),
         ] {
-            assert_eq!(error.code, "TypedRuntimeError");
+            assert_eq!(error.code, "LaunchRuntimeError");
             assert!(
                 error.message.contains("BootstrapRun")
                     || error.message.contains("bootstrap")
@@ -2560,7 +2548,7 @@ mod tests {
             .expect_err("replay rejects standalone retention projection");
         assert!(matches!(
             replay_err.code.as_str(),
-            "TypedRuntimeError" | "TypedStoreRejected"
+            "LaunchRuntimeError" | "RunStoreRejected"
         ));
         assert!(
             replay_err.message.contains("retention")
@@ -2600,7 +2588,7 @@ mod tests {
             .verify_replay_for_run(&fixture.run_id)
             .await
             .expect_err("replay rejects post-completion retention refs");
-        assert_eq!(replay_err.code, "TypedRuntimeError");
+        assert_eq!(replay_err.code, "LaunchRuntimeError");
         assert!(
             replay_err.message.contains("RunCompleted") || replay_err.message.contains("retention"),
             "{}",
@@ -2648,7 +2636,7 @@ mod tests {
         .await
         .expect_err("tampered stream rejects before render authority");
 
-        assert_eq!(err.code, "TypedRuntimeError");
+        assert_eq!(err.code, "LaunchRuntimeError");
         assert!(err.message.contains("public-output payload"));
         let _ = std::fs::remove_dir_all(root);
     }
@@ -2701,7 +2689,7 @@ mod tests {
 
         assert!(matches!(
             err.code.as_str(),
-            "TypedRuntimeError" | "TypedStoreRejected"
+            "LaunchRuntimeError" | "RunStoreRejected"
         ));
         let _ = std::fs::remove_dir_all(root);
     }
@@ -2719,8 +2707,8 @@ mod tests {
         let registry =
             CertificationRegistry::from_program_draft(&fixture.draft).expect("fixture registry");
         let run_id = fixture.run_id.clone();
-        let err = verify_certified_bundle_run_start_request(
-            UntrustedCertifiedSpecBundleStartInput {
+        let err = prepare_verified_bundle_launch(
+            UntrustedCertifiedBundleLaunchInput {
                 spec_bytes: &bad_spec,
                 certificate_bytes: bundle.certificate_bytes(),
                 registry: &registry,
@@ -2733,7 +2721,7 @@ mod tests {
             Vec::new(),
         )
         .expect_err("invalid bundle must not build a start request");
-        assert_eq!(err.code, "TypedCertificationFailed");
+        assert_eq!(err.code, "CertifiedBundleVerificationFailed");
 
         let services = make_async_typed_services_with_certification_registry(
             ErasedRunnerRegistry::new(),
@@ -2777,8 +2765,8 @@ mod tests {
         let registry =
             CertificationRegistry::from_program_draft(&fixture.draft).expect("fixture registry");
         let run_id = fixture.run_id.clone();
-        let err = verify_certified_bundle_run_start_request(
-            UntrustedCertifiedSpecBundleStartInput {
+        let err = prepare_verified_bundle_launch(
+            UntrustedCertifiedBundleLaunchInput {
                 spec_bytes: &spec_bytes,
                 certificate_bytes: &certificate_bytes,
                 registry: &registry,
@@ -2791,7 +2779,7 @@ mod tests {
             Vec::new(),
         )
         .expect_err("certifier-invalid bundle must not build a start request");
-        assert_eq!(err.code, "TypedCertificationFailed");
+        assert_eq!(err.code, "CertifiedBundleVerificationFailed");
 
         let services = make_async_typed_services_with_certification_registry(
             ErasedRunnerRegistry::new(),
@@ -2828,7 +2816,7 @@ mod tests {
             .resume_stored_run(&fixture.run_id, DriveMode::AppendOnly)
             .await
             .expect_err("tampered spec rejects before resume");
-        assert_eq!(err.code, "TypedArtifactError");
+        assert_eq!(err.code, "ArtifactError");
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -2853,7 +2841,7 @@ mod tests {
             .resume_stored_run(&fixture.run_id, DriveMode::AppendOnly)
             .await
             .expect_err("tampered certificate rejects before resume");
-        assert_eq!(err.code, "TypedArtifactError");
+        assert_eq!(err.code, "ArtifactError");
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -2878,7 +2866,7 @@ mod tests {
             .resume_stored_run(&fixture.run_id, DriveMode::AppendOnly)
             .await
             .expect_err("sync resume rejects tampered stored certificate");
-        assert_eq!(err.code, "TypedArtifactError");
+        assert_eq!(err.code, "ArtifactError");
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -2904,7 +2892,7 @@ mod tests {
             .verify_replay_for_run(&fixture.run_id)
             .await
             .expect_err("registry mismatch rejects before replay");
-        assert_eq!(err.code, "TypedCertificationFailed");
+        assert_eq!(err.code, "CertifiedBundleVerificationFailed");
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -3003,7 +2991,7 @@ mod tests {
             .replay_broker(&fixture.run_id)
             .await
             .expect_err("sync replay broker rejects tampered stored certificate");
-        assert_eq!(err.code, "TypedArtifactError");
+        assert_eq!(err.code, "ArtifactError");
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -3028,7 +3016,7 @@ mod tests {
             .typed_public_output(&fixture.run_id, &fixture.public_schema_id)
             .await
             .expect_err("tampered authority rejects before rendering");
-        assert_eq!(err.code, "TypedArtifactError");
+        assert_eq!(err.code, "ArtifactError");
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -3059,13 +3047,13 @@ mod tests {
             .resume_stored_run(&fixture.run_id, DriveMode::AppendOnly)
             .await
             .expect_err("rendered JSON must not authorize resume");
-        assert_eq!(resume_err.code, "TypedArtifactError");
+        assert_eq!(resume_err.code, "ArtifactError");
 
         let replay_err = services
             .verify_replay_for_run(&fixture.run_id)
             .await
             .expect_err("rendered JSON must not authorize replay");
-        assert_eq!(replay_err.code, "TypedArtifactError");
+        assert_eq!(replay_err.code, "ArtifactError");
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -3080,8 +3068,8 @@ mod tests {
         let config_inputs = config_inputs_for_fixture(&fixture);
         let registry =
             CertificationRegistry::from_program_draft(&fixture.draft).expect("fixture registry");
-        let request = build_certified_typed_run_start_request(
-            CertifiedTypedRunStartInput {
+        let request = prepare_certified_run_launch(
+            CertifiedRunLaunchInput {
                 certified_spec: fixture.certified_spec.clone(),
                 registry: &registry,
                 run_id: fixture.run_id.clone(),
@@ -3090,7 +3078,7 @@ mod tests {
                 drive: DriveMode::UntilBlocked,
             },
             config_inputs,
-            vec![TypedSeedInput {
+            vec![RunLaunchSeedArtifact {
                 seed_id: fixture.seed_id.clone(),
                 bytes: fixture.seed_bytes.clone(),
                 media_type: spec::MediaType::new("application/json").expect("media type"),
@@ -3105,21 +3093,21 @@ mod tests {
         );
 
         let err = services
-            .start_certified_run(request)
+            .launch_run(request)
             .await
             .expect_err("missing typed runner rejects");
-        assert_eq!(err.code, "TypedRunnerUnavailable");
+        assert_eq!(err.code, "LaunchRunnerUnavailable");
         assert!(matches!(err.class, ErrorClass::BadRequest));
         let status = services
             .run_status(&fixture.run_id)
             .await
             .expect_err("run was not started");
-        assert_eq!(status.code, "TypedRunNotFound");
+        assert_eq!(status.code, "RunNotFound");
         let stream = services
             .run_stream(&fixture.run_id)
             .await
             .expect_err("run stream was not started");
-        assert_eq!(stream.code, "TypedRunNotFound");
+        assert_eq!(stream.code, "RunNotFound");
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -3137,8 +3125,8 @@ mod tests {
         let config_inputs = config_inputs_for_draft_and_spec(&draft, &certified.envelope().spec);
         let bundle = certified.bundle().expect("proof bundle");
         let registry = production_certification_registry().expect("production registry");
-        let request = verify_certified_bundle_run_start_request(
-            UntrustedCertifiedSpecBundleStartInput {
+        let request = prepare_verified_bundle_launch(
+            UntrustedCertifiedBundleLaunchInput {
                 spec_bytes: bundle.spec_bytes(),
                 certificate_bytes: bundle.certificate_bytes(),
                 registry: &registry,
@@ -3159,10 +3147,7 @@ mod tests {
             registry,
         );
 
-        let response = services
-            .start_certified_run(request)
-            .await
-            .expect("start proof run");
+        let response = services.launch_run(request).await.expect("start proof run");
 
         assert_eq!(response.phase, TypedRunPhase::Completed);
         let replay = services
@@ -3189,7 +3174,7 @@ mod tests {
     async fn start_framework_fixture_run() -> (
         PathBuf,
         FrameworkSeedPublicOutputFixture,
-        TypedAsyncAppServices<AsyncInMemoryStore>,
+        AsyncRunServices<AsyncInMemoryStore>,
         TypedRunResponse,
     ) {
         let root = std::env::temp_dir().join(format!(
@@ -3215,8 +3200,8 @@ mod tests {
             )
             .await
             .expect("persist runner output artifact");
-        let request = build_certified_typed_run_start_request(
-            CertifiedTypedRunStartInput {
+        let request = prepare_certified_run_launch(
+            CertifiedRunLaunchInput {
                 certified_spec: fixture.certified_spec.clone(),
                 registry: &registry,
                 run_id: fixture.run_id.clone(),
@@ -3225,7 +3210,7 @@ mod tests {
                 drive: DriveMode::UntilBlocked,
             },
             config_inputs,
-            vec![TypedSeedInput {
+            vec![RunLaunchSeedArtifact {
                 seed_id: fixture.seed_id.clone(),
                 bytes: fixture.seed_bytes.clone(),
                 media_type: spec::MediaType::new("application/json").expect("media type"),
@@ -3240,17 +3225,14 @@ mod tests {
             registry,
         );
 
-        let started = services
-            .start_certified_run(request)
-            .await
-            .expect("start typed run");
+        let started = services.launch_run(request).await.expect("start typed run");
         (root, fixture, services, started)
     }
 
     async fn start_sync_framework_fixture_run() -> (
         PathBuf,
         FrameworkSeedPublicOutputFixture,
-        TypedAppServices<store::InMemoryTypedRunStore>,
+        RunServices<store::InMemoryTypedRunStore>,
         TypedRunResponse,
     ) {
         let root = std::env::temp_dir().join(format!(
@@ -3276,8 +3258,8 @@ mod tests {
             )
             .await
             .expect("persist runner output artifact");
-        let request = build_certified_typed_run_start_request(
-            CertifiedTypedRunStartInput {
+        let request = prepare_certified_run_launch(
+            CertifiedRunLaunchInput {
                 certified_spec: fixture.certified_spec.clone(),
                 registry: &registry,
                 run_id: fixture.run_id.clone(),
@@ -3286,7 +3268,7 @@ mod tests {
                 drive: DriveMode::UntilBlocked,
             },
             config_inputs,
-            vec![TypedSeedInput {
+            vec![RunLaunchSeedArtifact {
                 seed_id: fixture.seed_id.clone(),
                 bytes: fixture.seed_bytes.clone(),
                 media_type: spec::MediaType::new("application/json").expect("media type"),
@@ -3297,10 +3279,7 @@ mod tests {
         let services =
             make_in_memory_typed_services_with_certification_registry(runners, &root, registry);
 
-        let started = services
-            .start_certified_run(request)
-            .await
-            .expect("start typed run");
+        let started = services.launch_run(request).await.expect("start typed run");
         (root, fixture, services, started)
     }
 
@@ -3327,14 +3306,14 @@ mod tests {
 
     fn config_inputs_for_fixture(
         fixture: &FrameworkSeedPublicOutputFixture,
-    ) -> Vec<TypedConfigInput> {
+    ) -> Vec<RunLaunchConfigArtifact> {
         config_inputs_for_draft_and_spec(&fixture.draft, &fixture.certified_spec.envelope().spec)
     }
 
     fn config_inputs_for_draft_and_spec(
         draft: &mfm_program::TypedProgramDraft,
         typed_spec: &spec::TypedExecutionSpec,
-    ) -> Vec<TypedConfigInput> {
+    ) -> Vec<RunLaunchConfigArtifact> {
         let mut inputs = Vec::new();
         inputs.extend(
             draft
@@ -3342,7 +3321,7 @@ mod tests {
                 .iter()
                 .map(|node| &node.config)
                 .chain(draft.operation_lineage().iter().map(|frame| &frame.config))
-                .map(|config| TypedConfigInput {
+                .map(|config| RunLaunchConfigArtifact {
                     schema_id: config.schema_id.clone(),
                     bytes: config.canonical_json.to_vec(),
                     media_type: spec::MediaType::new("application/json").expect("media type"),
@@ -3360,7 +3339,7 @@ mod tests {
                 node.config_ref.digest,
                 "framework config helper must match certified config ref"
             );
-            inputs.push(TypedConfigInput {
+            inputs.push(RunLaunchConfigArtifact {
                 schema_id: node.config_ref.schema_id.clone(),
                 bytes: bytes.to_vec(),
                 media_type: node.config_ref.media_type.clone(),

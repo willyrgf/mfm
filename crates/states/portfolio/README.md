@@ -15,7 +15,6 @@ State contracts:
 - `ObserveBatchState`
 - `MergeObservationsState`
 - `AssembleSnapshotState`
-- `PublishSnapshotState`
 - `ProjectReportState`
 
 The crate does not own store commits, runner registration, CLI/REST rendering, or live RPC source

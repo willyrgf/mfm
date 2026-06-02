@@ -16,7 +16,6 @@ and typed public outputs:
 - `ObserveBatch`
 - `MergeObservations`
 - `AssembleSnapshot`
-- `PublishSnapshot`
 - `ProjectReport`
 
 The crate exposes no legacy dynamic `PlannedOp`, `PortKey`, `DynContext`, context-key, or

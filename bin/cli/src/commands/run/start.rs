@@ -5,11 +5,11 @@ use crate::commands::result::{CommandError, CommandOutput, CommandResult};
 use crate::commands::CommandContext;
 use crate::presentation::output::handle_command_result;
 use crate::support::typed_run::{
-    command_error_from_typed_app_error, drive_mode, make_typed_app_services, parse_typed_run_id,
+    command_error_from_app_error, connect_run_services, drive_mode, parse_typed_run_id,
     TypedDriveArg, TypedRunStoresArgs,
 };
 use clap::Args;
-use mfm_app::{TypedConfigInput, TypedRunResponse, TypedSeedInput};
+use mfm_app::{RunLaunchConfigArtifact, RunLaunchSeedArtifact, TypedRunResponse};
 use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_ids::{SchemaId, SeedId};
 
@@ -104,7 +104,7 @@ async fn execute_internal(args: &StartArgs) -> CommandResult<TypedRunResponse> {
     };
     let bundle_bytes = tokio::fs::read(&args.bundle).await.map_err(|error| {
         CommandError::new(
-            "TypedBundleReadFailed",
+            "CertifiedBundleReadFailed",
             format!(
                 "failed to read certified typed spec bundle file {}: {error}",
                 args.bundle.display()
@@ -112,20 +112,20 @@ async fn execute_internal(args: &StartArgs) -> CommandResult<TypedRunResponse> {
         )
     })?;
     let bundle = mfm_app::parse_certified_spec_bundle_json_bytes(&bundle_bytes)
-        .map_err(command_error_from_typed_app_error)?;
+        .map_err(command_error_from_app_error)?;
     let registry =
-        mfm_app::production_certification_registry().map_err(command_error_from_typed_app_error)?;
-    let media_type = mfm_app::json_media_type().map_err(command_error_from_typed_app_error)?;
+        mfm_app::production_certification_registry().map_err(command_error_from_app_error)?;
+    let media_type = mfm_app::json_media_type().map_err(command_error_from_app_error)?;
     let mut config_inputs = Vec::with_capacity(args.configs.len());
     for config in &args.configs {
         let bytes = read_canonical_json_file(
             &config.path,
-            "TypedConfigReadFailed",
-            "TypedConfigInvalid",
+            "LaunchConfigReadFailed",
+            "LaunchConfigInvalid",
             format!("config input {}", config.schema_id),
         )
         .await?;
-        config_inputs.push(TypedConfigInput {
+        config_inputs.push(RunLaunchConfigArtifact {
             schema_id: config.schema_id.clone(),
             bytes,
             media_type: media_type.clone(),
@@ -135,20 +135,20 @@ async fn execute_internal(args: &StartArgs) -> CommandResult<TypedRunResponse> {
     for seed in &args.seeds {
         let bytes = read_canonical_json_file(
             &seed.path,
-            "TypedSeedReadFailed",
-            "TypedSeedInvalid",
+            "LaunchSeedReadFailed",
+            "LaunchSeedInvalid",
             format!("seed input {}", seed.seed_id),
         )
         .await?;
-        seed_inputs.push(TypedSeedInput {
+        seed_inputs.push(RunLaunchSeedArtifact {
             seed_id: seed.seed_id.clone(),
             bytes,
             media_type: media_type.clone(),
         });
     }
 
-    let request = mfm_app::verify_certified_bundle_run_start_request(
-        mfm_app::UntrustedCertifiedSpecBundleStartInput {
+    let request = mfm_app::prepare_verified_bundle_launch(
+        mfm_app::UntrustedCertifiedBundleLaunchInput {
             spec_bytes: bundle.spec_bytes(),
             certificate_bytes: bundle.certificate_bytes(),
             registry: &registry,
@@ -160,12 +160,12 @@ async fn execute_internal(args: &StartArgs) -> CommandResult<TypedRunResponse> {
         config_inputs,
         seed_inputs,
     )
-    .map_err(command_error_from_typed_app_error)?;
-    let services = make_typed_app_services(&args.stores).await?;
+    .map_err(command_error_from_app_error)?;
+    let services = connect_run_services(&args.stores).await?;
     let response = services
-        .start_certified_run(request)
+        .launch_run(request)
         .await
-        .map_err(command_error_from_typed_app_error)?;
+        .map_err(command_error_from_app_error)?;
     Ok(CommandOutput::new(response))
 }
 
@@ -220,7 +220,7 @@ mod tests {
         .await
         .expect_err("invalid bundle rejects before store construction");
 
-        assert_eq!(err.code, "TypedBundleInvalid");
+        assert_eq!(err.code, "CertifiedBundleInvalid");
     }
 
     #[tokio::test]
@@ -244,7 +244,7 @@ mod tests {
         .await
         .expect_err("missing config inputs reject before store construction");
 
-        assert_eq!(err.code, "MissingTypedConfigInput");
+        assert_eq!(err.code, "MissingLaunchConfigArtifact");
     }
 
     #[tokio::test]

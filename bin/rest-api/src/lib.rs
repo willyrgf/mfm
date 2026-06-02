@@ -29,18 +29,15 @@ use axum::Json;
 use axum::Router;
 use http::header::HeaderName;
 use mfm_app::{
-    AppError, DriveMode, ErrorClass, TypedAsyncAppServices, TypedConfigInput,
-    TypedPublicOutputResponse, TypedRunPhase, TypedRunResponse, TypedRunStreamResponse,
-    TypedSeedInput,
+    AppError, AsyncRunServices, DriveMode, ErrorClass, RunLaunchConfigArtifact,
+    RunLaunchSeedArtifact, TypedPublicOutputResponse, TypedRunPhase, TypedRunResponse,
+    TypedRunStreamResponse,
 };
 use mfm_artifact_store_fs::{FsTypedArtifactError, FsTypedArtifactStore};
 use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
 use mfm_events::v1::ArtifactRole;
 use mfm_ids::{ArtifactId, ContentDigest, DigestAlgorithm, RunId, SchemaId, SeedId};
-use mfm_op_portfolio_tracker::{
-    certified_portfolio_spec, portfolio_config_artifacts_for_spec, portfolio_program_draft,
-    PortfolioConfigArtifact,
-};
+use mfm_op_portfolio_tracker::{compile_portfolio_snapshot_program, PortfolioConfigArtifact};
 use mfm_portfolio_config::{
     canonicalize_portfolio_snapshot_authored_config, parse_portfolio_snapshot_authored_config,
     AuthoredConfigFormat, PortfolioSnapshotConfigError,
@@ -210,7 +207,7 @@ impl<S> RouterState<S>
 where
     S: AsyncTypedRunEventStore + Clone + Send + Sync,
 {
-    fn services(&self) -> Result<TypedAsyncAppServices<S>, ApiError> {
+    fn services(&self) -> Result<AsyncRunServices<S>, ApiError> {
         let runners = mfm_app::production_typed_runner_registry(self.app.artifacts.clone())?;
         let certification_registry = mfm_app::production_certification_registry()?;
         Ok(
@@ -496,42 +493,21 @@ where
     }
     let canonical = parse_portfolio_snapshot_request(&req.request)?;
     let workflow_config = PortfolioWorkflowConfig::from(canonical);
-    let draft = portfolio_program_draft(workflow_config.clone()).map_err(|error| {
+    let compiled = compile_portfolio_snapshot_program(workflow_config).map_err(|error| {
         ApiError::new(
             StatusCode::BAD_REQUEST,
-            "TypedPortfolioPlanInvalid",
+            "PortfolioCompileInvalid",
             error.to_string(),
         )
     })?;
-    let certified = certified_portfolio_spec(workflow_config).map_err(|error| {
-        ApiError::new(
-            StatusCode::BAD_REQUEST,
-            "TypedPortfolioSpecInvalid",
-            error.to_string(),
-        )
-    })?;
-    let public_schema_id = certified
-        .envelope()
-        .spec
-        .public_outputs
-        .public_schema_id
-        .clone();
-    let configs = portfolio_config_artifacts_for_spec(&draft, &certified.envelope().spec).map_err(
-        |error| {
-            ApiError::new(
-                StatusCode::BAD_REQUEST,
-                "TypedPortfolioConfigInvalid",
-                error.to_string(),
-            )
-        },
-    )?;
+    let public_schema_id = compiled.public_schema_id.clone();
 
     let run_id = parse_optional_run_id(req.run_id)?;
     let services = state.services()?;
-    let config_inputs = typed_config_inputs(configs);
-    let start = mfm_app::build_certified_typed_run_start_request(
-        mfm_app::CertifiedTypedRunStartInput {
-            certified_spec: certified,
+    let config_inputs = run_launch_config_artifacts(compiled.config_artifacts);
+    let start = mfm_app::prepare_certified_run_launch(
+        mfm_app::CertifiedRunLaunchInput {
+            certified_spec: compiled.certified_spec,
             registry: services.certification_registry(),
             run_id: run_id.clone(),
             framework_version: &req.framework_version,
@@ -541,7 +517,7 @@ where
         config_inputs,
         Vec::new(),
     )?;
-    let run = services.start_certified_run(start).await?;
+    let run = services.launch_run(start).await?;
     let public_output = if run.phase == TypedRunPhase::Completed {
         Some(
             services
@@ -572,31 +548,31 @@ where
     let config_media_type = mfm_app::json_media_type()?;
     let mut configs = Vec::with_capacity(req.configs.len());
     for config in req.configs {
-        configs.push(TypedConfigInput {
+        configs.push(RunLaunchConfigArtifact {
             schema_id: SchemaId::parse(&config.schema_id).map_err(|_| {
                 ApiError::new(
                     StatusCode::BAD_REQUEST,
-                    "TypedConfigSchemaInvalid",
+                    "LaunchConfigSchemaInvalid",
                     "typed config schema id is invalid",
                 )
             })?,
-            bytes: canonical_json_value_bytes(&config.json, "TypedConfigInvalid")?,
+            bytes: canonical_json_value_bytes(&config.json, "LaunchConfigInvalid")?,
             media_type: config_media_type.clone(),
         });
     }
     let seed_media_type = mfm_app::json_media_type()?;
     let mut seeds = Vec::with_capacity(req.seeds.len());
     for seed in req.seeds {
-        seeds.push(TypedSeedInput {
+        seeds.push(RunLaunchSeedArtifact {
             seed_id: parse_seed_id(&seed.seed_id)?,
-            bytes: canonical_json_value_bytes(&seed.json, "TypedSeedInvalid")?,
+            bytes: canonical_json_value_bytes(&seed.json, "LaunchSeedInvalid")?,
             media_type: seed_media_type.clone(),
         });
     }
 
     let services = state.services()?;
-    let start = mfm_app::verify_certified_bundle_run_start_request(
-        mfm_app::UntrustedCertifiedSpecBundleStartInput {
+    let start = mfm_app::prepare_verified_bundle_launch(
+        mfm_app::UntrustedCertifiedBundleLaunchInput {
             spec_bytes: bundle.spec_bytes(),
             certificate_bytes: bundle.certificate_bytes(),
             registry: services.certification_registry(),
@@ -608,7 +584,7 @@ where
         configs,
         seeds,
     )?;
-    let data = services.start_certified_run(start).await?;
+    let data = services.launch_run(start).await?;
 
     json_ok(data)
 }
@@ -804,10 +780,12 @@ fn parse_portfolio_snapshot_request(
         .map_err(api_error_from_portfolio_config_error)
 }
 
-fn typed_config_inputs(configs: Vec<PortfolioConfigArtifact>) -> Vec<TypedConfigInput> {
+fn run_launch_config_artifacts(
+    configs: Vec<PortfolioConfigArtifact>,
+) -> Vec<RunLaunchConfigArtifact> {
     configs
         .into_iter()
-        .map(|config| TypedConfigInput {
+        .map(|config| RunLaunchConfigArtifact {
             schema_id: config.schema_id,
             bytes: config.bytes,
             media_type: config.media_type,
@@ -869,7 +847,7 @@ fn readiness_artifact_probe() -> Result<store::ArtifactEvidenceRef, ApiError> {
         media_type: spec::MediaType::new("application/json").map_err(|error| {
             ApiError::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "TypedJsonMediaTypeInvalid",
+                "JsonMediaTypeInvalid",
                 error.to_string(),
             )
         })?,
@@ -883,24 +861,22 @@ fn readiness_artifact_probe() -> Result<store::ArtifactEvidenceRef, ApiError> {
 
 fn api_error_from_typed_store_error(error: PostgresTypedStoreError) -> ApiError {
     match error {
-        PostgresTypedStoreError::Store(error) => ApiError::new(
-            StatusCode::CONFLICT,
-            "TypedStoreRejected",
-            error.to_string(),
-        ),
+        PostgresTypedStoreError::Store(error) => {
+            ApiError::new(StatusCode::CONFLICT, "RunStoreRejected", error.to_string())
+        }
         PostgresTypedStoreError::Database(message) => ApiError::new(
             StatusCode::SERVICE_UNAVAILABLE,
-            "TypedStoreUnavailable",
+            "RunStoreUnavailable",
             message,
         ),
         PostgresTypedStoreError::DatabaseSource { context, source } => ApiError::new(
             StatusCode::SERVICE_UNAVAILABLE,
-            "TypedStoreUnavailable",
+            "RunStoreUnavailable",
             format!("{context}: {source}"),
         ),
         PostgresTypedStoreError::Corruption(message) => ApiError::new(
             StatusCode::INTERNAL_SERVER_ERROR,
-            "TypedStoreCorruption",
+            "RunStoreCorruption",
             message,
         ),
     }
@@ -908,31 +884,25 @@ fn api_error_from_typed_store_error(error: PostgresTypedStoreError) -> ApiError 
 
 fn api_error_from_typed_artifact_error(error: FsTypedArtifactError) -> ApiError {
     match error {
-        FsTypedArtifactError::NotFound { .. } => ApiError::new(
-            StatusCode::NOT_FOUND,
-            "TypedArtifactNotFound",
-            error.to_string(),
-        ),
+        FsTypedArtifactError::NotFound { .. } => {
+            ApiError::new(StatusCode::NOT_FOUND, "ArtifactNotFound", error.to_string())
+        }
         FsTypedArtifactError::InvalidEvidence { .. }
         | FsTypedArtifactError::InvalidIdentity { .. }
-        | FsTypedArtifactError::EvidenceMismatch { .. } => ApiError::new(
-            StatusCode::CONFLICT,
-            "TypedArtifactRejected",
-            error.to_string(),
-        ),
-        FsTypedArtifactError::RetainedArtifactRefused { .. } => ApiError::new(
-            StatusCode::CONFLICT,
-            "TypedArtifactRetained",
-            error.to_string(),
-        ),
+        | FsTypedArtifactError::EvidenceMismatch { .. } => {
+            ApiError::new(StatusCode::CONFLICT, "ArtifactRejected", error.to_string())
+        }
+        FsTypedArtifactError::RetainedArtifactRefused { .. } => {
+            ApiError::new(StatusCode::CONFLICT, "ArtifactRetained", error.to_string())
+        }
         FsTypedArtifactError::Corruption { .. } => ApiError::new(
             StatusCode::INTERNAL_SERVER_ERROR,
-            "TypedArtifactCorruption",
+            "ArtifactCorruption",
             error.to_string(),
         ),
         FsTypedArtifactError::Io { .. } => ApiError::new(
             StatusCode::SERVICE_UNAVAILABLE,
-            "TypedArtifactStoreUnavailable",
+            "ArtifactStoreUnavailable",
             error.to_string(),
         ),
     }

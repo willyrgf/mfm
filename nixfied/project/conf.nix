@@ -349,6 +349,11 @@ rec {
         clientPackage = minioLocalClientPackage;
       };
       defaultSource = "local";
+      probes.ready.wait = {
+        enabled = true;
+        timeoutSeconds = 30;
+        intervalSeconds = 1;
+      };
     };
 
     reth = {

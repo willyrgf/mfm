@@ -2,7 +2,7 @@ use crate::commands::result::{CommandOutput, CommandResult};
 use crate::commands::CommandContext;
 use crate::presentation::output::handle_command_result;
 use crate::support::typed_run::{
-    command_error_from_typed_app_error, drive_mode, make_typed_app_services, parse_typed_run_id,
+    command_error_from_app_error, connect_run_services, drive_mode, parse_typed_run_id,
     TypedDriveArg, TypedRunStoresArgs,
 };
 use clap::Args;
@@ -31,10 +31,10 @@ pub(crate) async fn execute(ctx: &CommandContext, args: &ResumeArgs) -> ! {
 
 async fn execute_internal(args: &ResumeArgs) -> CommandResult<TypedRunResponse> {
     let run_id = parse_typed_run_id(&args.run_id)?;
-    let services = make_typed_app_services(&args.stores).await?;
+    let services = connect_run_services(&args.stores).await?;
     let response = services
         .resume_stored_run(&run_id, drive_mode(args.drive))
         .await
-        .map_err(command_error_from_typed_app_error)?;
+        .map_err(command_error_from_app_error)?;
     Ok(CommandOutput::new(response))
 }

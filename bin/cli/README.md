@@ -305,19 +305,19 @@ Bundle shape:
 Run start always resolves runner executable identities before `RunStarted`, because those identities
 are replay authority. `--drive append-only` suppresses post-start execution only; it does not bypass
 runner resolution. Specs that reference unported domain state descriptors fail with
-`TypedRunnerUnavailable` before any typed run event is written. The current production CLI registry
+`LaunchRunnerUnavailable` before any typed run event is written. The current production CLI registry
 contains the runtime built-in framework public-output renderer; domain runners are added by their
 typed porting commits.
 
-Stable typed start errors include:
+Stable launch errors include:
 
-- `TypedBundleReadFailed`: the bundle file could not be read.
-- `TypedBundleInvalid`: the bundle JSON is malformed, has the wrong kind, is missing fields, or has
+- `CertifiedBundleReadFailed`: the bundle file could not be read.
+- `CertifiedBundleInvalid`: the bundle JSON is malformed, has the wrong kind, is missing fields, or has
   non-canonicalizable spec/certificate values.
-- `TypedCertificationFailed`: certificate/spec evidence, registry digest, descriptor evidence, or
+- `CertifiedBundleVerificationFailed`: certificate/spec evidence, registry digest, descriptor evidence, or
   certifier validation failed. A hash-only spec envelope is not certification authority.
-- `MissingTypedConfigInput`: a certified config reference was not supplied with `--config`.
-- `TypedRunnerUnavailable`: the certified spec references a state descriptor with no production
+- `MissingLaunchConfigArtifact`: a certified config reference was not supplied with `--config`.
+- `LaunchRunnerUnavailable`: the certified spec references a state descriptor with no production
   runner binding.
 
 ### `run resume`

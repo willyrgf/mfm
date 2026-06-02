@@ -2,10 +2,11 @@ use std::fmt;
 use std::path::PathBuf;
 
 use clap::Args;
-use mfm_app::{TypedConfigInput, TypedPublicOutputResponse, TypedRunPhase, TypedRunResponse};
+use mfm_app::{
+    RunLaunchConfigArtifact, TypedPublicOutputResponse, TypedRunPhase, TypedRunResponse,
+};
 use mfm_op_portfolio_tracker::{
-    certified_portfolio_spec, portfolio_config_artifacts_for_spec, portfolio_program_draft,
-    PortfolioConfigArtifact, PortfolioWorkflowConfig,
+    compile_portfolio_snapshot_program, PortfolioConfigArtifact, PortfolioWorkflowConfig,
 };
 use mfm_portfolio_config::{
     canonicalize_portfolio_snapshot_authored_config, parse_portfolio_snapshot_authored_config,
@@ -18,7 +19,7 @@ use crate::commands::result::{CommandError, CommandOutput, CommandResult};
 use crate::commands::CommandContext;
 use crate::presentation::output::handle_command_result;
 use crate::support::typed_run::{
-    command_error_from_typed_app_error, drive_mode, make_typed_app_services, TypedDriveArg,
+    command_error_from_app_error, connect_run_services, drive_mode, TypedDriveArg,
     TypedRunStoresArgs,
 };
 
@@ -74,27 +75,17 @@ pub(crate) async fn execute(ctx: &CommandContext, args: &SnapshotArgs) -> ! {
 async fn execute_internal(args: &SnapshotArgs) -> CommandResult<PortfolioSnapshotResponse> {
     let canonical = parse_request(args)?;
     let workflow_config = PortfolioWorkflowConfig::from(canonical);
-    let draft = portfolio_program_draft(workflow_config.clone())
-        .map_err(|error| CommandError::new("TypedPortfolioPlanInvalid", error.to_string()))?;
-    let certified = certified_portfolio_spec(workflow_config)
-        .map_err(|error| CommandError::new("TypedPortfolioSpecInvalid", error.to_string()))?;
-    let public_schema_id = certified
-        .envelope()
-        .spec
-        .public_outputs
-        .public_schema_id
-        .clone();
+    let compiled = compile_portfolio_snapshot_program(workflow_config)
+        .map_err(|error| CommandError::new("PortfolioCompileInvalid", error.to_string()))?;
+    let public_schema_id = compiled.public_schema_id.clone();
 
-    let services = make_typed_app_services(&args.stores).await?;
-    let config_inputs = typed_config_inputs(
-        portfolio_config_artifacts_for_spec(&draft, &certified.envelope().spec)
-            .map_err(|error| CommandError::new("TypedPortfolioConfigInvalid", error.to_string()))?,
-    );
+    let services = connect_run_services(&args.stores).await?;
+    let config_inputs = run_launch_config_artifacts(compiled.config_artifacts);
 
     let run_id = mfm_app::new_run_id();
-    let request = mfm_app::build_certified_typed_run_start_request(
-        mfm_app::CertifiedTypedRunStartInput {
-            certified_spec: certified,
+    let request = mfm_app::prepare_certified_run_launch(
+        mfm_app::CertifiedRunLaunchInput {
+            certified_spec: compiled.certified_spec,
             registry: services.certification_registry(),
             run_id: run_id.clone(),
             framework_version: &args.framework_version,
@@ -104,17 +95,17 @@ async fn execute_internal(args: &SnapshotArgs) -> CommandResult<PortfolioSnapsho
         config_inputs,
         Vec::new(),
     )
-    .map_err(command_error_from_typed_app_error)?;
+    .map_err(command_error_from_app_error)?;
     let run = services
-        .start_certified_run(request)
+        .launch_run(request)
         .await
-        .map_err(command_error_from_typed_app_error)?;
+        .map_err(command_error_from_app_error)?;
     let public_output = if run.phase == TypedRunPhase::Completed {
         Some(
             services
                 .typed_public_output(&run_id, &public_schema_id)
                 .await
-                .map_err(command_error_from_typed_app_error)?,
+                .map_err(command_error_from_app_error)?,
         )
     } else {
         None
@@ -160,10 +151,12 @@ fn parse_and_canonicalize_json(
         .map_err(command_error_from_portfolio_snapshot_config_error)
 }
 
-fn typed_config_inputs(configs: Vec<PortfolioConfigArtifact>) -> Vec<TypedConfigInput> {
+fn run_launch_config_artifacts(
+    configs: Vec<PortfolioConfigArtifact>,
+) -> Vec<RunLaunchConfigArtifact> {
     configs
         .into_iter()
-        .map(|config| TypedConfigInput {
+        .map(|config| RunLaunchConfigArtifact {
             schema_id: config.schema_id,
             bytes: config.bytes,
             media_type: config.media_type,

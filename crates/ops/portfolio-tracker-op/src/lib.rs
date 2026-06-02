@@ -43,8 +43,7 @@ pub use mfm_state_portfolio::{
     ObserveBatchConfig, ObserveBatchInput, ObserveBatchInputHandles, ObserveBatchState,
     PinViewsConfig, PinViewsState, PortfolioOperationOutputs, PortfolioPublicOutputs,
     PortfolioWorkflowConfig, PrepareSourcesConfig, PrepareSourcesState, ProjectReportConfig,
-    ProjectReportInput, ProjectReportInputHandles, ProjectReportState, PublishSnapshotConfig,
-    PublishSnapshotInput, PublishSnapshotInputHandles, PublishSnapshotState, ResolveSubjectsConfig,
+    ProjectReportInput, ProjectReportInputHandles, ProjectReportState, ResolveSubjectsConfig,
     ResolveSubjectsState, ResolveValuationsConfig, ResolveValuationsState,
 };
 
@@ -200,18 +199,11 @@ impl Operation for PortfolioTrackerWorkflowOperation {
                 observations,
             },
         )?;
-        let published = builder.state::<PublishSnapshotState, _>(
-            StateKey::new("publish_snapshot")?,
-            PublishSnapshotConfig { publish_version: 1 },
-            PublishSnapshotInputHandles {
-                snapshot: snapshot.clone(),
-            },
-        )?;
         let report = builder.state_with_domain_keys::<ProjectReportState, _, _>(
             StateKey::new("project_report")?,
             ProjectReportConfig { report_version: 2 },
             ProjectReportInputHandles {
-                snapshot: published.clone(),
+                snapshot: snapshot.clone(),
             },
             vec![report_key],
         )?;
@@ -230,7 +222,6 @@ pub fn portfolio_state_registry() -> mfm_program::Result<mfm_program::StateRegis
     states.register::<ObserveBatchState>()?;
     states.register::<MergeObservationsState>()?;
     states.register::<AssembleSnapshotState>()?;
-    states.register::<PublishSnapshotState>()?;
     states.register::<ProjectReportState>()?;
     Ok(states.into_snapshot())
 }
@@ -285,11 +276,6 @@ pub fn register_portfolio_certification_descriptors(
     )?;
     registry.register_state(
         &states
-            .register::<PublishSnapshotState>()
-            .map_err(|error| mfm_certify::CertifyError::Lowering(error.to_string()))?,
-    )?;
-    registry.register_state(
-        &states
             .register::<ProjectReportState>()
             .map_err(|error| mfm_certify::CertifyError::Lowering(error.to_string()))?,
     )?;
@@ -335,6 +321,70 @@ pub fn certified_portfolio_spec(
     let draft = portfolio_program_draft(config)
         .map_err(|error| mfm_certify::CertifyError::Lowering(error.to_string()))?;
     certify_program_draft(&draft)
+}
+
+/// Fully compiled portfolio snapshot launch program.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompiledPortfolioSnapshotProgram {
+    /// Certifier-backed typed spec authority.
+    pub certified_spec: CertifiedTypedSpec,
+    /// Public output schema id exposed by the certified spec.
+    pub public_schema_id: SchemaId,
+    /// Config artifacts required to launch the certified spec.
+    pub config_artifacts: Vec<PortfolioConfigArtifact>,
+}
+
+/// Error returned while compiling a portfolio snapshot program.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PortfolioSnapshotCompileError {
+    /// Program drafting or config artifact selection failed.
+    Plan(mfm_program::PlanError),
+    /// Certification failed.
+    Certify(mfm_certify::CertifyError),
+}
+
+impl std::fmt::Display for PortfolioSnapshotCompileError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Plan(error) => write!(f, "portfolio snapshot planning failed: {error}"),
+            Self::Certify(error) => write!(f, "portfolio snapshot certification failed: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for PortfolioSnapshotCompileError {}
+
+impl From<mfm_program::PlanError> for PortfolioSnapshotCompileError {
+    fn from(error: mfm_program::PlanError) -> Self {
+        Self::Plan(error)
+    }
+}
+
+impl From<mfm_certify::CertifyError> for PortfolioSnapshotCompileError {
+    fn from(error: mfm_certify::CertifyError) -> Self {
+        Self::Certify(error)
+    }
+}
+
+/// Builds, certifies, and gathers launch config artifacts for a portfolio snapshot program.
+pub fn compile_portfolio_snapshot_program(
+    config: PortfolioWorkflowConfig,
+) -> Result<CompiledPortfolioSnapshotProgram, PortfolioSnapshotCompileError> {
+    let draft = portfolio_program_draft(config)?;
+    let certified_spec = certify_program_draft(&draft)?;
+    let public_schema_id = certified_spec
+        .envelope()
+        .spec
+        .public_outputs
+        .public_schema_id
+        .clone();
+    let config_artifacts =
+        portfolio_config_artifacts_for_spec(&draft, &certified_spec.envelope().spec)?;
+    Ok(CompiledPortfolioSnapshotProgram {
+        certified_spec,
+        public_schema_id,
+        config_artifacts,
+    })
 }
 
 /// Canonical bytes for one config artifact required by a typed portfolio spec.
@@ -535,7 +585,7 @@ mod tests {
     #[test]
     fn portfolio_program_lowers_to_typed_state_contracts() {
         let draft = portfolio_program_draft(sample_workflow_config()).expect("draft");
-        assert_eq!(draft.state_nodes().len(), 9);
+        assert_eq!(draft.state_nodes().len(), 8);
         assert_eq!(
             draft
                 .state_nodes()
@@ -553,7 +603,24 @@ mod tests {
             "portfolio descriptors must not expose dynamic context"
         );
 
+        assert!(
+            draft
+                .state_nodes()
+                .iter()
+                .all(|node| node.key.as_str() != "publish_snapshot"),
+            "portfolio snapshot graph must not include the removed publish wrapper"
+        );
+
         let certified = certify_program_draft(&draft).expect("certified portfolio spec");
+        assert!(
+            certified
+                .envelope()
+                .spec
+                .nodes
+                .iter()
+                .all(|node| !node.node_id.as_str().contains("publish_snapshot")),
+            "certified portfolio spec must not include the removed publish wrapper"
+        );
         assert_eq!(
             certified
                 .envelope()

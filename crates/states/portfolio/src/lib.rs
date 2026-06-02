@@ -282,14 +282,6 @@ pub struct AssembleSnapshotConfig {
     pub portfolio: PortfolioConfig,
 }
 
-/// Config for the snapshot publication boundary.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmConfig)]
-#[mfm(schema = "mfm.portfolio.config.publish_snapshot")]
-pub struct PublishSnapshotConfig {
-    /// Publish config contract version.
-    pub publish_version: u64,
-}
-
 /// Config for report projection.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmConfig)]
 #[mfm(schema = "mfm.portfolio.config.project_report")]
@@ -450,20 +442,6 @@ pub struct MergedObservations {
     pub errors: Vec<PortfolioSnapshotError>,
 }
 
-/// Distinct publication boundary output for an assembled snapshot.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, MfmValue)]
-#[mfm(
-    namespace = "mfm.portfolio",
-    name = "published-snapshot",
-    schema = "mfm.portfolio.published_snapshot"
-)]
-pub struct PublishedPortfolioSnapshot {
-    /// Publication contract version.
-    pub publish_version: u64,
-    /// Snapshot selected for public projection.
-    pub snapshot: PortfolioSnapshot,
-}
-
 /// Input consumed by typed observation fanout states.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, StateInput)]
 #[mfm(schema = "mfm.portfolio.input.observe_batch")]
@@ -488,20 +466,12 @@ pub struct AssembleSnapshotInput {
     pub observations: MergedObservations,
 }
 
-/// Input consumed by the snapshot publication boundary.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, StateInput)]
-#[mfm(schema = "mfm.portfolio.input.publish_snapshot")]
-pub struct PublishSnapshotInput {
-    /// Assembled snapshot.
-    pub snapshot: PortfolioSnapshot,
-}
-
 /// Input consumed by report projection.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, StateInput)]
 #[mfm(schema = "mfm.portfolio.input.project_report")]
 pub struct ProjectReportInput {
-    /// Published snapshot boundary output.
-    pub snapshot: PublishedPortfolioSnapshot,
+    /// Assembled portfolio snapshot.
+    pub snapshot: PortfolioSnapshot,
 }
 
 /// Fact request recorded by source-preparation states.
@@ -892,49 +862,6 @@ impl PureState for AssembleSnapshotState {
     }
 }
 
-/// State that publishes the snapshot value as the stable public snapshot handle.
-pub struct PublishSnapshotState {
-    config: PublishSnapshotConfig,
-}
-
-impl StateSpec for PublishSnapshotState {
-    type Config = PublishSnapshotConfig;
-    type Input = PublishSnapshotInput;
-    type Output = PublishedPortfolioSnapshot;
-    type Effect = Pure;
-    type Caps = NoCaps;
-
-    fn kind() -> mfm_program::Result<StateKind> {
-        state_kind("publish_snapshot")
-    }
-
-    fn version() -> mfm_program::Result<StateVersion> {
-        state_version("publish_snapshot")
-    }
-
-    fn name() -> &'static str {
-        "mfm.portfolio.publish_snapshot"
-    }
-
-    fn new(config: Self::Config) -> mfm_program::Result<Self> {
-        if config.publish_version != 1 {
-            return Err(mfm_program::PlanError::Key(
-                "unsupported portfolio publish version".to_owned(),
-            ));
-        }
-        Ok(Self { config })
-    }
-}
-
-impl PureState for PublishSnapshotState {
-    fn run(&self, input: Self::Input) -> StateResult<Self::Output> {
-        Ok(PublishedPortfolioSnapshot {
-            publish_version: self.config.publish_version,
-            snapshot: input.snapshot,
-        })
-    }
-}
-
 /// State that projects the canonical public report from a snapshot.
 pub struct ProjectReportState {
     config: ProjectReportConfig,
@@ -971,7 +898,7 @@ impl StateSpec for ProjectReportState {
 
 impl PureState for ProjectReportState {
     fn run(&self, input: Self::Input) -> StateResult<Self::Output> {
-        project_report_from_snapshot(input.snapshot.snapshot, self.config.report_version)
+        project_report_from_snapshot(input.snapshot, self.config.report_version)
     }
 }
 

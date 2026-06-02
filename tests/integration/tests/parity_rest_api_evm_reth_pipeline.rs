@@ -4,7 +4,7 @@
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-use mfm_app::{DriveMode, TypedConfigInput};
+use mfm_app::{DriveMode, RunLaunchConfigArtifact};
 use mfm_artifact_store_fs::FsTypedArtifactStore;
 use mfm_events::v1 as typed_events;
 use mfm_ids::ArtifactId;
@@ -58,10 +58,10 @@ fn contract_artifact_json() -> serde_json::Value {
         .expect("contract artifact output must include /artifact")
 }
 
-fn typed_config_inputs(configs: Vec<DcvConfigArtifact>) -> Vec<TypedConfigInput> {
+fn typed_config_inputs(configs: Vec<DcvConfigArtifact>) -> Vec<RunLaunchConfigArtifact> {
     configs
         .into_iter()
-        .map(|config| TypedConfigInput {
+        .map(|config| RunLaunchConfigArtifact {
             schema_id: config.schema_id,
             bytes: config.bytes,
             media_type: config.media_type,
@@ -227,8 +227,8 @@ async fn parity_reth_deploy_configure_validate_root_op() {
 
     let bundle = certified.bundle().expect("typed EVM DCV certified bundle");
     let run_id = mfm_app::new_run_id();
-    let request = mfm_app::verify_certified_bundle_run_start_request(
-        mfm_app::UntrustedCertifiedSpecBundleStartInput {
+    let request = mfm_app::prepare_verified_bundle_launch(
+        mfm_app::UntrustedCertifiedBundleLaunchInput {
             spec_bytes: bundle.spec_bytes(),
             certificate_bytes: bundle.certificate_bytes(),
             registry: &registry,
@@ -242,7 +242,7 @@ async fn parity_reth_deploy_configure_validate_root_op() {
     )
     .expect("typed EVM DCV append-only start request");
     let mut response = services
-        .start_certified_run(request)
+        .launch_run(request)
         .await
         .expect("start typed EVM DCV run");
     assert_eq!(response.phase, mfm_app::TypedRunPhase::Started);

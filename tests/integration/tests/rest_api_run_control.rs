@@ -196,7 +196,7 @@ async fn start_parses_certified_bundle_and_rejects_invalid_spec() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     let v = response_json(resp).await;
     assert_eq!(v["status"], "error");
-    assert_eq!(v["error"]["code"], "TypedCertificationFailed");
+    assert_eq!(v["error"]["code"], "CertifiedBundleVerificationFailed");
 
     let status = app
         .oneshot(
@@ -232,7 +232,7 @@ async fn start_rejects_invalid_certified_bundle_before_stream_creation() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     let v = response_json(resp).await;
     assert_eq!(v["status"], "error");
-    assert_eq!(v["error"]["code"], "TypedBundleInvalid");
+    assert_eq!(v["error"]["code"], "CertifiedBundleInvalid");
 
     let status = app
         .oneshot(
@@ -285,7 +285,7 @@ async fn start_rejects_certifier_invalid_runtime_shape_valid_bundle_before_strea
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     let v = response_json(resp).await;
     assert_eq!(v["status"], "error");
-    assert_eq!(v["error"]["code"], "TypedCertificationFailed");
+    assert_eq!(v["error"]["code"], "CertifiedBundleVerificationFailed");
 
     let status = app
         .oneshot(
@@ -326,7 +326,7 @@ async fn start_rejects_missing_config_inputs_before_stream_creation() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     let v = response_json(resp).await;
     assert_eq!(v["status"], "error");
-    assert_eq!(v["error"]["code"], "MissingTypedConfigInput");
+    assert_eq!(v["error"]["code"], "MissingLaunchConfigArtifact");
 
     let status = app
         .oneshot(

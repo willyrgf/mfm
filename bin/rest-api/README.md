@@ -126,17 +126,17 @@ Request notes:
   their evidence is admitted by the same prepared start commit that first references it.
 - `drive` is `until_blocked` or `append_only`; it defaults to `until_blocked`.
 - Specs that reference unported domain descriptors fail before `RunStarted` with
-  `TypedRunnerUnavailable`.
+  `LaunchRunnerUnavailable`.
 
-Stable start error codes:
+Stable launch error codes:
 
 - `InvalidJson`: the request envelope is not accepted by the route schema.
-- `TypedBundleInvalid`: the bundle is malformed, has the wrong kind, is missing fields, contains
+- `CertifiedBundleInvalid`: the bundle is malformed, has the wrong kind, is missing fields, contains
   unknown fields, or cannot be canonicalized.
-- `TypedCertificationFailed`: certificate/spec hash, registry digest, descriptor identity/digest,
+- `CertifiedBundleVerificationFailed`: certificate/spec hash, registry digest, descriptor identity/digest,
   lowering/canonicalizer identity, public-output schema evidence, or certifier validation failed.
-- `MissingTypedConfigInput`: a certified config reference was not supplied in `configs`.
-- `TypedRunnerUnavailable`: the verified spec references a state descriptor without a production
+- `MissingLaunchConfigArtifact`: a certified config reference was not supplied in `configs`.
+- `LaunchRunnerUnavailable`: the verified spec references a state descriptor without a production
   runner binding.
 
 ## Resume, Replay, And Public Output

@@ -351,7 +351,7 @@ fn test_run_start_rejects_invalid_bundle_before_store_access() {
     assert!(output.stdout.is_empty());
     let stderr = String::from_utf8(output.stderr).unwrap();
     let parsed = verify_error_response(&stderr);
-    assert_eq!(parsed.error.code, "TypedBundleInvalid");
+    assert_eq!(parsed.error.code, "CertifiedBundleInvalid");
 }
 
 #[test]

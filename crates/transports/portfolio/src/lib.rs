@@ -36,8 +36,7 @@ use mfm_state_portfolio::{
     ObserveBatchInput, ObserveBatchState, PinViewsConfig, PinViewsState, PortfolioReadBackend,
     PortfolioReadCapability, PortfolioReadError, PortfolioReadFuture, PrepareSourcesConfig,
     PrepareSourcesState, ProjectReportConfig, ProjectReportInput, ProjectReportState,
-    PublishSnapshotConfig, PublishSnapshotInput, PublishSnapshotState, ResolveSubjectsConfig,
-    ResolveSubjectsState, ResolveValuationsConfig, ResolveValuationsState,
+    ResolveSubjectsConfig, ResolveSubjectsState, ResolveValuationsConfig, ResolveValuationsState,
     SourcePreparationRequest, SourcePreparationResponse, ViewPinRequest, ViewPinResponse,
 };
 use mfm_store::v1 as store;
@@ -128,13 +127,6 @@ pub fn register_portfolio_runners(
         registered_descriptor::<AssembleSnapshotState>()?,
         PURE_FACTORY,
         Arc::new(AssembleSnapshotRunner {
-            artifacts: artifacts.clone(),
-        }),
-    )?)?;
-    registry.register(binding(
-        registered_descriptor::<PublishSnapshotState>()?,
-        PURE_FACTORY,
-        Arc::new(PublishSnapshotRunner {
             artifacts: artifacts.clone(),
         }),
     )?)?;
@@ -356,27 +348,6 @@ impl ErasedNodeRunner for AssembleSnapshotRunner {
     }
 }
 
-struct PublishSnapshotRunner {
-    artifacts: Arc<dyn PortfolioArtifactReader>,
-}
-
-impl ErasedNodeRunner for PublishSnapshotRunner {
-    fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
-        Box::pin(async move {
-            let config =
-                load_config::<PublishSnapshotConfig>(&ctx, self.artifacts.as_ref()).await?;
-            let input =
-                load_struct_input::<PublishSnapshotInput>(ctx.inputs(), self.artifacts.as_ref())
-                    .await?;
-            let output = mfm_state_portfolio::PublishedPortfolioSnapshot {
-                publish_version: config.publish_version,
-                snapshot: input.snapshot,
-            };
-            state_output(ctx, &output).await
-        })
-    }
-}
-
 struct ProjectReportRunner {
     artifacts: Arc<dyn PortfolioArtifactReader>,
 }
@@ -389,7 +360,7 @@ impl ErasedNodeRunner for ProjectReportRunner {
                 load_struct_input::<ProjectReportInput>(ctx.inputs(), self.artifacts.as_ref())
                     .await?;
             let output = mfm_state_portfolio::project_report_from_snapshot(
-                input.snapshot.snapshot,
+                input.snapshot,
                 config.report_version,
             )
             .map_err(|error| mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string()))?;
