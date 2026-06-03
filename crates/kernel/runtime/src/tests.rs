@@ -1,9 +1,11 @@
-
 use super::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
-use mfm_capabilities::CapabilityRole;
+use mfm_canonical::sha256_digest_bytes;
+use mfm_capabilities::{
+    CapabilityDescriptor, CapabilityRole, CapabilitySetDescriptor, EffectSpec, ManagedPlatformWrite,
+};
 use mfm_ids::{
     DigestBytes, EffectKind, EffectVersion, EventId, ScopeId, SeedId, SemanticTypeId, StateKind,
     StateVersion,
