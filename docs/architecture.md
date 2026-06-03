@@ -5,9 +5,9 @@ This is the short contributor map for the typed-core codebase. For normative run
 
 ## One Sentence
 
-MFM executes certified typed state programs: ops plan typed specs, runtime executes registered typed
-states, `mfm-store` commits typed events, and CLI/REST assemble and render without owning workflow
-semantics.
+MFM runs event-sourced typed state-machine workflows: ops plan typed specs, runtime schedules over
+certified graph plus verified history, `mfm-store` commits typed events, and CLI/REST assemble and
+render without owning workflow semantics.
 
 ## End-To-End Flow
 
@@ -16,14 +16,34 @@ typed or authored input
   -> operation crate builds typed program draft
   -> mfm-certify emits certified typed execution spec
   -> app verifies the certified bundle and assembles typed launch material
-  -> runtime middleware stages artifacts and builds PreparedTypedCommit
-  -> store atomically admits artifact evidence and appends typed events
-  -> projections rebuild from the append-only run stream
+  -> runtime rebuilds verified history from the append-only run stream authority
+  -> deterministic frontier scheduler chooses one certified node or terminal decision
+  -> sealed runner invocation produces typed intent, staged artifacts, or sealed handles
+  -> runtime commit planner guards bindings and builds PreparedTypedCommit
+  -> store atomically admits artifact evidence, appends typed events, and updates projections
+  -> rebuilt projection remains a derived cache of the run stream
   -> replay/resume/public-output read from certified spec + run stream
 ```
 
 The certified typed execution spec is the runtime contract. Any runner plan is an implementation
 detail that must be derivable from that spec.
+
+## Runtime Model
+
+The typed runtime is a small event-sourced state-machine scheduler around four authority steps:
+
+```text
+static certified transition graph + rebuilt projection of verified history
+  -> deterministic frontier scheduler
+  -> sealed runner invocation
+  -> guarded commit through mfm-store
+```
+
+Runtime keeps the global authority boundary. The store owns append-only stream ordering,
+per-append atomicity, event envelopes, logical keys, and projection construction. Runtime owns
+spec-aware validation, runner and capability admissibility, side-effect protocol guards, artifact
+binding, and commit precondition construction. States and transports produce typed domain intent and
+evidence; they do not authorize stream mutation by themselves.
 
 ## Authority Contract
 
@@ -106,9 +126,9 @@ assembly, not through ambient access.
 ## Transport Boundary
 
 Transport crates bind certified state descriptors to runtime runners and live/replay capability
-backends. Runners return typed payloads plus staged artifacts or sealed handles; runtime middleware
-is the only execution path that persists required runtime artifacts and admits their evidence to the
-run stream. Transport crates do not become semantic authority by themselves.
+backends. Runners return typed payloads plus staged artifacts or sealed handles; the runtime commit
+planner is the only execution path that persists required runtime artifacts and admits their
+evidence to the run stream. Transport crates do not become semantic authority by themselves.
 
 Active typed transports:
 

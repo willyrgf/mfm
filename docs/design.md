@@ -223,8 +223,19 @@ tests, replay fixtures, and typed workflow ports.
 
 ## Runtime
 
+The runtime is the authority boundary for an event-sourced typed state-machine workflow. Its input
+model is deliberately small:
+
+```text
+static certified transition graph + verified run history
+  -> deterministic frontier scheduler
+  -> sealed runner invocation
+  -> guarded commit
+```
+
 The runtime authority contract starts from `CertifiedTypedSpec`, not from parsed spec JSON or a
-hash-only envelope. Before `RunStarted`, the assembly/runtime boundary verifies:
+hash-only envelope. `CertifiedRuntimeSpec` is the runtime view of the static certified transition
+graph. Before `RunStarted`, the assembly/runtime boundary verifies:
 
 - spec hash and schema/version fields
 - staged spec/certificate/config/seed artifact bytes and typed evidence
@@ -232,22 +243,41 @@ hash-only envelope. Before `RunStarted`, the assembly/runtime boundary verifies:
 - runner registry availability
 - capability registry availability
 
-Runtime mutation middleware owns all execution appends. Bootstrap verifies and stages launch
+After launch, runtime advances only from the append-only run stream authority. It loads the stream,
+delegates spec-independent ordering and projection checks to `mfm-store`, then performs
+runtime-owned spec-aware validation of seeds, configs, artifacts, completed cells, side-effect
+ledger evidence, public-output events, retention events, and terminal run state. The rebuilt
+projection is derived from the stream; it is not independent semantic authority.
+
+The deterministic frontier scheduler is pure. Given the static certified transition graph and
+verified run history, it returns exactly one decision: run a certified node, block because no valid
+frontier is executable, or complete because all certified terminal conditions are satisfied. It does
+not write the store, stage artifacts, construct live capabilities, or call runners.
+
+For a runnable node, runtime materializes state inputs from certified binding trees and prior typed
+cell evidence, checks runner identity and capability availability, and constructs a sealed runner
+invocation. Runners receive only scoped typed inputs, allowed capabilities, and erased context
+surfaces. They return typed payload intent, staged artifacts, side-effect evidence, or sealed handles
+but cannot append to the run stream.
+
+The commit planner owns all production execution appends. Bootstrap verifies and stages launch
 material, executes the sealed `BootstrapRun` genesis state, and commits `RunStarted`, bootstrap
 attempt lifecycle, launch artifact references, retention refs, and admitted artifact evidence in one
 prepared store commit. Ordinary states, `PublicOutputRender`, `ProjectRetentionManifest`, and
-`CompleteRun` use the same middleware path: staged artifacts are persisted before the prepared
-commit, and run-store artifact evidence is admitted only in the commit that first references it.
-Failed commits may leave orphan artifact-store bytes, but orphan run-store evidence is not
-authority.
+`CompleteRun` use the same guarded commit path: staged artifacts are persisted before the prepared
+commit, output and reference bindings are checked against the certified graph, side-effect protocol
+rules are enforced, commit preconditions are built, and run-store artifact evidence is admitted only
+in the commit that first references it. Failed commits may leave orphan artifact-store bytes, but
+orphan run-store evidence is not authority.
 
-The scheduler materializes state inputs from certified binding trees and prior typed cell evidence.
-It executes states in certified topological order and commits terminal evidence only through runtime
-middleware and the prepared typed store boundary. Missing runners, missing capabilities, mismatched
-specs, missing inputs, and malformed history fail before semantic execution advances.
+Framework lifecycle work is represented by certified graph nodes, not ad hoc runtime side effects.
+`BootstrapRun`, `PublicOutputRender`, `ProjectRetentionManifest`, and `CompleteRun` are sealed
+framework runners with the same append-only stream, rebuilt projection, deterministic scheduler,
+and guarded commit rules as domain states.
 
-Resume loads the stored certified spec, rebuilds projections from the run stream, verifies completed
-cell and side-effect evidence against the spec, then advances only from a type-valid frontier.
+Resume loads the stored certified spec, rebuilds the verified history and projection from the run
+stream, verifies completed cell and side-effect evidence against the spec, then advances only from a
+type-valid frontier.
 
 Replay loads the stored certified spec and certificate artifacts, verifies them against the
 production registry, compares the hashes to `RunStarted`, rebuilds stream evidence, and uses replay
