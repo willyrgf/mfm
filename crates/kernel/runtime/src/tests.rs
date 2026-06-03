@@ -1,0 +1,8114 @@
+
+use super::*;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
+
+use mfm_capabilities::CapabilityRole;
+use mfm_ids::{
+    DigestBytes, EffectKind, EffectVersion, EventId, ScopeId, SeedId, SemanticTypeId, StateKind,
+    StateVersion,
+};
+use mfm_program::{
+    build_root_with_registries, CanonicalSeed, PublicOutputKey, PureState, RootBuilder, ScopeKey,
+    StateKey, StateRegistryBuilder, StateResult, StateSpec,
+};
+use mfm_program_derive::{MfmConfig, MfmValue, PublicOutputs};
+use mfm_store::v1::{TypedProjectionRead, TypedRunEventStore};
+use serde::{Deserialize, Serialize};
+
+const D0: DigestBytes = DigestBytes::from_array([0x10; 32]);
+const D1: DigestBytes = DigestBytes::from_array([0x11; 32]);
+const D2: DigestBytes = DigestBytes::from_array([0x12; 32]);
+const D3: DigestBytes = DigestBytes::from_array([0x13; 32]);
+const D4: DigestBytes = DigestBytes::from_array([0x14; 32]);
+const D5: DigestBytes = DigestBytes::from_array([0x15; 32]);
+const D6: DigestBytes = DigestBytes::from_array([0x16; 32]);
+const D7: DigestBytes = DigestBytes::from_array([0x17; 32]);
+const D8: DigestBytes = DigestBytes::from_array([0x18; 32]);
+const D9: DigestBytes = DigestBytes::from_array([0x19; 32]);
+
+trait TestPreparedCommitExt {
+    fn append_prepared_commit(
+        &mut self,
+        request: store::TypedCommitRequest,
+    ) -> store::Result<store::CommitOutcome>;
+}
+
+impl TestPreparedCommitExt for store::InMemoryTypedRunStore {
+    fn append_prepared_commit(
+        &mut self,
+        request: store::TypedCommitRequest,
+    ) -> store::Result<store::CommitOutcome> {
+        let admitted_artifacts = request.required_artifacts.clone();
+        let commit = store::PreparedTypedCommit::new(request, admitted_artifacts)?;
+        self.append_prepared_typed_commit(commit)
+    }
+}
+
+struct RecordedPreparedCommit {
+    seq: store::StreamSeq,
+    commit_key: store::CommitKey,
+    payloads: Vec<events::KernelEventPayload>,
+    admitted_artifacts: Vec<store::ArtifactEvidenceRef>,
+}
+
+struct RecordingTypedRunStore {
+    inner: store::InMemoryTypedRunStore,
+    commits: Vec<RecordedPreparedCommit>,
+}
+
+impl RecordingTypedRunStore {
+    fn new() -> Self {
+        Self {
+            inner: store::InMemoryTypedRunStore::new(),
+            commits: Vec::new(),
+        }
+    }
+}
+
+impl store::TypedProjectionRead for RecordingTypedRunStore {
+    fn projection_snapshot(&self) -> &store::ProjectionSnapshot {
+        self.inner.projection_snapshot()
+    }
+}
+
+impl store::TypedRunEventStore for RecordingTypedRunStore {
+    fn append_prepared_typed_commit(
+        &mut self,
+        commit: store::PreparedTypedCommit,
+    ) -> store::Result<store::CommitOutcome> {
+        let payloads = commit.request().payloads.clone();
+        let admitted_artifacts = commit.admitted_artifacts().to_vec();
+        let outcome = self.inner.append_prepared_typed_commit(commit)?;
+        if let store::CommitOutcome::Appended(batch) = &outcome {
+            self.commits.push(RecordedPreparedCommit {
+                seq: batch.seq(),
+                commit_key: batch.commit_key().clone(),
+                payloads,
+                admitted_artifacts,
+            });
+        }
+        Ok(outcome)
+    }
+
+    fn load_run_stream(&self, run_id: &RunId) -> Vec<store::KernelEventEnvelope> {
+        self.inner.load_run_stream(run_id)
+    }
+
+    fn expected_next_seq(&self, run_id: &RunId) -> store::StreamSeq {
+        self.inner.expected_next_seq(run_id)
+    }
+}
+
+#[derive(Clone)]
+struct TestRuntimeArtifactStager;
+
+impl RuntimeArtifactStager for TestRuntimeArtifactStager {
+    fn stage_verified_artifact<'a>(
+        &'a self,
+        bytes: Vec<u8>,
+        evidence: store::ArtifactEvidenceRef,
+    ) -> RuntimeArtifactStageFuture<'a> {
+        Box::pin(async move {
+            verify_artifact_bytes(&bytes, &evidence)?;
+            Ok(())
+        })
+    }
+}
+
+#[derive(Clone)]
+struct RecordingRuntimeArtifactStager {
+    staged: Arc<Mutex<Vec<store::ArtifactEvidenceRef>>>,
+}
+
+impl RuntimeArtifactStager for RecordingRuntimeArtifactStager {
+    fn stage_verified_artifact<'a>(
+        &'a self,
+        bytes: Vec<u8>,
+        evidence: store::ArtifactEvidenceRef,
+    ) -> RuntimeArtifactStageFuture<'a> {
+        Box::pin(async move {
+            verify_artifact_bytes(&bytes, &evidence)?;
+            self.staged
+                .lock()
+                .expect("recording stager lock")
+                .push(evidence);
+            Ok(())
+        })
+    }
+}
+
+struct FailingAfterRuntimeArtifactStager {
+    remaining_successes: AtomicUsize,
+}
+
+impl FailingAfterRuntimeArtifactStager {
+    fn after(successes: usize) -> Self {
+        Self {
+            remaining_successes: AtomicUsize::new(successes),
+        }
+    }
+}
+
+impl RuntimeArtifactStager for FailingAfterRuntimeArtifactStager {
+    fn stage_verified_artifact<'a>(
+        &'a self,
+        bytes: Vec<u8>,
+        evidence: store::ArtifactEvidenceRef,
+    ) -> RuntimeArtifactStageFuture<'a> {
+        Box::pin(async move {
+            verify_artifact_bytes(&bytes, &evidence)?;
+            if self
+                .remaining_successes
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok()
+            {
+                Ok(())
+            } else {
+                Err(RuntimeError::Store(
+                    "test artifact staging failure".to_owned(),
+                ))
+            }
+        })
+    }
+}
+
+fn test_scheduler(registry: ErasedRunnerRegistry) -> SerialTypedScheduler {
+    test_scheduler_with_stager(registry, Arc::new(TestRuntimeArtifactStager))
+}
+
+fn test_scheduler_with_stager(
+    registry: ErasedRunnerRegistry,
+    artifact_stager: Arc<dyn RuntimeArtifactStager>,
+) -> SerialTypedScheduler {
+    SerialTypedScheduler::new(registry, artifact_stager)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
+#[mfm(
+    namespace = "mfm.runtime.test",
+    name = "value",
+    version = "1",
+    schema = "mfm.runtime.test.value"
+)]
+struct CertifierValue {
+    amount: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmConfig)]
+struct CertifierConfig {
+    multiplier: u64,
+}
+
+#[derive(PublicOutputs)]
+#[mfm(schema = "mfm.runtime.test.public_outputs")]
+struct CertifierPublicOutputs<'p, 's> {
+    result: mfm_program::Handle<'p, 's, CertifierValue>,
+}
+
+struct CertifierState {
+    config: CertifierConfig,
+}
+
+impl StateSpec for CertifierState {
+    type Config = CertifierConfig;
+    type Input = CertifierValue;
+    type Output = CertifierValue;
+    type Effect = mfm_effects::Pure;
+    type Caps = mfm_capabilities::NoCaps;
+
+    fn kind() -> mfm_program::Result<StateKind> {
+        StateKind::new(
+            "mfm.runtime.test",
+            "multiply",
+            DigestAlgorithm::Sha256JcsV1,
+            D1,
+        )
+        .map_err(|error| mfm_program::PlanError::Key(error.to_string()))
+    }
+
+    fn version() -> mfm_program::Result<StateVersion> {
+        StateVersion::new("mfm.runtime.test.multiply.v1")
+            .map_err(|error| mfm_program::PlanError::Key(error.to_string()))
+    }
+
+    fn name() -> &'static str {
+        "mfm.runtime.test.multiply"
+    }
+
+    fn new(config: Self::Config) -> mfm_program::Result<Self> {
+        Ok(Self { config })
+    }
+}
+
+impl PureState for CertifierState {
+    fn run(&self, input: Self::Input) -> StateResult<Self::Output> {
+        Ok(CertifierValue {
+            amount: input.amount * self.config.multiplier,
+        })
+    }
+}
+
+fn certifier_backed_runtime_authority() -> (
+    mfm_certify::CertifiedTypedSpec,
+    mfm_certify::CertificationRegistry,
+) {
+    let mut states = StateRegistryBuilder::new();
+    let registered = states
+        .register::<CertifierState>()
+        .expect("state registration");
+    let mut registry = mfm_certify::CertificationRegistry::new();
+    registry
+        .register_state(&registered)
+        .expect("certification registry");
+    let draft = build_root_with_registries(
+        ScopeKey::new("root").expect("root key"),
+        states.snapshot(),
+        mfm_program::OperationRegistryBuilder::new().snapshot(),
+        |root: &mut RootBuilder<'_, '_>| {
+            let seed = root.seed(
+                mfm_program::SeedKey::new("initial").expect("seed key"),
+                CanonicalSeed::from_value(&CertifierValue { amount: 2 }).expect("seed"),
+            )?;
+            let result = root.scope().state::<CertifierState, _>(
+                StateKey::new("multiply-state")?,
+                CertifierConfig { multiplier: 3 },
+                seed,
+            )?;
+            root.bind_public_outputs(
+                PublicOutputKey::new("terminal")?,
+                &CertifierPublicOutputs { result },
+            )
+        },
+    )
+    .expect("program draft");
+    (
+        mfm_certify::certify_program_draft(&draft).expect("certified program"),
+        registry,
+    )
+}
+
+const DA: DigestBytes = DigestBytes::from_array([0x1a; 32]);
+const DB: DigestBytes = DigestBytes::from_array([0x1b; 32]);
+const DC: DigestBytes = DigestBytes::from_array([0x1c; 32]);
+const DD: DigestBytes = DigestBytes::from_array([0x1d; 32]);
+const DE: DigestBytes = DigestBytes::from_array([0x1e; 32]);
+const DF: DigestBytes = DigestBytes::from_array([0x1f; 32]);
+const TEST_CONFIG_BYTES: &[u8] = b"{}";
+const TEST_SEED_BYTES: &[u8] = br#"{"seed":true}"#;
+
+#[derive(Clone)]
+struct Fixture {
+    runtime_spec: CertifiedRuntimeSpec,
+    run_id: RunId,
+    seed_ref: events::SeedCellRef,
+    descriptor_a: DescriptorId,
+    descriptor_b: DescriptorId,
+    render_node: NodeId,
+    render_cell: CellId,
+    cell_a: CellId,
+    cell_b: CellId,
+    cap_kind: CapabilityKind,
+    cap_version: CapabilityVersion,
+    adapter_kind: AdapterKind,
+    adapter_version: AdapterVersion,
+}
+
+struct RecordingRunner {
+    expected_caps: Vec<(CapabilityKind, CapabilityVersion)>,
+    output_artifact: ArtifactId,
+    output_digest: ContentDigest,
+}
+
+impl ErasedNodeRunner for RecordingRunner {
+    fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
+        Box::pin(async move {
+            for (kind, version) in &self.expected_caps {
+                assert!(ctx.caps().contains(kind, version));
+            }
+            let output_cell = ctx.node().output_cell.clone();
+            let cell = match ctx.inputs().root.clone() {
+                MaterializedInputNode::Cell(cell) => cell,
+                MaterializedInputNode::Unit
+                | MaterializedInputNode::Tuple(_)
+                | MaterializedInputNode::Struct(_)
+                | MaterializedInputNode::Vec(_)
+                | MaterializedInputNode::NonEmptyVec(_) => {
+                    panic!("expected cell input")
+                }
+            };
+            assert!(matches!(
+                cell.terminal,
+                MaterializedCellTerminal::Seed { .. } | MaterializedCellTerminal::Produced { .. }
+            ));
+            let certified_cell = ctx.projections().cell_terminal(&output_cell).is_none();
+            assert!(certified_cell);
+            let artifact = store::ArtifactEvidenceRef {
+                artifact_id: self.output_artifact.clone(),
+                digest: self.output_digest.clone(),
+                byte_len: 17,
+                media_type: spec::MediaType::new("application/json").expect("media"),
+                schema_id: Some(ctx.descriptor().output_schema_id.clone()),
+                semantic_type_id: Some(ctx.descriptor().output_semantic_type_id.clone()),
+                producer_node_id: Some(ctx.node().node_id.clone()),
+                producer_seed_id: None,
+                artifact_role: events::ArtifactRole::StateOutput,
+            };
+            let staged_artifact = staged_attempt_artifact(&ctx, artifact)?;
+            Ok(ErasedRunnerOutput {
+                staged_artifacts: vec![staged_artifact],
+                staged_retention_refs: Vec::new(),
+                payloads: vec![RunnerEventPayload::CellProduced(events::CellProduced {
+                    spec_hash: ctx.spec_hash().clone(),
+                    node_id: ctx.node().node_id.clone(),
+                    cell_id: ctx.node().output_cell.clone(),
+                    scope_id: ctx.node().scope_id.clone(),
+                    attempt_id: ctx.attempt_id().clone(),
+                    semantic_type_id: ctx.descriptor().output_semantic_type_id.clone(),
+                    schema_id: ctx.descriptor().output_schema_id.clone(),
+                    value_lineage: ctx.output_cell().value_lineage.clone(),
+                    artifact_id: self.output_artifact.clone(),
+                    content_digest: self.output_digest.clone(),
+                    producer_state_kind: Some(ctx.node().state_kind.clone()),
+                    producer_state_version: Some(ctx.node().state_version.clone()),
+                })],
+            })
+        })
+    }
+}
+
+#[tokio::test]
+async fn serial_scheduler_runs_nodes_in_certified_topological_order() {
+    let fixture = fixture();
+    let mut registry = ErasedRunnerRegistry::new();
+    registry
+        .register(binding(
+            fixture.descriptor_a.clone(),
+            "pure",
+            RecordingRunner {
+                expected_caps: Vec::new(),
+                output_artifact: artifact(0xa1),
+                output_digest: content(0xa2),
+            },
+        ))
+        .expect("binding a");
+    registry
+        .register(binding(
+            fixture.descriptor_b.clone(),
+            "read",
+            RecordingRunner {
+                expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
+                output_artifact: artifact(0xb1),
+                output_digest: content(0xb2),
+            },
+        ))
+        .expect("binding b");
+    let scheduler = test_scheduler(registry);
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+
+    assert_eq!(
+        scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("drive a"),
+        SchedulerStatus::Advanced
+    );
+    assert!(store
+        .projection_snapshot()
+        .cell_terminal(&fixture.cell_a)
+        .is_some());
+    assert!(store
+        .projection_snapshot()
+        .cell_terminal(&fixture.cell_b)
+        .is_none());
+    assert_eq!(
+        scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("drive b"),
+        SchedulerStatus::Advanced
+    );
+    assert!(store
+        .projection_snapshot()
+        .cell_terminal(&fixture.cell_b)
+        .is_some());
+}
+
+#[tokio::test]
+async fn scheduler_completes_run_after_public_output_evidence() {
+    let fixture = fixture();
+    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+
+    assert_eq!(
+        scheduler
+            .drive_until_blocked(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("drive to public output"),
+        SchedulerStatus::PublicOutputProjected
+    );
+    assert_eq!(
+        store.projection_snapshot().run_state(&fixture.run_id),
+        store::RunState::Completed
+    );
+    assert!(store
+        .projection_snapshot()
+        .cell_terminal(&fixture.render_cell)
+        .is_some());
+
+    let stream = store.load_run_stream(&fixture.run_id);
+    let public_output_pos = stream
+        .iter()
+        .position(|event| {
+            matches!(
+                event.payload(),
+                events::KernelEventPayload::PublicOutputProduced(_)
+            )
+        })
+        .expect("public output produced");
+    let completed_pos = stream
+        .iter()
+        .position(|event| matches!(event.payload(), events::KernelEventPayload::RunCompleted(_)))
+        .expect("run completed");
+    assert!(public_output_pos < completed_pos);
+
+    let public_event = &stream[public_output_pos];
+    let public_payload = match public_event.payload() {
+        events::KernelEventPayload::PublicOutputProduced(payload) => payload,
+        _ => unreachable!("checked above"),
+    };
+    assert_eq!(public_payload.node_id, fixture.render_node);
+    assert_eq!(public_payload.receipt_cell_id, fixture.render_cell);
+    assert!(public_payload.rendered_artifact_id.is_none());
+
+    let completed_payload = match stream[completed_pos].payload() {
+        events::KernelEventPayload::RunCompleted(payload) => payload,
+        _ => unreachable!("checked above"),
+    };
+    assert_eq!(
+        completed_payload.outcome,
+        events::RunCompletionOutcome::Completed(events::PublicOutputCompletionEvidence {
+            public_output_schema_id: fixture
+                .runtime_spec
+                .spec()
+                .public_outputs
+                .public_schema_id
+                .clone(),
+            public_output_event_id: public_event.event_id().clone(),
+        })
+    );
+    assert_eq!(completed_pos, stream.len() - 1);
+
+    let complete_node = certified_complete_run_node(&fixture.runtime_spec).expect("complete node");
+    let completion_seq = stream[completed_pos].seq();
+    let completion_key = stream[completed_pos].commit_key().clone();
+    let completion_commit = stream
+        .iter()
+        .filter(|event| event.seq() == completion_seq && event.commit_key() == &completion_key)
+        .collect::<Vec<_>>();
+    assert_eq!(completion_commit.len(), 5);
+    let complete_attempt = completion_commit
+        .iter()
+        .find_map(|event| match event.payload() {
+            events::KernelEventPayload::StateAttemptStarted(payload)
+                if payload.node_id == complete_node.node_id =>
+            {
+                Some(payload.attempt_id.clone())
+            }
+            _ => None,
+        })
+        .expect("complete attempt started");
+    let complete_receipt = completion_commit
+        .iter()
+        .find_map(|event| match event.payload() {
+            events::KernelEventPayload::CellProduced(payload)
+                if payload.node_id == complete_node.node_id =>
+            {
+                Some(payload)
+            }
+            _ => None,
+        })
+        .expect("complete receipt cell");
+    assert_eq!(complete_receipt.attempt_id, complete_attempt);
+    assert_eq!(complete_receipt.cell_id, complete_node.output_cell);
+    assert!(completion_commit.iter().any(|event| {
+        matches!(
+            event.payload(),
+            events::KernelEventPayload::StateAttemptCompleted(payload)
+                if payload.node_id == complete_node.node_id
+                    && payload.attempt_id == complete_attempt
+                    && payload.output_cell_id == complete_node.output_cell
+        )
+    }));
+    assert!(completion_commit.iter().any(|event| {
+        matches!(
+            event.payload(),
+            events::KernelEventPayload::ArtifactReferenced(payload)
+                if payload.node_id.as_ref() == Some(&complete_node.node_id)
+                    && payload.attempt_id.as_ref() == Some(&complete_attempt)
+                    && payload.artifact_ref.artifact_id == complete_receipt.artifact_id
+                    && payload.artifact_ref.content_digest == complete_receipt.content_digest
+                    && payload.artifact_ref.role == events::ArtifactRole::StateOutput
+        )
+    }));
+    let stream_len = stream.len();
+    assert_eq!(
+        scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("drive completed run"),
+        SchedulerStatus::PublicOutputProjected
+    );
+    assert_eq!(store.load_run_stream(&fixture.run_id).len(), stream_len);
+}
+
+#[tokio::test]
+async fn no_second_authority_full_run_stages_and_admits_first_artifact_references() {
+    struct InlineRecordingRunner {
+        expected_caps: Vec<(CapabilityKind, CapabilityVersion)>,
+        output_bytes: Vec<u8>,
+    }
+
+    impl ErasedNodeRunner for InlineRecordingRunner {
+        fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
+            Box::pin(async move {
+                for (kind, version) in &self.expected_caps {
+                    assert!(ctx.caps().contains(kind, version));
+                }
+                let artifact = state_output_artifact_for_bytes(
+                    ctx.node(),
+                    ctx.descriptor(),
+                    &self.output_bytes,
+                );
+                let staged_artifact = StagedArtifact::inline_attempt_artifact(
+                    &ctx,
+                    self.output_bytes.clone(),
+                    artifact.clone(),
+                )?;
+                Ok(ErasedRunnerOutput {
+                    staged_artifacts: vec![staged_artifact],
+                    staged_retention_refs: Vec::new(),
+                    payloads: terminal_payloads(
+                        &ctx,
+                        artifact.artifact_id.clone(),
+                        artifact.digest.clone(),
+                    ),
+                })
+            })
+        }
+    }
+
+    let fixture = fixture();
+    let mut registry = ErasedRunnerRegistry::new();
+    registry
+        .register(binding(
+            fixture.descriptor_a.clone(),
+            "pure",
+            InlineRecordingRunner {
+                expected_caps: Vec::new(),
+                output_bytes: br#"{"node":"a"}"#.to_vec(),
+            },
+        ))
+        .expect("binding a");
+    registry
+        .register(binding(
+            fixture.descriptor_b.clone(),
+            "read",
+            InlineRecordingRunner {
+                expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
+                output_bytes: br#"{"node":"b"}"#.to_vec(),
+            },
+        ))
+        .expect("binding b");
+    let staged = Arc::new(Mutex::new(Vec::new()));
+    let scheduler = test_scheduler_with_stager(
+        registry,
+        Arc::new(RecordingRuntimeArtifactStager {
+            staged: Arc::clone(&staged),
+        }),
+    );
+    let mut store = RecordingTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+
+    assert_eq!(
+        scheduler
+            .drive_until_blocked(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("drive full representative run"),
+        SchedulerStatus::PublicOutputProjected
+    );
+    assert_eq!(
+        store.projection_snapshot().run_state(&fixture.run_id),
+        store::RunState::Completed
+    );
+
+    let stream = store.load_run_stream(&fixture.run_id);
+    validate_run_stream(&fixture.runtime_spec, &fixture.run_id, &stream)
+        .expect("representative stream validates");
+    assert_every_certified_node_has_attempt(&fixture.runtime_spec, &stream);
+    assert!(node_by_output(&fixture, &fixture.cell_a)
+        .framework
+        .is_none());
+    assert!(matches!(
+        &certified_bootstrap_run_node(&fixture.runtime_spec)
+            .expect("bootstrap node")
+            .framework,
+        Some(spec::FrameworkNodeSpec::BootstrapRun(_))
+    ));
+    assert!(matches!(
+        &node_by_output(&fixture, &fixture.render_cell).framework,
+        Some(spec::FrameworkNodeSpec::PublicOutputRender(_))
+    ));
+    assert!(matches!(
+        &certified_retention_manifest_node(&fixture.runtime_spec)
+            .expect("retention node")
+            .framework,
+        Some(spec::FrameworkNodeSpec::ProjectRetentionManifest(_))
+    ));
+    assert!(matches!(
+        &certified_complete_run_node(&fixture.runtime_spec)
+            .expect("complete node")
+            .framework,
+        Some(spec::FrameworkNodeSpec::CompleteRun(_))
+    ));
+
+    let staged_artifacts = staged.lock().expect("staged artifact lock").clone();
+    let mut first_reference_by_artifact = BTreeMap::<ArtifactId, usize>::new();
+    for (commit_index, commit) in store.commits.iter().enumerate() {
+        let commit_references = commit
+            .payloads
+            .iter()
+            .flat_map(referenced_artifact_ids_for_payload)
+            .collect::<BTreeSet<_>>();
+        assert!(
+            !commit_references.is_empty() || commit.admitted_artifacts.is_empty(),
+            "commit {} admitted artifacts without same-commit references",
+            commit.commit_key
+        );
+        for admitted in &commit.admitted_artifacts {
+            assert!(
+                commit_references.contains(&admitted.artifact_id),
+                "commit {} admitted unreferenced artifact {}",
+                commit.commit_key,
+                admitted.artifact_id
+            );
+            assert!(
+                staged_artifacts.contains(admitted),
+                "artifact {} was admitted without runtime staging",
+                admitted.artifact_id
+            );
+        }
+        for artifact_id in commit_references {
+            first_reference_by_artifact
+                .entry(artifact_id)
+                .or_insert(commit_index);
+        }
+    }
+
+    assert!(
+        !first_reference_by_artifact.is_empty(),
+        "representative run should reference artifacts"
+    );
+    for (artifact_id, commit_index) in first_reference_by_artifact {
+        let commit = &store.commits[commit_index];
+        assert!(
+            commit
+                .admitted_artifacts
+                .iter()
+                .any(|admitted| admitted.artifact_id == artifact_id),
+            "artifact {artifact_id} was first referenced by {} at seq {} but not admitted there",
+            commit.commit_key,
+            commit.seq.as_u64()
+        );
+    }
+}
+
+#[tokio::test]
+async fn run_launch_executes_bootstrap_genesis_batch_and_stages_launch_artifacts() {
+    let fixture = fixture();
+    let staged = Arc::new(Mutex::new(Vec::new()));
+    let scheduler = test_scheduler_with_stager(
+        registered_fixture_runners(&fixture),
+        Arc::new(RecordingRuntimeArtifactStager {
+            staged: Arc::clone(&staged),
+        }),
+    );
+    let mut store = store::InMemoryTypedRunStore::new();
+
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+
+    let stream = store.load_run_stream(&fixture.run_id);
+    let bootstrap_node =
+        certified_bootstrap_run_node(&fixture.runtime_spec).expect("bootstrap node");
+    let first = stream.first().expect("stream event");
+    let genesis_commit = stream
+        .iter()
+        .take_while(|event| event.seq() == first.seq() && event.commit_key() == first.commit_key())
+        .collect::<Vec<_>>();
+    assert!(matches!(
+        genesis_commit[0].payload(),
+        events::KernelEventPayload::RunStarted(_)
+    ));
+    assert_eq!(genesis_commit[0].ordinal(), store::CommitOrdinal::new(0));
+    let bootstrap_cell = genesis_commit
+        .iter()
+        .find_map(|event| match event.payload() {
+            events::KernelEventPayload::CellProduced(payload)
+                if payload.node_id == bootstrap_node.node_id =>
+            {
+                Some(payload)
+            }
+            _ => None,
+        })
+        .expect("bootstrap receipt cell");
+    assert_eq!(bootstrap_cell.cell_id, bootstrap_node.output_cell);
+    assert!(genesis_commit.iter().any(|event| {
+        matches!(
+            event.payload(),
+            events::KernelEventPayload::StateAttemptStarted(payload)
+                if payload.node_id == bootstrap_node.node_id && payload.attempt_no == 1
+        )
+    }));
+    assert!(genesis_commit.iter().any(|event| {
+        matches!(
+            event.payload(),
+            events::KernelEventPayload::StateAttemptCompleted(payload)
+                if payload.node_id == bootstrap_node.node_id
+                    && payload.attempt_id == bootstrap_cell.attempt_id
+                    && payload.output_cell_id == bootstrap_node.output_cell
+        )
+    }));
+    assert!(genesis_commit.iter().any(|event| {
+        matches!(
+            event.payload(),
+            events::KernelEventPayload::ArtifactReferenced(payload)
+                if payload.node_id.as_ref() == Some(&bootstrap_node.node_id)
+                    && payload.attempt_id.as_ref() == Some(&bootstrap_cell.attempt_id)
+                    && payload.artifact_ref.artifact_id == bootstrap_cell.artifact_id
+                    && payload.artifact_ref.content_digest == bootstrap_cell.content_digest
+        )
+    }));
+    assert!(genesis_commit.iter().any(|event| {
+        matches!(
+            event.payload(),
+            events::KernelEventPayload::RetentionRefsAppended(payload)
+                if payload.reason == events::RetentionReason::RunStarted
+                    && payload.refs.iter().any(|reference|
+                        reference.artifact_id == bootstrap_cell.artifact_id
+                            && reference.content_digest == bootstrap_cell.content_digest
+                            && reference.role == events::ArtifactRole::StateOutput)
+        )
+    }));
+
+    let staged = staged.lock().expect("recording stager lock");
+    assert!(staged.iter().any(|evidence| {
+        evidence.artifact_id == bootstrap_cell.artifact_id
+            && evidence.digest == bootstrap_cell.content_digest
+            && evidence.producer_node_id.as_ref() == Some(&bootstrap_node.node_id)
+            && evidence.artifact_role == events::ArtifactRole::StateOutput
+    }));
+    let run_started = match genesis_commit[0].payload() {
+        events::KernelEventPayload::RunStarted(payload) => payload,
+        _ => panic!("first genesis event must be RunStarted"),
+    };
+    assert!(staged.iter().any(|evidence| {
+        evidence.artifact_id == run_started.spec_artifact_id
+            && evidence.artifact_role == events::ArtifactRole::TypedExecutionSpec
+    }));
+    assert!(staged.iter().any(|evidence| {
+        evidence.artifact_id == run_started.certificate_artifact_id
+            && evidence.artifact_role == events::ArtifactRole::TypedSpecCertificate
+    }));
+    assert!(staged.iter().any(|evidence| {
+        evidence.artifact_id == fixture.seed_ref.seed_artifact.artifact_id
+            && evidence.artifact_role == events::ArtifactRole::SeedInput
+    }));
+}
+
+#[tokio::test]
+async fn run_launch_staging_failure_prevents_start_commit() {
+    let fixture = fixture();
+    let scheduler = test_scheduler_with_stager(
+        registered_fixture_runners(&fixture),
+        Arc::new(FailingAfterRuntimeArtifactStager::after(0)),
+    );
+    let mut store = store::InMemoryTypedRunStore::new();
+    assert!(matches!(
+        start_fixture_run(
+            &scheduler,
+            &mut store,
+            &fixture,
+            vec![fixture.seed_ref.clone()],
+        )
+        .await,
+        Err(RuntimeError::Store(message))
+            if message.contains("test artifact staging failure")
+    ));
+    assert!(store.load_run_stream(&fixture.run_id).is_empty());
+}
+
+#[tokio::test]
+async fn runtime_rejects_bootstrap_receipt_artifact_ref_metadata_tampering() {
+    let fixture = fixture();
+    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+
+    let bootstrap_node =
+        certified_bootstrap_run_node(&fixture.runtime_spec).expect("bootstrap node");
+    let valid_stream = store.load_run_stream(&fixture.run_id);
+    let artifact_ref_pos = valid_stream
+        .iter()
+        .position(|event| {
+            matches!(
+                event.payload(),
+                events::KernelEventPayload::ArtifactReferenced(payload)
+                    if payload.node_id.as_ref() == Some(&bootstrap_node.node_id)
+            )
+        })
+        .expect("bootstrap artifact ref");
+    let mut payload = match valid_stream[artifact_ref_pos].payload().clone() {
+        events::KernelEventPayload::ArtifactReferenced(payload) => payload,
+        _ => unreachable!("position checked"),
+    };
+    payload.artifact_ref.byte_len += 1;
+    let corrupt_stream = rewrite_commit_payload(
+        &valid_stream,
+        artifact_ref_pos,
+        events::KernelEventPayload::ArtifactReferenced(payload),
+    );
+
+    assert!(matches!(
+        validate_run_stream(&fixture.runtime_spec, &fixture.run_id, &corrupt_stream),
+        Err(RuntimeError::InvalidRunStream(message))
+            if message.contains("bootstrap receipt artifact reference")
+                || message.contains("sealed BootstrapRun genesis commit")
+    ));
+}
+
+#[tokio::test]
+async fn runtime_rejects_run_start_without_bootstrap_attempt() {
+    let fixture = fixture();
+    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+    let bootstrap_node =
+        certified_bootstrap_run_node(&fixture.runtime_spec).expect("bootstrap node");
+    let valid_stream = store.load_run_stream(&fixture.run_id);
+    assert_eq!(
+        valid_stream
+            .iter()
+            .filter(|event| matches!(
+                event.payload(),
+                events::KernelEventPayload::StateAttemptStarted(payload)
+                    if payload.node_id == bootstrap_node.node_id
+            ))
+            .count(),
+        1
+    );
+    let corrupt_stream = rewrite_stream_without_payloads(&valid_stream, |payload| {
+        matches!(
+            payload,
+            events::KernelEventPayload::StateAttemptStarted(payload)
+                if payload.node_id == bootstrap_node.node_id
+        )
+    });
+    assert_eq!(corrupt_stream.len(), valid_stream.len() - 1);
+
+    assert!(matches!(
+        validate_historical_bootstrap_run_batch(
+            &fixture.runtime_spec,
+            &fixture.run_id,
+            &corrupt_stream
+        ),
+        Err(RuntimeError::InvalidRunStream(message))
+            if message.contains("unexpected payload count")
+    ));
+    assert!(validate_run_stream(&fixture.runtime_spec, &fixture.run_id, &corrupt_stream).is_err());
+}
+
+#[tokio::test]
+async fn public_output_receipt_staging_failure_prevents_commit() {
+    let fixture = fixture();
+    let launch_artifact_count = 3 + fixture.runtime_spec.spec().config_refs.len() + 1;
+    let scheduler = test_scheduler_with_stager(
+        registered_fixture_runners(&fixture),
+        Arc::new(FailingAfterRuntimeArtifactStager::after(
+            launch_artifact_count,
+        )),
+    );
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+    scheduler
+        .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+        .await
+        .expect("drive a");
+    scheduler
+        .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+        .await
+        .expect("drive b");
+
+    assert!(matches!(
+        scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await,
+        Err(RuntimeError::Store(message))
+            if message.contains("test artifact staging failure")
+    ));
+    assert!(store
+        .projection_snapshot()
+        .cell_terminal(&fixture.render_cell)
+        .is_none());
+    assert!(store.load_run_stream(&fixture.run_id).iter().all(|event| {
+        !matches!(
+            event.payload(),
+            events::KernelEventPayload::PublicOutputProduced(_)
+        )
+    }));
+}
+
+#[tokio::test]
+async fn scheduler_binds_staged_retention_refs_and_projects_manifest() {
+    let fixture = fixture_with_retention_lifecycle_node();
+    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+
+    let start_retention = store
+        .projection_snapshot()
+        .retention(&fixture.run_id)
+        .expect("run-start retention");
+    assert!(start_retention
+        .refs
+        .contains_key(&fixture.seed_ref.seed_artifact.artifact_id));
+
+    let status = scheduler
+        .drive_until_blocked(&mut store, &fixture.runtime_spec, &fixture.run_id)
+        .await
+        .expect("drive to completion");
+    assert_eq!(status, SchedulerStatus::PublicOutputProjected);
+    let render_receipt_artifact = match store
+        .projection_snapshot()
+        .cell_terminal(&fixture.render_cell)
+        .expect("render receipt cell")
+    {
+        store::CellTerminalProjection::Produced { artifact_id, .. } => artifact_id.clone(),
+        terminal => panic!("unexpected render terminal: {terminal:?}"),
+    };
+    assert!(store
+        .projection_snapshot()
+        .retention(&fixture.run_id)
+        .expect("runtime retention")
+        .refs
+        .contains_key(&render_receipt_artifact));
+
+    let projection = store
+        .projection_snapshot()
+        .retention(&fixture.run_id)
+        .expect("retention projection");
+    let manifest = projection.manifest.as_ref().expect("manifest");
+    assert_eq!(manifest.manifest_seq, 1);
+    assert!(projection.refs.contains_key(&manifest.manifest_artifact_id));
+
+    let retention_node =
+        certified_retention_manifest_node(&fixture.runtime_spec).expect("retention node");
+    let stream = store.load_run_stream(&fixture.run_id);
+    let manifest_event = stream
+        .iter()
+        .find_map(|event| match event.payload() {
+            events::KernelEventPayload::RetentionManifestProjected(payload)
+                if payload.manifest_artifact_id == manifest.manifest_artifact_id =>
+            {
+                Some((event.seq(), payload))
+            }
+            _ => None,
+        })
+        .expect("manifest event");
+    let retention_seq = manifest_event.0;
+    assert_eq!(manifest_event.1.manifest_digest, manifest.manifest_digest);
+    assert!(stream.iter().any(|event| {
+        matches!(
+            event.payload(),
+            events::KernelEventPayload::StateAttemptStarted(payload)
+                if event.seq() == retention_seq
+                    && payload.node_id == retention_node.node_id
+        )
+    }));
+    let receipt = stream
+        .iter()
+        .find_map(|event| match event.payload() {
+            events::KernelEventPayload::CellProduced(payload)
+                if event.seq() == retention_seq && payload.node_id == retention_node.node_id =>
+            {
+                Some(payload)
+            }
+            _ => None,
+        })
+        .expect("retention receipt cell");
+    assert_eq!(receipt.cell_id, retention_node.output_cell);
+    assert!(stream.iter().any(|event| {
+        matches!(
+            event.payload(),
+            events::KernelEventPayload::StateAttemptCompleted(payload)
+                if event.seq() == retention_seq
+                    && payload.node_id == retention_node.node_id
+                    && payload.attempt_id == receipt.attempt_id
+                    && payload.output_cell_id == retention_node.output_cell
+        )
+    }));
+    let manifest_ref = stream
+        .iter()
+        .find_map(|event| match event.payload() {
+            events::KernelEventPayload::RetentionRefsAppended(payload)
+                if event.seq() == retention_seq
+                    && payload.reason == events::RetentionReason::ManifestProjection =>
+            {
+                payload.refs.first()
+            }
+            _ => None,
+        })
+        .expect("manifest retention ref");
+    assert_eq!(manifest_ref.artifact_id, manifest.manifest_artifact_id);
+    assert_eq!(manifest_ref.content_digest, manifest.manifest_digest);
+    assert_eq!(manifest_ref.role, events::ArtifactRole::RetentionManifest);
+}
+
+#[tokio::test]
+async fn retention_manifest_projection_retry_is_idempotent_after_current_store_advanced() {
+    let fixture = fixture_with_retention_lifecycle_node();
+    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+
+    drive_until_public_output_produced(&scheduler, &mut store, &fixture).await;
+    let stale_stream = store.load_run_stream(&fixture.run_id);
+
+    scheduler
+        .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+        .await
+        .expect("advance current store with retention projection");
+    assert!(store
+        .projection_snapshot()
+        .retention(&fixture.run_id)
+        .and_then(|retention| retention.manifest.as_ref())
+        .is_some());
+
+    let mut stale_store = StaleStreamStore {
+        inner: &mut store,
+        stream: stale_stream,
+    };
+    assert_eq!(
+        scheduler
+            .drive_once(&mut stale_store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("idempotent retention retry"),
+        SchedulerStatus::Advanced
+    );
+}
+
+#[tokio::test]
+async fn retention_manifest_projection_rejects_corrupt_stream_before_commit() {
+    let fixture = fixture_with_retention_lifecycle_node();
+    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+
+    drive_until_public_output_produced(&scheduler, &mut store, &fixture).await;
+
+    let mut corrupt_stream = store.load_run_stream(&fixture.run_id);
+    let corrupt_pos = corrupt_stream
+        .iter()
+        .position(|event| {
+            event.ordinal() == store::CommitOrdinal::new(0)
+                && matches!(
+                    event.payload(),
+                    events::KernelEventPayload::StateAttemptStarted(_)
+                )
+        })
+        .expect("attempt-start event");
+    let mut corrupt_payload = match corrupt_stream[corrupt_pos].payload().clone() {
+        events::KernelEventPayload::StateAttemptStarted(payload) => payload,
+        _ => unreachable!("position checked"),
+    };
+    corrupt_payload.spec_hash = SpecHash::from_digest(DigestAlgorithm::Sha256JcsV1, D9);
+    corrupt_stream[corrupt_pos] = rewrite_single_payload_envelope(
+        &corrupt_stream[corrupt_pos],
+        events::KernelEventPayload::StateAttemptStarted(corrupt_payload),
+    );
+
+    let projection = store::ProjectionSnapshot::rebuild_from_run_stream(&corrupt_stream)
+        .expect("projection rebuild accepts ordered corrupt stream");
+    let mut corrupt_store = ReadOnlyCorruptStore {
+        stream: corrupt_stream,
+        projection,
+    };
+
+    assert!(matches!(
+        scheduler
+            .drive_once(&mut corrupt_store, &fixture.runtime_spec, &fixture.run_id)
+            .await,
+        Err(RuntimeError::InvalidRunStream(message))
+            if message.contains("event payload spec hash")
+    ));
+}
+
+#[tokio::test]
+async fn runtime_rejects_standalone_retention_manifest_projection_history() {
+    let fixture = fixture_with_retention_lifecycle_node();
+    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+    drive_until_public_output_produced(&scheduler, &mut store, &fixture).await;
+
+    let retention_node =
+        certified_retention_manifest_node(&fixture.runtime_spec).expect("retention node");
+    let manifest = build_retention_manifest_artifact_with_producer(
+        &fixture.runtime_spec,
+        &fixture.run_id,
+        &store.load_run_stream(&fixture.run_id),
+        Some(retention_node.node_id.clone()),
+    )
+    .expect("manifest");
+    let manifest_evidence = manifest.evidence.clone();
+    let request = store::TypedCommitRequest {
+        run_id: fixture.run_id.clone(),
+        expected_next_seq: store.expected_next_seq(&fixture.run_id),
+        commit_key: store::CommitKey::new("synthetic/standalone-retention-projection")
+            .expect("commit key"),
+        payloads: retention_manifest_payloads(&fixture.runtime_spec, &fixture.run_id, manifest),
+        required_artifacts: vec![manifest_evidence],
+        preconditions: store::CommitPreconditions::default(),
+    };
+    store
+        .append_prepared_commit(request)
+        .expect("synthetic standalone projection");
+
+    assert!(matches!(
+        RuntimeRunView::from_store(&fixture.runtime_spec, &fixture.run_id, &store),
+        Err(RuntimeError::InvalidRunStream(message))
+            if message.contains("retention manifest projection was not produced")
+    ));
+}
+
+#[tokio::test]
+async fn runtime_rejects_completed_history_without_retention_projection() {
+    let fixture = fixture();
+    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+    assert_eq!(
+        scheduler
+            .drive_until_blocked(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("drive to completion"),
+        SchedulerStatus::PublicOutputProjected
+    );
+    assert_eq!(
+        store.projection_snapshot().run_state(&fixture.run_id),
+        store::RunState::Completed
+    );
+
+    let valid_stream = store.load_run_stream(&fixture.run_id);
+    let corrupt_stream = rewrite_stream_without_commit_containing(&valid_stream, |payload| {
+        matches!(
+            payload,
+            events::KernelEventPayload::RetentionManifestProjected(_)
+        )
+    });
+
+    assert!(matches!(
+        validate_run_stream(&fixture.runtime_spec, &fixture.run_id, &corrupt_stream),
+        Err(RuntimeError::InvalidRunStream(message))
+            if message.contains("started before certified input cell")
+    ));
+}
+
+#[tokio::test]
+async fn runtime_rejects_standalone_run_completed_after_retention_projection() {
+    let fixture = fixture();
+    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+    scheduler
+        .drive_until_blocked(&mut store, &fixture.runtime_spec, &fixture.run_id)
+        .await
+        .expect("drive to completion");
+
+    let valid_stream = store.load_run_stream(&fixture.run_id);
+    let completion_payload = valid_stream
+        .iter()
+        .find_map(|event| match event.payload() {
+            events::KernelEventPayload::RunCompleted(payload) => Some(payload.clone()),
+            _ => None,
+        })
+        .expect("run completion");
+    let mut corrupt_stream = rewrite_stream_without_commit_containing(&valid_stream, |payload| {
+        matches!(payload, events::KernelEventPayload::RunCompleted(_))
+    });
+    append_payload_commit_for_tests(
+        &mut corrupt_stream,
+        &fixture.run_id,
+        "standalone-run-completed-after-retention",
+        events::KernelEventPayload::RunCompleted(completion_payload),
+    );
+
+    assert!(matches!(
+        validate_run_stream(&fixture.runtime_spec, &fixture.run_id, &corrupt_stream),
+        Err(RuntimeError::InvalidRunStream(message))
+            if message.contains("CompleteRun commit was not produced")
+    ));
+}
+
+#[tokio::test]
+async fn runtime_rejects_complete_run_receipt_commit_without_run_completed() {
+    let fixture = fixture();
+    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+    scheduler
+        .drive_until_blocked(&mut store, &fixture.runtime_spec, &fixture.run_id)
+        .await
+        .expect("drive to completion");
+
+    let valid_stream = store.load_run_stream(&fixture.run_id);
+    let corrupt_stream = rewrite_stream_without_payloads(&valid_stream, |payload| {
+        matches!(payload, events::KernelEventPayload::RunCompleted(_))
+    });
+
+    assert!(matches!(
+        validate_run_stream(&fixture.runtime_spec, &fixture.run_id, &corrupt_stream),
+        Err(RuntimeError::InvalidRunStream(message))
+            if message.contains("missing RunCompleted")
+    ));
+}
+
+#[tokio::test]
+async fn runtime_rejects_complete_run_receipt_artifact_ref_metadata_tampering() {
+    for mutation in ["byte_len", "media_type"] {
+        let fixture = fixture();
+        let scheduler = test_scheduler(registered_fixture_runners(&fixture));
+        let mut store = store::InMemoryTypedRunStore::new();
+        start_fixture_run(
+            &scheduler,
+            &mut store,
+            &fixture,
+            vec![fixture.seed_ref.clone()],
+        )
+        .await
+        .expect("start run");
+        scheduler
+            .drive_until_blocked(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("drive to completion");
+
+        let complete_node =
+            certified_complete_run_node(&fixture.runtime_spec).expect("complete node");
+        let valid_stream = store.load_run_stream(&fixture.run_id);
+        let artifact_ref_pos = valid_stream
+            .iter()
+            .position(|event| {
+                matches!(
+                    event.payload(),
+                    events::KernelEventPayload::ArtifactReferenced(payload)
+                        if payload.node_id.as_ref() == Some(&complete_node.node_id)
+                )
+            })
+            .expect("completion artifact ref");
+        let mut payload = match valid_stream[artifact_ref_pos].payload().clone() {
+            events::KernelEventPayload::ArtifactReferenced(payload) => payload,
+            _ => unreachable!("checked above"),
+        };
+        match mutation {
+            "byte_len" => payload.artifact_ref.byte_len += 1,
+            "media_type" => {
+                payload.artifact_ref.media_type =
+                    spec::MediaType::new("application/octet-stream").expect("media type");
+            }
+            _ => unreachable!("known mutation"),
+        }
+        let corrupt_stream = rewrite_commit_payload(
+            &valid_stream,
+            artifact_ref_pos,
+            events::KernelEventPayload::ArtifactReferenced(payload),
+        );
+
+        assert!(matches!(
+            validate_run_stream(&fixture.runtime_spec, &fixture.run_id, &corrupt_stream),
+            Err(RuntimeError::InvalidRunStream(message))
+                if message.contains("sealed framework batch")
+        ));
+    }
+}
+
+#[tokio::test]
+async fn runtime_rejects_bare_retention_refs_before_completion() {
+    let fixture = fixture();
+    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+    let mut corrupt_stream = store.load_run_stream(&fixture.run_id);
+    append_payload_commit_for_tests(
+        &mut corrupt_stream,
+        &fixture.run_id,
+        "bare-runtime-retention-ref",
+        events::KernelEventPayload::RetentionRefsAppended(events::RetentionRefsAppended {
+            run_id: fixture.run_id.clone(),
+            spec_hash: fixture.runtime_spec.spec_hash().clone(),
+            refs: vec![events::RetentionRef {
+                artifact_id: fixture.seed_ref.seed_artifact.artifact_id.clone(),
+                role: fixture.seed_ref.seed_artifact.role,
+                content_digest: fixture.seed_ref.seed_artifact.content_digest.clone(),
+            }],
+            reason: events::RetentionReason::RuntimeEvidence,
+        }),
+    );
+
+    assert!(matches!(
+        validate_run_stream(&fixture.runtime_spec, &fixture.run_id, &corrupt_stream),
+        Err(RuntimeError::InvalidRunStream(message))
+            if message.contains("same-commit typed payload evidence")
+    ));
+}
+
+#[tokio::test]
+async fn runtime_rejects_missing_run_start_retention_refs() {
+    let fixture = fixture();
+    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+
+    let valid_stream = store.load_run_stream(&fixture.run_id);
+    let corrupt_stream = rewrite_stream_without_payloads(&valid_stream, |payload| {
+        matches!(
+            payload,
+            events::KernelEventPayload::RetentionRefsAppended(events::RetentionRefsAppended {
+                reason: events::RetentionReason::RunStarted,
+                ..
+            })
+        )
+    });
+
+    assert!(matches!(
+        validate_run_stream(&fixture.runtime_spec, &fixture.run_id, &corrupt_stream),
+        Err(RuntimeError::InvalidRunStream(message))
+            if message.contains("sealed BootstrapRun genesis commit")
+    ));
+}
+
+#[tokio::test]
+async fn runtime_rejects_failed_or_cancelled_run_completion_without_complete_authority() {
+    for (name, outcome) in [
+        (
+            "failed",
+            events::RunCompletionOutcome::Failed(public_output_error()),
+        ),
+        (
+            "cancelled",
+            events::RunCompletionOutcome::Cancelled(public_output_error()),
+        ),
+    ] {
+        let fixture = fixture();
+        let scheduler = test_scheduler(registered_fixture_runners(&fixture));
+        let mut store = store::InMemoryTypedRunStore::new();
+        start_fixture_run(
+            &scheduler,
+            &mut store,
+            &fixture,
+            vec![fixture.seed_ref.clone()],
+        )
+        .await
+        .expect("start run");
+        store
+            .append_prepared_commit(store::TypedCommitRequest {
+                run_id: fixture.run_id.clone(),
+                expected_next_seq: store.expected_next_seq(&fixture.run_id),
+                commit_key: store::CommitKey::new(format!("forged-{name}-completion"))
+                    .expect("commit key"),
+                payloads: vec![events::KernelEventPayload::RunCompleted(
+                    events::RunCompleted {
+                        run_id: fixture.run_id.clone(),
+                        spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                        outcome,
+                    },
+                )],
+                required_artifacts: Vec::new(),
+                preconditions: store::CommitPreconditions {
+                    required_run_state: store::RequiredRunState::NotCompleted,
+                    ..store::CommitPreconditions::default()
+                },
+            })
+            .expect("append forged completion");
+
+        assert!(matches!(
+            validate_run_stream(
+                &fixture.runtime_spec,
+                &fixture.run_id,
+                &store.load_run_stream(&fixture.run_id),
+            ),
+            Err(RuntimeError::InvalidRunStream(message))
+                if message.contains("failed/cancelled")
+        ));
+    }
+}
+
+#[tokio::test]
+async fn runtime_rejects_post_completion_retention_refs() {
+    let fixture = fixture();
+    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+    assert_eq!(
+        scheduler
+            .drive_until_blocked(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("drive to completion"),
+        SchedulerStatus::PublicOutputProjected
+    );
+
+    let mut corrupt_stream = store.load_run_stream(&fixture.run_id);
+    append_payload_commit_for_tests(
+        &mut corrupt_stream,
+        &fixture.run_id,
+        "post-completion-retention-ref",
+        events::KernelEventPayload::RetentionRefsAppended(events::RetentionRefsAppended {
+            run_id: fixture.run_id.clone(),
+            spec_hash: fixture.runtime_spec.spec_hash().clone(),
+            refs: vec![events::RetentionRef {
+                artifact_id: fixture.seed_ref.seed_artifact.artifact_id.clone(),
+                role: fixture.seed_ref.seed_artifact.role,
+                content_digest: fixture.seed_ref.seed_artifact.content_digest.clone(),
+            }],
+            reason: events::RetentionReason::RuntimeEvidence,
+        }),
+    );
+
+    assert!(matches!(
+        validate_run_stream(&fixture.runtime_spec, &fixture.run_id, &corrupt_stream),
+        Err(RuntimeError::InvalidRunStream(message))
+            if message.contains("events after RunCompleted")
+    ));
+}
+
+#[tokio::test]
+async fn runtime_rejects_run_completed_with_active_retention_attempt() {
+    let fixture = fixture();
+    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+    drive_until_public_output_produced(&scheduler, &mut store, &fixture).await;
+
+    let retention_node =
+        certified_retention_manifest_node(&fixture.runtime_spec).expect("retention node");
+    let mut corrupt_stream = store.load_run_stream(&fixture.run_id);
+    let public_event_id = corrupt_stream
+        .iter()
+        .find(|event| {
+            matches!(
+                event.payload(),
+                events::KernelEventPayload::PublicOutputProduced(_)
+            )
+        })
+        .expect("public output produced")
+        .event_id()
+        .clone();
+    append_payloads_commit_for_tests(
+        &mut corrupt_stream,
+        &fixture.run_id,
+        "active-retention-at-completion",
+        vec![
+            events::KernelEventPayload::StateAttemptStarted(events::StateAttemptStarted {
+                spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                node_id: retention_node.node_id.clone(),
+                attempt_id: AttemptId::from_digest(
+                    DigestAlgorithm::Sha256JcsV1,
+                    DigestBytes::from_array([0x75; 32]),
+                ),
+                attempt_no: 99,
+                state_kind: retention_node.state_kind.clone(),
+                state_version: retention_node.state_version.clone(),
+            }),
+            events::KernelEventPayload::RunCompleted(events::RunCompleted {
+                run_id: fixture.run_id.clone(),
+                spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                outcome: events::RunCompletionOutcome::Completed(
+                    events::PublicOutputCompletionEvidence {
+                        public_output_schema_id: fixture
+                            .runtime_spec
+                            .spec()
+                            .public_outputs
+                            .public_schema_id
+                            .clone(),
+                        public_output_event_id: public_event_id,
+                    },
+                ),
+            }),
+        ],
+    );
+
+    assert!(matches!(
+        validate_run_stream(&fixture.runtime_spec, &fixture.run_id, &corrupt_stream),
+        Err(RuntimeError::InvalidRunStream(message))
+            if message.contains("attempts are active")
+    ));
+}
+
+#[tokio::test]
+async fn runtime_rejects_retained_evidence_between_retention_projection_and_completion() {
+    let fixture = fixture();
+    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+    scheduler
+        .drive_until_blocked(&mut store, &fixture.runtime_spec, &fixture.run_id)
+        .await
+        .expect("drive to completion");
+
+    let valid_stream = store.load_run_stream(&fixture.run_id);
+    let completion_payload = valid_stream
+        .iter()
+        .find_map(|event| match event.payload() {
+            events::KernelEventPayload::RunCompleted(payload) => Some(payload.clone()),
+            _ => None,
+        })
+        .expect("run completion");
+    let retention_node =
+        certified_retention_manifest_node(&fixture.runtime_spec).expect("retention node");
+    let attempt_id = AttemptId::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        DigestBytes::from_array([0x77; 32]),
+    );
+    let diagnostic_digest = content(0x78);
+    let diagnostic_artifact =
+        ArtifactId::from_digest(diagnostic_digest.algorithm(), *diagnostic_digest.digest());
+    let diagnostic_ref = events::ArtifactEvidenceRef {
+        artifact_id: diagnostic_artifact.clone(),
+        role: events::ArtifactRole::RedactedDiagnostic,
+        schema_id: retention_node.config_ref.schema_id.clone(),
+        semantic_type_id: None,
+        content_digest: diagnostic_digest.clone(),
+        byte_len: 10,
+        media_type: spec::MediaType::new("application/json").expect("media type"),
+    };
+    let mut corrupt_stream = rewrite_stream_without_commit_containing(&valid_stream, |payload| {
+        matches!(payload, events::KernelEventPayload::RunCompleted(_))
+    });
+    append_payloads_commit_for_tests(
+        &mut corrupt_stream,
+        &fixture.run_id,
+        "retained-evidence-after-retention-projection",
+        vec![
+            events::KernelEventPayload::StateAttemptStarted(events::StateAttemptStarted {
+                spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                node_id: retention_node.node_id.clone(),
+                attempt_id: attempt_id.clone(),
+                attempt_no: 100,
+                state_kind: retention_node.state_kind.clone(),
+                state_version: retention_node.state_version.clone(),
+            }),
+            events::KernelEventPayload::ArtifactReferenced(events::ArtifactReferenced {
+                spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                node_id: Some(retention_node.node_id.clone()),
+                attempt_id: Some(attempt_id.clone()),
+                artifact_ref: diagnostic_ref.clone(),
+            }),
+            events::KernelEventPayload::StateAttemptFailed(events::StateAttemptFailed {
+                spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                node_id: retention_node.node_id.clone(),
+                attempt_id,
+                retryable: false,
+                error: events::MfmErrorInfo {
+                    diagnostic_ref: Some(diagnostic_ref.clone()),
+                    ..public_output_error()
+                },
+            }),
+            events::KernelEventPayload::RetentionRefsAppended(events::RetentionRefsAppended {
+                run_id: fixture.run_id.clone(),
+                spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                refs: vec![events::RetentionRef {
+                    artifact_id: diagnostic_artifact,
+                    role: events::ArtifactRole::RedactedDiagnostic,
+                    content_digest: diagnostic_digest,
+                }],
+                reason: events::RetentionReason::RuntimeEvidence,
+            }),
+        ],
+    );
+    append_payload_commit_for_tests(
+        &mut corrupt_stream,
+        &fixture.run_id,
+        "completion-after-post-retention-evidence",
+        events::KernelEventPayload::RunCompleted(completion_payload),
+    );
+
+    assert!(matches!(
+        validate_run_stream(&fixture.runtime_spec, &fixture.run_id, &corrupt_stream),
+        Err(RuntimeError::InvalidRunStream(message))
+            if message.contains("after retention manifest projection")
+    ));
+}
+
+#[tokio::test]
+async fn runtime_rejects_extra_attempt_evidence_in_retention_projection_commit() {
+    let fixture = fixture();
+    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+    scheduler
+        .drive_until_blocked(&mut store, &fixture.runtime_spec, &fixture.run_id)
+        .await
+        .expect("drive to completion");
+
+    let retention_node =
+        certified_retention_manifest_node(&fixture.runtime_spec).expect("retention node");
+    let attempt_id = AttemptId::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        DigestBytes::from_array([0x79; 32]),
+    );
+    let diagnostic_digest = content(0x7a);
+    let diagnostic_artifact =
+        ArtifactId::from_digest(diagnostic_digest.algorithm(), *diagnostic_digest.digest());
+    let diagnostic_ref = events::ArtifactEvidenceRef {
+        artifact_id: diagnostic_artifact,
+        role: events::ArtifactRole::RedactedDiagnostic,
+        schema_id: retention_node.config_ref.schema_id.clone(),
+        semantic_type_id: None,
+        content_digest: diagnostic_digest,
+        byte_len: 10,
+        media_type: spec::MediaType::new("application/json").expect("media type"),
+    };
+    let valid_stream = store.load_run_stream(&fixture.run_id);
+    let corrupt_stream = prepend_payloads_to_retention_projection_commit_for_tests(
+        &valid_stream,
+        vec![
+            events::KernelEventPayload::StateAttemptStarted(events::StateAttemptStarted {
+                spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                node_id: retention_node.node_id.clone(),
+                attempt_id: attempt_id.clone(),
+                attempt_no: 100,
+                state_kind: retention_node.state_kind.clone(),
+                state_version: retention_node.state_version.clone(),
+            }),
+            events::KernelEventPayload::ArtifactReferenced(events::ArtifactReferenced {
+                spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                node_id: Some(retention_node.node_id.clone()),
+                attempt_id: Some(attempt_id.clone()),
+                artifact_ref: diagnostic_ref.clone(),
+            }),
+            events::KernelEventPayload::StateAttemptFailed(events::StateAttemptFailed {
+                spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                node_id: retention_node.node_id.clone(),
+                attempt_id,
+                retryable: false,
+                error: events::MfmErrorInfo {
+                    diagnostic_ref: Some(diagnostic_ref),
+                    ..public_output_error()
+                },
+            }),
+        ],
+    );
+
+    assert!(matches!(
+        validate_run_stream(&fixture.runtime_spec, &fixture.run_id, &corrupt_stream),
+        Err(RuntimeError::InvalidRunStream(message))
+            if message.contains(
+                "retention manifest projection commit contains unsupported payload"
+            )
+    ));
+}
+
+#[tokio::test]
+async fn runtime_rejects_same_sequence_sidecar_commit_at_retention_projection() {
+    let fixture = fixture();
+    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+    scheduler
+        .drive_until_blocked(&mut store, &fixture.runtime_spec, &fixture.run_id)
+        .await
+        .expect("drive to completion");
+
+    let valid_stream = store.load_run_stream(&fixture.run_id);
+    let corrupt_stream =
+        append_same_sequence_sidecar_to_retention_projection_for_tests(&valid_stream);
+
+    assert!(matches!(
+        validate_run_stream(&fixture.runtime_spec, &fixture.run_id, &corrupt_stream),
+        Err(RuntimeError::Store(message)) if message.contains("multiple commit keys")
+    ));
+}
+
+#[tokio::test]
+async fn runtime_rejects_post_completion_retention_attempt() {
+    let fixture = fixture();
+    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+    assert_eq!(
+        scheduler
+            .drive_until_blocked(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("drive to completion"),
+        SchedulerStatus::PublicOutputProjected
+    );
+
+    let retention_node =
+        certified_retention_manifest_node(&fixture.runtime_spec).expect("retention node");
+    let mut corrupt_stream = store.load_run_stream(&fixture.run_id);
+    append_payload_commit_for_tests(
+        &mut corrupt_stream,
+        &fixture.run_id,
+        "post-completion-retention-attempt",
+        events::KernelEventPayload::StateAttemptStarted(events::StateAttemptStarted {
+            spec_hash: fixture.runtime_spec.spec_hash().clone(),
+            node_id: retention_node.node_id.clone(),
+            attempt_id: AttemptId::from_digest(DigestAlgorithm::Sha256JcsV1, DF),
+            attempt_no: 99,
+            state_kind: retention_node.state_kind.clone(),
+            state_version: retention_node.state_version.clone(),
+        }),
+    );
+
+    assert!(matches!(
+        validate_run_stream(&fixture.runtime_spec, &fixture.run_id, &corrupt_stream),
+        Err(RuntimeError::InvalidRunStream(message))
+            if message.contains("events after RunCompleted")
+    ));
+}
+
+#[tokio::test]
+async fn runtime_rejects_started_attempt_for_terminal_retention_node() {
+    let fixture = fixture();
+    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+    scheduler
+        .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+        .await
+        .expect("produce first cell");
+
+    let terminal_node = node_by_output(&fixture, &fixture.cell_a);
+    let mut corrupt_stream = store.load_run_stream(&fixture.run_id);
+    append_payload_commit_for_tests(
+        &mut corrupt_stream,
+        &fixture.run_id,
+        "terminal-node-started-again",
+        events::KernelEventPayload::StateAttemptStarted(events::StateAttemptStarted {
+            spec_hash: fixture.runtime_spec.spec_hash().clone(),
+            node_id: terminal_node.node_id.clone(),
+            attempt_id: AttemptId::from_digest(
+                DigestAlgorithm::Sha256JcsV1,
+                DigestBytes::from_array([0x76; 32]),
+            ),
+            attempt_no: 99,
+            state_kind: terminal_node.state_kind.clone(),
+            state_version: terminal_node.state_version.clone(),
+        }),
+    );
+
+    assert!(matches!(
+        validate_run_stream(&fixture.runtime_spec, &fixture.run_id, &corrupt_stream),
+        Err(RuntimeError::InvalidRunStream(message))
+            if message.contains("after its output cell became terminal")
+    ));
+}
+
+#[tokio::test]
+async fn public_output_render_failure_resumes_and_completes() {
+    let fixture = fixture();
+    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+    scheduler
+        .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+        .await
+        .expect("drive a");
+    scheduler
+        .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+        .await
+        .expect("drive b");
+    let render_node = node_by_output(&fixture, &fixture.render_cell);
+    let failed_attempt = append_attempt_start(&mut store, &fixture, render_node, 1);
+    append_public_output_render_failure(&mut store, &fixture, render_node, &failed_attempt);
+    assert!(matches!(
+        store
+            .projection_snapshot()
+            .public_output(&fixture.runtime_spec.spec().public_outputs.public_schema_id),
+        Some(store::PublicOutputProjection::RenderFailed { .. })
+    ));
+
+    assert_eq!(
+        scheduler
+            .drive_until_blocked(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("retry render"),
+        SchedulerStatus::PublicOutputProjected
+    );
+    assert_eq!(
+        attempt_started_count(&store, &fixture.run_id, &fixture.render_node),
+        2
+    );
+    assert_eq!(
+        store.projection_snapshot().run_state(&fixture.run_id),
+        store::RunState::Completed
+    );
+    assert!(matches!(
+        store
+            .projection_snapshot()
+            .public_output(&fixture.runtime_spec.spec().public_outputs.public_schema_id),
+        Some(store::PublicOutputProjection::Produced { .. })
+    ));
+}
+
+#[test]
+fn certified_runtime_spec_rejects_hash_mismatch() {
+    let fixture = fixture();
+    let mut envelope = fixture.runtime_spec.envelope().clone();
+    envelope.spec_hash = SpecHash::from_digest(DigestAlgorithm::Sha256JcsV1, D9);
+    assert!(matches!(
+        CertifiedRuntimeSpec::from_verified_envelope(envelope),
+        Err(RuntimeError::SpecHash(_))
+    ));
+}
+
+#[test]
+fn certified_runtime_spec_accepts_certifier_authority() {
+    let (certified, _registry) = certifier_backed_runtime_authority();
+    let runtime = CertifiedRuntimeSpec::new(certified).expect("runtime authority");
+    assert!(!runtime.topological_order().is_empty());
+}
+
+#[test]
+fn certified_runtime_spec_accepts_verified_bundle_authority() {
+    let (certified, registry) = certifier_backed_runtime_authority();
+    let bundle = certified.bundle().expect("certified bundle");
+    let verified = mfm_certify::verify_certified_bundle(
+        bundle.spec_bytes(),
+        bundle.certificate_bytes(),
+        &registry,
+    )
+    .expect("verified persisted bundle");
+    let runtime = CertifiedRuntimeSpec::new(verified).expect("runtime authority");
+    assert!(!runtime.topological_order().is_empty());
+}
+
+#[test]
+fn certified_runtime_spec_requires_framework_public_output_render_node() {
+    let fixture = fixture();
+    let mut envelope = fixture.runtime_spec.envelope().clone();
+    envelope.spec.nodes.retain(|node| {
+        !matches!(
+            node.framework,
+            Some(spec::FrameworkNodeSpec::PublicOutputRender(_))
+        )
+    });
+    let envelope = spec::HashedSpecEnvelope::new(envelope.spec, envelope.audit).expect("rehash");
+    assert!(matches!(
+        CertifiedRuntimeSpec::from_verified_envelope(envelope),
+        Err(RuntimeError::InvalidSpec(message))
+            if message.contains("public-output render node")
+    ));
+}
+
+#[test]
+fn certified_runtime_spec_rejects_forged_lifecycle_framework_variant() {
+    let fixture = fixture();
+    let mut envelope = fixture.runtime_spec.envelope().clone();
+    let node = envelope
+        .spec
+        .nodes
+        .iter_mut()
+        .find(|node| node.framework.is_none())
+        .expect("user node");
+    node.framework = Some(spec::FrameworkNodeSpec::BootstrapRun(
+        spec::BootstrapRunNodeSpec {},
+    ));
+    let envelope = spec::HashedSpecEnvelope::new(envelope.spec, envelope.audit).expect("rehash");
+
+    assert!(matches!(
+        CertifiedRuntimeSpec::from_verified_envelope(envelope),
+        Err(RuntimeError::InvalidSpec(_))
+    ));
+}
+
+#[test]
+fn certified_runtime_spec_rejects_lifecycle_ordering() {
+    let fixture = fixture();
+    let mut envelope = fixture.runtime_spec.envelope().clone();
+    let public_cell = envelope
+        .spec
+        .public_outputs
+        .outputs
+        .first()
+        .expect("public output")
+        .cell_id
+        .clone();
+    envelope.spec.nodes.retain(|node| {
+        !matches!(
+            node.framework,
+            Some(spec::FrameworkNodeSpec::ProjectRetentionManifest(_))
+        )
+    });
+    append_runtime_retention_lifecycle_node(&mut envelope.spec, public_cell, false);
+    let envelope = spec::HashedSpecEnvelope::new(envelope.spec, envelope.audit).expect("rehash");
+
+    assert!(matches!(
+        CertifiedRuntimeSpec::from_verified_envelope(envelope),
+        Err(RuntimeError::InvalidSpec(_))
+    ));
+}
+
+#[test]
+fn certified_runtime_spec_rejects_lifecycle_framework_permissions() {
+    let fixture = fixture();
+    let mut envelope = fixture.runtime_spec.envelope().clone();
+    find_runtime_lifecycle_node_mut(
+        &mut envelope.spec,
+        RuntimeLifecycleVariant::ProjectRetentionManifest,
+    )
+    .adapter_bindings
+    .push(spec::AdapterBinding {
+        adapter_kind: AdapterKind::new(
+            "mfm.runtime.test",
+            "forged-adapter",
+            DigestAlgorithm::Sha256JcsV1,
+            DigestBytes::from_array([0xf7; 32]),
+        )
+        .expect("adapter kind"),
+        adapter_version: AdapterVersion::new("mfm.runtime.test.adapter.v1")
+            .expect("adapter version"),
+        binding_digest: None,
+    });
+    let envelope = spec::HashedSpecEnvelope::new(envelope.spec, envelope.audit).expect("rehash");
+
+    assert!(matches!(
+        CertifiedRuntimeSpec::from_verified_envelope(envelope),
+        Err(RuntimeError::InvalidSpec(message))
+            if message.contains("user-controlled execution permissions")
+    ));
+}
+
+#[test]
+fn certified_runtime_spec_rejects_user_consumers_of_lifecycle_receipts() {
+    let fixture = fixture();
+
+    let mut bootstrap_envelope = fixture.runtime_spec.envelope().clone();
+    let bootstrap_receipt = runtime_bootstrap_receipt_cell(&bootstrap_envelope.spec);
+    append_runtime_user_receipt_consumer(
+        &mut bootstrap_envelope.spec,
+        bootstrap_receipt,
+        "user/bootstrap-receipt",
+    );
+    let bootstrap_envelope =
+        spec::HashedSpecEnvelope::new(bootstrap_envelope.spec, bootstrap_envelope.audit)
+            .expect("rehash");
+    assert!(matches!(
+        CertifiedRuntimeSpec::from_verified_envelope(bootstrap_envelope),
+        Err(RuntimeError::InvalidSpec(message))
+            if message.contains("must not be consumed")
+    ));
+
+    let mut render_envelope = fixture.runtime_spec.envelope().clone();
+    let render_receipt = runtime_render_receipt_cell(&render_envelope.spec);
+    append_runtime_user_receipt_consumer(
+        &mut render_envelope.spec,
+        render_receipt,
+        "user/render-receipt",
+    );
+    let render_envelope =
+        spec::HashedSpecEnvelope::new(render_envelope.spec, render_envelope.audit).expect("rehash");
+    assert!(matches!(
+        CertifiedRuntimeSpec::from_verified_envelope(render_envelope),
+        Err(RuntimeError::InvalidSpec(message))
+            if message.contains("project-retention-manifest")
+    ));
+
+    let mut retention_envelope = fixture.runtime_spec.envelope().clone();
+    let retention_receipt = runtime_retention_receipt_cell(&retention_envelope.spec);
+    append_runtime_user_receipt_consumer(
+        &mut retention_envelope.spec,
+        retention_receipt,
+        "user/retention-receipt",
+    );
+    let retention_envelope =
+        spec::HashedSpecEnvelope::new(retention_envelope.spec, retention_envelope.audit)
+            .expect("rehash");
+    assert!(matches!(
+        CertifiedRuntimeSpec::from_verified_envelope(retention_envelope),
+        Err(RuntimeError::InvalidSpec(message)) if message.contains("complete-run")
+    ));
+}
+
+#[test]
+fn certified_runtime_spec_rejects_executable_nodes_outside_lifecycle_tail() {
+    let fixture = fixture();
+    let mut envelope = fixture.runtime_spec.envelope().clone();
+    append_runtime_independent_user_node(&mut envelope.spec, "user/outside-lifecycle-tail");
+    let envelope = spec::HashedSpecEnvelope::new(envelope.spec, envelope.audit).expect("rehash");
+
+    assert!(matches!(
+        CertifiedRuntimeSpec::from_verified_envelope(envelope),
+        Err(RuntimeError::InvalidSpec(message))
+            if message.contains("outside the certified public-output lifecycle tail")
+    ));
+}
+
+#[test]
+fn certified_runtime_spec_rejects_forged_lifecycle_config_ref() {
+    let fixture = fixture();
+    let mut envelope = fixture.runtime_spec.envelope().clone();
+    find_runtime_lifecycle_node_mut(
+        &mut envelope.spec,
+        RuntimeLifecycleVariant::ProjectRetentionManifest,
+    )
+    .config_ref
+    .byte_len += 1;
+    let envelope = spec::HashedSpecEnvelope::new(envelope.spec, envelope.audit).expect("rehash");
+
+    assert!(matches!(
+        CertifiedRuntimeSpec::from_verified_envelope(envelope),
+        Err(RuntimeError::InvalidSpec(message))
+            if message.contains("config ref is not deterministic")
+    ));
+}
+
+#[test]
+fn certified_runtime_spec_accepts_lifecycle_framework_node_chain() {
+    let fixture = fixture();
+    let envelope = fixture.runtime_spec.envelope().clone();
+
+    CertifiedRuntimeSpec::from_verified_envelope(envelope)
+        .expect("lifecycle framework chain is valid runtime authority");
+}
+
+#[test]
+fn certified_runtime_spec_rejects_missing_retention_lifecycle_node() {
+    let fixture = fixture();
+    let mut envelope = fixture.runtime_spec.envelope().clone();
+    envelope.spec.nodes.retain(|node| {
+        !matches!(
+            node.framework,
+            Some(spec::FrameworkNodeSpec::ProjectRetentionManifest(_))
+        )
+    });
+    let envelope = spec::HashedSpecEnvelope::new(envelope.spec, envelope.audit).expect("rehash");
+
+    assert!(matches!(
+        CertifiedRuntimeSpec::from_verified_envelope(envelope),
+        Err(RuntimeError::InvalidSpec(message))
+            if message.contains("retention")
+                || message.contains("project-retention-manifest")
+    ));
+}
+
+#[test]
+fn certified_runtime_spec_rejects_missing_bootstrap_lifecycle_node() {
+    let fixture = fixture();
+    let mut envelope = fixture.runtime_spec.envelope().clone();
+    envelope.spec.nodes.retain(|node| {
+        !matches!(
+            node.framework,
+            Some(spec::FrameworkNodeSpec::BootstrapRun(_))
+        )
+    });
+    let envelope = spec::HashedSpecEnvelope::new(envelope.spec, envelope.audit).expect("rehash");
+
+    assert!(matches!(
+        CertifiedRuntimeSpec::from_verified_envelope(envelope),
+        Err(RuntimeError::InvalidSpec(message))
+            if message.contains("bootstrap")
+    ));
+}
+
+#[test]
+fn certified_runtime_spec_rejects_builtin_lifecycle_descriptors_without_framework_metadata() {
+    let fixture = fixture();
+
+    let mut bootstrap_envelope = fixture.runtime_spec.envelope().clone();
+    clear_runtime_framework_metadata(
+        &mut bootstrap_envelope.spec,
+        RuntimeLifecycleVariant::BootstrapRun,
+    );
+    let bootstrap_envelope =
+        spec::HashedSpecEnvelope::new(bootstrap_envelope.spec, bootstrap_envelope.audit)
+            .expect("rehash");
+    assert!(matches!(
+        CertifiedRuntimeSpec::from_verified_envelope(bootstrap_envelope),
+        Err(RuntimeError::InvalidSpec(message))
+            if message.contains("without matching framework metadata")
+    ));
+
+    let mut retention_envelope = fixture.runtime_spec.envelope().clone();
+    clear_runtime_framework_metadata(
+        &mut retention_envelope.spec,
+        RuntimeLifecycleVariant::ProjectRetentionManifest,
+    );
+    let retention_envelope =
+        spec::HashedSpecEnvelope::new(retention_envelope.spec, retention_envelope.audit)
+            .expect("rehash");
+    assert!(matches!(
+        CertifiedRuntimeSpec::from_verified_envelope(retention_envelope),
+        Err(RuntimeError::InvalidSpec(message))
+            if message.contains("without matching framework metadata")
+    ));
+
+    let mut complete_envelope = fixture.runtime_spec.envelope().clone();
+    clear_runtime_framework_metadata(
+        &mut complete_envelope.spec,
+        RuntimeLifecycleVariant::CompleteRun,
+    );
+    let complete_envelope =
+        spec::HashedSpecEnvelope::new(complete_envelope.spec, complete_envelope.audit)
+            .expect("rehash");
+    assert!(matches!(
+        CertifiedRuntimeSpec::from_verified_envelope(complete_envelope),
+        Err(RuntimeError::InvalidSpec(message))
+            if message.contains("without matching framework metadata")
+    ));
+}
+
+#[test]
+fn certified_runtime_spec_rejects_forged_lifecycle_input_binding() {
+    let fixture = fixture();
+
+    let mut bootstrap_envelope = fixture.runtime_spec.envelope().clone();
+    let node = find_runtime_lifecycle_node_mut(
+        &mut bootstrap_envelope.spec,
+        RuntimeLifecycleVariant::BootstrapRun,
+    );
+    node.input_bindings.input_descriptor_id = DescriptorId::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        DigestBytes::from_array([0xb1; 32]),
+    );
+    let bootstrap_envelope =
+        spec::HashedSpecEnvelope::new(bootstrap_envelope.spec, bootstrap_envelope.audit)
+            .expect("rehash");
+    assert!(matches!(
+        CertifiedRuntimeSpec::from_verified_envelope(bootstrap_envelope),
+        Err(RuntimeError::InvalidSpec(message))
+            if message.contains("input binding is not deterministic")
+    ));
+
+    let mut retention_envelope = fixture.runtime_spec.envelope().clone();
+    let node = find_runtime_lifecycle_node_mut(
+        &mut retention_envelope.spec,
+        RuntimeLifecycleVariant::ProjectRetentionManifest,
+    );
+    let current = match &node.input_bindings.root {
+        spec::InputBindingNodeSpec::Cell(cell) => cell.clone(),
+        _ => panic!("expected cell input"),
+    };
+    node.input_bindings.root =
+        spec::InputBindingNodeSpec::Struct(vec![spec::NamedInputBindingSpec {
+            field_path: spec::PublicFieldPath::new("public_output_receipt").expect("field path"),
+            node: spec::InputBindingNodeSpec::Cell(current),
+        }]);
+    node.input_bindings.digest =
+        content_digest_json(input_node_json(&node.input_bindings.root)).expect("input digest");
+    let retention_envelope =
+        spec::HashedSpecEnvelope::new(retention_envelope.spec, retention_envelope.audit)
+            .expect("rehash");
+    assert!(matches!(
+        CertifiedRuntimeSpec::from_verified_envelope(retention_envelope),
+        Err(RuntimeError::InvalidSpec(message))
+            if message.contains("input binding is not deterministic")
+    ));
+
+    let mut complete_envelope = fixture.runtime_spec.envelope().clone();
+    let node = find_runtime_lifecycle_node_mut(
+        &mut complete_envelope.spec,
+        RuntimeLifecycleVariant::CompleteRun,
+    );
+    let current = match &node.input_bindings.root {
+        spec::InputBindingNodeSpec::Cell(cell) => cell.clone(),
+        _ => panic!("expected cell input"),
+    };
+    node.input_bindings.root =
+        spec::InputBindingNodeSpec::Struct(vec![spec::NamedInputBindingSpec {
+            field_path: spec::PublicFieldPath::new("retention_manifest_receipt")
+                .expect("field path"),
+            node: spec::InputBindingNodeSpec::Cell(current),
+        }]);
+    node.input_bindings.digest =
+        content_digest_json(input_node_json(&node.input_bindings.root)).expect("input digest");
+    let complete_envelope =
+        spec::HashedSpecEnvelope::new(complete_envelope.spec, complete_envelope.audit)
+            .expect("rehash");
+    assert!(matches!(
+        CertifiedRuntimeSpec::from_verified_envelope(complete_envelope),
+        Err(RuntimeError::InvalidSpec(message))
+            if message.contains("input binding is not deterministic")
+    ));
+}
+
+#[tokio::test]
+async fn replay_rejects_run_completed_without_public_output_evidence() {
+    let fixture = fixture();
+    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+    store
+        .append_prepared_commit(store::TypedCommitRequest {
+            run_id: fixture.run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&fixture.run_id),
+            commit_key: store::CommitKey::new("forged-complete-without-public-output")
+                .expect("commit key"),
+            payloads: vec![events::KernelEventPayload::RunCompleted(
+                events::RunCompleted {
+                    run_id: fixture.run_id.clone(),
+                    spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                    outcome: events::RunCompletionOutcome::Completed(
+                        events::PublicOutputCompletionEvidence {
+                            public_output_schema_id: fixture
+                                .runtime_spec
+                                .spec()
+                                .public_outputs
+                                .public_schema_id
+                                .clone(),
+                            public_output_event_id: EventId::from_digest(
+                                DigestAlgorithm::Sha256JcsV1,
+                                D9,
+                            ),
+                        },
+                    ),
+                },
+            )],
+            required_artifacts: Vec::new(),
+            preconditions: store::CommitPreconditions {
+                required_run_state: store::RequiredRunState::NotCompleted,
+                ..store::CommitPreconditions::default()
+            },
+        })
+        .expect("append forged completion");
+
+    assert!(matches!(
+        scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await,
+        Err(RuntimeError::InvalidRunStream(message))
+            if message.contains("RunCompleted appeared before PublicOutputProduced")
+    ));
+}
+
+#[tokio::test]
+async fn scheduler_rejects_uncertified_capability_use() {
+    struct BadFactRunner {
+        cap_kind: CapabilityKind,
+        cap_version: CapabilityVersion,
+    }
+
+    impl ErasedNodeRunner for BadFactRunner {
+        fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
+            Box::pin(async move {
+                Ok(ErasedRunnerOutput::new(vec![
+                    RunnerEventPayload::FactRecorded(events::FactRecorded {
+                        spec_hash: ctx.spec_hash().clone(),
+                        node_id: ctx.node().node_id.clone(),
+                        attempt_id: ctx.attempt_id().clone(),
+                        capability_kind: self.cap_kind.clone(),
+                        capability_version: self.cap_version.clone(),
+                        adapter_kind: AdapterKind::new(
+                            "mfm.test",
+                            "adapter",
+                            DigestAlgorithm::Sha256JcsV1,
+                            D1,
+                        )
+                        .expect("adapter"),
+                        adapter_version: AdapterVersion::new("mfm.adapter.v1")
+                            .expect("adapter version"),
+                        request_schema_id: ctx.node().config_ref.schema_id.clone(),
+                        request_hash: content(0xc1),
+                        response_schema_id: ctx.node().config_ref.schema_id.clone(),
+                        response_hash: content(0xc2),
+                        fact_key: events::FactKey::new("bad-fact").expect("fact key"),
+                        artifact_id: artifact(0xc3),
+                    }),
+                ]))
+            })
+        }
+    }
+
+    let fixture = fixture();
+    let mut registry = ErasedRunnerRegistry::new();
+    registry
+        .register(binding(
+            fixture.descriptor_a.clone(),
+            "pure",
+            BadFactRunner {
+                cap_kind: fixture.cap_kind.clone(),
+                cap_version: fixture.cap_version.clone(),
+            },
+        ))
+        .expect("binding");
+    registry
+        .register(binding(
+            fixture.descriptor_b.clone(),
+            "read",
+            RecordingRunner {
+                expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
+                output_artifact: artifact(0xb1),
+                output_digest: content(0xb2),
+            },
+        ))
+        .expect("binding b");
+    let scheduler = test_scheduler(registry);
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+    assert!(matches!(
+        scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await,
+        Err(RuntimeError::InvalidRunnerOutput(_))
+    ));
+}
+
+#[tokio::test]
+async fn runner_cannot_stage_artifact_with_foreign_producer() {
+    struct ForeignProducerArtifactRunner {
+        foreign_node_id: NodeId,
+        output_artifact: ArtifactId,
+        output_digest: ContentDigest,
+    }
+
+    impl ErasedNodeRunner for ForeignProducerArtifactRunner {
+        fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
+            Box::pin(async move {
+                let mut artifact = state_output_artifact(
+                    ctx.node(),
+                    ctx.descriptor(),
+                    self.output_artifact.clone(),
+                    self.output_digest.clone(),
+                );
+                artifact.producer_node_id = Some(self.foreign_node_id.clone());
+                let staged_artifact = staged_attempt_artifact(&ctx, artifact)?;
+                Ok(ErasedRunnerOutput {
+                    staged_artifacts: vec![staged_artifact],
+                    staged_retention_refs: Vec::new(),
+                    payloads: terminal_payloads(
+                        &ctx,
+                        self.output_artifact.clone(),
+                        self.output_digest.clone(),
+                    ),
+                })
+            })
+        }
+    }
+
+    let fixture = fixture();
+    let foreign_node_id = node_by_output(&fixture, &fixture.cell_b).node_id.clone();
+    let mut registry = ErasedRunnerRegistry::new();
+    registry
+        .register(binding(
+            fixture.descriptor_a.clone(),
+            "pure",
+            ForeignProducerArtifactRunner {
+                foreign_node_id,
+                output_artifact: artifact(0xa1),
+                output_digest: content(0xa2),
+            },
+        ))
+        .expect("binding a");
+    registry
+        .register(binding(
+            fixture.descriptor_b.clone(),
+            "read",
+            RecordingRunner {
+                expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
+                output_artifact: artifact(0xb1),
+                output_digest: content(0xb2),
+            },
+        ))
+        .expect("binding b");
+    let scheduler = test_scheduler(registry);
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+
+    assert!(matches!(
+        scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await,
+        Err(RuntimeError::InvalidRunnerOutput(message))
+            if message.contains("producer evidence outside its attempt")
+    ));
+}
+
+#[tokio::test]
+async fn runner_cannot_stage_inline_artifact_with_mismatched_bytes() {
+    struct BadInlineArtifactRunner {
+        output_artifact: ArtifactId,
+        output_digest: ContentDigest,
+    }
+
+    impl ErasedNodeRunner for BadInlineArtifactRunner {
+        fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
+            Box::pin(async move {
+                let artifact = state_output_artifact(
+                    ctx.node(),
+                    ctx.descriptor(),
+                    self.output_artifact.clone(),
+                    self.output_digest.clone(),
+                );
+                let staged_artifact = StagedArtifact::inline_attempt_artifact(
+                    &ctx,
+                    b"mismatched".to_vec(),
+                    artifact,
+                )?;
+                Ok(ErasedRunnerOutput {
+                    staged_artifacts: vec![staged_artifact],
+                    staged_retention_refs: Vec::new(),
+                    payloads: terminal_payloads(
+                        &ctx,
+                        self.output_artifact.clone(),
+                        self.output_digest.clone(),
+                    ),
+                })
+            })
+        }
+    }
+
+    let fixture = fixture();
+    let mut registry = ErasedRunnerRegistry::new();
+    registry
+        .register(binding(
+            fixture.descriptor_a.clone(),
+            "pure",
+            BadInlineArtifactRunner {
+                output_artifact: artifact(0xa1),
+                output_digest: content(0xa2),
+            },
+        ))
+        .expect("binding a");
+    registry
+        .register(binding(
+            fixture.descriptor_b.clone(),
+            "read",
+            RecordingRunner {
+                expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
+                output_artifact: artifact(0xb1),
+                output_digest: content(0xb2),
+            },
+        ))
+        .expect("binding b");
+    let scheduler = test_scheduler(registry);
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+
+    assert!(matches!(
+        scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await,
+        Err(RuntimeError::InvalidRunnerOutput(message))
+            if message.contains("bytes do not match typed evidence")
+    ));
+}
+
+#[tokio::test]
+async fn runner_can_commit_inline_state_output_artifact() {
+    struct InlineArtifactRunner {
+        output_bytes: Vec<u8>,
+    }
+
+    impl ErasedNodeRunner for InlineArtifactRunner {
+        fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
+            Box::pin(async move {
+                let artifact = state_output_artifact_for_bytes(
+                    ctx.node(),
+                    ctx.descriptor(),
+                    &self.output_bytes,
+                );
+                let staged_artifact = StagedArtifact::inline_attempt_artifact(
+                    &ctx,
+                    self.output_bytes.clone(),
+                    artifact.clone(),
+                )?;
+                Ok(ErasedRunnerOutput {
+                    staged_artifacts: vec![staged_artifact],
+                    staged_retention_refs: Vec::new(),
+                    payloads: terminal_payloads(
+                        &ctx,
+                        artifact.artifact_id.clone(),
+                        artifact.digest.clone(),
+                    ),
+                })
+            })
+        }
+    }
+
+    let fixture = fixture();
+    let output_bytes = br#"{"inline":true}"#.to_vec();
+    let output_digest = digest_for_bytes(&output_bytes);
+    let output_artifact =
+        ArtifactId::from_digest(output_digest.algorithm(), *output_digest.digest());
+    let mut registry = ErasedRunnerRegistry::new();
+    registry
+        .register(binding(
+            fixture.descriptor_a.clone(),
+            "pure",
+            InlineArtifactRunner { output_bytes },
+        ))
+        .expect("binding a");
+    registry
+        .register(binding(
+            fixture.descriptor_b.clone(),
+            "read",
+            RecordingRunner {
+                expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
+                output_artifact: artifact(0xb1),
+                output_digest: content(0xb2),
+            },
+        ))
+        .expect("binding b");
+    let scheduler = test_scheduler(registry);
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+
+    assert_eq!(
+        scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("drive inline output"),
+        SchedulerStatus::Advanced
+    );
+    assert!(matches!(
+        store.projection_snapshot().cell_terminal(&fixture.cell_a),
+        Some(store::CellTerminalProjection::Produced {
+            artifact_id,
+            content_digest,
+            ..
+        }) if artifact_id == &output_artifact && content_digest == &output_digest
+    ));
+}
+
+#[tokio::test]
+async fn runner_cannot_stage_reserved_retention_reasons() {
+    struct ReservedRetentionReasonRunner {
+        output_bytes: Vec<u8>,
+        reason: events::RetentionReason,
+    }
+
+    impl ErasedNodeRunner for ReservedRetentionReasonRunner {
+        fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
+            Box::pin(async move {
+                let artifact = state_output_artifact_for_bytes(
+                    ctx.node(),
+                    ctx.descriptor(),
+                    &self.output_bytes,
+                );
+                let staged_artifact = StagedArtifact::inline_attempt_artifact(
+                    &ctx,
+                    self.output_bytes.clone(),
+                    artifact.clone(),
+                )?;
+                Ok(ErasedRunnerOutput {
+                    staged_artifacts: vec![staged_artifact],
+                    staged_retention_refs: vec![StagedRetentionRefs {
+                        refs: vec![retention_ref_for_artifact(&artifact)],
+                        reason: self.reason,
+                    }],
+                    payloads: terminal_payloads(
+                        &ctx,
+                        artifact.artifact_id.clone(),
+                        artifact.digest.clone(),
+                    ),
+                })
+            })
+        }
+    }
+
+    for reason in [
+        events::RetentionReason::RunStarted,
+        events::RetentionReason::ManifestProjection,
+        events::RetentionReason::PublicOutput,
+    ] {
+        let fixture = fixture();
+        let node = node_by_output(&fixture, &fixture.cell_a).clone();
+        let mut registry = ErasedRunnerRegistry::new();
+        registry
+            .register(binding(
+                fixture.descriptor_a.clone(),
+                "pure",
+                ReservedRetentionReasonRunner {
+                    output_bytes: br#"{"reserved":true}"#.to_vec(),
+                    reason,
+                },
+            ))
+            .expect("binding a");
+        registry
+            .register(binding(
+                fixture.descriptor_b.clone(),
+                "read",
+                RecordingRunner {
+                    expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
+                    output_artifact: artifact(0xb1),
+                    output_digest: content(0xb2),
+                },
+            ))
+            .expect("binding b");
+        let scheduler = test_scheduler(registry);
+        let mut store = store::InMemoryTypedRunStore::new();
+        start_fixture_run(
+            &scheduler,
+            &mut store,
+            &fixture,
+            vec![fixture.seed_ref.clone()],
+        )
+        .await
+        .expect("start run");
+        append_attempt_start(&mut store, &fixture, &node, 1);
+        let stream_before = store.load_run_stream(&fixture.run_id);
+
+        assert!(matches!(
+            scheduler
+                .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+                .await,
+            Err(RuntimeError::InvalidRunnerOutput(message))
+                if message.contains("middleware-owned retention reason")
+                    || message.contains("public-output retention outside sealed framework")
+        ));
+        assert_eq!(store.load_run_stream(&fixture.run_id), stream_before);
+        assert!(store
+            .projection_snapshot()
+            .cell_terminal(&fixture.cell_a)
+            .is_none());
+    }
+}
+
+#[tokio::test]
+async fn runtime_rejects_public_output_retention_reason_on_user_commit() {
+    struct RetainedStateOutputRunner {
+        output_bytes: Vec<u8>,
+    }
+
+    impl ErasedNodeRunner for RetainedStateOutputRunner {
+        fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
+            Box::pin(async move {
+                let artifact = state_output_artifact_for_bytes(
+                    ctx.node(),
+                    ctx.descriptor(),
+                    &self.output_bytes,
+                );
+                let staged_artifact = StagedArtifact::inline_attempt_artifact(
+                    &ctx,
+                    self.output_bytes.clone(),
+                    artifact.clone(),
+                )?;
+                Ok(ErasedRunnerOutput {
+                    staged_artifacts: vec![staged_artifact],
+                    staged_retention_refs: vec![StagedRetentionRefs::runtime_evidence(vec![
+                        retention_ref_for_artifact(&artifact),
+                    ])],
+                    payloads: terminal_payloads(
+                        &ctx,
+                        artifact.artifact_id.clone(),
+                        artifact.digest.clone(),
+                    ),
+                })
+            })
+        }
+    }
+
+    let fixture = fixture();
+    let mut registry = ErasedRunnerRegistry::new();
+    registry
+        .register(binding(
+            fixture.descriptor_a.clone(),
+            "pure",
+            RetainedStateOutputRunner {
+                output_bytes: br#"{"retained":true}"#.to_vec(),
+            },
+        ))
+        .expect("binding a");
+    registry
+        .register(binding(
+            fixture.descriptor_b.clone(),
+            "read",
+            RecordingRunner {
+                expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
+                output_artifact: artifact(0xb1),
+                output_digest: content(0xb2),
+            },
+        ))
+        .expect("binding b");
+    let scheduler = test_scheduler(registry);
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+    assert_eq!(
+        scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("drive retained state output"),
+        SchedulerStatus::Advanced
+    );
+
+    let valid_stream = store.load_run_stream(&fixture.run_id);
+    let corrupt_pos = valid_stream
+        .iter()
+        .position(|event| {
+            matches!(
+                event.payload(),
+                events::KernelEventPayload::RetentionRefsAppended(events::RetentionRefsAppended {
+                    reason: events::RetentionReason::RuntimeEvidence,
+                    ..
+                })
+            )
+        })
+        .expect("runtime evidence retention refs");
+    let mut corrupt_payload = match valid_stream[corrupt_pos].payload().clone() {
+        events::KernelEventPayload::RetentionRefsAppended(payload) => payload,
+        _ => unreachable!("position checked"),
+    };
+    corrupt_payload.reason = events::RetentionReason::PublicOutput;
+    let corrupt_stream = rewrite_commit_payload(
+        &valid_stream,
+        corrupt_pos,
+        events::KernelEventPayload::RetentionRefsAppended(corrupt_payload),
+    );
+
+    assert!(matches!(
+        validate_run_stream(&fixture.runtime_spec, &fixture.run_id, &corrupt_stream),
+        Err(RuntimeError::InvalidRunStream(message))
+            if message.contains("public-output retention refs must be appended")
+    ));
+}
+
+#[tokio::test]
+async fn runner_output_requires_payload_bound_staged_artifact() {
+    struct MissingStagedArtifactRunner {
+        output_artifact: ArtifactId,
+        output_digest: ContentDigest,
+    }
+
+    impl ErasedNodeRunner for MissingStagedArtifactRunner {
+        fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
+            Box::pin(async move {
+                Ok(ErasedRunnerOutput {
+                    staged_artifacts: Vec::new(),
+                    staged_retention_refs: Vec::new(),
+                    payloads: terminal_payloads(
+                        &ctx,
+                        self.output_artifact.clone(),
+                        self.output_digest.clone(),
+                    ),
+                })
+            })
+        }
+    }
+
+    let fixture = fixture();
+    let mut registry = ErasedRunnerRegistry::new();
+    registry
+        .register(binding(
+            fixture.descriptor_a.clone(),
+            "pure",
+            MissingStagedArtifactRunner {
+                output_artifact: artifact(0xa1),
+                output_digest: content(0xa2),
+            },
+        ))
+        .expect("binding a");
+    registry
+        .register(binding(
+            fixture.descriptor_b.clone(),
+            "read",
+            RecordingRunner {
+                expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
+                output_artifact: artifact(0xb1),
+                output_digest: content(0xb2),
+            },
+        ))
+        .expect("binding b");
+    let scheduler = test_scheduler(registry);
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+
+    assert!(matches!(
+        scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await,
+        Err(RuntimeError::InvalidRunnerOutput(message))
+            if message.contains("without staged artifact")
+    ));
+}
+
+#[tokio::test]
+async fn rejected_staged_payload_mismatch_does_not_admit_artifact_evidence() {
+    struct MismatchedStagedArtifactRunner {
+        staged_artifact: ArtifactId,
+        staged_digest: ContentDigest,
+        payload_artifact: ArtifactId,
+        payload_digest: ContentDigest,
+    }
+
+    impl ErasedNodeRunner for MismatchedStagedArtifactRunner {
+        fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
+            Box::pin(async move {
+                let artifact = state_output_artifact(
+                    ctx.node(),
+                    ctx.descriptor(),
+                    self.staged_artifact.clone(),
+                    self.staged_digest.clone(),
+                );
+                let staged_artifact = staged_attempt_artifact(&ctx, artifact)?;
+                Ok(ErasedRunnerOutput {
+                    staged_artifacts: vec![staged_artifact],
+                    staged_retention_refs: Vec::new(),
+                    payloads: terminal_payloads(
+                        &ctx,
+                        self.payload_artifact.clone(),
+                        self.payload_digest.clone(),
+                    ),
+                })
+            })
+        }
+    }
+
+    let fixture = fixture();
+    let node = node_by_output(&fixture, &fixture.cell_a).clone();
+    let staged_artifact = artifact(0xa1);
+    let staged_digest = content(0xa2);
+    let payload_artifact = artifact(0xa3);
+    let payload_digest = content(0xa4);
+    let mut registry = ErasedRunnerRegistry::new();
+    registry
+        .register(binding(
+            fixture.descriptor_a.clone(),
+            "pure",
+            MismatchedStagedArtifactRunner {
+                staged_artifact: staged_artifact.clone(),
+                staged_digest: staged_digest.clone(),
+                payload_artifact,
+                payload_digest,
+            },
+        ))
+        .expect("binding a");
+    registry
+        .register(binding(
+            fixture.descriptor_b.clone(),
+            "read",
+            RecordingRunner {
+                expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
+                output_artifact: artifact(0xb1),
+                output_digest: content(0xb2),
+            },
+        ))
+        .expect("binding b");
+    let scheduler = test_scheduler(registry);
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+    let attempt_id = append_attempt_start(&mut store, &fixture, &node, 1);
+
+    assert!(matches!(
+        scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await,
+        Err(RuntimeError::InvalidRunnerOutput(message))
+            if message.contains("without typed payload reference")
+    ));
+
+    let descriptor = fixture
+        .runtime_spec
+        .state_descriptor_for_node(&node)
+        .expect("descriptor");
+    let output_cell = fixture
+        .runtime_spec
+        .cell(&node.output_cell)
+        .expect("output cell");
+    let attempt_logical_key =
+        store::LogicalEventKey::new(format!("attempt:{}:{}", node.node_id, attempt_id))
+            .expect("attempt key");
+    let leaked_artifact_request = store::TypedCommitRequest {
+        run_id: fixture.run_id.clone(),
+        expected_next_seq: store.expected_next_seq(&fixture.run_id),
+        commit_key: store::CommitKey::new("missing-leaked-staged-artifact").expect("commit key"),
+        payloads: vec![
+            events::KernelEventPayload::CellProduced(events::CellProduced {
+                spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                node_id: node.node_id.clone(),
+                cell_id: node.output_cell.clone(),
+                scope_id: node.scope_id.clone(),
+                attempt_id: attempt_id.clone(),
+                semantic_type_id: descriptor.output_semantic_type_id.clone(),
+                schema_id: descriptor.output_schema_id.clone(),
+                value_lineage: output_cell.value_lineage.clone(),
+                artifact_id: staged_artifact.clone(),
+                content_digest: staged_digest,
+                producer_state_kind: Some(node.state_kind.clone()),
+                producer_state_version: Some(node.state_version.clone()),
+            }),
+            events::KernelEventPayload::StateAttemptCompleted(events::StateAttemptCompleted {
+                spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                node_id: node.node_id.clone(),
+                attempt_id: attempt_id.clone(),
+                output_cell_id: node.output_cell.clone(),
+            }),
+        ],
+        required_artifacts: Vec::new(),
+        preconditions: store::CommitPreconditions {
+            required_run_state: store::RequiredRunState::NotCompleted,
+            required_present_logical_keys: vec![attempt_logical_key],
+            required_cell_states: vec![store::CellStatePrecondition {
+                cell_id: node.output_cell.clone(),
+                required: store::RequiredCellState::Absent,
+            }],
+            ..store::CommitPreconditions::default()
+        },
+    };
+    let commit = store::PreparedTypedCommit::new(leaked_artifact_request, Vec::new())
+        .expect("prepare leak probe");
+    assert!(matches!(
+        store.append_prepared_typed_commit(commit),
+        Err(store::StoreError::MissingArtifact { artifact_id }) if artifact_id == staged_artifact
+    ));
+}
+
+#[test]
+fn materialization_rejects_seed_digest_not_certified() {
+    let fixture = fixture();
+    let mut seed = fixture.seed_ref.clone();
+    seed.digest = content(0xee);
+    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
+    let store = store::InMemoryTypedRunStore::new();
+    assert!(matches!(
+        prepare_fixture_launch(&scheduler, &store, &fixture, vec![seed],),
+        Err(RuntimeError::InvalidRunStream(_))
+    ));
+}
+
+#[test]
+fn run_start_rejects_missing_config_artifact_evidence() {
+    let fixture = fixture();
+    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
+    let store = store::InMemoryTypedRunStore::new();
+    let mut evidence = run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]);
+    evidence.config_artifacts.clear();
+    assert!(matches!(
+        scheduler.prepare_run_launch(
+            &fixture.runtime_spec,
+            fixture.run_id.clone(),
+            evidence,
+            store.expected_next_seq(&fixture.run_id),
+        ),
+        Err(RuntimeError::InvalidRunStream(_))
+    ));
+}
+
+#[test]
+fn run_start_rejects_mismatched_staged_launch_bytes() {
+    let fixture = fixture();
+    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
+    let store = store::InMemoryTypedRunStore::new();
+    let base = run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]);
+
+    let mut bad_spec = base.clone();
+    bad_spec.spec_artifact.bytes.push(b'\n');
+    assert!(matches!(
+        scheduler.prepare_run_launch(
+            &fixture.runtime_spec,
+            fixture.run_id.clone(),
+            bad_spec,
+            store.expected_next_seq(&fixture.run_id),
+        ),
+        Err(RuntimeError::InvalidRunnerOutput(_))
+    ));
+
+    let mut bad_certificate = base.clone();
+    bad_certificate.certificate_artifact.bytes.push(b'\n');
+    assert!(matches!(
+        scheduler.prepare_run_launch(
+            &fixture.runtime_spec,
+            fixture.run_id.clone(),
+            bad_certificate,
+            store.expected_next_seq(&fixture.run_id),
+        ),
+        Err(RuntimeError::InvalidRunnerOutput(_))
+    ));
+
+    let mut bad_config = base.clone();
+    bad_config
+        .config_artifacts
+        .first_mut()
+        .expect("config artifact")
+        .bytes
+        .push(b'\n');
+    assert!(matches!(
+        scheduler.prepare_run_launch(
+            &fixture.runtime_spec,
+            fixture.run_id.clone(),
+            bad_config,
+            store.expected_next_seq(&fixture.run_id),
+        ),
+        Err(RuntimeError::InvalidRunnerOutput(_))
+    ));
+
+    let mut bad_seed = base;
+    bad_seed
+        .seed_cells
+        .first_mut()
+        .expect("seed cell")
+        .bytes
+        .push(b'\n');
+    assert!(matches!(
+        scheduler.prepare_run_launch(
+            &fixture.runtime_spec,
+            fixture.run_id.clone(),
+            bad_seed,
+            store.expected_next_seq(&fixture.run_id),
+        ),
+        Err(RuntimeError::InvalidRunnerOutput(_))
+    ));
+    assert!(store.load_run_stream(&fixture.run_id).is_empty());
+}
+
+#[tokio::test]
+async fn runner_invocation_requires_committed_config_reference() {
+    let fixture = fixture();
+    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+
+    let valid_stream = store.load_run_stream(&fixture.run_id);
+    let config_ref_pos = valid_stream
+        .iter()
+        .position(|event| {
+            matches!(
+                event.payload(),
+                events::KernelEventPayload::ArtifactReferenced(payload)
+                    if payload.artifact_ref.role == events::ArtifactRole::TypedConfig
+            )
+        })
+        .expect("config artifact reference");
+    let mut corrupt_payload = match valid_stream[config_ref_pos].payload().clone() {
+        events::KernelEventPayload::ArtifactReferenced(payload) => payload,
+        _ => unreachable!("position checked"),
+    };
+    corrupt_payload.artifact_ref.role = events::ArtifactRole::StateOutput;
+    let corrupt_stream = rewrite_commit_payload(
+        &valid_stream,
+        config_ref_pos,
+        events::KernelEventPayload::ArtifactReferenced(corrupt_payload),
+    );
+    let mut corrupt_store = StaleStreamStore {
+        inner: &mut store,
+        stream: corrupt_stream,
+    };
+
+    assert!(matches!(
+        scheduler
+            .drive_once(&mut corrupt_store, &fixture.runtime_spec, &fixture.run_id)
+            .await,
+        Err(RuntimeError::InvalidRunStream(message))
+            if message.contains("sealed BootstrapRun genesis commit")
+    ));
+}
+
+#[tokio::test]
+async fn runner_invocation_rejects_config_reference_outside_run_start_commit() {
+    let fixture = fixture();
+    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+
+    let valid_stream = store.load_run_stream(&fixture.run_id);
+    let config_ref = valid_stream
+        .iter()
+        .find_map(|event| match event.payload() {
+            events::KernelEventPayload::ArtifactReferenced(payload)
+                if payload.artifact_ref.role == events::ArtifactRole::TypedConfig =>
+            {
+                Some(event.payload().clone())
+            }
+            _ => None,
+        })
+        .expect("config artifact reference");
+    let mut corrupt_stream = rewrite_stream_without_payloads(&valid_stream, |payload| {
+        matches!(
+            payload,
+            events::KernelEventPayload::ArtifactReferenced(payload)
+                if payload.artifact_ref.role == events::ArtifactRole::TypedConfig
+        )
+    });
+    append_payload_commit_for_tests(
+        &mut corrupt_stream,
+        &fixture.run_id,
+        "late-config-reference",
+        config_ref,
+    );
+    let mut corrupt_store = StaleStreamStore {
+        inner: &mut store,
+        stream: corrupt_stream,
+    };
+
+    assert!(matches!(
+        scheduler
+            .drive_once(&mut corrupt_store, &fixture.runtime_spec, &fixture.run_id)
+            .await,
+        Err(RuntimeError::InvalidRunStream(message))
+            if message.contains("sealed BootstrapRun genesis commit")
+    ));
+}
+
+#[tokio::test]
+async fn runner_invocation_requires_committed_produced_input_artifact_reference() {
+    let fixture = fixture();
+    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+    scheduler
+        .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+        .await
+        .expect("produce first cell");
+
+    let producer_node_id = node_by_output(&fixture, &fixture.cell_a).node_id.clone();
+    let consumer_node_id = node_by_output(&fixture, &fixture.cell_b).node_id.clone();
+    let valid_stream = store.load_run_stream(&fixture.run_id);
+    let corrupt_stream = rewrite_stream_without_payloads(&valid_stream, |payload| {
+        matches!(
+            payload,
+            events::KernelEventPayload::ArtifactReferenced(payload)
+                if payload.artifact_ref.role == events::ArtifactRole::StateOutput
+                    && payload.node_id.as_ref() == Some(&producer_node_id)
+        )
+    });
+    let mut corrupt_store = StaleStreamStore {
+        inner: &mut store,
+        stream: corrupt_stream,
+    };
+
+    assert!(matches!(
+        scheduler
+            .drive_once(&mut corrupt_store, &fixture.runtime_spec, &fixture.run_id)
+            .await,
+        Err(RuntimeError::InputMaterialization(message))
+            if message.contains("is not committed in the run stream")
+    ));
+    assert_eq!(
+        attempt_started_count(&store, &fixture.run_id, &consumer_node_id),
+        0
+    );
+}
+
+#[tokio::test]
+async fn runner_invocation_rejects_late_produced_input_artifact_reference() {
+    let fixture = fixture();
+    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+    scheduler
+        .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+        .await
+        .expect("produce first cell");
+
+    let producer_node_id = node_by_output(&fixture, &fixture.cell_a).node_id.clone();
+    let consumer_node_id = node_by_output(&fixture, &fixture.cell_b).node_id.clone();
+    let valid_stream = store.load_run_stream(&fixture.run_id);
+    let output_ref = valid_stream
+        .iter()
+        .find_map(|event| match event.payload() {
+            events::KernelEventPayload::ArtifactReferenced(payload)
+                if payload.artifact_ref.role == events::ArtifactRole::StateOutput
+                    && payload.node_id.as_ref() == Some(&producer_node_id) =>
+            {
+                Some(event.payload().clone())
+            }
+            _ => None,
+        })
+        .expect("state output artifact reference");
+    let mut corrupt_stream = rewrite_stream_without_payloads(&valid_stream, |payload| {
+        matches!(
+            payload,
+            events::KernelEventPayload::ArtifactReferenced(payload)
+                if payload.artifact_ref.role == events::ArtifactRole::StateOutput
+                    && payload.node_id.as_ref() == Some(&producer_node_id)
+        )
+    });
+    append_payload_commit_for_tests(
+        &mut corrupt_stream,
+        &fixture.run_id,
+        "late-state-output-reference",
+        output_ref,
+    );
+    let mut corrupt_store = StaleStreamStore {
+        inner: &mut store,
+        stream: corrupt_stream,
+    };
+
+    assert!(matches!(
+        scheduler
+            .drive_once(&mut corrupt_store, &fixture.runtime_spec, &fixture.run_id)
+            .await,
+        Err(RuntimeError::InvalidRunStream(message))
+            if message.contains("same-commit typed payload")
+    ));
+    assert_eq!(
+        attempt_started_count(&store, &fixture.run_id, &consumer_node_id),
+        0
+    );
+}
+
+#[tokio::test]
+async fn runner_invocation_rejects_unsupported_artifact_reference_role() {
+    let fixture = fixture();
+    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+
+    let node = node_by_output(&fixture, &fixture.cell_a);
+    let artifact = store::ArtifactEvidenceRef {
+        artifact_id: artifact(0xe1),
+        digest: content(0xe2),
+        byte_len: 17,
+        media_type: spec::MediaType::new("application/json").expect("media"),
+        schema_id: Some(node.config_ref.schema_id.clone()),
+        semantic_type_id: None,
+        producer_node_id: Some(node.node_id.clone()),
+        producer_seed_id: None,
+        artifact_role: events::ArtifactRole::SideEffectIntent,
+    };
+    let mut corrupt_stream = store.load_run_stream(&fixture.run_id);
+    append_payload_commit_for_tests(
+        &mut corrupt_stream,
+        &fixture.run_id,
+        "unsupported-artifact-reference",
+        events::KernelEventPayload::ArtifactReferenced(events::ArtifactReferenced {
+            spec_hash: fixture.runtime_spec.spec_hash().clone(),
+            node_id: Some(node.node_id.clone()),
+            attempt_id: None,
+            artifact_ref: event_artifact_ref_from_store(&artifact),
+        }),
+    );
+    let mut corrupt_store = StaleStreamStore {
+        inner: &mut store,
+        stream: corrupt_stream,
+    };
+
+    assert!(matches!(
+        scheduler
+            .drive_once(&mut corrupt_store, &fixture.runtime_spec, &fixture.run_id)
+            .await,
+        Err(RuntimeError::InvalidRunStream(message))
+            if message.contains("unsupported artifact reference role")
+    ));
+}
+
+#[tokio::test]
+async fn replay_rejects_terminal_cell_producer_outside_certified_spec() {
+    let fixture = fixture();
+    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+
+    let forged_node = fixture
+        .runtime_spec
+        .topological_order()
+        .iter()
+        .filter_map(|node_id| fixture.runtime_spec.node(node_id))
+        .find(|node| node.output_cell != fixture.cell_a)
+        .expect("second node")
+        .clone();
+    let certified_cell = fixture
+        .runtime_spec
+        .cell(&fixture.cell_a)
+        .expect("cell a")
+        .clone();
+    let forged_attempt = AttemptId::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        DigestBytes::from_array([0xfa; 32]),
+    );
+    let artifact_id = artifact(0xfa);
+    let artifact_digest = content(0xfb);
+    let forged_artifact = store::ArtifactEvidenceRef {
+        artifact_id: artifact_id.clone(),
+        digest: artifact_digest.clone(),
+        byte_len: 10,
+        media_type: spec::MediaType::new("application/json").expect("media"),
+        schema_id: Some(certified_cell.schema_id.clone()),
+        semantic_type_id: Some(certified_cell.semantic_type_id.clone()),
+        producer_node_id: Some(forged_node.node_id.clone()),
+        producer_seed_id: None,
+        artifact_role: events::ArtifactRole::StateOutput,
+    };
+    store
+        .append_prepared_commit(store::TypedCommitRequest {
+            run_id: fixture.run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&fixture.run_id),
+            commit_key: store::CommitKey::new("forged-attempt-start").expect("commit key"),
+            payloads: vec![events::KernelEventPayload::StateAttemptStarted(
+                events::StateAttemptStarted {
+                    spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                    node_id: forged_node.node_id.clone(),
+                    attempt_id: forged_attempt.clone(),
+                    attempt_no: 1,
+                    state_kind: forged_node.state_kind.clone(),
+                    state_version: forged_node.state_version.clone(),
+                },
+            )],
+            required_artifacts: Vec::new(),
+            preconditions: store::CommitPreconditions {
+                required_run_state: store::RequiredRunState::NotCompleted,
+                ..store::CommitPreconditions::default()
+            },
+        })
+        .expect("append forged attempt start");
+    store
+        .append_prepared_commit(store::TypedCommitRequest {
+            run_id: fixture.run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&fixture.run_id),
+            commit_key: store::CommitKey::new("forged-terminal").expect("commit key"),
+            payloads: vec![
+                events::KernelEventPayload::CellProduced(events::CellProduced {
+                    spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                    node_id: forged_node.node_id.clone(),
+                    cell_id: fixture.cell_a.clone(),
+                    scope_id: certified_cell.scope_id.clone(),
+                    attempt_id: forged_attempt.clone(),
+                    semantic_type_id: certified_cell.semantic_type_id.clone(),
+                    schema_id: certified_cell.schema_id.clone(),
+                    value_lineage: certified_cell.value_lineage.clone(),
+                    artifact_id,
+                    content_digest: artifact_digest,
+                    producer_state_kind: Some(forged_node.state_kind.clone()),
+                    producer_state_version: Some(forged_node.state_version.clone()),
+                }),
+                events::KernelEventPayload::StateAttemptCompleted(events::StateAttemptCompleted {
+                    spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                    node_id: forged_node.node_id.clone(),
+                    attempt_id: forged_attempt,
+                    output_cell_id: fixture.cell_a.clone(),
+                }),
+            ],
+            required_artifacts: vec![forged_artifact],
+            preconditions: store::CommitPreconditions {
+                required_run_state: store::RequiredRunState::NotCompleted,
+                ..store::CommitPreconditions::default()
+            },
+        })
+        .expect("append forged terminal");
+
+    assert!(matches!(
+        scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await,
+        Err(RuntimeError::InvalidRunStream(_))
+    ));
+}
+
+#[tokio::test]
+async fn store_rejects_fact_without_started_attempt() {
+    let fixture = fixture();
+    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+    let node = fixture
+        .runtime_spec
+        .topological_order()
+        .iter()
+        .filter_map(|node_id| fixture.runtime_spec.node(node_id))
+        .find(|node| node.output_cell == fixture.cell_b)
+        .expect("read node")
+        .clone();
+    let fact_artifact = artifact(0xd1);
+    let fact_digest = content(0xd2);
+    let fact_schema = node.config_ref.schema_id.clone();
+    let fact_evidence = store::ArtifactEvidenceRef {
+        artifact_id: fact_artifact.clone(),
+        digest: fact_digest.clone(),
+        byte_len: 10,
+        media_type: spec::MediaType::new("application/json").expect("media"),
+        schema_id: Some(fact_schema.clone()),
+        semantic_type_id: None,
+        producer_node_id: Some(node.node_id.clone()),
+        producer_seed_id: None,
+        artifact_role: events::ArtifactRole::FactResponse,
+    };
+    assert!(store
+        .append_prepared_commit(store::TypedCommitRequest {
+            run_id: fixture.run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&fixture.run_id),
+            commit_key: store::CommitKey::new("forged-fact").expect("commit key"),
+            payloads: vec![events::KernelEventPayload::FactRecorded(
+                events::FactRecorded {
+                    spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                    node_id: node.node_id.clone(),
+                    attempt_id: AttemptId::from_digest(
+                        DigestAlgorithm::Sha256JcsV1,
+                        DigestBytes::from_array([0xd3; 32]),
+                    ),
+                    capability_kind: fixture.cap_kind.clone(),
+                    capability_version: fixture.cap_version.clone(),
+                    adapter_kind: fixture.adapter_kind.clone(),
+                    adapter_version: fixture.adapter_version.clone(),
+                    request_schema_id: fact_schema.clone(),
+                    request_hash: content(0xd4),
+                    response_schema_id: fact_schema,
+                    response_hash: fact_digest,
+                    fact_key: events::FactKey::new("forged-fact").expect("fact key"),
+                    artifact_id: fact_artifact,
+                },
+            )],
+            required_artifacts: vec![fact_evidence],
+            preconditions: store::CommitPreconditions {
+                required_run_state: store::RequiredRunState::NotCompleted,
+                ..store::CommitPreconditions::default()
+            },
+        })
+        .is_err());
+}
+
+#[tokio::test]
+async fn replay_rejects_public_output_without_render_attempt() {
+    let fixture = fixture();
+    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+    let non_render_node = fixture
+        .runtime_spec
+        .topological_order()
+        .iter()
+        .filter_map(|node_id| fixture.runtime_spec.node(node_id))
+        .find(|node| node.output_cell == fixture.cell_a)
+        .expect("non-render node")
+        .clone();
+    let public_cell = fixture
+        .runtime_spec
+        .spec()
+        .public_outputs
+        .outputs
+        .first()
+        .expect("public cell")
+        .clone();
+    let source_artifact = artifact(0xe1);
+    let source_digest = content(0xe2);
+    let producer_node_id = match &public_cell.producer {
+        spec::CellProducer::Node(node_id) => Some(node_id.clone()),
+        spec::CellProducer::Seed(_) => None,
+    };
+    let source_evidence = store::ArtifactEvidenceRef {
+        artifact_id: source_artifact.clone(),
+        digest: source_digest.clone(),
+        byte_len: 10,
+        media_type: spec::MediaType::new("application/json").expect("media"),
+        schema_id: Some(public_cell.schema_id.clone()),
+        semantic_type_id: Some(public_cell.semantic_type_id.clone()),
+        producer_node_id,
+        producer_seed_id: None,
+        artifact_role: events::ArtifactRole::StateOutput,
+    };
+    let forged_attempt = append_attempt_start(&mut store, &fixture, &non_render_node, 1);
+    let output_cell = fixture
+        .runtime_spec
+        .cell(&non_render_node.output_cell)
+        .expect("non-render output")
+        .clone();
+    let receipt_artifact = artifact(0xe3);
+    let receipt_digest = content(0xe4);
+    let receipt_evidence = store::ArtifactEvidenceRef {
+        artifact_id: receipt_artifact.clone(),
+        digest: receipt_digest.clone(),
+        byte_len: 10,
+        media_type: spec::MediaType::new("application/json").expect("media"),
+        schema_id: Some(output_cell.schema_id.clone()),
+        semantic_type_id: Some(output_cell.semantic_type_id.clone()),
+        producer_node_id: Some(non_render_node.node_id.clone()),
+        producer_seed_id: None,
+        artifact_role: events::ArtifactRole::StateOutput,
+    };
+    store
+        .append_prepared_commit(store::TypedCommitRequest {
+            run_id: fixture.run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&fixture.run_id),
+            commit_key: store::CommitKey::new("forged-public-output").expect("commit key"),
+            payloads: vec![
+                events::KernelEventPayload::CellProduced(events::CellProduced {
+                    spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                    node_id: non_render_node.node_id.clone(),
+                    cell_id: non_render_node.output_cell.clone(),
+                    scope_id: output_cell.scope_id.clone(),
+                    attempt_id: forged_attempt.clone(),
+                    semantic_type_id: output_cell.semantic_type_id.clone(),
+                    schema_id: output_cell.schema_id.clone(),
+                    value_lineage: output_cell.value_lineage.clone(),
+                    artifact_id: receipt_artifact,
+                    content_digest: receipt_digest,
+                    producer_state_kind: Some(non_render_node.state_kind.clone()),
+                    producer_state_version: Some(non_render_node.state_version.clone()),
+                }),
+                events::KernelEventPayload::PublicOutputProduced(events::PublicOutputProduced {
+                    spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                    node_id: non_render_node.node_id.clone(),
+                    attempt_id: forged_attempt.clone(),
+                    receipt_cell_id: non_render_node.output_cell.clone(),
+                    public_schema_id: fixture
+                        .runtime_spec
+                        .spec()
+                        .public_outputs
+                        .public_schema_id
+                        .clone(),
+                    output_spec_digest: fixture
+                        .runtime_spec
+                        .spec()
+                        .public_outputs
+                        .digest()
+                        .expect("public digest"),
+                    cells: vec![events::NamedTypedCellRef {
+                        public_field_path: public_cell.public_field_path.clone(),
+                        cell_id: public_cell.cell_id.clone(),
+                        producer: public_cell.producer.clone(),
+                        scope_id: public_cell.scope_id.clone(),
+                        semantic_type_id: public_cell.semantic_type_id.clone(),
+                        schema_id: public_cell.schema_id.clone(),
+                        value_lineage: public_cell.value_lineage.clone(),
+                        content_digest: source_digest,
+                        artifact_id: source_artifact,
+                    }],
+                    rendered_digest: content(0xe5),
+                    rendered_artifact_id: None,
+                    renderer_descriptor_id: fixture
+                        .runtime_spec
+                        .spec()
+                        .public_outputs
+                        .renderer_descriptor
+                        .descriptor_id
+                        .clone(),
+                }),
+                events::KernelEventPayload::StateAttemptCompleted(events::StateAttemptCompleted {
+                    spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                    node_id: non_render_node.node_id.clone(),
+                    attempt_id: forged_attempt.clone(),
+                    output_cell_id: non_render_node.output_cell.clone(),
+                }),
+            ],
+            required_artifacts: vec![source_evidence, receipt_evidence],
+            preconditions: store::CommitPreconditions {
+                required_run_state: store::RequiredRunState::NotCompleted,
+                required_present_logical_keys: vec![store::LogicalEventKey::new(format!(
+                    "attempt:{}:{}",
+                    non_render_node.node_id, forged_attempt
+                ))
+                .expect("attempt key")],
+                required_cell_states: vec![store::CellStatePrecondition {
+                    cell_id: non_render_node.output_cell.clone(),
+                    required: store::RequiredCellState::Absent,
+                }],
+                required_public_output_absent: true,
+                ..store::CommitPreconditions::default()
+            },
+        })
+        .expect("append forged public output");
+    assert!(matches!(
+        scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await,
+        Err(RuntimeError::InvalidRunStream(_))
+    ));
+}
+
+#[tokio::test]
+async fn replay_rejects_public_output_with_forged_rendered_digest() {
+    let fixture = fixture();
+    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+    scheduler
+        .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+        .await
+        .expect("drive a");
+    scheduler
+        .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+        .await
+        .expect("drive b");
+
+    let render_node = node_by_output(&fixture, &fixture.render_cell).clone();
+    let attempt_id = append_attempt_start(&mut store, &fixture, &render_node, 1);
+    let output_cell = fixture
+        .runtime_spec
+        .cell(&render_node.output_cell)
+        .expect("render output")
+        .clone();
+    let bad_rendered_digest = content(0xf1);
+    let bad_receipt_digest = content(0xf2);
+    let bad_receipt_artifact =
+        ArtifactId::from_digest(bad_receipt_digest.algorithm(), *bad_receipt_digest.digest());
+    let bad_receipt_evidence = store::ArtifactEvidenceRef {
+        artifact_id: bad_receipt_artifact.clone(),
+        digest: bad_receipt_digest.clone(),
+        byte_len: 17,
+        media_type: spec::MediaType::new("application/json").expect("media"),
+        schema_id: Some(output_cell.schema_id.clone()),
+        semantic_type_id: Some(output_cell.semantic_type_id.clone()),
+        producer_node_id: Some(render_node.node_id.clone()),
+        producer_seed_id: None,
+        artifact_role: events::ArtifactRole::StateOutput,
+    };
+    let public_cells = fixture
+        .runtime_spec
+        .spec()
+        .public_outputs
+        .outputs
+        .iter()
+        .map(|public_cell| {
+            let Some(store::CellTerminalProjection::Produced {
+                artifact_id,
+                content_digest,
+                ..
+            }) = store
+                .projection_snapshot()
+                .cell_terminal(&public_cell.cell_id)
+            else {
+                panic!("public cell should be produced");
+            };
+            events::NamedTypedCellRef {
+                public_field_path: public_cell.public_field_path.clone(),
+                cell_id: public_cell.cell_id.clone(),
+                producer: public_cell.producer.clone(),
+                scope_id: public_cell.scope_id.clone(),
+                semantic_type_id: public_cell.semantic_type_id.clone(),
+                schema_id: public_cell.schema_id.clone(),
+                value_lineage: public_cell.value_lineage.clone(),
+                content_digest: content_digest.clone(),
+                artifact_id: artifact_id.clone(),
+            }
+        })
+        .collect::<Vec<_>>();
+    let Some(spec::FrameworkNodeSpec::PublicOutputRender(render)) = &render_node.framework else {
+        panic!("expected render node");
+    };
+    store
+        .append_prepared_commit(store::TypedCommitRequest {
+            run_id: fixture.run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&fixture.run_id),
+            commit_key: store::CommitKey::new("forged-public-output-rendered-digest")
+                .expect("commit key"),
+            payloads: vec![
+                events::KernelEventPayload::CellProduced(events::CellProduced {
+                    spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                    node_id: render_node.node_id.clone(),
+                    cell_id: render_node.output_cell.clone(),
+                    scope_id: output_cell.scope_id.clone(),
+                    attempt_id: attempt_id.clone(),
+                    semantic_type_id: output_cell.semantic_type_id.clone(),
+                    schema_id: output_cell.schema_id.clone(),
+                    value_lineage: output_cell.value_lineage.clone(),
+                    artifact_id: bad_receipt_artifact,
+                    content_digest: bad_receipt_digest,
+                    producer_state_kind: Some(render_node.state_kind.clone()),
+                    producer_state_version: Some(render_node.state_version.clone()),
+                }),
+                events::KernelEventPayload::PublicOutputProduced(events::PublicOutputProduced {
+                    spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                    node_id: render_node.node_id.clone(),
+                    attempt_id: attempt_id.clone(),
+                    receipt_cell_id: render_node.output_cell.clone(),
+                    public_schema_id: render.public_schema_id.clone(),
+                    output_spec_digest: render.output_spec_digest.clone(),
+                    cells: public_cells,
+                    rendered_digest: bad_rendered_digest,
+                    rendered_artifact_id: None,
+                    renderer_descriptor_id: render.renderer_descriptor.descriptor_id.clone(),
+                }),
+                events::KernelEventPayload::StateAttemptCompleted(events::StateAttemptCompleted {
+                    spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                    node_id: render_node.node_id.clone(),
+                    attempt_id: attempt_id.clone(),
+                    output_cell_id: render_node.output_cell.clone(),
+                }),
+            ],
+            required_artifacts: vec![bad_receipt_evidence],
+            preconditions: store::CommitPreconditions {
+                required_run_state: store::RequiredRunState::NotCompleted,
+                required_present_logical_keys: vec![store::LogicalEventKey::new(format!(
+                    "attempt:{}:{}",
+                    render_node.node_id, attempt_id
+                ))
+                .expect("attempt key")],
+                required_cell_states: vec![store::CellStatePrecondition {
+                    cell_id: render_node.output_cell.clone(),
+                    required: store::RequiredCellState::Absent,
+                }],
+                required_public_output_absent: true,
+                ..store::CommitPreconditions::default()
+            },
+        })
+        .expect("append forged public output");
+
+    assert!(matches!(
+        scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await,
+        Err(RuntimeError::InvalidRunStream(message))
+            if message.contains("rendered digest")
+    ));
+}
+
+#[tokio::test]
+async fn replay_rejects_split_public_output_terminal_commit() {
+    let fixture = fixture();
+    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+    scheduler
+        .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+        .await
+        .expect("drive a");
+    scheduler
+        .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+        .await
+        .expect("drive b");
+    scheduler
+        .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+        .await
+        .expect("render public output");
+
+    let stream = store.load_run_stream(&fixture.run_id);
+    let corrupt_stream = split_public_output_payload_to_own_commit_for_tests(&stream);
+    let projection =
+        store::ProjectionSnapshot::rebuild_from_run_stream(&corrupt_stream).expect("rebuild");
+    let mut corrupt_store = ReadOnlyCorruptStore {
+        stream: corrupt_stream,
+        projection,
+    };
+
+    assert!(matches!(
+        scheduler
+            .drive_once(&mut corrupt_store, &fixture.runtime_spec, &fixture.run_id)
+            .await,
+        Err(RuntimeError::InvalidRunStream(message))
+            if message.contains("split from receipt terminal")
+    ));
+}
+
+#[tokio::test]
+async fn recovery_continues_started_pure_attempt_with_same_attempt_id() {
+    let fixture = fixture();
+    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+    let node = node_by_output(&fixture, &fixture.cell_a);
+    let attempt_id = append_attempt_start(&mut store, &fixture, node, 1);
+
+    assert_eq!(
+        scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("resume pure"),
+        SchedulerStatus::Advanced
+    );
+    assert_eq!(
+        attempt_started_count(&store, &fixture.run_id, &node.node_id),
+        1
+    );
+    match store
+        .projection_snapshot()
+        .cell_terminal(&fixture.cell_a)
+        .expect("terminal cell")
+    {
+        store::CellTerminalProjection::Produced {
+            attempt_id: produced_attempt,
+            ..
+        } => assert_eq!(produced_attempt, &attempt_id),
+        terminal => panic!("unexpected terminal projection: {terminal:?}"),
+    }
+}
+
+#[tokio::test]
+async fn recovery_rejects_split_terminal_cell_and_attempt_completion() {
+    let fixture = fixture();
+    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+    scheduler
+        .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+        .await
+        .expect("produce first cell");
+    let valid_stream = store.load_run_stream(&fixture.run_id);
+    let corrupt_stream = rewrite_stream_without_payloads(&valid_stream, |payload| {
+        matches!(
+            payload,
+            events::KernelEventPayload::StateAttemptCompleted(payload)
+                if payload.output_cell_id == fixture.cell_a
+        )
+    });
+    let mut corrupt_store = StaleStreamStore {
+        inner: &mut store,
+        stream: corrupt_stream,
+    };
+
+    assert!(matches!(
+        scheduler
+            .drive_once(&mut corrupt_store, &fixture.runtime_spec, &fixture.run_id)
+            .await,
+        Err(RuntimeError::InvalidRunStream(_))
+    ));
+}
+
+#[tokio::test]
+async fn recovery_rejects_attempt_started_before_inputs_were_terminal() {
+    let fixture = fixture();
+    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+    let node_a = node_by_output(&fixture, &fixture.cell_a);
+    let node_b = node_by_output(&fixture, &fixture.cell_b);
+    append_attempt_start(&mut store, &fixture, node_b, 1);
+    let attempt_a = append_attempt_start(&mut store, &fixture, node_a, 1);
+    append_terminal(
+        &mut store,
+        &fixture,
+        node_a,
+        &attempt_a,
+        artifact(0xa1),
+        content(0xa2),
+    );
+
+    assert!(matches!(
+        scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await,
+        Err(RuntimeError::InvalidRunStream(_))
+    ));
+}
+
+#[tokio::test]
+async fn recovery_reuses_committed_read_facts_for_same_attempt() {
+    struct FactReuseRunner {
+        fact_key: events::FactKey,
+        output_artifact: ArtifactId,
+        output_digest: ContentDigest,
+    }
+
+    impl ErasedNodeRunner for FactReuseRunner {
+        fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
+            Box::pin(async move {
+                let fact = ctx
+                    .recorded_facts()
+                    .get(&self.fact_key)
+                    .expect("recorded fact");
+                assert_eq!(fact.fact_key, self.fact_key);
+                assert_eq!(fact.request_schema_id, ctx.node().config_ref.schema_id);
+                assert_eq!(ctx.recorded_facts().iter().count(), 1);
+                let artifact = store::ArtifactEvidenceRef {
+                    artifact_id: self.output_artifact.clone(),
+                    digest: self.output_digest.clone(),
+                    byte_len: 17,
+                    media_type: spec::MediaType::new("application/json").expect("media"),
+                    schema_id: Some(ctx.descriptor().output_schema_id.clone()),
+                    semantic_type_id: Some(ctx.descriptor().output_semantic_type_id.clone()),
+                    producer_node_id: Some(ctx.node().node_id.clone()),
+                    producer_seed_id: None,
+                    artifact_role: events::ArtifactRole::StateOutput,
+                };
+                let staged_artifact = staged_attempt_artifact(&ctx, artifact)?;
+                Ok(ErasedRunnerOutput {
+                    staged_artifacts: vec![staged_artifact],
+                    staged_retention_refs: Vec::new(),
+                    payloads: terminal_payloads(
+                        &ctx,
+                        self.output_artifact.clone(),
+                        self.output_digest.clone(),
+                    ),
+                })
+            })
+        }
+    }
+
+    let fixture = fixture();
+    let fact_key = events::FactKey::new("reused-fact").expect("fact key");
+    let mut registry = ErasedRunnerRegistry::new();
+    registry
+        .register(binding(
+            fixture.descriptor_a.clone(),
+            "pure",
+            RecordingRunner {
+                expected_caps: Vec::new(),
+                output_artifact: artifact(0xa1),
+                output_digest: content(0xa2),
+            },
+        ))
+        .expect("binding a");
+    registry
+        .register(binding(
+            fixture.descriptor_b.clone(),
+            "read",
+            FactReuseRunner {
+                fact_key: fact_key.clone(),
+                output_artifact: artifact(0xb1),
+                output_digest: content(0xb2),
+            },
+        ))
+        .expect("binding b");
+    let scheduler = test_scheduler(registry);
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+    scheduler
+        .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+        .await
+        .expect("produce input");
+    let node = node_by_output(&fixture, &fixture.cell_b);
+    let attempt_id = append_attempt_start(&mut store, &fixture, node, 1);
+    append_fact(
+        &mut store,
+        &fixture,
+        node,
+        &attempt_id,
+        fact_key.clone(),
+        artifact(0xd1),
+        content(0xd2),
+    );
+
+    scheduler
+        .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+        .await
+        .expect("resume read");
+    assert_eq!(fact_recorded_count(&store), 1);
+    match store
+        .projection_snapshot()
+        .cell_terminal(&fixture.cell_b)
+        .expect("terminal cell")
+    {
+        store::CellTerminalProjection::Produced {
+            attempt_id: produced_attempt,
+            ..
+        } => assert_eq!(produced_attempt, &attempt_id),
+        terminal => panic!("unexpected terminal projection: {terminal:?}"),
+    }
+}
+
+#[tokio::test]
+async fn recovery_rejects_new_fact_after_same_attempt_fact_exists() {
+    struct NewFactRunner {
+        cap_kind: CapabilityKind,
+        cap_version: CapabilityVersion,
+        adapter_kind: AdapterKind,
+        adapter_version: AdapterVersion,
+    }
+
+    impl ErasedNodeRunner for NewFactRunner {
+        fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
+            Box::pin(async move {
+                Ok(ErasedRunnerOutput::new(vec![
+                    RunnerEventPayload::FactRecorded(events::FactRecorded {
+                        spec_hash: ctx.spec_hash().clone(),
+                        node_id: ctx.node().node_id.clone(),
+                        attempt_id: ctx.attempt_id().clone(),
+                        capability_kind: self.cap_kind.clone(),
+                        capability_version: self.cap_version.clone(),
+                        adapter_kind: self.adapter_kind.clone(),
+                        adapter_version: self.adapter_version.clone(),
+                        request_schema_id: ctx.node().config_ref.schema_id.clone(),
+                        request_hash: content(0xe1),
+                        response_schema_id: ctx.node().config_ref.schema_id.clone(),
+                        response_hash: content(0xe2),
+                        fact_key: events::FactKey::new("new-fact").expect("fact key"),
+                        artifact_id: artifact(0xe3),
+                    }),
+                ]))
+            })
+        }
+    }
+
+    let fixture = fixture();
+    let mut registry = ErasedRunnerRegistry::new();
+    registry
+        .register(binding(
+            fixture.descriptor_a.clone(),
+            "pure",
+            RecordingRunner {
+                expected_caps: Vec::new(),
+                output_artifact: artifact(0xa1),
+                output_digest: content(0xa2),
+            },
+        ))
+        .expect("binding a");
+    registry
+        .register(binding(
+            fixture.descriptor_b.clone(),
+            "read",
+            NewFactRunner {
+                cap_kind: fixture.cap_kind.clone(),
+                cap_version: fixture.cap_version.clone(),
+                adapter_kind: fixture.adapter_kind.clone(),
+                adapter_version: fixture.adapter_version.clone(),
+            },
+        ))
+        .expect("binding b");
+    let scheduler = test_scheduler(registry);
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+    scheduler
+        .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+        .await
+        .expect("produce input");
+    let node = node_by_output(&fixture, &fixture.cell_b);
+    let attempt_id = append_attempt_start(&mut store, &fixture, node, 1);
+    append_fact(
+        &mut store,
+        &fixture,
+        node,
+        &attempt_id,
+        events::FactKey::new("existing-fact").expect("fact key"),
+        artifact(0xd1),
+        content(0xd2),
+    );
+
+    assert!(matches!(
+        scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await,
+        Err(RuntimeError::InvalidRunnerOutput(_))
+    ));
+    assert_eq!(store.projection_snapshot().facts().count(), 1);
+}
+
+#[tokio::test]
+async fn recovery_allows_managed_write_artifact_restage_before_terminal_commit() {
+    let fixture = fixture_with_first_managed_write_state();
+    let output_artifact = artifact(0xa1);
+    let output_digest = content(0xa2);
+    let node = node_by_output(&fixture, &fixture.cell_a);
+    let expected_caps = node
+        .capability_bindings
+        .capabilities
+        .iter()
+        .map(|capability| (capability.kind.clone(), capability.version.clone()))
+        .collect();
+    let mut registry = ErasedRunnerRegistry::new();
+    registry
+        .register(binding(
+            fixture.descriptor_a.clone(),
+            "managed-write",
+            RecordingRunner {
+                expected_caps,
+                output_artifact: output_artifact.clone(),
+                output_digest: output_digest.clone(),
+            },
+        ))
+        .expect("binding a");
+    registry
+        .register(binding(
+            fixture.descriptor_b.clone(),
+            "read",
+            RecordingRunner {
+                expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
+                output_artifact: artifact(0xb1),
+                output_digest: content(0xb2),
+            },
+        ))
+        .expect("binding b");
+    let scheduler = test_scheduler(registry);
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+    let attempt_id = append_attempt_start(&mut store, &fixture, node, 1);
+    assert!(store
+        .projection_snapshot()
+        .cell_terminal(&fixture.cell_a)
+        .is_none());
+
+    scheduler
+        .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+        .await
+        .expect("resume managed write");
+    assert_eq!(
+        attempt_started_count(&store, &fixture.run_id, &node.node_id),
+        1
+    );
+    match store
+        .projection_snapshot()
+        .cell_terminal(&fixture.cell_a)
+        .expect("terminal cell")
+    {
+        store::CellTerminalProjection::Produced {
+            attempt_id: produced_attempt,
+            ..
+        } => assert_eq!(produced_attempt, &attempt_id),
+        terminal => panic!("unexpected terminal projection: {terminal:?}"),
+    }
+}
+
+#[tokio::test]
+async fn side_effect_scheduler_commits_durable_ledger_phases_before_output() {
+    let fixture = fixture_with_first_side_effect_state();
+    let scheduler = test_scheduler(registered_side_effect_fixture_runners(&fixture));
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+
+    for _ in 0..6 {
+        assert_eq!(
+            scheduler
+                .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+                .await
+                .expect("drive side effect phase"),
+            SchedulerStatus::Advanced
+        );
+    }
+
+    assert!(store
+        .projection_snapshot()
+        .cell_terminal(&fixture.cell_a)
+        .is_some());
+    let node = node_by_output(&fixture, &fixture.cell_a);
+    let attempt_id = attempt_id(
+        &fixture.run_id,
+        fixture.runtime_spec.spec_hash(),
+        &node.node_id,
+        1,
+    )
+    .expect("attempt id");
+    let projection =
+        side_effect_projection_for_attempt(store.projection_snapshot(), node, &attempt_id)
+            .expect("projection lookup")
+            .expect("side-effect projection");
+    assert!(matches!(
+        projection.phase,
+        store::SideEffectPhase::ConfirmationObserved { .. }
+    ));
+    assert!(store
+        .load_run_stream(&fixture.run_id)
+        .iter()
+        .any(|event| matches!(
+            event.payload(),
+            events::KernelEventPayload::SideEffectClaimTakenOver(_)
+        )));
+    assert_eq!(
+        attempt_started_count(&store, &fixture.run_id, &node.node_id),
+        1
+    );
+}
+
+#[tokio::test]
+async fn side_effect_not_submitted_resume_claims_next_epoch() {
+    let fixture = fixture_with_first_side_effect_state();
+    let scheduler = test_scheduler(registered_side_effect_fixture_runners(&fixture));
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+    scheduler
+        .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+        .await
+        .expect("prepare side effect");
+    scheduler
+        .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+        .await
+        .expect("take over and start invocation");
+
+    let node = node_by_output(&fixture, &fixture.cell_a);
+    let attempt_id = attempt_id(
+        &fixture.run_id,
+        fixture.runtime_spec.spec_hash(),
+        &node.node_id,
+        1,
+    )
+    .expect("attempt id");
+    append_not_submitted_proven(&mut store, &fixture, node, &attempt_id, 1);
+
+    scheduler
+        .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+        .await
+        .expect("resume not-submitted");
+    let projection =
+        side_effect_projection_for_attempt(store.projection_snapshot(), node, &attempt_id)
+            .expect("projection lookup")
+            .expect("side-effect projection");
+    assert!(matches!(
+        projection.phase,
+        store::SideEffectPhase::InvocationStarted {
+            invocation_epoch: 2,
+            claim_generation: 3,
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn side_effect_staged_artifact_must_match_payload_ledger_binding() {
+    struct WrongLedgerStagedSideEffectRunner {
+        cap_kind: CapabilityKind,
+        cap_version: CapabilityVersion,
+        adapter_kind: AdapterKind,
+        adapter_version: AdapterVersion,
+    }
+
+    impl ErasedNodeRunner for WrongLedgerStagedSideEffectRunner {
+        fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
+            Box::pin(async move {
+                let ledger = side_effect_ledger_key(ctx.attempt_no());
+                let staged_ledger =
+                    events::SideEffectLedgerKey::new("wrong-ledger").expect("ledger key");
+                let intent_bytes = br#"{"intent":"wrong-ledger"}"#.to_vec();
+                let intent_hash = digest_for_bytes(&intent_bytes);
+                let intent_artifact_id =
+                    ArtifactId::from_digest(intent_hash.algorithm(), *intent_hash.digest());
+                let evidence = store::ArtifactEvidenceRef {
+                    artifact_id: intent_artifact_id.clone(),
+                    digest: intent_hash.clone(),
+                    byte_len: intent_bytes.len() as u64,
+                    media_type: spec::MediaType::new("application/json").expect("media"),
+                    schema_id: Some(ctx.node().config_ref.schema_id.clone()),
+                    semantic_type_id: None,
+                    producer_node_id: Some(ctx.node().node_id.clone()),
+                    producer_seed_id: None,
+                    artifact_role: events::ArtifactRole::SideEffectIntent,
+                };
+                let staged_artifact = StagedArtifact::inline_side_effect_artifact(
+                    &ctx,
+                    intent_bytes,
+                    evidence,
+                    staged_ledger,
+                    1,
+                )?;
+                Ok(ErasedRunnerOutput {
+                    staged_artifacts: vec![staged_artifact],
+                    staged_retention_refs: Vec::new(),
+                    payloads: vec![
+                        RunnerEventPayload::SideEffectIntentPersisted(
+                            events::side_effect::IntentPersisted {
+                                spec_hash: ctx.spec_hash().clone(),
+                                node_id: ctx.node().node_id.clone(),
+                                scope_id: ctx.node().scope_id.clone(),
+                                attempt_id: ctx.attempt_id().clone(),
+                                ledger_key: ledger.clone(),
+                                invocation_epoch: 1,
+                                intent_schema_id: ctx.node().config_ref.schema_id.clone(),
+                                intent_hash,
+                                intent_artifact_id,
+                                idempotency_input_schema_id: ctx
+                                    .node()
+                                    .config_ref
+                                    .schema_id
+                                    .clone(),
+                                idempotency_input_hash: content(0xc3),
+                                idempotency_key: events::IdempotencyKeyRef::new("idem-1")
+                                    .expect("idempotency key"),
+                                capability_kind: self.cap_kind.clone(),
+                                capability_version: self.cap_version.clone(),
+                                adapter_kind: self.adapter_kind.clone(),
+                                adapter_version: self.adapter_version.clone(),
+                            },
+                        ),
+                        side_effect_claimed(&ctx, ledger.clone(), 1, 1),
+                        side_effect_prepared(&ctx, ledger, 1, 1),
+                    ],
+                })
+            })
+        }
+    }
+
+    let fixture = fixture_with_first_side_effect_state();
+    let mut registry = ErasedRunnerRegistry::new();
+    registry
+        .register(binding(
+            fixture.descriptor_a.clone(),
+            "sidefx",
+            WrongLedgerStagedSideEffectRunner {
+                cap_kind: side_effect_capability_kind(),
+                cap_version: side_effect_capability_version(),
+                adapter_kind: fixture.adapter_kind.clone(),
+                adapter_version: fixture.adapter_version.clone(),
+            },
+        ))
+        .expect("binding a");
+    registry
+        .register(binding(
+            fixture.descriptor_b.clone(),
+            "read",
+            RecordingRunner {
+                expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
+                output_artifact: artifact(0xb1),
+                output_digest: content(0xb2),
+            },
+        ))
+        .expect("binding b");
+    let scheduler = test_scheduler(registry);
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+
+    assert!(matches!(
+        scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await,
+        Err(RuntimeError::InvalidRunnerOutput(message))
+            if message.contains("does not match typed payload binding")
+    ));
+}
+
+#[tokio::test]
+async fn side_effect_ambiguous_phase_blocks_resume() {
+    let fixture = fixture_with_first_side_effect_state();
+    let mut registry = ErasedRunnerRegistry::new();
+    registry
+        .register(binding(
+            fixture.descriptor_a.clone(),
+            "sidefx",
+            AmbiguousSideEffectRunner::new(&fixture),
+        ))
+        .expect("binding a");
+    registry
+        .register(binding(
+            fixture.descriptor_b.clone(),
+            "read",
+            RecordingRunner {
+                expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
+                output_artifact: artifact(0xb1),
+                output_digest: content(0xb2),
+            },
+        ))
+        .expect("binding b");
+    let scheduler = test_scheduler(registry);
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+
+    for _ in 0..3 {
+        assert_eq!(
+            scheduler
+                .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+                .await
+                .expect("advance to ambiguity"),
+            SchedulerStatus::Advanced
+        );
+    }
+    assert_eq!(
+        scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("ambiguous side effect blocks"),
+        SchedulerStatus::Blocked
+    );
+    assert!(store
+        .projection_snapshot()
+        .cell_terminal(&fixture.cell_a)
+        .is_none());
+}
+
+#[tokio::test]
+async fn side_effect_ambiguity_blocks_independent_ready_nodes() {
+    let fixture = fixture_with_independent_second_node_and_first_side_effect_state();
+    let mut registry = ErasedRunnerRegistry::new();
+    registry
+        .register(binding(
+            fixture.descriptor_a.clone(),
+            "sidefx",
+            AmbiguousSideEffectRunner::new(&fixture),
+        ))
+        .expect("binding a");
+    registry
+        .register(binding(
+            fixture.descriptor_b.clone(),
+            "read",
+            RecordingRunner {
+                expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
+                output_artifact: artifact(0xb1),
+                output_digest: content(0xb2),
+            },
+        ))
+        .expect("binding b");
+    let scheduler = test_scheduler(registry);
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+
+    for _ in 0..3 {
+        scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("advance to ambiguity");
+    }
+    assert_eq!(
+        scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("ambiguity blocks independent node"),
+        SchedulerStatus::Blocked
+    );
+    assert!(store
+        .projection_snapshot()
+        .cell_terminal(&fixture.cell_b)
+        .is_none());
+}
+
+#[tokio::test]
+async fn side_effect_output_before_confirmation_is_rejected() {
+    let fixture = fixture_with_first_side_effect_state();
+    let mut registry = ErasedRunnerRegistry::new();
+    registry
+        .register(binding(
+            fixture.descriptor_a.clone(),
+            "sidefx",
+            PrematureSideEffectOutputRunner {
+                output_artifact: artifact(0xa1),
+                output_digest: content(0xa2),
+            },
+        ))
+        .expect("binding a");
+    registry
+        .register(binding(
+            fixture.descriptor_b.clone(),
+            "read",
+            RecordingRunner {
+                expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
+                output_artifact: artifact(0xb1),
+                output_digest: content(0xb2),
+            },
+        ))
+        .expect("binding b");
+    let scheduler = test_scheduler(registry);
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+
+    assert!(matches!(
+        scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await,
+        Err(RuntimeError::InvalidRunnerOutput(_))
+    ));
+}
+
+#[test]
+fn side_effect_failure_derives_attempt_failure_payload() {
+    let fixture = fixture_with_first_side_effect_state();
+    let node = node_by_output(&fixture, &fixture.cell_a);
+    let attempt_id = attempt_id(
+        &fixture.run_id,
+        fixture.runtime_spec.spec_hash(),
+        &node.node_id,
+        1,
+    )
+    .expect("attempt id");
+    let payloads = runner_payloads_with_derived_lifecycle(
+        &fixture.runtime_spec,
+        node,
+        &attempt_id,
+        vec![RunnerEventPayload::SideEffectFailed(
+            events::side_effect::Failed {
+                spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                node_id: node.node_id.clone(),
+                attempt_id: attempt_id.clone(),
+                ledger_key: side_effect_ledger_key(1),
+                invocation_epoch: 1,
+                failure_phase: events::side_effect::FailurePhase::BeforeInvocationStarted,
+                retryable: false,
+                error: side_effect_error(false),
+            },
+        )],
+    );
+    let payloads = payloads.expect("derive lifecycle");
+    assert!(
+        payloads.iter().any(|payload| {
+            matches!(
+                payload,
+                events::KernelEventPayload::StateAttemptFailed(events::StateAttemptFailed {
+                    retryable: false,
+                    ..
+                })
+            )
+        }),
+        "side-effect failure payloads should include middleware-derived StateAttemptFailed"
+    );
+}
+
+struct DeterministicSideEffectRunner {
+    cap_kind: CapabilityKind,
+    cap_version: CapabilityVersion,
+    adapter_kind: AdapterKind,
+    adapter_version: AdapterVersion,
+    output_artifact: ArtifactId,
+    output_digest: ContentDigest,
+}
+
+impl DeterministicSideEffectRunner {
+    fn new(fixture: &Fixture) -> Self {
+        Self {
+            cap_kind: side_effect_capability_kind(),
+            cap_version: side_effect_capability_version(),
+            adapter_kind: fixture.adapter_kind.clone(),
+            adapter_version: fixture.adapter_version.clone(),
+            output_artifact: artifact(0xa1),
+            output_digest: content(0xa2),
+        }
+    }
+}
+
+impl ErasedNodeRunner for DeterministicSideEffectRunner {
+    fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
+        Box::pin(async move {
+            let ledger = side_effect_ledger_key(ctx.attempt_no());
+            let phase = side_effect_projection_for_attempt(
+                ctx.projections(),
+                ctx.node(),
+                ctx.attempt_id(),
+            )?;
+            match phase {
+                None => self.prepare(ctx, ledger),
+                Some(projection)
+                    if matches!(
+                        projection.phase,
+                        store::SideEffectPhase::Claimed { .. }
+                            | store::SideEffectPhase::InvocationPrepared { .. }
+                    ) =>
+                {
+                    let claim = projection.claim.as_ref().expect("claim projection");
+                    Ok(ErasedRunnerOutput::new(vec![
+                        side_effect_claim_taken_over(&ctx, ledger.clone(), claim, 2),
+                        side_effect_prepared(&ctx, ledger.clone(), 1, 2),
+                        side_effect_invocation_started(&ctx, ledger, 1, 2),
+                    ]))
+                }
+                Some(store::SideEffectProjection {
+                    phase:
+                        store::SideEffectPhase::InvocationStarted {
+                            invocation_epoch, ..
+                        }
+                        | store::SideEffectPhase::SubmissionUnknown { invocation_epoch },
+                    ..
+                }) => {
+                    let artifact_id = artifact(0xc5);
+                    let digest = content(0xc4);
+                    let staged_artifact = staged_side_effect_artifact(
+                        &ctx,
+                        side_effect_artifact(
+                            &ctx,
+                            artifact_id.clone(),
+                            digest.clone(),
+                            events::ArtifactRole::Submission,
+                        ),
+                        ledger.clone(),
+                        *invocation_epoch,
+                    )?;
+                    Ok(ErasedRunnerOutput {
+                        staged_artifacts: vec![staged_artifact],
+                        staged_retention_refs: Vec::new(),
+                        payloads: vec![side_effect_submission_observed(
+                            &ctx,
+                            ledger,
+                            *invocation_epoch,
+                            artifact_id,
+                            digest,
+                        )],
+                    })
+                }
+                Some(store::SideEffectProjection {
+                    phase: store::SideEffectPhase::NotSubmittedProven { invocation_epoch },
+                    claim,
+                    ..
+                }) => {
+                    let claim = claim.as_ref().expect("claim projection");
+                    let next_epoch = invocation_epoch + 1;
+                    let next_generation = claim.claim_generation + 1;
+                    Ok(ErasedRunnerOutput::new(vec![
+                        side_effect_claimed(&ctx, ledger.clone(), next_epoch, next_generation),
+                        side_effect_prepared(&ctx, ledger.clone(), next_epoch, next_generation),
+                        side_effect_invocation_started(&ctx, ledger, next_epoch, next_generation),
+                    ]))
+                }
+                Some(store::SideEffectProjection {
+                    phase: store::SideEffectPhase::SubmissionObserved { invocation_epoch },
+                    ..
+                }) => {
+                    let artifact_id = artifact(0xc7);
+                    let digest = content(0xc6);
+                    let staged_artifact = staged_side_effect_artifact(
+                        &ctx,
+                        side_effect_artifact(
+                            &ctx,
+                            artifact_id.clone(),
+                            digest.clone(),
+                            events::ArtifactRole::Receipt,
+                        ),
+                        ledger.clone(),
+                        *invocation_epoch,
+                    )?;
+                    Ok(ErasedRunnerOutput {
+                        staged_artifacts: vec![staged_artifact],
+                        staged_retention_refs: Vec::new(),
+                        payloads: vec![side_effect_receipt_observed(
+                            &ctx,
+                            ledger,
+                            *invocation_epoch,
+                            artifact_id,
+                            digest,
+                        )],
+                    })
+                }
+                Some(store::SideEffectProjection {
+                    phase: store::SideEffectPhase::ReceiptObserved { invocation_epoch },
+                    ..
+                }) => {
+                    let artifact_id = artifact(0xc9);
+                    let digest = content(0xc8);
+                    let staged_artifact = staged_side_effect_artifact(
+                        &ctx,
+                        side_effect_artifact(
+                            &ctx,
+                            artifact_id.clone(),
+                            digest.clone(),
+                            events::ArtifactRole::Confirmation,
+                        ),
+                        ledger.clone(),
+                        *invocation_epoch,
+                    )?;
+                    Ok(ErasedRunnerOutput {
+                        staged_artifacts: vec![staged_artifact],
+                        staged_retention_refs: Vec::new(),
+                        payloads: vec![side_effect_confirmation_observed(
+                            &ctx,
+                            ledger,
+                            *invocation_epoch,
+                            artifact_id,
+                            digest,
+                        )],
+                    })
+                }
+                Some(store::SideEffectProjection {
+                    phase: store::SideEffectPhase::ConfirmationObserved { .. },
+                    ..
+                }) => {
+                    let artifact = state_output_artifact(
+                        ctx.node(),
+                        ctx.descriptor(),
+                        self.output_artifact.clone(),
+                        self.output_digest.clone(),
+                    );
+                    let staged_artifact = staged_attempt_artifact(&ctx, artifact)?;
+                    Ok(ErasedRunnerOutput {
+                        staged_artifacts: vec![staged_artifact],
+                        staged_retention_refs: Vec::new(),
+                        payloads: terminal_payloads(
+                            &ctx,
+                            self.output_artifact.clone(),
+                            self.output_digest.clone(),
+                        ),
+                    })
+                }
+                Some(_) => Err(RuntimeError::Blocked(
+                    "side-effect fixture blocked".to_owned(),
+                )),
+            }
+        })
+    }
+}
+
+impl DeterministicSideEffectRunner {
+    fn prepare(
+        &self,
+        ctx: ErasedRunCtx<'_>,
+        ledger: events::SideEffectLedgerKey,
+    ) -> Result<ErasedRunnerOutput> {
+        assert!(ctx.caps().contains(&self.cap_kind, &self.cap_version));
+        let intent_artifact_id = artifact(0xc2);
+        let intent_hash = content(0xc1);
+        let staged_artifact = staged_side_effect_artifact(
+            &ctx,
+            side_effect_artifact(
+                &ctx,
+                intent_artifact_id.clone(),
+                intent_hash.clone(),
+                events::ArtifactRole::SideEffectIntent,
+            ),
+            ledger.clone(),
+            1,
+        )?;
+        Ok(ErasedRunnerOutput {
+            staged_artifacts: vec![staged_artifact],
+            staged_retention_refs: Vec::new(),
+            payloads: vec![
+                RunnerEventPayload::SideEffectIntentPersisted(
+                    events::side_effect::IntentPersisted {
+                        spec_hash: ctx.spec_hash().clone(),
+                        node_id: ctx.node().node_id.clone(),
+                        scope_id: ctx.node().scope_id.clone(),
+                        attempt_id: ctx.attempt_id().clone(),
+                        ledger_key: ledger.clone(),
+                        invocation_epoch: 1,
+                        intent_schema_id: ctx.node().config_ref.schema_id.clone(),
+                        intent_hash,
+                        intent_artifact_id,
+                        idempotency_input_schema_id: ctx.node().config_ref.schema_id.clone(),
+                        idempotency_input_hash: content(0xc3),
+                        idempotency_key: events::IdempotencyKeyRef::new("idem-1")
+                            .expect("idempotency key"),
+                        capability_kind: self.cap_kind.clone(),
+                        capability_version: self.cap_version.clone(),
+                        adapter_kind: self.adapter_kind.clone(),
+                        adapter_version: self.adapter_version.clone(),
+                    },
+                ),
+                side_effect_claimed(&ctx, ledger.clone(), 1, 1),
+                side_effect_prepared(&ctx, ledger, 1, 1),
+            ],
+        })
+    }
+}
+
+struct AmbiguousSideEffectRunner {
+    inner: DeterministicSideEffectRunner,
+}
+
+impl AmbiguousSideEffectRunner {
+    fn new(fixture: &Fixture) -> Self {
+        Self {
+            inner: DeterministicSideEffectRunner::new(fixture),
+        }
+    }
+}
+
+impl ErasedNodeRunner for AmbiguousSideEffectRunner {
+    fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
+        Box::pin(async move {
+            let ledger = side_effect_ledger_key(ctx.attempt_no());
+            let phase = side_effect_projection_for_attempt(
+                ctx.projections(),
+                ctx.node(),
+                ctx.attempt_id(),
+            )?;
+            if matches!(
+                phase.map(|projection| &projection.phase),
+                Some(store::SideEffectPhase::InvocationStarted { .. })
+            ) {
+                let artifact_id = artifact(0xcb);
+                let digest = content(0xca);
+                let staged_artifact = staged_side_effect_artifact(
+                    &ctx,
+                    side_effect_artifact(
+                        &ctx,
+                        artifact_id.clone(),
+                        digest.clone(),
+                        events::ArtifactRole::AmbiguityEvidence,
+                    ),
+                    ledger.clone(),
+                    1,
+                )?;
+                Ok(ErasedRunnerOutput {
+                    staged_artifacts: vec![staged_artifact],
+                    staged_retention_refs: Vec::new(),
+                    payloads: vec![RunnerEventPayload::SideEffectAmbiguous(
+                        events::side_effect::Ambiguous {
+                            spec_hash: ctx.spec_hash().clone(),
+                            node_id: ctx.node().node_id.clone(),
+                            attempt_id: ctx.attempt_id().clone(),
+                            ledger_key: ledger,
+                            invocation_epoch: 1,
+                            ambiguity_code: events::AmbiguityCode::new("unknown_submission")
+                                .expect("ambiguity code"),
+                            evidence_schema_id: ctx.node().config_ref.schema_id.clone(),
+                            evidence_hash: digest,
+                            evidence_artifact_id: artifact_id,
+                        },
+                    )],
+                })
+            } else {
+                self.inner.run_erased(ctx).await
+            }
+        })
+    }
+}
+
+struct PrematureSideEffectOutputRunner {
+    output_artifact: ArtifactId,
+    output_digest: ContentDigest,
+}
+
+impl ErasedNodeRunner for PrematureSideEffectOutputRunner {
+    fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
+        Box::pin(async move {
+            let artifact = state_output_artifact(
+                ctx.node(),
+                ctx.descriptor(),
+                self.output_artifact.clone(),
+                self.output_digest.clone(),
+            );
+            let staged_artifact = staged_attempt_artifact(&ctx, artifact)?;
+            Ok(ErasedRunnerOutput {
+                staged_artifacts: vec![staged_artifact],
+                staged_retention_refs: Vec::new(),
+                payloads: terminal_payloads(
+                    &ctx,
+                    self.output_artifact.clone(),
+                    self.output_digest.clone(),
+                ),
+            })
+        })
+    }
+}
+
+struct StaleStreamStore<'a> {
+    inner: &'a mut store::InMemoryTypedRunStore,
+    stream: Vec<store::KernelEventEnvelope>,
+}
+
+impl store::TypedProjectionRead for StaleStreamStore<'_> {
+    fn projection_snapshot(&self) -> &store::ProjectionSnapshot {
+        self.inner.projection_snapshot()
+    }
+}
+
+impl store::TypedRunEventStore for StaleStreamStore<'_> {
+    fn append_prepared_typed_commit(
+        &mut self,
+        commit: store::PreparedTypedCommit,
+    ) -> store::Result<store::CommitOutcome> {
+        self.inner.append_prepared_typed_commit(commit)
+    }
+
+    fn load_run_stream(&self, _run_id: &RunId) -> Vec<store::KernelEventEnvelope> {
+        self.stream.clone()
+    }
+
+    fn expected_next_seq(&self, run_id: &RunId) -> store::StreamSeq {
+        self.inner.expected_next_seq(run_id)
+    }
+}
+
+struct ReadOnlyCorruptStore {
+    stream: Vec<store::KernelEventEnvelope>,
+    projection: store::ProjectionSnapshot,
+}
+
+impl store::TypedProjectionRead for ReadOnlyCorruptStore {
+    fn projection_snapshot(&self) -> &store::ProjectionSnapshot {
+        &self.projection
+    }
+}
+
+impl store::TypedRunEventStore for ReadOnlyCorruptStore {
+    fn append_prepared_typed_commit(
+        &mut self,
+        _commit: store::PreparedTypedCommit,
+    ) -> store::Result<store::CommitOutcome> {
+        Err(store::StoreError::Identity(
+            "corrupt test store is read-only".to_owned(),
+        ))
+    }
+
+    fn load_run_stream(&self, _run_id: &RunId) -> Vec<store::KernelEventEnvelope> {
+        self.stream.clone()
+    }
+
+    fn expected_next_seq(&self, _run_id: &RunId) -> store::StreamSeq {
+        store::StreamSeq::FIRST
+    }
+}
+
+fn rewrite_envelope(
+    event: &store::KernelEventEnvelope,
+    seq: store::StreamSeq,
+    ordinal: store::CommitOrdinal,
+    commit_key: store::CommitKey,
+) -> store::KernelEventEnvelope {
+    store::KernelEventEnvelope::from_persisted_record(store::PersistedKernelEventRecord {
+        event_id: event_id_for(event, seq, ordinal),
+        event_schema_id: event.event_schema_id().clone(),
+        run_id: event.run_id().clone(),
+        seq,
+        ordinal,
+        spec_hash: event.spec_hash().clone(),
+        commit_key,
+        logical_key: event.logical_key().clone(),
+        payload_hash: event.payload_hash().clone(),
+        payload: event.payload().clone(),
+        payload_canonical_byte_len: event.audit().payload_canonical_byte_len(),
+    })
+    .expect("rewritten envelope")
+}
+
+fn rewrite_commit_payload(
+    stream: &[store::KernelEventEnvelope],
+    target_pos: usize,
+    payload: events::KernelEventPayload,
+) -> Vec<store::KernelEventEnvelope> {
+    let target = &stream[target_pos];
+    let seq = target.seq();
+    let commit_key = target.commit_key().clone();
+    let mut positions = stream
+        .iter()
+        .enumerate()
+        .filter_map(|(index, event)| {
+            (event.seq() == seq && event.commit_key() == &commit_key).then_some(index)
+        })
+        .collect::<Vec<_>>();
+    positions.sort_by_key(|index| stream[*index].ordinal().as_u32());
+    let target_ordinal = target.ordinal().as_u32() as usize;
+    assert_eq!(positions[target_ordinal], target_pos);
+    let mut payloads = positions
+        .iter()
+        .map(|index| stream[*index].payload().clone())
+        .collect::<Vec<_>>();
+    payloads[target_ordinal] = payload;
+    let request = store::TypedCommitRequest {
+        run_id: target.run_id().clone(),
+        expected_next_seq: seq,
+        commit_key,
+        payloads,
+        required_artifacts: Vec::new(),
+        preconditions: store::CommitPreconditions::default(),
+    };
+    let batch =
+        store::build_committed_batch(&request, seq).expect("rewritten commit payload batch");
+    let mut rewritten = stream.to_vec();
+    for (position, event) in positions.into_iter().zip(batch.events().iter().cloned()) {
+        rewritten[position] = event;
+    }
+    rewritten
+}
+
+fn rewrite_stream_without_payloads<F>(
+    stream: &[store::KernelEventEnvelope],
+    mut should_remove: F,
+) -> Vec<store::KernelEventEnvelope>
+where
+    F: FnMut(&events::KernelEventPayload) -> bool,
+{
+    let mut rewritten = Vec::with_capacity(stream.len());
+    let mut index = 0;
+    while index < stream.len() {
+        let first = &stream[index];
+        let seq = first.seq();
+        let commit_key = first.commit_key().clone();
+        let mut end = index + 1;
+        while end < stream.len()
+            && stream[end].seq() == seq
+            && stream[end].commit_key() == &commit_key
+        {
+            end += 1;
+        }
+        let commit = &stream[index..end];
+        let payloads = commit
+            .iter()
+            .filter(|event| !should_remove(event.payload()))
+            .map(|event| event.payload().clone())
+            .collect::<Vec<_>>();
+        assert!(
+            !payloads.is_empty(),
+            "test corruption helper must not remove an entire commit"
+        );
+        if payloads.len() == commit.len() {
+            rewritten.extend(commit.iter().cloned());
+        } else {
+            let mut ordinal = 0;
+            for event in commit {
+                if should_remove(event.payload()) {
+                    continue;
+                }
+                rewritten.push(rewrite_envelope(
+                    event,
+                    seq,
+                    store::CommitOrdinal::new(ordinal),
+                    commit_key.clone(),
+                ));
+                ordinal += 1;
+            }
+        }
+        index = end;
+    }
+    rewritten
+}
+
+fn rewrite_stream_without_commit_containing<F>(
+    stream: &[store::KernelEventEnvelope],
+    mut should_remove_commit: F,
+) -> Vec<store::KernelEventEnvelope>
+where
+    F: FnMut(&events::KernelEventPayload) -> bool,
+{
+    let mut rewritten = Vec::with_capacity(stream.len());
+    let mut index = 0;
+    while index < stream.len() {
+        let first = &stream[index];
+        let original_seq = first.seq();
+        let commit_key = first.commit_key().clone();
+        let mut end = index + 1;
+        while end < stream.len()
+            && stream[end].seq() == original_seq
+            && stream[end].commit_key() == &commit_key
+        {
+            end += 1;
+        }
+        let commit = &stream[index..end];
+        if commit
+            .iter()
+            .any(|event| should_remove_commit(event.payload()))
+        {
+            index = end;
+            continue;
+        }
+        let seq = next_seq_after_stream(&rewritten).expect("next rewritten stream seq");
+        let request = store::TypedCommitRequest {
+            run_id: first.run_id().clone(),
+            expected_next_seq: seq,
+            commit_key,
+            payloads: commit
+                .iter()
+                .map(|event| event.payload().clone())
+                .collect::<Vec<_>>(),
+            required_artifacts: Vec::new(),
+            preconditions: store::CommitPreconditions::default(),
+        };
+        let batch =
+            store::build_committed_batch(&request, seq).expect("rewritten commit payload batch");
+        rewritten.extend(batch.events().iter().cloned());
+        index = end;
+    }
+    rewritten
+}
+
+fn prepend_payloads_to_retention_projection_commit_for_tests(
+    stream: &[store::KernelEventEnvelope],
+    prefix_payloads: Vec<events::KernelEventPayload>,
+) -> Vec<store::KernelEventEnvelope> {
+    let mut rewritten = Vec::with_capacity(stream.len() + prefix_payloads.len());
+    let mut inserted = false;
+    let mut index = 0;
+    while index < stream.len() {
+        let first = &stream[index];
+        let seq = first.seq();
+        let commit_key = first.commit_key().clone();
+        let mut end = index + 1;
+        while end < stream.len()
+            && stream[end].seq() == seq
+            && stream[end].commit_key() == &commit_key
+        {
+            end += 1;
+        }
+        let commit = &stream[index..end];
+        if commit.iter().any(|event| {
+            matches!(
+                event.payload(),
+                events::KernelEventPayload::RetentionManifestProjected(_)
+            )
+        }) {
+            let mut payloads = prefix_payloads.clone();
+            payloads.extend(commit.iter().map(|event| event.payload().clone()));
+            let request = store::TypedCommitRequest {
+                run_id: first.run_id().clone(),
+                expected_next_seq: seq,
+                commit_key,
+                payloads,
+                required_artifacts: Vec::new(),
+                preconditions: store::CommitPreconditions::default(),
+            };
+            let batch = store::build_committed_batch(&request, seq)
+                .expect("rewritten retention projection batch");
+            rewritten.extend(batch.events().iter().cloned());
+            inserted = true;
+        } else {
+            rewritten.extend(commit.iter().cloned());
+        }
+        index = end;
+    }
+    assert!(inserted, "retention projection commit exists");
+    rewritten
+}
+
+fn append_same_sequence_sidecar_to_retention_projection_for_tests(
+    stream: &[store::KernelEventEnvelope],
+) -> Vec<store::KernelEventEnvelope> {
+    let mut rewritten = Vec::with_capacity(stream.len() + 1);
+    let mut inserted = false;
+    let mut index = 0;
+    while index < stream.len() {
+        let first = &stream[index];
+        let seq = first.seq();
+        let commit_key = first.commit_key().clone();
+        let mut end = index + 1;
+        while end < stream.len()
+            && stream[end].seq() == seq
+            && stream[end].commit_key() == &commit_key
+        {
+            end += 1;
+        }
+        let commit = &stream[index..end];
+        rewritten.extend(commit.iter().cloned());
+        if commit.iter().any(|event| {
+            matches!(
+                event.payload(),
+                events::KernelEventPayload::RetentionManifestProjected(_)
+            )
+        }) {
+            let runtime_evidence = commit
+                .iter()
+                .find_map(|event| match event.payload() {
+                    events::KernelEventPayload::RetentionRefsAppended(payload)
+                        if payload.reason == events::RetentionReason::RuntimeEvidence =>
+                    {
+                        Some(payload)
+                    }
+                    _ => None,
+                })
+                .expect("retention projection runtime evidence refs");
+            let sidecar_key =
+                store::CommitKey::new("forged-same-seq-retention-sidecar").expect("commit key");
+            let request = store::TypedCommitRequest {
+                run_id: first.run_id().clone(),
+                expected_next_seq: seq,
+                commit_key: sidecar_key.clone(),
+                payloads: vec![events::KernelEventPayload::RetentionRefsAppended(
+                    events::RetentionRefsAppended {
+                        run_id: runtime_evidence.run_id.clone(),
+                        spec_hash: runtime_evidence.spec_hash.clone(),
+                        refs: runtime_evidence.refs.clone(),
+                        reason: events::RetentionReason::RuntimeEvidence,
+                    },
+                )],
+                required_artifacts: Vec::new(),
+                preconditions: store::CommitPreconditions::default(),
+            };
+            let batch = store::build_committed_batch(&request, seq).expect("sidecar commit batch");
+            let next_ordinal = u32::try_from(commit.len()).expect("retention commit ordinal count");
+            for (offset, event) in batch.events().iter().enumerate() {
+                rewritten.push(rewrite_envelope(
+                    event,
+                    seq,
+                    store::CommitOrdinal::new(
+                        next_ordinal
+                            .checked_add(u32::try_from(offset).expect("sidecar ordinal offset"))
+                            .expect("sidecar ordinal"),
+                    ),
+                    sidecar_key.clone(),
+                ));
+            }
+            inserted = true;
+        }
+        index = end;
+    }
+    assert!(inserted, "retention projection commit exists");
+    rewritten
+}
+
+fn split_public_output_payload_to_own_commit_for_tests(
+    stream: &[store::KernelEventEnvelope],
+) -> Vec<store::KernelEventEnvelope> {
+    let mut rewritten = Vec::with_capacity(stream.len());
+    let mut next_seq = store::StreamSeq::FIRST;
+    let mut split = false;
+    let mut index = 0;
+    while index < stream.len() {
+        let first = &stream[index];
+        let original_seq = first.seq();
+        let commit_key = first.commit_key().clone();
+        let mut end = index + 1;
+        while end < stream.len()
+            && stream[end].seq() == original_seq
+            && stream[end].commit_key() == &commit_key
+        {
+            end += 1;
+        }
+        let commit = &stream[index..end];
+        if commit.iter().any(|event| {
+            matches!(
+                event.payload(),
+                events::KernelEventPayload::PublicOutputProduced(_)
+            )
+        }) {
+            let mut terminal_payloads = Vec::new();
+            let mut public_event = None;
+            for event in commit {
+                if matches!(
+                    event.payload(),
+                    events::KernelEventPayload::PublicOutputProduced(_)
+                ) {
+                    public_event = Some(event);
+                } else {
+                    terminal_payloads.push(event.payload().clone());
+                }
+            }
+            assert!(
+                !terminal_payloads.is_empty(),
+                "public-output commit keeps terminal evidence"
+            );
+            let terminal_request = store::TypedCommitRequest {
+                run_id: first.run_id().clone(),
+                expected_next_seq: next_seq,
+                commit_key,
+                payloads: terminal_payloads,
+                required_artifacts: Vec::new(),
+                preconditions: store::CommitPreconditions::default(),
+            };
+            let terminal_batch = store::build_committed_batch(&terminal_request, next_seq)
+                .expect("terminal rewrite batch");
+            rewritten.extend(terminal_batch.events().iter().cloned());
+            next_seq = increment_stream_seq_for_tests(next_seq);
+
+            rewritten.push(rewrite_envelope(
+                public_event.expect("public output payload"),
+                next_seq,
+                store::CommitOrdinal::new(0),
+                store::CommitKey::new("corrupt-public-output-split").expect("commit key"),
+            ));
+            next_seq = increment_stream_seq_for_tests(next_seq);
+            split = true;
+        } else {
+            let request = store::TypedCommitRequest {
+                run_id: first.run_id().clone(),
+                expected_next_seq: next_seq,
+                commit_key,
+                payloads: commit.iter().map(|event| event.payload().clone()).collect(),
+                required_artifacts: Vec::new(),
+                preconditions: store::CommitPreconditions::default(),
+            };
+            let batch =
+                store::build_committed_batch(&request, next_seq).expect("shifted commit batch");
+            rewritten.extend(batch.events().iter().cloned());
+            next_seq = increment_stream_seq_for_tests(next_seq);
+        }
+        index = end;
+    }
+    assert!(split, "public output payload exists");
+    rewritten
+}
+
+fn increment_stream_seq_for_tests(seq: store::StreamSeq) -> store::StreamSeq {
+    store::StreamSeq::new(seq.as_u64() + 1).expect("next shifted seq")
+}
+
+fn append_payload_commit_for_tests(
+    stream: &mut Vec<store::KernelEventEnvelope>,
+    run_id: &RunId,
+    commit_key: &str,
+    payload: events::KernelEventPayload,
+) {
+    append_payloads_commit_for_tests(stream, run_id, commit_key, vec![payload]);
+}
+
+fn append_payloads_commit_for_tests(
+    stream: &mut Vec<store::KernelEventEnvelope>,
+    run_id: &RunId,
+    commit_key: &str,
+    payloads: Vec<events::KernelEventPayload>,
+) {
+    let seq = next_seq_after_stream(stream).expect("next stream seq");
+    let request = store::TypedCommitRequest {
+        run_id: run_id.clone(),
+        expected_next_seq: seq,
+        commit_key: store::CommitKey::new(commit_key).expect("commit key"),
+        payloads,
+        required_artifacts: Vec::new(),
+        preconditions: store::CommitPreconditions::default(),
+    };
+    let batch =
+        store::build_committed_batch(&request, seq).expect("appended corrupt payload commit batch");
+    stream.extend(batch.events().iter().cloned());
+}
+
+fn rewrite_single_payload_envelope(
+    event: &store::KernelEventEnvelope,
+    payload: events::KernelEventPayload,
+) -> store::KernelEventEnvelope {
+    assert_eq!(event.ordinal(), store::CommitOrdinal::new(0));
+    let request = store::TypedCommitRequest {
+        run_id: event.run_id().clone(),
+        expected_next_seq: event.seq(),
+        commit_key: event.commit_key().clone(),
+        payloads: vec![payload],
+        required_artifacts: Vec::new(),
+        preconditions: store::CommitPreconditions::default(),
+    };
+    let batch =
+        store::build_committed_batch(&request, event.seq()).expect("rewritten payload batch");
+    batch
+        .events()
+        .first()
+        .expect("rewritten payload event")
+        .clone()
+}
+
+fn event_id_for(
+    event: &store::KernelEventEnvelope,
+    seq: store::StreamSeq,
+    ordinal: store::CommitOrdinal,
+) -> EventId {
+    let canonical = canonical_json(serde_json::json!({
+        "event_schema_id": event.event_schema_id().as_str(),
+        "ordinal": ordinal.as_u32(),
+        "payload_hash": event.payload_hash().as_str(),
+        "run_id": event.run_id().as_str(),
+        "seq": seq.as_u64(),
+    }))
+    .expect("event id canonical");
+    EventId::from_digest(DigestAlgorithm::Sha256JcsV1, canonical.digest_bytes())
+}
+
+fn assert_every_certified_node_has_attempt(
+    runtime_spec: &CertifiedRuntimeSpec,
+    stream: &[store::KernelEventEnvelope],
+) {
+    let mut started = BTreeSet::new();
+    let mut completed = BTreeSet::new();
+    for event in stream {
+        match event.payload() {
+            events::KernelEventPayload::StateAttemptStarted(payload) => {
+                started.insert(payload.node_id.clone());
+            }
+            events::KernelEventPayload::StateAttemptCompleted(payload) => {
+                completed.insert(payload.node_id.clone());
+            }
+            _ => {}
+        }
+    }
+    for node in &runtime_spec.spec().nodes {
+        assert!(
+            started.contains(&node.node_id),
+            "node {} has no StateAttemptStarted",
+            node.node_id
+        );
+        assert!(
+            completed.contains(&node.node_id),
+            "node {} has no StateAttemptCompleted",
+            node.node_id
+        );
+    }
+}
+
+fn referenced_artifact_ids_for_payload(payload: &events::KernelEventPayload) -> Vec<ArtifactId> {
+    let mut artifacts = Vec::new();
+    match payload {
+        events::KernelEventPayload::RunStarted(payload) => {
+            artifacts.push(payload.spec_artifact_id.clone());
+            artifacts.push(payload.certificate_artifact_id.clone());
+            artifacts.extend(
+                payload
+                    .seed_cells
+                    .iter()
+                    .map(|seed| seed.seed_artifact.artifact_id.clone()),
+            );
+        }
+        events::KernelEventPayload::FactRecorded(payload) => {
+            artifacts.push(payload.artifact_id.clone());
+        }
+        events::KernelEventPayload::ArtifactReferenced(payload) => {
+            artifacts.push(payload.artifact_ref.artifact_id.clone());
+        }
+        events::KernelEventPayload::CellProduced(payload) => {
+            artifacts.push(payload.artifact_id.clone());
+        }
+        events::KernelEventPayload::PublicOutputProduced(payload) => {
+            artifacts.extend(payload.cells.iter().map(|cell| cell.artifact_id.clone()));
+            if let Some(artifact_id) = &payload.rendered_artifact_id {
+                artifacts.push(artifact_id.clone());
+            }
+        }
+        events::KernelEventPayload::PublicOutputRenderFailed(payload) => {
+            if let Some(evidence) = &payload.error.diagnostic_ref {
+                artifacts.push(evidence.artifact_id.clone());
+            }
+        }
+        events::KernelEventPayload::StateAttemptFailed(payload) => {
+            if let Some(evidence) = &payload.error.diagnostic_ref {
+                artifacts.push(evidence.artifact_id.clone());
+            }
+        }
+        events::KernelEventPayload::RunCompleted(payload) => match &payload.outcome {
+            events::RunCompletionOutcome::Failed(error)
+            | events::RunCompletionOutcome::Cancelled(error) => {
+                if let Some(evidence) = &error.diagnostic_ref {
+                    artifacts.push(evidence.artifact_id.clone());
+                }
+            }
+            events::RunCompletionOutcome::Completed(_) => {}
+        },
+        events::KernelEventPayload::SideEffectIntentPersisted(payload) => {
+            artifacts.push(payload.intent_artifact_id.clone());
+        }
+        events::KernelEventPayload::SideEffectInvocationPrepared(payload) => {
+            if let Some(artifact_id) = &payload.prepared_artifact_id {
+                artifacts.push(artifact_id.clone());
+            }
+        }
+        events::KernelEventPayload::SideEffectNotSubmittedProven(payload) => {
+            artifacts.push(payload.proof_artifact_id.clone());
+        }
+        events::KernelEventPayload::SideEffectSubmissionObserved(payload) => {
+            artifacts.push(payload.submission_artifact_id.clone());
+        }
+        events::KernelEventPayload::SideEffectSubmissionUnknown(payload) => {
+            artifacts.push(payload.evidence_artifact_id.clone());
+        }
+        events::KernelEventPayload::SideEffectReceiptObserved(payload) => {
+            artifacts.push(payload.receipt_artifact_id.clone());
+        }
+        events::KernelEventPayload::SideEffectConfirmationObserved(payload) => {
+            artifacts.push(payload.confirmation_artifact_id.clone());
+        }
+        events::KernelEventPayload::SideEffectAmbiguous(payload) => {
+            artifacts.push(payload.evidence_artifact_id.clone());
+        }
+        events::KernelEventPayload::SideEffectFailed(payload) => {
+            if let Some(evidence) = &payload.error.diagnostic_ref {
+                artifacts.push(evidence.artifact_id.clone());
+            }
+        }
+        events::KernelEventPayload::RetentionRefsAppended(payload) => {
+            artifacts.extend(
+                payload
+                    .refs
+                    .iter()
+                    .map(|reference| reference.artifact_id.clone()),
+            );
+        }
+        events::KernelEventPayload::RetentionManifestProjected(payload) => {
+            artifacts.push(payload.manifest_artifact_id.clone());
+        }
+        events::KernelEventPayload::StateAttemptStarted(_)
+        | events::KernelEventPayload::CellSkipped(_)
+        | events::KernelEventPayload::SideEffectClaimed(_)
+        | events::KernelEventPayload::SideEffectClaimTakenOver(_)
+        | events::KernelEventPayload::SideEffectInvocationStarted(_)
+        | events::KernelEventPayload::StateAttemptCompleted(_) => {}
+    }
+    artifacts
+}
+
+fn prepare_fixture_launch<S: store::TypedRunEventStore + ?Sized>(
+    scheduler: &SerialTypedScheduler,
+    store: &S,
+    fixture: &Fixture,
+    seed_cells: Vec<events::SeedCellRef>,
+) -> Result<PreparedRunLaunch> {
+    scheduler.prepare_run_launch(
+        &fixture.runtime_spec,
+        fixture.run_id.clone(),
+        run_start_evidence(fixture, seed_cells),
+        store.expected_next_seq(&fixture.run_id),
+    )
+}
+
+async fn start_fixture_run<S: store::TypedRunEventStore + ?Sized>(
+    scheduler: &SerialTypedScheduler,
+    store: &mut S,
+    fixture: &Fixture,
+    seed_cells: Vec<events::SeedCellRef>,
+) -> Result<store::CommitOutcome> {
+    let launch = prepare_fixture_launch(scheduler, store, fixture, seed_cells)?;
+    scheduler.start_run(store, launch).await
+}
+
+fn run_start_evidence(
+    fixture: &Fixture,
+    seed_cells: Vec<events::SeedCellRef>,
+) -> RunLaunchEvidence {
+    RunLaunchEvidence {
+        spec_artifact: spec_artifact(&fixture.runtime_spec),
+        certificate_artifact: certificate_artifact(&fixture.runtime_spec),
+        config_artifacts: fixture
+            .runtime_spec
+            .spec()
+            .config_refs
+            .iter()
+            .map(|config| config_artifact(&fixture.runtime_spec, config))
+            .collect(),
+        framework_version: events::FrameworkVersion::new("mfm.test.1").expect("framework"),
+        source_revision: events::SourceRevision::new("test-rev").expect("source"),
+        adapter_executables: Vec::new(),
+        seed_cells: seed_cells.into_iter().map(seed_launch_cell).collect(),
+    }
+}
+
+fn spec_artifact(runtime_spec: &CertifiedRuntimeSpec) -> RunLaunchArtifact {
+    let canonical = runtime_spec
+        .spec()
+        .canonical_json()
+        .expect("canonical spec");
+    let digest = canonical.content_digest();
+    RunLaunchArtifact {
+        bytes: canonical.to_vec(),
+        evidence: store::ArtifactEvidenceRef {
+            artifact_id: ArtifactId::from_digest(digest.algorithm(), *digest.digest()),
+            digest,
+            byte_len: canonical.as_bytes().len() as u64,
+            media_type: runtime_spec.spec().media_type.clone(),
+            schema_id: None,
+            semantic_type_id: None,
+            producer_node_id: None,
+            producer_seed_id: None,
+            artifact_role: events::ArtifactRole::TypedExecutionSpec,
+        },
+    }
+}
+
+fn certificate_artifact(runtime_spec: &CertifiedRuntimeSpec) -> RunLaunchArtifact {
+    let canonical = runtime_spec
+        .certificate()
+        .canonical_json()
+        .expect("canonical certificate");
+    let digest = canonical.content_digest();
+    RunLaunchArtifact {
+        bytes: canonical.to_vec(),
+        evidence: store::ArtifactEvidenceRef {
+            artifact_id: ArtifactId::from_digest(digest.algorithm(), *digest.digest()),
+            digest,
+            byte_len: canonical.as_bytes().len() as u64,
+            media_type: spec::MediaType::new(mfm_certify::CERTIFICATE_MEDIA_TYPE)
+                .expect("certificate media type"),
+            schema_id: None,
+            semantic_type_id: None,
+            producer_node_id: None,
+            producer_seed_id: None,
+            artifact_role: events::ArtifactRole::TypedSpecCertificate,
+        },
+    }
+}
+
+fn config_artifact(
+    runtime_spec: &CertifiedRuntimeSpec,
+    config: &spec::ConfigRef,
+) -> RunLaunchArtifact {
+    let bytes = runtime_spec
+        .spec()
+        .nodes
+        .iter()
+        .find(|node| node.config_ref == *config && node.framework.is_some())
+        .and_then(|node| {
+            node.framework.as_ref().map(|framework| {
+                spec::framework_config_canonical_json(framework.config_kind(), &node.node_id)
+                    .expect("framework config")
+                    .to_vec()
+            })
+        })
+        .unwrap_or_else(|| TEST_CONFIG_BYTES.to_vec());
+    assert_eq!(digest_for_bytes(&bytes), config.digest);
+    RunLaunchArtifact {
+        bytes,
+        evidence: store::ArtifactEvidenceRef {
+            artifact_id: config.artifact_id.clone(),
+            digest: config.digest.clone(),
+            byte_len: config.byte_len,
+            media_type: config.media_type.clone(),
+            schema_id: Some(config.schema_id.clone()),
+            semantic_type_id: None,
+            producer_node_id: None,
+            producer_seed_id: None,
+            artifact_role: events::ArtifactRole::TypedConfig,
+        },
+    }
+}
+
+fn seed_launch_cell(seed: events::SeedCellRef) -> RunLaunchSeedCell {
+    RunLaunchSeedCell {
+        bytes: TEST_SEED_BYTES.to_vec(),
+        cell: seed,
+    }
+}
+
+fn terminal_payloads(
+    ctx: &ErasedRunCtx<'_>,
+    output_artifact: ArtifactId,
+    output_digest: ContentDigest,
+) -> Vec<RunnerEventPayload> {
+    vec![RunnerEventPayload::CellProduced(events::CellProduced {
+        spec_hash: ctx.spec_hash().clone(),
+        node_id: ctx.node().node_id.clone(),
+        cell_id: ctx.node().output_cell.clone(),
+        scope_id: ctx.node().scope_id.clone(),
+        attempt_id: ctx.attempt_id().clone(),
+        semantic_type_id: ctx.descriptor().output_semantic_type_id.clone(),
+        schema_id: ctx.descriptor().output_schema_id.clone(),
+        value_lineage: ctx.output_cell().value_lineage.clone(),
+        artifact_id: output_artifact,
+        content_digest: output_digest,
+        producer_state_kind: Some(ctx.node().state_kind.clone()),
+        producer_state_version: Some(ctx.node().state_version.clone()),
+    })]
+}
+
+fn state_output_artifact(
+    node: &spec::NodeSpec,
+    descriptor: &spec::StateDescriptorIdentity,
+    artifact_id: ArtifactId,
+    digest: ContentDigest,
+) -> store::ArtifactEvidenceRef {
+    store::ArtifactEvidenceRef {
+        artifact_id,
+        digest,
+        byte_len: 17,
+        media_type: spec::MediaType::new("application/json").expect("media"),
+        schema_id: Some(descriptor.output_schema_id.clone()),
+        semantic_type_id: Some(descriptor.output_semantic_type_id.clone()),
+        producer_node_id: Some(node.node_id.clone()),
+        producer_seed_id: None,
+        artifact_role: events::ArtifactRole::StateOutput,
+    }
+}
+
+fn state_output_artifact_for_bytes(
+    node: &spec::NodeSpec,
+    descriptor: &spec::StateDescriptorIdentity,
+    bytes: &[u8],
+) -> store::ArtifactEvidenceRef {
+    let digest = digest_for_bytes(bytes);
+    let artifact_id = ArtifactId::from_digest(digest.algorithm(), *digest.digest());
+    store::ArtifactEvidenceRef {
+        artifact_id,
+        digest,
+        byte_len: bytes.len() as u64,
+        media_type: spec::MediaType::new("application/json").expect("media"),
+        schema_id: Some(descriptor.output_schema_id.clone()),
+        semantic_type_id: Some(descriptor.output_semantic_type_id.clone()),
+        producer_node_id: Some(node.node_id.clone()),
+        producer_seed_id: None,
+        artifact_role: events::ArtifactRole::StateOutput,
+    }
+}
+
+fn event_artifact_ref_from_store(
+    artifact: &store::ArtifactEvidenceRef,
+) -> events::ArtifactEvidenceRef {
+    events::ArtifactEvidenceRef {
+        artifact_id: artifact.artifact_id.clone(),
+        role: artifact.artifact_role,
+        schema_id: artifact.schema_id.clone().expect("schema-bearing artifact"),
+        semantic_type_id: artifact.semantic_type_id.clone(),
+        content_digest: artifact.digest.clone(),
+        byte_len: artifact.byte_len,
+        media_type: artifact.media_type.clone(),
+    }
+}
+
+fn digest_for_bytes(bytes: &[u8]) -> ContentDigest {
+    ContentDigest::from_digest(DigestAlgorithm::Sha256JcsV1, sha256_digest_bytes(bytes))
+}
+
+fn staged_attempt_artifact(
+    ctx: &ErasedRunCtx<'_>,
+    evidence: store::ArtifactEvidenceRef,
+) -> Result<StagedArtifact> {
+    let binding = staged_artifact_binding_kind(evidence.artifact_role).expect("staged role");
+    StagedArtifact::finalized_attempt_artifact_for_tests(ctx, evidence, binding)
+}
+
+fn staged_side_effect_artifact(
+    ctx: &ErasedRunCtx<'_>,
+    evidence: store::ArtifactEvidenceRef,
+    ledger_key: events::SideEffectLedgerKey,
+    invocation_epoch: u32,
+) -> Result<StagedArtifact> {
+    let phase =
+        staged_side_effect_artifact_phase(evidence.artifact_role).expect("staged side-effect role");
+    StagedArtifact::finalized_attempt_artifact_for_tests(
+        ctx,
+        evidence,
+        StagedArtifactBindingKind::SideEffectEvidence {
+            ledger_key,
+            invocation_epoch,
+            phase,
+        },
+    )
+}
+
+fn node_by_output<'a>(fixture: &'a Fixture, cell_id: &CellId) -> &'a spec::NodeSpec {
+    fixture
+        .runtime_spec
+        .topological_order()
+        .iter()
+        .filter_map(|node_id| fixture.runtime_spec.node(node_id))
+        .find(|node| &node.output_cell == cell_id)
+        .expect("node by output")
+}
+
+fn append_attempt_start(
+    store: &mut store::InMemoryTypedRunStore,
+    fixture: &Fixture,
+    node: &spec::NodeSpec,
+    attempt_no: u32,
+) -> AttemptId {
+    let attempt_id = attempt_id(
+        &fixture.run_id,
+        fixture.runtime_spec.spec_hash(),
+        &node.node_id,
+        attempt_no,
+    )
+    .expect("attempt id");
+    store
+        .append_prepared_commit(store::TypedCommitRequest {
+            run_id: fixture.run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&fixture.run_id),
+            commit_key: store::CommitKey::new(format!(
+                "manual-attempt-start:{}:{}",
+                node.node_id, attempt_id
+            ))
+            .expect("commit key"),
+            payloads: vec![events::KernelEventPayload::StateAttemptStarted(
+                events::StateAttemptStarted {
+                    spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                    node_id: node.node_id.clone(),
+                    attempt_id: attempt_id.clone(),
+                    attempt_no,
+                    state_kind: node.state_kind.clone(),
+                    state_version: node.state_version.clone(),
+                },
+            )],
+            required_artifacts: Vec::new(),
+            preconditions: store::CommitPreconditions {
+                required_run_state: store::RequiredRunState::NotCompleted,
+                required_cell_states: vec![store::CellStatePrecondition {
+                    cell_id: node.output_cell.clone(),
+                    required: store::RequiredCellState::Absent,
+                }],
+                ..store::CommitPreconditions::default()
+            },
+        })
+        .expect("append attempt start");
+    attempt_id
+}
+
+fn append_fact(
+    store: &mut store::InMemoryTypedRunStore,
+    fixture: &Fixture,
+    node: &spec::NodeSpec,
+    attempt_id: &AttemptId,
+    fact_key: events::FactKey,
+    artifact_id: ArtifactId,
+    response_hash: ContentDigest,
+) {
+    let response_schema_id = node.config_ref.schema_id.clone();
+    let evidence = store::ArtifactEvidenceRef {
+        artifact_id: artifact_id.clone(),
+        digest: response_hash.clone(),
+        byte_len: 10,
+        media_type: spec::MediaType::new("application/json").expect("media"),
+        schema_id: Some(response_schema_id.clone()),
+        semantic_type_id: None,
+        producer_node_id: Some(node.node_id.clone()),
+        producer_seed_id: None,
+        artifact_role: events::ArtifactRole::FactResponse,
+    };
+    store
+        .append_prepared_commit(store::TypedCommitRequest {
+            run_id: fixture.run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&fixture.run_id),
+            commit_key: store::CommitKey::new(format!(
+                "manual-fact:{}:{}:{}",
+                node.node_id, attempt_id, fact_key
+            ))
+            .expect("commit key"),
+            payloads: vec![events::KernelEventPayload::FactRecorded(
+                events::FactRecorded {
+                    spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                    node_id: node.node_id.clone(),
+                    attempt_id: attempt_id.clone(),
+                    capability_kind: fixture.cap_kind.clone(),
+                    capability_version: fixture.cap_version.clone(),
+                    adapter_kind: fixture.adapter_kind.clone(),
+                    adapter_version: fixture.adapter_version.clone(),
+                    request_schema_id: node.config_ref.schema_id.clone(),
+                    request_hash: content(0xd4),
+                    response_schema_id,
+                    response_hash,
+                    fact_key,
+                    artifact_id,
+                },
+            )],
+            required_artifacts: vec![evidence],
+            preconditions: store::CommitPreconditions {
+                required_run_state: store::RequiredRunState::NotCompleted,
+                required_present_logical_keys: vec![store::LogicalEventKey::new(format!(
+                    "attempt:{}:{}",
+                    node.node_id, attempt_id
+                ))
+                .expect("attempt logical key")],
+                ..store::CommitPreconditions::default()
+            },
+        })
+        .expect("append fact");
+}
+
+fn append_terminal(
+    store: &mut store::InMemoryTypedRunStore,
+    fixture: &Fixture,
+    node: &spec::NodeSpec,
+    attempt_id: &AttemptId,
+    artifact_id: ArtifactId,
+    output_digest: ContentDigest,
+) {
+    let descriptor = fixture
+        .runtime_spec
+        .state_descriptor_for_node(node)
+        .expect("descriptor");
+    let output_cell = fixture
+        .runtime_spec
+        .cell(&node.output_cell)
+        .expect("output cell");
+    let evidence =
+        state_output_artifact(node, descriptor, artifact_id.clone(), output_digest.clone());
+    store
+        .append_prepared_commit(store::TypedCommitRequest {
+            run_id: fixture.run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&fixture.run_id),
+            commit_key: store::CommitKey::new(format!(
+                "manual-terminal:{}:{}",
+                node.node_id, attempt_id
+            ))
+            .expect("commit key"),
+            payloads: vec![
+                events::KernelEventPayload::CellProduced(events::CellProduced {
+                    spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                    node_id: node.node_id.clone(),
+                    cell_id: node.output_cell.clone(),
+                    scope_id: node.scope_id.clone(),
+                    attempt_id: attempt_id.clone(),
+                    semantic_type_id: descriptor.output_semantic_type_id.clone(),
+                    schema_id: descriptor.output_schema_id.clone(),
+                    value_lineage: output_cell.value_lineage.clone(),
+                    artifact_id,
+                    content_digest: output_digest,
+                    producer_state_kind: Some(node.state_kind.clone()),
+                    producer_state_version: Some(node.state_version.clone()),
+                }),
+                events::KernelEventPayload::StateAttemptCompleted(events::StateAttemptCompleted {
+                    spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                    node_id: node.node_id.clone(),
+                    attempt_id: attempt_id.clone(),
+                    output_cell_id: node.output_cell.clone(),
+                }),
+            ],
+            required_artifacts: vec![evidence],
+            preconditions: store::CommitPreconditions {
+                required_run_state: store::RequiredRunState::NotCompleted,
+                required_present_logical_keys: vec![store::LogicalEventKey::new(format!(
+                    "attempt:{}:{}",
+                    node.node_id, attempt_id
+                ))
+                .expect("attempt logical key")],
+                required_cell_states: vec![store::CellStatePrecondition {
+                    cell_id: node.output_cell.clone(),
+                    required: store::RequiredCellState::Absent,
+                }],
+                ..store::CommitPreconditions::default()
+            },
+        })
+        .expect("append terminal");
+}
+
+fn append_public_output_render_failure(
+    store: &mut store::InMemoryTypedRunStore,
+    fixture: &Fixture,
+    node: &spec::NodeSpec,
+    attempt_id: &AttemptId,
+) {
+    let Some(spec::FrameworkNodeSpec::PublicOutputRender(render)) = &node.framework else {
+        panic!("expected public-output render node");
+    };
+    let error = public_output_error();
+    store
+        .append_prepared_commit(store::TypedCommitRequest {
+            run_id: fixture.run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&fixture.run_id),
+            commit_key: store::CommitKey::new(format!(
+                "manual-public-output-failure:{}:{}",
+                node.node_id, attempt_id
+            ))
+            .expect("commit key"),
+            payloads: vec![
+                events::KernelEventPayload::PublicOutputRenderFailed(
+                    events::PublicOutputRenderFailed {
+                        spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                        node_id: node.node_id.clone(),
+                        attempt_id: attempt_id.clone(),
+                        public_schema_id: render.public_schema_id.clone(),
+                        renderer_descriptor_id: render.renderer_descriptor.descriptor_id.clone(),
+                        error: error.clone(),
+                    },
+                ),
+                events::KernelEventPayload::StateAttemptFailed(events::StateAttemptFailed {
+                    spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                    node_id: node.node_id.clone(),
+                    attempt_id: attempt_id.clone(),
+                    retryable: true,
+                    error,
+                }),
+            ],
+            required_artifacts: Vec::new(),
+            preconditions: store::CommitPreconditions {
+                required_run_state: store::RequiredRunState::NotCompleted,
+                required_present_logical_keys: vec![store::LogicalEventKey::new(format!(
+                    "attempt:{}:{}",
+                    node.node_id, attempt_id
+                ))
+                .expect("attempt logical key")],
+                required_cell_states: vec![store::CellStatePrecondition {
+                    cell_id: node.output_cell.clone(),
+                    required: store::RequiredCellState::Absent,
+                }],
+                required_public_output_absent: true,
+                ..store::CommitPreconditions::default()
+            },
+        })
+        .expect("append public output failure");
+}
+
+fn append_not_submitted_proven(
+    store: &mut store::InMemoryTypedRunStore,
+    fixture: &Fixture,
+    node: &spec::NodeSpec,
+    attempt_id: &AttemptId,
+    invocation_epoch: u32,
+) {
+    let proof_artifact = artifact(0xd5);
+    let proof_hash = content(0xd6);
+    let evidence = store::ArtifactEvidenceRef {
+        artifact_id: proof_artifact.clone(),
+        digest: proof_hash.clone(),
+        byte_len: 19,
+        media_type: spec::MediaType::new("application/json").expect("media"),
+        schema_id: Some(node.config_ref.schema_id.clone()),
+        semantic_type_id: None,
+        producer_node_id: Some(node.node_id.clone()),
+        producer_seed_id: None,
+        artifact_role: events::ArtifactRole::NotSubmittedProof,
+    };
+    store
+        .append_prepared_commit(store::TypedCommitRequest {
+            run_id: fixture.run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&fixture.run_id),
+            commit_key: store::CommitKey::new(format!(
+                "manual-not-submitted:{}:{}",
+                node.node_id, attempt_id
+            ))
+            .expect("commit key"),
+            payloads: vec![events::KernelEventPayload::SideEffectNotSubmittedProven(
+                events::side_effect::NotSubmittedProven {
+                    spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                    node_id: node.node_id.clone(),
+                    attempt_id: attempt_id.clone(),
+                    ledger_key: side_effect_ledger_key(1),
+                    invocation_epoch,
+                    proof_schema_id: node.config_ref.schema_id.clone(),
+                    proof_hash,
+                    proof_artifact_id: proof_artifact,
+                },
+            )],
+            required_artifacts: vec![evidence],
+            preconditions: store::CommitPreconditions {
+                required_run_state: store::RequiredRunState::NotCompleted,
+                required_present_logical_keys: vec![store::LogicalEventKey::new(format!(
+                    "attempt:{}:{}",
+                    node.node_id, attempt_id
+                ))
+                .expect("attempt logical key")],
+                ..store::CommitPreconditions::default()
+            },
+        })
+        .expect("append not-submitted proof");
+}
+
+fn attempt_started_count(
+    store: &store::InMemoryTypedRunStore,
+    run_id: &RunId,
+    node_id: &NodeId,
+) -> usize {
+    store
+        .load_run_stream(run_id)
+        .iter()
+        .filter(|event| {
+            matches!(
+                event.payload(),
+                events::KernelEventPayload::StateAttemptStarted(payload)
+                    if &payload.node_id == node_id
+            )
+        })
+        .count()
+}
+
+fn fact_recorded_count(store: &store::InMemoryTypedRunStore) -> usize {
+    store
+        .projection_snapshot()
+        .facts()
+        .filter(|(_, fact)| fact.fact_key.as_str() == "reused-fact")
+        .count()
+}
+
+#[test]
+fn runtime_order_is_deterministic_for_reordered_spec_nodes() {
+    let fixture = fixture();
+    let mut envelope = fixture.runtime_spec.envelope().clone();
+    envelope.spec.nodes.reverse();
+    let envelope = spec::HashedSpecEnvelope::new(envelope.spec, envelope.audit).expect("rehash");
+    let runtime = CertifiedRuntimeSpec::from_verified_envelope(envelope).expect("runtime");
+    assert_eq!(
+        runtime.topological_order(),
+        fixture.runtime_spec.topological_order()
+    );
+}
+
+fn registered_fixture_runners(fixture: &Fixture) -> ErasedRunnerRegistry {
+    let mut registry = ErasedRunnerRegistry::new();
+    registry
+        .register(binding(
+            fixture.descriptor_a.clone(),
+            "pure",
+            RecordingRunner {
+                expected_caps: Vec::new(),
+                output_artifact: artifact(0xa1),
+                output_digest: content(0xa2),
+            },
+        ))
+        .expect("binding a");
+    registry
+        .register(binding(
+            fixture.descriptor_b.clone(),
+            "read",
+            RecordingRunner {
+                expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
+                output_artifact: artifact(0xb1),
+                output_digest: content(0xb2),
+            },
+        ))
+        .expect("binding b");
+    registry
+}
+
+fn registered_side_effect_fixture_runners(fixture: &Fixture) -> ErasedRunnerRegistry {
+    let mut registry = ErasedRunnerRegistry::new();
+    registry
+        .register(binding(
+            fixture.descriptor_a.clone(),
+            "sidefx",
+            DeterministicSideEffectRunner::new(fixture),
+        ))
+        .expect("binding a");
+    registry
+        .register(binding(
+            fixture.descriptor_b.clone(),
+            "read",
+            RecordingRunner {
+                expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
+                output_artifact: artifact(0xb1),
+                output_digest: content(0xb2),
+            },
+        ))
+        .expect("binding b");
+    registry
+}
+
+fn binding<R: ErasedNodeRunner + 'static>(
+    descriptor_id: DescriptorId,
+    factory: &str,
+    runner: R,
+) -> ErasedRunnerBinding {
+    let factory_id = events::RunnerFactoryId::new(factory).expect("factory");
+    ErasedRunnerBinding::new(
+        descriptor_id,
+        factory_id.clone(),
+        events::ExecutableIdentity {
+            factory_id,
+            source_revision: events::SourceRevision::new("test-rev").expect("source"),
+            cargo_package_name: events::PackageName::new("mfm-test").expect("package"),
+            cargo_package_version: events::PackageVersion::new("0.1.0").expect("version"),
+            cargo_package_digest: content(0xe1),
+            binary_digest: content(0xe2),
+            nix_derivation_hash: None,
+            nix_output_hash: None,
+        },
+        Arc::new(runner),
+    )
+    .expect("runner binding")
+}
+
+fn runtime_render_receipt_cell(typed: &spec::TypedExecutionSpec) -> CellId {
+    typed
+        .nodes
+        .iter()
+        .find(|node| {
+            matches!(
+                node.framework,
+                Some(spec::FrameworkNodeSpec::PublicOutputRender(_))
+            )
+        })
+        .expect("render node")
+        .output_cell
+        .clone()
+}
+
+fn runtime_bootstrap_receipt_cell(typed: &spec::TypedExecutionSpec) -> CellId {
+    typed
+        .nodes
+        .iter()
+        .find(|node| {
+            matches!(
+                node.framework,
+                Some(spec::FrameworkNodeSpec::BootstrapRun(_))
+            )
+        })
+        .expect("bootstrap node")
+        .output_cell
+        .clone()
+}
+
+fn runtime_retention_receipt_cell(typed: &spec::TypedExecutionSpec) -> CellId {
+    typed
+        .nodes
+        .iter()
+        .find(|node| {
+            matches!(
+                node.framework,
+                Some(spec::FrameworkNodeSpec::ProjectRetentionManifest(_))
+            )
+        })
+        .expect("retention node")
+        .output_cell
+        .clone()
+}
+
+#[derive(Clone, Copy)]
+enum RuntimeLifecycleVariant {
+    BootstrapRun,
+    ProjectRetentionManifest,
+    CompleteRun,
+}
+
+impl RuntimeLifecycleVariant {
+    fn matches(self, framework: &spec::FrameworkNodeSpec) -> bool {
+        match self {
+            Self::BootstrapRun => {
+                matches!(framework, spec::FrameworkNodeSpec::BootstrapRun(_))
+            }
+            Self::ProjectRetentionManifest => {
+                matches!(
+                    framework,
+                    spec::FrameworkNodeSpec::ProjectRetentionManifest(_)
+                )
+            }
+            Self::CompleteRun => {
+                matches!(framework, spec::FrameworkNodeSpec::CompleteRun(_))
+            }
+        }
+    }
+}
+
+fn find_runtime_lifecycle_node_mut(
+    typed: &mut spec::TypedExecutionSpec,
+    variant: RuntimeLifecycleVariant,
+) -> &mut spec::NodeSpec {
+    typed
+        .nodes
+        .iter_mut()
+        .find(|node| {
+            node.framework
+                .as_ref()
+                .is_some_and(|framework| variant.matches(framework))
+        })
+        .expect("runtime lifecycle node")
+}
+
+fn clear_runtime_framework_metadata(
+    typed: &mut spec::TypedExecutionSpec,
+    variant: RuntimeLifecycleVariant,
+) {
+    find_runtime_lifecycle_node_mut(typed, variant).framework = None;
+}
+
+fn append_runtime_bootstrap_lifecycle_node(typed: &mut spec::TypedExecutionSpec) -> CellId {
+    let node_id = NodeId::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        DigestBytes::from_array([0xe8; 32]),
+    );
+    let output_cell = CellId::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        DigestBytes::from_array([0xe9; 32]),
+    );
+    let descriptor_id = DescriptorId::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        DigestBytes::from_array([0xea; 32]),
+    );
+    let config_ref =
+        spec::framework_config_ref("bootstrap_run", &node_id).expect("bootstrap config ref");
+    let input_binding =
+        spec::framework_lifecycle_unit_input_binding("bootstrap_run").expect("input binding");
+    let managed = ManagedPlatformWrite::descriptor().expect("managed effect");
+    let receipt_schema = spec::bootstrap_run_receipt_schema_id().expect("bootstrap receipt schema");
+    let receipt_semantic =
+        spec::bootstrap_run_receipt_semantic_type_id().expect("bootstrap receipt semantic");
+    let no_caps = CapabilitySetDescriptor::new(Vec::new()).expect("no caps");
+    let state_kind = StateKind::new(
+        "mfm.framework",
+        "bootstrap_run",
+        DigestAlgorithm::Sha256JcsV1,
+        DigestBytes::from_array([0xed; 32]),
+    )
+    .expect("state kind");
+    let state_version =
+        StateVersion::new("mfm.framework.state.bootstrap_run.v1").expect("state version");
+    typed
+        .descriptor_identities
+        .push(spec::DescriptorIdentity::State(Box::new(
+            spec::StateDescriptorIdentity {
+                descriptor_id: descriptor_id.clone(),
+                name: "mfm.framework.bootstrap_run".to_owned(),
+                state_kind: state_kind.clone(),
+                state_version: state_version.clone(),
+                config_schema_id: config_ref.schema_id.clone(),
+                input_schema_id: input_binding.input_schema_id.clone(),
+                output_schema_id: receipt_schema.clone(),
+                output_semantic_type_id: receipt_semantic.clone(),
+                effect_kind: managed.kind.clone(),
+                effect_class: managed.class.as_str().to_owned(),
+                effect_name: managed.name.to_owned(),
+                effect_version: managed.version,
+                capabilities: no_caps.clone(),
+                runner: "managed_platform_write".to_owned(),
+                side_effect_contract_digest: None,
+            },
+        )));
+    typed.config_refs.push(config_ref.clone());
+    typed.cells.push(spec::CellSpec {
+        cell_id: output_cell.clone(),
+        producer: spec::CellProducer::Node(node_id.clone()),
+        scope_id: typed.scopes[0].scope_id.clone(),
+        semantic_type_id: receipt_semantic,
+        schema_id: receipt_schema,
+        value_lineage: spec::ValueLineageRef {
+            lineage_digest: content(0xee),
+        },
+        terminal_policy: spec::CellTerminalPolicy::ProducedOnly,
+        storage_policy: spec::StoragePolicy::ContentAddressed,
+        redaction_policy: spec::RedactionPolicy::Public,
+    });
+    typed.nodes.push(spec::NodeSpec {
+        node_id: node_id.clone(),
+        stable_key: spec::StableAuthorKey::new("framework/bootstrap-run").expect("stable key"),
+        scope_id: typed.scopes[0].scope_id.clone(),
+        state_kind,
+        state_version,
+        descriptor_id,
+        config_ref,
+        input_bindings: input_binding,
+        output_cell: output_cell.clone(),
+        effect_kind: managed.kind,
+        capability_bindings: no_caps,
+        adapter_bindings: Vec::new(),
+        side_effect: None,
+        framework: Some(spec::FrameworkNodeSpec::BootstrapRun(
+            spec::BootstrapRunNodeSpec {},
+        )),
+        planning_lineage: typed.scopes[0].planning_lineage.clone(),
+        deterministic_predecessors: Vec::new(),
+    });
+    output_cell
+}
+
+fn append_runtime_retention_lifecycle_node(
+    typed: &mut spec::TypedExecutionSpec,
+    public_output_receipt_cell: CellId,
+    valid_ordering: bool,
+) -> NodeId {
+    let node_id = NodeId::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        DigestBytes::from_array([0xf1; 32]),
+    );
+    let output_cell = CellId::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        DigestBytes::from_array([0xf2; 32]),
+    );
+    let descriptor_id = DescriptorId::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        DigestBytes::from_array([0xf3; 32]),
+    );
+    let config_ref = spec::framework_config_ref("project_retention_manifest", &node_id)
+        .expect("retention config ref");
+    let input_cell = typed
+        .cells
+        .iter()
+        .find(|cell| cell.cell_id == public_output_receipt_cell)
+        .expect("input cell")
+        .clone();
+    let input_binding = spec::framework_lifecycle_receipt_input_binding(
+        "project_retention_manifest",
+        "public_output_receipt",
+        &input_cell,
+    )
+    .expect("input binding");
+    let managed = ManagedPlatformWrite::descriptor().expect("managed effect");
+    let receipt_schema =
+        spec::retention_manifest_receipt_schema_id().expect("retention receipt schema");
+    let receipt_semantic =
+        spec::retention_manifest_receipt_semantic_type_id().expect("retention receipt semantic");
+    let no_caps = CapabilitySetDescriptor::new(Vec::new()).expect("no caps");
+    let state_kind = StateKind::new(
+        "mfm.framework",
+        "project_retention_manifest",
+        DigestAlgorithm::Sha256JcsV1,
+        DigestBytes::from_array([0xf9; 32]),
+    )
+    .expect("state kind");
+    let state_version = StateVersion::new("mfm.framework.state.project_retention_manifest.v1")
+        .expect("state version");
+    typed
+        .descriptor_identities
+        .push(spec::DescriptorIdentity::State(Box::new(
+            spec::StateDescriptorIdentity {
+                descriptor_id: descriptor_id.clone(),
+                name: "mfm.framework.project_retention_manifest".to_owned(),
+                state_kind: state_kind.clone(),
+                state_version: state_version.clone(),
+                config_schema_id: config_ref.schema_id.clone(),
+                input_schema_id: input_binding.input_schema_id.clone(),
+                output_schema_id: receipt_schema.clone(),
+                output_semantic_type_id: receipt_semantic.clone(),
+                effect_kind: managed.kind.clone(),
+                effect_class: managed.class.as_str().to_owned(),
+                effect_name: managed.name.to_owned(),
+                effect_version: managed.version,
+                capabilities: no_caps.clone(),
+                runner: "managed_platform_write".to_owned(),
+                side_effect_contract_digest: None,
+            },
+        )));
+    typed.config_refs.push(config_ref.clone());
+    typed.cells.push(spec::CellSpec {
+        cell_id: output_cell.clone(),
+        producer: spec::CellProducer::Node(node_id.clone()),
+        scope_id: input_cell.scope_id.clone(),
+        semantic_type_id: receipt_semantic,
+        schema_id: receipt_schema,
+        value_lineage: spec::ValueLineageRef {
+            lineage_digest: content(0xfa),
+        },
+        terminal_policy: spec::CellTerminalPolicy::ProducedOnly,
+        storage_policy: spec::StoragePolicy::ContentAddressed,
+        redaction_policy: spec::RedactionPolicy::Public,
+    });
+    let predecessors = match &input_cell.producer {
+        spec::CellProducer::Node(producer) => vec![producer.clone()],
+        spec::CellProducer::Seed(_) => Vec::new(),
+    };
+    let framework_receipt = if valid_ordering {
+        public_output_receipt_cell
+    } else {
+        input_cell.cell_id.clone()
+    };
+    typed.nodes.push(spec::NodeSpec {
+        node_id: node_id.clone(),
+        stable_key: spec::StableAuthorKey::new("framework/project-retention-manifest")
+            .expect("stable key"),
+        scope_id: input_cell.scope_id,
+        state_kind,
+        state_version,
+        descriptor_id,
+        config_ref,
+        input_bindings: input_binding,
+        output_cell,
+        effect_kind: managed.kind,
+        capability_bindings: no_caps,
+        adapter_bindings: Vec::new(),
+        side_effect: None,
+        framework: Some(spec::FrameworkNodeSpec::ProjectRetentionManifest(
+            spec::ProjectRetentionManifestNodeSpec {
+                public_schema_id: typed.public_outputs.public_schema_id.clone(),
+                public_output_receipt_cell: framework_receipt,
+            },
+        )),
+        planning_lineage: typed.scopes[0].planning_lineage.clone(),
+        deterministic_predecessors: predecessors,
+    });
+    node_id
+}
+
+fn append_runtime_complete_lifecycle_node(
+    typed: &mut spec::TypedExecutionSpec,
+    retention_manifest_receipt_cell: CellId,
+    valid_ordering: bool,
+) -> NodeId {
+    let node_id = NodeId::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        DigestBytes::from_array([0xb2; 32]),
+    );
+    let output_cell = CellId::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        DigestBytes::from_array([0xb3; 32]),
+    );
+    let descriptor_id = DescriptorId::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        DigestBytes::from_array([0xb4; 32]),
+    );
+    let config_ref =
+        spec::framework_config_ref("complete_run", &node_id).expect("complete config ref");
+    let input_cell = typed
+        .cells
+        .iter()
+        .find(|cell| cell.cell_id == retention_manifest_receipt_cell)
+        .expect("input cell")
+        .clone();
+    let input_binding = spec::framework_lifecycle_receipt_input_binding(
+        "complete_run",
+        "retention_manifest_receipt",
+        &input_cell,
+    )
+    .expect("input binding");
+    let managed = ManagedPlatformWrite::descriptor().expect("managed effect");
+    let receipt_schema = spec::complete_run_receipt_schema_id().expect("complete receipt schema");
+    let receipt_semantic =
+        spec::complete_run_receipt_semantic_type_id().expect("complete receipt semantic");
+    let no_caps = CapabilitySetDescriptor::new(Vec::new()).expect("no caps");
+    let state_kind = StateKind::new(
+        "mfm.framework",
+        "complete_run",
+        DigestAlgorithm::Sha256JcsV1,
+        DigestBytes::from_array([0xb8; 32]),
+    )
+    .expect("state kind");
+    let state_version =
+        StateVersion::new("mfm.framework.state.complete_run.v1").expect("state version");
+    typed
+        .descriptor_identities
+        .push(spec::DescriptorIdentity::State(Box::new(
+            spec::StateDescriptorIdentity {
+                descriptor_id: descriptor_id.clone(),
+                name: "mfm.framework.complete_run".to_owned(),
+                state_kind: state_kind.clone(),
+                state_version: state_version.clone(),
+                config_schema_id: config_ref.schema_id.clone(),
+                input_schema_id: input_binding.input_schema_id.clone(),
+                output_schema_id: receipt_schema.clone(),
+                output_semantic_type_id: receipt_semantic.clone(),
+                effect_kind: managed.kind.clone(),
+                effect_class: managed.class.as_str().to_owned(),
+                effect_name: managed.name.to_owned(),
+                effect_version: managed.version,
+                capabilities: no_caps.clone(),
+                runner: "managed_platform_write".to_owned(),
+                side_effect_contract_digest: None,
+            },
+        )));
+    typed.config_refs.push(config_ref.clone());
+    typed.cells.push(spec::CellSpec {
+        cell_id: output_cell.clone(),
+        producer: spec::CellProducer::Node(node_id.clone()),
+        scope_id: input_cell.scope_id.clone(),
+        semantic_type_id: receipt_semantic,
+        schema_id: receipt_schema,
+        value_lineage: spec::ValueLineageRef {
+            lineage_digest: content(0xbb),
+        },
+        terminal_policy: spec::CellTerminalPolicy::ProducedOnly,
+        storage_policy: spec::StoragePolicy::ContentAddressed,
+        redaction_policy: spec::RedactionPolicy::Public,
+    });
+    let predecessors = match &input_cell.producer {
+        spec::CellProducer::Node(producer) => vec![producer.clone()],
+        spec::CellProducer::Seed(_) => Vec::new(),
+    };
+    let framework_receipt = if valid_ordering {
+        retention_manifest_receipt_cell
+    } else {
+        typed
+            .public_outputs
+            .outputs
+            .first()
+            .expect("public output")
+            .cell_id
+            .clone()
+    };
+    typed.nodes.push(spec::NodeSpec {
+        node_id: node_id.clone(),
+        stable_key: spec::StableAuthorKey::new("framework/complete-run").expect("stable key"),
+        scope_id: input_cell.scope_id,
+        state_kind,
+        state_version,
+        descriptor_id,
+        config_ref,
+        input_bindings: input_binding,
+        output_cell,
+        effect_kind: managed.kind,
+        capability_bindings: no_caps,
+        adapter_bindings: Vec::new(),
+        side_effect: None,
+        framework: Some(spec::FrameworkNodeSpec::CompleteRun(
+            spec::CompleteRunNodeSpec {
+                public_schema_id: typed.public_outputs.public_schema_id.clone(),
+                retention_manifest_receipt_cell: framework_receipt,
+            },
+        )),
+        planning_lineage: typed.scopes[0].planning_lineage.clone(),
+        deterministic_predecessors: predecessors,
+    });
+    node_id
+}
+
+fn append_runtime_user_receipt_consumer(
+    typed: &mut spec::TypedExecutionSpec,
+    receipt_cell: CellId,
+    stable_key: &str,
+) -> NodeId {
+    let template = typed
+        .nodes
+        .iter()
+        .find(|node| node.framework.is_none())
+        .expect("user node template")
+        .clone();
+    let input_cell = typed
+        .cells
+        .iter()
+        .find(|cell| cell.cell_id == receipt_cell)
+        .expect("receipt cell")
+        .clone();
+    let output_cell = CellId::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        DigestBytes::from_array([0xfb; 32]),
+    );
+    let node_id = NodeId::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        DigestBytes::from_array([0xfc; 32]),
+    );
+    let field_path = spec::PublicFieldPath::new("receipt").expect("field path");
+    let input_root = spec::InputBindingNodeSpec::Cell(Box::new(spec::InputBindingCellSpec {
+        field_path,
+        cell_id: input_cell.cell_id.clone(),
+        semantic_type_id: input_cell.semantic_type_id.clone(),
+        schema_id: input_cell.schema_id.clone(),
+        required_terminal: spec::RequiredTerminal::ProducedOnly,
+        value_lineage: input_cell.value_lineage.clone(),
+    }));
+    let mut input_bindings = template.input_bindings.clone();
+    input_bindings.root = input_root;
+    input_bindings.digest =
+        content_digest_json(input_node_json(&input_bindings.root)).expect("input digest");
+    let predecessors = match &input_cell.producer {
+        spec::CellProducer::Node(producer) => vec![producer.clone()],
+        spec::CellProducer::Seed(_) => Vec::new(),
+    };
+    typed.cells.push(spec::CellSpec {
+        cell_id: output_cell.clone(),
+        producer: spec::CellProducer::Node(node_id.clone()),
+        scope_id: template.scope_id.clone(),
+        semantic_type_id: typed
+            .cells
+            .iter()
+            .find(|cell| cell.cell_id == template.output_cell)
+            .expect("template output")
+            .semantic_type_id
+            .clone(),
+        schema_id: typed
+            .cells
+            .iter()
+            .find(|cell| cell.cell_id == template.output_cell)
+            .expect("template output")
+            .schema_id
+            .clone(),
+        value_lineage: spec::ValueLineageRef {
+            lineage_digest: content(0xfd),
+        },
+        terminal_policy: spec::CellTerminalPolicy::ProducedOnly,
+        storage_policy: spec::StoragePolicy::ContentAddressed,
+        redaction_policy: spec::RedactionPolicy::Public,
+    });
+    typed.nodes.push(spec::NodeSpec {
+        node_id: node_id.clone(),
+        stable_key: spec::StableAuthorKey::new(stable_key).expect("stable key"),
+        scope_id: template.scope_id,
+        state_kind: template.state_kind,
+        state_version: template.state_version,
+        descriptor_id: template.descriptor_id,
+        config_ref: template.config_ref,
+        input_bindings,
+        output_cell,
+        effect_kind: template.effect_kind,
+        capability_bindings: template.capability_bindings,
+        adapter_bindings: Vec::new(),
+        side_effect: None,
+        framework: None,
+        planning_lineage: template.planning_lineage,
+        deterministic_predecessors: predecessors,
+    });
+    node_id
+}
+
+fn append_runtime_independent_user_node(
+    typed: &mut spec::TypedExecutionSpec,
+    stable_key: &str,
+) -> NodeId {
+    let template = typed
+        .nodes
+        .iter()
+        .find(|node| node.framework.is_none())
+        .expect("user node template")
+        .clone();
+    let template_output = typed
+        .cells
+        .iter()
+        .find(|cell| cell.cell_id == template.output_cell)
+        .expect("template output")
+        .clone();
+    let input_cells = runtime_collect_input_cells(&template.input_bindings.root);
+    let output_cell = CellId::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        DigestBytes::from_array([0xee; 32]),
+    );
+    let node_id = NodeId::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        DigestBytes::from_array([0xef; 32]),
+    );
+    typed.cells.push(spec::CellSpec {
+        cell_id: output_cell.clone(),
+        producer: spec::CellProducer::Node(node_id.clone()),
+        scope_id: template.scope_id.clone(),
+        semantic_type_id: template_output.semantic_type_id,
+        schema_id: template_output.schema_id,
+        value_lineage: spec::ValueLineageRef {
+            lineage_digest: content(0xee),
+        },
+        terminal_policy: spec::CellTerminalPolicy::ProducedOnly,
+        storage_policy: spec::StoragePolicy::ContentAddressed,
+        redaction_policy: spec::RedactionPolicy::Public,
+    });
+    typed.nodes.push(spec::NodeSpec {
+        node_id: node_id.clone(),
+        stable_key: spec::StableAuthorKey::new(stable_key).expect("stable key"),
+        scope_id: template.scope_id,
+        state_kind: template.state_kind,
+        state_version: template.state_version,
+        descriptor_id: template.descriptor_id,
+        config_ref: template.config_ref,
+        input_bindings: template.input_bindings,
+        output_cell,
+        effect_kind: template.effect_kind,
+        capability_bindings: template.capability_bindings,
+        adapter_bindings: template.adapter_bindings,
+        side_effect: template.side_effect,
+        framework: None,
+        planning_lineage: template.planning_lineage,
+        deterministic_predecessors: runtime_predecessors_for_inputs(typed, &input_cells),
+    });
+    node_id
+}
+
+fn runtime_collect_input_cells(root: &spec::InputBindingNodeSpec) -> Vec<CellId> {
+    let mut cells = Vec::new();
+    runtime_collect_input_cells_into(root, &mut cells);
+    cells
+}
+
+fn runtime_collect_input_cells_into(root: &spec::InputBindingNodeSpec, output: &mut Vec<CellId>) {
+    match root {
+        spec::InputBindingNodeSpec::Unit => {}
+        spec::InputBindingNodeSpec::Cell(cell) => output.push(cell.cell_id.clone()),
+        spec::InputBindingNodeSpec::Tuple(elements) => {
+            for element in elements {
+                runtime_collect_input_cells_into(element, output);
+            }
+        }
+        spec::InputBindingNodeSpec::Struct(fields) => {
+            for field in fields {
+                runtime_collect_input_cells_into(&field.node, output);
+            }
+        }
+        spec::InputBindingNodeSpec::Vec { elements, .. }
+        | spec::InputBindingNodeSpec::NonEmptyVec { elements, .. } => {
+            for element in elements {
+                runtime_collect_input_cells_into(element, output);
+            }
+        }
+    }
+}
+
+fn runtime_predecessors_for_inputs(
+    typed: &spec::TypedExecutionSpec,
+    input_cells: &[CellId],
+) -> Vec<NodeId> {
+    let mut predecessors = BTreeSet::new();
+    for input_cell in input_cells {
+        let cell = typed
+            .cells
+            .iter()
+            .find(|cell| cell.cell_id == *input_cell)
+            .expect("input cell");
+        if let spec::CellProducer::Node(node_id) = &cell.producer {
+            predecessors.insert(node_id.clone());
+        }
+    }
+    predecessors.into_iter().collect()
+}
+
+fn fixture() -> Fixture {
+    let scope = ScopeId::from_digest(DigestAlgorithm::Sha256JcsV1, D0);
+    let seed_id = SeedId::from_digest(DigestAlgorithm::Sha256JcsV1, D1);
+    let seed_cell = CellId::from_digest(DigestAlgorithm::Sha256JcsV1, D2);
+    let node_a = NodeId::from_digest(DigestAlgorithm::Sha256JcsV1, D3);
+    let cell_a = CellId::from_digest(DigestAlgorithm::Sha256JcsV1, D4);
+    let node_b = NodeId::from_digest(DigestAlgorithm::Sha256JcsV1, D5);
+    let cell_b = CellId::from_digest(DigestAlgorithm::Sha256JcsV1, D6);
+    let descriptor_a = DescriptorId::from_digest(DigestAlgorithm::Sha256JcsV1, D7);
+    let descriptor_b = DescriptorId::from_digest(DigestAlgorithm::Sha256JcsV1, D8);
+    let semantic = SemanticTypeId::new("mfm.test", "value", "1", DigestAlgorithm::Sha256JcsV1, D9)
+        .expect("semantic");
+    let value_schema =
+        SchemaId::new("mfm.test.value", "1", DigestAlgorithm::Sha256JcsV1, DA).expect("schema");
+    let input_schema = SchemaId::new("mfm.test.input", "1", DigestAlgorithm::Sha256JcsV1, DB)
+        .expect("input schema");
+    let config_schema = SchemaId::new("mfm.test.config", "1", DigestAlgorithm::Sha256JcsV1, DC)
+        .expect("config schema");
+    let public_schema = SchemaId::new("mfm.test.public", "1", DigestAlgorithm::Sha256JcsV1, DD)
+        .expect("public schema");
+    let effect_kind =
+        EffectKind::new("mfm.test", "pure", DigestAlgorithm::Sha256JcsV1, DE).expect("effect");
+    let read_effect =
+        EffectKind::new("mfm.test", "read", DigestAlgorithm::Sha256JcsV1, DF).expect("read effect");
+    let cap_kind = CapabilityKind::new("mfm.test", "read-db", DigestAlgorithm::Sha256JcsV1, D0)
+        .expect("cap kind");
+    let cap_version = CapabilityVersion::new("mfm.cap.read_db.v1").expect("cap version");
+    let adapter_kind = AdapterKind::new("mfm.test", "adapter", DigestAlgorithm::Sha256JcsV1, D1)
+        .expect("adapter kind");
+    let adapter_version = AdapterVersion::new("mfm.adapter.v1").expect("adapter version");
+    let read_cap = CapabilityDescriptor::new(
+        cap_kind.clone(),
+        cap_version.clone(),
+        CapabilityRole::ReadExternal,
+        "read-db",
+    )
+    .expect("capability");
+    let no_caps = CapabilitySetDescriptor::new(Vec::new()).expect("no caps");
+    let read_caps = CapabilitySetDescriptor::new(vec![read_cap]).expect("read caps");
+    let config_digest = digest_for_bytes(TEST_CONFIG_BYTES);
+    let config_ref = spec::ConfigRef {
+        schema_id: config_schema.clone(),
+        artifact_id: ArtifactId::from_digest(config_digest.algorithm(), *config_digest.digest()),
+        digest: config_digest,
+        byte_len: TEST_CONFIG_BYTES.len() as u64,
+        media_type: spec::MediaType::new("application/json").expect("media"),
+    };
+    let lineage_seed = spec::ValueLineageRef {
+        lineage_digest: content(0x41),
+    };
+    let lineage_a = spec::ValueLineageRef {
+        lineage_digest: content(0x42),
+    };
+    let lineage_b = spec::ValueLineageRef {
+        lineage_digest: content(0x43),
+    };
+    let planning = spec::PlanningLineage {
+        active_operation_instances: Vec::new(),
+        completed_operation_frames: Vec::new(),
+        lineage_digest: content(0x44),
+    };
+    let seed_digest = digest_for_bytes(TEST_SEED_BYTES);
+    let seed_ref = events::SeedCellRef {
+        seed_id: seed_id.clone(),
+        cell_id: seed_cell.clone(),
+        scope_id: scope.clone(),
+        semantic_type_id: semantic.clone(),
+        schema_id: value_schema.clone(),
+        digest: seed_digest.clone(),
+        seed_artifact: events::ArtifactEvidenceRef {
+            artifact_id: ArtifactId::from_digest(seed_digest.algorithm(), *seed_digest.digest()),
+            role: events::ArtifactRole::SeedInput,
+            schema_id: value_schema.clone(),
+            semantic_type_id: Some(semantic.clone()),
+            content_digest: seed_digest.clone(),
+            byte_len: TEST_SEED_BYTES.len() as u64,
+            media_type: spec::MediaType::new("application/json").expect("media"),
+        },
+    };
+    let renderer = spec::RendererDescriptorIdentity {
+        descriptor_id: DescriptorId::from_digest(DigestAlgorithm::Sha256JcsV1, D1),
+        renderer_kind: spec::RendererKind::new("public-output/json").expect("renderer"),
+        renderer_version: spec::RendererVersion::new("mfm.renderer.test.v1")
+            .expect("renderer version"),
+        public_schema_id: public_schema.clone(),
+        canonicalizer_identity: spec::CanonicalizerIdentity::new("sha256-jcs-v1")
+            .expect("canonicalizer"),
+    };
+    let public_output_cell = spec::PublicOutputCell {
+        public_field_path: spec::PublicFieldPath::new("result").expect("field"),
+        cell_id: cell_b.clone(),
+        producer: spec::CellProducer::Node(node_b.clone()),
+        scope_id: scope.clone(),
+        semantic_type_id: semantic.clone(),
+        schema_id: value_schema.clone(),
+        value_lineage: lineage_b.clone(),
+        required_terminal: spec::RequiredTerminal::ProducedOnly,
+    };
+    let public_outputs = spec::PublicOutputSpec {
+        public_schema_id: public_schema.clone(),
+        outputs: vec![public_output_cell.clone()],
+        renderer_descriptor: renderer.clone(),
+    };
+    let output_spec_digest = public_outputs.digest().expect("public output digest");
+    let render_node = NodeId::from_digest(DigestAlgorithm::Sha256JcsV1, D8);
+    let render_config_ref = spec::framework_config_ref("public_output_render", &render_node)
+        .expect("render config ref");
+    let render_cell = CellId::from_digest(DigestAlgorithm::Sha256JcsV1, D9);
+    let render_descriptor = DescriptorId::from_digest(DigestAlgorithm::Sha256JcsV1, DA);
+    let receipt_schema = spec::public_output_receipt_schema_id().expect("receipt schema");
+    let receipt_semantic =
+        spec::public_output_receipt_semantic_type_id().expect("receipt semantic");
+    let render_lineage = spec::ValueLineageRef {
+        lineage_digest: content(0x45),
+    };
+    let render_input_root = spec::InputBindingNodeSpec::Struct(vec![spec::NamedInputBindingSpec {
+        field_path: public_output_cell.public_field_path.clone(),
+        node: spec::InputBindingNodeSpec::Cell(Box::new(spec::InputBindingCellSpec {
+            field_path: public_output_cell.public_field_path.clone(),
+            cell_id: public_output_cell.cell_id.clone(),
+            semantic_type_id: public_output_cell.semantic_type_id.clone(),
+            schema_id: public_output_cell.schema_id.clone(),
+            required_terminal: public_output_cell.required_terminal,
+            value_lineage: public_output_cell.value_lineage.clone(),
+        })),
+    }]);
+    let render_input_binding = spec::InputBindingSpec {
+        input_schema_id: public_schema.clone(),
+        input_descriptor_id: DescriptorId::from_digest(DigestAlgorithm::Sha256JcsV1, DC),
+        digest: content_digest_json(input_node_json(&render_input_root))
+            .expect("render input digest"),
+        root: render_input_root,
+    };
+    let managed_effect = ManagedPlatformWrite::descriptor().expect("managed effect");
+    let render_state_kind = StateKind::new(
+        "mfm.framework.state",
+        "render_public_outputs",
+        DigestAlgorithm::Sha256JcsV1,
+        DD,
+    )
+    .expect("render state kind");
+    let render_state_version = StateVersion::new("mfm.framework.state.render_public_outputs.v1")
+        .expect("render state version");
+    let node_a_spec = node_spec(NodeSpecFixture {
+        node_id: node_a.clone(),
+        descriptor_id: descriptor_a.clone(),
+        scope_id: scope.clone(),
+        state_name: "mfm.test.state.a",
+        state_kind: StateKind::new("mfm.test", "a", DigestAlgorithm::Sha256JcsV1, D2)
+            .expect("state a"),
+        state_version: StateVersion::new("mfm.test.state.a.v1").expect("state version"),
+        effect_kind: effect_kind.clone(),
+        config_ref: config_ref.clone(),
+        input_schema: input_schema.clone(),
+        input_cell: seed_cell.clone(),
+        input_lineage: lineage_seed.clone(),
+        output_cell: cell_a.clone(),
+        output_schema: value_schema.clone(),
+        semantic: semantic.clone(),
+        caps: no_caps.clone(),
+        predecessors: Vec::new(),
+        adapter_bindings: Vec::new(),
+        planning: planning.clone(),
+    });
+    let node_b_spec = node_spec(NodeSpecFixture {
+        node_id: node_b.clone(),
+        descriptor_id: descriptor_b.clone(),
+        scope_id: scope.clone(),
+        state_name: "mfm.test.state.b",
+        state_kind: StateKind::new("mfm.test", "b", DigestAlgorithm::Sha256JcsV1, D3)
+            .expect("state b"),
+        state_version: StateVersion::new("mfm.test.state.b.v1").expect("state version"),
+        effect_kind: read_effect.clone(),
+        config_ref: config_ref.clone(),
+        input_schema: input_schema.clone(),
+        input_cell: cell_a.clone(),
+        input_lineage: lineage_a.clone(),
+        output_cell: cell_b.clone(),
+        output_schema: value_schema.clone(),
+        semantic: semantic.clone(),
+        caps: read_caps.clone(),
+        predecessors: vec![node_a.clone()],
+        adapter_bindings: vec![spec::AdapterBinding {
+            adapter_kind: adapter_kind.clone(),
+            adapter_version: adapter_version.clone(),
+            binding_digest: None,
+        }],
+        planning: planning.clone(),
+    });
+    let render_node_spec = spec::NodeSpec {
+        node_id: render_node.clone(),
+        stable_key: spec::StableAuthorKey::new("public-output").expect("render key"),
+        scope_id: scope.clone(),
+        state_kind: render_state_kind.clone(),
+        state_version: render_state_version.clone(),
+        descriptor_id: render_descriptor.clone(),
+        config_ref: render_config_ref.clone(),
+        input_bindings: render_input_binding,
+        output_cell: render_cell.clone(),
+        effect_kind: managed_effect.kind.clone(),
+        capability_bindings: no_caps.clone(),
+        adapter_bindings: Vec::new(),
+        side_effect: None,
+        framework: Some(spec::FrameworkNodeSpec::PublicOutputRender(
+            spec::PublicOutputRenderNodeSpec {
+                public_schema_id: public_schema.clone(),
+                output_spec_digest: output_spec_digest.clone(),
+                renderer_descriptor: renderer.clone(),
+                required_cells: public_outputs.outputs.clone(),
+            },
+        )),
+        planning_lineage: planning.clone(),
+        deterministic_predecessors: vec![node_b.clone()],
+    };
+    let mut spec = spec::TypedExecutionSpec::new(spec::TypedExecutionSpecParts {
+        authoring: spec::AuthoringProvenance::StateComposition {
+            descriptor: spec::CompositionDescriptor {
+                descriptor_id: DescriptorId::from_digest(DigestAlgorithm::Sha256JcsV1, D4),
+                name: "mfm.test.composition".to_owned(),
+                version: "mfm.test.composition.v1".to_owned(),
+            },
+            config_hash: content(0x60),
+        },
+        scopes: vec![spec::ScopeSpec {
+            scope_id: scope.clone(),
+            parent_scope_id: None,
+            stable_key: spec::StableAuthorKey::new("root").expect("stable key"),
+            planning_lineage: planning.clone(),
+        }],
+        seeds: vec![spec::SeedSpec {
+            seed_id: seed_id.clone(),
+            seed_key: spec::StableAuthorKey::new("launch").expect("seed key"),
+            cell_id: seed_cell.clone(),
+            scope_id: scope.clone(),
+            semantic_type_id: semantic.clone(),
+            schema_id: value_schema.clone(),
+            required_digest: Some(seed_digest),
+        }],
+        descriptor_identities: vec![
+            spec::DescriptorIdentity::State(Box::new(state_descriptor(
+                &node_a_spec,
+                descriptor_a.clone(),
+                "mfm.test.state.a",
+                effect_kind,
+                no_caps.clone(),
+                "pure",
+            ))),
+            spec::DescriptorIdentity::State(Box::new(state_descriptor(
+                &node_b_spec,
+                descriptor_b.clone(),
+                "mfm.test.state.b",
+                read_effect,
+                read_caps,
+                "read",
+            ))),
+            spec::DescriptorIdentity::State(Box::new(spec::StateDescriptorIdentity {
+                descriptor_id: render_descriptor.clone(),
+                name: "mfm.framework.render_public_outputs".to_owned(),
+                state_kind: render_state_kind,
+                state_version: render_state_version,
+                config_schema_id: render_config_ref.schema_id.clone(),
+                input_schema_id: public_schema.clone(),
+                output_schema_id: receipt_schema.clone(),
+                output_semantic_type_id: receipt_semantic.clone(),
+                effect_kind: managed_effect.kind,
+                effect_class: managed_effect.class.as_str().to_owned(),
+                effect_name: managed_effect.name.to_owned(),
+                effect_version: managed_effect.version,
+                capabilities: no_caps,
+                runner: "managed_platform_write".to_owned(),
+                side_effect_contract_digest: None,
+            })),
+            spec::DescriptorIdentity::Renderer(Box::new(renderer.clone())),
+        ],
+        config_refs: vec![config_ref.clone(), render_config_ref],
+        nodes: vec![
+            render_node_spec.clone(),
+            node_b_spec.clone(),
+            node_a_spec.clone(),
+        ],
+        cells: vec![
+            spec::CellSpec {
+                cell_id: seed_cell,
+                producer: spec::CellProducer::Seed(seed_id),
+                scope_id: scope.clone(),
+                semantic_type_id: semantic.clone(),
+                schema_id: value_schema.clone(),
+                value_lineage: lineage_seed.clone(),
+                terminal_policy: spec::CellTerminalPolicy::ProducedOnly,
+                storage_policy: spec::StoragePolicy::ContentAddressed,
+                redaction_policy: spec::RedactionPolicy::Public,
+            },
+            spec::CellSpec {
+                cell_id: cell_a.clone(),
+                producer: spec::CellProducer::Node(node_a.clone()),
+                scope_id: scope.clone(),
+                semantic_type_id: semantic.clone(),
+                schema_id: value_schema.clone(),
+                value_lineage: lineage_a.clone(),
+                terminal_policy: spec::CellTerminalPolicy::ProducedOnly,
+                storage_policy: spec::StoragePolicy::ContentAddressed,
+                redaction_policy: spec::RedactionPolicy::Public,
+            },
+            spec::CellSpec {
+                cell_id: cell_b.clone(),
+                producer: spec::CellProducer::Node(node_b.clone()),
+                scope_id: scope.clone(),
+                semantic_type_id: semantic.clone(),
+                schema_id: value_schema.clone(),
+                value_lineage: lineage_b.clone(),
+                terminal_policy: spec::CellTerminalPolicy::ProducedOnly,
+                storage_policy: spec::StoragePolicy::ContentAddressed,
+                redaction_policy: spec::RedactionPolicy::Public,
+            },
+            spec::CellSpec {
+                cell_id: render_cell.clone(),
+                producer: spec::CellProducer::Node(render_node.clone()),
+                scope_id: scope.clone(),
+                semantic_type_id: receipt_semantic,
+                schema_id: receipt_schema,
+                value_lineage: render_lineage.clone(),
+                terminal_policy: spec::CellTerminalPolicy::ProducedOnly,
+                storage_policy: spec::StoragePolicy::PublicOutputArtifact,
+                redaction_policy: spec::RedactionPolicy::Public,
+            },
+        ],
+        value_lineages: vec![
+            spec::ValueLineage {
+                lineage_ref: lineage_seed.clone(),
+                scope_id: scope.clone(),
+                producer: spec::CellProducer::Seed(SeedId::from_digest(
+                    DigestAlgorithm::Sha256JcsV1,
+                    D1,
+                )),
+                input_cells: Vec::new(),
+                config_ref_digest: None,
+                planning_lineage: planning.clone(),
+                domain_keys: Vec::new(),
+                transform_policy: spec::LineageTransformPolicy::Source,
+            },
+            spec::ValueLineage {
+                lineage_ref: lineage_a.clone(),
+                scope_id: scope.clone(),
+                producer: spec::CellProducer::Node(node_a.clone()),
+                input_cells: vec![CellId::from_digest(DigestAlgorithm::Sha256JcsV1, D2)],
+                config_ref_digest: Some(config_ref.digest.clone()),
+                planning_lineage: planning.clone(),
+                domain_keys: Vec::new(),
+                transform_policy: spec::LineageTransformPolicy::StateOutput,
+            },
+            spec::ValueLineage {
+                lineage_ref: lineage_b.clone(),
+                scope_id: scope.clone(),
+                producer: spec::CellProducer::Node(node_b.clone()),
+                input_cells: vec![cell_a.clone()],
+                config_ref_digest: Some(config_ref.digest.clone()),
+                planning_lineage: planning.clone(),
+                domain_keys: Vec::new(),
+                transform_policy: spec::LineageTransformPolicy::StateOutput,
+            },
+            spec::ValueLineage {
+                lineage_ref: render_lineage,
+                scope_id: scope,
+                producer: spec::CellProducer::Node(render_node.clone()),
+                input_cells: vec![cell_b.clone()],
+                config_ref_digest: Some(config_ref.digest.clone()),
+                planning_lineage: planning,
+                domain_keys: Vec::new(),
+                transform_policy: spec::LineageTransformPolicy::StateOutput,
+            },
+        ],
+        planning_lineage: Vec::new(),
+        public_outputs,
+    })
+    .expect("typed spec");
+    append_runtime_bootstrap_lifecycle_node(&mut spec);
+    append_runtime_retention_lifecycle_node(&mut spec, render_cell.clone(), true);
+    let retention_receipt = runtime_retention_receipt_cell(&spec);
+    append_runtime_complete_lifecycle_node(&mut spec, retention_receipt, true);
+    let envelope = spec::HashedSpecEnvelope::new(spec, spec::TypedExecutionSpecAudit::default())
+        .expect("envelope");
+    let runtime_spec =
+        CertifiedRuntimeSpec::from_verified_envelope(envelope).expect("runtime spec");
+    Fixture {
+        runtime_spec,
+        run_id: RunId::from_digest(DigestAlgorithm::Sha256JcsV1, D5),
+        seed_ref,
+        descriptor_a,
+        descriptor_b,
+        render_node,
+        render_cell,
+        cell_a,
+        cell_b,
+        cap_kind,
+        cap_version,
+        adapter_kind,
+        adapter_version,
+    }
+}
+
+fn fixture_with_retention_lifecycle_node() -> Fixture {
+    fixture()
+}
+
+async fn drive_until_public_output_produced(
+    scheduler: &SerialTypedScheduler,
+    store: &mut store::InMemoryTypedRunStore,
+    fixture: &Fixture,
+) {
+    for _ in 0..8 {
+        scheduler
+            .drive_once(store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("drive until public output");
+        let projections = store.projection_snapshot();
+        if projections.run_state(&fixture.run_id) == store::RunState::Started
+            && matches!(
+                projections
+                    .public_output(&fixture.runtime_spec.spec().public_outputs.public_schema_id),
+                Some(store::PublicOutputProjection::Produced { .. })
+            )
+        {
+            return;
+        }
+    }
+    panic!("public output was not produced");
+}
+
+fn fixture_with_first_managed_write_state() -> Fixture {
+    let mut fixture = fixture();
+    let mut envelope = fixture.runtime_spec.envelope().clone();
+    let managed_effect = EffectKind::new(
+        "mfm.test",
+        "managed-write",
+        DigestAlgorithm::Sha256JcsV1,
+        D8,
+    )
+    .expect("managed effect");
+    let managed_cap = CapabilityDescriptor::new(
+        CapabilityKind::new(
+            "mfm.test",
+            "managed-store",
+            DigestAlgorithm::Sha256JcsV1,
+            D9,
+        )
+        .expect("managed cap kind"),
+        CapabilityVersion::new("mfm.cap.managed_store.v1").expect("managed cap version"),
+        CapabilityRole::ManagedPlatformWrite,
+        "managed-store",
+    )
+    .expect("managed cap");
+    let managed_caps = CapabilitySetDescriptor::new(vec![managed_cap]).expect("managed caps");
+    for node in &mut envelope.spec.nodes {
+        if node.descriptor_id == fixture.descriptor_a {
+            node.effect_kind = managed_effect.clone();
+            node.capability_bindings = managed_caps.clone();
+        }
+    }
+    for descriptor in &mut envelope.spec.descriptor_identities {
+        if let spec::DescriptorIdentity::State(identity) = descriptor {
+            if identity.descriptor_id == fixture.descriptor_a {
+                identity.effect_kind = managed_effect.clone();
+                identity.effect_class = "managed-write".to_owned();
+                identity.effect_name = "managed-write".to_owned();
+                identity.capabilities = managed_caps.clone();
+                identity.runner = "managed-write".to_owned();
+            }
+        }
+    }
+    let envelope = spec::HashedSpecEnvelope::new(envelope.spec, envelope.audit).expect("rehash");
+    fixture.runtime_spec =
+        CertifiedRuntimeSpec::from_verified_envelope(envelope).expect("runtime spec");
+    fixture
+}
+
+fn fixture_with_first_side_effect_state() -> Fixture {
+    let mut fixture = fixture();
+    let mut envelope = fixture.runtime_spec.envelope().clone();
+    let side_effect = EffectKind::new("mfm.test", "side-effect", DigestAlgorithm::Sha256JcsV1, D8)
+        .expect("side-effect");
+    let side_effect_cap = CapabilityDescriptor::new(
+        side_effect_capability_kind(),
+        side_effect_capability_version(),
+        CapabilityRole::ExternalMutationAuthority,
+        "external-mutation",
+    )
+    .expect("side-effect cap");
+    let side_effect_caps =
+        CapabilitySetDescriptor::new(vec![side_effect_cap]).expect("side-effect caps");
+    let contract_digest = content(0x88);
+    for node in &mut envelope.spec.nodes {
+        if node.descriptor_id == fixture.descriptor_a {
+            node.effect_kind = side_effect.clone();
+            node.capability_bindings = side_effect_caps.clone();
+            node.adapter_bindings = vec![spec::AdapterBinding {
+                adapter_kind: fixture.adapter_kind.clone(),
+                adapter_version: fixture.adapter_version.clone(),
+                binding_digest: None,
+            }];
+            node.side_effect = Some(spec::SideEffectContractSpec {
+                contract_digest: contract_digest.clone(),
+            });
+        }
+    }
+    for descriptor in &mut envelope.spec.descriptor_identities {
+        if let spec::DescriptorIdentity::State(identity) = descriptor {
+            if identity.descriptor_id == fixture.descriptor_a {
+                identity.effect_kind = side_effect.clone();
+                identity.effect_class = "sidefx".to_owned();
+                identity.effect_name = "sidefx".to_owned();
+                identity.capabilities = side_effect_caps.clone();
+                identity.runner = "sidefx".to_owned();
+                identity.side_effect_contract_digest = Some(contract_digest.clone());
+            }
+        }
+    }
+    let envelope = spec::HashedSpecEnvelope::new(envelope.spec, envelope.audit).expect("rehash");
+    fixture.runtime_spec =
+        CertifiedRuntimeSpec::from_verified_envelope(envelope).expect("runtime spec");
+    fixture
+}
+
+fn fixture_with_independent_second_node_and_first_side_effect_state() -> Fixture {
+    let mut fixture = fixture_with_first_side_effect_state();
+    let mut envelope = fixture.runtime_spec.envelope().clone();
+    let seed_cell = envelope
+        .spec
+        .cells
+        .iter()
+        .find(|cell| cell.cell_id == fixture.seed_ref.cell_id)
+        .expect("seed cell")
+        .clone();
+    let node_b_id = envelope
+        .spec
+        .nodes
+        .iter()
+        .find(|node| node.descriptor_id == fixture.descriptor_b)
+        .expect("node b")
+        .node_id
+        .clone();
+    let cell_a = envelope
+        .spec
+        .cells
+        .iter()
+        .find(|cell| cell.cell_id == fixture.cell_a)
+        .expect("cell a")
+        .clone();
+    let cell_a_public_output = spec::PublicOutputCell {
+        public_field_path: spec::PublicFieldPath::new("side_effect").expect("field"),
+        cell_id: cell_a.cell_id.clone(),
+        producer: cell_a.producer.clone(),
+        scope_id: cell_a.scope_id.clone(),
+        semantic_type_id: cell_a.semantic_type_id.clone(),
+        schema_id: cell_a.schema_id.clone(),
+        value_lineage: cell_a.value_lineage.clone(),
+        required_terminal: spec::RequiredTerminal::ProducedOnly,
+    };
+    envelope
+        .spec
+        .public_outputs
+        .outputs
+        .push(cell_a_public_output);
+    let public_output_cells = envelope.spec.public_outputs.outputs.clone();
+    let output_spec_digest = envelope
+        .spec
+        .public_outputs
+        .digest()
+        .expect("public output digest");
+    let render_input_root = spec::InputBindingNodeSpec::Struct(
+        public_output_cells
+            .iter()
+            .map(|public_output| spec::NamedInputBindingSpec {
+                field_path: public_output.public_field_path.clone(),
+                node: spec::InputBindingNodeSpec::Cell(Box::new(spec::InputBindingCellSpec {
+                    field_path: public_output.public_field_path.clone(),
+                    cell_id: public_output.cell_id.clone(),
+                    semantic_type_id: public_output.semantic_type_id.clone(),
+                    schema_id: public_output.schema_id.clone(),
+                    required_terminal: public_output.required_terminal,
+                    value_lineage: public_output.value_lineage.clone(),
+                })),
+            })
+            .collect(),
+    );
+    let render_predecessors = runtime_predecessors_for_inputs(
+        &envelope.spec,
+        &public_output_cells
+            .iter()
+            .map(|public_output| public_output.cell_id.clone())
+            .collect::<Vec<_>>(),
+    );
+    for node in &mut envelope.spec.nodes {
+        if node.descriptor_id == fixture.descriptor_b {
+            node.input_bindings.root =
+                spec::InputBindingNodeSpec::Cell(Box::new(spec::InputBindingCellSpec {
+                    field_path: spec::PublicFieldPath::new("input").expect("field"),
+                    cell_id: seed_cell.cell_id.clone(),
+                    semantic_type_id: seed_cell.semantic_type_id.clone(),
+                    schema_id: seed_cell.schema_id.clone(),
+                    required_terminal: spec::RequiredTerminal::ProducedOnly,
+                    value_lineage: seed_cell.value_lineage.clone(),
+                }));
+            node.deterministic_predecessors.clear();
+        }
+        if node.node_id == fixture.render_node {
+            if let Some(spec::FrameworkNodeSpec::PublicOutputRender(render)) = &mut node.framework {
+                render.output_spec_digest = output_spec_digest.clone();
+                render.required_cells = public_output_cells.clone();
+            }
+            node.input_bindings.root = render_input_root.clone();
+            node.input_bindings.digest =
+                content_digest_json(input_node_json(&node.input_bindings.root))
+                    .expect("render input digest");
+            node.deterministic_predecessors = render_predecessors.clone();
+        }
+    }
+    for lineage in &mut envelope.spec.value_lineages {
+        if lineage.producer == spec::CellProducer::Node(node_b_id.clone()) {
+            lineage.input_cells = vec![seed_cell.cell_id.clone()];
+        }
+        if lineage.producer == spec::CellProducer::Node(fixture.render_node.clone()) {
+            lineage.input_cells = public_output_cells
+                .iter()
+                .map(|public_output| public_output.cell_id.clone())
+                .collect();
+        }
+    }
+    let envelope = spec::HashedSpecEnvelope::new(envelope.spec, envelope.audit).expect("rehash");
+    fixture.runtime_spec =
+        CertifiedRuntimeSpec::from_verified_envelope(envelope).expect("runtime spec");
+    fixture
+}
+
+struct NodeSpecFixture {
+    node_id: NodeId,
+    descriptor_id: DescriptorId,
+    scope_id: ScopeId,
+    state_name: &'static str,
+    state_kind: StateKind,
+    state_version: StateVersion,
+    effect_kind: EffectKind,
+    config_ref: spec::ConfigRef,
+    input_schema: SchemaId,
+    input_cell: CellId,
+    input_lineage: spec::ValueLineageRef,
+    output_cell: CellId,
+    output_schema: SchemaId,
+    semantic: SemanticTypeId,
+    caps: CapabilitySetDescriptor,
+    predecessors: Vec<NodeId>,
+    adapter_bindings: Vec<spec::AdapterBinding>,
+    planning: spec::PlanningLineage,
+}
+
+fn node_spec(fixture: NodeSpecFixture) -> spec::NodeSpec {
+    spec::NodeSpec {
+        node_id: fixture.node_id,
+        stable_key: spec::StableAuthorKey::new(
+            fixture.state_name.rsplit('.').next().expect("state key"),
+        )
+        .expect("stable key"),
+        scope_id: fixture.scope_id,
+        state_kind: fixture.state_kind,
+        state_version: fixture.state_version,
+        descriptor_id: fixture.descriptor_id,
+        config_ref: fixture.config_ref,
+        input_bindings: spec::InputBindingSpec {
+            input_schema_id: fixture.input_schema,
+            input_descriptor_id: DescriptorId::from_digest(DigestAlgorithm::Sha256JcsV1, D6),
+            root: spec::InputBindingNodeSpec::Cell(Box::new(spec::InputBindingCellSpec {
+                field_path: spec::PublicFieldPath::new("input").expect("field"),
+                cell_id: fixture.input_cell,
+                semantic_type_id: fixture.semantic.clone(),
+                schema_id: fixture.output_schema.clone(),
+                required_terminal: spec::RequiredTerminal::ProducedOnly,
+                value_lineage: fixture.input_lineage,
+            })),
+            digest: content(0x73),
+        },
+        output_cell: fixture.output_cell,
+        effect_kind: fixture.effect_kind,
+        capability_bindings: fixture.caps,
+        adapter_bindings: fixture.adapter_bindings,
+        side_effect: None,
+        framework: None,
+        planning_lineage: fixture.planning,
+        deterministic_predecessors: fixture.predecessors,
+    }
+}
+
+fn state_descriptor(
+    node: &spec::NodeSpec,
+    descriptor_id: DescriptorId,
+    name: &str,
+    effect_kind: EffectKind,
+    capabilities: CapabilitySetDescriptor,
+    runner: &str,
+) -> spec::StateDescriptorIdentity {
+    spec::StateDescriptorIdentity {
+        descriptor_id,
+        name: name.to_owned(),
+        state_kind: node.state_kind.clone(),
+        state_version: node.state_version.clone(),
+        config_schema_id: node.config_ref.schema_id.clone(),
+        input_schema_id: node.input_bindings.input_schema_id.clone(),
+        output_schema_id: node
+            .input_bindings
+            .root
+            .clone()
+            .first_schema_or(node.config_ref.schema_id.clone()),
+        output_semantic_type_id: match &node.input_bindings.root {
+            spec::InputBindingNodeSpec::Cell(cell) => cell.semantic_type_id.clone(),
+            _ => panic!("test input"),
+        },
+        effect_kind,
+        effect_class: runner.to_owned(),
+        effect_name: runner.to_owned(),
+        effect_version: EffectVersion::new("mfm.effect.v1").expect("effect version"),
+        capabilities,
+        runner: runner.to_owned(),
+        side_effect_contract_digest: None,
+    }
+}
+
+trait FirstSchema {
+    fn first_schema_or(&self, fallback: SchemaId) -> SchemaId;
+}
+
+impl FirstSchema for spec::InputBindingNodeSpec {
+    fn first_schema_or(&self, fallback: SchemaId) -> SchemaId {
+        match self {
+            spec::InputBindingNodeSpec::Cell(cell) => cell.schema_id.clone(),
+            _ => fallback,
+        }
+    }
+}
+
+fn content(byte: u8) -> ContentDigest {
+    ContentDigest::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        DigestBytes::from_array([byte; 32]),
+    )
+}
+
+fn input_node_json(node: &spec::InputBindingNodeSpec) -> serde_json::Value {
+    match node {
+        spec::InputBindingNodeSpec::Unit => serde_json::json!({ "kind": "unit" }),
+        spec::InputBindingNodeSpec::Cell(cell) => serde_json::json!({
+            "cell_id": cell.cell_id.as_str(),
+            "field_path": cell.field_path.as_str(),
+            "kind": "cell",
+            "required_terminal": match cell.required_terminal {
+                spec::RequiredTerminal::ProducedOnly => "produced_only",
+                spec::RequiredTerminal::MaybeSkipped => "maybe_skipped",
+            },
+            "schema_id": cell.schema_id.as_str(),
+            "semantic_type_id": cell.semantic_type_id.as_str(),
+            "value_lineage": cell.value_lineage.lineage_digest.as_str(),
+        }),
+        spec::InputBindingNodeSpec::Tuple(elements) => serde_json::json!({
+            "elements": elements.iter().map(input_node_json).collect::<Vec<_>>(),
+            "kind": "tuple",
+        }),
+        spec::InputBindingNodeSpec::Struct(fields) => serde_json::json!({
+            "fields": fields.iter().map(|field| {
+                serde_json::json!({
+                    "field_path": field.field_path.as_str(),
+                    "node": input_node_json(&field.node),
+                })
+            }).collect::<Vec<_>>(),
+            "kind": "struct",
+        }),
+        spec::InputBindingNodeSpec::Vec {
+            elements,
+            ordering,
+            domain_keys,
+        } => serde_json::json!({
+            "domain_keys": domain_keys.iter().map(stable_domain_key_ref_json).collect::<Vec<_>>(),
+            "elements": elements.iter().map(input_node_json).collect::<Vec<_>>(),
+            "kind": "vec",
+            "ordering": ordering_json(*ordering),
+        }),
+        spec::InputBindingNodeSpec::NonEmptyVec {
+            elements,
+            ordering,
+            domain_keys,
+        } => serde_json::json!({
+            "domain_keys": domain_keys.iter().map(stable_domain_key_ref_json).collect::<Vec<_>>(),
+            "elements": elements.iter().map(input_node_json).collect::<Vec<_>>(),
+            "kind": "non_empty_vec",
+            "ordering": ordering_json(*ordering),
+        }),
+    }
+}
+
+fn ordering_json(ordering: spec::OrderingEvidence) -> &'static str {
+    match ordering {
+        spec::OrderingEvidence::ExplicitAuthorOrder => "explicit_author_order",
+        spec::OrderingEvidence::StableDomainKey => "stable_domain_key",
+    }
+}
+
+fn stable_domain_key_ref_json(key: &spec::StableDomainKeyRef) -> serde_json::Value {
+    serde_json::json!({
+        "content_digest": key.content_digest.as_str(),
+        "schema_id": key.schema_id.as_str(),
+    })
+}
+
+fn artifact(byte: u8) -> ArtifactId {
+    ArtifactId::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        DigestBytes::from_array([byte; 32]),
+    )
+}
+
+fn side_effect_capability_kind() -> CapabilityKind {
+    CapabilityKind::new(
+        "mfm.test",
+        "external-mutation",
+        DigestAlgorithm::Sha256JcsV1,
+        D9,
+    )
+    .expect("side-effect cap kind")
+}
+
+fn side_effect_capability_version() -> CapabilityVersion {
+    CapabilityVersion::new("mfm.cap.external_mutation.v1").expect("side-effect cap version")
+}
+
+fn side_effect_ledger_key(attempt_no: u32) -> events::SideEffectLedgerKey {
+    events::SideEffectLedgerKey::new(format!("ledger-{attempt_no}")).expect("ledger key")
+}
+
+fn side_effect_claim_owner(attempt_no: u32, generation: u32) -> events::RunnerInvocationId {
+    events::RunnerInvocationId::new(format!("owner-{attempt_no}-{generation}"))
+        .expect("claim owner")
+}
+
+fn side_effect_fencing_token(
+    attempt_no: u32,
+    generation: u32,
+) -> events::side_effect::ClaimFencingToken {
+    events::side_effect::ClaimFencingToken::new(format!("token-{attempt_no}-{generation}"))
+        .expect("fencing token")
+}
+
+fn side_effect_artifact(
+    ctx: &ErasedRunCtx<'_>,
+    artifact_id: ArtifactId,
+    digest: ContentDigest,
+    role: events::ArtifactRole,
+) -> store::ArtifactEvidenceRef {
+    store::ArtifactEvidenceRef {
+        artifact_id,
+        digest,
+        byte_len: 19,
+        media_type: spec::MediaType::new("application/json").expect("media"),
+        schema_id: Some(ctx.node().config_ref.schema_id.clone()),
+        semantic_type_id: None,
+        producer_node_id: Some(ctx.node().node_id.clone()),
+        producer_seed_id: None,
+        artifact_role: role,
+    }
+}
+
+fn side_effect_claimed(
+    ctx: &ErasedRunCtx<'_>,
+    ledger: events::SideEffectLedgerKey,
+    invocation_epoch: u32,
+    claim_generation: u32,
+) -> RunnerEventPayload {
+    RunnerEventPayload::SideEffectClaimed(events::side_effect::Claimed {
+        spec_hash: ctx.spec_hash().clone(),
+        node_id: ctx.node().node_id.clone(),
+        attempt_id: ctx.attempt_id().clone(),
+        ledger_key: ledger,
+        claim_owner: side_effect_claim_owner(ctx.attempt_no(), claim_generation),
+        invocation_epoch,
+        claim_generation,
+        claim_fencing_token: side_effect_fencing_token(ctx.attempt_no(), claim_generation),
+    })
+}
+
+fn side_effect_claim_taken_over(
+    ctx: &ErasedRunCtx<'_>,
+    ledger: events::SideEffectLedgerKey,
+    previous: &store::SideEffectClaimProjection,
+    claim_generation: u32,
+) -> RunnerEventPayload {
+    RunnerEventPayload::SideEffectClaimTakenOver(events::side_effect::ClaimTakenOver {
+        spec_hash: ctx.spec_hash().clone(),
+        node_id: ctx.node().node_id.clone(),
+        attempt_id: ctx.attempt_id().clone(),
+        ledger_key: ledger,
+        previous_claim_owner: previous.claim_owner.clone(),
+        new_claim_owner: side_effect_claim_owner(ctx.attempt_no(), claim_generation),
+        invocation_epoch: previous.invocation_epoch,
+        previous_claim_generation: previous.claim_generation,
+        claim_generation,
+        claim_fencing_token: side_effect_fencing_token(ctx.attempt_no(), claim_generation),
+    })
+}
+
+fn side_effect_prepared(
+    ctx: &ErasedRunCtx<'_>,
+    ledger: events::SideEffectLedgerKey,
+    invocation_epoch: u32,
+    claim_generation: u32,
+) -> RunnerEventPayload {
+    RunnerEventPayload::SideEffectInvocationPrepared(events::side_effect::InvocationPrepared {
+        spec_hash: ctx.spec_hash().clone(),
+        node_id: ctx.node().node_id.clone(),
+        attempt_id: ctx.attempt_id().clone(),
+        ledger_key: ledger,
+        invocation_epoch,
+        claim_generation,
+        claim_fencing_token: side_effect_fencing_token(ctx.attempt_no(), claim_generation),
+        prepared_artifact_id: None,
+        prepared_hash: None,
+    })
+}
+
+fn side_effect_invocation_started(
+    ctx: &ErasedRunCtx<'_>,
+    ledger: events::SideEffectLedgerKey,
+    invocation_epoch: u32,
+    claim_generation: u32,
+) -> RunnerEventPayload {
+    RunnerEventPayload::SideEffectInvocationStarted(events::side_effect::InvocationStarted {
+        spec_hash: ctx.spec_hash().clone(),
+        node_id: ctx.node().node_id.clone(),
+        attempt_id: ctx.attempt_id().clone(),
+        ledger_key: ledger,
+        invocation_epoch,
+        claim_owner: side_effect_claim_owner(ctx.attempt_no(), claim_generation),
+        claim_generation,
+        claim_fencing_token: side_effect_fencing_token(ctx.attempt_no(), claim_generation),
+    })
+}
+
+fn side_effect_submission_observed(
+    ctx: &ErasedRunCtx<'_>,
+    ledger: events::SideEffectLedgerKey,
+    invocation_epoch: u32,
+    artifact_id: ArtifactId,
+    digest: ContentDigest,
+) -> RunnerEventPayload {
+    RunnerEventPayload::SideEffectSubmissionObserved(events::side_effect::SubmissionObserved {
+        spec_hash: ctx.spec_hash().clone(),
+        node_id: ctx.node().node_id.clone(),
+        attempt_id: ctx.attempt_id().clone(),
+        ledger_key: ledger,
+        invocation_epoch,
+        submission_schema_id: ctx.node().config_ref.schema_id.clone(),
+        submission_hash: digest,
+        submission_artifact_id: artifact_id,
+    })
+}
+
+fn side_effect_receipt_observed(
+    ctx: &ErasedRunCtx<'_>,
+    ledger: events::SideEffectLedgerKey,
+    invocation_epoch: u32,
+    artifact_id: ArtifactId,
+    digest: ContentDigest,
+) -> RunnerEventPayload {
+    RunnerEventPayload::SideEffectReceiptObserved(events::side_effect::ReceiptObserved {
+        spec_hash: ctx.spec_hash().clone(),
+        node_id: ctx.node().node_id.clone(),
+        attempt_id: ctx.attempt_id().clone(),
+        ledger_key: ledger,
+        invocation_epoch,
+        receipt_schema_id: ctx.node().config_ref.schema_id.clone(),
+        receipt_hash: digest,
+        receipt_artifact_id: artifact_id,
+        replay_verifier_id: events::ReplayVerifierId::new("verifier-1").expect("verifier"),
+    })
+}
+
+fn side_effect_confirmation_observed(
+    ctx: &ErasedRunCtx<'_>,
+    ledger: events::SideEffectLedgerKey,
+    invocation_epoch: u32,
+    artifact_id: ArtifactId,
+    digest: ContentDigest,
+) -> RunnerEventPayload {
+    RunnerEventPayload::SideEffectConfirmationObserved(events::side_effect::ConfirmationObserved {
+        spec_hash: ctx.spec_hash().clone(),
+        node_id: ctx.node().node_id.clone(),
+        attempt_id: ctx.attempt_id().clone(),
+        ledger_key: ledger,
+        invocation_epoch,
+        confirmation_schema_id: ctx.node().config_ref.schema_id.clone(),
+        confirmation_hash: digest,
+        confirmation_artifact_id: artifact_id,
+        replay_verifier_id: events::ReplayVerifierId::new("verifier-1").expect("verifier"),
+    })
+}
+
+fn side_effect_error(retryable: bool) -> events::MfmErrorInfo {
+    events::MfmErrorInfo {
+        code: events::ErrorCode::new("sidefx_failed").expect("error code"),
+        category: events::ErrorCategory::SideEffect,
+        retryable,
+        safe_message: "side-effect failed".to_owned(),
+        public_details: None,
+        diagnostic_ref: None,
+    }
+}
+
+fn public_output_error() -> events::MfmErrorInfo {
+    events::MfmErrorInfo {
+        code: events::ErrorCode::new("public_output_render_failed").expect("error code"),
+        category: events::ErrorCategory::Runtime,
+        retryable: true,
+        safe_message: "public output render failed".to_owned(),
+        public_details: None,
+        diagnostic_ref: None,
+    }
+}
