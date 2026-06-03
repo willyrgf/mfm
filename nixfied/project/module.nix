@@ -155,11 +155,8 @@ let
   minioSources = minioService.sources or { };
   rethSources = rethService.sources or { };
   postgresLocalSource = postgresSources.local or { };
-  minioLocalSource = minioSources.local or { };
   rethLocalSource = rethSources.local or { };
   postgresPackage = postgresLocalSource.package or pkgs.postgresql_16;
-  minioPackage = minioLocalSource.package or pkgs.minio;
-  minioClientPackage = minioLocalSource.clientPackage or pkgs.minio-client;
   rethPackage = rethLocalSource.package or pkgs.reth;
   postgresDatabase = postgresService.database or "mfm";
   postgresTestDatabase = postgresService.testDatabase or "${postgresDatabase}_test";
@@ -523,15 +520,6 @@ EOF
     export MFM_EVM_RPC_SOURCES_JSON="[{\"id\":\"reth_ethereum_mainnet\",\"network_id\":\"ethereum-mainnet\",\"rpc_url\":\"http://127.0.0.1:$RETH_HTTP_PORT\",\"kind\":\"local\"},{\"id\":\"reth_local_mainnet\",\"network_id\":\"ethereum-mainnet\",\"rpc_url\":\"http://127.0.0.1:$RETH_HTTP_PORT\",\"kind\":\"local\"},{\"id\":\"reth_local\",\"network_id\":\"reth-local\",\"rpc_url\":\"http://127.0.0.1:$RETH_HTTP_PORT\",\"kind\":\"local\"}]"
     export MFM_EVM_RPC_PREFERRED_ORDER="reth_ethereum_mainnet,reth_local_mainnet,reth_local"
     export MFM_EVM_RPC_REQUIRE_GET_PROOF_IDS=""
-    export MFM_S3_ENDPOINT="''${MFM_S3_ENDPOINT:-http://127.0.0.1:$MINIO_API_PORT}"
-    export MFM_S3_REGION="''${MFM_S3_REGION:-us-east-1}"
-    export MFM_S3_BUCKET="''${MFM_S3_BUCKET:-mfm-test}"
-    export MFM_S3_PREFIX="''${MFM_S3_PREFIX:-mfm-artifacts}"
-    export AWS_ACCESS_KEY_ID="''${AWS_ACCESS_KEY_ID:-${minioRootUser}}"
-    export AWS_SECRET_ACCESS_KEY="''${AWS_SECRET_ACCESS_KEY:-${minioRootPassword}}"
-    export AWS_REGION="''${AWS_REGION:-''${MFM_S3_REGION}}"
-    export AWS_DEFAULT_REGION="''${AWS_DEFAULT_REGION:-''${MFM_S3_REGION}}"
-    export AWS_EC2_METADATA_DISABLED="''${AWS_EC2_METADATA_DISABLED:-true}"
   '';
   parityNextestArchiveShell = ''
     parity_nextest_archive_file="''${MFM_CI_PARITY_NEXTEST_ARCHIVE_FILE:-$artifacts_dir/${parityNextestArchiveFileName}}"
@@ -556,8 +544,6 @@ EOF
   '';
   ciServicesRuntimeInputs = commonRuntimeInputs ++ [
     postgresPackage
-    minioPackage
-    minioClientPackage
     rethPackage
   ];
 
@@ -802,10 +788,9 @@ in
         ci-parity = {
           id = "service-set.ci-parity";
           summary = "CI parity services";
-          description = "Managed postgres, minio, and reth instances used by parity CI workflows.";
+          description = "Managed postgres and reth instances used by parity CI workflows.";
           services.required = [
             "postgres"
-            "minio"
             "reth"
           ];
           failureLogs = {
@@ -1903,7 +1888,7 @@ EOF
           id = "task.ci.services-start";
           kind = "ci-step";
           summary = "Bootstrap local CI parity services";
-          description = "Starts local postgres/minio/reth dependencies through public lifecycle hooks and prepares MinIO state for parity checks.";
+          description = "Starts local postgres and reth dependencies through public lifecycle hooks for parity checks.";
           tags = [
             "ci"
             "parity"
@@ -1913,7 +1898,6 @@ EOF
           requirements = {
             services = [
               "postgres"
-              "minio"
               "reth"
             ];
           };
@@ -1922,7 +1906,7 @@ EOF
             ${ciStepPreamble}
             ${ciParityServiceEnv}
 
-            echo "INFO: starting ci services env=$env_value slot=$slot_value postgres=$POSTGRES_PORT minio=$MINIO_API_PORT reth=$RETH_HTTP_PORT"
+            echo "INFO: starting ci services env=$env_value slot=$slot_value postgres=$POSTGRES_PORT reth=$RETH_HTTP_PORT"
 
             has_service_hook() {
               local hook_var="$1"
@@ -2004,18 +1988,11 @@ EOF
             require_hook "SVC_POSTGRES_READY"
             require_hook "SVC_POSTGRES_SETUP_DB"
             require_hook "SVC_POSTGRES_FULL_START_TEST"
-            require_hook "SVC_MINIO_FULL_START_TEST"
-            require_hook "SVC_MINIO_BUCKET_ENSURE"
             require_hook "SVC_RETH_FULL_START_TEST"
-            export MINIO_ROOT_USER="$AWS_ACCESS_KEY_ID"
-            export MINIO_ROOT_PASSWORD="$AWS_SECRET_ACCESS_KEY"
             ensure_postgres_test_db
-            run_logged_hook "minio-full-start-test" "$artifacts_dir/minio-full-start.log" run_service_hook SVC_MINIO_FULL_START_TEST
             run_logged_hook "reth-full-start-test" "$artifacts_dir/reth-full-start.log" run_service_hook SVC_RETH_FULL_START_TEST
 
-            run_logged_hook "minio-bucket-ensure" "$artifacts_dir/minio-bucket-ensure.log" run_service_hook SVC_MINIO_BUCKET_ENSURE "$MFM_S3_BUCKET"
-
-            echo "OK: ci services ready postgres=$POSTGRES_PORT minio=$MINIO_API_PORT reth=$RETH_HTTP_PORT"
+            echo "OK: ci services ready postgres=$POSTGRES_PORT reth=$RETH_HTTP_PORT"
           '';
         };
 
