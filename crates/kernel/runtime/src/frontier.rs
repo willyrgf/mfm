@@ -2,11 +2,11 @@ use mfm_ids::{AttemptId, NodeId, RunId};
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
 
+use crate::framework::public_output_is_produced;
 use crate::history::RuntimeRunView;
 use crate::{
-    public_output_is_produced, side_effect_projection_for_attempt,
-    validate_side_effect_terminal_evidence, validate_terminal_cell_has_completed_attempt,
-    CertifiedRuntimeSpec, Result, RuntimeError,
+    side_effect_projection_for_attempt, validate_side_effect_terminal_evidence,
+    validate_terminal_cell_has_completed_attempt, CertifiedRuntimeSpec, Result, RuntimeError,
 };
 
 pub(crate) struct RunnableNode<'a> {

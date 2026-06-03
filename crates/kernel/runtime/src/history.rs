@@ -6,17 +6,20 @@ use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
 
 use crate::error::async_store_error;
+use crate::framework::{
+    bootstrap_run_receipt_artifact, build_retention_manifest_artifact_with_producer,
+    certified_bootstrap_run_node, certified_complete_run_node, certified_retention_manifest_node,
+    complete_run_receipt_json, projected_retention_manifest, public_output_receipt_digest,
+    public_output_rendered_digest, retention_manifest_receipt_json, run_completion_evidence,
+    GenesisContext,
+};
 use crate::{
-    artifact_role_name, attempt_id, bootstrap_run_receipt_artifact,
-    build_retention_manifest_artifact_with_producer, complete_run_receipt_json,
-    config_artifact_reference_payloads, config_ref_key, projected_retention_manifest,
-    public_output_receipt_digest, public_output_rendered_digest, require_adapter,
-    require_capability, retention_manifest_receipt_json, retention_ref_for_artifact,
-    run_completion_evidence, staged_artifact_binding_kind, validate_public_output,
-    validate_public_output_render_node, validate_side_effect_terminal_evidence,
-    validate_terminal_cell_has_completed_attempt, verify_artifact_bytes,
-    CertifiedRuntimeCapabilities, CertifiedRuntimeSpec, CompleteRunCommitValidation,
-    GenesisContext, MaterializedCell, MaterializedCellTerminal, MaterializedInputNode,
+    artifact_role_name, attempt_id, config_artifact_reference_payloads, config_ref_key,
+    require_adapter, require_capability, retention_ref_for_artifact, staged_artifact_binding_kind,
+    validate_public_output, validate_public_output_render_node,
+    validate_side_effect_terminal_evidence, validate_terminal_cell_has_completed_attempt,
+    verify_artifact_bytes, CertifiedRuntimeCapabilities, CertifiedRuntimeSpec,
+    CompleteRunCommitValidation, MaterializedCell, MaterializedCellTerminal, MaterializedInputNode,
     MaterializedInputs, NamedMaterializedInput, RecordedFact, RecordedFacts, Result, RuntimeError,
 };
 
@@ -2532,75 +2535,6 @@ fn validate_complete_run_commit_payload_set(
             "CompleteRun commit does not match the sealed framework batch".to_owned(),
         )),
     }
-}
-
-pub(crate) fn certified_bootstrap_run_node(
-    runtime_spec: &CertifiedRuntimeSpec,
-) -> Result<&spec::NodeSpec> {
-    let mut bootstrap_node = None;
-    for node_id in runtime_spec.topological_order() {
-        let node = runtime_spec.node(node_id).expect("topological node exists");
-        if matches!(
-            &node.framework,
-            Some(spec::FrameworkNodeSpec::BootstrapRun(_))
-        ) && bootstrap_node.replace(node).is_some()
-        {
-            return Err(RuntimeError::InvalidRunStream(
-                "multiple certified bootstrap framework nodes".to_owned(),
-            ));
-        }
-    }
-    bootstrap_node.ok_or_else(|| {
-        RuntimeError::InvalidRunStream(
-            "RunStarted lacks a certified BootstrapRun framework node".to_owned(),
-        )
-    })
-}
-
-pub(crate) fn certified_retention_manifest_node(
-    runtime_spec: &CertifiedRuntimeSpec,
-) -> Result<&spec::NodeSpec> {
-    let mut retention_node = None;
-    for node_id in runtime_spec.topological_order() {
-        let node = runtime_spec.node(node_id).expect("topological node exists");
-        if matches!(
-            &node.framework,
-            Some(spec::FrameworkNodeSpec::ProjectRetentionManifest(_))
-        ) && retention_node.replace(node).is_some()
-        {
-            return Err(RuntimeError::InvalidRunStream(
-                "multiple certified retention manifest framework nodes".to_owned(),
-            ));
-        }
-    }
-    retention_node.ok_or_else(|| {
-        RuntimeError::InvalidRunStream(
-            "retention manifest projection lacks a certified framework retention node".to_owned(),
-        )
-    })
-}
-
-pub(crate) fn certified_complete_run_node(
-    runtime_spec: &CertifiedRuntimeSpec,
-) -> Result<&spec::NodeSpec> {
-    let mut completion_node = None;
-    for node_id in runtime_spec.topological_order() {
-        let node = runtime_spec.node(node_id).expect("topological node exists");
-        if matches!(
-            &node.framework,
-            Some(spec::FrameworkNodeSpec::CompleteRun(_))
-        ) && completion_node.replace(node).is_some()
-        {
-            return Err(RuntimeError::InvalidRunStream(
-                "multiple certified completion framework nodes".to_owned(),
-            ));
-        }
-    }
-    completion_node.ok_or_else(|| {
-        RuntimeError::InvalidRunStream(
-            "RunCompleted lacks a certified CompleteRun framework node".to_owned(),
-        )
-    })
 }
 
 fn validate_atomic_side_effect_failure_pairs(

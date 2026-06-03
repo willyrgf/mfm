@@ -7,10 +7,12 @@ use mfm_events::v1 as events;
 use mfm_ids::DescriptorId;
 use mfm_spec::v1 as spec;
 
-use crate::{
+use crate::framework::{
     framework_bootstrap_run_binding, framework_complete_run_binding,
-    framework_public_output_binding, framework_retention_manifest_binding, CertifiedRuntimeSpec,
-    ErasedRunCtx, Result, RuntimeError, StagedArtifact, StagedRetentionRefs,
+    framework_public_output_binding, framework_retention_manifest_binding,
+};
+use crate::{
+    CertifiedRuntimeSpec, ErasedRunCtx, Result, RuntimeError, StagedArtifact, StagedRetentionRefs,
 };
 
 /// Boxed future returned by an erased typed runner.
