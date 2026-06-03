@@ -20,6 +20,7 @@ use mfm_store::v1 as store;
 
 mod artifacts;
 mod error;
+mod frontier;
 mod history;
 mod invocation;
 mod runners;
@@ -47,6 +48,7 @@ use artifacts::{
     verify_artifact_bytes,
 };
 use error::async_store_error;
+use frontier::{scheduler_decision, AttemptPlan, RunnableNode, SchedulerDecision};
 use history::{
     certified_bootstrap_run_node, certified_complete_run_node, committed_config_artifact,
     event_artifact_ref_from_store, materialize_inputs, payload_spec_hash,
@@ -1075,20 +1077,6 @@ pub enum SchedulerStatus {
     PublicOutputProjected,
 }
 
-struct RunnableNode<'a> {
-    node: &'a spec::NodeSpec,
-    attempt: AttemptPlan,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum AttemptPlan {
-    StartNew,
-    Continue {
-        attempt_id: AttemptId,
-        attempt_no: u32,
-    },
-}
-
 struct RunnerOutputCommitInput<'a> {
     runtime_spec: &'a CertifiedRuntimeSpec,
     run_id: &'a RunId,
@@ -1703,23 +1691,15 @@ impl SerialTypedScheduler {
         run_id: &RunId,
     ) -> Result<SchedulerStatus> {
         let view = RuntimeRunView::from_store(runtime_spec, run_id, store)?;
-        if view.projections.run_state(run_id) == store::RunState::Completed {
-            return Ok(SchedulerStatus::PublicOutputProjected);
-        }
-        if public_output_is_produced(runtime_spec, &view.projections) {
-            if let Some(runnable) = next_runnable_node(runtime_spec, &view)? {
+        match scheduler_decision(runtime_spec, run_id, &view)? {
+            SchedulerDecision::Run(runnable) => {
                 self.run_node_attempt(store, runtime_spec, run_id, &view, runnable)
                     .await?;
-                return Ok(SchedulerStatus::Advanced);
+                Ok(SchedulerStatus::Advanced)
             }
-            return Ok(SchedulerStatus::PublicOutputProjected);
+            SchedulerDecision::Blocked => Ok(SchedulerStatus::Blocked),
+            SchedulerDecision::Completed => Ok(SchedulerStatus::PublicOutputProjected),
         }
-        let Some(runnable) = next_runnable_node(runtime_spec, &view)? else {
-            return Ok(SchedulerStatus::Blocked);
-        };
-        self.run_node_attempt(store, runtime_spec, run_id, &view, runnable)
-            .await?;
-        Ok(SchedulerStatus::Advanced)
     }
 
     /// Runs deterministic runnable nodes until no node is runnable or public output is projected.
@@ -1751,23 +1731,15 @@ impl SerialTypedScheduler {
             .await
             .map_err(async_store_error)?;
         let view = RuntimeRunView::from_stream(runtime_spec, run_id, &stream)?;
-        if view.projections.run_state(run_id) == store::RunState::Completed {
-            return Ok(SchedulerStatus::PublicOutputProjected);
-        }
-        if public_output_is_produced(runtime_spec, &view.projections) {
-            if let Some(runnable) = next_runnable_node(runtime_spec, &view)? {
+        match scheduler_decision(runtime_spec, run_id, &view)? {
+            SchedulerDecision::Run(runnable) => {
                 self.run_node_attempt_async(store, runtime_spec, run_id, &view, runnable)
                     .await?;
-                return Ok(SchedulerStatus::Advanced);
+                Ok(SchedulerStatus::Advanced)
             }
-            return Ok(SchedulerStatus::PublicOutputProjected);
+            SchedulerDecision::Blocked => Ok(SchedulerStatus::Blocked),
+            SchedulerDecision::Completed => Ok(SchedulerStatus::PublicOutputProjected),
         }
-        let Some(runnable) = next_runnable_node(runtime_spec, &view)? else {
-            return Ok(SchedulerStatus::Blocked);
-        };
-        self.run_node_attempt_async(store, runtime_spec, run_id, &view, runnable)
-            .await?;
-        Ok(SchedulerStatus::Advanced)
     }
 
     /// Runs deterministic runnable nodes against an async durable typed store until blocked.
@@ -1827,8 +1799,7 @@ impl SerialTypedScheduler {
             return Ok(());
         }
         let (attempt_id, attempt_no) = match runnable.attempt {
-            AttemptPlan::StartNew => {
-                let attempt_no = next_attempt_no(&view.projections, &node.node_id)?;
+            AttemptPlan::StartNew { attempt_no } => {
                 let attempt_id =
                     attempt_id(run_id, runtime_spec.spec_hash(), &node.node_id, attempt_no)?;
                 prepare_runner_invocation(RunnerInvocationInput {
@@ -1906,13 +1877,12 @@ impl SerialTypedScheduler {
             binding,
         } = input;
         let node = runnable.node;
-        let AttemptPlan::StartNew = runnable.attempt else {
+        let AttemptPlan::StartNew { attempt_no } = runnable.attempt else {
             return Err(RuntimeError::InvalidRunStream(format!(
                 "framework lifecycle node {} attempt was split across commits",
                 node.node_id
             )));
         };
-        let attempt_no = next_attempt_no(&view.projections, &node.node_id)?;
         let attempt_id = attempt_id(run_id, runtime_spec.spec_hash(), &node.node_id, attempt_no)?;
         let invocation = prepare_runner_invocation(RunnerInvocationInput {
             runtime_spec,
@@ -1987,8 +1957,7 @@ impl SerialTypedScheduler {
             return Ok(());
         }
         let (attempt_id, attempt_no) = match runnable.attempt {
-            AttemptPlan::StartNew => {
-                let attempt_no = next_attempt_no(&view.projections, &node.node_id)?;
+            AttemptPlan::StartNew { attempt_no } => {
                 let attempt_id =
                     attempt_id(run_id, runtime_spec.spec_hash(), &node.node_id, attempt_no)?;
                 prepare_runner_invocation(RunnerInvocationInput {
@@ -2077,13 +2046,12 @@ impl SerialTypedScheduler {
             binding,
         } = input;
         let node = runnable.node;
-        let AttemptPlan::StartNew = runnable.attempt else {
+        let AttemptPlan::StartNew { attempt_no } = runnable.attempt else {
             return Err(RuntimeError::InvalidRunStream(format!(
                 "framework lifecycle node {} attempt was split across commits",
                 node.node_id
             )));
         };
-        let attempt_no = next_attempt_no(&view.projections, &node.node_id)?;
         let attempt_id = attempt_id(run_id, runtime_spec.spec_hash(), &node.node_id, attempt_no)?;
         let invocation = prepare_runner_invocation(RunnerInvocationInput {
             runtime_spec,
@@ -3115,184 +3083,6 @@ fn runner_output_preconditions(
     Ok(preconditions)
 }
 
-fn next_runnable_node<'a>(
-    runtime_spec: &'a CertifiedRuntimeSpec,
-    view: &RuntimeRunView,
-) -> Result<Option<RunnableNode<'a>>> {
-    if view
-        .projections
-        .side_effects()
-        .any(|(_, projection)| matches!(projection.phase, store::SideEffectPhase::Ambiguous { .. }))
-    {
-        return Ok(None);
-    }
-    for node_id in runtime_spec.topological_order() {
-        let node = runtime_spec.node(node_id).expect("topological node exists");
-        let Some(attempt) = attempt_plan(runtime_spec, node, view)? else {
-            continue;
-        };
-        if node_inputs_ready(runtime_spec, node, view)? {
-            return Ok(Some(RunnableNode { node, attempt }));
-        }
-    }
-    Ok(None)
-}
-
-fn attempt_plan(
-    runtime_spec: &CertifiedRuntimeSpec,
-    node: &spec::NodeSpec,
-    view: &RuntimeRunView,
-) -> Result<Option<AttemptPlan>> {
-    if node.side_effect.is_some() {
-        side_effect_attempt_plan(runtime_spec, node, view)
-    } else {
-        non_side_effect_attempt_plan(runtime_spec, node, view)
-    }
-}
-
-fn non_side_effect_attempt_plan(
-    runtime_spec: &CertifiedRuntimeSpec,
-    node: &spec::NodeSpec,
-    view: &RuntimeRunView,
-) -> Result<Option<AttemptPlan>> {
-    if let Some(cell_terminal) = view.projections.cell_terminal(&node.output_cell) {
-        validate_terminal_cell_has_completed_attempt(
-            runtime_spec,
-            &view.projections,
-            node,
-            cell_terminal,
-        )?;
-        return Ok(None);
-    }
-
-    let mut started = None::<(AttemptId, u32)>;
-    for ((attempt_node_id, attempt_id), projection) in view.projections.attempts() {
-        if attempt_node_id != &node.node_id {
-            continue;
-        }
-        match &projection.status {
-            store::AttemptStatus::Started {
-                attempt_no,
-                state_kind,
-                state_version,
-            } => {
-                if state_kind != &node.state_kind || state_version != &node.state_version {
-                    return Err(RuntimeError::InvalidRunStream(format!(
-                        "started attempt {} for node {} has state identity outside the certified spec",
-                        attempt_id, node.node_id
-                    )));
-                }
-                if started.replace((attempt_id.clone(), *attempt_no)).is_some() {
-                    return Err(RuntimeError::InvalidRunStream(format!(
-                        "node {} has multiple non-terminal attempts",
-                        node.node_id
-                    )));
-                }
-            }
-            store::AttemptStatus::Completed { output_cell_id } => {
-                return Err(RuntimeError::InvalidRunStream(format!(
-                    "node {} attempt {} completed output cell {} without terminal cell authority",
-                    node.node_id, attempt_id, output_cell_id
-                )));
-            }
-            store::AttemptStatus::Failed { retryable, .. } => {
-                if !*retryable {
-                    return Ok(None);
-                }
-            }
-        }
-    }
-
-    if let Some((attempt_id, attempt_no)) = started {
-        Ok(Some(AttemptPlan::Continue {
-            attempt_id,
-            attempt_no,
-        }))
-    } else {
-        Ok(Some(AttemptPlan::StartNew))
-    }
-}
-
-fn side_effect_attempt_plan(
-    runtime_spec: &CertifiedRuntimeSpec,
-    node: &spec::NodeSpec,
-    view: &RuntimeRunView,
-) -> Result<Option<AttemptPlan>> {
-    if let Some(cell_terminal) = view.projections.cell_terminal(&node.output_cell) {
-        let attempt_id = validate_terminal_cell_has_completed_attempt(
-            runtime_spec,
-            &view.projections,
-            node,
-            cell_terminal,
-        )?;
-        validate_side_effect_terminal_evidence(&view.projections, node, &attempt_id)?;
-        return Ok(None);
-    }
-
-    let mut started = None::<(AttemptId, u32)>;
-    for ((attempt_node_id, attempt_id), projection) in view.projections.attempts() {
-        if attempt_node_id != &node.node_id {
-            continue;
-        }
-        match &projection.status {
-            store::AttemptStatus::Started {
-                attempt_no,
-                state_kind,
-                state_version,
-            } => {
-                if state_kind != &node.state_kind || state_version != &node.state_version {
-                    return Err(RuntimeError::InvalidRunStream(format!(
-                        "started side-effect attempt {} for node {} has state identity outside the certified spec",
-                        attempt_id, node.node_id
-                    )));
-                }
-                if let Some(projection) =
-                    side_effect_projection_for_attempt(&view.projections, node, attempt_id)?
-                {
-                    match projection.phase {
-                        store::SideEffectPhase::Ambiguous { .. } => return Ok(None),
-                        store::SideEffectPhase::Failed { .. } => {
-                            return Err(RuntimeError::InvalidRunStream(format!(
-                                "side-effect ledger {} failed while attempt {} for node {} remained started",
-                                projection.ledger_key, attempt_id, node.node_id
-                            )));
-                        }
-                        _ => {}
-                    }
-                }
-                if started.replace((attempt_id.clone(), *attempt_no)).is_some() {
-                    return Err(RuntimeError::InvalidRunStream(format!(
-                        "node {} has multiple non-terminal side-effect attempts",
-                        node.node_id
-                    )));
-                }
-            }
-            store::AttemptStatus::Completed { output_cell_id } => {
-                if view.projections.cell_terminal(output_cell_id).is_none() {
-                    return Err(RuntimeError::InvalidRunStream(format!(
-                        "side-effect node {} attempt {} completed without terminal output cell {}",
-                        node.node_id, attempt_id, output_cell_id
-                    )));
-                }
-            }
-            store::AttemptStatus::Failed { retryable, .. } => {
-                if !*retryable {
-                    return Ok(None);
-                }
-            }
-        }
-    }
-
-    if let Some((attempt_id, attempt_no)) = started {
-        Ok(Some(AttemptPlan::Continue {
-            attempt_id,
-            attempt_no,
-        }))
-    } else {
-        Ok(Some(AttemptPlan::StartNew))
-    }
-}
-
 fn validate_terminal_cell_has_completed_attempt(
     runtime_spec: &CertifiedRuntimeSpec,
     projections: &store::ProjectionSnapshot,
@@ -3386,35 +3176,6 @@ fn validate_side_effect_terminal_evidence(
             node.node_id, attempt_id
         )))
     }
-}
-
-fn node_inputs_ready(
-    runtime_spec: &CertifiedRuntimeSpec,
-    node: &spec::NodeSpec,
-    view: &RuntimeRunView,
-) -> Result<bool> {
-    let input_cells = runtime_spec.validate_input_binding(&node.input_bindings.root)?;
-    for cell_id in input_cells {
-        let cell = runtime_spec.cell(&cell_id).ok_or_else(|| {
-            RuntimeError::InvalidSpec(format!(
-                "node {} input cell {} is missing",
-                node.node_id, cell_id
-            ))
-        })?;
-        match &cell.producer {
-            spec::CellProducer::Seed(_) => {
-                if !view.seed_cells.contains_key(&cell_id) {
-                    return Ok(false);
-                }
-            }
-            spec::CellProducer::Node(_) => {
-                if view.projections.cell_terminal(&cell_id).is_none() {
-                    return Ok(false);
-                }
-            }
-        }
-    }
-    Ok(true)
 }
 
 fn node_cell_preconditions(
@@ -4043,16 +3804,6 @@ fn require_adapter(
             node.node_id, kind, version
         )))
     }
-}
-
-fn next_attempt_no(projections: &store::ProjectionSnapshot, node_id: &NodeId) -> Result<u32> {
-    let count = projections
-        .attempts()
-        .filter(|((attempt_node_id, _), _)| attempt_node_id == node_id)
-        .count();
-    u32::try_from(count + 1).map_err(|_| {
-        RuntimeError::InvalidRunStream(format!("attempt count overflow for {node_id}"))
-    })
 }
 
 fn attempt_id(
