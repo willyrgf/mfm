@@ -25,6 +25,7 @@ mod frontier;
 mod history;
 mod invocation;
 mod runners;
+mod side_effects;
 mod spec_authority;
 
 pub use artifacts::{
@@ -58,9 +59,14 @@ use framework::{
 use frontier::{scheduler_decision, AttemptPlan, RunnableNode, SchedulerDecision};
 use history::{
     committed_config_artifact, event_artifact_ref_from_store, materialize_inputs,
-    payload_spec_hash, recorded_facts_for_attempt, side_effect_payload_ref, store_seed_artifact,
+    payload_spec_hash, recorded_facts_for_attempt, store_seed_artifact,
     validate_certificate_artifact, validate_config_artifacts, validate_seed_cells,
     validate_spec_artifact, RuntimeRunView,
+};
+use side_effects::{
+    side_effect_artifact_binding, side_effect_projection_for_attempt,
+    validate_runner_side_effect_payload, validate_side_effect_resume_output,
+    validate_side_effect_terminal_evidence,
 };
 
 #[cfg(test)]
@@ -1804,11 +1810,7 @@ fn side_effect_artifact_requirement(
         schema_id,
         semantic_type_id: None,
         role,
-        binding: StagedArtifactBindingKind::SideEffectEvidence {
-            ledger_key,
-            invocation_epoch,
-            phase,
-        },
+        binding: side_effect_artifact_binding(ledger_key, invocation_epoch, phase),
     }
 }
 
@@ -2049,101 +2051,6 @@ fn runner_output_preconditions(
     }
 
     Ok(preconditions)
-}
-
-fn validate_terminal_cell_has_completed_attempt(
-    runtime_spec: &CertifiedRuntimeSpec,
-    projections: &store::ProjectionSnapshot,
-    node: &spec::NodeSpec,
-    terminal: &store::CellTerminalProjection,
-) -> Result<AttemptId> {
-    let certified = runtime_spec.cell(&node.output_cell).ok_or_else(|| {
-        RuntimeError::InvalidSpec(format!(
-            "node {} output cell {} is missing",
-            node.node_id, node.output_cell
-        ))
-    })?;
-    let (terminal_node_id, terminal_attempt_id, schema_id, semantic_type_id) = match terminal {
-        store::CellTerminalProjection::Produced {
-            node_id,
-            attempt_id,
-            schema_id,
-            semantic_type_id,
-            ..
-        }
-        | store::CellTerminalProjection::Skipped {
-            node_id,
-            attempt_id,
-            schema_id,
-            semantic_type_id,
-            ..
-        } => (node_id, attempt_id, schema_id, semantic_type_id),
-    };
-    if terminal_node_id != &node.node_id
-        || certified.producer != spec::CellProducer::Node(node.node_id.clone())
-        || schema_id != &certified.schema_id
-        || semantic_type_id != &certified.semantic_type_id
-    {
-        return Err(RuntimeError::InvalidRunStream(format!(
-            "terminal cell {} is not certified terminal evidence for node {}",
-            node.output_cell, node.node_id
-        )));
-    }
-    match projections.attempt(&node.node_id, terminal_attempt_id) {
-        Some(store::AttemptProjection {
-            status: store::AttemptStatus::Completed { output_cell_id },
-            ..
-        }) if output_cell_id == &node.output_cell => Ok(terminal_attempt_id.clone()),
-        _ => Err(RuntimeError::InvalidRunStream(format!(
-            "terminal cell {} for node {} lacks matching completed attempt {}",
-            node.output_cell, node.node_id, terminal_attempt_id
-        ))),
-    }
-}
-
-fn side_effect_projection_for_attempt<'a>(
-    projections: &'a store::ProjectionSnapshot,
-    node: &spec::NodeSpec,
-    attempt_id: &AttemptId,
-) -> Result<Option<&'a store::SideEffectProjection>> {
-    let mut found = None;
-    for (_, projection) in projections.side_effects() {
-        if projection.intent.node_id == node.node_id
-            && projection.intent.attempt_id == *attempt_id
-            && found.replace(projection).is_some()
-        {
-            return Err(RuntimeError::InvalidRunStream(format!(
-                "side-effect node {} attempt {} has multiple ledger projections",
-                node.node_id, attempt_id
-            )));
-        }
-    }
-    Ok(found)
-}
-
-fn validate_side_effect_terminal_evidence(
-    projections: &store::ProjectionSnapshot,
-    node: &spec::NodeSpec,
-    attempt_id: &AttemptId,
-) -> Result<()> {
-    let Some(projection) = side_effect_projection_for_attempt(projections, node, attempt_id)?
-    else {
-        return Err(RuntimeError::InvalidRunStream(format!(
-            "side-effect node {} attempt {} produced output without ledger evidence",
-            node.node_id, attempt_id
-        )));
-    };
-    if matches!(
-        projection.phase,
-        store::SideEffectPhase::ConfirmationObserved { .. }
-    ) {
-        Ok(())
-    } else {
-        Err(RuntimeError::InvalidRunStream(format!(
-            "side-effect node {} attempt {} produced output before confirmation",
-            node.node_id, attempt_id
-        )))
-    }
 }
 
 fn node_cell_preconditions(
@@ -2477,182 +2384,6 @@ fn validate_runner_output(
             node.node_id
         )));
     }
-    Ok(())
-}
-
-fn validate_runner_side_effect_payload(
-    node: &spec::NodeSpec,
-    attempt_id: &AttemptId,
-    caps: &CertifiedRuntimeCapabilities,
-    projections: &store::ProjectionSnapshot,
-    payload: &events::KernelEventPayload,
-) -> Result<()> {
-    if node.side_effect.is_none() {
-        return Err(RuntimeError::InvalidRunnerOutput(format!(
-            "non-side-effect node {} returned side-effect payload",
-            node.node_id
-        )));
-    }
-    let (payload_node_id, payload_attempt_id, _, _) =
-        side_effect_payload_ref(payload).ok_or_else(|| {
-            RuntimeError::InvalidRunnerOutput("expected side-effect payload".to_owned())
-        })?;
-    require_attempt(node, attempt_id, payload_node_id, payload_attempt_id)?;
-    match payload {
-        events::KernelEventPayload::SideEffectIntentPersisted(payload) => {
-            if payload.scope_id != node.scope_id {
-                return Err(RuntimeError::InvalidRunnerOutput(format!(
-                    "side-effect node {} persisted intent for uncertified scope {}",
-                    node.node_id, payload.scope_id
-                )));
-            }
-            require_capability(
-                caps,
-                &payload.capability_kind,
-                &payload.capability_version,
-                &node.node_id,
-            )?;
-            require_adapter(node, &payload.adapter_kind, &payload.adapter_version)?;
-        }
-        events::KernelEventPayload::SideEffectClaimTakenOver(payload) => {
-            if payload.new_claim_owner == payload.previous_claim_owner {
-                return Err(RuntimeError::InvalidRunnerOutput(format!(
-                    "side-effect node {} takeover reused the previous claim owner",
-                    node.node_id
-                )));
-            }
-            if payload.claim_generation <= payload.previous_claim_generation {
-                return Err(RuntimeError::InvalidRunnerOutput(format!(
-                    "side-effect node {} takeover did not increase claim generation",
-                    node.node_id
-                )));
-            }
-            if let Some(projection) =
-                side_effect_projection_for_attempt(projections, node, attempt_id)?
-            {
-                let claim = projection.claim.as_ref().ok_or_else(|| {
-                    RuntimeError::InvalidRunnerOutput(format!(
-                        "side-effect node {} takeover requires an active claim",
-                        node.node_id
-                    ))
-                })?;
-                if payload.claim_fencing_token == claim.claim_fencing_token {
-                    return Err(RuntimeError::InvalidRunnerOutput(format!(
-                        "side-effect node {} takeover reused the previous fencing token",
-                        node.node_id
-                    )));
-                }
-            }
-        }
-        _ => {}
-    }
-    Ok(())
-}
-
-fn validate_side_effect_resume_output(
-    projections: &store::ProjectionSnapshot,
-    node: &spec::NodeSpec,
-    attempt_id: &AttemptId,
-    payloads: &[events::KernelEventPayload],
-) -> Result<()> {
-    let Some(projection) = side_effect_projection_for_attempt(projections, node, attempt_id)?
-    else {
-        return Ok(());
-    };
-    let has_takeover = payloads.iter().any(|payload| {
-        matches!(
-            payload,
-            events::KernelEventPayload::SideEffectClaimTakenOver(_)
-        )
-    });
-    let has_claim = payloads
-        .iter()
-        .any(|payload| matches!(payload, events::KernelEventPayload::SideEffectClaimed(_)));
-    let has_invocation_prepared = payloads.iter().any(|payload| {
-        matches!(
-            payload,
-            events::KernelEventPayload::SideEffectInvocationPrepared(_)
-        )
-    });
-    let has_invocation_started = payloads.iter().any(|payload| {
-        matches!(
-            payload,
-            events::KernelEventPayload::SideEffectInvocationStarted(_)
-        )
-    });
-    let has_submission_recovery = payloads.iter().any(|payload| {
-        matches!(
-            payload,
-            events::KernelEventPayload::SideEffectNotSubmittedProven(_)
-                | events::KernelEventPayload::SideEffectSubmissionObserved(_)
-                | events::KernelEventPayload::SideEffectSubmissionUnknown(_)
-                | events::KernelEventPayload::SideEffectAmbiguous(_)
-        )
-    });
-
-    match projection.phase {
-        store::SideEffectPhase::Claimed { .. } => {
-            if !has_takeover && !has_invocation_prepared {
-                return Err(RuntimeError::InvalidRunnerOutput(format!(
-                    "side-effect node {} resumed claimed ledger {} without takeover or prepared invocation",
-                    node.node_id, projection.ledger_key
-                )));
-            }
-        }
-        store::SideEffectPhase::InvocationPrepared { .. } => {
-            if !has_takeover && !has_invocation_started {
-                return Err(RuntimeError::InvalidRunnerOutput(format!(
-                    "side-effect node {} resumed prepared ledger {} without takeover or invocation start",
-                    node.node_id, projection.ledger_key
-                )));
-            }
-        }
-        store::SideEffectPhase::NotSubmittedProven { .. } => {
-            if !has_claim {
-                return Err(RuntimeError::InvalidRunnerOutput(format!(
-                    "side-effect node {} resumed not-submitted ledger {} without next-epoch claim",
-                    node.node_id, projection.ledger_key
-                )));
-            }
-        }
-        store::SideEffectPhase::InvocationStarted { .. }
-        | store::SideEffectPhase::SubmissionUnknown { .. } => {
-            if !has_submission_recovery {
-                return Err(RuntimeError::InvalidRunnerOutput(format!(
-                    "side-effect node {} resumed uncertain submission ledger {} without submission recovery evidence",
-                    node.node_id, projection.ledger_key
-                )));
-            }
-        }
-        store::SideEffectPhase::Ambiguous { .. } => {
-            return Err(RuntimeError::InvalidRunnerOutput(format!(
-                "side-effect node {} attempted to run ambiguous ledger {}",
-                node.node_id, projection.ledger_key
-            )));
-        }
-        store::SideEffectPhase::Failed { .. } => {
-            return Err(RuntimeError::InvalidRunnerOutput(format!(
-                "side-effect node {} attempted to run failed ledger {} on the same attempt",
-                node.node_id, projection.ledger_key
-            )));
-        }
-        store::SideEffectPhase::IntentPersisted { .. }
-        | store::SideEffectPhase::SubmissionObserved { .. }
-        | store::SideEffectPhase::ReceiptObserved { .. }
-        | store::SideEffectPhase::ConfirmationObserved { .. } => {}
-    }
-
-    if has_invocation_started
-        && matches!(projection.phase, store::SideEffectPhase::Claimed { .. })
-        && !has_takeover
-        && !has_invocation_prepared
-    {
-        return Err(RuntimeError::InvalidRunnerOutput(format!(
-            "side-effect node {} started invocation from stale claim without takeover",
-            node.node_id
-        )));
-    }
-
     Ok(())
 }
 

@@ -4,10 +4,11 @@ use mfm_store::v1 as store;
 
 use crate::framework::public_output_is_produced;
 use crate::history::RuntimeRunView;
-use crate::{
+use crate::side_effects::{
     side_effect_projection_for_attempt, validate_side_effect_terminal_evidence,
-    validate_terminal_cell_has_completed_attempt, CertifiedRuntimeSpec, Result, RuntimeError,
+    validate_terminal_cell_has_completed_attempt,
 };
+use crate::{CertifiedRuntimeSpec, Result, RuntimeError};
 
 pub(crate) struct RunnableNode<'a> {
     pub(crate) node: &'a spec::NodeSpec,
