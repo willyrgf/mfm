@@ -49,8 +49,7 @@ Typed state programs are the semantic executable surface. Ops plan typed program
 Start here:
 
 - Design contract (source of truth): [`docs/design.md`](docs/design.md)
-- One-page overview + invariants: [`docs/architecture.md`](docs/architecture.md)
-- Current ops/states inventory: [`docs/ops-and-states.md`](docs/ops-and-states.md)
+- Architecture taxonomy + placement rules: [`docs/architecture.md`](docs/architecture.md)
 - Contribution rules / CI parity: [`AGENTS.md`](AGENTS.md)
 - Code quality policy: [`docs/code-quality.md`](docs/code-quality.md)
 

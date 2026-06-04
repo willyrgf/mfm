@@ -222,7 +222,6 @@ rec {
       "docs/code-quality.md"
       "docs/DETAILED.md"
       "docs/design.md"
-      "docs/ops-and-states.md"
       "docs/UPGRADE.md"
     ];
   };

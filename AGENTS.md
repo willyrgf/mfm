@@ -18,17 +18,18 @@ It is inspired by the practices used in large Rust codebases: modular crates, st
   - op planning logic belongs in `crates/ops/*-op`
   - reusable executable state logic belongs in shared-state crates (`crates/states/common`, `crates/states/keystore`, `crates/states/aave-v3`, `crates/evm-runtime`)
   - binaries should parse input, start/resume runs, and render outputs only
-- Apply the three-tier thin-layer principle from `docs/architecture.md`; use `docs/ops-and-states.md` for the current ops/state catalog:
-  - executable logic lives in reusable states (`crates/states/common/src/states/*` and domain shared-state crates)
-  - ops stay thin and assemble state graphs
+- Apply the taxonomy and boundary contract from `docs/architecture.md`:
+  - operations stay deterministic and assemble state graphs
+  - states own reusable domain semantics
+  - adapters bind state intent to explicit capabilities
+  - transports and signers stay reusable platform primitives
   - binaries stay transport-only
 - If you touch security-sensitive code (keystore/crypto), add or strengthen tests.
 
 ## Design Contract (Architecture Invariants)
 
 - `docs/design.md` is the design contract. If code disagrees with it, the code is wrong (until the doc is updated).
-- `docs/architecture.md` is the contributor-facing one-pager.
-- `docs/ops-and-states.md` is the current inventory of registered ops and production state implementations.
+- `docs/architecture.md` is the contributor-facing taxonomy and placement guide.
 
 Key invariants to preserve (high risk if violated):
 
@@ -60,9 +61,8 @@ Nixfied is the canonical entrypoint for dev/test/build/check/ci:
 - `README.md`: project disclaimer.
 - `docs/repo-map.md`: Repository map
 - `docs/code-quality.md`: mandatory quality policy for all changes.
-- `docs/architecture.md`: one-page architecture overview + invariants.
+- `docs/architecture.md`: taxonomy, placement rules, and architecture boundaries.
 - `docs/design.md`: full design contract (authoritative).
-- `docs/ops-and-states.md`: current inventory of registered ops and production state implementations.
 - `bin/cli/README.md`: CLI behavior and JSON output contract.
 - `crates/machine/README.md`: state machine concepts and usage.
 - `crates/machine-derive/README.md`: proc-macro notes.

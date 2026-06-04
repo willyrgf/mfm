@@ -19,9 +19,8 @@ Use this page to jump between crate families:
 - transports
 - binaries and tooling
 
-The live runtime inventory still lives in the repository docs:
+The architecture and runtime contracts live in the repository docs:
 
-- `docs/ops-and-states.md`
 - `docs/architecture.md`
 - `docs/design.md`
 

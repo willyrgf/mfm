@@ -35,8 +35,7 @@ pub(crate) fn render_readme(
     out.push_str("- collectors\n");
     out.push_str("- transports\n");
     out.push_str("- binaries and tooling\n\n");
-    out.push_str("The live runtime inventory still lives in the repository docs:\n\n");
-    out.push_str("- `docs/ops-and-states.md`\n");
+    out.push_str("The architecture and runtime contracts live in the repository docs:\n\n");
     out.push_str("- `docs/architecture.md`\n");
     out.push_str("- `docs/design.md`\n");
 

@@ -337,17 +337,11 @@ They must not:
 - infer public outputs from untyped snapshots
 - migrate uncertified historical runs into certified typed runs
 
-## Current Typed Workflow Ports
+## Architecture Placement
 
-The active typed workflow ports are:
-
-- proof: deterministic proof fact, side effect, output, and replay verifier contracts
-- portfolio tracker: typed multi-network snapshot, fanout/fanin, publication, report, and public
-  output
-- EVM deploy/configure/validate: typed lifecycle side effects, protected transaction artifacts,
-  validation reads, and replay verification
-
-The current inventory is maintained in `docs/ops-and-states.md`.
+This design contract defines runtime authority. Crate placement, taxonomy, operation/state/adapter/
+transport/signer/config boundaries, public naming rules, and reviewer checks are maintained in
+`docs/architecture.md`.
 
 ## Documentation Update Rules
 

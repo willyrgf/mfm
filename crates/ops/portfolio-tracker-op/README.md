@@ -24,5 +24,5 @@ in `mfm-transports-portfolio`.
 
 Docs:
 - `docs/design.md`
-- `docs/ops-and-states.md`
+- `docs/architecture.md`
 - `bin/cli/README.md`

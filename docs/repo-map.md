@@ -12,7 +12,6 @@ Generated from `docs/repo-index.json`.
 - `docs/architecture.md` - Project documentation.
 - `docs/code-quality.md` - Project documentation.
 - `docs/design.md` - Project documentation.
-- `docs/ops-and-states.md` - Project documentation.
 
 ## Components
 - `Cargo.toml` (rust-cargo)
