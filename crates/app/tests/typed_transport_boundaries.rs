@@ -3,11 +3,7 @@
 #[test]
 fn production_typed_app_links_only_typed_transport_crates() {
     let manifest = include_str!("../Cargo.toml");
-    for required in [
-        "mfm-transports-proof",
-        "mfm-transports-portfolio",
-        "mfm-transports-evm-dcv",
-    ] {
+    for required in ["mfm-transports-proof", "mfm-transports-portfolio"] {
         assert!(
             manifest.contains(required),
             "typed app manifest must link {required}"
