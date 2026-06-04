@@ -6,6 +6,9 @@ description = "Low-level EVM ABI, encoding, hex, RLP, and transaction helpers fo
 repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
 
+[package.metadata.mfm]
+category = "domain-model"
+
 [dependencies]
 alloy-primitives = { workspace = true }
 hex = { workspace = true }

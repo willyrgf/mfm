@@ -5,3 +5,6 @@ edition = "2021"
 description = "Shared JSON/TOML authored-config ingress helpers"
 repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
+
+[package.metadata.mfm]
+category = "domain-config"

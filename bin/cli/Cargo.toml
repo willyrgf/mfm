@@ -3,6 +3,9 @@ name = "mfm"
 version = "0.1.29"
 edition = "2021"
 
+[package.metadata.mfm]
+category = "binary"
+
 [features]
 parity-tests = []
 

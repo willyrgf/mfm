@@ -3,6 +3,9 @@ name = "mfm-stream-store-postgres"
 version = "0.1.0"
 edition = "2021"
 
+[package.metadata.mfm]
+category = "storage"
+
 [dependencies]
 mfm-events = { path = "../../kernel/events" }
 mfm-ids = { path = "../../kernel/ids" }

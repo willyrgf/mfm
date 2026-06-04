@@ -3,6 +3,9 @@ name = "mfm-op-proof"
 version = "0.1.0"
 edition = "2021"
 
+[package.metadata.mfm]
+category = "operation"
+
 [dependencies]
 mfm-canonical = { path = "../../kernel/canonical" }
 mfm-certify = { path = "../../kernel/certify" }

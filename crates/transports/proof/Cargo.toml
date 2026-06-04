@@ -3,6 +3,9 @@ name = "mfm-transports-proof"
 version = "0.1.0"
 edition = "2021"
 
+[package.metadata.mfm]
+category = "transport"
+
 [dependencies]
 mfm-collectors-proof = { path = "../../collectors/proof" }
 mfm-capabilities = { path = "../../kernel/capabilities" }

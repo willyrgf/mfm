@@ -7,6 +7,9 @@ repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
 readme = "README.md"
 
+[package.metadata.mfm]
+category = "kernel"
+
 [lib]
 name = "mfm_events"
 path = "src/lib.rs"

@@ -3,6 +3,9 @@ name = "mfm-app"
 version = "0.1.0"
 edition = "2021"
 
+[package.metadata.mfm]
+category = "app"
+
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }

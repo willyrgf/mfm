@@ -3,6 +3,9 @@ name = "mfm-publish-docs"
 version = "0.1.0"
 edition = "2021"
 
+[package.metadata.mfm]
+category = "docs-tooling"
+
 [dependencies]
 anyhow = { workspace = true }
 clap = { workspace = true, features = ["derive", "env"] }

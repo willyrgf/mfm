@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2021"
 description = "Typed portfolio snapshot workflow operation"
 
+[package.metadata.mfm]
+category = "operation"
+
 [dependencies]
 serde_json = { workspace = true }
 

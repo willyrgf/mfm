@@ -6,6 +6,9 @@ description = "Shared authored and canonical config pipeline for portfolio snaps
 repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
 
+[package.metadata.mfm]
+category = "domain-config"
+
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }

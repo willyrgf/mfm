@@ -6,6 +6,9 @@ description = "Reusable portfolio-domain runtime states and adapters for canonic
 repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
 
+[package.metadata.mfm]
+category = "state"
+
 [dependencies]
 serde = { workspace = true }
 alloy-primitives = { workspace = true }

@@ -6,6 +6,9 @@ description = "Typed portfolio workflow runners"
 repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
 
+[package.metadata.mfm]
+category = "transport"
+
 [dependencies]
 alloy-primitives = { workspace = true }
 serde = { workspace = true }

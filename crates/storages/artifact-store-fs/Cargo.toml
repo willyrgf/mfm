@@ -3,6 +3,9 @@ name = "mfm-artifact-store-fs"
 version = "0.1.0"
 edition = "2021"
 
+[package.metadata.mfm]
+category = "storage"
+
 [dependencies]
 mfm-canonical = { path = "../../kernel/canonical" }
 mfm-events = { path = "../../kernel/events" }

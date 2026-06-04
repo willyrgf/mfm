@@ -6,6 +6,9 @@ description = "Canonical portfolio, symbol, and wallet model for MFM portfolio s
 repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
 
+[package.metadata.mfm]
+category = "domain-model"
+
 [dependencies]
 bs58 = { workspace = true, features = ["check"] }
 serde = { workspace = true }

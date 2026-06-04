@@ -3,6 +3,9 @@ name = "mfm-rest-api"
 version = "0.1.0"
 edition = "2021"
 
+[package.metadata.mfm]
+category = "binary"
+
 [dependencies]
 tokio = { workspace = true }
 serde = { workspace = true }

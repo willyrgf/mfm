@@ -3,6 +3,9 @@ name = "mfm-collectors-proof"
 version = "0.1.0"
 edition = "2021"
 
+[package.metadata.mfm]
+category = "state"
+
 [dependencies]
 serde = { workspace = true }
 mfm-capabilities = { path = "../../kernel/capabilities" }
