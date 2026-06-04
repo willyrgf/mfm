@@ -181,6 +181,12 @@ certify typed specs internally before `RunStarted`.
 | portfolio tracker | `crates/ops/portfolio-tracker-op` | `crates/states/portfolio` | `crates/transports/portfolio` |
 | EVM deploy/configure/validate | `crates/ops/evm-deploy-configure-validate-op` | `crates/states/evm-dcv` | `crates/transports/evm-dcv` |
 
+The EVM port exposes deploy, configure, and validate as composable typed workflows plus the
+full deploy-configure-validate recipe. Validation consumes `ConfiguredContract` and confirms the
+configuration intent recorded by configure against live contract reads/events. Deploy and configure
+use non-secret keystore signer references in typed config; `mfm-transports-evm-dcv` opens the MFM
+keystore at runtime and keeps signed raw transactions transient.
+
 Keystore CLI commands currently call `mfm_core` keystore primitives directly and do not submit
 workflow runs.
 

@@ -124,7 +124,7 @@ Request notes:
 - `run_id` is optional; the server generates a typed digest run id when omitted.
 - `configs[*].json` and `seeds[*].json` are canonicalized and staged by runtime middleware before
   their evidence is admitted by the same prepared start commit that first references it.
-- `drive` is `until_blocked` or `append_only`; it defaults to `until_blocked`.
+- `drive` is `until_blocked`, `append_only`, or `once`; it defaults to `until_blocked`.
 - Specs that reference unported domain descriptors fail before `RunStarted` with
   `LaunchRunnerUnavailable`.
 
@@ -139,6 +139,27 @@ Stable launch error codes:
 - `LaunchRunnerUnavailable`: the verified spec references a state descriptor without a production
   runner binding.
 
+## EVM Deploy/Configure/Validate
+
+Domain routes compile authored EVM DCV requests into certified typed runs before `RunStarted`:
+
+- `POST /v1/evm/dcv/deploy`
+- `POST /v1/evm/dcv/configure`
+- `POST /v1/evm/dcv/validate`
+- `POST /v1/evm/dcv/deploy-configure-validate`
+
+Each route accepts `kind`, `request`, optional `run_id`, `framework_version`, `source_revision`,
+and `drive`. Configure additionally requires a `deployed_contract` seed. Validate additionally
+requires a `configured_contract` seed. Responses include `run`, `public_schema_id`, and
+`public_output` when the initial drive completes the run.
+
+Configure requests must include confirmation checks. `ValidateContractState` replays those
+configured-intent confirmations against live contract reads/events and fails closed when intended
+configuration and observed contract state differ.
+Deploy and configure requests sign transactions through `signer.kind = "keystore_entry"` using
+runtime-only environment references for the keystore path and password-file path. Requests must not
+carry raw private keys or passwords.
+
 ## Resume, Replay, And Public Output
 
 Resume:
@@ -146,7 +167,7 @@ Resume:
 ```bash
 curl -s -X POST "http://127.0.0.1:3001/v1/runs/$RUN_ID/resume" \
   -H "content-type: application/json" \
-  -d '{"drive":"append_only"}'
+  -d '{"drive":"once"}'
 ```
 
 Replay verification:

@@ -7,6 +7,7 @@
 //! bytes and are never retained as normal MFM artifacts.
 
 use std::future::Future;
+use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -14,7 +15,7 @@ use std::time::Duration;
 use mfm_artifact_store_fs::FsTypedArtifactStore;
 use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_capabilities::CapabilitySpec;
-use mfm_core::crypto::EthereumPrivateKey;
+use mfm_core::keystore::Keystore;
 use mfm_events::v1::{self as events, side_effect};
 use mfm_evm_core::hex::bytes_to_hex_prefixed;
 use mfm_evm_core::tx::{
@@ -23,7 +24,7 @@ use mfm_evm_core::tx::{
 };
 use mfm_evm_deploy_configure_validate_config::{
     DeployConfigureValidateConfigureConfig, DeployConfigureValidateDeployConfig,
-    DeployConfigureValidateValidateConfig,
+    DeployConfigureValidateSignerConfig, DeployConfigureValidateValidateConfig,
 };
 use mfm_ids::{ArtifactId, ContentDigest, DescriptorId, NodeId, SchemaId};
 use mfm_program::{SideEffectState, StateSpec};
@@ -433,7 +434,7 @@ async fn deploy_prepare_invocation(
     let prepared = rpc
         .prepare_transactions(
             &config.network_id,
-            config.signing_key_env.as_deref(),
+            &config.signer,
             &intent.transaction.from,
             std::slice::from_ref(&intent.transaction),
             config.poll_interval_ms,
@@ -456,7 +457,7 @@ async fn configure_prepare_invocation(
     let prepared = rpc
         .prepare_transactions(
             &config.network_id,
-            config.signing_key_env.as_deref(),
+            &config.signer,
             &config.from,
             &intent.transactions,
             config.poll_interval_ms,
@@ -2111,7 +2112,7 @@ fn runtime_invalid(message: String) -> mfm_runtime::RuntimeError {
 #[derive(Clone, Serialize, Deserialize)]
 struct PreparedTransactions {
     network_id: String,
-    signing_key_env: String,
+    signer: DeployConfigureValidateSignerConfig,
     expected_from: String,
     poll_interval_ms: u64,
     max_receipt_polls: u64,
@@ -2206,44 +2207,89 @@ struct SignedPreparedTransaction {
     transaction_hash: String,
 }
 
-fn signing_key_from_env(
-    signing_key_env: &str,
+async fn sign_legacy_transaction_with_signer(
+    signer: &DeployConfigureValidateSignerConfig,
     expected_from: &str,
-) -> mfm_runtime::Result<EthereumPrivateKey> {
-    let raw_key = Zeroizing::new(std::env::var(signing_key_env).map_err(|_| {
+    tx: &LegacyTxToSign,
+) -> mfm_runtime::Result<SignedPreparedTransaction> {
+    let signer = signer.clone();
+    let expected_from = expected_from.to_owned();
+    let tx = tx.clone();
+    tokio::task::spawn_blocking(move || {
+        sign_legacy_transaction_with_signer_blocking(&signer, &expected_from, &tx)
+    })
+    .await
+    .map_err(|_| {
         mfm_runtime::RuntimeError::InvalidRunnerOutput(
-            "configured EVM signing key environment variable was not available".to_owned(),
+            "keystore EVM signing task failed".to_owned(),
         )
-    })?);
-    let key = EthereumPrivateKey::from_hex_secret(raw_key.as_str()).map_err(|_| {
-        mfm_runtime::RuntimeError::InvalidRunnerOutput(
-            "configured EVM signing key was invalid".to_owned(),
-        )
-    })?;
+    })?
+}
+
+fn sign_legacy_transaction_with_signer_blocking(
+    signer: &DeployConfigureValidateSignerConfig,
+    expected_from: &str,
+    tx: &LegacyTxToSign,
+) -> mfm_runtime::Result<SignedPreparedTransaction> {
+    let secure_key = match signer {
+        DeployConfigureValidateSignerConfig::KeystoreEntry {
+            entry_id,
+            keystore_path_env,
+            password_file_env,
+        } => {
+            let key_id = uuid::Uuid::parse_str(entry_id).map_err(|_| {
+                mfm_runtime::RuntimeError::InvalidRunnerOutput(
+                    "configured EVM keystore entry id was invalid".to_owned(),
+                )
+            })?;
+            let keystore_path = env_value(keystore_path_env, "keystore path")?;
+            let password_file = env_value(password_file_env, "keystore password file")?;
+            let mut password =
+                Zeroizing::new(std::fs::read_to_string(&password_file).map_err(|_| {
+                    mfm_runtime::RuntimeError::InvalidRunnerOutput(
+                        "configured EVM keystore password file could not be read".to_owned(),
+                    )
+                })?);
+            trim_line_endings(&mut password);
+            if password.is_empty() {
+                return Err(mfm_runtime::RuntimeError::InvalidRunnerOutput(
+                    "configured EVM keystore password file was empty".to_owned(),
+                ));
+            }
+            let mut keystore = Keystore::new(Path::new(keystore_path.as_str())).map_err(|_| {
+                mfm_runtime::RuntimeError::InvalidRunnerOutput(
+                    "configured EVM keystore could not be opened".to_owned(),
+                )
+            })?;
+            keystore.unlock(password.as_str()).map_err(|_| {
+                mfm_runtime::RuntimeError::InvalidRunnerOutput(
+                    "configured EVM keystore could not be unlocked".to_owned(),
+                )
+            })?;
+            keystore.get_private_key(key_id).map_err(|_| {
+                mfm_runtime::RuntimeError::InvalidRunnerOutput(
+                    "configured EVM keystore entry could not be loaded".to_owned(),
+                )
+            })?
+        }
+    };
     let derived = format!(
         "{:?}",
-        key.address().map_err(|_| {
+        secure_key.ethereum_address().map_err(|_| {
             mfm_runtime::RuntimeError::InvalidRunnerOutput(
-                "configured EVM signing key address derivation failed".to_owned(),
+                "configured EVM keystore signing address derivation failed".to_owned(),
             )
         })?
     );
     if !derived.eq_ignore_ascii_case(expected_from) {
         return Err(mfm_runtime::RuntimeError::InvalidRunnerOutput(
-            "configured EVM signing key did not match from address".to_owned(),
+            "configured EVM keystore signer did not match from address".to_owned(),
         ));
     }
-    Ok(key)
-}
-
-fn sign_legacy_transaction(
-    key: &EthereumPrivateKey,
-    tx: &LegacyTxToSign,
-) -> mfm_runtime::Result<SignedPreparedTransaction> {
     let signing_hash = legacy_signing_hash(tx);
     let mut hash = [0u8; 32];
     hash.copy_from_slice(signing_hash.as_slice());
-    let signature = key.sign_hash_recoverable(&hash).map_err(|_| {
+    let signature = secure_key.sign_hash_recoverable(&hash).map_err(|_| {
         mfm_runtime::RuntimeError::InvalidRunnerOutput("failed to sign EVM transaction".to_owned())
     })?;
     let raw_transaction_hex = encode_signed_legacy_tx_hex(tx, signature);
@@ -2253,6 +2299,29 @@ fn sign_legacy_transaction(
         raw_transaction_hex,
         transaction_hash,
     })
+}
+
+fn env_value(env_name: &str, label: &str) -> mfm_runtime::Result<Zeroizing<String>> {
+    if env_name.trim().is_empty() {
+        return Err(mfm_runtime::RuntimeError::InvalidRunnerOutput(format!(
+            "configured EVM {label} environment variable name was empty"
+        )));
+    }
+    std::env::var(env_name)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .map(Zeroizing::new)
+        .ok_or_else(|| {
+            mfm_runtime::RuntimeError::InvalidRunnerOutput(format!(
+                "configured EVM {label} environment variable was unavailable"
+            ))
+        })
+}
+
+fn trim_line_endings(input: &mut String) {
+    while input.ends_with(['\r', '\n']) {
+        input.pop();
+    }
 }
 
 impl EvmDcvRpcClient {
@@ -2289,19 +2358,12 @@ impl EvmDcvRpcClient {
     async fn prepare_transactions(
         &self,
         network_id: &str,
-        signing_key_env: Option<&str>,
+        signer: &DeployConfigureValidateSignerConfig,
         expected_from: &str,
         intents: &[EvmDcvTransactionIntent],
         poll_interval_ms: u64,
         max_receipt_polls: u64,
     ) -> mfm_runtime::Result<PreparedTransactions> {
-        let signing_key_env = signing_key_env.ok_or_else(|| {
-            mfm_runtime::RuntimeError::InvalidRunnerOutput(
-                "typed EVM DCV side effects require signing_key_env".to_owned(),
-            )
-        })?;
-        let key = signing_key_from_env(signing_key_env, expected_from)?;
-
         let chain_id = self.chain_id(network_id).await?;
         let mut nonce = self.transaction_count(network_id, expected_from).await?;
         let gas_price_wei = self.gas_price(network_id).await?;
@@ -2310,7 +2372,7 @@ impl EvmDcvRpcClient {
             let tx = self
                 .legacy_transaction(network_id, intent, chain_id, nonce, gas_price_wei)
                 .await?;
-            let signed = sign_legacy_transaction(&key, &tx)?;
+            let signed = sign_legacy_transaction_with_signer(signer, expected_from, &tx).await?;
             prepared.push(PreparedTransaction {
                 transaction_index: intent.transaction_index,
                 legacy: PreparedLegacyTransaction::from_legacy(&tx),
@@ -2321,7 +2383,7 @@ impl EvmDcvRpcClient {
 
         Ok(PreparedTransactions {
             network_id: network_id.to_owned(),
-            signing_key_env: signing_key_env.to_owned(),
+            signer: signer.clone(),
             expected_from: expected_from.to_owned(),
             poll_interval_ms,
             max_receipt_polls,
@@ -2363,10 +2425,14 @@ impl EvmDcvRpcClient {
         &self,
         prepared: &PreparedTransactions,
     ) -> mfm_runtime::Result<PreparedSubmissionOutcome> {
-        let key = signing_key_from_env(&prepared.signing_key_env, &prepared.expected_from)?;
         for tx in &prepared.transactions {
             let legacy = tx.legacy.to_legacy()?;
-            let signed = sign_legacy_transaction(&key, &legacy)?;
+            let signed = sign_legacy_transaction_with_signer(
+                &prepared.signer,
+                &prepared.expected_from,
+                &legacy,
+            )
+            .await?;
             if !signed
                 .transaction_hash
                 .eq_ignore_ascii_case(&tx.transaction_hash)
@@ -2755,8 +2821,65 @@ fn runtime_to_read_error(error: mfm_runtime::RuntimeError) -> EvmDcvReadError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mfm_core::keystore::KeystoreConfig;
 
     const DIGEST_HEX: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const TEST_KEY_HEX: &str = "0000000000000000000000000000000000000000000000000000000000000001";
+    const TEST_PASSWORD: &str = "transport-test-password-123";
+
+    struct TestKeystoreSigner {
+        _tmp: tempfile::TempDir,
+        signer: DeployConfigureValidateSignerConfig,
+        expected_from: String,
+        keystore_env: String,
+        password_env: String,
+    }
+
+    impl Drop for TestKeystoreSigner {
+        fn drop(&mut self) {
+            std::env::remove_var(&self.keystore_env);
+            std::env::remove_var(&self.password_env);
+        }
+    }
+
+    fn test_keystore_signer() -> TestKeystoreSigner {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let keystore_path = tmp.path().join("signer.keystore");
+        let password_file = tmp.path().join("signer.password");
+        std::fs::write(&password_file, TEST_PASSWORD).expect("write password file");
+
+        let mut keystore =
+            Keystore::new_with_config(&keystore_path, KeystoreConfig::insecure_integration_test())
+                .expect("keystore");
+        keystore.unlock(TEST_PASSWORD).expect("unlock");
+        let entry_id = keystore
+            .import_private_key(Some("transport-test-signer".to_owned()), TEST_KEY_HEX)
+            .expect("import private key");
+        let key_info = keystore
+            .list_keys()
+            .expect("list keys")
+            .into_iter()
+            .find(|key| key.id == entry_id)
+            .expect("imported key info");
+
+        let suffix = uuid::Uuid::new_v4().simple().to_string();
+        let keystore_env = format!("MFM_EVM_DCV_TEST_KEYSTORE_{suffix}");
+        let password_env = format!("MFM_EVM_DCV_TEST_KEYSTORE_PASSWORD_{suffix}");
+        std::env::set_var(&keystore_env, &keystore_path);
+        std::env::set_var(&password_env, &password_file);
+
+        TestKeystoreSigner {
+            _tmp: tmp,
+            signer: DeployConfigureValidateSignerConfig::KeystoreEntry {
+                entry_id: entry_id.to_string(),
+                keystore_path_env: keystore_env.clone(),
+                password_file_env: password_env.clone(),
+            },
+            expected_from: format!("{:?}", key_info.address),
+            keystore_env,
+            password_env,
+        }
+    }
 
     #[test]
     fn short_digest_uses_digest_suffix_not_identity_prefix() {
@@ -2773,9 +2896,10 @@ mod tests {
 
     #[test]
     fn prepared_invocation_artifact_excludes_signed_raw_transaction() {
+        let signer = test_keystore_signer();
         let prepared = PreparedTransactions {
             network_id: "local".to_owned(),
-            signing_key_env: "MFM_TEST_SIGNING_KEY".to_owned(),
+            signer: signer.signer.clone(),
             expected_from: "0x0000000000000000000000000000000000000000".to_owned(),
             poll_interval_ms: 1,
             max_receipt_polls: 1,
@@ -2815,10 +2939,7 @@ mod tests {
 
     #[test]
     fn prepared_legacy_transaction_regenerates_expected_hash() {
-        let key = EthereumPrivateKey::from_hex_secret(
-            "0000000000000000000000000000000000000000000000000000000000000001",
-        )
-        .expect("test key");
+        let signer = test_keystore_signer();
         let legacy = LegacyTxToSign {
             to: None,
             value_wei: 0,
@@ -2828,10 +2949,20 @@ mod tests {
             gas_limit: 21_000,
             data: vec![0xde, 0xad, 0xbe, 0xef],
         };
-        let expected = sign_legacy_transaction(&key, &legacy).expect("sign original");
+        let expected = sign_legacy_transaction_with_signer_blocking(
+            &signer.signer,
+            &signer.expected_from,
+            &legacy,
+        )
+        .expect("sign original");
         let prepared = PreparedLegacyTransaction::from_legacy(&legacy);
         let regenerated = prepared.to_legacy().expect("prepared to legacy");
-        let actual = sign_legacy_transaction(&key, &regenerated).expect("sign regenerated");
+        let actual = sign_legacy_transaction_with_signer_blocking(
+            &signer.signer,
+            &signer.expected_from,
+            &regenerated,
+        )
+        .expect("sign regenerated");
 
         assert_eq!(actual.transaction_hash, expected.transaction_hash);
         assert_eq!(actual.raw_transaction_hex, expected.raw_transaction_hex);
@@ -2839,24 +2970,15 @@ mod tests {
 
     #[tokio::test]
     async fn submit_prepared_rejects_hash_mismatch_before_rpc() {
-        let key_env = "MFM_EVM_DCV_TEST_SIGNING_KEY";
-        std::env::set_var(
-            key_env,
-            "0000000000000000000000000000000000000000000000000000000000000001",
-        );
-        let key = EthereumPrivateKey::from_hex_secret(
-            "0000000000000000000000000000000000000000000000000000000000000001",
-        )
-        .expect("test key");
-        let expected_from = format!("{:?}", key.address().expect("test address"));
+        let signer = test_keystore_signer();
         let client = EvmDcvRpcClient {
             client: reqwest::Client::new(),
             sources: Vec::new(),
         };
         let prepared = PreparedTransactions {
             network_id: "local".to_owned(),
-            signing_key_env: key_env.to_owned(),
-            expected_from,
+            signer: signer.signer.clone(),
+            expected_from: signer.expected_from.clone(),
             poll_interval_ms: 1,
             max_receipt_polls: 1,
             transactions: vec![PreparedTransaction {

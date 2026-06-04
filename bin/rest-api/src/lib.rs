@@ -37,6 +37,13 @@ use mfm_artifact_store_fs::{FsTypedArtifactError, FsTypedArtifactStore};
 use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
 use mfm_events::v1::ArtifactRole;
 use mfm_ids::{ArtifactId, ContentDigest, DigestAlgorithm, RunId, SchemaId, SeedId};
+use mfm_op_evm_deploy_configure_validate::{
+    compile_dcv_configure_program, compile_dcv_deploy_program, compile_dcv_program,
+    compile_dcv_validate_program, decode_deploy_configure_validate_canonical_config,
+    CompiledDcvProgram, ConfiguredContract, DcvConfigArtifact, DcvSeedArtifact,
+    DeployConfigureValidateConfigureConfig, DeployConfigureValidateDeployConfig,
+    DeployConfigureValidateValidateConfig, DeployedContract,
+};
 use mfm_op_portfolio_tracker::{compile_portfolio_snapshot_program, PortfolioConfigArtifact};
 use mfm_portfolio_config::{
     canonicalize_portfolio_snapshot_authored_config, parse_portfolio_snapshot_authored_config,
@@ -264,6 +271,13 @@ where
         .route("/v1/health", get(health))
         .route("/v1/ready", get(ready::<S>))
         .route("/v1/portfolio/snapshot", post(portfolio_snapshot::<S>))
+        .route("/v1/evm/dcv/deploy", post(evm_dcv_deploy::<S>))
+        .route("/v1/evm/dcv/configure", post(evm_dcv_configure::<S>))
+        .route("/v1/evm/dcv/validate", post(evm_dcv_validate::<S>))
+        .route(
+            "/v1/evm/dcv/deploy-configure-validate",
+            post(evm_dcv_deploy_configure_validate::<S>),
+        )
         .route("/v1/runs/start", post(runs_start::<S>))
         .route("/v1/runs/:run_id/resume", post(runs_resume::<S>))
         .route("/v1/runs/:run_id/status", get(runs_status::<S>))
@@ -375,10 +389,35 @@ enum PortfolioSnapshotStartKind {
     PortfolioSnapshotStartV1,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum EvmDcvDeployStartKind {
+    EvmDcvDeployStartV1,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum EvmDcvConfigureStartKind {
+    EvmDcvConfigureStartV1,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum EvmDcvValidateStartKind {
+    EvmDcvValidateStartV1,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum EvmDcvFullStartKind {
+    EvmDcvDeployConfigureValidateStartV1,
+}
+
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum RestDriveMode {
     AppendOnly,
+    Once,
     #[default]
     UntilBlocked,
 }
@@ -387,6 +426,7 @@ impl RestDriveMode {
     fn into_app(self) -> DriveMode {
         match self {
             Self::AppendOnly => DriveMode::AppendOnly,
+            Self::Once => DriveMode::Once,
             Self::UntilBlocked => DriveMode::UntilBlocked,
         }
     }
@@ -441,6 +481,75 @@ struct PortfolioSnapshotStartResponse {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct EvmDcvDeployStartBody {
+    kind: EvmDcvDeployStartKind,
+    request: serde_json::Value,
+    #[serde(default)]
+    run_id: Option<String>,
+    #[serde(default = "default_evm_dcv_framework_version")]
+    framework_version: String,
+    #[serde(default = "default_source_revision")]
+    source_revision: String,
+    #[serde(default)]
+    drive: RestDriveMode,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EvmDcvConfigureStartBody {
+    kind: EvmDcvConfigureStartKind,
+    request: serde_json::Value,
+    deployed_contract: DeployedContract,
+    #[serde(default)]
+    run_id: Option<String>,
+    #[serde(default = "default_evm_dcv_framework_version")]
+    framework_version: String,
+    #[serde(default = "default_source_revision")]
+    source_revision: String,
+    #[serde(default)]
+    drive: RestDriveMode,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EvmDcvValidateStartBody {
+    kind: EvmDcvValidateStartKind,
+    request: serde_json::Value,
+    configured_contract: ConfiguredContract,
+    #[serde(default)]
+    run_id: Option<String>,
+    #[serde(default = "default_evm_dcv_framework_version")]
+    framework_version: String,
+    #[serde(default = "default_source_revision")]
+    source_revision: String,
+    #[serde(default)]
+    drive: RestDriveMode,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EvmDcvFullStartBody {
+    kind: EvmDcvFullStartKind,
+    request: serde_json::Value,
+    #[serde(default)]
+    run_id: Option<String>,
+    #[serde(default = "default_evm_dcv_framework_version")]
+    framework_version: String,
+    #[serde(default = "default_source_revision")]
+    source_revision: String,
+    #[serde(default)]
+    drive: RestDriveMode,
+}
+
+#[derive(Debug, Serialize)]
+struct EvmDcvStartResponse {
+    run: TypedRunResponse,
+    public_schema_id: String,
+    public_output: Option<TypedPublicOutputResponse>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct TypedSeedBody {
     seed_id: String,
     json: serde_json::Value,
@@ -472,6 +581,10 @@ fn default_framework_version() -> String {
 
 fn default_portfolio_framework_version() -> String {
     "mfm.rest_api.portfolio.typed.v1".to_owned()
+}
+
+fn default_evm_dcv_framework_version() -> String {
+    "mfm.rest_api.evm_dcv.typed.v1".to_owned()
 }
 
 #[allow(clippy::disallowed_methods)]
@@ -529,6 +642,183 @@ where
     };
 
     json_ok(PortfolioSnapshotStartResponse { run, public_output })
+}
+
+#[instrument(level = "info", skip(state, body))]
+async fn evm_dcv_deploy<S>(
+    State(state): State<RouterState<S>>,
+    body: Result<Json<EvmDcvDeployStartBody>, JsonRejection>,
+) -> Result<Json<serde_json::Value>, ApiError>
+where
+    S: AsyncTypedRunEventStore + Clone + Send + Sync,
+{
+    let Json(req) = body.map_err(|_| ApiError::invalid_json())?;
+    match req.kind {
+        EvmDcvDeployStartKind::EvmDcvDeployStartV1 => {}
+    }
+    let config = parse_evm_dcv_config::<DeployConfigureValidateDeployConfig>(&req.request)?;
+    let compiled = compile_dcv_deploy_program(config).map_err(|error| {
+        ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "EvmDcvCompileInvalid",
+            error.to_string(),
+        )
+    })?;
+    launch_compiled_evm_dcv(
+        state,
+        compiled,
+        req.run_id,
+        &req.framework_version,
+        &req.source_revision,
+        req.drive,
+    )
+    .await
+}
+
+#[instrument(level = "info", skip(state, body))]
+async fn evm_dcv_configure<S>(
+    State(state): State<RouterState<S>>,
+    body: Result<Json<EvmDcvConfigureStartBody>, JsonRejection>,
+) -> Result<Json<serde_json::Value>, ApiError>
+where
+    S: AsyncTypedRunEventStore + Clone + Send + Sync,
+{
+    let Json(req) = body.map_err(|_| ApiError::invalid_json())?;
+    match req.kind {
+        EvmDcvConfigureStartKind::EvmDcvConfigureStartV1 => {}
+    }
+    let config = parse_evm_dcv_config::<DeployConfigureValidateConfigureConfig>(&req.request)?;
+    let compiled =
+        compile_dcv_configure_program(config, req.deployed_contract).map_err(|error| {
+            ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "EvmDcvCompileInvalid",
+                error.to_string(),
+            )
+        })?;
+    launch_compiled_evm_dcv(
+        state,
+        compiled,
+        req.run_id,
+        &req.framework_version,
+        &req.source_revision,
+        req.drive,
+    )
+    .await
+}
+
+#[instrument(level = "info", skip(state, body))]
+async fn evm_dcv_validate<S>(
+    State(state): State<RouterState<S>>,
+    body: Result<Json<EvmDcvValidateStartBody>, JsonRejection>,
+) -> Result<Json<serde_json::Value>, ApiError>
+where
+    S: AsyncTypedRunEventStore + Clone + Send + Sync,
+{
+    let Json(req) = body.map_err(|_| ApiError::invalid_json())?;
+    match req.kind {
+        EvmDcvValidateStartKind::EvmDcvValidateStartV1 => {}
+    }
+    let config = parse_evm_dcv_config::<DeployConfigureValidateValidateConfig>(&req.request)?;
+    let compiled =
+        compile_dcv_validate_program(config, req.configured_contract).map_err(|error| {
+            ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "EvmDcvCompileInvalid",
+                error.to_string(),
+            )
+        })?;
+    launch_compiled_evm_dcv(
+        state,
+        compiled,
+        req.run_id,
+        &req.framework_version,
+        &req.source_revision,
+        req.drive,
+    )
+    .await
+}
+
+#[instrument(level = "info", skip(state, body))]
+async fn evm_dcv_deploy_configure_validate<S>(
+    State(state): State<RouterState<S>>,
+    body: Result<Json<EvmDcvFullStartBody>, JsonRejection>,
+) -> Result<Json<serde_json::Value>, ApiError>
+where
+    S: AsyncTypedRunEventStore + Clone + Send + Sync,
+{
+    let Json(req) = body.map_err(|_| ApiError::invalid_json())?;
+    match req.kind {
+        EvmDcvFullStartKind::EvmDcvDeployConfigureValidateStartV1 => {}
+    }
+    let canonical =
+        decode_deploy_configure_validate_canonical_config(&req.request).map_err(|error| {
+            ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "InvalidEvmDcvRequest",
+                error.to_string(),
+            )
+        })?;
+    let compiled = compile_dcv_program(canonical).map_err(|error| {
+        ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "EvmDcvCompileInvalid",
+            error.to_string(),
+        )
+    })?;
+    launch_compiled_evm_dcv(
+        state,
+        compiled,
+        req.run_id,
+        &req.framework_version,
+        &req.source_revision,
+        req.drive,
+    )
+    .await
+}
+
+async fn launch_compiled_evm_dcv<S>(
+    state: RouterState<S>,
+    compiled: CompiledDcvProgram,
+    run_id: Option<String>,
+    framework_version: &str,
+    source_revision: &str,
+    drive: RestDriveMode,
+) -> Result<Json<serde_json::Value>, ApiError>
+where
+    S: AsyncTypedRunEventStore + Clone + Send + Sync,
+{
+    let public_schema_id = compiled.public_schema_id.clone();
+    let run_id = parse_optional_run_id(run_id)?;
+    let services = state.services()?;
+    let start = mfm_app::prepare_certified_run_launch(
+        mfm_app::CertifiedRunLaunchInput {
+            certified_spec: compiled.certified_spec,
+            registry: services.certification_registry(),
+            run_id: run_id.clone(),
+            framework_version,
+            source_revision,
+            drive: drive.into_app(),
+        },
+        dcv_run_launch_config_artifacts(compiled.config_artifacts),
+        dcv_run_launch_seed_artifacts(compiled.seed_artifacts),
+    )?;
+    let run = services.launch_run(start).await?;
+    let public_output = if run.phase == TypedRunPhase::Completed {
+        Some(
+            services
+                .typed_public_output(&run_id, &public_schema_id)
+                .await?,
+        )
+    } else {
+        None
+    };
+
+    json_ok(EvmDcvStartResponse {
+        run,
+        public_schema_id: public_schema_id.as_str().to_owned(),
+        public_output,
+    })
 }
 
 #[instrument(level = "info", skip(state, body))]
@@ -780,6 +1070,19 @@ fn parse_portfolio_snapshot_request(
         .map_err(api_error_from_portfolio_config_error)
 }
 
+fn parse_evm_dcv_config<T>(value: &serde_json::Value) -> Result<T, ApiError>
+where
+    T: DeserializeOwned,
+{
+    serde_json::from_value(value.clone()).map_err(|error| {
+        ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "InvalidEvmDcvRequest",
+            error.to_string(),
+        )
+    })
+}
+
 fn run_launch_config_artifacts(
     configs: Vec<PortfolioConfigArtifact>,
 ) -> Vec<RunLaunchConfigArtifact> {
@@ -789,6 +1092,30 @@ fn run_launch_config_artifacts(
             schema_id: config.schema_id,
             bytes: config.bytes,
             media_type: config.media_type,
+        })
+        .collect()
+}
+
+fn dcv_run_launch_config_artifacts(
+    configs: Vec<DcvConfigArtifact>,
+) -> Vec<RunLaunchConfigArtifact> {
+    configs
+        .into_iter()
+        .map(|config| RunLaunchConfigArtifact {
+            schema_id: config.schema_id,
+            bytes: config.bytes,
+            media_type: config.media_type,
+        })
+        .collect()
+}
+
+fn dcv_run_launch_seed_artifacts(seeds: Vec<DcvSeedArtifact>) -> Vec<RunLaunchSeedArtifact> {
+    seeds
+        .into_iter()
+        .map(|seed| RunLaunchSeedArtifact {
+            seed_id: seed.seed_id,
+            bytes: seed.bytes,
+            media_type: seed.media_type,
         })
         .collect()
 }

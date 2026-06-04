@@ -284,7 +284,7 @@ mfm_cli run start --bundle <PATH> [--config <SCHEMA_ID=PATH>]... [--seed <SEED_I
 - `--seed <SEED_ID=PATH>`: Canonical JSON seed input for a seed declared by the certified spec.
 - `--framework-version <VALUE>`: Framework version evidence recorded in `RunStarted`.
 - `--source-revision <VALUE>`: Source revision evidence recorded in `RunStarted` (or `MFM_SOURCE_REVISION`).
-- `--drive <append-only|until-blocked>`: Scheduler drive policy after `RunStarted`.
+- `--drive <append-only|once|until-blocked>`: Scheduler drive policy after `RunStarted`.
 - `--database-url <URL>`: PostgreSQL connection string (default: `$DATABASE_URL`)
 - `--typed-artifact-root <PATH>`: Typed artifact store root directory
 
@@ -402,7 +402,7 @@ mfm_cli portfolio snapshot --request-json '<REQUEST_JSON>' [OPTIONS]
 **Key Options:**
 - `--request-file <PATH>`: Path to an authored request file in JSON or TOML
 - `--request-json <JSON>`: Inline canonical request JSON payload
-- `--drive <append-only|until-blocked>`: Scheduler drive policy after `RunStarted`
+- `--drive <append-only|once|until-blocked>`: Scheduler drive policy after `RunStarted`
 - `--typed-artifact-root <PATH>`: Typed artifact root
 - `--database-url <URL>`: PostgreSQL typed run-event store URL
 
@@ -426,6 +426,28 @@ the same network.
 - Text output prints the public output JSON when available.
 - The command never submits old dynamic `portfolio_tracker`, `portfolio_execute`, or
   `portfolio_config_build` ops.
+
+## EVM DCV Commands (Experimental)
+
+The EVM deploy/configure/validate commands compile authored requests into certified typed runs:
+
+```sh
+mfm_cli evm dcv deploy --request-file <REQUEST_FILE> [OPTIONS]
+mfm_cli evm dcv configure --request-file <REQUEST_FILE> --deployed-contract-file <DEPLOYED_JSON> [OPTIONS]
+mfm_cli evm dcv validate --request-file <REQUEST_FILE> --configured-contract-file <CONFIGURED_JSON> [OPTIONS]
+mfm_cli evm dcv deploy-configure-validate --request-file <REQUEST_FILE> [OPTIONS]
+```
+
+All commands also accept `--request-json`. Configure consumes the `DeployedContract` JSON emitted by
+deploy. Validate consumes the `ConfiguredContract` JSON emitted by configure. Configure requests
+must include confirmation checks; validation reads those configured-intent checks from
+`ConfiguredContract` and confirms live contract state matches the intended configuration.
+Deploy and configure requests sign transactions through a `signer.kind = "keystore_entry"` object
+that names a keystore entry and environment variables for the keystore path and password-file path.
+The CLI request must not contain raw private keys or passwords.
+
+JSON output includes the typed run response, `public_schema_id`, and typed public output when the
+run completes during the selected drive.
 
 ## Configuration
 

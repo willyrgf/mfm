@@ -102,6 +102,10 @@ Owner: `crates/states/evm-dcv`
 
 Deploy/configure states keep raw signed transaction material below typed semantic values. Protected
 transaction bytes may be staged as managed artifacts, but they cannot become public typed values.
+Deploy, configure, and validate are independently composable typed workflows as well as the full
+deploy-configure-validate recipe. Configure emits confirmation checks in `ConfiguredContract`;
+validate must prove those intended configuration checks against live contract reads/events before
+any extra validation assertions can make the report valid.
 
 ## Runner And Transport Inventory
 

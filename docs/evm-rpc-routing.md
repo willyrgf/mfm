@@ -68,7 +68,8 @@ Live typed transports may:
 - select a configured source for the certified network and scope
 - probe source health before use
 - perform read calls required by certified read states
-- submit side-effect transactions required by certified side-effect states
+- sign with runtime-only MFM keystore access and submit side-effect transactions required by
+  certified side-effect states
 - persist typed fact, receipt, confirmation, and artifact evidence through runtime/store APIs
 
 Live typed transports must not:
@@ -78,6 +79,10 @@ Live typed transports must not:
 - create an independent run stream or side-effect stream
 - persist secrets or raw signing material in typed semantic surfaces
 - accept per-request raw RPC URL overrides from workflow configs
+
+Deploy/configure signer config carries only non-secret keystore references: entry id and the names
+of environment variables that point to the keystore path and password file. The referenced paths,
+passwords, private keys, and signed raw transactions remain runtime-only.
 
 ## Replay
 

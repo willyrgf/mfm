@@ -26,6 +26,8 @@ pub(crate) struct TypedRunStoresArgs {
 pub(crate) enum TypedDriveArg {
     /// Append or inspect only, without driving runnable states.
     AppendOnly,
+    /// Drive at most one scheduler step.
+    Once,
     /// Drive runnable states until the typed scheduler blocks.
     UntilBlocked,
 }
@@ -86,6 +88,7 @@ pub(crate) async fn connect_run_services(
 pub(crate) fn drive_mode(arg: TypedDriveArg) -> DriveMode {
     match arg {
         TypedDriveArg::AppendOnly => DriveMode::AppendOnly,
+        TypedDriveArg::Once => DriveMode::Once,
         TypedDriveArg::UntilBlocked => DriveMode::UntilBlocked,
     }
 }

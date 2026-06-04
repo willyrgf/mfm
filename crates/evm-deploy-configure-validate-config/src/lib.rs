@@ -28,12 +28,22 @@
 //!         "deploy": {
 //!             "network_id": "ethereum-mainnet",
 //!             "from": "0x000000000000000000000000000000000000dead",
-//!             "signing_key_env": "MFM_DEPLOYER_KEY"
+//!             "signer": {
+//!                 "kind": "keystore_entry",
+//!                 "entry_id": "550e8400-e29b-41d4-a716-446655440000",
+//!                 "keystore_path_env": "MFM_DEPLOYER_KEYSTORE",
+//!                 "password_file_env": "MFM_DEPLOYER_KEYSTORE_PASSWORD_FILE"
+//!             }
 //!         },
 //!         "configure": {
 //!             "network_id": "ethereum-mainnet",
 //!             "from": "0x000000000000000000000000000000000000dead",
-//!             "signing_key_env": "MFM_DEPLOYER_KEY",
+//!             "signer": {
+//!                 "kind": "keystore_entry",
+//!                 "entry_id": "550e8400-e29b-41d4-a716-446655440000",
+//!                 "keystore_path_env": "MFM_DEPLOYER_KEYSTORE",
+//!                 "password_file_env": "MFM_DEPLOYER_KEYSTORE_PASSWORD_FILE"
+//!             },
 //!             "calls": []
 //!         },
 //!         "validate": {
@@ -182,6 +192,26 @@ impl<'de> Deserialize<'de> for DeployConfigureValidateInput {
     }
 }
 
+/// Local signer reference used for deploy and configure transactions.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[mfm(
+    namespace = "mfm.evm.dcv",
+    name = "signer-config",
+    schema = "mfm.evm.dcv.config.signer"
+)]
+pub enum DeployConfigureValidateSignerConfig {
+    /// Sign with a private key stored in an MFM keystore entry.
+    KeystoreEntry {
+        /// Stable keystore entry identifier.
+        entry_id: String,
+        /// Environment variable containing the keystore file path.
+        keystore_path_env: String,
+        /// Environment variable containing the keystore password file path.
+        password_file_env: String,
+    },
+}
+
 /// Typed authored and canonical deploy-phase config.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, MfmValue, MfmConfig)]
 #[mfm(
@@ -202,8 +232,8 @@ pub struct DeployConfigureValidateDeployConfig {
     pub constructor_args: Vec<AbiArgumentValue>,
     /// Optional deployment value expressed in wei.
     pub value_wei: Option<String>,
-    /// Optional environment variable name used for local signing.
-    pub signing_key_env: Option<String>,
+    /// Local signer reference used for transaction signing.
+    pub signer: DeployConfigureValidateSignerConfig,
     /// Delay between receipt polls in milliseconds.
     pub poll_interval_ms: u64,
     /// Maximum number of receipt polls before timing out.
@@ -228,8 +258,7 @@ impl<'de> Deserialize<'de> for DeployConfigureValidateDeployConfig {
             constructor_args: Vec<AbiArgumentValue>,
             #[serde(default)]
             value_wei: Option<String>,
-            #[serde(default)]
-            signing_key_env: Option<String>,
+            signer: DeployConfigureValidateSignerConfig,
             #[serde(default = "default_poll_interval_ms")]
             poll_interval_ms: u64,
             #[serde(default = "default_max_receipt_polls")]
@@ -244,7 +273,7 @@ impl<'de> Deserialize<'de> for DeployConfigureValidateDeployConfig {
             from: raw.from,
             constructor_args: raw.constructor_args,
             value_wei: raw.value_wei,
-            signing_key_env: raw.signing_key_env,
+            signer: raw.signer,
             poll_interval_ms: raw.poll_interval_ms,
             max_receipt_polls: raw.max_receipt_polls,
         })
@@ -267,10 +296,14 @@ pub struct DeployConfigureValidateConfigureConfig {
     pub control_scope: String,
     /// Sender address used for configuration transactions.
     pub from: String,
-    /// Optional environment variable name used for local signing.
-    pub signing_key_env: Option<String>,
+    /// Local signer reference used for transaction signing.
+    pub signer: DeployConfigureValidateSignerConfig,
     /// Calls to execute against the deployed contract.
     pub calls: Vec<ConfigureCallConfig>,
+    /// Read confirmations that must prove the intended configuration after execution.
+    pub confirmation_read_assertions: Vec<ReadAssertionConfig>,
+    /// Event confirmations that must prove the intended configuration after execution.
+    pub confirmation_event_assertions: Vec<EventAssertionConfig>,
     /// Export key used by the configure phase for transaction hashes.
     pub tx_hashes_export_key: String,
     /// Export key used by the configure phase for transaction receipts.
@@ -295,10 +328,13 @@ impl<'de> Deserialize<'de> for DeployConfigureValidateConfigureConfig {
             #[serde(default = "default_control_scope")]
             control_scope: String,
             from: String,
-            #[serde(default)]
-            signing_key_env: Option<String>,
+            signer: DeployConfigureValidateSignerConfig,
             #[serde(default)]
             calls: Vec<ConfigureCallConfig>,
+            #[serde(default)]
+            confirmation_read_assertions: Vec<ReadAssertionConfig>,
+            #[serde(default)]
+            confirmation_event_assertions: Vec<EventAssertionConfig>,
             #[serde(default = "default_configure_tx_hashes_export_key")]
             tx_hashes_export_key: String,
             #[serde(default = "default_configure_receipts_export_key")]
@@ -315,8 +351,10 @@ impl<'de> Deserialize<'de> for DeployConfigureValidateConfigureConfig {
             network_id: raw.network_id,
             control_scope: raw.control_scope,
             from: raw.from,
-            signing_key_env: raw.signing_key_env,
+            signer: raw.signer,
             calls: raw.calls,
+            confirmation_read_assertions: raw.confirmation_read_assertions,
+            confirmation_event_assertions: raw.confirmation_event_assertions,
             tx_hashes_export_key: raw.tx_hashes_export_key,
             receipts_export_key: raw.receipts_export_key,
             poll_interval_ms: raw.poll_interval_ms,
@@ -705,10 +743,25 @@ mod tests {
     use mfm_values::{MfmConfig, MfmValue};
 
     const JSON_CONFIG: &str = r#"{
-        "deploy": {"network_id": "ethereum-mainnet", "from": "0x000000000000000000000000000000000000dead"},
+        "deploy": {
+            "network_id": "ethereum-mainnet",
+            "from": "0x000000000000000000000000000000000000dead",
+            "signer": {
+                "kind": "keystore_entry",
+                "entry_id": "00000000-0000-0000-0000-000000000001",
+                "keystore_path_env": "MFM_TEST_KEYSTORE",
+                "password_file_env": "MFM_TEST_KEYSTORE_PASSWORD_FILE"
+            }
+        },
         "configure": {
             "network_id": "ethereum-mainnet",
             "from": "0x000000000000000000000000000000000000dead",
+            "signer": {
+                "kind": "keystore_entry",
+                "entry_id": "00000000-0000-0000-0000-000000000001",
+                "keystore_path_env": "MFM_TEST_KEYSTORE",
+                "password_file_env": "MFM_TEST_KEYSTORE_PASSWORD_FILE"
+            },
             "calls": [{"function": "noop", "args": []}]
         },
         "validate": {"network_id": "ethereum-mainnet", "expected_chain_id": 1}
@@ -719,9 +772,21 @@ mod tests {
         network_id = "ethereum-mainnet"
         from = "0x000000000000000000000000000000000000dead"
 
+        [deploy.signer]
+        kind = "keystore_entry"
+        entry_id = "00000000-0000-0000-0000-000000000001"
+        keystore_path_env = "MFM_TEST_KEYSTORE"
+        password_file_env = "MFM_TEST_KEYSTORE_PASSWORD_FILE"
+
         [configure]
         network_id = "ethereum-mainnet"
         from = "0x000000000000000000000000000000000000dead"
+
+        [configure.signer]
+        kind = "keystore_entry"
+        entry_id = "00000000-0000-0000-0000-000000000001"
+        keystore_path_env = "MFM_TEST_KEYSTORE"
+        password_file_env = "MFM_TEST_KEYSTORE_PASSWORD_FILE"
 
         [[configure.calls]]
         function = "noop"
@@ -731,6 +796,15 @@ mod tests {
         network_id = "ethereum-mainnet"
         expected_chain_id = 1
     "#;
+
+    fn test_signer_json() -> Value {
+        serde_json::json!({
+            "kind": "keystore_entry",
+            "entry_id": "00000000-0000-0000-0000-000000000001",
+            "keystore_path_env": "MFM_TEST_KEYSTORE",
+            "password_file_env": "MFM_TEST_KEYSTORE_PASSWORD_FILE"
+        })
+    }
 
     #[test]
     fn json_and_toml_authoring_normalize_to_same_canonical_config() {
@@ -808,11 +882,13 @@ mod tests {
         let canonical = decode_deploy_configure_validate_canonical_config(&serde_json::json!({
             "deploy": {
                 "network_id": "ethereum-mainnet",
-                "from": "0x000000000000000000000000000000000000dead"
+                "from": "0x000000000000000000000000000000000000dead",
+                "signer": test_signer_json()
             },
             "configure": {
                 "network_id": "ethereum-mainnet",
                 "from": "0x000000000000000000000000000000000000dead",
+                "signer": test_signer_json(),
                 "calls": []
             },
             "validate": {
@@ -845,11 +921,13 @@ mod tests {
                 },
                 "network_id": "ethereum-mainnet",
                 "from": "0x000000000000000000000000000000000000dead",
+                "signer": test_signer_json(),
                 "constructor_args": ["0x0000000000000000000000000000000000000001"]
             },
             "configure": {
                 "network_id": "ethereum-mainnet",
                 "from": "0x000000000000000000000000000000000000dead",
+                "signer": test_signer_json(),
                 "calls": [{
                     "function": "setOwner",
                     "args": ["0x0000000000000000000000000000000000000002"]
@@ -897,11 +975,13 @@ mod tests {
         let canonical = decode_deploy_configure_validate_canonical_config(&serde_json::json!({
             "deploy": {
                 "network_id": "ethereum-mainnet",
-                "from": "0x000000000000000000000000000000000000dead"
+                "from": "0x000000000000000000000000000000000000dead",
+                "signer": test_signer_json()
             },
             "configure": {
                 "network_id": "ethereum-mainnet",
                 "from": "0x000000000000000000000000000000000000dead",
+                "signer": test_signer_json(),
                 "calls": []
             },
             "validate": {
@@ -1010,11 +1090,13 @@ mod tests {
         let configure_err = decode_deploy_configure_validate_canonical_config(&serde_json::json!({
             "deploy": {
                 "network_id": "ethereum-mainnet",
-                "from": "0x000000000000000000000000000000000000dead"
+                "from": "0x000000000000000000000000000000000000dead",
+                "signer": test_signer_json()
             },
             "configure": {
                 "network_id": "ethereum-mainnet",
                 "from": "0x000000000000000000000000000000000000dead",
+                "signer": test_signer_json(),
                 "contract_address": "0x0000000000000000000000000000000000000001",
                 "calls": []
             },
@@ -1027,11 +1109,13 @@ mod tests {
         let validate_err = decode_deploy_configure_validate_canonical_config(&serde_json::json!({
             "deploy": {
                 "network_id": "ethereum-mainnet",
-                "from": "0x000000000000000000000000000000000000dead"
+                "from": "0x000000000000000000000000000000000000dead",
+                "signer": test_signer_json()
             },
             "configure": {
                 "network_id": "ethereum-mainnet",
                 "from": "0x000000000000000000000000000000000000dead",
+                "signer": test_signer_json(),
                 "calls": []
             },
             "validate": {

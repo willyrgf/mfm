@@ -1730,6 +1730,7 @@ dependencies = [
  "mfm-canonical",
  "mfm-evm-core",
  "mfm-ids",
+ "mfm-op-evm-deploy-configure-validate",
  "mfm-op-portfolio-tracker",
  "mfm-op-proof",
  "mfm-portfolio-config",
@@ -1744,6 +1745,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "toml 0.8.23",
  "uuid",
  "zeroize",
 ]
@@ -1949,6 +1951,7 @@ dependencies = [
  "mfm-stream-store-postgres",
  "mfm-transports-evm-dcv",
  "mfm-values",
+ "mfm_core",
  "reqwest",
  "serde",
  "serde_json",
@@ -2109,6 +2112,7 @@ dependencies = [
  "mfm-canonical",
  "mfm-events",
  "mfm-ids",
+ "mfm-op-evm-deploy-configure-validate",
  "mfm-op-portfolio-tracker",
  "mfm-portfolio-config",
  "mfm-spec",
@@ -2240,7 +2244,9 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
+ "uuid",
  "zeroize",
 ]
 

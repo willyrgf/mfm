@@ -4,10 +4,13 @@
 use std::collections::BTreeSet;
 use std::time::Duration;
 
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
 use mfm_app::{DriveMode, RunLaunchConfigArtifact};
 use mfm_artifact_store_fs::FsTypedArtifactStore;
 use mfm_events::v1 as typed_events;
 use mfm_ids::ArtifactId;
+use mfm_integration_tests::test_support::{funded_reth_keystore_wallet, rpc_call};
 use mfm_op_evm_deploy_configure_validate::{
     certified_dcv_spec, dcv_config_artifacts_for_spec, dcv_program_draft,
     decode_deploy_configure_validate_canonical_config, DcvConfigArtifact,
@@ -16,11 +19,13 @@ use mfm_store::v1 as typed_store;
 use mfm_store::v1::TypedRunEventStore;
 use mfm_transports_evm_dcv::EvmDcvArtifactReader;
 use serde::Deserialize;
+use tower::ServiceExt;
 
 const NETWORK_ID: &str = "ethereum-mainnet";
 const CONTROL_SCOPE: &str = "parity.evm_reth_pipeline";
 const DEFAULT_PARITY_RETH_HTTP_PORT: &str = "8565";
 const ENV_EVM_RPC_SOURCES_JSON: &str = "MFM_EVM_RPC_SOURCES_JSON";
+static EVM_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 fn parse_u64_hex(s: &str) -> u64 {
     let trimmed = s
@@ -73,7 +78,7 @@ fn typed_deploy_configure_validate_config(
     artifact: serde_json::Value,
     from: &str,
     control_scope: &str,
-    signing_key_env: &str,
+    signer: &serde_json::Value,
     expected_chain_id: u64,
 ) -> serde_json::Value {
     serde_json::json!({
@@ -87,7 +92,7 @@ fn typed_deploy_configure_validate_config(
             "network_id": NETWORK_ID,
             "control_scope": control_scope,
             "from": from,
-            "signing_key_env": signing_key_env,
+            "signer": signer.clone(),
             "constructor_args": [1],
             "poll_interval_ms": 200,
             "max_receipt_polls": 120,
@@ -96,9 +101,15 @@ fn typed_deploy_configure_validate_config(
             "network_id": NETWORK_ID,
             "control_scope": control_scope,
             "from": from,
-            "signing_key_env": signing_key_env,
+            "signer": signer.clone(),
             "calls": [
                 {"function": "setValue", "args": [7]}
+            ],
+            "confirmation_read_assertions": [
+                {"function": "getValue", "args": [], "expected": 7}
+            ],
+            "confirmation_event_assertions": [
+                {"event": "ValueSet", "min_count": 2}
             ],
             "poll_interval_ms": 200,
             "max_receipt_polls": 120,
@@ -116,6 +127,178 @@ fn typed_deploy_configure_validate_config(
             ],
         },
     })
+}
+
+fn typed_deploy_config(
+    artifact: serde_json::Value,
+    from: &str,
+    control_scope: &str,
+    signer: &serde_json::Value,
+) -> serde_json::Value {
+    serde_json::json!({
+        "artifact": artifact,
+        "network_id": NETWORK_ID,
+        "control_scope": control_scope,
+        "from": from,
+        "signer": signer.clone(),
+        "constructor_args": [1],
+        "poll_interval_ms": 200,
+        "max_receipt_polls": 120,
+    })
+}
+
+fn typed_configure_config(
+    artifact: serde_json::Value,
+    from: &str,
+    control_scope: &str,
+    signer: &serde_json::Value,
+) -> serde_json::Value {
+    serde_json::json!({
+        "artifact": artifact,
+        "network_id": NETWORK_ID,
+        "control_scope": control_scope,
+        "from": from,
+        "signer": signer.clone(),
+        "calls": [
+            {"function": "setValue", "args": [7]}
+        ],
+        "confirmation_read_assertions": [
+            {"function": "getValue", "args": [], "expected": 7}
+        ],
+        "confirmation_event_assertions": [
+            {"event": "ValueSet", "min_count": 2}
+        ],
+        "poll_interval_ms": 200,
+        "max_receipt_polls": 120,
+    })
+}
+
+fn typed_validate_config(
+    artifact: serde_json::Value,
+    control_scope: &str,
+    expected_chain_id: u64,
+) -> serde_json::Value {
+    serde_json::json!({
+        "artifact": artifact,
+        "network_id": NETWORK_ID,
+        "control_scope": control_scope,
+        "expected_chain_id": expected_chain_id,
+        "require_client_substring": "reth",
+    })
+}
+
+fn rest_test_app() -> (axum::Router, tempfile::TempDir) {
+    let tmp = tempfile::tempdir().expect("typed EVM DCV REST tempdir");
+    let app = mfm_rest_api::make_app(mfm_rest_api::make_in_memory_app_state(tmp.path()));
+    (app, tmp)
+}
+
+fn json_post(uri: &str, body: serde_json::Value) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&body).expect("request body serializes"),
+        ))
+        .expect("request")
+}
+
+async fn response_json(response: axum::response::Response) -> serde_json::Value {
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("response body");
+    serde_json::from_slice(&bytes).expect("response json")
+}
+
+async fn rest_post_json(
+    app: &axum::Router,
+    uri: &str,
+    body: serde_json::Value,
+) -> serde_json::Value {
+    let response = app
+        .clone()
+        .oneshot(json_post(uri, body))
+        .await
+        .expect("REST response");
+    let status = response.status();
+    let body = response_json(response).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "REST POST {uri} returned {status}: {body}"
+    );
+    assert_eq!(body["status"], "success");
+    body
+}
+
+async fn rest_get_json(app: &axum::Router, uri: &str) -> serde_json::Value {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(uri)
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("REST response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response_json(response).await;
+    assert_eq!(body["status"], "success");
+    body
+}
+
+async fn run_evm_dcv_phase_to_completion(
+    app: &axum::Router,
+    uri: &str,
+    mut body: serde_json::Value,
+) -> (String, String, serde_json::Value) {
+    body["drive"] = serde_json::json!("append_only");
+    let started = rest_post_json(app, uri, body).await;
+    let run_id = started["data"]["run"]["run_id"]
+        .as_str()
+        .expect("run id")
+        .to_owned();
+    let public_schema_id = started["data"]["public_schema_id"]
+        .as_str()
+        .expect("public schema id")
+        .to_owned();
+
+    let mut terminal = started["data"]["run"].clone();
+    for _ in 0..96 {
+        if terminal["phase"] == "completed" {
+            break;
+        }
+        let resumed = rest_post_json(
+            app,
+            &format!("/v1/runs/{run_id}/resume"),
+            serde_json::json!({"drive": "once"}),
+        )
+        .await;
+        terminal = resumed["data"].clone();
+    }
+    assert_eq!(terminal["phase"], "completed");
+
+    let replay = rest_post_json(
+        app,
+        &format!("/v1/runs/{run_id}/replay"),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(replay["data"]["phase"], "completed");
+
+    let public_output = rest_get_json(
+        app,
+        &format!("/v1/runs/{run_id}/public-output/{public_schema_id}"),
+    )
+    .await;
+    (
+        run_id,
+        public_schema_id,
+        public_output["data"]["json"].clone(),
+    )
 }
 
 #[derive(Deserialize)]
@@ -143,47 +326,116 @@ fn required_rpc_url_for_network(network_id: &str) -> String {
     format!("http://127.0.0.1:{port}")
 }
 
-async fn rpc_call(rpc_url: &str, method: &str, params: serde_json::Value) -> serde_json::Value {
-    let response = reqwest::Client::new()
-        .post(rpc_url)
-        .json(&serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": method,
-            "params": params,
-        }))
-        .send()
-        .await
-        .expect("send json-rpc request")
-        .error_for_status()
-        .expect("json-rpc http status");
-    let payload: serde_json::Value = response.json().await.expect("json-rpc response json");
-    if let Some(error) = payload.get("error") {
-        panic!("json-rpc {method} returned error: {error}");
-    }
-    payload
-        .get("result")
-        .cloned()
-        .unwrap_or_else(|| panic!("json-rpc {method} response missing result: {payload}"))
-}
+#[tokio::test]
+async fn parity_reth_evm_dcv_public_phase_lifecycle_rest() {
+    let _env_guard = EVM_ENV_LOCK.lock().await;
+    let rpc_url = required_rpc_url_for_network(NETWORK_ID);
+    let control_scope = format!("{CONTROL_SCOPE}.phase.{}", uuid::Uuid::new_v4().simple());
 
-const RETH_DEV_ACCOUNT0_PRIVATE_KEY: &str =
-    "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
+    let wallet = funded_reth_keystore_wallet(&rpc_url, 1).await;
+    let signer = wallet.signer_json();
+
+    let chain_id_hex = rpc_call(&rpc_url, "eth_chainId", serde_json::json!([])).await;
+    let expected_chain_id = chain_id_hex
+        .as_str()
+        .map(parse_u64_hex)
+        .expect("eth_chainId hex");
+    let artifact = contract_artifact_json();
+
+    let (deploy_app, _deploy_tmp) = rest_test_app();
+    let (_, _, deploy_public) = run_evm_dcv_phase_to_completion(
+        &deploy_app,
+        "/v1/evm/dcv/deploy",
+        serde_json::json!({
+            "kind": "evm_dcv_deploy_start_v1",
+            "request": typed_deploy_config(
+                artifact.clone(),
+                &wallet.from,
+                &control_scope,
+                &signer,
+            ),
+            "framework_version": "mfm.integration.evm_dcv.rest.deploy.v1",
+            "source_revision": "integration-test",
+        }),
+    )
+    .await;
+    let deployed_contract = deploy_public
+        .get("deployed_contract")
+        .cloned()
+        .expect("deployed_contract public output");
+
+    let (configure_app, _configure_tmp) = rest_test_app();
+    let (_, _, configure_public) = run_evm_dcv_phase_to_completion(
+        &configure_app,
+        "/v1/evm/dcv/configure",
+        serde_json::json!({
+            "kind": "evm_dcv_configure_start_v1",
+            "request": typed_configure_config(
+                artifact.clone(),
+                &wallet.from,
+                &control_scope,
+                &signer,
+            ),
+            "deployed_contract": deployed_contract,
+            "framework_version": "mfm.integration.evm_dcv.rest.configure.v1",
+            "source_revision": "integration-test",
+        }),
+    )
+    .await;
+    let configured_contract = configure_public
+        .get("configured_contract")
+        .cloned()
+        .expect("configured_contract public output");
+
+    let (validate_app, _validate_tmp) = rest_test_app();
+    let (_, _, validate_public) = run_evm_dcv_phase_to_completion(
+        &validate_app,
+        "/v1/evm/dcv/validate",
+        serde_json::json!({
+            "kind": "evm_dcv_validate_start_v1",
+            "request": typed_validate_config(artifact, &control_scope, expected_chain_id),
+            "configured_contract": configured_contract,
+            "framework_version": "mfm.integration.evm_dcv.rest.validate.v1",
+            "source_revision": "integration-test",
+        }),
+    )
+    .await;
+    let report = validate_public
+        .get("validation_report")
+        .expect("validation_report public output");
+
+    assert_eq!(report["valid"], serde_json::json!(true));
+    assert_eq!(
+        report["configuration_read_results"][0]["actual"]["json_text"],
+        serde_json::json!("7")
+    );
+    assert_eq!(
+        report["configuration_event_results"][0]["observed_count"],
+        serde_json::json!(2)
+    );
+    assert_eq!(
+        report["observed_chain_id"],
+        serde_json::json!(expected_chain_id)
+    );
+    assert!(report["client_version"]
+        .as_str()
+        .expect("client version")
+        .to_ascii_lowercase()
+        .contains("reth"));
+    let rendered = serde_json::to_string(&validate_public).expect("rendered public output");
+    assert!(!wallet.rendered_contains_secret_path(&rendered));
+    assert!(!rendered.contains(&rpc_url));
+    assert!(!rendered.contains("raw_transaction_hex"));
+}
 
 #[tokio::test]
 async fn parity_reth_deploy_configure_validate_root_op() {
+    let _env_guard = EVM_ENV_LOCK.lock().await;
     let rpc_url = required_rpc_url_for_network(NETWORK_ID);
     let control_scope = format!("{CONTROL_SCOPE}.typed.{}", uuid::Uuid::new_v4().simple());
 
-    let accounts = rpc_call(&rpc_url, "eth_accounts", serde_json::json!([])).await;
-    let from = accounts
-        .as_array()
-        .and_then(|arr| arr.first())
-        .and_then(|v| v.as_str())
-        .expect("eth_accounts first address")
-        .to_string();
-    let signing_key_env = "MFM_EVM_PARITY_DEPLOY_SIGNING_KEY";
-    std::env::set_var(signing_key_env, RETH_DEV_ACCOUNT0_PRIVATE_KEY);
+    let wallet = funded_reth_keystore_wallet(&rpc_url, 0).await;
+    let signer = wallet.signer_json();
 
     let chain_id_hex = rpc_call(&rpc_url, "eth_chainId", serde_json::json!([])).await;
     let expected_chain_id = chain_id_hex
@@ -194,9 +446,9 @@ async fn parity_reth_deploy_configure_validate_root_op() {
     let canonical =
         decode_deploy_configure_validate_canonical_config(&typed_deploy_configure_validate_config(
             contract_artifact_json(),
-            &from,
+            &wallet.from,
             &control_scope,
-            signing_key_env,
+            &signer,
             expected_chain_id,
         ))
         .expect("typed EVM DCV canonical config");
@@ -364,6 +616,10 @@ async fn parity_reth_deploy_configure_validate_root_op() {
         .await
         .expect("typed EVM DCV public output");
     let json = public_output.json.expect("rendered typed public output");
+    let rendered_public_output = serde_json::to_string(&json).expect("rendered public output");
+    assert!(!wallet.rendered_contains_secret_path(&rendered_public_output));
+    assert!(!rendered_public_output.contains(&rpc_url));
+    assert!(!rendered_public_output.contains("raw_transaction_hex"));
     let report = json
         .get("validation_report")
         .expect("validation_report public output");

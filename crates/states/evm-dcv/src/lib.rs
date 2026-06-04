@@ -28,13 +28,14 @@ use mfm_effects::{ApplySideEffect, ReadExternal};
 pub use mfm_evm_dcv_model::{
     bytes_to_hex_prefixed, decode_single_output_to_json, expected_matches, normalize_address,
     parse_artifact, prepare_validate_assertions, AbiArgumentValue, ConfiguredContract,
-    ConfiguredContractRef, ContractArtifactConfig, DeployedContract, ExpectedValue,
-    ValidationEventResult, ValidationReadResult, ValidationReport,
+    ConfiguredContractRef, ContractArtifactConfig, DeployedContract, EventAssertionConfig,
+    ExpectedValue, ReadAssertionConfig, ValidationEventResult, ValidationReadResult,
+    ValidationReport,
 };
 use mfm_evm_dcv_model::{constructor_data, parse_value_wei_to_hex, resolve_function_call};
 use mfm_evm_deploy_configure_validate_config::{
     DeployConfigureValidateConfigureConfig, DeployConfigureValidateDeployConfig,
-    DeployConfigureValidateValidateConfig,
+    DeployConfigureValidateSignerConfig, DeployConfigureValidateValidateConfig,
 };
 use mfm_ids::{
     AdapterKind, AdapterVersion, CapabilityKind, CapabilityVersion, DigestAlgorithm, StateKind,
@@ -540,6 +541,34 @@ pub struct EvmDcvConfigureConfirmation {
 #[derive(PublicOutputs)]
 #[mfm(schema = "mfm.evm.dcv.public_outputs")]
 pub struct DcvPublicOutputs<'program, 'scope> {
+    /// Deployment lifecycle output.
+    pub deployed_contract: mfm_program::Handle<'program, 'scope, DeployedContract>,
+    /// Configuration lifecycle output.
+    pub configured_contract: mfm_program::Handle<'program, 'scope, ConfiguredContract>,
+    /// Terminal validation report.
+    pub validation_report: mfm_program::Handle<'program, 'scope, ValidationReport>,
+}
+
+/// Public outputs produced by the standalone deploy workflow.
+#[derive(PublicOutputs)]
+#[mfm(schema = "mfm.evm.dcv.deploy_public_outputs")]
+pub struct DcvDeployPublicOutputs<'program, 'scope> {
+    /// Deployment lifecycle output.
+    pub deployed_contract: mfm_program::Handle<'program, 'scope, DeployedContract>,
+}
+
+/// Public outputs produced by the standalone configure workflow.
+#[derive(PublicOutputs)]
+#[mfm(schema = "mfm.evm.dcv.configure_public_outputs")]
+pub struct DcvConfigurePublicOutputs<'program, 'scope> {
+    /// Configuration lifecycle output.
+    pub configured_contract: mfm_program::Handle<'program, 'scope, ConfiguredContract>,
+}
+
+/// Public outputs produced by the standalone validate workflow.
+#[derive(PublicOutputs)]
+#[mfm(schema = "mfm.evm.dcv.validate_public_outputs")]
+pub struct DcvValidatePublicOutputs<'program, 'scope> {
     /// Terminal validation report.
     pub validation_report: mfm_program::Handle<'program, 'scope, ValidationReport>,
 }
@@ -552,6 +581,30 @@ pub struct DcvOperationOutputs<'program, 'scope> {
     pub deployed: mfm_program::Handle<'program, 'scope, DeployedContract>,
     /// Configuration lifecycle output.
     pub configured: mfm_program::Handle<'program, 'scope, ConfiguredContract>,
+    /// Terminal validation report.
+    pub validation_report: mfm_program::Handle<'program, 'scope, ValidationReport>,
+}
+
+/// Operation output handles produced by the standalone deploy operation.
+#[derive(OperationOutput)]
+#[mfm(schema = "mfm.evm.dcv.deploy_operation_outputs")]
+pub struct DcvDeployOperationOutputs<'program, 'scope> {
+    /// Deployment lifecycle output.
+    pub deployed_contract: mfm_program::Handle<'program, 'scope, DeployedContract>,
+}
+
+/// Operation output handles produced by the standalone configure operation.
+#[derive(OperationOutput)]
+#[mfm(schema = "mfm.evm.dcv.configure_operation_outputs")]
+pub struct DcvConfigureOperationOutputs<'program, 'scope> {
+    /// Configuration lifecycle output.
+    pub configured_contract: mfm_program::Handle<'program, 'scope, ConfiguredContract>,
+}
+
+/// Operation output handles produced by the standalone validate operation.
+#[derive(OperationOutput)]
+#[mfm(schema = "mfm.evm.dcv.validate_operation_outputs")]
+pub struct DcvValidateOperationOutputs<'program, 'scope> {
     /// Terminal validation report.
     pub validation_report: mfm_program::Handle<'program, 'scope, ValidationReport>,
 }
@@ -735,6 +788,9 @@ impl SideEffectState for ConfigureContractState {
         Ok(ConfiguredContract {
             lifecycle_version: 1,
             deployed: input.clone(),
+            configure_calls: self.config.calls.clone(),
+            confirmation_read_assertions: self.config.confirmation_read_assertions.clone(),
+            confirmation_event_assertions: self.config.confirmation_event_assertions.clone(),
             configure_tx_hashes: confirmation.transaction_hashes.clone(),
             configure_receipt_artifact_ids: confirmation.receipt_artifact_ids.clone(),
             configured_block_number: confirmation.configured_block_number,
@@ -864,10 +920,6 @@ pub async fn validate_configured_contract_with_backend(
         .map_err(|message| EvmDcvReadError::new("invalid_validate_config", message))?;
     let (abi, _) = parse_artifact(artifact)
         .map_err(|message| EvmDcvReadError::new("invalid_validate_config", message))?;
-    let (reads, events) =
-        prepare_validate_assertions(&abi, &config.read_assertions, &config.event_assertions)
-            .map_err(|message| EvmDcvReadError::new("invalid_validate_config", message))?;
-
     let observed_chain_id = backend.chain_id(&config.network_id).await?;
     let client_version = backend.client_version(&config.network_id).await?;
     let mut valid = observed_chain_id == config.expected_chain_id
@@ -876,10 +928,62 @@ pub async fn validate_configured_contract_with_backend(
     let contract_address = normalize_address(&configured.deployed.contract_address)
         .map_err(|message| EvmDcvReadError::new("invalid_configured_contract", message))?;
 
+    let configuration_results = evaluate_assertions(
+        &abi,
+        backend,
+        &config.network_id,
+        &contract_address,
+        &configured.confirmation_read_assertions,
+        &configured.confirmation_event_assertions,
+    )
+    .await?;
+    let extra_results = evaluate_assertions(
+        &abi,
+        backend,
+        &config.network_id,
+        &contract_address,
+        &config.read_assertions,
+        &config.event_assertions,
+    )
+    .await?;
+    valid &= configuration_results.valid && extra_results.valid;
+
+    Ok(ValidationReport {
+        report_version: 1,
+        configured_contract: ConfiguredContractRef::from_configured(configured),
+        expected_chain_id: config.expected_chain_id,
+        observed_chain_id,
+        client_version,
+        configuration_read_results: configuration_results.read_results,
+        configuration_event_results: configuration_results.event_results,
+        read_results: extra_results.read_results,
+        event_results: extra_results.event_results,
+        valid,
+    })
+}
+
+struct AssertionEvaluation {
+    read_results: Vec<ValidationReadResult>,
+    event_results: Vec<ValidationEventResult>,
+    valid: bool,
+}
+
+async fn evaluate_assertions(
+    abi: &mfm_evm_dcv_model::ParsedAbi,
+    backend: &dyn EvmDcvReadBackend,
+    network_id: &str,
+    contract_address: &str,
+    read_assertions: &[ReadAssertionConfig],
+    event_assertions: &[EventAssertionConfig],
+) -> Result<AssertionEvaluation, EvmDcvReadError> {
+    let (reads, events) = prepare_validate_assertions(abi, read_assertions, event_assertions)
+        .map_err(|message| EvmDcvReadError::new("invalid_validate_config", message))?;
+    let mut valid = true;
+
     let mut read_results = Vec::with_capacity(reads.len());
-    for (assertion, cfg) in reads.iter().zip(config.read_assertions.iter()) {
+    for (assertion, cfg) in reads.iter().zip(read_assertions.iter()) {
         let raw = backend
-            .eth_call(&config.network_id, &contract_address, &assertion.data_hex)
+            .eth_call(network_id, contract_address, &assertion.data_hex)
             .await?;
         let actual_json = decode_single_output_to_json(&assertion.outputs, &raw)
             .map_err(|message| EvmDcvReadError::new("invalid_read_response", message))?;
@@ -900,8 +1004,8 @@ pub async fn validate_configured_contract_with_backend(
     for assertion in events {
         let observed_count = backend
             .log_count(
-                &config.network_id,
-                &contract_address,
+                network_id,
+                contract_address,
                 &assertion.topic0_hex,
                 &assertion.from_block,
                 &assertion.to_block,
@@ -917,12 +1021,7 @@ pub async fn validate_configured_contract_with_backend(
         });
     }
 
-    Ok(ValidationReport {
-        report_version: 1,
-        configured_contract: ConfiguredContractRef::from_configured(configured),
-        expected_chain_id: config.expected_chain_id,
-        observed_chain_id,
-        client_version,
+    Ok(AssertionEvaluation {
         read_results,
         event_results,
         valid,
@@ -955,6 +1054,7 @@ fn validate_deploy_config(config: &DeployConfigureValidateDeployConfig) -> mfm_p
         .and_then(|artifact| parse_artifact(artifact).map(|_| ()))
         .map_err(mfm_plan_error)?;
     normalize_address(&config.from).map_err(mfm_plan_error)?;
+    validate_signer_config(&config.signer)?;
     mfm_evm_dcv_model::ensure_nonzero_polls(config.max_receipt_polls).map_err(mfm_plan_error)?;
     Ok(())
 }
@@ -965,8 +1065,53 @@ fn validate_configure_config(
     required_artifact(config.artifact.as_ref(), "configure")
         .and_then(|artifact| parse_artifact(artifact).map(|_| ()))
         .map_err(mfm_plan_error)?;
+    let artifact = required_artifact(config.artifact.as_ref(), "configure")
+        .and_then(|artifact| parse_artifact(artifact).map(|(abi, _)| abi))
+        .map_err(mfm_plan_error)?;
+    if config.confirmation_read_assertions.is_empty()
+        && config.confirmation_event_assertions.is_empty()
+    {
+        return Err(mfm_plan_error(
+            "configure config requires at least one confirmation read or event assertion"
+                .to_owned(),
+        ));
+    }
+    prepare_validate_assertions(
+        &artifact,
+        &config.confirmation_read_assertions,
+        &config.confirmation_event_assertions,
+    )
+    .map_err(mfm_plan_error)?;
     normalize_address(&config.from).map_err(mfm_plan_error)?;
+    validate_signer_config(&config.signer)?;
     mfm_evm_dcv_model::ensure_nonzero_polls(config.max_receipt_polls).map_err(mfm_plan_error)?;
+    Ok(())
+}
+
+fn validate_signer_config(config: &DeployConfigureValidateSignerConfig) -> mfm_program::Result<()> {
+    match config {
+        DeployConfigureValidateSignerConfig::KeystoreEntry {
+            entry_id,
+            keystore_path_env,
+            password_file_env,
+        } => {
+            if entry_id.trim().is_empty() {
+                return Err(mfm_plan_error(
+                    "keystore signer entry_id must be non-empty".to_owned(),
+                ));
+            }
+            if keystore_path_env.trim().is_empty() {
+                return Err(mfm_plan_error(
+                    "keystore signer keystore_path_env must be non-empty".to_owned(),
+                ));
+            }
+            if password_file_env.trim().is_empty() {
+                return Err(mfm_plan_error(
+                    "keystore signer password_file_env must be non-empty".to_owned(),
+                ));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -1056,6 +1201,9 @@ mod tests {
         let configured = ConfiguredContract {
             lifecycle_version: 1,
             deployed,
+            configure_calls: Vec::new(),
+            confirmation_read_assertions: Vec::new(),
+            confirmation_event_assertions: Vec::new(),
             configure_tx_hashes: Vec::new(),
             configure_receipt_artifact_ids: Vec::new(),
             configured_block_number: None,
@@ -1070,6 +1218,43 @@ mod tests {
         .expect_err("control scope mismatch rejected");
         assert_eq!(error.code, "invalid_configured_contract");
         assert!(error.to_string().contains("control_scope"));
+    }
+
+    #[tokio::test]
+    async fn validate_confirms_configured_intent_against_live_reads() {
+        let report = validate_configured_contract_with_backend(
+            &sample_validate_config(),
+            &sample_configured_contract(),
+            &StaticReadBackend {
+                value: 1,
+                log_count: 0,
+            },
+        )
+        .await
+        .expect("validation report");
+
+        assert!(report.valid);
+        assert_eq!(report.configuration_read_results.len(), 1);
+        assert!(report.configuration_read_results[0].passed);
+        assert!(report.read_results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn validate_fails_when_configured_intent_differs_from_live_reads() {
+        let report = validate_configured_contract_with_backend(
+            &sample_validate_config(),
+            &sample_configured_contract(),
+            &StaticReadBackend {
+                value: 2,
+                log_count: 0,
+            },
+        )
+        .await
+        .expect("validation report");
+
+        assert!(!report.valid);
+        assert_eq!(report.configuration_read_results.len(), 1);
+        assert!(!report.configuration_read_results[0].passed);
     }
 
     fn sample_deployed_contract() -> DeployedContract {
@@ -1096,6 +1281,13 @@ mod tests {
                     "name": "configure",
                     "inputs": [],
                     "outputs": []
+                },
+                {
+                    "type": "function",
+                    "name": "getValue",
+                    "inputs": [],
+                    "outputs": [{ "name": "", "type": "uint256" }],
+                    "stateMutability": "view"
                 }
             ]))
             .expect("abi"),
@@ -1114,7 +1306,7 @@ mod tests {
             from: "0x0000000000000000000000000000000000000000".to_owned(),
             constructor_args: Vec::new(),
             value_wei: None,
-            signing_key_env: Some("MFM_TEST_KEY".to_owned()),
+            signer: sample_signer_config(),
             poll_interval_ms: 1,
             max_receipt_polls: 1,
         }
@@ -1126,16 +1318,30 @@ mod tests {
             network_id: "local".to_owned(),
             control_scope: "shared".to_owned(),
             from: "0x0000000000000000000000000000000000000000".to_owned(),
-            signing_key_env: Some("MFM_TEST_KEY".to_owned()),
+            signer: sample_signer_config(),
             calls: vec![mfm_evm_dcv_model::ConfigureCallConfig {
                 function: "configure".to_owned(),
                 args: Vec::new(),
                 value_wei: None,
             }],
+            confirmation_read_assertions: vec![mfm_evm_dcv_model::ReadAssertionConfig {
+                function: "getValue".to_owned(),
+                args: Vec::new(),
+                expected: ExpectedValue::from_json_value(&serde_json::json!(1)).expect("expected"),
+            }],
+            confirmation_event_assertions: Vec::new(),
             tx_hashes_export_key: "tx_hashes".to_owned(),
             receipts_export_key: "receipts".to_owned(),
             poll_interval_ms: 1,
             max_receipt_polls: 1,
+        }
+    }
+
+    fn sample_signer_config() -> DeployConfigureValidateSignerConfig {
+        DeployConfigureValidateSignerConfig::KeystoreEntry {
+            entry_id: "550e8400-e29b-41d4-a716-446655440000".to_owned(),
+            keystore_path_env: "MFM_TEST_KEYSTORE".to_owned(),
+            password_file_env: "MFM_TEST_KEYSTORE_PASSWORD_FILE".to_owned(),
         }
     }
 
@@ -1148,6 +1354,54 @@ mod tests {
             require_client_substring: "reth".to_owned(),
             read_assertions: Vec::new(),
             event_assertions: Vec::new(),
+        }
+    }
+
+    fn sample_configured_contract() -> ConfiguredContract {
+        ConfiguredContract {
+            lifecycle_version: 1,
+            deployed: sample_deployed_contract(),
+            configure_calls: sample_configure_config().calls,
+            confirmation_read_assertions: sample_configure_config().confirmation_read_assertions,
+            confirmation_event_assertions: Vec::new(),
+            configure_tx_hashes: Vec::new(),
+            configure_receipt_artifact_ids: Vec::new(),
+            configured_block_number: Some(1),
+        }
+    }
+
+    struct StaticReadBackend {
+        value: u64,
+        log_count: u64,
+    }
+
+    impl EvmDcvReadBackend for StaticReadBackend {
+        fn chain_id<'a>(&'a self, _network_id: &'a str) -> EvmDcvReadFuture<'a, u64> {
+            Box::pin(async move { Ok(1) })
+        }
+
+        fn client_version<'a>(&'a self, _network_id: &'a str) -> EvmDcvReadFuture<'a, String> {
+            Box::pin(async move { Ok("reth-test".to_owned()) })
+        }
+
+        fn eth_call<'a>(
+            &'a self,
+            _network_id: &'a str,
+            _to: &'a str,
+            _data_hex: &'a str,
+        ) -> EvmDcvReadFuture<'a, String> {
+            Box::pin(async move { Ok(format!("0x{:064x}", self.value)) })
+        }
+
+        fn log_count<'a>(
+            &'a self,
+            _network_id: &'a str,
+            _address: &'a str,
+            _topic0_hex: &'a str,
+            _from_block: &'a serde_json::Value,
+            _to_block: &'a serde_json::Value,
+        ) -> EvmDcvReadFuture<'a, u64> {
+            Box::pin(async move { Ok(self.log_count) })
         }
     }
 }

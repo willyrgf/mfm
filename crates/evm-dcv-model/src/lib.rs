@@ -460,6 +460,12 @@ pub struct ConfiguredContract {
     pub lifecycle_version: u64,
     /// Deployment stage value consumed by the configure state.
     pub deployed: DeployedContract,
+    /// Configuration calls requested against the deployed contract.
+    pub configure_calls: Vec<ConfigureCallConfig>,
+    /// Read confirmations required to prove the intended configuration is live on-chain.
+    pub confirmation_read_assertions: Vec<ReadAssertionConfig>,
+    /// Event confirmations required to prove the intended configuration was observed on-chain.
+    pub confirmation_event_assertions: Vec<EventAssertionConfig>,
     /// Transaction hashes for configuration calls.
     pub configure_tx_hashes: Vec<String>,
     /// Optional content-addressed artifact ids for configuration receipts.
@@ -573,9 +579,13 @@ pub struct ValidationReport {
     pub observed_chain_id: u64,
     /// Redaction-safe client version returned by the EVM RPC endpoint.
     pub client_version: String,
-    /// Read assertion results.
+    /// Results for configuration-intent read confirmations stored on the configured contract.
+    pub configuration_read_results: Vec<ValidationReadResult>,
+    /// Results for configuration-intent event confirmations stored on the configured contract.
+    pub configuration_event_results: Vec<ValidationEventResult>,
+    /// Additional read assertion results from validation config.
     pub read_results: Vec<ValidationReadResult>,
-    /// Event assertion results.
+    /// Additional event assertion results from validation config.
     pub event_results: Vec<ValidationEventResult>,
     /// Whether all validation checks passed.
     pub valid: bool,
@@ -878,6 +888,9 @@ mod tests {
         let configured = ConfiguredContract {
             lifecycle_version: 1,
             deployed,
+            configure_calls: Vec::new(),
+            confirmation_read_assertions: Vec::new(),
+            confirmation_event_assertions: Vec::new(),
             configure_tx_hashes: vec![
                 "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
             ],
