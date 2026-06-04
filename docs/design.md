@@ -81,9 +81,11 @@ Domain and product crates sit outside the kernel:
 
 | Area | Responsibility |
 |---|---|
+| Domain capability contract crates | Typed capability specs, authority traits, request/response evidence types, and redacted error contracts used by states and adapters |
 | `crates/states/*` | Typed state contracts and deterministic state-owned behavior |
 | `crates/ops/*` | Typed operation planners that assemble state programs |
-| `crates/transports/*` | Live and replay capability backends and erased typed runners |
+| `crates/adapters/*` | Runner bindings from state intent to capabilities, evidence phases, and domain replay verifiers |
+| `crates/transports/*` | Live and replay capability backend implementations |
 | `crates/storages/*` | Implementations of typed store and typed artifact contracts |
 | `crates/app` | Assembly of registries, stores, artifacts, start/resume/replay, and public output |
 | `bin/cli`, `bin/rest-api` | Transport-only user surfaces |
@@ -96,11 +98,16 @@ ids -> canonical -> values -> effects/capabilities
 ```
 
 Kernel crates must not depend on domain crates, binaries, app assembly, storage implementations, or
-transport implementations. States must not depend on runtime/store implementations or binaries.
+transport implementations. States must not depend on runtime/store implementations, binaries, live
+transport implementations, signer provider implementations, or operation crates. States may depend
+on capability contract crates because those crates define typed authority contracts, not live IO.
 Ops may depend on typed states and domain config/model crates, but not on runtime scheduling or
-storage implementations. Storages implement storage contracts and know no domain semantics.
-Transports implement capability backends and runner bindings; they do not mint production authority
-outside app/runtime assembly.
+storage implementations. Adapters may bind states to capability implementations, but must not
+depend on workflow operation crates, app assembly, binaries, or storage implementations. Storages
+implement storage contracts and know no domain semantics.
+Adapters bind state-owned intent to capabilities and evidence phases. Transports implement
+capability backends. Neither adapters nor transports mint production authority outside app/runtime
+assembly.
 
 ## Typed Values And Configs
 
@@ -168,6 +175,35 @@ The runtime injects only capabilities certified for the current node. State code
 own live network, filesystem, clock, process, or signer access when that access is part of semantic
 execution. Domain helpers may compute deterministic values, parse data, or validate typed inputs,
 but side effects and replayable observations must pass through typed capabilities.
+
+## State Capability Boundary
+
+States declare authority. Transports implement authority. Adapters bind the two at runtime.
+
+Capability contract crates are part of the typed state-facing contract. They may define capability
+specs, request types, response/evidence types, redacted error contracts, and traits that represent
+external authority. They must not perform live IO, route endpoints, resolve signer material, or own
+workflow topology.
+
+States may depend on capability contract crates. States must not depend on live transport
+implementation crates. For example, a contract validation state may depend on an EVM capability
+contract that defines an EVM call-read capability, request, and evidence type. It must not depend on
+the live JSON-RPC transport that chooses an endpoint, attaches authorization, retries HTTP calls, or
+uses a concrete client library.
+
+Runtime/app assembly supplies concrete capability implementations for live execution. Replay
+supplies replay implementations backed only by recorded facts, typed artifacts, and side-effect
+evidence. Adapters translate state-owned intent into capability calls and evidence phases without
+moving protocol IO or signer material into state code.
+
+Replay and resume semantics follow the effect class:
+
+- Pure states replay by recomputing deterministic state behavior.
+- Read states replay from recorded read evidence. Replay must not call live transports.
+- Side-effect states resume from durable phase evidence such as intent, idempotency, preparation,
+  submission, receipt, confirmation, or recovery evidence. Resume must not duplicate external
+  mutations or infer mutation status from unstored state.
+- Replay never constructs live transports or signer providers.
 
 ## Certified Spec
 

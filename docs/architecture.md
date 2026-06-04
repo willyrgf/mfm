@@ -56,6 +56,7 @@ capability, public type, CLI command, REST route, or test fixture.
 | Category | Owns | Does Not Own |
 |---|---|---|
 | Platform primitive | Reusable infrastructure such as signing, protocol clients, source routing, artifact access, process execution | Workflow topology or domain-specific semantics |
+| Capability contract | Typed authority contracts such as capability specs, request/response evidence types, redacted errors, and traits consumed by states/adapters | Live IO, endpoint routing, signer material resolution, workflow topology |
 | Domain model/config | Pure domain types, validation, canonical config, schema descriptors | Runtime IO, signer resolution, transport clients |
 | State | Reusable executable domain semantics and typed state contracts | Ambient IO, app/store authority, protocol implementation |
 | Operation | Deterministic graph topology and config lowering | Runtime execution, IO, signers, transports, replay |
@@ -109,6 +110,7 @@ States may:
 - define `StateSpec` metadata
 - define config, input, output, public-output, and artifact value types
 - declare effect class and required capabilities
+- depend on capability contract crates that define typed authority contracts
 - define side-effect contract when applicable
 - validate domain config shape
 - construct deterministic domain intent
@@ -131,6 +133,18 @@ States must not:
 Side-effecting or external observation behavior is reached through typed capabilities supplied by
 runtime/app assembly. State code must not create its own live network, filesystem, clock, process,
 or signer access when that access is part of semantic execution.
+
+### State Capability Boundary
+
+States declare authority. Transports implement authority. Adapters bind the two at runtime.
+
+States may depend on capability contract crates because those crates define typed authority
+contracts. States must not depend on live transport implementation crates. Adapters translate
+state-owned intent into capability calls and recorded evidence. Transports perform protocol IO and
+implement capability contracts.
+
+For replay/resume semantics, including pure/read/side-effect behavior, see the authoritative
+`State Capability Boundary` section in `docs/design.md`.
 
 ### Adapter
 
@@ -156,8 +170,8 @@ Adapters must not:
 - depend on workflow operation crates for runtime behavior
 - persist secrets, raw signing material, or raw signed transaction bytes
 
-If adapter code currently lives under `crates/transports/*`, it still must obey adapter rules. A
-workflow-specific runner crate is not a license to own generic transport or signer behavior.
+Adapter code belongs under `crates/adapters/*`. A workflow-specific runner crate is not a license
+to own generic transport or signer behavior.
 
 ### Transport
 
@@ -169,13 +183,14 @@ Transports may:
 - select protocol sources by non-secret runtime refs
 - redact endpoints and authorization material
 - execute protocol calls
-- expose protocol traits and request/response types
+- implement protocol traits defined by capability contract crates
 - support multiple adapters, states, and workflows
 - answer replay requests from recorded evidence only when implementing replay backends
 
 Transports must not:
 
 - use workflow recipe names
+- define the state-facing protocol contract that states depend on
 - depend on workflow operation crates
 - know about workflow topology
 - open keystores or own signer behavior
@@ -220,7 +235,7 @@ Typed config may contain:
 - domain intent
 - content-addressed artifact refs or inline non-secret artifacts
 - network id
-- source id when source selection is semantic
+- source/oracle id only when source selection is domain intent, not local runtime routing
 - expected chain id or equivalent protocol identity
 - signer id
 - expected public address or public identity
@@ -294,7 +309,10 @@ Capability names must describe the authority being granted, not the workflow req
 
 Allowed:
 
-- `mfm.evm.rpc.read`
+- `mfm.evm.chain_identity.read`
+- `mfm.evm.call.read`
+- `mfm.evm.logs.read`
+- `mfm.evm.nonce.read`
 - `mfm.evm.transaction.submit`
 - `mfm.signing.sign`
 - `mfm.artifact.read`
@@ -332,14 +350,16 @@ Disallowed public names:
 
 ### Rule 5: Runtime Routing Is Not Semantic Config
 
-Semantic config may refer to runtime systems by stable non-secret ids. Runtime process config maps
-those ids to concrete local resources.
+Semantic config describes domain intent. Runtime process config chooses concrete local resources.
+Typed workflow config must not contain process-local source routing unless choosing the source is
+itself domain intent, such as selecting a named oracle.
 
 Keep these concepts distinct:
 
 - `network_id`: semantic domain network label
-- `source_id`: local runtime source routing key
 - `expected_chain_id`: concrete chain identity returned by the network
+- `source_id`: process-local runtime source routing key, not workflow semantic config unless the
+  selected source itself is domain intent
 - `control_scope`: MFM execution partition, only if truly semantic
 - `signer_id`: non-secret signer reference
 
@@ -363,11 +383,12 @@ Source scans may be useful as guardrails, but they are not architecture proof by
 ## Placement Guide
 
 - New kernel semantic primitive: `crates/kernel/*`, with no domain dependencies.
+- New protocol/domain capability contract: a capability contract crate such as
+  `crates/evm-capabilities`.
 - New pure domain type or canonical config type: domain model/config crate.
 - New reusable state behavior: `crates/states/*` or another clearly named domain state crate.
 - New workflow topology: `crates/ops/*-op`.
-- New runner binding from state intent to capabilities: adapter crate, or transport crate obeying
-  adapter rules until an adapter namespace exists.
+- New runner binding from state intent to capabilities: `crates/adapters/*`.
 - New reusable live/replay protocol backend: `crates/transports/*`.
 - New signer abstraction or provider: `crates/signing` or `crates/signers/*`.
 - New store implementation: `crates/storages/*`.
@@ -389,10 +410,15 @@ Additional dependency rules:
   signers, or storage implementations
 - states must not depend on runtime, store implementations, app, binaries, transport
   implementations, signer implementations, or operation crates
+- states may depend on capability contract crates, because those crates define typed authority
+  contracts rather than live IO implementations
 - operations may depend on typed states and domain config/model crates, but not on transports,
   signer implementations, app, binaries, runtime scheduling, or storage implementations
-- transports may depend on protocol/domain support crates and kernel contracts, but not on workflow
-  operation crates
+- adapters may depend on states, capability contract crates, transport contracts, and signer
+  contracts as needed for runner binding, but not on workflow operation crates, app, binaries, or
+  storage implementations
+- transports may depend on protocol/domain support crates, capability contract crates, and kernel
+  contracts, but not on workflow operation crates
 - signer providers may depend on security-sensitive core primitives, but not on workflow operation
   or state crates
 - binaries may depend on app and operation/config crates for input compilation, but must not own
@@ -474,6 +500,8 @@ Before merging a change, verify:
   retained signed raw transactions
 - replay paths cannot construct live capabilities
 - resume validates stored stream evidence against the certified spec
+- states declare capabilities but do not instantiate live transports or signer providers
+- transports implement capability contracts but do not define state-owned domain semantics
 - app/bin changes do not embed planner or state behavior
 - generic protocol behavior is not implemented inside workflow-specific crates
 - signer behavior is not implemented inside workflow-specific crates
@@ -498,8 +526,11 @@ Required metadata checks should assert:
 
 - `crates/states/*` do not depend on transports, signer implementations, app, binaries, or storage
   implementations
+- `crates/states/*` may depend on allowlisted capability contract crates
 - `crates/ops/*` do not depend on transports, signer implementations, app, binaries, runtime
   scheduling, or storage implementations
+- `crates/adapters/*` do not depend on workflow operation crates, app, binaries, or storage
+  implementations
 - generic transports do not depend on workflow operation crates
 - signer providers do not depend on workflow operation or state crates
 - public schema namespaces do not use temporary recipe names
