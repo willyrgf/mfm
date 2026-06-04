@@ -1014,10 +1014,307 @@ The following should not survive as public or crate architecture:
 This is not because "DCV is a bad acronym." It is because DCV was a recipe and the architecture let
 a recipe become a platform boundary.
 
-## Appendix B: Crate-By-Crate Impact
+## Appendix B: Repo-Wide Audit And Crate-By-Crate Impact
 
-Intentionally deferred.
+This appendix is the current repo-wide audit ledger. It is intentionally concrete. It records where
+the architecture failure is already hardened in crate boundaries, public APIs, schema names, tests,
+docs, Nixfied wiring, and support code.
 
-Use this appendix in the next review pass to spell out the concrete impact for each current crate,
-including rename/delete/split decisions, dependency changes, public type changes, schema namespace
-changes, tests, and docs.
+Not every item below is equally broken. Some entries are correct behavior in the wrong crate, some
+are correct crates with leaked runtime-resource fields, and some are tests that should survive after
+renaming. The purpose is to make the real blast radius explicit before migration work starts.
+
+### Audit Labels
+
+- `replace`: the current public boundary is wrong and should be superseded, not carried forward
+- `split`: useful behavior exists, but the crate owns more than one durable abstraction
+- `rename`: useful behavior can survive under domain/platform names
+- `move`: code belongs under another boundary
+- `preserve`: the invariant is good and should be kept under the new boundary
+- `audit`: the same flaw may exist, but the exact target depends on a later design pass
+
+### B.1 Primary Blast Radius
+
+The direct DCV stack is not a local naming problem. The repo currently makes DCV a first-class
+architecture axis through all of these surfaces:
+
+- workspace members in `Cargo.toml`
+- generated package names in `Cargo.lock`
+- model schemas in `crates/evm-dcv-model`
+- workflow config schemas in `crates/evm-deploy-configure-validate-config`
+- state schemas, capabilities, public outputs, and adapter identity in `crates/states/evm-dcv`
+- EVM JSON-RPC, transaction submission, signer resolution, lifecycle runner, artifact reader, and
+  replay verifier in `crates/transports/evm-dcv`
+- operation topology and public operation ids in `crates/ops/evm-deploy-configure-validate-op`
+- app registration in `crates/app`
+- CLI commands in `bin/cli/src/commands/evm/dcv.rs`
+- REST routes and request kinds in `bin/rest-api/src/lib.rs`
+- parity tests in `tests/integration`
+- docs catalog, repo map, docs.rs readiness notes, CLI docs, REST docs, and EVM RPC routing docs
+- Nixfied publish-docs and reth source wiring
+
+The same underlying pattern also appears outside the DCV stack:
+
+- `crates/transports/portfolio` duplicates generic EVM JSON-RPC behavior and source routing
+- portfolio wallet/source models include runtime-provider and signer-adjacent concepts
+- core config mixes semantic network/auth config with endpoint URLs and keystore references
+- CLI keystore support owns signing behavior that should be behind a signer provider
+- `crates/transports/proof` depends on an operation crate, reversing the operation/transport
+  dependency direction
+- tests assert current implementation shape more strongly than architecture invariants
+
+### B.2 Direct Contract Lifecycle Stack
+
+| Area | Impact | Required correction |
+|---|---|---|
+| `Cargo.toml` | `replace`: workspace promotes DCV model/config/state/transport/op crates as durable taxonomy. | Replace workspace members with contract model, contract lifecycle config/state/op, generic EVM transport, generic signing, keystore signer, and lifecycle adapter crates. |
+| `Cargo.lock` | `replace`: generated package graph hardens old package names. | Regenerate only after crate split/rename work lands. |
+| `crates/evm-dcv-model` | `rename`: reusable contract model behavior is named after the DCV recipe. | Replace with `crates/evm-contract-model`; move generic ABI helpers to `crates/evm-core` if that produces a cleaner boundary. |
+| `crates/evm-dcv-model/src/lib.rs` | `replace`: ABI, bytecode, deployed/configured values, assertions, and validation reports use `mfm.evm.dcv.*` schema namespaces and `Dcv` naming. | Use `mfm.evm.contract.*`, `mfm.evm.abi.*`, and `mfm.evm.contract.lifecycle.*` namespaces. |
+| `crates/evm-dcv-model/README.md` | `rename`: package docs teach the wrong model name. | Rewrite around EVM contract artifact, ABI, lifecycle, and validation values. |
+| `crates/evm-deploy-configure-validate-config` | `rename`: config crate is named after workflow topology. | Replace with `crates/evm-contract-lifecycle-config`. |
+| `crates/evm-deploy-configure-validate-config/src/lib.rs` | `split`: config mixes contract intent, `network_id`, `control_scope`, signer implementation, keystore entry id, keystore path env vars, password-file env vars, receipt policy, and client-version assertions. | Keep semantic lifecycle config only. Move signer material resolution to signer runtime config. Move RPC routing to EVM source registry. Move runtime client assertions to adapter policy or test fixtures. |
+| `DeployConfigureValidateSignerConfig` | `replace`: typed config embeds `keystore_path_env` and `password_file_env`. | Replace with `SignerRef` plus optional expected public address. Runtime signer registry maps signer refs to provider-specific details. |
+| `crates/states/evm-dcv` | `rename`: state crate owns reusable contract lifecycle states under a recipe name. | Replace with `crates/states/evm-contracts` or another durable contract lifecycle state crate. |
+| `crates/states/evm-dcv/src/lib.rs` | `replace`: state namespace, adapter identity, capability ids, public outputs, values, evidence, and operation output types use `mfm.evm.dcv`, `typed-evm-dcv`, `EvmDcv*`, and `Dcv*`. | Rename to contract lifecycle state and value language. Adapter identity should move to the adapter crate. |
+| `EvmDcvReadCapability` | `replace`: generic EVM read authority is named after DCV. | Replace with `mfm.evm.rpc.read` or narrower authority names such as `mfm.evm.logs.read`. |
+| `EvmDcvSignerCapability` | `replace`: generic signing authority is named after DCV. | Replace with `mfm.signing.sign`. |
+| `EvmDcvTransactionSubmitCapability` | `replace`: generic EVM transaction submission authority is named after DCV. | Replace with `mfm.evm.transaction.submit`. |
+| `EvmDcvReadBackend` | `move`: generic EVM read behavior is state-local. | Move reusable protocol behavior to the generic EVM transport/capability boundary. |
+| state raw-transaction protection tests | `preserve`: raw signed transaction secrecy is the right invariant. | Keep the invariant under lifecycle/signing boundaries; stop anchoring it to `evm-dcv`. |
+| `crates/transports/evm-dcv` | `split`: one recipe transport owns generic EVM JSON-RPC, source routing, signer resolution, keystore access, signing, transaction submission, receipt polling, lifecycle runner, artifact reader, and replay verifier. | Split into `crates/transports/evm`, `crates/signing`, `crates/signers/keystore`, and lifecycle adapter/runner crate. |
+| `EvmDcvRpcClient` | `move`: generic EVM JSON-RPC client is workflow-local. | Extract to `EvmJsonRpcClient` in `crates/transports/evm`. |
+| `MFM_EVM_RPC_SOURCES_JSON` parsing in DCV transport | `move`: runtime source registry is owned by a workflow transport. | Move to generic EVM transport runtime config. Route by `source_id`, not `network_id`; verify `expected_chain_id`. |
+| keystore signing in DCV transport | `move`: transport opens keystore files, reads password files, extracts private keys, derives addresses, signs transactions, and encodes raw transactions. | Move signing request/result traits to `crates/signing`; move MFM keystore implementation to `crates/signers/keystore`; lifecycle adapter asks for signatures. |
+| `verify_evm_dcv_replay` and `EvmDcvReplayVerifier` | `rename`: replay verifier is contract lifecycle evidence behavior, not DCV transport behavior. | Move/rename to lifecycle adapter replay verifier; replay must not read env vars, RPC, or signer providers. |
+| `mfm-transports-evm-dcv` and `typed-evm-dcv` executable identity | `replace`: executable/source identity is named after recipe scaffolding. | Use generic transport identity for EVM RPC and lifecycle adapter identity for contract lifecycle runners. |
+| `crates/ops/evm-deploy-configure-validate-op` | `rename`: operation crate can own topology, but the public name is recipe-shaped and leaks lower-layer DCV types. | Replace with `crates/ops/evm-contract-lifecycle-op`; expose planning API and domain outputs only. |
+| operation public ids/scopes | `replace`: `mfm.evm.dcv.operation.*`, `evm_dcv`, `DCV_OPERATION_VERSION`, and `PUBLIC_OUTPUT_KEY = "evm_dcv"` harden recipe names. | Use contract lifecycle operation ids, scopes, versions, and public output keys. |
+| operation compile APIs | `rename`: `compile_dcv_*`, `dcv_program_draft`, `Dcv*` APIs expose scaffolding. | Rename to lifecycle draft/compile/output names. |
+| operation typestate tests | `preserve`: phase ordering tests are valid. | Keep compile-fail coverage under lifecycle operation/config types. |
+
+### B.3 App, CLI, And REST Public Surface
+
+| Area | Impact | Required correction |
+|---|---|---|
+| `crates/app/Cargo.toml` | `replace`: app depends directly on DCV op and DCV transport. | Depend on lifecycle op, lifecycle adapter, generic EVM transport, and signer providers. |
+| `crates/app/src/lib.rs` | `replace`: app registers `EvmDcvArtifactReader`, DCV runners, DCV certification descriptors, and DCV replay verifier. | Register generic transports and signer providers separately from lifecycle adapter/descriptors. |
+| `bin/cli/Cargo.toml` | `replace`: CLI imports recipe op crate. | Depend on lifecycle op/config only; do not depend on transport implementation names. |
+| `bin/cli/src/commands/evm/mod.rs` | `replace`: public command group is `mfm evm dcv`. | Use `mfm evm contracts` or another durable contract lifecycle command group. |
+| `bin/cli/src/commands/evm/dcv.rs` | `replace`: public types and outputs use `DcvCommand`, `DcvRequestArgs`, `EvmDcvResponse`, and `mfm.cli.evm_dcv.typed.v1`. | Rename around contract lifecycle. CLI should parse input, start/resume runs, and render outputs only. |
+| `bin/cli/README.md` | `replace`: documents DCV command surface and EVM RPC source env examples that route local reth as mainnet. | Rewrite around contract lifecycle commands and generic EVM source registry. |
+| `bin/rest-api/Cargo.toml` | `replace`: REST imports recipe op crate. | Depend on lifecycle op/config only. |
+| `bin/rest-api/src/lib.rs` | `replace`: routes expose `/v1/evm/dcv/deploy`, `/configure`, `/validate`, and `/deploy-configure-validate`; request kinds and errors use `evm_dcv_*`. | Replace with contract lifecycle routes, request kinds, error codes, and framework versions. |
+| `bin/rest-api/README.md` | `replace`: documents DCV REST contract and signer env references in requests. | Rewrite with lifecycle routes and `SignerRef` request shape. |
+
+Breaking changes are required here. Compatibility aliases would preserve the wrong public
+architecture and should not be added.
+
+### B.4 Missing Platform Primitives
+
+The audit found missing reusable capability crates. These should be introduced before renaming the
+public lifecycle API, otherwise code will just move the same boundary violations under new names.
+
+| Missing primitive | Why it is required | Proposed owner |
+|---|---|---|
+| generic signing API | Signing is broader than contract lifecycle and broader than EVM. | `crates/signing` |
+| keystore signer provider | MFM keystore resolution, password handling, unlock, audit, and redaction are provider behavior. | `crates/signers/keystore` |
+| generic EVM JSON-RPC transport | `evm-dcv` and `portfolio` both implement EVM JSON-RPC and parse the same source env. | `crates/transports/evm` |
+| EVM source registry | Runtime endpoint routing must be reusable and redacted. | `crates/transports/evm` or a runtime source crate if multiple protocols need the same abstraction |
+| runtime source reference | Typed config needs a non-secret reference that is distinct from semantic network identity. | shared config/capability model |
+| lifecycle adapter | Contract lifecycle side-effect execution is domain-specific adapter behavior, not generic transport behavior. | `crates/transports/evm-contracts` or `crates/adapters/evm-contracts` |
+
+Minimum target types:
+
+- `SignerRef`
+- `SigningRequest`
+- `SigningResult`
+- `SigningCapability`
+- `EvmSourceRef`
+- `EvmRpcSource`
+- `EvmJsonRpcClient`
+- `EvmRpcReadCapability`
+- `EvmTransactionSubmitCapability`
+- `expected_chain_id` as a chain check, not an endpoint routing key
+
+### B.5 Same Flaw Outside The DCV Stack
+
+These areas should be audited before they are extended. Some are lower risk because they are not
+yet public contract lifecycle APIs, but they show the same boundary weakness.
+
+| Area | Impact | Required correction |
+|---|---|---|
+| `crates/transports/portfolio/src/lib.rs` | `split`: portfolio transport parses `MFM_EVM_RPC_SOURCES_JSON`, owns `PortfolioRpcClient`, implements `eth_blockNumber`, `eth_getBalance`, `eth_call`, ERC-20 reads, and routes by `network_id`. | Delete duplicate EVM RPC once `crates/transports/evm` exists. Portfolio adapter should call generic EVM read capability. |
+| `crates/states/portfolio/src/lib.rs` | `audit`: `PortfolioReadCapability` hides generic protocol authority behind portfolio naming; prepared sources and resolved subjects can carry `control_scope` and implementation kind. | Split portfolio semantic observation from generic EVM/Bitcoin/source capabilities. State outputs should carry public subject identity and evidence, not provider implementation names. |
+| `crates/portfolio/model/src/portfolio.rs` | `audit`: `NetworkConfig` mixes `network_id`, `chain_id`, and `control_scope`. | Keep semantic network identity and expected chain identity distinct from runtime routing. |
+| `crates/portfolio/model/src/wallet.rs` | `audit`: wallet config includes `KeystoreEntry`, `NodeManagedAccount`, `ExternalSigner`, `WalletSignerConfig`, `WalletCapabilities`, and `ResolvedWallet`. | Read-only portfolio config should describe wallet subjects only. Mutation/signing authority should use generic signer refs and runtime signer registry. |
+| `crates/portfolio/model/src/symbol.rs` | `audit`: `PriceSourceRef.source_id` is documented as runtime environment source id. | Decide whether this is semantic oracle identity or runtime source routing; do not mix both in one field. |
+| `crates/ops/portfolio-tracker-op` | `audit`: operation-level workflow naming is allowed, but it must not become a transport/source/signer boundary. | Keep planning-only. Ensure portfolio op does not own runtime EVM routing or generic source concepts. |
+| `docs/PORTFOLIO_SNAPSHOT_DETAILED.md` | `replace`: portfolio docs own EVM RPC bootstrap details and public mainnet fallback behavior. | Point to generic EVM transport/source registry docs after that boundary exists. |
+| `docs/UPGRADE.md` | `replace`: upgrade notes document `MFM_EVM_RPC_SOURCES_JSON` and public mainnet fallback as workflow setup. | Rewrite with source registry semantics and explicit source/network/chain distinction. |
+| `crates/core/src/config/mod.rs` | `audit`: top-level config mixes networks, wallets, auth, `rpc_urls`, `rpc_url`, and chain id. | Quarantine as legacy application config or split into domain registry plus runtime process config. Do not reuse as typed workflow config. |
+| `crates/core/src/config/authentication/mod.rs` | `audit`: `KeystoreReference` includes local paths. | Public/typed config should carry signer refs. Runtime config may resolve paths. |
+| `crates/core/src/config/network.rs` | `audit`: static network config includes RPC URLs. | Static registries should keep semantic network identity only; transports own endpoints. |
+| `crates/core/src/config/dexes.rs` | `audit`: DEX config includes endpoint-like runtime data mixed with static protocol data. | Keep protocol/address identity separate from runtime endpoint selection. |
+| `crates/core/src/keystore/mod.rs` | `audit`: `get_private_key` returns decrypted signing authority to callers. | Prefer provider APIs that accept signing requests and return signatures/public metadata without exposing keys. |
+| `crates/core/src/keystore/README.md` | `replace`: docs teach private key retrieval and path-based runtime config. | Rewrite around signer-provider usage once provider exists. |
+| `bin/cli/src/support/keystore.rs` | `move`: CLI owns EIP-1559 signing, key lookup, password env/file handling, raw signed tx file output, and test KDF downgrade behavior. | Move signing and secret-file hardening into keystore signer provider. CLI remains parser/renderer and utility wrapper. |
+| `bin/cli/src/commands/keystore/mod.rs` | `audit`: boundary tests currently require direct typed keystore helpers. | Invert tests so CLI-owned signing and broad private-key extraction become review failures. |
+| `bin/cli/src/presentation/output.rs` | `audit`: public error output can print arbitrary messages. | Add central redaction discipline for secret-bearing/runtime-resource errors. |
+| `crates/kernel/values/src/lib.rs` | `audit`: secret marker checks are heuristic and do not reject runtime-resource field names. | Add persisted-surface deny rules for fields such as `rpc_url`, `authorization`, `password_file_env`, `keystore_path`, and raw transaction material. |
+| `crates/kernel/program-derive/src/lib.rs` | `audit`: derive checks reject secret wrapper misuse, but not runtime-resource references in typed config. | Add schema/derive/CI checks for forbidden typed config field names. |
+| `crates/collectors/btc-jsonrpc-http` | `audit`: Bitcoin JSON-RPC is protocol-shaped but lives under collectors and carries `rpc_password` as plain `String`. | Before Bitcoin workflows grow, decide transport taxonomy and use redacted/zeroized runtime config. |
+| `crates/transports/proof` | `replace`: transport depends on `mfm-op-proof`, reversing operation/transport direction. | Move op-based conformance helpers to tests/support or app fixture layer; transports must not depend on op crates. |
+| `crates/transports/process-exec` | `preserve`: no duplicate workflow-specific protocol issue found in this audit. | Keep watching dependency direction and public capability names. |
+| `crates/evm-core` | `preserve`: appears to be utility/domain support, not a workflow transport. | Use it as a possible home for generic ABI/EVM helpers if that preserves crate focus. |
+
+### B.6 Public Names And Identifiers To Retire
+
+These names should disappear from public API, schema, crate, docs, and test surfaces except in
+historical migration notes:
+
+- `dcv`
+- `Dcv*`
+- `EvmDcv*`
+- `DeployConfigureValidate*` below the operation topology layer
+- `deploy_configure_validate` as a durable schema, route, framework, or runner identity
+- `crates/evm-dcv-model`
+- `crates/evm-deploy-configure-validate-config`
+- `crates/states/evm-dcv`
+- `crates/transports/evm-dcv`
+- `crates/ops/evm-deploy-configure-validate-op`
+- `mfm.evm.dcv.*`
+- `mfm.evm.dcv.operation.*`
+- `mfm.evm.dcv.config.*`
+- `mfm.evm.dcv.value.*`
+- `mfm.evm.dcv.fact.*`
+- `mfm.evm.dcv.capability.*`
+- `mfm evm dcv`
+- `/v1/evm/dcv/*`
+- `evm_dcv_*` request kinds, error codes, public output keys, and test helper names
+- `mfm.cli.evm_dcv.typed.v1`
+- `mfm.rest_api.evm_dcv.typed.v1`
+- `mfm-transports-evm-dcv`
+- `typed-evm-dcv`
+- `EvmDcvRpcClient`
+- `EvmDcvReplayVerifier`
+- `verify_evm_dcv_replay`
+
+Names that may survive only at operation topology level if MFM deliberately chooses that public
+workflow language:
+
+- `deploy`
+- `configure`
+- `validate`
+- `deploy -> configure -> validate`
+
+The preferred durable public language is contract lifecycle.
+
+### B.7 Tests And Tooling That Currently Enforce The Wrong Shape
+
+| Area | Current problem | Required correction |
+|---|---|---|
+| `crates/app/tests/typed_transport_boundaries.rs` | Requires `mfm-transports-evm-dcv` and blesses the wrong transport crate. | Invert into architecture tests that reject workflow-specific generic transports, signer leakage, and `mfm.evm.dcv` public ids. |
+| `tests/integration/tests/cargo_metadata_contract.rs` | Checks only narrow kernel dependency boundaries. | Add cargo-metadata rules for operation/state/adapter/transport/signer/config dependency direction. |
+| `tests/integration/Cargo.toml` | Integration tests depend on DCV op/transport crates. | Depend on lifecycle op/adapter and generic EVM transport. |
+| `tests/integration/src/test_support.rs` | Test wallet helpers emit DCV signer JSON with keystore env refs. | Emit `SignerRef`; configure test signer registry separately. |
+| `tests/integration/tests/parity_rest_api_evm_reth_pipeline.rs` | Asserts `/v1/evm/dcv/*`, `evm_dcv_*`, DCV replay APIs, and local reth as `ethereum-mainnet`. | Test contract lifecycle routes/kinds, generic signer/source registry, local network identity, and explicit expected chain id. Add negative checks for retired DCV routes. |
+| `tests/integration/tests/parity_portfolio_tracker_reth_snapshot.rs` | Uses local reth as `ethereum-mainnet`. | Use local/dev network identity, runtime `source_id`, and expected chain check. |
+| `tests/integration/tests/typed_portfolio_snapshot_local.rs` | Has a better local network fixture, but still relies on source env keyed by network id. | Preserve as a positive fixture after source registry migrates to `source_id`. |
+| `crates/ops/evm-deploy-configure-validate-op/tests` | Compile-fail tests are useful but anchored to recipe crate/types. | Keep phase-ordering coverage under lifecycle operation/config names. |
+| `crates/states/evm-dcv/tests` | Raw transaction protection is useful but anchored to old crate name. | Preserve under lifecycle/signing boundary and add checks for signer/ref leakage. |
+| source-scan tests | Some scans assert implementation structure instead of architecture. | Prefer cargo metadata, schema tests, compile-fail tests, and type-boundary tests; use scans only as secondary guardrails. |
+
+New architecture tests should reject:
+
+- state crates depending on transport, signer provider, app, binary, or storage implementation crates
+- operation crates depending on transport, signer provider, app, binary, or storage implementation
+  crates
+- transport crates depending on operation crates
+- signer crates depending on workflow operation/state crates
+- workflow config schemas containing `keystore_path_env`, `password_file_env`, `rpc_url`,
+  `authorization`, raw transaction fields, private keys, mnemonics, or password fields
+- public schema namespaces using recipe acronyms
+- capability names using workflow names instead of authority names
+- local reth fixtures using `ethereum-mainnet` unless the fixture is actually mainnet
+
+### B.8 Docs, Catalogs, And Generated Metadata
+
+| Area | Impact | Required correction |
+|---|---|---|
+| `docs/evm-rpc-routing.md` | `replace`: current runbook mixes DCV, portfolio, runtime routing, `network_id`, `control_scope`, and signer env references. | Rewrite around generic EVM source registry and separate `network_id`, `source_id`, `expected_chain_id`, and `control_scope`. |
+| `docs/docs-rs-readiness.md` | `replace`: lists DCV model/config/state/transport/op as publishable units. | Reframe around platform primitives and contract lifecycle crates. |
+| `crates/docs/catalog.toml` | `replace`: docs.rs catalog publishes DCV packages. | Replace entries after split/rename. |
+| `crates/docs/README.md` | `replace`: umbrella docs list DCV packages. | Regenerate after catalog change. |
+| `docs/repo-index.json` | `replace`: generated index lists old crate paths and descriptions. | Regenerate after crate changes. |
+| `docs/repo-map.md` | `replace`: repo map teaches old placement. | Regenerate or rewrite after taxonomy changes. |
+| `bin/cli/README.md` | `replace`: public docs bless DCV CLI and mixed EVM RPC source examples. | Rewrite after CLI and EVM source registry changes. |
+| `bin/rest-api/README.md` | `replace`: public docs bless DCV REST routes. | Rewrite after REST route change. |
+| `nixfied/project/module.nix` | `replace`: local reth source aliases include `ethereum-mainnet`; publish-docs examples reference `mfm-transports-evm-dcv`. | Use local/dev source and network ids with explicit chain checks; update docs package list after split. |
+
+`docs/ops-and-states.md` has already been removed. No new architecture doc should refer to it.
+
+### B.9 Target Crate Map
+
+This is the target crate boundary map implied by the audit. Names can still be reviewed, but the
+responsibility split should not be weakened.
+
+| Current boundary | Target boundary |
+|---|---|
+| `crates/evm-dcv-model` | `crates/evm-contract-model`; optional generic ABI helpers in `crates/evm-core` |
+| `crates/evm-deploy-configure-validate-config` | `crates/evm-contract-lifecycle-config` |
+| `crates/states/evm-dcv` | `crates/states/evm-contracts` or contract lifecycle state crate |
+| `crates/transports/evm-dcv` | split into `crates/transports/evm`, `crates/signing`, `crates/signers/keystore`, and lifecycle adapter |
+| `crates/transports/evm-dcv` replay verifier | lifecycle adapter replay verifier |
+| `crates/ops/evm-deploy-configure-validate-op` | `crates/ops/evm-contract-lifecycle-op` |
+| `bin/cli/src/commands/evm/dcv.rs` | contract lifecycle CLI command module |
+| `/v1/evm/dcv/*` | `/v1/evm/contracts/*` or equivalent lifecycle REST routes |
+| `crates/transports/portfolio` EVM client | generic EVM transport plus portfolio adapter behavior |
+| portfolio wallet signer model | generic signer refs/capabilities plus portfolio subject model |
+| core path/url-bearing config reused by workflows | runtime process config only; typed workflow config gets non-secret refs |
+| CLI keystore signing support | keystore signer provider plus thin CLI wrapper |
+| proof transport depending on proof op | transport independent of op; conformance helpers in tests/support or app fixture layer |
+
+### B.10 Migration Worklist From The Audit
+
+Perform the correction capability-first, then public-surface-first. Do not start with string
+renames while generic EVM transport and signing are still embedded in workflow crates.
+
+1. Add `crates/signing`.
+2. Add `crates/signers/keystore`.
+3. Add `crates/transports/evm` with source registry, `EvmJsonRpcClient`, source-id routing, and
+   expected chain id verification.
+4. Move DCV and portfolio EVM RPC use to the generic EVM transport.
+5. Replace workflow signer config with `SignerRef` and runtime signer registry setup.
+6. Rename/split `evm-dcv-model` into contract/ABI model namespaces.
+7. Rename/split lifecycle config so typed config contains semantic intent and non-secret refs only.
+8. Rename state crate, schemas, capabilities, state values, and public outputs to contract
+   lifecycle language.
+9. Extract lifecycle adapter from the current transport crate.
+10. Rename operation crate and compile APIs to contract lifecycle language.
+11. Replace CLI and REST public surfaces with contract lifecycle routes, commands, request kinds,
+    error codes, and framework versions.
+12. Rebaseline reth/Nixfied fixtures so local reth is not represented as `ethereum-mainnet`.
+13. Rewrite docs, catalog, repo map, docs.rs readiness notes, CLI docs, REST docs, and EVM routing
+    docs.
+14. Add architecture tests for dependency direction, schema namespaces, capability names, typed
+    config forbidden fields, signer boundaries, and transport boundaries.
+15. Remove stale DCV public names once the new boundaries are in place.
+
+### B.11 Audit Completion Definition
+
+The audit-driven correction is complete when all of these are true:
+
+- workspace members no longer include DCV-named platform/domain crates
+- public schema namespaces no longer use `mfm.evm.dcv.*`
+- public CLI and REST surfaces no longer expose `dcv`
+- generic EVM JSON-RPC exists once and is reused by portfolio and contract lifecycle
+- runtime source routing uses `source_id` and verifies `expected_chain_id`
+- local reth tests do not use `ethereum-mainnet` unless they are actually connected to mainnet
+- keystore signing is behind a signer provider and no lifecycle transport opens keystores directly
+- typed workflow config contains signer refs and runtime source refs, not path/env/url/auth fields
+- operation crates are planning-only
+- state crates do not own runtime IO or signer/provider resolution
+- transport crates do not depend on operation crates
+- signer crates do not depend on workflow crates
+- tests enforce the architecture doctrine instead of the current implementation shape
