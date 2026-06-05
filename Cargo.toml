@@ -40,6 +40,7 @@ members = [
 	"crates/storages/artifact-store-fs",
 	"crates/storages/stream-store-postgres",
 	"crates/transports/process-exec",
+	"crates/transports/evm",
 	"crates/transports/portfolio",
 	"crates/transports/proof",
 	"crates/transports/evm-dcv",

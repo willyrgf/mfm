@@ -1,0 +1,23 @@
+[package]
+name = "mfm-transports-evm"
+version = "0.1.0"
+edition = "2021"
+description = "Reusable EVM JSON-RPC transport for MFM"
+repository = "https://github.com/willyrgf/mfm"
+license = "MIT"
+
+[package.metadata.mfm]
+category = "transport"
+
+[dependencies]
+alloy-primitives = { workspace = true, features = ["serde"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+mfm-evm-capabilities = { path = "../../evm-capabilities" }
+mfm-evm-core = { path = "../../evm-core" }
+
+[dev-dependencies]
+tokio = { workspace = true }

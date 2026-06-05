@@ -2292,6 +2292,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "mfm-transports-evm"
+version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "mfm-evm-capabilities",
+ "mfm-evm-core",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "mfm-transports-evm-dcv"
 version = "0.1.0"
 dependencies = [
