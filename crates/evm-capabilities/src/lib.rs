@@ -25,7 +25,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::str::FromStr;
 
-use alloy_primitives::{Address, B256};
+use alloy_primitives::{Address, B256, U256};
 use mfm_canonical::sha256_digest_bytes;
 use mfm_capabilities::{
     CapabilityError, CapabilitySpec, ExternalMutationAuthorityRole, ReadExternalRole,
@@ -72,6 +72,12 @@ evm_capability!(
     EvmBlockReadCapability,
     ReadExternalRole,
     "block.read"
+);
+evm_capability!(
+    /// EVM account balance read authority.
+    EvmBalanceReadCapability,
+    ReadExternalRole,
+    "balance.read"
 );
 evm_capability!(
     /// EVM contract call read authority.
@@ -147,6 +153,15 @@ pub trait EvmBlockReadProvider: Send + Sync {
         &'a self,
         request: &'a EvmBlockReadRequest,
     ) -> EvmCapabilityFuture<'a, EvmBlockReadResponse>;
+}
+
+/// Provider interface for EVM account balance reads.
+pub trait EvmBalanceReadProvider: Send + Sync {
+    /// Reads an account balance at the selected block.
+    fn read_balance<'a>(
+        &'a self,
+        request: &'a EvmBalanceReadRequest,
+    ) -> EvmCapabilityFuture<'a, EvmBalanceReadResponse>;
 }
 
 /// Provider interface for EVM contract call reads.
@@ -364,6 +379,28 @@ pub struct EvmBlockReadResponse {
     pub block_number: u64,
     /// Block hash.
     pub block_hash: B256,
+}
+
+/// Request for an EVM account balance.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvmBalanceReadRequest {
+    /// Source reference.
+    pub source_ref: EvmSourceRef,
+    /// Source policy id.
+    pub policy_id: EvmSourcePolicyId,
+    /// Account address.
+    pub account: Address,
+    /// Block selector.
+    pub block: EvmBlockSelector,
+}
+
+/// Response for an EVM account balance.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvmBalanceReadResponse {
+    /// Redacted source evidence.
+    pub evidence: RedactedEvmSourceEvidence,
+    /// Account balance in wei.
+    pub balance_wei: U256,
 }
 
 /// Request for a read-only EVM call.
@@ -668,6 +705,7 @@ mod tests {
             [
                 "mfm.evm.chain_identity.read",
                 "mfm.evm.block.read",
+                "mfm.evm.balance.read",
                 "mfm.evm.call.read",
                 "mfm.evm.logs.read",
                 "mfm.evm.nonce.read",
@@ -730,10 +768,11 @@ mod tests {
         assert!(!rendered.contains("1, 2, 3"));
     }
 
-    fn capability_names() -> [&'static str; 9] {
+    fn capability_names() -> [&'static str; 10] {
         [
             EvmChainIdentityCapability::name(),
             EvmBlockReadCapability::name(),
+            EvmBalanceReadCapability::name(),
             EvmCallReadCapability::name(),
             EvmLogsReadCapability::name(),
             EvmNonceReadCapability::name(),

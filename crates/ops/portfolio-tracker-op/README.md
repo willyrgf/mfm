@@ -20,7 +20,7 @@ and typed public outputs:
 
 The crate exposes no legacy dynamic `PlannedOp`, `PortKey`, `DynContext`, context-key, or
 hand-authored dependency-edge surface. Runtime execution is provided by the typed runner registry
-in `mfm-transports-portfolio`.
+in `mfm-adapters-portfolio`.
 
 Docs:
 - `docs/design.md`

@@ -1,24 +1,24 @@
 #![warn(missing_docs)]
-//! Typed portfolio workflow runners.
+//! Portfolio adapter runners.
 //!
-//! This crate binds certified portfolio state descriptors to concrete typed runners. It receives
-//! only certified node specs, store-verified input cell evidence, and typed artifact handles from
-//! the kernel runtime.
+//! This crate binds certified portfolio state descriptors to typed runners over explicit artifact
+//! and EVM capability contracts. Concrete artifact stores and live EVM transports are supplied by
+//! app assembly.
 
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Duration;
 
 use alloy_primitives::{Address, U256};
-use mfm_artifact_store_fs::FsTypedArtifactStore;
+use mfm_artifact_capabilities::{ArtifactReadProvider, ArtifactReadRequest};
 use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_capabilities::CapabilitySpec;
 use mfm_events::v1 as events;
-use mfm_evm_core::encoding::{
-    encode_erc20_balance_of, encode_erc20_decimals, parse_u256_hex_value, parse_u8_u256,
-    u64_hex_quantity,
+use mfm_evm_capabilities::{
+    EvmBalanceReadProvider, EvmBalanceReadRequest, EvmBlockReadProvider, EvmBlockReadRequest,
+    EvmBlockSelector, EvmCallReadProvider, EvmCallReadRequest, EvmCapabilityError,
+    EvmCapabilityFuture, EvmSourcePolicyId, EvmSourceRef,
 };
+use mfm_evm_core::encoding::{encode_erc20_balance_of, encode_erc20_decimals, parse_u8_u256};
+use mfm_evm_core::hex::hex_to_bytes;
 use mfm_ids::{ArtifactId, ContentDigest, DescriptorId, NodeId};
 use mfm_program::StateSpec;
 use mfm_runtime::{
@@ -42,43 +42,93 @@ use mfm_state_portfolio::{
 use mfm_store::v1 as store;
 use mfm_values::{MfmConfig, MfmValue, NonEmpty};
 use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 const READ_FACTORY: &str = "read_external";
 const PURE_FACTORY: &str = "pure";
-const ENV_EVM_RPC_SOURCES_JSON: &str = "MFM_EVM_RPC_SOURCES_JSON";
 
-/// Future returned by typed portfolio artifact readers.
-pub type PortfolioArtifactReaderFuture<'a, T> =
-    Pin<Box<dyn Future<Output = mfm_runtime::Result<T>> + Send + 'a>>;
-
-/// Read-only artifact boundary used by typed portfolio runners.
-pub trait PortfolioArtifactReader: Send + Sync {
-    /// Loads verified typed artifact bytes by id.
-    fn get_artifact_by_id<'a>(
-        &'a self,
-        artifact_id: &'a ArtifactId,
-    ) -> PortfolioArtifactReaderFuture<'a, (Vec<u8>, store::ArtifactEvidenceRef)>;
+/// EVM read capabilities required by portfolio adapter runners.
+pub trait PortfolioEvmProvider:
+    EvmBlockReadProvider + EvmBalanceReadProvider + EvmCallReadProvider
+{
 }
 
-impl PortfolioArtifactReader for FsTypedArtifactStore {
-    fn get_artifact_by_id<'a>(
+impl<T> PortfolioEvmProvider for T where
+    T: EvmBlockReadProvider + EvmBalanceReadProvider + EvmCallReadProvider
+{
+}
+
+/// EVM provider used when portfolio runtime sources are not configured.
+#[derive(Debug, Clone, Default)]
+pub struct UnavailablePortfolioEvmProvider;
+
+impl EvmBlockReadProvider for UnavailablePortfolioEvmProvider {
+    fn read_block<'a>(
         &'a self,
-        artifact_id: &'a ArtifactId,
-    ) -> PortfolioArtifactReaderFuture<'a, (Vec<u8>, store::ArtifactEvidenceRef)> {
-        Box::pin(async move {
-            self.get_artifact_by_id(artifact_id)
-                .await
-                .map_err(|error| mfm_runtime::RuntimeError::Store(error.to_string()))
-        })
+        _request: &'a EvmBlockReadRequest,
+    ) -> EvmCapabilityFuture<'a, mfm_evm_capabilities::EvmBlockReadResponse> {
+        unavailable_evm()
+    }
+}
+
+impl EvmBalanceReadProvider for UnavailablePortfolioEvmProvider {
+    fn read_balance<'a>(
+        &'a self,
+        _request: &'a EvmBalanceReadRequest,
+    ) -> EvmCapabilityFuture<'a, mfm_evm_capabilities::EvmBalanceReadResponse> {
+        unavailable_evm()
+    }
+}
+
+impl EvmCallReadProvider for UnavailablePortfolioEvmProvider {
+    fn read_call<'a>(
+        &'a self,
+        _request: &'a EvmCallReadRequest,
+    ) -> EvmCapabilityFuture<'a, mfm_evm_capabilities::EvmCallReadResponse> {
+        unavailable_evm()
+    }
+}
+
+fn unavailable_evm<'a, T>() -> EvmCapabilityFuture<'a, T> {
+    Box::pin(async {
+        Err(EvmCapabilityError::redacted_provider_failure(
+            "portfolio EVM provider unavailable",
+        ))
+    })
+}
+
+/// Runtime capabilities used by portfolio adapter runners.
+#[derive(Clone)]
+pub struct PortfolioRunnerCapabilities {
+    artifacts: Arc<dyn ArtifactReadProvider>,
+    evm: Arc<dyn PortfolioEvmProvider>,
+}
+
+impl PortfolioRunnerCapabilities {
+    /// Creates portfolio runner capabilities from artifact and EVM providers.
+    pub fn new(
+        artifacts: Arc<dyn ArtifactReadProvider>,
+        evm: Arc<dyn PortfolioEvmProvider>,
+    ) -> Self {
+        Self { artifacts, evm }
+    }
+
+    fn artifacts(&self) -> Arc<dyn ArtifactReadProvider> {
+        Arc::clone(&self.artifacts)
+    }
+
+    fn evm(&self) -> Arc<dyn PortfolioEvmProvider> {
+        Arc::clone(&self.evm)
     }
 }
 
 /// Registers typed portfolio runners.
 pub fn register_portfolio_runners(
     registry: &mut ErasedRunnerRegistry,
-    artifacts: Arc<dyn PortfolioArtifactReader>,
+    capabilities: PortfolioRunnerCapabilities,
 ) -> mfm_runtime::Result<()> {
+    let artifacts = capabilities.artifacts();
+    let evm = capabilities.evm();
     registry.register(binding(
         registered_descriptor::<PrepareSourcesState>()?,
         READ_FACTORY,
@@ -98,7 +148,7 @@ pub fn register_portfolio_runners(
         READ_FACTORY,
         Arc::new(PinViewsRunner {
             artifacts: artifacts.clone(),
-            rpc: PortfolioRpcClient::from_env(),
+            evm: evm.clone(),
         }),
     )?)?;
     registry.register(binding(
@@ -113,7 +163,7 @@ pub fn register_portfolio_runners(
         READ_FACTORY,
         Arc::new(ObserveBatchRunner {
             artifacts: artifacts.clone(),
-            rpc: PortfolioRpcClient::from_env(),
+            evm,
         }),
     )?)?;
     registry.register(binding(
@@ -170,15 +220,15 @@ fn executable(
 ) -> mfm_runtime::Result<events::ExecutableIdentity> {
     Ok(events::ExecutableIdentity {
         factory_id,
-        source_revision: events::SourceRevision::new("mfm-transports-portfolio-built-in")?,
-        cargo_package_name: events::PackageName::new("mfm-transports-portfolio")?,
+        source_revision: events::SourceRevision::new("mfm-adapters-portfolio-built-in")?,
+        cargo_package_name: events::PackageName::new("mfm-adapters-portfolio")?,
         cargo_package_version: events::PackageVersion::new(env!("CARGO_PKG_VERSION"))?,
         cargo_package_digest: digest_json(serde_json::json!({
-            "crate": "mfm-transports-portfolio",
+            "crate": "mfm-adapters-portfolio",
             "version": env!("CARGO_PKG_VERSION"),
         }))?,
         binary_digest: digest_json(serde_json::json!({
-            "crate": "mfm-transports-portfolio",
+            "crate": "mfm-adapters-portfolio",
             "runner": "typed-portfolio",
             "version": env!("CARGO_PKG_VERSION"),
         }))?,
@@ -188,7 +238,7 @@ fn executable(
 }
 
 struct PrepareSourcesRunner {
-    artifacts: Arc<dyn PortfolioArtifactReader>,
+    artifacts: Arc<dyn ArtifactReadProvider>,
 }
 
 impl ErasedNodeRunner for PrepareSourcesRunner {
@@ -212,7 +262,7 @@ impl ErasedNodeRunner for PrepareSourcesRunner {
 }
 
 struct ResolveSubjectsRunner {
-    artifacts: Arc<dyn PortfolioArtifactReader>,
+    artifacts: Arc<dyn ArtifactReadProvider>,
 }
 
 impl ErasedNodeRunner for ResolveSubjectsRunner {
@@ -232,8 +282,8 @@ impl ErasedNodeRunner for ResolveSubjectsRunner {
 }
 
 struct PinViewsRunner {
-    artifacts: Arc<dyn PortfolioArtifactReader>,
-    rpc: PortfolioRpcClient,
+    artifacts: Arc<dyn ArtifactReadProvider>,
+    evm: Arc<dyn PortfolioEvmProvider>,
 }
 
 impl ErasedNodeRunner for PinViewsRunner {
@@ -245,7 +295,8 @@ impl ErasedNodeRunner for PinViewsRunner {
                 self.artifacts.as_ref(),
             )
             .await?;
-            let output = pin_views_with_backend(&config, &self.rpc)
+            let backend = EvmCapabilityPortfolioBackend::new(Arc::clone(&self.evm));
+            let output = pin_views_with_backend(&config, &backend)
                 .await
                 .map_err(portfolio_read_runtime_error)?;
             let request = ViewPinRequest {
@@ -264,7 +315,7 @@ impl ErasedNodeRunner for PinViewsRunner {
 }
 
 struct ResolveValuationsRunner {
-    artifacts: Arc<dyn PortfolioArtifactReader>,
+    artifacts: Arc<dyn ArtifactReadProvider>,
 }
 
 impl ErasedNodeRunner for ResolveValuationsRunner {
@@ -284,8 +335,8 @@ impl ErasedNodeRunner for ResolveValuationsRunner {
 }
 
 struct ObserveBatchRunner {
-    artifacts: Arc<dyn PortfolioArtifactReader>,
-    rpc: PortfolioRpcClient,
+    artifacts: Arc<dyn ArtifactReadProvider>,
+    evm: Arc<dyn PortfolioEvmProvider>,
 }
 
 impl ErasedNodeRunner for ObserveBatchRunner {
@@ -296,7 +347,8 @@ impl ErasedNodeRunner for ObserveBatchRunner {
                 load_struct_input::<ObserveBatchInput>(ctx.inputs(), self.artifacts.as_ref())
                     .await?;
             let block_number = evm_block_number_for(&input.views, &config.network.network_id);
-            let output = observe_batch_with_backend(&config, &input, &self.rpc).await;
+            let backend = EvmCapabilityPortfolioBackend::new(Arc::clone(&self.evm));
+            let output = observe_batch_with_backend(&config, &input, &backend).await;
             let request = ObservationRequest {
                 wallet_id: config.wallet.wallet_id.clone(),
                 symbol_id: config.symbol.symbol_id.clone(),
@@ -313,7 +365,7 @@ impl ErasedNodeRunner for ObserveBatchRunner {
 }
 
 struct MergeObservationsRunner {
-    artifacts: Arc<dyn PortfolioArtifactReader>,
+    artifacts: Arc<dyn ArtifactReadProvider>,
 }
 
 impl ErasedNodeRunner for MergeObservationsRunner {
@@ -331,7 +383,7 @@ impl ErasedNodeRunner for MergeObservationsRunner {
 }
 
 struct AssembleSnapshotRunner {
-    artifacts: Arc<dyn PortfolioArtifactReader>,
+    artifacts: Arc<dyn ArtifactReadProvider>,
 }
 
 impl ErasedNodeRunner for AssembleSnapshotRunner {
@@ -349,7 +401,7 @@ impl ErasedNodeRunner for AssembleSnapshotRunner {
 }
 
 struct ProjectReportRunner {
-    artifacts: Arc<dyn PortfolioArtifactReader>,
+    artifacts: Arc<dyn ArtifactReadProvider>,
 }
 
 impl ErasedNodeRunner for ProjectReportRunner {
@@ -454,32 +506,23 @@ fn staged_attempt_artifact(
 
 async fn load_config<T>(
     ctx: &ErasedRunCtx<'_>,
-    artifacts: &dyn PortfolioArtifactReader,
+    artifacts: &dyn ArtifactReadProvider,
 ) -> mfm_runtime::Result<T>
 where
     T: MfmConfig + DeserializeOwned,
 {
-    let (bytes, evidence) = artifacts
-        .get_artifact_by_id(&ctx.node().config_ref.artifact_id)
-        .await?;
-    if evidence.digest != ctx.node().config_ref.digest
-        || evidence.byte_len != ctx.node().config_ref.byte_len
-        || evidence.media_type != ctx.node().config_ref.media_type
-        || evidence.schema_id.as_ref() != Some(&ctx.node().config_ref.schema_id)
-        || evidence.artifact_role != events::ArtifactRole::TypedConfig
-    {
-        return Err(mfm_runtime::RuntimeError::InvalidRunnerOutput(format!(
-            "portfolio config artifact did not match certified config ref for node {}",
-            ctx.node().node_id
-        )));
-    }
-    serde_json::from_slice(&bytes)
+    let request = ArtifactReadRequest::from_certified_config_ref(&ctx.node().config_ref);
+    let verified = artifacts
+        .read_artifact(&request)
+        .await
+        .map_err(runtime_artifact_read_error)?;
+    serde_json::from_slice(verified.bytes())
         .map_err(|error| mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string()))
 }
 
 async fn load_input_cell<T>(
     inputs: &mfm_runtime::MaterializedInputs,
-    artifacts: &dyn PortfolioArtifactReader,
+    artifacts: &dyn ArtifactReadProvider,
 ) -> mfm_runtime::Result<T>
 where
     T: MfmValue + DeserializeOwned,
@@ -489,7 +532,7 @@ where
 
 async fn load_struct_input<T>(
     inputs: &mfm_runtime::MaterializedInputs,
-    artifacts: &dyn PortfolioArtifactReader,
+    artifacts: &dyn ArtifactReadProvider,
 ) -> mfm_runtime::Result<T>
 where
     T: DeserializeOwned,
@@ -501,7 +544,7 @@ where
 
 async fn load_non_empty_input<T>(
     inputs: &mfm_runtime::MaterializedInputs,
-    artifacts: &dyn PortfolioArtifactReader,
+    artifacts: &dyn ArtifactReadProvider,
 ) -> mfm_runtime::Result<NonEmpty<T>>
 where
     T: MfmValue + DeserializeOwned,
@@ -521,7 +564,7 @@ where
 
 async fn materialized_node_json(
     node: &MaterializedInputNode,
-    artifacts: &dyn PortfolioArtifactReader,
+    artifacts: &dyn ArtifactReadProvider,
 ) -> mfm_runtime::Result<serde_json::Value> {
     match node {
         MaterializedInputNode::Unit => Ok(serde_json::Value::Null),
@@ -559,7 +602,7 @@ async fn materialized_node_json(
 
 async fn load_value_from_node<T>(
     node: &MaterializedInputNode,
-    artifacts: &dyn PortfolioArtifactReader,
+    artifacts: &dyn ArtifactReadProvider,
 ) -> mfm_runtime::Result<T>
 where
     T: MfmValue + DeserializeOwned,
@@ -571,36 +614,45 @@ where
 
 async fn load_cell_bytes(
     node: &MaterializedInputNode,
-    artifacts: &dyn PortfolioArtifactReader,
+    artifacts: &dyn ArtifactReadProvider,
 ) -> mfm_runtime::Result<Vec<u8>> {
     let MaterializedInputNode::Cell(cell) = node else {
         return Err(mfm_runtime::RuntimeError::InvalidRunnerOutput(
             "portfolio input node was not a produced cell".to_owned(),
         ));
     };
-    let (artifact_id, content_digest) = match &cell.terminal {
+    let request = match &cell.terminal {
         MaterializedCellTerminal::Produced {
             artifact_id,
             content_digest,
-        }
-        | MaterializedCellTerminal::Seed {
+        } => ArtifactReadRequest::from_materialized_produced_cell(
+            artifact_id.clone(),
+            content_digest.clone(),
+            cell.schema_id.clone(),
+            cell.semantic_type_id.clone(),
+        ),
+        MaterializedCellTerminal::Seed {
+            seed_id,
             artifact_id,
             content_digest,
-            ..
-        } => (artifact_id, content_digest),
+        } => ArtifactReadRequest::from_materialized_seed_cell(
+            artifact_id.clone(),
+            content_digest.clone(),
+            cell.schema_id.clone(),
+            cell.semantic_type_id.clone(),
+            seed_id.clone(),
+        ),
         MaterializedCellTerminal::Skipped { .. } => {
             return Err(mfm_runtime::RuntimeError::InvalidRunnerOutput(
                 "portfolio input cell was skipped".to_owned(),
             ))
         }
     };
-    let (bytes, evidence) = artifacts.get_artifact_by_id(artifact_id).await?;
-    if &evidence.digest != content_digest {
-        return Err(mfm_runtime::RuntimeError::InvalidRunnerOutput(
-            "portfolio input artifact digest did not match cell terminal".to_owned(),
-        ));
-    }
-    Ok(bytes)
+    let verified = artifacts
+        .read_artifact(&request)
+        .await
+        .map_err(runtime_artifact_read_error)?;
+    Ok(verified.into_bytes())
 }
 
 fn cell_produced(
@@ -690,74 +742,38 @@ fn runtime_capability_error(error: mfm_capabilities::CapabilityError) -> mfm_run
     mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
 }
 
-#[derive(Debug, Clone, Deserialize)]
-struct EnvRpcSource {
-    id: String,
-    network_id: Option<String>,
-    rpc_url: String,
-    authorization: Option<String>,
-}
-
 #[derive(Clone)]
-struct RpcSource {
-    network_id: String,
-    rpc_url: String,
-    authorization: Option<String>,
+struct EvmCapabilityPortfolioBackend {
+    evm: Arc<dyn PortfolioEvmProvider>,
 }
 
-#[derive(Clone)]
-struct PortfolioRpcClient {
-    client: reqwest::Client,
-    sources: Vec<RpcSource>,
-}
+impl EvmCapabilityPortfolioBackend {
+    fn new(evm: Arc<dyn PortfolioEvmProvider>) -> Self {
+        Self { evm }
+    }
 
-impl PortfolioRpcClient {
-    fn from_env() -> Self {
-        let sources = std::env::var(ENV_EVM_RPC_SOURCES_JSON)
-            .ok()
-            .and_then(|raw| serde_json::from_str::<Vec<EnvRpcSource>>(&raw).ok())
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|source| {
-                let network_id = source.network_id?;
-                if source.id.trim().is_empty()
-                    || network_id.trim().is_empty()
-                    || source.rpc_url.trim().is_empty()
-                {
-                    return None;
-                }
-                Some(RpcSource {
-                    network_id,
-                    rpc_url: source.rpc_url,
-                    authorization: source.authorization,
-                })
-            })
-            .collect();
-        Self {
-            client: reqwest::Client::builder()
-                .timeout(Duration::from_secs(15))
-                .build()
-                .unwrap_or_else(|_| reqwest::Client::new()),
-            sources,
-        }
+    fn route(
+        &self,
+        network_id: &str,
+    ) -> Result<(EvmSourceRef, EvmSourcePolicyId), PortfolioReadError> {
+        Ok((
+            EvmSourceRef::new(network_id).map_err(portfolio_evm_invalid_route)?,
+            EvmSourcePolicyId::new(network_id).map_err(portfolio_evm_invalid_route)?,
+        ))
     }
 
     async fn read_evm_block_number(&self, network_id: &str) -> Result<u64, PortfolioReadError> {
-        let value = self
-            .call(network_id, "eth_blockNumber", serde_json::json!([]))
-            .await?;
-        let raw = value.as_str().ok_or_else(|| {
-            PortfolioReadError::new(
-                "evm_response_invalid",
-                "eth_blockNumber response was not a hex string",
-            )
-        })?;
-        parse_hex_u64(raw).map_err(|message| {
-            PortfolioReadError::new(
-                "evm_response_invalid",
-                format!("eth_blockNumber response was invalid: {message}"),
-            )
-        })
+        let (source_ref, policy_id) = self.route(network_id)?;
+        let response = self
+            .evm
+            .read_block(&EvmBlockReadRequest {
+                source_ref,
+                policy_id,
+                block: EvmBlockSelector::Latest,
+            })
+            .await
+            .map_err(portfolio_evm_capability_error)?;
+        Ok(response.block_number)
     }
 
     async fn read_raw_balance(
@@ -767,20 +783,24 @@ impl PortfolioRpcClient {
     ) -> Result<(U256, u8), PortfolioReadError> {
         match &config.symbol.balance_reader {
             mfm_portfolio_model::symbol::BalanceReaderConfig::NativeBalance {} => {
-                let value = self
-                    .call(
-                        &config.network.network_id,
-                        "eth_getBalance",
-                        serde_json::json!([config.wallet.address, u64_hex_quantity(block_number)]),
-                    )
-                    .await?;
-                let raw = parse_u256_hex_value(&value).map_err(|_| {
+                let wallet: Address = config.wallet.address.parse().map_err(|_| {
                     PortfolioReadError::new(
-                        "evm_response_invalid",
-                        "native balance response was invalid",
+                        "invalid_wallet_address",
+                        "wallet address was invalid for native balance read",
                     )
                 })?;
-                Ok((raw, config.symbol.decimals.unwrap_or(18)))
+                let (source_ref, policy_id) = self.route(&config.network.network_id)?;
+                let response = self
+                    .evm
+                    .read_balance(&EvmBalanceReadRequest {
+                        source_ref,
+                        policy_id,
+                        account: wallet,
+                        block: EvmBlockSelector::Number(block_number),
+                    })
+                    .await
+                    .map_err(portfolio_evm_capability_error)?;
+                Ok((response.balance_wei, config.symbol.decimals.unwrap_or(18)))
             }
             mfm_portfolio_model::symbol::BalanceReaderConfig::Erc20Balance { token_address } => {
                 let decimals = match config.symbol.decimals {
@@ -796,22 +816,15 @@ impl PortfolioRpcClient {
                         "wallet address was invalid for ERC-20 balance read",
                     )
                 })?;
-                let value = self
-                    .call(
+                let token = parse_address(token_address, "token address")?;
+                let raw = self
+                    .evm_call_u256(
                         &config.network.network_id,
-                        "eth_call",
-                        serde_json::json!([
-                            {"to": token_address, "data": encode_erc20_balance_of(&wallet)},
-                            u64_hex_quantity(block_number)
-                        ]),
+                        token,
+                        encode_erc20_balance_of(&wallet),
+                        block_number,
                     )
                     .await?;
-                let raw = parse_u256_hex_value(&value).map_err(|_| {
-                    PortfolioReadError::new(
-                        "evm_response_invalid",
-                        "token balance response was invalid",
-                    )
-                })?;
                 Ok((raw, decimals))
             }
             mfm_portfolio_model::symbol::BalanceReaderConfig::ProtocolPosition { .. } => {
@@ -829,22 +842,10 @@ impl PortfolioRpcClient {
         token_address: &str,
         block_number: u64,
     ) -> Result<u8, PortfolioReadError> {
-        let value = self
-            .call(
-                network_id,
-                "eth_call",
-                serde_json::json!([
-                    {"to": token_address, "data": encode_erc20_decimals()},
-                    u64_hex_quantity(block_number)
-                ]),
-            )
+        let token = parse_address(token_address, "token address")?;
+        let raw = self
+            .evm_call_u256(network_id, token, encode_erc20_decimals(), block_number)
             .await?;
-        let raw = parse_u256_hex_value(&value).map_err(|_| {
-            PortfolioReadError::new(
-                "evm_response_invalid",
-                "token decimals response was invalid",
-            )
-        })?;
         parse_u8_u256(raw).map_err(|_| {
             PortfolioReadError::new(
                 "evm_response_invalid",
@@ -853,65 +854,33 @@ impl PortfolioRpcClient {
         })
     }
 
-    async fn call(
+    async fn evm_call_u256(
         &self,
         network_id: &str,
-        method: &str,
-        params: serde_json::Value,
-    ) -> Result<serde_json::Value, PortfolioReadError> {
-        let source = self
-            .sources
-            .iter()
-            .find(|source| source.network_id == network_id)
-            .ok_or_else(|| {
-                PortfolioReadError::new(
-                    "rpc_source_missing",
-                    format!("no typed EVM RPC source configured for network `{network_id}`"),
-                )
-            })?;
-        let mut request = self.client.post(&source.rpc_url).json(&serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 1u64,
-            "method": method,
-            "params": params,
-        }));
-        if let Some(authorization) = &source.authorization {
-            request = request.header(reqwest::header::AUTHORIZATION, authorization);
-        }
-        let response = request.send().await.map_err(|_| {
-            PortfolioReadError::new(
-                "evm_http_request_failed",
-                format!("EVM JSON-RPC request `{method}` failed"),
-            )
+        to: Address,
+        calldata_hex: String,
+        block_number: u64,
+    ) -> Result<U256, PortfolioReadError> {
+        let (source_ref, policy_id) = self.route(network_id)?;
+        let calldata = hex_to_bytes(&calldata_hex).map_err(|_| {
+            PortfolioReadError::new("invalid_call_data", "portfolio EVM call data was invalid")
         })?;
-        if !response.status().is_success() {
-            return Err(PortfolioReadError::new(
-                "evm_http_status",
-                format!("EVM JSON-RPC request `{method}` returned non-success status"),
-            ));
-        }
-        let body = response.json::<serde_json::Value>().await.map_err(|_| {
-            PortfolioReadError::new(
-                "evm_response_invalid_json",
-                format!("EVM JSON-RPC response for `{method}` was invalid JSON"),
-            )
-        })?;
-        if body.get("error").is_some() {
-            return Err(PortfolioReadError::new(
-                "evm_jsonrpc_error",
-                format!("EVM JSON-RPC method `{method}` returned an error"),
-            ));
-        }
-        body.get("result").cloned().ok_or_else(|| {
-            PortfolioReadError::new(
-                "evm_jsonrpc_missing_result",
-                format!("EVM JSON-RPC response for `{method}` had no result"),
-            )
-        })
+        let response = self
+            .evm
+            .read_call(&EvmCallReadRequest {
+                source_ref,
+                policy_id,
+                to,
+                calldata,
+                block: EvmBlockSelector::Number(block_number),
+            })
+            .await
+            .map_err(portfolio_evm_capability_error)?;
+        decode_u256_return(&response.return_data)
     }
 }
 
-impl PortfolioReadBackend for PortfolioRpcClient {
+impl PortfolioReadBackend for EvmCapabilityPortfolioBackend {
     fn evm_block_number<'a>(&'a self, network_id: &'a str) -> PortfolioReadFuture<'a, u64> {
         Box::pin(async move { self.read_evm_block_number(network_id).await })
     }
@@ -925,14 +894,43 @@ impl PortfolioReadBackend for PortfolioRpcClient {
     }
 }
 
-fn parse_hex_u64(raw: &str) -> Result<u64, &'static str> {
-    let Some(rest) = raw.strip_prefix("0x") else {
-        return Err("missing 0x prefix");
-    };
-    if rest.is_empty() || rest.len() > 16 || !rest.chars().all(|ch| ch.is_ascii_hexdigit()) {
-        return Err("not a u64 hex quantity");
+fn decode_u256_return(data: &[u8]) -> Result<U256, PortfolioReadError> {
+    if data.len() != 32 {
+        return Err(PortfolioReadError::new(
+            "evm_response_invalid",
+            "EVM call response was not a single uint256 word",
+        ));
     }
-    u64::from_str_radix(rest, 16).map_err(|_| "not a u64 hex quantity")
+    Ok(U256::from_be_slice(data))
+}
+
+fn parse_address(value: &str, label: &'static str) -> Result<Address, PortfolioReadError> {
+    value.parse().map_err(|_| {
+        PortfolioReadError::new(
+            "invalid_evm_address",
+            format!("{label} was invalid for portfolio EVM read"),
+        )
+    })
+}
+
+fn portfolio_evm_invalid_route(error: EvmCapabilityError) -> PortfolioReadError {
+    PortfolioReadError::new(
+        "evm_route_invalid",
+        format!("portfolio EVM source route was invalid: {error}"),
+    )
+}
+
+fn portfolio_evm_capability_error(error: EvmCapabilityError) -> PortfolioReadError {
+    PortfolioReadError::new(
+        "evm_capability_failed",
+        format!("portfolio EVM read capability failed: {error}"),
+    )
+}
+
+fn runtime_artifact_read_error(
+    error: mfm_artifact_capabilities::ArtifactReadError,
+) -> mfm_runtime::RuntimeError {
+    mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
 }
 
 fn portfolio_read_runtime_error(error: PortfolioReadError) -> mfm_runtime::RuntimeError {

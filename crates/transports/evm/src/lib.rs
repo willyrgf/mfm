@@ -28,16 +28,18 @@ use std::fmt;
 
 use alloy_primitives::B256;
 use mfm_evm_capabilities::{
-    EvmBlockReadProvider, EvmBlockReadRequest, EvmBlockReadResponse, EvmBlockSelector,
-    EvmCallReadProvider, EvmCallReadRequest, EvmCallReadResponse, EvmCapabilityError,
-    EvmCapabilityFuture, EvmChainIdentityProvider, EvmChainIdentityRequest,
-    EvmChainIdentityResponse, EvmFeeReadProvider, EvmFeeReadRequest, EvmFeeReadResponse,
-    EvmGasEstimateProvider, EvmGasEstimateRequest, EvmGasEstimateResponse, EvmLogEntry,
-    EvmLogsReadProvider, EvmLogsReadRequest, EvmLogsReadResponse, EvmNonceReadProvider,
-    EvmNonceReadRequest, EvmNonceReadResponse, EvmReceiptReadProvider, EvmReceiptReadRequest,
-    EvmReceiptReadResponse, EvmSourcePolicyId, EvmSourceRef, EvmTransactionSubmitProvider,
-    EvmTransactionSubmitRequest, EvmTransactionSubmitResponse, RedactedEvmSourceEvidence,
+    EvmBalanceReadProvider, EvmBalanceReadRequest, EvmBalanceReadResponse, EvmBlockReadProvider,
+    EvmBlockReadRequest, EvmBlockReadResponse, EvmBlockSelector, EvmCallReadProvider,
+    EvmCallReadRequest, EvmCallReadResponse, EvmCapabilityError, EvmCapabilityFuture,
+    EvmChainIdentityProvider, EvmChainIdentityRequest, EvmChainIdentityResponse,
+    EvmFeeReadProvider, EvmFeeReadRequest, EvmFeeReadResponse, EvmGasEstimateProvider,
+    EvmGasEstimateRequest, EvmGasEstimateResponse, EvmLogEntry, EvmLogsReadProvider,
+    EvmLogsReadRequest, EvmLogsReadResponse, EvmNonceReadProvider, EvmNonceReadRequest,
+    EvmNonceReadResponse, EvmReceiptReadProvider, EvmReceiptReadRequest, EvmReceiptReadResponse,
+    EvmSourcePolicyId, EvmSourceRef, EvmTransactionSubmitProvider, EvmTransactionSubmitRequest,
+    EvmTransactionSubmitResponse, RedactedEvmSourceEvidence,
 };
+use mfm_evm_core::encoding::parse_u256_hex;
 use mfm_evm_core::hex::{bytes_to_hex_prefixed, hex_to_bytes};
 use mfm_evm_core::tx::{parse_u128_quantity, parse_u64_quantity};
 use serde::Deserialize;
@@ -381,6 +383,30 @@ impl EvmJsonRpcClient {
         })
     }
 
+    async fn balance_read_impl(
+        &self,
+        request: &EvmBalanceReadRequest,
+    ) -> TransportResult<EvmBalanceReadResponse> {
+        let selected = self
+            .verified_source(&request.policy_id, &request.source_ref)
+            .await?;
+        let result = self
+            .rpc_call(
+                selected.source,
+                "eth_getBalance",
+                json!([
+                    format!("{:?}", request.account),
+                    block_selector_tag(&request.block)
+                ]),
+            )
+            .await?;
+        let raw = result.as_str().ok_or(EvmTransportError::InvalidResponse)?;
+        Ok(EvmBalanceReadResponse {
+            evidence: selected.evidence,
+            balance_wei: parse_u256_hex(raw).map_err(|_| EvmTransportError::InvalidResponse)?,
+        })
+    }
+
     async fn logs_read_impl(
         &self,
         request: &EvmLogsReadRequest,
@@ -721,6 +747,13 @@ impl_provider!(
     block_read_impl
 );
 impl_provider!(
+    EvmBalanceReadProvider,
+    read_balance,
+    EvmBalanceReadRequest,
+    EvmBalanceReadResponse,
+    balance_read_impl
+);
+impl_provider!(
     EvmCallReadProvider,
     read_call,
     EvmCallReadRequest,
@@ -880,7 +913,7 @@ pub enum EvmTransportError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_primitives::{address, B256};
+    use alloy_primitives::{address, B256, U256};
     use mfm_evm_capabilities::{EvmTransactionSubmitRequest, SignedEvmPayload};
     use serde_json::Value;
     use std::sync::{Arc, Mutex};
@@ -938,6 +971,20 @@ mod tests {
             .await
             .expect("block");
         assert_eq!(block.block_number, 42);
+
+        let balance = client
+            .read_balance(&EvmBalanceReadRequest {
+                source_ref: source_ref.clone(),
+                policy_id: policy_id.clone(),
+                account: address,
+                block: EvmBlockSelector::Latest,
+            })
+            .await
+            .expect("balance");
+        assert_eq!(
+            balance.balance_wei,
+            U256::from(1_000_000_000_000_000_000u128)
+        );
 
         let call = client
             .read_call(&EvmCallReadRequest {
@@ -1288,6 +1335,7 @@ mod tests {
                 "number": "0x2a",
                 "hash": HASH_HEX,
             }),
+            "eth_getBalance" => json!("0xde0b6b3a7640000"),
             "eth_call" => json!("0x1234"),
             "eth_getLogs" => json!([{
                 "address": "0x1111111111111111111111111111111111111111",

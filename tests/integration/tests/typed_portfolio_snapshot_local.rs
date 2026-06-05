@@ -121,14 +121,22 @@ async fn start_rpc_mock() -> String {
 fn set_rpc_env(rpc_url: String) {
     std::env::set_var(
         "MFM_EVM_RPC_SOURCES_JSON",
-        json!([
-            {
-                "id": "typed_local_eth",
-                "network_id": NETWORK_ID,
-                "rpc_url": rpc_url,
-                "authorization": null
-            }
-        ])
+        json!({
+            "sources": [
+                {
+                    "id": NETWORK_ID,
+                    "expected_chain_id": 31337,
+                    "rpc_url": rpc_url,
+                    "authorization": null
+                }
+            ],
+            "policies": [
+                {
+                    "id": NETWORK_ID,
+                    "ordered_sources": [NETWORK_ID]
+                }
+            ]
+        })
         .to_string(),
     );
 }
@@ -163,7 +171,11 @@ async fn rpc_handler(Json(request): Json<serde_json::Value>) -> Json<serde_json:
         .and_then(|value| value.as_str())
         .expect("json-rpc method");
     let result = match method {
-        "eth_blockNumber" => json!("0x64"),
+        "eth_chainId" => json!("0x7a69"),
+        "eth_getBlockByNumber" => json!({
+            "number": "0x64",
+            "hash": "0x1111111111111111111111111111111111111111111111111111111111111111"
+        }),
         "eth_getBalance" => json!("0xde0b6b3a7640000"),
         other => panic!("unexpected rpc method {other}"),
     };

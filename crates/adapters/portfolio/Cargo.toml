@@ -1,24 +1,24 @@
 [package]
-name = "mfm-transports-portfolio"
+name = "mfm-adapters-portfolio"
 version = "0.1.0"
 edition = "2021"
-description = "Typed portfolio workflow runners"
+description = "Portfolio adapter runners for typed workflow execution"
 repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
 
 [package.metadata.mfm]
-category = "transport"
+category = "adapter"
 
 [dependencies]
 alloy-primitives = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
 
-mfm-artifact-store-fs = { path = "../../storages/artifact-store-fs", default-features = false }
+mfm-artifact-capabilities = { path = "../../artifact-capabilities" }
 mfm-canonical = { path = "../../kernel/canonical" }
 mfm-capabilities = { path = "../../kernel/capabilities" }
 mfm-events = { path = "../../kernel/events" }
+mfm-evm-capabilities = { path = "../../evm-capabilities" }
 mfm-evm-core = { path = "../../evm-core" }
 mfm-ids = { path = "../../kernel/ids" }
 mfm-program = { path = "../../kernel/program" }

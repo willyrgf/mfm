@@ -27,8 +27,6 @@ const TEMPORARY_CATEGORY_DEPENDENCY_ALLOWLIST: &[(&str, &str)] = &[
     ("mfm-rest-api", "mfm-artifact-store-fs"),
     ("mfm-rest-api", "mfm-state-portfolio"),
     ("mfm-rest-api", "mfm-stream-store-postgres"),
-    ("mfm-transports-portfolio", "mfm-artifact-store-fs"),
-    ("mfm-transports-portfolio", "mfm-state-portfolio"),
     ("mfm-transports-proof", "mfm-collectors-proof"),
     ("mfm-transports-proof", "mfm-op-proof"),
 ];
@@ -157,7 +155,7 @@ fn category_dependency_rules_reject_forbidden_edges() {
         .and_then(Value::as_array_mut)
         .expect("mfm-state-portfolio dependencies")
         .push(json!({
-            "name": "mfm-transports-portfolio",
+            "name": "mfm-adapters-portfolio",
             "source": null,
             "req": "*",
             "kind": null,
@@ -167,15 +165,15 @@ fn category_dependency_rules_reject_forbidden_edges() {
             "features": [],
             "target": null,
             "registry": null,
-            "path": root.join("crates/transports/portfolio").to_string_lossy(),
+            "path": root.join("crates/adapters/portfolio").to_string_lossy(),
         }));
 
     let error =
         validate_category_dependency_rules(&metadata, &root).expect_err("fixture must fail");
     assert!(
         error.contains("source_category=state")
-            && error.contains("dependency_category=transport")
-            && error.contains("mfm-transports-portfolio"),
+            && error.contains("dependency_category=adapter")
+            && error.contains("mfm-adapters-portfolio"),
         "unexpected error: {error}"
     );
 }
@@ -235,7 +233,7 @@ fn category_dependency_rules_reject_forbidden_binary_edges() {
         .and_then(Value::as_array_mut)
         .expect("mfm dependencies")
         .push(json!({
-            "name": "mfm-transports-portfolio",
+            "name": "mfm-adapters-portfolio",
             "source": null,
             "req": "*",
             "kind": null,
@@ -245,15 +243,15 @@ fn category_dependency_rules_reject_forbidden_binary_edges() {
             "features": [],
             "target": null,
             "registry": null,
-            "path": root.join("crates/transports/portfolio").to_string_lossy(),
+            "path": root.join("crates/adapters/portfolio").to_string_lossy(),
         }));
 
     let error =
         validate_category_dependency_rules(&metadata, &root).expect_err("fixture must fail");
     assert!(
         error.contains("source_category=binary")
-            && error.contains("dependency_category=transport")
-            && error.contains("mfm-transports-portfolio"),
+            && error.contains("dependency_category=adapter")
+            && error.contains("mfm-adapters-portfolio"),
         "unexpected error: {error}"
     );
 }

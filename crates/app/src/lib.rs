@@ -297,9 +297,18 @@ pub fn production_typed_runner_registry(
     artifacts: FsTypedArtifactStore,
 ) -> Result<ErasedRunnerRegistry, AppError> {
     let mut registry = ErasedRunnerRegistry::new();
-    let portfolio_artifacts: Arc<dyn mfm_transports_portfolio::PortfolioArtifactReader> =
+    let portfolio_artifacts: Arc<dyn mfm_artifact_capabilities::ArtifactReadProvider> =
         Arc::new(artifacts.clone());
-    mfm_transports_portfolio::register_portfolio_runners(&mut registry, portfolio_artifacts)?;
+    let portfolio_evm: Arc<dyn mfm_adapters_portfolio::PortfolioEvmProvider> =
+        match mfm_transports_evm::EvmJsonRpcClient::from_env() {
+            Ok(client) => Arc::new(client),
+            Err(_) => Arc::new(mfm_adapters_portfolio::UnavailablePortfolioEvmProvider),
+        };
+    let portfolio_capabilities = mfm_adapters_portfolio::PortfolioRunnerCapabilities::new(
+        portfolio_artifacts,
+        portfolio_evm,
+    );
+    mfm_adapters_portfolio::register_portfolio_runners(&mut registry, portfolio_capabilities)?;
     evm_contracts::register_contract_lifecycle_runners(&mut registry, artifacts)?;
     mfm_transports_proof::register_deterministic_proof_runners(&mut registry)?;
     Ok(registry)

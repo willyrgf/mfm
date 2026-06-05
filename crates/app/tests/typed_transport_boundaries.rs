@@ -4,9 +4,9 @@
 fn production_typed_app_links_only_typed_transport_crates() {
     let manifest = include_str!("../Cargo.toml");
     for required in [
+        "mfm-adapters-portfolio",
         "mfm-transports-evm",
         "mfm-transports-proof",
-        "mfm-transports-portfolio",
     ] {
         assert!(
             manifest.contains(required),
@@ -17,6 +17,7 @@ fn production_typed_app_links_only_typed_transport_crates() {
         "mfm-transports-exec",
         "mfm-transports-local-evm",
         concat!("mfm-transports-evm-", "d", "cv"),
+        "mfm-transports-portfolio",
         "mfm-transports-local-fs",
         "mfm-transports-local-keystore",
         "mfm-transports-rpc-control",
@@ -36,7 +37,7 @@ fn typed_transport_sources_exclude_legacy_io_surfaces() {
         ("proof", include_str!("../../transports/proof/src/lib.rs")),
         (
             "portfolio",
-            include_str!("../../transports/portfolio/src/lib.rs"),
+            include_str!("../../adapters/portfolio/src/lib.rs"),
         ),
     ] {
         for banned in [

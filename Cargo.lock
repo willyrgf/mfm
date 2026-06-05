@@ -1788,11 +1788,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "mfm-adapters-portfolio"
+version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "mfm-artifact-capabilities",
+ "mfm-canonical",
+ "mfm-capabilities",
+ "mfm-events",
+ "mfm-evm-capabilities",
+ "mfm-evm-core",
+ "mfm-ids",
+ "mfm-portfolio-model",
+ "mfm-program",
+ "mfm-runtime",
+ "mfm-spec",
+ "mfm-state-portfolio",
+ "mfm-store",
+ "mfm-values",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "mfm-app"
 version = "0.1.0"
 dependencies = [
  "mfm-adapter-contracts",
  "mfm-adapters-evm-contracts",
+ "mfm-adapters-portfolio",
  "mfm-artifact-capabilities",
  "mfm-artifact-store-fs",
  "mfm-canonical",
@@ -1816,7 +1840,6 @@ dependencies = [
  "mfm-state-evm-contracts",
  "mfm-store",
  "mfm-transports-evm",
- "mfm-transports-portfolio",
  "mfm-transports-proof",
  "mfm-values",
  "mfm_core",
@@ -2352,29 +2375,6 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tokio",
-]
-
-[[package]]
-name = "mfm-transports-portfolio"
-version = "0.1.0"
-dependencies = [
- "alloy-primitives",
- "mfm-artifact-store-fs",
- "mfm-canonical",
- "mfm-capabilities",
- "mfm-events",
- "mfm-evm-core",
- "mfm-ids",
- "mfm-portfolio-model",
- "mfm-program",
- "mfm-runtime",
- "mfm-spec",
- "mfm-state-portfolio",
- "mfm-store",
- "mfm-values",
- "reqwest",
- "serde",
- "serde_json",
 ]
 
 [[package]]
