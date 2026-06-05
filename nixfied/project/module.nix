@@ -1364,6 +1364,8 @@ in
               test -f "$ROOT/nixfied/schemas/workflow-contract.json"
               test -f "$ROOT/nixfied/schemas/model-export.json"
 
+              shell_contracts_flake_ref="path:$ROOT"
+
               jq -e "." "$ROOT/nixfied/schemas/task-contract.json" >/dev/null
               jq -e "." "$ROOT/nixfied/schemas/workflow-contract.json" >/dev/null
               jq -e "." "$ROOT/nixfied/schemas/model-export.json" >/dev/null
@@ -1469,9 +1471,9 @@ EOF
                 exit 1
               fi
 
-              INTROSPECTION_BUNDLE_PATH="$(build_output_with_timeout ".#introspectionBundle" "introspection bundle")"
+              INTROSPECTION_BUNDLE_PATH="$(build_output_with_timeout "$shell_contracts_flake_ref#introspectionBundle" "introspection bundle")"
               INTROSPECTION_BUNDLE_WITH_SKIP_POSTGRES_PATH="$(
-                build_output_with_skip_env_with_timeout ".#introspectionBundle" "introspection bundle with SKIP_POSTGRES"
+                build_output_with_skip_env_with_timeout "$shell_contracts_flake_ref#introspectionBundle" "introspection bundle with SKIP_POSTGRES"
               )"
 
               if ! ${pkgs.diffutils}/bin/cmp -s "$INTROSPECTION_BUNDLE_PATH" "$INTROSPECTION_BUNDLE_WITH_SKIP_POSTGRES_PATH"; then
