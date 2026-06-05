@@ -1,0 +1,17 @@
+[package]
+name = "mfm-adapter-contracts"
+version = "0.1.0"
+edition = "2021"
+description = "Neutral adapter contract identities and binding descriptors for MFM"
+repository = "https://github.com/willyrgf/mfm"
+license = "MIT"
+
+[package.metadata.mfm]
+category = "adapter-contract"
+
+[dependencies]
+mfm-canonical = { path = "../kernel/canonical" }
+mfm-capabilities = { path = "../kernel/capabilities" }
+mfm-evm-capabilities = { path = "../evm-capabilities" }
+mfm-ids = { path = "../kernel/ids" }
+thiserror = { workspace = true }

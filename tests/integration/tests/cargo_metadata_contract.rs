@@ -188,6 +188,44 @@ fn category_dependency_rules_reject_forbidden_edges() {
 }
 
 #[test]
+fn state_category_allows_adapter_contracts_and_rejects_adapters() {
+    let root = repo_root();
+    let mut metadata = workspace_metadata(&root);
+    push_path_dependency(
+        &mut metadata,
+        "mfm-state-portfolio",
+        "mfm-adapter-contracts",
+        &root.join("crates/adapter-contracts"),
+    );
+
+    validate_category_dependency_rules(&metadata, &root)
+        .expect("state may depend on neutral adapter contract crate");
+
+    push_synthetic_workspace_package(
+        &mut metadata,
+        &root,
+        "mfm-adapter-fixture",
+        "crates/adapters/fixture/Cargo.toml",
+        "adapter",
+    );
+    push_path_dependency(
+        &mut metadata,
+        "mfm-state-portfolio",
+        "mfm-adapter-fixture",
+        &root.join("crates/adapters/fixture"),
+    );
+
+    let error =
+        validate_category_dependency_rules(&metadata, &root).expect_err("fixture must fail");
+    assert!(
+        error.contains("source_category=state")
+            && error.contains("dependency_category=adapter")
+            && error.contains("mfm-adapter-fixture"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
 fn category_dependency_rules_reject_forbidden_binary_edges() {
     let root = repo_root();
     let mut metadata = workspace_metadata(&root);
@@ -433,6 +471,70 @@ fn workspace_packages(metadata: &Value, root: &Path) -> Result<Vec<WorkspacePack
     }
 
     Ok(workspace_packages)
+}
+
+fn push_path_dependency(
+    metadata: &mut Value,
+    source_name: &str,
+    dependency_name: &str,
+    path: &Path,
+) {
+    let packages = metadata
+        .get_mut("packages")
+        .and_then(Value::as_array_mut)
+        .expect("metadata packages");
+    let source = packages
+        .iter_mut()
+        .find(|package| package.get("name").and_then(Value::as_str) == Some(source_name))
+        .expect("source package");
+    source
+        .get_mut("dependencies")
+        .and_then(Value::as_array_mut)
+        .expect("source dependencies")
+        .push(json!({
+            "name": dependency_name,
+            "source": null,
+            "req": "*",
+            "kind": null,
+            "rename": null,
+            "optional": false,
+            "uses_default_features": true,
+            "features": [],
+            "target": null,
+            "registry": null,
+            "path": path.to_string_lossy(),
+        }));
+}
+
+fn push_synthetic_workspace_package(
+    metadata: &mut Value,
+    root: &Path,
+    name: &str,
+    manifest_rel: &str,
+    category: &str,
+) {
+    let manifest_path = root.join(manifest_rel);
+    let package_id = format!("path+file://{}#{name}@0.0.0", manifest_path.display());
+    metadata
+        .get_mut("workspace_members")
+        .and_then(Value::as_array_mut)
+        .expect("workspace members")
+        .push(json!(package_id.clone()));
+    metadata
+        .get_mut("packages")
+        .and_then(Value::as_array_mut)
+        .expect("metadata packages")
+        .push(json!({
+            "name": name,
+            "id": package_id,
+            "manifest_path": manifest_path.to_string_lossy(),
+            "metadata": {
+                "mfm": {
+                    "category": category,
+                },
+            },
+            "dependencies": [],
+        }));
 }
 
 fn validate_workspace_category_paths(packages: &[WorkspacePackage]) -> Result<(), String> {

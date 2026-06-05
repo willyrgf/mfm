@@ -1751,6 +1751,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "mfm-adapter-contracts"
+version = "0.1.0"
+dependencies = [
+ "mfm-canonical",
+ "mfm-capabilities",
+ "mfm-evm-capabilities",
+ "mfm-ids",
+ "thiserror",
+]
+
+[[package]]
 name = "mfm-app"
 version = "0.1.0"
 dependencies = [
