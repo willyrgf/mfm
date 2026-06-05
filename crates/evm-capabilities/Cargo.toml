@@ -1,0 +1,18 @@
+[package]
+name = "mfm-evm-capabilities"
+version = "0.1.0"
+edition = "2021"
+description = "Reusable EVM capability contracts for MFM"
+repository = "https://github.com/willyrgf/mfm"
+license = "MIT"
+
+[package.metadata.mfm]
+category = "capability-contract"
+
+[dependencies]
+alloy-primitives = { workspace = true, features = ["serde"] }
+thiserror = { workspace = true }
+
+mfm-canonical = { path = "../kernel/canonical" }
+mfm-capabilities = { path = "../kernel/capabilities" }
+mfm-ids = { path = "../kernel/ids" }
