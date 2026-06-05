@@ -2035,6 +2035,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "mfm-op-evm-contract-lifecycle"
+version = "0.1.0"
+dependencies = [
+ "mfm-canonical",
+ "mfm-certify",
+ "mfm-evm-contract-config",
+ "mfm-evm-contract-model",
+ "mfm-ids",
+ "mfm-program",
+ "mfm-program-derive",
+ "mfm-spec",
+ "mfm-state-evm-contracts",
+ "mfm-values",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "trybuild",
+]
+
+[[package]]
 name = "mfm-op-portfolio-tracker"
 version = "0.1.0"
 dependencies = [

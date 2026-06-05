@@ -45,6 +45,7 @@ members = [
 	"crates/transports/evm",
 	"crates/transports/portfolio",
 	"crates/transports/proof",
+	"crates/ops/evm-contract-lifecycle-op",
 	"crates/ops/portfolio-tracker-op",
 	"crates/ops/proof-op",
 	"crates/tools/publish-docs",
