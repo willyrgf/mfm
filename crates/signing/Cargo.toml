@@ -1,0 +1,23 @@
+[package]
+name = "mfm-signing"
+version = "0.1.0"
+edition = "2021"
+description = "Generic signer capability contracts for MFM"
+repository = "https://github.com/willyrgf/mfm"
+license = "MIT"
+
+[package.metadata.mfm]
+category = "signer-contract"
+
+[dependencies]
+serde = { workspace = true }
+
+mfm-canonical = { path = "../kernel/canonical" }
+mfm-capabilities = { path = "../kernel/capabilities" }
+mfm-ids = { path = "../kernel/ids" }
+
+[dev-dependencies]
+mfm-program-derive = { path = "../kernel/program-derive" }
+mfm-values = { path = "../kernel/values" }
+serde = { workspace = true }
+trybuild = "1.0"

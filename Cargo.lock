@@ -2163,6 +2163,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "mfm-signing"
+version = "0.1.0"
+dependencies = [
+ "mfm-canonical",
+ "mfm-capabilities",
+ "mfm-ids",
+ "mfm-program-derive",
+ "mfm-values",
+ "serde",
+ "trybuild",
+]
+
+[[package]]
 name = "mfm-spec"
 version = "0.1.0"
 dependencies = [
