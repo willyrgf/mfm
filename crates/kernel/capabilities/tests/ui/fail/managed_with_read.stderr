@@ -4,7 +4,11 @@ error[E0277]: the trait bound `ReadExternalRole: mfm_capabilities::private::Mana
 7 |     assert_capability_set::<mfm_capabilities::ManagedPlatformWrite, (ReadCap,)>();
   |                                                                     ^^^^^^^^^^ the trait `mfm_capabilities::private::ManagedPlatformWriteEffectRole` is not implemented for `ReadExternalRole`
   |
-  = help: the trait `mfm_capabilities::private::ManagedPlatformWriteEffectRole` is implemented for `ManagedPlatformWriteRole`
+help: the trait `mfm_capabilities::private::ManagedPlatformWriteEffectRole` is implemented for `ManagedPlatformWriteRole`
+ --> src/lib.rs
+  |
+  |     impl ManagedPlatformWriteEffectRole for ManagedPlatformWriteRole {}
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
   = note: required for `(ReadCap,)` to implement `mfm_capabilities::private::CapabilitySetForSealed<mfm_capabilities::ManagedPlatformWrite>`
   = note: required for `(ReadCap,)` to implement `CapabilitySetFor<mfm_capabilities::ManagedPlatformWrite>`
 note: required by a bound in `assert_capability_set`

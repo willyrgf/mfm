@@ -5,7 +5,7 @@ error[E0061]: this method takes 4 arguments but 3 arguments were supplied
    |               ^^^^^^---------------------------------------------
    |                     |                                    |
    |                     |                                    expected `&mut OperationExpansion<'_, '_>`, found `&mut ScopeBuilder<'_, '_>`
-   |                     argument #4 of type `OperationExpansionDispatch<TryOperation>` is missing
+   |                     argument #4 of type `mfm_program::OperationExpansionDispatch<TryOperation>` is missing
    |
    = note: expected mutable reference `&mut OperationExpansion<'_, '_>`
               found mutable reference `&mut ScopeBuilder<'program, 'scope>`
@@ -17,5 +17,5 @@ note: method defined here
 help: provide the argument
    |
 12 -     operation.expand(TryConfig { multiplier: 2 }, input, builder)
-12 +     operation.expand(TryConfig { multiplier: 2 }, input, /* &mut OperationExpansion<'_, '_> */, /* OperationExpansionDispatch<TryOperation> */)
+12 +     operation.expand(TryConfig { multiplier: 2 }, input, /* &mut OperationExpansion<'_, '_> */, /* mfm_program::OperationExpansionDispatch<TryOperation> */)
    |

@@ -5,7 +5,11 @@ error[E0277]: the trait bound `mfm_capabilities::private::ZeroMutationAuthoritie
   |                                                                ^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
   |
   = help: the trait `mfm_capabilities::private::ExactlyOneMutationAuthorityCount` is not implemented for `mfm_capabilities::private::ZeroMutationAuthorities`
-  = help: the trait `mfm_capabilities::private::ExactlyOneMutationAuthorityCount` is implemented for `mfm_capabilities::private::OneMutationAuthority`
+help: the trait `mfm_capabilities::private::ExactlyOneMutationAuthorityCount` is implemented for `mfm_capabilities::private::OneMutationAuthority`
+ --> src/lib.rs
+  |
+  |     impl ExactlyOneMutationAuthorityCount for OneMutationAuthority {}
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
   = note: required for `(ReadExternalRole, SupportRole)` to implement `mfm_capabilities::private::ExactlyOneMutationAuthorityTuple`
   = note: required for `(ReadExternalRole, SupportRole)` to implement `mfm_capabilities::private::ExactlyOneMutationAuthority`
   = note: required for `(ReadCap, SupportCap)` to implement `mfm_capabilities::private::CapabilitySetForSealed<mfm_capabilities::ApplySideEffect>`

@@ -4,10 +4,17 @@ error[E0277]: the trait bound `std::string::String: mfm_values::MfmDefault` is n
 7 |     name: String,
   |           ^^^^^^ the trait `mfm_values::MfmDefault` is not implemented for `std::string::String`
   |
-  = help: the following other types implement trait `mfm_values::MfmDefault`:
-            BTreeMap<std::string::String, V>
-            std::option::Option<T>
-            std::vec::Vec<T>
+help: the following other types implement trait `mfm_values::MfmDefault`
+ --> $WORKSPACE/crates/kernel/values/src/lib.rs
+  |
+  | impl<T> MfmDefault for Option<T> {}
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `std::option::Option<T>`
+  |
+  | impl<T> MfmDefault for Vec<T> {}
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `std::vec::Vec<T>`
+  |
+  | impl<V> MfmDefault for BTreeMap<String, V> {}
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `BTreeMap<std::string::String, V>`
 note: required by a bound in `assert_mfm_default`
  --> tests/ui/fail/serde_default_requires_mfm_default.rs:4:41
   |

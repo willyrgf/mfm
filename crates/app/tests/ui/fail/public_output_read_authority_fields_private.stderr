@@ -3,3 +3,5 @@ error: cannot construct `PublicOutputReadAuthority` with struct literal syntax d
   |
 2 |     let _ = mfm_app::PublicOutputReadAuthority {};
   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: private fields `run_id`, `public_schema_id`, `event_id`, `rendered_digest`, `rendered_artifact_id` and `payload` that were not provided

@@ -4,7 +4,11 @@ error[E0277]: the trait bound `Handle<'_, '_, TryValue>: mfm_program::PublicOutp
 9 |             root.bind_public_outputs(mfm_program::PublicOutputKey::new("terminal")?, &handle)
   |                  ------------------- required by a bound introduced by this call     ^^^^^^^ the trait `mfm_program::PublicOutputs<'_, '_>` is not implemented for `Handle<'_, '_, TryValue>`
   |
-  = help: the trait `mfm_program::PublicOutputs<'p, 's>` is implemented for `TryPublicOutputs<'p, 's>`
+help: the trait `mfm_program::PublicOutputs<'p, 's>` is implemented for `TryPublicOutputs<'p, 's>`
+ --> tests/ui/fail/../support/types.rs
+  |
+  | #[derive(PublicOutputs)]
+  |          ^^^^^^^^^^^^^
 note: required by a bound in `RootBuilder::<'program, 'scope>::bind_public_outputs`
  --> src/lib.rs
   |
@@ -13,3 +17,4 @@ note: required by a bound in `RootBuilder::<'program, 'scope>::bind_public_outpu
 ...
   |         P: PublicOutputs<'program, 'scope>,
   |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `RootBuilder::<'program, 'scope>::bind_public_outputs`
+  = note: this error originates in the derive macro `PublicOutputs` (in Nightly builds, run with -Z macro-backtrace for more info)

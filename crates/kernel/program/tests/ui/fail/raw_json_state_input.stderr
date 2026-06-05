@@ -21,9 +21,14 @@ error[E0277]: the trait bound `serde_json::Value: mfm_values::StateInput` is not
 6 |         serde_json::Value,
   |         ^^^^^^^^^^^^^^^^^ the trait `mfm_values::MfmValue` is not implemented for `serde_json::Value`
   |
-  = help: the following other types implement trait `mfm_values::MfmValue`:
-            mfm_values::ArtifactRef<T>
-            mfm_values::MaybeValue<T>
+help: the following other types implement trait `mfm_values::MfmValue`
+ --> $WORKSPACE/crates/kernel/values/src/lib.rs
+  |
+  | impl<T: MfmValue> MfmValue for MaybeValue<T> {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `mfm_values::MaybeValue<T>`
+...
+  | impl<T: MfmValue> MfmValue for ArtifactRef<T> {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `mfm_values::ArtifactRef<T>`
   = note: required for `serde_json::Value` to implement `mfm_values::StateInput`
 note: required by a bound in `into_binding`
  --> src/lib.rs
@@ -45,9 +50,14 @@ error[E0277]: the trait bound `serde_json::Value: mfm_values::MfmValue` is not s
 7 | |     >>::into_binding(value);
   | |___________________________^ the trait `mfm_values::MfmValue` is not implemented for `serde_json::Value`
   |
-  = help: the following other types implement trait `mfm_values::MfmValue`:
-            mfm_values::ArtifactRef<T>
-            mfm_values::MaybeValue<T>
+help: the following other types implement trait `mfm_values::MfmValue`
+ --> $WORKSPACE/crates/kernel/values/src/lib.rs
+  |
+  | impl<T: MfmValue> MfmValue for MaybeValue<T> {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `mfm_values::MaybeValue<T>`
+...
+  | impl<T: MfmValue> MfmValue for ArtifactRef<T> {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `mfm_values::ArtifactRef<T>`
   = note: required for `serde_json::Value` to implement `mfm_values::StateInput`
 note: required by a bound in `InputBinding`
  --> src/lib.rs

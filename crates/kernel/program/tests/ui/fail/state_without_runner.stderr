@@ -9,7 +9,11 @@ help: the trait `PureState` is not implemented for `StateWithoutRunner`
    |
  6 | struct StateWithoutRunner;
    | ^^^^^^^^^^^^^^^^^^^^^^^^^
-   = help: the trait `PureState` is implemented for `TryPureState`
+help: the trait `PureState` is implemented for `TryPureState`
+  --> tests/ui/fail/../support/types.rs
+   |
+   | impl mfm_program::PureState for TryPureState {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    = note: required for `mfm_capabilities::Pure` to implement `EffectRunner<StateWithoutRunner>`
 note: required by a bound in `StateRegistryBuilder::register`
   --> src/lib.rs
@@ -31,7 +35,11 @@ help: the trait `PureState` is not implemented for `StateWithoutRunner`
    |
  6 | struct StateWithoutRunner;
    | ^^^^^^^^^^^^^^^^^^^^^^^^^
-   = help: the trait `PureState` is implemented for `TryPureState`
+help: the trait `PureState` is implemented for `TryPureState`
+  --> tests/ui/fail/../support/types.rs
+   |
+   | impl mfm_program::PureState for TryPureState {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    = note: required for `mfm_capabilities::Pure` to implement `EffectRunner<StateWithoutRunner>`
 note: required by a bound in `ScopeBuilder::<'program, 'scope>::state`
   --> src/lib.rs

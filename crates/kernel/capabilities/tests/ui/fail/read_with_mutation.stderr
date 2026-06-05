@@ -4,9 +4,14 @@ error[E0277]: the trait bound `ExternalMutationAuthorityRole: mfm_capabilities::
 7 |     assert_capability_set::<mfm_capabilities::ReadExternal, (MutationCap,)>();
   |                                                             ^^^^^^^^^^^^^^ the trait `mfm_capabilities::private::ReadEffectRole` is not implemented for `ExternalMutationAuthorityRole`
   |
-  = help: the following other types implement trait `mfm_capabilities::private::ReadEffectRole`:
-            ReadExternalRole
-            SupportRole
+help: the following other types implement trait `mfm_capabilities::private::ReadEffectRole`
+ --> src/lib.rs
+  |
+  |     impl ReadEffectRole for ReadExternalRole {}
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `ReadExternalRole`
+  |
+  |     impl ReadEffectRole for SupportRole {}
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `SupportRole`
   = note: required for `(MutationCap,)` to implement `mfm_capabilities::private::CapabilitySetForSealed<mfm_capabilities::ReadExternal>`
   = note: required for `(MutationCap,)` to implement `CapabilitySetFor<mfm_capabilities::ReadExternal>`
 note: required by a bound in `assert_capability_set`
