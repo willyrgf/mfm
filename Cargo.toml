@@ -25,6 +25,7 @@ members = [
 	"crates/kernel/store",
 	"crates/kernel/values",
 	"crates/evm-dcv-model",
+	"crates/evm-contract-model",
 	"crates/evm-core",
 	"crates/evm-capabilities",
 	"crates/artifact-capabilities",

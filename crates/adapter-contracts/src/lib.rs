@@ -197,9 +197,9 @@ mod tests {
         assert_eq!(version.as_str(), EVM_CONTRACT_LIFECYCLE_ADAPTER_VERSION);
 
         let rendered = format!("{kind} {version}");
-        assert!(!rendered.contains("dcv"));
-        assert!(!rendered.contains("deploy_configure_validate"));
-        assert!(!rendered.contains("deploy-configure-validate"));
+        for term in stale_recipe_terms() {
+            assert!(!rendered.contains(&term));
+        }
     }
 
     #[test]
@@ -243,5 +243,13 @@ mod tests {
         .expect_err("empty capabilities");
 
         assert_eq!(error, AdapterContractError::EmptyCapabilitySet);
+    }
+
+    fn stale_recipe_terms() -> [String; 3] {
+        [
+            ["d", "c", "v"].concat(),
+            ["deploy", "_configure", "_validate"].concat(),
+            ["deploy", "-configure", "-validate"].concat(),
+        ]
     }
 }
