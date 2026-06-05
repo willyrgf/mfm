@@ -28,7 +28,6 @@ const TEMPORARY_CATEGORY_DEPENDENCY_ALLOWLIST: &[(&str, &str)] = &[
     ("mfm-rest-api", "mfm-state-portfolio"),
     ("mfm-rest-api", "mfm-stream-store-postgres"),
     ("mfm-transports-proof", "mfm-collectors-proof"),
-    ("mfm-transports-proof", "mfm-op-proof"),
 ];
 
 const PATH_CATEGORY_EXCEPTIONS: &[(&str, CrateCategory)] = &[
@@ -252,6 +251,27 @@ fn category_dependency_rules_reject_forbidden_binary_edges() {
         error.contains("source_category=binary")
             && error.contains("dependency_category=adapter")
             && error.contains("mfm-adapters-portfolio"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn category_dependency_rules_reject_forbidden_transport_to_operation_edges() {
+    let root = repo_root();
+    let mut metadata = workspace_metadata(&root);
+    push_path_dependency(
+        &mut metadata,
+        "mfm-transports-proof",
+        "mfm-op-proof",
+        &root.join("crates/ops/proof-op"),
+    );
+
+    let error =
+        validate_category_dependency_rules(&metadata, &root).expect_err("fixture must fail");
+    assert!(
+        error.contains("source_category=transport")
+            && error.contains("dependency_category=operation")
+            && error.contains("mfm-op-proof"),
         "unexpected error: {error}"
     );
 }

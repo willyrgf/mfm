@@ -1,7 +1,7 @@
 # mfm-transports-proof
 
-Deterministic typed proof runners and conformance fixture.
+Deterministic typed proof runners and replay verifier.
 
-This crate registers erased typed runners for the certified proof state descriptors and verifies
-the enabled proof implementation against the RFC conformance shape. It intentionally does not
-provide a legacy `proof.*` live-IO namespace.
+This crate registers erased typed runners for certified proof state descriptors and exposes a
+replay verifier for recorded proof side-effect evidence. Operation-aware conformance fixtures live
+outside this transport crate so the transport does not depend on proof workflow planning code.
