@@ -13,23 +13,35 @@ tokio = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter", "fmt", "json"] }
 uuid = { version = "1.0", features = ["v4"] }
 
+mfm-adapters-evm-contracts = { path = "../adapters/evm-contracts" }
+mfm-adapter-contracts = { path = "../adapter-contracts" }
+mfm-artifact-capabilities = { path = "../artifact-capabilities" }
 mfm-artifact-store-fs = { path = "../storages/artifact-store-fs", default-features = false }
 mfm-canonical = { path = "../kernel/canonical" }
+mfm-capabilities = { path = "../kernel/capabilities" }
 mfm-certify = { path = "../kernel/certify" }
 mfm-events = { path = "../kernel/events" }
+mfm-evm-capabilities = { path = "../evm-capabilities" }
+mfm-evm-contract-config = { path = "../evm-contract-config" }
+mfm-evm-contract-model = { path = "../evm-contract-model" }
 mfm-ids = { path = "../kernel/ids" }
+mfm-op-evm-contract-lifecycle = { path = "../ops/evm-contract-lifecycle-op" }
 mfm-op-portfolio-tracker = { path = "../ops/portfolio-tracker-op" }
 mfm-op-proof = { path = "../ops/proof-op" }
+mfm-program = { path = "../kernel/program" }
 mfm-replay = { path = "../kernel/replay" }
 mfm-runtime = { path = "../kernel/runtime" }
+mfm-signers-keystore = { path = "../signers/keystore" }
+mfm-signing = { path = "../signing" }
 mfm-spec = { path = "../kernel/spec" }
+mfm-state-evm-contracts = { path = "../states/evm-contracts" }
 mfm-store = { path = "../kernel/store" }
+mfm-transports-evm = { path = "../transports/evm" }
 mfm-transports-portfolio = { path = "../transports/portfolio" }
 mfm-transports-proof = { path = "../transports/proof" }
+mfm-values = { path = "../kernel/values" }
 
 [dev-dependencies]
-mfm-capabilities = { path = "../kernel/capabilities" }
-mfm-program = { path = "../kernel/program" }
+mfm_core = { path = "../core" }
 mfm-program-derive = { path = "../kernel/program-derive" }
-mfm-values = { path = "../kernel/values" }
 trybuild = "1.0"

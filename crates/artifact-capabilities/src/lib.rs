@@ -158,6 +158,7 @@ impl ArtifactEvidenceExpectation {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum OptionalEvidence<T> {
+    Any,
     Absent,
     Present(T),
 }
@@ -168,6 +169,7 @@ impl<T> OptionalEvidence<T> {
         T: PartialEq,
     {
         match self {
+            Self::Any => true,
             Self::Absent => actual.is_none(),
             Self::Present(expected) => actual.as_ref() == Some(expected),
         }
@@ -234,6 +236,47 @@ impl ArtifactReadRequest {
         }
     }
 
+    /// Creates a request from runtime materialized seed-cell evidence.
+    pub fn from_materialized_seed_cell(
+        artifact_id: ArtifactId,
+        digest: ContentDigest,
+        schema_id: SchemaId,
+        semantic_type_id: SemanticTypeId,
+        seed_id: SeedId,
+    ) -> Self {
+        Self::from_expectation(ArtifactEvidenceExpectation {
+            artifact_id,
+            digest: Some(digest),
+            byte_len: None,
+            media_type: None,
+            schema_id: OptionalEvidence::Present(schema_id),
+            semantic_type_id: OptionalEvidence::Present(semantic_type_id),
+            producer_node_id: OptionalEvidence::Absent,
+            producer_seed_id: OptionalEvidence::Present(seed_id),
+            artifact_role: Some(ArtifactRole::SeedInput),
+        })
+    }
+
+    /// Creates a request from runtime materialized produced-cell evidence.
+    pub fn from_materialized_produced_cell(
+        artifact_id: ArtifactId,
+        digest: ContentDigest,
+        schema_id: SchemaId,
+        semantic_type_id: SemanticTypeId,
+    ) -> Self {
+        Self::from_expectation(ArtifactEvidenceExpectation {
+            artifact_id,
+            digest: Some(digest),
+            byte_len: None,
+            media_type: None,
+            schema_id: OptionalEvidence::Present(schema_id),
+            semantic_type_id: OptionalEvidence::Present(semantic_type_id),
+            producer_node_id: OptionalEvidence::Any,
+            producer_seed_id: OptionalEvidence::Absent,
+            artifact_role: Some(ArtifactRole::StateOutput),
+        })
+    }
+
     /// Creates a request from side-effect artifact projection evidence.
     pub fn from_side_effect_projection(
         artifact: &store::SideEffectArtifactProjection,
@@ -245,8 +288,11 @@ impl ArtifactReadRequest {
             digest: Some(artifact.content_digest.clone()),
             byte_len: None,
             media_type: None,
-            schema_id: optional_exact(artifact.schema_id.clone()),
-            semantic_type_id: OptionalEvidence::Absent,
+            schema_id: match artifact.schema_id.clone() {
+                Some(schema_id) => OptionalEvidence::Present(schema_id),
+                None => OptionalEvidence::Any,
+            },
+            semantic_type_id: OptionalEvidence::Any,
             producer_node_id: OptionalEvidence::Present(producer_node_id),
             producer_seed_id: OptionalEvidence::Absent,
             artifact_role: Some(artifact_role),
@@ -515,6 +561,13 @@ mod tests {
         )
     }
 
+    fn seed_id(name: &str) -> SeedId {
+        SeedId::from_digest(
+            DigestAlgorithm::Sha256JcsV1,
+            sha256_digest_bytes(name.as_bytes()),
+        )
+    }
+
     fn evidence(bytes: &[u8]) -> ArtifactEvidenceRef {
         ArtifactEvidenceRef {
             artifact_id: artifact_id(bytes),
@@ -581,6 +634,85 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn materialized_seed_cell_request_checks_seed_role_schema_and_semantic_identity() {
+        let bytes = br#"{"seed":true}"#.to_vec();
+        let seed_id = seed_id("configured");
+        let request = ArtifactReadRequest::from_materialized_seed_cell(
+            artifact_id(&bytes),
+            digest(&bytes),
+            schema_id("mfm.test.seed_schema"),
+            semantic_id("seed_value"),
+            seed_id.clone(),
+        );
+        let evidence = ArtifactEvidenceRef {
+            artifact_id: artifact_id(&bytes),
+            digest: digest(&bytes),
+            byte_len: bytes.len() as u64,
+            media_type: MediaType::new("application/json").expect("media type"),
+            schema_id: Some(schema_id("mfm.test.seed_schema")),
+            semantic_type_id: Some(semantic_id("seed_value")),
+            producer_node_id: None,
+            producer_seed_id: Some(seed_id),
+            artifact_role: ArtifactRole::SeedInput,
+        };
+
+        VerifiedArtifactBytes::new(bytes, evidence, &request).expect("verified seed cell");
+    }
+
+    #[test]
+    fn materialized_produced_cell_request_checks_state_output_schema_and_semantic_identity() {
+        let bytes = br#"{"produced":true}"#.to_vec();
+        let request = ArtifactReadRequest::from_materialized_produced_cell(
+            artifact_id(&bytes),
+            digest(&bytes),
+            schema_id("mfm.test.output_schema"),
+            semantic_id("output_value"),
+        );
+        let evidence = ArtifactEvidenceRef {
+            artifact_id: artifact_id(&bytes),
+            digest: digest(&bytes),
+            byte_len: bytes.len() as u64,
+            media_type: MediaType::new("application/json").expect("media type"),
+            schema_id: Some(schema_id("mfm.test.output_schema")),
+            semantic_type_id: Some(semantic_id("output_value")),
+            producer_node_id: Some(node_id("producer")),
+            producer_seed_id: None,
+            artifact_role: ArtifactRole::StateOutput,
+        };
+
+        VerifiedArtifactBytes::new(bytes, evidence, &request).expect("verified produced cell");
+    }
+
+    #[test]
+    fn side_effect_projection_request_accepts_unprojected_schema_and_semantic_identity() {
+        let bytes = br#"{"prepared":true}"#.to_vec();
+        let projection = store::SideEffectArtifactProjection {
+            artifact_id: artifact_id(&bytes),
+            content_digest: digest(&bytes),
+            schema_id: None,
+        };
+        let request = ArtifactReadRequest::from_side_effect_projection(
+            &projection,
+            ArtifactRole::PreparedInvocation,
+            node_id("producer"),
+        );
+        let evidence = ArtifactEvidenceRef {
+            artifact_id: artifact_id(&bytes),
+            digest: digest(&bytes),
+            byte_len: bytes.len() as u64,
+            media_type: MediaType::new("application/json").expect("media type"),
+            schema_id: Some(schema_id("mfm.test.prepared_schema")),
+            semantic_type_id: Some(semantic_id("prepared_value")),
+            producer_node_id: Some(node_id("producer")),
+            producer_seed_id: None,
+            artifact_role: ArtifactRole::PreparedInvocation,
+        };
+
+        VerifiedArtifactBytes::new(bytes, evidence, &request)
+            .expect("verified prepared side-effect artifact");
     }
 
     #[test]

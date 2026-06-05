@@ -21,15 +21,16 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
+use std::collections::BTreeMap;
 use std::fmt;
 
-use alloy_primitives::{Address, B256};
+use alloy_primitives::{keccak256, Address, B256};
 use mfm_adapter_contracts::evm_contract_lifecycle_adapter_binding;
 use mfm_artifact_capabilities::{
     ArtifactEvidenceRef as CapabilityArtifactEvidenceRef, ArtifactReadProvider, ArtifactReadRequest,
 };
 use mfm_canonical::sha256_digest_bytes;
-use mfm_events::v1 as events;
+use mfm_events::v1::{self as events, side_effect};
 use mfm_evm_capabilities::{
     EvmBlockSelector, EvmCallReadProvider, EvmCallReadRequest, EvmChainIdentityProvider,
     EvmChainIdentityRequest, EvmFeeReadProvider, EvmFeeReadRequest, EvmGasEstimateProvider,
@@ -48,6 +49,7 @@ use mfm_evm_contract_model::{
     LifecycleArtifactEvidenceRef, ReadAssertionConfig, ValidationEventResult, ValidationReadResult,
 };
 use mfm_evm_core::hex::bytes_to_hex_prefixed;
+use mfm_evm_core::rlp::{rlp_encode_list, u64_to_min_be};
 use mfm_evm_core::tx::{parse_address, parse_u128_quantity, Eip1559TxToSign, LegacyTxToSign};
 use mfm_evm_signing::EvmSigningRequest;
 use mfm_ids::{ContentDigest, DigestAlgorithm, SchemaId};
@@ -58,9 +60,9 @@ use mfm_signing::{PublicKeyBytes, SignerRef, SigningProvider};
 use mfm_state_evm_contracts::{
     ConfigureContractInput, ConfigureContractState, ContractConfigureConfirmation,
     ContractConfigureIntent, ContractDeployConfirmation, ContractDeployIntent,
-    ContractTransactionReceipt, ContractTransactionSubmission, ContractValidationReadRequest,
-    ContractValidationReadResponse, DeployContractState, ValidateContractInput,
-    ValidateContractState,
+    ContractTransactionReceipt, ContractTransactionReceipts, ContractTransactionSubmission,
+    ContractTransactionSubmissions, ContractValidationReadRequest, ContractValidationReadResponse,
+    DeployContractState, ValidateContractInput, ValidateContractState,
 };
 use mfm_values::MfmValue;
 use serde::{Deserialize, Serialize};
@@ -384,6 +386,75 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
             tx_inputs,
         )
         .await
+    }
+
+    /// Reconstructs deploy signing requests from persisted prepared evidence without live reads.
+    pub fn reconstruct_deploy_invocation(
+        &self,
+        config: &DeployPhaseConfig,
+        intent: &ContractDeployIntent,
+        evidence: &PreparedContractInvocation,
+    ) -> Result<PreparedContractMutation> {
+        let expected = DeployContractState::new(config.clone())
+            .map_err(state_error)?
+            .prepare_intent(&())
+            .map_err(state_runtime_error)?;
+        if &expected != intent {
+            return Err(EvmContractAdapterError::IntentMismatch);
+        }
+        reconstruct_prepared_mutation(
+            evidence,
+            ContractMutationPhase::Deploy,
+            config.network().network_id(),
+            config.network().expected_chain_id(),
+            config
+                .signer()
+                .signer_ref()
+                .map_err(EvmContractAdapterError::Model)?,
+            config
+                .signer()
+                .expected_signer_address()
+                .map_err(EvmContractAdapterError::Model)?,
+            config.signer().expected_signer_address_str(),
+            vec![PreparedTransactionInput {
+                to: None,
+                value_wei: parse_optional_wei(config.value_wei())?,
+                data: deploy_data(config)?,
+            }],
+        )
+    }
+
+    /// Reconstructs configure signing requests from persisted prepared evidence without live reads.
+    pub fn reconstruct_configure_invocation(
+        &self,
+        config: &ConfigurePhaseConfig,
+        input: &ConfigureContractInput,
+        intent: &ContractConfigureIntent,
+        evidence: &PreparedContractInvocation,
+    ) -> Result<PreparedContractMutation> {
+        let expected = ConfigureContractState::new(config.clone())
+            .map_err(state_error)?
+            .prepare_intent(input)
+            .map_err(state_runtime_error)?;
+        if &expected != intent {
+            return Err(EvmContractAdapterError::IntentMismatch);
+        }
+        reconstruct_prepared_mutation(
+            evidence,
+            ContractMutationPhase::Configure,
+            config.network().network_id(),
+            config.network().expected_chain_id(),
+            config
+                .signer()
+                .signer_ref()
+                .map_err(EvmContractAdapterError::Model)?,
+            config
+                .signer()
+                .expected_signer_address()
+                .map_err(EvmContractAdapterError::Model)?,
+            config.signer().expected_signer_address_str(),
+            configure_transaction_inputs(config, &input.deployed.contract_address)?,
+        )
     }
 
     /// Signs and submits all prepared transactions.
@@ -872,7 +943,7 @@ impl replay::SideEffectReplayVerifier for EvmContractLifecycleReplayVerifier {
         self.verify_adapter_binding(&input.intent)?;
         ensure_schema(
             &input.submission.submission.submission_schema_id,
-            &ContractTransactionSubmission::schema_id().map_err(replay_value_error)?,
+            &ContractTransactionSubmissions::schema_id().map_err(replay_value_error)?,
             "submission",
         )
     }
@@ -881,7 +952,7 @@ impl replay::SideEffectReplayVerifier for EvmContractLifecycleReplayVerifier {
         self.verify_adapter_binding(&input.intent)?;
         ensure_schema(
             &input.receipt.receipt.receipt_schema_id,
-            &ContractTransactionReceipt::schema_id().map_err(replay_value_error)?,
+            &ContractTransactionReceipts::schema_id().map_err(replay_value_error)?,
             "receipt",
         )
     }
@@ -909,6 +980,113 @@ impl replay::SideEffectReplayVerifier for EvmContractLifecycleReplayVerifier {
 pub fn replay_verifier_id() -> Result<events::ReplayVerifierId> {
     events::ReplayVerifierId::new(REPLAY_VERIFIER_ID)
         .map_err(|error| EvmContractAdapterError::Identity(error.to_string()))
+}
+
+/// Verifies contract lifecycle side-effect replay evidence when present in a broker stream.
+///
+/// Returns `Ok(false)` when the stream contains no contract lifecycle side-effect intent.
+pub fn verify_contract_lifecycle_replay(broker: &replay::ReplayBroker) -> replay::Result<bool> {
+    let mut frames =
+        BTreeMap::<(events::SideEffectLedgerKey, u32), ContractLifecycleReplayFrames>::new();
+    for event in broker.events() {
+        match event.payload() {
+            events::KernelEventPayload::SideEffectIntentPersisted(payload)
+                if is_contract_lifecycle_intent(payload)? =>
+            {
+                let key = (payload.ledger_key.clone(), payload.invocation_epoch);
+                if frames
+                    .insert(
+                        key,
+                        ContractLifecycleReplayFrames {
+                            intent: payload.clone(),
+                            submission: None,
+                            receipt: None,
+                            confirmation: None,
+                        },
+                    )
+                    .is_some()
+                {
+                    return Err(replay::ReplayError::new(
+                        replay::ReplayErrorKind::SideEffectMismatch,
+                        "duplicate contract lifecycle side-effect intent",
+                    ));
+                }
+            }
+            events::KernelEventPayload::SideEffectSubmissionObserved(payload) => {
+                let key = (payload.ledger_key.clone(), payload.invocation_epoch);
+                if let Some(frames) = frames.get_mut(&key) {
+                    frames.submission = Some(payload.clone());
+                }
+            }
+            events::KernelEventPayload::SideEffectReceiptObserved(payload) => {
+                let key = (payload.ledger_key.clone(), payload.invocation_epoch);
+                if let Some(frames) = frames.get_mut(&key) {
+                    frames.receipt = Some(payload.clone());
+                }
+            }
+            events::KernelEventPayload::SideEffectConfirmationObserved(payload) => {
+                let key = (payload.ledger_key.clone(), payload.invocation_epoch);
+                if let Some(frames) = frames.get_mut(&key) {
+                    frames.confirmation = Some(payload.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+    if frames.is_empty() {
+        return Ok(false);
+    }
+    let verifier =
+        EvmContractLifecycleReplayVerifier::new().map_err(replay_contract_adapter_error)?;
+    for frames in frames.values() {
+        verify_contract_lifecycle_replay_frames(broker, &verifier, frames)?;
+    }
+    Ok(true)
+}
+
+fn verify_contract_lifecycle_replay_frames(
+    broker: &replay::ReplayBroker,
+    verifier: &EvmContractLifecycleReplayVerifier,
+    frames: &ContractLifecycleReplayFrames,
+) -> replay::Result<()> {
+    let Some(submission) = &frames.submission else {
+        return Err(contract_lifecycle_side_effect_missing("submission"));
+    };
+    let Some(receipt) = &frames.receipt else {
+        return Err(contract_lifecycle_side_effect_missing("receipt"));
+    };
+    let Some(confirmation) = &frames.confirmation else {
+        return Err(contract_lifecycle_side_effect_missing("confirmation"));
+    };
+
+    broker.verify_side_effect_submission(
+        &side_effect_replay_request(
+            &frames.intent,
+            submission.submission_schema_id.clone(),
+            submission.submission_hash.clone(),
+            None,
+        ),
+        verifier,
+    )?;
+    broker.verify_side_effect_receipt(
+        &side_effect_replay_request(
+            &frames.intent,
+            receipt.receipt_schema_id.clone(),
+            receipt.receipt_hash.clone(),
+            Some(receipt.replay_verifier_id.clone()),
+        ),
+        verifier,
+    )?;
+    broker.verify_side_effect_confirmation(
+        &side_effect_replay_request(
+            &frames.intent,
+            confirmation.confirmation_schema_id.clone(),
+            confirmation.confirmation_hash.clone(),
+            Some(confirmation.replay_verifier_id.clone()),
+        ),
+        verifier,
+    )?;
+    Ok(())
 }
 
 /// Reads and decodes prepared invocation evidence through the artifact-read contract.
@@ -941,6 +1119,33 @@ pub fn lifecycle_evidence_ref(
     )
 }
 
+/// Derives the deployed contract address from public prepared deploy evidence.
+pub fn deploy_contract_address_from_prepared(
+    prepared: &PreparedContractInvocation,
+) -> Result<String> {
+    ensure_prepared_invocation_public(prepared)?;
+    if prepared.phase != ContractMutationPhase::Deploy || prepared.transactions.len() != 1 {
+        return Err(EvmContractAdapterError::InvalidPreparedInvocation);
+    }
+    let transaction = &prepared.transactions[0];
+    if transaction.to_address.is_some() {
+        return Err(EvmContractAdapterError::InvalidPreparedInvocation);
+    }
+    let signer = parse_address(&prepared.expected_signer_address, "expected_signer_address")
+        .map_err(|error| EvmContractAdapterError::Model(error.message))?;
+    normalize_address(&format!(
+        "{:?}",
+        created_contract_address(signer, transaction.nonce)
+    ))
+    .map_err(EvmContractAdapterError::Model)
+}
+
+fn created_contract_address(sender: Address, nonce: u64) -> Address {
+    let encoded = rlp_encode_list(&[sender.as_slice().to_vec(), u64_to_min_be(nonce)]);
+    let hash = keccak256(encoded);
+    Address::from_slice(&hash.as_slice()[12..])
+}
+
 /// Validates that prepared invocation evidence has no live or secret-bearing surface.
 pub fn ensure_prepared_invocation_public(prepared: &PreparedContractInvocation) -> Result<()> {
     let json = serde_json::to_string(prepared)
@@ -951,6 +1156,59 @@ pub fn ensure_prepared_invocation_public(prepared: &PreparedContractInvocation) 
         }
     }
     Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct ContractLifecycleReplayFrames {
+    intent: side_effect::IntentPersisted,
+    submission: Option<side_effect::SubmissionObserved>,
+    receipt: Option<side_effect::ReceiptObserved>,
+    confirmation: Option<side_effect::ConfirmationObserved>,
+}
+
+fn is_contract_lifecycle_intent(intent: &side_effect::IntentPersisted) -> replay::Result<bool> {
+    let binding = evm_contract_lifecycle_adapter_binding().map_err(replay_adapter_error)?;
+    Ok(intent.adapter_kind == *binding.adapter_kind()
+        && intent.adapter_version == *binding.adapter_version())
+}
+
+fn side_effect_replay_request(
+    intent: &side_effect::IntentPersisted,
+    evidence_schema_id: SchemaId,
+    evidence_hash: ContentDigest,
+    replay_verifier_id: Option<events::ReplayVerifierId>,
+) -> replay::SideEffectEvidenceReplayRequest {
+    replay::SideEffectEvidenceReplayRequest {
+        ledger_key: intent.ledger_key.clone(),
+        node_id: intent.node_id.clone(),
+        attempt_id: intent.attempt_id.clone(),
+        invocation_epoch: intent.invocation_epoch,
+        intent_schema_id: intent.intent_schema_id.clone(),
+        intent_hash: intent.intent_hash.clone(),
+        idempotency_input_schema_id: intent.idempotency_input_schema_id.clone(),
+        idempotency_input_hash: intent.idempotency_input_hash.clone(),
+        capability_kind: intent.capability_kind.clone(),
+        capability_version: intent.capability_version.clone(),
+        adapter_kind: intent.adapter_kind.clone(),
+        adapter_version: intent.adapter_version.clone(),
+        evidence_schema_id,
+        evidence_hash,
+        replay_verifier_id,
+    }
+}
+
+fn contract_lifecycle_side_effect_missing(phase: &str) -> replay::ReplayError {
+    replay::ReplayError::new(
+        replay::ReplayErrorKind::SideEffectMissing,
+        format!("missing contract lifecycle {phase} evidence"),
+    )
+}
+
+fn replay_contract_adapter_error(error: EvmContractAdapterError) -> replay::ReplayError {
+    replay::ReplayError::new(
+        replay::ReplayErrorKind::SideEffectMismatch,
+        error.to_string(),
+    )
 }
 
 fn deploy_data(config: &DeployPhaseConfig) -> Result<Vec<u8>> {
@@ -994,6 +1252,113 @@ fn configure_transaction_input(
         value_wei: parse_optional_wei(call.value_wei.as_deref())?,
         data,
     })
+}
+
+fn reconstruct_prepared_mutation(
+    evidence: &PreparedContractInvocation,
+    phase: ContractMutationPhase,
+    network_id: &str,
+    expected_chain_id: u64,
+    signer_ref: SignerRef,
+    expected_signer: Address,
+    expected_signer_text: &str,
+    tx_inputs: Vec<PreparedTransactionInput>,
+) -> Result<PreparedContractMutation> {
+    ensure_prepared_invocation_public(evidence)?;
+    let expected_signer_address =
+        normalize_address(expected_signer_text).map_err(EvmContractAdapterError::Model)?;
+    if evidence.phase != phase
+        || evidence.network_id != network_id
+        || evidence.expected_chain_id != expected_chain_id
+        || evidence.signer_ref != signer_ref.to_string()
+        || evidence.expected_signer_address != expected_signer_address
+        || evidence.transactions.len() != tx_inputs.len()
+    {
+        return Err(EvmContractAdapterError::InvalidPreparedInvocation);
+    }
+
+    let mut signing_requests = Vec::with_capacity(tx_inputs.len());
+    for (index, (input, transaction)) in tx_inputs
+        .into_iter()
+        .zip(evidence.transactions.iter())
+        .enumerate()
+    {
+        let expected_to = input.to.map(|address| format!("{address:?}"));
+        if transaction.index != index as u64
+            || transaction.chain_id != expected_chain_id
+            || transaction.to_address != expected_to
+            || transaction.value_wei != input.value_wei.to_string()
+            || transaction.data_digest != digest_bytes(&input.data).to_string()
+            || transaction.data_len != input.data.len() as u64
+        {
+            return Err(EvmContractAdapterError::InvalidPreparedInvocation);
+        }
+
+        let signing_request = match transaction.style {
+            PreparedContractTransactionStyle::Eip1559 => {
+                let max_fee_per_gas = required_prepared_quantity(
+                    transaction.max_fee_per_gas.as_deref(),
+                    "max_fee_per_gas",
+                )?;
+                let max_priority_fee_per_gas = required_prepared_quantity(
+                    transaction.max_priority_fee_per_gas.as_deref(),
+                    "max_priority_fee_per_gas",
+                )?;
+                if transaction.gas_price.is_some() {
+                    return Err(EvmContractAdapterError::InvalidPreparedInvocation);
+                }
+                EvmSigningRequest::eip1559(
+                    signer_ref.clone(),
+                    Eip1559TxToSign {
+                        to: input.to,
+                        value_wei: input.value_wei,
+                        chain_id: expected_chain_id,
+                        nonce: transaction.nonce,
+                        max_fee_per_gas,
+                        max_priority_fee_per_gas,
+                        gas_limit: transaction.gas_limit,
+                        data: input.data,
+                    },
+                    expected_signer,
+                )
+                .map_err(EvmContractAdapterError::EvmSigning)?
+            }
+            PreparedContractTransactionStyle::Legacy => {
+                let gas_price_wei =
+                    required_prepared_quantity(transaction.gas_price.as_deref(), "gas_price")?;
+                if transaction.max_fee_per_gas.is_some()
+                    || transaction.max_priority_fee_per_gas.is_some()
+                {
+                    return Err(EvmContractAdapterError::InvalidPreparedInvocation);
+                }
+                EvmSigningRequest::legacy(
+                    signer_ref.clone(),
+                    LegacyTxToSign {
+                        to: input.to,
+                        value_wei: input.value_wei,
+                        chain_id: expected_chain_id,
+                        nonce: transaction.nonce,
+                        gas_price_wei,
+                        gas_limit: transaction.gas_limit,
+                        data: input.data,
+                    },
+                    expected_signer,
+                )
+                .map_err(EvmContractAdapterError::EvmSigning)?
+            }
+        };
+        if transaction.signing_digest != format!("{:?}", signing_request.signing_hash()) {
+            return Err(EvmContractAdapterError::InvalidPreparedInvocation);
+        }
+        signing_requests.push(signing_request);
+    }
+
+    PreparedContractMutation::new(evidence.clone(), signing_requests)
+}
+
+fn required_prepared_quantity(value: Option<&str>, field: &'static str) -> Result<u128> {
+    optional_policy_quantity(value, field)?
+        .ok_or(EvmContractAdapterError::InvalidPreparedInvocation)
 }
 
 fn parse_optional_wei(value: Option<&str>) -> Result<u128> {

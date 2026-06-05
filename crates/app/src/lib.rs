@@ -44,6 +44,8 @@ use tokio::sync::Mutex;
 
 pub use mfm_runtime::ErasedRunnerRegistry;
 
+mod evm_contracts;
+
 /// Shared observability configuration used by typed binaries.
 pub mod observability;
 
@@ -298,6 +300,7 @@ pub fn production_typed_runner_registry(
     let portfolio_artifacts: Arc<dyn mfm_transports_portfolio::PortfolioArtifactReader> =
         Arc::new(artifacts.clone());
     mfm_transports_portfolio::register_portfolio_runners(&mut registry, portfolio_artifacts)?;
+    evm_contracts::register_contract_lifecycle_runners(&mut registry, artifacts)?;
     mfm_transports_proof::register_deterministic_proof_runners(&mut registry)?;
     Ok(registry)
 }
@@ -305,6 +308,9 @@ pub fn production_typed_runner_registry(
 /// Builds the trusted production certification registry for bundled spec verification.
 pub fn production_certification_registry() -> Result<CertificationRegistry, AppError> {
     let mut registry = CertificationRegistry::new();
+    mfm_op_evm_contract_lifecycle::register_contract_lifecycle_certification_descriptors(
+        &mut registry,
+    )?;
     mfm_op_portfolio_tracker::register_portfolio_certification_descriptors(&mut registry)?;
     mfm_op_proof::register_proof_certification_descriptors(&mut registry)?;
     Ok(registry)
@@ -979,6 +985,7 @@ where
             replay_read_authority_for_run(&self.artifacts, &runtime_spec, &verified_stream).await?;
         let broker = ReplayBroker::from_read_authority(authority)?;
         let stream = verified_stream.events();
+        mfm_adapters_evm_contracts::verify_contract_lifecycle_replay(&broker)?;
         mfm_transports_proof::verify_deterministic_proof_replay(&broker)?;
         let projection = broker.projection_snapshot();
         let retained_artifacts = projection

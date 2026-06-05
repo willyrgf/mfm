@@ -198,6 +198,20 @@ pub struct ContractTransactionSubmission {
     pub signer_public_key: Option<String>,
 }
 
+/// Redaction-safe aggregate transaction submission result.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
+#[mfm(
+    namespace = "mfm.evm.contract",
+    name = "transaction-submissions",
+    schema = "mfm.evm.contract.value.transaction_submissions"
+)]
+pub struct ContractTransactionSubmissions {
+    /// Aggregate contract version.
+    pub submissions_version: u64,
+    /// Submitted transaction evidence in deterministic transaction order.
+    pub transactions: Vec<ContractTransactionSubmission>,
+}
+
 /// Redaction-safe transaction receipt evidence summary.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
 #[mfm(
@@ -216,6 +230,20 @@ pub struct ContractTransactionReceipt {
     pub status: bool,
     /// Typed artifact evidence reference for the retained receipt.
     pub receipt_evidence: Option<LifecycleArtifactEvidenceRef>,
+}
+
+/// Redaction-safe aggregate transaction receipt evidence.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
+#[mfm(
+    namespace = "mfm.evm.contract",
+    name = "transaction-receipts",
+    schema = "mfm.evm.contract.value.transaction_receipts"
+)]
+pub struct ContractTransactionReceipts {
+    /// Aggregate contract version.
+    pub receipts_version: u64,
+    /// Confirmed receipt evidence in deterministic transaction order.
+    pub transactions: Vec<ContractTransactionReceipt>,
 }
 
 /// Deployment confirmation consumed by [`DeployContractState::output_from_confirmation`].
@@ -361,8 +389,8 @@ impl StateSpec for DeployContractState {
 impl SideEffectState for DeployContractState {
     type Intent = ContractDeployIntent;
     type IdempotencyInput = ContractTransactionIdempotency;
-    type Submission = ContractTransactionSubmission;
-    type Receipt = ContractTransactionReceipt;
+    type Submission = ContractTransactionSubmissions;
+    type Receipt = ContractTransactionReceipts;
     type Confirmation = ContractDeployConfirmation;
     type SubmitFuture<'a> = future::Ready<StateResult<Self::Submission>>;
 
@@ -453,8 +481,8 @@ impl StateSpec for ConfigureContractState {
 impl SideEffectState for ConfigureContractState {
     type Intent = ContractConfigureIntent;
     type IdempotencyInput = ContractTransactionIdempotency;
-    type Submission = ContractTransactionSubmission;
-    type Receipt = ContractTransactionReceipt;
+    type Submission = ContractTransactionSubmissions;
+    type Receipt = ContractTransactionReceipts;
     type Confirmation = ContractConfigureConfirmation;
     type SubmitFuture<'a> = future::Ready<StateResult<Self::Submission>>;
 
