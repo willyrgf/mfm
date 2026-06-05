@@ -2178,6 +2178,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "mfm-signers-keystore"
+version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "mfm-evm-signing",
+ "mfm-ids",
+ "mfm-signing",
+ "mfm_core",
+ "tempfile",
+ "thiserror",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
 name = "mfm-signing"
 version = "0.1.0"
 dependencies = [

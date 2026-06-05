@@ -1,0 +1,24 @@
+[package]
+name = "mfm-signers-keystore"
+version = "0.1.0"
+edition = "2021"
+description = "MFM keystore-backed signer provider"
+repository = "https://github.com/willyrgf/mfm"
+license = "MIT"
+
+[package.metadata.mfm]
+category = "signer-provider"
+
+[dependencies]
+alloy-primitives = { workspace = true, features = ["k256"] }
+thiserror = { workspace = true }
+uuid = { version = "1.8.0", features = ["v4"] }
+zeroize = "1.7"
+
+mfm-core = { package = "mfm_core", path = "../../core" }
+mfm-evm-signing = { path = "../../evm-signing" }
+mfm-signing = { path = "../../signing" }
+
+[dev-dependencies]
+mfm-ids = { path = "../../kernel/ids" }
+tempfile = "3.8"
