@@ -1782,9 +1782,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "mfm-artifact-capabilities"
+version = "0.1.0"
+dependencies = [
+ "mfm-canonical",
+ "mfm-capabilities",
+ "mfm-events",
+ "mfm-ids",
+ "mfm-spec",
+ "mfm-store",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "mfm-artifact-store-fs"
 version = "0.1.0"
 dependencies = [
+ "mfm-artifact-capabilities",
  "mfm-canonical",
  "mfm-certify",
  "mfm-events",

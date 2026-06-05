@@ -26,6 +26,7 @@ members = [
 	"crates/kernel/values",
 	"crates/evm-dcv-model",
 	"crates/evm-core",
+	"crates/artifact-capabilities",
 	"crates/authored-config",
 	"crates/evm-deploy-configure-validate-config",
 	"crates/portfolio-config",

@@ -564,7 +564,7 @@ fn category_dependency_allowed(source: CrateCategory, dependency: CrateCategory)
             dependency,
             Kernel | DomainModel | SignerContract | SignerProvider
         ),
-        Storage => dependency == Kernel,
+        Storage => matches!(dependency, Kernel | CapabilityContract),
         App => !matches!(dependency, Binary | TestSupport | DocsTooling),
         Binary => matches!(
             dependency,

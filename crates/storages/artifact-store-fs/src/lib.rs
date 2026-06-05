@@ -133,6 +133,22 @@ impl From<mfm_spec::SpecError> for FsTypedArtifactError {
     }
 }
 
+impl mfm_artifact_capabilities::ArtifactReadProvider for FsTypedArtifactStore {
+    fn read_artifact<'a>(
+        &'a self,
+        request: &'a mfm_artifact_capabilities::ArtifactReadRequest,
+    ) -> mfm_artifact_capabilities::ArtifactReadFuture<'a> {
+        Box::pin(async move {
+            let (bytes, evidence) = self
+                .get_artifact_by_id(request.artifact_id())
+                .await
+                .map_err(redact_artifact_capability_error)?;
+            let evidence = mfm_artifact_capabilities::ArtifactEvidenceRef::from(evidence);
+            mfm_artifact_capabilities::VerifiedArtifactBytes::new(bytes, evidence, request)
+        })
+    }
+}
+
 /// Evidence fields supplied when storing typed artifact bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypedArtifactDescriptor {
@@ -502,6 +518,26 @@ fn compare_evidence_field<T: PartialEq>(
     })
 }
 
+fn redact_artifact_capability_error(
+    error: FsTypedArtifactError,
+) -> mfm_artifact_capabilities::ArtifactReadError {
+    match error {
+        FsTypedArtifactError::NotFound { artifact_id } => {
+            mfm_artifact_capabilities::ArtifactReadError::NotFound { artifact_id }
+        }
+        FsTypedArtifactError::EvidenceMismatch { artifact_id, field } => {
+            mfm_artifact_capabilities::ArtifactReadError::EvidenceMismatch { artifact_id, field }
+        }
+        error @ (FsTypedArtifactError::InvalidEvidence { .. }
+        | FsTypedArtifactError::InvalidIdentity { .. }
+        | FsTypedArtifactError::Corruption { .. }
+        | FsTypedArtifactError::RetainedArtifactRefused { .. }
+        | FsTypedArtifactError::Io { .. }) => {
+            mfm_artifact_capabilities::ArtifactReadError::redacted_backend_failure(error)
+        }
+    }
+}
+
 fn seed_artifact_evidence(seed: &SeedCellRef) -> TypedArtifactResult<ArtifactEvidenceRef> {
     let artifact = &seed.seed_artifact;
     if artifact.role != ArtifactRole::SeedInput {
@@ -806,5 +842,125 @@ fn parse_artifact_role(value: &str) -> TypedArtifactResult<ArtifactRole> {
         _ => Err(FsTypedArtifactError::InvalidEvidence {
             message: format!("unknown artifact role {value}"),
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use mfm_artifact_capabilities::{ArtifactReadProvider, ArtifactReadRequest};
+    use mfm_ids::{DigestAlgorithm, SemanticTypeId};
+
+    use super::*;
+
+    fn schema_id(name: &str) -> SchemaId {
+        SchemaId::new(
+            name,
+            "1",
+            DigestAlgorithm::Sha256JcsV1,
+            sha256_digest_bytes(name.as_bytes()),
+        )
+        .expect("schema id")
+    }
+
+    fn semantic_id(name: &str) -> SemanticTypeId {
+        SemanticTypeId::new(
+            "mfm.test",
+            name,
+            "1",
+            DigestAlgorithm::Sha256JcsV1,
+            sha256_digest_bytes(name.as_bytes()),
+        )
+        .expect("semantic id")
+    }
+
+    fn node_id(name: &str) -> NodeId {
+        NodeId::from_digest(
+            DigestAlgorithm::Sha256JcsV1,
+            sha256_digest_bytes(name.as_bytes()),
+        )
+    }
+
+    fn descriptor() -> TypedArtifactDescriptor {
+        TypedArtifactDescriptor {
+            media_type: MediaType::new("application/json").expect("media type"),
+            schema_id: Some(schema_id("mfm.test.artifact")),
+            semantic_type_id: Some(semantic_id("artifact")),
+            producer_node_id: Some(node_id("producer")),
+            producer_seed_id: None,
+            artifact_role: ArtifactRole::StateOutput,
+        }
+    }
+
+    #[tokio::test]
+    async fn filesystem_store_implements_artifact_read_provider() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let store = FsTypedArtifactStore::new(temp.path());
+        let bytes = br#"{"ok":true}"#.to_vec();
+        let evidence = store
+            .put_artifact(bytes.clone(), descriptor())
+            .await
+            .expect("put artifact");
+        let request = ArtifactReadRequest::from_replay_authorized_evidence(evidence.clone().into());
+
+        let verified = store
+            .read_artifact(&request)
+            .await
+            .expect("read artifact through capability");
+
+        assert_eq!(verified.bytes(), bytes.as_slice());
+        assert_eq!(verified.evidence().artifact_id, evidence.artifact_id);
+    }
+
+    #[tokio::test]
+    async fn filesystem_provider_maps_missing_artifact_to_redacted_error() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let store = FsTypedArtifactStore::new(temp.path());
+        let bytes = br#"{"ok":true}"#.to_vec();
+        let evidence = ArtifactEvidenceRef {
+            artifact_id: ArtifactId::from_digest(
+                DigestAlgorithm::Sha256JcsV1,
+                sha256_digest_bytes(&bytes),
+            ),
+            digest: content_digest_for_bytes(&bytes),
+            byte_len: bytes.len() as u64,
+            media_type: MediaType::new("application/json").expect("media type"),
+            schema_id: Some(schema_id("mfm.test.artifact")),
+            semantic_type_id: Some(semantic_id("artifact")),
+            producer_node_id: Some(node_id("producer")),
+            producer_seed_id: None,
+            artifact_role: ArtifactRole::StateOutput,
+        };
+        let request = ArtifactReadRequest::from_replay_authorized_evidence(evidence.into());
+
+        let err = store
+            .read_artifact(&request)
+            .await
+            .expect_err("missing artifact");
+        let rendered = err.to_string();
+
+        assert!(matches!(
+            err,
+            mfm_artifact_capabilities::ArtifactReadError::NotFound { .. }
+        ));
+        assert!(!rendered.contains(temp.path().to_string_lossy().as_ref()));
+    }
+
+    #[test]
+    fn filesystem_provider_redacts_backend_error_sources() {
+        let source_path = "/tmp/secret/mfm-key.json";
+        let err = redact_artifact_capability_error(FsTypedArtifactError::Io {
+            context: "failed to read typed artifact bytes",
+            source: std::io::Error::new(std::io::ErrorKind::Other, source_path),
+        });
+        let rendered = err.to_string();
+
+        assert!(matches!(
+            err,
+            mfm_artifact_capabilities::ArtifactReadError::Backend {
+                reason: mfm_artifact_capabilities::ArtifactReadBackendError::Failed
+            }
+        ));
+        assert!(!rendered.contains(source_path));
+        assert!(!rendered.contains("/tmp/secret"));
     }
 }

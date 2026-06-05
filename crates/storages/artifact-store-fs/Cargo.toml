@@ -7,6 +7,7 @@ edition = "2021"
 category = "storage"
 
 [dependencies]
+mfm-artifact-capabilities = { path = "../../artifact-capabilities" }
 mfm-canonical = { path = "../../kernel/canonical" }
 mfm-events = { path = "../../kernel/events" }
 mfm-ids = { path = "../../kernel/ids" }
