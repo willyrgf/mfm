@@ -381,6 +381,58 @@ registered by a domain port.
 mfm_cli run replay <RUN_ID> [OPTIONS]
 ```
 
+## EVM Contract Commands
+
+### `evm contracts deploy`
+
+Compiles a deploy phase config into a certified typed contract deployment run, starts the run, and
+renders the typed public output when the scheduler completes.
+
+**Usage:**
+```sh
+mfm_cli evm contracts deploy --config-file <DEPLOY_CONFIG_JSON> [OPTIONS]
+```
+
+### `evm contracts configure`
+
+Compiles a configure phase config plus a deployed-contract JSON seed into a certified typed
+configuration run.
+
+**Usage:**
+```sh
+mfm_cli evm contracts configure --config-file <CONFIGURE_CONFIG_JSON> --deployed-file <DEPLOYED_CONTRACT_JSON> [OPTIONS]
+```
+
+### `evm contracts validate`
+
+Compiles a validate phase config plus a configured-contract JSON seed into a certified typed
+validation run.
+
+**Usage:**
+```sh
+mfm_cli evm contracts validate --config-file <VALIDATE_CONFIG_JSON> --configured-file <CONFIGURED_CONTRACT_JSON> [OPTIONS]
+```
+
+### `evm contracts lifecycle`
+
+Compiles deploy, configure, and validate configs into one certified typed contract lifecycle run.
+
+**Usage:**
+```sh
+mfm_cli evm contracts lifecycle --config-file <LIFECYCLE_CONFIG_JSON> [OPTIONS]
+```
+
+**Common Options:**
+- `--drive <append-only|once|until-blocked>`: Scheduler drive policy after `RunStarted`
+- `--framework-version <VALUE>`: Framework version evidence recorded in `RunStarted`
+- `--source-revision <VALUE>`: Source revision evidence recorded in `RunStarted` (or `MFM_SOURCE_REVISION`)
+- `--typed-artifact-root <PATH>`: Typed artifact root
+- `--database-url <URL>`: PostgreSQL typed run-event store URL
+
+Contract config JSON is parsed into the reusable `mfm-evm-contract-config` phase types. Configure
+and validate seed files are parsed into `mfm-evm-contract-model` lifecycle values and supplied as
+typed launch seeds.
+
 ## Portfolio Commands (Experimental)
 
 ### `portfolio snapshot`

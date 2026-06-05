@@ -1,6 +1,8 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use std::ffi::OsStr;
 
+/// EVM operation commands.
+mod evm;
 /// Keystore-oriented CLI commands.
 mod keystore;
 /// Portfolio feature commands.
@@ -123,6 +125,12 @@ enum Commands {
         #[command(subcommand)]
         command: keystore::KeystoreCommand,
     },
+    /// EVM workflow operations
+    Evm {
+        /// Nested EVM command to execute.
+        #[command(subcommand)]
+        command: evm::EvmCommand,
+    },
     /// Portfolio monitoring operations
     Portfolio {
         /// Nested portfolio command to execute.
@@ -144,6 +152,9 @@ impl Cli {
 
         match &self.command {
             Commands::Keystore { command } => {
+                command.execute(&ctx).await;
+            }
+            Commands::Evm { command } => {
                 command.execute(&ctx).await;
             }
             Commands::Portfolio { command } => {

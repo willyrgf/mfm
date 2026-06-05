@@ -35,6 +35,55 @@ fn test_keystore_help() {
 }
 
 #[test]
+fn test_evm_contracts_help() {
+    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
+    let removed = ["d", "c", "v"].concat();
+    cmd.args(&["evm", "contracts", "--help"]);
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("EVM contract lifecycle workflows"))
+        .stdout(predicate::str::contains("deploy"))
+        .stdout(predicate::str::contains("configure"))
+        .stdout(predicate::str::contains("validate"))
+        .stdout(predicate::str::contains("lifecycle"))
+        .stdout(predicate::str::contains(removed).not());
+}
+
+#[test]
+fn test_removed_legacy_evm_command_is_absent() {
+    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
+    let removed = ["d", "c", "v"].concat();
+    cmd.args(["evm", removed.as_str(), "--help"]);
+
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("unrecognized subcommand"))
+        .stderr(predicate::str::contains(removed));
+}
+
+#[test]
+fn test_evm_contracts_json_error_envelope() {
+    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
+    cmd.args(&[
+        "--output-format",
+        "json",
+        "evm",
+        "contracts",
+        "deploy",
+        "--config-file",
+        "/definitely/missing/contract-config.json",
+    ]);
+
+    let output = cmd.output().expect("run command");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).expect("stderr utf8");
+    let parsed: serde_json::Value = serde_json::from_str(&stderr).expect("stderr JSON");
+    assert_eq!(parsed["status"], "error");
+    assert_eq!(parsed["error"]["code"], "InvalidEvmContractRequest");
+}
+
+#[test]
 fn test_import_help() {
     let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
     cmd.args(&["keystore", "import", "--help"]);
