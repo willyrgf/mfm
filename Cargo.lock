@@ -2215,6 +2215,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "mfm-state-evm-contracts"
+version = "0.1.0"
+dependencies = [
+ "mfm-adapter-contracts",
+ "mfm-canonical",
+ "mfm-capabilities",
+ "mfm-effects",
+ "mfm-evm-capabilities",
+ "mfm-evm-contract-config",
+ "mfm-evm-contract-model",
+ "mfm-ids",
+ "mfm-program",
+ "mfm-program-derive",
+ "mfm-signing",
+ "mfm-values",
+ "serde",
+ "serde_json",
+ "trybuild",
+]
+
+[[package]]
 name = "mfm-state-portfolio"
 version = "0.1.0"
 dependencies = [

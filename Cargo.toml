@@ -36,6 +36,7 @@ members = [
 	"crates/authored-config",
 	"crates/portfolio-config",
 	"crates/portfolio/model",
+	"crates/states/evm-contracts",
 	"crates/states/portfolio",
 	"crates/storages/artifact-store-fs",
 	"crates/storages/stream-store-postgres",

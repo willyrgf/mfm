@@ -1,0 +1,1034 @@
+#![warn(missing_docs)]
+//! Typed EVM contract lifecycle state contracts.
+//!
+//! This crate owns reusable deploy, configure, and validate state contracts for EVM
+//! contracts. The state definitions expose semantic intents, typestate values, adapter
+//! bindings, and capability sets only. Live RPC, signer-provider resolution, artifact-store
+//! access, and transaction submission are adapter responsibilities.
+//!
+//! ```rust
+//! use mfm_program::StateSpec;
+//! use mfm_state_evm_contracts::DeployContractState;
+//!
+//! assert_eq!(DeployContractState::name(), "mfm.evm.contract.deploy");
+//! ```
+
+use std::future;
+
+use mfm_adapter_contracts::evm_contract_lifecycle_adapter_binding;
+use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
+use mfm_capabilities::NoCaps;
+use mfm_effects::{ApplySideEffect, Pure, ReadExternal};
+use mfm_evm_capabilities::{
+    EvmCallReadCapability, EvmChainIdentityCapability, EvmFeeReadCapability,
+    EvmGasEstimateCapability, EvmLogsReadCapability, EvmNonceReadCapability,
+    EvmReceiptReadCapability, EvmTransactionSubmitCapability,
+};
+use mfm_evm_contract_config::{
+    ConfigurePhaseConfig, DeployPhaseConfig, EvmNetworkIntent, EvmTransactionPolicy,
+    ValidatePhaseConfig,
+};
+use mfm_evm_contract_model::{
+    ConfiguredContract, ConfiguredContractRef, ContractCallConfig, DeployedContract,
+    EventAssertionConfig, LifecycleArtifactEvidenceRef, ReadAssertionConfig, ValidationEventResult,
+    ValidationReadResult, ValidationReport,
+};
+use mfm_ids::{DigestAlgorithm, StateKind, StateVersion};
+use mfm_program::{
+    AdapterBindingSpec, IdempotencyKey, PureState, ReadState, SideEffectState, StateError,
+    StateResult, StateSpec,
+};
+use mfm_program_derive::{MfmConfig, MfmValue, OperationOutput, PublicOutputs, StateInput};
+use mfm_signing::SigningCapability;
+use serde::{Deserialize, Serialize};
+
+const NAMESPACE: &str = "mfm.evm.contract";
+
+type ContractMutationCaps = (
+    EvmChainIdentityCapability,
+    EvmNonceReadCapability,
+    EvmFeeReadCapability,
+    EvmGasEstimateCapability,
+    SigningCapability,
+    EvmTransactionSubmitCapability,
+    EvmReceiptReadCapability,
+);
+
+type ContractValidationReadCaps = (
+    EvmChainIdentityCapability,
+    EvmCallReadCapability,
+    EvmLogsReadCapability,
+);
+
+fn adapter_binding() -> mfm_program::Result<Vec<AdapterBindingSpec>> {
+    let binding = evm_contract_lifecycle_adapter_binding()
+        .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?;
+    Ok(vec![AdapterBindingSpec {
+        adapter_kind: binding.adapter_kind().clone(),
+        adapter_version: binding.adapter_version().clone(),
+    }])
+}
+
+fn state_kind(name: &'static str) -> mfm_program::Result<StateKind> {
+    StateKind::new(
+        NAMESPACE,
+        name,
+        DigestAlgorithm::Sha256JcsV1,
+        sha256_digest_bytes(format!("mfm.evm.contract.state:{name}").as_bytes()),
+    )
+    .map_err(|error| mfm_program::PlanError::Key(error.to_string()))
+}
+
+fn state_version(name: &'static str) -> mfm_program::Result<StateVersion> {
+    StateVersion::new(format!("mfm.evm.contract.state.{name}.v1"))
+        .map_err(|error| mfm_program::PlanError::Key(error.to_string()))
+}
+
+fn adapter_required_error(state_name: &'static str) -> StateError {
+    StateError::Message(format!(
+        "{state_name} requires an EVM contract lifecycle adapter runner"
+    ))
+}
+
+/// Input consumed by contract configuration states.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, StateInput)]
+#[mfm(schema = "mfm.evm.contract.input.configure")]
+pub struct ConfigureContractInput {
+    /// Contract emitted by a deploy state.
+    pub deployed: DeployedContract,
+}
+
+/// Input consumed by contract validation states.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, StateInput)]
+#[mfm(schema = "mfm.evm.contract.input.validate")]
+pub struct ValidateContractInput {
+    /// Configured contract emitted by a configure state.
+    pub configured: ConfiguredContract,
+}
+
+/// Generic deterministic EVM transaction intent.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
+#[mfm(
+    namespace = "mfm.evm.contract",
+    name = "transaction-intent",
+    schema = "mfm.evm.contract.intent.transaction"
+)]
+pub struct ContractTransactionIntent {
+    /// Intent contract version.
+    pub intent_version: u64,
+    /// Stable semantic network id.
+    pub network_id: String,
+    /// Expected EVM chain id.
+    pub expected_chain_id: u64,
+    /// Process-local signer reference.
+    pub signer_ref: String,
+    /// Expected signer EVM address.
+    pub expected_signer_address: String,
+    /// Optional destination contract address; absent for contract creation.
+    pub to_address: Option<String>,
+    /// Native token value expressed in wei.
+    pub value_wei: Option<String>,
+    /// Optional ABI or initcode payload reference, never a signed transaction.
+    pub data_ref: Option<String>,
+    /// Fee and gas policy.
+    pub transaction: EvmTransactionPolicy,
+}
+
+/// Deploy mutation intent prepared by [`DeployContractState`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
+#[mfm(
+    namespace = "mfm.evm.contract",
+    name = "deploy-intent",
+    schema = "mfm.evm.contract.intent.deploy"
+)]
+pub struct ContractDeployIntent {
+    /// Intent contract version.
+    pub intent_version: u64,
+    /// Generic transaction intent.
+    pub transaction: ContractTransactionIntent,
+    /// Constructor arguments retained for adapter-side ABI encoding.
+    pub constructor_args_len: u64,
+    /// Whether an inline contract artifact was provided.
+    pub has_inline_artifact: bool,
+}
+
+/// Configure mutation intent prepared by [`ConfigureContractState`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
+#[mfm(
+    namespace = "mfm.evm.contract",
+    name = "configure-intent",
+    schema = "mfm.evm.contract.intent.configure"
+)]
+pub struct ContractConfigureIntent {
+    /// Intent contract version.
+    pub intent_version: u64,
+    /// Deployed contract being configured.
+    pub deployed: DeployedContract,
+    /// Generic transaction intents, one for each configured call.
+    pub transactions: Vec<ContractTransactionIntent>,
+    /// Whether an inline contract artifact was provided.
+    pub has_inline_artifact: bool,
+}
+
+/// Idempotency input for contract lifecycle mutation states.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
+#[mfm(
+    namespace = "mfm.evm.contract",
+    name = "transaction-idempotency",
+    schema = "mfm.evm.contract.intent.transaction_idempotency"
+)]
+pub struct ContractTransactionIdempotency {
+    /// Stable intent digest or transaction-domain key.
+    pub key: String,
+}
+
+/// Redaction-safe transaction submission result.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
+#[mfm(
+    namespace = "mfm.evm.contract",
+    name = "transaction-submission",
+    schema = "mfm.evm.contract.value.transaction_submission"
+)]
+pub struct ContractTransactionSubmission {
+    /// Submission contract version.
+    pub submission_version: u64,
+    /// Submitted transaction hash.
+    pub transaction_hash: String,
+    /// Public signer metadata, when supplied by the signer provider.
+    pub signer_public_key: Option<String>,
+}
+
+/// Redaction-safe transaction receipt evidence summary.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
+#[mfm(
+    namespace = "mfm.evm.contract",
+    name = "transaction-receipt",
+    schema = "mfm.evm.contract.value.transaction_receipt"
+)]
+pub struct ContractTransactionReceipt {
+    /// Receipt contract version.
+    pub receipt_version: u64,
+    /// Transaction hash.
+    pub transaction_hash: String,
+    /// Block number that included the transaction.
+    pub block_number: u64,
+    /// Whether the transaction succeeded.
+    pub status: bool,
+    /// Typed artifact evidence reference for the retained receipt.
+    pub receipt_evidence: Option<LifecycleArtifactEvidenceRef>,
+}
+
+/// Deployment confirmation consumed by [`DeployContractState::output_from_confirmation`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
+#[mfm(
+    namespace = "mfm.evm.contract",
+    name = "deploy-confirmation",
+    schema = "mfm.evm.contract.value.deploy_confirmation"
+)]
+pub struct ContractDeployConfirmation {
+    /// Confirmation contract version.
+    pub confirmation_version: u64,
+    /// Deployed contract address.
+    pub contract_address: String,
+    /// Confirmed transaction receipt.
+    pub receipt: ContractTransactionReceipt,
+}
+
+/// Configuration confirmation consumed by [`ConfigureContractState::output_from_confirmation`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
+#[mfm(
+    namespace = "mfm.evm.contract",
+    name = "configure-confirmation",
+    schema = "mfm.evm.contract.value.configure_confirmation"
+)]
+pub struct ContractConfigureConfirmation {
+    /// Confirmation contract version.
+    pub confirmation_version: u64,
+    /// Confirmed transaction receipts.
+    pub receipts: Vec<ContractTransactionReceipt>,
+    /// Highest observed configuration block, when known.
+    pub configured_block_number: Option<u64>,
+}
+
+/// Read request used by contract validation adapters.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
+#[mfm(
+    namespace = "mfm.evm.contract",
+    name = "validation-read-request",
+    schema = "mfm.evm.contract.intent.validation_read_request"
+)]
+pub struct ContractValidationReadRequest {
+    /// Request contract version.
+    pub request_version: u64,
+    /// Configured contract being validated.
+    pub configured_contract: ConfiguredContractRef,
+    /// Expected EVM chain id.
+    pub expected_chain_id: u64,
+    /// Read assertions evaluated by the adapter.
+    pub read_assertions: Vec<ReadAssertionConfig>,
+    /// Event assertions evaluated by the adapter.
+    pub event_assertions: Vec<EventAssertionConfig>,
+}
+
+/// Read response used to project a validation report.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
+#[mfm(
+    namespace = "mfm.evm.contract",
+    name = "validation-read-response",
+    schema = "mfm.evm.contract.value.validation_read_response"
+)]
+pub struct ContractValidationReadResponse {
+    /// Response contract version.
+    pub response_version: u64,
+    /// Observed EVM chain id.
+    pub observed_chain_id: u64,
+    /// Redaction-safe client version label.
+    pub client_version: String,
+    /// Results for configured-intent read confirmations.
+    pub configuration_read_results: Vec<ValidationReadResult>,
+    /// Results for configured-intent event confirmations.
+    pub configuration_event_results: Vec<ValidationEventResult>,
+    /// Results for validation read assertions.
+    pub read_results: Vec<ValidationReadResult>,
+    /// Results for validation event assertions.
+    pub event_results: Vec<ValidationEventResult>,
+}
+
+/// Public output handles for contract lifecycle workflows.
+#[derive(PublicOutputs)]
+#[mfm(schema = "mfm.evm.contract.public_outputs.lifecycle")]
+pub struct ContractLifecyclePublicOutputs<'program, 'scope> {
+    /// Deployed contract typestate.
+    pub deployed: mfm_program::Handle<'program, 'scope, DeployedContract>,
+    /// Configured contract typestate.
+    pub configured: mfm_program::Handle<'program, 'scope, ConfiguredContract>,
+    /// Validation report.
+    pub validation_report: mfm_program::Handle<'program, 'scope, ValidationReport>,
+}
+
+/// Operation output handles produced by contract lifecycle operation helpers.
+#[derive(OperationOutput)]
+#[mfm(schema = "mfm.evm.contract.operation_outputs.lifecycle")]
+pub struct ContractLifecycleOperationOutputs<'program, 'scope> {
+    /// Deployed contract typestate.
+    pub deployed: mfm_program::Handle<'program, 'scope, DeployedContract>,
+    /// Configured contract typestate.
+    pub configured: mfm_program::Handle<'program, 'scope, ConfiguredContract>,
+    /// Validation report.
+    pub validation_report: mfm_program::Handle<'program, 'scope, ValidationReport>,
+}
+
+/// State that prepares and submits contract deployment transactions.
+pub struct DeployContractState {
+    config: DeployPhaseConfig,
+}
+
+impl DeployContractState {
+    /// Returns the deploy phase config.
+    pub const fn config(&self) -> &DeployPhaseConfig {
+        &self.config
+    }
+}
+
+impl StateSpec for DeployContractState {
+    type Config = DeployPhaseConfig;
+    type Input = ();
+    type Output = DeployedContract;
+    type Effect = ApplySideEffect;
+    type Caps = ContractMutationCaps;
+
+    fn kind() -> mfm_program::Result<StateKind> {
+        state_kind("deploy")
+    }
+
+    fn version() -> mfm_program::Result<StateVersion> {
+        state_version("deploy")
+    }
+
+    fn name() -> &'static str {
+        "mfm.evm.contract.deploy"
+    }
+
+    fn adapter_bindings() -> mfm_program::Result<Vec<AdapterBindingSpec>> {
+        adapter_binding()
+    }
+
+    fn new(config: Self::Config) -> mfm_program::Result<Self> {
+        Ok(Self { config })
+    }
+}
+
+impl SideEffectState for DeployContractState {
+    type Intent = ContractDeployIntent;
+    type IdempotencyInput = ContractTransactionIdempotency;
+    type Submission = ContractTransactionSubmission;
+    type Receipt = ContractTransactionReceipt;
+    type Confirmation = ContractDeployConfirmation;
+    type SubmitFuture<'a> = future::Ready<StateResult<Self::Submission>>;
+
+    fn prepare_intent(&self, _input: &Self::Input) -> StateResult<Self::Intent> {
+        Ok(ContractDeployIntent {
+            intent_version: 1,
+            transaction: transaction_intent_from_deploy_config(&self.config, None),
+            constructor_args_len: self.config.constructor_args().len() as u64,
+            has_inline_artifact: self.config.artifact().is_some(),
+        })
+    }
+
+    fn idempotency_input(
+        &self,
+        _input: &Self::Input,
+        intent: &Self::Intent,
+    ) -> StateResult<Self::IdempotencyInput> {
+        idempotency_from_intent(intent)
+    }
+
+    fn submit<'a>(
+        &'a self,
+        _intent: &'a Self::Intent,
+        _key: &'a IdempotencyKey<Self::IdempotencyInput>,
+        _caps: &'a Self::Caps,
+    ) -> Self::SubmitFuture<'a> {
+        future::ready(Err(adapter_required_error(Self::name())))
+    }
+
+    fn output_from_confirmation(
+        &self,
+        _input: &Self::Input,
+        _intent: &Self::Intent,
+        confirmation: &Self::Confirmation,
+    ) -> StateResult<Self::Output> {
+        Ok(DeployedContract {
+            lifecycle_version: 1,
+            network_id: self.config.network().network_id().to_owned(),
+            expected_chain_id: self.config.network().expected_chain_id(),
+            contract_address: confirmation.contract_address.clone(),
+            deploy_tx_hash: confirmation.receipt.transaction_hash.clone(),
+            deploy_receipt_evidence: confirmation.receipt.receipt_evidence.clone(),
+            deployed_block_number: Some(confirmation.receipt.block_number),
+        })
+    }
+}
+
+/// State that prepares and submits contract configuration transactions.
+pub struct ConfigureContractState {
+    config: ConfigurePhaseConfig,
+}
+
+impl ConfigureContractState {
+    /// Returns the configure phase config.
+    pub const fn config(&self) -> &ConfigurePhaseConfig {
+        &self.config
+    }
+}
+
+impl StateSpec for ConfigureContractState {
+    type Config = ConfigurePhaseConfig;
+    type Input = ConfigureContractInput;
+    type Output = ConfiguredContract;
+    type Effect = ApplySideEffect;
+    type Caps = ContractMutationCaps;
+
+    fn kind() -> mfm_program::Result<StateKind> {
+        state_kind("configure")
+    }
+
+    fn version() -> mfm_program::Result<StateVersion> {
+        state_version("configure")
+    }
+
+    fn name() -> &'static str {
+        "mfm.evm.contract.configure"
+    }
+
+    fn adapter_bindings() -> mfm_program::Result<Vec<AdapterBindingSpec>> {
+        adapter_binding()
+    }
+
+    fn new(config: Self::Config) -> mfm_program::Result<Self> {
+        Ok(Self { config })
+    }
+}
+
+impl SideEffectState for ConfigureContractState {
+    type Intent = ContractConfigureIntent;
+    type IdempotencyInput = ContractTransactionIdempotency;
+    type Submission = ContractTransactionSubmission;
+    type Receipt = ContractTransactionReceipt;
+    type Confirmation = ContractConfigureConfirmation;
+    type SubmitFuture<'a> = future::Ready<StateResult<Self::Submission>>;
+
+    fn prepare_intent(&self, input: &Self::Input) -> StateResult<Self::Intent> {
+        ensure_network_matches_deployed(self.config.network(), &input.deployed)?;
+        let transactions = self
+            .config
+            .calls()
+            .iter()
+            .map(|call| transaction_intent_from_configure_call(&self.config, &input.deployed, call))
+            .collect();
+        Ok(ContractConfigureIntent {
+            intent_version: 1,
+            deployed: input.deployed.clone(),
+            transactions,
+            has_inline_artifact: self.config.artifact().is_some(),
+        })
+    }
+
+    fn idempotency_input(
+        &self,
+        _input: &Self::Input,
+        intent: &Self::Intent,
+    ) -> StateResult<Self::IdempotencyInput> {
+        idempotency_from_intent(intent)
+    }
+
+    fn submit<'a>(
+        &'a self,
+        _intent: &'a Self::Intent,
+        _key: &'a IdempotencyKey<Self::IdempotencyInput>,
+        _caps: &'a Self::Caps,
+    ) -> Self::SubmitFuture<'a> {
+        future::ready(Err(adapter_required_error(Self::name())))
+    }
+
+    fn output_from_confirmation(
+        &self,
+        input: &Self::Input,
+        _intent: &Self::Intent,
+        confirmation: &Self::Confirmation,
+    ) -> StateResult<Self::Output> {
+        ensure_network_matches_deployed(self.config.network(), &input.deployed)?;
+        Ok(ConfiguredContract {
+            lifecycle_version: 1,
+            deployed: input.deployed.clone(),
+            configure_calls: self.config.calls().to_vec(),
+            confirmation_read_assertions: self.config.confirmation_read_assertions().to_vec(),
+            confirmation_event_assertions: self.config.confirmation_event_assertions().to_vec(),
+            configure_tx_hashes: confirmation
+                .receipts
+                .iter()
+                .map(|receipt| receipt.transaction_hash.clone())
+                .collect(),
+            configure_receipt_evidence: confirmation
+                .receipts
+                .iter()
+                .filter_map(|receipt| receipt.receipt_evidence.clone())
+                .collect(),
+            configured_block_number: confirmation.configured_block_number.or_else(|| {
+                confirmation
+                    .receipts
+                    .iter()
+                    .map(|receipt| receipt.block_number)
+                    .max()
+            }),
+        })
+    }
+}
+
+/// State that validates a configured contract through read-only EVM capabilities.
+pub struct ValidateContractState {
+    config: ValidatePhaseConfig,
+}
+
+impl ValidateContractState {
+    /// Returns the validate phase config.
+    pub const fn config(&self) -> &ValidatePhaseConfig {
+        &self.config
+    }
+
+    /// Builds the deterministic read request an adapter must execute.
+    pub fn read_request(
+        &self,
+        input: &ValidateContractInput,
+    ) -> StateResult<ContractValidationReadRequest> {
+        ensure_network_matches_configured(self.config.network(), &input.configured)?;
+        Ok(ContractValidationReadRequest {
+            request_version: 1,
+            configured_contract: ConfiguredContractRef::from_configured(&input.configured),
+            expected_chain_id: self.config.network().expected_chain_id(),
+            read_assertions: self.config.validation().read_assertions().to_vec(),
+            event_assertions: self.config.validation().event_assertions().to_vec(),
+        })
+    }
+
+    /// Projects a validation report from an adapter-provided read response.
+    pub fn report_from_response(
+        &self,
+        input: &ValidateContractInput,
+        response: ContractValidationReadResponse,
+    ) -> StateResult<ValidationReport> {
+        ensure_network_matches_configured(self.config.network(), &input.configured)?;
+        let valid = response.observed_chain_id == self.config.network().expected_chain_id()
+            && response
+                .configuration_read_results
+                .iter()
+                .all(|result| result.passed)
+            && response
+                .configuration_event_results
+                .iter()
+                .all(|result| result.passed)
+            && response.read_results.iter().all(|result| result.passed)
+            && response.event_results.iter().all(|result| result.passed);
+
+        Ok(ValidationReport {
+            report_version: 1,
+            configured_contract: ConfiguredContractRef::from_configured(&input.configured),
+            expected_chain_id: self.config.network().expected_chain_id(),
+            observed_chain_id: response.observed_chain_id,
+            client_version: response.client_version,
+            configuration_read_results: response.configuration_read_results,
+            configuration_event_results: response.configuration_event_results,
+            read_results: response.read_results,
+            event_results: response.event_results,
+            valid,
+        })
+    }
+}
+
+impl StateSpec for ValidateContractState {
+    type Config = ValidatePhaseConfig;
+    type Input = ValidateContractInput;
+    type Output = ValidationReport;
+    type Effect = ReadExternal;
+    type Caps = ContractValidationReadCaps;
+
+    fn kind() -> mfm_program::Result<StateKind> {
+        state_kind("validate")
+    }
+
+    fn version() -> mfm_program::Result<StateVersion> {
+        state_version("validate")
+    }
+
+    fn name() -> &'static str {
+        "mfm.evm.contract.validate"
+    }
+
+    fn adapter_bindings() -> mfm_program::Result<Vec<AdapterBindingSpec>> {
+        adapter_binding()
+    }
+
+    fn new(config: Self::Config) -> mfm_program::Result<Self> {
+        Ok(Self { config })
+    }
+}
+
+impl ReadState for ValidateContractState {
+    type RunFuture<'a> = future::Ready<StateResult<Self::Output>>;
+
+    fn run<'a>(&'a self, _input: Self::Input, _caps: &'a Self::Caps) -> Self::RunFuture<'a> {
+        future::ready(Err(adapter_required_error(Self::name())))
+    }
+}
+
+/// Pure state that projects a configured contract reference for public outputs.
+pub struct ProjectConfiguredContractRefState {
+    config: ProjectConfiguredContractRefConfig,
+}
+
+/// Config for projecting a configured contract reference.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmConfig)]
+#[mfm(schema = "mfm.evm.contract.config.project_configured_ref")]
+pub struct ProjectConfiguredContractRefConfig {
+    /// Projection contract version.
+    pub projection_version: u64,
+}
+
+impl StateSpec for ProjectConfiguredContractRefState {
+    type Config = ProjectConfiguredContractRefConfig;
+    type Input = ConfiguredContract;
+    type Output = ConfiguredContractRef;
+    type Effect = Pure;
+    type Caps = NoCaps;
+
+    fn kind() -> mfm_program::Result<StateKind> {
+        state_kind("project_configured_ref")
+    }
+
+    fn version() -> mfm_program::Result<StateVersion> {
+        state_version("project_configured_ref")
+    }
+
+    fn name() -> &'static str {
+        "mfm.evm.contract.project_configured_ref"
+    }
+
+    fn new(config: Self::Config) -> mfm_program::Result<Self> {
+        if config.projection_version == 0 {
+            return Err(mfm_program::PlanError::Key(
+                "projection_version must be non-zero".to_owned(),
+            ));
+        }
+        Ok(Self { config })
+    }
+}
+
+impl PureState for ProjectConfiguredContractRefState {
+    fn run(&self, input: Self::Input) -> StateResult<Self::Output> {
+        let _ = self.config.projection_version;
+        Ok(ConfiguredContractRef::from_configured(&input))
+    }
+}
+
+fn transaction_intent_from_deploy_config(
+    config: &DeployPhaseConfig,
+    data_ref: Option<String>,
+) -> ContractTransactionIntent {
+    ContractTransactionIntent {
+        intent_version: 1,
+        network_id: config.network().network_id().to_owned(),
+        expected_chain_id: config.network().expected_chain_id(),
+        signer_ref: config.signer().signer_ref_str().to_owned(),
+        expected_signer_address: config.signer().expected_signer_address_str().to_owned(),
+        to_address: None,
+        value_wei: config.value_wei().map(ToOwned::to_owned),
+        data_ref,
+        transaction: config.transaction().clone(),
+    }
+}
+
+fn transaction_intent_from_configure_call(
+    config: &ConfigurePhaseConfig,
+    deployed: &DeployedContract,
+    call: &ContractCallConfig,
+) -> ContractTransactionIntent {
+    ContractTransactionIntent {
+        intent_version: 1,
+        network_id: config.network().network_id().to_owned(),
+        expected_chain_id: config.network().expected_chain_id(),
+        signer_ref: config.signer().signer_ref_str().to_owned(),
+        expected_signer_address: config.signer().expected_signer_address_str().to_owned(),
+        to_address: Some(deployed.contract_address.clone()),
+        value_wei: call.value_wei.clone(),
+        data_ref: Some(call.function.clone()),
+        transaction: config.transaction().clone(),
+    }
+}
+
+fn ensure_network_matches_deployed(
+    network: &EvmNetworkIntent,
+    deployed: &DeployedContract,
+) -> StateResult<()> {
+    if network.network_id() != deployed.network_id {
+        return Err(StateError::Message(
+            "contract lifecycle network id mismatch".to_owned(),
+        ));
+    }
+    if network.expected_chain_id() != deployed.expected_chain_id {
+        return Err(StateError::Message(
+            "contract lifecycle expected chain id mismatch".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_network_matches_configured(
+    network: &EvmNetworkIntent,
+    configured: &ConfiguredContract,
+) -> StateResult<()> {
+    ensure_network_matches_deployed(network, &configured.deployed)
+}
+
+fn idempotency_from_intent<T>(intent: &T) -> StateResult<ContractTransactionIdempotency>
+where
+    T: Serialize,
+{
+    let json = serde_json::to_string(intent)
+        .map_err(|error| StateError::Message(format!("intent serialization failed: {error}")))?;
+    let canonical = PlainCanonicalJsonBytes::from_json_str(&json)
+        .map_err(|error| StateError::Message(format!("intent canonicalization failed: {error}")))?;
+    Ok(ContractTransactionIdempotency {
+        key: canonical.digest_bytes().to_string(),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mfm_capabilities::CapabilitySet;
+    use mfm_values::MfmValue;
+
+    fn network_json() -> serde_json::Value {
+        serde_json::json!({
+            "network_id": "ethereum-mainnet",
+            "expected_chain_id": 1,
+        })
+    }
+
+    fn signer_json() -> serde_json::Value {
+        serde_json::json!({
+            "signer_ref": "deployer",
+            "expected_signer_address": "0x000000000000000000000000000000000000dead",
+        })
+    }
+
+    fn deploy_config() -> DeployPhaseConfig {
+        serde_json::from_value(serde_json::json!({
+            "network": network_json(),
+            "signer": signer_json(),
+        }))
+        .expect("deploy config")
+    }
+
+    fn configure_config() -> ConfigurePhaseConfig {
+        serde_json::from_value(serde_json::json!({
+            "network": network_json(),
+            "signer": signer_json(),
+            "calls": [{
+                "function": "configure",
+                "args": [],
+            }],
+        }))
+        .expect("configure config")
+    }
+
+    fn validate_config() -> ValidatePhaseConfig {
+        serde_json::from_value(serde_json::json!({
+            "network": network_json(),
+        }))
+        .expect("validate config")
+    }
+
+    fn deployed_contract() -> DeployedContract {
+        DeployedContract {
+            lifecycle_version: 1,
+            network_id: "ethereum-mainnet".to_owned(),
+            expected_chain_id: 1,
+            contract_address: "0x000000000000000000000000000000000000dead".to_owned(),
+            deploy_tx_hash: "0x01".to_owned(),
+            deploy_receipt_evidence: None,
+            deployed_block_number: Some(1),
+        }
+    }
+
+    fn deployed_contract_on_chain(chain_id: u64) -> DeployedContract {
+        DeployedContract {
+            expected_chain_id: chain_id,
+            ..deployed_contract()
+        }
+    }
+
+    fn configured_contract() -> ConfiguredContract {
+        ConfiguredContract {
+            lifecycle_version: 1,
+            deployed: deployed_contract(),
+            configure_calls: Vec::new(),
+            confirmation_read_assertions: Vec::new(),
+            confirmation_event_assertions: Vec::new(),
+            configure_tx_hashes: Vec::new(),
+            configure_receipt_evidence: Vec::new(),
+            configured_block_number: Some(2),
+        }
+    }
+
+    fn configured_contract_on_chain(chain_id: u64) -> ConfiguredContract {
+        ConfiguredContract {
+            deployed: deployed_contract_on_chain(chain_id),
+            ..configured_contract()
+        }
+    }
+
+    #[test]
+    fn state_schemas_and_names_use_contract_lifecycle_namespace() {
+        let state_names = [
+            DeployContractState::name(),
+            ConfigureContractState::name(),
+            ValidateContractState::name(),
+            ProjectConfiguredContractRefState::name(),
+        ];
+        assert!(state_names
+            .iter()
+            .all(|name| name.starts_with("mfm.evm.contract.")));
+
+        let schema_ids = [
+            ContractTransactionIntent::schema_id()
+                .expect("schema")
+                .to_string(),
+            ContractDeployIntent::schema_id()
+                .expect("schema")
+                .to_string(),
+            ContractConfigureIntent::schema_id()
+                .expect("schema")
+                .to_string(),
+            ContractValidationReadRequest::schema_id()
+                .expect("schema")
+                .to_string(),
+            ContractValidationReadResponse::schema_id()
+                .expect("schema")
+                .to_string(),
+        ];
+        assert!(schema_ids
+            .iter()
+            .all(|schema_id| schema_id.contains("mfm.evm.contract.")));
+    }
+
+    #[test]
+    fn mutation_states_use_lifecycle_adapter_binding() {
+        let expected = evm_contract_lifecycle_adapter_binding().expect("binding");
+
+        for bindings in [
+            DeployContractState::adapter_bindings().expect("bindings"),
+            ConfigureContractState::adapter_bindings().expect("bindings"),
+            ValidateContractState::adapter_bindings().expect("bindings"),
+        ] {
+            assert_eq!(bindings.len(), 1);
+            assert_eq!(bindings[0].adapter_kind, *expected.adapter_kind());
+            assert_eq!(bindings[0].adapter_version, *expected.adapter_version());
+        }
+    }
+
+    #[test]
+    fn capability_sets_validate_for_their_effects() {
+        <ContractMutationCaps as CapabilitySet>::descriptor()
+            .expect("mutation caps")
+            .validate_for_effect::<ApplySideEffect>()
+            .expect("side effect caps");
+        <ContractValidationReadCaps as CapabilitySet>::descriptor()
+            .expect("read caps")
+            .validate_for_effect::<ReadExternal>()
+            .expect("read caps");
+    }
+
+    #[test]
+    fn idempotency_digest_uses_canonical_json() {
+        #[derive(Serialize)]
+        struct First {
+            b: u64,
+            a: u64,
+        }
+
+        #[derive(Serialize)]
+        struct Second {
+            a: u64,
+            b: u64,
+        }
+
+        let first = idempotency_from_intent(&First { b: 2, a: 1 }).expect("first");
+        let second = idempotency_from_intent(&Second { a: 1, b: 2 }).expect("second");
+
+        assert_eq!(first.key, second.key);
+    }
+
+    #[test]
+    fn deploy_intent_contains_no_signed_payload_or_secret_material() {
+        let state = DeployContractState::new(deploy_config()).expect("state");
+        let intent = state.prepare_intent(&()).expect("intent");
+        let json = serde_json::to_string(&intent).expect("intent json");
+
+        for forbidden in [
+            ["raw", "_transaction"].concat(),
+            "signature".to_owned(),
+            ["private", "_key"].concat(),
+            ["pass", "word"].concat(),
+            ["rpc", "_url"].concat(),
+            ["keystore", "_path"].concat(),
+        ] {
+            assert!(!json.contains(&forbidden), "{json} contains {forbidden}");
+        }
+    }
+
+    #[test]
+    fn configure_confirmation_projects_configured_typestate() {
+        let state = ConfigureContractState::new(configure_config()).expect("state");
+        let input = ConfigureContractInput {
+            deployed: deployed_contract(),
+        };
+        let intent = state.prepare_intent(&input).expect("intent");
+        let output = state
+            .output_from_confirmation(
+                &input,
+                &intent,
+                &ContractConfigureConfirmation {
+                    confirmation_version: 1,
+                    receipts: vec![ContractTransactionReceipt {
+                        receipt_version: 1,
+                        transaction_hash: "0x02".to_owned(),
+                        block_number: 3,
+                        status: true,
+                        receipt_evidence: None,
+                    }],
+                    configured_block_number: None,
+                },
+            )
+            .expect("configured");
+
+        assert_eq!(output.configure_tx_hashes, vec!["0x02"]);
+        assert_eq!(output.configured_block_number, Some(3));
+        assert_eq!(intent.transactions.len(), 1);
+    }
+
+    #[test]
+    fn configure_rejects_typestate_network_mismatch() {
+        let state = ConfigureContractState::new(configure_config()).expect("state");
+        let input = ConfigureContractInput {
+            deployed: deployed_contract_on_chain(2),
+        };
+
+        assert!(state.prepare_intent(&input).is_err());
+        assert!(state
+            .output_from_confirmation(
+                &input,
+                &ContractConfigureIntent {
+                    intent_version: 1,
+                    deployed: input.deployed.clone(),
+                    transactions: Vec::new(),
+                    has_inline_artifact: false,
+                },
+                &ContractConfigureConfirmation {
+                    confirmation_version: 1,
+                    receipts: Vec::new(),
+                    configured_block_number: None,
+                },
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn validate_report_projection_fails_closed_on_wrong_chain() {
+        let state = ValidateContractState::new(validate_config()).expect("state");
+        let input = ValidateContractInput {
+            configured: configured_contract(),
+        };
+        let response = ContractValidationReadResponse {
+            response_version: 1,
+            observed_chain_id: 2,
+            client_version: "redacted-client".to_owned(),
+            configuration_read_results: Vec::new(),
+            configuration_event_results: Vec::new(),
+            read_results: Vec::new(),
+            event_results: Vec::new(),
+        };
+        let report = state
+            .report_from_response(&input, response)
+            .expect("validation report");
+
+        assert!(!report.valid);
+        assert_eq!(
+            state
+                .read_request(&input)
+                .expect("read request")
+                .expected_chain_id,
+            1
+        );
+    }
+
+    #[test]
+    fn validate_rejects_typestate_network_mismatch() {
+        let state = ValidateContractState::new(validate_config()).expect("state");
+        let input = ValidateContractInput {
+            configured: configured_contract_on_chain(2),
+        };
+        let response = ContractValidationReadResponse {
+            response_version: 1,
+            observed_chain_id: 1,
+            client_version: "redacted-client".to_owned(),
+            configuration_read_results: Vec::new(),
+            configuration_event_results: Vec::new(),
+            read_results: Vec::new(),
+            event_results: Vec::new(),
+        };
+
+        assert!(state.read_request(&input).is_err());
+        assert!(state.report_from_response(&input, response).is_err());
+    }
+}
