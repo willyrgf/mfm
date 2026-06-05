@@ -20,7 +20,7 @@ const EXPECTED_KERNEL_MANIFESTS: &[&str] = &[
     "crates/kernel/store/Cargo.toml",
 ];
 
-const TEMPORARY_CATEGORY_DEPENDENCY_ALLOWLIST: &[(&str, &str)] = &[
+const APPROVED_CATEGORY_DEPENDENCY_OVERRIDES: &[(&str, &str)] = &[
     ("mfm", "mfm-artifact-store-fs"),
     ("mfm", "mfm-stream-store-postgres"),
     ("mfm", "mfm_core"),
@@ -138,6 +138,28 @@ fn workspace_category_dependency_rules_hold_with_exact_allowlist() {
 }
 
 #[test]
+fn architecture_overrides_do_not_preserve_stale_workflow_names() {
+    validate_architecture_overrides_do_not_preserve_stale_workflow_names()
+        .expect("architecture override names");
+}
+
+#[test]
+fn architecture_override_guard_rejects_expanded_stale_workflow_names() {
+    let stale_operation_name = [
+        "mfm-op-evm-",
+        &["deploy", "configure", "validate"].join("-"),
+    ]
+    .concat();
+    let error = reject_stale_workflow_name("synthetic override", &stale_operation_name)
+        .expect_err("expanded stale workflow name must fail");
+
+    assert!(
+        error.contains(&stale_operation_name),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
 fn category_dependency_rules_reject_forbidden_edges() {
     let root = repo_root();
     let mut metadata = workspace_metadata(&root);
@@ -173,6 +195,27 @@ fn category_dependency_rules_reject_forbidden_edges() {
         error.contains("source_category=state")
             && error.contains("dependency_category=adapter")
             && error.contains("mfm-adapters-portfolio"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn category_dependency_rules_reject_forbidden_state_to_live_transport_edges() {
+    let root = repo_root();
+    let mut metadata = workspace_metadata(&root);
+    push_path_dependency(
+        &mut metadata,
+        "mfm-state-portfolio",
+        "mfm-transports-evm",
+        &root.join("crates/transports/evm"),
+    );
+
+    let error =
+        validate_category_dependency_rules(&metadata, &root).expect_err("fixture must fail");
+    assert!(
+        error.contains("source_category=state")
+            && error.contains("dependency_category=transport")
+            && error.contains("mfm-transports-evm"),
         "unexpected error: {error}"
     );
 }
@@ -256,6 +299,59 @@ fn category_dependency_rules_reject_forbidden_binary_edges() {
 }
 
 #[test]
+fn category_dependency_rules_reject_unapproved_binary_platform_edges() {
+    let root = repo_root();
+    let mut metadata = workspace_metadata(&root);
+
+    push_synthetic_workspace_package(
+        &mut metadata,
+        &root,
+        "mfm-storage-fixture",
+        "crates/storages/fixture/Cargo.toml",
+        "storage",
+    );
+    push_path_dependency(
+        &mut metadata,
+        "mfm",
+        "mfm-storage-fixture",
+        &root.join("crates/storages/fixture"),
+    );
+
+    let error =
+        validate_category_dependency_rules(&metadata, &root).expect_err("fixture must fail");
+    assert!(
+        error.contains("source_category=binary")
+            && error.contains("dependency_category=storage")
+            && error.contains("mfm-storage-fixture"),
+        "unexpected error: {error}"
+    );
+
+    let mut metadata = workspace_metadata(&root);
+    push_synthetic_workspace_package(
+        &mut metadata,
+        &root,
+        "mfm-signer-provider-fixture",
+        "crates/signers/fixture/Cargo.toml",
+        "signer-provider",
+    );
+    push_path_dependency(
+        &mut metadata,
+        "mfm",
+        "mfm-signer-provider-fixture",
+        &root.join("crates/signers/fixture"),
+    );
+
+    let error =
+        validate_category_dependency_rules(&metadata, &root).expect_err("fixture must fail");
+    assert!(
+        error.contains("source_category=binary")
+            && error.contains("dependency_category=signer-provider")
+            && error.contains("mfm-signer-provider-fixture"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
 fn category_dependency_rules_reject_forbidden_transport_to_operation_edges() {
     let root = repo_root();
     let mut metadata = workspace_metadata(&root);
@@ -321,6 +417,67 @@ fn kernel_dependency_boundary_rejects_non_kernel_path_dependency_fixture() {
     );
 }
 
+fn validate_architecture_overrides_do_not_preserve_stale_workflow_names() -> Result<(), String> {
+    for &(source, dependency) in APPROVED_CATEGORY_DEPENDENCY_OVERRIDES {
+        reject_stale_workflow_name("category dependency override source", source)?;
+        reject_stale_workflow_name("category dependency override dependency", dependency)?;
+    }
+
+    for &(manifest, category) in PATH_CATEGORY_EXCEPTIONS {
+        reject_stale_workflow_name("category path exception manifest", manifest)?;
+        reject_stale_workflow_name("category path exception category", category.as_str())?;
+    }
+
+    Ok(())
+}
+
+fn reject_stale_workflow_name(label: &str, value: &str) -> Result<(), String> {
+    if let Some(term) = stale_workflow_terms()
+        .into_iter()
+        .find(|term| value.contains(term))
+    {
+        return Err(format!(
+            "{label} preserves stale workflow-shaped name value={value} term={term}"
+        ));
+    }
+
+    Ok(())
+}
+
+fn stale_workflow_terms() -> Vec<String> {
+    let lower = ["d", "cv"].concat();
+    let upper = lower.to_ascii_uppercase();
+    let title = lower
+        .chars()
+        .enumerate()
+        .flat_map(|(index, ch)| {
+            if index == 0 {
+                ch.to_uppercase().collect::<Vec<_>>()
+            } else {
+                vec![ch]
+            }
+        })
+        .collect::<String>();
+    let deploy = "deploy";
+    let configure = "configure";
+    let validate = "validate";
+    let operation_words = [deploy, configure, validate];
+
+    vec![
+        lower.clone(),
+        upper,
+        title.clone(),
+        format!("Evm{title}"),
+        format!("evm_{lower}"),
+        format!("evm-{lower}"),
+        format!("mfm.evm.{lower}"),
+        format!("typed-evm-{lower}"),
+        ["Deploy", "Configure", "Validate"].concat(),
+        operation_words.join("_"),
+        operation_words.join("-"),
+    ]
+}
+
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -378,6 +535,8 @@ fn validate_all_workspace_crates_have_mfm_category(metadata: &Value) -> Result<(
 }
 
 fn validate_category_dependency_rules(metadata: &Value, root: &Path) -> Result<(), String> {
+    validate_architecture_overrides_do_not_preserve_stale_workflow_names()?;
+
     let packages = workspace_packages(metadata, root)?;
     let by_manifest_dir = packages
         .iter()
@@ -416,7 +575,7 @@ fn validate_category_dependency_rules(metadata: &Value, root: &Path) -> Result<(
                 source_package.name.as_str(),
                 dependency_package.name.as_str(),
             );
-            if TEMPORARY_CATEGORY_DEPENDENCY_ALLOWLIST.contains(&edge) {
+            if APPROVED_CATEGORY_DEPENDENCY_OVERRIDES.contains(&edge) {
                 used_allowlist
                     .insert((source_package.name.clone(), dependency_package.name.clone()));
                 continue;
@@ -433,10 +592,10 @@ fn validate_category_dependency_rules(metadata: &Value, root: &Path) -> Result<(
         }
     }
 
-    for &(source, dependency) in TEMPORARY_CATEGORY_DEPENDENCY_ALLOWLIST {
+    for &(source, dependency) in APPROVED_CATEGORY_DEPENDENCY_OVERRIDES {
         if !used_allowlist.contains(&(source.to_owned(), dependency.to_owned())) {
             return Err(format!(
-                "stale category dependency allowlist source={source} dependency={dependency}"
+                "stale category dependency override source={source} dependency={dependency}"
             ));
         }
     }
@@ -549,6 +708,8 @@ fn push_synthetic_workspace_package(
 }
 
 fn validate_workspace_category_paths(packages: &[WorkspacePackage]) -> Result<(), String> {
+    validate_architecture_overrides_do_not_preserve_stale_workflow_names()?;
+
     let mut used_exceptions = BTreeSet::new();
 
     for package in packages {

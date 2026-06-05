@@ -1,28 +1,9 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
-const HISTORICAL_ARCHITECTURE_DOCS: &[&str] = &["PLAN_IMPL_PROBLEM_ARCH.md", "PROBLEM_ARCH_DCV.md"];
-
-const SCAN_SKIP_PATHS: &[&str] = &["tests/integration/tests/architecture_namespace_contract.rs"];
-
-const FORBIDDEN_PUBLIC_NAME_TERMS: &[&str] = &[
-    "dcv",
-    "DCV",
-    "Dcv",
-    "EvmDcv",
-    "evm_dcv",
-    "evm-dcv",
-    "mfm.evm.dcv",
-    "/v1/evm/dcv",
-    "typed-evm-dcv",
-    "DeployConfigureValidate",
-    "deploy_configure_validate",
-    "deploy-configure-validate",
-    "mfm-transports-evm-dcv",
-];
-
-const TEMPORARY_PUBLIC_NAME_ALLOWLIST: &[(&str, &str, usize)] = &[];
+const TEST_HARNESS_PATHS: &[&str] = &["tests/integration/tests/architecture_namespace_contract.rs"];
 
 const FORBIDDEN_TYPED_SURFACE_FIELDS: &[&str] = &[
     "rpc_url",
@@ -55,18 +36,17 @@ const TEMPORARY_TYPED_FIELD_ALLOWLIST: &[(&str, &str, usize)] = &[
 ];
 
 #[test]
-fn stale_public_namespace_terms_are_temporarily_allowlisted_by_path() {
+fn active_public_namespace_has_no_stale_workflow_recipe_terms() {
     let root = repo_root();
     let entries = repo_text_entries(&root);
+    let forbidden_terms = forbidden_public_name_terms();
 
     assert_forbidden_terms_are_allowlisted(
         "public namespace",
         &entries,
-        FORBIDDEN_PUBLIC_NAME_TERMS,
-        TEMPORARY_PUBLIC_NAME_ALLOWLIST,
-        |path, _source| {
-            !HISTORICAL_ARCHITECTURE_DOCS.contains(&path) && !SCAN_SKIP_PATHS.contains(&path)
-        },
+        &forbidden_terms,
+        &[],
+        |path, _source| !is_historical_architecture_doc(path),
     );
 }
 
@@ -81,8 +61,8 @@ fn typed_surface_runtime_fields_are_temporarily_allowlisted_by_path() {
         FORBIDDEN_TYPED_SURFACE_FIELDS,
         TEMPORARY_TYPED_FIELD_ALLOWLIST,
         |path, source| {
-            !HISTORICAL_ARCHITECTURE_DOCS.contains(&path)
-                && !SCAN_SKIP_PATHS.contains(&path)
+            !is_historical_architecture_doc(path)
+                && !TEST_HARNESS_PATHS.contains(&path)
                 && !TYPED_SURFACE_FIELD_SCAN_SKIP_PATHS.contains(&path)
                 && is_typed_surface_candidate(source)
         },
@@ -90,47 +70,78 @@ fn typed_surface_runtime_fields_are_temporarily_allowlisted_by_path() {
 }
 
 #[test]
+fn repository_text_entries_include_tracked_dot_config_surfaces() {
+    let root = repo_root();
+    let entries = repo_text_entries(&root);
+
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry.path.starts_with(".github/workflows/")),
+        "namespace scan must cover tracked workflow files"
+    );
+    assert!(
+        entries.iter().any(|entry| entry.path.starts_with(".env")),
+        "namespace scan must cover tracked env example files"
+    );
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry.path == "contracts/src/ConfigurableCounter.sol"),
+        "namespace scan must cover tracked Solidity files"
+    );
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry.path == "migrations/0001_typed_run_event_store.sql"),
+        "namespace scan must cover tracked SQL files"
+    );
+}
+
+#[test]
 fn namespace_guard_rejects_synthetic_stale_names() {
+    let forbidden_terms = forbidden_public_name_terms();
+    let stale_route_base = format!("/v1/evm/{}", stale_recipe_abbrev());
+    let stale_route = format!("{stale_route_base}/deploy");
     let entries = vec![TextEntry {
         path: "crates/new-public-surface/src/lib.rs".to_owned(),
-        source: "const ROUTE: &str = \"/v1/evm/dcv/deploy\";".to_owned(),
+        source: format!("const ROUTE: &str = \"{stale_route}\";"),
     }];
 
     let error = forbidden_term_report(
         "synthetic namespace",
         &entries,
-        FORBIDDEN_PUBLIC_NAME_TERMS,
+        &forbidden_terms,
         &[],
         |_path, _source| true,
     )
     .expect_err("synthetic stale name must fail");
 
     assert!(
-        error.contains("crates/new-public-surface/src/lib.rs") && error.contains("/v1/evm/dcv"),
+        error.contains("crates/new-public-surface/src/lib.rs") && error.contains(&stale_route_base),
         "unexpected error: {error}"
     );
 }
 
 #[test]
-fn namespace_guard_rejects_extra_stale_name_in_allowlisted_path() {
+fn namespace_guard_rejects_synthetic_stale_path_names() {
+    let forbidden_terms = forbidden_public_name_terms();
+    let stale_path = format!("crates/transports/evm-{}/src/lib.rs", stale_recipe_abbrev());
     let entries = vec![TextEntry {
-        path: "bin/rest-api/src/lib.rs".to_owned(),
-        source: "/v1/evm/dcv /v1/evm/dcv".to_owned(),
+        path: stale_path.clone(),
+        source: "pub struct ContractTransport;".to_owned(),
     }];
 
     let error = forbidden_term_report(
         "synthetic namespace",
         &entries,
-        &["/v1/evm/dcv"],
-        &[("bin/rest-api/src/lib.rs", "/v1/evm/dcv", 1)],
+        &forbidden_terms,
+        &[],
         |_path, _source| true,
     )
-    .expect_err("extra stale name in allowlisted path must fail");
+    .expect_err("synthetic stale path must fail");
 
-    assert!(
-        error.contains("expected=1") && error.contains("actual=2"),
-        "unexpected error: {error}"
-    );
+    assert!(error.contains(&stale_path), "unexpected error: {error}");
 }
 
 #[test]
@@ -158,7 +169,7 @@ fn typed_surface_guard_rejects_synthetic_runtime_fields() {
 #[test]
 fn typed_surface_guard_rejects_extra_runtime_field_in_allowlisted_path() {
     let entries = vec![TextEntry {
-        path: "crates/transports/evm-dcv/src/lib.rs".to_owned(),
+        path: "crates/transports/runtime-fixture/src/lib.rs".to_owned(),
         source: "#[derive(MfmValue)] struct Bad { rpc_url: String, another_rpc_url: String }"
             .to_owned(),
     }];
@@ -167,7 +178,7 @@ fn typed_surface_guard_rejects_extra_runtime_field_in_allowlisted_path() {
         "synthetic typed field",
         &entries,
         &["rpc_url"],
-        &[("crates/transports/evm-dcv/src/lib.rs", "rpc_url", 1)],
+        &[("crates/transports/runtime-fixture/src/lib.rs", "rpc_url", 1)],
         |_path, source| is_typed_surface_candidate(source),
     )
     .expect_err("extra runtime field in allowlisted path must fail");
@@ -184,10 +195,59 @@ struct TextEntry {
     source: String,
 }
 
-fn assert_forbidden_terms_are_allowlisted(
+fn stale_recipe_abbrev() -> String {
+    ["d", "cv"].concat()
+}
+
+fn forbidden_public_name_terms() -> Vec<String> {
+    let lower = stale_recipe_abbrev();
+    let upper = lower.to_ascii_uppercase();
+    let title = lower
+        .chars()
+        .enumerate()
+        .flat_map(|(index, ch)| {
+            if index == 0 {
+                ch.to_uppercase().collect::<Vec<_>>()
+            } else {
+                vec![ch]
+            }
+        })
+        .collect::<String>();
+    let deploy = "deploy";
+    let configure = "configure";
+    let validate = "validate";
+    let operation_words = [deploy, configure, validate];
+
+    vec![
+        lower.clone(),
+        upper,
+        title.clone(),
+        format!("Evm{title}"),
+        format!("evm_{lower}"),
+        format!("evm-{lower}"),
+        format!("mfm.evm.{lower}"),
+        format!("/v1/evm/{lower}"),
+        format!("typed-evm-{lower}"),
+        ["Deploy", "Configure", "Validate"].concat(),
+        operation_words.join("_"),
+        operation_words.join("-"),
+        format!("mfm-transports-evm-{lower}"),
+    ]
+}
+
+fn is_historical_architecture_doc(path: &str) -> bool {
+    path == "PLAN_IMPL_PROBLEM_ARCH.md"
+        || path
+            == format!(
+                "PROBLEM_ARCH_{}.md",
+                stale_recipe_abbrev().to_ascii_uppercase()
+            )
+}
+
+fn assert_forbidden_terms_are_allowlisted<T: AsRef<str>>(
     label: &str,
     entries: &[TextEntry],
-    terms: &[&str],
+    terms: &[T],
     allowlist: &[(&str, &str, usize)],
     include: impl Fn(&str, &str) -> bool,
 ) {
@@ -196,26 +256,26 @@ fn assert_forbidden_terms_are_allowlisted(
     }
 }
 
-fn forbidden_term_report(
+fn forbidden_term_report<T: AsRef<str>>(
     label: &str,
     entries: &[TextEntry],
-    terms: &[&str],
+    terms: &[T],
     allowlist: &[(&str, &str, usize)],
     include: impl Fn(&str, &str) -> bool,
 ) -> Result<(), String> {
     let expected = allowlist
         .iter()
-        .map(|(path, term, count)| ((*path, *term), *count))
+        .map(|(path, term, count)| (((*path).to_owned(), (*term).to_owned()), *count))
         .collect::<BTreeMap<_, _>>();
-    let mut actual = BTreeMap::<(&str, &str), usize>::new();
+    let mut actual = BTreeMap::<(String, String), usize>::new();
 
     for entry in entries {
         if !include(&entry.path, &entry.source) {
             continue;
         }
 
-        for (term, count) in term_counts_in_source(&entry.source, terms) {
-            actual.insert((entry.path.as_str(), term), count);
+        for (term, count) in term_counts_in_entry(entry, terms) {
+            actual.insert((entry.path.clone(), term), count);
         }
     }
 
@@ -265,13 +325,13 @@ fn forbidden_term_report(
     Ok(())
 }
 
-fn term_counts_in_source<'a>(source: &str, terms: &'a [&'a str]) -> Vec<(&'a str, usize)> {
+fn term_counts_in_entry<T: AsRef<str>>(entry: &TextEntry, terms: &[T]) -> Vec<(String, usize)> {
     terms
         .iter()
-        .copied()
         .filter_map(|term| {
-            let count = source.matches(term).count();
-            (count > 0).then_some((term, count))
+            let term = term.as_ref();
+            let count = entry.path.matches(term).count() + entry.source.matches(term).count();
+            (count > 0).then_some((term.to_owned(), count))
         })
         .collect()
 }
@@ -289,63 +349,38 @@ fn is_typed_surface_candidate(source: &str) -> bool {
 }
 
 fn repo_text_entries(root: &Path) -> Vec<TextEntry> {
-    let mut entries = Vec::new();
-    collect_text_entries(root, root, &mut entries);
+    let output = Command::new("git")
+        .args(["ls-files", "-z"])
+        .current_dir(root)
+        .output()
+        .expect("list tracked files");
+    assert!(
+        output.status.success(),
+        "git ls-files failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let mut entries = output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|raw| !raw.is_empty())
+        .map(|raw| {
+            std::str::from_utf8(raw)
+                .unwrap_or_else(|error| panic!("tracked path is not utf-8: {error}"))
+        })
+        .filter_map(|rel| {
+            let path = root.join(rel);
+            let bytes = fs::read(&path).unwrap_or_else(|error| {
+                panic!("read tracked file {}: {error}", path.display());
+            });
+            String::from_utf8(bytes).ok().map(|source| TextEntry {
+                path: rel.replace('\\', "/"),
+                source,
+            })
+        })
+        .collect::<Vec<_>>();
     entries.sort_by(|left, right| left.path.cmp(&right.path));
     entries
-}
-
-fn collect_text_entries(root: &Path, dir: &Path, entries: &mut Vec<TextEntry>) {
-    let read_dir = fs::read_dir(dir).unwrap_or_else(|error| {
-        panic!("read directory {}: {error}", dir.display());
-    });
-
-    for entry in read_dir {
-        let entry = entry.unwrap_or_else(|error| {
-            panic!("read directory entry {}: {error}", dir.display());
-        });
-        let path = entry.path();
-        let file_type = entry.file_type().unwrap_or_else(|error| {
-            panic!("read file type {}: {error}", path.display());
-        });
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-
-        if file_type.is_dir() {
-            if should_skip_dir(&name) {
-                continue;
-            }
-            collect_text_entries(root, &path, entries);
-            continue;
-        }
-
-        if file_type.is_file() && should_scan_file(&path) {
-            let rel = repo_relative(root, &path);
-            let source = fs::read_to_string(&path).unwrap_or_else(|error| {
-                panic!("read text file {}: {error}", path.display());
-            });
-            entries.push(TextEntry { path: rel, source });
-        }
-    }
-}
-
-fn should_skip_dir(name: &str) -> bool {
-    if name.starts_with('.') {
-        return true;
-    }
-
-    matches!(name, "target" | "result" | "result-bin")
-}
-
-fn should_scan_file(path: &Path) -> bool {
-    if path.file_name().and_then(|name| name.to_str()) == Some("Cargo.lock") {
-        return true;
-    }
-
-    matches!(
-        path.extension().and_then(|extension| extension.to_str()),
-        Some("rs" | "toml" | "md" | "json" | "nix" | "stderr" | "txt" | "yaml" | "yml")
-    )
 }
 
 fn repo_root() -> PathBuf {
@@ -354,11 +389,4 @@ fn repo_root() -> PathBuf {
         .and_then(Path::parent)
         .expect("integration crate lives under tests/integration")
         .to_path_buf()
-}
-
-fn repo_relative(root: &Path, path: &Path) -> String {
-    path.strip_prefix(root)
-        .unwrap_or(path)
-        .to_string_lossy()
-        .replace('\\', "/")
 }
