@@ -55,8 +55,8 @@ pub struct LegacyTxToSign {
 /// Canonical EIP-1559 transaction fields required for signing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Eip1559TxToSign {
-    /// Destination address for the transaction.
-    pub to: Address,
+    /// Destination address for the transaction, or none for contract creation.
+    pub to: Option<Address>,
     /// Native token value in wei.
     pub value_wei: u128,
     /// Chain ID used for replay protection.
@@ -267,13 +267,17 @@ fn legacy_unsigned_payload(tx: &LegacyTxToSign) -> Vec<u8> {
 }
 
 fn encode_eip1559_unsigned_payload(tx: &Eip1559TxToSign) -> Vec<u8> {
+    let to = tx
+        .to
+        .map(|addr| addr.as_slice().to_vec())
+        .unwrap_or_default();
     rlp_encode_list_preencoded(&[
         rlp_encode_bytes(&u64_to_min_be(tx.chain_id)),
         rlp_encode_bytes(&u64_to_min_be(tx.nonce)),
         rlp_encode_bytes(&u128_to_min_be(tx.max_priority_fee_per_gas)),
         rlp_encode_bytes(&u128_to_min_be(tx.max_fee_per_gas)),
         rlp_encode_bytes(&u64_to_min_be(tx.gas_limit)),
-        rlp_encode_bytes(tx.to.as_slice()),
+        rlp_encode_bytes(&to),
         rlp_encode_bytes(&u128_to_min_be(tx.value_wei)),
         rlp_encode_bytes(&tx.data),
         rlp_encode_list_preencoded(&[]),
@@ -283,6 +287,10 @@ fn encode_eip1559_unsigned_payload(tx: &Eip1559TxToSign) -> Vec<u8> {
 fn encode_eip1559_signed_payload(tx: &Eip1559TxToSign, sig: PrimitiveSignature) -> Vec<u8> {
     let r = trim_leading_zero_bytes(&sig.r().to_be_bytes::<32>());
     let s = trim_leading_zero_bytes(&sig.s().to_be_bytes::<32>());
+    let to = tx
+        .to
+        .map(|addr| addr.as_slice().to_vec())
+        .unwrap_or_default();
 
     rlp_encode_list_preencoded(&[
         rlp_encode_bytes(&u64_to_min_be(tx.chain_id)),
@@ -290,7 +298,7 @@ fn encode_eip1559_signed_payload(tx: &Eip1559TxToSign, sig: PrimitiveSignature) 
         rlp_encode_bytes(&u128_to_min_be(tx.max_priority_fee_per_gas)),
         rlp_encode_bytes(&u128_to_min_be(tx.max_fee_per_gas)),
         rlp_encode_bytes(&u64_to_min_be(tx.gas_limit)),
-        rlp_encode_bytes(tx.to.as_slice()),
+        rlp_encode_bytes(&to),
         rlp_encode_bytes(&u128_to_min_be(tx.value_wei)),
         rlp_encode_bytes(&tx.data),
         rlp_encode_list_preencoded(&[]),
@@ -351,7 +359,7 @@ mod tests {
     #[test]
     fn signed_eip1559_encoding_uses_canonical_zero_y_parity() {
         let tx = Eip1559TxToSign {
-            to: Address::from([0u8; 20]),
+            to: Some(Address::from([0u8; 20])),
             value_wei: 0,
             chain_id: 1,
             nonce: 0,
@@ -364,6 +372,25 @@ mod tests {
         assert_eq!(
             bytes_to_hex_prefixed(&encode_signed_eip1559_tx(&tx, signature(false))),
             "0x02e2018001028252089400000000000000000000000000000000000000008080c0800102"
+        );
+    }
+
+    #[test]
+    fn signed_eip1559_create_encoding_allows_absent_recipient() {
+        let tx = Eip1559TxToSign {
+            to: None,
+            value_wei: 0,
+            chain_id: 1,
+            nonce: 0,
+            max_fee_per_gas: 2,
+            max_priority_fee_per_gas: 1,
+            gas_limit: 21_000,
+            data: vec![0x60, 0x00],
+        };
+
+        assert_eq!(
+            bytes_to_hex_prefixed(&encode_signed_eip1559_tx(&tx, signature(false))),
+            "0x02d0018001028252088080826000c0800102"
         );
     }
 

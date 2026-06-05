@@ -1,0 +1,36 @@
+[package]
+name = "mfm-adapters-evm-contracts"
+version = "0.1.0"
+edition = "2021"
+description = "EVM contract lifecycle adapter runners"
+repository = "https://github.com/willyrgf/mfm"
+license = "MIT"
+
+[package.metadata.mfm]
+category = "adapter"
+
+[dependencies]
+alloy-primitives = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+mfm-adapter-contracts = { path = "../../adapter-contracts" }
+mfm-artifact-capabilities = { path = "../../artifact-capabilities" }
+mfm-canonical = { path = "../../kernel/canonical" }
+mfm-events = { path = "../../kernel/events" }
+mfm-evm-capabilities = { path = "../../evm-capabilities" }
+mfm-evm-contract-config = { path = "../../evm-contract-config" }
+mfm-evm-contract-model = { path = "../../evm-contract-model" }
+mfm-evm-core = { path = "../../evm-core" }
+mfm-evm-signing = { path = "../../evm-signing" }
+mfm-ids = { path = "../../kernel/ids" }
+mfm-program = { path = "../../kernel/program" }
+mfm-program-derive = { path = "../../kernel/program-derive" }
+mfm-replay = { path = "../../kernel/replay" }
+mfm-signing = { path = "../../signing" }
+mfm-state-evm-contracts = { path = "../../states/evm-contracts" }
+mfm-values = { path = "../../kernel/values" }
+
+[dev-dependencies]
+tokio = { workspace = true }

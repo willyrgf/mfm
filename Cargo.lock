@@ -1761,6 +1761,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "mfm-adapters-evm-contracts"
+version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "mfm-adapter-contracts",
+ "mfm-artifact-capabilities",
+ "mfm-canonical",
+ "mfm-events",
+ "mfm-evm-capabilities",
+ "mfm-evm-contract-config",
+ "mfm-evm-contract-model",
+ "mfm-evm-core",
+ "mfm-evm-signing",
+ "mfm-ids",
+ "mfm-program",
+ "mfm-program-derive",
+ "mfm-replay",
+ "mfm-signing",
+ "mfm-state-evm-contracts",
+ "mfm-values",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "mfm-app"
 version = "0.1.0"
 dependencies = [

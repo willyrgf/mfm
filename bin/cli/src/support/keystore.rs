@@ -343,7 +343,7 @@ pub(crate) fn sign_transaction(req: TxSignRequest) -> Result<SignedTx, CommandEr
     let mut keystore = load_unlocked_keystore(&req.keystore_path)?;
     let key_id = resolve_key_id(&keystore, req.id.as_deref(), req.by_label.as_deref())?;
     let tx = Eip1559TxToSign {
-        to: parse_address(&req.to, "to").map_err(command_error_from_util)?,
+        to: Some(parse_address(&req.to, "to").map_err(command_error_from_util)?),
         value_wei: parse_u128_quantity(&req.value_wei, "value-wei")
             .map_err(command_error_from_util)?,
         chain_id: req.chain_id,

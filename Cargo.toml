@@ -30,6 +30,7 @@ members = [
 	"crates/evm-capabilities",
 	"crates/artifact-capabilities",
 	"crates/adapter-contracts",
+	"crates/adapters/evm-contracts",
 	"crates/signing",
 	"crates/evm-signing",
 	"crates/signers/keystore",

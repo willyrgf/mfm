@@ -122,8 +122,8 @@ impl EvmSigningRequest {
         self.expected_from
     }
 
-    /// Verifies the provider result and materializes a transient raw signed transaction.
-    pub fn materialize_raw_transaction(
+    /// Verifies the provider result and materializes a transient signed payload.
+    pub fn materialize_signed_payload(
         &self,
         signing_result: &SigningResult,
     ) -> Result<TransientRawTransaction> {
@@ -353,7 +353,7 @@ mod tests {
 
     fn eip1559_tx() -> Eip1559TxToSign {
         Eip1559TxToSign {
-            to: Address::from([0x11; 20]),
+            to: Some(Address::from([0x11; 20])),
             value_wei: 0,
             chain_id: 1,
             nonce: 7,
@@ -470,7 +470,7 @@ mod tests {
         .expect("signing result");
 
         let raw = request
-            .materialize_raw_transaction(&result)
+            .materialize_signed_payload(&result)
             .expect("raw transaction");
 
         assert!(raw.hex().starts_with("0x"));
@@ -507,7 +507,7 @@ mod tests {
         .expect("signing result");
 
         assert_eq!(
-            request.materialize_raw_transaction(&result),
+            request.materialize_signed_payload(&result),
             Err(EvmSigningError::RecoveredAddressMismatch)
         );
     }
