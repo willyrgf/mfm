@@ -25,6 +25,10 @@ Environment variables:
 - `DATABASE_URL`: Postgres URL for the certified typed run-event store (required)
 - `MFM_TYPED_ARTIFACT_ROOT`: typed artifact root (default: `~/.mfm/typed_run_artifacts`)
 - `MFM_SOURCE_REVISION`: optional source revision evidence for typed run starts
+- `MFM_EVM_RPC_SOURCES_JSON`: runtime-only EVM source registry for contract lifecycle routes
+- `MFM_EVM_CONTRACT_SOURCE_REF`: optional EVM source id for contract lifecycle routes
+- `MFM_EVM_CONTRACT_SOURCE_POLICY_ID`: optional EVM source policy id for contract lifecycle routes
+- `MFM_EVM_SIGNERS_JSON`: runtime-only signer provider registry for contract lifecycle routes
 
 ## API
 
@@ -81,7 +85,9 @@ submits old dynamic `portfolio_tracker`, `portfolio_execute`, or `portfolio_conf
 ## Start EVM Contract Runs
 
 The EVM contract routes compile typed contract lifecycle programs and start certified runs through
-the same run middleware as `/v1/runs/start`.
+the same run middleware as `/v1/runs/start`. Config JSON carries semantic network intent,
+expected chain id, artifact refs, and non-secret signer intent. Process-local RPC endpoints and
+keystore paths are resolved only through `MFM_EVM_RPC_SOURCES_JSON` and `MFM_EVM_SIGNERS_JSON`.
 
 Deploy:
 

@@ -384,9 +384,7 @@ fn password_from_file(path: impl AsRef<Path>) -> Result<ResolvedPassword> {
             kind: RuntimeSourceKind::PasswordFile,
         }
     })?);
-    let trimmed = contents
-        .trim_end_matches(|ch| ch == '\r' || ch == '\n')
-        .to_owned();
+    let trimmed = contents.trim_end_matches(['\r', '\n']).to_owned();
     if trimmed.is_empty() {
         return Err(KeystoreSignerError::InvalidRuntimeSource {
             kind: RuntimeSourceKind::PasswordFile,

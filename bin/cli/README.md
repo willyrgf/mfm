@@ -515,30 +515,40 @@ The CLI's behavior can be modified using environment variables, which is ideal f
   mfm_cli run public-output "run:sha256-jcs-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" --schema-id "<SCHEMA_ID>"
   ```
 
-- **`MFM_EVM_RPC_SOURCES_JSON`**: Optional JSON array of source objects used by typed EVM RPC
-  backends. Runtime-only and never persisted.
+- **`MFM_EVM_RPC_SOURCES_JSON`**: Optional JSON source registry used by typed EVM RPC
+  backends. It is runtime-only and never persisted. The registry contains endpoint-bearing
+  `sources` and ordered fallback `policies`; workflow configs refer only to source and policy ids.
   ```sh
-  export MFM_EVM_RPC_SOURCES_JSON='[
-    {"id":"reth_local","network_id":"ethereum-mainnet","rpc_url":"http://127.0.0.1:8545","kind":"local"},
-    {"id":"drpc_public","network_id":"ethereum-mainnet","rpc_url":"https://eth.drpc.org","kind":"remote_public"}
+  export MFM_EVM_RPC_SOURCES_JSON='{
+    "sources": [
+      {"id":"reth-local","expected_chain_id":31337,"rpc_url":"http://127.0.0.1:8545","authorization":null},
+      {"id":"publicnode-ethereum-mainnet","expected_chain_id":1,"rpc_url":"https://ethereum-rpc.publicnode.com","authorization":null}
+    ],
+    "policies": [
+      {"id":"reth-local","ordered_sources":["reth-local"]},
+      {"id":"publicnode-ethereum-mainnet","ordered_sources":["publicnode-ethereum-mainnet"]}
+    ]
+  }'
+  ```
+
+- **`MFM_EVM_SIGNERS_JSON`**: Optional runtime signer registry consumed by typed EVM contract
+  workflows. Signer provider entries resolve non-secret `signer_ref` values from config to
+  process-local providers without exposing private keys in typed values or outputs.
+  ```sh
+  export MFM_EVM_SIGNERS_JSON='[
+    {
+      "signer_ref": "deployer",
+      "entry_id": "<uuid>",
+      "keystore_env": "MFM_KEYSTORE_PATH",
+      "unlock_file_env": "MFM_KEYSTORE_PASSWORD_FILE"
+    }
   ]'
   ```
 
-- **`MFM_EVM_RPC_PREFERRED_ORDER`**: Optional comma-separated source IDs that seed typed RPC source
-  preference order.
-  ```sh
-  export MFM_EVM_RPC_PREFERRED_ORDER="reth_local,drpc_public"
-  ```
-
-- **`MFM_EVM_RPC_REQUIRE_GET_PROOF_IDS`**: Optional comma-separated source IDs that must pass
-  `eth_getProof` during typed RPC source probing.
-  ```sh
-  export MFM_EVM_RPC_REQUIRE_GET_PROOF_IDS="reth_local"
-  ```
-
-- Typed EVM RPC source configuration requires `network_id` on every configured source.
-- Typed EVM requests require an explicit `network_id`; `control_scope` defaults to `shared` unless
-  workflow config overrides it.
+- Typed EVM RPC source configuration requires `expected_chain_id` on every configured source and at
+  least one policy with an ordered source list.
+- Typed EVM requests use semantic `network_id` plus explicit source and policy refs where needed;
+  `control_scope` defaults to `shared` unless workflow config overrides it.
 
 - Typed EVM RPC note: per-request `rpc_url` override is not supported.
 - Typed EVM RPC runbook: [`../../docs/evm-rpc-routing.md`](../../docs/evm-rpc-routing.md)

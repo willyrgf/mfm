@@ -15,37 +15,56 @@ Normative architecture references:
 
 Typed EVM transports discover RPC sources from environment variables:
 
-- `MFM_EVM_RPC_SOURCES_JSON`: JSON array of source objects.
-- `MFM_EVM_RPC_PREFERRED_ORDER`: comma-separated source IDs used as selection preference.
-- `MFM_EVM_RPC_REQUIRE_GET_PROOF_IDS`: comma-separated source IDs that must pass `eth_getProof`
-  probing before use.
+- `MFM_EVM_RPC_SOURCES_JSON`: JSON source registry with endpoint-bearing `sources` and ordered
+  fallback `policies`.
+- `MFM_EVM_CONTRACT_SOURCE_REF`: optional source id used by contract lifecycle routes when the
+  workflow config does not select a process-local source explicitly.
+- `MFM_EVM_CONTRACT_SOURCE_POLICY_ID`: optional source policy id used by contract lifecycle routes
+  when the workflow config does not select a process-local policy explicitly.
+- `MFM_EVM_SIGNERS_JSON`: JSON array of runtime signer-provider entries used by contract lifecycle
+  routes.
 
 Source object fields:
 
 - `id`: stable source id used only for runtime selection and diagnostics
-- `network_id`: typed workflow network id
+- `expected_chain_id`: chain id that must be observed before the source can be used
 - `rpc_url`: endpoint URL
-- `kind`: optional `local`, `remote_user`, or `remote_public`
 - `authorization`: optional runtime-only auth metadata
-- `require_get_proof_probe`: optional per-source probe requirement
+
+Policy object fields:
+
+- `id`: stable policy id used only for runtime selection and diagnostics
+- `ordered_sources`: source ids tried in order
 
 Example:
 
 ```json
-[
-  {
-    "id": "reth_local",
-    "network_id": "ethereum-mainnet",
-    "rpc_url": "http://127.0.0.1:8545",
-    "kind": "local"
-  },
-  {
-    "id": "public_eth",
-    "network_id": "ethereum-mainnet",
-    "rpc_url": "https://ethereum-rpc.publicnode.com",
-    "kind": "remote_public"
-  }
-]
+{
+  "sources": [
+    {
+      "id": "reth-local",
+      "expected_chain_id": 31337,
+      "rpc_url": "http://127.0.0.1:8545",
+      "authorization": null
+    },
+    {
+      "id": "publicnode-ethereum-mainnet",
+      "expected_chain_id": 1,
+      "rpc_url": "https://ethereum-rpc.publicnode.com",
+      "authorization": null
+    }
+  ],
+  "policies": [
+    {
+      "id": "reth-local",
+      "ordered_sources": ["reth-local"]
+    },
+    {
+      "id": "publicnode-ethereum-mainnet",
+      "ordered_sources": ["publicnode-ethereum-mainnet"]
+    }
+  ]
+}
 ```
 
 Do not persist `rpc_url` or authorization material in typed values, specs, events, artifacts, public
@@ -68,8 +87,7 @@ Live typed transports may:
 - select a configured source for the certified network and scope
 - probe source health before use
 - perform read calls required by certified read states
-- sign with runtime-only MFM keystore access and submit side-effect transactions required by
-  certified side-effect states
+- submit side-effect transactions required by certified side-effect states
 - persist typed fact, receipt, confirmation, and artifact evidence through runtime/store APIs
 
 Live typed transports must not:
@@ -80,9 +98,21 @@ Live typed transports must not:
 - persist secrets or raw signing material in typed semantic surfaces
 - accept per-request raw RPC URL overrides from workflow configs
 
-Deploy/configure signer config carries only non-secret keystore references: entry id and the names
-of environment variables that point to the keystore path and password file. The referenced paths,
-passwords, private keys, and signed raw transactions remain runtime-only.
+Contract lifecycle configs carry only signer intent: a non-secret `signer_ref` and expected signer
+address. `MFM_EVM_SIGNERS_JSON` maps `signer_ref` to a process-local provider entry, for example:
+
+```json
+[
+  {
+    "signer_ref": "deployer",
+    "entry_id": "00000000-0000-0000-0000-000000000000",
+    "keystore_env": "MFM_KEYSTORE_PATH",
+    "unlock_file_env": "MFM_KEYSTORE_PASSWORD_FILE"
+  }
+]
+```
+
+The referenced paths, passwords, private keys, and signed raw transactions remain runtime-only.
 
 ## Replay
 

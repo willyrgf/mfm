@@ -17,7 +17,7 @@ fn production_typed_app_links_only_typed_transport_crates() {
         "mfm-transports-exec",
         "mfm-transports-local-evm",
         concat!("mfm-transports-evm-", "d", "cv"),
-        "mfm-transports-portfolio",
+        concat!("mfm-transports-", "portfolio"),
         "mfm-transports-local-fs",
         "mfm-transports-local-keystore",
         "mfm-transports-rpc-control",

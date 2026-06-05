@@ -11,7 +11,7 @@ It is inspired by the practices used in large Rust codebases: modular crates, st
 - If the requested change needs missing underlying support, add that support properly or report the blocker honestly.
 - Match CI (Nixfied): use `nix run .#check`, `nix run .#test`, and `nix run .#ci -- --mode <mode> --summary`.
 - Default pre-commit gate: run `nix run .#ci -- --mode full` before every commit.
-- Write commit subjects in lower case. Examples: `mfm-core bump to 0.1.30`, `fix nix task wrappers to preserve caller cwd`, `implement phased publish-docs reconciler`, `docs: publish umbrella earlier with live links only`, `docs: point crate metadata at mfm repo`.
+- Write commit subjects in lower case. Examples: `mfm-core bump to 0.1.30`, `fix nix task wrappers to preserve caller cwd`, `docs: refresh repo map for typed crates`, `docs: publish umbrella earlier with live links only`, `docs: point crate metadata at mfm repo`.
 - Never log, print, or persist secrets (passwords, mnemonics, private keys).
 - Preserve crate boundaries: libraries stay usable without the CLI.
 - Keep binaries (`bin/cli`, `bin/rest-api`) thin:

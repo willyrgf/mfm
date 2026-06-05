@@ -535,11 +535,6 @@ Required metadata checks should assert:
 - signer providers do not depend on workflow operation or state crates
 - public schema namespaces do not use temporary recipe names
 
-## Release Tooling
-
-`publish-docs` is separate release tooling for crate documentation publication. It is not part of
-the typed workflow runtime surface and must not be used as architectural proof.
-
 ## Companion Docs
 
 - `docs/design.md`: authoritative runtime, store, replay, and secret-handling contract

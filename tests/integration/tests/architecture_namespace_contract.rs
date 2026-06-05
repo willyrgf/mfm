@@ -370,9 +370,11 @@ fn repo_text_entries(root: &Path) -> Vec<TextEntry> {
         })
         .filter_map(|rel| {
             let path = root.join(rel);
-            let bytes = fs::read(&path).unwrap_or_else(|error| {
-                panic!("read tracked file {}: {error}", path.display());
-            });
+            let bytes = match fs::read(&path) {
+                Ok(bytes) => bytes,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+                Err(error) => panic!("read tracked file {}: {error}", path.display()),
+            };
             String::from_utf8(bytes).ok().map(|source| TextEntry {
                 path: rel.replace('\\', "/"),
                 source,

@@ -950,7 +950,7 @@ mod tests {
         let source_path = "/tmp/secret/mfm-key.json";
         let err = redact_artifact_capability_error(FsTypedArtifactError::Io {
             context: "failed to read typed artifact bytes",
-            source: std::io::Error::new(std::io::ErrorKind::Other, source_path),
+            source: std::io::Error::other(source_path),
         });
         let rendered = err.to_string();
 

@@ -189,12 +189,12 @@ impl EvmSourceRegistry {
             .sources
             .into_iter()
             .map(|source| {
-                Ok(EvmRuntimeSource::new(
+                EvmRuntimeSource::new(
                     EvmSourceRef::new(source.id).map_err(|_| EvmTransportError::InvalidRegistry)?,
                     source.expected_chain_id,
                     source.rpc_url,
                     source.authorization,
-                )?)
+                )
             })
             .collect::<TransportResult<Vec<_>>>()?;
         let policies = config

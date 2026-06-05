@@ -13,24 +13,29 @@ The wrapper is intentionally thin:
 ## RPC Defaults
 
 The preferred runtime contract is explicit RPC configuration through
-`MFM_EVM_RPC_SOURCES_JSON` and `MFM_EVM_RPC_PREFERRED_ORDER`.
+`MFM_EVM_RPC_SOURCES_JSON`.
 
 When `MFM_EVM_RPC_SOURCES_JSON` is unset, the wrapper provides a public Ethereum mainnet
 fallback:
 
 ```json
-[
-  {
-    "id": "publicnode_ethereum_mainnet",
-    "network_id": "ethereum-mainnet",
-    "rpc_url": "https://ethereum-rpc.publicnode.com",
-    "kind": "remote_public"
-  }
-]
+{
+  "sources": [
+    {
+      "id": "publicnode-ethereum-mainnet",
+      "expected_chain_id": 1,
+      "rpc_url": "https://ethereum-rpc.publicnode.com",
+      "authorization": null
+    }
+  ],
+  "policies": [
+    {
+      "id": "publicnode-ethereum-mainnet",
+      "ordered_sources": ["publicnode-ethereum-mainnet"]
+    }
+  ]
+}
 ```
-
-When `MFM_EVM_RPC_PREFERRED_ORDER` is unset, it defaults to
-`publicnode_ethereum_mainnet`.
 
 ## Service Policy
 

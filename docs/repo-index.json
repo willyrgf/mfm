@@ -74,8 +74,28 @@
       "kind": "rust-cargo"
     },
     {
+      "name": "adapter-contracts",
+      "path": "crates/adapter-contracts/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "evm-contracts",
+      "path": "crates/adapters/evm-contracts/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "portfolio",
+      "path": "crates/adapters/portfolio/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
       "name": "app",
       "path": "crates/app/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "artifact-capabilities",
+      "path": "crates/artifact-capabilities/Cargo.toml",
       "kind": "rust-cargo"
     },
     {
@@ -104,8 +124,28 @@
       "kind": "rust-cargo"
     },
     {
+      "name": "evm-capabilities",
+      "path": "crates/evm-capabilities/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "evm-contract-config",
+      "path": "crates/evm-contract-config/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "evm-contract-model",
+      "path": "crates/evm-contract-model/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
       "name": "evm-core",
       "path": "crates/evm-core/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "evm-signing",
+      "path": "crates/evm-signing/Cargo.toml",
       "kind": "rust-cargo"
     },
     {
@@ -174,6 +214,11 @@
       "kind": "rust-cargo"
     },
     {
+      "name": "evm-contract-lifecycle-op",
+      "path": "crates/ops/evm-contract-lifecycle-op/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
       "name": "portfolio-tracker-op",
       "path": "crates/ops/portfolio-tracker-op/Cargo.toml",
       "kind": "rust-cargo"
@@ -194,6 +239,21 @@
       "kind": "rust-cargo"
     },
     {
+      "name": "keystore",
+      "path": "crates/signers/keystore/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "signing",
+      "path": "crates/signing/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "evm-contracts",
+      "path": "crates/states/evm-contracts/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
       "name": "portfolio",
       "path": "crates/states/portfolio/Cargo.toml",
       "kind": "rust-cargo"
@@ -209,13 +269,8 @@
       "kind": "rust-cargo"
     },
     {
-      "name": "publish-docs",
-      "path": "crates/tools/publish-docs/Cargo.toml",
-      "kind": "rust-cargo"
-    },
-    {
-      "name": "portfolio",
-      "path": "crates/transports/portfolio/Cargo.toml",
+      "name": "evm",
+      "path": "crates/transports/evm/Cargo.toml",
       "kind": "rust-cargo"
     },
     {

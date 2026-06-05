@@ -208,8 +208,6 @@ let
     "MFM_CI_ENABLE_PARITY"
     "DATABASE_URL"
     "MFM_EVM_RPC_SOURCES_JSON"
-    "MFM_EVM_RPC_REQUIRE_GET_PROOF_IDS"
-    "MFM_EVM_RPC_URL"
     "MFM_EVM_CONTRACT_SOURCE_REF"
     "MFM_EVM_CONTRACT_SOURCE_POLICY_ID"
     "MFM_EVM_SIGNERS_JSON"
@@ -518,11 +516,9 @@ EOF
     export MFM_PARITY_EVM_RETH_RUN_IDS_PATH="''${MFM_PARITY_EVM_RETH_RUN_IDS_PATH:-$artifacts_dir/parity-evm-reth-run-ids.json}"
     export PGDATABASE="''${PGDATABASE:-${postgresTestDatabase}}"
     export DATABASE_URL="''${DATABASE_URL:-postgresql://postgres:postgres@127.0.0.1:$POSTGRES_PORT/$PGDATABASE}"
-    export MFM_EVM_RPC_URL="http://127.0.0.1:$RETH_HTTP_PORT"
     export MFM_EVM_RPC_SOURCES_JSON="{\"sources\":[{\"id\":\"reth-local\",\"expected_chain_id\":31337,\"rpc_url\":\"http://127.0.0.1:$RETH_HTTP_PORT\",\"authorization\":null}],\"policies\":[{\"id\":\"reth-local\",\"ordered_sources\":[\"reth-local\"]}]}"
     export MFM_EVM_CONTRACT_SOURCE_REF="reth-local"
     export MFM_EVM_CONTRACT_SOURCE_POLICY_ID="reth-local"
-    export MFM_EVM_RPC_REQUIRE_GET_PROOF_IDS=""
   '';
   parityNextestArchiveShell = ''
     parity_nextest_archive_file="''${MFM_CI_PARITY_NEXTEST_ARCHIVE_FILE:-$artifacts_dir/${parityNextestArchiveFileName}}"
@@ -924,9 +920,6 @@ in
               export DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:5432/mfm"
             fi
 
-            if [ -z "''${MFM_EVM_RPC_URL:-}" ]; then
-              export MFM_EVM_RPC_URL="http://127.0.0.1:8545"
-            fi
             if [ -z "''${MFM_EVM_RPC_SOURCES_JSON:-}" ]; then
               export MFM_EVM_RPC_SOURCES_JSON='{"sources":[{"id":"reth-local","expected_chain_id":31337,"rpc_url":"http://127.0.0.1:8545","authorization":null}],"policies":[{"id":"reth-local","ordered_sources":["reth-local"]}]}'
             fi
@@ -1210,49 +1203,6 @@ in
             run_with_log "$clippy_log" ${cargoClippyCmd}
 
             echo "OK: quality checks completed"
-          '';
-        };
-
-        publish-docs = mkCommandTask {
-          id = "task.publish-docs";
-          summary = "Plan or publish the docs.rs crate wave with exact crates.io observation";
-          description = ''
-            Runs the Rust Phase-1 publish-docs tool against `crates/docs/publish-wave.json`.
-            The tool resolves local versions from `cargo metadata`, checks exact crates.io package
-            versions, emits sanitized run artifacts under `.mfm/publish-docs/runs/`, and either
-            plans or applies publish actions. By default this performs a real `cargo publish`;
-            use `plan` to build a plan without uploading crates.
-          '';
-          tags = [
-            "release"
-            "docs"
-          ];
-          usage = [
-            "nix run .#publish-docs -- plan"
-            "nix run .#publish-docs -- plan --json"
-            "nix run .#publish-docs -- --from mfm-runtime"
-            "nix run .#publish-docs -- --only mfm-docs"
-            "nix run .#publish-docs"
-          ];
-          examples = [
-            "nix run .#publish-docs -- plan"
-            "nix run .#publish-docs -- apply --json"
-            "nix run .#publish-docs -- --from mfm-runtime"
-          ];
-          runtimeInputs = rustRuntimeInputs ++ [ pkgs.git ];
-          argParser = "passthrough";
-          allowUnknownArgs = true;
-          passThroughEnv = sharedPassThroughEnv ++ [
-            "CARGO_HOME"
-            "CARGO_REGISTRY_TOKEN"
-            "CARGO_REGISTRIES_CRATES_IO_TOKEN"
-            "MFM_OUTPUT_FORMAT"
-          ];
-          env = sharedCargoRustEnv;
-          command = ''
-            set -euo pipefail
-            ${cargoWorkspaceTargetPreamble}
-            exec cargo run -p mfm-publish-docs -- "$@"
           '';
         };
 
@@ -1592,7 +1542,6 @@ EOF
               require_app "dev"
               require_app "build"
               require_app "check"
-              require_app "publish-docs"
               require_app "format"
               require_app "test"
               require_app "ci"
@@ -1603,6 +1552,7 @@ EOF
               require_app "svcset::ci-parity::start"
               require_app "svcset::ci-parity::stop"
               require_app "svcset::ci-parity::export"
+              require_absent_app "publish-docs"
               require_absent_app "aave-v3-origin-fetch"
               require_absent_app "aave-v3-origin-compile"
               require_absent_app "aave-v3-origin-deploy"
@@ -2167,24 +2117,6 @@ EOF
           taskId = "task.check";
           appId = "check";
           usage = [ "nix run .#check" ];
-          ownerFile = "nixfied/project/module.nix";
-        };
-
-        "publish-docs" = mkTaskApp {
-          taskId = "task.publish-docs";
-          appId = "publish-docs";
-          usage = [
-            "nix run .#publish-docs -- plan"
-            "nix run .#publish-docs -- plan --json"
-            "nix run .#publish-docs -- --from mfm-runtime"
-            "nix run .#publish-docs -- --only mfm-docs"
-            "nix run .#publish-docs"
-          ];
-          examples = [
-            "nix run .#publish-docs -- plan"
-            "nix run .#publish-docs -- apply --json"
-            "nix run .#publish-docs -- --from mfm-runtime"
-          ];
           ownerFile = "nixfied/project/module.nix";
         };
 

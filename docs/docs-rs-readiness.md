@@ -1,47 +1,48 @@
-# docs.rs Publishing Readiness Guide
+# docs.rs Readiness Guide
 
-Generated: 2026-05-25
+Generated: 2026-06-05
 
-Purpose: checklist for keeping public crate documentation aligned with the typed-core architecture
-and the `publish-docs` catalog.
+Purpose: checklist for keeping public crate documentation aligned with the typed-core
+architecture while crate publication remains manual.
 
 ## Current State
 
-The active documentation wave is typed-core first. Removed dynamic crates are not publish targets
-and should not appear in publish waves, crate examples, or umbrella docs.
+Public crate documentation is intentionally maintained without an automated release planner until
+the API surface stabilizes. Removed workflow-shaped crates are not publish targets and should not
+appear in crate examples, umbrella docs, or release notes.
 
-Canonical package metadata lives in:
+Canonical package navigation lives in:
 
-- `crates/docs/catalog.toml`
-- `crates/docs/publish-wave.json`
 - `crates/docs/README.md`
-
-Use `nix run .#publish-docs -- plan` for release planning and `nix run .#publish-docs --
-sync-umbrella --check` to verify umbrella README freshness.
+- `docs/repo-map.md`
+- `docs/repo-index.json`
 
 ## Current Wave
 
-The first docs.rs wave contains:
+The first docs.rs wave should prioritize:
 
 | Group | Packages |
 |---|---|
 | typed kernel | `mfm-ids`, `mfm-canonical`, `mfm-values`, `mfm-effects`, `mfm-capabilities`, `mfm-program`, `mfm-program-derive`, `mfm-spec`, `mfm-certify`, `mfm-events`, `mfm-store`, `mfm-replay` |
 | foundation | `mfm_core`, `mfm-evm-core` |
+| platform contracts | `mfm-artifact-capabilities`, `mfm-evm-capabilities`, `mfm-signing`, `mfm-evm-signing`, `mfm-adapter-contracts` |
 | umbrella | `mfm-docs` |
 
-`mfm-runtime` is cataloged as a typed-core public package, but the current first wave keeps runtime
-publication after the lower-level contracts it consumes.
+`mfm-runtime` remains a typed-core public package, but it should publish after the lower-level
+contracts it consumes.
 
-## Cataloged Typed Packages
+## Public Package Groups
 
 | Section | Packages |
 |---|---|
-| core | typed kernel crates, `mfm-authored-config`, `mfm_core`, `mfm-evm-core`, portfolio model/config |
-| states | `mfm-state-portfolio` |
-| ops | proof and portfolio tracker typed planners |
-| transports | proof, portfolio, and process execution typed backends |
+| core | typed kernel crates, capability contracts, `mfm-authored-config`, `mfm_core`, EVM core/contract model/config, portfolio model/config |
+| states | `mfm-state-evm-contracts`, `mfm-state-portfolio` |
+| ops | EVM contract lifecycle, proof, and portfolio tracker typed planners |
+| adapters | EVM contract lifecycle and portfolio capability bindings |
+| signers | generic signing, EVM signing, and keystore signer provider contracts |
+| transports | generic EVM JSON-RPC, proof, and process execution typed backends |
 | storages | typed Postgres run-event store and filesystem artifact store |
-| tools/docs | `mfm-publish-docs`, `mfm-docs` |
+| docs | `mfm-docs` |
 
 ## Global Requirements
 
@@ -89,22 +90,23 @@ Prioritize:
 - portfolio stable domain-key examples
 - keystore threat model and redaction notes in `mfm_core`
 
-### Tier 4: States, Ops, And Transports
+### Tier 4: States, Ops, Adapters, And Transports
 
 Prioritize:
 
 - each state crate's typed state contract table
 - operation planner examples that produce certified specs
-- runner backend docs that explain live versus replay behavior
+- adapter docs that show capability binding without live transport ownership
+- transport docs that explain live versus replay behavior
 - side-effect idempotency and receipt/recovery evidence docs
 
-### Tier 5: Storage And Tooling
+### Tier 5: Storage And Docs
 
 Prioritize:
 
 - typed Postgres event-store setup
 - typed filesystem artifact-store setup
-- `publish-docs` plan/apply/resume examples
+- manual `mfm-docs` README updates for public package navigation
 
 ## Validation Workflow
 
@@ -119,13 +121,6 @@ For crate-level rustdoc work:
 ```bash
 cargo doc --no-deps -p <package>
 cargo test -p <package> --doc
-```
-
-For publish planning:
-
-```bash
-nix run .#publish-docs -- plan
-nix run .#publish-docs -- sync-umbrella --check
 ```
 
 Use real publishing commands only from an intentional release context with registry credentials

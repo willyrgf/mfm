@@ -48,7 +48,6 @@ members = [
 	"crates/ops/evm-contract-lifecycle-op",
 	"crates/ops/portfolio-tracker-op",
 	"crates/ops/proof-op",
-	"crates/tools/publish-docs",
 ]
 
 # Core dependencies

@@ -33,18 +33,13 @@ pub const EVM_LEGACY_TRANSACTION_PURPOSE_ID: &str = "evm.transaction.legacy";
 pub const EVM_EIP1559_TRANSACTION_PURPOSE_ID: &str = "evm.transaction.eip1559";
 
 /// EVM transaction signing style.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum EvmTransactionStyle {
     /// Legacy EIP-155 transaction signing.
     Legacy,
     /// EIP-1559 typed transaction signing.
+    #[default]
     Eip1559,
-}
-
-impl Default for EvmTransactionStyle {
-    fn default() -> Self {
-        Self::Eip1559
-    }
 }
 
 /// EVM transaction plus digest-only generic signing request.

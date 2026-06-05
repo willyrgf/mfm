@@ -327,28 +327,28 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
             return Err(EvmContractAdapterError::IntentMismatch);
         }
         let data = deploy_data(config)?;
-        self.prepare_transactions(
-            ContractMutationPhase::Deploy,
-            config.network().network_id(),
-            config.network().expected_chain_id(),
-            config
+        self.prepare_transactions(PrepareTransactionsRequest {
+            phase: ContractMutationPhase::Deploy,
+            network_id: config.network().network_id(),
+            expected_chain_id: config.network().expected_chain_id(),
+            signer_ref: config
                 .signer()
                 .signer_ref()
                 .map_err(EvmContractAdapterError::Model)?,
-            config
+            expected_signer: config
                 .signer()
                 .expected_signer_address()
                 .map_err(EvmContractAdapterError::Model)?,
-            config.signer().expected_signer_address_str(),
-            config.transaction(),
-            config.receipt().poll_interval_ms(),
-            config.receipt().max_receipt_polls(),
-            vec![PreparedTransactionInput {
+            expected_signer_text: config.signer().expected_signer_address_str(),
+            policy: config.transaction(),
+            poll_interval_ms: config.receipt().poll_interval_ms(),
+            max_receipt_polls: config.receipt().max_receipt_polls(),
+            tx_inputs: vec![PreparedTransactionInput {
                 to: None,
                 value_wei: parse_optional_wei(config.value_wei())?,
                 data,
             }],
-        )
+        })
         .await
     }
 
@@ -367,24 +367,24 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
             return Err(EvmContractAdapterError::IntentMismatch);
         }
         let tx_inputs = configure_transaction_inputs(config, &input.deployed.contract_address)?;
-        self.prepare_transactions(
-            ContractMutationPhase::Configure,
-            config.network().network_id(),
-            config.network().expected_chain_id(),
-            config
+        self.prepare_transactions(PrepareTransactionsRequest {
+            phase: ContractMutationPhase::Configure,
+            network_id: config.network().network_id(),
+            expected_chain_id: config.network().expected_chain_id(),
+            signer_ref: config
                 .signer()
                 .signer_ref()
                 .map_err(EvmContractAdapterError::Model)?,
-            config
+            expected_signer: config
                 .signer()
                 .expected_signer_address()
                 .map_err(EvmContractAdapterError::Model)?,
-            config.signer().expected_signer_address_str(),
-            config.transaction(),
-            config.receipt().poll_interval_ms(),
-            config.receipt().max_receipt_polls(),
+            expected_signer_text: config.signer().expected_signer_address_str(),
+            policy: config.transaction(),
+            poll_interval_ms: config.receipt().poll_interval_ms(),
+            max_receipt_polls: config.receipt().max_receipt_polls(),
             tx_inputs,
-        )
+        })
         .await
     }
 
@@ -402,26 +402,26 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
         if &expected != intent {
             return Err(EvmContractAdapterError::IntentMismatch);
         }
-        reconstruct_prepared_mutation(
+        reconstruct_prepared_mutation(PreparedMutationReconstruction {
             evidence,
-            ContractMutationPhase::Deploy,
-            config.network().network_id(),
-            config.network().expected_chain_id(),
-            config
+            phase: ContractMutationPhase::Deploy,
+            network_id: config.network().network_id(),
+            expected_chain_id: config.network().expected_chain_id(),
+            signer_ref: config
                 .signer()
                 .signer_ref()
                 .map_err(EvmContractAdapterError::Model)?,
-            config
+            expected_signer: config
                 .signer()
                 .expected_signer_address()
                 .map_err(EvmContractAdapterError::Model)?,
-            config.signer().expected_signer_address_str(),
-            vec![PreparedTransactionInput {
+            expected_signer_text: config.signer().expected_signer_address_str(),
+            tx_inputs: vec![PreparedTransactionInput {
                 to: None,
                 value_wei: parse_optional_wei(config.value_wei())?,
                 data: deploy_data(config)?,
             }],
-        )
+        })
     }
 
     /// Reconstructs configure signing requests from persisted prepared evidence without live reads.
@@ -439,22 +439,22 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
         if &expected != intent {
             return Err(EvmContractAdapterError::IntentMismatch);
         }
-        reconstruct_prepared_mutation(
+        reconstruct_prepared_mutation(PreparedMutationReconstruction {
             evidence,
-            ContractMutationPhase::Configure,
-            config.network().network_id(),
-            config.network().expected_chain_id(),
-            config
+            phase: ContractMutationPhase::Configure,
+            network_id: config.network().network_id(),
+            expected_chain_id: config.network().expected_chain_id(),
+            signer_ref: config
                 .signer()
                 .signer_ref()
                 .map_err(EvmContractAdapterError::Model)?,
-            config
+            expected_signer: config
                 .signer()
                 .expected_signer_address()
                 .map_err(EvmContractAdapterError::Model)?,
-            config.signer().expected_signer_address_str(),
-            configure_transaction_inputs(config, &input.deployed.contract_address)?,
-        )
+            expected_signer_text: config.signer().expected_signer_address_str(),
+            tx_inputs: configure_transaction_inputs(config, &input.deployed.contract_address)?,
+        })
     }
 
     /// Signs and submits all prepared transactions.
@@ -636,17 +636,20 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
 
     async fn prepare_transactions(
         &self,
-        phase: ContractMutationPhase,
-        network_id: &str,
-        expected_chain_id: u64,
-        signer_ref: SignerRef,
-        expected_signer: Address,
-        expected_signer_text: &str,
-        policy: &EvmTransactionPolicy,
-        poll_interval_ms: u64,
-        max_receipt_polls: u64,
-        tx_inputs: Vec<PreparedTransactionInput>,
+        request: PrepareTransactionsRequest<'_>,
     ) -> Result<PreparedContractMutation> {
+        let PrepareTransactionsRequest {
+            phase,
+            network_id,
+            expected_chain_id,
+            signer_ref,
+            expected_signer,
+            expected_signer_text,
+            policy,
+            poll_interval_ms,
+            max_receipt_polls,
+            tx_inputs,
+        } = request;
         let chain = self
             .mutation
             .chain_identity
@@ -885,6 +888,19 @@ struct PreparedTransactionInput {
     to: Option<Address>,
     value_wei: u128,
     data: Vec<u8>,
+}
+
+struct PrepareTransactionsRequest<'a> {
+    phase: ContractMutationPhase,
+    network_id: &'a str,
+    expected_chain_id: u64,
+    signer_ref: SignerRef,
+    expected_signer: Address,
+    expected_signer_text: &'a str,
+    policy: &'a EvmTransactionPolicy,
+    poll_interval_ms: u64,
+    max_receipt_polls: u64,
+    tx_inputs: Vec<PreparedTransactionInput>,
 }
 
 struct PreparedTransaction {
@@ -1255,15 +1271,18 @@ fn configure_transaction_input(
 }
 
 fn reconstruct_prepared_mutation(
-    evidence: &PreparedContractInvocation,
-    phase: ContractMutationPhase,
-    network_id: &str,
-    expected_chain_id: u64,
-    signer_ref: SignerRef,
-    expected_signer: Address,
-    expected_signer_text: &str,
-    tx_inputs: Vec<PreparedTransactionInput>,
+    request: PreparedMutationReconstruction<'_>,
 ) -> Result<PreparedContractMutation> {
+    let PreparedMutationReconstruction {
+        evidence,
+        phase,
+        network_id,
+        expected_chain_id,
+        signer_ref,
+        expected_signer,
+        expected_signer_text,
+        tx_inputs,
+    } = request;
     ensure_prepared_invocation_public(evidence)?;
     let expected_signer_address =
         normalize_address(expected_signer_text).map_err(EvmContractAdapterError::Model)?;
@@ -1354,6 +1373,17 @@ fn reconstruct_prepared_mutation(
     }
 
     PreparedContractMutation::new(evidence.clone(), signing_requests)
+}
+
+struct PreparedMutationReconstruction<'a> {
+    evidence: &'a PreparedContractInvocation,
+    phase: ContractMutationPhase,
+    network_id: &'a str,
+    expected_chain_id: u64,
+    signer_ref: SignerRef,
+    expected_signer: Address,
+    expected_signer_text: &'a str,
+    tx_inputs: Vec<PreparedTransactionInput>,
 }
 
 fn required_prepared_quantity(value: Option<&str>, field: &'static str) -> Result<u128> {
