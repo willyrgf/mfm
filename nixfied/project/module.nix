@@ -1641,6 +1641,7 @@ EOF
 
               runtime_env_fixture_root="$(mktemp -d "''${TMPDIR:-/tmp}/shell-app-contracts.runtime-env.XXXXXX")"
               trap "rm -rf \"$runtime_env_fixture_root\"" EXIT
+              runtime_env_flake_ref="path:$ROOT"
               caller_home="$runtime_env_fixture_root/h"
               caller_tmp="$runtime_env_fixture_root/t"
               caller_xdg_data="$runtime_env_fixture_root/d"
@@ -1662,7 +1663,8 @@ EOF
                 XDG_DATA_HOME="$caller_xdg_data" \
                 XDG_STATE_HOME="$caller_xdg_state" \
                 XDG_CACHE_HOME="$caller_xdg_cache" \
-                nix run ".#framework::runtime-env-default"
+                NIXFIED_FLAKE_ROOT="$ROOT" \
+                nix run "$runtime_env_flake_ref#framework::runtime-env-default"
               default_scope="$(read_report_value "NIXFIED_RUNTIME_DIR_SCOPE" "$default_report")"
               expect_report_value "$default_report" "HOME" "$default_scope/home"
               expect_report_value "$default_report" "TMPDIR" "$default_scope/tmp"
@@ -1678,7 +1680,8 @@ EOF
                 XDG_DATA_HOME="$caller_xdg_data" \
                 XDG_STATE_HOME="$caller_xdg_state" \
                 XDG_CACHE_HOME="$caller_xdg_cache" \
-                nix run ".#framework::runtime-env-opt-in"
+                NIXFIED_FLAKE_ROOT="$ROOT" \
+                nix run "$runtime_env_flake_ref#framework::runtime-env-opt-in"
               expect_report_value "$opt_in_report" "HOME" "$caller_home"
               expect_report_value "$opt_in_report" "TMPDIR" "$caller_tmp"
               expect_report_value "$opt_in_report" "XDG_DATA_HOME" "$caller_xdg_data"
@@ -1693,7 +1696,8 @@ EOF
                 -u XDG_CACHE_HOME \
                 HOME="$caller_home" \
                 TMPDIR="$caller_tmp" \
-                nix run ".#framework::runtime-env-opt-in"
+                NIXFIED_FLAKE_ROOT="$ROOT" \
+                nix run "$runtime_env_flake_ref#framework::runtime-env-opt-in"
               fallback_scope="$(read_report_value "NIXFIED_RUNTIME_DIR_SCOPE" "$fallback_report")"
               expect_report_value "$fallback_report" "HOME" "$caller_home"
               expect_report_value "$fallback_report" "TMPDIR" "$caller_tmp"
@@ -1703,7 +1707,8 @@ EOF
 
               run_report_command_expect_failure \
                 "$invalid_report" \
-                nix run ".#framework::runtime-env-invalid"
+                env NIXFIED_FLAKE_ROOT="$ROOT" \
+                nix run "$runtime_env_flake_ref#framework::runtime-env-invalid"
               if ! grep -F "runtime-owned runtime env passthrough blocked name=REGISTRY_ROOT" "$invalid_report" >/dev/null; then
                 echo "ERROR: invalid runtime-env passthrough failure missing expected message"
                 cat "$invalid_report"
@@ -1712,7 +1717,8 @@ EOF
 
               run_report_command_expect_failure \
                 "$blocked_report" \
-                nix run ".#framework::runtime-env-pass-through-blocked"
+                env NIXFIED_FLAKE_ROOT="$ROOT" \
+                nix run "$runtime_env_flake_ref#framework::runtime-env-pass-through-blocked"
               if ! grep -F "runtime-owned passthrough env blocked name=TMPDIR" "$blocked_report" >/dev/null; then
                 echo "ERROR: ordinary passThroughEnv failure missing expected message"
                 cat "$blocked_report"
