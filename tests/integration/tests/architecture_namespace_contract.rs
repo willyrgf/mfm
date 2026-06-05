@@ -349,27 +349,31 @@ fn is_typed_surface_candidate(source: &str) -> bool {
 }
 
 fn repo_text_entries(root: &Path) -> Vec<TextEntry> {
-    let output = Command::new("git")
+    let tracked_paths = Command::new("git")
         .args(["ls-files", "-z"])
         .current_dir(root)
         .output()
-        .expect("list tracked files");
-    assert!(
-        output.status.success(),
-        "git ls-files failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let mut entries = output
-        .stdout
-        .split(|byte| *byte == 0)
-        .filter(|raw| !raw.is_empty())
-        .map(|raw| {
-            std::str::from_utf8(raw)
-                .unwrap_or_else(|error| panic!("tracked path is not utf-8: {error}"))
+        .ok()
+        .and_then(|output| {
+            output.status.success().then(|| {
+                output
+                    .stdout
+                    .split(|byte| *byte == 0)
+                    .filter(|raw| !raw.is_empty())
+                    .map(|raw| {
+                        std::str::from_utf8(raw)
+                            .unwrap_or_else(|error| panic!("tracked path is not utf-8: {error}"))
+                            .to_owned()
+                    })
+                    .collect::<Vec<_>>()
+            })
         })
+        .unwrap_or_else(|| repo_text_paths_from_materialized_tree(root));
+
+    let mut entries = tracked_paths
+        .into_iter()
         .filter_map(|rel| {
-            let path = root.join(rel);
+            let path = root.join(&rel);
             let bytes = match fs::read(&path) {
                 Ok(bytes) => bytes,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
@@ -383,6 +387,58 @@ fn repo_text_entries(root: &Path) -> Vec<TextEntry> {
         .collect::<Vec<_>>();
     entries.sort_by(|left, right| left.path.cmp(&right.path));
     entries
+}
+
+fn repo_text_paths_from_materialized_tree(root: &Path) -> Vec<String> {
+    fn visit(root: &Path, dir: &Path, paths: &mut Vec<String>) {
+        let mut entries = fs::read_dir(dir)
+            .unwrap_or_else(|error| panic!("read directory {}: {error}", dir.display()))
+            .map(|entry| {
+                entry.unwrap_or_else(|error| {
+                    panic!("read directory entry {}: {error}", dir.display())
+                })
+            })
+            .collect::<Vec<_>>();
+        entries.sort_by_key(|entry| entry.path());
+
+        for entry in entries {
+            let path = entry.path();
+            let rel = path.strip_prefix(root).unwrap_or_else(|error| {
+                panic!("strip repository root from {}: {error}", path.display())
+            });
+            let rel = rel
+                .to_str()
+                .unwrap_or_else(|| panic!("repository path is not utf-8: {}", path.display()))
+                .replace('\\', "/");
+
+            if fallback_scan_skips_path(&rel) {
+                continue;
+            }
+
+            let file_type = entry
+                .file_type()
+                .unwrap_or_else(|error| panic!("read file type {}: {error}", path.display()));
+            if file_type.is_dir() {
+                visit(root, &path, paths);
+            } else if file_type.is_file() {
+                paths.push(rel);
+            }
+        }
+    }
+
+    let mut paths = Vec::new();
+    visit(root, root, &mut paths);
+    paths.sort();
+    paths
+}
+
+fn fallback_scan_skips_path(rel: &str) -> bool {
+    rel == ".git"
+        || rel.starts_with(".git/")
+        || rel == "target"
+        || rel.starts_with("target/")
+        || rel == "result"
+        || rel.starts_with("result-")
 }
 
 fn repo_root() -> PathBuf {

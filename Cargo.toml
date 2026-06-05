@@ -74,6 +74,5 @@ tracing-subscriber = "0.3"
 # Canonical Rust compilation profile for nix run .#ci workflows.
 [profile.ci]
 inherits = "test"
-debug = 0
 incremental = true
 codegen-units = 256

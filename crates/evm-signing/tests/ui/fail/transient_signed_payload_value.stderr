@@ -117,7 +117,17 @@ error[E0277]: the trait bound `TransientRawTransaction: MfmValue` is not satisfi
 13 |     signed_payload: TransientRawTransaction,
    |                     ^^^^^^^^^^^^^^^^^^^^^^^ the trait `MfmValue` is not implemented for `TransientRawTransaction`
    |
-   = help: the following other types implement trait `MfmValue`:
-             ArtifactRef<T>
-             BadSignedPayloadValue
-             MaybeValue<T>
+help: the following other types implement trait `MfmValue`
+  --> tests/ui/fail/transient_signed_payload_value.rs:5:41
+   |
+ 5 | #[derive(Clone, Serialize, Deserialize, MfmValue)]
+   |                                         ^^^^^^^^ `BadSignedPayloadValue`
+   |
+  ::: $WORKSPACE/crates/kernel/values/src/lib.rs
+   |
+   | impl<T: MfmValue> MfmValue for MaybeValue<T> {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `MaybeValue<T>`
+...
+   | impl<T: MfmValue> MfmValue for ArtifactRef<T> {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `ArtifactRef<T>`
+   = note: this error originates in the derive macro `MfmValue` (in Nightly builds, run with -Z macro-backtrace for more info)
