@@ -8,7 +8,7 @@
 //! # Examples
 //!
 //! ```no_run
-//! # async fn main() -> Result<(), mfm_stream_store_postgres::PostgresTypedStoreError> {
+//! # async fn example() -> Result<(), mfm_stream_store_postgres::PostgresTypedStoreError> {
 //! let _store = mfm_stream_store_postgres::PostgresTypedRunEventStore::connect(
 //!     "postgres://postgres:postgres@localhost/mfm",
 //! )
