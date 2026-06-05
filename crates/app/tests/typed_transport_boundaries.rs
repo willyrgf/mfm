@@ -33,10 +33,6 @@ fn typed_transport_sources_exclude_legacy_io_surfaces() {
             "portfolio",
             include_str!("../../transports/portfolio/src/lib.rs"),
         ),
-        (
-            "evm-dcv",
-            include_str!("../../transports/evm-dcv/src/lib.rs"),
-        ),
     ] {
         for banned in [
             concat!("mfm_", "machine"),
@@ -51,8 +47,6 @@ fn typed_transport_sources_exclude_legacy_io_surfaces() {
             "ProofArtifactSinkFuture",
             "PortfolioArtifactStore",
             "PortfolioArtifactStoreFuture",
-            "EvmDcvArtifactStore",
-            "EvmDcvArtifactStoreFuture",
             "put_artifact(",
             "put_verified_artifact(",
             "persist_artifact(",

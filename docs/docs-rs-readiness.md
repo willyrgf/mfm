@@ -36,10 +36,10 @@ publication after the lower-level contracts it consumes.
 
 | Section | Packages |
 |---|---|
-| core | typed kernel crates, `mfm-authored-config`, `mfm_core`, `mfm-evm-core`, EVM DCV model/config, portfolio model/config |
-| states | `mfm-state-evm-dcv`, `mfm-state-portfolio` |
-| ops | proof, portfolio tracker, and EVM deploy/configure/validate typed planners |
-| transports | proof, portfolio, EVM DCV, and process execution typed backends |
+| core | typed kernel crates, `mfm-authored-config`, `mfm_core`, `mfm-evm-core`, portfolio model/config |
+| states | `mfm-state-portfolio` |
+| ops | proof and portfolio tracker typed planners |
+| transports | proof, portfolio, and process execution typed backends |
 | storages | typed Postgres run-event store and filesystem artifact store |
 | tools/docs | `mfm-publish-docs`, `mfm-docs` |
 

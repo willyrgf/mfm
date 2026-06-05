@@ -18,14 +18,12 @@ mfm-canonical = { path = "../kernel/canonical" }
 mfm-certify = { path = "../kernel/certify" }
 mfm-events = { path = "../kernel/events" }
 mfm-ids = { path = "../kernel/ids" }
-mfm-op-evm-deploy-configure-validate = { path = "../ops/evm-deploy-configure-validate-op" }
 mfm-op-portfolio-tracker = { path = "../ops/portfolio-tracker-op" }
 mfm-op-proof = { path = "../ops/proof-op" }
 mfm-replay = { path = "../kernel/replay" }
 mfm-runtime = { path = "../kernel/runtime" }
 mfm-spec = { path = "../kernel/spec" }
 mfm-store = { path = "../kernel/store" }
-mfm-transports-evm-dcv = { path = "../transports/evm-dcv" }
 mfm-transports-portfolio = { path = "../transports/portfolio" }
 mfm-transports-proof = { path = "../transports/proof" }
 

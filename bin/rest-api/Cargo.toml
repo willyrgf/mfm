@@ -21,7 +21,6 @@ mfm-artifact-store-fs = { path = "../../crates/storages/artifact-store-fs", defa
 mfm-canonical = { path = "../../crates/kernel/canonical" }
 mfm-events = { path = "../../crates/kernel/events" }
 mfm-ids = { path = "../../crates/kernel/ids" }
-mfm-op-evm-deploy-configure-validate = { path = "../../crates/ops/evm-deploy-configure-validate-op" }
 mfm-op-portfolio-tracker = { path = "../../crates/ops/portfolio-tracker-op" }
 mfm-portfolio-config = { path = "../../crates/portfolio-config" }
 mfm-state-portfolio = { path = "../../crates/states/portfolio" }

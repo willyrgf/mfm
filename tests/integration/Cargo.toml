@@ -16,9 +16,8 @@ uuid = { version = "1.0", features = ["v4"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
 tempfile = "3.0"
 tokio = { workspace = true }
-mfm-rest-api = { path = "../../bin/rest-api" }
-mfm-app = { path = "../../crates/app" }
 mfm-artifact-store-fs = { path = "../../crates/storages/artifact-store-fs" }
+mfm-app = { path = "../../crates/app" }
 mfm-events = { path = "../../crates/kernel/events" }
 mfm-ids = { path = "../../crates/kernel/ids" }
 mfm-canonical = { path = "../../crates/kernel/canonical" }
@@ -31,13 +30,12 @@ mfm-values = { path = "../../crates/kernel/values" }
 mfm-store = { path = "../../crates/kernel/store" }
 mfm-stream-store-postgres = { path = "../../crates/storages/stream-store-postgres" }
 mfm-op-proof = { path = "../../crates/ops/proof-op" }
-mfm-op-evm-deploy-configure-validate = { path = "../../crates/ops/evm-deploy-configure-validate-op" }
-mfm-transports-evm-dcv = { path = "../../crates/transports/evm-dcv" }
 mfm-replay = { path = "../../crates/kernel/replay" }
 mfm-runtime = { path = "../../crates/kernel/runtime" }
 mfm-op-portfolio-tracker = { path = "../../crates/ops/portfolio-tracker-op" }
 mfm-portfolio-config = { path = "../../crates/portfolio-config" }
 mfm_core = { path = "../../crates/core" }
+mfm-rest-api = { path = "../../bin/rest-api" }
 
 [dev-dependencies]
 axum = "0.7"

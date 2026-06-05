@@ -27,13 +27,6 @@ const TEMPORARY_CATEGORY_DEPENDENCY_ALLOWLIST: &[(&str, &str)] = &[
     ("mfm-rest-api", "mfm-artifact-store-fs"),
     ("mfm-rest-api", "mfm-state-portfolio"),
     ("mfm-rest-api", "mfm-stream-store-postgres"),
-    ("mfm-transports-evm-dcv", "mfm-artifact-store-fs"),
-    (
-        "mfm-transports-evm-dcv",
-        "mfm-evm-deploy-configure-validate-config",
-    ),
-    ("mfm-transports-evm-dcv", "mfm-state-evm-dcv"),
-    ("mfm-transports-evm-dcv", "mfm_core"),
     ("mfm-transports-portfolio", "mfm-artifact-store-fs"),
     ("mfm-transports-portfolio", "mfm-state-portfolio"),
     ("mfm-transports-proof", "mfm-collectors-proof"),

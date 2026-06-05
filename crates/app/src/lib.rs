@@ -298,9 +298,6 @@ pub fn production_typed_runner_registry(
     let portfolio_artifacts: Arc<dyn mfm_transports_portfolio::PortfolioArtifactReader> =
         Arc::new(artifacts.clone());
     mfm_transports_portfolio::register_portfolio_runners(&mut registry, portfolio_artifacts)?;
-    let evm_dcv_artifacts: Arc<dyn mfm_transports_evm_dcv::EvmDcvArtifactReader> =
-        Arc::new(artifacts.clone());
-    mfm_transports_evm_dcv::register_evm_dcv_runners(&mut registry, evm_dcv_artifacts)?;
     mfm_transports_proof::register_deterministic_proof_runners(&mut registry)?;
     Ok(registry)
 }
@@ -309,7 +306,6 @@ pub fn production_typed_runner_registry(
 pub fn production_certification_registry() -> Result<CertificationRegistry, AppError> {
     let mut registry = CertificationRegistry::new();
     mfm_op_portfolio_tracker::register_portfolio_certification_descriptors(&mut registry)?;
-    mfm_op_evm_deploy_configure_validate::register_dcv_certification_descriptors(&mut registry)?;
     mfm_op_proof::register_proof_certification_descriptors(&mut registry)?;
     Ok(registry)
 }
@@ -984,7 +980,6 @@ where
         let broker = ReplayBroker::from_read_authority(authority)?;
         let stream = verified_stream.events();
         mfm_transports_proof::verify_deterministic_proof_replay(&broker)?;
-        mfm_transports_evm_dcv::verify_evm_dcv_replay(&broker, &self.artifacts).await?;
         let projection = broker.projection_snapshot();
         let retained_artifacts = projection
             .retention(run_id)

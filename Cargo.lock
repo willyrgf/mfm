@@ -1730,7 +1730,6 @@ dependencies = [
  "mfm-canonical",
  "mfm-evm-core",
  "mfm-ids",
- "mfm-op-evm-deploy-configure-validate",
  "mfm-op-portfolio-tracker",
  "mfm-op-proof",
  "mfm-portfolio-config",
@@ -1771,7 +1770,6 @@ dependencies = [
  "mfm-certify",
  "mfm-events",
  "mfm-ids",
- "mfm-op-evm-deploy-configure-validate",
  "mfm-op-portfolio-tracker",
  "mfm-op-proof",
  "mfm-program",
@@ -1780,7 +1778,6 @@ dependencies = [
  "mfm-runtime",
  "mfm-spec",
  "mfm-store",
- "mfm-transports-evm-dcv",
  "mfm-transports-portfolio",
  "mfm-transports-proof",
  "mfm-values",
@@ -1919,6 +1916,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "mfm-evm-contract-config"
+version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "mfm-evm-contract-model",
+ "mfm-evm-core",
+ "mfm-ids",
+ "mfm-program-derive",
+ "mfm-signing",
+ "mfm-values",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "mfm-evm-contract-model"
 version = "0.1.0"
 dependencies = [
@@ -1940,36 +1952,6 @@ dependencies = [
  "hex",
  "serde",
  "serde_json",
-]
-
-[[package]]
-name = "mfm-evm-dcv-model"
-version = "0.1.0"
-dependencies = [
- "alloy-primitives",
- "mfm-canonical",
- "mfm-evm-core",
- "mfm-ids",
- "mfm-program-derive",
- "mfm-values",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "mfm-evm-deploy-configure-validate-config"
-version = "0.1.0"
-dependencies = [
- "mfm-authored-config",
- "mfm-canonical",
- "mfm-evm-dcv-model",
- "mfm-ids",
- "mfm-program-derive",
- "mfm-values",
- "serde",
- "serde_json",
- "thiserror",
- "toml 0.8.23",
 ]
 
 [[package]]
@@ -2003,7 +1985,6 @@ dependencies = [
  "mfm-certify",
  "mfm-events",
  "mfm-ids",
- "mfm-op-evm-deploy-configure-validate",
  "mfm-op-portfolio-tracker",
  "mfm-op-proof",
  "mfm-portfolio-config",
@@ -2015,7 +1996,6 @@ dependencies = [
  "mfm-spec",
  "mfm-store",
  "mfm-stream-store-postgres",
- "mfm-transports-evm-dcv",
  "mfm-values",
  "mfm_core",
  "reqwest",
@@ -2025,22 +2005,6 @@ dependencies = [
  "tokio",
  "tower",
  "uuid",
-]
-
-[[package]]
-name = "mfm-op-evm-deploy-configure-validate"
-version = "0.1.0"
-dependencies = [
- "mfm-canonical",
- "mfm-certify",
- "mfm-evm-dcv-model",
- "mfm-evm-deploy-configure-validate-config",
- "mfm-ids",
- "mfm-program",
- "mfm-spec",
- "mfm-state-evm-dcv",
- "serde_json",
- "trybuild",
 ]
 
 [[package]]
@@ -2178,7 +2142,6 @@ dependencies = [
  "mfm-canonical",
  "mfm-events",
  "mfm-ids",
- "mfm-op-evm-deploy-configure-validate",
  "mfm-op-portfolio-tracker",
  "mfm-portfolio-config",
  "mfm-spec",
@@ -2252,25 +2215,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mfm-state-evm-dcv"
-version = "0.1.0"
-dependencies = [
- "mfm-canonical",
- "mfm-capabilities",
- "mfm-effects",
- "mfm-evm-dcv-model",
- "mfm-evm-deploy-configure-validate-config",
- "mfm-ids",
- "mfm-program",
- "mfm-program-derive",
- "mfm-values",
- "serde",
- "serde_json",
- "tokio",
- "trybuild",
-]
-
-[[package]]
 name = "mfm-state-portfolio"
 version = "0.1.0"
 dependencies = [
@@ -2328,34 +2272,6 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tokio",
-]
-
-[[package]]
-name = "mfm-transports-evm-dcv"
-version = "0.1.0"
-dependencies = [
- "mfm-artifact-store-fs",
- "mfm-canonical",
- "mfm-capabilities",
- "mfm-events",
- "mfm-evm-core",
- "mfm-evm-deploy-configure-validate-config",
- "mfm-ids",
- "mfm-program",
- "mfm-replay",
- "mfm-runtime",
- "mfm-spec",
- "mfm-state-evm-dcv",
- "mfm-store",
- "mfm-values",
- "mfm_core",
- "reqwest",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "uuid",
- "zeroize",
 ]
 
 [[package]]

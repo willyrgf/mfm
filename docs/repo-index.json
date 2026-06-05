@@ -109,16 +109,6 @@
       "kind": "rust-cargo"
     },
     {
-      "name": "evm-dcv-model",
-      "path": "crates/evm-dcv-model/Cargo.toml",
-      "kind": "rust-cargo"
-    },
-    {
-      "name": "evm-deploy-configure-validate-config",
-      "path": "crates/evm-deploy-configure-validate-config/Cargo.toml",
-      "kind": "rust-cargo"
-    },
-    {
       "name": "canonical",
       "path": "crates/kernel/canonical/Cargo.toml",
       "kind": "rust-cargo"
@@ -184,11 +174,6 @@
       "kind": "rust-cargo"
     },
     {
-      "name": "evm-deploy-configure-validate-op",
-      "path": "crates/ops/evm-deploy-configure-validate-op/Cargo.toml",
-      "kind": "rust-cargo"
-    },
-    {
       "name": "portfolio-tracker-op",
       "path": "crates/ops/portfolio-tracker-op/Cargo.toml",
       "kind": "rust-cargo"
@@ -209,11 +194,6 @@
       "kind": "rust-cargo"
     },
     {
-      "name": "evm-dcv",
-      "path": "crates/states/evm-dcv/Cargo.toml",
-      "kind": "rust-cargo"
-    },
-    {
       "name": "portfolio",
       "path": "crates/states/portfolio/Cargo.toml",
       "kind": "rust-cargo"
@@ -231,11 +211,6 @@
     {
       "name": "publish-docs",
       "path": "crates/tools/publish-docs/Cargo.toml",
-      "kind": "rust-cargo"
-    },
-    {
-      "name": "evm-dcv",
-      "path": "crates/transports/evm-dcv/Cargo.toml",
       "kind": "rust-cargo"
     },
     {

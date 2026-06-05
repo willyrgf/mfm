@@ -1234,7 +1234,7 @@ in
           examples = [
             "nix run .#publish-docs -- plan"
             "nix run .#publish-docs -- apply --json"
-            "nix run .#publish-docs -- --from mfm-transports-evm-dcv"
+            "nix run .#publish-docs -- --from mfm-runtime"
           ];
           runtimeInputs = rustRuntimeInputs ++ [ pkgs.git ];
           argParser = "passthrough";
@@ -2180,7 +2180,7 @@ EOF
           examples = [
             "nix run .#publish-docs -- plan"
             "nix run .#publish-docs -- apply --json"
-            "nix run .#publish-docs -- --from mfm-transports-evm-dcv"
+            "nix run .#publish-docs -- --from mfm-runtime"
           ];
           ownerFile = "nixfied/project/module.nix";
         };

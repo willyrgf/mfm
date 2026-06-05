@@ -128,15 +128,6 @@ docs_policy = "docs-rs"
 umbrella_policy = "when-published"
 
 [[packages]]
-name = "mfm-evm-dcv-model"
-workspace_path = "crates/evm-dcv-model"
-visibility = "public"
-section = "core"
-summary = "Pure EVM deploy/configure/validate model and ABI preparation helpers."
-docs_policy = "repo-only"
-umbrella_policy = "always"
-
-[[packages]]
 name = "mfm_core"
 workspace_path = "crates/core"
 visibility = "public"
@@ -151,15 +142,6 @@ workspace_path = "crates/evm-core"
 visibility = "public"
 section = "core"
 summary = "EVM ABI, encoding, hex, and transaction support types."
-docs_policy = "docs-rs"
-umbrella_policy = "when-published"
-
-[[packages]]
-name = "mfm-evm-deploy-configure-validate-config"
-workspace_path = "crates/evm-deploy-configure-validate-config"
-visibility = "public"
-section = "core"
-summary = "Shared deploy/configure/validate config pipeline."
 docs_policy = "docs-rs"
 umbrella_policy = "when-published"
 
@@ -182,15 +164,6 @@ docs_policy = "repo-only"
 umbrella_policy = "always"
 
 [[packages]]
-name = "mfm-state-evm-dcv"
-workspace_path = "crates/states/evm-dcv"
-visibility = "public"
-section = "states"
-summary = "Typed EVM deploy/configure/validate lifecycle state contracts."
-docs_policy = "docs-rs"
-umbrella_policy = "when-published"
-
-[[packages]]
 name = "mfm-state-portfolio"
 workspace_path = "crates/states/portfolio"
 visibility = "public"
@@ -198,15 +171,6 @@ section = "states"
 summary = "Reusable portfolio-domain runtime states and adapters for canonical snapshots."
 docs_policy = "docs-rs"
 umbrella_policy = "when-published"
-
-[[packages]]
-name = "mfm-op-evm-deploy-configure-validate"
-workspace_path = "crates/ops/evm-deploy-configure-validate-op"
-visibility = "public"
-section = "ops"
-summary = "EVM deploy/configure/validate planner."
-docs_policy = "repo-only"
-umbrella_policy = "always"
 
 [[packages]]
 name = "mfm-op-portfolio-tracker"
@@ -261,15 +225,6 @@ section = "collectors"
 summary = "Typed proof collector interfaces and payloads with no live IO."
 docs_policy = "docs-rs"
 umbrella_policy = "when-published"
-
-[[packages]]
-name = "mfm-transports-evm-dcv"
-workspace_path = "crates/transports/evm-dcv"
-visibility = "public"
-section = "transports"
-summary = "Typed EVM deploy/configure/validate workflow runners."
-docs_policy = "repo-only"
-umbrella_policy = "always"
 
 [[packages]]
 name = "mfm-transports-process-exec"

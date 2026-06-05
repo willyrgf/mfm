@@ -35,8 +35,6 @@ The architecture and runtime contracts live in the repository docs:
 | `mfm-effects` | Framework-owned typed effect markers. | pending | `crates/kernel/effects` |
 | `mfm-events` | Typed kernel event schemas and event identity contracts. | pending | `crates/kernel/events` |
 | `mfm-evm-core` | EVM ABI, encoding, hex, and transaction support types. | <https://docs.rs/mfm-evm-core> | `crates/evm-core` |
-| `mfm-evm-dcv-model` | Pure EVM deploy/configure/validate model and ABI preparation helpers. | pending | `crates/evm-dcv-model` |
-| `mfm-evm-deploy-configure-validate-config` | Shared deploy/configure/validate config pipeline. | pending | `crates/evm-deploy-configure-validate-config` |
 | `mfm-ids` | Strong typed identity primitives for the typed kernel. | pending | `crates/kernel/ids` |
 | `mfm-portfolio-config` | Shared portfolio snapshot config pipeline. | pending | `crates/portfolio-config` |
 | `mfm-portfolio-model` | Pure canonical portfolio, symbol, and wallet models. | pending | `crates/portfolio/model` |
@@ -53,7 +51,6 @@ The architecture and runtime contracts live in the repository docs:
 
 | Package | Role | docs.rs | Workspace Path |
 | --- | --- | --- | --- |
-| `mfm-state-evm-dcv` | Typed EVM deploy/configure/validate lifecycle state contracts. | pending | `crates/states/evm-dcv` |
 | `mfm-state-portfolio` | Reusable portfolio-domain runtime states and adapters for canonical snapshots. | pending | `crates/states/portfolio` |
 
 ## Ops
@@ -62,7 +59,6 @@ Ops stay thin and focus on graph composition and config validation. Most are sti
 
 | Package | Role | Workspace Path |
 | --- | --- | --- |
-| `mfm-op-evm-deploy-configure-validate` | EVM deploy/configure/validate planner. | `crates/ops/evm-deploy-configure-validate-op` |
 | `mfm-op-portfolio-tracker` | Portfolio tracking planner. | `crates/ops/portfolio-tracker-op` |
 | `mfm-op-proof` | Certified typed proof workflow operation. | `crates/ops/proof-op` |
 
@@ -84,7 +80,6 @@ Ops stay thin and focus on graph composition and config validation. Most are sti
 
 | Package | Role | Workspace Path |
 | --- | --- | --- |
-| `mfm-transports-evm-dcv` | Typed EVM deploy/configure/validate workflow runners. | `crates/transports/evm-dcv` |
 | `mfm-transports-process-exec` | Bounded child-process execution helpers for live transports. | `crates/transports/process-exec` |
 | `mfm-transports-portfolio` | Typed portfolio workflow runners. | `crates/transports/portfolio` |
 | `mfm-transports-proof` | Deterministic typed proof runners and conformance fixture. | `crates/transports/proof` |

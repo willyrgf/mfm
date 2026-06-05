@@ -1,6 +1,6 @@
 # Typed EVM RPC Routing
 
-Status: typed transport runbook for EVM-backed portfolio and deploy/configure/validate workflows.
+Status: typed transport runbook for EVM-backed portfolio and contract-lifecycle workflows.
 
 The current EVM RPC path is not a separate semantic stream or workflow runtime. RPC source
 configuration is runtime-only capability input consumed by typed transport backends. Certified run
@@ -53,10 +53,10 @@ outputs, or fixtures.
 
 ## `control_scope`
 
-Portfolio and EVM DCV configs still carry a non-secret `control_scope`. In the typed runtime it is
-part of the domain request identity and source-selection partition, not independent store
-authority. Use a distinct scope when two workflows on the same network should not share runtime RPC
-source preference or diagnostics.
+Portfolio configs still carry a non-secret `control_scope`. In the typed runtime it is part of the
+domain request identity and source-selection partition, not independent store authority. Use a
+distinct scope when two workflows on the same network should not share runtime RPC source preference
+or diagnostics.
 
 `network_id` remains required for every configured source and every typed workflow request that
 uses an EVM RPC backend.
@@ -89,7 +89,7 @@ passwords, private keys, and signed raw transactions remain runtime-only.
 Replay uses the stored certified spec, typed run stream, typed artifacts, and replay verifiers.
 Replay must not open live RPC connections or consult runtime source configuration.
 
-EVM DCV replay recomputes expected validation-read requests from certified config and typestate
+EVM contract replay recomputes expected validation-read requests from certified config and typestate
 artifacts, then checks stored fact evidence and terminal output artifacts against that expected
 request.
 

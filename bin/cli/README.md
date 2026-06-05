@@ -427,28 +427,6 @@ the same network.
 - The command never submits old dynamic `portfolio_tracker`, `portfolio_execute`, or
   `portfolio_config_build` ops.
 
-## EVM DCV Commands (Experimental)
-
-The EVM deploy/configure/validate commands compile authored requests into certified typed runs:
-
-```sh
-mfm_cli evm dcv deploy --request-file <REQUEST_FILE> [OPTIONS]
-mfm_cli evm dcv configure --request-file <REQUEST_FILE> --deployed-contract-file <DEPLOYED_JSON> [OPTIONS]
-mfm_cli evm dcv validate --request-file <REQUEST_FILE> --configured-contract-file <CONFIGURED_JSON> [OPTIONS]
-mfm_cli evm dcv deploy-configure-validate --request-file <REQUEST_FILE> [OPTIONS]
-```
-
-All commands also accept `--request-json`. Configure consumes the `DeployedContract` JSON emitted by
-deploy. Validate consumes the `ConfiguredContract` JSON emitted by configure. Configure requests
-must include confirmation checks; validation reads those configured-intent checks from
-`ConfiguredContract` and confirms live contract state matches the intended configuration.
-Deploy and configure requests sign transactions through a `signer.kind = "keystore_entry"` object
-that names a keystore entry and environment variables for the keystore path and password-file path.
-The CLI request must not contain raw private keys or passwords.
-
-JSON output includes the typed run response, `public_schema_id`, and typed public output when the
-run completes during the selected drive.
-
 ## Configuration
 
 The CLI's behavior can be modified using environment variables, which is ideal for CI/CD pipelines and automated scripts.

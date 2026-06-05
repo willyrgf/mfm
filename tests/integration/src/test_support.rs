@@ -72,14 +72,14 @@ pub struct FundedRethKeystoreWallet {
     password_file_env: String,
     /// Funded sender address derived from the keystore entry.
     pub from: String,
-    /// Stable keystore entry id used by the DCV signer config.
+    /// Stable keystore entry id used by EVM signer config fixtures.
     pub entry_id: String,
     keystore_path: PathBuf,
     password_file_path: PathBuf,
 }
 
 impl FundedRethKeystoreWallet {
-    /// Returns the DCV signer JSON config for this wallet.
+    /// Returns the EVM signer JSON config for this wallet.
     pub fn signer_json(&self) -> serde_json::Value {
         serde_json::json!({
             "kind": "keystore_entry",

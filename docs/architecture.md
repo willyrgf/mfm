@@ -545,7 +545,6 @@ the typed workflow runtime surface and must not be used as architectural proof.
 - `docs/design.md`: authoritative runtime, store, replay, and secret-handling contract
 - `docs/code-quality.md`: mandatory quality policy for code, test, documentation, build, and
   workflow changes
-- `PROBLEM_ARCH_DCV.md`: architecture correction case study for recipe-boundary failure
 - `bin/cli/README.md`: CLI command and JSON output contract
 - `bin/rest-api/README.md`: REST contract
 - `RFC_TYPED_CORE_PROPOSAL_1.md`: historical RFC for the typed-core rewrite
