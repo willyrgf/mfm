@@ -1,0 +1,10 @@
+error[E0624]: associated function `new` is private
+ --> tests/ui/fail/transient_signed_payload_constructor.rs:4:45
+  |
+4 |     let _payload = TransientRawTransaction::new(vec![0x01]);
+  |                                             ^^^ private associated function
+  |
+ ::: src/lib.rs
+  |
+  |     fn new(raw: Vec<u8>) -> Result<Self> {
+  |     ------------------------------------ private associated function defined here

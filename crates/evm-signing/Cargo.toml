@@ -1,0 +1,24 @@
+[package]
+name = "mfm-evm-signing"
+version = "0.1.0"
+edition = "2021"
+description = "EVM signing bridge contracts for MFM"
+repository = "https://github.com/willyrgf/mfm"
+license = "MIT"
+
+[package.metadata.mfm]
+category = "signer-contract"
+
+[dependencies]
+alloy-primitives = { workspace = true, features = ["k256"] }
+
+mfm-evm-core = { path = "../evm-core" }
+mfm-ids = { path = "../kernel/ids" }
+mfm-signing = { path = "../signing" }
+
+[dev-dependencies]
+hex = { workspace = true }
+mfm-program-derive = { path = "../kernel/program-derive" }
+mfm-values = { path = "../kernel/values" }
+serde = { workspace = true }
+trybuild = "1.0"

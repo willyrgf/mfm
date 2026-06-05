@@ -28,6 +28,7 @@ members = [
 	"crates/evm-core",
 	"crates/artifact-capabilities",
 	"crates/signing",
+	"crates/evm-signing",
 	"crates/authored-config",
 	"crates/evm-deploy-configure-validate-config",
 	"crates/portfolio-config",

@@ -1937,6 +1937,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "mfm-evm-signing"
+version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "hex",
+ "mfm-evm-core",
+ "mfm-ids",
+ "mfm-program-derive",
+ "mfm-signing",
+ "mfm-values",
+ "serde",
+ "trybuild",
+]
+
+[[package]]
 name = "mfm-ids"
 version = "0.1.0"
 
