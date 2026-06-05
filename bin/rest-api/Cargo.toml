@@ -19,8 +19,11 @@ http = "1"
 mfm-app = { path = "../../crates/app" }
 mfm-artifact-store-fs = { path = "../../crates/storages/artifact-store-fs", default-features = false }
 mfm-canonical = { path = "../../crates/kernel/canonical" }
+mfm-evm-contract-config = { path = "../../crates/evm-contract-config" }
+mfm-evm-contract-model = { path = "../../crates/evm-contract-model" }
 mfm-events = { path = "../../crates/kernel/events" }
 mfm-ids = { path = "../../crates/kernel/ids" }
+mfm-op-evm-contract-lifecycle = { path = "../../crates/ops/evm-contract-lifecycle-op" }
 mfm-op-portfolio-tracker = { path = "../../crates/ops/portfolio-tracker-op" }
 mfm-portfolio-config = { path = "../../crates/portfolio-config" }
 mfm-state-portfolio = { path = "../../crates/states/portfolio" }
@@ -32,6 +35,7 @@ mfm-stream-store-postgres = { path = "../../crates/storages/stream-store-postgre
 parity-tests = []
 
 [dev-dependencies]
+tower = "0.5"
 
 [[bin]]
 name = "mfm_rest_api"

@@ -2227,7 +2227,10 @@ dependencies = [
  "mfm-artifact-store-fs",
  "mfm-canonical",
  "mfm-events",
+ "mfm-evm-contract-config",
+ "mfm-evm-contract-model",
  "mfm-ids",
+ "mfm-op-evm-contract-lifecycle",
  "mfm-op-portfolio-tracker",
  "mfm-portfolio-config",
  "mfm-spec",
@@ -2237,6 +2240,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tower",
  "tower-http",
  "tracing",
 ]

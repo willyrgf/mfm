@@ -36,7 +36,15 @@ use mfm_app::{
 use mfm_artifact_store_fs::{FsTypedArtifactError, FsTypedArtifactStore};
 use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
 use mfm_events::v1::ArtifactRole;
+use mfm_evm_contract_config::{ConfigurePhaseConfig, DeployPhaseConfig, ValidatePhaseConfig};
+use mfm_evm_contract_model::{ConfiguredContract, DeployedContract};
 use mfm_ids::{ArtifactId, ContentDigest, DigestAlgorithm, RunId, SchemaId, SeedId};
+use mfm_op_evm_contract_lifecycle::{
+    compile_contract_configure_program, compile_contract_deploy_program,
+    compile_contract_lifecycle_program, compile_contract_validate_program,
+    CompiledContractLifecycleProgram, ContractLifecycleCompileError, ContractLifecycleConfig,
+    ContractLifecycleConfigArtifact,
+};
 use mfm_op_portfolio_tracker::{compile_portfolio_snapshot_program, PortfolioConfigArtifact};
 use mfm_portfolio_config::{
     canonicalize_portfolio_snapshot_authored_config, parse_portfolio_snapshot_authored_config,
@@ -264,6 +272,19 @@ where
         .route("/v1/health", get(health))
         .route("/v1/ready", get(ready::<S>))
         .route("/v1/portfolio/snapshot", post(portfolio_snapshot::<S>))
+        .route("/v1/evm/contracts/deploy", post(evm_contract_deploy::<S>))
+        .route(
+            "/v1/evm/contracts/configure",
+            post(evm_contract_configure::<S>),
+        )
+        .route(
+            "/v1/evm/contracts/validate",
+            post(evm_contract_validate::<S>),
+        )
+        .route(
+            "/v1/evm/contracts/lifecycle",
+            post(evm_contract_lifecycle::<S>),
+        )
         .route("/v1/runs/start", post(runs_start::<S>))
         .route("/v1/runs/:run_id/resume", post(runs_resume::<S>))
         .route("/v1/runs/:run_id/status", get(runs_status::<S>))
@@ -375,6 +396,30 @@ enum PortfolioSnapshotStartKind {
     PortfolioSnapshotStartV1,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum EvmContractDeployStartKind {
+    EvmContractDeployStartV1,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum EvmContractConfigureStartKind {
+    EvmContractConfigureStartV1,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum EvmContractValidateStartKind {
+    EvmContractValidateStartV1,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum EvmContractLifecycleStartKind {
+    EvmContractLifecycleStartV1,
+}
+
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum RestDriveMode {
@@ -435,8 +480,76 @@ struct PortfolioSnapshotStartBody {
     drive: RestDriveMode,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EvmContractDeployStartBody {
+    kind: EvmContractDeployStartKind,
+    config: serde_json::Value,
+    #[serde(default)]
+    run_id: Option<String>,
+    #[serde(default = "default_evm_contract_framework_version")]
+    framework_version: String,
+    #[serde(default = "default_source_revision")]
+    source_revision: String,
+    #[serde(default)]
+    drive: RestDriveMode,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EvmContractConfigureStartBody {
+    kind: EvmContractConfigureStartKind,
+    config: serde_json::Value,
+    deployed: serde_json::Value,
+    #[serde(default)]
+    run_id: Option<String>,
+    #[serde(default = "default_evm_contract_framework_version")]
+    framework_version: String,
+    #[serde(default = "default_source_revision")]
+    source_revision: String,
+    #[serde(default)]
+    drive: RestDriveMode,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EvmContractValidateStartBody {
+    kind: EvmContractValidateStartKind,
+    config: serde_json::Value,
+    configured: serde_json::Value,
+    #[serde(default)]
+    run_id: Option<String>,
+    #[serde(default = "default_evm_contract_framework_version")]
+    framework_version: String,
+    #[serde(default = "default_source_revision")]
+    source_revision: String,
+    #[serde(default)]
+    drive: RestDriveMode,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EvmContractLifecycleStartBody {
+    kind: EvmContractLifecycleStartKind,
+    config: serde_json::Value,
+    #[serde(default)]
+    run_id: Option<String>,
+    #[serde(default = "default_evm_contract_framework_version")]
+    framework_version: String,
+    #[serde(default = "default_source_revision")]
+    source_revision: String,
+    #[serde(default)]
+    drive: RestDriveMode,
+}
+
 #[derive(Debug, Serialize)]
 struct PortfolioSnapshotStartResponse {
+    run: TypedRunResponse,
+    public_output: Option<TypedPublicOutputResponse>,
+}
+
+#[derive(Debug, Serialize)]
+struct EvmContractStartResponse {
     run: TypedRunResponse,
     public_output: Option<TypedPublicOutputResponse>,
 }
@@ -474,6 +587,10 @@ fn default_framework_version() -> String {
 
 fn default_portfolio_framework_version() -> String {
     "mfm.rest_api.portfolio.typed.v1".to_owned()
+}
+
+fn default_evm_contract_framework_version() -> String {
+    "mfm.rest_api.evm_contracts.typed.v1".to_owned()
 }
 
 #[allow(clippy::disallowed_methods)]
@@ -531,6 +648,120 @@ where
     };
 
     json_ok(PortfolioSnapshotStartResponse { run, public_output })
+}
+
+#[instrument(level = "info", skip(state, body))]
+async fn evm_contract_deploy<S>(
+    State(state): State<RouterState<S>>,
+    body: Result<Json<EvmContractDeployStartBody>, JsonRejection>,
+) -> Result<Json<serde_json::Value>, ApiError>
+where
+    S: AsyncTypedRunEventStore + Clone + Send + Sync,
+{
+    let Json(req) = body.map_err(|_| ApiError::invalid_json())?;
+    match req.kind {
+        EvmContractDeployStartKind::EvmContractDeployStartV1 => {}
+    }
+    let config = deserialize_request_value::<DeployPhaseConfig>(&req.config)?;
+    let compiled =
+        compile_contract_deploy_program(config).map_err(api_error_from_contract_compile)?;
+    evm_contract_start(
+        state,
+        req.run_id,
+        req.framework_version,
+        req.source_revision,
+        req.drive,
+        compiled,
+        Vec::new(),
+    )
+    .await
+}
+
+#[instrument(level = "info", skip(state, body))]
+async fn evm_contract_configure<S>(
+    State(state): State<RouterState<S>>,
+    body: Result<Json<EvmContractConfigureStartBody>, JsonRejection>,
+) -> Result<Json<serde_json::Value>, ApiError>
+where
+    S: AsyncTypedRunEventStore + Clone + Send + Sync,
+{
+    let Json(req) = body.map_err(|_| ApiError::invalid_json())?;
+    match req.kind {
+        EvmContractConfigureStartKind::EvmContractConfigureStartV1 => {}
+    }
+    let config = deserialize_request_value::<ConfigurePhaseConfig>(&req.config)?;
+    let deployed = deserialize_request_value::<DeployedContract>(&req.deployed)?;
+    let seed_bytes = canonical_request_value_bytes(&deployed)?;
+    let compiled = compile_contract_configure_program(config, deployed)
+        .map_err(api_error_from_contract_compile)?;
+    let seed = seed_artifact_for_single_contract_seed(&compiled, seed_bytes)?;
+    evm_contract_start(
+        state,
+        req.run_id,
+        req.framework_version,
+        req.source_revision,
+        req.drive,
+        compiled,
+        vec![seed],
+    )
+    .await
+}
+
+#[instrument(level = "info", skip(state, body))]
+async fn evm_contract_validate<S>(
+    State(state): State<RouterState<S>>,
+    body: Result<Json<EvmContractValidateStartBody>, JsonRejection>,
+) -> Result<Json<serde_json::Value>, ApiError>
+where
+    S: AsyncTypedRunEventStore + Clone + Send + Sync,
+{
+    let Json(req) = body.map_err(|_| ApiError::invalid_json())?;
+    match req.kind {
+        EvmContractValidateStartKind::EvmContractValidateStartV1 => {}
+    }
+    let config = deserialize_request_value::<ValidatePhaseConfig>(&req.config)?;
+    let configured = deserialize_request_value::<ConfiguredContract>(&req.configured)?;
+    let seed_bytes = canonical_request_value_bytes(&configured)?;
+    let compiled = compile_contract_validate_program(config, configured)
+        .map_err(api_error_from_contract_compile)?;
+    let seed = seed_artifact_for_single_contract_seed(&compiled, seed_bytes)?;
+    evm_contract_start(
+        state,
+        req.run_id,
+        req.framework_version,
+        req.source_revision,
+        req.drive,
+        compiled,
+        vec![seed],
+    )
+    .await
+}
+
+#[instrument(level = "info", skip(state, body))]
+async fn evm_contract_lifecycle<S>(
+    State(state): State<RouterState<S>>,
+    body: Result<Json<EvmContractLifecycleStartBody>, JsonRejection>,
+) -> Result<Json<serde_json::Value>, ApiError>
+where
+    S: AsyncTypedRunEventStore + Clone + Send + Sync,
+{
+    let Json(req) = body.map_err(|_| ApiError::invalid_json())?;
+    match req.kind {
+        EvmContractLifecycleStartKind::EvmContractLifecycleStartV1 => {}
+    }
+    let config = deserialize_request_value::<ContractLifecycleConfig>(&req.config)?;
+    let compiled =
+        compile_contract_lifecycle_program(config).map_err(api_error_from_contract_compile)?;
+    evm_contract_start(
+        state,
+        req.run_id,
+        req.framework_version,
+        req.source_revision,
+        req.drive,
+        compiled,
+        Vec::new(),
+    )
+    .await
 }
 
 #[instrument(level = "info", skip(state, body))]
@@ -701,6 +932,125 @@ where
         .await?;
 
     json_ok(data)
+}
+
+async fn evm_contract_start<S>(
+    state: RouterState<S>,
+    run_id: Option<String>,
+    framework_version: String,
+    source_revision: String,
+    drive: RestDriveMode,
+    compiled: CompiledContractLifecycleProgram,
+    seed_inputs: Vec<RunLaunchSeedArtifact>,
+) -> Result<Json<serde_json::Value>, ApiError>
+where
+    S: AsyncTypedRunEventStore + Clone + Send + Sync,
+{
+    let run_id = parse_optional_run_id(run_id)?;
+    let public_schema_id = compiled.public_schema_id.clone();
+    let services = state.services()?;
+    let start = mfm_app::prepare_certified_run_launch(
+        mfm_app::CertifiedRunLaunchInput {
+            certified_spec: compiled.certified_spec,
+            registry: services.certification_registry(),
+            run_id: run_id.clone(),
+            framework_version: &framework_version,
+            source_revision: &source_revision,
+            drive: drive.into_app(),
+        },
+        evm_contract_config_artifacts(compiled.config_artifacts),
+        seed_inputs,
+    )?;
+    let run = services.launch_run(start).await?;
+    let public_output = if run.phase == TypedRunPhase::Completed {
+        Some(
+            services
+                .typed_public_output(&run_id, &public_schema_id)
+                .await?,
+        )
+    } else {
+        None
+    };
+
+    json_ok(EvmContractStartResponse { run, public_output })
+}
+
+fn evm_contract_config_artifacts(
+    configs: Vec<ContractLifecycleConfigArtifact>,
+) -> Vec<RunLaunchConfigArtifact> {
+    configs
+        .into_iter()
+        .map(|config| RunLaunchConfigArtifact {
+            schema_id: config.schema_id,
+            bytes: config.bytes,
+            media_type: config.media_type,
+        })
+        .collect()
+}
+
+fn seed_artifact_for_single_contract_seed(
+    compiled: &CompiledContractLifecycleProgram,
+    bytes: Vec<u8>,
+) -> Result<RunLaunchSeedArtifact, ApiError> {
+    let seeds = &compiled.certified_spec.envelope().spec.seeds;
+    let [seed] = seeds.as_slice() else {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "EvmContractCompileInvalid",
+            format!(
+                "expected exactly one contract launch seed, found {}",
+                seeds.len()
+            ),
+        ));
+    };
+    Ok(RunLaunchSeedArtifact {
+        seed_id: seed.seed_id.clone(),
+        bytes,
+        media_type: mfm_app::json_media_type()?,
+    })
+}
+
+fn deserialize_request_value<T>(value: &serde_json::Value) -> Result<T, ApiError>
+where
+    T: DeserializeOwned,
+{
+    serde_json::from_value(value.clone()).map_err(|error| {
+        ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "InvalidEvmContractRequest",
+            error.to_string(),
+        )
+    })
+}
+
+fn canonical_request_value_bytes<T>(value: &T) -> Result<Vec<u8>, ApiError>
+where
+    T: Serialize,
+{
+    let json = serde_json::to_string(value).map_err(|error| {
+        ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "InvalidEvmContractRequest",
+            error.to_string(),
+        )
+    })?;
+    PlainCanonicalJsonBytes::from_json_str(&json)
+        .map(|canonical| canonical.to_vec())
+        .map_err(|error| {
+            ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "InvalidEvmContractRequest",
+                error.to_string(),
+            )
+        })
+}
+
+fn api_error_from_contract_compile(error: ContractLifecycleCompileError) -> ApiError {
+    ApiError::new(
+        StatusCode::BAD_REQUEST,
+        "EvmContractCompileInvalid",
+        error.to_string(),
+    )
 }
 
 fn parse_run_id(value: &str) -> Result<RunId, ApiError> {
@@ -919,6 +1269,9 @@ impl From<FsTypedArtifactError> for ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::{to_bytes, Body};
+    use axum::http::Request;
+    use tower::ServiceExt;
 
     struct FailingSerialize;
 
@@ -949,6 +1302,101 @@ mod tests {
         assert_eq!(err.code, "InvalidRunId");
     }
 
+    #[tokio::test]
+    async fn evm_contract_routes_accept_append_only_starts() {
+        for (route, body) in [
+            (
+                "/v1/evm/contracts/deploy",
+                json!({
+                    "kind": "evm_contract_deploy_start_v1",
+                    "config": deploy_config_json(),
+                    "drive": "append_only"
+                }),
+            ),
+            (
+                "/v1/evm/contracts/configure",
+                json!({
+                    "kind": "evm_contract_configure_start_v1",
+                    "config": configure_config_json(),
+                    "deployed": deployed_contract_json(),
+                    "drive": "append_only"
+                }),
+            ),
+            (
+                "/v1/evm/contracts/validate",
+                json!({
+                    "kind": "evm_contract_validate_start_v1",
+                    "config": validate_config_json(),
+                    "configured": configured_contract_json(),
+                    "drive": "append_only"
+                }),
+            ),
+            (
+                "/v1/evm/contracts/lifecycle",
+                json!({
+                    "kind": "evm_contract_lifecycle_start_v1",
+                    "config": {
+                        "lifecycle_version": 1,
+                        "deploy": deploy_config_json(),
+                        "configure": configure_config_json(),
+                        "validate": validate_config_json()
+                    },
+                    "drive": "append_only"
+                }),
+            ),
+        ] {
+            let response = test_app()
+                .oneshot(json_post(route, body))
+                .await
+                .expect("response");
+
+            assert_eq!(response.status(), StatusCode::OK, "route {route}");
+            let value = response_json(response).await;
+            assert_eq!(value["status"], "success");
+            assert_eq!(value["data"]["run"]["phase"], "started");
+            assert_eq!(value["data"]["public_output"], serde_json::Value::Null);
+        }
+    }
+
+    #[tokio::test]
+    async fn removed_legacy_contract_route_is_not_found() {
+        let route = ["/v1/evm/", "d", "c", "v", "/deploy"].concat();
+        let response = test_app()
+            .oneshot(json_post(
+                &route,
+                json!({
+                    "kind": "evm_contract_deploy_start_v1",
+                    "config": deploy_config_json(),
+                    "drive": "append_only"
+                }),
+            ))
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn removed_legacy_contract_start_kind_rejects() {
+        let removed_kind = ["evm_", "d", "c", "v", "_deploy_start_v1"].concat();
+        let response = test_app()
+            .oneshot(json_post(
+                "/v1/evm/contracts/deploy",
+                json!({
+                    "kind": removed_kind,
+                    "config": deploy_config_json(),
+                    "drive": "append_only"
+                }),
+            ))
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let value = response_json(response).await;
+        assert_eq!(value["status"], "error");
+        assert_eq!(value["error"]["code"], "InvalidJson");
+    }
+
     #[test]
     fn run_routes_do_not_import_dynamic_semantic_surfaces() {
         let source = std::fs::read_to_string(
@@ -973,5 +1421,91 @@ mod tests {
                 "REST typed run surface must not mention dynamic semantic surface `{needle}`"
             );
         }
+    }
+
+    fn test_app() -> axum::Router {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("mfm-rest-api-contract-test-{unique}"));
+        std::fs::create_dir_all(&root).expect("artifact root");
+        make_app(make_in_memory_app_state(root))
+    }
+
+    fn json_post(uri: &str, body: serde_json::Value) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .expect("request")
+    }
+
+    async fn response_json(response: axum::response::Response) -> serde_json::Value {
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        serde_json::from_slice(&bytes).expect("response json")
+    }
+
+    fn deploy_config_json() -> serde_json::Value {
+        json!({
+            "network": network_json(),
+            "signer": signer_json()
+        })
+    }
+
+    fn configure_config_json() -> serde_json::Value {
+        json!({
+            "network": network_json(),
+            "signer": signer_json(),
+            "calls": []
+        })
+    }
+
+    fn validate_config_json() -> serde_json::Value {
+        json!({
+            "network": network_json()
+        })
+    }
+
+    fn network_json() -> serde_json::Value {
+        json!({
+            "network_id": "ethereum-mainnet",
+            "expected_chain_id": 1
+        })
+    }
+
+    fn signer_json() -> serde_json::Value {
+        json!({
+            "signer_ref": "deployer",
+            "expected_signer_address": "0x000000000000000000000000000000000000dead"
+        })
+    }
+
+    fn deployed_contract_json() -> serde_json::Value {
+        json!({
+            "lifecycle_version": 1,
+            "network_id": "ethereum-mainnet",
+            "expected_chain_id": 1,
+            "contract_address": "0x000000000000000000000000000000000000c0de",
+            "deploy_tx_hash": "0xabc123",
+            "deploy_receipt_evidence": null,
+            "deployed_block_number": 100
+        })
+    }
+
+    fn configured_contract_json() -> serde_json::Value {
+        json!({
+            "lifecycle_version": 1,
+            "deployed": deployed_contract_json(),
+            "configure_calls": [],
+            "confirmation_read_assertions": [],
+            "confirmation_event_assertions": [],
+            "configure_tx_hashes": [],
+            "configure_receipt_evidence": [],
+            "configured_block_number": 101
+        })
     }
 }

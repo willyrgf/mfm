@@ -38,6 +38,10 @@ Endpoints:
 - `GET /v1/health`
 - `GET /v1/ready`
 - `POST /v1/portfolio/snapshot`
+- `POST /v1/evm/contracts/deploy`
+- `POST /v1/evm/contracts/configure`
+- `POST /v1/evm/contracts/validate`
+- `POST /v1/evm/contracts/lifecycle`
 - `POST /v1/runs/start`
 - `POST /v1/runs/:run_id/resume`
 - `GET /v1/runs/:run_id/status`
@@ -73,6 +77,71 @@ required typed config launch material to runtime middleware, and starts the cert
 The response is `{"run": ..., "public_output": ...}` inside the standard success envelope.
 `public_output` is present when the run completes during the selected drive mode. This route never
 submits old dynamic `portfolio_tracker`, `portfolio_execute`, or `portfolio_config_build` ops.
+
+## Start EVM Contract Runs
+
+The EVM contract routes compile typed contract lifecycle programs and start certified runs through
+the same run middleware as `/v1/runs/start`.
+
+Deploy:
+
+```json
+{
+  "kind": "evm_contract_deploy_start_v1",
+  "config": {
+    "...": "DeployPhaseConfig JSON"
+  },
+  "run_id": "run:sha256-jcs-v1:<optional-digest>",
+  "framework_version": "mfm.rest_api.evm_contracts.typed.v1",
+  "source_revision": "git-or-build-id",
+  "drive": "until_blocked"
+}
+```
+
+Configure:
+
+```json
+{
+  "kind": "evm_contract_configure_start_v1",
+  "config": {
+    "...": "ConfigurePhaseConfig JSON"
+  },
+  "deployed": {
+    "...": "DeployedContract JSON"
+  },
+  "drive": "until_blocked"
+}
+```
+
+Validate:
+
+```json
+{
+  "kind": "evm_contract_validate_start_v1",
+  "config": {
+    "...": "ValidatePhaseConfig JSON"
+  },
+  "configured": {
+    "...": "ConfiguredContract JSON"
+  },
+  "drive": "until_blocked"
+}
+```
+
+Full lifecycle:
+
+```json
+{
+  "kind": "evm_contract_lifecycle_start_v1",
+  "config": {
+    "...": "ContractLifecycleConfig JSON"
+  },
+  "drive": "until_blocked"
+}
+```
+
+The response is `{"run": ..., "public_output": ...}` inside the standard success envelope.
+`public_output` is present when the selected drive mode completes the run.
 
 ## Start A Typed Run
 
