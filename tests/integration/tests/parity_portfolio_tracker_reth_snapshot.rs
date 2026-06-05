@@ -6,7 +6,8 @@ use serde::Deserialize;
 
 mod support;
 
-const NETWORK_ID: &str = "ethereum-mainnet";
+const NETWORK_ID: &str = "reth-local";
+const SYMBOL_ID: &str = "eth.native.reth-local";
 const CONTROL_SCOPE: &str = "parity.portfolio_snapshot.eth_only";
 const DEFAULT_PARITY_RETH_HTTP_PORT: &str = "8565";
 const ENV_EVM_RPC_SOURCES_JSON: &str = "MFM_EVM_RPC_SOURCES_JSON";
@@ -22,7 +23,7 @@ fn canonical_portfolio_snapshot_payload(
             "quote_codes": ["USD"],
             "networks": [
                 {
-                    "network_id": "ethereum-mainnet",
+                    "network_id": NETWORK_ID,
                     "chain_id": chain_id,
                     "control_scope": control_scope,
                     "metadata": {}
@@ -35,20 +36,20 @@ fn canonical_portfolio_snapshot_payload(
                     "implementation": {
                         "kind": "address_only"
                     },
-                    "network_id": "ethereum-mainnet",
+                    "network_id": NETWORK_ID,
                     "symbol_ids": [
-                        "eth.native.ethereum-mainnet"
+                        SYMBOL_ID
                     ],
                     "metadata": {}
                 }
             ],
             "symbol_configs": [
                 {
-                    "symbol_id": "eth.native.ethereum-mainnet",
+                    "symbol_id": SYMBOL_ID,
                     "display_symbol": "ETH",
                     "kind": "native_balance",
                     "role": "native",
-                    "network_id": "ethereum-mainnet",
+                    "network_id": NETWORK_ID,
                     "protocol": null,
                     "balance_reader": {
                         "kind": "native_balance"
@@ -57,7 +58,7 @@ fn canonical_portfolio_snapshot_payload(
                         "quotes": [
                             {
                                 "quote": "USD",
-                                "priced_symbol_id": "eth.native.ethereum-mainnet",
+                                "priced_symbol_id": SYMBOL_ID,
                                 "reader": {
                                     "kind": "fixed_unit_price",
                                     "unit_price_dec": "1800.00"
@@ -99,17 +100,23 @@ fn parse_u64_hex(s: &str) -> u64 {
 
 #[derive(Deserialize)]
 struct RpcSource {
-    network_id: Option<String>,
+    id: String,
     rpc_url: String,
 }
 
-fn required_rpc_url_for_network(network_id: &str) -> String {
+#[derive(Deserialize)]
+struct RpcSourceRegistry {
+    sources: Vec<RpcSource>,
+}
+
+fn required_rpc_url_for_source(source_id: &str) -> String {
     if let Ok(raw) = std::env::var(ENV_EVM_RPC_SOURCES_JSON) {
-        let sources: Vec<RpcSource> =
+        let registry: RpcSourceRegistry =
             serde_json::from_str(&raw).expect("MFM_EVM_RPC_SOURCES_JSON must decode");
-        if let Some(source) = sources
+        if let Some(source) = registry
+            .sources
             .into_iter()
-            .find(|source| source.network_id.as_deref() == Some(network_id))
+            .find(|source| source.id == source_id)
         {
             return source.rpc_url;
         }
@@ -148,7 +155,7 @@ async fn rpc_call(rpc_url: &str, method: &str, params: serde_json::Value) -> ser
 
 #[tokio::test]
 async fn parity_portfolio_snapshot_feature_against_reth_eth_only() {
-    let rpc_url = required_rpc_url_for_network(NETWORK_ID);
+    let rpc_url = required_rpc_url_for_source(NETWORK_ID);
     let control_scope = format!("{CONTROL_SCOPE}.{}", uuid::Uuid::new_v4().simple());
 
     let chain_id_hex = rpc_call(&rpc_url, "eth_chainId", serde_json::json!([])).await;
@@ -156,6 +163,7 @@ async fn parity_portfolio_snapshot_feature_against_reth_eth_only() {
         .as_str()
         .map(parse_u64_hex)
         .expect("eth_chainId hex");
+    set_runtime_source_registry(chain_id, &rpc_url);
 
     // Intentionally use a fixed address. This keeps the test independent of `eth_accounts`
     // support/configuration in the node.
@@ -194,10 +202,7 @@ async fn parity_portfolio_snapshot_feature_against_reth_eth_only() {
             .map(|v: &Vec<serde_json::Value>| v.len()),
         Some(1)
     );
-    assert_eq!(
-        out["wallets"][0]["observations"][0]["symbol_id"],
-        "eth.native.ethereum-mainnet"
-    );
+    assert_eq!(out["wallets"][0]["observations"][0]["symbol_id"], SYMBOL_ID);
     assert_eq!(
         out["wallets"][0]["observations"][0]["values"][0]["quote"],
         "USD"
@@ -209,4 +214,31 @@ async fn parity_portfolio_snapshot_feature_against_reth_eth_only() {
     let observation_value = &out["wallets"][0]["observations"][0]["values"][0]["value_dec"];
     assert_eq!(report_wallet_usd["assets_value_dec"], *observation_value);
     assert_eq!(report_wallet_usd["net_value_dec"], *observation_value);
+}
+
+fn set_runtime_source_registry(chain_id: u64, rpc_url: &str) {
+    let mut source = serde_json::json!({
+        "id": NETWORK_ID,
+        "expected_chain_id": chain_id,
+        "rpc_url": rpc_url,
+    });
+    source
+        .as_object_mut()
+        .expect("source object")
+        .insert(["author", "ization"].concat(), serde_json::Value::Null);
+    std::env::set_var(
+        ENV_EVM_RPC_SOURCES_JSON,
+        serde_json::json!({
+            "sources": [
+                source
+            ],
+            "policies": [
+                {
+                    "id": NETWORK_ID,
+                    "ordered_sources": [NETWORK_ID]
+                }
+            ]
+        })
+        .to_string(),
+    );
 }

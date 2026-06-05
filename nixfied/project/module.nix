@@ -208,9 +208,11 @@ let
     "MFM_CI_ENABLE_PARITY"
     "DATABASE_URL"
     "MFM_EVM_RPC_SOURCES_JSON"
-    "MFM_EVM_RPC_PREFERRED_ORDER"
     "MFM_EVM_RPC_REQUIRE_GET_PROOF_IDS"
     "MFM_EVM_RPC_URL"
+    "MFM_EVM_CONTRACT_SOURCE_REF"
+    "MFM_EVM_CONTRACT_SOURCE_POLICY_ID"
+    "MFM_EVM_SIGNERS_JSON"
     "MFM_S3_ENDPOINT"
     "MFM_S3_REGION"
     "MFM_S3_BUCKET"
@@ -392,7 +394,7 @@ let
     jobs = 1;
     binaryIds = [
       "mfm::parity_keystore_reth_tx_send"
-      "mfm-integration-tests::parity_rest_api_evm_reth_pipeline"
+      "mfm-integration-tests::parity_evm_contract_lifecycle_reth"
       "mfm-integration-tests::parity_portfolio_tracker_reth_snapshot"
     ];
   };
@@ -517,8 +519,9 @@ EOF
     export PGDATABASE="''${PGDATABASE:-${postgresTestDatabase}}"
     export DATABASE_URL="''${DATABASE_URL:-postgresql://postgres:postgres@127.0.0.1:$POSTGRES_PORT/$PGDATABASE}"
     export MFM_EVM_RPC_URL="http://127.0.0.1:$RETH_HTTP_PORT"
-    export MFM_EVM_RPC_SOURCES_JSON="[{\"id\":\"reth_ethereum_mainnet\",\"network_id\":\"ethereum-mainnet\",\"rpc_url\":\"http://127.0.0.1:$RETH_HTTP_PORT\",\"kind\":\"local\"},{\"id\":\"reth_local_mainnet\",\"network_id\":\"ethereum-mainnet\",\"rpc_url\":\"http://127.0.0.1:$RETH_HTTP_PORT\",\"kind\":\"local\"},{\"id\":\"reth_local\",\"network_id\":\"reth-local\",\"rpc_url\":\"http://127.0.0.1:$RETH_HTTP_PORT\",\"kind\":\"local\"}]"
-    export MFM_EVM_RPC_PREFERRED_ORDER="reth_ethereum_mainnet,reth_local_mainnet,reth_local"
+    export MFM_EVM_RPC_SOURCES_JSON="{\"sources\":[{\"id\":\"reth-local\",\"expected_chain_id\":31337,\"rpc_url\":\"http://127.0.0.1:$RETH_HTTP_PORT\",\"authorization\":null}],\"policies\":[{\"id\":\"reth-local\",\"ordered_sources\":[\"reth-local\"]}]}"
+    export MFM_EVM_CONTRACT_SOURCE_REF="reth-local"
+    export MFM_EVM_CONTRACT_SOURCE_POLICY_ID="reth-local"
     export MFM_EVM_RPC_REQUIRE_GET_PROOF_IDS=""
   '';
   parityNextestArchiveShell = ''
@@ -925,10 +928,13 @@ in
               export MFM_EVM_RPC_URL="http://127.0.0.1:8545"
             fi
             if [ -z "''${MFM_EVM_RPC_SOURCES_JSON:-}" ]; then
-              export MFM_EVM_RPC_SOURCES_JSON='[{"id":"reth_ethereum_mainnet","network_id":"ethereum-mainnet","rpc_url":"http://127.0.0.1:8545","kind":"local"},{"id":"reth_local","network_id":"reth-local","rpc_url":"http://127.0.0.1:8545","kind":"local"}]'
+              export MFM_EVM_RPC_SOURCES_JSON='{"sources":[{"id":"reth-local","expected_chain_id":31337,"rpc_url":"http://127.0.0.1:8545","authorization":null}],"policies":[{"id":"reth-local","ordered_sources":["reth-local"]}]}'
             fi
-            if [ -z "''${MFM_EVM_RPC_PREFERRED_ORDER:-}" ]; then
-              export MFM_EVM_RPC_PREFERRED_ORDER="reth_ethereum_mainnet,reth_local"
+            if [ -z "''${MFM_EVM_CONTRACT_SOURCE_REF:-}" ]; then
+              export MFM_EVM_CONTRACT_SOURCE_REF="reth-local"
+            fi
+            if [ -z "''${MFM_EVM_CONTRACT_SOURCE_POLICY_ID:-}" ]; then
+              export MFM_EVM_CONTRACT_SOURCE_POLICY_ID="reth-local"
             fi
 
             if [ -z "''${MFM_REST_API_ADDR:-}" ]; then
@@ -1106,10 +1112,7 @@ in
             PGDATABASE="$snapshot_database" "$SVC_POSTGRES_SETUP_DB" >&2
 
             if [ -z "''${MFM_EVM_RPC_SOURCES_JSON:-}" ]; then
-              export MFM_EVM_RPC_SOURCES_JSON='[{"id":"publicnode_ethereum_mainnet","network_id":"ethereum-mainnet","rpc_url":"https://ethereum-rpc.publicnode.com","kind":"remote_public"}]'
-            fi
-            if [ -z "''${MFM_EVM_RPC_PREFERRED_ORDER:-}" ]; then
-              export MFM_EVM_RPC_PREFERRED_ORDER="publicnode_ethereum_mainnet"
+              export MFM_EVM_RPC_SOURCES_JSON='{"sources":[{"id":"publicnode-ethereum-mainnet","expected_chain_id":1,"rpc_url":"https://ethereum-rpc.publicnode.com","authorization":null}],"policies":[{"id":"publicnode-ethereum-mainnet","ordered_sources":["publicnode-ethereum-mainnet"]}]}'
             fi
 
             export DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$POSTGRES_PORT/$snapshot_database"

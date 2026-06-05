@@ -47,11 +47,6 @@ const TEMPORARY_TYPED_FIELD_ALLOWLIST: &[(&str, &str, usize)] = &[
     ("tests/integration/src/test_support.rs", "rpc_url", 5),
     (
         "tests/integration/src/test_support.rs",
-        "keystore_path_env",
-        1,
-    ),
-    (
-        "tests/integration/src/test_support.rs",
         "password_file_env",
         7,
     ),

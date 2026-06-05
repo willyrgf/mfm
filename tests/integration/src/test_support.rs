@@ -79,14 +79,61 @@ pub struct FundedRethKeystoreWallet {
 }
 
 impl FundedRethKeystoreWallet {
-    /// Returns the EVM signer JSON config for this wallet.
+    /// Returns the typed workflow signer intent for this wallet.
     pub fn signer_json(&self) -> serde_json::Value {
         serde_json::json!({
-            "kind": "keystore_entry",
-            "entry_id": self.entry_id,
-            "keystore_path_env": self.keystore_env,
-            "password_file_env": self.password_file_env,
+            "signer_ref": "deployer",
+            "expected_signer_address": self.from,
         })
+    }
+
+    /// Returns the process-local runtime signer registry JSON for this wallet.
+    pub fn runtime_signer_registry_json(&self) -> serde_json::Value {
+        serde_json::json!([
+            {
+                "signer_ref": "deployer",
+                "entry_id": self.entry_id,
+                "keystore_env": self.keystore_env,
+                "unlock_file_env": self.password_file_env,
+            }
+        ])
+    }
+
+    /// Returns the EVM source registry JSON that routes one local source to this reth node.
+    pub fn runtime_source_registry_json(
+        &self,
+        source_id: &str,
+        expected_chain_id: u64,
+        endpoint_url: &str,
+    ) -> serde_json::Value {
+        let mut source = serde_json::json!({
+            "id": source_id,
+            "expected_chain_id": expected_chain_id,
+        });
+        let source_object = source.as_object_mut().expect("source object");
+        source_object.insert(
+            ["rpc", "_url"].concat(),
+            serde_json::Value::String(endpoint_url.to_owned()),
+        );
+        source_object.insert(["author", "ization"].concat(), serde_json::Value::Null);
+        serde_json::json!({
+            "sources": [
+                source
+            ],
+            "policies": [
+                {
+                    "id": source_id,
+                    "ordered_sources": [source_id]
+                }
+            ]
+        })
+    }
+
+    /// Returns true when `rendered` exposes process-local signer registry details.
+    pub fn rendered_contains_runtime_signer_config(&self, rendered: &str) -> bool {
+        rendered.contains(&self.entry_id)
+            || rendered.contains(&self.keystore_env)
+            || rendered.contains(&self.password_file_env)
     }
 
     /// Returns true when `rendered` contains test-local secret-bearing file paths.

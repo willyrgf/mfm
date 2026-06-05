@@ -2050,6 +2050,7 @@ dependencies = [
  "mfm-certify",
  "mfm-events",
  "mfm-ids",
+ "mfm-op-evm-contract-lifecycle",
  "mfm-op-portfolio-tracker",
  "mfm-op-proof",
  "mfm-portfolio-config",

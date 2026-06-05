@@ -30,6 +30,7 @@ mfm-values = { path = "../../crates/kernel/values" }
 mfm-store = { path = "../../crates/kernel/store" }
 mfm-stream-store-postgres = { path = "../../crates/storages/stream-store-postgres" }
 mfm-op-proof = { path = "../../crates/ops/proof-op" }
+mfm-op-evm-contract-lifecycle = { path = "../../crates/ops/evm-contract-lifecycle-op" }
 mfm-transports-proof = { path = "../../crates/transports/proof" }
 mfm-replay = { path = "../../crates/kernel/replay" }
 mfm-runtime = { path = "../../crates/kernel/runtime" }
