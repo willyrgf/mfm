@@ -60,8 +60,9 @@ async fn parity_reth_contract_lifecycle_rest_route_completes_and_replays() {
         ))
         .await
         .expect("contract lifecycle start response");
-    assert_eq!(start.status(), StatusCode::OK);
+    let start_status = start.status();
     let mut body = response_json(start).await;
+    assert_eq!(start_status, StatusCode::OK, "{body}");
     assert_eq!(body["status"], "success");
     let run_id = body["data"]["run"]["run_id"]
         .as_str()
@@ -125,11 +126,11 @@ async fn parity_reth_contract_lifecycle_rest_route_completes_and_replays() {
     let public_output_body = response_json(public_output).await;
     assert_eq!(public_output_body["status"], "success");
     assert_eq!(
-        public_output_body["data"]["json"]["contract"]["validation_report"]["valid"],
-        true
+        public_output_body["data"]["json"]["validation_report"]["valid"], true,
+        "{public_output_body}"
     );
     assert_eq!(
-        public_output_body["data"]["json"]["contract"]["validation_report"]["observed_chain_id"],
+        public_output_body["data"]["json"]["validation_report"]["observed_chain_id"],
         chain_id
     );
 }

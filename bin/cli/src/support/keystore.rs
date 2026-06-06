@@ -372,6 +372,10 @@ pub(crate) fn sign_transaction(req: TxSignRequest) -> Result<SignedTx, CommandEr
     let from_address = secure_key
         .ethereum_address()
         .map_err(|err| CommandError::new("signing_error", err.to_string()))?;
+    let to_address = tx
+        .to
+        .map(|address| format!("{address:?}"))
+        .unwrap_or_default();
 
     let hash = eip1559_signing_hash(&tx);
     let mut hash_bytes = [0u8; 32];
@@ -384,7 +388,7 @@ pub(crate) fn sign_transaction(req: TxSignRequest) -> Result<SignedTx, CommandEr
 
     Ok(SignedTx {
         from: format!("{from_address:?}"),
-        to: format!("{:?}", tx.to),
+        to: to_address,
         nonce: tx.nonce,
         chain_id: tx.chain_id,
         tx_type: "0x2".to_string(),

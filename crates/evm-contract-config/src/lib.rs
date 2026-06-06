@@ -45,6 +45,13 @@ fn default_max_receipt_polls() -> u64 {
     120
 }
 
+/// Maximum delay accepted between transaction receipt polls.
+pub const MAX_RECEIPT_POLL_INTERVAL_MS: u64 = 10_000;
+/// Maximum receipt poll attempts accepted for one mutation phase.
+pub const MAX_RECEIPT_POLLS: u64 = 600;
+/// Maximum total receipt polling wait accepted for one mutation phase.
+pub const MAX_RECEIPT_TOTAL_WAIT_MS: u64 = 600_000;
+
 fn validate_nonempty(value: &str, field: &'static str) -> Result<(), String> {
     if value.trim().is_empty() {
         Err(format!("{field} must be non-empty"))
@@ -346,8 +353,24 @@ impl ReceiptRetryPolicy {
         if poll_interval_ms == 0 {
             return Err("poll_interval_ms must be non-zero".to_string());
         }
+        if poll_interval_ms > MAX_RECEIPT_POLL_INTERVAL_MS {
+            return Err(format!(
+                "poll_interval_ms must be <= {MAX_RECEIPT_POLL_INTERVAL_MS}"
+            ));
+        }
         if max_receipt_polls == 0 {
             return Err("max_receipt_polls must be non-zero".to_string());
+        }
+        if max_receipt_polls > MAX_RECEIPT_POLLS {
+            return Err(format!("max_receipt_polls must be <= {MAX_RECEIPT_POLLS}"));
+        }
+        let total_wait_ms = poll_interval_ms
+            .checked_mul(max_receipt_polls.saturating_sub(1))
+            .ok_or_else(|| "receipt polling wait budget overflowed".to_string())?;
+        if total_wait_ms > MAX_RECEIPT_TOTAL_WAIT_MS {
+            return Err(format!(
+                "receipt polling wait budget must be <= {MAX_RECEIPT_TOTAL_WAIT_MS} ms"
+            ));
         }
         Ok(Self {
             poll_interval_ms,
@@ -747,6 +770,25 @@ mod tests {
         assert_eq!(deploy.receipt().poll_interval_ms(), 500);
         assert_eq!(deploy.network().expected_chain_id(), 1);
         assert_eq!(deploy.signer().signer_ref_str(), "deployer");
+    }
+
+    #[test]
+    fn receipt_policy_rejects_unbounded_waits() {
+        assert!(ReceiptRetryPolicy::new(MAX_RECEIPT_POLL_INTERVAL_MS + 1, 1).is_err());
+        assert!(ReceiptRetryPolicy::new(1, MAX_RECEIPT_POLLS + 1).is_err());
+        assert!(ReceiptRetryPolicy::new(MAX_RECEIPT_POLL_INTERVAL_MS, 62).is_err());
+        assert!(ReceiptRetryPolicy::new(MAX_RECEIPT_POLL_INTERVAL_MS, 61).is_ok());
+        assert!(
+            serde_json::from_value::<DeployPhaseConfig>(serde_json::json!({
+                "network": network_json(1),
+                "signer": signer_json(),
+                "receipt": {
+                    "poll_interval_ms": MAX_RECEIPT_POLL_INTERVAL_MS + 1,
+                    "max_receipt_polls": 1
+                }
+            }))
+            .is_err()
+        );
     }
 
     #[test]

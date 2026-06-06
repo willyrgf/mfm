@@ -611,7 +611,7 @@ impl EvmJsonRpcClient {
             )
             .await?;
         if result.is_null() {
-            return Err(EvmTransportError::InvalidResponse);
+            return Err(EvmTransportError::ReceiptPending);
         }
         let transaction_hash = parse_b256_field(&result, "transactionHash")?;
         let block_number = result
@@ -804,7 +804,10 @@ impl_provider!(
 );
 
 fn capability_error_from_transport(error: EvmTransportError) -> EvmCapabilityError {
-    EvmCapabilityError::redacted_provider_failure(error)
+    match error {
+        EvmTransportError::ReceiptPending => EvmCapabilityError::ReceiptPending,
+        other => EvmCapabilityError::redacted_provider_failure(other),
+    }
 }
 
 fn block_selector_tag(selector: &EvmBlockSelector) -> String {
@@ -908,6 +911,9 @@ pub enum EvmTransportError {
     /// JSON-RPC response failed contract validation.
     #[error("EVM JSON-RPC response was invalid")]
     InvalidResponse,
+    /// Transaction receipt is not yet available.
+    #[error("EVM transaction receipt is pending")]
+    ReceiptPending,
 }
 
 #[cfg(test)]
@@ -1071,6 +1077,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pending_receipt_is_typed_capability_error() {
+        let server = TestRpcServer::spawn_pending_receipt("0x1").await;
+        let client = client_for(&server.url, "primary", "mainnet", 1);
+        let error = client
+            .read_receipt(&EvmReceiptReadRequest {
+                source_ref: EvmSourceRef::new("primary").expect("source"),
+                policy_id: EvmSourcePolicyId::new("mainnet").expect("policy"),
+                transaction_hash: HASH_HEX.parse::<B256>().expect("hash"),
+            })
+            .await
+            .expect_err("pending receipt");
+
+        assert_eq!(error, EvmCapabilityError::ReceiptPending);
+    }
+
+    #[tokio::test]
     async fn supports_legacy_fee_source_without_eip1559_methods() {
         let server = TestRpcServer::spawn_legacy_fee("0x1").await;
         let client = client_for(&server.url, "primary", "mainnet", 1);
@@ -1197,6 +1219,10 @@ mod tests {
             Self::spawn_with_mode(TestRpcMode::LegacyFee { chain_id }).await
         }
 
+        async fn spawn_pending_receipt(chain_id: &'static str) -> Self {
+            Self::spawn_with_mode(TestRpcMode::PendingReceipt { chain_id }).await
+        }
+
         async fn spawn_failure() -> Self {
             Self::spawn_with_mode(TestRpcMode::Failure).await
         }
@@ -1272,6 +1298,24 @@ mod tests {
                                     body
                                 )
                             }
+                            TestRpcMode::PendingReceipt { chain_id } => {
+                                let result = if method == "eth_getTransactionReceipt" {
+                                    serde_json::Value::Null
+                                } else {
+                                    rpc_result(chain_id, &method)
+                                };
+                                let body = serde_json::json!({
+                                    "jsonrpc": "2.0",
+                                    "id": 1,
+                                    "result": result,
+                                })
+                                .to_string();
+                                format!(
+                                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+                                    body.len(),
+                                    body
+                                )
+                            }
                             TestRpcMode::Failure => {
                                 "HTTP/1.1 500 Internal Server Error\r\ncontent-length: 0\r\n\r\n"
                                     .to_owned()
@@ -1292,6 +1336,7 @@ mod tests {
     enum TestRpcMode {
         Ok { chain_id: &'static str },
         LegacyFee { chain_id: &'static str },
+        PendingReceipt { chain_id: &'static str },
         Failure,
     }
 

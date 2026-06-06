@@ -658,6 +658,9 @@ pub enum EvmCapabilityError {
         /// Closed provider failure reason.
         reason: EvmProviderFailure,
     },
+    /// A transaction receipt is not available yet.
+    #[error("EVM transaction receipt is pending")]
+    ReceiptPending,
 }
 
 impl EvmCapabilityError {

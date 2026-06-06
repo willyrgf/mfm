@@ -191,7 +191,10 @@ pub async fn funded_reth_keystore_wallet(
         .expect("imported reth parity key info");
     let from = format!("{:?}", key_info.address);
 
-    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let suffix = uuid::Uuid::new_v4()
+        .simple()
+        .to_string()
+        .to_ascii_uppercase();
     let keystore_env = format!("MFM_EVM_PARITY_KEYSTORE_{suffix}");
     let password_file_env = format!("MFM_EVM_PARITY_KEYSTORE_PASSWORD_FILE_{suffix}");
     std::env::set_var(&keystore_env, &keystore_path);

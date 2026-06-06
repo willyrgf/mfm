@@ -1,12 +1,13 @@
 use std::fmt;
 use std::sync::Arc;
+use std::time::Duration;
 
 use mfm_adapter_contracts::evm_contract_lifecycle_adapter_binding;
 use mfm_adapters_evm_contracts::{
     deploy_contract_address_from_prepared, ensure_prepared_invocation_public,
-    lifecycle_evidence_ref, replay_verifier_id, EvmContractLifecycleAdapter,
-    EvmContractMutationProviders, EvmContractReadProviders, EvmContractRuntimeRoute,
-    PreparedContractMutation,
+    lifecycle_evidence_ref, replay_verifier_id, EvmContractAdapterError,
+    EvmContractLifecycleAdapter, EvmContractMutationProviders, EvmContractReadProviders,
+    EvmContractRuntimeRoute, PreparedContractInvocation, PreparedContractMutation,
 };
 use mfm_artifact_capabilities::{ArtifactReadProvider, ArtifactReadRequest};
 use mfm_artifact_store_fs::FsTypedArtifactStore;
@@ -14,12 +15,14 @@ use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_capabilities::CapabilitySpec;
 use mfm_events::v1::{self as events, side_effect};
 use mfm_evm_capabilities::{
-    EvmCallReadCapability, EvmCallReadProvider, EvmChainIdentityCapability,
+    EvmCallReadCapability, EvmCallReadProvider, EvmCapabilityError, EvmChainIdentityCapability,
     EvmChainIdentityProvider, EvmFeeReadProvider, EvmGasEstimateProvider, EvmLogsReadCapability,
     EvmLogsReadProvider, EvmNonceReadProvider, EvmReceiptReadProvider, EvmSourcePolicyId,
     EvmSourceRef, EvmTransactionSubmitCapability, EvmTransactionSubmitProvider,
 };
-use mfm_evm_contract_config::{ConfigurePhaseConfig, DeployPhaseConfig, ValidatePhaseConfig};
+use mfm_evm_contract_config::{
+    ConfigurePhaseConfig, DeployPhaseConfig, ReceiptRetryPolicy, ValidatePhaseConfig,
+};
 use mfm_evm_contract_model::{ConfiguredContract, DeployedContract};
 use mfm_ids::{ArtifactId, CapabilityKind, CapabilityVersion, ContentDigest, DescriptorId, NodeId};
 use mfm_program::{SideEffectState, StateSpec};
@@ -42,6 +45,7 @@ use mfm_transports_evm::EvmJsonRpcClient;
 use mfm_values::{MfmConfig, MfmValue};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use tokio::time::sleep;
 use uuid::Uuid;
 
 const READ_FACTORY: &str = "read_external";
@@ -370,6 +374,7 @@ async fn run_deploy_mutation(
                 .await
         }
         Some(store::SideEffectPhase::SubmissionObserved { invocation_epoch }) => {
+            let prepared_projection = projected_prepared_artifact(&ctx, &plan.ledger_key)?;
             let submission_projection = projected_submission_artifact(&ctx, &plan.ledger_key)?;
             let runtime = factory.runtime_for(plan.config.network().network_id())?;
             side_effect_receipt(
@@ -378,6 +383,7 @@ async fn run_deploy_mutation(
                 &runtime,
                 plan.ledger_key,
                 invocation_epoch,
+                &prepared_projection,
                 &submission_projection,
             )
             .await
@@ -481,6 +487,7 @@ async fn run_configure_mutation(
                 .await
         }
         Some(store::SideEffectPhase::SubmissionObserved { invocation_epoch }) => {
+            let prepared_projection = projected_prepared_artifact(&ctx, &plan.ledger_key)?;
             let submission_projection = projected_submission_artifact(&ctx, &plan.ledger_key)?;
             let runtime = factory.runtime_for(plan.config.network().network_id())?;
             side_effect_receipt(
@@ -489,6 +496,7 @@ async fn run_configure_mutation(
                 &runtime,
                 plan.ledger_key,
                 invocation_epoch,
+                &prepared_projection,
                 &submission_projection,
             )
             .await
@@ -772,8 +780,16 @@ async fn side_effect_receipt(
     runtime: &EvmContractRuntime,
     ledger_key: events::SideEffectLedgerKey,
     invocation_epoch: u32,
+    prepared_projection: &store::SideEffectArtifactProjection,
     submission_projection: &store::SideEffectArtifactProjection,
 ) -> mfm_runtime::Result<ErasedRunnerOutput> {
+    let prepared = load_prepared_invocation(
+        prepared_projection,
+        events::ArtifactRole::PreparedInvocation,
+        &ctx,
+        artifacts,
+    )
+    .await?;
     let submissions = load_side_effect_value::<ContractTransactionSubmissions>(
         submission_projection,
         events::ArtifactRole::Submission,
@@ -783,11 +799,7 @@ async fn side_effect_receipt(
     .await?;
     let receipts = ContractTransactionReceipts {
         receipts_version: 1,
-        transactions: runtime
-            .adapter()
-            .read_receipts(&submissions.transactions)
-            .await
-            .map_err(runtime_adapter_error)?,
+        transactions: read_receipts_with_poll(runtime, &prepared, &submissions).await?,
     };
     let artifact = artifact_for_value(
         &receipts,
@@ -814,6 +826,45 @@ async fn side_effect_receipt(
             },
         )],
     })
+}
+
+async fn read_receipts_with_poll(
+    runtime: &EvmContractRuntime,
+    prepared: &PreparedContractInvocation,
+    submissions: &ContractTransactionSubmissions,
+) -> mfm_runtime::Result<Vec<mfm_state_evm_contracts::ContractTransactionReceipt>> {
+    if prepared.transactions.len() != submissions.transactions.len() {
+        return Err(mfm_runtime::RuntimeError::InvalidRunnerOutput(
+            "contract lifecycle receipt read transaction count mismatch".to_owned(),
+        ));
+    }
+    let receipt_policy =
+        ReceiptRetryPolicy::new(prepared.poll_interval_ms, prepared.max_receipt_polls)
+            .map_err(mfm_runtime::RuntimeError::InvalidRunnerOutput)?;
+
+    let max_polls = receipt_policy.max_receipt_polls();
+    for attempt in 0..max_polls {
+        match runtime
+            .adapter()
+            .read_receipts(&submissions.transactions)
+            .await
+        {
+            Ok(receipts) => return Ok(receipts),
+            Err(EvmContractAdapterError::EvmCapability(EvmCapabilityError::ReceiptPending)) => {
+                if attempt + 1 == max_polls {
+                    return Err(mfm_runtime::RuntimeError::InvalidRunnerOutput(
+                        "contract lifecycle receipt polling exhausted".to_owned(),
+                    ));
+                }
+                sleep(Duration::from_millis(receipt_policy.poll_interval_ms())).await;
+            }
+            Err(error) => return Err(runtime_adapter_error(error)),
+        }
+    }
+
+    Err(mfm_runtime::RuntimeError::InvalidRunnerOutput(
+        "contract lifecycle receipt polling exhausted".to_owned(),
+    ))
 }
 
 fn side_effect_confirmation<Confirmation>(
@@ -1842,23 +1893,76 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    #[tokio::test]
+    async fn receipt_polling_does_not_retry_permanent_capability_failures() {
+        let root = std::env::temp_dir().join(format!(
+            "mfm-app-evm-contract-receipt-failure-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let factory = TestRuntimeFactory::new(FsTypedArtifactStore::new(&root));
+        let transaction_hash = "0x1111111111111111111111111111111111111111111111111111111111111111";
+        let prepared = mfm_adapters_evm_contracts::PreparedContractInvocation {
+            prepared_version: 1,
+            phase: mfm_adapters_evm_contracts::ContractMutationPhase::Deploy,
+            network_id: "reth-dev".to_owned(),
+            expected_chain_id: 31337,
+            signer_ref: "deployer".to_owned(),
+            expected_signer_address: "0x0000000000000000000000000000000000000001".to_owned(),
+            transactions: vec![mfm_adapters_evm_contracts::PreparedContractTransactionEvidence {
+                index: 0,
+                style: mfm_adapters_evm_contracts::PreparedContractTransactionStyle::Eip1559,
+                chain_id: 31337,
+                nonce: 7,
+                to_address: None,
+                value_wei: "0".to_owned(),
+                gas_limit: 21_000,
+                max_fee_per_gas: Some("11".to_owned()),
+                max_priority_fee_per_gas: Some("3".to_owned()),
+                gas_price: None,
+                data_digest: "content:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000000".to_owned(),
+                data_len: 0,
+                signing_digest: transaction_hash.to_owned(),
+            }],
+            poll_interval_ms: 25,
+            max_receipt_polls: 3,
+        };
+        let submissions = ContractTransactionSubmissions {
+            submissions_version: 1,
+            transactions: vec![mfm_state_evm_contracts::ContractTransactionSubmission {
+                submission_version: 1,
+                transaction_hash: transaction_hash.to_owned(),
+                signer_public_key: None,
+            }],
+        };
+
+        let error = read_receipts_with_poll(&factory.runtime, &prepared, &submissions)
+            .await
+            .expect_err("permanent capability failure");
+
+        assert!(error.to_string().contains("EVM capability provider failed"));
+        assert_eq!(factory.reads.lock().expect("reads").receipt, 1);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[derive(Clone)]
     struct TestRuntimeFactory {
         artifacts: Arc<dyn ArtifactReadProvider>,
         runtime: EvmContractRuntime,
+        reads: Arc<Mutex<TestEvmReads>>,
     }
 
     impl TestRuntimeFactory {
         fn new(artifacts: FsTypedArtifactStore) -> Self {
             let source_ref = EvmSourceRef::new("reth-dev").expect("source ref");
             let policy_id = EvmSourcePolicyId::new("reth-dev").expect("policy id");
+            let reads = Arc::new(Mutex::new(TestEvmReads::default()));
             let evm = Arc::new(TestEvmProvider {
                 source_ref: source_ref.clone(),
                 policy_id: policy_id.clone(),
                 chain_id: 31337,
                 mutation: false,
                 fail_repeated_prepare_reads: false,
-                reads: Arc::new(Mutex::new(TestEvmReads::default())),
+                reads: Arc::clone(&reads),
             });
             Self {
                 artifacts: Arc::new(artifacts),
@@ -1867,6 +1971,7 @@ mod tests {
                     evm,
                     signer: Arc::new(TestSigner),
                 },
+                reads,
             }
         }
 
@@ -1877,13 +1982,14 @@ mod tests {
         ) -> Self {
             let source_ref = EvmSourceRef::new("reth-dev").expect("source ref");
             let policy_id = EvmSourcePolicyId::new("reth-dev").expect("policy id");
+            let reads = Arc::new(Mutex::new(TestEvmReads::default()));
             let evm = Arc::new(TestEvmProvider {
                 source_ref: source_ref.clone(),
                 policy_id: policy_id.clone(),
                 chain_id: 31337,
                 mutation: true,
                 fail_repeated_prepare_reads,
-                reads: Arc::new(Mutex::new(TestEvmReads::default())),
+                reads: Arc::clone(&reads),
             });
             Self {
                 artifacts: Arc::new(artifacts),
@@ -1892,6 +1998,7 @@ mod tests {
                     evm,
                     signer,
                 },
+                reads,
             }
         }
     }
@@ -1929,6 +2036,7 @@ mod tests {
         nonce: u32,
         fee: u32,
         gas: u32,
+        receipt: u32,
     }
 
     impl TestEvmProvider {
@@ -2062,10 +2170,22 @@ mod tests {
             &'a self,
             request: &'a EvmReceiptReadRequest,
         ) -> EvmCapabilityFuture<'a, EvmReceiptReadResponse> {
+            let reads = Arc::clone(&self.reads);
             if !self.mutation {
-                return failed_evm();
+                return Box::pin(async move {
+                    let mut reads = reads
+                        .lock()
+                        .map_err(|_| EvmCapabilityError::redacted_provider_failure("test evm"))?;
+                    reads.receipt += 1;
+                    Err(EvmCapabilityError::redacted_provider_failure("test evm"))
+                });
             }
             Box::pin(async move {
+                let mut reads = self
+                    .reads
+                    .lock()
+                    .map_err(|_| EvmCapabilityError::redacted_provider_failure("test evm"))?;
+                reads.receipt += 1;
                 Ok(EvmReceiptReadResponse {
                     evidence: self.evidence(),
                     transaction_hash: request.transaction_hash,
