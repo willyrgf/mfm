@@ -46,7 +46,7 @@ fn active_public_namespace_has_no_stale_workflow_recipe_terms() {
         &entries,
         &forbidden_terms,
         &[],
-        |path, _source| !is_historical_architecture_doc(path),
+        |_path, _source| true,
     );
 }
 
@@ -61,8 +61,7 @@ fn typed_surface_runtime_fields_are_temporarily_allowlisted_by_path() {
         FORBIDDEN_TYPED_SURFACE_FIELDS,
         TEMPORARY_TYPED_FIELD_ALLOWLIST,
         |path, source| {
-            !is_historical_architecture_doc(path)
-                && !TEST_HARNESS_PATHS.contains(&path)
+            !TEST_HARNESS_PATHS.contains(&path)
                 && !TYPED_SURFACE_FIELD_SCAN_SKIP_PATHS.contains(&path)
                 && is_typed_surface_candidate(source)
         },
@@ -233,15 +232,6 @@ fn forbidden_public_name_terms() -> Vec<String> {
         operation_words.join("-"),
         format!("mfm-transports-evm-{lower}"),
     ]
-}
-
-fn is_historical_architecture_doc(path: &str) -> bool {
-    path == "PLAN_IMPL_PROBLEM_ARCH.md"
-        || path
-            == format!(
-                "PROBLEM_ARCH_{}.md",
-                stale_recipe_abbrev().to_ascii_uppercase()
-            )
 }
 
 fn assert_forbidden_terms_are_allowlisted<T: AsRef<str>>(
