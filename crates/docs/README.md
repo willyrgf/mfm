@@ -57,7 +57,7 @@ The architecture and runtime contracts live in the repository docs:
 | Package | Role | docs.rs | Workspace Path |
 | --- | --- | --- | --- |
 | `mfm-state-evm-contracts` | Reusable EVM contract lifecycle state contracts and replay semantics. | unknown | `crates/states/evm-contracts` |
-| `mfm-state-portfolio` | Reusable portfolio-domain runtime states and adapters for canonical snapshots. | unknown | `crates/states/portfolio` |
+| `mfm-state-portfolio` | Reusable portfolio-domain runtime state contracts for canonical snapshots. | unknown | `crates/states/portfolio` |
 
 ## Ops
 

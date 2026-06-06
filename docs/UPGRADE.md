@@ -4,12 +4,12 @@ This document tracks downstream expectations when the vendored Nixfied framework
 
 ## What To Recheck After A Framework Upgrade
 
-- If the upgrade adds new vendored files under `nixfied/framework/` or `nixfied/lib/`, track them before running `nix run .#...`; flake evaluation from a dirty Git tree omits untracked files.
-- `nix run .#help`
-- `nix run .#services`
-- `nix run .#features`
-- `nix run .#validate-env`
-- `nix run .#ci -- --mode basic --summary`
+- If the upgrade adds new vendored files under `nixfied/framework/` or `nixfied/lib/`, track them
+  before evaluating framework surfaces; flake evaluation from a dirty Git tree omits untracked
+  files.
+- Recheck exposed app metadata, service metadata, feature metadata, and environment validation
+  surfaces only when the change is specifically about Nixfied behavior.
+- Run the repository's focused Cargo architecture checks after accepting the framework update.
 
 ## Current Local Conventions
 

@@ -17,10 +17,9 @@ Typed EVM transports discover RPC sources from environment variables:
 
 - `MFM_EVM_RPC_SOURCES_JSON`: JSON source registry with endpoint-bearing `sources` and ordered
   fallback `policies`.
-- `MFM_EVM_CONTRACT_SOURCE_REF`: optional source id used by contract lifecycle routes when the
-  workflow config does not select a process-local source explicitly.
+- `MFM_EVM_CONTRACT_SOURCE_REF`: optional process-local source id used by contract lifecycle routes.
 - `MFM_EVM_CONTRACT_SOURCE_POLICY_ID`: optional source policy id used by contract lifecycle routes
-  when the workflow config does not select a process-local policy explicitly.
+  to select a runtime policy.
 - `MFM_EVM_SIGNERS_JSON`: JSON array of runtime signer-provider entries used by contract lifecycle
   routes.
 
@@ -88,13 +87,14 @@ Live typed transports may:
 - probe source health before use
 - perform read calls required by certified read states
 - submit side-effect transactions required by certified side-effect states
-- persist typed fact, receipt, confirmation, and artifact evidence through runtime/store APIs
+- return typed capability responses and redacted source evidence to adapters
 
 Live typed transports must not:
 
 - add uncertified state nodes
 - rewrite a certified spec
 - create an independent run stream or side-effect stream
+- record facts, receipts, confirmations, or artifact evidence directly
 - persist secrets or raw signing material in typed semantic surfaces
 - accept per-request raw RPC URL overrides from workflow configs
 

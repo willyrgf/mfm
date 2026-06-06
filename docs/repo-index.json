@@ -299,41 +299,40 @@
       "path": "crates/core/src/crypto.rs",
       "risk": "Security-sensitive Ethereum private-key parsing, address derivation, and recoverable signing.",
       "required_checks": [
-        "nix run .#check",
-        "nix run .#test",
-        "nix run .#ci -- --audit --summary"
+        "cargo test -p mfm_core",
+        "cargo test -p mfm-signers-keystore",
+        "cargo test -p mfm-evm-signing"
       ]
     },
     {
       "path": "crates/core/src/keystore",
       "risk": "Security-sensitive key handling, tamper detection, and persisted keystore compatibility.",
       "required_checks": [
-        "nix run .#check",
-        "nix run .#test",
-        "nix run .#ci -- --audit --summary"
+        "cargo test -p mfm_core",
+        "cargo test -p mfm-signers-keystore"
       ]
     },
     {
       "path": "nixfied/framework",
       "risk": "Framework internals; avoid direct edits in installed repos.",
       "required_checks": [
-        "nix run .#help"
+        "review vendored-boundary changes manually"
       ]
     },
     {
       "path": "nixfied/project/conf.nix",
       "risk": "Project identity, environment names, and port contract.",
       "required_checks": [
-        "nix run .#check",
-        "nix run .#ci -- --summary"
+        "cargo test -p mfm-integration-tests --test cargo_metadata_contract",
+        "review Nixfied behavior only when changing Nixfied wiring"
       ]
     },
     {
       "path": "nixfied/project/module.nix",
       "risk": "Modeled tasks, workflows, CI pipeline behavior, quality checks, and discovery drift enforcement.",
       "required_checks": [
-        "nix run .#check",
-        "nix run .#ci -- --summary"
+        "cargo test -p mfm-integration-tests --test cargo_metadata_contract",
+        "review Nixfied behavior only when changing Nixfied wiring"
       ]
     }
   ],

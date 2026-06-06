@@ -81,7 +81,7 @@ Domain and product crates sit outside the kernel:
 
 | Area | Responsibility |
 |---|---|
-| Domain capability contract crates | Typed capability specs, authority traits, request/response evidence types, and redacted error contracts used by states and adapters |
+| Domain capability contract crates | Typed capability specs, authority traits, request/response evidence types, and redacted error contracts used by state and adapter crates |
 | `crates/states/*` | Typed state contracts and deterministic state-owned behavior |
 | `crates/ops/*` | Typed operation planners that assemble state programs |
 | `crates/adapters/*` | Runner bindings from state intent to capabilities, evidence phases, and domain replay verifiers |

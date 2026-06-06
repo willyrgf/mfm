@@ -9,14 +9,18 @@ It is inspired by the practices used in large Rust codebases: modular crates, st
 - Follow `docs/code-quality.md` for every code, test, documentation, build, and workflow change.
 - Do not introduce hacks, monkey patches, partial workarounds, or fragile compatibility shims.
 - If the requested change needs missing underlying support, add that support properly or report the blocker honestly.
-- Match CI (Nixfied): use `nix run .#check`, `nix run .#test`, and `nix run .#ci -- --mode <mode> --summary`.
-- Default pre-commit gate: run `nix run .#ci -- --mode full` before every commit.
+- Use focused Cargo verification by default. Prefer targeted `cargo test`, `cargo check`,
+  `cargo metadata`, namespace scans, schema checks, and manually started service parity tests.
+- Do not use Nixfied test/CI wrappers as the default gate. Use Nixfied commands only when the
+  change is specifically about Nixfied behavior or the user asks for them.
 - Write commit subjects in lower case. Examples: `mfm-core bump to 0.1.30`, `fix nix task wrappers to preserve caller cwd`, `docs: refresh repo map for typed crates`, `docs: publish umbrella earlier with live links only`, `docs: point crate metadata at mfm repo`.
 - Never log, print, or persist secrets (passwords, mnemonics, private keys).
 - Preserve crate boundaries: libraries stay usable without the CLI.
 - Keep binaries (`bin/cli`, `bin/rest-api`) thin:
   - op planning logic belongs in `crates/ops/*-op`
-  - reusable executable state logic belongs in shared-state crates (`crates/states/common`, `crates/states/keystore`, `crates/states/aave-v3`, `crates/evm-runtime`)
+  - reusable executable state logic belongs in `crates/states/*`
+  - runner bindings from state intent to capabilities belong in `crates/adapters/*`
+  - live protocol implementations belong in `crates/transports/*`
   - binaries should parse input, start/resume runs, and render outputs only
 - Apply the taxonomy and boundary contract from `docs/architecture.md`:
   - operations stay deterministic and assemble state graphs
@@ -42,21 +46,22 @@ Key invariants to preserve (high risk if violated):
 - Secrets must not appear in persisted surfaces:
   - manifests, events, artifacts (including fact payloads and context snapshots), CLI/API outputs, or error details.
 
-## Nixfied Entry Points
+## Verification Entry Points
 
-Nixfied is the canonical entrypoint for dev/test/build/check/ci:
+Use Cargo and focused checks first:
 
-- `nix run .#help`
-- `nix run .#dev`
-- `nix run .#check`
-- `nix run .#test`
-- `nix run .#build`
-- `nix run .#ci -- --mode basic --summary`
-- `nix run .#ci -- --mode audit --summary`
-- `nix run .#ci -- --mode parity --summary`
-- `nix run .#ci -- --mode full --summary`
+- `cargo fmt --all -- --check`
+- `cargo check --workspace`
+- `cargo test --workspace`
+- `cargo test -p mfm-integration-tests --test cargo_metadata_contract`
+- `cargo test -p mfm-integration-tests --test architecture_namespace_contract`
+- `rg` namespace/config scans for architecture guardrails
 
-## Key docs:
+For parity tests that need Postgres, Reth, or other live services, start those services manually and
+run the focused Cargo test with explicit environment variables such as `DATABASE_URL`,
+`RETH_HTTP_PORT`, or `MFM_EVM_RPC_SOURCES_JSON`.
+
+## Key Docs:
 
 - `README.md`: project disclaimer.
 - `docs/repo-map.md`: Repository map
@@ -82,19 +87,19 @@ Nixfied is the canonical entrypoint for dev/test/build/check/ci:
 
 ### Code Style and Standards
 
-1. **Formatting + Clippy (nightly)**:
+1. **Formatting**:
 ```bash
-nix run .#check
+cargo fmt --all -- --check
 ```
 
-2. **Testing**:
+2. **Focused testing**:
 ```bash
-nix run .#test
+cargo test -p <package>
 ```
 
-3. **Security Audit**:
+3. **Workspace testing when feasible**:
 ```bash
-nix run .#ci -- --mode audit --summary
+cargo test --workspace
 ```
 
 
@@ -108,7 +113,8 @@ Nixfied is vendored under `nixfied/`. Vendoring boundaries (canonical doc: `nixf
 Prefer editing `nixfied/project/` and `nixfied/local/` (not `flake.nix` or framework code under `nixfied/framework/`) for workflow changes:
 
 - `nixfied/project/conf.nix`: project identity, env vars, envs/ports, service defaults, slot behavior.
-- `nixfied/project/module.nix`: `nix run .#dev`, `nix run .#mfm_rest_api`, `nix run .#build`, `nix run .#check`, `nix run .#test`, and `nix run .#ci` task/workflow wiring including `mfm::portfolio::snapshot`.
+- `nixfied/project/module.nix`: modeled task/workflow wiring for dev, REST API, build,
+  check/test, CI, and portfolio snapshot app surfaces.
 - `nixfied/project/ci-runtime.nix`: CI runtime environment helpers and command assembly used by the CI task/workflow layer.
 - Framework introspection surfaces such as `.#introspect`, `.#schema`, `.#features`, and package outputs like `.#introspectionBundle`: compiled model surfaces that project CI checks should consume directly.
 - `nixfied/project/default.nix`: merges project files; update it if you add a new `nixfied/project/*.nix` part.
@@ -214,8 +220,7 @@ The CLI is designed to be scriptable and AI-friendly.
 Run locally:
 
 ```bash
-nix build .#mfm-cli
-./result/bin/mfm_cli --help
+cargo run -p mfm -- --help
 ```
 
 ### State Machine (`crates/machine/`)
@@ -280,7 +285,8 @@ When changing CLI/REST behavior, update the relevant docs in the same change:
 
 - Backtraces: set `RUST_BACKTRACE=1` (CI already does).
 - CLI logging: use `tracing::{debug, info, warn, error}` with a clear target.
-- CI summaries: `nix run .#ci -- --summary` writes `summary.json` to the artifacts dir (see `nixfied/project/module.nix`).
+- For parity failures, keep service logs beside the manually started Postgres/Reth data directory
+  and rerun the focused Cargo test with `-- --nocapture`.
 
 
 ## Commenting Guidelines (Keep Future Readers in Mind)

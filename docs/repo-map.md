@@ -79,28 +79,19 @@ Generated from `docs/repo-index.json`.
 - `introspect`, `stateHash`, `schema` from `nixfied/framework/core/mkNixfied.nix`
 
 ## Sensitive Zones
-- `crates/core/src/crypto.rs` - Security-sensitive Ethereum private-key parsing, address derivation, and recoverable signing. (checks: nix run .#check, nix run .#test, nix run .#ci -- --audit --summary)
-- `crates/core/src/keystore` - Security-sensitive key handling, tamper detection, and persisted keystore compatibility. (checks: nix run .#check, nix run .#test, nix run .#ci -- --audit --summary)
-- `nixfied/framework` - Framework internals; avoid direct edits in installed repos. (checks: nix run .#help)
-- `nixfied/project/conf.nix` - Project identity, environment names, and port contract. (checks: nix run .#check, nix run .#ci -- --summary)
-- `nixfied/project/module.nix` - Modeled tasks, workflows, CI pipeline behavior, quality checks, and discovery drift enforcement. (checks: nix run .#check, nix run .#ci -- --summary)
+- `crates/core/src/crypto.rs` - Security-sensitive Ethereum private-key parsing, address derivation, and recoverable signing. (checks: cargo test -p mfm_core, cargo test -p mfm-signers-keystore, cargo test -p mfm-evm-signing)
+- `crates/core/src/keystore` - Security-sensitive key handling, tamper detection, and persisted keystore compatibility. (checks: cargo test -p mfm_core, cargo test -p mfm-signers-keystore)
+- `nixfied/framework` - Framework internals; avoid direct edits in installed repos. (checks: review vendored-boundary changes manually)
+- `nixfied/project/conf.nix` - Project identity, environment names, and port contract. (checks: cargo test -p mfm-integration-tests --test cargo_metadata_contract, review Nixfied behavior only when changing Nixfied wiring)
+- `nixfied/project/module.nix` - Modeled tasks, workflows, CI pipeline behavior, quality checks, and discovery drift enforcement. (checks: cargo test -p mfm-integration-tests --test cargo_metadata_contract, review Nixfied behavior only when changing Nixfied wiring)
 
-## Canonical Commands
-- `nix run .#help`
-- `nix run .#dev`
-- `nix run .#test`
-- `nix run .#build`
-- `nix run .#check`
-- `nix run .#format`
-- `nix run .#ci -- --summary`
-- `nix run .#validate-env`
-- `nix run .#test-isolation`
-- `nix run .#ports`
-- `nix run .#check-ports`
-- `nix run .#features`
-- `nix run .#framework::test`
-- `nix run .#framework::install`
-- `nix run .#framework::upgrade`
+## Verification Commands
+- `cargo fmt --all -- --check`
+- `cargo check --workspace`
+- `cargo test --workspace`
+- `cargo test -p mfm-integration-tests --test cargo_metadata_contract`
+- `cargo test -p mfm-integration-tests --test architecture_namespace_contract`
+- Start Postgres/Reth manually before running parity tests that need live services.
 
 ## Invariants
 - Treat `nixfied/project/` as the primary customization surface.

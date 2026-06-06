@@ -113,7 +113,8 @@ Prioritize:
 For documentation-only changes:
 
 ```bash
-nix run .#check
+cargo fmt --all -- --check
+cargo test -p mfm-integration-tests --test architecture_namespace_contract
 ```
 
 For crate-level rustdoc work:

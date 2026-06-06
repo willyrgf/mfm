@@ -11,11 +11,13 @@ flowchart TD
     B["bin/cli<br/>bin/rest-api<br/>(transport only)"] --> A["crates/app<br/>(typed assembly)"]
     A --> O["crates/ops/*-op<br/>(typed program planning)"]
     O --> SH["crates/states/*<br/>(typed executable states)"]
+    SH --> AD["crates/adapters/*<br/>(runner bindings)"]
+    AD --> CAP["capability + signer contracts<br/>(typed authority)"]
+    CAP --> TP["crates/transports/*<br/>(live protocol backends)"]
+    CAP --> SG["crates/signers/*<br/>(signer providers)"]
     A --> R["crates/kernel/runtime<br/>(typed scheduler)"]
     R --> K["crates/kernel/*<br/>(ids, values, spec, events, store, replay)"]
     R --> ST["crates/storages/*<br/>(mfm-store implementations)"]
-    R --> TP["crates/transports/*<br/>(typed capability backends)"]
-    C["crates/core<br/>(primitives + keystore/crypto)"] --> SH
 
     classDef transport fill:#e8f0ff,stroke:#2f5aa8,color:#0f2d63,stroke-width:1px;
     classDef orchestration fill:#eefbe7,stroke:#3a7a2a,color:#1d4d12,stroke-width:1px;
@@ -27,12 +29,13 @@ flowchart TD
     class B transport;
     class A,O orchestration;
     class SH statecore;
-    class R,K,C engine;
+    class R,K engine;
     class ST storage;
-    class TP adapter;
+    class AD adapter;
+    class CAP,TP,SG transport;
 ```
 
-Typed state programs are the semantic executable surface. Ops plan typed programs, the certified typed execution spec is the runtime contract, states execute through typed effect runners and capability backends, and binaries stay transport-only.
+Typed state programs are the semantic executable surface. Ops plan typed programs, the certified typed execution spec is the runtime contract, states declare reusable semantics, adapters bind state intent to capability contracts, transports/signers provide reusable platform implementations, and binaries stay transport-only.
 
 ## Core capabilities
 
@@ -75,79 +78,28 @@ Design notes / planning:
 
 ## Development
 
-Canonical entrypoints:
+Use focused Cargo verification by default. Start external services such as Postgres or Reth manually
+when a parity test needs them, then run the targeted test against those live endpoints.
 
 ```bash
-nix run .#help
-nix run .#dev
-nix run .#check
-nix run .#test
-nix run .#ci -- --mode basic --summary
-nix run .#ci -- --mode audit --summary
-nix run .#ci -- --mode parity --summary
-nix run .#ci -- --mode full --summary
-nix run .#ci -- --mode <mode> --summary
+cargo fmt --all -- --check
+cargo test --workspace
+cargo test -p mfm-integration-tests --test cargo_metadata_contract
+cargo test -p mfm-integration-tests --test architecture_namespace_contract
 ```
 
-### Behavioral changes (workflow modes)
-
-- `--mode <value>` is the canonical interface for workflow mode selection.
-- Shorthand `--<mode>` is only accepted for simple mode names matching `[a-z0-9-]+`.
-- Dotted/complex modes must use `--mode` (for example `--mode parallel.smoke`).
-- Unknown mode errors now print expected modes derived from the compiled model.
-
-### Contract notes:
-
-- Framework service hooks and model-level service tasks share the same launcher/runtime policy path, but this repo does not currently expose public `service::*::start` apps.
-- Local supervisor wrappers in `nixfied/local/default.nix` (`up`, `down`, `svc-*`) are intentional prod-only overrides.
-- `mfm::portfolio::snapshot` is a strict json app that owns process/bootstrap orchestration, stdout envelope
-  validation, and readiness mediation via `SVC_*` hooks while forwarding validated `mfm_cli` payloads unchanged.
-- `nix run .#help` lists exposed core apps; invoke `mfm::portfolio::snapshot` directly by name.
-- CI help/docs metadata comes from task/app metadata in `nixfied/project/module.nix`, and is mirrored into `apps.<system>.ci.meta.nixfied.api`.
-- Project scripts should prefer framework policy helpers and `task.ops.ready`/`task.ops.health` surfaces over duplicating service policy or readiness logic.
-- `nix run .#dev` intentionally uses `start_service ... --cleanup` for deterministic teardown.
-
-### Reliability improvements:
-
-- Explicit shell app classes are now enforced:
-  - `typed` for strict text commands (`check`, `test`, `build`, `mfm_rest_api`, `svc-*`)
-  - `json` for machine-output workflows (`mfm::portfolio::snapshot`, and other machine-output apps)
-  - `batch-runner` for `ci`
-- Unknown args are rejected at the shell-contract boundary for typed/json commands before domain execution.
-- `mfm::portfolio::snapshot` preserves `mfm_cli` as the output-contract authority and returns the validated
-  `mfm_cli` payload unchanged.
-- CI now validates command class policies and runtime behavior (including unknown-arg probes and JSON-shape checks) in `shell-app-contracts`.
-
-### Process-first ops:
-
-- Runtime visibility:
-  - `nix run .#process::status`
-  - `nix run .#process::status -- --all`
-  - `nix run .#process::runs -- --all`
-  - `nix run .#process::inspect -- <id>`
-  - `nix run .#process::stop -- --run-id <id>`
-  - `nix run .#process::stop -- --run-id <id> --scope slot-env`
-  - `nix run .#process::stop -- --run-id <id> --dry-run`
-- Service model surfaces:
-  - `nix run .#services`
-  - `nix run .#ready -- --service postgres --source local`
-  - `nix run .#ready -- --service reth --source local`
-  - `nix run .#health -- --service all`
-- Policy controls (optional overrides):
-  - `SERVICE_OWNER_SCOPE=ephemeral|persistent`
-  - `SERVICE_DISCOVERY_SCOPE=local|global`
-- Migration note:
-  - `SERVICE_REUSE_POLICY` and `MFM_KEEP_SERVICES` are rejected by `mfm::portfolio::snapshot`.
-- Preserve or tear down snapshot-managed services via `SERVICE_*` policy envs on `mfm::portfolio::snapshot`; the direct-task
-  launch and lifecycle handling remain internal.
-
-### Run binaries:
+Useful focused parity examples:
 
 ```bash
-nix build .#mfm-cli
-./result/bin/mfm_cli --help
-nix run .#mfm_rest_api
-nix run .#mfm::portfolio::snapshot -- <ADDRESS>
+RETH_HTTP_PORT=8565 cargo test -p mfm-integration-tests --features parity-tests --test parity_evm_contract_lifecycle_reth
+DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/mfm_test cargo test -p mfm-integration-tests --features parity-tests --test parity_rest_api_postgres_typed_smoke
+```
+
+Run binaries locally:
+
+```bash
+cargo run -p mfm -- --help
+cargo run -p mfm-rest-api
 ```
 
 ## License

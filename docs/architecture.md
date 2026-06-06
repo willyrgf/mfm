@@ -211,7 +211,7 @@ Signer crates may:
 - define signing algorithm and domain identifiers
 - define signing request/result traits
 - implement MFM keystore-backed signing
-- map runtime signer ids to keystore entries, hardware signers, remote signers, or future wallets
+- map runtime signer refs to keystore entries, hardware signers, remote signers, or future wallets
 - verify expected public identities
 - redact all secret-bearing details from errors
 
@@ -237,7 +237,7 @@ Typed config may contain:
 - network id
 - source/oracle id only when source selection is domain intent, not local runtime routing
 - expected chain id or equivalent protocol identity
-- signer id
+- signer ref
 - expected public address or public identity
 - receipt, retry, or validation policy
 - assertion definitions
@@ -361,7 +361,7 @@ Keep these concepts distinct:
 - `source_id`: process-local runtime source routing key, not workflow semantic config unless the
   selected source itself is domain intent
 - `control_scope`: MFM execution partition, only if truly semantic
-- `signer_id`: non-secret signer reference
+- `signer_ref`: non-secret signer reference
 
 Local development chains must not be labeled as mainnet networks unless they are actually mainnet.
 

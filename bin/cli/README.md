@@ -517,7 +517,7 @@ The CLI's behavior can be modified using environment variables, which is ideal f
 
 - **`MFM_EVM_RPC_SOURCES_JSON`**: Optional JSON source registry used by typed EVM RPC
   backends. It is runtime-only and never persisted. The registry contains endpoint-bearing
-  `sources` and ordered fallback `policies`; workflow configs refer only to source and policy ids.
+  `sources` and ordered fallback `policies`; workflow configs carry semantic network intent only.
   ```sh
   export MFM_EVM_RPC_SOURCES_JSON='{
     "sources": [
@@ -547,8 +547,10 @@ The CLI's behavior can be modified using environment variables, which is ideal f
 
 - Typed EVM RPC source configuration requires `expected_chain_id` on every configured source and at
   least one policy with an ordered source list.
-- Typed EVM requests use semantic `network_id` plus explicit source and policy refs where needed;
-  `control_scope` defaults to `shared` unless workflow config overrides it.
+- Typed EVM contract requests use semantic `network_id` plus `expected_chain_id`; process-local
+  source and policy refs come from runtime environment.
+- Portfolio configs may also use `control_scope` when source-selection partitioning is part of the
+  domain request identity.
 
 - Typed EVM RPC note: per-request `rpc_url` override is not supported.
 - Typed EVM RPC runbook: [`../../docs/evm-rpc-routing.md`](../../docs/evm-rpc-routing.md)
