@@ -40,5 +40,8 @@ mfm_core = { path = "../../crates/core" }
 mfm-rest-api = { path = "../../bin/rest-api" }
 
 [dev-dependencies]
+alloy-primitives = { workspace = true }
 axum = "0.7"
+mfm-evm-contract-config = { path = "../../crates/evm-contract-config" }
+mfm-evm-contract-model = { path = "../../crates/evm-contract-model" }
 tower = "0.5"

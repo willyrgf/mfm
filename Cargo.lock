@@ -2027,6 +2027,7 @@ version = "0.1.0"
 name = "mfm-integration-tests"
 version = "0.1.0"
 dependencies = [
+ "alloy-primitives",
  "axum",
  "mfm-app",
  "mfm-artifact-store-fs",
@@ -2034,6 +2035,8 @@ dependencies = [
  "mfm-capabilities",
  "mfm-certify",
  "mfm-events",
+ "mfm-evm-contract-config",
+ "mfm-evm-contract-model",
  "mfm-ids",
  "mfm-op-evm-contract-lifecycle",
  "mfm-op-portfolio-tracker",
