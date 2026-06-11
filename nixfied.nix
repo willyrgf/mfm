@@ -11,16 +11,26 @@ let
       "rustfmt"
     ];
   };
+  darwinLinkInputs = lib.optionals pkgs.stdenv.hostPlatform.isDarwin [
+    pkgs.libiconv
+  ];
+  ccEnvSuffix = lib.replaceStrings [ "-" ] [ "_" ] pkgs.stdenv.hostPlatform.config;
+  darwinLinkSetup = lib.optionalString pkgs.stdenv.hostPlatform.isDarwin ''
+    export NIX_LDFLAGS_${ccEnvSuffix}="''${NIX_LDFLAGS_${ccEnvSuffix}:-} -L${pkgs.libiconv}/lib"
+    export CPATH="${pkgs.libiconv}/include:''${CPATH:-}"
+  '';
 
   mfmRunner = pkgs.writeShellApplication {
     name = "mfm-nixfied-runner";
-    runtimeInputs = [
-      pkgs.coreutils
-      pkgs.git
-      pkgs.pkg-config
-      rustToolchain
-      pkgs.stdenv.cc
-    ];
+    runtimeInputs =
+      [
+        pkgs.coreutils
+        pkgs.git
+        pkgs.pkg-config
+        rustToolchain
+        pkgs.stdenv.cc
+      ]
+      ++ darwinLinkInputs;
     text = ''
       command_name="''${1:?missing mfm task command}"
       shift
@@ -57,6 +67,7 @@ let
       mkdir -p "$state_dir/cargo-target"
       export CARGO_TARGET_DIR="''${CARGO_TARGET_DIR:-$state_dir/cargo-target}"
       export RUST_BACKTRACE="''${RUST_BACKTRACE:-1}"
+      ${darwinLinkSetup}
 
       require_postgres_port() {
         if [[ -z "$postgres_port" ]]; then
