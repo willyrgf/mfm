@@ -1,23 +1,24 @@
 # Upgrade Notes
 
-This document tracks downstream expectations when the vendored Nixfied framework changes.
+This document tracks downstream expectations when the Nixfied v2 flake input changes.
 
 ## What To Recheck After A Framework Upgrade
 
-- If the upgrade adds new vendored files under `nixfied/framework/` or `nixfied/lib/`, track them
-  before evaluating framework surfaces; flake evaluation from a dirty Git tree omits untracked
-  files.
-- Recheck exposed app metadata, service metadata, feature metadata, and environment validation
-  surfaces only when the change is specifically about Nixfied behavior.
+- Update `flake.lock` so the exact Nixfied, nixpkgs, and Rust overlay revisions are recorded.
+- Recheck exposed app behavior and the compiled model only when the change is specifically about
+  Nixfied behavior.
 - Run the repository's focused Cargo architecture checks after accepting the framework update.
 
 ## Current Local Conventions
 
-- Ephemeral copies are pinned to `git-files` with `includeUntracked = true` in [`nixfied/project/conf.nix`](../nixfied/project/conf.nix) so local `.env` files are not pulled into the framework's new `nix-source` materialization path.
-- Service metadata in [`nixfied/project/conf.nix`](../nixfied/project/conf.nix) uses explicit `sources` entries so the compiled model can describe local Postgres, MinIO, and Reth backends.
-- Portfolio snapshot RPC bootstrap is configured through `MFM_EVM_RPC_SOURCES_JSON`; the wrapper supplies a public Ethereum mainnet fallback only when callers do not provide one.
+- [`nixfied.nix`](../nixfied.nix) is the project-owned model. It declares `check`, `test`, and `ci`
+  workflows plus managed Postgres and Reth services for full CI.
+- `.#ci` is full by definition and does not accept v1 `--mode`, `--full`, or `--summary` flags.
+- Reth parity tests use the managed local dev node declared in `nixfied.nix`.
 
 ## Notes For Future Upgrades
 
-- If a new release adds required discovery docs, prefer adding thin compatibility entrypoints here rather than moving the existing lowercase MFM design docs.
-- If a new release changes ephemeral defaults again, re-audit secret exposure around `.env`, keystore files, and other local-only inputs before accepting the new default.
+- If a new release changes state placement, re-audit secret exposure around `.env`, keystore files,
+  and other local-only inputs before accepting the new default.
+- If a new release changes service or task substitution semantics, re-run `nix run .#ci` before
+  accepting the update.

@@ -103,26 +103,27 @@ cargo test --workspace
 ```
 
 
-## Nixfied Customization Surface
+## Nixfied v2 Customization Surface
 
-Nixfied is vendored under `nixfied/`. Vendoring boundaries (canonical doc: `nixfied/VENDORED.txt`):
+Nixfied v2 is consumed as a flake input, not vendored as a framework tree.
 
-- Framework-owned (overwritten on `framework::upgrade`): `flake.nix`, `flake.lock`, `nixfied/framework/`.
-- User-owned (preserved on `framework::upgrade`): `nixfied/project/` (primary customization surface) and `nixfied/local/` (extensions).
+- `flake.nix`: pins the `nixfied` input, compiles `nixfied.nix`, and exposes `.#check`, `.#test`, and `.#ci`.
+- `flake.lock`: records the exact Nixfied/nixpkgs/Rust overlay inputs.
+- `nixfied.nix`: project-owned model for MFM tasks, workflows, services, slots, and ports.
 
-Prefer editing `nixfied/project/` and `nixfied/local/` (not `flake.nix` or framework code under `nixfied/framework/`) for workflow changes:
+Prefer editing `nixfied.nix` for workflow changes. Do not recreate v1-style `nixfied/project/`,
+`nixfied/framework/`, dispatcher, or introspection surfaces.
 
-- `nixfied/project/conf.nix`: project identity, env vars, envs/ports, service defaults, slot behavior.
-- `nixfied/project/module.nix`: modeled task/workflow wiring for dev, REST API, build,
-  check/test, CI, and portfolio snapshot app surfaces.
-- `nixfied/project/ci-runtime.nix`: CI runtime environment helpers and command assembly used by the CI task/workflow layer.
-- Framework introspection surfaces such as `.#introspect`, `.#schema`, `.#features`, and package outputs like `.#introspectionBundle`: compiled model surfaces that project CI checks should consume directly.
-- `nixfied/project/default.nix`: merges project files; update it if you add a new `nixfied/project/*.nix` part.
-- `nixfied/local/default.nix`: optional extension point for extra flake `apps`/`packages`/`devShells` that should survive framework upgrades.
+Current Nixfied command contract:
+
+- `nix run .#check`: model admission, rustfmt, clippy, and architecture/cargo metadata contracts.
+- `nix run .#test`: full `cargo test --workspace` without managed external services.
+- `nix run .#ci`: full CI by definition; starts managed Postgres and Reth and runs all parity tests.
+
 Environment variables you should expect:
 
-- `MFM_ENV`: environment name (`dev|test|prod`).
-- `NIX_ENV`: slot number (0-9) for disjoint ports when running multiple local instances (defaults to `0` when unset).
+- `NIXFIED_STATE_DIR`: optional runtime state/artifact root override.
+- `CARGO_TARGET_DIR`: optional shared Cargo target directory override.
 
 ## Common Contribution Types
 

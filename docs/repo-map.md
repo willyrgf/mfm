@@ -63,27 +63,20 @@ Generated from `docs/repo-index.json`.
 - `tests/integration/Cargo.toml` (rust-cargo)
 
 ## Command Surfaces
-- `ci` from `nixfied/project/module.nix`
+- `check` from `flake.nix` / `nixfied.nix`
+- `test` from `flake.nix` / `nixfied.nix`
+- `ci` from `flake.nix` / `nixfied.nix`
 
 ## Features
 - (none detected)
 
 ## Dispatcher and Introspection
-- `run-task -- <task-id> [-- ...]` from `nixfied/framework/runtime/dispatcher.nix`
-- `run-workflow -- <workflow-id> [-- ...]` from `nixfied/framework/runtime/dispatcher.nix`
-- `run-workflow-parallel -- <workflow-id> [-- ...]` from `nixfied/framework/runtime/dispatcher.nix`
-- `runs [run-id]` from `nixfied/framework/runtime/dispatcher.nix`
-- `stop-run -- <run-id>` from `nixfied/framework/runtime/dispatcher.nix`
-- `stop-all-runs` from `nixfied/framework/runtime/dispatcher.nix`
-- `features` from `nixfied/framework/runtime/dispatcher.nix`
-- `introspect`, `stateHash`, `schema` from `nixfied/framework/core/mkNixfied.nix`
+- Nixfied v2 does not expose the v1 project dispatcher or introspection apps in MFM.
 
 ## Sensitive Zones
 - `crates/core/src/crypto.rs` - Security-sensitive Ethereum private-key parsing, address derivation, and recoverable signing. (checks: cargo test -p mfm_core, cargo test -p mfm-signers-keystore, cargo test -p mfm-evm-signing)
 - `crates/core/src/keystore` - Security-sensitive key handling, tamper detection, and persisted keystore compatibility. (checks: cargo test -p mfm_core, cargo test -p mfm-signers-keystore)
-- `nixfied/framework` - Framework internals; avoid direct edits in installed repos. (checks: review vendored-boundary changes manually)
-- `nixfied/project/conf.nix` - Project identity, environment names, and port contract. (checks: cargo test -p mfm-integration-tests --test cargo_metadata_contract, review Nixfied behavior only when changing Nixfied wiring)
-- `nixfied/project/module.nix` - Modeled tasks, workflows, CI pipeline behavior, quality checks, and discovery drift enforcement. (checks: cargo test -p mfm-integration-tests --test cargo_metadata_contract, review Nixfied behavior only when changing Nixfied wiring)
+- `nixfied.nix` - Nixfied v2 project model for tasks, workflows, managed services, slots, and port contract. (checks: nix run .#check, nix run .#test, nix run .#ci when changing Nixfied wiring)
 
 ## Verification Commands
 - `cargo fmt --all -- --check`
@@ -92,8 +85,11 @@ Generated from `docs/repo-index.json`.
 - `cargo test -p mfm-integration-tests --test cargo_metadata_contract`
 - `cargo test -p mfm-integration-tests --test architecture_namespace_contract`
 - Start Postgres/Reth manually before running parity tests that need live services.
+- `nix run .#check` for the Nixfied v2 check workflow.
+- `nix run .#test` for the Nixfied v2 workspace test workflow.
+- `nix run .#ci` for full Nixfied v2 CI with managed Postgres and Reth.
 
 ## Invariants
-- Treat `nixfied/project/` as the primary customization surface.
+- Treat `nixfied.nix` as the primary Nixfied customization surface.
 - Keep command metadata aligned with script behavior.
 - Keep this map and `docs/repo-index.json` in sync when command surfaces or key docs change.
