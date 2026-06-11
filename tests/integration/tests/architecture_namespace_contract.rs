@@ -25,7 +25,7 @@ const TEMPORARY_TYPED_FIELD_ALLOWLIST: &[(&str, &str, usize)] = &[
     ("crates/portfolio/model/src/portfolio.rs", "password", 1),
     ("crates/portfolio/model/src/portfolio.rs", "mnemonic", 2),
     ("crates/portfolio/model/src/symbol.rs", "authorization", 2),
-    ("tests/integration/src/test_support.rs", "rpc_url", 5),
+    ("tests/integration/src/test_support.rs", "rpc_url", 4),
     (
         "tests/integration/src/test_support.rs",
         "password_file_env",

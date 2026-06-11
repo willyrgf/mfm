@@ -200,21 +200,9 @@ pub async fn funded_reth_keystore_wallet(
     std::env::set_var(&keystore_env, &keystore_path);
     std::env::set_var(&password_file_env, &password_file_path);
 
-    let accounts = rpc_call(rpc_url, "eth_accounts", serde_json::json!([])).await;
-    let account_is_exposed = accounts
-        .as_array()
-        .expect("reth eth_accounts array")
-        .iter()
-        .any(|account| {
-            account
-                .as_str()
-                .is_some_and(|account| account.eq_ignore_ascii_case(&from))
-        });
-    assert!(
-        account_is_exposed,
-        "reth dev account imported into the test keystore must be exposed by eth_accounts"
-    );
-
+    // Reth dev nodes prefund this deterministic key set, but recent releases do
+    // not expose the dev accounts through `eth_accounts`. The balance assertion
+    // below is the funding contract these tests actually need.
     let balance = rpc_call(
         rpc_url,
         "eth_getBalance",
