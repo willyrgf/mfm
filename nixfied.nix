@@ -161,16 +161,18 @@ let
       p2p_port=$((http_port + 3))
       reth_dir="$state_dir/reth"
       jwt_file="$reth_dir/config/jwt.hex"
+      ipc_path="/tmp/mfm-reth-$http_port.ipc"
 
       mkdir -p "$reth_dir/data" "$reth_dir/run" "$reth_dir/config"
       if [[ ! -s "$jwt_file" ]]; then
         printf '%064x\n' 0 > "$jwt_file"
       fi
       chmod 600 "$jwt_file" 2>/dev/null || true
+      rm -f "$ipc_path"
 
       exec reth node \
         --datadir "$reth_dir/data" \
-        --ipcpath "$reth_dir/run/reth.ipc" \
+        --ipcpath "$ipc_path" \
         --port "$p2p_port" \
         --http \
         --http.addr "$host" \
