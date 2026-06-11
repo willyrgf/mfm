@@ -5,8 +5,6 @@ permissions:
 
 on:
   push:
-    branches: [dev]
-  pull_request:
 
 jobs:
   flake-check:
@@ -45,7 +43,6 @@ jobs:
       MFM_LOG: "debug"
       MFM_TEST_LOG: "1"
       MFM_TEST_LOG_FILTER: "debug"
-      NIXFIED_STATE_DIR: ${{ runner.temp }}/nixfied-state
     strategy:
       fail-fast: true
       matrix:
@@ -69,6 +66,8 @@ jobs:
           key: nix-${{ runner.os }}-${{ runner.arch }}-${{ github.ref_name }}-${{ hashFiles('flake.lock', 'flake.nix', 'nixfied.nix', 'Cargo.lock', '.github/workflows/checks.yml') }}
 
       - name: Nixfied CI
+        env:
+          NIXFIED_STATE_DIR: ${{ runner.temp }}/nixfied-state
         run: |
           nix -L -v --log-format bar-with-logs run .#ci
 
