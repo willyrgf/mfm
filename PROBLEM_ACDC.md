@@ -1,309 +1,357 @@
 # PROBLEM: AC/DC workflow guarantees for MFM
 
-Status: problem statement for the next MFM architecture attack.
+Status: implementation-aware problem statement for the next MFM architecture discussion.
 
 Source context: Stonebraker, Zhou, Kraft, and Li, "Consistency and Correctness in
 Data-Oriented Workflow Systems" (CIDR 2026 draft, local PDF
 `/Users/willyrgf/Downloads/p9-stonebraker.pdf`).
 
+Review basis:
+
+- `AGENTS.md`
+- `docs/code-quality.md`
+- `docs/design.md`
+- `docs/architecture.md`
+- current typed-core implementation in kernel/runtime/store/replay/app/storage crates
+- extracted paper text from `/private/tmp/p9-stonebraker.txt`
+
 ## One Sentence
 
-MFM has the foundations for durable typed workflow execution, but it cannot yet claim AC/DC
-workflow semantics because failed multi-step runs with completed external side effects do not have a
-first-class, certified, durable, correctness-aware compensation/backout model.
+MFM has a strong typed durable-execution foundation, including append-only run streams and durable
+forward side-effect ledgers, but it cannot claim AC/DC workflow semantics until failure directives,
+compensation/backout, manual resolution, and concurrency correctness become certified typed
+execution semantics rather than ordinary user-authored states or app glue.
 
-## Why This Matters
+## Non-Claim
 
-MFM workflows are not just local computations. They can observe external systems, submit
-transactions, call services, write artifacts, and produce public outputs. Durable execution by
-itself handles the forward path: if the process crashes, MFM can rebuild typed authority from the
-append-only run stream and resume from committed evidence.
+AC/DC is not implemented today.
 
-That is not enough for update-oriented workflows. If a run confirms one side effect and a later
-state fails, MFM must not merely preserve a durable record of the partial result. The platform must
-drive the run toward one of these outcomes:
+Current MFM can preserve and resume forward typed execution evidence. It does not yet provide a
+platform-owned guarantee that a failed update-oriented workflow either completes on a certified
+alternate path, is correctly backed out or compensated, or is durably escalated to a typed manual
+resolution state.
 
-- the workflow completes through the primary path;
-- the workflow completes through a certified alternate path;
-- the workflow is backed out or compensated so the visible state is equivalent to the workflow never
-  starting, within the declared correctness model;
-- the workflow is durably blocked for manual resolution because automatic correctness cannot be
-  guaranteed.
+## Paper Terms In MFM Vocabulary
 
-Anything else leaves users with the same "oops logic" AC/DC is meant to remove.
+The paper uses AC/DC to extend ACID-style expectations from one database transaction to a workflow.
+For MFM, the terms should be interpreted through typed-core authority:
 
-## AC/DC In MFM Terms
+| Paper term | MFM typed-core interpretation |
+| --- | --- |
+| Workflow step | A certified typed node attempt selected by runtime from `CertifiedRuntimeSpec` and verified run history. |
+| Durable computing | Append-only typed run streams plus artifact evidence that let runtime/replay rebuild authority and avoid repeating completed work. |
+| Operation log | `run:{run_id}` kernel event stream plus retained artifact evidence and rebuildable projections. |
+| Step transaction | A node commit admitted through `PreparedTypedCommit`; for external side effects, the external mutation is not inside the store transaction. |
+| Directive | Missing certified spec semantics for retry, alternate step, backout/compensation, manual resolution, or terminal failure. |
+| Backout | Missing platform-owned remediation mode that appends evidence without erasing forward history. |
+| Compensation | Missing typed side-effect-like remedial obligation linked to a completed forward side effect. |
+| Manual resolution | Missing durable typed run status and evidence for operator-owned completion or backout. |
+| Atomic workflow | A run that reaches successful output, certified alternate output, compensated/backed-out terminal evidence, or manual-resolution terminal evidence. |
+| Consistent workflow | A workflow whose declared remediation restores required invariants in single-user mode or explicitly carries a domain assertion/manual path. |
+| Correct workflow under concurrency | A workflow whose remediation outcome is equivalent to removing the failed workflow and preserving other completed concurrent workflows that should remain. |
 
-AC/DC extends ACID-style expectations from one transaction to an entire workflow. For MFM, the terms
-must mean the following.
+The paper's durable execution maps closely to MFM's implemented forward path. The paper's
+atomicity, consistency, and concurrency correctness do not yet map to implemented MFM authority.
 
-Atomicity:
-Every certified run must either reach a successful terminal output, reach a certified alternate
-terminal output, or reach a terminal compensated/manual-resolution state. A failed run with
-unresolved confirmed side effects is not atomically complete.
+## Current Implementation Facts
 
-Consistency:
-Each side-effecting workflow must declare enough domain semantics to restore required invariants
-when the forward path cannot complete. A compensation that works only in the happy single-user case
-is not enough.
+These are facts from inspected code and docs, not design goals.
 
-Durability:
-Forward steps, alternate steps, compensation steps, recovery probes, manual-resolution records, and
-terminal backout decisions must all be append-only typed workflow events. Compensation must be
-once-and-only-once in the same sense as forward side effects.
+- `docs/design.md` makes certified typed specs the only runtime contract, run streams
+  append-only and authoritative, store commits atomic at the event-batch level, and replay/resume
+  driven by stored certified spec plus authoritative run stream.
+- `docs/architecture.md` assigns planning to ops, domain semantics to states, capability binding
+  to adapters, IO to transports, append authority/projections to store, scheduling to runtime,
+  assembly to app, and transport-only surfaces to binaries.
+- `crates/kernel/program/src/lib.rs` has `RunnerKind::ApplySideEffect` and `SideEffectState`.
+  `SideEffectState` declares forward intent, idempotency input, submission, receipt,
+  confirmation, submit, and `output_from_confirmation`.
+- The side-effect descriptor digest generated for `ApplySideEffect` covers forward schema and
+  semantic type identities for intent, idempotency input, submission, receipt, and confirmation.
+  It does not include a compensation contract, failure directive, correctness class, finality
+  policy, or irreversible-effect classification.
+- `crates/kernel/spec/src/lib.rs` represents node side-effect metadata as
+  `SideEffectContractSpec { contract_digest }`. It has no certified fields for retry,
+  alternate paths, compensation, backout, manual resolution, physical backout, or correctness
+  assertions.
+- `crates/kernel/certify/src/lib.rs` requires `ApplySideEffect` descriptors and nodes to carry a
+  matching side-effect contract digest. That is a forward side-effect contract check, not a
+  backout-strategy check.
+- `crates/kernel/events/src/lib.rs` has forward side-effect events for intent, claim/takeover,
+  invocation prepared/started, not-submitted proof, submission observed/unknown, receipt,
+  confirmation, ambiguity, and failure.
+- `SideEffectFailed` has only two legal failure phases:
+  `BeforeInvocationStarted` and `AfterNotSubmittedProven`. The current event vocabulary does not
+  model "submitted but later compensated", "confirmed but later compensated", or "manual
+  remediation completed".
+- `RunCompletionOutcome` has `Completed`, `Failed`, and `Cancelled` variants, but
+  `crates/kernel/runtime/src/history.rs` currently accepts historical `RunCompleted` only when the
+  outcome matches sealed successful `CompleteRun` evidence. Tests reject forged failed/cancelled
+  completion.
+- `crates/kernel/store/src/lib.rs` owns commit preconditions, logical keys, run/cell/attempt/fact/
+  public-output/retention projections, and a forward `SideEffectProjection`.
+- Store run state is only `Absent`, `Started`, or `Completed`. There is no durable run projection
+  for unresolved failure, compensating, compensated, backed out, manual resolution, or irreversible
+  blocked.
+- Store side-effect phases are forward phases:
+  intent persisted, claimed, invocation prepared, invocation started, submission observed,
+  not-submitted proven, submission unknown, receipt observed, confirmation observed, ambiguous,
+  or failed.
+- Runtime historical validation requires side-effect terminal cell output to be preceded by
+  confirmation evidence. A side-effect node cannot produce output from merely submitted or receipt
+  evidence.
+- Runtime pairs `SideEffectFailed` with `StateAttemptFailed` for side-effect attempts. A
+  non-retryable failed attempt removes that node from the runnable frontier; it does not enter a
+  compensation frontier.
+- Runtime frontier scheduling blocks when any side-effect projection is ambiguous, including
+  independent ready nodes. This is a conservative forward-safety rule.
+- Runtime's sealed framework lifecycle nodes are `BootstrapRun`, bridge, `PublicOutputRender`,
+  `ProjectRetentionManifest`, and successful `CompleteRun`. There is no remediation lifecycle node.
+- `crates/kernel/replay` is evidence-only. `ReplayBroker` indexes recorded facts plus forward
+  side-effect intent/submission/receipt/confirmation evidence, and `SideEffectReplayVerifier`
+  verifies those phases without live IO. There is no compensation verifier contract.
+- `crates/app/src/lib.rs` verifies stored certified spec/certificate artifacts before resume,
+  status, public-output rendering, and replay. Public app run phase is still only
+  absent/started/completed; blocked is a scheduler status string, not durable AC/DC state.
+- `crates/storages/stream-store-postgres/src/typed.rs` persists the same derived projections,
+  including the forward side-effect projection JSON and absent/started/completed run state. It adds
+  durable storage, not new AC/DC semantics.
+- Existing tests cover forward side-effect phase durability, not-submitted resume, ambiguity
+  blocking, output-before-confirmation rejection, side-effect failure pairing, failed/cancelled
+  `RunCompleted` rejection, replay evidence validation, and app replay/resume authority checks.
+  They do not cover compensation, reverse-order remediation, manual resolution, irreversible
+  boundaries, or phantom-prone compensation.
 
-Correctness:
-Backout or compensation must account for concurrent workflows. The target outcome is equivalent to
-removing the failed workflow and then applying the other completed concurrent workflows that should
-remain. This is the hard part: simple inverse operations can be wrong when predicates, reads,
-intervening writes, or external systems create phantom and cascading-backout cases.
+## What MFM Already Guarantees
 
-## What MFM Already Has
+MFM already has reusable AC/DC prerequisites:
 
-MFM already has important AC/DC prerequisites:
+- certified typed specs are the only semantic runtime contract;
+- append-only run streams are the authority for execution history;
+- store commits are atomic at the MFM event-batch level;
+- projections are rebuildable and not independent semantic authority;
+- side-effect execution has typed forward intent, typed idempotency input, durable claims and
+  fencing, invocation epochs, uncertainty boundaries, evidence artifacts, replay verifier ids, and
+  ambiguity blocking;
+- resume advances only from verified stream/projection state;
+- replay cannot construct live transports or capability handles;
+- app and binaries are not supposed to own workflow semantics.
 
-- certified typed execution specs are the only semantic runtime contract;
-- run streams are append-only and authoritative;
-- store commits are atomic at the event batch level;
-- replay and resume rebuild authority from stored certified specs plus run streams;
-- side effects have typed intent, idempotency input, durable ledger events, receipt or recovery
-  evidence, claim fencing, invocation epochs, and ambiguity handling;
-- live replay is forbidden, so replay authority is evidence-only;
-- binaries remain transport-only and cannot smuggle workflow semantics around typed authority.
+These are durable execution foundations. They are not workflow atomicity, consistency, or
+concurrency correctness for failed update-oriented workflows.
 
-These are durable execution foundations. They are not yet workflow atomicity/correctness.
+## What MFM Does Not Yet Guarantee
 
-## The Gap
+MFM currently lacks:
 
-Current MFM side-effect semantics are forward-side-effect semantics. They model how to prepare,
-submit, observe, recover, and confirm a mutation. They do not model what the platform must do when a
-later workflow node fails after one or more prior side effects were already confirmed.
-
-The missing pieces are:
-
-- no first-class compensation contract linked to a forward side-effect contract;
-- no certified reverse-order compensation schedule for completed forward steps;
-- no typed compensation intent, idempotency input, receipt, confirmation, or failure phases;
-- no store projection that can answer whether a run is fully compensated, partially compensated,
+- certified failure directives for retry, alternate step, compensation/backout, manual resolution,
+  and terminal failure conditions;
+- a platform-owned decision point that says a later node failure requires compensation of already
+  confirmed side effects;
+- compensation contracts linked to forward side-effect contracts;
+- typed compensation intent, idempotency input, capability contract, receipt, confirmation,
+  ambiguity, and failure evidence;
+- reverse dependency-order compensation scheduling from certified graph plus completed ledgers;
+- durable run statuses for unresolved failure, compensating, compensated, backed out, irreversible
   blocked, or manually resolved;
-- no terminal run phase that distinguishes "failed with unresolved effects" from "compensated" or
-  "manual resolution recorded";
-- no certification rule that rejects side-effecting workflows without an explicit backout strategy;
-- no correctness model for concurrent compensation, predicate phantoms, cascading effects,
-  commutative updates, escrow-like updates, or domain assertions;
-- no policy for irreversible side effects beyond relying on workflow authors to be careful;
-- no platform-level alternate-step directive semantics for failure handling as part of the durable
-  workflow contract.
+- replay authority for compensation evidence;
+- public inspect/render surfaces that expose unresolved remediation obligations;
+- certification rules that reject side-effecting workflows without a declared remediation strategy;
+- correctness classes or assertions for phantoms, cascading backout, commutative updates,
+  escrow-like updates, external-service ambiguity, or irreversible effects.
 
-A workflow author can manually model a compensation as another ordinary state today. That does not
-provide AC/DC. The platform would not know that this state is an inverse obligation, would not
-automatically schedule it in reverse order, would not make its execution mandatory after a later
-failure, and would not know whether it restores correctness under concurrency.
+A workflow author can model a "compensation" as another ordinary state today, but that does not
+give AC/DC. The platform would not know the state is a mandatory inverse obligation, would not
+schedule it automatically after a later failure, would not resume it as remediation, and would not
+know what correctness claim it is supposed to prove.
 
-## Primary Problem To Attack Now
+## Primary Architecture Problem
 
-Define and implement a typed compensation/backout model that is as authoritative as the existing
-forward side-effect model.
+Define a certified typed remediation model for side-effecting workflows.
 
-The model must answer these questions:
+The model must let MFM answer, from certified spec plus append-only events:
 
-1. What does a state promise about compensation?
-2. What evidence proves that compensation is required?
-3. What evidence proves that compensation ran exactly once?
-4. What evidence proves that the compensation produced a correct terminal condition?
-5. What happens when compensation itself fails, is ambiguous, or requires human input?
-6. How does certification prevent side-effecting workflows from omitting backout semantics?
-7. How does runtime choose between retry, alternate path, compensation, and manual resolution?
-8. What concurrency guarantees can MFM actually make, and what must be declared as a domain
-   assertion rather than a platform proof?
+1. What should happen when a node fails?
+2. Which completed side effects create remediation obligations?
+3. Which obligations are compensatable, physically backout-capable, alternate-path-resolvable,
+   manual-only, or irreversible?
+4. What evidence proves an obligation was attempted exactly once?
+5. What evidence proves the obligation restored the declared invariant or reached a declared manual
+   terminal state?
+6. What happens when remediation itself fails, is ambiguous, or crosses an irreversible boundary?
+7. Which concurrency-correctness claims are framework-enforced, and which are domain assertions
+   carried by certified evidence?
 
-## Required Semantics
+This is a kernel/runtime/store/spec/replay architecture problem, not an app cleanup problem.
 
-### 1. Failure Directives Are Certified Semantics
+## Modeling Placement Analysis
 
-Failure handling cannot live in ad hoc app or CLI glue. A certified spec must carry failure
-directives for relevant nodes:
+The current architecture suggests a mixed model, not a plain user-state pattern.
 
-- retry with bounded policy;
-- take a certified alternate path;
-- begin compensation/backout;
-- block for manual resolution;
-- terminal fail only when no side effects require remediation.
+| Candidate | Fit | Problem if used alone |
+| --- | --- | --- |
+| Extend `SideEffectState` with compensation metadata | Reuses forward side-effect concepts: intent, idempotency, capability binding, evidence, replay verifier. | A trait extension alone cannot create run remediation mode, reverse scheduling, terminal phases, or certification directives. |
+| Add a parallel compensation effect class | Makes remedial mutation distinct from forward mutation and may avoid overloading `ApplySideEffect`. | It would duplicate much of the ledger machinery unless designed as a specialization of the same side-effect protocol. |
+| Certified continuation runs | Useful when remediation needs a newly certified graph, operator input, or post-failure planning boundary. | A detached run does not by itself make the original run atomically complete; parent/child causality and terminal authority would be required. |
+| Framework lifecycle remediation nodes | Matches existing sealed lifecycle pattern for bootstrap, render, retention, and completion. Runtime can own mode transitions and frontier derivation. | Lifecycle nodes still need domain-declared compensation contracts and typed capability evidence; framework code must not perform domain IO. |
+| Ordinary user states or app/binary glue | Easy to author locally. | Rejected for AC/DC: it hides obligations from certification, runtime, store, replay, and public status. |
 
-"Do nothing" is not an acceptable directive for a side-effecting workflow because it can leave an
-incomplete and inconsistent run.
+Working conclusion for discussion:
 
-### 2. Compensation Is A Typed Side Effect
+Compensation should be modeled as certified remediation semantics owned by the framework/runtime,
+with remedial actions carrying side-effect-grade typed evidence and being linked to forward
+side-effect contracts. Whether that is encoded as a `SideEffectState` extension, a sibling
+`ApplyCompensation` effect class, framework-owned lifecycle nodes, certified continuation runs, or
+a combination is still open. It should not be hidden in ordinary user states.
 
-Compensation must be represented as workflow execution, not as mutable cleanup outside the run
-stream.
+## Reusable Foundations Vs New Authority
 
-A compensation state needs the same class of durable semantics as forward side effects:
+| Area | Reusable foundation | New authority required |
+| --- | --- | --- |
+| Spec/certification | Certified typed spec, descriptor identities, side-effect contract digest checks, framework lifecycle nodes. | Failure directives, remediation contract specs, correctness classes, irreversible boundaries, manual-resolution metadata. |
+| Events | Append-only event model, side-effect ledger payload pattern, redaction-safe errors, artifact evidence refs. | Compensation/backout/manual-resolution event payloads and terminal run outcomes. |
+| Store | Atomic prepared commits, logical keys, preconditions, rebuildable projections, forward side-effect phase rules. | Remediation projections, run remediation state, preconditions for compensation once-and-only-once and terminal resolution. |
+| Runtime | Verified history, deterministic scheduler, guarded commit planner, conservative ambiguity blocking. | Failure-mode transition, compensation frontier derivation, reverse dependency ordering, alternate-path/manual-resolution scheduling. |
+| Replay | Evidence-only broker and forward side-effect verifier contract. | Compensation evidence indexes and verifier contracts; replay-visible correctness assertions. |
+| App/storage | Certified bundle verification, start/resume/replay/render assembly, durable Postgres event/projection storage. | Public status/render surfaces for unresolved, compensating, compensated, manually resolved, and irreversible-blocked states. |
+| States/adapters/transports | State-owned intent, adapter evidence phases, reusable transports, secret boundaries. | Domain-declared compensation intent and correctness evidence without moving live IO or topology into the wrong layer. |
 
-- deterministic compensation intent;
-- deterministic compensation idempotency input;
-- typed capability contract;
-- durable claim and fencing;
-- invocation-started uncertainty boundary;
-- submission, unknown, not-submitted, receipt, confirmation, ambiguous, and failure evidence;
-- replay verifier identity;
-- terminal output binding.
+## Concrete Correctness Problems For MFM
 
-The run stream must append compensation events. It must never erase, rewrite, or "undo" forward
-events.
+### External Services
 
-### 3. Reverse Order Must Be Platform-Owned
+MFM's current side-effect protocol handles uncertainty in the forward direction with idempotency
+input, submission unknown, not-submitted proof, ambiguity, receipt, and confirmation evidence.
+For AC/DC, an external service call also needs a declared remediation path: cancel, refund, release,
+reverse transfer, manual resolution, or irreversible boundary.
 
-For saga-style compensation, completed forward side effects must be compensated in reverse
-dependency order unless the certified spec proves a different safe partial order.
+If the service cannot prove whether the original request happened, the run must not be marked
+compensated unless typed evidence or manual authority resolves the ambiguity.
 
-The scheduler, not application code, must derive the compensation frontier from:
+### On-Chain Effects
 
-- the certified graph;
-- completed cells and side-effect ledgers;
-- dependency edges;
-- declared compensation contracts;
-- existing compensation evidence.
+EVM contract lifecycle states record transaction intents, submissions, receipts, confirmation
+values, block numbers, and receipt status. That is not the same as a finality or reorg policy.
 
-This makes compensation crash-resumable and once-and-only-once.
+For AC/DC, MFM needs to know whether an on-chain effect is:
 
-### 4. Correctness Requires More Than Inverses
+- not submitted and safe to retry;
+- submitted but not confirmed;
+- included but not final under a declared finality rule;
+- final and compensatable only through another transaction;
+- final and irreversible for the workflow's atomicity claim.
 
-The platform must not equate "ran an inverse operation" with "restored correctness".
+Current typed confirmation evidence should not be interpreted as proof that an irreversible
+business boundary can be backed out.
 
-For each side-effecting state, MFM needs a declared compensation correctness class. Examples:
+### Replay Evidence
 
-- commutative inverse, such as decrement then increment under declared constraints;
-- escrow or bounded counter operation with invariant-preserving compensation;
-- predicate update with captured qualifying set;
-- external service operation with idempotent cancel/refund/release endpoint;
-- irreversible operation allowed only as the final irreversible boundary;
-- manual-only remediation.
+Replay can verify that recorded forward evidence is internally consistent and bound to certified
+authority. It cannot prove compensation correctness without recorded compensation evidence,
+declared correctness classes, and replay verifier contracts for those classes.
 
-If a state cannot provide a platform-checkable correctness class, certification should force an
-explicit domain assertion or manual-resolution path. The assertion must be visible in the certified
-spec and replayable evidence; it must not be hidden in code comments or docs.
+Replay must remain evidence-only. A future compensation replay path must not call live services to
+decide whether a run was compensated.
 
-### 5. Phantom And Cascading Cases Must Be Explicit
+### Phantoms And Cascading Backout
 
-Concurrent workflows create the phantom problem. A compensation that re-runs a predicate later can
-touch records that were not touched by the original step, and a compensation that blindly restores an
-old value can erase intervening work.
+The paper's phantom problem is concrete for MFM whenever a side effect describes a predicate, scope,
+or external resource set rather than a single commutative operation. Re-running a predicate during
+compensation can touch objects that were not touched originally. Restoring an old value can erase
+intervening work.
 
-MFM needs typed evidence for the set or semantic scope originally affected by a side effect. For
-database-like effects, this may mean predicate snapshot evidence, touched-key evidence, or an
-isolation/lock proof. For external systems, this may mean service-provided operation identifiers,
-prior/post state evidence, or an explicit ambiguity/manual-resolution record.
+MFM needs typed evidence for the original affected set or a stronger semantic proof, such as:
 
-If the platform cannot prove the compensation is safe, the run must not be marked compensated.
+- touched keys or object ids;
+- predicate snapshot evidence;
+- prior/post state evidence;
+- service operation ids with cancel/refund semantics;
+- escrow/commutative-operation assertions;
+- isolation or lock proof;
+- explicit manual-only remediation.
 
-### 6. Irreversible Effects Shape Workflow Topology
+If the platform cannot prove or verify the declared correctness claim, the run should block for
+manual resolution rather than claim compensated success.
 
-Some effects cannot be undone: dispensing funds, publishing an irreversible on-chain transaction,
-notifying an external party without cancellation semantics, or crossing a business finality
-boundary.
+### Irreversible Effects
 
-MFM must make irreversible boundaries explicit. A certified workflow with an irreversible effect must
-either:
+Some effects cannot be undone in the workflow's semantic model: dispensing funds, final on-chain
+transactions, sending irreversible notifications, or crossing a business finality boundary.
 
-- place the irreversible effect after all fallible compensatable work;
-- split the business process into multiple workflows;
-- require a manual-resolution terminal state for failures after the irreversible boundary.
+The certified spec should force those boundaries to shape topology. Options include placing the
+irreversible effect after all fallible compensatable work, splitting the business process into
+multiple workflows, or requiring a manual-resolution terminal path for failures after the boundary.
 
-The runtime must not pretend such a workflow can be atomically backed out.
-
-### 7. Manual Resolution Is A Durable State
-
-Manual intervention is not an out-of-band escape hatch. It must be represented by typed events and
-publicly inspectable run status.
-
-Manual resolution must record:
-
-- why automatic compensation could not continue;
-- what side effects remain unresolved;
-- what authority or operator action resolved them;
-- what evidence allows the run to become terminal.
-
-This evidence must be redaction-safe and must not persist secrets.
+MFM must not model irreversible effects as if running an inverse state can make the workflow look
+like it never happened.
 
 ## Architecture Constraints
 
-Any solution must preserve the existing MFM boundary contract:
+Any AC/DC design must preserve the MFM boundary contract:
 
-- operations plan topology and failure directives, but do not execute compensation;
-- states declare forward and compensation semantics, but do not create live IO;
-- adapters bind forward and compensation intent to capabilities and evidence phases;
+- operations plan topology and directives, but do not execute remediation;
+- states declare forward and remediation semantics, but do not create live IO;
+- adapters bind state intent to capabilities and evidence phases;
 - transports implement reusable live/replay capability backends;
-- store owns append-only event admission, logical keys, preconditions, side-effect projections, and
-  compensation projections;
-- runtime owns scheduler decisions, compensation frontier derivation, and guarded commits;
+- store owns append-only event admission, logical keys, preconditions, and projections;
+- runtime owns scheduler decisions, failure-mode transitions, compensation frontier derivation,
+  and guarded commits;
+- replay verifies only certified recorded evidence;
 - app assembles registries, stores, artifacts, runners, and capabilities;
 - CLI and REST expose start/resume/replay/inspect/render surfaces only.
 
-Compensation cannot be bolted on in binaries, app glue, storage projections alone, or transport
-retry code. It must become certified typed execution semantics.
+Append-only history remains authority. AC/DC cannot mean erasing or mutating forward events. It
+must mean appending certified remediation evidence and terminal resolution evidence.
 
-## Non-Goals
+## Success Criteria For Claiming Progress
 
-The immediate goal is not to implement long-running global locks as the default. Physical backout
-can be useful for narrow database-local cases, but MFM workflows commonly involve external services
-and on-chain effects where saga-style compensation or explicit manual resolution is the realistic
-path.
+MFM can start claiming AC/DC progress only when these are true:
 
-The immediate goal is not to guarantee serializable isolation for all sagas. The problem is to make
-the guarantee explicit, enforce what the platform can prove, and block or require assertions where
-correctness depends on domain-specific facts.
+- certification rejects side-effecting workflows that omit required failure/remediation semantics;
+- later failure after confirmed side effects enters durable remediation or manual-resolution mode;
+- remediation obligations are typed, idempotent, replay-verifiable, and crash-resumable;
+- runtime derives a remediation frontier from the certified graph and forward ledger evidence;
+- store projects forward and remediation obligations from append-only events;
+- public status distinguishes unresolved failure, ambiguous side effect, compensating,
+  compensated, irreversible blocked, manually resolved, and successful completion;
+- replay verifies remediation evidence without live capabilities;
+- tests cover failure after one confirmed side effect, failure after multiple confirmed side
+  effects, reverse-order compensation, compensation crash-resume, ambiguous compensation, manual
+  resolution, irreversible-boundary rejection or blocking, and at least one phantom-prone case.
 
-The immediate goal is not to erase failed workflow history. Append-only history remains authority;
-AC/DC is achieved by appending remediation evidence, not by mutating the past.
+## Open Questions
 
-## Success Criteria
+- Should failure directives live directly in `TypedExecutionSpec` nodes, in framework lifecycle
+  metadata, or in a separate certified remediation spec section?
+- Should compensation be encoded as an extension of `SideEffectState`, a sibling effect class, or a
+  framework-owned remedial side-effect protocol shared by both?
+- When is a certified continuation run the right remediation unit, and how does it become terminal
+  authority for the parent run?
+- What is the minimal compensation event vocabulary that avoids duplicating the whole forward
+  side-effect event model while preserving once-and-only-once evidence?
+- Which correctness classes can the kernel name generically without depending on domain semantics?
+- What assertion format is acceptable when correctness depends on domain facts that the framework
+  cannot prove?
+- How should MFM model physical backout for narrow database-local cases without making it the
+  default for external-service and on-chain workflows?
+- How should public API compatibility be handled when adding durable run phases beyond
+  absent/started/completed?
+- How should on-chain finality depth, reorg evidence, and irreversible business boundaries be
+  represented without putting protocol policy in the wrong layer?
 
-MFM can start claiming AC/DC progress only when all of the following are true:
+## Immediate Discussion Target
 
-- certification rejects side-effecting workflows with no declared failure/backout strategy;
-- a failed run with confirmed side effects automatically enters a durable compensation or manual
-  resolution mode;
-- compensation steps are typed, idempotent, replay-verifiable, and crash-resumable;
-- the store projects forward and compensation ledger status from append-only events;
-- resume can continue incomplete compensation without duplicating external mutations;
-- replay can verify compensation evidence without live capabilities;
-- public inspect/render surfaces show unresolved, compensating, compensated, ambiguous, and manual
-  resolution states distinctly;
-- tests cover failure after one confirmed side effect, failure after multiple side effects,
-  compensation crash-resume, ambiguous compensation, irreversible boundary rejection, and at least
-  one phantom-prone compensation case that must block or require explicit evidence.
+The next design discussion should define the smallest certified vertical slice:
 
-## Open Design Questions
+1. A failure directive shape in certified typed specs.
+2. A remediation contract linked to a forward side-effect contract.
+3. Append-only remediation evidence and store projections.
+4. Runtime transition from non-retryable failure with completed side effects into remediation or
+   manual-resolution mode.
+5. Replay verification for remediation evidence.
+6. Public status vocabulary for unresolved, compensating, compensated, manually resolved, and
+   irreversible-blocked runs.
 
-- Should compensation be part of the same certified spec, or should failure instantiate a certified
-  continuation spec derived from the original run?
-- How should MFM express compensation correctness classes without making kernel crates depend on
-  domain semantics?
-- What is the minimal event vocabulary for compensation without duplicating the entire forward
-  side-effect event model?
-- How should alternate paths interact with already completed side effects?
-- Which compensation guarantees are framework-enforced, and which are domain assertions carried as
-  certified evidence?
-- What is the public API contract for runs that are failed, compensating, compensated, ambiguous, or
-  manually resolved?
-- How should on-chain finality and reorg/replay evidence affect irreversible-boundary classification?
-
-## Immediate Attack Surface
-
-The first implementation design should focus on the smallest vertical slice:
-
-1. Add certified failure directives and compensation metadata to typed program/spec descriptors.
-2. Add a compensation contract shape for `SideEffectState` or a parallel trait with typed intent,
-   idempotency, receipt, confirmation, and correctness class evidence.
-3. Add append-only compensation ledger events and store projections.
-4. Teach runtime to enter compensation mode after a non-retryable failure with confirmed forward
-   side effects.
-5. Add replay/resume verification for compensation evidence.
-6. Expose distinct run phases for unresolved failure, compensating, compensated, ambiguous, and
-   manual resolution.
-7. Add focused tests before adding broad workflow features.
-
-This is the problem MFM should attack now: extend the existing typed durable execution core from
-"we can resume the forward workflow safely" to "we can finish, compensate, or durably escalate the
-entire workflow with explicit correctness semantics."
+The goal is not to design every AC/DC feature at once. The immediate problem is to extend MFM's
+typed durable execution core from "we can resume the forward workflow safely" to "we can finish,
+compensate, or durably escalate the whole workflow with explicit correctness semantics."
