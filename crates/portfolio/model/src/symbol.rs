@@ -183,8 +183,7 @@ pub struct SymbolValuationConfig {
 impl SymbolValuationConfig {
     /// Sorts quote routes by canonical quote code.
     pub fn normalize(&mut self) {
-        self.quotes
-            .sort_by(|left, right| left.quote.cmp(&right.quote));
+        self.quotes.sort_by_key(|quote| quote.quote);
     }
 }
 
@@ -395,8 +394,7 @@ pub struct Observation {
 impl Observation {
     /// Sorts nested value collections into canonical order.
     pub fn normalize(&mut self) {
-        self.values
-            .sort_by(|left, right| left.quote.cmp(&right.quote));
+        self.values.sort_by_key(|value| value.quote);
     }
 }
 
