@@ -1,4 +1,5 @@
 {
+  adapters,
   lib,
   pkgs,
   ...
@@ -118,152 +119,6 @@ let
     '';
   };
 
-  postgresWrapper = pkgs.writeShellApplication {
-    name = "mfm-nixfied-postgres";
-    runtimeInputs = [
-      pkgs.coreutils
-      pkgs.postgresql
-    ];
-    # Slot state is reused across runs; prepare tolerates an existing cluster and
-    # rebuilds only incomplete service-owned pgdata.
-    text = ''
-      command_name="''${1:?missing postgres command}"
-      shift
-
-      state_dir=""
-      port=""
-      host="127.0.0.1"
-
-      while [[ $# -gt 0 ]]; do
-        case "$1" in
-          --state-dir)
-            state_dir="''${2:?missing --state-dir value}"
-            shift 2
-            ;;
-          --port)
-            port="''${2:?missing --port value}"
-            shift 2
-            ;;
-          --host)
-            host="''${2:?missing --host value}"
-            shift 2
-            ;;
-          *)
-            echo "unknown postgres argument: $1" >&2
-            exit 64
-            ;;
-        esac
-      done
-
-      if [[ -z "$state_dir" || "$state_dir" == "/" ]]; then
-        echo "missing or unsafe --state-dir argument" >&2
-        exit 64
-      fi
-
-      pgdata="$state_dir/pgdata"
-
-      case "$command_name" in
-        prepare)
-          if [[ -s "$pgdata/PG_VERSION" ]]; then
-            exit 0
-          fi
-
-          rm -rf "$pgdata"
-          mkdir -p "$pgdata"
-          exec initdb \
-            -D "$pgdata" \
-            -U postgres \
-            -A trust \
-            --no-locale \
-            --encoding=UTF8
-          ;;
-        start)
-          if [[ -z "$port" ]]; then
-            echo "missing required --port argument" >&2
-            exit 64
-          fi
-          exec postgres \
-            -D "$pgdata" \
-            -c unix_socket_directories= \
-            -h "$host" \
-            -p "$port"
-          ;;
-        *)
-          echo "unknown postgres command: $command_name" >&2
-          exit 64
-          ;;
-      esac
-    '';
-  };
-
-  rethWrapper = pkgs.writeShellApplication {
-    name = "mfm-nixfied-reth";
-    runtimeInputs = [
-      pkgs.coreutils
-      pkgs.reth
-    ];
-    text = ''
-      http_port=""
-      state_dir=""
-      host="127.0.0.1"
-
-      while [[ $# -gt 0 ]]; do
-        case "$1" in
-          --http-port)
-            http_port="''${2:?missing --http-port value}"
-            shift 2
-            ;;
-          --state-dir)
-            state_dir="''${2:?missing --state-dir value}"
-            shift 2
-            ;;
-          --host)
-            host="''${2:?missing --host value}"
-            shift 2
-            ;;
-          *)
-            echo "unknown reth argument: $1" >&2
-            exit 64
-            ;;
-        esac
-      done
-
-      if [[ -z "$http_port" || -z "$state_dir" ]]; then
-        echo "missing required --http-port or --state-dir argument" >&2
-        exit 64
-      fi
-
-      ws_port=$((http_port + 1))
-      auth_port=$((http_port + 2))
-      p2p_port=$((http_port + 3))
-      reth_dir="$state_dir/reth"
-      jwt_file="$reth_dir/config/jwt.hex"
-      ipc_path="/tmp/mfm-reth-$http_port.ipc"
-
-      mkdir -p "$reth_dir/data" "$reth_dir/run" "$reth_dir/config"
-      if [[ ! -s "$jwt_file" ]]; then
-        printf '%064x\n' 0 > "$jwt_file"
-      fi
-      chmod 600 "$jwt_file" 2>/dev/null || true
-      rm -f "$ipc_path"
-
-      exec reth node \
-        --datadir "$reth_dir/data" \
-        --ipcpath "$ipc_path" \
-        --port "$p2p_port" \
-        --http \
-        --http.addr "$host" \
-        --http.port "$http_port" \
-        --ws \
-        --ws.addr "$host" \
-        --ws.port "$ws_port" \
-        --authrpc.addr "$host" \
-        --authrpc.port "$auth_port" \
-        --authrpc.jwtsecret "$jwt_file" \
-        --dev
-    '';
-  };
-
   mfmTask = taskId: command: {
     operationId = "task.mfm.${taskId}.run";
     execId = "mfm-runner";
@@ -291,6 +146,14 @@ let
     };
 in
 {
+  # Postgres and Reth come from the upstream reference adapters: idempotent
+  # prepare, protocol probes (pg_isready / JSON-RPC), platform behavior, and
+  # lifecycle are framework-owned. MFM declares only its own tasks/workflows.
+  imports = [
+    adapters.postgres
+    adapters.reth
+  ];
+
   nixfied.project.projectId = "mfm";
   nixfied.project.name = "MFM";
   nixfied.codebases.main.logicalRoot = ".";
@@ -301,8 +164,11 @@ in
     max = 9;
   };
 
+  # Keep deterministic service windows outside common OS ephemeral ranges. Reth's
+  # wrapper also derives ws/auth/p2p listeners as http+1/+2/+3, which the planner
+  # does not reserve yet, so this range is dedicated to MFM.
   nixfied.placement.ports = {
-    base = 38080;
+    base = 28080;
     windowSize = 16;
     slotStride = 100;
   };
@@ -331,202 +197,9 @@ in
     ];
   };
 
-  nixfied.closures.mfm-postgres = {
-    package = postgresWrapper;
-    executable = "bin/mfm-nixfied-postgres";
-    kind = "executable";
-    requiresExecutable = true;
-    operationBindings = [
-      "service.postgres.prepare"
-      "service.postgres.start"
-    ];
-    effects = [
-      "process"
-      "network-listener"
-      "file-write"
-    ];
-  };
-
-  nixfied.closures.mfm-reth = {
-    package = rethWrapper;
-    executable = "bin/mfm-nixfied-reth";
-    kind = "executable";
-    requiresExecutable = true;
-    operationBindings = [ "service.reth.start" ];
-    effects = [
-      "process"
-      "network-listener"
-      "file-write"
-    ];
-  };
-
-  nixfied.execs = {
-    mfm-runner = {
-      closureId = "mfm-runner";
-      timeoutMs = 7200000;
-    };
-    mfm-postgres-prepare = {
-      closureId = "mfm-postgres";
-      timeoutMs = 60000;
-      args = [
-        "prepare"
-        "--state-dir"
-        "\${stateDir}"
-      ];
-    };
-    mfm-postgres-start = {
-      closureId = "mfm-postgres";
-      timeoutMs = 60000;
-      args = [
-        "start"
-        "--state-dir"
-        "\${stateDir}"
-        "--port"
-        "\${port}"
-      ];
-    };
-    mfm-reth = {
-      closureId = "mfm-reth";
-      timeoutMs = 60000;
-    };
-  };
-
-  nixfied.services.postgres = {
-    lifecycle = {
-      prepare = {
-        operationId = "service.postgres.prepare";
-        execId = "mfm-postgres-prepare";
-        terminal = {
-          success = "initialized";
-          failure = "failed";
-        };
-      };
-      start = {
-        operationId = "service.postgres.start";
-        execId = "mfm-postgres-start";
-        terminal = {
-          success = "spawned";
-          failure = "failed";
-        };
-      };
-      ready = {
-        operationId = "service.postgres.ready";
-        probe = {
-          timeoutMs = 1000;
-          retryIntervalMs = 200;
-          maxAttempts = 60;
-        };
-        terminal = {
-          success = "ready";
-          failure = "not-ready";
-        };
-      };
-      health = {
-        operationId = "service.postgres.health";
-        probe = {
-          timeoutMs = 1000;
-          retryIntervalMs = 200;
-          maxAttempts = 60;
-        };
-        terminal = {
-          success = "healthy";
-          failure = "unhealthy";
-        };
-      };
-      stop = {
-        operationId = "service.postgres.stop";
-        signal = "INT";
-        terminal = {
-          success = "stopped";
-          failure = "failed";
-        };
-      };
-      clean = {
-        operationId = "service.postgres.clean";
-        terminal = {
-          success = "cleaned";
-          failure = "failed";
-        };
-      };
-    };
-    endpoint = {
-      endpointId = "postgres-tcp";
-    };
-    stateRefs = [ "slot" ];
-    logRefs = [ "service.postgres" ];
-    containment = "process-tree";
-  };
-
-  nixfied.services.reth = {
-    lifecycle = {
-      prepare = {
-        operationId = "service.reth.prepare";
-        terminal = {
-          success = "prepared";
-          failure = "failed";
-        };
-      };
-      start = {
-        operationId = "service.reth.start";
-        execId = "mfm-reth";
-        execArgs = [
-          "--http-port"
-          "\${port}"
-          "--state-dir"
-          "\${stateDir}"
-        ];
-        terminal = {
-          success = "spawned";
-          failure = "failed";
-        };
-      };
-      ready = {
-        operationId = "service.reth.ready";
-        probe = {
-          timeoutMs = 1000;
-          retryIntervalMs = 500;
-          maxAttempts = 180;
-        };
-        terminal = {
-          success = "ready";
-          failure = "not-ready";
-        };
-      };
-      health = {
-        operationId = "service.reth.health";
-        probe = {
-          timeoutMs = 1000;
-          retryIntervalMs = 500;
-          maxAttempts = 180;
-        };
-        terminal = {
-          success = "healthy";
-          failure = "unhealthy";
-        };
-      };
-      stop = {
-        operationId = "service.reth.stop";
-        signal = "INT";
-        timeoutMs = 10000;
-        terminal = {
-          success = "stopped";
-          failure = "failed";
-        };
-      };
-      clean = {
-        operationId = "service.reth.clean";
-        terminal = {
-          success = "cleaned";
-          failure = "failed";
-        };
-      };
-    };
-    endpoint = {
-      endpointId = "reth-http";
-    };
-    stateRefs = [ "slot" ];
-    logRefs = [ "service.reth" ];
-    containment = "process-tree";
+  nixfied.execs.mfm-runner = {
+    closureId = "mfm-runner";
+    timeoutMs = 7200000;
   };
 
   nixfied.tasks = {
@@ -554,37 +227,28 @@ in
     tasks = [ ];
   };
 
-  nixfied.workflows.check = {
-    nodes = [
-      {
-        nodeId = "fmt";
-        taskId = "mfm-fmt";
-      }
-      {
-        nodeId = "clippy";
-        taskId = "mfm-clippy";
-        dependsOn = [ "fmt" ];
-      }
-      {
-        nodeId = "cargo-metadata-contract";
-        taskId = "mfm-cargo-metadata-contract";
-        dependsOn = [ "clippy" ];
-      }
-      {
-        nodeId = "architecture-namespace-contract";
-        taskId = "mfm-architecture-namespace-contract";
-        dependsOn = [ "cargo-metadata-contract" ];
-      }
-    ];
+  nixfied.workflows.check.nodes = {
+    fmt = {
+      taskId = "mfm-fmt";
+    };
+    clippy = {
+      taskId = "mfm-clippy";
+      dependsOn = [ "fmt" ];
+    };
+    cargo-metadata-contract = {
+      taskId = "mfm-cargo-metadata-contract";
+      dependsOn = [ "clippy" ];
+    };
+    architecture-namespace-contract = {
+      taskId = "mfm-architecture-namespace-contract";
+      dependsOn = [ "cargo-metadata-contract" ];
+    };
   };
 
-  nixfied.workflows.test = {
-    nodes = [
-      {
-        nodeId = "workspace-tests";
-        taskId = "mfm-workspace-tests";
-      }
-    ];
+  nixfied.workflows.test.nodes = {
+    workspace-tests = {
+      taskId = "mfm-workspace-tests";
+    };
   };
 
   nixfied.workflows.ci = {
@@ -592,56 +256,46 @@ in
       "postgres"
       "reth"
     ];
-    nodes = [
-      {
-        nodeId = "fmt";
+    nodes = {
+      fmt = {
         taskId = "mfm-fmt";
-      }
-      {
-        nodeId = "clippy";
+      };
+      clippy = {
         taskId = "mfm-clippy";
         dependsOn = [ "fmt" ];
-      }
-      {
-        nodeId = "cargo-metadata-contract";
+      };
+      cargo-metadata-contract = {
         taskId = "mfm-cargo-metadata-contract";
         dependsOn = [ "clippy" ];
-      }
-      {
-        nodeId = "architecture-namespace-contract";
+      };
+      architecture-namespace-contract = {
         taskId = "mfm-architecture-namespace-contract";
         dependsOn = [ "cargo-metadata-contract" ];
-      }
-      {
-        nodeId = "workspace-tests";
+      };
+      workspace-tests = {
         taskId = "mfm-workspace-tests";
         dependsOn = [ "architecture-namespace-contract" ];
-      }
-      {
-        nodeId = "parity-cli-keystore";
+      };
+      parity-cli-keystore = {
         taskId = "mfm-parity-cli-keystore";
         dependsOn = [ "workspace-tests" ];
-      }
-      {
-        nodeId = "parity-postgres-rest-api";
+      };
+      parity-postgres-rest-api = {
         taskId = "mfm-parity-postgres-rest-api";
         dependsOn = [ "parity-cli-keystore" ];
-      }
-      {
-        nodeId = "parity-postgres-state-events";
+      };
+      parity-postgres-state-events = {
         taskId = "mfm-parity-postgres-state-events";
         dependsOn = [ "parity-postgres-rest-api" ];
-      }
-      {
-        nodeId = "parity-reth-contracts";
+      };
+      parity-reth-contracts = {
         taskId = "mfm-parity-reth-contracts";
         dependsOn = [ "parity-postgres-state-events" ];
-      }
-      {
-        nodeId = "parity-reth-portfolio";
+      };
+      parity-reth-portfolio = {
         taskId = "mfm-parity-reth-portfolio";
         dependsOn = [ "parity-reth-contracts" ];
-      }
-    ];
+      };
+    };
   };
 }

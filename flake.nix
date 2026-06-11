@@ -36,31 +36,18 @@
           pkgs = import nixpkgs { inherit system; };
           runtimeBin = "${nixfied.packages.${system}.nixfied-runtime}/bin/nixfied-runtime";
           modelJson = "${self.packages.${system}.model}/model.json";
-          mkRuntimeApp =
-            name: text:
+          # MFM's verification surface selects project workflows: `check` is the
+          # source gate (fmt/clippy/contracts), `ci` the full service-backed
+          # gate. Everything else (run/test/ps/down/clean and default state
+          # placement) is the generated nixfied surface.
+          mkWorkflowApp =
+            name: workflow:
             let
               app = pkgs.writeShellApplication {
                 inherit name;
                 text = ''
-                  if [ -z "''${NIXFIED_STATE_DIR:-}" ]; then
-                    model_store="${modelJson}"
-                    model_store="''${model_store%/model.json}"
-                    model_key="''${model_store##*/}"
-                    model_key="''${model_key%-nixfied-model}"
-
-                    state_home="''${XDG_STATE_HOME:-}"
-                    if [ -z "$state_home" ]; then
-                      if [ -z "''${HOME:-}" ]; then
-                        echo "HOME or NIXFIED_STATE_DIR is required" >&2
-                        exit 64
-                      fi
-                      state_home="$HOME/.local/state"
-                    fi
-
-                    export NIXFIED_STATE_DIR="$state_home/nixfied/mfm-models/$model_key"
-                  fi
-
-                  ${text}
+                  "${runtimeBin}" check --model "${modelJson}"
+                  exec "${runtimeBin}" run --model "${modelJson}" --workflow "${workflow}" "$@"
                 '';
               };
             in
@@ -68,18 +55,10 @@
               type = "app";
               program = "${app}/bin/${name}";
             };
-          mkWorkflowApp =
-            name: workflow:
-            mkRuntimeApp name ''
-              "${runtimeBin}" check --model "${modelJson}"
-              exec "${runtimeBin}" run --model "${modelJson}" --workflow "${workflow}" "$@"
-            '';
         in
         (nixfied.lib.${system}.projectApps ./nixfied.nix)
         // {
-          run = mkRuntimeApp "mfm-run" ''exec "${runtimeBin}" run --model "${modelJson}" "$@"'';
           check = mkWorkflowApp "mfm-check" "check";
-          test = mkWorkflowApp "mfm-test" "test";
           ci = mkWorkflowApp "mfm-ci" "ci";
         }
       );
