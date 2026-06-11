@@ -64,7 +64,6 @@ run the focused Cargo test with explicit environment variables such as `DATABASE
 ## Key Docs:
 
 - `README.md`: project disclaimer.
-- `docs/repo-map.md`: Repository map
 - `docs/code-quality.md`: mandatory quality policy for all changes.
 - `docs/architecture.md`: taxonomy, placement rules, and architecture boundaries.
 - `docs/design.md`: full design contract (authoritative).
@@ -107,7 +106,7 @@ cargo test --workspace
 
 Nixfied v2 is consumed as a flake input, not vendored as a framework tree.
 
-- `flake.nix`: pins the `nixfied` input, compiles `nixfied.nix`, and exposes `.#check`, `.#test`, and `.#ci`.
+- `flake.nix`: pins the `nixfied` input, compiles `nixfied.nix`, and exposes `.#check`, `.#test`, `.#ci`, and `.#mfm`.
 - `flake.lock`: records the exact Nixfied/nixpkgs/Rust overlay inputs.
 - `nixfied.nix`: project-owned model for MFM tasks, workflows, services, slots, and ports.
 
@@ -117,8 +116,9 @@ Prefer editing `nixfied.nix` for workflow changes. Do not recreate v1-style `nix
 Current Nixfied command contract:
 
 - `nix run .#check`: model admission, rustfmt, clippy, and architecture/cargo metadata contracts.
-- `nix run .#test`: full `cargo test --workspace` without managed external services.
+- `nix run .#test`: `cargo nextest run --workspace` plus `cargo test --workspace --doc` without managed external services.
 - `nix run .#ci`: full CI by definition; starts managed Postgres and Reth and runs all parity tests.
+- `nix run .#mfm -- <ARGS>`: runs the packaged MFM CLI built with the Nixfied-pinned Rust toolchain.
 
 Environment variables you should expect:
 

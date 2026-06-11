@@ -14,8 +14,8 @@ appear in crate examples, umbrella docs, or release notes.
 Canonical package navigation lives in:
 
 - `crates/docs/README.md`
-- `docs/repo-map.md`
-- `docs/repo-index.json`
+- `README.md`
+- `docs/architecture.md`
 
 ## Current Wave
 

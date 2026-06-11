@@ -25,6 +25,7 @@ let
     runtimeInputs =
       [
         pkgs.coreutils
+        pkgs.cargo-nextest
         pkgs.git
         pkgs.pkg-config
         rustToolchain
@@ -101,7 +102,8 @@ let
           exec cargo test -p mfm-integration-tests --test architecture_namespace_contract
           ;;
         workspace-tests)
-          exec cargo test --workspace
+          cargo nextest run --workspace
+          exec cargo test --workspace --doc
           ;;
         parity-cli-keystore)
           exec cargo test -p mfm --features parity-tests --test parity_keystore_reth_tx_send -- --nocapture

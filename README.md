@@ -104,12 +104,15 @@ nix run .#test
 nix run .#ci
 ```
 
+`nix run .#test` runs `cargo nextest run --workspace` followed by
+`cargo test --workspace --doc`, without managed external services.
 `.#ci` is full by definition: it starts managed Postgres and Reth and runs all feature-gated parity
 tests. There is no `--mode` or `--full` compatibility flag.
 
 Run binaries locally:
 
 ```bash
+nix run .#mfm -- --help
 cargo run -p mfm -- --help
 cargo run -p mfm-rest-api
 ```

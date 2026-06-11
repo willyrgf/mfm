@@ -23,17 +23,54 @@
             value = f system;
           }) systems
         );
+      mkPkgs =
+        system:
+        import nixpkgs {
+          inherit system;
+          overlays = [ nixfied.inputs.rust-overlay.overlays.default ];
+        };
     in
     {
-      packages = forAllSystems (system: {
-        default = self.packages.${system}.model;
-        model = nixfied.lib.${system}.compileModel ./nixfied.nix;
-      });
+      packages = forAllSystems (
+        system:
+        let
+          pkgs = mkPkgs system;
+          rustToolchain = pkgs.rust-bin.stable."1.96.0".minimal;
+          rustPlatform = pkgs.makeRustPlatform {
+            cargo = rustToolchain;
+            rustc = rustToolchain;
+          };
+        in
+        {
+          default = self.packages.${system}.model;
+          model = nixfied.lib.${system}.compileModel ./nixfied.nix;
+          mfm = rustPlatform.buildRustPackage {
+            pname = "mfm";
+            version = "0.1.29";
+            src = ./.;
+            cargoLock.lockFile = ./Cargo.lock;
+            cargoBuildFlags = [
+              "-p"
+              "mfm"
+              "--bin"
+              "mfm_cli"
+            ];
+            doCheck = false;
+            nativeBuildInputs = [ pkgs.pkg-config ];
+            buildInputs = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin [
+              pkgs.libiconv
+            ];
+            postInstall = ''
+              ln -s "$out/bin/mfm_cli" "$out/bin/mfm"
+            '';
+          };
+        }
+      );
 
       apps = forAllSystems (
         system:
         let
-          pkgs = import nixpkgs { inherit system; };
+          pkgs = mkPkgs system;
           runtimeBin = "${nixfied.packages.${system}.nixfied-runtime}/bin/nixfied-runtime";
           modelJson = "${self.packages.${system}.model}/model.json";
           # MFM's verification surface selects project workflows: `check` is the
@@ -55,11 +92,17 @@
               type = "app";
               program = "${app}/bin/${name}";
             };
+          mfmApp =
+            {
+              type = "app";
+              program = "${self.packages.${system}.mfm}/bin/mfm";
+            };
         in
         (nixfied.lib.${system}.projectApps ./nixfied.nix)
         // {
           check = mkWorkflowApp "mfm-check" "check";
           ci = mkWorkflowApp "mfm-ci" "ci";
+          mfm = mfmApp;
         }
       );
     };
