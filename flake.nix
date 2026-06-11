@@ -36,14 +36,31 @@
           pkgs = import nixpkgs { inherit system; };
           runtimeBin = "${nixfied.packages.${system}.nixfied-runtime}/bin/nixfied-runtime";
           modelJson = "${self.packages.${system}.model}/model.json";
-          mkWorkflowApp =
-            name: workflow:
+          mkRuntimeApp =
+            name: text:
             let
               app = pkgs.writeShellApplication {
                 inherit name;
                 text = ''
-                  "${runtimeBin}" check --model "${modelJson}"
-                  exec "${runtimeBin}" run --model "${modelJson}" --workflow "${workflow}" "$@"
+                  if [ -z "''${NIXFIED_STATE_DIR:-}" ]; then
+                    model_store="${modelJson}"
+                    model_store="''${model_store%/model.json}"
+                    model_key="''${model_store##*/}"
+                    model_key="''${model_key%-nixfied-model}"
+
+                    state_home="''${XDG_STATE_HOME:-}"
+                    if [ -z "$state_home" ]; then
+                      if [ -z "''${HOME:-}" ]; then
+                        echo "HOME or NIXFIED_STATE_DIR is required" >&2
+                        exit 64
+                      fi
+                      state_home="$HOME/.local/state"
+                    fi
+
+                    export NIXFIED_STATE_DIR="$state_home/nixfied/mfm-models/$model_key"
+                  fi
+
+                  ${text}
                 '';
               };
             in
@@ -51,9 +68,16 @@
               type = "app";
               program = "${app}/bin/${name}";
             };
+          mkWorkflowApp =
+            name: workflow:
+            mkRuntimeApp name ''
+              "${runtimeBin}" check --model "${modelJson}"
+              exec "${runtimeBin}" run --model "${modelJson}" --workflow "${workflow}" "$@"
+            '';
         in
         (nixfied.lib.${system}.projectApps ./nixfied.nix)
         // {
+          run = mkRuntimeApp "mfm-run" ''exec "${runtimeBin}" run --model "${modelJson}" "$@"'';
           check = mkWorkflowApp "mfm-check" "check";
           test = mkWorkflowApp "mfm-test" "test";
           ci = mkWorkflowApp "mfm-ci" "ci";
