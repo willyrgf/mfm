@@ -1405,7 +1405,7 @@ fn observation_values(
             )),
         }
     }
-    values.sort_by(|left, right| left.quote.cmp(&right.quote));
+    values.sort_by_key(|value| value.quote);
     values
 }
 

@@ -286,8 +286,7 @@ impl PortfolioReport {
         }
         self.wallet_summaries
             .sort_by(|left, right| left.wallet_id.cmp(&right.wallet_id));
-        self.totals_by_quote
-            .sort_by(|left, right| left.quote.cmp(&right.quote));
+        self.totals_by_quote.sort_by_key(|total| total.quote);
     }
 }
 
@@ -310,8 +309,7 @@ pub struct WalletReport {
 impl WalletReport {
     /// Sorts nested collections into the canonical order used for persistence.
     pub fn normalize(&mut self) {
-        self.totals_by_quote
-            .sort_by(|left, right| left.quote.cmp(&right.quote));
+        self.totals_by_quote.sort_by_key(|total| total.quote);
     }
 }
 

@@ -884,12 +884,10 @@ pub fn expected_matches(actual: &ExpectedValue, expected: &ExpectedValue) -> boo
     }
 
     match (&actual, &expected) {
-        (Value::String(actual), Value::String(expected)) => {
-            if actual.starts_with("0x") && expected.starts_with("0x") {
-                normalize_hex_str(actual).ok() == normalize_hex_str(expected).ok()
-            } else {
-                false
-            }
+        (Value::String(actual), Value::String(expected))
+            if actual.starts_with("0x") && expected.starts_with("0x") =>
+        {
+            normalize_hex_str(actual).ok() == normalize_hex_str(expected).ok()
         }
         _ => false,
     }

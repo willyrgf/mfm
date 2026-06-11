@@ -1513,16 +1513,15 @@ pub(crate) fn runner_payloads_with_derived_lifecycle(
                     )));
                 }
             }
-            events::KernelEventPayload::PublicOutputRenderFailed(payload) => {
+            events::KernelEventPayload::PublicOutputRenderFailed(payload)
                 if failure
                     .replace((payload.error.retryable, payload.error.clone()))
-                    .is_some()
-                {
-                    return Err(RuntimeError::InvalidRunnerOutput(format!(
-                        "runner for node {} returned multiple failure payloads",
-                        node.node_id
-                    )));
-                }
+                    .is_some() =>
+            {
+                return Err(RuntimeError::InvalidRunnerOutput(format!(
+                    "runner for node {} returned multiple failure payloads",
+                    node.node_id
+                )));
             }
             _ => {}
         }
