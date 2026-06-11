@@ -8,9 +8,6 @@ on:
     branches: [dev]
   pull_request:
 
-env:
-  NIX_CMD_OPTS: "-L -v --log-format bar-with-logs"
-
 jobs:
   flake-check:
     name: Flake Check
@@ -29,14 +26,14 @@ jobs:
         with:
           path: |
             ~/.cache/nix
-          key: nix-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.lock', 'flake.nix', 'Cargo.lock', '.github/workflows/checks.yml', 'nixfied/**/*.nix') }}
+          key: nix-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.lock', 'flake.nix', 'nixfied.nix', 'Cargo.lock', '.github/workflows/checks.yml') }}
 
       - name: Nix flake check
         run: |
-          nix flake check
+          nix -L -v --log-format bar-with-logs flake check
 
   ci-full:
-    name: Nixfied CI (full, ${{ matrix.runner }})
+    name: Nixfied CI (${{ matrix.runner }})
     runs-on: ${{ matrix.runner }}
     env:
       LOG_TEE: "1"
@@ -48,6 +45,7 @@ jobs:
       MFM_LOG: "debug"
       MFM_TEST_LOG: "1"
       MFM_TEST_LOG_FILTER: "debug"
+      NIXFIED_STATE_DIR: ${{ runner.temp }}/nixfied-state
     strategy:
       fail-fast: true
       matrix:
@@ -68,19 +66,17 @@ jobs:
         with:
           path: |
             ~/.cache/nix
-          key: nix-${{ runner.os }}-${{ runner.arch }}-${{ github.ref_name }}-${{ hashFiles('flake.lock', 'flake.nix', 'Cargo.lock', '.github/workflows/checks.yml', 'nixfied/**/*.nix') }}
+          key: nix-${{ runner.os }}-${{ runner.arch }}-${{ github.ref_name }}-${{ hashFiles('flake.lock', 'flake.nix', 'nixfied.nix', 'Cargo.lock', '.github/workflows/checks.yml') }}
 
-      - name: Nixfied CI (full)
-        env:
-          CI_ARTIFACTS_ROOT: ${{ runner.temp }}/mfm-ci-artifacts
+      - name: Nixfied CI
         run: |
-          nix run .#ci $NIX_CMD_OPTS -- --mode full --summary
+          nix -L -v --log-format bar-with-logs run .#ci
 
       - name: Upload CI artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ci-artifacts-full-${{ matrix.runner }}
+          name: nixfied-state-${{ matrix.runner }}
           path: |
-            ${{ runner.temp }}/mfm-ci-artifacts
+            ${{ runner.temp }}/nixfied-state
           if-no-files-found: ignore
