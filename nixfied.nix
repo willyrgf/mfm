@@ -1,5 +1,4 @@
 {
-  adapters,
   lib,
   pkgs,
   ...
@@ -119,6 +118,84 @@ let
     '';
   };
 
+  postgresWrapper = pkgs.writeShellApplication {
+    name = "mfm-nixfied-postgres";
+    runtimeInputs = [
+      pkgs.coreutils
+      pkgs.postgresql
+    ];
+    # Slot state is reused across runs; prepare tolerates an existing cluster and
+    # rebuilds only incomplete service-owned pgdata.
+    text = ''
+      command_name="''${1:?missing postgres command}"
+      shift
+
+      state_dir=""
+      port=""
+      host="127.0.0.1"
+
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --state-dir)
+            state_dir="''${2:?missing --state-dir value}"
+            shift 2
+            ;;
+          --port)
+            port="''${2:?missing --port value}"
+            shift 2
+            ;;
+          --host)
+            host="''${2:?missing --host value}"
+            shift 2
+            ;;
+          *)
+            echo "unknown postgres argument: $1" >&2
+            exit 64
+            ;;
+        esac
+      done
+
+      if [[ -z "$state_dir" || "$state_dir" == "/" ]]; then
+        echo "missing or unsafe --state-dir argument" >&2
+        exit 64
+      fi
+
+      pgdata="$state_dir/pgdata"
+
+      case "$command_name" in
+        prepare)
+          if [[ -s "$pgdata/PG_VERSION" ]]; then
+            exit 0
+          fi
+
+          rm -rf "$pgdata"
+          mkdir -p "$pgdata"
+          exec initdb \
+            -D "$pgdata" \
+            -U postgres \
+            -A trust \
+            --no-locale \
+            --encoding=UTF8
+          ;;
+        start)
+          if [[ -z "$port" ]]; then
+            echo "missing required --port argument" >&2
+            exit 64
+          fi
+          exec postgres \
+            -D "$pgdata" \
+            -c unix_socket_directories= \
+            -h "$host" \
+            -p "$port"
+          ;;
+        *)
+          echo "unknown postgres command: $command_name" >&2
+          exit 64
+          ;;
+      esac
+    '';
+  };
+
   rethWrapper = pkgs.writeShellApplication {
     name = "mfm-nixfied-reth";
     runtimeInputs = [
@@ -187,19 +264,17 @@ let
     '';
   };
 
-  mfmTask =
-    taskId: command:
-    {
-      operationId = "task.mfm.${taskId}.run";
-      execId = "mfm-runner";
-      args = [
-        command
-        "--state-dir"
-        "\${stateDir}"
-      ];
-      logRefs = [ "task.mfm.${taskId}" ];
-      summaryRefs = [ "summary" ];
-    };
+  mfmTask = taskId: command: {
+    operationId = "task.mfm.${taskId}.run";
+    execId = "mfm-runner";
+    args = [
+      command
+      "--state-dir"
+      "\${stateDir}"
+    ];
+    logRefs = [ "task.mfm.${taskId}" ];
+    summaryRefs = [ "summary" ];
+  };
 
   mfmServiceTask =
     taskId: command: service:
@@ -209,17 +284,13 @@ let
     baseTask
     // {
       dependsOnServicesReady = [ service ];
-      args =
-        baseTask.args
-        ++ [
-          "--${service}-port"
-          "\${port}"
-        ];
+      args = baseTask.args ++ [
+        "--${service}-port"
+        "\${port}"
+      ];
     };
 in
 {
-  imports = [ adapters.postgres ];
-
   nixfied.project.projectId = "mfm";
   nixfied.project.name = "MFM";
   nixfied.codebases.main.logicalRoot = ".";
@@ -260,6 +331,22 @@ in
     ];
   };
 
+  nixfied.closures.mfm-postgres = {
+    package = postgresWrapper;
+    executable = "bin/mfm-nixfied-postgres";
+    kind = "executable";
+    requiresExecutable = true;
+    operationBindings = [
+      "service.postgres.prepare"
+      "service.postgres.start"
+    ];
+    effects = [
+      "process"
+      "network-listener"
+      "file-write"
+    ];
+  };
+
   nixfied.closures.mfm-reth = {
     package = rethWrapper;
     executable = "bin/mfm-nixfied-reth";
@@ -278,10 +365,96 @@ in
       closureId = "mfm-runner";
       timeoutMs = 7200000;
     };
+    mfm-postgres-prepare = {
+      closureId = "mfm-postgres";
+      timeoutMs = 60000;
+      args = [
+        "prepare"
+        "--state-dir"
+        "\${stateDir}"
+      ];
+    };
+    mfm-postgres-start = {
+      closureId = "mfm-postgres";
+      timeoutMs = 60000;
+      args = [
+        "start"
+        "--state-dir"
+        "\${stateDir}"
+        "--port"
+        "\${port}"
+      ];
+    };
     mfm-reth = {
       closureId = "mfm-reth";
       timeoutMs = 60000;
     };
+  };
+
+  nixfied.services.postgres = {
+    lifecycle = {
+      prepare = {
+        operationId = "service.postgres.prepare";
+        execId = "mfm-postgres-prepare";
+        terminal = {
+          success = "initialized";
+          failure = "failed";
+        };
+      };
+      start = {
+        operationId = "service.postgres.start";
+        execId = "mfm-postgres-start";
+        terminal = {
+          success = "spawned";
+          failure = "failed";
+        };
+      };
+      ready = {
+        operationId = "service.postgres.ready";
+        probe = {
+          timeoutMs = 1000;
+          retryIntervalMs = 200;
+          maxAttempts = 60;
+        };
+        terminal = {
+          success = "ready";
+          failure = "not-ready";
+        };
+      };
+      health = {
+        operationId = "service.postgres.health";
+        probe = {
+          timeoutMs = 1000;
+          retryIntervalMs = 200;
+          maxAttempts = 60;
+        };
+        terminal = {
+          success = "healthy";
+          failure = "unhealthy";
+        };
+      };
+      stop = {
+        operationId = "service.postgres.stop";
+        signal = "INT";
+        terminal = {
+          success = "stopped";
+          failure = "failed";
+        };
+      };
+      clean = {
+        operationId = "service.postgres.clean";
+        terminal = {
+          success = "cleaned";
+          failure = "failed";
+        };
+      };
+    };
+    endpoint = {
+      endpointId = "postgres-tcp";
+    };
+    stateRefs = [ "slot" ];
+    logRefs = [ "service.postgres" ];
+    containment = "process-tree";
   };
 
   nixfied.services.reth = {
@@ -360,18 +533,17 @@ in
     mfm-fmt = mfmTask "fmt" "fmt";
     mfm-clippy = mfmTask "clippy" "clippy";
     mfm-cargo-metadata-contract = mfmTask "cargo-metadata-contract" "cargo-metadata-contract";
-    mfm-architecture-namespace-contract =
-      mfmTask "architecture-namespace-contract" "architecture-namespace-contract";
+    mfm-architecture-namespace-contract = mfmTask "architecture-namespace-contract" "architecture-namespace-contract";
     mfm-workspace-tests = mfmTask "workspace-tests" "workspace-tests";
     mfm-parity-cli-keystore = mfmTask "parity-cli-keystore" "parity-cli-keystore";
     mfm-parity-postgres-rest-api =
-      mfmServiceTask "parity-postgres-rest-api" "parity-postgres-rest-api" "postgres";
+      mfmServiceTask "parity-postgres-rest-api" "parity-postgres-rest-api"
+        "postgres";
     mfm-parity-postgres-state-events =
-      mfmServiceTask "parity-postgres-state-events" "parity-postgres-state-events" "postgres";
-    mfm-parity-reth-contracts =
-      mfmServiceTask "parity-reth-contracts" "parity-reth-contracts" "reth";
-    mfm-parity-reth-portfolio =
-      mfmServiceTask "parity-reth-portfolio" "parity-reth-portfolio" "reth";
+      mfmServiceTask "parity-postgres-state-events" "parity-postgres-state-events"
+        "postgres";
+    mfm-parity-reth-contracts = mfmServiceTask "parity-reth-contracts" "parity-reth-contracts" "reth";
+    mfm-parity-reth-portfolio = mfmServiceTask "parity-reth-portfolio" "parity-reth-portfolio" "reth";
   };
 
   nixfied.environments.dev = lib.mkForce {
