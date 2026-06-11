@@ -66,12 +66,13 @@ Generated from `docs/repo-index.json`.
 - `check` from `flake.nix` / `nixfied.nix`
 - `test` from `flake.nix` / `nixfied.nix`
 - `ci` from `flake.nix` / `nixfied.nix`
+- `run`, `ps`, `down`, `clean` from the generated Nixfied project surface
 
 ## Features
 - (none detected)
 
 ## Dispatcher and Introspection
-- Nixfied v2 does not expose the v1 project dispatcher or introspection apps in MFM.
+- Nixfied v2 exposes the generated control surface (`nix run .#ps`, `.#down`, `.#clean`) for slot observation and recovery; the v1 dispatcher and richer introspection apps remain unexposed.
 
 ## Sensitive Zones
 - `crates/core/src/crypto.rs` - Security-sensitive Ethereum private-key parsing, address derivation, and recoverable signing. (checks: cargo test -p mfm_core, cargo test -p mfm-signers-keystore, cargo test -p mfm-evm-signing)
