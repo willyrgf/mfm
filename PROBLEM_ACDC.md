@@ -130,7 +130,7 @@ These are facts from inspected code and docs, not design goals.
   blocking, output-before-confirmation rejection, side-effect failure pairing, failed/cancelled
   `RunCompleted` rejection, replay evidence validation, and app replay/resume authority checks.
   They do not cover compensation, reverse-order remediation, manual resolution, irreversible
-  boundaries, resource-footprint sequencing, or phantom-prone compensation.
+  boundaries, resource-claim sequencing, or phantom-prone compensation.
 
 ## What MFM Already Guarantees
 
@@ -167,7 +167,7 @@ MFM currently lacks:
 - replay authority for compensation evidence;
 - public inspect/render surfaces that expose unresolved remediation obligations;
 - certification rules that reject side-effecting workflows without a declared remediation strategy;
-- certified resource footprints, resource keys, operation ids, touched sets, or commutativity
+- certified resource claims, resource keys, operation ids, touched sets, or commutativity
   declarations that let runtime/store sequence conflicting runs when needed;
 - correctness classes or assertions for phantoms, cascading backout, commutative updates,
   escrow-like updates, external-service ambiguity, or irreversible effects.
@@ -220,8 +220,9 @@ side-effect contracts. Whether that is encoded as a `SideEffectState` extension,
 a combination is still open. It should not be hidden in ordinary user states.
 
 State implementations may perform domain conflict handling, but the conflict model must not remain
-private state code if MFM is expected to certify the outcome. Mutating states should declare
-resource-footprint contracts, and attempts should emit actual footprint evidence such as resource
+private state code if MFM is expected to certify the outcome. Mutating state/adapter contracts
+should derive certified resource claims from typed intent, effect/capability authority, adapter
+identity, and runtime evidence. Attempts should then emit actual resource evidence such as resource
 keys, operation ids, touched sets, predicate snapshots, finality evidence, or replay-verifiable
 domain verifier evidence. Otherwise the run can still be durable and remediated, but its terminal
 claim must be manual or "failed without AC/DC claim", not platform-certified concurrency
@@ -231,23 +232,29 @@ correctness.
 
 | Area | Reusable foundation | New authority required |
 | --- | --- | --- |
-| Spec/certification | Certified typed spec, descriptor identities, side-effect contract digest checks, framework lifecycle nodes. | Failure directives, remediation contract specs, resource-footprint contracts, correctness classes, irreversible boundaries, manual-resolution metadata. |
-| Events | Append-only event model, side-effect ledger payload pattern, redaction-safe errors, artifact evidence refs. | Compensation/backout/manual-resolution event payloads, actual footprint evidence, and terminal run outcomes. |
+| Spec/certification | Certified typed spec, descriptor identities, side-effect contract digest checks, framework lifecycle nodes. | Failure directives, remediation contract specs, certified resource-claim derivation, correctness classes, irreversible boundaries, manual-resolution metadata. |
+| Events | Append-only event model, side-effect ledger payload pattern, redaction-safe errors, artifact evidence refs. | Compensation/backout/manual-resolution event payloads, actual resource evidence, and terminal run outcomes. |
 | Store | Atomic prepared commits, logical keys, preconditions, rebuildable projections, forward side-effect phase rules. | Remediation projections, run remediation state, resource-conflict indexes, preconditions for compensation once-and-only-once and terminal resolution. |
 | Runtime | Verified history, deterministic scheduler, guarded commit planner, conservative ambiguity blocking. | Failure-mode transition, compensation frontier derivation, reverse dependency ordering, resource-aware sequencing, alternate-path/manual-resolution scheduling. |
-| Replay | Evidence-only broker and forward side-effect verifier contract. | Compensation evidence indexes, footprint evidence indexes, verifier contracts, and replay-visible correctness assertions. |
+| Replay | Evidence-only broker and forward side-effect verifier contract. | Compensation evidence indexes, resource-evidence indexes, verifier contracts, and replay-visible correctness assertions. |
 | App/storage | Certified bundle verification, start/resume/replay/render assembly, durable Postgres event/projection storage. | Public status/render surfaces for unresolved, compensating, compensated, manually resolved, and irreversible-blocked states. |
 | States/adapters/transports | State-owned intent, adapter evidence phases, reusable transports, secret boundaries. | Domain-declared compensation intent and correctness evidence without moving live IO or topology into the wrong layer. |
 
 ## Concrete Correctness Problems For MFM
 
-### Resource Footprints And Parallel Runs
+### Resource Claims And Parallel Runs
 
 Runs are independent MFM histories, but the external resources they affect are not automatically
 independent. Two runs can touch the same account, chain contract, inventory item, external order,
 file, or service object. If MFM wants to certify concurrent correctness, the certified spec and run
 events need enough resource evidence for runtime/store/replay to distinguish independent work from
 conflicting work.
+
+This does not imply that workflow authors must hand-write a broad resource policy for every state.
+For many effects, MFM can derive the claim from typed state intent plus certified adapter/IO
+identity. For example, an Ethereum transaction submission can derive an account-nonce lane from
+chain id and sender, letting runtime/store sequence workflows that would otherwise race the same
+wallet nonce while allowing unrelated wallets to proceed in parallel.
 
 The useful lanes are:
 
@@ -257,8 +264,11 @@ The useful lanes are:
 - opaque external resources: MFM can run and resume durably, but terminal correctness is manual or
   domain-asserted rather than platform-proven.
 
-State code may compute resource keys and perform domain conflict handling, but those decisions must
-be surfaced as certified specs and append-only evidence if they are part of a correctness claim.
+State/adapter code may compute resource keys and perform domain conflict handling, but those
+decisions must be surfaced as certified specs and append-only evidence if they are part of a
+correctness claim. If a precise resource claim cannot be known before execution, MFM should use one
+of a conservative coarse claim, observed touched-set evidence after execution, a replay-verifiable
+domain verifier, or a manual/unsequenced classification.
 
 ### External Services
 
@@ -360,7 +370,7 @@ MFM can start claiming certified saga progress only when these are true:
 - public status distinguishes unresolved failure, ambiguous side effect, compensating,
   compensated, irreversible blocked, manually resolved, and successful completion;
 - replay verifies remediation evidence without live capabilities;
-- mutating states can declare resource-footprint contracts and record actual footprint evidence;
+- mutating states/adapters can derive certified resource claims and record actual resource evidence;
 - tests cover failure after one confirmed side effect, failure after multiple confirmed side
   effects, reverse-order compensation, compensation crash-resume, ambiguous compensation, manual
   resolution, irreversible-boundary rejection or blocking, resource-conflict sequencing, and at
@@ -373,7 +383,7 @@ ownership or replay-verifiable proof contracts establish atomicity and concurren
 
 - MFM is saga-only for external side effects. Physical backout is not the general model.
 - MFM can provide stronger atomicity for MFM-owned transactional resources.
-- External-system correctness comes from certified state contracts plus append-only evidence:
+- External-system correctness comes from certified state/adapter contracts plus append-only evidence:
   resource keys, operation ids, touched sets, finality evidence, adapter evidence, and replay
   verifier evidence.
 - State implementations may own domain conflict logic, but correctness-relevant decisions must be
@@ -387,14 +397,14 @@ ownership or replay-verifiable proof contracts establish atomicity and concurren
 
 ## Remaining Open Questions
 
-- Should failure directives and resource-footprint policies live directly in `TypedExecutionSpec`
+- Should failure directives and resource-claim derivation policies live directly in `TypedExecutionSpec`
   nodes, in framework lifecycle metadata, or in a separate certified remediation/resource spec
   section?
 - Should compensation be encoded as an extension of `SideEffectState`, a sibling effect class, or a
   framework-owned remedial side-effect protocol shared by both?
 - What is the minimal compensation event vocabulary that avoids duplicating the whole forward
   side-effect event model while preserving once-and-only-once evidence?
-- Which resource footprint and commutativity classes can the kernel enforce generically without
+- Which resource-claim and commutativity classes can the kernel enforce generically without
   depending on domain semantics?
 - What assertion format is acceptable when correctness depends on domain facts that the framework
   cannot prove, and when must that degrade to manual resolution?

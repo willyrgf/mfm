@@ -9,7 +9,7 @@ Companion problem statement: `PROBLEM_ACDC.md`.
 `PROBLEM_ACDC.md` argues that MFM already has durable forward execution foundations, but cannot
 claim AC/DC workflow semantics for arbitrary external systems. The realistic target is certified
 saga semantics for external effects: failure directives, compensation, manual resolution, resource
-footprints, and concurrency evidence become certified typed execution semantics.
+claims, and concurrency evidence become certified typed execution semantics.
 
 MFM can make stronger AC/DC-style claims only where it owns the affected transactional resource or
 where the certified run records enough replay-verifiable evidence to prove the required
@@ -21,7 +21,7 @@ blowing up public API or LOC:
 
 - keep `EffectClass` as the coarse authority boundary;
 - add a certified run-level `RemediationPolicy`;
-- add certified resource-footprint contracts for mutating work;
+- add certified resource-claim derivation for mutating work;
 - reuse the existing side-effect ledger protocol for remedial mutations where possible;
 - make runtime/store own all durable failure, remediation, and terminal mode transitions.
 
@@ -40,11 +40,11 @@ The important split is:
 | Layer | Owns |
 | --- | --- |
 | `EffectClass` | What kind of authority a state may exercise. |
-| State contracts | Typed intent, input, output, resource footprint, and evidence shapes. |
+| State contracts | Typed intent, input, output, resource-claim derivation, and evidence shapes. |
 | Certified run policy | What should happen when failure, conflict, finality, or rollback evidence appears. |
 | Runtime | Deterministic mode transitions, frontier selection, and guarded commits. |
 | Store | Append-only event admission, logical keys, resource indexes, projections, and preconditions. |
-| Replay | Evidence-only verification of forward, remedial, and resource-footprint history. |
+| Replay | Evidence-only verification of forward, remedial, and resource-claim history. |
 
 Runtime/store already need to persist all semantic transitions through append-only typed events.
 That should remain the durability foundation for certified saga remediation and any scoped
@@ -56,9 +56,9 @@ output, retention, artifacts, or redacted diagnostics.
 
 1. Policy is certified data, not app glue.
 
-   Remediation and resource policy must be included in the certified execution spec or in certified
-   spec-bound companion data. A dynamic callback, closure, CLI flag, or app-level handler cannot be
-   semantic authority for resume or replay.
+   Remediation policy and resource-claim derivation must be included in the certified execution
+   spec or in certified spec-bound companion data. A dynamic callback, closure, CLI flag, or
+   app-level handler cannot be semantic authority for resume or replay.
 
 2. Policies are run-level, not state-local.
 
@@ -85,9 +85,10 @@ output, retention, artifacts, or redacted diagnostics.
 
 6. Resource conflicts are certified evidence, not hidden state behavior.
 
-   State code may compute domain resource keys and perform domain conflict handling, but any
-   correctness-relevant resource key, operation id, touched set, predicate snapshot, finality proof,
-   or commutativity claim must be declared in certified policy and emitted as typed evidence.
+   State and adapter contracts may derive domain resource keys from typed intent, effect/capability
+   authority, adapter identity, and recorded evidence, but any correctness-relevant resource key,
+   operation id, touched set, predicate snapshot, finality proof, or commutativity claim must be
+   certified and emitted as typed evidence.
 
 7. Replay remains evidence-only.
 
@@ -122,7 +123,7 @@ pub struct RemediationPolicySpec {
     pub default_failure: FailureDirectiveSpec,
     pub node_overrides: BTreeMap<NodeId, FailureDirectiveSpec>,
     pub obligations: BTreeMap<RemediationObligationId, RemediationObligationSpec>,
-    pub resources: BTreeMap<NodeId, ResourceFootprintSpec>,
+    pub resources: BTreeMap<NodeId, ResourceClaimSpec>,
     pub triggers: Vec<RemediationTriggerSpec>,
     pub correctness: CorrectnessPolicySpec,
 }
@@ -197,7 +198,7 @@ pub struct RemediationObligationSpec {
     pub remediation_node: NodeId,
     pub strategy: RemediationStrategySpec,
     pub correctness: CorrectnessClaimSpec,
-    pub required_forward_footprint: ResourceFootprintRequirementSpec,
+    pub required_forward_resource_evidence: ResourceEvidenceRequirementSpec,
     pub ambiguity_directive: FailureDirectiveSpec,
 }
 ```
@@ -237,7 +238,7 @@ Runtime may act on a trigger only when the recorded evidence matches the certifi
 older node or ledger is not retried because a later state asked for it. It is retried, compensated,
 or escalated because certified policy plus append-only evidence require that transition.
 
-### Resource footprints and parallel runs
+### Resource claims and parallel runs
 
 Runs have independent append-only histories, but the resources they mutate may overlap. MFM should
 make that overlap explicit instead of relying on private state implementation behavior.
@@ -245,12 +246,20 @@ make that overlap explicit instead of relying on private state implementation be
 Sketch:
 
 ```rust
-pub struct ResourceFootprintSpec {
+pub struct ResourceClaimSpec {
     pub namespace: ResourceNamespace,
-    pub declared_keys: ResourceKeySpec,
+    pub derivation: ResourceClaimDerivationSpec,
     pub operation_kind: ResourceOperationKind,
     pub concurrency: ResourceConcurrencySpec,
     pub actual_evidence_schema: SchemaId,
+}
+
+pub enum ResourceClaimDerivationSpec {
+    FromTypedIntent,
+    FromAdapterIdentity,
+    FromIntentAndAdapter,
+    FromRuntimeEvidence,
+    Conservative(ResourceScopeSpec),
 }
 
 pub enum ResourceConcurrencySpec {
@@ -263,11 +272,15 @@ pub enum ResourceConcurrencySpec {
 }
 ```
 
-Runtime/store can conservatively sequence `Exclusive` declared keys when they are known before a
-mutation. When the exact touched set is only known after execution, the attempt must emit typed
-footprint evidence. Replay verifies that evidence against the certified footprint contract. If a
-state cannot declare or prove enough footprint information, the workflow can still run durably, but
-MFM should not mark the terminal outcome as platform-certified concurrent correctness.
+Runtime/store can conservatively sequence `Exclusive` claims when a concrete key can be derived
+before mutation. For example, an EVM transaction state and adapter can derive an account nonce lane
+from chain id and sender; workflows using the same lane wait for nonce advancement while workflows
+using unrelated senders continue in parallel. When the exact touched set is only known after
+execution, the attempt must emit typed resource evidence. Replay verifies that evidence against the
+certified resource-claim contract.
+
+If a state cannot derive or prove enough resource information, the workflow can still run durably,
+but MFM should not mark the terminal outcome as platform-certified concurrent correctness.
 
 The useful lanes are:
 
@@ -317,7 +330,7 @@ Preferred direction:
 
    These describe mode transitions and obligations, not protocol-level submission/receipt phases.
 
-3. Add resource-footprint evidence events or fields.
+3. Add resource evidence events or fields.
 
    These record declared and actual resource keys, operation ids, touched sets, predicate snapshots,
    finality evidence references, and verifier ids when those are part of the certified correctness
@@ -334,7 +347,7 @@ RemediationObligationFailed
 RemediationObligationAmbiguous
 ManualResolutionRequested
 ManualResolutionRecorded
-ResourceFootprintRecorded
+ResourceEvidenceRecorded
 RunTerminalResolved
 ```
 
@@ -350,7 +363,7 @@ Initial rules:
 
 - every `ApplySideEffect` reachable before successful terminal output must have a policy-covered
   failure path;
-- every mutating node must declare a resource footprint class, even if the class is
+- every mutating node must expose a certified resource-claim derivation class, even if the class is
   `UnsequencedExternal` or `ManualOnly`;
 - every `CompensateCompleted` directive must point to certified remediation obligations;
 - every remediation node must itself be side-effect-grade or manual-only;
@@ -425,7 +438,8 @@ what terminal claim the run may make.
 
 The public API should grow in two places only:
 
-1. Planning/certification builders get a run-level remediation and resource policy surface.
+1. Planning/certification builders get a run-level remediation surface and reuse state/adapter
+   resource-claim contracts where possible.
 2. Inspection/status surfaces expose durable remediation modes, obligations, and relevant resource
    conflicts.
 
@@ -456,7 +470,7 @@ The first implementation target should be deliberately narrow:
 6. Runtime schedules linked remediation nodes in reverse dependency order.
 7. Replay indexes and verifies remediation events without live transports.
 8. Public status reports unresolved obligations.
-9. Add a minimal resource footprint contract with `ExactTouchedSet` and `ManualOnly`.
+9. Add a minimal resource-claim contract with `Exclusive`, `ExactTouchedSet`, and `ManualOnly`.
 10. Tests cover one confirmed side effect followed by later failure, compensation crash-resume,
     manual resolution, replay of compensated evidence, one resource-conflict sequencing case, and
     one phantom-prone touched-set case.
@@ -475,7 +489,7 @@ the tested proof classes.
   validation harder to reason about?
 - What is the smallest manual-resolution evidence shape that is useful without becoming a generic
   escape hatch?
-- Which correctness classes and resource footprint classes should be framework-verifiable in v1,
+- Which correctness classes and resource-claim classes should be framework-verifiable in v1,
   and which should require certified domain verifiers or manual resolution?
 - How should a parent run link to continuation runs so the parent can reach a durable terminal
   outcome?
