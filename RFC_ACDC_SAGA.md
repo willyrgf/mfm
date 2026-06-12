@@ -40,6 +40,36 @@ where replay can verify a certified domain proof from typed evidence.
 - Do not preserve the old absent/started/completed public status model as the user-facing contract.
 - Do not hide compensation as ordinary user states that runtime/store/replay cannot recognize.
 
+## Engineering Constraints
+
+These constraints are part of the RFC, not implementation preferences.
+
+1. Prefer unrepresentable invalid states over runtime rejection.
+
+   Normal authoring APIs should use closed enums, sealed constructors, typestate builders, branded
+   handles, and effect-specific node types so invalid saga configurations cannot be built through
+   the public planning surface. Certification still rejects hostile or stale lowered specs, but that
+   should be the authority backstop, not the main authoring experience.
+
+2. Keep the public API and LOC growth narrow.
+
+   V1 should add only the concepts needed for the first end-to-end certified saga slice:
+   remediation policy, remediation-only nodes, ledger purpose, minimal remediation control events,
+   semantic run mode, bounded manual evidence, and minimal resource claims. Avoid generic callback
+   systems, broad new traits, duplicate side-effect machinery, and speculative correctness classes.
+
+3. Break compatibility deliberately.
+
+   Backward compatibility is not a goal. If old public status, persisted spec shape, or event schema
+   shape conflicts with the certified saga model, change it cleanly and update docs/tests in the
+   same PR. Do not add compatibility shims that preserve flawed semantics.
+
+4. Divide work by semantic boundary.
+
+   Each commit should introduce one coherent layer of authority and its tests. Avoid cross-layer
+   mega-commits that mix spec shape, store projection rules, runtime scheduling, replay, and public
+   API changes.
+
 ## Architectural Decision
 
 The v1 implementation should be a certified saga implementation, not a durable bookkeeping layer.
@@ -81,6 +111,45 @@ These decisions are intentionally closed for the first implementation slice.
 11. Continuations are child runs linked by append-only parent events.
 12. Irreversible boundaries are both state/adapter metadata and run policy.
 13. Public status exposes semantic `RunMode`; coarse store `RunState` may remain internal.
+
+## Strictness Through Types
+
+The implementation should push invalid saga states out of the public type system wherever the
+resulting API stays small.
+
+Preferred mechanisms:
+
+- closed enums for directives, run modes, resource classes, terminal outcomes, and ledger purpose;
+- private or sealed constructors for lowered semantic records;
+- typestate builders for draft/finalized programs where they materially reduce invalid states;
+- branded node handles for forward side-effect nodes, remediation-only nodes, and policy-covered
+  nodes;
+- effect-specific constraints so only side-effect-grade or manual-only nodes can satisfy
+  remediation obligations;
+- certified verifier ids and typed evidence inputs instead of opaque correctness strings;
+- explicit degradation variants such as `ManualOnly` and `FailWithoutAcdcClaim`.
+
+Lowered specs, persisted bytes, registry inputs, and migration outputs must still be treated as
+hostile. Certification remains the authority check for anything that bypasses the public builder
+surface.
+
+Do not use optional fields to encode semantic state machines when a closed enum or branded handle
+would make invalid combinations impossible. Optional fields are acceptable for evidence that is
+truly absent/present over time in projections; they should not be the primary way to express whether
+a run claims compensation, manual resolution, or AC/DC-style equivalence.
+
+## Breaking Change Posture
+
+Breaking changes are allowed and expected.
+
+- Bump persisted spec/event schemas when remediation semantics become hash-defining.
+- Replace public absent/started/completed status with semantic `RunMode`.
+- Reject old side-effecting specs that lack certified remediation policy.
+- Remove or rewrite APIs that allow raw construction of semantically invalid specs, nodes, events,
+  or run terminal states.
+- Do not add best-effort compatibility shims for old status values or ambiguous old specs.
+- If old persisted runs need support later, handle that as an explicit migration tool or
+  read-only archival mode, not as hidden compatibility in runtime semantics.
 
 ## V1 Data Model
 
@@ -229,6 +298,17 @@ Do not implement generic `Commutative`, `EscrowBounded`, `PredicateSnapshotRequi
 Certification should be the authority boundary for lowered specs, but normal authors should hit
 typed builder constraints before certification where practical.
 
+The public construction path should make these cases unrepresentable:
+
+- finalizing a program draft that contains reachable forward `ApplySideEffect` nodes without a
+  policy-covered failure path;
+- using a remediation-only node as a forward frontier node;
+- constructing `CompensateCompleted` without at least one obligation target;
+- linking a remediation obligation to a node that is not side-effect-grade or manual-only;
+- declaring a platform-certified correctness claim without framework-verifiable evidence or a
+  certified replay verifier;
+- constructing manual resolution without a typed evidence schema and closed allowed outcomes.
+
 V1 certification must reject:
 
 - reachable `ApplySideEffect` forward nodes that can reach successful terminal output without a
@@ -327,6 +407,37 @@ App/CLI/API status should expose:
   AC/DC-style claim.
 
 This is a breaking public status change. It is allowed.
+
+## API And LOC Budget
+
+The implementation should bias toward replacing broad APIs with narrow typed authority.
+
+Required public API additions:
+
+- one planning/remediation builder surface;
+- closed remediation directive and run-mode enums;
+- remediation-only node markers or branded node handles;
+- bounded manual-resolution evidence types;
+- public status fields for run mode and obligations.
+
+Required internal or persisted additions:
+
+- hash-defining `RemediationPolicySpec`;
+- side-effect ledger purpose/linkage;
+- minimal remediation control events;
+- remediation, manual, run-mode, and resource projections;
+- replay indexes for remediation evidence.
+
+Avoid in v1:
+
+- new effect class hierarchy;
+- generic remediation handler traits;
+- per-state compensation trait methods;
+- dynamic policy callbacks;
+- exposing store projection internals as authoring API;
+- compatibility adapters for old run-status semantics;
+- framework implementations of generic commutativity, escrow, predicate isolation, or reorg
+  semantics.
 
 ## Implementation Milestones
 
@@ -460,6 +571,88 @@ Acceptance:
 - exact touched-set evidence is replay-verified;
 - missing touched-set evidence prevents platform-certified concurrent correctness.
 
+## Reviewable Commit Plan
+
+Each commit should compile and include the tests that make sense for that layer. Commit subjects
+should stay narrow and lower-case.
+
+1. `spec: add certified saga policy types`
+
+   Add `RemediationPolicySpec`, `FailureDirectiveSpec`, obligation ids/specs, correctness claim
+   skeletons, manual evidence specs, and minimal resource claim specs to the typed spec crate. Make
+   the new policy hash-defining.
+
+2. `program: add remediation authoring handles`
+
+   Add the smallest builder/handle surface needed to mark remediation-only nodes and attach policy.
+   Use typestate or branded handles so forward nodes, remediation-only nodes, and policy-covered
+   side-effect nodes cannot be confused through normal APIs.
+
+3. `certify: reject ambiguous saga specs`
+
+   Add certification checks for missing policy, missing obligations, forward-reachable remediation
+   nodes, manual paths without typed evidence, and compensation claims without verifier/manual/fail
+   degradation.
+
+4. `events: add remediation control payloads`
+
+   Add typed event payloads and schema descriptors for directive selection, obligation open/close,
+   manual resolution, resource evidence, continuation linkage, and terminal resolution.
+
+5. `events: add side effect ledger purpose`
+
+   Add `SideEffectLedgerPurpose` to side-effect evidence shapes. Keep this separate from the control
+   event commit so review can focus on forward/remedial ledger identity.
+
+6. `store: project remediation state`
+
+   Add in-memory projections for run mode, obligations, manual resolution, and resource evidence.
+   Enforce once-only obligation open/close and terminal-resolution preconditions.
+
+7. `store: validate remedial side effect linkage`
+
+   Enforce that a remediation ledger references an opened obligation and an eligible forward ledger.
+   Add negative tests for wrong obligation id, wrong forward ledger, and premature close.
+
+8. `postgres: persist saga projections`
+
+   Extend typed Postgres persistence for the new event/projection shapes. Keep it storage-only:
+   no runtime or domain decisions in this commit.
+
+9. `runtime: enter remediation mode`
+
+   On non-retryable failure after confirmed eligible side effects, select the certified directive,
+   append the directive event, open obligations, and project `Remediating`.
+
+10. `runtime: schedule remediation frontier`
+
+   Schedule remediation-only `ApplySideEffect` nodes in reverse dependency order. Prove the forward
+   scheduler cannot run remediation-only nodes.
+
+11. `runtime: resolve saga terminals`
+
+   Close obligations after remedial confirmation and emit terminal resolution for `Compensated`,
+   `ManualBlocked`, or `FailedWithoutAcdcClaim` according to certified policy.
+
+12. `replay: verify saga evidence`
+
+   Index remediation events and ledger purpose. Reject forged obligation closure, wrong ledger
+   linkage, missing remediation confirmation, and missing manual evidence.
+
+13. `app: expose semantic run mode`
+
+   Replace user-facing absent/started/completed status with semantic `RunMode` and obligation
+   details. Update app/CLI/API docs and contract tests in the same commit.
+
+14. `runtime: add minimal resource claims`
+
+   Implement `Exclusive`, `ExactTouchedSet`, and `ManualOnly` resource evidence handling and the
+   first cross-run sequencing tests.
+
+Do not merge commits that add a semantic shape without its corresponding rejection tests unless the
+commit is a pure type skeleton explicitly marked as such. Do not combine runtime remediation,
+replay verification, and public status in one commit.
+
 ## Test Matrix
 
 The implementation is not credible until these tests exist.
@@ -521,4 +714,3 @@ Required proof:
 V1 is done when MFM can run, persist, resume, replay, and inspect the first end-to-end slice above,
 and the test matrix proves that compensation is certified runtime/store/replay behavior rather than
 ordinary user-state bookkeeping.
-
