@@ -56,7 +56,7 @@ For MFM, the terms should be interpreted through typed-core authority:
 | Atomic workflow | A run that reaches successful output or a certified alternate/backout outcome equivalent to the failed workflow not having happened. MFM can claim this only for MFM-owned resources or replay-verifiable proof contracts. |
 | Certified saga workflow | The realistic external-system target: a run that either completes, executes certified compensation, starts a certified continuation, or reaches typed manual resolution without erasing forward history. |
 | Consistent workflow | A workflow whose declared remediation restores required invariants in single-user mode or explicitly carries a replay-verifiable domain proof/manual path. |
-| Correct workflow under concurrency | A workflow whose remediation outcome is equivalent to removing the failed workflow and preserving other completed concurrent workflows that should remain; for external resources this requires typed resource/conflict evidence, not state-local intent alone. |
+| Correct workflow under concurrency | A workflow whose remediation outcome is equivalent to removing the failed workflow and preserving other completed concurrent workflows that should remain; for external resources this requires typed resource/conflict evidence, replay-verifiable domain evidence, or a manual path, not state-local intent alone. |
 
 The paper's durable execution maps closely to MFM's implemented forward path. The paper's
 atomicity, consistency, and concurrency correctness do not yet map to implemented MFM authority.
@@ -169,7 +169,7 @@ MFM currently lacks:
 - certification rules that reject side-effecting workflows without a declared remediation strategy;
 - certified resource claims, resource keys, operation ids, touched sets, or commutativity
   declarations that let runtime/store sequence conflicting runs when needed;
-- correctness classes or assertions for phantoms, cascading backout, commutative updates,
+- correctness classes or verifier-backed claims for phantoms, cascading backout, commutative updates,
   escrow-like updates, external-service ambiguity, or irreversible effects.
 
 A workflow author can model a "compensation" as another ordinary state today, but that does not
@@ -194,8 +194,8 @@ The model must let MFM answer, from certified spec plus append-only events:
 6. What happens when remediation itself fails, is ambiguous, or crosses an irreversible boundary?
 7. Which resources does each mutating step claim, what actual touched set did it produce, and which
    conflicts require sequencing rather than parallel execution?
-8. Which concurrency-correctness claims are framework-enforced, and which are domain assertions
-   carried by certified evidence?
+8. Which concurrency-correctness claims are framework-enforced, and which require domain verifiers,
+   typed evidence, or manual resolution?
 
 This is a kernel/runtime/store/spec/replay architecture problem, not an app cleanup problem.
 
@@ -211,13 +211,14 @@ The current architecture suggests a mixed model, not a plain user-state pattern.
 | Framework lifecycle remediation nodes | Matches existing sealed lifecycle pattern for bootstrap, render, retention, and completion. Runtime can own mode transitions and frontier derivation. | Lifecycle nodes still need domain-declared compensation contracts and typed capability evidence; framework code must not perform domain IO. |
 | Ordinary user states or app/binary glue | Easy to author locally. | Rejected for AC/DC: it hides obligations from certification, runtime, store, replay, and public status. |
 
-Working conclusion for discussion:
+Resolved direction for v1:
 
 Compensation should be modeled as certified saga remediation semantics owned by the framework/
 runtime, with remedial actions carrying side-effect-grade typed evidence and being linked to forward
-side-effect contracts. Whether that is encoded as a `SideEffectState` extension, a sibling
-`ApplyCompensation` effect class, framework-owned lifecycle nodes, certified continuation runs, or
-a combination is still open. It should not be hidden in ordinary user states.
+side-effect contracts. V1 should reuse `ApplySideEffect` for dormant remediation-only nodes in the
+same certified spec, distinguished by persisted ledger purpose and obligation linkage. A sibling
+`ApplyCompensation` effect class should remain a later specialization only if ledger reuse becomes
+harder to reason about. Remediation should not be hidden in ordinary user states.
 
 State implementations may perform domain conflict handling, but the conflict model must not remain
 private state code if MFM is expected to certify the outcome. Mutating state/adapter contracts
@@ -236,7 +237,7 @@ correctness.
 | Events | Append-only event model, side-effect ledger payload pattern, redaction-safe errors, artifact evidence refs. | Compensation/backout/manual-resolution event payloads, actual resource evidence, and terminal run outcomes. |
 | Store | Atomic prepared commits, logical keys, preconditions, rebuildable projections, forward side-effect phase rules. | Remediation projections, run remediation state, resource-conflict indexes, preconditions for compensation once-and-only-once and terminal resolution. |
 | Runtime | Verified history, deterministic scheduler, guarded commit planner, conservative ambiguity blocking. | Failure-mode transition, compensation frontier derivation, reverse dependency ordering, resource-aware sequencing, alternate-path/manual-resolution scheduling. |
-| Replay | Evidence-only broker and forward side-effect verifier contract. | Compensation evidence indexes, resource-evidence indexes, verifier contracts, and replay-visible correctness assertions. |
+| Replay | Evidence-only broker and forward side-effect verifier contract. | Compensation evidence indexes, resource-evidence indexes, verifier contracts, and replay-visible correctness claims. |
 | App/storage | Certified bundle verification, start/resume/replay/render assembly, durable Postgres event/projection storage. | Public status/render surfaces for unresolved, compensating, compensated, manually resolved, and irreversible-blocked states. |
 | States/adapters/transports | State-owned intent, adapter evidence phases, reusable transports, secret boundaries. | Domain-declared compensation intent and correctness evidence without moving live IO or topology into the wrong layer. |
 
@@ -321,7 +322,7 @@ MFM needs typed evidence for the original affected set or a stronger semantic pr
 - predicate snapshot evidence;
 - prior/post state evidence;
 - service operation ids with cancel/refund semantics;
-- escrow/commutative-operation assertions;
+- escrow/commutative-operation verifier claims;
 - isolation or lock proof;
 - explicit manual-only remediation.
 
@@ -395,25 +396,36 @@ ownership or replay-verifiable proof contracts establish atomicity and concurren
 - On-chain finality and reorg handling can live in states, adapters, and certified remediation
   policies, as long as replay can verify the recorded evidence without live IO.
 
-## Remaining Open Questions
+## Resolved Direction For V1
 
-- Should failure directives and resource-claim derivation policies live directly in `TypedExecutionSpec`
-  nodes, in framework lifecycle metadata, or in a separate certified remediation/resource spec
-  section?
-- Should compensation be encoded as an extension of `SideEffectState`, a sibling effect class, or a
-  framework-owned remedial side-effect protocol shared by both?
-- What is the minimal compensation event vocabulary that avoids duplicating the whole forward
-  side-effect event model while preserving once-and-only-once evidence?
-- Which resource-claim and commutativity classes can the kernel enforce generically without
-  depending on domain semantics?
-- What assertion format is acceptable when correctness depends on domain facts that the framework
-  cannot prove, and when must that degrade to manual resolution?
-- How should public API compatibility be handled when adding durable run phases beyond
-  absent/started/completed?
+- Failure directives, remediation obligations, resource-claim policies, and correctness claims live
+  in certified hash-defining typed spec authority, with `DESIGN_ACDC.md` proposing direct
+  `TypedExecutionSpec` placement.
+- State and adapter contracts declare derivation and evidence capabilities; run-level policy decides
+  failure, remediation, continuation, manual, irreversible, and terminal behavior for a concrete
+  workflow.
+- Compensation is encoded first as framework-owned remediation semantics over side-effect-grade
+  remedial actions, reusing `ApplySideEffect` with persisted ledger purpose and obligation linkage
+  instead of adding a sibling effect class.
+- The compensation event vocabulary should be minimal: append remediation control events for
+  directive selection, obligation open/close, manual resolution, resource evidence, and terminal
+  resolution while reusing the side-effect submission/receipt/confirmation/ambiguity/failure
+  protocol for remedial IO.
+- The kernel should generically enforce only MFM-owned serialization, concrete-key `Exclusive`
+  resource claims, obligation linkage, once-only ledger progression, reverse-order remediation
+  scheduling, and evidence presence/hash/schema checks.
+- Commutativity, escrow, predicate snapshots, isolation, finality/reorg correctness, and other
+  external-truth claims require certified replay verifiers or must degrade to `ManualOnly` or
+  `FailWithoutAcdcClaim`.
+- Manual resolution is typed evidence with certified allowed outcomes, not a generic escape hatch.
+- Public API compatibility is not the goal. User-facing status should move beyond
+  absent/started/completed to semantic run modes such as `Forward`, `Remediating`,
+  `ManualBlocked`, `Compensated`, `ManuallyResolved`, `IrreversibleBlocked`, and
+  `FailedWithoutAcdcClaim`.
 
-## Immediate Discussion Target
+## Immediate Implementation Target
 
-The next design discussion should define the smallest certified vertical slice:
+The next design step should implement the smallest certified vertical slice:
 
 1. A failure directive shape in certified typed specs.
 2. A remediation contract linked to a forward side-effect contract.
