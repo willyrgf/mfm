@@ -1,4 +1,4 @@
-# PROBLEM: AC/DC workflow guarantees for MFM
+# PROBLEM: certified saga and scoped AC/DC-style workflow guarantees for MFM
 
 Status: implementation-aware problem statement for the next MFM architecture discussion.
 
@@ -18,9 +18,9 @@ Review basis:
 ## One Sentence
 
 MFM has a strong typed durable-execution foundation, including append-only run streams and durable
-forward side-effect ledgers, but it cannot claim AC/DC workflow semantics until failure directives,
-compensation/backout, manual resolution, and concurrency correctness become certified typed
-execution semantics rather than ordinary user-authored states or app glue.
+forward side-effect ledgers, but for external systems it should claim certified saga semantics,
+not full AC/DC; AC/DC-style claims are honest only for MFM-owned transactional resources or for
+workflows whose certified evidence lets replay verify the required correctness properties.
 
 ## Non-Claim
 
@@ -30,6 +30,13 @@ Current MFM can preserve and resume forward typed execution evidence. It does no
 platform-owned guarantee that a failed update-oriented workflow either completes on a certified
 alternate path, is correctly backed out or compensated, or is durably escalated to a typed manual
 resolution state.
+
+Even after remediation support lands, MFM cannot make external systems atomic in the Stonebraker
+sense unless MFM controls the resource or the workflow records enough typed, replay-verifiable
+evidence to justify that stronger claim. For external chains, APIs, services, files, and accounts,
+the realistic target is a certified saga: append-only forward evidence, certified remediation
+obligations, typed conflict/finality/touched-set evidence, deterministic resume, and explicit
+manual resolution when the platform cannot prove correctness.
 
 ## Paper Terms In MFM Vocabulary
 
@@ -46,12 +53,15 @@ For MFM, the terms should be interpreted through typed-core authority:
 | Backout | Missing platform-owned remediation mode that appends evidence without erasing forward history. |
 | Compensation | Missing typed side-effect-like remedial obligation linked to a completed forward side effect. |
 | Manual resolution | Missing durable typed run status and evidence for operator-owned completion or backout. |
-| Atomic workflow | A run that reaches successful output, certified alternate output, compensated/backed-out terminal evidence, or manual-resolution terminal evidence. |
-| Consistent workflow | A workflow whose declared remediation restores required invariants in single-user mode or explicitly carries a domain assertion/manual path. |
-| Correct workflow under concurrency | A workflow whose remediation outcome is equivalent to removing the failed workflow and preserving other completed concurrent workflows that should remain. |
+| Atomic workflow | A run that reaches successful output or a certified alternate/backout outcome equivalent to the failed workflow not having happened. MFM can claim this only for MFM-owned resources or replay-verifiable proof contracts. |
+| Certified saga workflow | The realistic external-system target: a run that either completes, executes certified compensation, starts a certified continuation, or reaches typed manual resolution without erasing forward history. |
+| Consistent workflow | A workflow whose declared remediation restores required invariants in single-user mode or explicitly carries a replay-verifiable domain proof/manual path. |
+| Correct workflow under concurrency | A workflow whose remediation outcome is equivalent to removing the failed workflow and preserving other completed concurrent workflows that should remain; for external resources this requires typed resource/conflict evidence, not state-local intent alone. |
 
 The paper's durable execution maps closely to MFM's implemented forward path. The paper's
 atomicity, consistency, and concurrency correctness do not yet map to implemented MFM authority.
+This document therefore treats "AC/DC" as the design pressure and "certified saga" as the first
+honest implementation target for external side effects.
 
 ## Current Implementation Facts
 
@@ -120,11 +130,11 @@ These are facts from inspected code and docs, not design goals.
   blocking, output-before-confirmation rejection, side-effect failure pairing, failed/cancelled
   `RunCompleted` rejection, replay evidence validation, and app replay/resume authority checks.
   They do not cover compensation, reverse-order remediation, manual resolution, irreversible
-  boundaries, or phantom-prone compensation.
+  boundaries, resource-footprint sequencing, or phantom-prone compensation.
 
 ## What MFM Already Guarantees
 
-MFM already has reusable AC/DC prerequisites:
+MFM already has reusable certified-saga and AC/DC-style prerequisites:
 
 - certified typed specs are the only semantic runtime contract;
 - append-only run streams are the authority for execution history;
@@ -137,8 +147,8 @@ MFM already has reusable AC/DC prerequisites:
 - replay cannot construct live transports or capability handles;
 - app and binaries are not supposed to own workflow semantics.
 
-These are durable execution foundations. They are not workflow atomicity, consistency, or
-concurrency correctness for failed update-oriented workflows.
+These are durable execution foundations. They are not workflow atomicity, consistency, certified
+saga remediation, or concurrency correctness for failed update-oriented workflows.
 
 ## What MFM Does Not Yet Guarantee
 
@@ -157,17 +167,20 @@ MFM currently lacks:
 - replay authority for compensation evidence;
 - public inspect/render surfaces that expose unresolved remediation obligations;
 - certification rules that reject side-effecting workflows without a declared remediation strategy;
+- certified resource footprints, resource keys, operation ids, touched sets, or commutativity
+  declarations that let runtime/store sequence conflicting runs when needed;
 - correctness classes or assertions for phantoms, cascading backout, commutative updates,
   escrow-like updates, external-service ambiguity, or irreversible effects.
 
 A workflow author can model a "compensation" as another ordinary state today, but that does not
-give AC/DC. The platform would not know the state is a mandatory inverse obligation, would not
-schedule it automatically after a later failure, would not resume it as remediation, and would not
-know what correctness claim it is supposed to prove.
+give certified saga semantics or AC/DC-style correctness. The platform would not know the state is
+a mandatory inverse obligation, would not schedule it automatically after a later failure, would not
+resume it as remediation, and would not know what correctness claim it is supposed to prove.
 
 ## Primary Architecture Problem
 
-Define a certified typed remediation model for side-effecting workflows.
+Define a certified typed saga/remediation model for side-effecting workflows, with scoped stronger
+AC/DC-style claims where MFM owns the affected resource or can replay-verify a domain proof.
 
 The model must let MFM answer, from certified spec plus append-only events:
 
@@ -179,7 +192,9 @@ The model must let MFM answer, from certified spec plus append-only events:
 5. What evidence proves the obligation restored the declared invariant or reached a declared manual
    terminal state?
 6. What happens when remediation itself fails, is ambiguous, or crosses an irreversible boundary?
-7. Which concurrency-correctness claims are framework-enforced, and which are domain assertions
+7. Which resources does each mutating step claim, what actual touched set did it produce, and which
+   conflicts require sequencing rather than parallel execution?
+8. Which concurrency-correctness claims are framework-enforced, and which are domain assertions
    carried by certified evidence?
 
 This is a kernel/runtime/store/spec/replay architecture problem, not an app cleanup problem.
@@ -198,42 +213,72 @@ The current architecture suggests a mixed model, not a plain user-state pattern.
 
 Working conclusion for discussion:
 
-Compensation should be modeled as certified remediation semantics owned by the framework/runtime,
-with remedial actions carrying side-effect-grade typed evidence and being linked to forward
+Compensation should be modeled as certified saga remediation semantics owned by the framework/
+runtime, with remedial actions carrying side-effect-grade typed evidence and being linked to forward
 side-effect contracts. Whether that is encoded as a `SideEffectState` extension, a sibling
 `ApplyCompensation` effect class, framework-owned lifecycle nodes, certified continuation runs, or
 a combination is still open. It should not be hidden in ordinary user states.
+
+State implementations may perform domain conflict handling, but the conflict model must not remain
+private state code if MFM is expected to certify the outcome. Mutating states should declare
+resource-footprint contracts, and attempts should emit actual footprint evidence such as resource
+keys, operation ids, touched sets, predicate snapshots, finality evidence, or replay-verifiable
+domain verifier evidence. Otherwise the run can still be durable and remediated, but its terminal
+claim must be manual or "failed without AC/DC claim", not platform-certified concurrency
+correctness.
 
 ## Reusable Foundations Vs New Authority
 
 | Area | Reusable foundation | New authority required |
 | --- | --- | --- |
-| Spec/certification | Certified typed spec, descriptor identities, side-effect contract digest checks, framework lifecycle nodes. | Failure directives, remediation contract specs, correctness classes, irreversible boundaries, manual-resolution metadata. |
-| Events | Append-only event model, side-effect ledger payload pattern, redaction-safe errors, artifact evidence refs. | Compensation/backout/manual-resolution event payloads and terminal run outcomes. |
-| Store | Atomic prepared commits, logical keys, preconditions, rebuildable projections, forward side-effect phase rules. | Remediation projections, run remediation state, preconditions for compensation once-and-only-once and terminal resolution. |
-| Runtime | Verified history, deterministic scheduler, guarded commit planner, conservative ambiguity blocking. | Failure-mode transition, compensation frontier derivation, reverse dependency ordering, alternate-path/manual-resolution scheduling. |
-| Replay | Evidence-only broker and forward side-effect verifier contract. | Compensation evidence indexes and verifier contracts; replay-visible correctness assertions. |
+| Spec/certification | Certified typed spec, descriptor identities, side-effect contract digest checks, framework lifecycle nodes. | Failure directives, remediation contract specs, resource-footprint contracts, correctness classes, irreversible boundaries, manual-resolution metadata. |
+| Events | Append-only event model, side-effect ledger payload pattern, redaction-safe errors, artifact evidence refs. | Compensation/backout/manual-resolution event payloads, actual footprint evidence, and terminal run outcomes. |
+| Store | Atomic prepared commits, logical keys, preconditions, rebuildable projections, forward side-effect phase rules. | Remediation projections, run remediation state, resource-conflict indexes, preconditions for compensation once-and-only-once and terminal resolution. |
+| Runtime | Verified history, deterministic scheduler, guarded commit planner, conservative ambiguity blocking. | Failure-mode transition, compensation frontier derivation, reverse dependency ordering, resource-aware sequencing, alternate-path/manual-resolution scheduling. |
+| Replay | Evidence-only broker and forward side-effect verifier contract. | Compensation evidence indexes, footprint evidence indexes, verifier contracts, and replay-visible correctness assertions. |
 | App/storage | Certified bundle verification, start/resume/replay/render assembly, durable Postgres event/projection storage. | Public status/render surfaces for unresolved, compensating, compensated, manually resolved, and irreversible-blocked states. |
 | States/adapters/transports | State-owned intent, adapter evidence phases, reusable transports, secret boundaries. | Domain-declared compensation intent and correctness evidence without moving live IO or topology into the wrong layer. |
 
 ## Concrete Correctness Problems For MFM
 
+### Resource Footprints And Parallel Runs
+
+Runs are independent MFM histories, but the external resources they affect are not automatically
+independent. Two runs can touch the same account, chain contract, inventory item, external order,
+file, or service object. If MFM wants to certify concurrent correctness, the certified spec and run
+events need enough resource evidence for runtime/store/replay to distinguish independent work from
+conflicting work.
+
+The useful lanes are:
+
+- MFM-owned resources: MFM can enforce real serialization and stronger atomicity directly.
+- typed external resources with evidence: MFM can sequence by resource keys and certify saga
+  remediation from recorded operation ids, touched sets, finality evidence, and verifier evidence.
+- opaque external resources: MFM can run and resume durably, but terminal correctness is manual or
+  domain-asserted rather than platform-proven.
+
+State code may compute resource keys and perform domain conflict handling, but those decisions must
+be surfaced as certified specs and append-only evidence if they are part of a correctness claim.
+
 ### External Services
 
 MFM's current side-effect protocol handles uncertainty in the forward direction with idempotency
 input, submission unknown, not-submitted proof, ambiguity, receipt, and confirmation evidence.
-For AC/DC, an external service call also needs a declared remediation path: cancel, refund, release,
-reverse transfer, manual resolution, or irreversible boundary.
+For certified saga remediation, an external service call also needs a declared remediation path:
+cancel, refund, release, reverse transfer, manual resolution, or irreversible boundary.
 
 If the service cannot prove whether the original request happened, the run must not be marked
-compensated unless typed evidence or manual authority resolves the ambiguity.
+compensated unless typed evidence or manual authority resolves the ambiguity. If the service cannot
+provide replay-verifiable resource/touched-set evidence, MFM can still offer certified saga
+bookkeeping, but not a platform-certified concurrency-correctness claim.
 
 ### On-Chain Effects
 
 EVM contract lifecycle states record transaction intents, submissions, receipts, confirmation
 values, block numbers, and receipt status. That is not the same as a finality or reorg policy.
 
-For AC/DC, MFM needs to know whether an on-chain effect is:
+For certified saga remediation and any scoped AC/DC-style claim, MFM needs to know whether an
+on-chain effect is:
 
 - not submitted and safe to retry;
 - submitted but not confirmed;
@@ -287,7 +332,7 @@ like it never happened.
 
 ## Architecture Constraints
 
-Any AC/DC design must preserve the MFM boundary contract:
+Any certified saga or scoped AC/DC-style design must preserve the MFM boundary contract:
 
 - operations plan topology and directives, but do not execute remediation;
 - states declare forward and remediation semantics, but do not create live IO;
@@ -305,7 +350,7 @@ must mean appending certified remediation evidence and terminal resolution evide
 
 ## Success Criteria For Claiming Progress
 
-MFM can start claiming AC/DC progress only when these are true:
+MFM can start claiming certified saga progress only when these are true:
 
 - certification rejects side-effecting workflows that omit required failure/remediation semantics;
 - later failure after confirmed side effects enters durable remediation or manual-resolution mode;
@@ -315,29 +360,46 @@ MFM can start claiming AC/DC progress only when these are true:
 - public status distinguishes unresolved failure, ambiguous side effect, compensating,
   compensated, irreversible blocked, manually resolved, and successful completion;
 - replay verifies remediation evidence without live capabilities;
+- mutating states can declare resource-footprint contracts and record actual footprint evidence;
 - tests cover failure after one confirmed side effect, failure after multiple confirmed side
   effects, reverse-order compensation, compensation crash-resume, ambiguous compensation, manual
-  resolution, irreversible-boundary rejection or blocking, and at least one phantom-prone case.
+  resolution, irreversible-boundary rejection or blocking, resource-conflict sequencing, and at
+  least one phantom-prone case.
 
-## Open Questions
+MFM can claim stronger Stonebraker-style AC/DC only for the subset of workflows whose resource
+ownership or replay-verifiable proof contracts establish atomicity and concurrency correctness.
 
-- Should failure directives live directly in `TypedExecutionSpec` nodes, in framework lifecycle
-  metadata, or in a separate certified remediation spec section?
+## Working Assumptions
+
+- MFM is saga-only for external side effects. Physical backout is not the general model.
+- MFM can provide stronger atomicity for MFM-owned transactional resources.
+- External-system correctness comes from certified state contracts plus append-only evidence:
+  resource keys, operation ids, touched sets, finality evidence, adapter evidence, and replay
+  verifier evidence.
+- State implementations may own domain conflict logic, but correctness-relevant decisions must be
+  declared in certified policy and emitted as typed evidence.
+- Manual resolution is a typed terminal path with operator authority and reason evidence, not an
+  unstructured note.
+- Certified continuations should be modeled as child runs whose terminal outcome can resolve a
+  parent obligation through explicit parent/child events.
+- On-chain finality and reorg handling can live in states, adapters, and certified remediation
+  policies, as long as replay can verify the recorded evidence without live IO.
+
+## Remaining Open Questions
+
+- Should failure directives and resource-footprint policies live directly in `TypedExecutionSpec`
+  nodes, in framework lifecycle metadata, or in a separate certified remediation/resource spec
+  section?
 - Should compensation be encoded as an extension of `SideEffectState`, a sibling effect class, or a
   framework-owned remedial side-effect protocol shared by both?
-- When is a certified continuation run the right remediation unit, and how does it become terminal
-  authority for the parent run?
 - What is the minimal compensation event vocabulary that avoids duplicating the whole forward
   side-effect event model while preserving once-and-only-once evidence?
-- Which correctness classes can the kernel name generically without depending on domain semantics?
+- Which resource footprint and commutativity classes can the kernel enforce generically without
+  depending on domain semantics?
 - What assertion format is acceptable when correctness depends on domain facts that the framework
-  cannot prove?
-- How should MFM model physical backout for narrow database-local cases without making it the
-  default for external-service and on-chain workflows?
+  cannot prove, and when must that degrade to manual resolution?
 - How should public API compatibility be handled when adding durable run phases beyond
   absent/started/completed?
-- How should on-chain finality depth, reorg evidence, and irreversible business boundaries be
-  represented without putting protocol policy in the wrong layer?
 
 ## Immediate Discussion Target
 
@@ -352,6 +414,6 @@ The next design discussion should define the smallest certified vertical slice:
 6. Public status vocabulary for unresolved, compensating, compensated, manually resolved, and
    irreversible-blocked runs.
 
-The goal is not to design every AC/DC feature at once. The immediate problem is to extend MFM's
-typed durable execution core from "we can resume the forward workflow safely" to "we can finish,
-compensate, or durably escalate the whole workflow with explicit correctness semantics."
+The goal is not to design every AC/DC-inspired feature at once. The immediate problem is to extend
+MFM's typed durable execution core from "we can resume the forward workflow safely" to "we can
+finish, compensate, or durably escalate the whole workflow with explicit certified saga semantics."

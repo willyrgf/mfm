@@ -1,4 +1,4 @@
-# DESIGN: AC/DC remediation policy for MFM
+# DESIGN: certified saga remediation policy for MFM
 
 Status: draft design note for review and iteration.
 
@@ -7,20 +7,29 @@ Companion problem statement: `PROBLEM_ACDC.md`.
 ## Purpose
 
 `PROBLEM_ACDC.md` argues that MFM already has durable forward execution foundations, but cannot
-claim AC/DC workflow semantics until failure directives, compensation/backout, manual resolution,
-and concurrency correctness become certified typed execution semantics.
+claim AC/DC workflow semantics for arbitrary external systems. The realistic target is certified
+saga semantics for external effects: failure directives, compensation, manual resolution, resource
+footprints, and concurrency evidence become certified typed execution semantics.
+
+MFM can make stronger AC/DC-style claims only where it owns the affected transactional resource or
+where the certified run records enough replay-verifiable evidence to prove the required
+correctness properties. This design keeps the AC/DC pressure, but it does not pretend that durable
+bookkeeping makes external systems atomic.
 
 This document proposes the smallest architecture shape that moves MFM in that direction without
 blowing up public API or LOC:
 
 - keep `EffectClass` as the coarse authority boundary;
 - add a certified run-level `RemediationPolicy`;
+- add certified resource-footprint contracts for mutating work;
 - reuse the existing side-effect ledger protocol for remedial mutations where possible;
 - make runtime/store own all durable failure, remediation, and terminal mode transitions.
 
 ## Core Position
 
-AC/DC is a property of a certified run, not a property of an individual state type.
+Certified saga correctness is a property of a certified run, not a property of an individual state
+type. Stronger AC/DC-style correctness is a scoped property of a certified run plus the resources
+and proof contracts it controls or verifies.
 
 State types should declare what they can do and what evidence shapes they produce. A certified run
 should declare what failure policy applies to a specific graph, node, side-effect obligation, or
@@ -31,24 +40,25 @@ The important split is:
 | Layer | Owns |
 | --- | --- |
 | `EffectClass` | What kind of authority a state may exercise. |
-| State contracts | Typed intent, input, output, and evidence shapes. |
-| Certified run policy | What should happen when failure or rollback evidence appears. |
+| State contracts | Typed intent, input, output, resource footprint, and evidence shapes. |
+| Certified run policy | What should happen when failure, conflict, finality, or rollback evidence appears. |
 | Runtime | Deterministic mode transitions, frontier selection, and guarded commits. |
-| Store | Append-only event admission, logical keys, projections, and preconditions. |
-| Replay | Evidence-only verification of forward and remedial history. |
+| Store | Append-only event admission, logical keys, resource indexes, projections, and preconditions. |
+| Replay | Evidence-only verification of forward, remedial, and resource-footprint history. |
 
 Runtime/store already need to persist all semantic transitions through append-only typed events.
-That should remain the durability foundation for AC/DC. `ManagedPlatformWrite` should not become
-the mechanism that makes every state durable. It should remain the effect class for explicitly
-managed platform writes, such as public output, retention, artifacts, or redacted diagnostics.
+That should remain the durability foundation for certified saga remediation and any scoped
+AC/DC-style claim. `ManagedPlatformWrite` should not become the mechanism that makes every state
+durable. It should remain the effect class for explicitly managed platform writes, such as public
+output, retention, artifacts, or redacted diagnostics.
 
 ## Design Principles
 
 1. Policy is certified data, not app glue.
 
-   Remediation policy must be included in the certified execution spec or in certified spec-bound
-   companion data. A dynamic callback, closure, CLI flag, or app-level handler cannot be semantic
-   authority for resume or replay.
+   Remediation and resource policy must be included in the certified execution spec or in certified
+   spec-bound companion data. A dynamic callback, closure, CLI flag, or app-level handler cannot be
+   semantic authority for resume or replay.
 
 2. Policies are run-level, not state-local.
 
@@ -73,7 +83,13 @@ managed platform writes, such as public output, retention, artifacts, or redacte
    idempotency input, durable claim/fencing, invocation boundary, receipt or confirmation evidence,
    ambiguity handling, and replay verification.
 
-6. Replay remains evidence-only.
+6. Resource conflicts are certified evidence, not hidden state behavior.
+
+   State code may compute domain resource keys and perform domain conflict handling, but any
+   correctness-relevant resource key, operation id, touched set, predicate snapshot, finality proof,
+   or commutativity claim must be declared in certified policy and emitted as typed evidence.
+
+7. Replay remains evidence-only.
 
    Replay must not call live transports to decide whether a workflow was compensated, manually
    resolved, or safe to retry.
@@ -106,6 +122,7 @@ pub struct RemediationPolicySpec {
     pub default_failure: FailureDirectiveSpec,
     pub node_overrides: BTreeMap<NodeId, FailureDirectiveSpec>,
     pub obligations: BTreeMap<RemediationObligationId, RemediationObligationSpec>,
+    pub resources: BTreeMap<NodeId, ResourceFootprintSpec>,
     pub triggers: Vec<RemediationTriggerSpec>,
     pub correctness: CorrectnessPolicySpec,
 }
@@ -146,7 +163,7 @@ pub enum FailureDirectiveSpec {
     ManualResolution {
         reason_code: ManualResolutionReason,
     },
-    TerminalFailure,
+    FailWithoutAcdcClaim,
 }
 ```
 
@@ -160,8 +177,8 @@ Notes:
   certified planning boundary, continuation run, or run epoch with explicit fresh-read policy.
 - `StartCertifiedContinuation` is the clean path when runtime data must select new topology.
 - `ManualResolution` is a durable run mode with typed operator evidence, not an out-of-band note.
-- `TerminalFailure` is allowed only when the certified policy says the workflow may fail without an
-  AC/DC compensation claim.
+- `FailWithoutAcdcClaim` is allowed only when the certified policy says the workflow may fail
+  without a compensation or AC/DC-equivalence claim.
 
 ### Remediation obligations
 
@@ -180,13 +197,18 @@ pub struct RemediationObligationSpec {
     pub remediation_node: NodeId,
     pub strategy: RemediationStrategySpec,
     pub correctness: CorrectnessClaimSpec,
+    pub required_forward_footprint: ResourceFootprintRequirementSpec,
     pub ambiguity_directive: FailureDirectiveSpec,
 }
 ```
 
-This avoids adding a new `ApplyCompensation` effect class initially. If later experience shows that
-separating forward mutation from remedial mutation buys real clarity, `ApplyCompensation` can be
-added as a specialization. It should not be the starting point.
+This avoids adding a new `ApplyCompensation` effect class initially. If the existing ledger is reused,
+the ledger must carry a first-class purpose such as `Forward` or `Remediation`, the obligation id it
+resolves, and the forward ledger it is linked to. Without those fields, a dormant remediation node is
+only an ordinary side-effect state with special scheduling, not certified saga semantics.
+
+If later experience shows that separating forward mutation from remedial mutation buys real clarity,
+`ApplyCompensation` can be added as a specialization. It should not be the starting point.
 
 ### Triggers
 
@@ -215,10 +237,50 @@ Runtime may act on a trigger only when the recorded evidence matches the certifi
 older node or ledger is not retried because a later state asked for it. It is retried, compensated,
 or escalated because certified policy plus append-only evidence require that transition.
 
+### Resource footprints and parallel runs
+
+Runs have independent append-only histories, but the resources they mutate may overlap. MFM should
+make that overlap explicit instead of relying on private state implementation behavior.
+
+Sketch:
+
+```rust
+pub struct ResourceFootprintSpec {
+    pub namespace: ResourceNamespace,
+    pub declared_keys: ResourceKeySpec,
+    pub operation_kind: ResourceOperationKind,
+    pub concurrency: ResourceConcurrencySpec,
+    pub actual_evidence_schema: SchemaId,
+}
+
+pub enum ResourceConcurrencySpec {
+    Exclusive,
+    Commutative,
+    EscrowBounded,
+    PredicateSnapshotRequired,
+    ManualOnly,
+    UnsequencedExternal,
+}
+```
+
+Runtime/store can conservatively sequence `Exclusive` declared keys when they are known before a
+mutation. When the exact touched set is only known after execution, the attempt must emit typed
+footprint evidence. Replay verifies that evidence against the certified footprint contract. If a
+state cannot declare or prove enough footprint information, the workflow can still run durably, but
+MFM should not mark the terminal outcome as platform-certified concurrent correctness.
+
+The useful lanes are:
+
+- MFM-owned resources: runtime/store can enforce stronger serialization and atomicity.
+- typed external resources with evidence: MFM can provide certified saga correctness and scoped
+  AC/DC-style claims when replay-verifiable proof is sufficient.
+- opaque external resources: MFM can provide durable execution, compensation attempts, and manual
+  resolution, but not platform-proven concurrency correctness.
+
 ## Runtime Modes
 
-The current "blocked" scheduler result is not enough for AC/DC. Run status needs durable semantic
-phases derived from the stream.
+The current "blocked" scheduler result is not enough for certified saga remediation or scoped
+AC/DC-style claims. Run status needs durable semantic phases derived from the stream.
 
 Proposed mode vocabulary:
 
@@ -230,29 +292,36 @@ Proposed mode vocabulary:
 | `Replanning` | The run has reached a certified planning boundary for fresh reads or continuation. |
 | `ManualBlocked` | Runtime requires typed operator evidence before it can continue or terminate. |
 | `Completed` | Forward workflow reached successful certified output. |
-| `Compensated` | Required remediation obligations completed with certified evidence. |
+| `Compensated` | Required saga remediation obligations completed with certified evidence. This is not automatically an AC/DC-equivalent outcome unless the correctness proof contract says so. |
 | `ManuallyResolved` | Operator evidence completed the certified manual path. |
 | `IrreversibleBlocked` | Failure crossed a certified irreversible boundary and cannot claim compensation. |
-| `Failed` | Terminal failure allowed by certified policy. |
+| `FailedWithoutAcdcClaim` | Terminal failure allowed by certified policy without compensation or AC/DC-equivalence claim. |
 
 These should be stream-derived run projections, not app-layer status strings.
 
 ## Store And Event Shape
 
 The store should continue to own event envelopes, sequence numbers, logical keys, preconditions, and
-projections. AC/DC adds new event families, but should avoid duplicating the entire side-effect
-protocol if possible.
+projections. Saga remediation adds new event families, but should avoid duplicating the entire
+side-effect protocol if possible.
 
 Preferred direction:
 
 1. Generalize side-effect ledger purpose.
 
    Existing side-effect ledger phases can apply to both forward and remedial mutations if the ledger
-   carries a purpose such as `Forward` or `Remediation`.
+   carries a purpose such as `Forward` or `Remediation`, plus obligation linkage for remedial
+   mutations.
 
 2. Add remediation-control events.
 
    These describe mode transitions and obligations, not protocol-level submission/receipt phases.
+
+3. Add resource-footprint evidence events or fields.
+
+   These record declared and actual resource keys, operation ids, touched sets, predicate snapshots,
+   finality evidence references, and verifier ids when those are part of the certified correctness
+   claim.
 
 Minimal event families:
 
@@ -265,6 +334,7 @@ RemediationObligationFailed
 RemediationObligationAmbiguous
 ManualResolutionRequested
 ManualResolutionRecorded
+ResourceFootprintRecorded
 RunTerminalResolved
 ```
 
@@ -273,15 +343,19 @@ store-validated, projected, and replay-verifiable.
 
 ## Certification Rules
 
-Certification should reject side-effecting workflows that leave AC/DC behavior ambiguous.
+Certification should reject side-effecting workflows that leave failure, remediation, or claimed
+AC/DC-equivalence behavior ambiguous.
 
 Initial rules:
 
 - every `ApplySideEffect` reachable before successful terminal output must have a policy-covered
   failure path;
+- every mutating node must declare a resource footprint class, even if the class is
+  `UnsequencedExternal` or `ManualOnly`;
 - every `CompensateCompleted` directive must point to certified remediation obligations;
 - every remediation node must itself be side-effect-grade or manual-only;
-- every remediation obligation must carry a correctness claim;
+- every remediation obligation must carry a correctness proof contract or explicitly degrade to
+  manual/fail-without-claim;
 - irreversible nodes must either appear after all fallible compensatable work, split the workflow at
   a continuation boundary, or declare a manual/irreversible terminal path;
 - continuation/replan directives must identify where fresh facts are allowed and which old facts are
@@ -302,13 +376,18 @@ Potential classes:
 | `EscrowBounded` | Domain proves a bounded resource invariant rather than restoring old values. |
 | `PredicateSnapshot` | Forward evidence recorded the predicate/object set needed to avoid phantoms. |
 | `IsolationProof` | Domain evidence proves no conflicting concurrent workflow affects the obligation. |
-| `DomainAssertion` | Certified domain verifier asserts correctness from typed evidence. |
+| `DomainVerifier` | A certified replay verifier checks domain-specific correctness from typed evidence. |
 | `ManualOnly` | The platform cannot prove correctness and requires operator authority. |
 | `Irreversible` | No compensation claim is allowed after this boundary. |
 
 If runtime/replay cannot verify a declared correctness claim, the run must not be marked
-`Compensated`. It should block for manual resolution or terminal failure according to certified
-policy.
+`Compensated` with an AC/DC-equivalence claim. It should block for manual resolution or fail without
+an AC/DC claim according to certified policy.
+
+Opaque assertions are not enough for platform-certified correctness. A domain-specific proof is
+acceptable only when certification names the verifier, the verifier inputs are typed evidence, and
+replay can run the verifier without live IO. Otherwise the policy should use `ManualOnly` or
+`FailWithoutAcdcClaim`.
 
 ## Reads And Replanning
 
@@ -329,7 +408,7 @@ facts.
 
 On-chain confirmation evidence is not automatically an AC/DC finality claim.
 
-The run policy must distinguish:
+The run policy and state evidence must distinguish:
 
 - not submitted and safe to retry;
 - submitted but not confirmed;
@@ -339,13 +418,16 @@ The run policy must distinguish:
 
 Reorg or rollback evidence should be modeled as a certified trigger that opens recovery,
 compensation, replan, or manual resolution. It should not mutate historical confirmation events.
+Adapters may collect the evidence, but the certified policy and replay-visible evidence determine
+what terminal claim the run may make.
 
 ## Public API Minimization
 
 The public API should grow in two places only:
 
-1. Planning/certification builders get a run-level remediation policy surface.
-2. Inspection/status surfaces expose durable remediation modes and obligations.
+1. Planning/certification builders get a run-level remediation and resource policy surface.
+2. Inspection/status surfaces expose durable remediation modes, obligations, and relevant resource
+   conflicts.
 
 Avoid initially:
 
@@ -362,21 +444,26 @@ new work stays in spec, certification, runtime, store, replay, and docs.
 
 The first implementation target should be deliberately narrow:
 
-1. Add certified `RemediationPolicySpec` with `TerminalFailure`, `ManualResolution`, and
+1. Add certified `RemediationPolicySpec` with `FailWithoutAcdcClaim`, `ManualResolution`, and
    `CompensateCompleted` directives.
-2. Let a forward `ApplySideEffect` node link to one dormant remediation `ApplySideEffect` node.
-3. Add durable run modes for `Forward`, `Remediating`, `ManualBlocked`, `Compensated`, and `Failed`.
+2. Let a forward `ApplySideEffect` node link to one dormant remediation `ApplySideEffect` node,
+   using a first-class remediation ledger purpose and obligation id.
+3. Add durable run modes for `Forward`, `Remediating`, `ManualBlocked`, `Compensated`, and
+   `FailedWithoutAcdcClaim`.
 4. Add append-only obligation open/completed/failed/manual events and projections.
 5. Runtime enters `Remediating` after non-retryable failure following at least one confirmed
    side-effect obligation.
 6. Runtime schedules linked remediation nodes in reverse dependency order.
 7. Replay indexes and verifies remediation events without live transports.
 8. Public status reports unresolved obligations.
-9. Tests cover one confirmed side effect followed by later failure, compensation crash-resume,
-   manual resolution, and replay of compensated evidence.
+9. Add a minimal resource footprint contract with `ExactTouchedSet` and `ManualOnly`.
+10. Tests cover one confirmed side effect followed by later failure, compensation crash-resume,
+    manual resolution, replay of compensated evidence, one resource-conflict sequencing case, and
+    one phantom-prone touched-set case.
 
-This would not be the full AC/DC story, but it would cross the architectural boundary from durable
-forward execution to durable platform-owned remediation.
+This would not be the full AC/DC story. It would cross the architectural boundary from durable
+forward execution to durable platform-owned saga remediation, with scoped stronger claims only for
+the tested proof classes.
 
 ## Open Review Questions
 
@@ -388,8 +475,8 @@ forward execution to durable platform-owned remediation.
   validation harder to reason about?
 - What is the smallest manual-resolution evidence shape that is useful without becoming a generic
   escape hatch?
-- Which correctness classes should be framework-verifiable in v1, and which should be certified
-  domain assertions?
+- Which correctness classes and resource footprint classes should be framework-verifiable in v1,
+  and which should require certified domain verifiers or manual resolution?
 - How should a parent run link to continuation runs so the parent can reach a durable terminal
   outcome?
 - Should irreversible boundaries be certified as node metadata, policy metadata, or both?
