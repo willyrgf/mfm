@@ -368,8 +368,11 @@ pub async fn typed_certified_slice_coverage() -> Result<TypedCertifiedSliceCover
     let side_effect_logical_key_conflicts_rejected = duplicate_submit_rejected(&mut run)?;
     let replay_live_cap_requests_count = replay_without_live_capabilities(&run)?;
     let resume_drift_rejected = resume_drift_is_rejected().await?;
-    if !side_effect_ambiguity_blocks_completion().await? {
-        return Err("typed-certified-slice ambiguity fixture did not block completion".to_owned());
+    if !side_effect_ambiguity_degrades_without_public_output().await? {
+        return Err(
+            "typed-certified-slice ambiguity fixture did not degrade without public output"
+                .to_owned(),
+        );
     }
     let side_effect_failed_semantics_covered = side_effect_failure_semantics_are_covered().await?;
     let incomplete_retention_rejected = incomplete_retention_projection_is_rejected().await?;
@@ -1420,7 +1423,7 @@ async fn side_effect_failure_semantics_are_covered() -> Result<bool, String> {
     ))
 }
 
-async fn side_effect_ambiguity_blocks_completion() -> Result<bool, String> {
+async fn side_effect_ambiguity_degrades_without_public_output() -> Result<bool, String> {
     let fixture = reference_fixture()?;
     let registry = reference_registry_with_side_effect(
         &fixture,
@@ -1438,8 +1441,7 @@ async fn side_effect_ambiguity_blocks_completion() -> Result<bool, String> {
             .map_err(display_error)?
         {
             SchedulerStatus::Advanced => {}
-            SchedulerStatus::PublicOutputProjected => return Ok(false),
-            SchedulerStatus::Blocked => {
+            SchedulerStatus::PublicOutputProjected => {
                 let stream = store.load_run_stream(&fixture.run_id);
                 let ambiguous = stream.iter().any(|event| {
                     matches!(
@@ -1447,19 +1449,28 @@ async fn side_effect_ambiguity_blocks_completion() -> Result<bool, String> {
                         events::KernelEventPayload::SideEffectAmbiguous(_)
                     )
                 });
-                let completed = stream.iter().any(|event| {
+                let failed_without_claim = stream.iter().any(|event| {
                     matches!(
                         event.payload(),
-                        events::KernelEventPayload::RunCompleted(_)
-                            | events::KernelEventPayload::PublicOutputProduced(_)
+                        events::KernelEventPayload::RunCompleted(events::RunCompleted {
+                            outcome: events::RunCompletionOutcome::FailedWithoutAcdcClaim,
+                            ..
+                        })
                     )
                 });
-                return Ok(ambiguous && !completed);
+                let public_output = stream.iter().any(|event| {
+                    matches!(
+                        event.payload(),
+                        events::KernelEventPayload::PublicOutputProduced(_)
+                    )
+                });
+                return Ok(ambiguous && failed_without_claim && !public_output);
             }
+            SchedulerStatus::Blocked => return Ok(false),
         }
     }
 
-    Err("ambiguous side-effect fixture did not reach a blocked scheduler state".to_owned())
+    Err("ambiguous side-effect fixture did not reach a terminal scheduler state".to_owned())
 }
 
 struct FailingSideEffectRunner {

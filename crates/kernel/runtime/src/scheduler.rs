@@ -245,6 +245,7 @@ impl SerialTypedScheduler {
             Some(
                 spec::FrameworkNodeSpec::ProjectRetentionManifest(_)
                     | spec::FrameworkNodeSpec::CompleteRun(_)
+                    | spec::FrameworkNodeSpec::ResolveSagaTerminal(_)
             )
         ) {
             self.run_started_framework_node_attempt(
@@ -402,6 +403,7 @@ impl SerialTypedScheduler {
             Some(
                 spec::FrameworkNodeSpec::ProjectRetentionManifest(_)
                     | spec::FrameworkNodeSpec::CompleteRun(_)
+                    | spec::FrameworkNodeSpec::ResolveSagaTerminal(_)
             )
         ) {
             self.run_started_framework_node_attempt_async(

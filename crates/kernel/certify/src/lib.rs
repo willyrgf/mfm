@@ -1474,7 +1474,7 @@ impl<'a> DraftLowerer<'a> {
         let retention_receipt_cell =
             self.lower_project_retention_manifest_node(&public_outputs, render_receipt_cell)?;
         self.lower_complete_run_node(&public_outputs, retention_receipt_cell.clone())?;
-        self.lower_resolve_saga_terminal_node(&public_outputs, retention_receipt_cell)?;
+        self.lower_resolve_saga_terminal_node(&public_outputs)?;
         Ok(public_outputs)
     }
 
@@ -1824,12 +1824,10 @@ impl<'a> DraftLowerer<'a> {
     fn lower_resolve_saga_terminal_node(
         &mut self,
         public_outputs: &spec::PublicOutputSpec,
-        retention_manifest_receipt_cell: CellId,
     ) -> Result<CellId> {
         let stable_key = stable_author_key("framework/resolve-saga-terminal")?;
         let resolve = spec::ResolveSagaTerminalNodeSpec {
             public_schema_id: public_outputs.public_schema_id.clone(),
-            retention_manifest_receipt_cell: retention_manifest_receipt_cell.clone(),
         };
         let node_id = resolve_saga_terminal_node_id_from_spec(
             self.draft.root_scope_id(),
@@ -1849,25 +1847,8 @@ impl<'a> DraftLowerer<'a> {
         let planning_lineage = final_planning_lineage(self.draft.operation_lineage())?;
         let config_ref = framework_config_ref("resolve_saga_terminal", &node_id)?;
         let config_ref_digest = config_ref_digest(&config_ref)?;
-        let input_cell = self
-            .cells
-            .iter()
-            .find(|cell| cell.cell_id == retention_manifest_receipt_cell)
-            .cloned()
-            .ok_or_else(|| {
-                problem(
-                    ProblemClass::InvalidTopology,
-                    format!(
-                        "resolve-saga-terminal lifecycle node input cell {retention_manifest_receipt_cell} is missing"
-                    ),
-                )
-            })?;
-        let input_binding = spec::framework_lifecycle_receipt_input_binding(
-            "resolve_saga_terminal",
-            "retention_manifest_receipt",
-            &input_cell,
-        )
-        .map_err(|error| CertifyError::Spec(error.to_string()))?;
+        let input_binding = spec::framework_lifecycle_unit_input_binding("resolve_saga_terminal")
+            .map_err(|error| CertifyError::Spec(error.to_string()))?;
         let descriptor = framework_resolve_saga_terminal_descriptor(
             &receipt_schema_id,
             &semantic_type_id,
@@ -1877,7 +1858,7 @@ impl<'a> DraftLowerer<'a> {
         let lineage_ref = render_value_lineage_ref(
             self.draft.root_scope_id(),
             &node_id,
-            std::slice::from_ref(&retention_manifest_receipt_cell),
+            &[],
             &planning_lineage,
             &config_ref_digest,
         )?;
@@ -1889,7 +1870,7 @@ impl<'a> DraftLowerer<'a> {
             lineage_ref: lineage_ref.clone(),
             scope_id: self.draft.root_scope_id().clone(),
             producer: spec::CellProducer::Node(node_id.clone()),
-            input_cells: vec![retention_manifest_receipt_cell.clone()],
+            input_cells: Vec::new(),
             config_ref_digest: Some(config_ref_digest),
             planning_lineage: planning_lineage.clone(),
             domain_keys: Vec::new(),
@@ -1922,8 +1903,7 @@ impl<'a> DraftLowerer<'a> {
             side_effect: None,
             framework: Some(spec::FrameworkNodeSpec::ResolveSagaTerminal(resolve)),
             planning_lineage,
-            deterministic_predecessors: self
-                .predecessors_for_inputs(std::slice::from_ref(&retention_manifest_receipt_cell))?,
+            deterministic_predecessors: Vec::new(),
         });
         Ok(output_cell)
     }
@@ -3683,16 +3663,12 @@ fn validate_framework_nodes(
                     node,
                     &all_input_cells,
                     &nodes_by_id,
-                    "complete-run or resolve-saga-terminal lifecycle node",
+                    "complete-run lifecycle node",
                     |consumer| {
                         matches!(
                             &consumer.framework,
                             Some(spec::FrameworkNodeSpec::CompleteRun(complete))
                                 if complete.retention_manifest_receipt_cell == node.output_cell
-                        ) || matches!(
-                            &consumer.framework,
-                            Some(spec::FrameworkNodeSpec::ResolveSagaTerminal(resolve))
-                                if resolve.retention_manifest_receipt_cell == node.output_cell
                         )
                     },
                 )?;
@@ -3795,50 +3771,17 @@ fn validate_framework_nodes(
                         .map_err(|error| CertifyError::Spec(error.to_string()))?,
                     spec::StoragePolicy::ContentAddressed,
                 )?;
-                let retention_manifest_receipt_cell = cells
-                    .get(resolve.retention_manifest_receipt_cell.as_str())
-                    .ok_or_else(|| {
-                        problem(
-                            ProblemClass::InvalidTopology,
-                            format!(
-                                "resolve-saga-terminal lifecycle node {} missing retention receipt cell",
-                                node.node_id
-                            ),
-                        )
-                    })?;
                 validate_framework_input_binding(
                     node,
-                    &spec::framework_lifecycle_receipt_input_binding(
-                        "resolve_saga_terminal",
-                        "retention_manifest_receipt",
-                        retention_manifest_receipt_cell,
-                    )
-                    .map_err(|error| CertifyError::Spec(error.to_string()))?,
+                    &spec::framework_lifecycle_unit_input_binding("resolve_saga_terminal")
+                        .map_err(|error| CertifyError::Spec(error.to_string()))?,
                 )?;
                 let input_cells = validate_input_binding(&node.input_bindings, cells)?;
-                if input_cells != vec![resolve.retention_manifest_receipt_cell.clone()] {
+                if !input_cells.is_empty() || !node.deterministic_predecessors.is_empty() {
                     return Err(problem(
                         ProblemClass::InvalidTopology,
                         format!(
-                            "resolve-saga-terminal lifecycle node {} must depend on the retention receipt cell",
-                            node.node_id
-                        ),
-                    ));
-                }
-                let retention_node = lifecycle_outputs
-                    .get(&resolve.retention_manifest_receipt_cell)
-                    .filter(|candidate| {
-                        matches!(
-                            &candidate.framework,
-                            Some(spec::FrameworkNodeSpec::ProjectRetentionManifest(retention))
-                                if retention.public_schema_id == resolve.public_schema_id
-                        )
-                    });
-                if retention_node.is_none() {
-                    return Err(problem(
-                        ProblemClass::InvalidTopology,
-                        format!(
-                            "resolve-saga-terminal lifecycle node {} is not ordered after retention projection",
+                            "resolve-saga-terminal lifecycle node {} must not have inputs",
                             node.node_id
                         ),
                     ));
@@ -4190,8 +4133,8 @@ fn expected_node_lineage(
             config_ref_digest: Some(config_ref_digest.clone()),
             transform_policy: spec::LineageTransformPolicy::StateOutput,
         }),
-        Some(spec::FrameworkNodeSpec::ResolveSagaTerminal(resolve)) => Ok(ExpectedNodeLineage {
-            input_cells: vec![resolve.retention_manifest_receipt_cell.clone()],
+        Some(spec::FrameworkNodeSpec::ResolveSagaTerminal(_)) => Ok(ExpectedNodeLineage {
+            input_cells: Vec::new(),
             config_ref_digest: Some(config_ref_digest.clone()),
             transform_policy: spec::LineageTransformPolicy::StateOutput,
         }),
@@ -5615,7 +5558,6 @@ fn resolve_saga_terminal_node_id_from_spec(
             "local_node_key": key,
             "lowering_version": spec::LOWERING_VERSION,
             "public_schema_id": resolve.public_schema_id.as_str(),
-            "retention_manifest_receipt_cell": resolve.retention_manifest_receipt_cell.as_str(),
             "scope_id": scope_id.as_str(),
         }))?,
     ))
@@ -6376,7 +6318,7 @@ mod tests {
         );
         assert_eq!(
             certified.certificate_hash().as_str(),
-            "content:sha256-jcs-v1:043101cfebcc73690934c48f0a3b68c12fa4eb2b5e95d82c9ae9a5d0dfccbaa1"
+            "content:sha256-jcs-v1:c36b86e2abca672e0b08201a604ffbd6e304ef8d1d1c63420c780d5b4e8c46bf"
         );
         assert_eq!(
             certified.envelope().spec.public_outputs.public_schema_id,
@@ -6971,16 +6913,25 @@ mod tests {
             &base,
             ProblemClass::InvalidInterfaceWiring,
             |spec| {
+                let input_cell = spec.cells.first().expect("input cell").clone();
                 let node = find_lifecycle_node_mut::<spec::ResolveSagaTerminalNodeSpec>(spec);
-                let current = match &node.input_bindings.root {
-                    spec::InputBindingNodeSpec::Cell(cell) => cell.clone(),
-                    _ => panic!("expected cell input"),
-                };
                 node.input_bindings.root =
                     spec::InputBindingNodeSpec::Struct(vec![spec::NamedInputBindingSpec {
                         field_path: spec::PublicFieldPath::new("retention_manifest_receipt")
                             .expect("field path"),
-                        node: spec::InputBindingNodeSpec::Cell(current),
+                        node: spec::InputBindingNodeSpec::Cell(Box::new(
+                            spec::InputBindingCellSpec {
+                                field_path: spec::PublicFieldPath::new(
+                                    "retention_manifest_receipt",
+                                )
+                                .expect("field path"),
+                                cell_id: input_cell.cell_id,
+                                semantic_type_id: input_cell.semantic_type_id,
+                                schema_id: input_cell.schema_id,
+                                required_terminal: spec::RequiredTerminal::ProducedOnly,
+                                value_lineage: input_cell.value_lineage,
+                            },
+                        )),
                     }]);
                 node.input_bindings.digest =
                     content_digest_json(input_node_json(&node.input_bindings.root))

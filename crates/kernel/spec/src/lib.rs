@@ -237,8 +237,8 @@ pub fn resolve_saga_terminal_receipt_schema_id() -> Result<SchemaId> {
     let digest = content_digest(serde_json::json!({
         "fields": [
             "public_output_schema_id",
-            "retention_manifest_receipt_cell",
             "terminal_outcome",
+            "pre_resolution_stream_seq",
         ],
         "name": "mfm.framework.resolve_saga_terminal_receipt",
         "version": "1",
@@ -1637,15 +1637,12 @@ pub mod v1 {
     pub struct ResolveSagaTerminalNodeSpec {
         /// Public output schema whose terminal status is resolved.
         pub public_schema_id: SchemaId,
-        /// Retention-manifest projection receipt cell that orders resolution after retention.
-        pub retention_manifest_receipt_cell: CellId,
     }
 
     impl ResolveSagaTerminalNodeSpec {
         fn json(&self) -> serde_json::Value {
             serde_json::json!({
                 "public_schema_id": self.public_schema_id.as_str(),
-                "retention_manifest_receipt_cell": self.retention_manifest_receipt_cell.as_str(),
             })
         }
     }
@@ -2581,10 +2578,6 @@ pub mod v1 {
         let object = object(value, "resolve-saga-terminal node")?;
         Ok(ResolveSagaTerminalNodeSpec {
             public_schema_id: identity(required_str(object, "public_schema_id")?)?,
-            retention_manifest_receipt_cell: identity(required_str(
-                object,
-                "retention_manifest_receipt_cell",
-            )?)?,
         })
     }
 
@@ -3666,7 +3659,6 @@ pub mod v1 {
             variants.push(FrameworkNodeSpec::ResolveSagaTerminal(
                 ResolveSagaTerminalNodeSpec {
                     public_schema_id: schema("mfm.spec.test.lifecycle_resolve", 0x74),
-                    retention_manifest_receipt_cell: cell(0x75),
                 },
             ));
 

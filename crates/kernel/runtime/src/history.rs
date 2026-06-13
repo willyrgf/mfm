@@ -10,9 +10,11 @@ use crate::commit::CompleteRunCommitValidation;
 use crate::error::async_store_error;
 use crate::framework::{
     bootstrap_run_receipt_artifact, build_retention_manifest_artifact_with_producer,
-    certified_bootstrap_run_node, certified_complete_run_node, certified_retention_manifest_node,
+    certified_bootstrap_run_node, certified_complete_run_node,
+    certified_resolve_saga_terminal_node, certified_retention_manifest_node,
     complete_run_receipt_json, projected_retention_manifest, public_output_receipt_digest,
-    public_output_rendered_digest, retention_manifest_receipt_json, run_completion_evidence,
+    public_output_rendered_digest, resolve_saga_terminal_receipt_json,
+    retention_manifest_receipt_json, run_completion_evidence, saga_terminal_completion_outcome,
     GenesisContext,
 };
 use crate::side_effects::{
@@ -830,7 +832,7 @@ fn validate_historical_run_stream(
     validate_historical_bootstrap_run_batch(runtime_spec, run_id, stream)?;
     validate_historical_retention_ref_batches(runtime_spec, stream)?;
     validate_historical_retention_manifest_batches(runtime_spec, stream)?;
-    validate_historical_complete_run_tail(runtime_spec, run_id, stream)?;
+    validate_historical_terminal_tail(runtime_spec, run_id, stream)?;
     validate_atomic_side_effect_failure_pairs(runtime_spec, stream)?;
     validate_recovery_frontier(runtime_spec, projections)?;
     Ok(())
@@ -2022,14 +2024,15 @@ fn validate_retention_projection_commit_payload_set(
     }
 }
 
-fn validate_historical_complete_run_tail(
+fn validate_historical_terminal_tail(
     runtime_spec: &CertifiedRuntimeSpec,
     run_id: &RunId,
     stream: &[store::KernelEventEnvelope],
 ) -> Result<()> {
     let completion_node = certified_complete_run_node(runtime_spec)?;
+    let resolve_node = certified_resolve_saga_terminal_node(runtime_spec)?;
     let mut last_retention_commit_end = None::<usize>;
-    let mut completion_commit = None::<(usize, usize)>;
+    let mut terminal_commit = None::<(usize, usize, TerminalCommitKind)>;
     let mut index = 0;
     while index < stream.len() {
         let first = &stream[index];
@@ -2055,55 +2058,100 @@ fn validate_historical_complete_run_tail(
         let has_completion_node_payload = commit
             .iter()
             .any(|event| payload_targets_node(event.payload(), &completion_node.node_id));
-        let completion_count = commit
+        let has_resolve_node_payload = commit
             .iter()
-            .filter(|event| matches!(event.payload(), events::KernelEventPayload::RunCompleted(_)))
-            .count();
-        if has_completion_node_payload || completion_count > 0 {
-            if completion_commit.replace((index, end)).is_some() {
+            .any(|event| payload_targets_node(event.payload(), &resolve_node.node_id));
+        let run_completed_payloads = commit
+            .iter()
+            .filter_map(|event| match event.payload() {
+                events::KernelEventPayload::RunCompleted(payload) => Some(payload),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let completion_count = run_completed_payloads.len();
+        if has_completion_node_payload && has_resolve_node_payload {
+            return Err(RuntimeError::InvalidRunStream(
+                "terminal commit targets both CompleteRun and ResolveSagaTerminal".to_owned(),
+            ));
+        }
+        if has_completion_node_payload || has_resolve_node_payload || completion_count > 0 {
+            let kind = if has_resolve_node_payload
+                || run_completed_payloads
+                    .first()
+                    .map(|payload| {
+                        !matches!(payload.outcome, events::RunCompletionOutcome::Completed(_))
+                    })
+                    .unwrap_or(false)
+            {
+                TerminalCommitKind::ResolveSagaTerminal
+            } else {
+                TerminalCommitKind::CompleteRun
+            };
+            if terminal_commit.replace((index, end, kind)).is_some() {
                 return Err(RuntimeError::InvalidRunStream(
-                    "run stream contains multiple CompleteRun commits".to_owned(),
+                    "run stream contains multiple terminal lifecycle commits".to_owned(),
                 ));
             }
             if completion_count == 0 {
                 return Err(RuntimeError::InvalidRunStream(
-                    "CompleteRun commit is missing RunCompleted payload".to_owned(),
+                    "terminal lifecycle commit is missing RunCompleted payload".to_owned(),
                 ));
             }
             if completion_count != 1 {
                 return Err(RuntimeError::InvalidRunStream(
-                    "CompleteRun commit contains multiple RunCompleted payloads".to_owned(),
+                    "terminal lifecycle commit contains multiple RunCompleted payloads".to_owned(),
                 ));
             }
         }
         index = end;
     }
 
-    match (last_retention_commit_end, completion_commit) {
-        (Some(retention_end), Some((completion_start, completion_end)))
-            if retention_end == completion_start =>
+    match (last_retention_commit_end, terminal_commit) {
+        (Some(retention_end), Some((terminal_start, terminal_end, TerminalCommitKind::CompleteRun)))
+            if retention_end == terminal_start =>
         {
             validate_historical_complete_run_batch(
                 runtime_spec,
                 run_id,
-                &stream[..completion_start],
-                &stream[completion_start..completion_end],
+                &stream[..terminal_start],
+                &stream[terminal_start..terminal_end],
             )
         }
-        (Some(_), Some(_)) => Err(RuntimeError::InvalidRunStream(
-            "run stream contains events after retention manifest projection outside sealed CompleteRun commit"
-                .to_owned(),
-        )),
+        (Some(_), Some((_, _, TerminalCommitKind::CompleteRun))) => {
+            Err(RuntimeError::InvalidRunStream(
+                "run stream contains events after retention manifest projection outside sealed CompleteRun commit"
+                    .to_owned(),
+            ))
+        }
+        (retention, Some((terminal_start, terminal_end, TerminalCommitKind::ResolveSagaTerminal))) => {
+            if retention.is_some() {
+                return Err(RuntimeError::InvalidRunStream(
+                    "sealed saga terminal appeared after retention manifest projection".to_owned(),
+                ));
+            }
+            validate_historical_resolve_saga_terminal_batch(
+                runtime_spec,
+                run_id,
+                &stream[..terminal_start],
+                &stream[terminal_start..terminal_end],
+            )
+        }
         (Some(retention_end), None) if retention_end == stream.len() => Ok(()),
         (Some(_), None) => Err(RuntimeError::InvalidRunStream(
             "run stream contains events after retention manifest projection outside sealed CompleteRun commit"
                 .to_owned(),
         )),
-        (None, Some(_)) => Err(RuntimeError::InvalidRunStream(
+        (None, Some((_, _, TerminalCommitKind::CompleteRun))) => Err(RuntimeError::InvalidRunStream(
             "RunCompleted appeared before retention manifest projection".to_owned(),
         )),
         (None, None) => Ok(()),
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum TerminalCommitKind {
+    CompleteRun,
+    ResolveSagaTerminal,
 }
 
 fn payload_targets_node(payload: &events::KernelEventPayload, node_id: &NodeId) -> bool {
@@ -2218,6 +2266,173 @@ fn validate_historical_complete_run_batch(
             expected_receipt_ref: &expected_receipt_ref,
         },
     )
+}
+
+fn validate_historical_resolve_saga_terminal_batch(
+    runtime_spec: &CertifiedRuntimeSpec,
+    run_id: &RunId,
+    pre_resolution_stream: &[store::KernelEventEnvelope],
+    commit: &[store::KernelEventEnvelope],
+) -> Result<()> {
+    let completion_payload = commit
+        .iter()
+        .find_map(|event| match event.payload() {
+            events::KernelEventPayload::RunCompleted(payload) => Some(payload),
+            _ => None,
+        })
+        .expect("caller checked completion count");
+    let resolve_node = certified_resolve_saga_terminal_node(runtime_spec)?;
+    let pre_resolution_projection =
+        store::ProjectionSnapshot::rebuild_from_run_stream(pre_resolution_stream)?;
+    let outcome =
+        saga_terminal_completion_outcome(runtime_spec, run_id, &pre_resolution_projection)?;
+    if completion_payload.run_id != *run_id
+        || completion_payload.spec_hash != *runtime_spec.spec_hash()
+        || completion_payload.outcome != outcome
+    {
+        return Err(RuntimeError::InvalidRunStream(
+            "RunCompleted payload does not match sealed ResolveSagaTerminal evidence".to_owned(),
+        ));
+    }
+
+    let receipt_bytes =
+        resolve_saga_terminal_receipt_json(runtime_spec, &outcome, pre_resolution_stream)?;
+    let receipt_digest = receipt_bytes.content_digest();
+    let receipt_artifact_id =
+        ArtifactId::from_digest(receipt_digest.algorithm(), *receipt_digest.digest());
+    let produced = commit
+        .iter()
+        .filter_map(|event| match event.payload() {
+            events::KernelEventPayload::CellProduced(payload)
+                if payload.node_id == resolve_node.node_id =>
+            {
+                Some(payload)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if produced.len() != 1 {
+        return Err(RuntimeError::InvalidRunStream(
+            "ResolveSagaTerminal commit was not produced by exactly one framework receipt cell"
+                .to_owned(),
+        ));
+    }
+    let produced = produced[0];
+    if produced.spec_hash != *runtime_spec.spec_hash()
+        || produced.cell_id != resolve_node.output_cell
+        || produced.artifact_id != receipt_artifact_id
+        || produced.content_digest != receipt_digest
+    {
+        return Err(RuntimeError::InvalidRunStream(
+            "ResolveSagaTerminal receipt cell does not match the sealed terminal evidence"
+                .to_owned(),
+        ));
+    }
+    let resolve_cell = runtime_spec
+        .cell(&resolve_node.output_cell)
+        .ok_or_else(|| {
+            RuntimeError::InvalidSpec(format!(
+                "resolve-saga-terminal lifecycle node {} output cell {} is missing",
+                resolve_node.node_id, resolve_node.output_cell
+            ))
+        })?;
+    let expected_receipt_ref = events::ArtifactEvidenceRef {
+        artifact_id: receipt_artifact_id.clone(),
+        role: events::ArtifactRole::StateOutput,
+        schema_id: resolve_cell.schema_id.clone(),
+        semantic_type_id: Some(resolve_cell.semantic_type_id.clone()),
+        content_digest: receipt_digest.clone(),
+        byte_len: receipt_bytes.as_bytes().len() as u64,
+        media_type: spec::MediaType::new("application/json")?,
+    };
+
+    validate_resolve_saga_terminal_commit_payload_set(
+        commit,
+        run_id,
+        runtime_spec.spec_hash(),
+        &outcome,
+        &resolve_node.node_id,
+        &produced.attempt_id,
+        &resolve_node.output_cell,
+        &receipt_artifact_id,
+        &receipt_digest,
+        &expected_receipt_ref,
+    )
+}
+
+fn validate_resolve_saga_terminal_commit_payload_set(
+    commit: &[store::KernelEventEnvelope],
+    run_id: &RunId,
+    spec_hash: &SpecHash,
+    outcome: &events::RunCompletionOutcome,
+    resolve_node_id: &NodeId,
+    attempt_id: &AttemptId,
+    receipt_cell_id: &CellId,
+    receipt_artifact_id: &ArtifactId,
+    receipt_digest: &ContentDigest,
+    expected_receipt_ref: &events::ArtifactEvidenceRef,
+) -> Result<()> {
+    if commit.len() != 5 {
+        return Err(RuntimeError::InvalidRunStream(
+            "ResolveSagaTerminal commit does not match the sealed framework batch".to_owned(),
+        ));
+    }
+    match commit[0].payload() {
+        events::KernelEventPayload::StateAttemptStarted(payload)
+            if payload.node_id == *resolve_node_id && payload.attempt_id == *attempt_id => {}
+        _ => {
+            return Err(RuntimeError::InvalidRunStream(
+                "ResolveSagaTerminal commit does not match the sealed framework batch".to_owned(),
+            ));
+        }
+    }
+    match commit[1].payload() {
+        events::KernelEventPayload::CellProduced(payload)
+            if payload.node_id == *resolve_node_id
+                && payload.attempt_id == *attempt_id
+                && payload.cell_id == *receipt_cell_id
+                && payload.artifact_id == *receipt_artifact_id
+                && payload.content_digest == *receipt_digest => {}
+        _ => {
+            return Err(RuntimeError::InvalidRunStream(
+                "ResolveSagaTerminal commit does not match the sealed framework batch".to_owned(),
+            ));
+        }
+    }
+    match commit[2].payload() {
+        events::KernelEventPayload::StateAttemptCompleted(payload)
+            if payload.node_id == *resolve_node_id
+                && payload.attempt_id == *attempt_id
+                && payload.output_cell_id == *receipt_cell_id => {}
+        _ => {
+            return Err(RuntimeError::InvalidRunStream(
+                "ResolveSagaTerminal commit does not match the sealed framework batch".to_owned(),
+            ));
+        }
+    }
+    match commit[3].payload() {
+        events::KernelEventPayload::ArtifactReferenced(payload)
+            if payload.node_id.as_ref() == Some(resolve_node_id)
+                && payload.attempt_id.as_ref() == Some(attempt_id)
+                && payload.artifact_ref == *expected_receipt_ref => {}
+        _ => {
+            return Err(RuntimeError::InvalidRunStream(
+                "ResolveSagaTerminal commit does not match the sealed framework batch".to_owned(),
+            ));
+        }
+    }
+    match commit[4].payload() {
+        events::KernelEventPayload::RunCompleted(payload)
+            if payload.run_id == *run_id
+                && payload.spec_hash == *spec_hash
+                && payload.outcome == *outcome =>
+        {
+            Ok(())
+        }
+        _ => Err(RuntimeError::InvalidRunStream(
+            "ResolveSagaTerminal commit does not match the sealed framework batch".to_owned(),
+        )),
+    }
 }
 
 fn validate_complete_run_commit_payload_set(
@@ -2555,10 +2770,13 @@ fn validate_historical_run_completed(
             payload.run_id, run_id
         )));
     }
-    let events::RunCompletionOutcome::Completed(completion) = &payload.outcome else {
+    if payload.spec_hash != *runtime_spec.spec_hash() {
         return Err(RuntimeError::InvalidRunStream(
-            "RunCompleted non-Completed outcomes require sealed saga terminal authority".to_owned(),
+            "RunCompleted carries a spec hash outside the certified run".to_owned(),
         ));
+    }
+    let events::RunCompletionOutcome::Completed(completion) = &payload.outcome else {
+        return Ok(());
     };
     if completion.public_output_schema_id != runtime_spec.spec().public_outputs.public_schema_id {
         return Err(RuntimeError::InvalidRunStream(format!(

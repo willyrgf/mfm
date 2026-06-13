@@ -1581,7 +1581,7 @@ async fn runtime_rejects_non_completed_run_completion_without_saga_terminal_auth
                 &store.load_run_stream(&fixture.run_id),
             ),
             Err(RuntimeError::InvalidRunStream(message))
-                if message.contains("non-Completed")
+                if message.contains("saga terminal resolution requires terminal saga mode")
         ));
     }
 }
@@ -4495,20 +4495,6 @@ async fn side_effect_scheduler_commits_durable_ledger_phases_before_output() {
     .await
     .expect("start run");
 
-    for _ in 0..6 {
-        assert_eq!(
-            scheduler
-                .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-                .await
-                .expect("drive side effect phase"),
-            SchedulerStatus::Advanced
-        );
-    }
-
-    assert!(store
-        .projection_snapshot()
-        .cell_terminal(&fixture.cell_a)
-        .is_some());
     let node = node_by_output(&fixture, &fixture.cell_a);
     let attempt_id = attempt_id(
         &fixture.run_id,
@@ -4517,6 +4503,49 @@ async fn side_effect_scheduler_commits_durable_ledger_phases_before_output() {
         1,
     )
     .expect("attempt id");
+    let mut confirmed_before_output = false;
+    for _ in 0..8 {
+        assert_eq!(
+            scheduler
+                .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+                .await
+                .expect("drive side effect phase"),
+            SchedulerStatus::Advanced
+        );
+        let projection =
+            side_effect_projection_for_attempt(store.projection_snapshot(), node, &attempt_id)
+                .expect("projection lookup")
+                .expect("side-effect projection");
+        if matches!(
+            projection.phase,
+            store::SideEffectPhase::ConfirmationObserved { .. }
+        ) && store
+            .projection_snapshot()
+            .cell_terminal(&fixture.cell_a)
+            .is_none()
+        {
+            confirmed_before_output = true;
+            break;
+        }
+    }
+    assert!(confirmed_before_output);
+    assert!(store
+        .projection_snapshot()
+        .cell_terminal(&fixture.cell_a)
+        .is_none());
+
+    assert_eq!(
+        scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("materialize side-effect output"),
+        SchedulerStatus::Advanced
+    );
+
+    assert!(store
+        .projection_snapshot()
+        .cell_terminal(&fixture.cell_a)
+        .is_some());
     let projection =
         side_effect_projection_for_attempt(store.projection_snapshot(), node, &attempt_id)
             .expect("projection lookup")
@@ -4651,9 +4680,270 @@ async fn runtime_remediates_confirmed_forward_ledgers_in_reverse_confirmation_or
         scheduler
             .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
             .await
-            .expect("compensated mode awaits terminal resolution"),
-        SchedulerStatus::Blocked
+            .expect("resolve compensated terminal"),
+        SchedulerStatus::Advanced
     );
+    assert_eq!(
+        store.projection_snapshot().run_state(&fixture.run_id),
+        store::RunState::Completed
+    );
+    assert!(matches!(
+        store
+            .projection_snapshot()
+            .run_completion(&fixture.run_id)
+            .expect("run completion")
+            .outcome,
+        events::RunCompletionOutcome::Compensated
+    ));
+    assert_eq!(
+        scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("completed compensated run"),
+        SchedulerStatus::PublicOutputProjected
+    );
+}
+
+#[tokio::test]
+async fn runtime_resolves_clean_failure_without_acdc_claim() {
+    let fixture = fixture();
+    let failure_node = node_by_output(&fixture, &fixture.cell_a).clone();
+    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+
+    let failure_attempt = append_attempt_start(&mut store, &fixture, &failure_node, 1);
+    append_attempt_failure(&mut store, &fixture, &failure_node, &failure_attempt, false);
+    let saga = store
+        .projection_snapshot()
+        .derive_saga_projection(&fixture.run_id, &fixture.runtime_spec.spec().saga);
+    assert_eq!(saga.run_mode, store::RunMode::FailedWithoutAcdcClaim);
+    assert!(saga.obligations.is_empty());
+
+    assert_eq!(
+        scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("resolve clean failure terminal"),
+        SchedulerStatus::Advanced
+    );
+    assert!(matches!(
+        store
+            .projection_snapshot()
+            .run_completion(&fixture.run_id)
+            .expect("run completion")
+            .outcome,
+        events::RunCompletionOutcome::FailedWithoutAcdcClaim
+    ));
+}
+
+#[tokio::test]
+async fn runtime_materializes_confirmed_forward_output_before_failed_without_claim_terminal() {
+    let fixture = fixture_with_independent_second_node_and_first_side_effect_state();
+    let forward_node = node_by_output(&fixture, &fixture.cell_a).clone();
+    let failure_node = node_by_output(&fixture, &fixture.cell_b).clone();
+    let mut registry = ErasedRunnerRegistry::new();
+    registry
+        .register(binding(
+            fixture.descriptor_a.clone(),
+            "sidefx",
+            DeterministicSideEffectRunner::new(&fixture),
+        ))
+        .expect("binding side effect");
+    registry
+        .register(binding(
+            fixture.descriptor_b.clone(),
+            "read",
+            RecordingRunner {
+                expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
+                output_artifact: artifact(0xb1),
+                output_digest: content(0xb2),
+            },
+        ))
+        .expect("binding failure node");
+    let scheduler = test_scheduler(registry);
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+
+    let forward_attempt = attempt_id(
+        &fixture.run_id,
+        fixture.runtime_spec.spec_hash(),
+        &forward_node.node_id,
+        1,
+    )
+    .expect("attempt id");
+    for _ in 0..8 {
+        assert_eq!(
+            scheduler
+                .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+                .await
+                .expect("drive forward side-effect to confirmation"),
+            SchedulerStatus::Advanced
+        );
+        let projection = side_effect_projection_for_attempt(
+            store.projection_snapshot(),
+            &forward_node,
+            &forward_attempt,
+        )
+        .expect("side-effect projection lookup")
+        .expect("side-effect projection");
+        assert!(store
+            .projection_snapshot()
+            .cell_terminal(&fixture.cell_a)
+            .is_none());
+        if matches!(
+            projection.phase,
+            store::SideEffectPhase::ConfirmationObserved { .. }
+        ) {
+            break;
+        }
+    }
+    assert!(store
+        .projection_snapshot()
+        .cell_terminal(&fixture.cell_a)
+        .is_none());
+    let projection = side_effect_projection_for_attempt(
+        store.projection_snapshot(),
+        &forward_node,
+        &forward_attempt,
+    )
+    .expect("side-effect projection lookup")
+    .expect("side-effect projection");
+    assert!(matches!(
+        projection.phase,
+        store::SideEffectPhase::ConfirmationObserved { .. }
+    ));
+
+    let failure_attempt = append_attempt_start(&mut store, &fixture, &failure_node, 1);
+    append_attempt_failure(&mut store, &fixture, &failure_node, &failure_attempt, false);
+    let saga = store
+        .projection_snapshot()
+        .derive_saga_projection(&fixture.run_id, &fixture.runtime_spec.spec().saga);
+    assert_eq!(saga.run_mode, store::RunMode::FailedWithoutAcdcClaim);
+
+    assert_eq!(
+        scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("materialize confirmed forward output"),
+        SchedulerStatus::Advanced
+    );
+    assert!(store
+        .projection_snapshot()
+        .cell_terminal(&fixture.cell_a)
+        .is_some());
+    assert!(store
+        .projection_snapshot()
+        .run_completion(&fixture.run_id)
+        .is_none());
+
+    assert_eq!(
+        scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("resolve failed-without-claim terminal"),
+        SchedulerStatus::Advanced
+    );
+    assert!(matches!(
+        store
+            .projection_snapshot()
+            .run_completion(&fixture.run_id)
+            .expect("run completion")
+            .outcome,
+        events::RunCompletionOutcome::FailedWithoutAcdcClaim
+    ));
+}
+
+#[tokio::test]
+async fn runtime_resolves_manual_resolution_terminal() {
+    let fixture = fixture_with_manual_resolution_side_effect_state();
+    let mut registry = ErasedRunnerRegistry::new();
+    registry
+        .register(binding(
+            fixture.descriptor_a.clone(),
+            "sidefx",
+            AmbiguousSideEffectRunner::new(&fixture),
+        ))
+        .expect("binding side effect");
+    registry
+        .register(binding(
+            fixture.descriptor_b.clone(),
+            "read",
+            RecordingRunner {
+                expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
+                output_artifact: artifact(0xb1),
+                output_digest: content(0xb2),
+            },
+        ))
+        .expect("binding read");
+    let scheduler = test_scheduler(registry);
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+
+    for _ in 0..3 {
+        assert_eq!(
+            scheduler
+                .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+                .await
+                .expect("advance to ambiguity"),
+            SchedulerStatus::Advanced
+        );
+    }
+    let saga = store
+        .projection_snapshot()
+        .derive_saga_projection(&fixture.run_id, &fixture.runtime_spec.spec().saga);
+    assert_eq!(saga.run_mode, store::RunMode::ManualBlocked);
+    assert_eq!(
+        saga.manual_block_reason,
+        Some(store::ManualBlockReason::PolicyManualResolution)
+    );
+
+    append_manual_resolution(
+        &mut store,
+        &fixture,
+        events::ManualResolutionOutcome::ConfirmRemediated,
+    );
+    let saga = store
+        .projection_snapshot()
+        .derive_saga_projection(&fixture.run_id, &fixture.runtime_spec.spec().saga);
+    assert_eq!(saga.run_mode, store::RunMode::ManuallyResolved);
+
+    assert_eq!(
+        scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("resolve manual terminal"),
+        SchedulerStatus::Advanced
+    );
+    assert!(matches!(
+        store
+            .projection_snapshot()
+            .run_completion(&fixture.run_id)
+            .expect("run completion")
+            .outcome,
+        events::RunCompletionOutcome::ManuallyResolved
+    ));
 }
 
 #[tokio::test]
@@ -4976,13 +5266,21 @@ async fn side_effect_ambiguous_phase_blocks_resume() {
         scheduler
             .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
             .await
-            .expect("ambiguous side effect blocks"),
-        SchedulerStatus::Blocked
+            .expect("ambiguous side effect resolves terminal"),
+        SchedulerStatus::Advanced
     );
     assert!(store
         .projection_snapshot()
         .cell_terminal(&fixture.cell_a)
         .is_none());
+    assert!(matches!(
+        store
+            .projection_snapshot()
+            .run_completion(&fixture.run_id)
+            .expect("run completion")
+            .outcome,
+        events::RunCompletionOutcome::FailedWithoutAcdcClaim
+    ));
 }
 
 #[tokio::test]
@@ -5028,13 +5326,21 @@ async fn side_effect_ambiguity_blocks_independent_ready_nodes() {
         scheduler
             .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
             .await
-            .expect("ambiguity blocks independent node"),
-        SchedulerStatus::Blocked
+            .expect("ambiguity resolves terminal"),
+        SchedulerStatus::Advanced
     );
     assert!(store
         .projection_snapshot()
         .cell_terminal(&fixture.cell_b)
         .is_none());
+    assert!(matches!(
+        store
+            .projection_snapshot()
+            .run_completion(&fixture.run_id)
+            .expect("run completion")
+            .outcome,
+        events::RunCompletionOutcome::FailedWithoutAcdcClaim
+    ));
 }
 
 #[tokio::test]
@@ -5123,6 +5429,49 @@ fn side_effect_failure_derives_attempt_failure_payload() {
         }),
         "side-effect failure payloads should include middleware-derived StateAttemptFailed"
     );
+}
+
+#[test]
+fn side_effect_ambiguity_derives_attempt_failure_payload() {
+    let fixture = fixture_with_first_side_effect_state();
+    let node = node_by_output(&fixture, &fixture.cell_a);
+    let attempt_id = attempt_id(
+        &fixture.run_id,
+        fixture.runtime_spec.spec_hash(),
+        &node.node_id,
+        1,
+    )
+    .expect("attempt id");
+    let payloads = runner_payloads_with_derived_lifecycle(
+        &fixture.runtime_spec,
+        node,
+        &attempt_id,
+        vec![RunnerEventPayload::SideEffectAmbiguous(
+            events::side_effect::Ambiguous {
+                spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                node_id: node.node_id.clone(),
+                attempt_id: attempt_id.clone(),
+                ledger_key: side_effect_ledger_key(1),
+                ledger_purpose: side_effect_ledger_purpose(),
+                invocation_epoch: 1,
+                ambiguity_code: events::AmbiguityCode::new("unknown_submission")
+                    .expect("ambiguity code"),
+                evidence_schema_id: node.config_ref.schema_id.clone(),
+                evidence_hash: content(0xca),
+                evidence_artifact_id: artifact(0xcb),
+            },
+        )],
+    );
+    let payloads = payloads.expect("derive lifecycle");
+    let failure = payloads
+        .iter()
+        .find_map(|payload| match payload {
+            events::KernelEventPayload::StateAttemptFailed(payload) => Some(payload),
+            _ => None,
+        })
+        .expect("derived attempt failure");
+    assert!(!failure.retryable);
+    assert_eq!(failure.error.code.as_str(), "side_effect_ambiguous");
 }
 
 struct DeterministicSideEffectRunner {
@@ -6056,6 +6405,12 @@ fn assert_every_certified_node_has_attempt(
         }
     }
     for node in &runtime_spec.spec().nodes {
+        if matches!(
+            node.framework,
+            Some(spec::FrameworkNodeSpec::ResolveSagaTerminal(_))
+        ) {
+            continue;
+        }
         assert!(
             started.contains(&node.node_id),
             "node {} has no StateAttemptStarted",
@@ -6505,6 +6860,72 @@ fn append_attempt_failure(
             },
         })
         .expect("append attempt failure");
+}
+
+fn append_manual_resolution(
+    store: &mut store::InMemoryTypedRunStore,
+    fixture: &Fixture,
+    outcome: events::ManualResolutionOutcome,
+) {
+    let manual = match &fixture.runtime_spec.spec().saga {
+        spec::SagaPolicySpec::ManualResolution { manual } => manual,
+        spec::SagaPolicySpec::CompensateCompleted {
+            on_remediation_unresolved: spec::RemediationUnresolvedSpec::ManualResolution { manual },
+        } => manual,
+        _ => panic!("fixture does not carry manual resolution schemas"),
+    };
+    let operator_identity_ref_hash = content(0xe1);
+    let operator_identity_ref_artifact_id = artifact(0xe2);
+    let evidence_hash = content(0xe3);
+    let evidence_artifact_id = artifact(0xe4);
+    let operator_identity = store::ArtifactEvidenceRef {
+        artifact_id: operator_identity_ref_artifact_id.clone(),
+        digest: operator_identity_ref_hash.clone(),
+        byte_len: 17,
+        media_type: spec::MediaType::new("application/json").expect("media"),
+        schema_id: Some(manual.operator_identity_ref_schema.clone()),
+        semantic_type_id: None,
+        producer_node_id: None,
+        producer_seed_id: None,
+        artifact_role: events::ArtifactRole::StateOutput,
+    };
+    let evidence = store::ArtifactEvidenceRef {
+        artifact_id: evidence_artifact_id.clone(),
+        digest: evidence_hash.clone(),
+        byte_len: 29,
+        media_type: spec::MediaType::new("application/json").expect("media"),
+        schema_id: Some(manual.evidence_schema.clone()),
+        semantic_type_id: None,
+        producer_node_id: None,
+        producer_seed_id: None,
+        artifact_role: events::ArtifactRole::StateOutput,
+    };
+    store
+        .append_prepared_commit(store::TypedCommitRequest {
+            run_id: fixture.run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&fixture.run_id),
+            commit_key: store::CommitKey::new("manual-resolution:confirm").expect("commit key"),
+            payloads: vec![events::KernelEventPayload::ManualResolutionRecorded(
+                events::ManualResolutionRecorded {
+                    run_id: fixture.run_id.clone(),
+                    spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                    outcome,
+                    operator_identity_ref_schema_id: manual.operator_identity_ref_schema.clone(),
+                    operator_identity_ref_hash,
+                    operator_identity_ref_artifact_id,
+                    evidence_schema_id: manual.evidence_schema.clone(),
+                    evidence_hash,
+                    evidence_artifact_id,
+                    note: None,
+                },
+            )],
+            required_artifacts: vec![operator_identity, evidence],
+            preconditions: store::CommitPreconditions {
+                required_run_state: store::RequiredRunState::NotCompleted,
+                ..store::CommitPreconditions::default()
+            },
+        })
+        .expect("append manual resolution");
 }
 
 fn append_fact(
@@ -7287,6 +7708,102 @@ fn append_runtime_complete_lifecycle_node(
     node_id
 }
 
+fn append_runtime_resolve_saga_terminal_lifecycle_node(
+    typed: &mut spec::TypedExecutionSpec,
+) -> NodeId {
+    let node_id = NodeId::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        DigestBytes::from_array([0xc2; 32]),
+    );
+    let output_cell = CellId::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        DigestBytes::from_array([0xc3; 32]),
+    );
+    let descriptor_id = DescriptorId::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        DigestBytes::from_array([0xc4; 32]),
+    );
+    let config_ref =
+        spec::framework_config_ref("resolve_saga_terminal", &node_id).expect("resolve config ref");
+    let input_binding = spec::framework_lifecycle_unit_input_binding("resolve_saga_terminal")
+        .expect("input binding");
+    let managed = ManagedPlatformWrite::descriptor().expect("managed effect");
+    let receipt_schema =
+        spec::resolve_saga_terminal_receipt_schema_id().expect("resolve receipt schema");
+    let receipt_semantic =
+        spec::resolve_saga_terminal_receipt_semantic_type_id().expect("resolve receipt semantic");
+    let no_caps = CapabilitySetDescriptor::new(Vec::new()).expect("no caps");
+    let state_kind = StateKind::new(
+        "mfm.framework",
+        "resolve_saga_terminal",
+        DigestAlgorithm::Sha256JcsV1,
+        DigestBytes::from_array([0xc8; 32]),
+    )
+    .expect("state kind");
+    let state_version =
+        StateVersion::new("mfm.framework.state.resolve_saga_terminal.v1").expect("state version");
+    typed
+        .descriptor_identities
+        .push(spec::DescriptorIdentity::State(Box::new(
+            spec::StateDescriptorIdentity {
+                descriptor_id: descriptor_id.clone(),
+                name: "mfm.framework.resolve_saga_terminal".to_owned(),
+                state_kind: state_kind.clone(),
+                state_version: state_version.clone(),
+                config_schema_id: config_ref.schema_id.clone(),
+                input_schema_id: input_binding.input_schema_id.clone(),
+                output_schema_id: receipt_schema.clone(),
+                output_semantic_type_id: receipt_semantic.clone(),
+                effect_kind: managed.kind.clone(),
+                effect_class: managed.class.as_str().to_owned(),
+                effect_name: managed.name.to_owned(),
+                effect_version: managed.version,
+                capabilities: no_caps.clone(),
+                runner: "managed_platform_write".to_owned(),
+                side_effect_contract_digest: None,
+            },
+        )));
+    typed.config_refs.push(config_ref.clone());
+    let scope_id = typed.scopes.first().expect("root scope").scope_id.clone();
+    typed.cells.push(spec::CellSpec {
+        cell_id: output_cell.clone(),
+        producer: spec::CellProducer::Node(node_id.clone()),
+        scope_id: scope_id.clone(),
+        semantic_type_id: receipt_semantic,
+        schema_id: receipt_schema,
+        value_lineage: spec::ValueLineageRef {
+            lineage_digest: content(0xcb),
+        },
+        terminal_policy: spec::CellTerminalPolicy::ProducedOnly,
+        storage_policy: spec::StoragePolicy::ContentAddressed,
+        redaction_policy: spec::RedactionPolicy::Public,
+    });
+    typed.nodes.push(spec::NodeSpec {
+        node_id: node_id.clone(),
+        stable_key: spec::StableAuthorKey::new("framework/resolve-saga-terminal")
+            .expect("stable key"),
+        scope_id,
+        state_kind,
+        state_version,
+        descriptor_id,
+        config_ref,
+        input_bindings: input_binding,
+        output_cell,
+        effect_kind: managed.kind,
+        capability_bindings: no_caps,
+        adapter_bindings: Vec::new(),
+        side_effect: None,
+        framework: Some(spec::FrameworkNodeSpec::ResolveSagaTerminal(
+            spec::ResolveSagaTerminalNodeSpec {
+                public_schema_id: typed.public_outputs.public_schema_id.clone(),
+            },
+        )),
+        planning_lineage: typed.scopes[0].planning_lineage.clone(),
+        deterministic_predecessors: Vec::new(),
+    });
+    node_id
+}
+
 fn append_runtime_user_receipt_consumer(
     typed: &mut spec::TypedExecutionSpec,
     receipt_cell: CellId,
@@ -7862,6 +8379,7 @@ fn fixture() -> Fixture {
     append_runtime_retention_lifecycle_node(&mut spec, render_cell.clone(), true);
     let retention_receipt = runtime_retention_receipt_cell(&spec);
     append_runtime_complete_lifecycle_node(&mut spec, retention_receipt, true);
+    append_runtime_resolve_saga_terminal_lifecycle_node(&mut spec);
     let envelope = spec::HashedSpecEnvelope::new(spec, spec::TypedExecutionSpecAudit::default())
         .expect("envelope");
     let runtime_spec =
@@ -8001,6 +8519,20 @@ fn fixture_with_first_side_effect_state() -> Fixture {
             }
         }
     }
+    let envelope = spec::HashedSpecEnvelope::new(envelope.spec, envelope.audit).expect("rehash");
+    fixture.runtime_spec =
+        CertifiedRuntimeSpec::from_verified_envelope(envelope).expect("runtime spec");
+    fixture
+}
+
+fn fixture_with_manual_resolution_side_effect_state() -> Fixture {
+    let mut fixture = fixture_with_first_side_effect_state();
+    let mut envelope = fixture.runtime_spec.envelope().clone();
+    let manual = spec::ManualResolutionEvidenceSpec {
+        evidence_schema: fixture.seed_ref.schema_id.clone(),
+        operator_identity_ref_schema: fixture.seed_ref.schema_id.clone(),
+    };
+    envelope.spec.saga = spec::SagaPolicySpec::ManualResolution { manual };
     let envelope = spec::HashedSpecEnvelope::new(envelope.spec, envelope.audit).expect("rehash");
     fixture.runtime_spec =
         CertifiedRuntimeSpec::from_verified_envelope(envelope).expect("runtime spec");

@@ -68,21 +68,31 @@ fn saga_scheduler_decision<'a>(
     view: &RuntimeRunView,
     saga: &store::SagaProjection,
 ) -> Result<SchedulerDecision<'a>> {
+    if let Some(runnable) = next_forward_completion_node(runtime_spec, view)? {
+        return Ok(SchedulerDecision::Run(runnable));
+    }
     match saga.run_mode {
-        store::RunMode::Forward => match next_forward_completion_node(runtime_spec, view)? {
-            Some(runnable) => Ok(SchedulerDecision::Run(runnable)),
-            None => Ok(SchedulerDecision::Blocked),
-        },
+        store::RunMode::Forward => Ok(SchedulerDecision::Blocked),
         store::RunMode::Remediating | store::RunMode::Compensated => {
             match next_remediation_node(runtime_spec, view, saga)? {
                 Some(runnable) => Ok(SchedulerDecision::Run(runnable)),
+                None if saga.run_mode == store::RunMode::Compensated => {
+                    match next_saga_terminal_node(runtime_spec, view, saga)? {
+                        Some(runnable) => Ok(SchedulerDecision::Run(runnable)),
+                        None => Ok(SchedulerDecision::Blocked),
+                    }
+                }
                 None => Ok(SchedulerDecision::Blocked),
             }
         }
         store::RunMode::Completed => Ok(SchedulerDecision::Completed),
-        store::RunMode::ManualBlocked
-        | store::RunMode::ManuallyResolved
-        | store::RunMode::FailedWithoutAcdcClaim => Ok(SchedulerDecision::Blocked),
+        store::RunMode::ManuallyResolved | store::RunMode::FailedWithoutAcdcClaim => {
+            match next_saga_terminal_node(runtime_spec, view, saga)? {
+                Some(runnable) => Ok(SchedulerDecision::Run(runnable)),
+                None => Ok(SchedulerDecision::Blocked),
+            }
+        }
+        store::RunMode::ManualBlocked => Ok(SchedulerDecision::Blocked),
     }
 }
 
@@ -181,6 +191,56 @@ fn next_remediation_node<'a>(
         return Ok(None);
     }
     Ok(None)
+}
+
+fn next_saga_terminal_node<'a>(
+    runtime_spec: &'a CertifiedRuntimeSpec,
+    view: &RuntimeRunView,
+    saga: &store::SagaProjection,
+) -> Result<Option<RunnableNode<'a>>> {
+    if !saga.forward_quiescent {
+        return Ok(None);
+    }
+    if !matches!(
+        saga.run_mode,
+        store::RunMode::Compensated
+            | store::RunMode::ManuallyResolved
+            | store::RunMode::FailedWithoutAcdcClaim
+    ) {
+        return Ok(None);
+    }
+    let node = certified_resolve_saga_terminal_node(runtime_spec)?;
+    let Some(attempt) = non_side_effect_attempt_plan(runtime_spec, node, view)? else {
+        return Ok(None);
+    };
+    if node_inputs_ready(runtime_spec, node, view)? {
+        return Ok(Some(RunnableNode { node, attempt }));
+    }
+    Ok(None)
+}
+
+fn certified_resolve_saga_terminal_node(
+    runtime_spec: &CertifiedRuntimeSpec,
+) -> Result<&spec::NodeSpec> {
+    let mut resolve_node = None;
+    for node_id in runtime_spec.topological_order() {
+        let node = runtime_spec.node(node_id).expect("topological node exists");
+        if matches!(
+            &node.framework,
+            Some(spec::FrameworkNodeSpec::ResolveSagaTerminal(_))
+        ) && resolve_node.replace(node).is_some()
+        {
+            return Err(RuntimeError::InvalidSpec(
+                "multiple certified resolve-saga-terminal framework nodes".to_owned(),
+            ));
+        }
+    }
+    resolve_node.ok_or_else(|| {
+        RuntimeError::InvalidSpec(
+            "saga terminal resolution lacks a certified ResolveSagaTerminal framework node"
+                .to_owned(),
+        )
+    })
 }
 
 fn continuing_side_effect_node_if<'a>(

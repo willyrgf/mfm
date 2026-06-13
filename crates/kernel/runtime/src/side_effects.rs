@@ -308,11 +308,14 @@ pub(crate) fn validate_historical_side_effect_failure(
     attempt_id: &AttemptId,
 ) -> Result<()> {
     let ledger = historical_side_effect_ledger_for_attempt(ledgers, node_id, attempt_id)?;
-    if ledger.phase == HistoricalSideEffectPhase::Failed {
+    if matches!(
+        ledger.phase,
+        HistoricalSideEffectPhase::Failed | HistoricalSideEffectPhase::Ambiguous
+    ) {
         Ok(())
     } else {
         Err(RuntimeError::InvalidRunStream(format!(
-            "side-effect node {} attempt {} failed without side-effect failure evidence",
+            "side-effect node {} attempt {} failed without terminal side-effect evidence",
             node_id, attempt_id
         )))
     }
@@ -361,6 +364,16 @@ pub(crate) fn validate_atomic_side_effect_failure_pairs(
                     payload.retryable,
                 );
             }
+            events::KernelEventPayload::SideEffectAmbiguous(payload) => {
+                side_effect_failures.insert(
+                    (
+                        event.seq(),
+                        payload.node_id.clone(),
+                        payload.attempt_id.clone(),
+                    ),
+                    false,
+                );
+            }
             events::KernelEventPayload::StateAttemptFailed(payload) => {
                 let node = runtime_spec.node(&payload.node_id).ok_or_else(|| {
                     RuntimeError::InvalidRunStream(format!(
@@ -387,13 +400,13 @@ pub(crate) fn validate_atomic_side_effect_failure_pairs(
             Some(attempt_retryable) if attempt_retryable == side_effect_retryable => {}
             Some(_) => {
                 return Err(RuntimeError::InvalidRunStream(format!(
-                    "side-effect failure for node {} attempt {} disagrees with StateAttemptFailed retryability",
+                    "terminal side-effect evidence for node {} attempt {} disagrees with StateAttemptFailed retryability",
                     failure.1, failure.2
                 )));
             }
             None => {
                 return Err(RuntimeError::InvalidRunStream(format!(
-                    "side-effect failure for node {} attempt {} lacks StateAttemptFailed in the same commit",
+                    "terminal side-effect evidence for node {} attempt {} lacks StateAttemptFailed in the same commit",
                     failure.1, failure.2
                 )));
             }
@@ -402,7 +415,7 @@ pub(crate) fn validate_atomic_side_effect_failure_pairs(
     for failure in attempt_failures.keys() {
         if !side_effect_failures.contains_key(failure) {
             return Err(RuntimeError::InvalidRunStream(format!(
-                "side-effect attempt failure for node {} attempt {} lacks SideEffectFailed in the same commit",
+                "side-effect attempt failure for node {} attempt {} lacks terminal side-effect evidence in the same commit",
                 failure.1, failure.2
             )));
         }

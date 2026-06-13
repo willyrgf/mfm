@@ -411,6 +411,7 @@ impl CertifiedRuntimeSpec {
         let mut bootstrap_count = 0_usize;
         let mut retention_count = 0_usize;
         let mut completion_count = 0_usize;
+        let mut resolve_count = 0_usize;
         let mut lifecycle_outputs = BTreeMap::<CellId, &spec::NodeSpec>::new();
         let mut input_consumers = BTreeMap::<CellId, Vec<NodeId>>::new();
         for node in self.nodes.values() {
@@ -540,10 +541,6 @@ impl CertifiedRuntimeSpec {
                                 &consumer.framework,
                                 Some(spec::FrameworkNodeSpec::CompleteRun(complete))
                                     if complete.retention_manifest_receipt_cell == node.output_cell
-                            ) || matches!(
-                                &consumer.framework,
-                                Some(spec::FrameworkNodeSpec::ResolveSagaTerminal(resolve))
-                                    if resolve.retention_manifest_receipt_cell == node.output_cell
                             )
                         },
                     )?;
@@ -605,6 +602,7 @@ impl CertifiedRuntimeSpec {
                     self.validate_no_framework_receipt_consumers(node, &input_consumers)?;
                 }
                 Some(spec::FrameworkNodeSpec::ResolveSagaTerminal(resolve)) => {
+                    resolve_count += 1;
                     self.validate_framework_descriptor(
                         node,
                         "mfm.framework.resolve_saga_terminal",
@@ -621,42 +619,14 @@ impl CertifiedRuntimeSpec {
                         &spec::resolve_saga_terminal_receipt_semantic_type_id()?,
                         spec::StoragePolicy::ContentAddressed,
                     )?;
-                    let retention_manifest_receipt_cell = self
-                        .cells
-                        .get(&resolve.retention_manifest_receipt_cell)
-                        .ok_or_else(|| {
-                            RuntimeError::InvalidSpec(format!(
-                                "resolve-saga-terminal lifecycle node {} missing retention receipt cell",
-                                node.node_id
-                            ))
-                        })?;
                     self.validate_framework_input_binding(
                         node,
-                        &spec::framework_lifecycle_receipt_input_binding(
-                            "resolve_saga_terminal",
-                            "retention_manifest_receipt",
-                            retention_manifest_receipt_cell,
-                        )?,
+                        &spec::framework_lifecycle_unit_input_binding("resolve_saga_terminal")?,
                     )?;
                     let input_cells = self.validate_input_binding(&node.input_bindings.root)?;
-                    if input_cells != vec![resolve.retention_manifest_receipt_cell.clone()] {
+                    if !input_cells.is_empty() || !node.deterministic_predecessors.is_empty() {
                         return Err(RuntimeError::InvalidSpec(format!(
-                            "resolve-saga-terminal lifecycle node {} must depend on the retention receipt cell",
-                            node.node_id
-                        )));
-                    }
-                    let retention_node = lifecycle_outputs
-                        .get(&resolve.retention_manifest_receipt_cell)
-                        .filter(|candidate| {
-                            matches!(
-                                &candidate.framework,
-                                Some(spec::FrameworkNodeSpec::ProjectRetentionManifest(retention))
-                                    if retention.public_schema_id == resolve.public_schema_id
-                            )
-                        });
-                    if retention_node.is_none() {
-                        return Err(RuntimeError::InvalidSpec(format!(
-                            "resolve-saga-terminal lifecycle node {} is not ordered after retention projection",
+                            "resolve-saga-terminal lifecycle node {} must not have inputs",
                             node.node_id
                         )));
                     }
@@ -674,6 +644,11 @@ impl CertifiedRuntimeSpec {
         if completion_count != 1 {
             return Err(RuntimeError::InvalidSpec(format!(
                 "expected exactly one completion lifecycle framework node, found {completion_count}"
+            )));
+        }
+        if resolve_count != 1 {
+            return Err(RuntimeError::InvalidSpec(format!(
+                "expected exactly one resolve-saga-terminal lifecycle framework node, found {resolve_count}"
             )));
         }
         if bootstrap_count != 1 {

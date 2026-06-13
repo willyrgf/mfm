@@ -399,11 +399,14 @@ impl CommitPlanner {
         )?;
         if matches!(
             &input.node.framework,
-            Some(spec::FrameworkNodeSpec::CompleteRun(_))
+            Some(
+                spec::FrameworkNodeSpec::CompleteRun(_)
+                    | spec::FrameworkNodeSpec::ResolveSagaTerminal(_)
+            )
         ) && !staged_retention_refs.is_empty()
         {
             return Err(RuntimeError::InvalidRunnerOutput(format!(
-                "complete-run framework node {} cannot stage retention refs after manifest projection",
+                "terminal framework node {} cannot stage retention refs",
                 input.node.node_id
             )));
         }
@@ -1515,6 +1518,17 @@ pub(crate) fn runner_payloads_with_derived_lifecycle(
                     )));
                 }
             }
+            events::KernelEventPayload::SideEffectAmbiguous(payload) => {
+                if failure
+                    .replace((false, side_effect_ambiguity_error(payload)?))
+                    .is_some()
+                {
+                    return Err(RuntimeError::InvalidRunnerOutput(format!(
+                        "runner for node {} returned multiple failure payloads",
+                        node.node_id
+                    )));
+                }
+            }
             events::KernelEventPayload::PublicOutputRenderFailed(payload)
                 if failure
                     .replace((payload.error.retryable, payload.error.clone()))
@@ -1553,6 +1567,22 @@ pub(crate) fn runner_payloads_with_derived_lifecycle(
     Ok(payloads)
 }
 
+fn side_effect_ambiguity_error(
+    payload: &events::side_effect::Ambiguous,
+) -> Result<events::MfmErrorInfo> {
+    Ok(events::MfmErrorInfo {
+        code: events::ErrorCode::new("side_effect_ambiguous")?,
+        category: events::ErrorCategory::SideEffect,
+        retryable: false,
+        safe_message: format!(
+            "side-effect outcome is ambiguous: {}",
+            payload.ambiguity_code
+        ),
+        public_details: None,
+        diagnostic_ref: None,
+    })
+}
+
 fn validate_runner_output(
     runtime_spec: &CertifiedRuntimeSpec,
     node: &spec::NodeSpec,
@@ -1574,9 +1604,9 @@ fn validate_runner_output(
     let mut public_output_produced = false;
     let mut public_output_failed = false;
     let mut side_effect_payload = false;
-    let mut side_effect_failed = false;
+    let mut side_effect_terminal_failure = false;
     let mut attempt_failure_retryable = None;
-    let mut side_effect_failure_retryable = None;
+    let mut side_effect_terminal_failure_retryable = None;
     for payload in payloads {
         if payload_spec_hash(payload) != *runtime_spec.spec_hash() {
             return Err(RuntimeError::InvalidRunnerOutput(format!(
@@ -1720,9 +1750,16 @@ fn validate_runner_output(
                     payload,
                 )?;
                 side_effect_payload = true;
-                if let events::KernelEventPayload::SideEffectFailed(payload) = payload {
-                    side_effect_failed = true;
-                    side_effect_failure_retryable = Some(payload.retryable);
+                match payload {
+                    events::KernelEventPayload::SideEffectFailed(payload) => {
+                        side_effect_terminal_failure = true;
+                        side_effect_terminal_failure_retryable = Some(payload.retryable);
+                    }
+                    events::KernelEventPayload::SideEffectAmbiguous(_) => {
+                        side_effect_terminal_failure = true;
+                        side_effect_terminal_failure_retryable = Some(false);
+                    }
+                    _ => {}
                 }
             }
         }
@@ -1730,13 +1767,13 @@ fn validate_runner_output(
     if node.side_effect.is_some() {
         validate_side_effect_resume_output(projections, node, attempt_id, payloads)?;
         if failed {
-            if !side_effect_failed {
+            if !side_effect_terminal_failure {
                 return Err(RuntimeError::InvalidRunnerOutput(format!(
-                    "side-effect node {} returned StateAttemptFailed without SideEffectFailed",
+                    "side-effect node {} returned StateAttemptFailed without terminal side-effect evidence",
                     node.node_id
                 )));
             }
-            if side_effect_failure_retryable != attempt_failure_retryable {
+            if side_effect_terminal_failure_retryable != attempt_failure_retryable {
                 return Err(RuntimeError::InvalidRunnerOutput(format!(
                     "side-effect node {} returned inconsistent failure retryability",
                     node.node_id
@@ -1750,9 +1787,9 @@ fn validate_runner_output(
             }
             return Ok(());
         }
-        if side_effect_failed {
+        if side_effect_terminal_failure {
             return Err(RuntimeError::InvalidRunnerOutput(format!(
-                "side-effect node {} returned SideEffectFailed without StateAttemptFailed",
+                "side-effect node {} returned terminal side-effect evidence without StateAttemptFailed",
                 node.node_id
             )));
         }

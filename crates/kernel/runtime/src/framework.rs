@@ -306,12 +306,7 @@ struct FrameworkResolveSagaTerminalRunner;
 
 impl ErasedNodeRunner for FrameworkResolveSagaTerminalRunner {
     fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
-        Box::pin(async move {
-            Err(RuntimeError::Blocked(format!(
-                "resolve-saga-terminal node {} requires saga terminal resolution scheduling",
-                ctx.node().node_id
-            )))
-        })
+        Box::pin(async move { resolve_saga_terminal_framework(ctx) })
     }
 }
 
@@ -522,6 +517,53 @@ fn complete_run_framework(ctx: ErasedRunCtx<'_>) -> Result<ErasedRunnerOutput> {
     })
 }
 
+fn resolve_saga_terminal_framework(ctx: ErasedRunCtx<'_>) -> Result<ErasedRunnerOutput> {
+    let Some(spec::FrameworkNodeSpec::ResolveSagaTerminal(_)) = &ctx.node().framework else {
+        return Err(RuntimeError::InvalidRunnerOutput(format!(
+            "node {} is not a resolve-saga-terminal framework node",
+            ctx.node().node_id
+        )));
+    };
+    let outcome =
+        saga_terminal_completion_outcome(ctx.runtime_spec(), ctx.run_id(), ctx.projections())?;
+    let receipt_bytes =
+        resolve_saga_terminal_receipt_json(ctx.runtime_spec(), &outcome, ctx.run_stream())?;
+    let receipt_digest = receipt_bytes.content_digest();
+    let receipt_artifact_id =
+        ArtifactId::from_digest(receipt_digest.algorithm(), *receipt_digest.digest());
+    let receipt_artifact = store::ArtifactEvidenceRef {
+        artifact_id: receipt_artifact_id.clone(),
+        digest: receipt_digest.clone(),
+        byte_len: receipt_bytes.as_bytes().len() as u64,
+        media_type: spec::MediaType::new("application/json")?,
+        schema_id: Some(ctx.output_cell().schema_id.clone()),
+        semantic_type_id: Some(ctx.output_cell().semantic_type_id.clone()),
+        producer_node_id: Some(ctx.node().node_id.clone()),
+        producer_seed_id: None,
+        artifact_role: events::ArtifactRole::StateOutput,
+    };
+    let receipt_artifact =
+        StagedArtifact::inline_attempt_artifact(&ctx, receipt_bytes.to_vec(), receipt_artifact)?;
+    Ok(ErasedRunnerOutput {
+        staged_artifacts: vec![receipt_artifact],
+        staged_retention_refs: Vec::new(),
+        payloads: vec![RunnerEventPayload::CellProduced(events::CellProduced {
+            spec_hash: ctx.spec_hash().clone(),
+            node_id: ctx.node().node_id.clone(),
+            cell_id: ctx.node().output_cell.clone(),
+            scope_id: ctx.output_cell().scope_id.clone(),
+            attempt_id: ctx.attempt_id().clone(),
+            semantic_type_id: ctx.output_cell().semantic_type_id.clone(),
+            schema_id: ctx.output_cell().schema_id.clone(),
+            value_lineage: ctx.output_cell().value_lineage.clone(),
+            artifact_id: receipt_artifact_id,
+            content_digest: receipt_digest,
+            producer_state_kind: Some(ctx.node().state_kind.clone()),
+            producer_state_version: Some(ctx.node().state_version.clone()),
+        })],
+    })
+}
+
 pub(crate) fn public_output_rendered_digest(
     render: &spec::PublicOutputRenderNodeSpec,
     cells: &[events::NamedTypedCellRef],
@@ -566,6 +608,42 @@ pub(crate) fn complete_run_receipt_json(
     }))
 }
 
+pub(crate) fn resolve_saga_terminal_receipt_json(
+    runtime_spec: &CertifiedRuntimeSpec,
+    outcome: &events::RunCompletionOutcome,
+    pre_resolution_stream: &[store::KernelEventEnvelope],
+) -> Result<PlainCanonicalJsonBytes> {
+    canonical_json(serde_json::json!({
+        "public_output_schema_id": runtime_spec.spec().public_outputs.public_schema_id.as_str(),
+        "terminal_outcome": run_completion_outcome_name(outcome),
+        "pre_resolution_stream_seq": pre_resolution_stream
+            .last()
+            .map(|event| event.seq().as_u64()),
+    }))
+}
+
+pub(crate) fn saga_terminal_completion_outcome(
+    runtime_spec: &CertifiedRuntimeSpec,
+    run_id: &RunId,
+    projections: &store::ProjectionSnapshot,
+) -> Result<events::RunCompletionOutcome> {
+    let saga = projections.derive_saga_projection(run_id, &runtime_spec.spec().saga);
+    match saga.run_mode {
+        store::RunMode::Compensated => Ok(events::RunCompletionOutcome::Compensated),
+        store::RunMode::ManuallyResolved => Ok(events::RunCompletionOutcome::ManuallyResolved),
+        store::RunMode::FailedWithoutAcdcClaim => {
+            Ok(events::RunCompletionOutcome::FailedWithoutAcdcClaim)
+        }
+        store::RunMode::Forward
+        | store::RunMode::Remediating
+        | store::RunMode::ManualBlocked
+        | store::RunMode::Completed => Err(RuntimeError::InvalidRunStream(format!(
+            "saga terminal resolution requires terminal saga mode, found {:?}",
+            saga.run_mode
+        ))),
+    }
+}
+
 pub(crate) fn run_completion_evidence(
     runtime_spec: &CertifiedRuntimeSpec,
     projections: &store::ProjectionSnapshot,
@@ -606,29 +684,48 @@ pub(crate) fn framework_run_completed_payload(
     node: &spec::NodeSpec,
     projections: &store::ProjectionSnapshot,
 ) -> Result<Option<events::KernelEventPayload>> {
-    let Some(spec::FrameworkNodeSpec::CompleteRun(complete)) = &node.framework else {
-        return Ok(None);
+    let outcome = match &node.framework {
+        Some(spec::FrameworkNodeSpec::CompleteRun(complete)) => {
+            let certified_node = certified_complete_run_node(runtime_spec)?;
+            if certified_node.node_id != node.node_id {
+                return Err(RuntimeError::InvalidSpec(format!(
+                    "complete-run node {} is not the certified completion lifecycle node",
+                    node.node_id
+                )));
+            }
+            if complete.public_schema_id != runtime_spec.spec().public_outputs.public_schema_id {
+                return Err(RuntimeError::InvalidSpec(format!(
+                    "complete-run node {} references public schema {} outside certified public outputs",
+                    node.node_id, complete.public_schema_id
+                )));
+            }
+            let completion = run_completion_evidence(runtime_spec, projections)?;
+            projected_retention_manifest(run_id, projections)?;
+            events::RunCompletionOutcome::Completed(completion)
+        }
+        Some(spec::FrameworkNodeSpec::ResolveSagaTerminal(resolve)) => {
+            let certified_node = certified_resolve_saga_terminal_node(runtime_spec)?;
+            if certified_node.node_id != node.node_id {
+                return Err(RuntimeError::InvalidSpec(format!(
+                    "resolve-saga-terminal node {} is not the certified saga terminal lifecycle node",
+                    node.node_id
+                )));
+            }
+            if resolve.public_schema_id != runtime_spec.spec().public_outputs.public_schema_id {
+                return Err(RuntimeError::InvalidSpec(format!(
+                    "resolve-saga-terminal node {} references public schema {} outside certified public outputs",
+                    node.node_id, resolve.public_schema_id
+                )));
+            }
+            saga_terminal_completion_outcome(runtime_spec, run_id, projections)?
+        }
+        _ => return Ok(None),
     };
-    let certified_node = certified_complete_run_node(runtime_spec)?;
-    if certified_node.node_id != node.node_id {
-        return Err(RuntimeError::InvalidSpec(format!(
-            "complete-run node {} is not the certified completion lifecycle node",
-            node.node_id
-        )));
-    }
-    if complete.public_schema_id != runtime_spec.spec().public_outputs.public_schema_id {
-        return Err(RuntimeError::InvalidSpec(format!(
-            "complete-run node {} references public schema {} outside certified public outputs",
-            node.node_id, complete.public_schema_id
-        )));
-    }
-    let completion = run_completion_evidence(runtime_spec, projections)?;
-    projected_retention_manifest(run_id, projections)?;
     Ok(Some(events::KernelEventPayload::RunCompleted(
         events::RunCompleted {
             run_id: run_id.clone(),
             spec_hash: runtime_spec.spec_hash().clone(),
-            outcome: events::RunCompletionOutcome::Completed(completion),
+            outcome,
         },
     )))
 }
@@ -1186,4 +1283,36 @@ pub(crate) fn certified_complete_run_node(
             "RunCompleted lacks a certified CompleteRun framework node".to_owned(),
         )
     })
+}
+
+pub(crate) fn certified_resolve_saga_terminal_node(
+    runtime_spec: &CertifiedRuntimeSpec,
+) -> Result<&spec::NodeSpec> {
+    let mut resolve_node = None;
+    for node_id in runtime_spec.topological_order() {
+        let node = runtime_spec.node(node_id).expect("topological node exists");
+        if matches!(
+            &node.framework,
+            Some(spec::FrameworkNodeSpec::ResolveSagaTerminal(_))
+        ) && resolve_node.replace(node).is_some()
+        {
+            return Err(RuntimeError::InvalidRunStream(
+                "multiple certified resolve-saga-terminal framework nodes".to_owned(),
+            ));
+        }
+    }
+    resolve_node.ok_or_else(|| {
+        RuntimeError::InvalidRunStream(
+            "RunCompleted lacks a certified ResolveSagaTerminal framework node".to_owned(),
+        )
+    })
+}
+
+fn run_completion_outcome_name(outcome: &events::RunCompletionOutcome) -> &'static str {
+    match outcome {
+        events::RunCompletionOutcome::Completed(_) => "completed",
+        events::RunCompletionOutcome::Compensated => "compensated",
+        events::RunCompletionOutcome::ManuallyResolved => "manually_resolved",
+        events::RunCompletionOutcome::FailedWithoutAcdcClaim => "failed_without_acdc_claim",
+    }
 }
