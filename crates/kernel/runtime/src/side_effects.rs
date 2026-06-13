@@ -602,6 +602,7 @@ pub(crate) fn validate_runner_side_effect_payload(
         })?;
     require_attempt(node, attempt_id, payload_node_id, payload_attempt_id)?;
     validate_side_effect_ledger_purpose(runtime_spec, projections, node, payload)?;
+    validate_side_effect_resource_claim(node, payload)?;
     match payload {
         events::KernelEventPayload::SideEffectIntentPersisted(payload) => {
             if payload.scope_id != node.scope_id {
@@ -649,6 +650,49 @@ pub(crate) fn validate_runner_side_effect_payload(
             }
         }
         _ => {}
+    }
+    Ok(())
+}
+
+fn validate_side_effect_resource_claim(
+    node: &spec::NodeSpec,
+    payload: &events::KernelEventPayload,
+) -> Result<()> {
+    let Some(side_effect) = &node.side_effect else {
+        return Err(RuntimeError::InvalidRunnerOutput(format!(
+            "non-side-effect node {} emitted side-effect ledger event",
+            node.node_id
+        )));
+    };
+    let events::KernelEventPayload::SideEffectInvocationPrepared(payload) = payload else {
+        return Ok(());
+    };
+    match &side_effect.resource_claim {
+        spec::ResourceClaimSpec::Exclusive {
+            namespace,
+            key_schema,
+        } => {
+            let Some(resource_key) = &payload.resource_key else {
+                return Err(RuntimeError::InvalidRunnerOutput(format!(
+                    "exclusive side-effect node {} prepared invocation without resource key evidence",
+                    node.node_id
+                )));
+            };
+            if &resource_key.namespace != namespace || &resource_key.key_schema_id != key_schema {
+                return Err(RuntimeError::InvalidRunnerOutput(format!(
+                    "exclusive side-effect node {} prepared invocation with resource key evidence outside certified schema",
+                    node.node_id
+                )));
+            }
+        }
+        spec::ResourceClaimSpec::ExactTouchedSet { .. } | spec::ResourceClaimSpec::ManualOnly => {
+            if payload.resource_key.is_some() {
+                return Err(RuntimeError::InvalidRunnerOutput(format!(
+                    "side-effect node {} recorded exclusive resource key without an exclusive certified resource claim",
+                    node.node_id
+                )));
+            }
+        }
     }
     Ok(())
 }

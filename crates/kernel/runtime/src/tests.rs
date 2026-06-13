@@ -8,8 +8,8 @@ use mfm_capabilities::{
     CapabilityDescriptor, CapabilityRole, CapabilitySetDescriptor, EffectSpec, ManagedPlatformWrite,
 };
 use mfm_ids::{
-    DigestBytes, EffectKind, EffectVersion, EventId, ScopeId, SeedId, SemanticTypeId, StateKind,
-    StateVersion,
+    DigestBytes, EffectKind, EffectVersion, EventId, LoweringVersion, ScopeId, SeedId,
+    SemanticTypeId, SpecVersion, StateKind, StateVersion,
 };
 use mfm_program::{
     build_root_with_registries, CanonicalSeed, PublicOutputKey, PureState, RootBuilder, ScopeKey,
@@ -5051,6 +5051,503 @@ async fn runtime_rejects_remediation_node_emitting_forward_ledger_purpose() {
 }
 
 #[tokio::test]
+async fn runtime_rejects_exclusive_side_effect_without_resource_key() {
+    let fixture = fixture_with_first_exclusive_side_effect_state();
+    let scheduler = test_scheduler(registered_first_side_effect_runners_with(
+        &fixture,
+        DeterministicSideEffectRunner::new(&fixture),
+    ));
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+
+    assert!(matches!(
+        scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await,
+        Err(RuntimeError::InvalidRunnerOutput(message))
+            if message.contains("without resource key evidence")
+    ));
+}
+
+#[tokio::test]
+async fn runtime_sequences_two_runs_on_same_exclusive_lane_until_release() {
+    let fixture = fixture_with_first_exclusive_side_effect_state();
+    let holder_run_id = RunId::from_digest(DigestAlgorithm::Sha256JcsV1, DA);
+    let resource_key = exclusive_resource_key(&fixture, "wallet-1");
+    let lane_key = store::ResourceLaneKey::from_evidence(&resource_key);
+    let runner = side_effect_runner_with_resource_keys(
+        &fixture,
+        resource_keys_for_all_side_effects(&fixture, "wallet-1"),
+    );
+    let scheduler = test_scheduler(registered_first_side_effect_runners_with(&fixture, runner));
+    let mut store = store::InMemoryTypedRunStore::new();
+    let node = node_by_output(&fixture, &fixture.cell_a).clone();
+    append_synthetic_run_started(&mut store, &fixture, &holder_run_id, "holder-run-start");
+    let (holder_attempt, holder_ledger) = append_synthetic_exclusive_prepare(
+        &mut store,
+        &fixture,
+        &holder_run_id,
+        &node,
+        "wallet-1",
+        "holder-prepare",
+    );
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start peer run");
+    assert_eq!(
+        store
+            .projection_snapshot()
+            .resource_lane(&lane_key)
+            .expect("held lane")
+            .run_id,
+        holder_run_id
+    );
+
+    assert_eq!(
+        scheduler
+            .drive_until_blocked(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("peer blocks on lane"),
+        SchedulerStatus::Advanced
+    );
+    assert!(side_effect_projection_for_run_node(
+        store.projection_snapshot(),
+        &fixture.run_id,
+        &node.node_id
+    )
+    .is_none());
+    assert_eq!(
+        scheduler
+            .drive_until_blocked(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("peer remains blocked"),
+        SchedulerStatus::Blocked
+    );
+
+    append_synthetic_side_effect_failed(
+        &mut store,
+        &fixture,
+        &holder_run_id,
+        &node,
+        &holder_attempt,
+        &holder_ledger,
+        "holder-release",
+    );
+    assert!(store
+        .projection_snapshot()
+        .resource_lane(&lane_key)
+        .is_none());
+    assert_eq!(
+        scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("peer prepares after release"),
+        SchedulerStatus::Advanced
+    );
+    assert!(side_effect_projection_for_run_node(
+        store.projection_snapshot(),
+        &fixture.run_id,
+        &node.node_id
+    )
+    .is_some());
+}
+
+#[tokio::test]
+async fn runtime_allows_unrelated_exclusive_keys_to_progress_across_runs() {
+    let fixture = fixture_with_first_exclusive_side_effect_state();
+    let holder_run_id = RunId::from_digest(DigestAlgorithm::Sha256JcsV1, DB);
+    let runner = side_effect_runner_with_resource_keys(
+        &fixture,
+        resource_keys_for_all_side_effects(&fixture, "wallet-b"),
+    );
+    let scheduler = test_scheduler(registered_first_side_effect_runners_with(&fixture, runner));
+    let mut store = store::InMemoryTypedRunStore::new();
+    let node = node_by_output(&fixture, &fixture.cell_a).clone();
+    append_synthetic_run_started(
+        &mut store,
+        &fixture,
+        &holder_run_id,
+        "unrelated-holder-start",
+    );
+    append_synthetic_exclusive_prepare(
+        &mut store,
+        &fixture,
+        &holder_run_id,
+        &node,
+        "wallet-a",
+        "unrelated-holder-prepare",
+    );
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start peer run");
+
+    assert_eq!(
+        scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("peer prepares unrelated key"),
+        SchedulerStatus::Advanced
+    );
+    assert!(side_effect_projection_for_run_node(
+        store.projection_snapshot(),
+        &fixture.run_id,
+        &node.node_id
+    )
+    .is_some());
+}
+
+#[tokio::test]
+async fn runtime_blocks_parallel_branches_of_one_run_on_held_exclusive_lane() {
+    let fixture = fixture_with_run_id(fixture_with_independent_exclusive_side_effects(), DC);
+    let holder_run_id = RunId::from_digest(DigestAlgorithm::Sha256JcsV1, DD);
+    let runner = side_effect_runner_with_resource_keys(
+        &fixture,
+        resource_keys_for_all_side_effects(&fixture, "wallet-shared"),
+    );
+    let scheduler = test_scheduler(registered_two_side_effect_runners_with(&fixture, runner));
+    let mut store = store::InMemoryTypedRunStore::new();
+    let node_a = node_by_output(&fixture, &fixture.cell_a).clone();
+    let node_b = node_by_output(&fixture, &fixture.cell_b).clone();
+    append_synthetic_run_started(&mut store, &fixture, &holder_run_id, "branch-holder-start");
+    append_synthetic_exclusive_prepare(
+        &mut store,
+        &fixture,
+        &holder_run_id,
+        &node_a,
+        "wallet-shared",
+        "branch-holder-prepare",
+    );
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start branched run");
+    assert_eq!(
+        scheduler
+            .drive_until_blocked(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("branched run blocks"),
+        SchedulerStatus::Advanced
+    );
+    assert_eq!(
+        attempt_started_count(&store, &fixture.run_id, &node_a.node_id),
+        1
+    );
+    assert_eq!(
+        attempt_started_count(&store, &fixture.run_id, &node_b.node_id),
+        1
+    );
+    assert!(side_effect_projection_for_run_node(
+        store.projection_snapshot(),
+        &fixture.run_id,
+        &node_a.node_id
+    )
+    .is_none());
+    assert!(side_effect_projection_for_run_node(
+        store.projection_snapshot(),
+        &fixture.run_id,
+        &node_b.node_id
+    )
+    .is_none());
+}
+
+#[tokio::test]
+async fn runtime_blocks_remediation_lane_until_conflicting_holder_releases() {
+    let fixture = fixture_with_two_exclusive_side_effects_and_failing_tail();
+    let holder_run_id = RunId::from_digest(DigestAlgorithm::Sha256JcsV1, DE);
+    let runner = side_effect_runner_with_resource_keys(
+        &fixture,
+        resource_keys_for_all_side_effects(&fixture, "wallet-remediate"),
+    );
+    let mut registry = registered_two_side_effect_runners_with(&fixture, runner.clone());
+    registry
+        .register(binding(
+            fixture
+                .descriptor_c
+                .clone()
+                .expect("failing node descriptor"),
+            "fail",
+            BlockingRunner,
+        ))
+        .expect("binding failure node");
+    let scheduler = test_scheduler(registry);
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start compensating run");
+
+    let forward_a = node_by_output(&fixture, &fixture.cell_a).clone();
+    let forward_b = node_by_output(&fixture, &fixture.cell_b).clone();
+    drive_side_effect_to_confirmation(&scheduler, &mut store, &fixture, &forward_a).await;
+    assert_eq!(
+        scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("materialize forward a"),
+        SchedulerStatus::Advanced
+    );
+    drive_side_effect_to_confirmation(&scheduler, &mut store, &fixture, &forward_b).await;
+    assert_eq!(
+        scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("materialize forward b"),
+        SchedulerStatus::Advanced
+    );
+    let failure_node = node_by_output(
+        &fixture,
+        fixture.cell_c.as_ref().expect("failing output cell"),
+    )
+    .clone();
+    let failure_attempt = append_attempt_start(&mut store, &fixture, &failure_node, 1);
+    append_attempt_failure(&mut store, &fixture, &failure_node, &failure_attempt, false);
+
+    append_synthetic_run_started(
+        &mut store,
+        &fixture,
+        &holder_run_id,
+        "remediation-holder-start",
+    );
+    let (holder_attempt, holder_ledger) = append_synthetic_exclusive_prepare(
+        &mut store,
+        &fixture,
+        &holder_run_id,
+        &forward_b,
+        "wallet-remediate",
+        "remediation-holder-prepare",
+    );
+    assert_eq!(
+        scheduler
+            .drive_until_blocked(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("remediation blocks on lane"),
+        SchedulerStatus::Advanced
+    );
+    assert_eq!(
+        scheduler
+            .drive_until_blocked(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("remediation remains blocked on lane"),
+        SchedulerStatus::Blocked
+    );
+    assert!(remediation_intent_forward_links(&store, &fixture.run_id).is_empty());
+
+    append_synthetic_side_effect_failed(
+        &mut store,
+        &fixture,
+        &holder_run_id,
+        &forward_b,
+        &holder_attempt,
+        &holder_ledger,
+        "remediation-holder-release",
+    );
+    assert_eq!(
+        scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("remediation prepares after lane release"),
+        SchedulerStatus::Advanced
+    );
+    assert_eq!(
+        remediation_intent_forward_links(&store, &fixture.run_id).len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn runtime_ambiguous_holder_keeps_lane_until_terminal_resolution() {
+    let fixture = fixture_with_first_exclusive_side_effect_state();
+    let holder_run_id = RunId::from_digest(DigestAlgorithm::Sha256JcsV1, DE);
+    let scheduler = test_scheduler(registered_first_side_effect_runners_with(
+        &fixture,
+        side_effect_runner_with_resource_keys(
+            &fixture,
+            resource_keys_for_all_side_effects(&fixture, "wallet-ambiguous"),
+        ),
+    ));
+    let mut store = store::InMemoryTypedRunStore::new();
+    let node = node_by_output(&fixture, &fixture.cell_a).clone();
+    append_synthetic_run_started(
+        &mut store,
+        &fixture,
+        &holder_run_id,
+        "ambiguous-holder-start",
+    );
+    let (holder_attempt, holder_ledger) = append_synthetic_exclusive_prepare(
+        &mut store,
+        &fixture,
+        &holder_run_id,
+        &node,
+        "wallet-ambiguous",
+        "ambiguous-holder-prepare",
+    );
+    append_synthetic_invocation_started(
+        &mut store,
+        &fixture,
+        &holder_run_id,
+        &node,
+        &holder_attempt,
+        &holder_ledger,
+        "ambiguous-holder-invocation-started",
+    );
+    append_synthetic_ambiguous(
+        &mut store,
+        &fixture,
+        &holder_run_id,
+        &node,
+        &holder_attempt,
+        &holder_ledger,
+        "ambiguous-holder-evidence",
+    );
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start peer");
+
+    assert_eq!(
+        scheduler
+            .drive_until_blocked(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("peer blocks on ambiguous holder"),
+        SchedulerStatus::Advanced
+    );
+    assert!(side_effect_projection_for_run_node(
+        store.projection_snapshot(),
+        &fixture.run_id,
+        &node.node_id
+    )
+    .is_none());
+
+    append_synthetic_failed_terminal(
+        &mut store,
+        &fixture,
+        &holder_run_id,
+        "ambiguous-holder-terminal",
+    );
+    assert_eq!(
+        scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("peer prepares after holder terminal"),
+        SchedulerStatus::Advanced
+    );
+    assert!(side_effect_projection_for_run_node(
+        store.projection_snapshot(),
+        &fixture.run_id,
+        &node.node_id
+    )
+    .is_some());
+}
+
+#[tokio::test]
+async fn runtime_prepared_holder_lane_releases_at_run_terminal() {
+    let fixture = fixture_with_first_exclusive_side_effect_state();
+    let holder_run_id = RunId::from_digest(DigestAlgorithm::Sha256JcsV1, DF);
+    let resource_key = exclusive_resource_key(&fixture, "wallet-prepared");
+    let lane_key = store::ResourceLaneKey::from_evidence(&resource_key);
+    let scheduler = test_scheduler(registered_first_side_effect_runners_with(
+        &fixture,
+        side_effect_runner_with_resource_keys(
+            &fixture,
+            resource_keys_for_all_side_effects(&fixture, "wallet-prepared"),
+        ),
+    ));
+    let mut store = store::InMemoryTypedRunStore::new();
+    let node = node_by_output(&fixture, &fixture.cell_a).clone();
+    append_synthetic_run_started(
+        &mut store,
+        &fixture,
+        &holder_run_id,
+        "prepared-holder-start",
+    );
+    append_synthetic_exclusive_prepare(
+        &mut store,
+        &fixture,
+        &holder_run_id,
+        &node,
+        "wallet-prepared",
+        "prepared-holder-prepare",
+    );
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start peer");
+    assert_eq!(
+        scheduler
+            .drive_until_blocked(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("peer blocks on prepared holder"),
+        SchedulerStatus::Advanced
+    );
+    assert!(store
+        .projection_snapshot()
+        .resource_lane(&lane_key)
+        .is_some());
+    assert!(side_effect_projection_for_run_node(
+        store.projection_snapshot(),
+        &fixture.run_id,
+        &node.node_id
+    )
+    .is_none());
+    append_synthetic_failed_terminal(
+        &mut store,
+        &fixture,
+        &holder_run_id,
+        "prepared-holder-terminal",
+    );
+    assert!(store
+        .projection_snapshot()
+        .resource_lane(&lane_key)
+        .is_none());
+    assert_eq!(
+        scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("peer prepares after holder terminal"),
+        SchedulerStatus::Advanced
+    );
+    assert!(side_effect_projection_for_run_node(
+        store.projection_snapshot(),
+        &fixture.run_id,
+        &node.node_id
+    )
+    .is_some());
+}
+
+#[tokio::test]
 async fn side_effect_not_submitted_resume_claims_next_epoch() {
     let fixture = fixture_with_first_side_effect_state();
     let scheduler = test_scheduler(registered_side_effect_fixture_runners(&fixture));
@@ -5474,11 +5971,13 @@ fn side_effect_ambiguity_derives_attempt_failure_payload() {
     assert_eq!(failure.error.code.as_str(), "side_effect_ambiguous");
 }
 
+#[derive(Clone)]
 struct DeterministicSideEffectRunner {
     cap_kind: CapabilityKind,
     cap_version: CapabilityVersion,
     adapter_kind: AdapterKind,
     adapter_version: AdapterVersion,
+    resource_keys: BTreeMap<NodeId, events::ResourceKeyEvidence>,
 }
 
 impl DeterministicSideEffectRunner {
@@ -5488,7 +5987,36 @@ impl DeterministicSideEffectRunner {
             cap_version: side_effect_capability_version(),
             adapter_kind: fixture.adapter_kind.clone(),
             adapter_version: fixture.adapter_version.clone(),
+            resource_keys: BTreeMap::new(),
         }
+    }
+
+    fn with_resource_keys(
+        mut self,
+        resource_keys: BTreeMap<NodeId, events::ResourceKeyEvidence>,
+    ) -> Self {
+        self.resource_keys = resource_keys;
+        self
+    }
+
+    fn resource_key_for_ctx(&self, ctx: &ErasedRunCtx<'_>) -> Option<events::ResourceKeyEvidence> {
+        self.resource_keys.get(&ctx.node().node_id).cloned()
+    }
+
+    fn prepared(
+        &self,
+        ctx: &ErasedRunCtx<'_>,
+        ledger: events::SideEffectLedgerKey,
+        invocation_epoch: u32,
+        claim_generation: u32,
+    ) -> RunnerEventPayload {
+        side_effect_prepared_with_resource_key(
+            ctx,
+            ledger,
+            invocation_epoch,
+            claim_generation,
+            self.resource_key_for_ctx(ctx),
+        )
     }
 }
 
@@ -5513,7 +6041,7 @@ impl ErasedNodeRunner for DeterministicSideEffectRunner {
                     let claim = projection.claim.as_ref().expect("claim projection");
                     Ok(ErasedRunnerOutput::new(vec![
                         side_effect_claim_taken_over(&ctx, ledger.clone(), claim, 2),
-                        side_effect_prepared(&ctx, ledger.clone(), 1, 2),
+                        self.prepared(&ctx, ledger.clone(), 1, 2),
                         side_effect_invocation_started(&ctx, ledger, 1, 2),
                     ]))
                 }
@@ -5560,7 +6088,7 @@ impl ErasedNodeRunner for DeterministicSideEffectRunner {
                     let next_generation = claim.claim_generation + 1;
                     Ok(ErasedRunnerOutput::new(vec![
                         side_effect_claimed(&ctx, ledger.clone(), next_epoch, next_generation),
-                        side_effect_prepared(&ctx, ledger.clone(), next_epoch, next_generation),
+                        self.prepared(&ctx, ledger.clone(), next_epoch, next_generation),
                         side_effect_invocation_started(&ctx, ledger, next_epoch, next_generation),
                     ]))
                 }
@@ -5694,7 +6222,7 @@ impl DeterministicSideEffectRunner {
                     },
                 ),
                 side_effect_claimed(&ctx, ledger.clone(), 1, 1),
-                side_effect_prepared(&ctx, ledger, 1, 1),
+                self.prepared(&ctx, ledger, 1, 1),
             ],
         })
     }
@@ -6805,10 +7333,6 @@ fn append_attempt_start(
             required_artifacts: Vec::new(),
             preconditions: store::CommitPreconditions {
                 required_run_state: store::RequiredRunState::NotCompleted,
-                required_cell_states: vec![store::CellStatePrecondition {
-                    cell_id: node.output_cell.clone(),
-                    required: store::RequiredCellState::Absent,
-                }],
                 ..store::CommitPreconditions::default()
             },
         })
@@ -6860,6 +7384,356 @@ fn append_attempt_failure(
             },
         })
         .expect("append attempt failure");
+}
+
+fn append_synthetic_run_started(
+    store: &mut store::InMemoryTypedRunStore,
+    fixture: &Fixture,
+    run_id: &RunId,
+    commit_key: &str,
+) {
+    let spec_artifact = spec_artifact(&fixture.runtime_spec).evidence;
+    let certificate_artifact = certificate_artifact(&fixture.runtime_spec).evidence;
+    store
+        .append_prepared_commit(store::TypedCommitRequest {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(run_id),
+            commit_key: store::CommitKey::new(commit_key).expect("commit key"),
+            payloads: vec![events::KernelEventPayload::RunStarted(events::RunStarted {
+                run_id: run_id.clone(),
+                spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                spec_artifact_id: spec_artifact.artifact_id.clone(),
+                certificate_artifact_id: certificate_artifact.artifact_id.clone(),
+                certificate_artifact_digest: certificate_artifact.digest.clone(),
+                certificate_media_type: certificate_artifact.media_type.clone(),
+                spec_media_type: spec_artifact.media_type.clone(),
+                spec_version: SpecVersion::new(spec::SPEC_VERSION).expect("spec version"),
+                lowering_version: LoweringVersion::new(spec::LOWERING_VERSION)
+                    .expect("lowering version"),
+                public_output_schema_id: fixture
+                    .runtime_spec
+                    .spec()
+                    .public_outputs
+                    .public_schema_id
+                    .clone(),
+                descriptor_identities: Vec::new(),
+                runner_executables: Vec::new(),
+                adapter_executables: Vec::new(),
+                canonicalizer_identity: spec::CanonicalizerIdentity::new("sha256-jcs-v1")
+                    .expect("canonicalizer"),
+                framework_version: events::FrameworkVersion::new("mfm.test.1").expect("framework"),
+                source_revision: events::SourceRevision::new("test-rev").expect("source"),
+                seed_cells: Vec::new(),
+            })],
+            required_artifacts: vec![spec_artifact, certificate_artifact],
+            preconditions: store::CommitPreconditions {
+                required_run_state: store::RequiredRunState::Absent,
+                ..store::CommitPreconditions::default()
+            },
+        })
+        .expect("append synthetic run start");
+}
+
+fn append_synthetic_exclusive_prepare(
+    store: &mut store::InMemoryTypedRunStore,
+    fixture: &Fixture,
+    run_id: &RunId,
+    node: &spec::NodeSpec,
+    key: &str,
+    commit_key: &str,
+) -> (AttemptId, events::SideEffectLedgerKey) {
+    let attempt_id =
+        attempt_id(run_id, fixture.runtime_spec.spec_hash(), &node.node_id, 1).expect("attempt id");
+    store
+        .append_prepared_commit(store::TypedCommitRequest {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(run_id),
+            commit_key: store::CommitKey::new(format!("{commit_key}-attempt-start"))
+                .expect("commit key"),
+            payloads: vec![events::KernelEventPayload::StateAttemptStarted(
+                events::StateAttemptStarted {
+                    spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                    node_id: node.node_id.clone(),
+                    attempt_id: attempt_id.clone(),
+                    attempt_no: 1,
+                    state_kind: node.state_kind.clone(),
+                    state_version: node.state_version.clone(),
+                },
+            )],
+            required_artifacts: Vec::new(),
+            preconditions: store::CommitPreconditions {
+                required_run_state: store::RequiredRunState::NotCompleted,
+                ..store::CommitPreconditions::default()
+            },
+        })
+        .expect("append synthetic attempt start");
+
+    let ledger =
+        events::SideEffectLedgerKey::new(format!("holder-{commit_key}")).expect("holder ledger");
+    let intent_hash = content_digest_json(serde_json::json!({
+        "key": key,
+        "ledger": ledger.as_str(),
+        "run": run_id.as_str(),
+    }))
+    .expect("intent digest");
+    let intent_artifact_id =
+        ArtifactId::from_digest(intent_hash.algorithm(), *intent_hash.digest());
+    let intent_artifact = store::ArtifactEvidenceRef {
+        artifact_id: intent_artifact_id.clone(),
+        digest: intent_hash.clone(),
+        byte_len: 17,
+        media_type: spec::MediaType::new("application/json").expect("media"),
+        schema_id: Some(node.config_ref.schema_id.clone()),
+        semantic_type_id: None,
+        producer_node_id: Some(node.node_id.clone()),
+        producer_seed_id: None,
+        artifact_role: events::ArtifactRole::SideEffectIntent,
+    };
+    store
+        .append_prepared_commit(store::TypedCommitRequest {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(run_id),
+            commit_key: store::CommitKey::new(commit_key).expect("commit key"),
+            payloads: vec![
+                events::KernelEventPayload::SideEffectIntentPersisted(
+                    events::side_effect::IntentPersisted {
+                        spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                        node_id: node.node_id.clone(),
+                        scope_id: node.scope_id.clone(),
+                        attempt_id: attempt_id.clone(),
+                        ledger_key: ledger.clone(),
+                        ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+                        invocation_epoch: 1,
+                        intent_schema_id: node.config_ref.schema_id.clone(),
+                        intent_hash: intent_hash.clone(),
+                        intent_artifact_id,
+                        idempotency_input_schema_id: node.config_ref.schema_id.clone(),
+                        idempotency_input_hash: content(0xc3),
+                        idempotency_key: events::IdempotencyKeyRef::new(format!(
+                            "idem-{commit_key}"
+                        ))
+                        .expect("idempotency key"),
+                        capability_kind: side_effect_capability_kind(),
+                        capability_version: side_effect_capability_version(),
+                        adapter_kind: fixture.adapter_kind.clone(),
+                        adapter_version: fixture.adapter_version.clone(),
+                    },
+                ),
+                events::KernelEventPayload::SideEffectClaimed(events::side_effect::Claimed {
+                    spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                    node_id: node.node_id.clone(),
+                    attempt_id: attempt_id.clone(),
+                    ledger_key: ledger.clone(),
+                    ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+                    claim_owner: events::RunnerInvocationId::new("owner-1").expect("claim owner"),
+                    invocation_epoch: 1,
+                    claim_generation: 1,
+                    claim_fencing_token: events::side_effect::ClaimFencingToken::new("token-1")
+                        .expect("fencing token"),
+                }),
+                events::KernelEventPayload::SideEffectInvocationPrepared(
+                    events::side_effect::InvocationPrepared {
+                        spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                        node_id: node.node_id.clone(),
+                        attempt_id: attempt_id.clone(),
+                        ledger_key: ledger.clone(),
+                        ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+                        invocation_epoch: 1,
+                        claim_generation: 1,
+                        claim_fencing_token: events::side_effect::ClaimFencingToken::new("token-1")
+                            .expect("fencing token"),
+                        prepared_artifact_id: None,
+                        prepared_hash: None,
+                        resource_key: Some(exclusive_resource_key(fixture, key)),
+                    },
+                ),
+            ],
+            required_artifacts: vec![intent_artifact],
+            preconditions: store::CommitPreconditions {
+                required_run_state: store::RequiredRunState::NotCompleted,
+                required_present_logical_keys: vec![store::LogicalEventKey::new(format!(
+                    "attempt:{}:{}",
+                    node.node_id, attempt_id
+                ))
+                .expect("attempt logical key")],
+                required_side_effect_states: vec![store::SideEffectStatePrecondition {
+                    ledger_key: ledger.clone(),
+                    required: store::RequiredSideEffectState::Absent,
+                }],
+                ..store::CommitPreconditions::default()
+            },
+        })
+        .expect("append synthetic side-effect prepare");
+    (attempt_id, ledger)
+}
+
+fn append_synthetic_invocation_started(
+    store: &mut store::InMemoryTypedRunStore,
+    fixture: &Fixture,
+    run_id: &RunId,
+    node: &spec::NodeSpec,
+    attempt_id: &AttemptId,
+    ledger: &events::SideEffectLedgerKey,
+    commit_key: &str,
+) {
+    store
+        .append_prepared_commit(store::TypedCommitRequest {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(run_id),
+            commit_key: store::CommitKey::new(commit_key).expect("commit key"),
+            payloads: vec![events::KernelEventPayload::SideEffectInvocationStarted(
+                events::side_effect::InvocationStarted {
+                    spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                    node_id: node.node_id.clone(),
+                    attempt_id: attempt_id.clone(),
+                    ledger_key: ledger.clone(),
+                    ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+                    invocation_epoch: 1,
+                    claim_owner: events::RunnerInvocationId::new("owner-1").expect("claim owner"),
+                    claim_generation: 1,
+                    claim_fencing_token: events::side_effect::ClaimFencingToken::new("token-1")
+                        .expect("fencing token"),
+                },
+            )],
+            required_artifacts: Vec::new(),
+            preconditions: store::CommitPreconditions {
+                required_run_state: store::RequiredRunState::NotCompleted,
+                required_side_effect_states: vec![store::SideEffectStatePrecondition {
+                    ledger_key: ledger.clone(),
+                    required: store::RequiredSideEffectState::InvocationPrepared,
+                }],
+                ..store::CommitPreconditions::default()
+            },
+        })
+        .expect("append synthetic invocation started");
+}
+
+fn append_synthetic_side_effect_failed(
+    store: &mut store::InMemoryTypedRunStore,
+    fixture: &Fixture,
+    run_id: &RunId,
+    node: &spec::NodeSpec,
+    attempt_id: &AttemptId,
+    ledger: &events::SideEffectLedgerKey,
+    commit_key: &str,
+) {
+    store
+        .append_prepared_commit(store::TypedCommitRequest {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(run_id),
+            commit_key: store::CommitKey::new(commit_key).expect("commit key"),
+            payloads: vec![
+                events::KernelEventPayload::SideEffectFailed(events::side_effect::Failed {
+                    spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                    node_id: node.node_id.clone(),
+                    attempt_id: attempt_id.clone(),
+                    ledger_key: ledger.clone(),
+                    ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+                    invocation_epoch: 1,
+                    failure_phase: events::side_effect::FailurePhase::BeforeInvocationStarted,
+                    retryable: true,
+                    error: side_effect_error(true),
+                }),
+                events::KernelEventPayload::StateAttemptFailed(events::StateAttemptFailed {
+                    spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                    node_id: node.node_id.clone(),
+                    attempt_id: attempt_id.clone(),
+                    retryable: true,
+                    error: side_effect_error(true),
+                }),
+            ],
+            required_artifacts: Vec::new(),
+            preconditions: store::CommitPreconditions {
+                required_run_state: store::RequiredRunState::NotCompleted,
+                required_side_effect_states: vec![store::SideEffectStatePrecondition {
+                    ledger_key: ledger.clone(),
+                    required: store::RequiredSideEffectState::InvocationPrepared,
+                }],
+                ..store::CommitPreconditions::default()
+            },
+        })
+        .expect("append synthetic side-effect failure");
+}
+
+fn append_synthetic_ambiguous(
+    store: &mut store::InMemoryTypedRunStore,
+    fixture: &Fixture,
+    run_id: &RunId,
+    node: &spec::NodeSpec,
+    attempt_id: &AttemptId,
+    ledger: &events::SideEffectLedgerKey,
+    commit_key: &str,
+) {
+    let evidence_hash = content(0xd5);
+    let evidence_artifact_id = artifact(0xd6);
+    let evidence = store::ArtifactEvidenceRef {
+        artifact_id: evidence_artifact_id.clone(),
+        digest: evidence_hash.clone(),
+        byte_len: 19,
+        media_type: spec::MediaType::new("application/json").expect("media"),
+        schema_id: Some(node.config_ref.schema_id.clone()),
+        semantic_type_id: None,
+        producer_node_id: Some(node.node_id.clone()),
+        producer_seed_id: None,
+        artifact_role: events::ArtifactRole::AmbiguityEvidence,
+    };
+    store
+        .append_prepared_commit(store::TypedCommitRequest {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(run_id),
+            commit_key: store::CommitKey::new(commit_key).expect("commit key"),
+            payloads: vec![events::KernelEventPayload::SideEffectAmbiguous(
+                events::side_effect::Ambiguous {
+                    spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                    node_id: node.node_id.clone(),
+                    attempt_id: attempt_id.clone(),
+                    ledger_key: ledger.clone(),
+                    ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+                    invocation_epoch: 1,
+                    ambiguity_code: events::AmbiguityCode::new("unknown").expect("ambiguity"),
+                    evidence_schema_id: node.config_ref.schema_id.clone(),
+                    evidence_hash,
+                    evidence_artifact_id,
+                },
+            )],
+            required_artifacts: vec![evidence],
+            preconditions: store::CommitPreconditions {
+                required_run_state: store::RequiredRunState::NotCompleted,
+                required_side_effect_states: vec![store::SideEffectStatePrecondition {
+                    ledger_key: ledger.clone(),
+                    required: store::RequiredSideEffectState::InvocationStarted,
+                }],
+                ..store::CommitPreconditions::default()
+            },
+        })
+        .expect("append synthetic ambiguity");
+}
+
+fn append_synthetic_failed_terminal(
+    store: &mut store::InMemoryTypedRunStore,
+    fixture: &Fixture,
+    run_id: &RunId,
+    commit_key: &str,
+) {
+    store
+        .append_prepared_commit(store::TypedCommitRequest {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(run_id),
+            commit_key: store::CommitKey::new(commit_key).expect("commit key"),
+            payloads: vec![events::KernelEventPayload::RunCompleted(
+                events::RunCompleted {
+                    run_id: run_id.clone(),
+                    spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                    outcome: events::RunCompletionOutcome::FailedWithoutAcdcClaim,
+                },
+            )],
+            required_artifacts: Vec::new(),
+            preconditions: store::CommitPreconditions {
+                required_run_state: store::RequiredRunState::Started,
+                ..store::CommitPreconditions::default()
+            },
+        })
+        .expect("append synthetic terminal");
 }
 
 fn append_manual_resolution(
@@ -7260,6 +8134,46 @@ fn registered_side_effect_fixture_runners(fixture: &Fixture) -> ErasedRunnerRegi
                 output_digest: content(0xb2),
             },
         ))
+        .expect("binding b");
+    registry
+}
+
+fn registered_first_side_effect_runners_with(
+    fixture: &Fixture,
+    runner: DeterministicSideEffectRunner,
+) -> ErasedRunnerRegistry {
+    let mut registry = ErasedRunnerRegistry::new();
+    registry
+        .register(binding(fixture.descriptor_a.clone(), "sidefx", runner))
+        .expect("binding a");
+    registry
+        .register(binding(
+            fixture.descriptor_b.clone(),
+            "read",
+            RecordingRunner {
+                expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
+                output_artifact: artifact(0xb1),
+                output_digest: content(0xb2),
+            },
+        ))
+        .expect("binding b");
+    registry
+}
+
+fn registered_two_side_effect_runners_with(
+    fixture: &Fixture,
+    runner: DeterministicSideEffectRunner,
+) -> ErasedRunnerRegistry {
+    let mut registry = ErasedRunnerRegistry::new();
+    registry
+        .register(binding(
+            fixture.descriptor_a.clone(),
+            "sidefx",
+            runner.clone(),
+        ))
+        .expect("binding a");
+    registry
+        .register(binding(fixture.descriptor_b.clone(), "sidefx", runner))
         .expect("binding b");
     registry
 }
@@ -8526,6 +9440,12 @@ fn fixture_with_first_side_effect_state() -> Fixture {
     fixture
 }
 
+fn fixture_with_first_exclusive_side_effect_state() -> Fixture {
+    let fixture = fixture_with_first_side_effect_state();
+    let descriptors = vec![fixture.descriptor_a.clone()];
+    with_exclusive_resource_claims(fixture, &descriptors)
+}
+
 fn fixture_with_manual_resolution_side_effect_state() -> Fixture {
     let mut fixture = fixture_with_first_side_effect_state();
     let mut envelope = fixture.runtime_spec.envelope().clone();
@@ -8649,6 +9569,12 @@ fn fixture_with_independent_second_node_and_first_side_effect_state() -> Fixture
     fixture.runtime_spec =
         CertifiedRuntimeSpec::from_verified_envelope(envelope).expect("runtime spec");
     fixture
+}
+
+fn fixture_with_independent_exclusive_side_effects() -> Fixture {
+    let fixture = fixture_with_independent_second_node_and_first_side_effect_state();
+    let descriptors = vec![fixture.descriptor_a.clone(), fixture.descriptor_b.clone()];
+    with_exclusive_resource_claims(fixture, &descriptors)
 }
 
 fn fixture_with_two_side_effects_and_failing_tail() -> Fixture {
@@ -8927,6 +9853,74 @@ fn fixture_with_two_side_effects_and_failing_tail() -> Fixture {
     fixture
 }
 
+fn fixture_with_two_exclusive_side_effects_and_failing_tail() -> Fixture {
+    let fixture = fixture_with_two_side_effects_and_failing_tail();
+    let descriptors = vec![fixture.descriptor_a.clone(), fixture.descriptor_b.clone()];
+    with_exclusive_resource_claims(fixture, &descriptors)
+}
+
+fn with_exclusive_resource_claims(mut fixture: Fixture, descriptors: &[DescriptorId]) -> Fixture {
+    let mut envelope = fixture.runtime_spec.envelope().clone();
+    let side_effect = EffectKind::new("mfm.test", "side-effect", DigestAlgorithm::Sha256JcsV1, D8)
+        .expect("side-effect");
+    let side_effect_cap = CapabilityDescriptor::new(
+        side_effect_capability_kind(),
+        side_effect_capability_version(),
+        CapabilityRole::ExternalMutationAuthority,
+        "external-mutation",
+    )
+    .expect("side-effect cap");
+    let side_effect_caps =
+        CapabilitySetDescriptor::new(vec![side_effect_cap]).expect("side-effect caps");
+    let contract_digest = content(0x88);
+    let resource_claim = spec::ResourceClaimSpec::Exclusive {
+        namespace: exclusive_resource_namespace(),
+        key_schema: fixture.seed_ref.schema_id.clone(),
+    };
+    for node in envelope
+        .spec
+        .nodes
+        .iter_mut()
+        .chain(envelope.spec.remediations.values_mut())
+    {
+        if descriptors
+            .iter()
+            .any(|descriptor| descriptor == &node.descriptor_id)
+        {
+            node.effect_kind = side_effect.clone();
+            node.capability_bindings = side_effect_caps.clone();
+            node.adapter_bindings = vec![spec::AdapterBinding {
+                adapter_kind: fixture.adapter_kind.clone(),
+                adapter_version: fixture.adapter_version.clone(),
+                binding_digest: None,
+            }];
+            node.side_effect = Some(spec::SideEffectContractSpec {
+                contract_digest: contract_digest.clone(),
+                resource_claim: resource_claim.clone(),
+            });
+        }
+    }
+    for descriptor in &mut envelope.spec.descriptor_identities {
+        if let spec::DescriptorIdentity::State(identity) = descriptor {
+            if descriptors
+                .iter()
+                .any(|descriptor| descriptor == &identity.descriptor_id)
+            {
+                identity.effect_kind = side_effect.clone();
+                identity.effect_class = "sidefx".to_owned();
+                identity.effect_name = "sidefx".to_owned();
+                identity.capabilities = side_effect_caps.clone();
+                identity.runner = "sidefx".to_owned();
+                identity.side_effect_contract_digest = Some(contract_digest.clone());
+            }
+        }
+    }
+    let envelope = spec::HashedSpecEnvelope::new(envelope.spec, envelope.audit).expect("rehash");
+    fixture.runtime_spec =
+        CertifiedRuntimeSpec::from_verified_envelope(envelope).expect("runtime spec");
+    fixture
+}
+
 fn remediation_node_for_forward(
     forward: &spec::NodeSpec,
     forward_output: &spec::CellSpec,
@@ -9185,6 +10179,46 @@ fn side_effect_capability_version() -> CapabilityVersion {
     CapabilityVersion::new("mfm.cap.external_mutation.v1").expect("side-effect cap version")
 }
 
+fn exclusive_resource_namespace() -> spec::ResourceNamespace {
+    spec::ResourceNamespace::new("mfm.test.wallet_nonce").expect("resource namespace")
+}
+
+fn exclusive_resource_key(fixture: &Fixture, value: &str) -> events::ResourceKeyEvidence {
+    events::ResourceKeyEvidence {
+        namespace: exclusive_resource_namespace(),
+        key_schema_id: fixture.seed_ref.schema_id.clone(),
+        key: events::ResourceKey::new(value).expect("resource key"),
+    }
+}
+
+fn resource_keys_for_all_side_effects(
+    fixture: &Fixture,
+    value: &str,
+) -> BTreeMap<NodeId, events::ResourceKeyEvidence> {
+    let evidence = exclusive_resource_key(fixture, value);
+    fixture
+        .runtime_spec
+        .spec()
+        .nodes
+        .iter()
+        .chain(fixture.runtime_spec.spec().remediations.values())
+        .filter(|node| node.side_effect.is_some())
+        .map(|node| (node.node_id.clone(), evidence.clone()))
+        .collect()
+}
+
+fn side_effect_runner_with_resource_keys(
+    fixture: &Fixture,
+    resource_keys: BTreeMap<NodeId, events::ResourceKeyEvidence>,
+) -> DeterministicSideEffectRunner {
+    DeterministicSideEffectRunner::new(fixture).with_resource_keys(resource_keys)
+}
+
+fn fixture_with_run_id(mut fixture: Fixture, digest: DigestBytes) -> Fixture {
+    fixture.run_id = RunId::from_digest(DigestAlgorithm::Sha256JcsV1, digest);
+    fixture
+}
+
 fn side_effect_ledger_key(attempt_no: u32) -> events::SideEffectLedgerKey {
     events::SideEffectLedgerKey::new(format!("ledger-{attempt_no}")).expect("ledger key")
 }
@@ -9212,6 +10246,51 @@ fn forward_ledger_for_node(
         }
     }
     found.expect("forward ledger for node")
+}
+
+fn side_effect_projection_for_run_node<'a>(
+    projections: &'a store::ProjectionSnapshot,
+    run_id: &RunId,
+    node_id: &NodeId,
+) -> Option<&'a store::SideEffectProjection> {
+    projections.side_effects().find_map(|(_, projection)| {
+        (projection.run_id == *run_id && projection.intent.node_id == *node_id)
+            .then_some(projection)
+    })
+}
+
+async fn drive_side_effect_to_confirmation(
+    scheduler: &SerialTypedScheduler,
+    store: &mut store::InMemoryTypedRunStore,
+    fixture: &Fixture,
+    node: &spec::NodeSpec,
+) {
+    for _ in 0..8 {
+        assert_eq!(
+            scheduler
+                .drive_once(store, &fixture.runtime_spec, &fixture.run_id)
+                .await
+                .expect("drive side effect to confirmation"),
+            SchedulerStatus::Advanced
+        );
+        if side_effect_projection_for_run_node(
+            store.projection_snapshot(),
+            &fixture.run_id,
+            &node.node_id,
+        )
+        .is_some_and(|projection| {
+            matches!(
+                projection.phase,
+                store::SideEffectPhase::ConfirmationObserved { .. }
+            )
+        }) {
+            return;
+        }
+    }
+    panic!(
+        "side-effect node {} did not reach confirmation",
+        node.node_id
+    );
 }
 
 fn remediation_intent_forward_links(
@@ -9265,7 +10344,8 @@ fn side_effect_ledger_key_for_ctx(ctx: &ErasedRunCtx<'_>) -> events::SideEffectL
         .expect("remediation ledger key")
     } else {
         events::SideEffectLedgerKey::new(format!(
-            "forward-{}-{}",
+            "forward-{}-{}-{}",
+            ctx.run_id(),
             ctx.node().node_id,
             ctx.attempt_no()
         ))
@@ -9393,6 +10473,16 @@ fn side_effect_prepared(
     invocation_epoch: u32,
     claim_generation: u32,
 ) -> RunnerEventPayload {
+    side_effect_prepared_with_resource_key(ctx, ledger, invocation_epoch, claim_generation, None)
+}
+
+fn side_effect_prepared_with_resource_key(
+    ctx: &ErasedRunCtx<'_>,
+    ledger: events::SideEffectLedgerKey,
+    invocation_epoch: u32,
+    claim_generation: u32,
+    resource_key: Option<events::ResourceKeyEvidence>,
+) -> RunnerEventPayload {
     RunnerEventPayload::SideEffectInvocationPrepared(events::side_effect::InvocationPrepared {
         spec_hash: ctx.spec_hash().clone(),
         node_id: ctx.node().node_id.clone(),
@@ -9404,7 +10494,7 @@ fn side_effect_prepared(
         claim_fencing_token: side_effect_fencing_token(ctx.attempt_no(), claim_generation),
         prepared_artifact_id: None,
         prepared_hash: None,
-        resource_key: None,
+        resource_key,
     })
 }
 

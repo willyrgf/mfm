@@ -1,6 +1,8 @@
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use mfm_ids::{AttemptId, RunId};
+use mfm_events::v1 as events;
+use mfm_ids::{AttemptId, NodeId, RunId};
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
 
@@ -10,7 +12,9 @@ use crate::commit::{
     RunnerOutputCommitInput,
 };
 use crate::error::async_store_error;
-use crate::frontier::{scheduler_decision, AttemptPlan, RunnableNode, SchedulerDecision};
+use crate::frontier::{
+    scheduler_decision_with_blocked_nodes, AttemptPlan, RunnableNode, SchedulerDecision,
+};
 use crate::history::{
     committed_config_artifact, materialize_inputs, recorded_facts_for_attempt, RuntimeRunView,
 };
@@ -50,6 +54,18 @@ struct FrameworkNodeAttemptInput<'a> {
     binding: ErasedRunnerBinding,
 }
 
+enum DriveStepStatus {
+    Advanced,
+    Blocked,
+    PublicOutputProjected,
+    BlockedOnResourceLane { node_id: NodeId, advanced: bool },
+}
+
+enum NodeRunStatus {
+    Advanced,
+    BlockedOnResourceLane { node_id: NodeId, advanced: bool },
+}
+
 fn prepare_runner_invocation<'a>(
     input: RunnerInvocationInput<'a>,
 ) -> Result<PreparedRunnerInvocation<'a>> {
@@ -84,6 +100,47 @@ fn prepare_runner_invocation<'a>(
         projections: &view.projections,
         run_stream: &view.stream,
     })
+}
+
+fn resource_lane_block_for_request(
+    projections: &store::ProjectionSnapshot,
+    request: &store::TypedCommitRequest,
+) -> Option<store::ResourceLaneKey> {
+    request.payloads.iter().find_map(|payload| {
+        let events::KernelEventPayload::SideEffectInvocationPrepared(payload) = payload else {
+            return None;
+        };
+        let resource_key = payload.resource_key.as_ref()?;
+        let lane_key = store::ResourceLaneKey::from_evidence(resource_key);
+        projections
+            .resource_lane(&lane_key)
+            .filter(|holder| holder.ledger_key != payload.ledger_key)
+            .map(|_| lane_key)
+    })
+}
+
+fn request_has_resource_lane_prepare(request: &store::TypedCommitRequest) -> bool {
+    request.payloads.iter().any(|payload| {
+        matches!(
+            payload,
+            events::KernelEventPayload::SideEffectInvocationPrepared(payload)
+                if payload.resource_key.is_some()
+        )
+    })
+}
+
+fn store_error_is_resource_lane_block(error: &store::StoreError) -> bool {
+    matches!(
+        error,
+        store::StoreError::ProjectionConflict { key, message }
+            if key.starts_with("resource_lane:")
+                && message.starts_with("resource lane already held by ledger ")
+    )
+}
+
+fn async_error_is_resource_lane_block(message: &str) -> bool {
+    message.contains("projection conflict for resource_lane:")
+        && message.contains("resource lane already held by ledger ")
 }
 
 /// Serial typed scheduler.
@@ -154,15 +211,24 @@ impl SerialTypedScheduler {
         runtime_spec: &CertifiedRuntimeSpec,
         run_id: &RunId,
     ) -> Result<SchedulerStatus> {
-        let view = RuntimeRunView::from_store(runtime_spec, run_id, store)?;
-        match scheduler_decision(runtime_spec, run_id, &view)? {
-            SchedulerDecision::Run(runnable) => {
-                self.run_node_attempt(store, runtime_spec, run_id, &view, runnable)
-                    .await?;
-                Ok(SchedulerStatus::Advanced)
+        let mut blocked_nodes = BTreeSet::new();
+        loop {
+            match self
+                .drive_once_with_blocked_nodes(store, runtime_spec, run_id, &blocked_nodes)
+                .await?
+            {
+                DriveStepStatus::Advanced => return Ok(SchedulerStatus::Advanced),
+                DriveStepStatus::Blocked => return Ok(SchedulerStatus::Blocked),
+                DriveStepStatus::PublicOutputProjected => {
+                    return Ok(SchedulerStatus::PublicOutputProjected);
+                }
+                DriveStepStatus::BlockedOnResourceLane { node_id, advanced } => {
+                    if advanced {
+                        return Ok(SchedulerStatus::Advanced);
+                    }
+                    blocked_nodes.insert(node_id);
+                }
             }
-            SchedulerDecision::Blocked => Ok(SchedulerStatus::Blocked),
-            SchedulerDecision::Completed => Ok(SchedulerStatus::PublicOutputProjected),
         }
     }
 
@@ -174,11 +240,25 @@ impl SerialTypedScheduler {
         run_id: &RunId,
     ) -> Result<SchedulerStatus> {
         let mut advanced = false;
+        let mut blocked_nodes = BTreeSet::new();
         loop {
-            match self.drive_once(store, runtime_spec, run_id).await? {
-                SchedulerStatus::Advanced => advanced = true,
-                SchedulerStatus::Blocked if advanced => return Ok(SchedulerStatus::Advanced),
-                status => return Ok(status),
+            match self
+                .drive_once_with_blocked_nodes(store, runtime_spec, run_id, &blocked_nodes)
+                .await?
+            {
+                DriveStepStatus::Advanced => advanced = true,
+                DriveStepStatus::BlockedOnResourceLane {
+                    node_id,
+                    advanced: step_advanced,
+                } => {
+                    advanced |= step_advanced;
+                    blocked_nodes.insert(node_id);
+                }
+                DriveStepStatus::Blocked if advanced => return Ok(SchedulerStatus::Advanced),
+                DriveStepStatus::Blocked => return Ok(SchedulerStatus::Blocked),
+                DriveStepStatus::PublicOutputProjected => {
+                    return Ok(SchedulerStatus::PublicOutputProjected);
+                }
             }
         }
     }
@@ -190,19 +270,24 @@ impl SerialTypedScheduler {
         runtime_spec: &CertifiedRuntimeSpec,
         run_id: &RunId,
     ) -> Result<SchedulerStatus> {
-        let stream = store
-            .load_run_stream(run_id)
-            .await
-            .map_err(async_store_error)?;
-        let view = RuntimeRunView::from_stream(runtime_spec, run_id, &stream)?;
-        match scheduler_decision(runtime_spec, run_id, &view)? {
-            SchedulerDecision::Run(runnable) => {
-                self.run_node_attempt_async(store, runtime_spec, run_id, &view, runnable)
-                    .await?;
-                Ok(SchedulerStatus::Advanced)
+        let mut blocked_nodes = BTreeSet::new();
+        loop {
+            match self
+                .drive_once_async_with_blocked_nodes(store, runtime_spec, run_id, &blocked_nodes)
+                .await?
+            {
+                DriveStepStatus::Advanced => return Ok(SchedulerStatus::Advanced),
+                DriveStepStatus::Blocked => return Ok(SchedulerStatus::Blocked),
+                DriveStepStatus::PublicOutputProjected => {
+                    return Ok(SchedulerStatus::PublicOutputProjected);
+                }
+                DriveStepStatus::BlockedOnResourceLane { node_id, advanced } => {
+                    if advanced {
+                        return Ok(SchedulerStatus::Advanced);
+                    }
+                    blocked_nodes.insert(node_id);
+                }
             }
-            SchedulerDecision::Blocked => Ok(SchedulerStatus::Blocked),
-            SchedulerDecision::Completed => Ok(SchedulerStatus::PublicOutputProjected),
         }
     }
 
@@ -214,12 +299,80 @@ impl SerialTypedScheduler {
         run_id: &RunId,
     ) -> Result<SchedulerStatus> {
         let mut advanced = false;
+        let mut blocked_nodes = BTreeSet::new();
         loop {
-            match self.drive_once_async(store, runtime_spec, run_id).await? {
-                SchedulerStatus::Advanced => advanced = true,
-                SchedulerStatus::Blocked if advanced => return Ok(SchedulerStatus::Advanced),
-                status => return Ok(status),
+            match self
+                .drive_once_async_with_blocked_nodes(store, runtime_spec, run_id, &blocked_nodes)
+                .await?
+            {
+                DriveStepStatus::Advanced => advanced = true,
+                DriveStepStatus::BlockedOnResourceLane {
+                    node_id,
+                    advanced: step_advanced,
+                } => {
+                    advanced |= step_advanced;
+                    blocked_nodes.insert(node_id);
+                }
+                DriveStepStatus::Blocked if advanced => return Ok(SchedulerStatus::Advanced),
+                DriveStepStatus::Blocked => return Ok(SchedulerStatus::Blocked),
+                DriveStepStatus::PublicOutputProjected => {
+                    return Ok(SchedulerStatus::PublicOutputProjected);
+                }
             }
+        }
+    }
+
+    async fn drive_once_with_blocked_nodes<S: store::TypedRunEventStore + ?Sized>(
+        &self,
+        store: &mut S,
+        runtime_spec: &CertifiedRuntimeSpec,
+        run_id: &RunId,
+        blocked_nodes: &BTreeSet<NodeId>,
+    ) -> Result<DriveStepStatus> {
+        let view = RuntimeRunView::from_store(runtime_spec, run_id, store)?;
+        match scheduler_decision_with_blocked_nodes(runtime_spec, run_id, &view, blocked_nodes)? {
+            SchedulerDecision::Run(runnable) => {
+                match self
+                    .run_node_attempt(store, runtime_spec, run_id, &view, runnable)
+                    .await?
+                {
+                    NodeRunStatus::Advanced => Ok(DriveStepStatus::Advanced),
+                    NodeRunStatus::BlockedOnResourceLane { node_id, advanced } => {
+                        Ok(DriveStepStatus::BlockedOnResourceLane { node_id, advanced })
+                    }
+                }
+            }
+            SchedulerDecision::Blocked => Ok(DriveStepStatus::Blocked),
+            SchedulerDecision::Completed => Ok(DriveStepStatus::PublicOutputProjected),
+        }
+    }
+
+    async fn drive_once_async_with_blocked_nodes<S: store::AsyncTypedRunEventStore + ?Sized>(
+        &self,
+        store: &S,
+        runtime_spec: &CertifiedRuntimeSpec,
+        run_id: &RunId,
+        blocked_nodes: &BTreeSet<NodeId>,
+    ) -> Result<DriveStepStatus> {
+        let stream = store
+            .load_run_stream(run_id)
+            .await
+            .map_err(async_store_error)?;
+        let view = RuntimeRunView::from_stream(runtime_spec, run_id, &stream)?;
+        match scheduler_decision_with_blocked_nodes(runtime_spec, run_id, &view, blocked_nodes)? {
+            SchedulerDecision::Run(runnable) => {
+                match self
+                    .run_node_attempt_async(store, runtime_spec, run_id, &view, runnable)
+                    .await?
+                {
+                    NodeRunStatus::Advanced => Ok(DriveStepStatus::Advanced),
+                    NodeRunStatus::BlockedOnResourceLane { node_id, advanced } => {
+                        Ok(DriveStepStatus::BlockedOnResourceLane { node_id, advanced })
+                    }
+                }
+            }
+            SchedulerDecision::Blocked => Ok(DriveStepStatus::Blocked),
+            SchedulerDecision::Completed => Ok(DriveStepStatus::PublicOutputProjected),
         }
     }
 
@@ -230,7 +383,7 @@ impl SerialTypedScheduler {
         run_id: &RunId,
         view: &RuntimeRunView,
         runnable: RunnableNode<'_>,
-    ) -> Result<()> {
+    ) -> Result<NodeRunStatus> {
         let node = runnable.node;
         let descriptor = runtime_spec.state_descriptor_for_node(node)?;
         let output_cell = runtime_spec.cell(&node.output_cell).ok_or_else(|| {
@@ -248,21 +401,22 @@ impl SerialTypedScheduler {
                     | spec::FrameworkNodeSpec::ResolveSagaTerminal(_)
             )
         ) {
-            self.run_started_framework_node_attempt(
-                store,
-                FrameworkNodeAttemptInput {
-                    runtime_spec,
-                    run_id,
-                    view,
-                    runnable,
-                    descriptor,
-                    output_cell,
-                    binding,
-                },
-            )
-            .await?;
-            return Ok(());
+            return self
+                .run_started_framework_node_attempt(
+                    store,
+                    FrameworkNodeAttemptInput {
+                        runtime_spec,
+                        run_id,
+                        view,
+                        runnable,
+                        descriptor,
+                        output_cell,
+                        binding,
+                    },
+                )
+                .await;
         }
+        let mut advanced = false;
         let (attempt_id, attempt_no) = match runnable.attempt {
             AttemptPlan::StartNew { attempt_no } => {
                 let attempt_id =
@@ -286,6 +440,7 @@ impl SerialTypedScheduler {
                     view,
                 )?;
                 store.append_prepared_typed_commit(start_commit)?;
+                advanced = true;
                 (attempt_id, attempt_no)
             }
             AttemptPlan::Continue {
@@ -320,17 +475,40 @@ impl SerialTypedScheduler {
             view: &latest_view,
             output,
         })?;
+        if resource_lane_block_for_request(
+            store.projection_snapshot(),
+            terminal_output.commit.request(),
+        )
+        .is_some()
+        {
+            return Ok(NodeRunStatus::BlockedOnResourceLane {
+                node_id: node.node_id.clone(),
+                advanced,
+            });
+        }
+        let has_resource_lane_prepare =
+            request_has_resource_lane_prepare(terminal_output.commit.request());
         self.stage_prepared_artifacts(&terminal_output.artifacts_to_stage)
             .await?;
-        store.append_prepared_typed_commit(terminal_output.commit)?;
-        Ok(())
+        match store.append_prepared_typed_commit(terminal_output.commit) {
+            Ok(_) => Ok(NodeRunStatus::Advanced),
+            Err(error)
+                if has_resource_lane_prepare && store_error_is_resource_lane_block(&error) =>
+            {
+                Ok(NodeRunStatus::BlockedOnResourceLane {
+                    node_id: node.node_id.clone(),
+                    advanced,
+                })
+            }
+            Err(error) => Err(error.into()),
+        }
     }
 
     async fn run_started_framework_node_attempt<S: store::TypedRunEventStore + ?Sized>(
         &self,
         store: &mut S,
         input: FrameworkNodeAttemptInput<'_>,
-    ) -> Result<()> {
+    ) -> Result<NodeRunStatus> {
         let FrameworkNodeAttemptInput {
             runtime_spec,
             run_id,
@@ -378,7 +556,7 @@ impl SerialTypedScheduler {
         self.stage_prepared_artifacts(&terminal_output.artifacts_to_stage)
             .await?;
         store.append_prepared_typed_commit(terminal_output.commit)?;
-        Ok(())
+        Ok(NodeRunStatus::Advanced)
     }
 
     async fn run_node_attempt_async<S: store::AsyncTypedRunEventStore + ?Sized>(
@@ -388,7 +566,7 @@ impl SerialTypedScheduler {
         run_id: &RunId,
         view: &RuntimeRunView,
         runnable: RunnableNode<'_>,
-    ) -> Result<()> {
+    ) -> Result<NodeRunStatus> {
         let node = runnable.node;
         let descriptor = runtime_spec.state_descriptor_for_node(node)?;
         let output_cell = runtime_spec.cell(&node.output_cell).ok_or_else(|| {
@@ -406,21 +584,22 @@ impl SerialTypedScheduler {
                     | spec::FrameworkNodeSpec::ResolveSagaTerminal(_)
             )
         ) {
-            self.run_started_framework_node_attempt_async(
-                store,
-                FrameworkNodeAttemptInput {
-                    runtime_spec,
-                    run_id,
-                    view,
-                    runnable,
-                    descriptor,
-                    output_cell,
-                    binding,
-                },
-            )
-            .await?;
-            return Ok(());
+            return self
+                .run_started_framework_node_attempt_async(
+                    store,
+                    FrameworkNodeAttemptInput {
+                        runtime_spec,
+                        run_id,
+                        view,
+                        runnable,
+                        descriptor,
+                        output_cell,
+                        binding,
+                    },
+                )
+                .await;
         }
+        let mut advanced = false;
         let (attempt_id, attempt_no) = match runnable.attempt {
             AttemptPlan::StartNew { attempt_no } => {
                 let attempt_id =
@@ -447,6 +626,7 @@ impl SerialTypedScheduler {
                     .append_prepared_typed_commit(start_commit)
                     .await
                     .map_err(async_store_error)?;
+                advanced = true;
                 (attempt_id, attempt_no)
             }
             AttemptPlan::Continue {
@@ -484,13 +664,26 @@ impl SerialTypedScheduler {
             view: &latest_view,
             output,
         })?;
+        let has_resource_lane_prepare =
+            request_has_resource_lane_prepare(terminal_output.commit.request());
         self.stage_prepared_artifacts(&terminal_output.artifacts_to_stage)
             .await?;
-        store
+        match store
             .append_prepared_typed_commit(terminal_output.commit)
             .await
-            .map_err(async_store_error)?;
-        Ok(())
+        {
+            Ok(_) => Ok(NodeRunStatus::Advanced),
+            Err(error)
+                if has_resource_lane_prepare
+                    && async_error_is_resource_lane_block(&error.to_string()) =>
+            {
+                Ok(NodeRunStatus::BlockedOnResourceLane {
+                    node_id: node.node_id.clone(),
+                    advanced,
+                })
+            }
+            Err(error) => Err(async_store_error(error)),
+        }
     }
 
     async fn run_started_framework_node_attempt_async<
@@ -499,7 +692,7 @@ impl SerialTypedScheduler {
         &self,
         store: &S,
         input: FrameworkNodeAttemptInput<'_>,
-    ) -> Result<()> {
+    ) -> Result<NodeRunStatus> {
         let FrameworkNodeAttemptInput {
             runtime_spec,
             run_id,
@@ -550,7 +743,7 @@ impl SerialTypedScheduler {
             .append_prepared_typed_commit(terminal_output.commit)
             .await
             .map_err(async_store_error)?;
-        Ok(())
+        Ok(NodeRunStatus::Advanced)
     }
 
     async fn stage_prepared_artifacts(&self, artifacts: &[PreparedStagedArtifact]) -> Result<()> {

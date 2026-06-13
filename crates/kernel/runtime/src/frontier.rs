@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use mfm_events::v1 as events;
 use mfm_ids::{AttemptId, NodeId, RunId};
 use mfm_spec::v1 as spec;
@@ -37,10 +39,11 @@ pub(crate) enum SchedulerDecision<'a> {
     Completed,
 }
 
-pub(crate) fn scheduler_decision<'a>(
+pub(crate) fn scheduler_decision_with_blocked_nodes<'a>(
     runtime_spec: &'a CertifiedRuntimeSpec,
     run_id: &RunId,
     view: &RuntimeRunView,
+    blocked_nodes: &BTreeSet<NodeId>,
 ) -> Result<SchedulerDecision<'a>> {
     if view.projections.run_state(run_id) == store::RunState::Completed {
         return Ok(SchedulerDecision::Completed);
@@ -49,15 +52,15 @@ pub(crate) fn scheduler_decision<'a>(
         .projections
         .derive_saga_projection(run_id, &runtime_spec.spec().saga);
     if saga.engagement.is_some() {
-        return saga_scheduler_decision(runtime_spec, view, &saga);
+        return saga_scheduler_decision(runtime_spec, view, &saga, blocked_nodes);
     }
     if public_output_is_produced(runtime_spec, &view.projections) {
-        return match next_runnable_node(runtime_spec, view)? {
+        return match next_runnable_node(runtime_spec, view, blocked_nodes)? {
             Some(runnable) => Ok(SchedulerDecision::Run(runnable)),
             None => Ok(SchedulerDecision::Completed),
         };
     }
-    match next_runnable_node(runtime_spec, view)? {
+    match next_runnable_node(runtime_spec, view, blocked_nodes)? {
         Some(runnable) => Ok(SchedulerDecision::Run(runnable)),
         None => Ok(SchedulerDecision::Blocked),
     }
@@ -67,14 +70,15 @@ fn saga_scheduler_decision<'a>(
     runtime_spec: &'a CertifiedRuntimeSpec,
     view: &RuntimeRunView,
     saga: &store::SagaProjection,
+    blocked_nodes: &BTreeSet<NodeId>,
 ) -> Result<SchedulerDecision<'a>> {
-    if let Some(runnable) = next_forward_completion_node(runtime_spec, view)? {
+    if let Some(runnable) = next_forward_completion_node(runtime_spec, view, blocked_nodes)? {
         return Ok(SchedulerDecision::Run(runnable));
     }
     match saga.run_mode {
         store::RunMode::Forward => Ok(SchedulerDecision::Blocked),
         store::RunMode::Remediating | store::RunMode::Compensated => {
-            match next_remediation_node(runtime_spec, view, saga)? {
+            match next_remediation_node(runtime_spec, view, saga, blocked_nodes)? {
                 Some(runnable) => Ok(SchedulerDecision::Run(runnable)),
                 None if saga.run_mode == store::RunMode::Compensated => {
                     match next_saga_terminal_node(runtime_spec, view, saga)? {
@@ -99,8 +103,12 @@ fn saga_scheduler_decision<'a>(
 fn next_runnable_node<'a>(
     runtime_spec: &'a CertifiedRuntimeSpec,
     view: &RuntimeRunView,
+    blocked_nodes: &BTreeSet<NodeId>,
 ) -> Result<Option<RunnableNode<'a>>> {
     for node_id in runtime_spec.topological_order() {
+        if blocked_nodes.contains(node_id) {
+            continue;
+        }
         let node = runtime_spec.node(node_id).expect("topological node exists");
         let Some(attempt) = attempt_plan(runtime_spec, node, view)? else {
             continue;
@@ -115,8 +123,12 @@ fn next_runnable_node<'a>(
 fn next_forward_completion_node<'a>(
     runtime_spec: &'a CertifiedRuntimeSpec,
     view: &RuntimeRunView,
+    blocked_nodes: &BTreeSet<NodeId>,
 ) -> Result<Option<RunnableNode<'a>>> {
     for node_id in runtime_spec.topological_order() {
+        if blocked_nodes.contains(node_id) {
+            continue;
+        }
         let node = runtime_spec.node(node_id).expect("topological node exists");
         if node.side_effect.is_none() {
             continue;
@@ -147,6 +159,7 @@ fn next_remediation_node<'a>(
     runtime_spec: &'a CertifiedRuntimeSpec,
     view: &RuntimeRunView,
     saga: &store::SagaProjection,
+    blocked_nodes: &BTreeSet<NodeId>,
 ) -> Result<Option<RunnableNode<'a>>> {
     for obligation in owed_obligations_reverse_confirmation_order(view, saga)? {
         let forward = view
@@ -166,6 +179,9 @@ fn next_remediation_node<'a>(
                     forward.intent.node_id
                 ))
             })?;
+        if blocked_nodes.contains(&remediation_node.node_id) {
+            continue;
+        }
         if let Some(remediation) = &obligation.remediation {
             if remediation.unresolved.is_some() {
                 return Ok(None);
