@@ -381,8 +381,7 @@ pub async fn typed_certified_slice_coverage() -> Result<TypedCertifiedSliceCover
     let stream = run.store.load_run_stream(&run.fixture.run_id);
     let projection =
         store::ProjectionSnapshot::rebuild_from_run_stream(&stream).map_err(display_error)?;
-    let side_effect_projection = projection
-        .side_effect(&side_effect_ledger_key(1))
+    let side_effect_projection = first_forward_side_effect_projection(&projection)
         .ok_or_else(|| "missing side-effect projection".to_owned())?;
     let side_effect_ledger_complete = matches!(
         side_effect_projection.phase,
@@ -521,6 +520,12 @@ struct ReferenceRun {
     store: store::InMemoryTypedRunStore,
 }
 
+#[cfg(test)]
+struct CompensatedReferenceRun {
+    fixture: CompensatedReferenceFixture,
+    store: store::InMemoryTypedRunStore,
+}
+
 #[derive(Clone)]
 struct ReferenceFixture {
     runtime_spec: CertifiedRuntimeSpec,
@@ -539,6 +544,23 @@ struct ReferenceFixture {
     read_cap_version: CapabilityVersion,
     managed_cap_kind: CapabilityKind,
     managed_cap_version: CapabilityVersion,
+    side_effect_cap_kind: CapabilityKind,
+    side_effect_cap_version: CapabilityVersion,
+    adapter_kind: AdapterKind,
+    adapter_version: AdapterVersion,
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+struct CompensatedReferenceFixture {
+    runtime_spec: CertifiedRuntimeSpec,
+    run_id: RunId,
+    seed_ref: events::SeedCellRef,
+    seed_bytes: Vec<u8>,
+    config_bytes: BTreeMap<String, Vec<u8>>,
+    side_effect_descriptors: Vec<DescriptorId>,
+    failing_descriptor: DescriptorId,
+    remediation_links: BTreeMap<NodeId, NodeId>,
     side_effect_cap_kind: CapabilityKind,
     side_effect_cap_version: CapabilityVersion,
     adapter_kind: AdapterKind,
@@ -835,6 +857,46 @@ impl SideEffectState for ReferenceSideEffectState {
     }
 }
 
+#[cfg(test)]
+struct ReferenceFailingState {
+    config: ReferenceConfig,
+}
+
+#[cfg(test)]
+impl StateSpec for ReferenceFailingState {
+    type Config = ReferenceConfig;
+    type Input = ReferenceValue;
+    type Output = ReferenceValue;
+    type Effect = Pure;
+    type Caps = NoCaps;
+
+    fn kind() -> mfm_program::Result<StateKind> {
+        state_kind("tail_failure", 0x4e).map_err(mfm_program::PlanError::Key)
+    }
+
+    fn version() -> mfm_program::Result<StateVersion> {
+        StateVersion::new("mfm.typed_slice.state.tail_failure.v1")
+            .map_err(|error| mfm_program::PlanError::Key(error.to_string()))
+    }
+
+    fn name() -> &'static str {
+        "mfm.typed_slice.state.tail_failure"
+    }
+
+    fn new(config: Self::Config) -> mfm_program::Result<Self> {
+        Ok(Self { config })
+    }
+}
+
+#[cfg(test)]
+impl PureState for ReferenceFailingState {
+    fn run(&self, input: Self::Input) -> StateResult<Self::Output> {
+        Ok(ReferenceValue {
+            amount: input.amount + self.config.multiplier,
+        })
+    }
+}
+
 async fn run_reference_certified_workflow() -> Result<ReferenceRun, String> {
     let fixture = reference_fixture()?;
     let scheduler = test_scheduler(reference_registry(&fixture)?);
@@ -858,12 +920,215 @@ async fn run_reference_certified_workflow() -> Result<ReferenceRun, String> {
     Err("reference workflow did not reach terminal public-output projection".to_owned())
 }
 
+#[cfg(test)]
+async fn run_compensated_reference_workflow() -> Result<CompensatedReferenceRun, String> {
+    let fixture = compensated_reference_fixture()?;
+    let scheduler = test_scheduler(compensated_reference_registry(&fixture)?);
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_compensated_reference_run(&scheduler, &mut store, &fixture).await?;
+
+    for _ in 0..48 {
+        if compensated_forward_outputs_complete(&fixture, &store) {
+            break;
+        }
+        match scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .map_err(display_error)?
+        {
+            SchedulerStatus::Advanced => {
+                if compensated_forward_outputs_complete(&fixture, &store) {
+                    break;
+                }
+            }
+            SchedulerStatus::PublicOutputProjected => {
+                return Err(
+                    "compensated workflow projected public output before failure".to_owned(),
+                )
+            }
+            SchedulerStatus::Blocked => {
+                if compensated_forward_outputs_complete(&fixture, &store) {
+                    break;
+                }
+                return Err("compensated reference workflow blocked before failure".to_owned());
+            }
+        }
+    }
+    if !compensated_forward_outputs_complete(&fixture, &store) {
+        return Err("compensated reference workflow did not complete forward outputs".to_owned());
+    }
+    append_compensated_tail_failure(&mut store, &fixture)?;
+
+    for _ in 0..96 {
+        match scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .map_err(display_error)?
+        {
+            SchedulerStatus::Advanced => {}
+            SchedulerStatus::PublicOutputProjected => {
+                return Ok(CompensatedReferenceRun { fixture, store });
+            }
+            SchedulerStatus::Blocked => {
+                return Err("compensated reference workflow blocked".to_owned())
+            }
+        }
+    }
+
+    Err("compensated reference workflow did not reach terminal projection".to_owned())
+}
+
 fn reference_registry(fixture: &ReferenceFixture) -> Result<ErasedRunnerRegistry, String> {
     reference_registry_with_side_effect(
         fixture,
         "apply_side_effect",
         DeterministicSideEffectRunner::new(fixture),
     )
+}
+
+#[cfg(test)]
+fn compensated_reference_registry(
+    fixture: &CompensatedReferenceFixture,
+) -> Result<ErasedRunnerRegistry, String> {
+    let mut registry = ErasedRunnerRegistry::new();
+    for descriptor in &fixture.side_effect_descriptors {
+        registry
+            .register(binding(
+                descriptor.clone(),
+                "apply_side_effect",
+                DeterministicSideEffectRunner::from_parts(
+                    fixture.side_effect_cap_kind.clone(),
+                    fixture.side_effect_cap_version.clone(),
+                    fixture.adapter_kind.clone(),
+                    fixture.adapter_version.clone(),
+                )
+                .with_remediation_links(fixture.remediation_links.clone()),
+            )?)
+            .map_err(display_error)?;
+    }
+    registry
+        .register(binding(
+            fixture.failing_descriptor.clone(),
+            "pure",
+            BlockingTailRunner,
+        )?)
+        .map_err(display_error)?;
+    Ok(registry)
+}
+
+#[cfg(test)]
+fn compensated_forward_outputs_complete(
+    fixture: &CompensatedReferenceFixture,
+    store: &store::InMemoryTypedRunStore,
+) -> bool {
+    let spec = fixture.runtime_spec.spec();
+    let projection = store.projection_snapshot();
+    spec.nodes
+        .iter()
+        .filter(|node| spec.remediations.contains_key(&node.node_id))
+        .all(|node| projection.cell_terminal(&node.output_cell).is_some())
+}
+
+#[cfg(test)]
+fn compensated_tail_node(fixture: &CompensatedReferenceFixture) -> &spec::NodeSpec {
+    fixture
+        .runtime_spec
+        .spec()
+        .nodes
+        .iter()
+        .find(|node| node.descriptor_id == fixture.failing_descriptor)
+        .expect("compensated tail node")
+}
+
+#[cfg(test)]
+fn append_compensated_tail_failure(
+    store: &mut store::InMemoryTypedRunStore,
+    fixture: &CompensatedReferenceFixture,
+) -> Result<(), String> {
+    let node = compensated_tail_node(fixture);
+    let attempt_id = attempt_id(
+        &fixture.run_id,
+        fixture.runtime_spec.spec_hash(),
+        &node.node_id,
+        1,
+    )?;
+    store
+        .append_prepared_typed_commit(
+            store::PreparedTypedCommit::new(
+                store::TypedCommitRequest {
+                    run_id: fixture.run_id.clone(),
+                    expected_next_seq: store.expected_next_seq(&fixture.run_id),
+                    commit_key: store::CommitKey::new(format!(
+                        "compensated-tail-attempt-started:{}:{}",
+                        node.node_id, attempt_id
+                    ))
+                    .map_err(display_error)?,
+                    payloads: vec![events::KernelEventPayload::StateAttemptStarted(
+                        events::StateAttemptStarted {
+                            spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                            node_id: node.node_id.clone(),
+                            attempt_id: attempt_id.clone(),
+                            attempt_no: 1,
+                            state_kind: node.state_kind.clone(),
+                            state_version: node.state_version.clone(),
+                        },
+                    )],
+                    required_artifacts: Vec::new(),
+                    preconditions: store::CommitPreconditions {
+                        required_run_state: store::RequiredRunState::NotCompleted,
+                        required_cell_states: vec![store::CellStatePrecondition {
+                            cell_id: node.output_cell.clone(),
+                            required: store::RequiredCellState::Absent,
+                        }],
+                        ..store::CommitPreconditions::default()
+                    },
+                },
+                Vec::new(),
+            )
+            .map_err(display_error)?,
+        )
+        .map_err(display_error)?;
+    store
+        .append_prepared_typed_commit(
+            store::PreparedTypedCommit::new(
+                store::TypedCommitRequest {
+                    run_id: fixture.run_id.clone(),
+                    expected_next_seq: store.expected_next_seq(&fixture.run_id),
+                    commit_key: store::CommitKey::new(format!(
+                        "compensated-tail-attempt-failed:{}:{}",
+                        node.node_id, attempt_id
+                    ))
+                    .map_err(display_error)?,
+                    payloads: vec![events::KernelEventPayload::StateAttemptFailed(
+                        events::StateAttemptFailed {
+                            spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                            node_id: node.node_id.clone(),
+                            attempt_id: attempt_id.clone(),
+                            retryable: false,
+                            error: side_effect_error(false),
+                        },
+                    )],
+                    required_artifacts: Vec::new(),
+                    preconditions: store::CommitPreconditions {
+                        required_run_state: store::RequiredRunState::NotCompleted,
+                        required_present_logical_keys: vec![store::LogicalEventKey::new(format!(
+                            "attempt:{}:{}",
+                            node.node_id, attempt_id
+                        ))
+                        .map_err(display_error)?],
+                        required_cell_states: vec![store::CellStatePrecondition {
+                            cell_id: node.output_cell.clone(),
+                            required: store::RequiredCellState::Absent,
+                        }],
+                        ..store::CommitPreconditions::default()
+                    },
+                },
+                Vec::new(),
+            )
+            .map_err(display_error)?,
+        )
+        .map_err(display_error)?;
+    Ok(())
 }
 
 fn reference_registry_with_side_effect<R: ErasedNodeRunner + 'static>(
@@ -964,6 +1229,21 @@ impl ErasedNodeRunner for TerminalRunner {
     }
 }
 
+#[cfg(test)]
+struct BlockingTailRunner;
+
+#[cfg(test)]
+impl ErasedNodeRunner for BlockingTailRunner {
+    fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
+        Box::pin(async move {
+            Err(RuntimeError::Blocked(format!(
+                "tail node {} is failed by the compensated fixture",
+                ctx.node().node_id
+            )))
+        })
+    }
+}
+
 struct ReadRunner {
     cap_kind: CapabilityKind,
     cap_version: CapabilityVersion,
@@ -1038,18 +1318,40 @@ struct DeterministicSideEffectRunner {
     cap_version: CapabilityVersion,
     adapter_kind: AdapterKind,
     adapter_version: AdapterVersion,
+    remediation_links: BTreeMap<NodeId, NodeId>,
     output_label: &'static str,
 }
 
 impl DeterministicSideEffectRunner {
     fn new(fixture: &ReferenceFixture) -> Self {
+        Self::from_parts(
+            fixture.side_effect_cap_kind.clone(),
+            fixture.side_effect_cap_version.clone(),
+            fixture.adapter_kind.clone(),
+            fixture.adapter_version.clone(),
+        )
+    }
+
+    fn from_parts(
+        cap_kind: CapabilityKind,
+        cap_version: CapabilityVersion,
+        adapter_kind: AdapterKind,
+        adapter_version: AdapterVersion,
+    ) -> Self {
         Self {
-            cap_kind: fixture.side_effect_cap_kind.clone(),
-            cap_version: fixture.side_effect_cap_version.clone(),
-            adapter_kind: fixture.adapter_kind.clone(),
-            adapter_version: fixture.adapter_version.clone(),
+            cap_kind,
+            cap_version,
+            adapter_kind,
+            adapter_version,
+            remediation_links: BTreeMap::new(),
             output_label: "side-effect-output",
         }
+    }
+
+    #[cfg(test)]
+    fn with_remediation_links(mut self, remediation_links: BTreeMap<NodeId, NodeId>) -> Self {
+        self.remediation_links = remediation_links;
+        self
     }
 }
 
@@ -1186,6 +1488,155 @@ fn reference_fixture() -> Result<ReferenceFixture, String> {
         read_cap_version,
         managed_cap_kind,
         managed_cap_version,
+        side_effect_cap_kind,
+        side_effect_cap_version,
+        adapter_kind,
+        adapter_version,
+    })
+}
+
+#[cfg(test)]
+fn compensated_reference_fixture() -> Result<CompensatedReferenceFixture, String> {
+    let seed = CanonicalSeed::from_value(&ReferenceValue { amount: 1 }).map_err(display_error)?;
+    let mut states = StateRegistryBuilder::new();
+    states
+        .register::<ReferenceSideEffectState>()
+        .map_err(display_error)?;
+    states
+        .register::<ReferenceFailingState>()
+        .map_err(display_error)?;
+    let draft = build_root_with_registries(
+        ScopeKey::new("root").map_err(display_error)?,
+        states.snapshot(),
+        mfm_program::OperationRegistryBuilder::new().snapshot(),
+        |root: &mut RootBuilder<'_, '_>| {
+            root.set_saga_policy(SagaPolicy::CompensateCompleted {
+                on_remediation_unresolved: mfm_program::RemediationUnresolved::FailWithoutAcdcClaim,
+            })?;
+            let seed = root.seed(SeedKey::new("launch")?, seed.clone())?;
+            let (forward_a, _) = root.scope().side_effect_with_compensation::<
+                ReferenceSideEffectState,
+                ReferenceSideEffectState,
+                _,
+                _,
+                _,
+            >(
+                StateKey::new("forward-a")?,
+                ReferenceConfig { multiplier: 2 },
+                seed,
+                ResourceClaimSpec::ManualOnly,
+                StateKey::new("remediate-a")?,
+                ReferenceConfig { multiplier: 11 },
+                ResourceClaimSpec::ManualOnly,
+                |forward| Ok(forward.clone()),
+            )?;
+            let (forward_b, _) = root.scope().side_effect_with_compensation::<
+                ReferenceSideEffectState,
+                ReferenceSideEffectState,
+                _,
+                _,
+                _,
+            >(
+                StateKey::new("forward-b")?,
+                ReferenceConfig { multiplier: 3 },
+                forward_a,
+                ResourceClaimSpec::ManualOnly,
+                StateKey::new("remediate-b")?,
+                ReferenceConfig { multiplier: 13 },
+                ResourceClaimSpec::ManualOnly,
+                |forward| Ok(forward.clone()),
+            )?;
+            let tail = root.scope().state::<ReferenceFailingState, _>(
+                StateKey::new("tail-failure")?,
+                ReferenceConfig { multiplier: 5 },
+                forward_b.into_handle(),
+            )?;
+            root.bind_public_outputs(
+                PublicOutputKey::new("public-output")?,
+                &ReferencePublicOutputs { result: tail },
+            )
+        },
+    )
+    .map_err(display_error)?;
+    let certified = mfm_certify::certify_program_draft(&draft).map_err(display_error)?;
+    let runtime_spec = CertifiedRuntimeSpec::new(certified).map_err(display_error)?;
+    let spec = runtime_spec.spec();
+    let config_bytes = config_bytes_for_draft_and_spec(&draft, spec)?;
+    let seed_bytes = seed.canonical_json().to_vec();
+    let side_effect_node = spec
+        .nodes
+        .iter()
+        .find(|node| node.stable_key.as_str() == "forward-a")
+        .ok_or_else(|| "missing forward-a node".to_owned())?;
+    let failing_node = spec
+        .nodes
+        .iter()
+        .find(|node| node.stable_key.as_str() == "tail-failure")
+        .ok_or_else(|| "missing tail-failure node".to_owned())?;
+    let seed_spec = spec
+        .seeds
+        .first()
+        .ok_or_else(|| "missing compensated reference seed".to_owned())?;
+    let seed_digest = seed_spec
+        .required_digest
+        .clone()
+        .ok_or_else(|| "compensated reference seed must require a digest".to_owned())?;
+    let seed_ref = events::SeedCellRef {
+        seed_id: seed_spec.seed_id.clone(),
+        cell_id: seed_spec.cell_id.clone(),
+        scope_id: seed_spec.scope_id.clone(),
+        semantic_type_id: seed_spec.semantic_type_id.clone(),
+        schema_id: seed_spec.schema_id.clone(),
+        digest: seed_digest.clone(),
+        seed_artifact: events::ArtifactEvidenceRef {
+            artifact_id: artifact_id_for_digest(&seed_digest),
+            role: events::ArtifactRole::SeedInput,
+            schema_id: seed_spec.schema_id.clone(),
+            semantic_type_id: Some(seed_spec.semantic_type_id.clone()),
+            content_digest: seed_digest,
+            byte_len: seed.canonical_json().as_bytes().len() as u64,
+            media_type: spec::MediaType::new("application/json").map_err(display_error)?,
+        },
+    };
+    let capability = side_effect_node
+        .capability_bindings
+        .capabilities
+        .first()
+        .ok_or_else(|| "compensated side-effect node has no capability".to_owned())?;
+    let adapter = side_effect_node
+        .adapter_bindings
+        .first()
+        .ok_or_else(|| "compensated side-effect node missing adapter binding".to_owned())?;
+    let mut side_effect_descriptors = spec
+        .nodes
+        .iter()
+        .chain(spec.remediations.values())
+        .filter(|node| node.side_effect.is_some())
+        .map(|node| node.descriptor_id.clone())
+        .collect::<Vec<_>>();
+    side_effect_descriptors.sort();
+    side_effect_descriptors.dedup();
+    let failing_descriptor = failing_node.descriptor_id.clone();
+    let side_effect_cap_kind = capability.kind.clone();
+    let side_effect_cap_version = capability.version.clone();
+    let adapter_kind = adapter.adapter_kind.clone();
+    let adapter_version = adapter.adapter_version.clone();
+    let remediation_links = spec
+        .remediations
+        .iter()
+        .map(|(forward_node_id, remediation)| {
+            (remediation.node_id.clone(), forward_node_id.clone())
+        })
+        .collect();
+    Ok(CompensatedReferenceFixture {
+        runtime_spec,
+        run_id: run_id(0x58),
+        seed_ref,
+        seed_bytes,
+        config_bytes,
+        side_effect_descriptors,
+        failing_descriptor,
+        remediation_links,
         side_effect_cap_kind,
         side_effect_cap_version,
         adapter_kind,
@@ -1344,6 +1795,23 @@ fn duplicate_submit_rejected(run: &mut ReferenceRun) -> Result<bool, String> {
 
 fn replay_without_live_capabilities(run: &ReferenceRun) -> Result<u64, String> {
     let stream = run.store.load_run_stream(&run.fixture.run_id);
+    replay_without_live_capabilities_for(&run.fixture.runtime_spec, &run.store, &run.fixture.run_id)
+        .map(|()| 0)
+        .map_err(|error| {
+            if stream.is_empty() {
+                "missing run stream for replay fixture".to_owned()
+            } else {
+                error
+            }
+        })
+}
+
+fn replay_without_live_capabilities_for(
+    runtime_spec: &CertifiedRuntimeSpec,
+    store: &store::InMemoryTypedRunStore,
+    run_id: &RunId,
+) -> Result<(), String> {
+    let stream = store.load_run_stream(run_id);
     let run_started = stream
         .iter()
         .find_map(|event| match event.payload() {
@@ -1351,20 +1819,17 @@ fn replay_without_live_capabilities(run: &ReferenceRun) -> Result<u64, String> {
             _ => None,
         })
         .ok_or_else(|| "missing RunStarted for replay fixture".to_owned())?;
-    let verified_stream = mfm_runtime::VerifiedRunStream::from_store(
-        &run.fixture.runtime_spec,
-        &run_started.run_id,
-        &run.store,
-    )
-    .map_err(display_error)?;
-    let artifacts = retained_replay_artifacts(
-        &run.fixture,
+    let verified_stream =
+        mfm_runtime::VerifiedRunStream::from_store(runtime_spec, &run_started.run_id, store)
+            .map_err(display_error)?;
+    let artifacts = retained_replay_artifacts_for(
+        runtime_spec,
         &stream,
         verified_stream.projection_snapshot(),
         &run_started.run_id,
     )?;
     let authority = replay::ReplayReadAuthority::from_verified_run_stream(
-        &run.fixture.runtime_spec,
+        runtime_spec,
         &verified_stream,
         artifacts,
     )
@@ -1378,7 +1843,7 @@ fn replay_without_live_capabilities(run: &ReferenceRun) -> Result<u64, String> {
         })
     );
     if live_cap_rejected {
-        Ok(0)
+        Ok(())
     } else {
         Err("replay broker did not reject a live capability request".to_owned())
     }
@@ -1416,8 +1881,7 @@ async fn side_effect_failure_semantics_are_covered() -> Result<bool, String> {
             .map_err(display_error)?;
     }
     let projection = store.projection_snapshot();
-    let side_effect = projection
-        .side_effect(&side_effect_ledger_key(1))
+    let side_effect = first_forward_side_effect_projection(projection)
         .ok_or_else(|| "missing failed side-effect projection".to_owned())?;
     Ok(matches!(
         side_effect.phase,
@@ -1496,7 +1960,7 @@ impl FailingSideEffectRunner {
 impl ErasedNodeRunner for FailingSideEffectRunner {
     fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
         Box::pin(async move {
-            let ledger = side_effect_ledger_key(ctx.attempt_no());
+            let ledger = side_effect_forward_ledger_key_for_ctx(&ctx);
             let artifact = side_effect_artifact(
                 &ctx,
                 "failing-intent",
@@ -1521,8 +1985,12 @@ impl ErasedNodeRunner for FailingSideEffectRunner {
                             intent_artifact_id: artifact.evidence.artifact_id.clone(),
                             idempotency_input_schema_id: ctx.node().config_ref.schema_id.clone(),
                             idempotency_input_hash: content(0xf3),
-                            idempotency_key: events::IdempotencyKeyRef::new("failing-idem")
-                                .map_err(RuntimeError::from)?,
+                            idempotency_key: events::IdempotencyKeyRef::new(format!(
+                                "failing-idem-{}-{}",
+                                ctx.node().node_id,
+                                ctx.attempt_no()
+                            ))
+                            .map_err(RuntimeError::from)?,
                             capability_kind: self.cap_kind.clone(),
                             capability_version: self.cap_version.clone(),
                             adapter_kind: self.adapter_kind.clone(),
@@ -1561,7 +2029,7 @@ impl AmbiguousSideEffectRunner {
 impl ErasedNodeRunner for AmbiguousSideEffectRunner {
     fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
         Box::pin(async move {
-            let ledger = side_effect_ledger_key(ctx.attempt_no());
+            let ledger = side_effect_ledger_key_for_ctx(&ctx, &self.inner.remediation_links);
             let phase = ctx.projections().side_effect(&ledger);
             if matches!(
                 phase.map(|projection| &projection.phase),
@@ -1583,7 +2051,10 @@ impl ErasedNodeRunner for AmbiguousSideEffectRunner {
                             node_id: ctx.node().node_id.clone(),
                             attempt_id: ctx.attempt_id().clone(),
                             ledger_key: ledger,
-                            ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+                            ledger_purpose: side_effect_ledger_purpose_for_ctx(
+                                &ctx,
+                                &self.inner.remediation_links,
+                            ),
                             invocation_epoch: 1,
                             ambiguity_code: events::AmbiguityCode::new("unknown_submission")
                                 .map_err(RuntimeError::from)?,
@@ -1600,23 +2071,25 @@ impl ErasedNodeRunner for AmbiguousSideEffectRunner {
     }
 }
 
+#[cfg(test)]
 fn replay_artifacts(
     fixture: &ReferenceFixture,
     stream: &[store::KernelEventEnvelope],
 ) -> Result<Vec<store::ArtifactEvidenceRef>, String> {
+    replay_artifacts_for(&fixture.runtime_spec, stream)
+}
+
+fn replay_artifacts_for(
+    runtime_spec: &CertifiedRuntimeSpec,
+    stream: &[store::KernelEventEnvelope],
+) -> Result<Vec<store::ArtifactEvidenceRef>, String> {
     let mut artifacts = BTreeMap::<ArtifactId, store::ArtifactEvidenceRef>::new();
-    insert_artifact(
-        &mut artifacts,
-        spec_artifact(&fixture.runtime_spec)?.evidence,
-    );
-    insert_artifact(
-        &mut artifacts,
-        certificate_artifact(&fixture.runtime_spec)?.evidence,
-    );
-    for config in &fixture.runtime_spec.spec().config_refs {
+    insert_artifact(&mut artifacts, spec_artifact(runtime_spec)?.evidence);
+    insert_artifact(&mut artifacts, certificate_artifact(runtime_spec)?.evidence);
+    for config in &runtime_spec.spec().config_refs {
         insert_artifact(&mut artifacts, config_artifact_evidence(config));
     }
-    for artifact in referenced_artifacts_from_stream(fixture, stream)? {
+    for artifact in referenced_artifacts_from_stream(runtime_spec, stream)? {
         insert_artifact(&mut artifacts, artifact);
     }
     for event in stream {
@@ -1728,13 +2201,13 @@ fn replay_artifacts(
     Ok(artifacts.into_values().collect())
 }
 
-fn retained_replay_artifacts(
-    fixture: &ReferenceFixture,
+fn retained_replay_artifacts_for(
+    runtime_spec: &CertifiedRuntimeSpec,
     stream: &[store::KernelEventEnvelope],
     projection: &store::ProjectionSnapshot,
     run_id: &RunId,
 ) -> Result<Vec<store::ArtifactEvidenceRef>, String> {
-    let mut discovered = replay_artifacts(fixture, stream)?
+    let mut discovered = replay_artifacts_for(runtime_spec, stream)?
         .into_iter()
         .map(|artifact| (artifact.artifact_id.clone(), artifact))
         .collect::<BTreeMap<_, _>>();
@@ -1766,7 +2239,7 @@ fn retention_artifact_evidence(retention_ref: &events::RetentionRef) -> store::A
 }
 
 fn referenced_artifacts_from_stream(
-    fixture: &ReferenceFixture,
+    runtime_spec: &CertifiedRuntimeSpec,
     stream: &[store::KernelEventEnvelope],
 ) -> Result<Vec<store::ArtifactEvidenceRef>, String> {
     let (start_seq, start_commit_key) = stream
@@ -1850,18 +2323,17 @@ fn referenced_artifacts_from_stream(
         index = end;
     }
     artifacts.extend(validate_referenced_config_artifacts(
-        fixture,
+        runtime_spec,
         config_artifacts,
     )?);
     Ok(artifacts)
 }
 
 fn validate_referenced_config_artifacts(
-    fixture: &ReferenceFixture,
+    runtime_spec: &CertifiedRuntimeSpec,
     artifacts: Vec<store::ArtifactEvidenceRef>,
 ) -> Result<Vec<store::ArtifactEvidenceRef>, String> {
-    let mut expected = fixture
-        .runtime_spec
+    let mut expected = runtime_spec
         .spec()
         .config_refs
         .iter()
@@ -2177,19 +2649,58 @@ async fn start_reference_run(
     Ok(())
 }
 
+#[cfg(test)]
+async fn start_compensated_reference_run(
+    scheduler: &SerialTypedScheduler,
+    store: &mut store::InMemoryTypedRunStore,
+    fixture: &CompensatedReferenceFixture,
+) -> Result<(), String> {
+    let launch = scheduler
+        .prepare_run_launch(
+            &fixture.runtime_spec,
+            fixture.run_id.clone(),
+            run_start_evidence_for(
+                &fixture.runtime_spec,
+                &fixture.config_bytes,
+                &fixture.seed_bytes,
+                vec![fixture.seed_ref.clone()],
+            )?,
+            store.expected_next_seq(&fixture.run_id),
+        )
+        .map_err(display_error)?;
+    scheduler
+        .start_run(store, launch)
+        .await
+        .map_err(display_error)?;
+    Ok(())
+}
+
 fn run_start_evidence(
     fixture: &ReferenceFixture,
     seed_cells: Vec<events::SeedCellRef>,
 ) -> Result<RunLaunchEvidence, String> {
+    run_start_evidence_for(
+        &fixture.runtime_spec,
+        &fixture.config_bytes,
+        &fixture.seed_bytes,
+        seed_cells,
+    )
+}
+
+fn run_start_evidence_for(
+    runtime_spec: &CertifiedRuntimeSpec,
+    config_bytes: &BTreeMap<String, Vec<u8>>,
+    seed_bytes: &[u8],
+    seed_cells: Vec<events::SeedCellRef>,
+) -> Result<RunLaunchEvidence, String> {
     Ok(RunLaunchEvidence {
-        spec_artifact: spec_artifact(&fixture.runtime_spec)?,
-        certificate_artifact: certificate_artifact(&fixture.runtime_spec)?,
-        config_artifacts: fixture
-            .runtime_spec
+        spec_artifact: spec_artifact(runtime_spec)?,
+        certificate_artifact: certificate_artifact(runtime_spec)?,
+        config_artifacts: runtime_spec
             .spec()
             .config_refs
             .iter()
-            .map(|config| config_artifact(fixture, config))
+            .map(|config| config_artifact_from(config_bytes, config))
             .collect::<Result<Vec<_>, _>>()?,
         framework_version: events::FrameworkVersion::new("mfm.typed_slice.framework.v1")
             .map_err(display_error)?,
@@ -2199,7 +2710,7 @@ fn run_start_evidence(
         seed_cells: seed_cells
             .into_iter()
             .map(|cell| RunLaunchSeedCell {
-                bytes: fixture.seed_bytes.clone(),
+                bytes: seed_bytes.to_vec(),
                 cell,
             })
             .collect(),
@@ -2252,12 +2763,11 @@ fn certificate_artifact(runtime_spec: &CertifiedRuntimeSpec) -> Result<RunLaunch
     })
 }
 
-fn config_artifact(
-    fixture: &ReferenceFixture,
+fn config_artifact_from(
+    config_bytes: &BTreeMap<String, Vec<u8>>,
     config: &spec::ConfigRef,
 ) -> Result<RunLaunchArtifact, String> {
-    let bytes = fixture
-        .config_bytes
+    let bytes = config_bytes
         .get(&config_ref_key(config))
         .ok_or_else(|| format!("missing config bytes for {}", config.artifact_id))?
         .clone();
@@ -2294,6 +2804,7 @@ fn config_bytes_for_draft_and_spec(
         .state_nodes()
         .iter()
         .map(|node| &node.config)
+        .chain(draft.remediation_nodes().values().map(|node| &node.config))
         .chain(draft.operation_lineage().iter().map(|frame| &frame.config))
     {
         let digest = config.canonical_json.content_digest();
@@ -2369,7 +2880,7 @@ fn state_output_artifact(
     descriptor: &spec::StateDescriptorIdentity,
     label: &str,
 ) -> TestArtifact {
-    let bytes = test_artifact_bytes(label);
+    let bytes = test_artifact_bytes(&format!("{label}:{}", node.node_id));
     let digest = digest_for_bytes(&bytes);
     let evidence = store::ArtifactEvidenceRef {
         artifact_id: artifact_id_for_digest(&digest),
@@ -2390,7 +2901,11 @@ fn side_effect_artifact(
     label: &str,
     role: events::ArtifactRole,
 ) -> TestArtifact {
-    let bytes = test_artifact_bytes(label);
+    let bytes = test_artifact_bytes(&format!(
+        "{label}:{}:{}",
+        ctx.node().node_id,
+        ctx.attempt_id()
+    ));
     let digest = digest_for_bytes(&bytes);
     let evidence = store::ArtifactEvidenceRef {
         artifact_id: artifact_id_for_digest(&digest),
@@ -2446,6 +2961,7 @@ fn retain_artifacts<'a>(
 fn side_effect_claimed(
     ctx: &ErasedRunCtx<'_>,
     ledger: events::SideEffectLedgerKey,
+    remediation_links: &BTreeMap<NodeId, NodeId>,
     invocation_epoch: u32,
     claim_generation: u32,
 ) -> RunnerEventPayload {
@@ -2454,7 +2970,7 @@ fn side_effect_claimed(
         node_id: ctx.node().node_id.clone(),
         attempt_id: ctx.attempt_id().clone(),
         ledger_key: ledger,
-        ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+        ledger_purpose: side_effect_ledger_purpose_for_ctx(ctx, remediation_links),
         claim_owner: side_effect_claim_owner(ctx.attempt_no(), claim_generation),
         invocation_epoch,
         claim_generation,
@@ -2465,6 +2981,7 @@ fn side_effect_claimed(
 fn side_effect_claim_taken_over(
     ctx: &ErasedRunCtx<'_>,
     ledger: events::SideEffectLedgerKey,
+    remediation_links: &BTreeMap<NodeId, NodeId>,
     previous: &store::SideEffectClaimProjection,
     claim_generation: u32,
 ) -> RunnerEventPayload {
@@ -2473,7 +2990,7 @@ fn side_effect_claim_taken_over(
         node_id: ctx.node().node_id.clone(),
         attempt_id: ctx.attempt_id().clone(),
         ledger_key: ledger,
-        ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+        ledger_purpose: side_effect_ledger_purpose_for_ctx(ctx, remediation_links),
         previous_claim_owner: previous.claim_owner.clone(),
         new_claim_owner: side_effect_claim_owner(ctx.attempt_no(), claim_generation),
         invocation_epoch: previous.invocation_epoch,
@@ -2486,6 +3003,7 @@ fn side_effect_claim_taken_over(
 fn side_effect_prepared(
     ctx: &ErasedRunCtx<'_>,
     ledger: events::SideEffectLedgerKey,
+    remediation_links: &BTreeMap<NodeId, NodeId>,
     invocation_epoch: u32,
     claim_generation: u32,
 ) -> RunnerEventPayload {
@@ -2494,7 +3012,7 @@ fn side_effect_prepared(
         node_id: ctx.node().node_id.clone(),
         attempt_id: ctx.attempt_id().clone(),
         ledger_key: ledger,
-        ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+        ledger_purpose: side_effect_ledger_purpose_for_ctx(ctx, remediation_links),
         invocation_epoch,
         claim_generation,
         claim_fencing_token: side_effect_fencing_token(ctx.attempt_no(), claim_generation),
@@ -2507,6 +3025,7 @@ fn side_effect_prepared(
 fn side_effect_invocation_started(
     ctx: &ErasedRunCtx<'_>,
     ledger: events::SideEffectLedgerKey,
+    remediation_links: &BTreeMap<NodeId, NodeId>,
     invocation_epoch: u32,
     claim_generation: u32,
 ) -> RunnerEventPayload {
@@ -2515,7 +3034,7 @@ fn side_effect_invocation_started(
         node_id: ctx.node().node_id.clone(),
         attempt_id: ctx.attempt_id().clone(),
         ledger_key: ledger,
-        ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+        ledger_purpose: side_effect_ledger_purpose_for_ctx(ctx, remediation_links),
         invocation_epoch,
         claim_owner: side_effect_claim_owner(ctx.attempt_no(), claim_generation),
         claim_generation,
@@ -2526,6 +3045,7 @@ fn side_effect_invocation_started(
 fn side_effect_submission_observed(
     ctx: &ErasedRunCtx<'_>,
     ledger: events::SideEffectLedgerKey,
+    remediation_links: &BTreeMap<NodeId, NodeId>,
     invocation_epoch: u32,
     artifact_id: ArtifactId,
     digest: ContentDigest,
@@ -2535,7 +3055,7 @@ fn side_effect_submission_observed(
         node_id: ctx.node().node_id.clone(),
         attempt_id: ctx.attempt_id().clone(),
         ledger_key: ledger,
-        ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+        ledger_purpose: side_effect_ledger_purpose_for_ctx(ctx, remediation_links),
         invocation_epoch,
         submission_schema_id: ctx.node().config_ref.schema_id.clone(),
         submission_hash: digest,
@@ -2546,6 +3066,7 @@ fn side_effect_submission_observed(
 fn side_effect_receipt_observed(
     ctx: &ErasedRunCtx<'_>,
     ledger: events::SideEffectLedgerKey,
+    remediation_links: &BTreeMap<NodeId, NodeId>,
     invocation_epoch: u32,
     artifact_id: ArtifactId,
     digest: ContentDigest,
@@ -2555,7 +3076,7 @@ fn side_effect_receipt_observed(
         node_id: ctx.node().node_id.clone(),
         attempt_id: ctx.attempt_id().clone(),
         ledger_key: ledger,
-        ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+        ledger_purpose: side_effect_ledger_purpose_for_ctx(ctx, remediation_links),
         invocation_epoch,
         receipt_schema_id: ctx.node().config_ref.schema_id.clone(),
         receipt_hash: digest,
@@ -2569,6 +3090,7 @@ fn side_effect_receipt_observed(
 fn side_effect_confirmation_observed(
     ctx: &ErasedRunCtx<'_>,
     ledger: events::SideEffectLedgerKey,
+    remediation_links: &BTreeMap<NodeId, NodeId>,
     invocation_epoch: u32,
     artifact_id: ArtifactId,
     digest: ContentDigest,
@@ -2578,7 +3100,7 @@ fn side_effect_confirmation_observed(
         node_id: ctx.node().node_id.clone(),
         attempt_id: ctx.attempt_id().clone(),
         ledger_key: ledger,
-        ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+        ledger_purpose: side_effect_ledger_purpose_for_ctx(ctx, remediation_links),
         invocation_epoch,
         confirmation_schema_id: ctx.node().config_ref.schema_id.clone(),
         confirmation_hash: digest,
@@ -2660,9 +3182,77 @@ fn executable(factory: &str) -> Result<events::ExecutableIdentity, String> {
     })
 }
 
-fn side_effect_ledger_key(attempt_no: u32) -> events::SideEffectLedgerKey {
-    events::SideEffectLedgerKey::new(format!("typed-slice-ledger-{attempt_no}"))
-        .expect("valid ledger key")
+fn side_effect_ledger_key_for_ctx(
+    ctx: &ErasedRunCtx<'_>,
+    remediation_links: &BTreeMap<NodeId, NodeId>,
+) -> events::SideEffectLedgerKey {
+    if let Some(forward_ledger_key) = linked_forward_ledger_for_remediation(ctx, remediation_links)
+    {
+        events::SideEffectLedgerKey::new(format!(
+            "typed-slice-remediation-{}-{}",
+            forward_ledger_key,
+            ctx.attempt_no()
+        ))
+        .expect("valid remediation ledger key")
+    } else {
+        side_effect_forward_ledger_key_for_ctx(ctx)
+    }
+}
+
+fn side_effect_forward_ledger_key_for_ctx(ctx: &ErasedRunCtx<'_>) -> events::SideEffectLedgerKey {
+    events::SideEffectLedgerKey::new(format!(
+        "typed-slice-forward-{}-{}-{}",
+        ctx.run_id(),
+        ctx.node().node_id,
+        ctx.attempt_no()
+    ))
+    .expect("valid forward ledger key")
+}
+
+fn side_effect_ledger_purpose_for_ctx(
+    ctx: &ErasedRunCtx<'_>,
+    remediation_links: &BTreeMap<NodeId, NodeId>,
+) -> events::SideEffectLedgerPurpose {
+    linked_forward_ledger_for_remediation(ctx, remediation_links)
+        .map(
+            |forward_ledger_key| events::SideEffectLedgerPurpose::Remediation {
+                forward_ledger_key,
+            },
+        )
+        .unwrap_or(events::SideEffectLedgerPurpose::Forward)
+}
+
+fn linked_forward_ledger_for_remediation(
+    ctx: &ErasedRunCtx<'_>,
+    remediation_links: &BTreeMap<NodeId, NodeId>,
+) -> Option<events::SideEffectLedgerKey> {
+    let forward_node_id = remediation_links.get(&ctx.node().node_id)?;
+    ctx.projections()
+        .side_effects()
+        .find_map(|(_, projection)| {
+            (projection.intent.node_id == *forward_node_id
+                && matches!(
+                    &projection.ledger_purpose,
+                    events::SideEffectLedgerPurpose::Forward
+                )
+                && matches!(
+                    projection.phase,
+                    store::SideEffectPhase::ConfirmationObserved { .. }
+                ))
+            .then(|| projection.ledger_key.clone())
+        })
+}
+
+fn first_forward_side_effect_projection(
+    projection: &store::ProjectionSnapshot,
+) -> Option<&store::SideEffectProjection> {
+    projection.side_effects().find_map(|(_, side_effect)| {
+        matches!(
+            side_effect.ledger_purpose,
+            events::SideEffectLedgerPurpose::Forward
+        )
+        .then_some(side_effect)
+    })
 }
 
 fn side_effect_claim_owner(attempt_no: u32, generation: u32) -> events::RunnerInvocationId {
@@ -2724,7 +3314,7 @@ fn state_kind(name: &str, byte: u8) -> Result<StateKind, String> {
 impl ErasedNodeRunner for DeterministicSideEffectRunner {
     fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
         Box::pin(async move {
-            let ledger = side_effect_ledger_key(ctx.attempt_no());
+            let ledger = side_effect_ledger_key_for_ctx(&ctx, &self.remediation_links);
             let phase = ctx.projections().side_effect(&ledger);
             match phase {
                 None => self.persist_intent_and_claim(ctx, ledger),
@@ -2741,9 +3331,15 @@ impl ErasedNodeRunner for DeterministicSideEffectRunner {
                         )
                     })?;
                     Ok(ErasedRunnerOutput::new(vec![
-                        side_effect_claim_taken_over(&ctx, ledger.clone(), claim, 2),
-                        side_effect_prepared(&ctx, ledger.clone(), 1, 2),
-                        side_effect_invocation_started(&ctx, ledger, 1, 2),
+                        side_effect_claim_taken_over(
+                            &ctx,
+                            ledger.clone(),
+                            &self.remediation_links,
+                            claim,
+                            2,
+                        ),
+                        side_effect_prepared(&ctx, ledger.clone(), &self.remediation_links, 1, 2),
+                        side_effect_invocation_started(&ctx, ledger, &self.remediation_links, 1, 2),
                     ]))
                 }
                 Some(store::SideEffectProjection {
@@ -2773,7 +3369,10 @@ impl ErasedNodeRunner for DeterministicSideEffectRunner {
                                 node_id: ctx.node().node_id.clone(),
                                 attempt_id: ctx.attempt_id().clone(),
                                 ledger_key: ledger,
-                                ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+                                ledger_purpose: side_effect_ledger_purpose_for_ctx(
+                                    &ctx,
+                                    &self.remediation_links,
+                                ),
                                 invocation_epoch: *invocation_epoch,
                                 evidence_schema_id: ctx.node().config_ref.schema_id.clone(),
                                 evidence_hash: artifact.evidence.digest,
@@ -2800,6 +3399,7 @@ impl ErasedNodeRunner for DeterministicSideEffectRunner {
                         payloads: vec![side_effect_submission_observed(
                             &ctx,
                             ledger,
+                            &self.remediation_links,
                             *invocation_epoch,
                             artifact.evidence.artifact_id,
                             artifact.evidence.digest,
@@ -2824,6 +3424,7 @@ impl ErasedNodeRunner for DeterministicSideEffectRunner {
                         payloads: vec![side_effect_receipt_observed(
                             &ctx,
                             ledger,
+                            &self.remediation_links,
                             *invocation_epoch,
                             artifact.evidence.artifact_id,
                             artifact.evidence.digest,
@@ -2851,6 +3452,7 @@ impl ErasedNodeRunner for DeterministicSideEffectRunner {
                         payloads: vec![side_effect_confirmation_observed(
                             &ctx,
                             ledger,
+                            &self.remediation_links,
                             *invocation_epoch,
                             artifact.evidence.artifact_id,
                             artifact.evidence.digest,
@@ -2910,23 +3512,30 @@ impl DeterministicSideEffectRunner {
                         scope_id: ctx.node().scope_id.clone(),
                         attempt_id: ctx.attempt_id().clone(),
                         ledger_key: ledger.clone(),
-                        ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+                        ledger_purpose: side_effect_ledger_purpose_for_ctx(
+                            &ctx,
+                            &self.remediation_links,
+                        ),
                         invocation_epoch: 1,
                         intent_schema_id: ctx.node().config_ref.schema_id.clone(),
                         intent_hash: artifact.evidence.digest.clone(),
                         intent_artifact_id: artifact.evidence.artifact_id.clone(),
                         idempotency_input_schema_id: ctx.node().config_ref.schema_id.clone(),
                         idempotency_input_hash: content(0xdd),
-                        idempotency_key: events::IdempotencyKeyRef::new("reference-idem")
-                            .map_err(RuntimeError::from)?,
+                        idempotency_key: events::IdempotencyKeyRef::new(format!(
+                            "reference-idem-{}-{}",
+                            ctx.node().node_id,
+                            ctx.attempt_no()
+                        ))
+                        .map_err(RuntimeError::from)?,
                         capability_kind: self.cap_kind.clone(),
                         capability_version: self.cap_version.clone(),
                         adapter_kind: self.adapter_kind.clone(),
                         adapter_version: self.adapter_version.clone(),
                     },
                 ),
-                side_effect_claimed(&ctx, ledger.clone(), 1, 1),
-                side_effect_prepared(&ctx, ledger, 1, 1),
+                side_effect_claimed(&ctx, ledger.clone(), &self.remediation_links, 1, 1),
+                side_effect_prepared(&ctx, ledger, &self.remediation_links, 1, 1),
             ],
         })
     }
@@ -2944,6 +3553,105 @@ mod tests {
         summary
             .validate_required_contract()
             .expect("required contract");
+    }
+
+    #[tokio::test]
+    async fn compensated_certified_slice_replays_and_reports_public_status() {
+        let run = run_compensated_reference_workflow()
+            .await
+            .expect("compensated reference workflow");
+        let stream = run.store.load_run_stream(&run.fixture.run_id);
+        let projection =
+            store::ProjectionSnapshot::rebuild_from_run_stream(&stream).expect("projection");
+        let saga = projection
+            .derive_saga_projection(&run.fixture.run_id, &run.fixture.runtime_spec.spec().saga);
+
+        assert_eq!(saga.run_mode, store::RunMode::Compensated);
+        assert_eq!(saga.obligations.len(), 2);
+        assert!(saga.obligations.values().all(|obligation| {
+            obligation.classification == store::ForwardLedgerClassification::Owed
+                && obligation
+                    .remediation
+                    .as_ref()
+                    .is_some_and(|remediation| remediation.closed)
+        }));
+        assert!(matches!(
+            projection
+                .run_completion(&run.fixture.run_id)
+                .expect("run completion")
+                .outcome,
+            events::RunCompletionOutcome::Compensated
+        ));
+
+        let forward_confirmation_order = stream
+            .iter()
+            .filter_map(|event| match event.payload() {
+                events::KernelEventPayload::SideEffectConfirmationObserved(payload)
+                    if matches!(
+                        payload.ledger_purpose,
+                        events::SideEffectLedgerPurpose::Forward
+                    ) =>
+                {
+                    Some(payload.ledger_key.clone())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(forward_confirmation_order.len(), 2);
+        let remediation_order = stream
+            .iter()
+            .filter_map(|event| match event.payload() {
+                events::KernelEventPayload::SideEffectIntentPersisted(payload) => {
+                    match &payload.ledger_purpose {
+                        events::SideEffectLedgerPurpose::Remediation { forward_ledger_key } => {
+                            Some(forward_ledger_key.clone())
+                        }
+                        events::SideEffectLedgerPurpose::Forward => None,
+                    }
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            remediation_order,
+            forward_confirmation_order
+                .iter()
+                .rev()
+                .cloned()
+                .collect::<Vec<_>>()
+        );
+
+        replay_without_live_capabilities_for(
+            &run.fixture.runtime_spec,
+            &run.store,
+            &run.fixture.run_id,
+        )
+        .expect("replay without live capabilities");
+
+        let status = mfm_app::typed_run_status_from_stream(
+            &run.fixture.run_id,
+            &run.fixture.runtime_spec,
+            &stream,
+        )
+        .expect("typed run status");
+        assert_eq!(status.run_mode, mfm_app::TypedRunMode::Compensated);
+        assert_eq!(
+            status
+                .saga
+                .terminal_resolution
+                .as_ref()
+                .expect("terminal resolution")
+                .outcome,
+            "compensated"
+        );
+        assert_eq!(status.saga.obligations.len(), 2);
+        assert!(status.saga.obligations.iter().all(|obligation| {
+            obligation.classification == "owed"
+                && obligation
+                    .remediation
+                    .as_ref()
+                    .is_some_and(|remediation| remediation.closed)
+        }));
     }
 
     #[tokio::test]
