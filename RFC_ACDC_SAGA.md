@@ -27,7 +27,10 @@ saga semantics for external side effects:
    deterministically from certified spec plus recorded facts;
 5. store-owned projections and preconditions for remediation authority;
 6. replay verification without live IO;
-7. public status that reports semantic run modes and per-ledger obligation state.
+7. public status that reports semantic run modes and per-ledger obligation state;
+8. after the core slice: a minimal cross-run resource-claim surface — `Exclusive` lanes,
+   `ExactTouchedSet` evidence, and `ManualOnly` degradation — so concurrent isolated runs that
+   mutate the same external resource are sequenced or honestly unclaimed.
 
 Stronger AC/DC-style claims are allowed only where MFM owns the affected transactional resource or
 where replay can verify a certified domain proof from typed evidence. Core v1 makes no such claim.
@@ -43,8 +46,10 @@ where replay can verify a certified domain proof from typed evidence. Core v1 ma
   and run mode are projections of certified spec plus recorded facts, not appendable payloads.
 - Do not add dynamic remediation callbacks, closures, CLI handlers, or app-level policy hooks.
 - Do not make every state implement compensation methods.
-- Do not implement generic commutativity, escrow, predicate isolation, resource claims, or chain
-  reorg semantics in the kernel.
+- Do not implement generic commutativity, escrow, predicate isolation, or chain reorg semantics in
+  the kernel.
+- Do not add resource derivation enums, lane fairness/queueing policy, or cross-run deadlock
+  detection in the first resource-claim slice.
 - Do not preserve the old absent/started/completed public status model as the user-facing contract.
 - Do not hide compensation as ordinary user states that runtime/store/replay cannot recognize.
 - Do not define run cancellation semantics in v1. Cancellation is explicitly deferred and removed
@@ -75,7 +80,9 @@ These constraints are part of the RFC, not implementation preferences.
    V1 adds only: run-level saga policy, a linked-compensation authoring surface, ledger purpose,
    one operator evidence event, one sealed terminal lifecycle node, semantic run mode, and the
    projections behind public status. No generic callback systems, no broad new traits, no duplicate
-   side-effect machinery, no speculative correctness classes.
+   side-effect machinery, no speculative correctness classes. The post-core resource-claim
+   milestone is similarly bounded: one mandatory spec field, a derived lane projection, and
+   evidence checks on existing events.
 
 4. Break compatibility deliberately.
 
@@ -100,10 +107,12 @@ Cut from the core slice (beyond the cuts already made in `DESIGN_ACDC.md`):
   policy;
 - `PolicyCovered` typestate on node handles;
 - generic retry policy, replan and continuation directives, trigger policy, correctness-claim APIs,
-  resource-claim APIs, chain finality/reorg semantics;
+  chain finality/reorg semantics;
 - `RecoveringSideEffect`, `Replanning`, and `IrreversibleBlocked` public run modes;
-- the post-core resource-claim milestone, enum, and test matrix. Resource claims get their own RFC
-  after the core slice is proven.
+Resource claims stay out of the core slice but return as a bounded post-core milestone in this RFC
+(see Cross-Run Resource Claims): the same `Exclusive` / `ExactTouchedSet` / `ManualOnly` vocabulary
+as before, redesigned under this RFC's principles — no derivation enums, no policy maps, no new
+event families, no new run modes.
 
 The core v1 must prove only:
 
@@ -169,6 +178,14 @@ These decisions are intentionally closed for the first implementation slice.
 11. Continuations, triggers, replan, retry policy, resource claims, irreversible-boundary APIs, and
     correctness classes are deferred.
 12. Public status exposes semantic `RunMode`; coarse store `RunState` may remain internal.
+13. Resource claims (post-core, Milestone 6) are a mandatory closed field on every
+    `ApplySideEffect` node spec: `Exclusive`, `ExactTouchedSet`, or `ManualOnly`. There is no
+    derivation enum; adapters derive keys and touched sets as typed evidence under certified
+    schemas.
+14. Exclusive lanes are derived cross-run projections: acquisition is the resource key recorded at
+    invocation-prepared, release is the holding ledger's terminal evidence. No lane-control
+    events, no fairness guarantee, no new run mode.
+15. Remediation ledgers acquire lanes under the same rules as forward ledgers.
 
 ## Core Semantic Rules
 
@@ -250,6 +267,14 @@ accepted only when sealed lifecycle evidence exists and the derived projection a
 and manual `FailedWithoutAcdcClaim` require admitted `ManualResolutionRecorded` evidence; policy
 `FailedWithoutAcdcClaim` requires the certified policy to permit it). Successful forward completion
 keeps the existing sealed `CompleteRun` path unchanged.
+
+### Cross-run concurrency
+
+Runs are isolated append-only histories. Core v1 makes no cross-run claim: `Compensated` is a
+single-run claim and says nothing about concurrent runs that mutated the same external resources.
+The bounded mechanism that adds cross-run sequencing is specified in Cross-Run Resource Claims and
+lands as Milestone 6; until it lands, conflicting concurrent runs are the domain's responsibility
+and no platform concurrency claim exists.
 
 ## V1 Data Model
 
@@ -526,9 +551,77 @@ App/CLI/API status should expose:
   unresolvable) and remediation ledger state;
 - linked forward and remediation ledger keys;
 - the derived manual-block reason and required evidence schemas when `ManualBlocked`;
-- terminal resolution and which claim it carries.
+- terminal resolution and which claim it carries;
+- once Milestone 6 lands: per-ledger declared resource claim, the recorded key or touched set, and
+  blocked-on-lane detail (namespace, key, holding run) when a node is waiting.
 
 This is a breaking public status change. It is allowed.
+
+## Cross-Run Resource Claims
+
+Post-core scope: this section lands as Milestone 6, after the core saga slice is proven. It is the
+minimal API for concurrent and parallel isolated runs, in the established vocabulary — `Exclusive`,
+`ExactTouchedSet`, `ManualOnly` — redesigned under this RFC's principles: no derivation enums, no
+policy maps, no new event families, no new run modes.
+
+### Spec
+
+Every `ApplySideEffect` node spec — forward and remediation — gains one mandatory hash-defining
+field:
+
+```rust
+pub enum ResourceClaimSpec {
+    /// Concrete key derivable from typed intent before mutation;
+    /// the store serializes conflicting lanes across runs.
+    Exclusive { namespace: ResourceNamespace, key_schema: SchemaId },
+    /// The affected key set is knowable only after execution;
+    /// the attempt records the actual touched set as typed evidence.
+    ExactTouchedSet { namespace: ResourceNamespace, evidence_schema: SchemaId },
+    /// MFM derives and verifies nothing; no platform concurrency claim.
+    ManualOnly,
+}
+```
+
+Because the field is mandatory, the old "every mutating node must expose a claim class"
+certification rule is carried by the type; `ManualOnly` is the explicit no-claim choice. Builders
+take the claim at node construction (`side_effect_with_compensation` gains the parameters), so
+coverage is structural. `ResourceNamespace` follows capability naming
+(`mfm.evm.account_nonce`); the canonical first lane is chain id plus sender address derived from
+EVM transaction intent. Landing the mandatory field is one deliberate breaking spec bump.
+
+### Mechanics
+
+- The adapter derives the `Exclusive` key from typed intent during invocation preparation. The key
+  is recorded on the existing invocation-prepared event payload; no new event family exists.
+- Lane acquisition is the admission precondition of that same atomic commit: the store rejects an
+  invocation-prepared carrying `(namespace, key)` while another run's ledger holds that lane. The
+  same ledger may re-prepare under a new invocation epoch with the same key; replay verifies key
+  stability across epochs.
+- A lane is held from invocation-prepared until the holding ledger records terminal evidence:
+  confirmation observed, not-submitted proven, failure, or manual resolution covering that ledger.
+  A crashed or ambiguous holder keeps the lane — the external resource genuinely is in an unknown
+  state — until evidence or operator authority resolves it.
+- Lane state is a derived cross-run projection over all run streams, rebuildable like every other
+  projection. Acquisition order is recorded commit order; there are no lane-control events and
+  nothing to forge.
+- The scheduler treats a held lane as a per-node blocked condition: that node waits, the rest of
+  the frontier and all other runs proceed. No new `RunMode`; blocked-on-lane is projected detail
+  inside `Forward`/`Remediating`. No fairness guarantee in this slice.
+- `ExactTouchedSet` sequences nothing. The attempt emits the actual touched set as typed evidence
+  on the existing receipt/confirmation evidence, schema-checked at admission. In this slice it is
+  captured and replay-checked for presence and schema; the verifier that bounds compensation scope
+  to the recorded set is deferred.
+- Remediation ledgers acquire lanes under exactly the same rules: a compensation transaction races
+  concurrent runs the same way a forward one does.
+
+### Claim discipline
+
+With `Exclusive` lanes MFM may claim: mutations declaring the same `(namespace, key)` are
+serialized across runs at the uncertainty boundary. MFM still may not claim AC/DC equivalence,
+phantom freedom, or anything about keys that were never declared. Keys are adapter-derived
+evidence: schema-checked and stability-checked, not framework-re-derived. Per-run replay verifies
+key evidence; cross-run serialization itself is enforced at store admission and auditable from
+recorded commit order, and a multi-run audit verifier is deferred.
 
 ## API And LOC Budget
 
@@ -550,6 +643,11 @@ Required internal or persisted additions:
 - derived obligation/run-mode projections and their preconditions;
 - replay recomputation for saga history.
 
+The post-core resource milestone adds only: the `ResourceClaimSpec` and `ResourceNamespace` types,
+the mandatory node-spec field and builder parameter, resource evidence on existing event payloads,
+the derived lane projection and its admission precondition, and the public lane/claim status
+fields.
+
 Avoid in v1:
 
 - new effect class hierarchy;
@@ -558,8 +656,7 @@ Avoid in v1:
 - generic remediation handler traits, per-state compensation methods, dynamic policy callbacks;
 - exposing store projection internals as authoring API;
 - compatibility adapters for old run-status semantics;
-- framework implementations of commutativity, escrow, predicate isolation, resource claims, or
-  reorg semantics.
+- framework implementations of commutativity, escrow, predicate isolation, or reorg semantics.
 
 ## Implementation Milestones
 
@@ -670,6 +767,29 @@ Acceptance:
   `FailedWithoutAcdcClaim`;
 - CLI JSON contract tests if CLI output changes.
 
+### Milestone 6: cross-run resource claims
+
+Purpose: prove that concurrency correctness across isolated runs is platform authority, not domain
+convention. Starts only after Milestone 5 is done.
+
+Scope:
+
+- mandatory `ResourceClaimSpec` field on `ApplySideEffect` node specs (one breaking spec bump);
+- resource key on invocation-prepared payloads; touched-set evidence on receipt/confirmation;
+- derived cross-run lane projection and admission precondition (in-memory and Postgres);
+- scheduler blocked-on-lane handling for forward and remediation frontiers;
+- replay checks for key presence, schema, and per-ledger stability;
+- public status for claims, keys, and lane blockage.
+
+Acceptance:
+
+- two runs declaring the same exclusive key sequence at the uncertainty boundary; unrelated keys
+  proceed in parallel;
+- a crashed or ambiguous holder keeps the lane until resolved; manual resolution releases it;
+- remediation ledgers acquire lanes identically;
+- missing or schema-invalid key/touched-set evidence is rejected at admission and replay;
+- `ManualOnly` nodes run unsequenced and public status carries no concurrency claim for them.
+
 ## Reviewable Commit Plan
 
 Each commit compiles and includes the tests that make sense for that layer. Commit subjects stay
@@ -723,6 +843,28 @@ narrow and lower-case.
     Replace user-facing absent/started/completed status with `RunMode` and obligation details.
     Update app/CLI/API docs and contract tests in the same commit.
 
+11. `spec: require resource claims on side-effect nodes`
+
+    `ResourceClaimSpec`, `ResourceNamespace`, the mandatory node-spec field and builder parameter,
+    hash-defining, with certification of schema presence. One deliberate breaking spec bump.
+    Milestone 6 starts here.
+
+12. `store: derive cross-run resource lanes`
+
+    Resource key on invocation-prepared, touched-set evidence on receipt/confirmation, the derived
+    lane projection, the cross-run admission precondition, and rebuild parity tests (in-memory and
+    Postgres).
+
+13. `runtime: sequence exclusive lanes`
+
+    Blocked-on-lane scheduling for forward and remediation frontiers, with the two-run sequencing
+    and parallel-unrelated-keys tests.
+
+14. `replay: verify resource evidence`
+
+    Key presence/schema/stability and touched-set checks, with rejection tests. Public status for
+    claims and lane blockage rides this or a final small app commit.
+
 Do not merge commits that add a semantic shape without its corresponding rejection tests unless the
 commit is a pure type skeleton explicitly marked as such. Do not combine runtime remediation,
 replay verification, and public status in one commit.
@@ -739,6 +881,14 @@ The implementation is not credible until these tests exist.
 | Runtime | Two confirmed effects then later failure remediate in reverse confirmation order; saga engages only past the uncertainty boundary (clean failure otherwise); ambiguous forward ledger degrades per policy; remediation failure/ambiguity follows `on_remediation_unresolved`; crash/resume at every remediation boundary; frontier separation proven both directions. |
 | Replay | Compensated run verifies; `Compensated` with a missing remedial confirmation rejects; remediation ledger with wrong forward linkage rejects; manual evidence schema mismatch rejects; terminal claim unsupported by recomputation rejects. |
 | Public status | Status distinguishes all seven run modes and shows per-ledger obligation classification, including unresolved obligations under `FailedWithoutAcdcClaim`. |
+
+Milestone 6 resource-claim tests:
+
+| Area | Required tests |
+| --- | --- |
+| Store | Same `(namespace, key)` lane rejects a second run's invocation-prepared while held; lane releases on each terminal evidence kind; lane projection rebuilds from all run streams; touched-set evidence is schema-checked at admission. |
+| Runtime | Two runs on one wallet-nonce lane sequence; unrelated keys run in parallel; remediation ledgers acquire lanes under forward rules; an ambiguous holder blocks peers until manual resolution releases the lane. |
+| Replay | `Exclusive` ledger without a recorded key rejects; key unstable across invocation epochs rejects; `ExactTouchedSet` ledger without touched-set evidence rejects. |
 
 ## First End-to-End Slice
 
@@ -777,6 +927,15 @@ Required proof:
   hole the current history validation closed.
 - Run-level-only policy may prove too coarse for real workflows; per-node overrides are the known
   next step and must come back as certified spec data, not callbacks.
+- A stuck or ambiguous ledger holds its exclusive lane indefinitely. That is correct — the external
+  resource genuinely is in question — but it turns one stuck run into blocked peers until manual
+  resolution; operators need the lane-holder visibility public status provides.
+- `Exclusive` keys are adapter-derived evidence: schema- and stability-checked but not
+  framework-re-derived in this slice. A wrong adapter key silently weakens sequencing until
+  re-derivation verifiers exist.
+- The scheduler's input grows beyond "certified graph plus own run history" to include the derived
+  lane view. Cross-run acquisition order is recorded commit order, not a deterministic function of
+  specs; resume and rebuild must treat the lane projection like any other derived state.
 
 ## Deferred Work
 
@@ -784,7 +943,10 @@ Required proof:
 - Per-obligation manual resolution targeting and manual outcome catalogs.
 - Run cancellation semantics under remediation.
 - Concurrent remediation scheduling.
-- Resource claims and concurrency correctness (separate RFC after the core slice is proven).
+- Lane fairness/queueing, cross-run deadlock detection, and multi-run serialization audit
+  verifiers.
+- Deterministic re-derivation verifiers for `Exclusive` keys and touched-set bounding verifiers
+  for compensation scope.
 - `ApplyCompensation` effect class.
 - Generic commutativity, escrow, predicate isolation, and phantom-proof framework semantics.
 - Chain-specific reorg/finality verifiers and triggers.
