@@ -14,10 +14,11 @@ use mfm_store::v1::{
     stage_prepared_typed_run_commit, ArtifactEvidenceRef, AsyncStoreFuture,
     AsyncTypedRunEventStore, AttemptProjection, AttemptStatus, CellTerminalProjection, CommitKey,
     CommitOrdinal, CommitOutcome, FactProjection, KernelEventEnvelope, LogicalEventKey,
-    PersistedKernelEventRecord, PreparedTypedCommit, ProjectionSnapshot, PublicOutputProjection,
-    RetentionManifestProjection, RetentionProjection, RunState, SideEffectArtifactProjection,
-    SideEffectClaimProjection, SideEffectIntentProjection, SideEffectPhase, SideEffectProjection,
-    StoreError, StreamSeq, TypedCommitBase,
+    ManualResolutionProjection, PersistedKernelEventRecord, PreparedTypedCommit,
+    ProjectionSnapshot, PublicOutputProjection, RetentionManifestProjection, RetentionProjection,
+    RunCompletionProjection, RunState, SagaEngagementProjection, SagaEngagementReason,
+    SideEffectArtifactProjection, SideEffectClaimProjection, SideEffectIntentProjection,
+    SideEffectPhase, SideEffectProjection, StoreError, StreamSeq, TypedCommitBase,
 };
 use serde_json::Value;
 use tokio::sync::Mutex;
@@ -195,6 +196,21 @@ CREATE TABLE IF NOT EXISTS typed_unique_logical_payloads (
 CREATE TABLE IF NOT EXISTS typed_run_projection (
   run_id TEXT PRIMARY KEY,
   run_state TEXT NOT NULL,
+  projection_json JSONB NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS typed_run_completion_projection (
+  run_id TEXT PRIMARY KEY,
+  projection_json JSONB NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS typed_saga_engagement_projection (
+  run_id TEXT PRIMARY KEY,
+  projection_json JSONB NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS typed_manual_resolution_projection (
+  run_id TEXT PRIMARY KEY,
   projection_json JSONB NOT NULL
 );
 
@@ -743,6 +759,54 @@ async fn load_projection_snapshot_tx(
         run_states.insert(run_id.clone(), parse_run_state(&state)?);
     }
 
+    let mut run_completions = BTreeMap::new();
+    for row in tx
+        .query(
+            "SELECT projection_json FROM typed_run_completion_projection WHERE run_id = $1",
+            &[&run_id.as_str()],
+        )
+        .await
+        .map_err(|_| {
+            PostgresTypedStoreError::Database("failed to load run completion projection")
+        })?
+    {
+        let json: Value = row.get(0);
+        let (projected_run_id, projection) = parse_run_completion_projection(&json)?;
+        run_completions.insert(projected_run_id, projection);
+    }
+
+    let mut saga_engagements = BTreeMap::new();
+    for row in tx
+        .query(
+            "SELECT projection_json FROM typed_saga_engagement_projection WHERE run_id = $1",
+            &[&run_id.as_str()],
+        )
+        .await
+        .map_err(|_| {
+            PostgresTypedStoreError::Database("failed to load saga engagement projection")
+        })?
+    {
+        let json: Value = row.get(0);
+        let (projected_run_id, projection) = parse_saga_engagement_projection(&json)?;
+        saga_engagements.insert(projected_run_id, projection);
+    }
+
+    let mut manual_resolutions = BTreeMap::new();
+    for row in tx
+        .query(
+            "SELECT projection_json FROM typed_manual_resolution_projection WHERE run_id = $1",
+            &[&run_id.as_str()],
+        )
+        .await
+        .map_err(|_| {
+            PostgresTypedStoreError::Database("failed to load manual resolution projection")
+        })?
+    {
+        let json: Value = row.get(0);
+        let (projected_run_id, projection) = parse_manual_resolution_projection(&json)?;
+        manual_resolutions.insert(projected_run_id, projection);
+    }
+
     let mut attempts = BTreeMap::new();
     for row in tx
         .query(
@@ -829,8 +893,11 @@ async fn load_projection_snapshot_tx(
         retentions.insert(run_id.clone(), retention);
     }
 
-    Ok(ProjectionSnapshot::from_parts(
+    Ok(ProjectionSnapshot::from_parts_with_saga(
         run_states,
+        run_completions,
+        saga_engagements,
+        manual_resolutions,
         attempts,
         cells,
         facts,
@@ -928,6 +995,9 @@ async fn write_projection_tables(
 ) -> Result<()> {
     for table in [
         "typed_run_projection",
+        "typed_run_completion_projection",
+        "typed_saga_engagement_projection",
+        "typed_manual_resolution_projection",
         "typed_attempt_projection",
         "typed_cell_projection",
         "typed_fact_projection",
@@ -957,6 +1027,51 @@ async fn write_projection_tables(
             )
             .await
             .map_err(|_| PostgresTypedStoreError::Database("failed to write run projection"))?;
+        }
+    }
+
+    for (projected_run_id, projection) in snapshot.run_completions() {
+        if projected_run_id == run_id {
+            let json = run_completion_projection_json(projected_run_id, projection);
+            tx.execute(
+                "INSERT INTO typed_run_completion_projection (run_id, projection_json) \
+                 VALUES ($1,$2)",
+                &[&projected_run_id.as_str(), &json],
+            )
+            .await
+            .map_err(|_| {
+                PostgresTypedStoreError::Database("failed to write run completion projection")
+            })?;
+        }
+    }
+
+    for (projected_run_id, projection) in snapshot.saga_engagements() {
+        if projected_run_id == run_id {
+            let json = saga_engagement_projection_json(projected_run_id, projection);
+            tx.execute(
+                "INSERT INTO typed_saga_engagement_projection (run_id, projection_json) \
+                 VALUES ($1,$2)",
+                &[&projected_run_id.as_str(), &json],
+            )
+            .await
+            .map_err(|_| {
+                PostgresTypedStoreError::Database("failed to write saga engagement projection")
+            })?;
+        }
+    }
+
+    for (projected_run_id, projection) in snapshot.manual_resolutions() {
+        if projected_run_id == run_id {
+            let json = manual_resolution_projection_json(projected_run_id, projection);
+            tx.execute(
+                "INSERT INTO typed_manual_resolution_projection (run_id, projection_json) \
+                 VALUES ($1,$2)",
+                &[&projected_run_id.as_str(), &json],
+            )
+            .await
+            .map_err(|_| {
+                PostgresTypedStoreError::Database("failed to write manual resolution projection")
+            })?;
         }
     }
 
@@ -1089,6 +1204,120 @@ fn canonical_payload_value(payload: &events::KernelEventPayload) -> Result<Value
     serde_json::from_slice(canonical.as_bytes()).map_err(|error| {
         PostgresTypedStoreError::Corruption(format!("canonical payload was not JSON: {error}"))
     })
+}
+
+fn run_completion_projection_json(run_id: &RunId, projection: &RunCompletionProjection) -> Value {
+    serde_json::json!({
+        "event_id": projection.event_id.as_str(),
+        "outcome": run_completion_outcome_json(&projection.outcome),
+        "run_id": run_id.as_str(),
+    })
+}
+
+fn parse_run_completion_projection(json: &Value) -> Result<(RunId, RunCompletionProjection)> {
+    Ok((
+        parse_identity(required_str(json, "run_id")?)?,
+        RunCompletionProjection {
+            event_id: parse_identity(required_str(json, "event_id")?)?,
+            outcome: parse_run_completion_outcome(required_obj(json, "outcome")?)?,
+        },
+    ))
+}
+
+fn saga_engagement_projection_json(run_id: &RunId, projection: &SagaEngagementProjection) -> Value {
+    serde_json::json!({
+        "event_id": projection.event_id.as_str(),
+        "reason": saga_engagement_reason_json(&projection.reason),
+        "run_id": run_id.as_str(),
+    })
+}
+
+fn parse_saga_engagement_projection(json: &Value) -> Result<(RunId, SagaEngagementProjection)> {
+    Ok((
+        parse_identity(required_str(json, "run_id")?)?,
+        SagaEngagementProjection {
+            event_id: parse_identity(required_str(json, "event_id")?)?,
+            reason: parse_saga_engagement_reason(required_obj(json, "reason")?)?,
+        },
+    ))
+}
+
+fn saga_engagement_reason_json(reason: &SagaEngagementReason) -> Value {
+    match reason {
+        SagaEngagementReason::NonRetryableFailure {
+            node_id,
+            attempt_id,
+        } => serde_json::json!({
+            "attempt_id": attempt_id.as_str(),
+            "kind": "non_retryable_failure",
+            "node_id": node_id.as_str(),
+        }),
+        SagaEngagementReason::ForwardAmbiguous { ledger_key } => serde_json::json!({
+            "kind": "forward_ambiguous",
+            "ledger_key": ledger_key.as_str(),
+        }),
+    }
+}
+
+fn parse_saga_engagement_reason(json: &Value) -> Result<SagaEngagementReason> {
+    match required_str(json, "kind")? {
+        "non_retryable_failure" => Ok(SagaEngagementReason::NonRetryableFailure {
+            node_id: parse_identity(required_str(json, "node_id")?)?,
+            attempt_id: parse_identity(required_str(json, "attempt_id")?)?,
+        }),
+        "forward_ambiguous" => Ok(SagaEngagementReason::ForwardAmbiguous {
+            ledger_key: events::SideEffectLedgerKey::new(required_str(json, "ledger_key")?)?,
+        }),
+        other => Err(PostgresTypedStoreError::Corruption(format!(
+            "unknown saga engagement reason {other}"
+        ))),
+    }
+}
+
+fn manual_resolution_projection_json(
+    run_id: &RunId,
+    projection: &ManualResolutionProjection,
+) -> Value {
+    serde_json::json!({
+        "event_id": projection.event_id.as_str(),
+        "evidence_artifact_id": projection.evidence_artifact_id.as_str(),
+        "evidence_hash": projection.evidence_hash.as_str(),
+        "evidence_schema_id": projection.evidence_schema_id.as_str(),
+        "note": projection.note.as_ref().map(manual_resolution_note_json),
+        "operator_identity_ref_artifact_id": projection.operator_identity_ref_artifact_id.as_str(),
+        "operator_identity_ref_hash": projection.operator_identity_ref_hash.as_str(),
+        "operator_identity_ref_schema_id": projection.operator_identity_ref_schema_id.as_str(),
+        "outcome": manual_resolution_outcome_str(projection.outcome),
+        "run_id": run_id.as_str(),
+    })
+}
+
+fn parse_manual_resolution_projection(json: &Value) -> Result<(RunId, ManualResolutionProjection)> {
+    Ok((
+        parse_identity(required_str(json, "run_id")?)?,
+        ManualResolutionProjection {
+            event_id: parse_identity(required_str(json, "event_id")?)?,
+            outcome: parse_manual_resolution_outcome(required_str(json, "outcome")?)?,
+            operator_identity_ref_schema_id: parse_identity(required_str(
+                json,
+                "operator_identity_ref_schema_id",
+            )?)?,
+            operator_identity_ref_hash: parse_identity(required_str(
+                json,
+                "operator_identity_ref_hash",
+            )?)?,
+            operator_identity_ref_artifact_id: parse_identity(required_str(
+                json,
+                "operator_identity_ref_artifact_id",
+            )?)?,
+            evidence_schema_id: parse_identity(required_str(json, "evidence_schema_id")?)?,
+            evidence_hash: parse_identity(required_str(json, "evidence_hash")?)?,
+            evidence_artifact_id: parse_identity(required_str(json, "evidence_artifact_id")?)?,
+            note: optional_obj(json, "note")?
+                .map(parse_manual_resolution_note)
+                .transpose()?,
+        },
+    ))
 }
 
 fn attempt_projection_json(projection: &AttemptProjection) -> Value {
@@ -1686,6 +1915,79 @@ fn parse_event_artifact(json: &Value) -> Result<events::ArtifactEvidenceRef> {
     })
 }
 
+fn manual_resolution_outcome_str(outcome: events::ManualResolutionOutcome) -> &'static str {
+    outcome.as_str()
+}
+
+fn parse_manual_resolution_outcome(value: &str) -> Result<events::ManualResolutionOutcome> {
+    match value {
+        "confirm_remediated" => Ok(events::ManualResolutionOutcome::ConfirmRemediated),
+        "fail_without_acdc_claim" => Ok(events::ManualResolutionOutcome::FailWithoutAcdcClaim),
+        other => Err(PostgresTypedStoreError::Corruption(format!(
+            "unknown manual resolution outcome {other}"
+        ))),
+    }
+}
+
+fn manual_resolution_note_json(note: &events::ManualResolutionNote) -> Value {
+    serde_json::json!({
+        "text": note.as_str(),
+    })
+}
+
+fn parse_manual_resolution_note(json: &Value) -> Result<events::ManualResolutionNote> {
+    Ok(events::ManualResolutionNote::new(required_str(
+        json, "text",
+    )?)?)
+}
+
+fn run_completion_outcome_json(outcome: &events::RunCompletionOutcome) -> Value {
+    match outcome {
+        events::RunCompletionOutcome::Completed(evidence) => serde_json::json!({
+            "kind": "completed",
+            "public_output": {
+                "public_output_event_id": evidence.public_output_event_id.as_str(),
+                "public_output_schema_id": evidence.public_output_schema_id.as_str(),
+            },
+        }),
+        events::RunCompletionOutcome::Compensated => serde_json::json!({
+            "kind": "compensated",
+        }),
+        events::RunCompletionOutcome::ManuallyResolved => serde_json::json!({
+            "kind": "manually_resolved",
+        }),
+        events::RunCompletionOutcome::FailedWithoutAcdcClaim => serde_json::json!({
+            "kind": "failed_without_acdc_claim",
+        }),
+    }
+}
+
+fn parse_run_completion_outcome(json: &Value) -> Result<events::RunCompletionOutcome> {
+    match required_str(json, "kind")? {
+        "completed" => {
+            let evidence = required_obj(json, "public_output")?;
+            Ok(events::RunCompletionOutcome::Completed(
+                events::PublicOutputCompletionEvidence {
+                    public_output_schema_id: parse_identity(required_str(
+                        evidence,
+                        "public_output_schema_id",
+                    )?)?,
+                    public_output_event_id: parse_identity(required_str(
+                        evidence,
+                        "public_output_event_id",
+                    )?)?,
+                },
+            ))
+        }
+        "compensated" => Ok(events::RunCompletionOutcome::Compensated),
+        "manually_resolved" => Ok(events::RunCompletionOutcome::ManuallyResolved),
+        "failed_without_acdc_claim" => Ok(events::RunCompletionOutcome::FailedWithoutAcdcClaim),
+        other => Err(PostgresTypedStoreError::Corruption(format!(
+            "unknown run completion outcome {other}"
+        ))),
+    }
+}
+
 fn run_state_str(state: RunState) -> &'static str {
     match state {
         RunState::Absent => "absent",
@@ -2134,8 +2436,79 @@ mod tests {
         })
     }
 
+    fn fact_attempt_failed(retryable: bool) -> KernelEventPayload {
+        KernelEventPayload::StateAttemptFailed(events::StateAttemptFailed {
+            spec_hash: spec_hash(1),
+            node_id: node_id(30),
+            attempt_id: attempt_id(31),
+            retryable,
+            error: events::MfmErrorInfo {
+                code: events::ErrorCode::new("fact_failed").expect("error code"),
+                category: events::ErrorCategory::Runtime,
+                retryable,
+                safe_message: "fact state failed".to_owned(),
+                public_details: None,
+                diagnostic_ref: None,
+            },
+        })
+    }
+
+    fn run_completed(run_id: RunId, outcome: events::RunCompletionOutcome) -> KernelEventPayload {
+        KernelEventPayload::RunCompleted(events::RunCompleted {
+            run_id,
+            spec_hash: spec_hash(1),
+            outcome,
+        })
+    }
+
+    fn manual_resolution_recorded(run_id: RunId, byte: u8) -> KernelEventPayload {
+        KernelEventPayload::ManualResolutionRecorded(events::ManualResolutionRecorded {
+            run_id,
+            spec_hash: spec_hash(1),
+            outcome: events::ManualResolutionOutcome::ConfirmRemediated,
+            operator_identity_ref_schema_id: schema_id("mfm.test.operator_identity", byte),
+            operator_identity_ref_hash: content_digest(byte),
+            operator_identity_ref_artifact_id: artifact_id(byte),
+            evidence_schema_id: schema_id("mfm.test.manual_evidence", byte + 1),
+            evidence_hash: content_digest(byte + 1),
+            evidence_artifact_id: artifact_id(byte + 1),
+            note: Some(events::ManualResolutionNote::new("reviewed evidence").expect("note")),
+        })
+    }
+
+    fn manual_resolution_artifacts(byte: u8) -> Vec<ArtifactEvidenceRef> {
+        vec![
+            ArtifactEvidenceRef {
+                artifact_id: artifact_id(byte),
+                digest: content_digest(byte),
+                byte_len: 64,
+                media_type: media_type("application/json"),
+                schema_id: Some(schema_id("mfm.test.operator_identity", byte)),
+                semantic_type_id: None,
+                producer_node_id: None,
+                producer_seed_id: None,
+                artifact_role: ArtifactRole::StateOutput,
+            },
+            ArtifactEvidenceRef {
+                artifact_id: artifact_id(byte + 1),
+                digest: content_digest(byte + 1),
+                byte_len: 128,
+                media_type: media_type("application/json"),
+                schema_id: Some(schema_id("mfm.test.manual_evidence", byte + 1)),
+                semantic_type_id: None,
+                producer_node_id: None,
+                producer_seed_id: None,
+                artifact_role: ArtifactRole::StateOutput,
+            },
+        ]
+    }
+
     fn side_effect_ledger_key() -> events::SideEffectLedgerKey {
         events::SideEffectLedgerKey::new("ledger-key-1").expect("ledger key")
+    }
+
+    fn side_effect_ledger_purpose() -> events::SideEffectLedgerPurpose {
+        events::SideEffectLedgerPurpose::Forward
     }
 
     fn side_effect_attempt_started() -> KernelEventPayload {
@@ -2157,6 +2530,7 @@ mod tests {
             scope_id: scope_id(71),
             attempt_id: attempt_id(72),
             ledger_key: side_effect_ledger_key(),
+            ledger_purpose: side_effect_ledger_purpose(),
             invocation_epoch: 1,
             intent_schema_id: schema_id("mfm.test.side_effect_intent", 70),
             intent_hash: digest,
@@ -2190,6 +2564,7 @@ mod tests {
             node_id: node_id(70),
             attempt_id: attempt_id(72),
             ledger_key: side_effect_ledger_key(),
+            ledger_purpose: side_effect_ledger_purpose(),
             claim_owner: events::RunnerInvocationId::new("owner-1").expect("claim owner"),
             invocation_epoch: 1,
             claim_generation: 1,
@@ -2204,6 +2579,7 @@ mod tests {
             node_id: node_id(70),
             attempt_id: attempt_id(72),
             ledger_key: side_effect_ledger_key(),
+            ledger_purpose: side_effect_ledger_purpose(),
             invocation_epoch: 1,
             claim_generation: 1,
             claim_fencing_token: events::side_effect::ClaimFencingToken::new("token-1")
@@ -2219,6 +2595,7 @@ mod tests {
             node_id: node_id(70),
             attempt_id: attempt_id(72),
             ledger_key: side_effect_ledger_key(),
+            ledger_purpose: side_effect_ledger_purpose(),
             invocation_epoch: 1,
             claim_owner: events::RunnerInvocationId::new("owner-1").expect("claim owner"),
             claim_generation: 1,
@@ -2244,6 +2621,7 @@ mod tests {
             node_id: node_id(70),
             attempt_id: attempt_id(72),
             ledger_key: side_effect_ledger_key(),
+            ledger_purpose: side_effect_ledger_purpose(),
             invocation_epoch: 1,
             evidence_schema_id: unknown_schema(),
             evidence_hash: digest,
@@ -2260,6 +2638,7 @@ mod tests {
             node_id: node_id(70),
             attempt_id: attempt_id(72),
             ledger_key: side_effect_ledger_key(),
+            ledger_purpose: side_effect_ledger_purpose(),
             invocation_epoch: 1,
             submission_schema_id: submission_schema(),
             submission_hash: digest,
@@ -2523,6 +2902,139 @@ mod tests {
             client
                 .batch_execute(
                     "DELETE FROM typed_run_projection;\
+                     DELETE FROM typed_run_completion_projection;\
+                     DELETE FROM typed_saga_engagement_projection;\
+                     DELETE FROM typed_manual_resolution_projection;\
+                     DELETE FROM typed_attempt_projection;\
+                     DELETE FROM typed_cell_projection;\
+                     DELETE FROM typed_fact_projection;\
+                     DELETE FROM typed_side_effect_projection;\
+                     DELETE FROM typed_public_output_projection;\
+                     DELETE FROM typed_retention_projection;\
+                     DELETE FROM typed_retention_manifests;",
+                )
+                .await
+                .expect("clear projections");
+        }
+        let rebuilt = store
+            .rebuild_projections_from_events(&run)
+            .await
+            .expect("rebuild projections");
+        assert_eq!(rebuilt, before);
+
+        drop_schema(&store, &schema).await;
+    }
+
+    #[tokio::test]
+    async fn typed_saga_projection_tables_persist_and_rebuild_from_events() {
+        let (store, schema) = test_store().await;
+        let run = run_id(41);
+
+        append_prepared(
+            &store,
+            request(
+                run.clone(),
+                1,
+                "saga-run-start",
+                vec![run_started(run.clone())],
+            ),
+            vec![spec_artifact_ref(), certificate_artifact_ref()],
+        )
+        .await
+        .expect("run start");
+        append_prepared(
+            &store,
+            request(
+                run.clone(),
+                2,
+                "saga-attempt-start",
+                vec![fact_attempt_started()],
+            ),
+            Vec::new(),
+        )
+        .await
+        .expect("attempt start");
+        append_prepared(
+            &store,
+            request(
+                run.clone(),
+                3,
+                "saga-attempt-failed",
+                vec![fact_attempt_failed(false)],
+            ),
+            Vec::new(),
+        )
+        .await
+        .expect("attempt failed");
+        append_prepared(
+            &store,
+            request(
+                run.clone(),
+                4,
+                "saga-manual-resolution",
+                vec![manual_resolution_recorded(run.clone(), 42)],
+            ),
+            manual_resolution_artifacts(42),
+        )
+        .await
+        .expect("manual resolution");
+        append_prepared(
+            &store,
+            request(
+                run.clone(),
+                5,
+                "saga-run-completed",
+                vec![run_completed(
+                    run.clone(),
+                    events::RunCompletionOutcome::ManuallyResolved,
+                )],
+            ),
+            Vec::new(),
+        )
+        .await
+        .expect("run completed");
+
+        let before = store.projection_snapshot(&run).await.expect("projection");
+        let engagement = before.saga_engagement(&run).expect("saga engagement");
+        assert!(matches!(
+            engagement.reason,
+            SagaEngagementReason::NonRetryableFailure { .. }
+        ));
+        let manual = before
+            .manual_resolution(&run)
+            .expect("manual resolution projection");
+        assert_eq!(
+            manual.outcome,
+            events::ManualResolutionOutcome::ConfirmRemediated
+        );
+        assert_eq!(
+            manual
+                .note
+                .as_ref()
+                .map(events::ManualResolutionNote::as_str),
+            Some("reviewed evidence")
+        );
+        assert!(matches!(
+            before
+                .run_completion(&run)
+                .map(|projection| &projection.outcome),
+            Some(events::RunCompletionOutcome::ManuallyResolved)
+        ));
+
+        let stream = store.load_run_stream(&run).await.expect("typed run stream");
+        assert_eq!(
+            ProjectionSnapshot::rebuild_from_run_stream(&stream).expect("payload rebuild"),
+            before
+        );
+
+        {
+            let client = store.client.lock().await;
+            client
+                .batch_execute(
+                    "DELETE FROM typed_run_projection;\
+                     DELETE FROM typed_run_completion_projection;\
+                     DELETE FROM typed_saga_engagement_projection;\
+                     DELETE FROM typed_manual_resolution_projection;\
                      DELETE FROM typed_attempt_projection;\
                      DELETE FROM typed_cell_projection;\
                      DELETE FROM typed_fact_projection;\

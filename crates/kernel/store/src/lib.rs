@@ -1490,6 +1490,33 @@ pub mod v1 {
             }
         }
 
+        /// Creates a projection snapshot from storage-owned projection maps, including saga maps.
+        pub fn from_parts_with_saga(
+            run_states: BTreeMap<RunId, RunState>,
+            run_completions: BTreeMap<RunId, RunCompletionProjection>,
+            saga_engagements: BTreeMap<RunId, SagaEngagementProjection>,
+            manual_resolutions: BTreeMap<RunId, ManualResolutionProjection>,
+            attempts: BTreeMap<(NodeId, AttemptId), AttemptProjection>,
+            cells: BTreeMap<CellId, CellTerminalProjection>,
+            facts: BTreeMap<(NodeId, AttemptId, events::FactKey), FactProjection>,
+            side_effects: BTreeMap<events::SideEffectLedgerKey, SideEffectProjection>,
+            public_outputs: BTreeMap<SchemaId, PublicOutputProjection>,
+            retentions: BTreeMap<RunId, RetentionProjection>,
+        ) -> Self {
+            Self {
+                run_states,
+                run_completions,
+                saga_engagements,
+                manual_resolutions,
+                attempts,
+                cells,
+                facts,
+                side_effects,
+                public_outputs,
+                retentions,
+            }
+        }
+
         /// Validates that a loaded run stream is ordered and contiguous.
         pub fn validate_run_stream(events: &[KernelEventEnvelope]) -> Result<()> {
             validate_run_stream_order(events)
