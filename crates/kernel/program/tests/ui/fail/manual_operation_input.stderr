@@ -28,10 +28,10 @@ note: required by a bound in `OperationInput`
   = help: the following types implement the trait:
             ()
             mfm_program::Handle<'program, 'scope, T>
+            mfm_program::ForwardSideEffectHandle<'program, 'scope, T>
             std::vec::Vec<mfm_program::Handle<'program, 'scope, T>>
             mfm_program::NonEmptyHandles<'program, 'scope, T>
             (mfm_program::Handle<'program, 'scope, A>,)
             (mfm_program::Handle<'program, 'scope, A>, mfm_program::Handle<'program, 'scope, B>)
             (mfm_program::Handle<'program, 'scope, A>, mfm_program::Handle<'program, 'scope, B>, mfm_program::Handle<'program, 'scope, C>)
-            (mfm_program::Handle<'program, 'scope, A>, mfm_program::Handle<'program, 'scope, B>, mfm_program::Handle<'program, 'scope, C>, mfm_program::Handle<'program, 'scope, D>)
           and $N others

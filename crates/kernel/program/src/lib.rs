@@ -8,7 +8,7 @@
 
 extern crate self as mfm_program;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::future::Future;
 use std::marker::PhantomData;
@@ -81,6 +81,16 @@ pub enum PlanError {
     InvalidBridgeEvidence(String),
     /// A persisted bridge reference was not backed by an emitted bridge node.
     UnknownBridgeRef,
+    /// Saga policy was declared more than once.
+    SagaPolicyAlreadySet,
+    /// A side-effecting draft did not declare its run-level saga policy.
+    MissingSagaPolicy,
+    /// The declared saga policy disagreed with the authored graph shape.
+    SagaPolicyGraphMismatch(String),
+    /// A compensating saga policy left a forward side-effect node unlinked.
+    SagaCoverageGap(String),
+    /// A remediation node binding referenced cells outside the linked forward node scope.
+    RemediationBindingScope(String),
 }
 
 impl fmt::Display for PlanError {
@@ -114,6 +124,19 @@ impl fmt::Display for PlanError {
                 write!(f, "invalid bridge evidence: {message}")
             }
             Self::UnknownBridgeRef => f.write_str("bridge ref is not backed by an emitted node"),
+            Self::SagaPolicyAlreadySet => f.write_str("saga policy was already declared"),
+            Self::MissingSagaPolicy => {
+                f.write_str("side-effecting programs must declare a saga policy")
+            }
+            Self::SagaPolicyGraphMismatch(message) => {
+                write!(f, "saga policy graph mismatch: {message}")
+            }
+            Self::SagaCoverageGap(message) => {
+                write!(f, "saga compensation coverage gap: {message}")
+            }
+            Self::RemediationBindingScope(message) => {
+                write!(f, "remediation binding scope violation: {message}")
+            }
         }
     }
 }
@@ -447,6 +470,56 @@ pub struct AdapterBindingSpec {
     pub adapter_kind: AdapterKind,
     /// Adapter contract version.
     pub adapter_version: AdapterVersion,
+}
+
+/// Author-side run-level saga policy.
+///
+/// Program builders record the policy as draft data; certification lowers it into the
+/// hash-defining `mfm-spec` contract and re-verifies the hostile-bytes shape. Runtime decisions
+/// remain derived from this policy plus recorded facts, not from author-emitted control events.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SagaPolicy {
+    /// Derived by finalization when the forward graph has no side-effect nodes.
+    NoSideEffects,
+    /// Failure after mutation carries no compensation or AC/DC-equivalence claim.
+    FailWithoutAcdcClaim,
+    /// Failure after mutation blocks for typed operator evidence.
+    ManualResolution {
+        /// Required typed manual evidence.
+        manual: ManualResolutionEvidence,
+    },
+    /// Failure after confirmed forward side effects compensates linked remediations.
+    CompensateCompleted {
+        /// Directive used when a forward or remediation ledger remains unresolved.
+        on_remediation_unresolved: RemediationUnresolved,
+    },
+}
+
+impl SagaPolicy {
+    fn is_compensating(&self) -> bool {
+        matches!(self, Self::CompensateCompleted { .. })
+    }
+}
+
+/// Directive for unresolved remediation under compensating policy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RemediationUnresolved {
+    /// Block for typed operator evidence.
+    ManualResolution {
+        /// Required typed manual evidence.
+        manual: ManualResolutionEvidence,
+    },
+    /// Terminally fail without a compensation or AC/DC-equivalence claim.
+    FailWithoutAcdcClaim,
+}
+
+/// Typed schema requirements for run-scoped manual saga resolution evidence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManualResolutionEvidence {
+    /// Schema id for the operator evidence artifact.
+    pub evidence_schema: SchemaId,
+    /// Schema id for the operator identity reference.
+    pub operator_identity_ref_schema: SchemaId,
 }
 
 /// Effect-specific runner kind recorded by a registered state.
@@ -1557,6 +1630,83 @@ impl<'program, 'scope, T: MfmValue> Handle<'program, 'scope, T> {
     }
 }
 
+/// Branded output handle for a forward side-effect node with linked remediation.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ForwardSideEffectHandle<'program, 'scope, T: MfmValue> {
+    node_id: NodeId,
+    handle: Handle<'program, 'scope, T>,
+}
+
+impl<'program, 'scope, T: MfmValue> Clone for ForwardSideEffectHandle<'program, 'scope, T> {
+    fn clone(&self) -> Self {
+        Self {
+            node_id: self.node_id.clone(),
+            handle: self.handle.clone(),
+        }
+    }
+}
+
+impl<'program, 'scope, T: MfmValue> ForwardSideEffectHandle<'program, 'scope, T> {
+    fn new(node_id: NodeId, handle: Handle<'program, 'scope, T>) -> Self {
+        Self { node_id, handle }
+    }
+
+    /// Returns the linked forward side-effect node id.
+    pub fn node_id(&self) -> &NodeId {
+        &self.node_id
+    }
+
+    /// Returns this forward output as an ordinary typed handle reference.
+    pub fn handle(&self) -> &Handle<'program, 'scope, T> {
+        &self.handle
+    }
+
+    /// Converts this branded forward output into its ordinary typed handle.
+    pub fn into_handle(self) -> Handle<'program, 'scope, T> {
+        self.handle
+    }
+
+    /// Returns an unbranded typed handle reference for descriptors.
+    pub fn typed_ref(&self) -> TypedHandleRef {
+        self.handle.typed_ref()
+    }
+}
+
+/// Branded handle for a remediation node.
+///
+/// This intentionally does not implement state-input conversion: remediation outputs are outside
+/// the forward graph and cannot be scheduled by ordinary forward authoring APIs.
+#[derive(Debug, PartialEq, Eq)]
+pub struct RemediationHandle<'program, 'scope, T: MfmValue> {
+    node_id: NodeId,
+    handle: Handle<'program, 'scope, T>,
+}
+
+impl<'program, 'scope, T: MfmValue> Clone for RemediationHandle<'program, 'scope, T> {
+    fn clone(&self) -> Self {
+        Self {
+            node_id: self.node_id.clone(),
+            handle: self.handle.clone(),
+        }
+    }
+}
+
+impl<'program, 'scope, T: MfmValue> RemediationHandle<'program, 'scope, T> {
+    fn new(node_id: NodeId, handle: Handle<'program, 'scope, T>) -> Self {
+        Self { node_id, handle }
+    }
+
+    /// Returns the remediation node id.
+    pub fn node_id(&self) -> &NodeId {
+        &self.node_id
+    }
+
+    /// Returns an unbranded typed handle reference for audit and tests.
+    pub fn typed_ref(&self) -> TypedHandleRef {
+        self.handle.typed_ref()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum HandleOrigin {
     Local,
@@ -2428,6 +2578,25 @@ where
     }
 }
 
+impl<'program, 'scope, T> IntoInputBindingNode<T> for ForwardSideEffectHandle<'program, 'scope, T>
+where
+    T: MfmValue,
+{
+    fn into_binding_node(self, field_path: InputFieldPath) -> Result<InputBindingNode> {
+        self.into_handle().into_binding_node(field_path)
+    }
+}
+
+impl<'program, 'scope, T> IntoStateInput<'program, 'scope, T>
+    for ForwardSideEffectHandle<'program, 'scope, T>
+where
+    T: MfmValue,
+{
+    fn into_binding(self) -> Result<InputBinding<T>> {
+        self.into_handle().into_binding()
+    }
+}
+
 impl<'program, 'scope, T> IntoInputBindingNode<Vec<T>> for Vec<Handle<'program, 'scope, T>>
 where
     T: MfmValue,
@@ -2778,6 +2947,20 @@ where
     }
 }
 
+impl<'program, 'scope, T> OperationInput<'program, 'scope>
+    for ForwardSideEffectHandle<'program, 'scope, T>
+where
+    T: MfmValue,
+{
+    type Runtime = T;
+
+    fn input_binding(&self) -> Result<OperationInputBindingSpec> {
+        Ok(OperationInputBindingSpec::from_state_input_spec(
+            self.clone().into_binding()?.spec(),
+        ))
+    }
+}
+
 impl<'program, 'scope, T> OperationInput<'program, 'scope> for Vec<Handle<'program, 'scope, T>>
 where
     T: MfmValue,
@@ -2903,9 +3086,11 @@ impl_bridgeable_tuple!(A, B, C, D);
 pub struct TypedProgramDraft {
     root_key: ScopeKey,
     root_scope_id: ScopeId,
+    saga_policy: SagaPolicy,
     seeds: Vec<RootSeedSpec>,
     scopes: Vec<ScopeSpec>,
     state_nodes: Vec<StateNodeSpec>,
+    remediation_nodes: BTreeMap<NodeId, StateNodeSpec>,
     operation_lineage: Vec<OperationLineageFrameSpec>,
     bridge_nodes: Vec<BridgeNodeSpec>,
     public_output_spec: PublicOutputSpec,
@@ -2922,6 +3107,11 @@ impl TypedProgramDraft {
         &self.root_scope_id
     }
 
+    /// Returns the run-level saga policy for this draft.
+    pub fn saga_policy(&self) -> &SagaPolicy {
+        &self.saga_policy
+    }
+
     /// Returns root seed specs.
     pub fn seeds(&self) -> &[RootSeedSpec] {
         &self.seeds
@@ -2935,6 +3125,11 @@ impl TypedProgramDraft {
     /// Returns emitted typed state nodes.
     pub fn state_nodes(&self) -> &[StateNodeSpec] {
         &self.state_nodes
+    }
+
+    /// Returns remediation nodes keyed by the forward side-effect node they compensate.
+    pub fn remediation_nodes(&self) -> &BTreeMap<NodeId, StateNodeSpec> {
+        &self.remediation_nodes
     }
 
     /// Returns registry-mediated operation lineage frames.
@@ -2994,12 +3189,22 @@ pub struct RootBuilder<'program, 'scope> {
     seeds: Vec<RootSeedSpec>,
     seed_keys: BTreeSet<String>,
     public_outputs_bound: bool,
+    saga_policy: Option<SagaPolicy>,
 }
 
 impl<'program, 'scope> RootBuilder<'program, 'scope> {
     /// Returns the root scope builder.
     pub fn scope(&mut self) -> &mut ScopeBuilder<'program, 'scope> {
         &mut self.scope
+    }
+
+    /// Declares the run-level saga policy for side-effecting workflows.
+    pub fn set_saga_policy(&mut self, policy: SagaPolicy) -> Result<()> {
+        if self.saga_policy.is_some() {
+            return Err(PlanError::SagaPolicyAlreadySet);
+        }
+        self.saga_policy = Some(policy);
+        Ok(())
     }
 
     /// Declares a root launch seed and returns its typed cell handle.
@@ -3084,8 +3289,10 @@ pub struct ScopeBuilder<'program, 'scope> {
     state_registry: StateRegistrySnapshot,
     operation_registry: OperationRegistrySnapshot,
     state_keys: BTreeSet<String>,
+    remediation_keys: BTreeSet<String>,
     operation_keys: BTreeSet<String>,
     state_nodes: Vec<StateNodeSpec>,
+    remediation_nodes: BTreeMap<NodeId, StateNodeSpec>,
     operation_lineage: Vec<OperationLineageFrameSpec>,
     active_operation_stack: Vec<OperationInstanceId>,
     child_scope_keys: BTreeSet<String>,
@@ -3098,8 +3305,10 @@ pub struct ScopeBuilder<'program, 'scope> {
 #[derive(Debug, Clone)]
 struct ScopeBuilderCheckpoint {
     state_keys: BTreeSet<String>,
+    remediation_keys: BTreeSet<String>,
     operation_keys: BTreeSet<String>,
     state_nodes: Vec<StateNodeSpec>,
+    remediation_nodes: BTreeMap<NodeId, StateNodeSpec>,
     operation_lineage: Vec<OperationLineageFrameSpec>,
     active_operation_stack: Vec<OperationInstanceId>,
     child_scope_keys: BTreeSet<String>,
@@ -3145,8 +3354,10 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
                 state_registry: self.state_registry.clone(),
                 operation_registry: self.operation_registry.clone(),
                 state_keys: BTreeSet::new(),
+                remediation_keys: BTreeSet::new(),
                 operation_keys: BTreeSet::new(),
                 state_nodes: Vec::new(),
+                remediation_nodes: BTreeMap::new(),
                 operation_lineage: Vec::new(),
                 active_operation_stack: self.active_operation_stack.clone(),
                 child_scope_keys: BTreeSet::new(),
@@ -3171,6 +3382,7 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
             planning_lineage: operation_lineage,
         });
         self.state_nodes.extend(child.scope.state_nodes);
+        self.remediation_nodes.extend(child.scope.remediation_nodes);
         self.operation_lineage.extend(child.scope.operation_lineage);
         self.child_scopes.extend(child.scope.child_scopes);
         self.bridge_nodes.extend(child.bridge_nodes);
@@ -3264,6 +3476,109 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
         )
     }
 
+    /// Plans one forward side-effect state and one structurally separate remediation state.
+    ///
+    /// The forward node is appended to the ordinary forward graph. The remediation node is keyed
+    /// by the forward node id in the draft remediation collection, so the forward scheduler cannot
+    /// select it. The remediation input may reference only the linked forward output and cells
+    /// that are transitive ancestors of that forward node.
+    pub fn side_effect_with_compensation<F, R, I, J, B>(
+        &mut self,
+        forward_key: StateKey,
+        forward_config: F::Config,
+        forward_input: I,
+        remediation_key: StateKey,
+        remediation_config: R::Config,
+        build_remediation_input: B,
+    ) -> Result<(
+        ForwardSideEffectHandle<'program, 'scope, F::Output>,
+        RemediationHandle<'program, 'scope, R::Output>,
+    )>
+    where
+        F: SideEffectState,
+        F::Caps: CapabilitySetFor<ApplySideEffect>,
+        I: IntoStateInput<'program, 'scope, F::Input>,
+        R: SideEffectState,
+        R::Caps: CapabilitySetFor<ApplySideEffect>,
+        J: IntoStateInput<'program, 'scope, R::Input>,
+        B: FnOnce(ForwardSideEffectHandle<'program, 'scope, F::Output>) -> Result<J>,
+    {
+        let checkpoint = self.checkpoint();
+        let forward_key_string = forward_key.as_str().to_owned();
+        if self.state_keys.contains(&forward_key_string) {
+            return Err(PlanError::DuplicateStateKey(
+                forward_key.as_str().to_owned(),
+            ));
+        }
+        let remediation_key_string = remediation_key.as_str().to_owned();
+        if self.remediation_keys.contains(&remediation_key_string) {
+            return Err(PlanError::DuplicateStateKey(
+                remediation_key.as_str().to_owned(),
+            ));
+        }
+
+        let forward_registered = self.state_registry.registered_state::<F>()?;
+        let (forward_node, forward_handle) = self.plan_state_node(
+            forward_key,
+            forward_registered,
+            forward_config,
+            forward_input,
+            Vec::new(),
+        )?;
+        let forward = ForwardSideEffectHandle::new(forward_node.node_id.clone(), forward_handle);
+        let remediation_input = match build_remediation_input(forward.clone()) {
+            Ok(input) => input,
+            Err(error) => {
+                self.restore(checkpoint);
+                return Err(error);
+            }
+        };
+
+        let remediation_registered = match self.state_registry.registered_state::<R>() {
+            Ok(registered) => registered,
+            Err(error) => {
+                self.restore(checkpoint);
+                return Err(error.into());
+            }
+        };
+        let (remediation_node, remediation_handle) = match self.plan_state_node(
+            remediation_key,
+            remediation_registered,
+            remediation_config,
+            remediation_input,
+            Vec::new(),
+        ) {
+            Ok(planned) => planned,
+            Err(error) => {
+                self.restore(checkpoint);
+                return Err(error);
+            }
+        };
+        if let Err(error) =
+            self.validate_remediation_binding_scope(&forward_node, &remediation_node)
+        {
+            self.restore(checkpoint);
+            return Err(error);
+        }
+        if self.remediation_nodes.contains_key(&forward_node.node_id) {
+            self.restore(checkpoint);
+            return Err(PlanError::SagaCoverageGap(format!(
+                "forward side-effect node {} already has remediation",
+                forward_node.node_id.as_str()
+            )));
+        }
+
+        self.state_keys.insert(forward_key_string);
+        self.remediation_keys.insert(remediation_key_string);
+        self.state_nodes.push(forward_node.clone());
+        self.remediation_nodes
+            .insert(forward_node.node_id.clone(), remediation_node.clone());
+        Ok((
+            forward,
+            RemediationHandle::new(remediation_node.node_id, remediation_handle),
+        ))
+    }
+
     fn state_registered_with_domain_key_refs<S, I>(
         &mut self,
         key: StateKey,
@@ -3282,6 +3597,27 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
         if self.state_keys.contains(&key_string) {
             return Err(PlanError::DuplicateStateKey(key.as_str().to_owned()));
         }
+        let (node, handle) =
+            self.plan_state_node(key, registered, config, input, output_domain_keys)?;
+        self.state_keys.insert(key_string);
+        self.state_nodes.push(node);
+        Ok(handle)
+    }
+
+    fn plan_state_node<S, I>(
+        &self,
+        key: StateKey,
+        registered: RegisteredState<S>,
+        config: S::Config,
+        input: I,
+        output_domain_keys: Vec<StableDomainKeyRef>,
+    ) -> Result<(StateNodeSpec, Handle<'program, 'scope, S::Output>)>
+    where
+        S: StateSpec,
+        S::Effect: EffectRunner<S>,
+        S::Caps: CapabilitySetFor<S::Effect>,
+        I: IntoStateInput<'program, 'scope, S::Input>,
+    {
         let config_binding = canonical_config_binding::<S::Config>(&config)?;
         let input = input.into_binding()?;
         let adapter_bindings = S::adapter_bindings()?;
@@ -3323,31 +3659,85 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
             output_semantic_type_id.clone(),
             value_lineage.clone(),
         );
-        self.state_keys.insert(key_string);
         let planning_lineage = self.current_operation_lineage()?;
-        self.state_nodes.push(StateNodeSpec {
-            node_id,
-            key,
-            scope_id: self.scope_id.clone(),
-            state_kind: descriptor.kind().clone(),
-            state_version: descriptor.version().clone(),
-            state_descriptor_id: descriptor.descriptor_id().clone(),
-            state_descriptor_name: descriptor.name().to_owned(),
-            runner: registered.runner(),
-            effect_kind: descriptor.effect().kind.clone(),
-            capability_bindings: descriptor.capabilities().clone(),
-            adapter_bindings,
-            side_effect_contract_digest: descriptor.side_effect_contract_digest().cloned(),
-            config: config_binding,
-            input: input.spec(),
-            output_cell_id,
-            output_schema_id,
-            output_semantic_type_id,
-            output_value_lineage: value_lineage,
-            output_domain_keys,
-            planning_lineage,
-        });
-        Ok(handle)
+        Ok((
+            StateNodeSpec {
+                node_id,
+                key,
+                scope_id: self.scope_id.clone(),
+                state_kind: descriptor.kind().clone(),
+                state_version: descriptor.version().clone(),
+                state_descriptor_id: descriptor.descriptor_id().clone(),
+                state_descriptor_name: descriptor.name().to_owned(),
+                runner: registered.runner(),
+                effect_kind: descriptor.effect().kind.clone(),
+                capability_bindings: descriptor.capabilities().clone(),
+                adapter_bindings,
+                side_effect_contract_digest: descriptor.side_effect_contract_digest().cloned(),
+                config: config_binding,
+                input: input.spec(),
+                output_cell_id,
+                output_schema_id,
+                output_semantic_type_id,
+                output_value_lineage: value_lineage,
+                output_domain_keys,
+                planning_lineage,
+            },
+            handle,
+        ))
+    }
+
+    fn validate_remediation_binding_scope(
+        &self,
+        forward_node: &StateNodeSpec,
+        remediation_node: &StateNodeSpec,
+    ) -> Result<()> {
+        let mut allowed = BTreeSet::new();
+        allowed.insert(forward_node.output_cell_id.clone());
+
+        let mut forward_inputs = Vec::new();
+        collect_input_cell_ids(&forward_node.input.root, &mut forward_inputs);
+        for cell in forward_inputs {
+            self.collect_ancestor_cell(&cell, &mut allowed);
+        }
+
+        let mut remediation_inputs = Vec::new();
+        collect_input_cell_ids(&remediation_node.input.root, &mut remediation_inputs);
+        for cell in remediation_inputs {
+            if !allowed.contains(&cell) {
+                return Err(PlanError::RemediationBindingScope(format!(
+                    "remediation node {} references cell {} outside linked forward node {} scope",
+                    remediation_node.node_id.as_str(),
+                    cell.as_str(),
+                    forward_node.node_id.as_str()
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn collect_ancestor_cell(&self, cell: &CellId, output: &mut BTreeSet<CellId>) {
+        if !output.insert(cell.clone()) {
+            return;
+        }
+        if let Some(node) = self
+            .state_nodes
+            .iter()
+            .find(|node| node.output_cell_id == *cell)
+        {
+            let mut inputs = Vec::new();
+            collect_input_cell_ids(&node.input.root, &mut inputs);
+            for input in inputs {
+                self.collect_ancestor_cell(&input, output);
+            }
+        }
+        if let Some(bridge) = self
+            .bridge_nodes
+            .iter()
+            .find(|bridge| bridge.target_cell_id == *cell)
+        {
+            self.collect_ancestor_cell(&bridge.source_cell_id, output);
+        }
     }
 
     /// Expands a registered typed operation by resolving `O` through this builder's registry.
@@ -3463,8 +3853,10 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
     fn checkpoint(&self) -> ScopeBuilderCheckpoint {
         ScopeBuilderCheckpoint {
             state_keys: self.state_keys.clone(),
+            remediation_keys: self.remediation_keys.clone(),
             operation_keys: self.operation_keys.clone(),
             state_nodes: self.state_nodes.clone(),
+            remediation_nodes: self.remediation_nodes.clone(),
             operation_lineage: self.operation_lineage.clone(),
             active_operation_stack: self.active_operation_stack.clone(),
             child_scope_keys: self.child_scope_keys.clone(),
@@ -3475,8 +3867,10 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
 
     fn restore(&mut self, checkpoint: ScopeBuilderCheckpoint) {
         self.state_keys = checkpoint.state_keys;
+        self.remediation_keys = checkpoint.remediation_keys;
         self.operation_keys = checkpoint.operation_keys;
         self.state_nodes = checkpoint.state_nodes;
+        self.remediation_nodes = checkpoint.remediation_nodes;
         self.operation_lineage = checkpoint.operation_lineage;
         self.active_operation_stack = checkpoint.active_operation_stack;
         self.child_scope_keys = checkpoint.child_scope_keys;
@@ -3610,6 +4004,39 @@ impl<'program, 'scope> OperationExpansion<'program, 'scope> {
                 config,
                 input,
                 domain_keys,
+            )
+    }
+
+    /// Plans a linked forward/remediation side-effect pair.
+    pub fn side_effect_with_compensation<F, R, I, J, B>(
+        &mut self,
+        forward_key: StateKey,
+        forward_config: F::Config,
+        forward_input: I,
+        remediation_key: StateKey,
+        remediation_config: R::Config,
+        build_remediation_input: B,
+    ) -> Result<(
+        ForwardSideEffectHandle<'program, 'scope, F::Output>,
+        RemediationHandle<'program, 'scope, R::Output>,
+    )>
+    where
+        F: SideEffectState,
+        F::Caps: CapabilitySetFor<ApplySideEffect>,
+        I: IntoStateInput<'program, 'scope, F::Input>,
+        R: SideEffectState,
+        R::Caps: CapabilitySetFor<ApplySideEffect>,
+        J: IntoStateInput<'program, 'scope, R::Input>,
+        B: FnOnce(ForwardSideEffectHandle<'program, 'scope, F::Output>) -> Result<J>,
+    {
+        self.scope_mut()
+            .side_effect_with_compensation::<F, R, I, J, B>(
+                forward_key,
+                forward_config,
+                forward_input,
+                remediation_key,
+                remediation_config,
+                build_remediation_input,
             )
     }
 
@@ -3913,8 +4340,10 @@ where
             state_registry,
             operation_registry,
             state_keys: BTreeSet::new(),
+            remediation_keys: BTreeSet::new(),
             operation_keys: BTreeSet::new(),
             state_nodes: Vec::new(),
+            remediation_nodes: BTreeMap::new(),
             operation_lineage: Vec::new(),
             active_operation_stack: Vec::new(),
             child_scope_keys: BTreeSet::new(),
@@ -3926,11 +4355,14 @@ where
         seeds: Vec::new(),
         seed_keys: BTreeSet::new(),
         public_outputs_bound: false,
+        saga_policy: None,
     };
     let bound = f(&mut builder)?;
+    let saga_policy = finalize_saga_policy(builder.saga_policy, &builder.scope)?;
     Ok(TypedProgramDraft {
         root_key: builder.root_key,
         root_scope_id: root_scope_id.clone(),
+        saga_policy,
         seeds: builder.seeds,
         scopes: {
             let mut scopes = vec![ScopeSpec {
@@ -3943,6 +4375,7 @@ where
             scopes
         },
         state_nodes: builder.scope.state_nodes,
+        remediation_nodes: builder.scope.remediation_nodes,
         operation_lineage: builder.scope.operation_lineage,
         bridge_nodes: builder.scope.bridge_nodes,
         public_output_spec: bound.public_output_spec,
@@ -3952,6 +4385,70 @@ where
 /// Returns the public schema id for a derive-backed public output descriptor.
 pub fn public_schema_id<P: PublicOutputDescriptor>() -> Result<SchemaId> {
     P::public_schema_id().map_err(|error| PlanError::Value(error.to_string()))
+}
+
+fn finalize_saga_policy(
+    policy: Option<SagaPolicy>,
+    scope: &ScopeBuilder<'_, '_>,
+) -> Result<SagaPolicy> {
+    let forward_side_effects = scope
+        .state_nodes
+        .iter()
+        .filter(|node| node.runner == RunnerKind::ApplySideEffect)
+        .collect::<Vec<_>>();
+
+    if forward_side_effects.is_empty() {
+        if !scope.remediation_nodes.is_empty() {
+            return Err(PlanError::SagaPolicyGraphMismatch(
+                "remediation nodes require a compensating side-effecting forward graph".to_owned(),
+            ));
+        }
+        return match policy {
+            None | Some(SagaPolicy::NoSideEffects) => Ok(SagaPolicy::NoSideEffects),
+            Some(_) => Err(PlanError::SagaPolicyGraphMismatch(
+                "non-NoSideEffects policy requires at least one forward side-effect node"
+                    .to_owned(),
+            )),
+        };
+    }
+
+    let Some(policy) = policy else {
+        return Err(PlanError::MissingSagaPolicy);
+    };
+    if matches!(policy, SagaPolicy::NoSideEffects) {
+        return Err(PlanError::SagaPolicyGraphMismatch(
+            "NoSideEffects policy cannot cover forward side-effect nodes".to_owned(),
+        ));
+    }
+
+    if policy.is_compensating() {
+        for node in &forward_side_effects {
+            if !scope.remediation_nodes.contains_key(&node.node_id) {
+                return Err(PlanError::SagaCoverageGap(format!(
+                    "forward side-effect node {} has no linked remediation",
+                    node.node_id.as_str()
+                )));
+            }
+        }
+        for (forward_node_id, remediation) in &scope.remediation_nodes {
+            if !forward_side_effects
+                .iter()
+                .any(|node| node.node_id == *forward_node_id)
+            {
+                return Err(PlanError::SagaCoverageGap(format!(
+                    "remediation node {} links missing forward node {}",
+                    remediation.node_id.as_str(),
+                    forward_node_id.as_str()
+                )));
+            }
+        }
+    } else if !scope.remediation_nodes.is_empty() {
+        return Err(PlanError::SagaPolicyGraphMismatch(
+            "remediation nodes are valid only under CompensateCompleted policy".to_owned(),
+        ));
+    }
+
+    Ok(policy)
 }
 
 fn checked_key(label: &str, value: &str) -> Result<String> {
@@ -4754,8 +5251,8 @@ fn digest_only_id<I>(
 
 mod private {
     use super::{
-        ApplySideEffect, Handle, ManagedPlatformWrite, MfmValue, NonEmptyHandles, Pure,
-        ReadExternal, SideEffectState, StateSpec,
+        ApplySideEffect, ForwardSideEffectHandle, Handle, ManagedPlatformWrite, MfmValue,
+        NonEmptyHandles, Pure, ReadExternal, SideEffectState, StateSpec,
     };
 
     pub trait EffectRunnerSealed<S: StateSpec> {}
@@ -4773,6 +5270,11 @@ mod private {
     impl OperationInputSealed for () {}
 
     impl<'program, 'scope, T> OperationInputSealed for Handle<'program, 'scope, T> where T: MfmValue {}
+
+    impl<'program, 'scope, T> OperationInputSealed for ForwardSideEffectHandle<'program, 'scope, T> where
+        T: MfmValue
+    {
+    }
 
     impl<'program, 'scope, T> OperationInputSealed for Vec<Handle<'program, 'scope, T>> where T: MfmValue
     {}

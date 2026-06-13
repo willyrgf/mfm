@@ -73,6 +73,130 @@ impl mfm_program::PureState for TryPureState {
     }
 }
 
+pub struct TryMutationCap;
+
+impl mfm_capabilities::CapabilitySpec for TryMutationCap {
+    type Role = mfm_capabilities::ExternalMutationAuthorityRole;
+
+    fn kind() -> mfm_capabilities::Result<mfm_ids::CapabilityKind> {
+        mfm_ids::CapabilityKind::new(
+            "mfm.program.trybuild",
+            "mutation",
+            mfm_ids::DigestAlgorithm::Sha256JcsV1,
+            mfm_canonical::sha256_digest_bytes(b"mfm.program.trybuild.capability:mutation"),
+        )
+        .map_err(|error| mfm_capabilities::CapabilityError::Identity(error.to_string()))
+    }
+
+    fn version() -> mfm_capabilities::Result<mfm_ids::CapabilityVersion> {
+        mfm_ids::CapabilityVersion::new("mfm.program.trybuild.capability.mutation.v1")
+            .map_err(|error| mfm_capabilities::CapabilityError::Identity(error.to_string()))
+    }
+
+    fn name() -> &'static str {
+        "mutation"
+    }
+}
+
+pub struct TrySideEffectState {
+    pub config: TryConfig,
+}
+
+pub struct TryCompensationState {
+    pub config: TryConfig,
+}
+
+macro_rules! impl_try_side_effect_state {
+    ($state:ty, $kind:literal, $version:literal, $name:literal, $digest:literal) => {
+        impl mfm_program::StateSpec for $state {
+            type Config = TryConfig;
+            type Input = TryValue;
+            type Output = TryValue;
+            type Effect = mfm_effects::ApplySideEffect;
+            type Caps = (TryMutationCap,);
+
+            fn kind() -> mfm_program::Result<mfm_ids::StateKind> {
+                mfm_ids::StateKind::new(
+                    "mfm.program.trybuild.state",
+                    $kind,
+                    mfm_ids::DigestAlgorithm::Sha256JcsV1,
+                    mfm_canonical::sha256_digest_bytes($digest),
+                )
+                .map_err(|error| mfm_program::PlanError::Key(error.to_string()))
+            }
+
+            fn version() -> mfm_program::Result<mfm_ids::StateVersion> {
+                mfm_ids::StateVersion::new($version)
+                    .map_err(|error| mfm_program::PlanError::Key(error.to_string()))
+            }
+
+            fn name() -> &'static str {
+                $name
+            }
+
+            fn new(config: Self::Config) -> mfm_program::Result<Self> {
+                Ok(Self { config })
+            }
+        }
+
+        impl mfm_program::SideEffectState for $state {
+            type Intent = TryValue;
+            type IdempotencyInput = TryValue;
+            type Submission = TryValue;
+            type Receipt = TryValue;
+            type Confirmation = TryValue;
+            type SubmitFuture<'a> = std::future::Ready<mfm_program::StateResult<Self::Submission>>;
+
+            fn prepare_intent(&self, input: &Self::Input) -> mfm_program::StateResult<Self::Intent> {
+                Ok(TryValue {
+                    amount: input.amount * self.config.multiplier,
+                })
+            }
+
+            fn idempotency_input(
+                &self,
+                _input: &Self::Input,
+                intent: &Self::Intent,
+            ) -> mfm_program::StateResult<Self::IdempotencyInput> {
+                Ok(intent.clone())
+            }
+
+            fn submit<'a>(
+                &'a self,
+                intent: &'a Self::Intent,
+                _key: &'a mfm_program::IdempotencyKey<Self::IdempotencyInput>,
+                _caps: &'a Self::Caps,
+            ) -> Self::SubmitFuture<'a> {
+                std::future::ready(Ok(intent.clone()))
+            }
+
+            fn output_from_confirmation(
+                &self,
+                _input: &Self::Input,
+                _intent: &Self::Intent,
+                confirmation: &Self::Confirmation,
+            ) -> mfm_program::StateResult<Self::Output> {
+                Ok(confirmation.clone())
+            }
+        }
+    };
+}
+
+impl_try_side_effect_state!(
+    TrySideEffectState,
+    "try_side_effect",
+    "mfm.program.trybuild.state.try_side_effect.v1",
+    "try_side_effect",
+    b"mfm.program.trybuild.state:try_side_effect"
+);
+impl_try_side_effect_state!(
+    TryCompensationState,
+    "try_compensation",
+    "mfm.program.trybuild.state.try_compensation.v1",
+    "try_compensation",
+    b"mfm.program.trybuild.state:try_compensation"
+);
+
 pub struct TryOperation;
 
 impl mfm_program::Operation for TryOperation {

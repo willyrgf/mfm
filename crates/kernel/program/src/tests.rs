@@ -1,4 +1,6 @@
 use super::*;
+use mfm_capabilities::{CapabilitySpec, ExternalMutationAuthorityRole};
+use mfm_ids::{CapabilityKind, CapabilityVersion};
 use mfm_program_derive::{
     MfmConfig, MfmValue, OperationOutput as OperationOutputDerive,
     PublicOutputs as PublicOutputsDerive, StateInput as StateInputDerive,
@@ -103,6 +105,132 @@ impl PureState for MultiplyState {
         })
     }
 }
+
+struct TestMutationCap;
+
+impl CapabilitySpec for TestMutationCap {
+    type Role = ExternalMutationAuthorityRole;
+
+    fn kind() -> mfm_capabilities::Result<CapabilityKind> {
+        CapabilityKind::new(
+            "mfm.program.test",
+            "mutation",
+            DigestAlgorithm::Sha256JcsV1,
+            sha256_digest_bytes(b"mfm.program.test.capability:mutation"),
+        )
+        .map_err(|error| mfm_capabilities::CapabilityError::Identity(error.to_string()))
+    }
+
+    fn version() -> mfm_capabilities::Result<CapabilityVersion> {
+        CapabilityVersion::new("mfm.program.test.capability.mutation.v1")
+            .map_err(|error| mfm_capabilities::CapabilityError::Identity(error.to_string()))
+    }
+
+    fn name() -> &'static str {
+        "mutation"
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ForwardMutationState {
+    config: LaunchConfig,
+}
+
+#[derive(Debug, Clone)]
+struct CompensationMutationState {
+    config: LaunchConfig,
+}
+
+macro_rules! impl_side_effect_state_spec {
+    ($state:ty, $kind:literal, $version:literal, $name:literal, $digest:literal) => {
+        impl StateSpec for $state {
+            type Config = LaunchConfig;
+            type Input = LaunchValue;
+            type Output = LaunchValue;
+            type Effect = ApplySideEffect;
+            type Caps = (TestMutationCap,);
+
+            fn kind() -> Result<StateKind> {
+                StateKind::new(
+                    "mfm.program.test.state",
+                    $kind,
+                    DigestAlgorithm::Sha256JcsV1,
+                    sha256_digest_bytes($digest),
+                )
+                .map_err(|error| PlanError::Key(error.to_string()))
+            }
+
+            fn version() -> Result<StateVersion> {
+                StateVersion::new($version).map_err(|error| PlanError::Key(error.to_string()))
+            }
+
+            fn name() -> &'static str {
+                $name
+            }
+
+            fn new(config: Self::Config) -> Result<Self> {
+                Ok(Self { config })
+            }
+        }
+
+        impl SideEffectState for $state {
+            type Intent = LaunchValue;
+            type IdempotencyInput = LaunchValue;
+            type Submission = LaunchValue;
+            type Receipt = LaunchValue;
+            type Confirmation = LaunchValue;
+            type SubmitFuture<'a> = std::future::Ready<StateResult<Self::Submission>>;
+
+            fn prepare_intent(&self, input: &Self::Input) -> StateResult<Self::Intent> {
+                Ok(LaunchValue {
+                    amount: input.amount + self.config.multiplier,
+                    label: input.label.clone(),
+                })
+            }
+
+            fn idempotency_input(
+                &self,
+                _input: &Self::Input,
+                intent: &Self::Intent,
+            ) -> StateResult<Self::IdempotencyInput> {
+                Ok(intent.clone())
+            }
+
+            fn submit<'a>(
+                &'a self,
+                intent: &'a Self::Intent,
+                _key: &'a IdempotencyKey<Self::IdempotencyInput>,
+                _caps: &'a Self::Caps,
+            ) -> Self::SubmitFuture<'a> {
+                std::future::ready(Ok(intent.clone()))
+            }
+
+            fn output_from_confirmation(
+                &self,
+                _input: &Self::Input,
+                _intent: &Self::Intent,
+                confirmation: &Self::Confirmation,
+            ) -> StateResult<Self::Output> {
+                Ok(confirmation.clone())
+            }
+        }
+    };
+}
+
+impl_side_effect_state_spec!(
+    ForwardMutationState,
+    "forward_mutation",
+    "mfm.program.test.state.forward_mutation.v1",
+    "forward_mutation",
+    b"mfm.program.test.state:forward_mutation"
+);
+impl_side_effect_state_spec!(
+    CompensationMutationState,
+    "compensation_mutation",
+    "mfm.program.test.state.compensation_mutation.v1",
+    "compensation_mutation",
+    b"mfm.program.test.state:compensation_mutation"
+);
 
 #[derive(Debug, Clone)]
 struct MultiplyOperation;
@@ -327,6 +455,171 @@ fn explicit_registered_state_token_plans_without_builder_registry() {
 
     assert_eq!(draft.state_nodes().len(), 1);
     assert_eq!(draft.state_nodes()[0].key.as_str(), "multiply");
+}
+
+#[test]
+fn linked_compensation_authoring_keeps_remediation_out_of_forward_nodes() {
+    let mut registry = StateRegistryBuilder::new();
+    registry
+        .register::<ForwardMutationState>()
+        .expect("forward registers");
+    registry
+        .register::<CompensationMutationState>()
+        .expect("compensation registers");
+
+    let draft = build_root_with_registry(
+        ScopeKey::new("root").expect("scope key"),
+        registry.snapshot(),
+        |root| {
+            root.set_saga_policy(SagaPolicy::CompensateCompleted {
+                on_remediation_unresolved: RemediationUnresolved::FailWithoutAcdcClaim,
+            })?;
+            let seed = CanonicalSeed::from_value(&LaunchValue {
+                amount: 2,
+                label: "linked".to_owned(),
+            })?;
+            let input = root.seed(SeedKey::new("input")?, seed)?;
+            let (forward, remediation) = root
+                .scope()
+                .side_effect_with_compensation::<
+                    ForwardMutationState,
+                    CompensationMutationState,
+                    _,
+                    _,
+                    _,
+                >(
+                    StateKey::new("forward")?,
+                    LaunchConfig { multiplier: 5 },
+                    input,
+                    StateKey::new("compensate-forward")?,
+                    LaunchConfig { multiplier: 7 },
+                    |forward| Ok(forward.clone()),
+                )?;
+            assert_ne!(forward.node_id(), remediation.node_id());
+            root.bind_public_outputs(
+                PublicOutputKey::new("terminal")?,
+                &LaunchPublicOutputs {
+                    result: forward.into_handle(),
+                },
+            )
+        },
+    )
+    .expect("root builds");
+
+    assert!(matches!(
+        draft.saga_policy(),
+        SagaPolicy::CompensateCompleted { .. }
+    ));
+    assert_eq!(draft.state_nodes().len(), 1);
+    let forward = &draft.state_nodes()[0];
+    assert_eq!(forward.key.as_str(), "forward");
+    assert_eq!(forward.runner, RunnerKind::ApplySideEffect);
+    let remediation = draft
+        .remediation_nodes()
+        .get(&forward.node_id)
+        .expect("linked remediation");
+    assert_eq!(remediation.key.as_str(), "compensate-forward");
+    assert_eq!(remediation.runner, RunnerKind::ApplySideEffect);
+    assert!(
+        draft
+            .state_nodes()
+            .iter()
+            .all(|node| node.node_id != remediation.node_id),
+        "remediation node must not be in forward node collection"
+    );
+}
+
+#[test]
+fn compensating_policy_requires_every_forward_side_effect_linked() {
+    let mut registry = StateRegistryBuilder::new();
+    registry
+        .register::<ForwardMutationState>()
+        .expect("forward registers");
+
+    let err = build_root_with_registry(
+        ScopeKey::new("root").expect("scope key"),
+        registry.snapshot(),
+        |root| {
+            root.set_saga_policy(SagaPolicy::CompensateCompleted {
+                on_remediation_unresolved: RemediationUnresolved::FailWithoutAcdcClaim,
+            })?;
+            let seed = CanonicalSeed::from_value(&LaunchValue {
+                amount: 2,
+                label: "gap".to_owned(),
+            })?;
+            let input = root.seed(SeedKey::new("input")?, seed)?;
+            let result = root.scope().state::<ForwardMutationState, _>(
+                StateKey::new("forward")?,
+                LaunchConfig { multiplier: 5 },
+                input,
+            )?;
+            root.bind_public_outputs(
+                PublicOutputKey::new("terminal")?,
+                &LaunchPublicOutputs { result },
+            )
+        },
+    )
+    .expect_err("coverage gap rejects");
+
+    assert!(
+        matches!(err, PlanError::SagaCoverageGap(message) if message.contains("no linked remediation"))
+    );
+}
+
+#[test]
+fn out_of_scope_remediation_binding_fails_finalize() {
+    let mut registry = StateRegistryBuilder::new();
+    registry
+        .register::<MultiplyState>()
+        .expect("pure registers");
+    registry
+        .register::<ForwardMutationState>()
+        .expect("forward registers");
+    registry
+        .register::<CompensationMutationState>()
+        .expect("compensation registers");
+
+    let err = build_root_with_registry(
+        ScopeKey::new("root").expect("scope key"),
+        registry.snapshot(),
+        |root| {
+            root.set_saga_policy(SagaPolicy::CompensateCompleted {
+                on_remediation_unresolved: RemediationUnresolved::FailWithoutAcdcClaim,
+            })?;
+            let seed = CanonicalSeed::from_value(&LaunchValue {
+                amount: 2,
+                label: "scope".to_owned(),
+            })?;
+            let input = root.seed(SeedKey::new("input")?, seed)?;
+            let sibling = root.scope().state::<MultiplyState, _>(
+                StateKey::new("sibling")?,
+                LaunchConfig { multiplier: 3 },
+                input.clone(),
+            )?;
+            let _ = root
+                .scope()
+                .side_effect_with_compensation::<
+                    ForwardMutationState,
+                    CompensationMutationState,
+                    _,
+                    _,
+                    _,
+                >(
+                    StateKey::new("forward")?,
+                    LaunchConfig { multiplier: 5 },
+                    input,
+                    StateKey::new("compensate-forward")?,
+                    LaunchConfig { multiplier: 7 },
+                    |_forward| Ok(sibling),
+                )?;
+            unreachable!("remediation binding should have rejected");
+        },
+    )
+    .expect_err("out-of-scope remediation input rejects");
+
+    assert!(
+        matches!(err, PlanError::RemediationBindingScope(message) if message.contains("outside linked forward"))
+    );
 }
 
 #[test]
