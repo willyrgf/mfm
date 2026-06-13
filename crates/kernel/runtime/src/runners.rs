@@ -9,7 +9,8 @@ use mfm_spec::v1 as spec;
 
 use crate::framework::{
     framework_bootstrap_run_binding, framework_complete_run_binding,
-    framework_public_output_binding, framework_retention_manifest_binding,
+    framework_public_output_binding, framework_resolve_saga_terminal_binding,
+    framework_retention_manifest_binding,
 };
 use crate::{
     CertifiedRuntimeSpec, ErasedRunCtx, Result, RuntimeError, StagedArtifact, StagedRetentionRefs,
@@ -240,6 +241,12 @@ impl ErasedRunnerRegistry {
             Some(spec::FrameworkNodeSpec::CompleteRun(_))
         ) {
             return framework_complete_run_binding(node, descriptor);
+        }
+        if matches!(
+            &node.framework,
+            Some(spec::FrameworkNodeSpec::ResolveSagaTerminal(_))
+        ) {
+            return framework_resolve_saga_terminal_binding(node, descriptor);
         }
         let binding = self.bindings.get(&node.descriptor_id).ok_or_else(|| {
             RuntimeError::RunnerBinding(format!(

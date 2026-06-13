@@ -994,16 +994,22 @@ pub mod v1 {
                         events::RunCompletionOutcome::Completed(evidence) => {
                             self.verify_completed_run_public_output(evidence)?;
                         }
-                        events::RunCompletionOutcome::Failed(error)
-                        | events::RunCompletionOutcome::Cancelled(error) => {
-                            if let Some(evidence) = &error.diagnostic_ref {
-                                self.authorize_event_artifact_ref(evidence, None, None)?;
-                            }
-                        }
                         events::RunCompletionOutcome::Compensated
                         | events::RunCompletionOutcome::ManuallyResolved
                         | events::RunCompletionOutcome::FailedWithoutAcdcClaim => {}
                     },
+                    KernelEventPayload::ManualResolutionRecorded(payload) => {
+                        self.authorize_artifact_by_schema(
+                            &payload.operator_identity_ref_artifact_id,
+                            &payload.operator_identity_ref_hash,
+                            &payload.operator_identity_ref_schema_id,
+                        )?;
+                        self.authorize_artifact_by_schema(
+                            &payload.evidence_artifact_id,
+                            &payload.evidence_hash,
+                            &payload.evidence_schema_id,
+                        )?;
+                    }
                     KernelEventPayload::RetentionManifestProjected(payload) => {
                         self.authorize_artifact(
                             &payload.manifest_artifact_id,
@@ -1604,6 +1610,29 @@ pub mod v1 {
                 )
             })?;
             if &evidence.digest != digest || evidence.artifact_role != role {
+                return Err(ReplayError::new(
+                    ReplayErrorKind::ArtifactMismatch,
+                    format!("retained artifact evidence mismatch for {artifact_id}"),
+                ));
+            }
+            let evidence = evidence.clone();
+            self.insert_authorized_artifact(evidence.clone())?;
+            Ok(evidence)
+        }
+
+        fn authorize_artifact_by_schema(
+            &mut self,
+            artifact_id: &ArtifactId,
+            digest: &ContentDigest,
+            schema_id: &SchemaId,
+        ) -> Result<StoredArtifactEvidenceRef> {
+            let evidence = self.retained_artifacts.get(artifact_id).ok_or_else(|| {
+                ReplayError::new(
+                    ReplayErrorKind::ArtifactMissing,
+                    format!("missing retained artifact evidence for {artifact_id}"),
+                )
+            })?;
+            if &evidence.digest != digest || evidence.schema_id.as_ref() != Some(schema_id) {
                 return Err(ReplayError::new(
                     ReplayErrorKind::ArtifactMismatch,
                     format!("retained artifact evidence mismatch for {artifact_id}"),
@@ -2505,6 +2534,7 @@ pub mod v1 {
                         },
                         config_hash: content(0x2d),
                     },
+                    saga: spec::SagaPolicySpec::NoSideEffects,
                     scopes: vec![spec::ScopeSpec {
                         scope_id: scope_id.clone(),
                         parent_scope_id: None,
@@ -2518,6 +2548,7 @@ pub mod v1 {
                     ],
                     config_refs: vec![config_ref],
                     nodes: vec![node_spec],
+                    remediations: BTreeMap::new(),
                     cells: vec![spec::CellSpec {
                         cell_id: output_cell.clone(),
                         producer: spec::CellProducer::Node(node_id.clone()),
@@ -2578,6 +2609,7 @@ pub mod v1 {
                 let confirmation_hash = content(0x3e);
                 let ledger_key =
                     events::SideEffectLedgerKey::new("ledger-key-1").expect("ledger key");
+                let ledger_purpose = events::SideEffectLedgerPurpose::Forward;
 
                 let mut store = InMemoryTypedRunStore::default();
                 let mut artifacts = Vec::new();
@@ -2710,6 +2742,7 @@ pub mod v1 {
                                 scope_id: scope_id.clone(),
                                 attempt_id: attempt_id.clone(),
                                 ledger_key: ledger_key.clone(),
+                                ledger_purpose: ledger_purpose.clone(),
                                 invocation_epoch: 1,
                                 intent_schema_id: intent_schema_id.clone(),
                                 intent_hash: intent_hash.clone(),
@@ -2729,6 +2762,7 @@ pub mod v1 {
                             node_id: node_id.clone(),
                             attempt_id: attempt_id.clone(),
                             ledger_key: ledger_key.clone(),
+                            ledger_purpose: ledger_purpose.clone(),
                             claim_owner: events::RunnerInvocationId::new("owner-1").expect("owner"),
                             invocation_epoch: 1,
                             claim_generation: 1,
@@ -2741,6 +2775,7 @@ pub mod v1 {
                                 node_id: node_id.clone(),
                                 attempt_id: attempt_id.clone(),
                                 ledger_key: ledger_key.clone(),
+                                ledger_purpose: ledger_purpose.clone(),
                                 invocation_epoch: 1,
                                 claim_generation: 1,
                                 claim_fencing_token: side_effect::ClaimFencingToken::new("token-1")
@@ -2755,6 +2790,7 @@ pub mod v1 {
                                 node_id: node_id.clone(),
                                 attempt_id: attempt_id.clone(),
                                 ledger_key: ledger_key.clone(),
+                                ledger_purpose: ledger_purpose.clone(),
                                 invocation_epoch: 1,
                                 claim_owner: events::RunnerInvocationId::new("owner-1")
                                     .expect("owner"),
@@ -2785,6 +2821,7 @@ pub mod v1 {
                                 node_id: node_id.clone(),
                                 attempt_id: attempt_id.clone(),
                                 ledger_key: ledger_key.clone(),
+                                ledger_purpose: ledger_purpose.clone(),
                                 invocation_epoch: 1,
                                 submission_schema_id: schema("mfm.test.submission", 0x43),
                                 submission_hash: submission_hash.clone(),
@@ -2797,6 +2834,7 @@ pub mod v1 {
                                 node_id: node_id.clone(),
                                 attempt_id: attempt_id.clone(),
                                 ledger_key: ledger_key.clone(),
+                                ledger_purpose: ledger_purpose.clone(),
                                 invocation_epoch: 1,
                                 receipt_schema_id: schema("mfm.test.receipt", 0x44),
                                 receipt_hash: receipt_hash.clone(),
@@ -2811,6 +2849,7 @@ pub mod v1 {
                                 node_id: node_id.clone(),
                                 attempt_id: attempt_id.clone(),
                                 ledger_key: ledger_key.clone(),
+                                ledger_purpose: ledger_purpose,
                                 invocation_epoch: 1,
                                 confirmation_schema_id: schema("mfm.test.confirmation", 0x45),
                                 confirmation_hash: confirmation_hash.clone(),

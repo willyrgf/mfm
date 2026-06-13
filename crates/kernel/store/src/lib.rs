@@ -911,6 +911,8 @@ pub mod v1 {
     pub struct SideEffectProjection {
         /// Ledger key.
         pub ledger_key: events::SideEffectLedgerKey,
+        /// Ledger purpose.
+        pub ledger_purpose: events::SideEffectLedgerPurpose,
         /// Last event id that updated this projection.
         pub event_id: EventId,
         /// Intent evidence that opened this ledger key.
@@ -2463,6 +2465,7 @@ pub mod v1 {
     fn payload_run_id(payload: &KernelEventPayload) -> Option<RunId> {
         match payload {
             KernelEventPayload::RunStarted(payload) => Some(payload.run_id.clone()),
+            KernelEventPayload::ManualResolutionRecorded(payload) => Some(payload.run_id.clone()),
             KernelEventPayload::RunCompleted(payload) => Some(payload.run_id.clone()),
             KernelEventPayload::RetentionRefsAppended(payload) => Some(payload.run_id.clone()),
             KernelEventPayload::RetentionManifestProjected(payload) => Some(payload.run_id.clone()),
@@ -2496,6 +2499,7 @@ pub mod v1 {
             KernelEventPayload::PublicOutputRenderFailed(payload) => payload.spec_hash.clone(),
             KernelEventPayload::StateAttemptCompleted(payload) => payload.spec_hash.clone(),
             KernelEventPayload::StateAttemptFailed(payload) => payload.spec_hash.clone(),
+            KernelEventPayload::ManualResolutionRecorded(payload) => payload.spec_hash.clone(),
             KernelEventPayload::RunCompleted(payload) => payload.spec_hash.clone(),
             KernelEventPayload::RetentionRefsAppended(payload) => payload.spec_hash.clone(),
             KernelEventPayload::RetentionManifestProjected(payload) => payload.spec_hash.clone(),
@@ -2580,6 +2584,7 @@ pub mod v1 {
     ) -> Result<LogicalEventKey> {
         let key = match payload {
             KernelEventPayload::RunStarted(_) => "run:start".to_owned(),
+            KernelEventPayload::ManualResolutionRecorded(_) => "run:manual_resolution".to_owned(),
             KernelEventPayload::RunCompleted(_) => "run:complete".to_owned(),
             KernelEventPayload::StateAttemptStarted(payload) => {
                 format!("attempt:{}:{}", payload.node_id, payload.attempt_id)
@@ -2604,50 +2609,81 @@ pub mod v1 {
                 format!("cell:{}:terminal", payload.cell_id)
             }
             KernelEventPayload::SideEffectIntentPersisted(payload) => {
-                format!("sidefx:{}:intent", payload.ledger_key)
+                format!(
+                    "sidefx:{}:{}:intent",
+                    side_effect_ledger_purpose_key(&payload.ledger_purpose),
+                    payload.ledger_key
+                )
             }
             KernelEventPayload::SideEffectClaimed(payload) => format!(
-                "sidefx:{}:claim:{}:{}",
-                payload.ledger_key, payload.invocation_epoch, payload.claim_generation
+                "sidefx:{}:{}:claim:{}:{}",
+                side_effect_ledger_purpose_key(&payload.ledger_purpose),
+                payload.ledger_key,
+                payload.invocation_epoch,
+                payload.claim_generation
             ),
             KernelEventPayload::SideEffectClaimTakenOver(payload) => format!(
-                "sidefx:{}:claim:{}:{}:taken_over",
-                payload.ledger_key, payload.invocation_epoch, payload.claim_generation
+                "sidefx:{}:{}:claim:{}:{}:taken_over",
+                side_effect_ledger_purpose_key(&payload.ledger_purpose),
+                payload.ledger_key,
+                payload.invocation_epoch,
+                payload.claim_generation
             ),
             KernelEventPayload::SideEffectInvocationPrepared(payload) => format!(
-                "sidefx:{}:invocation:{}:prepared:{}",
-                payload.ledger_key, payload.invocation_epoch, payload.claim_generation
+                "sidefx:{}:{}:invocation:{}:prepared:{}",
+                side_effect_ledger_purpose_key(&payload.ledger_purpose),
+                payload.ledger_key,
+                payload.invocation_epoch,
+                payload.claim_generation
             ),
             KernelEventPayload::SideEffectInvocationStarted(payload) => format!(
-                "sidefx:{}:invocation:{}:started",
-                payload.ledger_key, payload.invocation_epoch
+                "sidefx:{}:{}:invocation:{}:started",
+                side_effect_ledger_purpose_key(&payload.ledger_purpose),
+                payload.ledger_key,
+                payload.invocation_epoch
             ),
             KernelEventPayload::SideEffectNotSubmittedProven(payload) => format!(
-                "sidefx:{}:invocation:{}:submission_result",
-                payload.ledger_key, payload.invocation_epoch
+                "sidefx:{}:{}:invocation:{}:submission_result",
+                side_effect_ledger_purpose_key(&payload.ledger_purpose),
+                payload.ledger_key,
+                payload.invocation_epoch
             ),
             KernelEventPayload::SideEffectSubmissionObserved(payload) => format!(
-                "sidefx:{}:invocation:{}:submission_result",
-                payload.ledger_key, payload.invocation_epoch
+                "sidefx:{}:{}:invocation:{}:submission_result",
+                side_effect_ledger_purpose_key(&payload.ledger_purpose),
+                payload.ledger_key,
+                payload.invocation_epoch
             ),
             KernelEventPayload::SideEffectSubmissionUnknown(payload) => format!(
-                "sidefx:{}:invocation:{}:submission_result",
-                payload.ledger_key, payload.invocation_epoch
+                "sidefx:{}:{}:invocation:{}:submission_result",
+                side_effect_ledger_purpose_key(&payload.ledger_purpose),
+                payload.ledger_key,
+                payload.invocation_epoch
             ),
             KernelEventPayload::SideEffectReceiptObserved(payload) => format!(
-                "sidefx:{}:invocation:{}:receipt",
-                payload.ledger_key, payload.invocation_epoch
+                "sidefx:{}:{}:invocation:{}:receipt",
+                side_effect_ledger_purpose_key(&payload.ledger_purpose),
+                payload.ledger_key,
+                payload.invocation_epoch
             ),
             KernelEventPayload::SideEffectConfirmationObserved(payload) => format!(
-                "sidefx:{}:invocation:{}:confirmation",
-                payload.ledger_key, payload.invocation_epoch
+                "sidefx:{}:{}:invocation:{}:confirmation",
+                side_effect_ledger_purpose_key(&payload.ledger_purpose),
+                payload.ledger_key,
+                payload.invocation_epoch
             ),
             KernelEventPayload::SideEffectAmbiguous(payload) => {
-                format!("sidefx:{}:ambiguous", payload.ledger_key)
+                format!(
+                    "sidefx:{}:{}:ambiguous",
+                    side_effect_ledger_purpose_key(&payload.ledger_purpose),
+                    payload.ledger_key
+                )
             }
             KernelEventPayload::SideEffectFailed(payload) => format!(
-                "sidefx:{}:invocation:{}:failure",
-                payload.ledger_key, payload.invocation_epoch
+                "sidefx:{}:{}:invocation:{}:failure",
+                side_effect_ledger_purpose_key(&payload.ledger_purpose),
+                payload.ledger_key,
+                payload.invocation_epoch
             ),
             KernelEventPayload::PublicOutputProduced(payload) => {
                 format!("public_output:{}", payload.public_schema_id)
@@ -2715,6 +2751,15 @@ pub mod v1 {
                 Some((&payload.ledger_key, payload.invocation_epoch))
             }
             _ => None,
+        }
+    }
+
+    fn side_effect_ledger_purpose_key(purpose: &events::SideEffectLedgerPurpose) -> String {
+        match purpose {
+            events::SideEffectLedgerPurpose::Forward => "forward".to_owned(),
+            events::SideEffectLedgerPurpose::Remediation { forward_ledger_key } => {
+                format!("remediation:{forward_ledger_key}")
+            }
         }
     }
 
@@ -2849,13 +2894,31 @@ pub mod v1 {
                     );
                 }
             }
+            KernelEventPayload::ManualResolutionRecorded(payload) => {
+                requirements.push(ArtifactRequirement {
+                    artifact_id: payload.operator_identity_ref_artifact_id.clone(),
+                    digest: Some(payload.operator_identity_ref_hash.clone()),
+                    byte_len: None,
+                    media_type: None,
+                    schema_id: Some(payload.operator_identity_ref_schema_id.clone()),
+                    semantic_type_id: None,
+                    producer_node_id: None,
+                    producer_seed_id: None,
+                    artifact_role: None,
+                });
+                requirements.push(ArtifactRequirement {
+                    artifact_id: payload.evidence_artifact_id.clone(),
+                    digest: Some(payload.evidence_hash.clone()),
+                    byte_len: None,
+                    media_type: None,
+                    schema_id: Some(payload.evidence_schema_id.clone()),
+                    semantic_type_id: None,
+                    producer_node_id: None,
+                    producer_seed_id: None,
+                    artifact_role: None,
+                });
+            }
             KernelEventPayload::RunCompleted(payload) => match &payload.outcome {
-                events::RunCompletionOutcome::Failed(error)
-                | events::RunCompletionOutcome::Cancelled(error) => {
-                    if let Some(ref evidence) = error.diagnostic_ref {
-                        push_event_artifact(&mut requirements, evidence, None, None);
-                    }
-                }
                 events::RunCompletionOutcome::Completed(_) => {}
                 events::RunCompletionOutcome::Compensated
                 | events::RunCompletionOutcome::ManuallyResolved
@@ -3199,6 +3262,7 @@ pub mod v1 {
                     payload.ledger_key.clone(),
                     SideEffectProjection {
                         ledger_key: payload.ledger_key.clone(),
+                        ledger_purpose: payload.ledger_purpose.clone(),
                         event_id: envelope.event_id.clone(),
                         intent,
                         prepared_invocation: None,
@@ -3230,6 +3294,11 @@ pub mod v1 {
                                 | SideEffectPhase::NotSubmittedProven { .. }
                         )
                     },
+                )?;
+                require_side_effect_purpose(
+                    previous,
+                    &payload.ledger_key,
+                    &payload.ledger_purpose,
                 )?;
                 match previous.phase {
                     SideEffectPhase::IntentPersisted { invocation_epoch } => {
@@ -3281,6 +3350,7 @@ pub mod v1 {
                     _ => unreachable!("phase predicate checked above"),
                 }
                 let intent = previous.intent.clone();
+                let ledger_purpose = previous.ledger_purpose.clone();
                 let prepared_invocation = previous.prepared_invocation.clone();
                 let submission = previous.submission.clone();
                 let receipt = previous.receipt.clone();
@@ -3297,6 +3367,7 @@ pub mod v1 {
                     payload.ledger_key.clone(),
                     SideEffectProjection {
                         ledger_key: payload.ledger_key.clone(),
+                        ledger_purpose,
                         event_id: envelope.event_id.clone(),
                         intent,
                         prepared_invocation,
@@ -3332,9 +3403,15 @@ pub mod v1 {
                         )
                     },
                 )?;
+                require_side_effect_purpose(
+                    previous,
+                    &payload.ledger_key,
+                    &payload.ledger_purpose,
+                )?;
                 let old_claim = previous_claim(previous, &payload.ledger_key)?;
                 require_claim_takeover_matches(&payload.ledger_key, old_claim, payload)?;
                 let intent = previous.intent.clone();
+                let ledger_purpose = previous.ledger_purpose.clone();
                 let prepared_invocation = previous.prepared_invocation.clone();
                 let submission = previous.submission.clone();
                 let receipt = previous.receipt.clone();
@@ -3351,6 +3428,7 @@ pub mod v1 {
                     payload.ledger_key.clone(),
                     SideEffectProjection {
                         ledger_key: payload.ledger_key.clone(),
+                        ledger_purpose,
                         event_id: envelope.event_id.clone(),
                         intent,
                         prepared_invocation,
@@ -3380,6 +3458,11 @@ pub mod v1 {
                     "claim",
                     |projection| matches!(projection.phase, SideEffectPhase::Claimed { .. }),
                 )?;
+                require_side_effect_purpose(
+                    previous,
+                    &payload.ledger_key,
+                    &payload.ledger_purpose,
+                )?;
                 let claim = previous_claim(previous, &payload.ledger_key)?;
                 require_claim_context(
                     &payload.ledger_key,
@@ -3394,6 +3477,7 @@ pub mod v1 {
                     },
                 )?;
                 let intent = previous.intent.clone();
+                let ledger_purpose = previous.ledger_purpose.clone();
                 let prepared_invocation = prepared_invocation_projection(
                     &payload.prepared_artifact_id,
                     &payload.prepared_hash,
@@ -3407,6 +3491,7 @@ pub mod v1 {
                     payload.ledger_key.clone(),
                     SideEffectProjection {
                         ledger_key: payload.ledger_key.clone(),
+                        ledger_purpose,
                         event_id: envelope.event_id.clone(),
                         intent,
                         prepared_invocation,
@@ -3437,6 +3522,11 @@ pub mod v1 {
                         matches!(projection.phase, SideEffectPhase::InvocationPrepared { .. })
                     },
                 )?;
+                require_side_effect_purpose(
+                    previous,
+                    &payload.ledger_key,
+                    &payload.ledger_purpose,
+                )?;
                 let claim = previous_claim(previous, &payload.ledger_key)?;
                 require_claim_context(
                     &payload.ledger_key,
@@ -3451,6 +3541,7 @@ pub mod v1 {
                     },
                 )?;
                 let intent = previous.intent.clone();
+                let ledger_purpose = previous.ledger_purpose.clone();
                 let prepared_invocation = previous.prepared_invocation.clone();
                 let submission = previous.submission.clone();
                 let receipt = previous.receipt.clone();
@@ -3459,6 +3550,7 @@ pub mod v1 {
                     payload.ledger_key.clone(),
                     SideEffectProjection {
                         ledger_key: payload.ledger_key.clone(),
+                        ledger_purpose,
                         event_id: envelope.event_id.clone(),
                         intent,
                         prepared_invocation,
@@ -3486,6 +3578,7 @@ pub mod v1 {
                     projections,
                     EpochOnlyTransition {
                         ledger_key: &payload.ledger_key,
+                        ledger_purpose: &payload.ledger_purpose,
                         node_id: &payload.node_id,
                         attempt_id: &payload.attempt_id,
                         event_id: envelope.event_id.clone(),
@@ -3509,6 +3602,7 @@ pub mod v1 {
                     projections,
                     EpochOnlyTransition {
                         ledger_key: &payload.ledger_key,
+                        ledger_purpose: &payload.ledger_purpose,
                         node_id: &payload.node_id,
                         attempt_id: &payload.attempt_id,
                         event_id: envelope.event_id.clone(),
@@ -3539,6 +3633,7 @@ pub mod v1 {
                     projections,
                     EpochOnlyTransition {
                         ledger_key: &payload.ledger_key,
+                        ledger_purpose: &payload.ledger_purpose,
                         node_id: &payload.node_id,
                         attempt_id: &payload.attempt_id,
                         event_id: envelope.event_id.clone(),
@@ -3562,6 +3657,7 @@ pub mod v1 {
                     projections,
                     EpochOnlyTransition {
                         ledger_key: &payload.ledger_key,
+                        ledger_purpose: &payload.ledger_purpose,
                         node_id: &payload.node_id,
                         attempt_id: &payload.attempt_id,
                         event_id: envelope.event_id.clone(),
@@ -3592,6 +3688,7 @@ pub mod v1 {
                     projections,
                     EpochOnlyTransition {
                         ledger_key: &payload.ledger_key,
+                        ledger_purpose: &payload.ledger_purpose,
                         node_id: &payload.node_id,
                         attempt_id: &payload.attempt_id,
                         event_id: envelope.event_id.clone(),
@@ -3622,6 +3719,7 @@ pub mod v1 {
                     projections,
                     EpochOnlyTransition {
                         ledger_key: &payload.ledger_key,
+                        ledger_purpose: &payload.ledger_purpose,
                         node_id: &payload.node_id,
                         attempt_id: &payload.attempt_id,
                         event_id: envelope.event_id.clone(),
@@ -3680,6 +3778,7 @@ pub mod v1 {
                     },
                 );
             }
+            KernelEventPayload::ManualResolutionRecorded(_) => {}
             KernelEventPayload::RetentionRefsAppended(payload) => {
                 if projections.run_state(&payload.run_id) == RunState::Absent {
                     return Err(StoreError::ProjectionConflict {
@@ -3881,6 +3980,21 @@ pub mod v1 {
             Err(side_effect_projection_error(
                 ledger_key,
                 format!("illegal side-effect transition; expected {expected}"),
+            ))
+        }
+    }
+
+    fn require_side_effect_purpose(
+        projection: &SideEffectProjection,
+        ledger_key: &events::SideEffectLedgerKey,
+        expected: &events::SideEffectLedgerPurpose,
+    ) -> Result<()> {
+        if projection.ledger_purpose == *expected {
+            Ok(())
+        } else {
+            Err(side_effect_projection_error(
+                ledger_key,
+                "side-effect ledger purpose changed",
             ))
         }
     }
@@ -4113,6 +4227,7 @@ pub mod v1 {
 
     struct EpochOnlyTransition<'a> {
         ledger_key: &'a events::SideEffectLedgerKey,
+        ledger_purpose: &'a events::SideEffectLedgerPurpose,
         node_id: &'a NodeId,
         attempt_id: &'a AttemptId,
         event_id: EventId,
@@ -4126,7 +4241,7 @@ pub mod v1 {
         next_phase: impl FnOnce(u32) -> SideEffectPhase,
         update_projection: impl FnOnce(&mut SideEffectProjection) -> Result<()>,
     ) -> Result<()> {
-        let (intent, prepared_invocation, submission, receipt, confirmation, claim) = {
+        let (ledger_purpose, intent, prepared_invocation, submission, receipt, confirmation, claim) = {
             let previous = require_side_effect_phase(
                 projections,
                 transition.ledger_key,
@@ -4134,6 +4249,11 @@ pub mod v1 {
                 |projection| {
                     phase_matches_expected(&projection.phase, transition.required_previous)
                 },
+            )?;
+            require_side_effect_purpose(
+                previous,
+                transition.ledger_key,
+                transition.ledger_purpose,
             )?;
             let claim = previous_claim(previous, transition.ledger_key)?;
             require_claim_context(
@@ -4149,6 +4269,7 @@ pub mod v1 {
                 },
             )?;
             (
+                previous.ledger_purpose.clone(),
                 previous.intent.clone(),
                 previous.prepared_invocation.clone(),
                 previous.submission.clone(),
@@ -4159,6 +4280,7 @@ pub mod v1 {
         };
         let mut projection = SideEffectProjection {
             ledger_key: transition.ledger_key.clone(),
+            ledger_purpose,
             event_id: transition.event_id,
             intent,
             prepared_invocation,
@@ -4180,13 +4302,14 @@ pub mod v1 {
         payload: &side_effect::Failed,
         event_id: EventId,
     ) -> Result<()> {
-        let (intent, prepared_invocation, submission, receipt, confirmation, claim) = {
+        let (ledger_purpose, intent, prepared_invocation, submission, receipt, confirmation, claim) = {
             let Some(previous) = projections.side_effects.get(&payload.ledger_key) else {
                 return Err(side_effect_projection_error(
                     &payload.ledger_key,
                     "missing side-effect projection",
                 ));
             };
+            require_side_effect_purpose(previous, &payload.ledger_key, &payload.ledger_purpose)?;
             match payload.failure_phase {
                 side_effect::FailurePhase::BeforeInvocationStarted => match previous.phase {
                     SideEffectPhase::IntentPersisted { invocation_epoch } => {
@@ -4249,6 +4372,7 @@ pub mod v1 {
                 }
             }
             (
+                previous.ledger_purpose.clone(),
                 previous.intent.clone(),
                 previous.prepared_invocation.clone(),
                 previous.submission.clone(),
@@ -4261,6 +4385,7 @@ pub mod v1 {
             payload.ledger_key.clone(),
             SideEffectProjection {
                 ledger_key: payload.ledger_key.clone(),
+                ledger_purpose,
                 event_id,
                 intent,
                 prepared_invocation,
@@ -4372,6 +4497,7 @@ pub mod v1 {
                 "intent_schema_id": payload.intent_schema_id.as_str(),
                 "invocation_epoch": payload.invocation_epoch,
                 "ledger_key": payload.ledger_key.as_str(),
+                "ledger_purpose": side_effect_ledger_purpose_json(&payload.ledger_purpose),
                 "node_id": payload.node_id.as_str(),
                 "scope_id": payload.scope_id.as_str(),
                 "spec_hash": payload.spec_hash.as_str(),
@@ -4384,6 +4510,7 @@ pub mod v1 {
                 "claim_owner": payload.claim_owner.as_str(),
                 "invocation_epoch": payload.invocation_epoch,
                 "ledger_key": payload.ledger_key.as_str(),
+                "ledger_purpose": side_effect_ledger_purpose_json(&payload.ledger_purpose),
                 "node_id": payload.node_id.as_str(),
                 "spec_hash": payload.spec_hash.as_str(),
                 "variant": "SideEffectClaimed",
@@ -4394,6 +4521,7 @@ pub mod v1 {
                 "claim_generation": payload.claim_generation,
                 "invocation_epoch": payload.invocation_epoch,
                 "ledger_key": payload.ledger_key.as_str(),
+                "ledger_purpose": side_effect_ledger_purpose_json(&payload.ledger_purpose),
                 "new_claim_owner": payload.new_claim_owner.as_str(),
                 "node_id": payload.node_id.as_str(),
                 "previous_claim_generation": payload.previous_claim_generation,
@@ -4407,6 +4535,7 @@ pub mod v1 {
                 "claim_generation": payload.claim_generation,
                 "invocation_epoch": payload.invocation_epoch,
                 "ledger_key": payload.ledger_key.as_str(),
+                "ledger_purpose": side_effect_ledger_purpose_json(&payload.ledger_purpose),
                 "node_id": payload.node_id.as_str(),
                 "prepared_artifact_id": payload.prepared_artifact_id.as_ref().map(ArtifactId::as_str),
                 "prepared_hash": payload.prepared_hash.as_ref().map(ContentDigest::as_str),
@@ -4420,6 +4549,7 @@ pub mod v1 {
                 "claim_owner": payload.claim_owner.as_str(),
                 "invocation_epoch": payload.invocation_epoch,
                 "ledger_key": payload.ledger_key.as_str(),
+                "ledger_purpose": side_effect_ledger_purpose_json(&payload.ledger_purpose),
                 "node_id": payload.node_id.as_str(),
                 "spec_hash": payload.spec_hash.as_str(),
                 "variant": "SideEffectInvocationStarted",
@@ -4428,6 +4558,7 @@ pub mod v1 {
                 "attempt_id": payload.attempt_id.as_str(),
                 "invocation_epoch": payload.invocation_epoch,
                 "ledger_key": payload.ledger_key.as_str(),
+                "ledger_purpose": side_effect_ledger_purpose_json(&payload.ledger_purpose),
                 "node_id": payload.node_id.as_str(),
                 "proof_artifact_id": payload.proof_artifact_id.as_str(),
                 "proof_hash": payload.proof_hash.as_str(),
@@ -4439,6 +4570,7 @@ pub mod v1 {
                 "attempt_id": payload.attempt_id.as_str(),
                 "invocation_epoch": payload.invocation_epoch,
                 "ledger_key": payload.ledger_key.as_str(),
+                "ledger_purpose": side_effect_ledger_purpose_json(&payload.ledger_purpose),
                 "node_id": payload.node_id.as_str(),
                 "spec_hash": payload.spec_hash.as_str(),
                 "submission_artifact_id": payload.submission_artifact_id.as_str(),
@@ -4453,6 +4585,7 @@ pub mod v1 {
                 "evidence_schema_id": payload.evidence_schema_id.as_str(),
                 "invocation_epoch": payload.invocation_epoch,
                 "ledger_key": payload.ledger_key.as_str(),
+                "ledger_purpose": side_effect_ledger_purpose_json(&payload.ledger_purpose),
                 "node_id": payload.node_id.as_str(),
                 "spec_hash": payload.spec_hash.as_str(),
                 "variant": "SideEffectSubmissionUnknown",
@@ -4461,6 +4594,7 @@ pub mod v1 {
                 "attempt_id": payload.attempt_id.as_str(),
                 "invocation_epoch": payload.invocation_epoch,
                 "ledger_key": payload.ledger_key.as_str(),
+                "ledger_purpose": side_effect_ledger_purpose_json(&payload.ledger_purpose),
                 "node_id": payload.node_id.as_str(),
                 "receipt_artifact_id": payload.receipt_artifact_id.as_str(),
                 "receipt_hash": payload.receipt_hash.as_str(),
@@ -4476,6 +4610,7 @@ pub mod v1 {
                 "confirmation_schema_id": payload.confirmation_schema_id.as_str(),
                 "invocation_epoch": payload.invocation_epoch,
                 "ledger_key": payload.ledger_key.as_str(),
+                "ledger_purpose": side_effect_ledger_purpose_json(&payload.ledger_purpose),
                 "node_id": payload.node_id.as_str(),
                 "replay_verifier_id": payload.replay_verifier_id.as_str(),
                 "spec_hash": payload.spec_hash.as_str(),
@@ -4489,6 +4624,7 @@ pub mod v1 {
                 "evidence_schema_id": payload.evidence_schema_id.as_str(),
                 "invocation_epoch": payload.invocation_epoch,
                 "ledger_key": payload.ledger_key.as_str(),
+                "ledger_purpose": side_effect_ledger_purpose_json(&payload.ledger_purpose),
                 "node_id": payload.node_id.as_str(),
                 "spec_hash": payload.spec_hash.as_str(),
                 "variant": "SideEffectAmbiguous",
@@ -4499,6 +4635,7 @@ pub mod v1 {
                 "failure_phase": failure_phase_str(payload.failure_phase),
                 "invocation_epoch": payload.invocation_epoch,
                 "ledger_key": payload.ledger_key.as_str(),
+                "ledger_purpose": side_effect_ledger_purpose_json(&payload.ledger_purpose),
                 "node_id": payload.node_id.as_str(),
                 "retryable": payload.retryable,
                 "spec_hash": payload.spec_hash.as_str(),
@@ -4540,6 +4677,19 @@ pub mod v1 {
                 "retryable": payload.retryable,
                 "spec_hash": payload.spec_hash.as_str(),
                 "variant": "StateAttemptFailed",
+            }),
+            KernelEventPayload::ManualResolutionRecorded(payload) => serde_json::json!({
+                "evidence_artifact_id": payload.evidence_artifact_id.as_str(),
+                "evidence_hash": payload.evidence_hash.as_str(),
+                "evidence_schema_id": payload.evidence_schema_id.as_str(),
+                "note": payload.note.as_ref().map(manual_resolution_note_json),
+                "operator_identity_ref_artifact_id": payload.operator_identity_ref_artifact_id.as_str(),
+                "operator_identity_ref_hash": payload.operator_identity_ref_hash.as_str(),
+                "operator_identity_ref_schema_id": payload.operator_identity_ref_schema_id.as_str(),
+                "outcome": manual_resolution_outcome_str(payload.outcome),
+                "run_id": payload.run_id.as_str(),
+                "spec_hash": payload.spec_hash.as_str(),
+                "variant": "ManualResolutionRecorded",
             }),
             KernelEventPayload::RunCompleted(payload) => serde_json::json!({
                 "outcome": run_completion_outcome_json(&payload.outcome),
@@ -4690,6 +4840,10 @@ pub mod v1 {
                         json,
                         "ledger_key",
                     )?)?,
+                    ledger_purpose: parse_side_effect_ledger_purpose(required_obj(
+                        json,
+                        "ledger_purpose",
+                    )?)?,
                     invocation_epoch: required_u32(json, "invocation_epoch")?,
                     intent_schema_id: parse_identity(required_str(json, "intent_schema_id")?)?,
                     intent_hash: parse_identity(required_str(json, "intent_hash")?)?,
@@ -4721,6 +4875,10 @@ pub mod v1 {
                         json,
                         "ledger_key",
                     )?)?,
+                    ledger_purpose: parse_side_effect_ledger_purpose(required_obj(
+                        json,
+                        "ledger_purpose",
+                    )?)?,
                     claim_owner: events::RunnerInvocationId::new(required_str(
                         json,
                         "claim_owner",
@@ -4741,6 +4899,10 @@ pub mod v1 {
                     ledger_key: events::SideEffectLedgerKey::new(required_str(
                         json,
                         "ledger_key",
+                    )?)?,
+                    ledger_purpose: parse_side_effect_ledger_purpose(required_obj(
+                        json,
+                        "ledger_purpose",
                     )?)?,
                     previous_claim_owner: events::RunnerInvocationId::new(required_str(
                         json,
@@ -4768,6 +4930,10 @@ pub mod v1 {
                         json,
                         "ledger_key",
                     )?)?,
+                    ledger_purpose: parse_side_effect_ledger_purpose(required_obj(
+                        json,
+                        "ledger_purpose",
+                    )?)?,
                     invocation_epoch: required_u32(json, "invocation_epoch")?,
                     claim_generation: required_u32(json, "claim_generation")?,
                     claim_fencing_token: side_effect::ClaimFencingToken::new(required_str(
@@ -4791,6 +4957,10 @@ pub mod v1 {
                         json,
                         "ledger_key",
                     )?)?,
+                    ledger_purpose: parse_side_effect_ledger_purpose(required_obj(
+                        json,
+                        "ledger_purpose",
+                    )?)?,
                     invocation_epoch: required_u32(json, "invocation_epoch")?,
                     claim_owner: events::RunnerInvocationId::new(required_str(
                         json,
@@ -4812,6 +4982,10 @@ pub mod v1 {
                         json,
                         "ledger_key",
                     )?)?,
+                    ledger_purpose: parse_side_effect_ledger_purpose(required_obj(
+                        json,
+                        "ledger_purpose",
+                    )?)?,
                     invocation_epoch: required_u32(json, "invocation_epoch")?,
                     proof_schema_id: parse_identity(required_str(json, "proof_schema_id")?)?,
                     proof_hash: parse_identity(required_str(json, "proof_hash")?)?,
@@ -4826,6 +5000,10 @@ pub mod v1 {
                     ledger_key: events::SideEffectLedgerKey::new(required_str(
                         json,
                         "ledger_key",
+                    )?)?,
+                    ledger_purpose: parse_side_effect_ledger_purpose(required_obj(
+                        json,
+                        "ledger_purpose",
                     )?)?,
                     invocation_epoch: required_u32(json, "invocation_epoch")?,
                     submission_schema_id: parse_identity(required_str(
@@ -4848,6 +5026,10 @@ pub mod v1 {
                         json,
                         "ledger_key",
                     )?)?,
+                    ledger_purpose: parse_side_effect_ledger_purpose(required_obj(
+                        json,
+                        "ledger_purpose",
+                    )?)?,
                     invocation_epoch: required_u32(json, "invocation_epoch")?,
                     evidence_schema_id: parse_identity(required_str(json, "evidence_schema_id")?)?,
                     evidence_hash: parse_identity(required_str(json, "evidence_hash")?)?,
@@ -4865,6 +5047,10 @@ pub mod v1 {
                     ledger_key: events::SideEffectLedgerKey::new(required_str(
                         json,
                         "ledger_key",
+                    )?)?,
+                    ledger_purpose: parse_side_effect_ledger_purpose(required_obj(
+                        json,
+                        "ledger_purpose",
                     )?)?,
                     invocation_epoch: required_u32(json, "invocation_epoch")?,
                     receipt_schema_id: parse_identity(required_str(json, "receipt_schema_id")?)?,
@@ -4888,6 +5074,10 @@ pub mod v1 {
                         ledger_key: events::SideEffectLedgerKey::new(required_str(
                             json,
                             "ledger_key",
+                        )?)?,
+                        ledger_purpose: parse_side_effect_ledger_purpose(required_obj(
+                            json,
+                            "ledger_purpose",
                         )?)?,
                         invocation_epoch: required_u32(json, "invocation_epoch")?,
                         confirmation_schema_id: parse_identity(required_str(
@@ -4918,6 +5108,10 @@ pub mod v1 {
                         json,
                         "ledger_key",
                     )?)?,
+                    ledger_purpose: parse_side_effect_ledger_purpose(required_obj(
+                        json,
+                        "ledger_purpose",
+                    )?)?,
                     invocation_epoch: required_u32(json, "invocation_epoch")?,
                     ambiguity_code: events::AmbiguityCode::new(required_str(
                         json,
@@ -4936,6 +5130,10 @@ pub mod v1 {
                 node_id: parse_identity(required_str(json, "node_id")?)?,
                 attempt_id: parse_identity(required_str(json, "attempt_id")?)?,
                 ledger_key: events::SideEffectLedgerKey::new(required_str(json, "ledger_key")?)?,
+                ledger_purpose: parse_side_effect_ledger_purpose(required_obj(
+                    json,
+                    "ledger_purpose",
+                )?)?,
                 invocation_epoch: required_u32(json, "invocation_epoch")?,
                 failure_phase: parse_failure_phase(required_str(json, "failure_phase")?)?,
                 retryable: required_bool(json, "retryable")?,
@@ -4988,6 +5186,34 @@ pub mod v1 {
                     attempt_id: parse_identity(required_str(json, "attempt_id")?)?,
                     retryable: required_bool(json, "retryable")?,
                     error: parse_error_info(required_obj(json, "error")?)?,
+                },
+            )),
+            "ManualResolutionRecorded" => Ok(KernelEventPayload::ManualResolutionRecorded(
+                events::ManualResolutionRecorded {
+                    run_id: parse_identity(required_str(json, "run_id")?)?,
+                    spec_hash: parse_identity(required_str(json, "spec_hash")?)?,
+                    outcome: parse_manual_resolution_outcome(required_str(json, "outcome")?)?,
+                    operator_identity_ref_schema_id: parse_identity(required_str(
+                        json,
+                        "operator_identity_ref_schema_id",
+                    )?)?,
+                    operator_identity_ref_hash: parse_identity(required_str(
+                        json,
+                        "operator_identity_ref_hash",
+                    )?)?,
+                    operator_identity_ref_artifact_id: parse_identity(required_str(
+                        json,
+                        "operator_identity_ref_artifact_id",
+                    )?)?,
+                    evidence_schema_id: parse_identity(required_str(json, "evidence_schema_id")?)?,
+                    evidence_hash: parse_identity(required_str(json, "evidence_hash")?)?,
+                    evidence_artifact_id: parse_identity(required_str(
+                        json,
+                        "evidence_artifact_id",
+                    )?)?,
+                    note: optional_obj(json, "note")?
+                        .map(parse_manual_resolution_note)
+                        .transpose()?,
                 },
             )),
             "RunCompleted" => Ok(KernelEventPayload::RunCompleted(events::RunCompleted {
@@ -5192,6 +5418,41 @@ pub mod v1 {
         })
     }
 
+    fn parse_side_effect_ledger_purpose(
+        json: &serde_json::Value,
+    ) -> Result<events::SideEffectLedgerPurpose> {
+        match required_str(json, "kind")? {
+            "forward" => Ok(events::SideEffectLedgerPurpose::Forward),
+            "remediation" => Ok(events::SideEffectLedgerPurpose::Remediation {
+                forward_ledger_key: events::SideEffectLedgerKey::new(required_str(
+                    json,
+                    "forward_ledger_key",
+                )?)?,
+            }),
+            other => Err(StoreError::Identity(format!(
+                "unknown side-effect ledger purpose {other}"
+            ))),
+        }
+    }
+
+    fn parse_manual_resolution_outcome(value: &str) -> Result<events::ManualResolutionOutcome> {
+        match value {
+            "confirm_remediated" => Ok(events::ManualResolutionOutcome::ConfirmRemediated),
+            "fail_without_acdc_claim" => Ok(events::ManualResolutionOutcome::FailWithoutAcdcClaim),
+            other => Err(StoreError::Identity(format!(
+                "unknown manual resolution outcome {other}"
+            ))),
+        }
+    }
+
+    fn parse_manual_resolution_note(
+        json: &serde_json::Value,
+    ) -> Result<events::ManualResolutionNote> {
+        Ok(events::ManualResolutionNote::new(required_str(
+            json, "text",
+        )?)?)
+    }
+
     fn parse_error_info(json: &serde_json::Value) -> Result<events::MfmErrorInfo> {
         Ok(events::MfmErrorInfo {
             code: events::ErrorCode::new(required_str(json, "code")?)?,
@@ -5233,12 +5494,6 @@ pub mod v1 {
             "compensated" => Ok(events::RunCompletionOutcome::Compensated),
             "manually_resolved" => Ok(events::RunCompletionOutcome::ManuallyResolved),
             "failed_without_acdc_claim" => Ok(events::RunCompletionOutcome::FailedWithoutAcdcClaim),
-            "failed" => Ok(events::RunCompletionOutcome::Failed(parse_error_info(
-                required_obj(json, "terminal_error")?,
-            )?)),
-            "cancelled" => Ok(events::RunCompletionOutcome::Cancelled(parse_error_info(
-                required_obj(json, "terminal_error")?,
-            )?)),
             other => Err(StoreError::Identity(format!(
                 "unknown run completion outcome {other}"
             ))),
@@ -5617,6 +5872,32 @@ pub mod v1 {
         })
     }
 
+    fn side_effect_ledger_purpose_json(
+        purpose: &events::SideEffectLedgerPurpose,
+    ) -> serde_json::Value {
+        match purpose {
+            events::SideEffectLedgerPurpose::Forward => serde_json::json!({
+                "kind": "forward",
+            }),
+            events::SideEffectLedgerPurpose::Remediation { forward_ledger_key } => {
+                serde_json::json!({
+                    "forward_ledger_key": forward_ledger_key.as_str(),
+                    "kind": "remediation",
+                })
+            }
+        }
+    }
+
+    fn manual_resolution_outcome_str(outcome: events::ManualResolutionOutcome) -> &'static str {
+        outcome.as_str()
+    }
+
+    fn manual_resolution_note_json(note: &events::ManualResolutionNote) -> serde_json::Value {
+        serde_json::json!({
+            "text": note.as_str(),
+        })
+    }
+
     fn error_info_json(error: &events::MfmErrorInfo) -> serde_json::Value {
         serde_json::json!({
             "category": error_category_str(error.category),
@@ -5649,14 +5930,6 @@ pub mod v1 {
             }),
             events::RunCompletionOutcome::FailedWithoutAcdcClaim => serde_json::json!({
                 "kind": "failed_without_acdc_claim",
-            }),
-            events::RunCompletionOutcome::Failed(error) => serde_json::json!({
-                "kind": "failed",
-                "terminal_error": error_info_json(error),
-            }),
-            events::RunCompletionOutcome::Cancelled(error) => serde_json::json!({
-                "kind": "cancelled",
-                "terminal_error": error_info_json(error),
             }),
         }
     }

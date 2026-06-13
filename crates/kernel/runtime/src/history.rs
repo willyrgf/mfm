@@ -593,6 +593,7 @@ fn validate_historical_run_stream(
                 )?;
                 completed = true;
             }
+            events::KernelEventPayload::ManualResolutionRecorded(_) => {}
             events::KernelEventPayload::RetentionRefsAppended(_) => {}
             events::KernelEventPayload::RetentionManifestProjected(payload) => {
                 if &payload.run_id == run_id && payload.spec_hash == *runtime_spec.spec_hash() {
@@ -2555,8 +2556,7 @@ fn validate_historical_run_completed(
     }
     let events::RunCompletionOutcome::Completed(completion) = &payload.outcome else {
         return Err(RuntimeError::InvalidRunStream(
-            "RunCompleted failed/cancelled outcomes require sealed CompleteRun authority"
-                .to_owned(),
+            "RunCompleted non-Completed outcomes require sealed saga terminal authority".to_owned(),
         ));
     };
     if completion.public_output_schema_id != runtime_spec.spec().public_outputs.public_schema_id {
@@ -3071,6 +3071,7 @@ pub(crate) fn payload_spec_hash(payload: &events::KernelEventPayload) -> SpecHas
         events::KernelEventPayload::PublicOutputRenderFailed(payload) => payload.spec_hash.clone(),
         events::KernelEventPayload::StateAttemptCompleted(payload) => payload.spec_hash.clone(),
         events::KernelEventPayload::StateAttemptFailed(payload) => payload.spec_hash.clone(),
+        events::KernelEventPayload::ManualResolutionRecorded(payload) => payload.spec_hash.clone(),
         events::KernelEventPayload::RunCompleted(payload) => payload.spec_hash.clone(),
         events::KernelEventPayload::RetentionRefsAppended(payload) => payload.spec_hash.clone(),
         events::KernelEventPayload::RetentionManifestProjected(payload) => {

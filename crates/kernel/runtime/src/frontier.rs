@@ -84,6 +84,12 @@ fn attempt_plan(
     node: &spec::NodeSpec,
     view: &RuntimeRunView,
 ) -> Result<Option<AttemptPlan>> {
+    if matches!(
+        &node.framework,
+        Some(spec::FrameworkNodeSpec::ResolveSagaTerminal(_))
+    ) {
+        return Ok(None);
+    }
     if node.side_effect.is_some() {
         side_effect_attempt_plan(runtime_spec, node, view)
     } else {

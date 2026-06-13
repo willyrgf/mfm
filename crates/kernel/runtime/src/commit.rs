@@ -672,6 +672,7 @@ fn runner_output_commit_fragment(payload: &events::KernelEventPayload) -> String
             payload.refs.len()
         ),
         events::KernelEventPayload::RunStarted(_)
+        | events::KernelEventPayload::ManualResolutionRecorded(_)
         | events::KernelEventPayload::RunCompleted(_)
         | events::KernelEventPayload::StateAttemptStarted(_) => "scheduler-owned".to_owned(),
     }
@@ -1112,6 +1113,7 @@ fn staged_payload_artifact_requirements(
                 ));
             }
             events::KernelEventPayload::RunStarted(_)
+            | events::KernelEventPayload::ManualResolutionRecorded(_)
             | events::KernelEventPayload::ArtifactReferenced(_)
             | events::KernelEventPayload::RunCompleted(_)
             | events::KernelEventPayload::RetentionRefsAppended(_)
@@ -1687,6 +1689,7 @@ fn validate_runner_output(
                 public_output_failed = true;
             }
             events::KernelEventPayload::RunStarted(_)
+            | events::KernelEventPayload::ManualResolutionRecorded(_)
             | events::KernelEventPayload::RunCompleted(_)
             | events::KernelEventPayload::RetentionRefsAppended(_)
             | events::KernelEventPayload::RetentionManifestProjected(_)

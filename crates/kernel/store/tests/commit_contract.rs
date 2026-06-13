@@ -10,11 +10,12 @@ use mfm_spec::v1::{
     CanonicalizerIdentity, CellProducer, MediaType, PublicFieldPath, ValueLineageRef,
 };
 use mfm_store::v1::{
-    build_committed_batch, ArtifactEvidenceRef, CellTerminalProjection, CommitKey, CommitOrdinal,
-    CommitOutcome, CommitPreconditions, InMemoryTypedRunStore, KernelEventEnvelope,
-    PersistedKernelEventRecord, PreparedTypedCommit, ProjectionSnapshot, RequiredRunState,
-    SideEffectPhase, StoreError, StreamSeq, TypedCommitRequest, TypedProjectionRead,
-    TypedRunEventStore, VerifiedRetentionProjection, VerifiedRetentionProjectionSet,
+    build_committed_batch, payload_canonical_json, payload_from_json_value, ArtifactEvidenceRef,
+    CellTerminalProjection, CommitKey, CommitOrdinal, CommitOutcome, CommitPreconditions,
+    InMemoryTypedRunStore, KernelEventEnvelope, PersistedKernelEventRecord, PreparedTypedCommit,
+    ProjectionSnapshot, RequiredRunState, SideEffectPhase, StoreError, StreamSeq,
+    TypedCommitRequest, TypedProjectionRead, TypedRunEventStore, VerifiedRetentionProjection,
+    VerifiedRetentionProjectionSet,
 };
 
 const SPEC_MEDIA_TYPE: &str = "application/vnd.mfm.typed-execution-spec+json;version=1";
@@ -272,6 +273,19 @@ fn side_effect_ledger_key() -> events::SideEffectLedgerKey {
     events::SideEffectLedgerKey::new("ledger-key-1").expect("ledger key")
 }
 
+fn side_effect_ledger_purpose() -> events::SideEffectLedgerPurpose {
+    events::SideEffectLedgerPurpose::Forward
+}
+
+fn payload_json_value(payload: &KernelEventPayload) -> serde_json::Value {
+    serde_json::from_str(
+        payload_canonical_json(payload)
+            .expect("payload canonical json")
+            .as_str(),
+    )
+    .expect("payload json value")
+}
+
 fn side_effect_attempt_started() -> KernelEventPayload {
     KernelEventPayload::StateAttemptStarted(events::StateAttemptStarted {
         spec_hash: spec_hash(1),
@@ -290,6 +304,7 @@ fn side_effect_intent(artifact_id: ArtifactId, digest: ContentDigest) -> KernelE
         scope_id: scope_id(71),
         attempt_id: attempt_id(72),
         ledger_key: side_effect_ledger_key(),
+        ledger_purpose: side_effect_ledger_purpose(),
         invocation_epoch: 1,
         intent_schema_id: schema_id("mfm.test.side_effect_intent", 70),
         intent_hash: digest,
@@ -311,6 +326,7 @@ fn side_effect_claim() -> KernelEventPayload {
         node_id: node_id(70),
         attempt_id: attempt_id(72),
         ledger_key: side_effect_ledger_key(),
+        ledger_purpose: side_effect_ledger_purpose(),
         claim_owner: events::RunnerInvocationId::new("owner-1").expect("claim owner"),
         invocation_epoch: 1,
         claim_generation: 1,
@@ -324,6 +340,7 @@ fn side_effect_claim_taken_over() -> KernelEventPayload {
         node_id: node_id(70),
         attempt_id: attempt_id(72),
         ledger_key: side_effect_ledger_key(),
+        ledger_purpose: side_effect_ledger_purpose(),
         previous_claim_owner: events::RunnerInvocationId::new("owner-1").expect("previous owner"),
         new_claim_owner: events::RunnerInvocationId::new("owner-2").expect("new owner"),
         invocation_epoch: 1,
@@ -339,6 +356,7 @@ fn side_effect_claim_taken_over_with_token(token: &str) -> KernelEventPayload {
         node_id: node_id(70),
         attempt_id: attempt_id(72),
         ledger_key: side_effect_ledger_key(),
+        ledger_purpose: side_effect_ledger_purpose(),
         previous_claim_owner: events::RunnerInvocationId::new("owner-1").expect("previous owner"),
         new_claim_owner: events::RunnerInvocationId::new("owner-2").expect("new owner"),
         invocation_epoch: 1,
@@ -354,6 +372,7 @@ fn side_effect_prepared(claim_generation: u32, token: &str) -> KernelEventPayloa
         node_id: node_id(70),
         attempt_id: attempt_id(72),
         ledger_key: side_effect_ledger_key(),
+        ledger_purpose: side_effect_ledger_purpose(),
         invocation_epoch: 1,
         claim_generation,
         claim_fencing_token: side_effect::ClaimFencingToken::new(token).expect("token"),
@@ -368,6 +387,7 @@ fn side_effect_started(owner: &str, claim_generation: u32, token: &str) -> Kerne
         node_id: node_id(70),
         attempt_id: attempt_id(72),
         ledger_key: side_effect_ledger_key(),
+        ledger_purpose: side_effect_ledger_purpose(),
         invocation_epoch: 1,
         claim_owner: events::RunnerInvocationId::new(owner).expect("claim owner"),
         claim_generation,
@@ -400,6 +420,7 @@ fn side_effect_submission_observed(
         node_id: node_id(70),
         attempt_id: attempt_id(72),
         ledger_key: side_effect_ledger_key(),
+        ledger_purpose: side_effect_ledger_purpose(),
         invocation_epoch: 1,
         submission_schema_id: submission_schema(),
         submission_hash: digest,
@@ -416,6 +437,7 @@ fn side_effect_submission_unknown(
         node_id: node_id(70),
         attempt_id: attempt_id(72),
         ledger_key: side_effect_ledger_key(),
+        ledger_purpose: side_effect_ledger_purpose(),
         invocation_epoch: 1,
         evidence_schema_id: unknown_schema(),
         evidence_hash: digest,
@@ -429,6 +451,7 @@ fn side_effect_receipt(artifact_id: ArtifactId, digest: ContentDigest) -> Kernel
         node_id: node_id(70),
         attempt_id: attempt_id(72),
         ledger_key: side_effect_ledger_key(),
+        ledger_purpose: side_effect_ledger_purpose(),
         invocation_epoch: 1,
         receipt_schema_id: receipt_schema(),
         receipt_hash: digest,
@@ -443,6 +466,7 @@ fn side_effect_confirmation(artifact_id: ArtifactId, digest: ContentDigest) -> K
         node_id: node_id(70),
         attempt_id: attempt_id(72),
         ledger_key: side_effect_ledger_key(),
+        ledger_purpose: side_effect_ledger_purpose(),
         invocation_epoch: 1,
         confirmation_schema_id: confirmation_schema(),
         confirmation_hash: digest,
@@ -457,6 +481,7 @@ fn side_effect_failed(retryable: bool) -> KernelEventPayload {
         node_id: node_id(70),
         attempt_id: attempt_id(72),
         ledger_key: side_effect_ledger_key(),
+        ledger_purpose: side_effect_ledger_purpose(),
         invocation_epoch: 1,
         failure_phase: side_effect::FailurePhase::BeforeInvocationStarted,
         retryable,
@@ -1394,6 +1419,144 @@ fn side_effect_transition_mismatches_are_rejected() {
 }
 
 #[test]
+fn side_effect_ledger_purpose_is_required_and_closed() {
+    let payload = side_effect_claim();
+    let mut missing = payload_json_value(&payload);
+    missing
+        .as_object_mut()
+        .expect("payload object")
+        .remove("ledger_purpose");
+    assert!(matches!(
+        payload_from_json_value(&missing),
+        Err(StoreError::Event(message)) if message.contains("ledger_purpose")
+    ));
+
+    let mut unknown = payload_json_value(&payload);
+    unknown
+        .get_mut("ledger_purpose")
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("ledger purpose object")
+        .insert(
+            "kind".to_owned(),
+            serde_json::Value::String("other".to_owned()),
+        );
+    assert!(matches!(
+        payload_from_json_value(&unknown),
+        Err(StoreError::Identity(message))
+            if message.contains("unknown side-effect ledger purpose")
+    ));
+}
+
+#[test]
+fn side_effect_ledger_purpose_cannot_change_after_intent() {
+    let run_id = run_id(92);
+    let artifact_id = artifact_id(93);
+    let artifact_digest = content_digest(94);
+    let mut store = InMemoryTypedRunStore::new();
+    store
+        .append_prepared_commit(TypedCommitRequest {
+            run_id: run_id.clone(),
+            expected_next_seq: StreamSeq::FIRST,
+            commit_key: CommitKey::new("purpose-attempt-start").expect("commit key"),
+            payloads: vec![side_effect_attempt_started()],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect("append sidefx attempt start");
+    store
+        .append_prepared_commit(TypedCommitRequest {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&run_id),
+            commit_key: CommitKey::new("purpose-intent").expect("commit key"),
+            payloads: vec![side_effect_intent(
+                artifact_id.clone(),
+                artifact_digest.clone(),
+            )],
+            required_artifacts: vec![intent_artifact_ref(artifact_id, artifact_digest)],
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect("append intent");
+
+    let mut changed = side_effect_claim();
+    let KernelEventPayload::SideEffectClaimed(payload) = &mut changed else {
+        unreachable!("helper returns claimed payload");
+    };
+    payload.ledger_purpose = events::SideEffectLedgerPurpose::Remediation {
+        forward_ledger_key: side_effect_ledger_key(),
+    };
+    let error = store
+        .append_prepared_commit(TypedCommitRequest {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&run_id),
+            commit_key: CommitKey::new("purpose-changed-claim").expect("commit key"),
+            payloads: vec![changed],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect_err("ledger purpose change rejects");
+    assert!(matches!(
+        error,
+        StoreError::ProjectionConflict { message, .. }
+            if message.contains("ledger purpose changed")
+    ));
+}
+
+#[test]
+fn removed_run_completion_outcome_tags_are_rejected() {
+    let payload = KernelEventPayload::RunCompleted(events::RunCompleted {
+        run_id: run_id(95),
+        spec_hash: spec_hash(1),
+        outcome: events::RunCompletionOutcome::FailedWithoutAcdcClaim,
+    });
+    for removed in ["failed", "cancelled"] {
+        let mut json = payload_json_value(&payload);
+        json.get_mut("outcome")
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("outcome object")
+            .insert(
+                "kind".to_owned(),
+                serde_json::Value::String(removed.to_owned()),
+            );
+        assert!(matches!(
+            payload_from_json_value(&json),
+            Err(StoreError::Identity(message))
+                if message.contains(&format!("unknown run completion outcome {removed}"))
+        ));
+    }
+}
+
+#[test]
+fn manual_resolution_outcome_is_closed() {
+    let payload = KernelEventPayload::ManualResolutionRecorded(events::ManualResolutionRecorded {
+        run_id: run_id(96),
+        spec_hash: spec_hash(1),
+        outcome: events::ManualResolutionOutcome::ConfirmRemediated,
+        operator_identity_ref_schema_id: schema_id("mfm.test.operator", 96),
+        operator_identity_ref_hash: content_digest(96),
+        operator_identity_ref_artifact_id: artifact_id(96),
+        evidence_schema_id: schema_id("mfm.test.manual_evidence", 97),
+        evidence_hash: content_digest(97),
+        evidence_artifact_id: artifact_id(97),
+        note: Some(events::ManualResolutionNote::new("reviewed evidence").expect("note")),
+    });
+    assert!(matches!(
+        payload_from_json_value(&payload_json_value(&payload)),
+        Ok(KernelEventPayload::ManualResolutionRecorded(_))
+    ));
+
+    let mut json = payload_json_value(&payload);
+    json.as_object_mut().expect("payload object").insert(
+        "outcome".to_owned(),
+        serde_json::Value::String("invented".to_owned()),
+    );
+    assert!(matches!(
+        payload_from_json_value(&json),
+        Err(StoreError::Identity(message))
+            if message.contains("unknown manual resolution outcome invented")
+    ));
+}
+
+#[test]
 fn side_effect_phase_order_and_fencing_are_enforced() {
     let mut stale_owner_store = InMemoryTypedRunStore::new();
     let stale_owner_run = run_id(100);
@@ -1483,6 +1646,7 @@ fn side_effect_phase_order_and_fencing_are_enforced() {
                     node_id: node_id(70),
                     attempt_id: attempt_id(72),
                     ledger_key: side_effect_ledger_key(),
+                    ledger_purpose: side_effect_ledger_purpose(),
                     previous_claim_owner: events::RunnerInvocationId::new("owner-2")
                         .expect("previous owner"),
                     new_claim_owner: events::RunnerInvocationId::new("owner-3").expect("new owner"),
@@ -1659,7 +1823,7 @@ fn side_effect_submission_unknown_recovery_uses_one_submission_result_key() {
         .batch()
         .clone();
     let submission_result_key = format!(
-        "sidefx:{}:invocation:1:submission_result",
+        "sidefx:forward:{}:invocation:1:submission_result",
         side_effect_ledger_key()
     );
     assert_eq!(

@@ -234,6 +234,7 @@ async fn side_effect_prepare(
         events::IdempotencyKeyRef::new(format!("idem-{}", short_digest(&idem_hash)))?;
     let owner = events::RunnerInvocationId::new("mfm.proof.owner.1")?;
     let token = side_effect::ClaimFencingToken::new("mfm.proof.token.1")?;
+    let ledger_purpose = events::SideEffectLedgerPurpose::Forward;
     let staged_artifact =
         staged_side_effect_artifact(&ctx, &intent_artifact, ledger_key.clone(), 1)?;
     Ok(ErasedRunnerOutput {
@@ -246,6 +247,7 @@ async fn side_effect_prepare(
                 scope_id: ctx.node().scope_id.clone(),
                 attempt_id: ctx.attempt_id().clone(),
                 ledger_key: ledger_key.clone(),
+                ledger_purpose: ledger_purpose.clone(),
                 invocation_epoch: 1,
                 intent_schema_id: ProofIntent::schema_id().map_err(runtime_value_error)?,
                 intent_hash: intent_artifact.evidence.digest.clone(),
@@ -266,6 +268,7 @@ async fn side_effect_prepare(
                 node_id: ctx.node().node_id.clone(),
                 attempt_id: ctx.attempt_id().clone(),
                 ledger_key: ledger_key.clone(),
+                ledger_purpose: ledger_purpose.clone(),
                 claim_owner: owner.clone(),
                 invocation_epoch: 1,
                 claim_generation: 1,
@@ -276,6 +279,7 @@ async fn side_effect_prepare(
                 node_id: ctx.node().node_id.clone(),
                 attempt_id: ctx.attempt_id().clone(),
                 ledger_key: ledger_key.clone(),
+                ledger_purpose: ledger_purpose.clone(),
                 invocation_epoch: 1,
                 claim_generation: 1,
                 claim_fencing_token: token.clone(),
@@ -287,6 +291,7 @@ async fn side_effect_prepare(
                 node_id: ctx.node().node_id.clone(),
                 attempt_id: ctx.attempt_id().clone(),
                 ledger_key,
+                ledger_purpose,
                 invocation_epoch: 1,
                 claim_owner: owner,
                 claim_generation: 1,
@@ -318,6 +323,7 @@ async fn side_effect_submission(
                 node_id: ctx.node().node_id.clone(),
                 attempt_id: ctx.attempt_id().clone(),
                 ledger_key,
+                ledger_purpose: events::SideEffectLedgerPurpose::Forward,
                 invocation_epoch,
                 submission_schema_id: ProofSubmission::schema_id().map_err(runtime_value_error)?,
                 submission_hash: artifact.evidence.digest,
@@ -349,6 +355,7 @@ async fn side_effect_receipt(
                 node_id: ctx.node().node_id.clone(),
                 attempt_id: ctx.attempt_id().clone(),
                 ledger_key,
+                ledger_purpose: events::SideEffectLedgerPurpose::Forward,
                 invocation_epoch,
                 receipt_schema_id: ProofReceipt::schema_id().map_err(runtime_value_error)?,
                 receipt_hash: artifact.evidence.digest,
@@ -381,6 +388,7 @@ async fn side_effect_confirmation(
                 node_id: ctx.node().node_id.clone(),
                 attempt_id: ctx.attempt_id().clone(),
                 ledger_key,
+                ledger_purpose: events::SideEffectLedgerPurpose::Forward,
                 invocation_epoch,
                 confirmation_schema_id: ProofConfirmation::schema_id()
                     .map_err(runtime_value_error)?,

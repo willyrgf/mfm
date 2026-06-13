@@ -1265,6 +1265,7 @@ fn side_effect_projection_json(projection: &SideEffectProjection) -> Value {
         "event_id": projection.event_id.as_str(),
         "intent": side_effect_intent_json(&projection.intent),
         "ledger_key": projection.ledger_key.as_str(),
+        "ledger_purpose": side_effect_ledger_purpose_json(&projection.ledger_purpose),
         "phase": side_effect_phase_json(&projection.phase),
         "prepared_invocation": projection.prepared_invocation.as_ref().map(side_effect_artifact_json),
         "receipt": projection.receipt.as_ref().map(side_effect_artifact_json),
@@ -1275,6 +1276,7 @@ fn side_effect_projection_json(projection: &SideEffectProjection) -> Value {
 fn parse_side_effect_projection(json: &Value) -> Result<SideEffectProjection> {
     Ok(SideEffectProjection {
         ledger_key: events::SideEffectLedgerKey::new(required_str(json, "ledger_key")?)?,
+        ledger_purpose: parse_side_effect_ledger_purpose(required_obj(json, "ledger_purpose")?)?,
         event_id: parse_identity(required_str(json, "event_id")?)?,
         intent: parse_side_effect_intent(required_obj(json, "intent")?)?,
         prepared_invocation: optional_obj(json, "prepared_invocation")?
@@ -1312,6 +1314,35 @@ fn parse_side_effect_artifact(json: &Value) -> Result<SideEffectArtifactProjecti
             .map(parse_identity)
             .transpose()?,
     })
+}
+
+fn side_effect_ledger_purpose_json(purpose: &events::SideEffectLedgerPurpose) -> Value {
+    match purpose {
+        events::SideEffectLedgerPurpose::Forward => serde_json::json!({
+            "kind": "forward",
+        }),
+        events::SideEffectLedgerPurpose::Remediation { forward_ledger_key } => {
+            serde_json::json!({
+                "forward_ledger_key": forward_ledger_key.as_str(),
+                "kind": "remediation",
+            })
+        }
+    }
+}
+
+fn parse_side_effect_ledger_purpose(json: &Value) -> Result<events::SideEffectLedgerPurpose> {
+    match required_str(json, "kind")? {
+        "forward" => Ok(events::SideEffectLedgerPurpose::Forward),
+        "remediation" => Ok(events::SideEffectLedgerPurpose::Remediation {
+            forward_ledger_key: events::SideEffectLedgerKey::new(required_str(
+                json,
+                "forward_ledger_key",
+            )?)?,
+        }),
+        other => Err(PostgresTypedStoreError::Store(StoreError::Identity(
+            format!("unknown side-effect ledger purpose {other}"),
+        ))),
+    }
 }
 
 fn side_effect_intent_json(intent: &SideEffectIntentProjection) -> Value {

@@ -23,8 +23,8 @@ use mfm_ids::{
 };
 use mfm_program::{
     build_root_with_registries, AdapterBindingSpec, CanonicalSeed, IdempotencyKey,
-    ManagedWriteState, PublicOutputKey, PureState, ReadState, RootBuilder, ScopeKey, SeedKey,
-    SideEffectState, StateKey, StateRegistryBuilder, StateResult, StateSpec,
+    ManagedWriteState, PublicOutputKey, PureState, ReadState, RootBuilder, SagaPolicy, ScopeKey,
+    SeedKey, SideEffectState, StateKey, StateRegistryBuilder, StateResult, StateSpec,
 };
 use mfm_program_derive::{MfmConfig, MfmValue, PublicOutputs};
 use mfm_replay::v1 as replay;
@@ -1069,6 +1069,7 @@ fn reference_fixture() -> Result<ReferenceFixture, String> {
         states.snapshot(),
         mfm_program::OperationRegistryBuilder::new().snapshot(),
         |root: &mut RootBuilder<'_, '_>| {
+            root.set_saga_policy(SagaPolicy::FailWithoutAcdcClaim)?;
             let seed = root.seed(SeedKey::new("launch")?, seed.clone())?;
             let pure = root.scope().state::<ReferencePureState, _>(
                 StateKey::new("pure")?,
@@ -1314,6 +1315,7 @@ fn duplicate_submit_rejected(run: &mut ReferenceRun) -> Result<bool, String> {
                 node_id: submission.node_id,
                 attempt_id: submission.attempt_id,
                 ledger_key: submission.ledger_key,
+                ledger_purpose: submission.ledger_purpose,
                 invocation_epoch: submission.invocation_epoch,
                 submission_schema_id: submission.submission_schema_id,
                 submission_hash: duplicate_digest,
@@ -1499,6 +1501,7 @@ impl ErasedNodeRunner for FailingSideEffectRunner {
                             scope_id: ctx.node().scope_id.clone(),
                             attempt_id: ctx.attempt_id().clone(),
                             ledger_key: ledger.clone(),
+                            ledger_purpose: events::SideEffectLedgerPurpose::Forward,
                             invocation_epoch: 1,
                             intent_schema_id: ctx.node().config_ref.schema_id.clone(),
                             intent_hash: artifact.evidence.digest.clone(),
@@ -1518,6 +1521,7 @@ impl ErasedNodeRunner for FailingSideEffectRunner {
                         node_id: ctx.node().node_id.clone(),
                         attempt_id: ctx.attempt_id().clone(),
                         ledger_key: ledger,
+                        ledger_purpose: events::SideEffectLedgerPurpose::Forward,
                         invocation_epoch: 1,
                         failure_phase: events::side_effect::FailurePhase::BeforeInvocationStarted,
                         retryable: false,
@@ -1566,6 +1570,7 @@ impl ErasedNodeRunner for AmbiguousSideEffectRunner {
                             node_id: ctx.node().node_id.clone(),
                             attempt_id: ctx.attempt_id().clone(),
                             ledger_key: ledger,
+                            ledger_purpose: events::SideEffectLedgerPurpose::Forward,
                             invocation_epoch: 1,
                             ambiguity_code: events::AmbiguityCode::new("unknown_submission")
                                 .map_err(RuntimeError::from)?,
@@ -1689,6 +1694,7 @@ fn replay_artifacts(
             events::KernelEventPayload::ArtifactReferenced(_)
             | events::KernelEventPayload::FactRecorded(_)
             | events::KernelEventPayload::CellProduced(_)
+            | events::KernelEventPayload::ManualResolutionRecorded(_)
             | events::KernelEventPayload::StateAttemptStarted(_)
             | events::KernelEventPayload::CellSkipped(_)
             | events::KernelEventPayload::SideEffectClaimed(_)
@@ -2435,6 +2441,7 @@ fn side_effect_claimed(
         node_id: ctx.node().node_id.clone(),
         attempt_id: ctx.attempt_id().clone(),
         ledger_key: ledger,
+        ledger_purpose: events::SideEffectLedgerPurpose::Forward,
         claim_owner: side_effect_claim_owner(ctx.attempt_no(), claim_generation),
         invocation_epoch,
         claim_generation,
@@ -2453,6 +2460,7 @@ fn side_effect_claim_taken_over(
         node_id: ctx.node().node_id.clone(),
         attempt_id: ctx.attempt_id().clone(),
         ledger_key: ledger,
+        ledger_purpose: events::SideEffectLedgerPurpose::Forward,
         previous_claim_owner: previous.claim_owner.clone(),
         new_claim_owner: side_effect_claim_owner(ctx.attempt_no(), claim_generation),
         invocation_epoch: previous.invocation_epoch,
@@ -2473,6 +2481,7 @@ fn side_effect_prepared(
         node_id: ctx.node().node_id.clone(),
         attempt_id: ctx.attempt_id().clone(),
         ledger_key: ledger,
+        ledger_purpose: events::SideEffectLedgerPurpose::Forward,
         invocation_epoch,
         claim_generation,
         claim_fencing_token: side_effect_fencing_token(ctx.attempt_no(), claim_generation),
@@ -2492,6 +2501,7 @@ fn side_effect_invocation_started(
         node_id: ctx.node().node_id.clone(),
         attempt_id: ctx.attempt_id().clone(),
         ledger_key: ledger,
+        ledger_purpose: events::SideEffectLedgerPurpose::Forward,
         invocation_epoch,
         claim_owner: side_effect_claim_owner(ctx.attempt_no(), claim_generation),
         claim_generation,
@@ -2511,6 +2521,7 @@ fn side_effect_submission_observed(
         node_id: ctx.node().node_id.clone(),
         attempt_id: ctx.attempt_id().clone(),
         ledger_key: ledger,
+        ledger_purpose: events::SideEffectLedgerPurpose::Forward,
         invocation_epoch,
         submission_schema_id: ctx.node().config_ref.schema_id.clone(),
         submission_hash: digest,
@@ -2530,6 +2541,7 @@ fn side_effect_receipt_observed(
         node_id: ctx.node().node_id.clone(),
         attempt_id: ctx.attempt_id().clone(),
         ledger_key: ledger,
+        ledger_purpose: events::SideEffectLedgerPurpose::Forward,
         invocation_epoch,
         receipt_schema_id: ctx.node().config_ref.schema_id.clone(),
         receipt_hash: digest,
@@ -2551,6 +2563,7 @@ fn side_effect_confirmation_observed(
         node_id: ctx.node().node_id.clone(),
         attempt_id: ctx.attempt_id().clone(),
         ledger_key: ledger,
+        ledger_purpose: events::SideEffectLedgerPurpose::Forward,
         invocation_epoch,
         confirmation_schema_id: ctx.node().config_ref.schema_id.clone(),
         confirmation_hash: digest,
@@ -2744,6 +2757,7 @@ impl ErasedNodeRunner for DeterministicSideEffectRunner {
                                 node_id: ctx.node().node_id.clone(),
                                 attempt_id: ctx.attempt_id().clone(),
                                 ledger_key: ledger,
+                                ledger_purpose: events::SideEffectLedgerPurpose::Forward,
                                 invocation_epoch: *invocation_epoch,
                                 evidence_schema_id: ctx.node().config_ref.schema_id.clone(),
                                 evidence_hash: artifact.evidence.digest,
@@ -2880,6 +2894,7 @@ impl DeterministicSideEffectRunner {
                         scope_id: ctx.node().scope_id.clone(),
                         attempt_id: ctx.attempt_id().clone(),
                         ledger_key: ledger.clone(),
+                        ledger_purpose: events::SideEffectLedgerPurpose::Forward,
                         invocation_epoch: 1,
                         intent_schema_id: ctx.node().config_ref.schema_id.clone(),
                         intent_hash: artifact.evidence.digest.clone(),

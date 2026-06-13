@@ -81,6 +81,20 @@ fn checked_ascii_token(field: &'static str, value: impl AsRef<str>) -> Result<St
     Ok(value.to_owned())
 }
 
+fn checked_printable_text(field: &'static str, value: impl AsRef<str>) -> Result<String> {
+    let value = value.as_ref();
+    if value.is_empty()
+        || value.len() > 1024
+        || !value.bytes().all(|byte| matches!(byte, 0x20..=0x7e))
+    {
+        return Err(EventError::InvalidString {
+            field,
+            value: value.to_owned(),
+        });
+    }
+    Ok(value.to_owned())
+}
+
 macro_rules! checked_string_type {
     ($(#[$doc:meta])* $name:ident, $field:literal) => {
         $(#[$doc])*
@@ -91,6 +105,32 @@ macro_rules! checked_string_type {
             #[doc = concat!("Creates a checked `", stringify!($name), "`.")]
             pub fn new(value: impl AsRef<str>) -> Result<Self> {
                 checked_ascii_token($field, value).map(Self)
+            }
+
+            #[doc = concat!("Returns the persisted `", stringify!($name), "` string.")]
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+        }
+
+        impl ::std::fmt::Display for $name {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                f.write_str(self.as_str())
+            }
+        }
+    };
+}
+
+macro_rules! checked_text_type {
+    ($(#[$doc:meta])* $name:ident, $field:literal) => {
+        $(#[$doc])*
+        #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        pub struct $name(String);
+
+        impl $name {
+            #[doc = concat!("Creates a checked `", stringify!($name), "`.")]
+            pub fn new(value: impl AsRef<str>) -> Result<Self> {
+                checked_printable_text($field, value).map(Self)
             }
 
             #[doc = concat!("Returns the persisted `", stringify!($name), "` string.")]
@@ -184,13 +224,17 @@ pub mod v1 {
         ErrorCode,
         "error code"
     );
+    checked_text_type!(
+        /// Optional redaction-safe operator note for manual resolution.
+        ManualResolutionNote,
+        "manual resolution note"
+    );
 
     /// Persisted purpose for a side-effect ledger.
     ///
     /// Purpose is part of certified saga semantics: forward ledgers are eligible for
     /// classification, while remediation ledgers link to the confirmed forward ledger they
-    /// compensate. This type is not yet attached to side-effect payloads in the pure skeleton
-    /// commit.
+    /// compensate.
     #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub enum SideEffectLedgerPurpose {
         /// Ordinary forward side-effect ledger.
@@ -200,6 +244,16 @@ pub mod v1 {
             /// Forward ledger key whose obligation this remediation addresses.
             forward_ledger_key: SideEffectLedgerKey,
         },
+    }
+
+    impl SideEffectLedgerPurpose {
+        /// Returns the persisted lowercase purpose tag.
+        pub const fn kind(&self) -> &'static str {
+            match self {
+                Self::Forward => "forward",
+                Self::Remediation { .. } => "remediation",
+            }
+        }
     }
 
     /// Run-scoped manual resolution outcome.
@@ -306,6 +360,8 @@ pub mod v1 {
         StateAttemptCompleted(StateAttemptCompleted),
         /// State attempt failed event.
         StateAttemptFailed(StateAttemptFailed),
+        /// Manual saga resolution recorded event.
+        ManualResolutionRecorded(ManualResolutionRecorded),
         /// Run completed event.
         RunCompleted(RunCompleted),
         /// Retention references appended event.
@@ -340,6 +396,7 @@ pub mod v1 {
                 Self::PublicOutputRenderFailed(_) => PUBLIC_OUTPUT_RENDER_FAILED_SCHEMA,
                 Self::StateAttemptCompleted(_) => STATE_ATTEMPT_COMPLETED_SCHEMA,
                 Self::StateAttemptFailed(_) => STATE_ATTEMPT_FAILED_SCHEMA,
+                Self::ManualResolutionRecorded(_) => MANUAL_RESOLUTION_RECORDED_SCHEMA,
                 Self::RunCompleted(_) => RUN_COMPLETED_SCHEMA,
                 Self::RetentionRefsAppended(_) => RETENTION_REFS_APPENDED_SCHEMA,
                 Self::RetentionManifestProjected(_) => RETENTION_MANIFEST_PROJECTED_SCHEMA,
@@ -604,6 +661,31 @@ pub mod v1 {
         pub outcome: RunCompletionOutcome,
     }
 
+    /// Manual resolution recorded event payload.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct ManualResolutionRecorded {
+        /// Run id.
+        pub run_id: RunId,
+        /// Certified typed spec hash.
+        pub spec_hash: SpecHash,
+        /// Operator-selected manual outcome.
+        pub outcome: ManualResolutionOutcome,
+        /// Operator identity reference schema id.
+        pub operator_identity_ref_schema_id: SchemaId,
+        /// Operator identity reference hash.
+        pub operator_identity_ref_hash: ContentDigest,
+        /// Operator identity reference artifact id.
+        pub operator_identity_ref_artifact_id: ArtifactId,
+        /// Evidence schema id.
+        pub evidence_schema_id: SchemaId,
+        /// Evidence hash.
+        pub evidence_hash: ContentDigest,
+        /// Evidence artifact id.
+        pub evidence_artifact_id: ArtifactId,
+        /// Optional redaction-safe operator note.
+        pub note: Option<ManualResolutionNote>,
+    }
+
     /// Run completion outcome.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub enum RunCompletionOutcome {
@@ -615,10 +697,6 @@ pub mod v1 {
         ManuallyResolved,
         /// Run ended without a compensation or AC/DC-equivalence claim.
         FailedWithoutAcdcClaim,
-        /// Run failed with a redaction-safe terminal error.
-        Failed(MfmErrorInfo),
-        /// Run was cancelled with a redaction-safe terminal error.
-        Cancelled(MfmErrorInfo),
     }
 
     /// Public-output evidence required for a completed run.
@@ -861,6 +939,8 @@ pub mod v1 {
             pub attempt_id: AttemptId,
             /// Side-effect ledger key.
             pub ledger_key: SideEffectLedgerKey,
+            /// Side-effect ledger purpose.
+            pub ledger_purpose: SideEffectLedgerPurpose,
             /// Invocation epoch.
             pub invocation_epoch: u32,
             /// Intent schema id.
@@ -896,6 +976,8 @@ pub mod v1 {
             pub attempt_id: AttemptId,
             /// Side-effect ledger key.
             pub ledger_key: SideEffectLedgerKey,
+            /// Side-effect ledger purpose.
+            pub ledger_purpose: SideEffectLedgerPurpose,
             /// Claim owner.
             pub claim_owner: RunnerInvocationId,
             /// Invocation epoch.
@@ -917,6 +999,8 @@ pub mod v1 {
             pub attempt_id: AttemptId,
             /// Side-effect ledger key.
             pub ledger_key: SideEffectLedgerKey,
+            /// Side-effect ledger purpose.
+            pub ledger_purpose: SideEffectLedgerPurpose,
             /// Previous claim owner.
             pub previous_claim_owner: RunnerInvocationId,
             /// New claim owner.
@@ -942,6 +1026,8 @@ pub mod v1 {
             pub attempt_id: AttemptId,
             /// Side-effect ledger key.
             pub ledger_key: SideEffectLedgerKey,
+            /// Side-effect ledger purpose.
+            pub ledger_purpose: SideEffectLedgerPurpose,
             /// Invocation epoch.
             pub invocation_epoch: u32,
             /// Claim generation.
@@ -965,6 +1051,8 @@ pub mod v1 {
             pub attempt_id: AttemptId,
             /// Side-effect ledger key.
             pub ledger_key: SideEffectLedgerKey,
+            /// Side-effect ledger purpose.
+            pub ledger_purpose: SideEffectLedgerPurpose,
             /// Invocation epoch.
             pub invocation_epoch: u32,
             /// Claim owner.
@@ -986,6 +1074,8 @@ pub mod v1 {
             pub attempt_id: AttemptId,
             /// Side-effect ledger key.
             pub ledger_key: SideEffectLedgerKey,
+            /// Side-effect ledger purpose.
+            pub ledger_purpose: SideEffectLedgerPurpose,
             /// Invocation epoch.
             pub invocation_epoch: u32,
             /// Proof schema id.
@@ -1007,6 +1097,8 @@ pub mod v1 {
             pub attempt_id: AttemptId,
             /// Side-effect ledger key.
             pub ledger_key: SideEffectLedgerKey,
+            /// Side-effect ledger purpose.
+            pub ledger_purpose: SideEffectLedgerPurpose,
             /// Invocation epoch.
             pub invocation_epoch: u32,
             /// Submission schema id.
@@ -1028,6 +1120,8 @@ pub mod v1 {
             pub attempt_id: AttemptId,
             /// Side-effect ledger key.
             pub ledger_key: SideEffectLedgerKey,
+            /// Side-effect ledger purpose.
+            pub ledger_purpose: SideEffectLedgerPurpose,
             /// Invocation epoch.
             pub invocation_epoch: u32,
             /// Evidence schema id.
@@ -1049,6 +1143,8 @@ pub mod v1 {
             pub attempt_id: AttemptId,
             /// Side-effect ledger key.
             pub ledger_key: SideEffectLedgerKey,
+            /// Side-effect ledger purpose.
+            pub ledger_purpose: SideEffectLedgerPurpose,
             /// Invocation epoch.
             pub invocation_epoch: u32,
             /// Receipt schema id.
@@ -1072,6 +1168,8 @@ pub mod v1 {
             pub attempt_id: AttemptId,
             /// Side-effect ledger key.
             pub ledger_key: SideEffectLedgerKey,
+            /// Side-effect ledger purpose.
+            pub ledger_purpose: SideEffectLedgerPurpose,
             /// Invocation epoch.
             pub invocation_epoch: u32,
             /// Confirmation schema id.
@@ -1095,6 +1193,8 @@ pub mod v1 {
             pub attempt_id: AttemptId,
             /// Side-effect ledger key.
             pub ledger_key: SideEffectLedgerKey,
+            /// Side-effect ledger purpose.
+            pub ledger_purpose: SideEffectLedgerPurpose,
             /// Invocation epoch.
             pub invocation_epoch: u32,
             /// Ambiguity code.
@@ -1118,6 +1218,8 @@ pub mod v1 {
             pub attempt_id: AttemptId,
             /// Side-effect ledger key.
             pub ledger_key: SideEffectLedgerKey,
+            /// Side-effect ledger purpose.
+            pub ledger_purpose: SideEffectLedgerPurpose,
             /// Invocation epoch.
             pub invocation_epoch: u32,
             /// Failure phase.
@@ -1713,6 +1815,32 @@ pub mod v1 {
                     ),
                 ],
             ),
+            "SideEffectLedgerPurpose" => enum_type(
+                "SideEffectLedgerPurpose",
+                vec![
+                    enum_variant("forward", Vec::new()),
+                    enum_variant(
+                        "remediation",
+                        vec![schema_field(
+                            "forward_ledger_key",
+                            "SideEffectLedgerKey",
+                            EventFieldCardinality::Required,
+                        )],
+                    ),
+                ],
+            ),
+            "ManualResolutionOutcome" => unit_enum_type(
+                "ManualResolutionOutcome",
+                &["confirm_remediated", "fail_without_acdc_claim"],
+            ),
+            "ManualResolutionNote" => struct_type(
+                "ManualResolutionNote",
+                vec![schema_field(
+                    "text",
+                    "String",
+                    EventFieldCardinality::Required,
+                )],
+            ),
             "RunCompletionOutcome" => enum_type(
                 "RunCompletionOutcome",
                 vec![
@@ -1727,22 +1855,6 @@ pub mod v1 {
                     enum_variant("compensated", Vec::new()),
                     enum_variant("manually_resolved", Vec::new()),
                     enum_variant("failed_without_acdc_claim", Vec::new()),
-                    enum_variant(
-                        "failed",
-                        vec![schema_field(
-                            "terminal_error",
-                            "MfmErrorInfo",
-                            EventFieldCardinality::Required,
-                        )],
-                    ),
-                    enum_variant(
-                        "cancelled",
-                        vec![schema_field(
-                            "terminal_error",
-                            "MfmErrorInfo",
-                            EventFieldCardinality::Required,
-                        )],
-                    ),
                 ],
             ),
             "FailurePhase" => unit_enum_type(
@@ -1857,6 +1969,7 @@ pub mod v1 {
             PUBLIC_OUTPUT_RENDER_FAILED_SCHEMA,
             STATE_ATTEMPT_COMPLETED_SCHEMA,
             STATE_ATTEMPT_FAILED_SCHEMA,
+            MANUAL_RESOLUTION_RECORDED_SCHEMA,
             RUN_COMPLETED_SCHEMA,
             RETENTION_REFS_APPENDED_SCHEMA,
             RETENTION_MANIFEST_PROJECTED_SCHEMA,
@@ -1985,6 +2098,7 @@ pub mod v1 {
             EventFieldDescriptor::required("scope_id", "ScopeId"),
             EventFieldDescriptor::required("attempt_id", "AttemptId"),
             EventFieldDescriptor::required("ledger_key", "SideEffectLedgerKey"),
+            EventFieldDescriptor::required("ledger_purpose", "SideEffectLedgerPurpose"),
             EventFieldDescriptor::required("invocation_epoch", "u32"),
             EventFieldDescriptor::required("intent_schema_id", "SchemaId"),
             EventFieldDescriptor::required("intent_hash", "ContentDigest"),
@@ -2008,6 +2122,7 @@ pub mod v1 {
             EventFieldDescriptor::required("node_id", "NodeId"),
             EventFieldDescriptor::required("attempt_id", "AttemptId"),
             EventFieldDescriptor::required("ledger_key", "SideEffectLedgerKey"),
+            EventFieldDescriptor::required("ledger_purpose", "SideEffectLedgerPurpose"),
             EventFieldDescriptor::required("claim_owner", "RunnerInvocationId"),
             EventFieldDescriptor::required("invocation_epoch", "u32"),
             EventFieldDescriptor::required("claim_generation", "u32"),
@@ -2024,6 +2139,7 @@ pub mod v1 {
             EventFieldDescriptor::required("node_id", "NodeId"),
             EventFieldDescriptor::required("attempt_id", "AttemptId"),
             EventFieldDescriptor::required("ledger_key", "SideEffectLedgerKey"),
+            EventFieldDescriptor::required("ledger_purpose", "SideEffectLedgerPurpose"),
             EventFieldDescriptor::required("previous_claim_owner", "RunnerInvocationId"),
             EventFieldDescriptor::required("new_claim_owner", "RunnerInvocationId"),
             EventFieldDescriptor::required("invocation_epoch", "u32"),
@@ -2042,6 +2158,7 @@ pub mod v1 {
             EventFieldDescriptor::required("node_id", "NodeId"),
             EventFieldDescriptor::required("attempt_id", "AttemptId"),
             EventFieldDescriptor::required("ledger_key", "SideEffectLedgerKey"),
+            EventFieldDescriptor::required("ledger_purpose", "SideEffectLedgerPurpose"),
             EventFieldDescriptor::required("invocation_epoch", "u32"),
             EventFieldDescriptor::required("claim_generation", "u32"),
             EventFieldDescriptor::required("claim_fencing_token", "ClaimFencingToken"),
@@ -2059,6 +2176,7 @@ pub mod v1 {
             EventFieldDescriptor::required("node_id", "NodeId"),
             EventFieldDescriptor::required("attempt_id", "AttemptId"),
             EventFieldDescriptor::required("ledger_key", "SideEffectLedgerKey"),
+            EventFieldDescriptor::required("ledger_purpose", "SideEffectLedgerPurpose"),
             EventFieldDescriptor::required("invocation_epoch", "u32"),
             EventFieldDescriptor::required("claim_owner", "RunnerInvocationId"),
             EventFieldDescriptor::required("claim_generation", "u32"),
@@ -2075,6 +2193,7 @@ pub mod v1 {
             EventFieldDescriptor::required("node_id", "NodeId"),
             EventFieldDescriptor::required("attempt_id", "AttemptId"),
             EventFieldDescriptor::required("ledger_key", "SideEffectLedgerKey"),
+            EventFieldDescriptor::required("ledger_purpose", "SideEffectLedgerPurpose"),
             EventFieldDescriptor::required("invocation_epoch", "u32"),
             EventFieldDescriptor::required("proof_schema_id", "SchemaId"),
             EventFieldDescriptor::required("proof_hash", "ContentDigest"),
@@ -2091,6 +2210,7 @@ pub mod v1 {
             EventFieldDescriptor::required("node_id", "NodeId"),
             EventFieldDescriptor::required("attempt_id", "AttemptId"),
             EventFieldDescriptor::required("ledger_key", "SideEffectLedgerKey"),
+            EventFieldDescriptor::required("ledger_purpose", "SideEffectLedgerPurpose"),
             EventFieldDescriptor::required("invocation_epoch", "u32"),
             EventFieldDescriptor::required("submission_schema_id", "SchemaId"),
             EventFieldDescriptor::required("submission_hash", "ContentDigest"),
@@ -2107,6 +2227,7 @@ pub mod v1 {
             EventFieldDescriptor::required("node_id", "NodeId"),
             EventFieldDescriptor::required("attempt_id", "AttemptId"),
             EventFieldDescriptor::required("ledger_key", "SideEffectLedgerKey"),
+            EventFieldDescriptor::required("ledger_purpose", "SideEffectLedgerPurpose"),
             EventFieldDescriptor::required("invocation_epoch", "u32"),
             EventFieldDescriptor::required("evidence_schema_id", "SchemaId"),
             EventFieldDescriptor::required("evidence_hash", "ContentDigest"),
@@ -2123,6 +2244,7 @@ pub mod v1 {
             EventFieldDescriptor::required("node_id", "NodeId"),
             EventFieldDescriptor::required("attempt_id", "AttemptId"),
             EventFieldDescriptor::required("ledger_key", "SideEffectLedgerKey"),
+            EventFieldDescriptor::required("ledger_purpose", "SideEffectLedgerPurpose"),
             EventFieldDescriptor::required("invocation_epoch", "u32"),
             EventFieldDescriptor::required("receipt_schema_id", "SchemaId"),
             EventFieldDescriptor::required("receipt_hash", "ContentDigest"),
@@ -2140,6 +2262,7 @@ pub mod v1 {
             EventFieldDescriptor::required("node_id", "NodeId"),
             EventFieldDescriptor::required("attempt_id", "AttemptId"),
             EventFieldDescriptor::required("ledger_key", "SideEffectLedgerKey"),
+            EventFieldDescriptor::required("ledger_purpose", "SideEffectLedgerPurpose"),
             EventFieldDescriptor::required("invocation_epoch", "u32"),
             EventFieldDescriptor::required("confirmation_schema_id", "SchemaId"),
             EventFieldDescriptor::required("confirmation_hash", "ContentDigest"),
@@ -2157,6 +2280,7 @@ pub mod v1 {
             EventFieldDescriptor::required("node_id", "NodeId"),
             EventFieldDescriptor::required("attempt_id", "AttemptId"),
             EventFieldDescriptor::required("ledger_key", "SideEffectLedgerKey"),
+            EventFieldDescriptor::required("ledger_purpose", "SideEffectLedgerPurpose"),
             EventFieldDescriptor::required("invocation_epoch", "u32"),
             EventFieldDescriptor::required("ambiguity_code", "AmbiguityCode"),
             EventFieldDescriptor::required("evidence_schema_id", "SchemaId"),
@@ -2174,6 +2298,7 @@ pub mod v1 {
             EventFieldDescriptor::required("node_id", "NodeId"),
             EventFieldDescriptor::required("attempt_id", "AttemptId"),
             EventFieldDescriptor::required("ledger_key", "SideEffectLedgerKey"),
+            EventFieldDescriptor::required("ledger_purpose", "SideEffectLedgerPurpose"),
             EventFieldDescriptor::required("invocation_epoch", "u32"),
             EventFieldDescriptor::required("failure_phase", "FailurePhase"),
             EventFieldDescriptor::required("retryable", "bool"),
@@ -2238,6 +2363,24 @@ pub mod v1 {
         ],
     };
 
+    const MANUAL_RESOLUTION_RECORDED_SCHEMA: EventSchemaDescriptor = EventSchemaDescriptor {
+        schema_name: "mfm.events.v1.manual_resolution_recorded",
+        rust_type_path: "mfm_events::v1::ManualResolutionRecorded",
+        schema_version: EVENT_SCHEMA_VERSION,
+        fields: fields![
+            EventFieldDescriptor::required("run_id", "RunId"),
+            EventFieldDescriptor::required("spec_hash", "SpecHash"),
+            EventFieldDescriptor::required("outcome", "ManualResolutionOutcome"),
+            EventFieldDescriptor::required("operator_identity_ref_schema_id", "SchemaId"),
+            EventFieldDescriptor::required("operator_identity_ref_hash", "ContentDigest"),
+            EventFieldDescriptor::required("operator_identity_ref_artifact_id", "ArtifactId"),
+            EventFieldDescriptor::required("evidence_schema_id", "SchemaId"),
+            EventFieldDescriptor::required("evidence_hash", "ContentDigest"),
+            EventFieldDescriptor::required("evidence_artifact_id", "ArtifactId"),
+            EventFieldDescriptor::optional("note", "ManualResolutionNote"),
+        ],
+    };
+
     const RUN_COMPLETED_SCHEMA: EventSchemaDescriptor = EventSchemaDescriptor {
         schema_name: "mfm.events.v1.run_completed",
         rust_type_path: "mfm_events::v1::RunCompleted",
@@ -2293,7 +2436,7 @@ pub mod v1 {
                 .collect::<Vec<_>>()
                 .join("\n");
 
-            assert_eq!(all_event_schema_descriptors().len(), 25);
+            assert_eq!(all_event_schema_descriptors().len(), 26);
             assert_eq!(
                 rows,
                 "mfm_events::v1::RunStarted schema:mfm.events.v1.run_started:1:sha256-jcs-v1:72c99b0fab445d1953efe2033b852029213f76cdf3497c4aabb957cfd6c0594b\n\
@@ -2302,23 +2445,24 @@ mfm_events::v1::FactRecorded schema:mfm.events.v1.fact_recorded:1:sha256-jcs-v1:
 mfm_events::v1::ArtifactReferenced schema:mfm.events.v1.artifact_referenced:1:sha256-jcs-v1:613176b118a4c04c9c6e8a44f6ef7d1e2ca40599aeff76c62e5e7f94f0cf036e\n\
 mfm_events::v1::CellProduced schema:mfm.events.v1.cell_produced:1:sha256-jcs-v1:9a2b250e7a5270bb302ae76a06091873dc50644855bace41bab97dcce311f07a\n\
 mfm_events::v1::CellSkipped schema:mfm.events.v1.cell_skipped:1:sha256-jcs-v1:e82d7230e3ca668b68f1403d3db7c07d36a3373f8e3744e9a41351a7aa5392f4\n\
-mfm_events::v1::side_effect::IntentPersisted schema:mfm.events.v1.side_effect.intent_persisted:1:sha256-jcs-v1:4fdfdd0e11e61200e015132408c9e7ed5f58edfe1c934fe117d709122ef04aaa\n\
-mfm_events::v1::side_effect::Claimed schema:mfm.events.v1.side_effect.claimed:1:sha256-jcs-v1:20fc2bed7cf5b9eb67ae3f3991bf9f874d0340aedb35c01d3e4c24405b043c6e\n\
-mfm_events::v1::side_effect::ClaimTakenOver schema:mfm.events.v1.side_effect.claim_taken_over:1:sha256-jcs-v1:3264ae1a9d53d90c5b786851e295ff3ddab49fb09585f6a8c750fb9e6cade32f\n\
-mfm_events::v1::side_effect::InvocationPrepared schema:mfm.events.v1.side_effect.invocation_prepared:1:sha256-jcs-v1:991c1221363102eb01640ea1538e93ca7c499d4cd992a9ecb207a8f4196d0055\n\
-mfm_events::v1::side_effect::InvocationStarted schema:mfm.events.v1.side_effect.invocation_started:1:sha256-jcs-v1:3653aa14495fdce6c969ce9d24289a837d68e084e3dbfca1657707f8f0be9d15\n\
-mfm_events::v1::side_effect::NotSubmittedProven schema:mfm.events.v1.side_effect.not_submitted_proven:1:sha256-jcs-v1:61a155497633dc50f7321eddbb404adca77fd20e37d19cf14cf3ccef98b700ce\n\
-mfm_events::v1::side_effect::SubmissionObserved schema:mfm.events.v1.side_effect.submission_observed:1:sha256-jcs-v1:693164b42ff85e73793603fcb73222ed2baf4c12689b7c7adfbb3cef234d0be6\n\
-mfm_events::v1::side_effect::SubmissionUnknown schema:mfm.events.v1.side_effect.submission_unknown:1:sha256-jcs-v1:3428b3f01f8ea1e49747c9ecac88aabc322f54512e65e7eafb4fe10bb26bcd40\n\
-mfm_events::v1::side_effect::ReceiptObserved schema:mfm.events.v1.side_effect.receipt_observed:1:sha256-jcs-v1:d1a5b302044d61b98a3b91c5fc4a9b3c647c1c2beff58afc42a22331abb88803\n\
-mfm_events::v1::side_effect::ConfirmationObserved schema:mfm.events.v1.side_effect.confirmation_observed:1:sha256-jcs-v1:70b439cb9f97eb49550a56abee943a6b076566158b06285314ba681ca9eab0ac\n\
-mfm_events::v1::side_effect::Ambiguous schema:mfm.events.v1.side_effect.ambiguous:1:sha256-jcs-v1:e06e1bbcabfd1cca7a811aa26adeaddaa46ea620bd756d6a8fab457288a87da2\n\
-mfm_events::v1::side_effect::Failed schema:mfm.events.v1.side_effect.failed:1:sha256-jcs-v1:1b8d7fe901adb212967287813afb043544f39e6e6814c6716d91d809e544fad1\n\
+mfm_events::v1::side_effect::IntentPersisted schema:mfm.events.v1.side_effect.intent_persisted:1:sha256-jcs-v1:d2f3042ed5189e6e5081b781b205886e3c7d469e4cadb0fa4a61e460926c7cce\n\
+mfm_events::v1::side_effect::Claimed schema:mfm.events.v1.side_effect.claimed:1:sha256-jcs-v1:264b474d74a9349bbc1b126e0c13ec3b29ec63124d54db6925fa41e2a7e8ef78\n\
+mfm_events::v1::side_effect::ClaimTakenOver schema:mfm.events.v1.side_effect.claim_taken_over:1:sha256-jcs-v1:358052910361a392a93a34fbb8bcccfd3edde420caa19289e1cd6136a7421a9f\n\
+mfm_events::v1::side_effect::InvocationPrepared schema:mfm.events.v1.side_effect.invocation_prepared:1:sha256-jcs-v1:61bc9acea0ae7ead8d31d8a752a5b02ecc6e6c4d0f4118dfef25a21f8dd5c82c\n\
+mfm_events::v1::side_effect::InvocationStarted schema:mfm.events.v1.side_effect.invocation_started:1:sha256-jcs-v1:51cbcca15a2cd022b87a78b71e7652f2928e3dcb011f47312cb5becaa8729002\n\
+mfm_events::v1::side_effect::NotSubmittedProven schema:mfm.events.v1.side_effect.not_submitted_proven:1:sha256-jcs-v1:795bf7a92342608ce42e42335ab318b060fce28353e4bf91ca56dda72d4da0f7\n\
+mfm_events::v1::side_effect::SubmissionObserved schema:mfm.events.v1.side_effect.submission_observed:1:sha256-jcs-v1:08c47a5f1a00a0052bdc66fdbf6273eb6dd39670ee7936b9e68c982fa333c714\n\
+mfm_events::v1::side_effect::SubmissionUnknown schema:mfm.events.v1.side_effect.submission_unknown:1:sha256-jcs-v1:ed336ca8c53f4567a1f63f8d911fc82526fb59669f5f8db68ac2745ce1f67ddb\n\
+mfm_events::v1::side_effect::ReceiptObserved schema:mfm.events.v1.side_effect.receipt_observed:1:sha256-jcs-v1:6fde665b12d208b0a016a11325650914918a98ad551053ffcab744e9b119c4cf\n\
+mfm_events::v1::side_effect::ConfirmationObserved schema:mfm.events.v1.side_effect.confirmation_observed:1:sha256-jcs-v1:ad50824f37c77ce4ffceddbb4cb84318439a09a6cb0b76e1424e5957b4ab1847\n\
+mfm_events::v1::side_effect::Ambiguous schema:mfm.events.v1.side_effect.ambiguous:1:sha256-jcs-v1:dfc9030e0d4fbbeb1800317623cecea3fbb1256c5a1b5d0e272bcda5fa4ef823\n\
+mfm_events::v1::side_effect::Failed schema:mfm.events.v1.side_effect.failed:1:sha256-jcs-v1:a42114700400f3a2e13ac86dc432b485299557a62138093134643970ba36d864\n\
 mfm_events::v1::PublicOutputProduced schema:mfm.events.v1.public_output_produced:1:sha256-jcs-v1:00d2531467818398553aa59e62c034fa0cd054e7856b89f425aeb4510f9c6776\n\
 mfm_events::v1::PublicOutputRenderFailed schema:mfm.events.v1.public_output_render_failed:1:sha256-jcs-v1:daaaa636cc408550ce27e462d0fcc2873e64a74dc73dbd3adc0ad6f39ecaa420\n\
 mfm_events::v1::StateAttemptCompleted schema:mfm.events.v1.state_attempt_completed:1:sha256-jcs-v1:36800f9d3ae748d407bc2ea24339049471c8ffe40aa86c53b35b6c7c6cd6ee80\n\
 mfm_events::v1::StateAttemptFailed schema:mfm.events.v1.state_attempt_failed:1:sha256-jcs-v1:e034fdb67110d1619a6f5cc6fbbfa8faa87c249d7f90ad938dfaa67c76a51a2d\n\
-mfm_events::v1::RunCompleted schema:mfm.events.v1.run_completed:1:sha256-jcs-v1:f51347833e211fdd91e74b532967bd2f2e95806c188827b9358bb0feaf62f891\n\
+mfm_events::v1::ManualResolutionRecorded schema:mfm.events.v1.manual_resolution_recorded:1:sha256-jcs-v1:ec43deb806de6509a7c3e276379d5989c5a339b5f31273c94fd22c9685810932\n\
+mfm_events::v1::RunCompleted schema:mfm.events.v1.run_completed:1:sha256-jcs-v1:cda37495cb3c733164ce1a91f58ff6d27bdcfbf9b1f9efe5a7fd48ae68eba479\n\
 mfm_events::v1::RetentionRefsAppended schema:mfm.events.v1.retention_refs_appended:1:sha256-jcs-v1:7b0fbde8418cc39d0e234aee9996dd95eb9d6830b2c0a33fde3749881e0e534e\n\
 mfm_events::v1::RetentionManifestProjected schema:mfm.events.v1.retention_manifest_projected:1:sha256-jcs-v1:269a96fc12c7c5004aa4592139f84cd0e4b617e04e494522ce639aeae0b9fed1"
             );
@@ -2351,7 +2495,23 @@ mfm_events::v1::RetentionManifestProjected schema:mfm.events.v1.retention_manife
             assert!(completed_json.contains("\"name\":\"compensated\""));
             assert!(completed_json.contains("\"name\":\"manually_resolved\""));
             assert!(completed_json.contains("\"name\":\"failed_without_acdc_claim\""));
-            assert!(completed_json.contains("\"name\":\"terminal_error\""));
+            assert!(!completed_json.contains("\"name\":\"terminal_error\""));
+
+            let manual_schema = MANUAL_RESOLUTION_RECORDED_SCHEMA
+                .canonical_json()
+                .expect("manual resolution schema json");
+            let manual_json = manual_schema.as_str();
+            assert!(manual_json.contains("\"name\":\"ManualResolutionOutcome\""));
+            assert!(manual_json.contains("\"name\":\"operator_identity_ref_schema_id\""));
+            assert!(manual_json.contains("\"name\":\"evidence_artifact_id\""));
+
+            let side_effect_schema = SIDE_EFFECT_INTENT_PERSISTED_SCHEMA
+                .canonical_json()
+                .expect("side effect schema json");
+            let side_effect_json = side_effect_schema.as_str();
+            assert!(side_effect_json.contains("\"name\":\"SideEffectLedgerPurpose\""));
+            assert!(side_effect_json.contains("\"name\":\"forward\""));
+            assert!(side_effect_json.contains("\"name\":\"remediation\""));
         }
 
         #[test]
@@ -2363,6 +2523,14 @@ mfm_events::v1::RetentionManifestProjected schema:mfm.events.v1.retention_manife
             assert_eq!(
                 ManualResolutionOutcome::FailWithoutAcdcClaim.as_str(),
                 "fail_without_acdc_claim"
+            );
+            assert_eq!(SideEffectLedgerPurpose::Forward.kind(), "forward");
+            assert_eq!(
+                SideEffectLedgerPurpose::Remediation {
+                    forward_ledger_key: SideEffectLedgerKey::new("forward-ledger").unwrap(),
+                }
+                .kind(),
+                "remediation"
             );
 
             let modes = [
@@ -2403,7 +2571,7 @@ mfm_events::v1::RetentionManifestProjected schema:mfm.events.v1.retention_manife
             schema_names.sort_unstable();
             schema_names.dedup();
 
-            assert_eq!(original_len, 25);
+            assert_eq!(original_len, 26);
             assert_eq!(schema_names.len(), original_len);
         }
 

@@ -1515,15 +1515,16 @@ async fn runtime_rejects_missing_run_start_retention_refs() {
 }
 
 #[tokio::test]
-async fn runtime_rejects_failed_or_cancelled_run_completion_without_complete_authority() {
+async fn runtime_rejects_non_completed_run_completion_without_saga_terminal_authority() {
     for (name, outcome) in [
+        ("compensated", events::RunCompletionOutcome::Compensated),
         (
-            "failed",
-            events::RunCompletionOutcome::Failed(public_output_error()),
+            "manually-resolved",
+            events::RunCompletionOutcome::ManuallyResolved,
         ),
         (
-            "cancelled",
-            events::RunCompletionOutcome::Cancelled(public_output_error()),
+            "failed-without-acdc-claim",
+            events::RunCompletionOutcome::FailedWithoutAcdcClaim,
         ),
     ] {
         let fixture = fixture();
@@ -1565,7 +1566,7 @@ async fn runtime_rejects_failed_or_cancelled_run_completion_without_complete_aut
                 &store.load_run_stream(&fixture.run_id),
             ),
             Err(RuntimeError::InvalidRunStream(message))
-                if message.contains("failed/cancelled")
+                if message.contains("non-Completed")
         ));
     }
 }
@@ -4620,6 +4621,7 @@ async fn side_effect_staged_artifact_must_match_payload_ledger_binding() {
                                 scope_id: ctx.node().scope_id.clone(),
                                 attempt_id: ctx.attempt_id().clone(),
                                 ledger_key: ledger.clone(),
+                                ledger_purpose: side_effect_ledger_purpose(),
                                 invocation_epoch: 1,
                                 intent_schema_id: ctx.node().config_ref.schema_id.clone(),
                                 intent_hash,
@@ -4863,6 +4865,7 @@ fn side_effect_failure_derives_attempt_failure_payload() {
                 node_id: node.node_id.clone(),
                 attempt_id: attempt_id.clone(),
                 ledger_key: side_effect_ledger_key(1),
+                ledger_purpose: side_effect_ledger_purpose(),
                 invocation_epoch: 1,
                 failure_phase: events::side_effect::FailurePhase::BeforeInvocationStarted,
                 retryable: false,
@@ -5097,6 +5100,7 @@ impl DeterministicSideEffectRunner {
                         scope_id: ctx.node().scope_id.clone(),
                         attempt_id: ctx.attempt_id().clone(),
                         ledger_key: ledger.clone(),
+                        ledger_purpose: side_effect_ledger_purpose(),
                         invocation_epoch: 1,
                         intent_schema_id: ctx.node().config_ref.schema_id.clone(),
                         intent_hash,
@@ -5165,6 +5169,7 @@ impl ErasedNodeRunner for AmbiguousSideEffectRunner {
                             node_id: ctx.node().node_id.clone(),
                             attempt_id: ctx.attempt_id().clone(),
                             ledger_key: ledger,
+                            ledger_purpose: side_effect_ledger_purpose(),
                             invocation_epoch: 1,
                             ambiguity_code: events::AmbiguityCode::new("unknown_submission")
                                 .expect("ambiguity code"),
@@ -5774,13 +5779,11 @@ fn referenced_artifact_ids_for_payload(payload: &events::KernelEventPayload) -> 
                 artifacts.push(evidence.artifact_id.clone());
             }
         }
+        events::KernelEventPayload::ManualResolutionRecorded(payload) => {
+            artifacts.push(payload.operator_identity_ref_artifact_id.clone());
+            artifacts.push(payload.evidence_artifact_id.clone());
+        }
         events::KernelEventPayload::RunCompleted(payload) => match &payload.outcome {
-            events::RunCompletionOutcome::Failed(error)
-            | events::RunCompletionOutcome::Cancelled(error) => {
-                if let Some(evidence) = &error.diagnostic_ref {
-                    artifacts.push(evidence.artifact_id.clone());
-                }
-            }
             events::RunCompletionOutcome::Completed(_) => {}
             events::RunCompletionOutcome::Compensated
             | events::RunCompletionOutcome::ManuallyResolved
@@ -6350,6 +6353,7 @@ fn append_not_submitted_proven(
                     node_id: node.node_id.clone(),
                     attempt_id: attempt_id.clone(),
                     ledger_key: side_effect_ledger_key(1),
+                    ledger_purpose: side_effect_ledger_purpose(),
                     invocation_epoch,
                     proof_schema_id: node.config_ref.schema_id.clone(),
                     proof_hash,
@@ -7933,6 +7937,10 @@ fn side_effect_ledger_key(attempt_no: u32) -> events::SideEffectLedgerKey {
     events::SideEffectLedgerKey::new(format!("ledger-{attempt_no}")).expect("ledger key")
 }
 
+fn side_effect_ledger_purpose() -> events::SideEffectLedgerPurpose {
+    events::SideEffectLedgerPurpose::Forward
+}
+
 fn side_effect_claim_owner(attempt_no: u32, generation: u32) -> events::RunnerInvocationId {
     events::RunnerInvocationId::new(format!("owner-{attempt_no}-{generation}"))
         .expect("claim owner")
@@ -7976,6 +7984,7 @@ fn side_effect_claimed(
         node_id: ctx.node().node_id.clone(),
         attempt_id: ctx.attempt_id().clone(),
         ledger_key: ledger,
+        ledger_purpose: side_effect_ledger_purpose(),
         claim_owner: side_effect_claim_owner(ctx.attempt_no(), claim_generation),
         invocation_epoch,
         claim_generation,
@@ -7994,6 +8003,7 @@ fn side_effect_claim_taken_over(
         node_id: ctx.node().node_id.clone(),
         attempt_id: ctx.attempt_id().clone(),
         ledger_key: ledger,
+        ledger_purpose: side_effect_ledger_purpose(),
         previous_claim_owner: previous.claim_owner.clone(),
         new_claim_owner: side_effect_claim_owner(ctx.attempt_no(), claim_generation),
         invocation_epoch: previous.invocation_epoch,
@@ -8014,6 +8024,7 @@ fn side_effect_prepared(
         node_id: ctx.node().node_id.clone(),
         attempt_id: ctx.attempt_id().clone(),
         ledger_key: ledger,
+        ledger_purpose: side_effect_ledger_purpose(),
         invocation_epoch,
         claim_generation,
         claim_fencing_token: side_effect_fencing_token(ctx.attempt_no(), claim_generation),
@@ -8033,6 +8044,7 @@ fn side_effect_invocation_started(
         node_id: ctx.node().node_id.clone(),
         attempt_id: ctx.attempt_id().clone(),
         ledger_key: ledger,
+        ledger_purpose: side_effect_ledger_purpose(),
         invocation_epoch,
         claim_owner: side_effect_claim_owner(ctx.attempt_no(), claim_generation),
         claim_generation,
@@ -8052,6 +8064,7 @@ fn side_effect_submission_observed(
         node_id: ctx.node().node_id.clone(),
         attempt_id: ctx.attempt_id().clone(),
         ledger_key: ledger,
+        ledger_purpose: side_effect_ledger_purpose(),
         invocation_epoch,
         submission_schema_id: ctx.node().config_ref.schema_id.clone(),
         submission_hash: digest,
@@ -8071,6 +8084,7 @@ fn side_effect_receipt_observed(
         node_id: ctx.node().node_id.clone(),
         attempt_id: ctx.attempt_id().clone(),
         ledger_key: ledger,
+        ledger_purpose: side_effect_ledger_purpose(),
         invocation_epoch,
         receipt_schema_id: ctx.node().config_ref.schema_id.clone(),
         receipt_hash: digest,
@@ -8091,6 +8105,7 @@ fn side_effect_confirmation_observed(
         node_id: ctx.node().node_id.clone(),
         attempt_id: ctx.attempt_id().clone(),
         ledger_key: ledger,
+        ledger_purpose: side_effect_ledger_purpose(),
         invocation_epoch,
         confirmation_schema_id: ctx.node().config_ref.schema_id.clone(),
         confirmation_hash: digest,

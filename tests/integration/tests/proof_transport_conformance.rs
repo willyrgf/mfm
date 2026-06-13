@@ -919,7 +919,7 @@ fn failed_completion_after_run_start(
             events::RunCompleted {
                 run_id: run_started.run_id.clone(),
                 spec_hash: run_started.spec_hash.clone(),
-                outcome: events::RunCompletionOutcome::Failed(test_error()),
+                outcome: events::RunCompletionOutcome::FailedWithoutAcdcClaim,
             },
         )],
         required_artifacts: Vec::new(),
@@ -928,17 +928,6 @@ fn failed_completion_after_run_start(
     let batch = store::build_committed_batch(&request, seq).expect("failed completion batch");
     rewritten.extend(batch.events().iter().cloned());
     rewritten
-}
-
-fn test_error() -> events::MfmErrorInfo {
-    events::MfmErrorInfo {
-        code: events::ErrorCode::new("test_failure").expect("error code"),
-        category: events::ErrorCategory::Runtime,
-        retryable: false,
-        safe_message: "test failure".to_owned(),
-        public_details: None,
-        diagnostic_ref: None,
-    }
 }
 
 fn append_post_completion_retention_refs(

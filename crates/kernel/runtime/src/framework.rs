@@ -251,6 +251,70 @@ fn framework_complete_run_executable(
     })
 }
 
+pub(crate) fn framework_resolve_saga_terminal_binding(
+    node: &spec::NodeSpec,
+    descriptor: &spec::StateDescriptorIdentity,
+) -> Result<ErasedRunnerBinding> {
+    let Some(spec::FrameworkNodeSpec::ResolveSagaTerminal(_)) = &node.framework else {
+        return Err(RuntimeError::RunnerBinding(format!(
+            "node {} is not a resolve-saga-terminal framework node",
+            node.node_id
+        )));
+    };
+    if descriptor.name != "mfm.framework.resolve_saga_terminal" {
+        return Err(RuntimeError::RunnerBinding(format!(
+            "resolve-saga-terminal node {} has non-framework descriptor {}",
+            node.node_id, descriptor.name
+        )));
+    }
+    let factory_id = events::RunnerFactoryId::new(descriptor.runner.as_str())?;
+    ErasedRunnerBinding::new(
+        node.descriptor_id.clone(),
+        factory_id.clone(),
+        framework_resolve_saga_terminal_executable(factory_id)?,
+        Arc::new(FrameworkResolveSagaTerminalRunner),
+    )
+}
+
+fn framework_resolve_saga_terminal_executable(
+    factory_id: events::RunnerFactoryId,
+) -> Result<events::ExecutableIdentity> {
+    let package_digest = content_digest_json(serde_json::json!({
+        "crate": "mfm-runtime",
+        "runner": "framework_resolve_saga_terminal",
+        "version": env!("CARGO_PKG_VERSION"),
+    }))?;
+    let binary_digest = content_digest_json(serde_json::json!({
+        "crate": "mfm-runtime",
+        "factory_id": factory_id.as_str(),
+        "runner": "framework_resolve_saga_terminal",
+        "version": env!("CARGO_PKG_VERSION"),
+    }))?;
+    Ok(events::ExecutableIdentity {
+        factory_id,
+        source_revision: events::SourceRevision::new("mfm-runtime-built-in")?,
+        cargo_package_name: events::PackageName::new("mfm-runtime")?,
+        cargo_package_version: events::PackageVersion::new(env!("CARGO_PKG_VERSION"))?,
+        cargo_package_digest: package_digest,
+        binary_digest,
+        nix_derivation_hash: None,
+        nix_output_hash: None,
+    })
+}
+
+struct FrameworkResolveSagaTerminalRunner;
+
+impl ErasedNodeRunner for FrameworkResolveSagaTerminalRunner {
+    fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
+        Box::pin(async move {
+            Err(RuntimeError::Blocked(format!(
+                "resolve-saga-terminal node {} requires saga terminal resolution scheduling",
+                ctx.node().node_id
+            )))
+        })
+    }
+}
+
 struct FrameworkCompleteRunRunner;
 
 impl ErasedNodeRunner for FrameworkCompleteRunRunner {
