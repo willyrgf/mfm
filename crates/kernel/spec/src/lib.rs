@@ -337,6 +337,30 @@ fn is_valid_field_segment(segment: &str) -> bool {
         && chars.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '/'))
 }
 
+fn checked_resource_namespace(field: &'static str, value: impl AsRef<str>) -> Result<String> {
+    let value = value.as_ref();
+    if value.len() <= 256
+        && value.contains('.')
+        && value.split('.').all(is_valid_resource_namespace_segment)
+    {
+        Ok(value.to_owned())
+    } else {
+        Err(SpecError::InvalidString {
+            field,
+            value: value.to_owned(),
+        })
+    }
+}
+
+fn is_valid_resource_namespace_segment(segment: &str) -> bool {
+    let mut chars = segment.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first.is_ascii_lowercase() || first.is_ascii_digit())
+        && chars.all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '_' | '-'))
+}
+
 macro_rules! checked_string_type {
     ($(#[$doc:meta])* $name:ident, $field:literal, $checker:ident) => {
         $(#[$doc])*
@@ -369,8 +393,8 @@ pub mod v1 {
 
     use super::{
         canonical_json, checked_ascii_token, checked_author_key, checked_field_path,
-        content_digest, spec_hash_from_canonical, ContentDigest, DigestAlgorithm,
-        PlainCanonicalJsonBytes, Result, SpecError, SpecHash,
+        checked_resource_namespace, content_digest, spec_hash_from_canonical, ContentDigest,
+        DigestAlgorithm, PlainCanonicalJsonBytes, Result, SpecError, SpecHash,
     };
     use mfm_capabilities::{CapabilityDescriptor, CapabilityRole, CapabilitySetDescriptor};
     use mfm_ids::{
@@ -648,6 +672,12 @@ pub mod v1 {
         CanonicalizerIdentity,
         "canonicalizer identity",
         checked_ascii_token
+    );
+    checked_string_type!(
+        /// Capability-style resource namespace for cross-run resource claims.
+        ResourceNamespace,
+        "resource namespace",
+        checked_resource_namespace
     );
 
     /// Hash-only envelope carrying a spec hash and non-semantic audit metadata.
@@ -1400,17 +1430,71 @@ pub mod v1 {
         }
     }
 
-    /// Side-effect contract digest placeholder persisted in node specs.
+    /// Resource claim declared by a side-effect node.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum ResourceClaimSpec {
+        /// The adapter records a concrete exclusive key before crossing the uncertainty boundary.
+        Exclusive {
+            /// Resource namespace for the exclusive lane.
+            namespace: ResourceNamespace,
+            /// Schema id for the adapter-recorded key evidence.
+            key_schema: SchemaId,
+        },
+        /// The adapter records the exact touched key set as typed post-execution evidence.
+        ExactTouchedSet {
+            /// Resource namespace for the touched set evidence.
+            namespace: ResourceNamespace,
+            /// Schema id for the touched set evidence.
+            evidence_schema: SchemaId,
+        },
+        /// No framework-derived cross-run concurrency claim is made.
+        ManualOnly,
+    }
+
+    impl ResourceClaimSpec {
+        fn json(&self) -> serde_json::Value {
+            match self {
+                Self::Exclusive {
+                    namespace,
+                    key_schema,
+                } => serde_json::json!({
+                    "kind": "exclusive",
+                    "exclusive": {
+                        "key_schema": key_schema.as_str(),
+                        "namespace": namespace.as_str(),
+                    },
+                }),
+                Self::ExactTouchedSet {
+                    namespace,
+                    evidence_schema,
+                } => serde_json::json!({
+                    "kind": "exact_touched_set",
+                    "exact_touched_set": {
+                        "evidence_schema": evidence_schema.as_str(),
+                        "namespace": namespace.as_str(),
+                    },
+                }),
+                Self::ManualOnly => serde_json::json!({
+                    "kind": "manual_only",
+                }),
+            }
+        }
+    }
+
+    /// Side-effect contract persisted in node specs.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct SideEffectContractSpec {
         /// Side-effect contract digest.
         pub contract_digest: ContentDigest,
+        /// Mandatory cross-run resource claim declaration.
+        pub resource_claim: ResourceClaimSpec,
     }
 
     impl SideEffectContractSpec {
         fn json(&self) -> serde_json::Value {
             serde_json::json!({
                 "contract_digest": self.contract_digest.as_str(),
+                "resource_claim": self.resource_claim.json(),
             })
         }
     }
@@ -2482,7 +2566,35 @@ pub mod v1 {
         let object = object(value, "side-effect contract")?;
         Ok(SideEffectContractSpec {
             contract_digest: identity(required_str(object, "contract_digest")?)?,
+            resource_claim: parse_resource_claim(required(object, "resource_claim")?)?,
         })
+    }
+
+    fn parse_resource_claim(value: &serde_json::Value) -> Result<ResourceClaimSpec> {
+        let claim = object(value, "resource claim")?;
+        match required_str(claim, "kind")? {
+            "exclusive" => {
+                let exclusive = object(required(claim, "exclusive")?, "exclusive resource claim")?;
+                Ok(ResourceClaimSpec::Exclusive {
+                    namespace: ResourceNamespace::new(required_str(exclusive, "namespace")?)?,
+                    key_schema: identity(required_str(exclusive, "key_schema")?)?,
+                })
+            }
+            "exact_touched_set" => {
+                let touched_set = object(
+                    required(claim, "exact_touched_set")?,
+                    "exact-touched-set resource claim",
+                )?;
+                Ok(ResourceClaimSpec::ExactTouchedSet {
+                    namespace: ResourceNamespace::new(required_str(touched_set, "namespace")?)?,
+                    evidence_schema: identity(required_str(touched_set, "evidence_schema")?)?,
+                })
+            }
+            "manual_only" => Ok(ResourceClaimSpec::ManualOnly),
+            kind => Err(json_error(format!(
+                "unsupported resource claim kind {kind:?}"
+            ))),
+        }
     }
 
     fn parse_framework_node(value: &serde_json::Value) -> Result<FrameworkNodeSpec> {
@@ -3622,6 +3734,60 @@ pub mod v1 {
                 base_hash,
                 "remediation node collection must be hash-defining"
             );
+        }
+
+        #[test]
+        fn resource_claims_are_mandatory_and_hash_defining() {
+            let mut manual = test_spec();
+            manual.nodes[0].side_effect = Some(SideEffectContractSpec {
+                contract_digest: content(0x91),
+                resource_claim: ResourceClaimSpec::ManualOnly,
+            });
+            let manual_hash = manual.spec_hash().expect("manual claim hash");
+
+            let mut exclusive = manual.clone();
+            exclusive.nodes[0]
+                .side_effect
+                .as_mut()
+                .expect("side-effect")
+                .resource_claim = ResourceClaimSpec::Exclusive {
+                namespace: ResourceNamespace::new("mfm.spec.test.account_nonce")
+                    .expect("namespace"),
+                key_schema: schema("mfm.spec.test.resource_key", 0x92),
+            };
+            assert_ne!(
+                exclusive.spec_hash().expect("exclusive claim hash"),
+                manual_hash,
+                "side-effect resource claim must be hash-defining"
+            );
+
+            let canonical = exclusive.canonical_json().expect("exclusive canonical");
+            let parsed = TypedExecutionSpec::from_json_slice(canonical.as_bytes())
+                .expect("parse exclusive resource claim");
+            assert_eq!(parsed, exclusive);
+
+            let mut missing: serde_json::Value =
+                serde_json::from_str(canonical.as_str()).expect("json value");
+            missing["nodes"][0]["side_effect"]
+                .as_object_mut()
+                .expect("side-effect object")
+                .remove("resource_claim");
+            let missing = serde_json::to_string(&missing).expect("json");
+            let err = TypedExecutionSpec::from_json_str(&missing)
+                .expect_err("missing resource claim rejects");
+            assert!(matches!(err, SpecError::Json(message) if message.contains("resource_claim")));
+
+            let mut unknown: serde_json::Value =
+                serde_json::from_str(canonical.as_str()).expect("json value");
+            unknown["nodes"][0]["side_effect"]["resource_claim"]["kind"] =
+                serde_json::json!("optimistic");
+            let unknown = serde_json::to_string(&unknown).expect("json");
+            let err = TypedExecutionSpec::from_json_str(&unknown)
+                .expect_err("unknown resource claim rejects");
+            assert!(matches!(
+                err,
+                SpecError::Json(message) if message.contains("unsupported resource claim kind")
+            ));
         }
 
         #[test]

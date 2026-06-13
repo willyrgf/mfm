@@ -1,11 +1,32 @@
 use super::*;
 use mfm_capabilities::{CapabilitySpec, ExternalMutationAuthorityRole};
-use mfm_ids::{CapabilityKind, CapabilityVersion};
+use mfm_ids::{CapabilityKind, CapabilityVersion, DigestBytes, SchemaId};
 use mfm_program_derive::{
     MfmConfig, MfmValue, OperationOutput as OperationOutputDerive,
     PublicOutputs as PublicOutputsDerive, StateInput as StateInputDerive,
 };
 use serde::{Deserialize, Serialize};
+
+fn manual_resource_claim() -> ResourceClaimSpec {
+    ResourceClaimSpec::ManualOnly
+}
+
+fn schema_id(name: &'static str, byte: u8) -> SchemaId {
+    SchemaId::new(
+        name,
+        "1",
+        DigestAlgorithm::Sha256JcsV1,
+        DigestBytes::from_array([byte; 32]),
+    )
+    .expect("schema id")
+}
+
+fn exclusive_resource_claim(name: &'static str, byte: u8) -> ResourceClaimSpec {
+    ResourceClaimSpec::Exclusive {
+        namespace: ResourceNamespace::new(name).expect("resource namespace"),
+        key_schema: schema_id(name, byte),
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
 #[mfm(
@@ -479,6 +500,9 @@ fn linked_compensation_authoring_keeps_remediation_out_of_forward_nodes() {
                 label: "linked".to_owned(),
             })?;
             let input = root.seed(SeedKey::new("input")?, seed)?;
+            let forward_claim = exclusive_resource_claim("mfm.program.test.forward_nonce", 0x61);
+            let remediation_claim =
+                exclusive_resource_claim("mfm.program.test.remediation_nonce", 0x62);
             let (forward, remediation) = root
                 .scope()
                 .side_effect_with_compensation::<
@@ -491,8 +515,10 @@ fn linked_compensation_authoring_keeps_remediation_out_of_forward_nodes() {
                     StateKey::new("forward")?,
                     LaunchConfig { multiplier: 5 },
                     input,
+                    forward_claim.clone(),
                     StateKey::new("compensate-forward")?,
                     LaunchConfig { multiplier: 7 },
+                    remediation_claim.clone(),
                     |forward| Ok(forward.clone()),
                 )?;
             assert_ne!(forward.node_id(), remediation.node_id());
@@ -514,12 +540,26 @@ fn linked_compensation_authoring_keeps_remediation_out_of_forward_nodes() {
     let forward = &draft.state_nodes()[0];
     assert_eq!(forward.key.as_str(), "forward");
     assert_eq!(forward.runner, RunnerKind::ApplySideEffect);
+    assert_eq!(
+        forward.side_effect_resource_claim.as_ref(),
+        Some(&exclusive_resource_claim(
+            "mfm.program.test.forward_nonce",
+            0x61
+        ))
+    );
     let remediation = draft
         .remediation_nodes()
         .get(&forward.node_id)
         .expect("linked remediation");
     assert_eq!(remediation.key.as_str(), "compensate-forward");
     assert_eq!(remediation.runner, RunnerKind::ApplySideEffect);
+    assert_eq!(
+        remediation.side_effect_resource_claim.as_ref(),
+        Some(&exclusive_resource_claim(
+            "mfm.program.test.remediation_nonce",
+            0x62
+        ))
+    );
     assert!(
         draft
             .state_nodes()
@@ -548,14 +588,17 @@ fn compensating_policy_requires_every_forward_side_effect_linked() {
                 label: "gap".to_owned(),
             })?;
             let input = root.seed(SeedKey::new("input")?, seed)?;
-            let result = root.scope().state::<ForwardMutationState, _>(
+            let result = root.scope().side_effect::<ForwardMutationState, _>(
                 StateKey::new("forward")?,
                 LaunchConfig { multiplier: 5 },
                 input,
+                manual_resource_claim(),
             )?;
             root.bind_public_outputs(
                 PublicOutputKey::new("terminal")?,
-                &LaunchPublicOutputs { result },
+                &LaunchPublicOutputs {
+                    result: result.into_handle(),
+                },
             )
         },
     )
@@ -608,8 +651,10 @@ fn out_of_scope_remediation_binding_fails_finalize() {
                     StateKey::new("forward")?,
                     LaunchConfig { multiplier: 5 },
                     input,
+                    manual_resource_claim(),
                     StateKey::new("compensate-forward")?,
                     LaunchConfig { multiplier: 7 },
+                    manual_resource_claim(),
                     |_forward| Ok(sibling),
                 )?;
             unreachable!("remediation binding should have rejected");

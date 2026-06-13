@@ -2148,6 +2148,7 @@ dependencies = [
  "mfm-effects",
  "mfm-ids",
  "mfm-program-derive",
+ "mfm-spec",
  "mfm-values",
  "serde",
  "serde_json",

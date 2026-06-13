@@ -3256,6 +3256,7 @@ pub mod v1 {
                     }],
                     side_effect: Some(spec::SideEffectContractSpec {
                         contract_digest: contract_digest.clone(),
+                        resource_claim: spec::ResourceClaimSpec::ManualOnly,
                     }),
                     framework: None,
                     planning_lineage: planning.clone(),

@@ -23,8 +23,9 @@ use mfm_ids::{
 };
 use mfm_program::{
     build_root_with_registries, AdapterBindingSpec, CanonicalSeed, IdempotencyKey,
-    ManagedWriteState, PublicOutputKey, PureState, ReadState, RootBuilder, SagaPolicy, ScopeKey,
-    SeedKey, SideEffectState, StateKey, StateRegistryBuilder, StateResult, StateSpec,
+    ManagedWriteState, PublicOutputKey, PureState, ReadState, ResourceClaimSpec, RootBuilder,
+    SagaPolicy, ScopeKey, SeedKey, SideEffectState, StateKey, StateRegistryBuilder, StateResult,
+    StateSpec,
 };
 use mfm_program_derive::{MfmConfig, MfmValue, PublicOutputs};
 use mfm_replay::v1 as replay;
@@ -1089,15 +1090,16 @@ fn reference_fixture() -> Result<ReferenceFixture, String> {
                 ReferenceConfig { multiplier: 4 },
                 read,
             )?;
-            let side_effect = root.scope().state::<ReferenceSideEffectState, _>(
+            let side_effect = root.scope().side_effect::<ReferenceSideEffectState, _>(
                 StateKey::new("side-effect")?,
                 ReferenceConfig { multiplier: 5 },
                 managed,
+                ResourceClaimSpec::ManualOnly,
             )?;
             root.bind_public_outputs(
                 PublicOutputKey::new("public-output")?,
                 &ReferencePublicOutputs {
-                    result: side_effect,
+                    result: side_effect.into_handle(),
                 },
             )
         },

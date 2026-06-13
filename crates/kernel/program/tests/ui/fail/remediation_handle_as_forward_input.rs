@@ -29,8 +29,10 @@ fn main() -> mfm_program::Result<()> {
                     mfm_program::StateKey::new("forward")?,
                     TryConfig { multiplier: 2 },
                     seed,
+                    mfm_program::ResourceClaimSpec::ManualOnly,
                     mfm_program::StateKey::new("compensate-forward")?,
                     TryConfig { multiplier: 3 },
+                    mfm_program::ResourceClaimSpec::ManualOnly,
                     |forward| Ok(forward),
                 )?;
             let result = root.scope().state::<TryPureState, _>(

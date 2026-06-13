@@ -24,6 +24,7 @@ use mfm_ids::{
     EffectKind, NodeId, OperationInstanceId, OperationKind, OperationVersion, SchemaId, ScopeId,
     SeedId, SemanticTypeId, StateKind, StateVersion,
 };
+pub use mfm_spec::v1::{ResourceClaimSpec, ResourceNamespace};
 pub use mfm_values::NonEmpty;
 use mfm_values::{
     MfmConfig, MfmValue, PublicOutputDescriptor, SchemaDescriptor, SchemaShape, StateInput,
@@ -85,6 +86,8 @@ pub enum PlanError {
     SagaPolicyAlreadySet,
     /// A side-effecting draft did not declare its run-level saga policy.
     MissingSagaPolicy,
+    /// A side-effecting state was planned through a builder that cannot declare a resource claim.
+    SideEffectClaimRequired(String),
     /// The declared saga policy disagreed with the authored graph shape.
     SagaPolicyGraphMismatch(String),
     /// A compensating saga policy left a forward side-effect node unlinked.
@@ -127,6 +130,9 @@ impl fmt::Display for PlanError {
             Self::SagaPolicyAlreadySet => f.write_str("saga policy was already declared"),
             Self::MissingSagaPolicy => {
                 f.write_str("side-effecting programs must declare a saga policy")
+            }
+            Self::SideEffectClaimRequired(message) => {
+                write!(f, "side-effect resource claim required: {message}")
             }
             Self::SagaPolicyGraphMismatch(message) => {
                 write!(f, "saga policy graph mismatch: {message}")
@@ -1860,6 +1866,8 @@ pub struct StateNodeSpec {
     pub adapter_bindings: Vec<AdapterBindingSpec>,
     /// Side-effect contract digest when this node mutates an external system.
     pub side_effect_contract_digest: Option<ContentDigest>,
+    /// Cross-run resource claim when this node mutates an external system.
+    pub side_effect_resource_claim: Option<ResourceClaimSpec>,
     /// Canonical config binding.
     pub config: ConfigBindingSpec,
     /// Typed input binding.
@@ -3487,8 +3495,10 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
         forward_key: StateKey,
         forward_config: F::Config,
         forward_input: I,
+        forward_resource_claim: ResourceClaimSpec,
         remediation_key: StateKey,
         remediation_config: R::Config,
+        remediation_resource_claim: ResourceClaimSpec,
         build_remediation_input: B,
     ) -> Result<(
         ForwardSideEffectHandle<'program, 'scope, F::Output>,
@@ -3524,6 +3534,7 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
             forward_config,
             forward_input,
             Vec::new(),
+            Some(forward_resource_claim),
         )?;
         let forward = ForwardSideEffectHandle::new(forward_node.node_id.clone(), forward_handle);
         let remediation_input = match build_remediation_input(forward.clone()) {
@@ -3547,6 +3558,7 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
             remediation_config,
             remediation_input,
             Vec::new(),
+            Some(remediation_resource_claim),
         ) {
             Ok(planned) => planned,
             Err(error) => {
@@ -3598,10 +3610,41 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
             return Err(PlanError::DuplicateStateKey(key.as_str().to_owned()));
         }
         let (node, handle) =
-            self.plan_state_node(key, registered, config, input, output_domain_keys)?;
+            self.plan_state_node(key, registered, config, input, output_domain_keys, None)?;
         self.state_keys.insert(key_string);
         self.state_nodes.push(node);
         Ok(handle)
+    }
+
+    /// Plans a registered side-effect state with an explicit resource claim.
+    pub fn side_effect<S, I>(
+        &mut self,
+        key: StateKey,
+        config: S::Config,
+        input: I,
+        resource_claim: ResourceClaimSpec,
+    ) -> Result<ForwardSideEffectHandle<'program, 'scope, S::Output>>
+    where
+        S: SideEffectState,
+        S::Caps: CapabilitySetFor<ApplySideEffect>,
+        I: IntoStateInput<'program, 'scope, S::Input>,
+    {
+        let key_string = key.as_str().to_owned();
+        if self.state_keys.contains(&key_string) {
+            return Err(PlanError::DuplicateStateKey(key.as_str().to_owned()));
+        }
+        let registered = self.state_registry.registered_state::<S>()?;
+        let (node, handle) = self.plan_state_node(
+            key,
+            registered,
+            config,
+            input,
+            Vec::new(),
+            Some(resource_claim),
+        )?;
+        self.state_keys.insert(key_string);
+        self.state_nodes.push(node.clone());
+        Ok(ForwardSideEffectHandle::new(node.node_id, handle))
     }
 
     fn plan_state_node<S, I>(
@@ -3611,6 +3654,7 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
         config: S::Config,
         input: I,
         output_domain_keys: Vec<StableDomainKeyRef>,
+        resource_claim: Option<ResourceClaimSpec>,
     ) -> Result<(StateNodeSpec, Handle<'program, 'scope, S::Output>)>
     where
         S: StateSpec,
@@ -3625,6 +3669,22 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
         drop(state);
 
         let descriptor = registered.descriptor();
+        let side_effect_contract_digest = descriptor.side_effect_contract_digest().cloned();
+        match (&side_effect_contract_digest, &resource_claim) {
+            (Some(_), Some(_)) | (None, None) => {}
+            (Some(_), None) => {
+                return Err(PlanError::SideEffectClaimRequired(format!(
+                    "state {} must be planned with side_effect or side_effect_with_compensation",
+                    descriptor.name()
+                )));
+            }
+            (None, Some(_)) => {
+                return Err(PlanError::SagaPolicyGraphMismatch(format!(
+                    "non-side-effect state {} cannot declare a resource claim",
+                    descriptor.name()
+                )));
+            }
+        }
         let node_id = state_node_id(
             &self.scope_id,
             &key,
@@ -3673,7 +3733,8 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
                 effect_kind: descriptor.effect().kind.clone(),
                 capability_bindings: descriptor.capabilities().clone(),
                 adapter_bindings,
-                side_effect_contract_digest: descriptor.side_effect_contract_digest().cloned(),
+                side_effect_contract_digest,
+                side_effect_resource_claim: resource_claim,
                 config: config_binding,
                 input: input.spec(),
                 output_cell_id,
@@ -4007,14 +4068,33 @@ impl<'program, 'scope> OperationExpansion<'program, 'scope> {
             )
     }
 
+    /// Plans a registered side-effect state with an explicit resource claim.
+    pub fn side_effect<S, I>(
+        &mut self,
+        key: StateKey,
+        config: S::Config,
+        input: I,
+        resource_claim: ResourceClaimSpec,
+    ) -> Result<ForwardSideEffectHandle<'program, 'scope, S::Output>>
+    where
+        S: SideEffectState,
+        S::Caps: CapabilitySetFor<ApplySideEffect>,
+        I: IntoStateInput<'program, 'scope, S::Input>,
+    {
+        self.scope_mut()
+            .side_effect::<S, I>(key, config, input, resource_claim)
+    }
+
     /// Plans a linked forward/remediation side-effect pair.
     pub fn side_effect_with_compensation<F, R, I, J, B>(
         &mut self,
         forward_key: StateKey,
         forward_config: F::Config,
         forward_input: I,
+        forward_resource_claim: ResourceClaimSpec,
         remediation_key: StateKey,
         remediation_config: R::Config,
+        remediation_resource_claim: ResourceClaimSpec,
         build_remediation_input: B,
     ) -> Result<(
         ForwardSideEffectHandle<'program, 'scope, F::Output>,
@@ -4034,8 +4114,10 @@ impl<'program, 'scope> OperationExpansion<'program, 'scope> {
                 forward_key,
                 forward_config,
                 forward_input,
+                forward_resource_claim,
                 remediation_key,
                 remediation_config,
+                remediation_resource_claim,
                 build_remediation_input,
             )
     }

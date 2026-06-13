@@ -1316,12 +1316,34 @@ impl<'a> DraftLowerer<'a> {
         self.insert_descriptor(spec::DescriptorIdentity::State(Box::new(
             state_descriptor_identity_from_program(node)?,
         )))?;
-        let side_effect =
-            node.side_effect_contract_digest
-                .as_ref()
-                .map(|digest| spec::SideEffectContractSpec {
-                    contract_digest: digest.clone(),
-                });
+        let side_effect = match (
+            node.side_effect_contract_digest.as_ref(),
+            node.side_effect_resource_claim.as_ref(),
+        ) {
+            (Some(digest), Some(resource_claim)) => Some(spec::SideEffectContractSpec {
+                contract_digest: digest.clone(),
+                resource_claim: resource_claim.clone(),
+            }),
+            (None, None) => None,
+            (Some(_), None) => {
+                return Err(problem(
+                    ProblemClass::InvalidSemanticTransition,
+                    format!(
+                        "side-effect node {} is missing resource claim",
+                        node.node_id
+                    ),
+                ));
+            }
+            (None, Some(_)) => {
+                return Err(problem(
+                    ProblemClass::InvalidSemanticTransition,
+                    format!(
+                        "non-side-effect node {} carries resource claim",
+                        node.node_id
+                    ),
+                ));
+            }
+        };
         Ok(spec::NodeSpec {
             node_id: node.node_id.clone(),
             stable_key: stable_author_key(node.key.as_str())?,
@@ -5857,8 +5879,8 @@ mod tests {
     };
     use mfm_program::{
         build_root_with_registries, CanonicalSeed, IdempotencyKey, Operation, OperationKey,
-        OperationRegistryBuilder, PublicOutputKey, PureState, RootBuilder, ScopeKey,
-        SideEffectState, StateKey, StateRegistryBuilder, StateResult, StateSpec,
+        OperationRegistryBuilder, PublicOutputKey, PureState, ResourceClaimSpec, RootBuilder,
+        ScopeKey, SideEffectState, StateKey, StateRegistryBuilder, StateResult, StateSpec,
     };
     use mfm_program_derive::{MfmConfig, MfmValue, OperationOutput, PublicOutputs};
     use serde::{Deserialize, Serialize};
@@ -6140,14 +6162,17 @@ mod tests {
                     mfm_program::SeedKey::new("initial").expect("seed key"),
                     CanonicalSeed::from_value(&TestValue { amount: 2 }).expect("seed"),
                 )?;
-                let result = root.scope().state::<MutatingState, _>(
+                let result = root.scope().side_effect::<MutatingState, _>(
                     StateKey::new("mutating-state")?,
                     TestConfig { multiplier: 3 },
                     seed,
+                    ResourceClaimSpec::ManualOnly,
                 )?;
                 root.bind_public_outputs(
                     PublicOutputKey::new("terminal")?,
-                    &TestPublicOutputs { result },
+                    &TestPublicOutputs {
+                        result: result.into_handle(),
+                    },
                 )
             },
         )
@@ -6177,8 +6202,10 @@ mod tests {
                         StateKey::new("mutating-state")?,
                         TestConfig { multiplier: 3 },
                         seed,
+                        ResourceClaimSpec::ManualOnly,
                         StateKey::new("compensating-state")?,
                         TestConfig { multiplier: 1 },
+                        ResourceClaimSpec::ManualOnly,
                         |forward| Ok(forward),
                     )?;
                 root.bind_public_outputs(
@@ -7061,6 +7088,7 @@ mod tests {
                         DigestAlgorithm::Sha256JcsV1,
                         digest_byte(0x63),
                     ),
+                    resource_claim: spec::ResourceClaimSpec::ManualOnly,
                 });
             },
         );
