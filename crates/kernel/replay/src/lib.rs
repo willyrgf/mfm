@@ -168,7 +168,7 @@ pub mod v1 {
             }
             let run_started = run_started_payload(verified_stream.events())?;
             let artifacts = artifact_map(artifact_evidence.clone())?;
-            verify_retained_artifacts(verified_stream, &artifacts)?;
+            verify_replay_artifact_authority(verified_stream, &artifacts)?;
             Ok(Self {
                 certified_spec: runtime_spec.envelope().clone(),
                 stream: verified_stream.events().to_vec(),
@@ -413,6 +413,8 @@ pub mod v1 {
                 &authority,
                 &retained_artifacts,
             )?;
+            verify_terminal_outcome_agreement(&certified_spec, &stream)?;
+            verify_remediation_ledger_links(&certified_spec, &projection)?;
 
             let mut broker = Self {
                 certified_spec,
@@ -429,6 +431,7 @@ pub mod v1 {
             };
             broker.authorize_certified_spec_artifacts()?;
             broker.index_stream(&stream)?;
+            broker.reject_unauthorized_artifact_evidence()?;
             Ok(broker)
         }
 
@@ -718,6 +721,13 @@ pub mod v1 {
                             ArtifactRole::TypedExecutionSpec,
                             None,
                         )?;
+                        self.authorize_artifact(
+                            &payload.certificate_artifact_id,
+                            &payload.certificate_artifact_digest,
+                            None,
+                            ArtifactRole::TypedSpecCertificate,
+                            None,
+                        )?;
                         for seed in &payload.seed_cells {
                             self.verify_seed_against_spec(seed)?;
                             self.authorize_event_artifact_ref(
@@ -754,7 +764,9 @@ pub mod v1 {
                     KernelEventPayload::ArtifactReferenced(payload) => {
                         if let Some(node_id) = &payload.node_id {
                             self.node(node_id)?;
-                            if self.is_complete_run_receipt_ref(node_id, &payload.artifact_ref)? {
+                            if self
+                                .is_terminal_lifecycle_receipt_ref(node_id, &payload.artifact_ref)?
+                            {
                                 continue;
                             }
                         }
@@ -937,7 +949,7 @@ pub mod v1 {
                     }
                     KernelEventPayload::CellProduced(payload) => {
                         self.verify_cell_produced_against_spec(payload)?;
-                        if self.is_complete_run_receipt_artifact(
+                        if self.is_terminal_lifecycle_receipt_artifact(
                             &payload.node_id,
                             &payload.artifact_id,
                             &payload.content_digest,
@@ -999,6 +1011,7 @@ pub mod v1 {
                         | events::RunCompletionOutcome::FailedWithoutAcdcClaim => {}
                     },
                     KernelEventPayload::ManualResolutionRecorded(payload) => {
+                        self.verify_manual_resolution_against_spec(payload)?;
                         self.authorize_artifact_by_schema(
                             &payload.operator_identity_ref_artifact_id,
                             &payload.operator_identity_ref_hash,
@@ -1197,6 +1210,7 @@ pub mod v1 {
                 .spec
                 .nodes
                 .iter()
+                .chain(self.certified_spec.spec.remediations.values())
                 .find(|node| &node.node_id == node_id)
                 .ok_or_else(|| {
                     ReplayError::new(
@@ -1220,21 +1234,18 @@ pub mod v1 {
                 })
         }
 
-        fn is_complete_run_receipt_ref(
+        fn is_terminal_lifecycle_receipt_ref(
             &self,
             node_id: &NodeId,
             event_ref: &events::ArtifactEvidenceRef,
         ) -> Result<bool> {
-            // CompleteRun receipts are deterministic post-manifest lifecycle evidence. Runtime
+            // Terminal lifecycle receipts are deterministic sealed framework evidence. Runtime
             // validation verifies the receipt digest, and no replayed node can consume the cell.
             if event_ref.role != ArtifactRole::StateOutput {
                 return Ok(false);
             }
             let node = self.node(node_id)?;
-            if !matches!(
-                &node.framework,
-                Some(spec::FrameworkNodeSpec::CompleteRun(_))
-            ) {
+            if !is_terminal_lifecycle_node(node) {
                 return Ok(false);
             }
             let cell = self.cell(&node.output_cell)?;
@@ -1243,24 +1254,21 @@ pub mod v1 {
             {
                 return Ok(false);
             }
-            self.is_complete_run_receipt_artifact(
+            self.is_terminal_lifecycle_receipt_artifact(
                 node_id,
                 &event_ref.artifact_id,
                 &event_ref.content_digest,
             )
         }
 
-        fn is_complete_run_receipt_artifact(
+        fn is_terminal_lifecycle_receipt_artifact(
             &self,
             node_id: &NodeId,
             artifact_id: &ArtifactId,
             digest: &ContentDigest,
         ) -> Result<bool> {
             let node = self.node(node_id)?;
-            if !matches!(
-                &node.framework,
-                Some(spec::FrameworkNodeSpec::CompleteRun(_))
-            ) {
+            if !is_terminal_lifecycle_node(node) {
                 return Ok(false);
             }
             Ok(matches!(
@@ -1363,6 +1371,47 @@ pub mod v1 {
                     "side-effect intent does not match certified side-effect node",
                 ));
             }
+            match &payload.ledger_purpose {
+                events::SideEffectLedgerPurpose::Forward => {
+                    if self
+                        .certified_spec
+                        .spec
+                        .remediations
+                        .values()
+                        .any(|remediation| remediation.node_id == payload.node_id)
+                    {
+                        return Err(certified_evidence_mismatch(
+                            "forward side-effect intent targets a remediation node",
+                        ));
+                    }
+                }
+                events::SideEffectLedgerPurpose::Remediation { forward_ledger_key } => {
+                    let forward =
+                        self.projection
+                            .side_effect(forward_ledger_key)
+                            .ok_or_else(|| {
+                                ReplayError::new(
+                                    ReplayErrorKind::SideEffectMissing,
+                                    format!("missing linked forward ledger {forward_ledger_key}"),
+                                )
+                            })?;
+                    let remediation = self
+                        .certified_spec
+                        .spec
+                        .remediations
+                        .get(&forward.intent.node_id)
+                        .ok_or_else(|| {
+                            certified_evidence_mismatch(
+                                "remediation ledger links to a forward node without remediation",
+                            )
+                        })?;
+                    if remediation.node_id != payload.node_id {
+                        return Err(certified_evidence_mismatch(
+                            "remediation side-effect intent targets the wrong certified node",
+                        ));
+                    }
+                }
+            }
             self.verify_node_capability(
                 &payload.node_id,
                 &payload.capability_kind,
@@ -1373,6 +1422,38 @@ pub mod v1 {
                 &payload.adapter_kind,
                 &payload.adapter_version,
             )?;
+            Ok(())
+        }
+
+        fn verify_manual_resolution_against_spec(
+            &self,
+            payload: &events::ManualResolutionRecorded,
+        ) -> Result<()> {
+            let manual = certified_manual_resolution_spec(&self.certified_spec.spec.saga)
+                .ok_or_else(|| {
+                    certified_evidence_mismatch(
+                        "manual resolution was recorded without certified manual policy",
+                    )
+                })?;
+            if payload.operator_identity_ref_schema_id != manual.operator_identity_ref_schema
+                || payload.evidence_schema_id != manual.evidence_schema
+            {
+                return Err(certified_evidence_mismatch(
+                    "manual resolution evidence schemas do not match certified policy",
+                ));
+            }
+            Ok(())
+        }
+
+        fn reject_unauthorized_artifact_evidence(&self) -> Result<()> {
+            for artifact_id in self.retained_artifacts.keys() {
+                if !self.artifacts.contains_key(artifact_id) {
+                    return Err(ReplayError::new(
+                        ReplayErrorKind::ArtifactMismatch,
+                        format!("unreferenced replay artifact evidence supplied for {artifact_id}"),
+                    ));
+                }
+            }
             Ok(())
         }
 
@@ -1725,19 +1806,35 @@ pub mod v1 {
         Ok(map)
     }
 
-    fn verify_retained_artifacts(
+    fn verify_replay_artifact_authority(
         verified_stream: &mfm_runtime::VerifiedRunStream,
         artifacts: &BTreeMap<ArtifactId, StoredArtifactEvidenceRef>,
     ) -> Result<()> {
-        let retention = verified_stream
+        if let Some(retention) = verified_stream
             .projection_snapshot()
             .retention(verified_stream.run_id())
-            .ok_or_else(|| {
-                ReplayError::new(
-                    ReplayErrorKind::ArtifactMissing,
-                    "replay read authority requires committed retention evidence",
-                )
-            })?;
+        {
+            verify_retained_artifacts(retention, artifacts)
+        } else if has_saga_terminal_completion(verified_stream) {
+            Ok(())
+        } else {
+            Err(ReplayError::new(
+                ReplayErrorKind::ArtifactMissing,
+                "replay read authority requires committed retention or saga terminal evidence",
+            ))
+        }
+    }
+
+    fn verify_retained_artifacts(
+        retention: &store::RetentionProjection,
+        artifacts: &BTreeMap<ArtifactId, StoredArtifactEvidenceRef>,
+    ) -> Result<()> {
+        if retention.refs.is_empty() {
+            return Err(ReplayError::new(
+                ReplayErrorKind::ArtifactMissing,
+                "replay read authority requires committed retention evidence",
+            ));
+        }
         for retained in retention.refs.values() {
             let evidence = artifacts.get(&retained.artifact_id).ok_or_else(|| {
                 ReplayError::new(
@@ -1768,6 +1865,181 @@ pub mod v1 {
             }
         }
         Ok(())
+    }
+
+    fn has_saga_terminal_completion(verified_stream: &mfm_runtime::VerifiedRunStream) -> bool {
+        matches!(
+            verified_stream
+                .projection_snapshot()
+                .run_completion(verified_stream.run_id())
+                .map(|completion| &completion.outcome),
+            Some(
+                events::RunCompletionOutcome::Compensated
+                    | events::RunCompletionOutcome::ManuallyResolved
+                    | events::RunCompletionOutcome::FailedWithoutAcdcClaim
+            )
+        )
+    }
+
+    fn verify_terminal_outcome_agreement(
+        certified_spec: &HashedSpecEnvelope,
+        stream: &[KernelEventEnvelope],
+    ) -> Result<()> {
+        let run_started = run_started_payload(stream)?;
+        let Some((terminal_start, payload)) = terminal_completion_event(stream)? else {
+            return Ok(());
+        };
+        match &payload.outcome {
+            events::RunCompletionOutcome::Completed(evidence) => {
+                let projection = ProjectionSnapshot::rebuild_from_run_stream(stream)?;
+                match projection.public_output(&evidence.public_output_schema_id) {
+                    Some(store::PublicOutputProjection::Produced { event_id, .. })
+                        if event_id == &evidence.public_output_event_id =>
+                    {
+                        Ok(())
+                    }
+                    _ => Err(certified_evidence_mismatch(
+                        "completed terminal outcome does not match projected public output",
+                    )),
+                }
+            }
+            events::RunCompletionOutcome::Compensated
+            | events::RunCompletionOutcome::ManuallyResolved
+            | events::RunCompletionOutcome::FailedWithoutAcdcClaim => {
+                let prefix_projection =
+                    ProjectionSnapshot::rebuild_from_run_stream(&stream[..terminal_start])?;
+                let saga = prefix_projection
+                    .derive_saga_projection(&run_started.run_id, &certified_spec.spec.saga);
+                let expected = match saga.run_mode {
+                    store::RunMode::Compensated => events::RunCompletionOutcome::Compensated,
+                    store::RunMode::ManuallyResolved => {
+                        events::RunCompletionOutcome::ManuallyResolved
+                    }
+                    store::RunMode::FailedWithoutAcdcClaim => {
+                        events::RunCompletionOutcome::FailedWithoutAcdcClaim
+                    }
+                    _ => {
+                        return Err(certified_evidence_mismatch(
+                            "saga terminal outcome is unsupported by derived run mode",
+                        ));
+                    }
+                };
+                if payload.outcome == expected {
+                    Ok(())
+                } else {
+                    Err(certified_evidence_mismatch(
+                        "saga terminal outcome does not match derived run mode",
+                    ))
+                }
+            }
+        }
+    }
+
+    fn terminal_completion_event(
+        stream: &[KernelEventEnvelope],
+    ) -> Result<Option<(usize, &events::RunCompleted)>> {
+        let mut found = None;
+        let mut index = 0;
+        while index < stream.len() {
+            let first = &stream[index];
+            let seq = first.seq();
+            let commit_key = first.commit_key().clone();
+            let start = index;
+            let mut end = index + 1;
+            while end < stream.len()
+                && stream[end].seq() == seq
+                && stream[end].commit_key() == &commit_key
+            {
+                end += 1;
+            }
+            for event in &stream[start..end] {
+                if let KernelEventPayload::RunCompleted(payload) = event.payload() {
+                    if found.replace((start, payload)).is_some() {
+                        return Err(ReplayError::new(
+                            ReplayErrorKind::InvalidRunStream,
+                            "run stream contains multiple terminal completions",
+                        ));
+                    }
+                }
+            }
+            index = end;
+        }
+        Ok(found)
+    }
+
+    fn verify_remediation_ledger_links(
+        certified_spec: &HashedSpecEnvelope,
+        projection: &ProjectionSnapshot,
+    ) -> Result<()> {
+        for (_, side_effect) in projection.side_effects() {
+            let events::SideEffectLedgerPurpose::Remediation { forward_ledger_key } =
+                &side_effect.ledger_purpose
+            else {
+                continue;
+            };
+            let forward = projection.side_effect(forward_ledger_key).ok_or_else(|| {
+                ReplayError::new(
+                    ReplayErrorKind::SideEffectMissing,
+                    format!("missing linked forward ledger {forward_ledger_key}"),
+                )
+            })?;
+            if forward.run_id != side_effect.run_id
+                || !matches!(
+                    forward.ledger_purpose,
+                    events::SideEffectLedgerPurpose::Forward
+                )
+                || !matches!(
+                    forward.phase,
+                    store::SideEffectPhase::ConfirmationObserved { .. }
+                )
+            {
+                return Err(certified_evidence_mismatch(
+                    "remediation ledger is not linked to a confirmed forward ledger",
+                ));
+            }
+            let remediation = certified_spec
+                .spec
+                .remediations
+                .get(&forward.intent.node_id)
+                .ok_or_else(|| {
+                    certified_evidence_mismatch(
+                        "remediation ledger references a forward node without certified remediation",
+                    )
+                })?;
+            if remediation.node_id != side_effect.intent.node_id {
+                return Err(certified_evidence_mismatch(
+                    "remediation ledger node does not match certified linkage",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn certified_manual_resolution_spec(
+        policy: &spec::SagaPolicySpec,
+    ) -> Option<&spec::ManualResolutionEvidenceSpec> {
+        match policy {
+            spec::SagaPolicySpec::ManualResolution { manual } => Some(manual),
+            spec::SagaPolicySpec::CompensateCompleted {
+                on_remediation_unresolved:
+                    spec::RemediationUnresolvedSpec::ManualResolution { manual },
+            } => Some(manual),
+            spec::SagaPolicySpec::NoSideEffects
+            | spec::SagaPolicySpec::FailWithoutAcdcClaim
+            | spec::SagaPolicySpec::CompensateCompleted {
+                on_remediation_unresolved: spec::RemediationUnresolvedSpec::FailWithoutAcdcClaim,
+            } => None,
+        }
+    }
+
+    fn is_terminal_lifecycle_node(node: &spec::NodeSpec) -> bool {
+        matches!(
+            &node.framework,
+            Some(
+                spec::FrameworkNodeSpec::CompleteRun(_)
+                    | spec::FrameworkNodeSpec::ResolveSagaTerminal(_)
+            )
+        )
     }
 
     fn verify_artifact_fields(
@@ -1936,8 +2208,9 @@ pub mod v1 {
         use super::*;
         use mfm_capabilities::{CapabilityDescriptor, CapabilityRole, CapabilitySetDescriptor};
         use mfm_ids::{
-            DescriptorId, DigestAlgorithm, DigestBytes, EffectKind, EffectVersion, LoweringVersion,
-            RunId, ScopeId, SeedId, SemanticTypeId, SpecVersion, StateKind, StateVersion,
+            DescriptorId, DigestAlgorithm, DigestBytes, EffectKind, EffectVersion, EventId,
+            LoweringVersion, RunId, ScopeId, SeedId, SemanticTypeId, SpecVersion, StateKind,
+            StateVersion,
         };
         use mfm_store::v1::{
             build_committed_batch, CommitKey, CommitPreconditions, InMemoryTypedRunStore,
@@ -2137,20 +2410,12 @@ pub mod v1 {
                 Some(fixture.node_id.clone()),
             );
             authority.artifact_evidence.push(extra_artifact.clone());
-            let broker = ReplayBroker::from_validated_parts(authority).expect("broker");
 
             assert_eq!(
-                broker
-                    .artifact(&ArtifactReplayRequest {
-                        artifact_id: extra_artifact.artifact_id,
-                        role: ArtifactRole::FactResponse,
-                        digest: extra_artifact.digest,
-                        schema_id: extra_artifact.schema_id,
-                        producer_node_id: Some(fixture.node_id.clone()),
-                    })
-                    .expect_err("unauthorized artifact")
+                ReplayBroker::from_validated_parts(authority)
+                    .expect_err("unauthorized artifact evidence")
                     .kind,
-                ReplayErrorKind::ArtifactMissing
+                ReplayErrorKind::ArtifactMismatch
             );
         }
 
@@ -2318,6 +2583,489 @@ pub mod v1 {
             );
         }
 
+        #[test]
+        fn replay_construction_rejects_compensated_terminal_without_closed_remediation() {
+            let fixture = Fixture::with_saga_policy(spec::SagaPolicySpec::CompensateCompleted {
+                on_remediation_unresolved: spec::RemediationUnresolvedSpec::FailWithoutAcdcClaim,
+            });
+            let mut stream = fixture.stream.clone();
+            let run_id = stream[0].run_id().clone();
+            append_payload_to_stream(
+                &mut stream,
+                "non-retryable-failure",
+                KernelEventPayload::StateAttemptFailed(events::StateAttemptFailed {
+                    spec_hash: fixture.envelope.spec_hash.clone(),
+                    node_id: fixture.node_id.clone(),
+                    attempt_id: fixture.attempt_id.clone(),
+                    retryable: false,
+                    error: test_error(false),
+                }),
+            );
+            append_payload_to_stream(
+                &mut stream,
+                "forged-compensated-terminal",
+                KernelEventPayload::RunCompleted(events::RunCompleted {
+                    run_id,
+                    spec_hash: fixture.envelope.spec_hash.clone(),
+                    outcome: events::RunCompletionOutcome::Compensated,
+                }),
+            );
+
+            assert_eq!(
+                ReplayBroker::from_validated_parts(fixture.authority_for_stream(&stream))
+                    .expect_err("unclosed compensation")
+                    .kind,
+                ReplayErrorKind::CertifiedEvidenceMismatch
+            );
+        }
+
+        #[test]
+        fn replay_construction_accepts_compensated_terminal_with_closed_remediation() {
+            let fixture = Fixture::with_saga_policy_and_remediation(
+                spec::SagaPolicySpec::CompensateCompleted {
+                    on_remediation_unresolved:
+                        spec::RemediationUnresolvedSpec::FailWithoutAcdcClaim,
+                },
+            );
+            let remediation_node_id = node(0x60);
+            let remediation_attempt_id = attempt(0xa0);
+            let remediation_ledger =
+                events::SideEffectLedgerKey::new("remediation-ledger").expect("ledger");
+            let remediation_purpose = events::SideEffectLedgerPurpose::Remediation {
+                forward_ledger_key: fixture.ledger_key.clone(),
+            };
+            let remediation_intent_artifact = artifact(0xa1);
+            let remediation_intent_hash = content(0xa2);
+            let remediation_submission_artifact = artifact(0xa3);
+            let remediation_submission_hash = content(0xa4);
+            let remediation_receipt_artifact = artifact(0xa5);
+            let remediation_receipt_hash = content(0xa6);
+            let remediation_confirmation_artifact = artifact(0xa7);
+            let remediation_confirmation_hash = content(0xa8);
+            let mut stream = fixture.stream.clone();
+            let run_id = stream[0].run_id().clone();
+            append_payload_to_stream(
+                &mut stream,
+                "non-retryable-failure",
+                KernelEventPayload::StateAttemptFailed(events::StateAttemptFailed {
+                    spec_hash: fixture.envelope.spec_hash.clone(),
+                    node_id: fixture.node_id.clone(),
+                    attempt_id: fixture.attempt_id.clone(),
+                    retryable: false,
+                    error: test_error(false),
+                }),
+            );
+            append_payload_to_stream(
+                &mut stream,
+                "remediation-attempt-start",
+                KernelEventPayload::StateAttemptStarted(events::StateAttemptStarted {
+                    spec_hash: fixture.envelope.spec_hash.clone(),
+                    node_id: remediation_node_id.clone(),
+                    attempt_id: remediation_attempt_id.clone(),
+                    attempt_no: 1,
+                    state_kind: fixture.envelope.spec.nodes[0].state_kind.clone(),
+                    state_version: fixture.envelope.spec.nodes[0].state_version.clone(),
+                }),
+            );
+            append_payloads_to_stream(
+                &mut stream,
+                "remediation-intent",
+                vec![
+                    KernelEventPayload::SideEffectIntentPersisted(side_effect::IntentPersisted {
+                        spec_hash: fixture.envelope.spec_hash.clone(),
+                        node_id: remediation_node_id.clone(),
+                        scope_id: fixture.envelope.spec.nodes[0].scope_id.clone(),
+                        attempt_id: remediation_attempt_id.clone(),
+                        ledger_key: remediation_ledger.clone(),
+                        ledger_purpose: remediation_purpose.clone(),
+                        invocation_epoch: 1,
+                        intent_schema_id: fixture.intent_schema_id.clone(),
+                        intent_hash: remediation_intent_hash.clone(),
+                        intent_artifact_id: remediation_intent_artifact.clone(),
+                        idempotency_input_schema_id: fixture.idempotency_input_schema_id.clone(),
+                        idempotency_input_hash: fixture.idempotency_input_hash.clone(),
+                        idempotency_key: events::IdempotencyKeyRef::new("remediation-idem")
+                            .expect("idempotency"),
+                        capability_kind: fixture.capability_kind.clone(),
+                        capability_version: fixture.capability_version.clone(),
+                        adapter_kind: fixture.adapter_kind.clone(),
+                        adapter_version: fixture.adapter_version.clone(),
+                    }),
+                    KernelEventPayload::SideEffectClaimed(side_effect::Claimed {
+                        spec_hash: fixture.envelope.spec_hash.clone(),
+                        node_id: remediation_node_id.clone(),
+                        attempt_id: remediation_attempt_id.clone(),
+                        ledger_key: remediation_ledger.clone(),
+                        ledger_purpose: remediation_purpose.clone(),
+                        claim_owner: events::RunnerInvocationId::new("remediation-owner")
+                            .expect("owner"),
+                        invocation_epoch: 1,
+                        claim_generation: 1,
+                        claim_fencing_token: side_effect::ClaimFencingToken::new(
+                            "remediation-token",
+                        )
+                        .expect("token"),
+                    }),
+                    KernelEventPayload::SideEffectInvocationPrepared(
+                        side_effect::InvocationPrepared {
+                            spec_hash: fixture.envelope.spec_hash.clone(),
+                            node_id: remediation_node_id.clone(),
+                            attempt_id: remediation_attempt_id.clone(),
+                            ledger_key: remediation_ledger.clone(),
+                            ledger_purpose: remediation_purpose.clone(),
+                            invocation_epoch: 1,
+                            claim_generation: 1,
+                            claim_fencing_token: side_effect::ClaimFencingToken::new(
+                                "remediation-token",
+                            )
+                            .expect("token"),
+                            prepared_artifact_id: None,
+                            prepared_hash: None,
+                        },
+                    ),
+                    KernelEventPayload::SideEffectInvocationStarted(
+                        side_effect::InvocationStarted {
+                            spec_hash: fixture.envelope.spec_hash.clone(),
+                            node_id: remediation_node_id.clone(),
+                            attempt_id: remediation_attempt_id.clone(),
+                            ledger_key: remediation_ledger.clone(),
+                            ledger_purpose: remediation_purpose.clone(),
+                            invocation_epoch: 1,
+                            claim_owner: events::RunnerInvocationId::new("remediation-owner")
+                                .expect("owner"),
+                            claim_generation: 1,
+                            claim_fencing_token: side_effect::ClaimFencingToken::new(
+                                "remediation-token",
+                            )
+                            .expect("token"),
+                        },
+                    ),
+                ],
+            );
+            append_payloads_to_stream(
+                &mut stream,
+                "remediation-confirmed",
+                vec![
+                    KernelEventPayload::SideEffectSubmissionObserved(
+                        side_effect::SubmissionObserved {
+                            spec_hash: fixture.envelope.spec_hash.clone(),
+                            node_id: remediation_node_id.clone(),
+                            attempt_id: remediation_attempt_id.clone(),
+                            ledger_key: remediation_ledger.clone(),
+                            ledger_purpose: remediation_purpose.clone(),
+                            invocation_epoch: 1,
+                            submission_schema_id: schema("mfm.test.submission", 0x43),
+                            submission_hash: remediation_submission_hash.clone(),
+                            submission_artifact_id: remediation_submission_artifact.clone(),
+                        },
+                    ),
+                    KernelEventPayload::SideEffectReceiptObserved(side_effect::ReceiptObserved {
+                        spec_hash: fixture.envelope.spec_hash.clone(),
+                        node_id: remediation_node_id.clone(),
+                        attempt_id: remediation_attempt_id.clone(),
+                        ledger_key: remediation_ledger.clone(),
+                        ledger_purpose: remediation_purpose.clone(),
+                        invocation_epoch: 1,
+                        receipt_schema_id: schema("mfm.test.receipt", 0x44),
+                        receipt_hash: remediation_receipt_hash.clone(),
+                        receipt_artifact_id: remediation_receipt_artifact.clone(),
+                        replay_verifier_id: events::ReplayVerifierId::new("verifier-1")
+                            .expect("verifier"),
+                    }),
+                    KernelEventPayload::SideEffectConfirmationObserved(
+                        side_effect::ConfirmationObserved {
+                            spec_hash: fixture.envelope.spec_hash.clone(),
+                            node_id: remediation_node_id.clone(),
+                            attempt_id: remediation_attempt_id.clone(),
+                            ledger_key: remediation_ledger,
+                            ledger_purpose: remediation_purpose,
+                            invocation_epoch: 1,
+                            confirmation_schema_id: schema("mfm.test.confirmation", 0x45),
+                            confirmation_hash: remediation_confirmation_hash.clone(),
+                            confirmation_artifact_id: remediation_confirmation_artifact.clone(),
+                            replay_verifier_id: events::ReplayVerifierId::new("verifier-1")
+                                .expect("verifier"),
+                        },
+                    ),
+                ],
+            );
+            append_payload_to_stream(
+                &mut stream,
+                "compensated-terminal",
+                KernelEventPayload::RunCompleted(events::RunCompleted {
+                    run_id: run_id.clone(),
+                    spec_hash: fixture.envelope.spec_hash.clone(),
+                    outcome: events::RunCompletionOutcome::Compensated,
+                }),
+            );
+            let mut artifacts = fixture.artifacts.clone();
+            artifacts.extend([
+                stored_artifact(
+                    remediation_intent_artifact,
+                    remediation_intent_hash,
+                    Some(fixture.intent_schema_id.clone()),
+                    ArtifactRole::SideEffectIntent,
+                    Some(remediation_node_id.clone()),
+                ),
+                stored_artifact(
+                    remediation_submission_artifact,
+                    remediation_submission_hash,
+                    Some(schema("mfm.test.submission", 0x43)),
+                    ArtifactRole::Submission,
+                    Some(remediation_node_id.clone()),
+                ),
+                stored_artifact(
+                    remediation_receipt_artifact,
+                    remediation_receipt_hash,
+                    Some(schema("mfm.test.receipt", 0x44)),
+                    ArtifactRole::Receipt,
+                    Some(remediation_node_id.clone()),
+                ),
+                stored_artifact(
+                    remediation_confirmation_artifact,
+                    remediation_confirmation_hash,
+                    Some(schema("mfm.test.confirmation", 0x45)),
+                    ArtifactRole::Confirmation,
+                    Some(remediation_node_id),
+                ),
+            ]);
+
+            let broker = ReplayBroker::from_validated_parts(
+                fixture.authority_for_stream_and_artifacts(&stream, artifacts),
+            )
+            .expect("compensated replay");
+            let saga = broker
+                .projection_snapshot()
+                .derive_saga_projection(&run_id, &fixture.envelope.spec.saga);
+            assert_eq!(saga.run_mode, store::RunMode::Compensated);
+        }
+
+        #[test]
+        fn replay_construction_rejects_vacuous_compensated_terminal() {
+            let fixture = Fixture::with_saga_policy(spec::SagaPolicySpec::CompensateCompleted {
+                on_remediation_unresolved: spec::RemediationUnresolvedSpec::FailWithoutAcdcClaim,
+            });
+            let mut stream = fixture.stream[..2].to_vec();
+            let run_id = stream[0].run_id().clone();
+            append_payload_to_stream(
+                &mut stream,
+                "clean-failure",
+                KernelEventPayload::StateAttemptFailed(events::StateAttemptFailed {
+                    spec_hash: fixture.envelope.spec_hash.clone(),
+                    node_id: fixture.node_id.clone(),
+                    attempt_id: fixture.attempt_id.clone(),
+                    retryable: false,
+                    error: test_error(false),
+                }),
+            );
+            append_payload_to_stream(
+                &mut stream,
+                "vacuous-compensated-terminal",
+                KernelEventPayload::RunCompleted(events::RunCompleted {
+                    run_id,
+                    spec_hash: fixture.envelope.spec_hash.clone(),
+                    outcome: events::RunCompletionOutcome::Compensated,
+                }),
+            );
+
+            assert_eq!(
+                ReplayBroker::from_validated_parts(
+                    fixture
+                        .authority_for_stream_and_artifacts(&stream, fixture.run_start_artifacts()),
+                )
+                .expect_err("vacuous compensated")
+                .kind,
+                ReplayErrorKind::CertifiedEvidenceMismatch
+            );
+        }
+
+        #[test]
+        fn replay_construction_rejects_terminal_without_forward_quiescence() {
+            let fixture = Fixture::with_saga_policy(spec::SagaPolicySpec::FailWithoutAcdcClaim);
+            let mut stream = fixture.stream[..7].to_vec();
+            let run_id = stream[0].run_id().clone();
+            append_payload_to_stream(
+                &mut stream,
+                "non-quiescent-terminal",
+                KernelEventPayload::RunCompleted(events::RunCompleted {
+                    run_id,
+                    spec_hash: fixture.envelope.spec_hash.clone(),
+                    outcome: events::RunCompletionOutcome::FailedWithoutAcdcClaim,
+                }),
+            );
+
+            assert_eq!(
+                ReplayBroker::from_validated_parts(
+                    fixture.authority_for_stream_and_artifacts(
+                        &stream,
+                        fixture.artifacts[..5].to_vec()
+                    ),
+                )
+                .expect_err("terminal without quiescence")
+                .kind,
+                ReplayErrorKind::InvalidRunStream
+            );
+        }
+
+        #[test]
+        fn replay_construction_rejects_forward_fence_violation() {
+            let fixture = Fixture::with_saga_policy(spec::SagaPolicySpec::FailWithoutAcdcClaim);
+            let mut stream = fixture.stream.clone();
+            append_payload_to_stream(
+                &mut stream,
+                "engage-saga",
+                KernelEventPayload::StateAttemptFailed(events::StateAttemptFailed {
+                    spec_hash: fixture.envelope.spec_hash.clone(),
+                    node_id: fixture.node_id.clone(),
+                    attempt_id: fixture.attempt_id.clone(),
+                    retryable: false,
+                    error: test_error(false),
+                }),
+            );
+            append_payload_to_stream(
+                &mut stream,
+                "late-forward-intent",
+                KernelEventPayload::SideEffectIntentPersisted(side_effect::IntentPersisted {
+                    spec_hash: fixture.envelope.spec_hash.clone(),
+                    node_id: fixture.node_id.clone(),
+                    scope_id: fixture.envelope.spec.nodes[0].scope_id.clone(),
+                    attempt_id: fixture.attempt_id.clone(),
+                    ledger_key: events::SideEffectLedgerKey::new("late-forward-ledger")
+                        .expect("ledger"),
+                    ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+                    invocation_epoch: 1,
+                    intent_schema_id: fixture.intent_schema_id.clone(),
+                    intent_hash: content(0xb0),
+                    intent_artifact_id: artifact(0xb1),
+                    idempotency_input_schema_id: fixture.idempotency_input_schema_id.clone(),
+                    idempotency_input_hash: fixture.idempotency_input_hash.clone(),
+                    idempotency_key: events::IdempotencyKeyRef::new("late-forward-idem")
+                        .expect("idempotency"),
+                    capability_kind: fixture.capability_kind.clone(),
+                    capability_version: fixture.capability_version.clone(),
+                    adapter_kind: fixture.adapter_kind.clone(),
+                    adapter_version: fixture.adapter_version.clone(),
+                }),
+            );
+
+            assert_eq!(
+                ReplayBroker::from_validated_parts(fixture.authority_for_stream(&stream))
+                    .expect_err("fence violation")
+                    .kind,
+                ReplayErrorKind::InvalidRunStream
+            );
+        }
+
+        #[test]
+        fn replay_rejects_remediation_ledger_linked_to_unconfirmed_or_foreign_forward() {
+            let fixture = Fixture::with_saga_policy(spec::SagaPolicySpec::CompensateCompleted {
+                on_remediation_unresolved: spec::RemediationUnresolvedSpec::FailWithoutAcdcClaim,
+            });
+            let remediation_node_id = node(0x80);
+            let certified_spec =
+                fixture.certified_spec_with_remediation(remediation_node_id.clone());
+            let forward_ledger =
+                events::SideEffectLedgerKey::new("forward-ledger").expect("ledger");
+            let remediation_ledger =
+                events::SideEffectLedgerKey::new("remediation-ledger").expect("ledger");
+            let mut side_effects = BTreeMap::new();
+            side_effects.insert(
+                forward_ledger.clone(),
+                fixture.side_effect_projection(
+                    forward_ledger.clone(),
+                    events::SideEffectLedgerPurpose::Forward,
+                    fixture.node_id.clone(),
+                    store::SideEffectPhase::ReceiptObserved {
+                        invocation_epoch: 1,
+                    },
+                    0x81,
+                ),
+            );
+            side_effects.insert(
+                remediation_ledger.clone(),
+                fixture.side_effect_projection(
+                    remediation_ledger.clone(),
+                    events::SideEffectLedgerPurpose::Remediation {
+                        forward_ledger_key: forward_ledger.clone(),
+                    },
+                    remediation_node_id,
+                    store::SideEffectPhase::ConfirmationObserved {
+                        invocation_epoch: 1,
+                    },
+                    0x82,
+                ),
+            );
+            let projection = projection_with_side_effects(side_effects);
+            assert_eq!(
+                verify_remediation_ledger_links(&certified_spec, &projection)
+                    .expect_err("unconfirmed forward")
+                    .kind,
+                ReplayErrorKind::CertifiedEvidenceMismatch
+            );
+
+            let foreign_forward =
+                events::SideEffectLedgerKey::new("foreign-forward-ledger").expect("ledger");
+            let mut side_effects = BTreeMap::new();
+            side_effects.insert(
+                remediation_ledger.clone(),
+                fixture.side_effect_projection(
+                    remediation_ledger,
+                    events::SideEffectLedgerPurpose::Remediation {
+                        forward_ledger_key: foreign_forward,
+                    },
+                    node(0x83),
+                    store::SideEffectPhase::ConfirmationObserved {
+                        invocation_epoch: 1,
+                    },
+                    0x84,
+                ),
+            );
+            let projection = projection_with_side_effects(side_effects);
+            assert_eq!(
+                verify_remediation_ledger_links(&certified_spec, &projection)
+                    .expect_err("foreign forward")
+                    .kind,
+                ReplayErrorKind::SideEffectMissing
+            );
+        }
+
+        #[test]
+        fn replay_construction_rejects_manual_resolution_schema_mismatch() {
+            let operator_schema = schema("mfm.test.operator_identity", 0x90);
+            let evidence_schema = schema("mfm.test.manual_evidence", 0x91);
+            let fixture = Fixture::with_saga_policy(spec::SagaPolicySpec::ManualResolution {
+                manual: spec::ManualResolutionEvidenceSpec {
+                    evidence_schema: evidence_schema.clone(),
+                    operator_identity_ref_schema: operator_schema,
+                },
+            });
+            let mut stream = fixture.stream.clone();
+            let run_id = stream[0].run_id().clone();
+            append_payload_to_stream(
+                &mut stream,
+                "bad-manual-resolution",
+                KernelEventPayload::ManualResolutionRecorded(events::ManualResolutionRecorded {
+                    run_id,
+                    spec_hash: fixture.envelope.spec_hash.clone(),
+                    outcome: events::ManualResolutionOutcome::ConfirmRemediated,
+                    operator_identity_ref_schema_id: schema("mfm.test.wrong_operator", 0x92),
+                    operator_identity_ref_hash: content(0x93),
+                    operator_identity_ref_artifact_id: artifact(0x94),
+                    evidence_schema_id: evidence_schema,
+                    evidence_hash: content(0x95),
+                    evidence_artifact_id: artifact(0x96),
+                    note: None,
+                }),
+            );
+
+            assert_eq!(
+                ReplayBroker::from_validated_parts(fixture.authority_for_stream(&stream))
+                    .expect_err("manual schema mismatch")
+                    .kind,
+                ReplayErrorKind::CertifiedEvidenceMismatch
+            );
+        }
+
         struct TestReplayVerifier {
             verifier_id: events::ReplayVerifierId,
             submission_hash: ContentDigest,
@@ -2400,6 +3148,21 @@ pub mod v1 {
 
         impl Fixture {
             fn new() -> Self {
+                Self::with_saga_policy(spec::SagaPolicySpec::NoSideEffects)
+            }
+
+            fn with_saga_policy(saga: spec::SagaPolicySpec) -> Self {
+                Self::with_saga_policy_internal(saga, false)
+            }
+
+            fn with_saga_policy_and_remediation(saga: spec::SagaPolicySpec) -> Self {
+                Self::with_saga_policy_internal(saga, true)
+            }
+
+            fn with_saga_policy_internal(
+                saga: spec::SagaPolicySpec,
+                include_remediation: bool,
+            ) -> Self {
                 let node_id = node(0x10);
                 let attempt_id = attempt(0x11);
                 let output_cell = cell(0x12);
@@ -2525,6 +3288,62 @@ pub mod v1 {
                     runner: "sidefx".to_owned(),
                     side_effect_contract_digest: Some(contract_digest),
                 };
+                let mut remediations = BTreeMap::new();
+                let mut cells = vec![spec::CellSpec {
+                    cell_id: output_cell.clone(),
+                    producer: spec::CellProducer::Node(node_id.clone()),
+                    scope_id: scope_id.clone(),
+                    semantic_type_id: semantic.clone(),
+                    schema_id: value_schema.clone(),
+                    value_lineage: lineage.clone(),
+                    terminal_policy: spec::CellTerminalPolicy::ProducedOnly,
+                    storage_policy: spec::StoragePolicy::ContentAddressed,
+                    redaction_policy: spec::RedactionPolicy::Public,
+                }];
+                let mut value_lineages = vec![spec::ValueLineage {
+                    lineage_ref: lineage.clone(),
+                    scope_id: scope_id.clone(),
+                    producer: spec::CellProducer::Node(node_id.clone()),
+                    input_cells: Vec::new(),
+                    config_ref_digest: None,
+                    planning_lineage: planning.clone(),
+                    domain_keys: Vec::new(),
+                    transform_policy: spec::LineageTransformPolicy::StateOutput,
+                }];
+                if include_remediation {
+                    let remediation_node_id = node(0x60);
+                    let remediation_output_cell = cell(0x61);
+                    let remediation_lineage = spec::ValueLineageRef {
+                        lineage_digest: content(0x62),
+                    };
+                    let mut remediation = node_spec.clone();
+                    remediation.node_id = remediation_node_id.clone();
+                    remediation.stable_key =
+                        spec::StableAuthorKey::new("remediation").expect("stable key");
+                    remediation.output_cell = remediation_output_cell.clone();
+                    remediations.insert(node_id.clone(), remediation);
+                    cells.push(spec::CellSpec {
+                        cell_id: remediation_output_cell.clone(),
+                        producer: spec::CellProducer::Node(remediation_node_id.clone()),
+                        scope_id: scope_id.clone(),
+                        semantic_type_id: semantic.clone(),
+                        schema_id: value_schema.clone(),
+                        value_lineage: remediation_lineage.clone(),
+                        terminal_policy: spec::CellTerminalPolicy::ProducedOnly,
+                        storage_policy: spec::StoragePolicy::ContentAddressed,
+                        redaction_policy: spec::RedactionPolicy::Public,
+                    });
+                    value_lineages.push(spec::ValueLineage {
+                        lineage_ref: remediation_lineage,
+                        scope_id: scope_id.clone(),
+                        producer: spec::CellProducer::Node(remediation_node_id),
+                        input_cells: Vec::new(),
+                        config_ref_digest: None,
+                        planning_lineage: planning.clone(),
+                        domain_keys: Vec::new(),
+                        transform_policy: spec::LineageTransformPolicy::StateOutput,
+                    });
+                }
                 let spec = spec::TypedExecutionSpec::new(spec::TypedExecutionSpecParts {
                     authoring: spec::AuthoringProvenance::StateComposition {
                         descriptor: spec::CompositionDescriptor {
@@ -2534,7 +3353,7 @@ pub mod v1 {
                         },
                         config_hash: content(0x2d),
                     },
-                    saga: spec::SagaPolicySpec::NoSideEffects,
+                    saga,
                     scopes: vec![spec::ScopeSpec {
                         scope_id: scope_id.clone(),
                         parent_scope_id: None,
@@ -2548,28 +3367,9 @@ pub mod v1 {
                     ],
                     config_refs: vec![config_ref],
                     nodes: vec![node_spec],
-                    remediations: BTreeMap::new(),
-                    cells: vec![spec::CellSpec {
-                        cell_id: output_cell.clone(),
-                        producer: spec::CellProducer::Node(node_id.clone()),
-                        scope_id: scope_id.clone(),
-                        semantic_type_id: semantic.clone(),
-                        schema_id: value_schema.clone(),
-                        value_lineage: lineage.clone(),
-                        terminal_policy: spec::CellTerminalPolicy::ProducedOnly,
-                        storage_policy: spec::StoragePolicy::ContentAddressed,
-                        redaction_policy: spec::RedactionPolicy::Public,
-                    }],
-                    value_lineages: vec![spec::ValueLineage {
-                        lineage_ref: lineage.clone(),
-                        scope_id: scope_id.clone(),
-                        producer: spec::CellProducer::Node(node_id.clone()),
-                        input_cells: Vec::new(),
-                        config_ref_digest: None,
-                        planning_lineage: planning,
-                        domain_keys: Vec::new(),
-                        transform_policy: spec::LineageTransformPolicy::StateOutput,
-                    }],
+                    remediations,
+                    cells,
+                    value_lineages,
                     planning_lineage: Vec::new(),
                     public_outputs: spec::PublicOutputSpec {
                         public_schema_id: public_schema,
@@ -2912,6 +3712,61 @@ pub mod v1 {
                 }
             }
 
+            fn certified_spec_with_remediation(
+                &self,
+                remediation_node_id: NodeId,
+            ) -> HashedSpecEnvelope {
+                let mut certified_spec = self.envelope.clone();
+                let mut remediation = certified_spec.spec.nodes[0].clone();
+                remediation.node_id = remediation_node_id;
+                remediation.stable_key =
+                    spec::StableAuthorKey::new("remediation").expect("stable key");
+                certified_spec
+                    .spec
+                    .remediations
+                    .insert(self.node_id.clone(), remediation);
+                certified_spec
+            }
+
+            fn side_effect_projection(
+                &self,
+                ledger_key: events::SideEffectLedgerKey,
+                ledger_purpose: events::SideEffectLedgerPurpose,
+                node_id: NodeId,
+                phase: store::SideEffectPhase,
+                event_byte: u8,
+            ) -> store::SideEffectProjection {
+                store::SideEffectProjection {
+                    run_id: self.stream[0].run_id().clone(),
+                    ledger_key,
+                    ledger_purpose,
+                    event_id: event(event_byte),
+                    intent: store::SideEffectIntentProjection {
+                        node_id,
+                        attempt_id: self.attempt_id.clone(),
+                        scope_id: self.envelope.spec.nodes[0].scope_id.clone(),
+                        invocation_epoch: 1,
+                        intent_schema_id: self.intent_schema_id.clone(),
+                        intent_hash: self.intent_hash.clone(),
+                        intent_artifact_id: artifact(event_byte.wrapping_add(1)),
+                        idempotency_input_schema_id: self.idempotency_input_schema_id.clone(),
+                        idempotency_input_hash: self.idempotency_input_hash.clone(),
+                        idempotency_key: events::IdempotencyKeyRef::new("projection-idem")
+                            .expect("idempotency"),
+                        capability_kind: self.capability_kind.clone(),
+                        capability_version: self.capability_version.clone(),
+                        adapter_kind: self.adapter_kind.clone(),
+                        adapter_version: self.adapter_version.clone(),
+                    },
+                    prepared_invocation: None,
+                    submission: None,
+                    receipt: None,
+                    confirmation: None,
+                    claim: None,
+                    phase,
+                }
+            }
+
             fn authority(&self) -> ReplayReadAuthority {
                 self.authority_for_stream(&self.stream)
             }
@@ -2943,6 +3798,21 @@ pub mod v1 {
 
             fn broker(&self) -> ReplayBroker {
                 ReplayBroker::from_validated_parts(self.authority()).expect("broker")
+            }
+
+            fn run_start_artifacts(&self) -> Vec<StoredArtifactEvidenceRef> {
+                self.artifacts
+                    .iter()
+                    .filter(|artifact| {
+                        matches!(
+                            artifact.artifact_role,
+                            ArtifactRole::TypedConfig
+                                | ArtifactRole::TypedExecutionSpec
+                                | ArtifactRole::TypedSpecCertificate
+                        )
+                    })
+                    .cloned()
+                    .collect()
             }
 
             fn fact_request(&self) -> FactReplayRequest {
@@ -3062,6 +3932,23 @@ pub mod v1 {
             stream.extend(batch.events().iter().cloned());
         }
 
+        fn projection_with_side_effects(
+            side_effects: BTreeMap<events::SideEffectLedgerKey, store::SideEffectProjection>,
+        ) -> ProjectionSnapshot {
+            ProjectionSnapshot::from_parts_with_saga(
+                BTreeMap::new(),
+                BTreeMap::new(),
+                BTreeMap::new(),
+                BTreeMap::new(),
+                BTreeMap::new(),
+                BTreeMap::new(),
+                BTreeMap::new(),
+                side_effects,
+                BTreeMap::new(),
+                BTreeMap::new(),
+            )
+        }
+
         fn stored_artifact(
             artifact_id: ArtifactId,
             digest: ContentDigest,
@@ -3107,6 +3994,10 @@ pub mod v1 {
             ArtifactId::from_digest(DigestAlgorithm::Sha256JcsV1, bytes(byte))
         }
 
+        fn event(byte: u8) -> EventId {
+            EventId::from_digest(DigestAlgorithm::Sha256JcsV1, bytes(byte))
+        }
+
         fn attempt(byte: u8) -> AttemptId {
             AttemptId::from_digest(DigestAlgorithm::Sha256JcsV1, bytes(byte))
         }
@@ -3140,6 +4031,17 @@ pub mod v1 {
                 bytes(byte),
             )
             .expect("semantic")
+        }
+
+        fn test_error(retryable: bool) -> events::MfmErrorInfo {
+            events::MfmErrorInfo {
+                code: events::ErrorCode::new("replay_test_failure").expect("error code"),
+                category: events::ErrorCategory::Runtime,
+                retryable,
+                safe_message: "replay test failure".to_owned(),
+                public_details: None,
+                diagnostic_ref: None,
+            }
         }
     }
 }
