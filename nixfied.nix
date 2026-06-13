@@ -2,166 +2,81 @@
   adapters,
   lib,
   pkgs,
+  nixfiedLib,
   ...
 }:
 let
-  rustToolchain = pkgs.rust-bin.stable."1.96.0".minimal.override {
-    extensions = [
-      "clippy"
-      "rustfmt"
-    ];
-  };
-  darwinLinkInputs = lib.optionals pkgs.stdenv.hostPlatform.isDarwin [
-    pkgs.libiconv
-  ];
+  # One pinned toolchain value, shared with flake.nix (nix/rust-toolchain.nix).
+  rustToolchain = import ./nix/rust-toolchain.nix { inherit pkgs; };
+
+  # The shared tool set every cargo leaf runs with: the runtime assembles the
+  # child PATH from these roots and nothing else (hermetic env).
+  cargoTools = [
+    "rust-toolchain"
+    pkgs.cargo-nextest
+    pkgs.git
+    pkgs.pkg-config
+  ]
+  ++ [ "cc" ]
+  ++ lib.optionals pkgs.stdenv.hostPlatform.isDarwin [ pkgs.libiconv ];
+
   ccEnvSuffix = lib.replaceStrings [ "-" ] [ "_" ] pkgs.stdenv.hostPlatform.config;
-  darwinLinkSetup = lib.optionalString pkgs.stdenv.hostPlatform.isDarwin ''
-    export NIX_LDFLAGS_${ccEnvSuffix}="''${NIX_LDFLAGS_${ccEnvSuffix}:-} -L${pkgs.libiconv}/lib"
-    export CPATH="${pkgs.libiconv}/include:''${CPATH:-}"
-  '';
-
-  mfmRunner = pkgs.writeShellApplication {
-    name = "mfm-nixfied-runner";
-    runtimeInputs =
-      [
-        pkgs.coreutils
-        pkgs.cargo-nextest
-        pkgs.git
-        pkgs.pkg-config
-        rustToolchain
-        pkgs.stdenv.cc
-      ]
-      ++ darwinLinkInputs;
-    text = ''
-      command_name="''${1:?missing mfm task command}"
-      shift
-
-      state_dir=""
-      postgres_port=""
-      reth_port=""
-      while [[ $# -gt 0 ]]; do
-        case "$1" in
-          --state-dir)
-            state_dir="''${2:?missing --state-dir value}"
-            shift 2
-            ;;
-          --postgres-port)
-            postgres_port="''${2:?missing --postgres-port value}"
-            shift 2
-            ;;
-          --reth-port)
-            reth_port="''${2:?missing --reth-port value}"
-            shift 2
-            ;;
-          *)
-            echo "unknown argument for $command_name: $1" >&2
-            exit 64
-            ;;
-        esac
-      done
-
-      if [[ -z "$state_dir" ]]; then
-        echo "missing required --state-dir argument" >&2
-        exit 64
-      fi
-
-      mkdir -p "$state_dir/cargo-target"
-      export CARGO_TARGET_DIR="''${CARGO_TARGET_DIR:-$state_dir/cargo-target}"
-      export RUST_BACKTRACE="''${RUST_BACKTRACE:-1}"
-      ${darwinLinkSetup}
-
-      require_postgres_port() {
-        if [[ -z "$postgres_port" ]]; then
-          echo "missing required --postgres-port argument for $command_name" >&2
-          exit 64
-        fi
-        export DATABASE_URL="postgresql://postgres@127.0.0.1:$postgres_port/postgres"
-      }
-
-      require_reth_port() {
-        if [[ -z "$reth_port" ]]; then
-          echo "missing required --reth-port argument for $command_name" >&2
-          exit 64
-        fi
-        rpc_url="http://127.0.0.1:$reth_port"
-        export RETH_HTTP_PORT="$reth_port"
-        export MFM_EVM_RPC_SOURCES_JSON="{\"sources\":[{\"id\":\"reth-local\",\"rpc_url\":\"$rpc_url\",\"authorization\":null}],\"policies\":[{\"id\":\"reth-local\",\"ordered_sources\":[\"reth-local\"]}]}"
-      }
-
-      case "$command_name" in
-        fmt)
-          exec cargo fmt --all -- --check
-          ;;
-        clippy)
-          exec cargo clippy --workspace --lib --examples --tests --benches --all-features -- -D warnings
-          ;;
-        cargo-metadata-contract)
-          exec cargo test -p mfm-integration-tests --test cargo_metadata_contract
-          ;;
-        architecture-namespace-contract)
-          exec cargo test -p mfm-integration-tests --test architecture_namespace_contract
-          ;;
-        workspace-tests)
-          cargo nextest run --workspace
-          exec cargo test --workspace --doc
-          ;;
-        parity-cli-keystore)
-          exec cargo test -p mfm --features parity-tests --test parity_keystore_reth_tx_send -- --nocapture
-          ;;
-        parity-postgres-rest-api)
-          require_postgres_port
-          exec cargo test -p mfm-integration-tests --features parity-tests --test parity_rest_api_postgres_typed_smoke -- --nocapture
-          ;;
-        parity-postgres-state-events)
-          require_postgres_port
-          exec cargo test -p mfm-stream-store-postgres --features parity-tests -- --nocapture
-          ;;
-        parity-reth-contracts)
-          require_reth_port
-          exec cargo test -p mfm-integration-tests --features parity-tests --test parity_evm_contract_lifecycle_reth -- --nocapture
-          ;;
-        parity-reth-portfolio)
-          require_reth_port
-          exec cargo test -p mfm-integration-tests --features parity-tests --test parity_portfolio_tracker_reth_snapshot -- --nocapture
-          ;;
-        *)
-          echo "unknown mfm task command: $command_name" >&2
-          exit 64
-          ;;
-      esac
-    '';
+  # The hermetic-env replacements for the old shell `export`s: typed values,
+  # no append-to-inherited (the child env starts empty).
+  cargoEnv = {
+    CARGO_TARGET_DIR = "\${stateDir}/cargo-target";
+    RUST_BACKTRACE = "1";
+    TMPDIR = "\${stateDir}";
+  }
+  // lib.optionalAttrs pkgs.stdenv.hostPlatform.isDarwin {
+    "NIX_LDFLAGS_${ccEnvSuffix}" = "-L${pkgs.libiconv}/lib";
+    CPATH = "${pkgs.libiconv}/include";
   };
 
-  mfmTask = taskId: command: {
-    operationId = "task.mfm.${taskId}.run";
-    execId = "mfm-runner";
-    args = [
-      command
-      "--state-dir"
-      "\${stateDir}"
-    ];
-    logRefs = [ "task.mfm.${taskId}" ];
-    summaryRefs = [ "summary" ];
+  postgresEnv = {
+    DATABASE_URL = "postgresql://postgres@\${host:postgres}:\${port:postgres}/postgres";
   };
-
-  mfmServiceTask =
-    taskId: command: service:
-    let
-      baseTask = mfmTask taskId command;
-    in
-    baseTask
-    // {
-      dependsOnServicesReady = [ service ];
-      args = baseTask.args ++ [
-        "--${service}-port"
-        "\${port}"
+  rethEnv = {
+    RETH_HTTP_PORT = "\${port:reth}";
+    MFM_EVM_RPC_SOURCES_JSON = builtins.toJSON {
+      sources = [
+        {
+          id = "reth-local";
+          rpc_url = "http://\${host:reth}:\${port:reth}";
+          authorization = null;
+        }
       ];
+      policies = [
+        {
+          id = "reth-local";
+          ordered_sources = [ "reth-local" ];
+        }
+      ];
+    };
+  };
+
+  # A cargo leaf: argv + extra env + service requirements. Reuse is this Nix
+  # function; the model carries the fully-applied copies.
+  cargoLeaf =
+    {
+      run,
+      env ? { },
+      requires ? [ ],
+    }:
+    {
+      invocation = {
+        tools = cargoTools;
+        inherit run;
+        env = cargoEnv // env;
+        timeoutMs = 7200000;
+      };
+      inherit requires;
     };
 in
 {
   # Postgres and Reth come from the upstream reference adapters: idempotent
   # prepare, protocol probes (pg_isready / JSON-RPC), platform behavior, and
-  # lifecycle are framework-owned. MFM declares only its own tasks/workflows.
+  # lifecycle are framework-owned. MFM declares only its own tasks.
   imports = [
     adapters.postgres
     adapters.reth
@@ -177,138 +92,237 @@ in
     max = 9;
   };
 
-  # Keep deterministic service windows outside common OS ephemeral ranges. Reth's
-  # wrapper also derives ws/auth/p2p listeners as http+1/+2/+3, which the planner
-  # does not reserve yet, so this range is dedicated to MFM.
+  # Keep deterministic service windows outside common OS ephemeral ranges. Reth
+  # models each listener endpoint explicitly, so this range is fully reserved by
+  # the planner rather than derived in a wrapper.
   nixfied.placement.ports = {
     base = 28080;
     windowSize = 16;
     slotStride = 100;
   };
 
-  nixfied.closures.mfm-runner = {
-    package = mfmRunner;
-    executable = "bin/mfm-nixfied-runner";
-    kind = "executable";
-    requiresExecutable = true;
-    operationBindings = [
-      "task.mfm.fmt.run"
-      "task.mfm.clippy.run"
-      "task.mfm.cargo-metadata-contract.run"
-      "task.mfm.architecture-namespace-contract.run"
-      "task.mfm.workspace-tests.run"
-      "task.mfm.parity-cli-keystore.run"
-      "task.mfm.parity-postgres-rest-api.run"
-      "task.mfm.parity-postgres-state-events.run"
-      "task.mfm.parity-reth-contracts.run"
-      "task.mfm.parity-reth-portfolio.run"
-    ];
+  # The toolchain closure anchors run[0] = "cargo"; cc anchors nothing (PATH
+  # member for build scripts). Effects are the one hand-declared attestation.
+  nixfied.closures.rust-toolchain = {
+    package = rustToolchain;
+    executable = "bin/cargo";
     effects = [
       "process"
       "source-read"
       "file-write"
     ];
   };
-
-  nixfied.execs.mfm-runner = {
-    closureId = "mfm-runner";
-    timeoutMs = 7200000;
+  nixfied.closures.cc = {
+    package = pkgs.stdenv.cc;
+    executable = "bin/cc";
+    effects = [ "process" ];
   };
 
   nixfied.tasks = {
-    mfm-fmt = mfmTask "fmt" "fmt";
-    mfm-clippy = mfmTask "clippy" "clippy";
-    mfm-cargo-metadata-contract = mfmTask "cargo-metadata-contract" "cargo-metadata-contract";
-    mfm-architecture-namespace-contract = mfmTask "architecture-namespace-contract" "architecture-namespace-contract";
-    mfm-workspace-tests = mfmTask "workspace-tests" "workspace-tests";
-    mfm-parity-cli-keystore = mfmTask "parity-cli-keystore" "parity-cli-keystore";
-    mfm-parity-postgres-rest-api =
-      mfmServiceTask "parity-postgres-rest-api" "parity-postgres-rest-api"
-        "postgres";
-    mfm-parity-postgres-state-events =
-      mfmServiceTask "parity-postgres-state-events" "parity-postgres-state-events"
-        "postgres";
-    mfm-parity-reth-contracts = mfmServiceTask "parity-reth-contracts" "parity-reth-contracts" "reth";
-    mfm-parity-reth-portfolio = mfmServiceTask "parity-reth-portfolio" "parity-reth-portfolio" "reth";
-  };
+    fmt = cargoLeaf {
+      run = [
+        "cargo"
+        "fmt"
+        "--all"
+        "--"
+        "--check"
+      ];
+    };
+    clippy = cargoLeaf {
+      run = [
+        "cargo"
+        "clippy"
+        "--workspace"
+        "--lib"
+        "--examples"
+        "--tests"
+        "--benches"
+        "--all-features"
+        "--"
+        "-D"
+        "warnings"
+      ];
+    };
+    cargo-metadata-contract = cargoLeaf {
+      run = [
+        "cargo"
+        "test"
+        "-p"
+        "mfm-integration-tests"
+        "--test"
+        "cargo_metadata_contract"
+      ];
+    };
+    architecture-namespace-contract = cargoLeaf {
+      run = [
+        "cargo"
+        "test"
+        "-p"
+        "mfm-integration-tests"
+        "--test"
+        "architecture_namespace_contract"
+      ];
+    };
+    nextest-run = cargoLeaf {
+      run = [
+        "cargo"
+        "nextest"
+        "run"
+        "--workspace"
+      ];
+    };
+    doc-tests = cargoLeaf {
+      run = [
+        "cargo"
+        "test"
+        "--workspace"
+        "--doc"
+      ];
+    };
+    parity-cli-keystore = cargoLeaf {
+      run = [
+        "cargo"
+        "test"
+        "-p"
+        "mfm"
+        "--features"
+        "parity-tests"
+        "--test"
+        "parity_keystore_reth_tx_send"
+        "--"
+        "--nocapture"
+      ];
+    };
+    parity-postgres-rest-api = cargoLeaf {
+      run = [
+        "cargo"
+        "test"
+        "-p"
+        "mfm-integration-tests"
+        "--features"
+        "parity-tests"
+        "--test"
+        "parity_rest_api_postgres_typed_smoke"
+        "--"
+        "--nocapture"
+      ];
+      env = postgresEnv;
+      requires = [ "postgres" ];
+    };
+    parity-postgres-state-events = cargoLeaf {
+      run = [
+        "cargo"
+        "test"
+        "-p"
+        "mfm-stream-store-postgres"
+        "--features"
+        "parity-tests"
+        "--"
+        "--nocapture"
+      ];
+      env = postgresEnv;
+      requires = [ "postgres" ];
+    };
+    parity-reth-contracts = cargoLeaf {
+      run = [
+        "cargo"
+        "test"
+        "-p"
+        "mfm-integration-tests"
+        "--features"
+        "parity-tests"
+        "--test"
+        "parity_evm_contract_lifecycle_reth"
+        "--"
+        "--nocapture"
+      ];
+      env = rethEnv;
+      requires = [ "reth" ];
+    };
+    parity-reth-portfolio = cargoLeaf {
+      run = [
+        "cargo"
+        "test"
+        "-p"
+        "mfm-integration-tests"
+        "--features"
+        "parity-tests"
+        "--test"
+        "parity_portfolio_tracker_reth_snapshot"
+        "--"
+        "--nocapture"
+      ];
+      env = rethEnv;
+      requires = [ "reth" ];
+    };
 
-  nixfied.environments.dev = lib.mkForce {
-    services = [
-      "postgres"
-      "reth"
-    ];
-    tasks = [ ];
-  };
-
-  nixfied.workflows.check.nodes = {
-    fmt = {
-      taskId = "mfm-fmt";
-    };
-    clippy = {
-      taskId = "mfm-clippy";
-      dependsOn = [ "fmt" ];
-    };
-    cargo-metadata-contract = {
-      taskId = "mfm-cargo-metadata-contract";
-      dependsOn = [ "clippy" ];
-    };
-    architecture-namespace-contract = {
-      taskId = "mfm-architecture-namespace-contract";
-      dependsOn = [ "cargo-metadata-contract" ];
-    };
-  };
-
-  nixfied.workflows.test.nodes = {
+    # The old `workspace-tests` case arm ran two commands; as a composite the
+    # second command is its own leaf with its own evidence.
     workspace-tests = {
-      taskId = "mfm-workspace-tests";
+      kind = "composite";
+      steps = nixfiedLib.seq [
+        "nextest-run"
+        "doc-tests"
+      ];
+    };
+
+    check = {
+      kind = "composite";
+      steps = nixfiedLib.seq [
+        "fmt"
+        "clippy"
+        "cargo-metadata-contract"
+        "architecture-namespace-contract"
+      ];
+    };
+
+    test = {
+      kind = "composite";
+      steps.workspace-tests.task = "workspace-tests";
+    };
+
+    # The full gate, composed from the public verbs: `.#ci` runs the same
+    # `check` and `test` composites that `.#check`/`.#test` expose (run-once is
+    # per step, so nesting reuses them without duplication), then the parity
+    # chain. The runtime starts the derived service union (postgres + reth, from
+    # the parity leaves' `requires`) before the nodes execute.
+    ci = {
+      kind = "composite";
+      steps = {
+        check.task = "check";
+        test = {
+          task = "test";
+          dependsOn = [ "check" ];
+        };
+        parity-cli-keystore = {
+          task = "parity-cli-keystore";
+          dependsOn = [ "test" ];
+        };
+        parity-postgres-rest-api = {
+          task = "parity-postgres-rest-api";
+          dependsOn = [ "parity-cli-keystore" ];
+        };
+        parity-postgres-state-events = {
+          task = "parity-postgres-state-events";
+          dependsOn = [ "parity-postgres-rest-api" ];
+        };
+        parity-reth-contracts = {
+          task = "parity-reth-contracts";
+          dependsOn = [ "parity-postgres-state-events" ];
+        };
+        parity-reth-portfolio = {
+          task = "parity-reth-portfolio";
+          dependsOn = [ "parity-reth-contracts" ];
+        };
+      };
     };
   };
 
-  nixfied.workflows.ci = {
-    servicesRequired = [
-      "postgres"
-      "reth"
-    ];
-    nodes = {
-      fmt = {
-        taskId = "mfm-fmt";
-      };
-      clippy = {
-        taskId = "mfm-clippy";
-        dependsOn = [ "fmt" ];
-      };
-      cargo-metadata-contract = {
-        taskId = "mfm-cargo-metadata-contract";
-        dependsOn = [ "clippy" ];
-      };
-      architecture-namespace-contract = {
-        taskId = "mfm-architecture-namespace-contract";
-        dependsOn = [ "cargo-metadata-contract" ];
-      };
-      workspace-tests = {
-        taskId = "mfm-workspace-tests";
-        dependsOn = [ "architecture-namespace-contract" ];
-      };
-      parity-cli-keystore = {
-        taskId = "mfm-parity-cli-keystore";
-        dependsOn = [ "workspace-tests" ];
-      };
-      parity-postgres-rest-api = {
-        taskId = "mfm-parity-postgres-rest-api";
-        dependsOn = [ "parity-cli-keystore" ];
-      };
-      parity-postgres-state-events = {
-        taskId = "mfm-parity-postgres-state-events";
-        dependsOn = [ "parity-postgres-rest-api" ];
-      };
-      parity-reth-contracts = {
-        taskId = "mfm-parity-reth-contracts";
-        dependsOn = [ "parity-postgres-state-events" ];
-      };
-      parity-reth-portfolio = {
-        taskId = "mfm-parity-reth-portfolio";
-        dependsOn = [ "parity-reth-contracts" ];
-      };
-    };
-  };
+  # MFM's public verbs, in MFM's vocabulary: `nix run .#check`, `.#test`,
+  # `.#ci`. Admission lives at the reserved `.#admit`.
+  nixfied.surface.verbs = [
+    "check"
+    "test"
+    "ci"
+  ];
 }
