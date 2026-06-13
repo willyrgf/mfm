@@ -232,6 +232,41 @@ pub fn complete_run_receipt_semantic_type_id() -> Result<SemanticTypeId> {
     )?)
 }
 
+/// Returns the framework-owned schema id for saga-terminal resolution receipts.
+pub fn resolve_saga_terminal_receipt_schema_id() -> Result<SchemaId> {
+    let digest = content_digest(serde_json::json!({
+        "fields": [
+            "public_output_schema_id",
+            "retention_manifest_receipt_cell",
+            "terminal_outcome",
+        ],
+        "name": "mfm.framework.resolve_saga_terminal_receipt",
+        "version": "1",
+    }))?;
+    Ok(SchemaId::new(
+        "mfm.framework.resolve_saga_terminal",
+        "1",
+        DigestAlgorithm::Sha256JcsV1,
+        *digest.digest(),
+    )?)
+}
+
+/// Returns the framework-owned semantic type id for saga-terminal resolution receipts.
+pub fn resolve_saga_terminal_receipt_semantic_type_id() -> Result<SemanticTypeId> {
+    let digest = content_digest(serde_json::json!({
+        "meaning": "framework saga-terminal resolution receipt",
+        "schema_id": resolve_saga_terminal_receipt_schema_id()?.as_str(),
+        "version": "1",
+    }))?;
+    Ok(SemanticTypeId::new(
+        "mfm.framework.resolve_saga_terminal",
+        "receipt",
+        "1",
+        DigestAlgorithm::Sha256JcsV1,
+        *digest.digest(),
+    )?)
+}
+
 fn spec_hash_from_canonical(canonical: &PlainCanonicalJsonBytes) -> SpecHash {
     SpecHash::from_digest(DigestAlgorithm::Sha256JcsV1, canonical.digest_bytes())
 }
@@ -389,6 +424,16 @@ pub mod v1 {
     /// Returns the v1 framework-owned semantic type id for complete-run receipts.
     pub fn complete_run_receipt_semantic_type_id() -> Result<SemanticTypeId> {
         super::complete_run_receipt_semantic_type_id()
+    }
+
+    /// Returns the v1 framework-owned schema id for saga-terminal resolution receipts.
+    pub fn resolve_saga_terminal_receipt_schema_id() -> Result<SchemaId> {
+        super::resolve_saga_terminal_receipt_schema_id()
+    }
+
+    /// Returns the v1 framework-owned semantic type id for saga-terminal resolution receipts.
+    pub fn resolve_saga_terminal_receipt_semantic_type_id() -> Result<SemanticTypeId> {
+        super::resolve_saga_terminal_receipt_semantic_type_id()
     }
 
     /// Returns canonical JSON bytes for a framework-owned config artifact.
@@ -694,13 +739,13 @@ pub mod v1 {
                 canonicalization: DigestAlgorithm::Sha256JcsV1,
                 lowering_version: LoweringVersion::new(LOWERING_VERSION)?,
                 authoring: parts.authoring,
-                saga: SagaPolicySpec::NoSideEffects,
+                saga: parts.saga,
                 scopes: parts.scopes,
                 seeds: parts.seeds,
                 descriptor_identities: parts.descriptor_identities,
                 config_refs: parts.config_refs,
                 nodes: parts.nodes,
-                remediations: BTreeMap::new(),
+                remediations: parts.remediations,
                 cells: parts.cells,
                 value_lineages: parts.value_lineages,
                 planning_lineage: parts.planning_lineage,
@@ -888,6 +933,8 @@ pub mod v1 {
     pub struct TypedExecutionSpecParts {
         /// Authoring provenance.
         pub authoring: AuthoringProvenance,
+        /// Certified run-level saga policy.
+        pub saga: SagaPolicySpec,
         /// Persisted scopes.
         pub scopes: Vec<ScopeSpec>,
         /// Declared seed cells.
@@ -898,6 +945,8 @@ pub mod v1 {
         pub config_refs: Vec<ConfigRef>,
         /// State and framework nodes.
         pub nodes: Vec<NodeSpec>,
+        /// Remediation nodes keyed by the forward side-effect node they compensate.
+        pub remediations: BTreeMap<NodeId, NodeSpec>,
         /// Planned cells.
         pub cells: Vec<CellSpec>,
         /// Hash-defining value lineage records referenced by cells and inputs.
@@ -1379,6 +1428,8 @@ pub mod v1 {
         ProjectRetentionManifest(ProjectRetentionManifestNodeSpec),
         /// Complete-run lifecycle framework node.
         CompleteRun(CompleteRunNodeSpec),
+        /// Saga-terminal resolution lifecycle framework node.
+        ResolveSagaTerminal(ResolveSagaTerminalNodeSpec),
     }
 
     impl FrameworkNodeSpec {
@@ -1390,6 +1441,7 @@ pub mod v1 {
                 Self::PublicOutputRender(_) => "public_output_render",
                 Self::ProjectRetentionManifest(_) => "project_retention_manifest",
                 Self::CompleteRun(_) => "complete_run",
+                Self::ResolveSagaTerminal(_) => "resolve_saga_terminal",
             }
         }
 
@@ -1414,6 +1466,10 @@ pub mod v1 {
                 Self::CompleteRun(spec) => serde_json::json!({
                     "complete_run": spec.json(),
                     "kind": "complete_run",
+                }),
+                Self::ResolveSagaTerminal(spec) => serde_json::json!({
+                    "kind": "resolve_saga_terminal",
+                    "resolve_saga_terminal": spec.json(),
                 }),
             }
         }
@@ -1568,6 +1624,24 @@ pub mod v1 {
     }
 
     impl CompleteRunNodeSpec {
+        fn json(&self) -> serde_json::Value {
+            serde_json::json!({
+                "public_schema_id": self.public_schema_id.as_str(),
+                "retention_manifest_receipt_cell": self.retention_manifest_receipt_cell.as_str(),
+            })
+        }
+    }
+
+    /// Resolve-saga-terminal lifecycle framework node metadata.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct ResolveSagaTerminalNodeSpec {
+        /// Public output schema whose terminal status is resolved.
+        pub public_schema_id: SchemaId,
+        /// Retention-manifest projection receipt cell that orders resolution after retention.
+        pub retention_manifest_receipt_cell: CellId,
+    }
+
+    impl ResolveSagaTerminalNodeSpec {
         fn json(&self) -> serde_json::Value {
             serde_json::json!({
                 "public_schema_id": self.public_schema_id.as_str(),
@@ -2155,8 +2229,9 @@ pub mod v1 {
             )));
         }
 
-        let mut spec = TypedExecutionSpec::new(TypedExecutionSpecParts {
+        TypedExecutionSpec::new(TypedExecutionSpecParts {
             authoring: parse_authoring(required(object, "authoring")?)?,
+            saga: parse_saga_policy(required(object, "saga")?)?,
             scopes: parse_vec(required(object, "scopes")?, parse_scope_spec)?,
             seeds: parse_vec(required(object, "seeds")?, parse_seed_spec)?,
             descriptor_identities: parse_vec(
@@ -2165,6 +2240,7 @@ pub mod v1 {
             )?,
             config_refs: parse_vec(required(object, "config_refs")?, parse_config_ref)?,
             nodes: parse_vec(required(object, "nodes")?, parse_node_spec)?,
+            remediations: parse_remediations(required(object, "remediations")?)?,
             cells: parse_vec(required(object, "cells")?, parse_cell_spec)?,
             value_lineages: parse_vec(required(object, "value_lineages")?, parse_value_lineage)?,
             planning_lineage: parse_vec(
@@ -2172,10 +2248,7 @@ pub mod v1 {
                 parse_operation_lineage_frame,
             )?,
             public_outputs: parse_public_output_spec(required(object, "public_outputs")?)?,
-        })?;
-        spec.saga = parse_saga_policy(required(object, "saga")?)?;
-        spec.remediations = parse_remediations(required(object, "remediations")?)?;
-        Ok(spec)
+        })
     }
 
     fn parse_saga_policy(value: &serde_json::Value) -> Result<SagaPolicySpec> {
@@ -2436,6 +2509,9 @@ pub mod v1 {
             "complete_run" => Ok(FrameworkNodeSpec::CompleteRun(parse_complete_run_node(
                 required(object, "complete_run")?,
             )?)),
+            "resolve_saga_terminal" => Ok(FrameworkNodeSpec::ResolveSagaTerminal(
+                parse_resolve_saga_terminal_node(required(object, "resolve_saga_terminal")?)?,
+            )),
             kind => Err(json_error(format!("unsupported framework kind {kind:?}"))),
         }
     }
@@ -2491,6 +2567,19 @@ pub mod v1 {
     fn parse_complete_run_node(value: &serde_json::Value) -> Result<CompleteRunNodeSpec> {
         let object = object(value, "complete-run node")?;
         Ok(CompleteRunNodeSpec {
+            public_schema_id: identity(required_str(object, "public_schema_id")?)?,
+            retention_manifest_receipt_cell: identity(required_str(
+                object,
+                "retention_manifest_receipt_cell",
+            )?)?,
+        })
+    }
+
+    fn parse_resolve_saga_terminal_node(
+        value: &serde_json::Value,
+    ) -> Result<ResolveSagaTerminalNodeSpec> {
+        let object = object(value, "resolve-saga-terminal node")?;
+        Ok(ResolveSagaTerminalNodeSpec {
             public_schema_id: identity(required_str(object, "public_schema_id")?)?,
             retention_manifest_receipt_cell: identity(required_str(
                 object,
@@ -3068,6 +3157,7 @@ pub mod v1 {
                     },
                     config_hash: content(0x51),
                 },
+                saga: SagaPolicySpec::NoSideEffects,
                 scopes: vec![ScopeSpec {
                     scope_id: scope_id.clone(),
                     parent_scope_id: None,
@@ -3340,6 +3430,7 @@ pub mod v1 {
                         deterministic_predecessors: vec![state_node.clone()],
                     },
                 ],
+                remediations: BTreeMap::new(),
                 cells: vec![
                     CellSpec {
                         cell_id: seed_cell.clone(),
@@ -3572,6 +3663,12 @@ pub mod v1 {
                 public_schema_id: schema("mfm.spec.test.lifecycle_complete", 0x72),
                 retention_manifest_receipt_cell: cell(0x73),
             }));
+            variants.push(FrameworkNodeSpec::ResolveSagaTerminal(
+                ResolveSagaTerminalNodeSpec {
+                    public_schema_id: schema("mfm.spec.test.lifecycle_resolve", 0x74),
+                    retention_manifest_receipt_cell: cell(0x75),
+                },
+            ));
 
             for framework in variants {
                 let mut spec = test_spec();

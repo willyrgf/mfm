@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
@@ -7319,6 +7320,7 @@ fn fixture() -> Fixture {
             },
             config_hash: content(0x60),
         },
+        saga: spec::SagaPolicySpec::NoSideEffects,
         scopes: vec![spec::ScopeSpec {
             scope_id: scope.clone(),
             parent_scope_id: None,
@@ -7376,6 +7378,7 @@ fn fixture() -> Fixture {
             node_b_spec.clone(),
             node_a_spec.clone(),
         ],
+        remediations: BTreeMap::new(),
         cells: vec![
             spec::CellSpec {
                 cell_id: seed_cell,

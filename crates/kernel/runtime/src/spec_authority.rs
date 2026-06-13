@@ -394,6 +394,7 @@ impl CertifiedRuntimeSpec {
                     spec::FrameworkNodeSpec::BootstrapRun(_)
                         | spec::FrameworkNodeSpec::ProjectRetentionManifest(_)
                         | spec::FrameworkNodeSpec::CompleteRun(_)
+                        | spec::FrameworkNodeSpec::ResolveSagaTerminal(_)
                 )
             ) {
                 lifecycle_outputs.insert(node.output_cell.clone(), node);
@@ -507,6 +508,10 @@ impl CertifiedRuntimeSpec {
                                 &consumer.framework,
                                 Some(spec::FrameworkNodeSpec::CompleteRun(complete))
                                     if complete.retention_manifest_receipt_cell == node.output_cell
+                            ) || matches!(
+                                &consumer.framework,
+                                Some(spec::FrameworkNodeSpec::ResolveSagaTerminal(resolve))
+                                    if resolve.retention_manifest_receipt_cell == node.output_cell
                             )
                         },
                     )?;
@@ -567,6 +572,64 @@ impl CertifiedRuntimeSpec {
                     }
                     self.validate_no_framework_receipt_consumers(node, &input_consumers)?;
                 }
+                Some(spec::FrameworkNodeSpec::ResolveSagaTerminal(resolve)) => {
+                    self.validate_framework_descriptor(
+                        node,
+                        "mfm.framework.resolve_saga_terminal",
+                    )?;
+                    if resolve.public_schema_id != self.spec().public_outputs.public_schema_id {
+                        return Err(RuntimeError::InvalidSpec(format!(
+                            "resolve-saga-terminal lifecycle node {} public schema mismatch",
+                            node.node_id
+                        )));
+                    }
+                    self.validate_framework_output_cell(
+                        node,
+                        &spec::resolve_saga_terminal_receipt_schema_id()?,
+                        &spec::resolve_saga_terminal_receipt_semantic_type_id()?,
+                        spec::StoragePolicy::ContentAddressed,
+                    )?;
+                    let retention_manifest_receipt_cell = self
+                        .cells
+                        .get(&resolve.retention_manifest_receipt_cell)
+                        .ok_or_else(|| {
+                            RuntimeError::InvalidSpec(format!(
+                                "resolve-saga-terminal lifecycle node {} missing retention receipt cell",
+                                node.node_id
+                            ))
+                        })?;
+                    self.validate_framework_input_binding(
+                        node,
+                        &spec::framework_lifecycle_receipt_input_binding(
+                            "resolve_saga_terminal",
+                            "retention_manifest_receipt",
+                            retention_manifest_receipt_cell,
+                        )?,
+                    )?;
+                    let input_cells = self.validate_input_binding(&node.input_bindings.root)?;
+                    if input_cells != vec![resolve.retention_manifest_receipt_cell.clone()] {
+                        return Err(RuntimeError::InvalidSpec(format!(
+                            "resolve-saga-terminal lifecycle node {} must depend on the retention receipt cell",
+                            node.node_id
+                        )));
+                    }
+                    let retention_node = lifecycle_outputs
+                        .get(&resolve.retention_manifest_receipt_cell)
+                        .filter(|candidate| {
+                            matches!(
+                                &candidate.framework,
+                                Some(spec::FrameworkNodeSpec::ProjectRetentionManifest(retention))
+                                    if retention.public_schema_id == resolve.public_schema_id
+                            )
+                        });
+                    if retention_node.is_none() {
+                        return Err(RuntimeError::InvalidSpec(format!(
+                            "resolve-saga-terminal lifecycle node {} is not ordered after retention projection",
+                            node.node_id
+                        )));
+                    }
+                    self.validate_no_framework_receipt_consumers(node, &input_consumers)?;
+                }
                 Some(spec::FrameworkNodeSpec::Bridge(_)) | None => {}
             }
         }
@@ -613,7 +676,8 @@ impl CertifiedRuntimeSpec {
                 Some(
                     spec::FrameworkNodeSpec::BootstrapRun(_)
                     | spec::FrameworkNodeSpec::ProjectRetentionManifest(_)
-                    | spec::FrameworkNodeSpec::CompleteRun(_),
+                    | spec::FrameworkNodeSpec::CompleteRun(_)
+                    | spec::FrameworkNodeSpec::ResolveSagaTerminal(_),
                 ) => {}
                 _ => {
                     return Err(RuntimeError::InvalidSpec(format!(
@@ -714,6 +778,12 @@ impl CertifiedRuntimeSpec {
                 matches!(
                     &node.framework,
                     Some(spec::FrameworkNodeSpec::CompleteRun(_))
+                )
+            }
+            "mfm.framework.resolve_saga_terminal" => {
+                matches!(
+                    &node.framework,
+                    Some(spec::FrameworkNodeSpec::ResolveSagaTerminal(_))
                 )
             }
             _ => return Ok(()),

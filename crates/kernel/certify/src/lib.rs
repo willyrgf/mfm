@@ -1109,17 +1109,20 @@ impl<'a> DraftLowerer<'a> {
         let seeds = self.lower_seeds()?;
         self.lower_bootstrap_run_node()?;
         self.lower_state_nodes()?;
+        let remediations = self.lower_remediation_nodes()?;
         self.lower_bridge_nodes()?;
         let public_outputs = self.lower_public_outputs()?;
         let planning_lineage = self.lower_operation_lineage()?;
 
         spec::TypedExecutionSpec::new(spec::TypedExecutionSpecParts {
             authoring: self.authoring_provenance()?,
+            saga: lower_saga_policy(self.draft.saga_policy()),
             scopes,
             seeds,
             descriptor_identities: self.descriptor_identities.values().cloned().collect(),
             config_refs: self.config_refs.values().cloned().collect(),
             nodes: self.nodes.clone(),
+            remediations,
             cells: self.cells.clone(),
             value_lineages: self.value_lineages.values().cloned().collect(),
             planning_lineage,
@@ -1263,73 +1266,88 @@ impl<'a> DraftLowerer<'a> {
 
     fn lower_state_nodes(&mut self) -> Result<()> {
         for node in self.draft.state_nodes() {
-            let config_ref = self.config_ref(&node.config)?;
-            let input_bindings = lower_input_binding(&node.input)?;
-            let input_cells = collect_input_cells(&input_bindings.root);
-            let planning_lineage = lower_planning_lineage(&node.planning_lineage);
-            let domain_keys = node
-                .output_domain_keys
-                .iter()
-                .map(lower_domain_key_ref)
-                .collect::<Vec<_>>();
-            let output_lineage = spec::ValueLineage {
-                lineage_ref: lineage_ref(node.output_value_lineage.digest()),
-                scope_id: node.scope_id.clone(),
-                producer: spec::CellProducer::Node(node.node_id.clone()),
-                input_cells: sorted_cell_ids(input_cells.clone()),
-                config_ref_digest: Some(node.config.config_ref_digest.clone()),
-                planning_lineage: planning_lineage.clone(),
-                domain_keys,
-                transform_policy: spec::LineageTransformPolicy::StateOutput,
-            };
-            self.insert_value_lineage(output_lineage)?;
-            self.insert_cell(spec::CellSpec {
-                cell_id: node.output_cell_id.clone(),
-                producer: spec::CellProducer::Node(node.node_id.clone()),
-                scope_id: node.scope_id.clone(),
-                semantic_type_id: node.output_semantic_type_id.clone(),
-                schema_id: node.output_schema_id.clone(),
-                value_lineage: lineage_ref(node.output_value_lineage.digest()),
-                terminal_policy: spec::CellTerminalPolicy::ProducedOnly,
-                storage_policy: spec::StoragePolicy::ContentAddressed,
-                redaction_policy: spec::RedactionPolicy::Public,
-            })?;
-            self.insert_descriptor(spec::DescriptorIdentity::State(Box::new(
-                state_descriptor_identity_from_program(node)?,
-            )))?;
-            let side_effect = node.side_effect_contract_digest.as_ref().map(|digest| {
-                spec::SideEffectContractSpec {
-                    contract_digest: digest.clone(),
-                }
-            });
-            self.nodes.push(spec::NodeSpec {
-                node_id: node.node_id.clone(),
-                stable_key: stable_author_key(node.key.as_str())?,
-                scope_id: node.scope_id.clone(),
-                state_kind: node.state_kind.clone(),
-                state_version: node.state_version.clone(),
-                descriptor_id: node.state_descriptor_id.clone(),
-                config_ref,
-                input_bindings,
-                output_cell: node.output_cell_id.clone(),
-                effect_kind: node.effect_kind.clone(),
-                capability_bindings: node.capability_bindings.clone(),
-                adapter_bindings: node
-                    .adapter_bindings
-                    .iter()
-                    .map(|binding| spec::AdapterBinding {
-                        adapter_kind: binding.adapter_kind.clone(),
-                        adapter_version: binding.adapter_version.clone(),
-                        binding_digest: None,
-                    })
-                    .collect(),
-                side_effect,
-                framework: None,
-                planning_lineage,
-                deterministic_predecessors: self.predecessors_for_inputs(&input_cells)?,
-            });
+            let lowered = self.lower_state_node(node)?;
+            self.nodes.push(lowered);
         }
         Ok(())
+    }
+
+    fn lower_remediation_nodes(&mut self) -> Result<BTreeMap<NodeId, spec::NodeSpec>> {
+        let mut remediations = BTreeMap::new();
+        for (forward_node_id, node) in self.draft.remediation_nodes() {
+            let lowered = self.lower_state_node(node)?;
+            remediations.insert(forward_node_id.clone(), lowered);
+        }
+        Ok(remediations)
+    }
+
+    fn lower_state_node(&mut self, node: &program::StateNodeSpec) -> Result<spec::NodeSpec> {
+        let config_ref = self.config_ref(&node.config)?;
+        let input_bindings = lower_input_binding(&node.input)?;
+        let input_cells = collect_input_cells(&input_bindings.root);
+        let planning_lineage = lower_planning_lineage(&node.planning_lineage);
+        let domain_keys = node
+            .output_domain_keys
+            .iter()
+            .map(lower_domain_key_ref)
+            .collect::<Vec<_>>();
+        let output_lineage = spec::ValueLineage {
+            lineage_ref: lineage_ref(node.output_value_lineage.digest()),
+            scope_id: node.scope_id.clone(),
+            producer: spec::CellProducer::Node(node.node_id.clone()),
+            input_cells: sorted_cell_ids(input_cells.clone()),
+            config_ref_digest: Some(node.config.config_ref_digest.clone()),
+            planning_lineage: planning_lineage.clone(),
+            domain_keys,
+            transform_policy: spec::LineageTransformPolicy::StateOutput,
+        };
+        self.insert_value_lineage(output_lineage)?;
+        self.insert_cell(spec::CellSpec {
+            cell_id: node.output_cell_id.clone(),
+            producer: spec::CellProducer::Node(node.node_id.clone()),
+            scope_id: node.scope_id.clone(),
+            semantic_type_id: node.output_semantic_type_id.clone(),
+            schema_id: node.output_schema_id.clone(),
+            value_lineage: lineage_ref(node.output_value_lineage.digest()),
+            terminal_policy: spec::CellTerminalPolicy::ProducedOnly,
+            storage_policy: spec::StoragePolicy::ContentAddressed,
+            redaction_policy: spec::RedactionPolicy::Public,
+        })?;
+        self.insert_descriptor(spec::DescriptorIdentity::State(Box::new(
+            state_descriptor_identity_from_program(node)?,
+        )))?;
+        let side_effect =
+            node.side_effect_contract_digest
+                .as_ref()
+                .map(|digest| spec::SideEffectContractSpec {
+                    contract_digest: digest.clone(),
+                });
+        Ok(spec::NodeSpec {
+            node_id: node.node_id.clone(),
+            stable_key: stable_author_key(node.key.as_str())?,
+            scope_id: node.scope_id.clone(),
+            state_kind: node.state_kind.clone(),
+            state_version: node.state_version.clone(),
+            descriptor_id: node.state_descriptor_id.clone(),
+            config_ref,
+            input_bindings,
+            output_cell: node.output_cell_id.clone(),
+            effect_kind: node.effect_kind.clone(),
+            capability_bindings: node.capability_bindings.clone(),
+            adapter_bindings: node
+                .adapter_bindings
+                .iter()
+                .map(|binding| spec::AdapterBinding {
+                    adapter_kind: binding.adapter_kind.clone(),
+                    adapter_version: binding.adapter_version.clone(),
+                    binding_digest: None,
+                })
+                .collect(),
+            side_effect,
+            framework: None,
+            planning_lineage,
+            deterministic_predecessors: self.predecessors_for_inputs(&input_cells)?,
+        })
     }
 
     fn lower_bridge_nodes(&mut self) -> Result<()> {
@@ -1455,7 +1473,8 @@ impl<'a> DraftLowerer<'a> {
         let render_receipt_cell = self.lower_public_output_render_node(&public_outputs)?;
         let retention_receipt_cell =
             self.lower_project_retention_manifest_node(&public_outputs, render_receipt_cell)?;
-        self.lower_complete_run_node(&public_outputs, retention_receipt_cell)?;
+        self.lower_complete_run_node(&public_outputs, retention_receipt_cell.clone())?;
+        self.lower_resolve_saga_terminal_node(&public_outputs, retention_receipt_cell)?;
         Ok(public_outputs)
     }
 
@@ -1802,6 +1821,113 @@ impl<'a> DraftLowerer<'a> {
         Ok(output_cell)
     }
 
+    fn lower_resolve_saga_terminal_node(
+        &mut self,
+        public_outputs: &spec::PublicOutputSpec,
+        retention_manifest_receipt_cell: CellId,
+    ) -> Result<CellId> {
+        let stable_key = stable_author_key("framework/resolve-saga-terminal")?;
+        let resolve = spec::ResolveSagaTerminalNodeSpec {
+            public_schema_id: public_outputs.public_schema_id.clone(),
+            retention_manifest_receipt_cell: retention_manifest_receipt_cell.clone(),
+        };
+        let node_id = resolve_saga_terminal_node_id_from_spec(
+            self.draft.root_scope_id(),
+            stable_key.as_str(),
+            &resolve,
+        )?;
+        let semantic_type_id = spec::resolve_saga_terminal_receipt_semantic_type_id()
+            .map_err(|error| CertifyError::Spec(error.to_string()))?;
+        let receipt_schema_id = spec::resolve_saga_terminal_receipt_schema_id()
+            .map_err(|error| CertifyError::Spec(error.to_string()))?;
+        let output_cell = framework_cell_id(
+            self.draft.root_scope_id(),
+            &node_id,
+            &semantic_type_id,
+            &receipt_schema_id,
+        )?;
+        let planning_lineage = final_planning_lineage(self.draft.operation_lineage())?;
+        let config_ref = framework_config_ref("resolve_saga_terminal", &node_id)?;
+        let config_ref_digest = config_ref_digest(&config_ref)?;
+        let input_cell = self
+            .cells
+            .iter()
+            .find(|cell| cell.cell_id == retention_manifest_receipt_cell)
+            .cloned()
+            .ok_or_else(|| {
+                problem(
+                    ProblemClass::InvalidTopology,
+                    format!(
+                        "resolve-saga-terminal lifecycle node input cell {retention_manifest_receipt_cell} is missing"
+                    ),
+                )
+            })?;
+        let input_binding = spec::framework_lifecycle_receipt_input_binding(
+            "resolve_saga_terminal",
+            "retention_manifest_receipt",
+            &input_cell,
+        )
+        .map_err(|error| CertifyError::Spec(error.to_string()))?;
+        let descriptor = framework_resolve_saga_terminal_descriptor(
+            &receipt_schema_id,
+            &semantic_type_id,
+            &config_ref.schema_id,
+            &input_binding.input_schema_id,
+        )?;
+        let lineage_ref = render_value_lineage_ref(
+            self.draft.root_scope_id(),
+            &node_id,
+            std::slice::from_ref(&retention_manifest_receipt_cell),
+            &planning_lineage,
+            &config_ref_digest,
+        )?;
+        self.insert_config_ref(config_ref.clone())?;
+        self.insert_descriptor(spec::DescriptorIdentity::State(Box::new(
+            descriptor.clone(),
+        )))?;
+        self.insert_value_lineage(spec::ValueLineage {
+            lineage_ref: lineage_ref.clone(),
+            scope_id: self.draft.root_scope_id().clone(),
+            producer: spec::CellProducer::Node(node_id.clone()),
+            input_cells: vec![retention_manifest_receipt_cell.clone()],
+            config_ref_digest: Some(config_ref_digest),
+            planning_lineage: planning_lineage.clone(),
+            domain_keys: Vec::new(),
+            transform_policy: spec::LineageTransformPolicy::StateOutput,
+        })?;
+        self.insert_cell(spec::CellSpec {
+            cell_id: output_cell.clone(),
+            producer: spec::CellProducer::Node(node_id.clone()),
+            scope_id: self.draft.root_scope_id().clone(),
+            semantic_type_id,
+            schema_id: receipt_schema_id,
+            value_lineage: lineage_ref,
+            terminal_policy: spec::CellTerminalPolicy::ProducedOnly,
+            storage_policy: spec::StoragePolicy::ContentAddressed,
+            redaction_policy: spec::RedactionPolicy::Public,
+        })?;
+        self.nodes.push(spec::NodeSpec {
+            node_id,
+            stable_key,
+            scope_id: self.draft.root_scope_id().clone(),
+            state_kind: descriptor.state_kind,
+            state_version: descriptor.state_version,
+            descriptor_id: descriptor.descriptor_id,
+            config_ref,
+            input_bindings: input_binding,
+            output_cell: output_cell.clone(),
+            effect_kind: descriptor.effect_kind,
+            capability_bindings: descriptor.capabilities,
+            adapter_bindings: Vec::new(),
+            side_effect: None,
+            framework: Some(spec::FrameworkNodeSpec::ResolveSagaTerminal(resolve)),
+            planning_lineage,
+            deterministic_predecessors: self
+                .predecessors_for_inputs(std::slice::from_ref(&retention_manifest_receipt_cell))?,
+        });
+        Ok(output_cell)
+    }
+
     fn lower_operation_lineage(&mut self) -> Result<Vec<spec::OperationLineageFrameSpec>> {
         let mut frames = Vec::new();
         for frame in self.draft.operation_lineage() {
@@ -2008,6 +2134,15 @@ fn validate_typed_spec(
         &cell_index,
         &lineage_index,
         &spec.public_outputs,
+    )?;
+    validate_saga_structure(
+        spec,
+        &scope_ids,
+        &descriptor_index,
+        &config_refs,
+        &cell_index,
+        &lineage_index,
+        &node_index,
     )?;
     validate_operation_lineage(
         &spec.planning_lineage,
@@ -2421,6 +2556,12 @@ fn validate_builtin_framework_state_descriptor(
             &descriptor.config_schema_id,
             &descriptor.input_schema_id,
         )?),
+        "mfm.framework.resolve_saga_terminal" => Some(framework_resolve_saga_terminal_descriptor(
+            &descriptor.output_schema_id,
+            &descriptor.output_semantic_type_id,
+            &descriptor.config_schema_id,
+            &descriptor.input_schema_id,
+        )?),
         _ => None,
     };
     let Some(expected) = expected else {
@@ -2660,6 +2801,13 @@ fn validate_nodes(
             Some(spec::FrameworkNodeSpec::CompleteRun(complete)) => {
                 complete_run_node_id_from_spec(&node.scope_id, node.stable_key.as_str(), complete)?
             }
+            Some(spec::FrameworkNodeSpec::ResolveSagaTerminal(resolve)) => {
+                resolve_saga_terminal_node_id_from_spec(
+                    &node.scope_id,
+                    node.stable_key.as_str(),
+                    resolve,
+                )?
+            }
             None => state_node_id_from_spec(node, &config_ref_digest)?,
         };
         if node.node_id != expected_node_id {
@@ -2744,6 +2892,312 @@ fn validate_nodes(
     validate_framework_nodes(nodes, cells, descriptors, public_outputs)?;
     validate_node_graph_acyclic(&index)?;
     Ok(index)
+}
+
+fn validate_saga_structure(
+    typed: &spec::TypedExecutionSpec,
+    scope_ids: &BTreeSet<String>,
+    descriptors: &DescriptorIndex<'_>,
+    config_refs: &ConfigIndex,
+    cells: &BTreeMap<String, spec::CellSpec>,
+    lineages: &BTreeMap<String, spec::ValueLineage>,
+    forward_nodes: &BTreeMap<String, spec::NodeSpec>,
+) -> Result<()> {
+    let forward_side_effects = forward_nodes
+        .values()
+        .filter(|node| is_apply_side_effect_node(node).unwrap_or(false))
+        .collect::<Vec<_>>();
+
+    match &typed.saga {
+        spec::SagaPolicySpec::NoSideEffects => {
+            if !forward_side_effects.is_empty() {
+                return Err(problem(
+                    ProblemClass::InvalidSemanticTransition,
+                    "NoSideEffects policy cannot certify forward side-effect nodes",
+                ));
+            }
+        }
+        spec::SagaPolicySpec::FailWithoutAcdcClaim
+        | spec::SagaPolicySpec::ManualResolution { .. }
+        | spec::SagaPolicySpec::CompensateCompleted { .. } => {
+            if forward_side_effects.is_empty() {
+                return Err(problem(
+                    ProblemClass::InvalidSemanticTransition,
+                    "side-effecting saga policy requires at least one forward side-effect node",
+                ));
+            }
+        }
+    }
+
+    if !matches!(typed.saga, spec::SagaPolicySpec::CompensateCompleted { .. })
+        && !typed.remediations.is_empty()
+    {
+        return Err(problem(
+            ProblemClass::InvalidSemanticTransition,
+            "remediations are valid only under CompensateCompleted policy",
+        ));
+    }
+
+    let forward_side_effect_ids = forward_side_effects
+        .iter()
+        .map(|node| node.node_id.as_str().to_owned())
+        .collect::<BTreeSet<_>>();
+    let mut remediation_node_ids = BTreeSet::new();
+    for (forward_node_id, remediation) in &typed.remediations {
+        if forward_nodes.contains_key(remediation.node_id.as_str()) {
+            return Err(problem(
+                ProblemClass::InvalidTopology,
+                format!(
+                    "remediation node {} also appears in the forward node collection",
+                    remediation.node_id
+                ),
+            ));
+        }
+        if !remediation_node_ids.insert(remediation.node_id.as_str().to_owned()) {
+            return Err(problem(
+                ProblemClass::InvalidTopology,
+                format!("duplicate remediation node id {}", remediation.node_id),
+            ));
+        }
+        let Some(forward) = forward_nodes.get(forward_node_id.as_str()) else {
+            return Err(problem(
+                ProblemClass::InvalidTopology,
+                format!("remediation key {forward_node_id} references missing forward node"),
+            ));
+        };
+        if !forward_side_effect_ids.contains(forward_node_id.as_str()) {
+            return Err(problem(
+                ProblemClass::InvalidSemanticTransition,
+                format!(
+                    "remediation key {forward_node_id} does not reference a forward side-effect node"
+                ),
+            ));
+        }
+        validate_remediation_node_contract(
+            remediation,
+            scope_ids,
+            descriptors,
+            config_refs,
+            cells,
+            lineages,
+        )?;
+        validate_remediation_binding_scope(forward, remediation, cells, forward_nodes)?;
+    }
+
+    if matches!(typed.saga, spec::SagaPolicySpec::CompensateCompleted { .. }) {
+        for node in forward_side_effects {
+            if !typed.remediations.contains_key(&node.node_id) {
+                return Err(problem(
+                    ProblemClass::InvalidTopology,
+                    format!(
+                        "compensating policy left forward side-effect node {} without remediation",
+                        node.node_id
+                    ),
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_remediation_node_contract(
+    node: &spec::NodeSpec,
+    scope_ids: &BTreeSet<String>,
+    descriptors: &DescriptorIndex<'_>,
+    config_refs: &ConfigIndex,
+    cells: &BTreeMap<String, spec::CellSpec>,
+    lineages: &BTreeMap<String, spec::ValueLineage>,
+) -> Result<()> {
+    if node.framework.is_some() {
+        return Err(problem(
+            ProblemClass::InvalidSemanticTransition,
+            format!(
+                "remediation node {} must not be a framework node",
+                node.node_id
+            ),
+        ));
+    }
+    if !scope_ids.contains(node.scope_id.as_str()) {
+        return Err(problem(
+            ProblemClass::InvalidTopology,
+            format!(
+                "remediation node {} references unknown scope {}",
+                node.node_id, node.scope_id
+            ),
+        ));
+    }
+    if !config_refs.contains_ref(&node.config_ref) {
+        return Err(problem(
+            ProblemClass::InvalidDataShape,
+            format!(
+                "remediation node {} references missing config {}",
+                node.node_id, node.config_ref.digest
+            ),
+        ));
+    }
+    let descriptor = descriptors.state(&node.descriptor_id)?;
+    let config_ref_digest = config_ref_digest(&node.config_ref)?;
+    if descriptor.state_kind != node.state_kind
+        || descriptor.state_version != node.state_version
+        || descriptor.config_schema_id != node.config_ref.schema_id
+        || descriptor.input_schema_id != node.input_bindings.input_schema_id
+        || descriptor.effect_kind != node.effect_kind
+        || descriptor.capabilities != node.capability_bindings
+        || descriptor.side_effect_contract_digest
+            != node
+                .side_effect
+                .as_ref()
+                .map(|contract| contract.contract_digest.clone())
+    {
+        return Err(problem(
+            ProblemClass::InvalidSemanticTransition,
+            format!(
+                "remediation node {} descriptor metadata mismatch",
+                node.node_id
+            ),
+        ));
+    }
+    validate_effect_capabilities(&node.effect_kind, &node.capability_bindings)?;
+    if !is_apply_side_effect_node(node)? {
+        return Err(problem(
+            ProblemClass::InvalidSemanticTransition,
+            format!("remediation node {} is not side-effect-grade", node.node_id),
+        ));
+    }
+    validate_side_effect_contract(node, descriptor)?;
+    let input_cells = validate_input_binding(&node.input_bindings, cells)?;
+    let expected_node_id = state_node_id_from_spec(node, &config_ref_digest)?;
+    if node.node_id != expected_node_id {
+        return Err(problem(
+            ProblemClass::InvalidTopology,
+            format!("remediation node {} is not stable-id derived", node.node_id),
+        ));
+    }
+    let expected_predecessors = predecessor_nodes(&input_cells, cells)?;
+    if expected_predecessors != node.deterministic_predecessors {
+        return Err(problem(
+            ProblemClass::InvalidTopology,
+            format!(
+                "remediation node {} deterministic predecessors do not match input cells: expected {:?}, got {:?}",
+                node.node_id, expected_predecessors, node.deterministic_predecessors
+            ),
+        ));
+    }
+    let output = cells.get(node.output_cell.as_str()).ok_or_else(|| {
+        problem(
+            ProblemClass::InvalidTopology,
+            format!(
+                "remediation node {} output cell {} is missing",
+                node.node_id, node.output_cell
+            ),
+        )
+    })?;
+    if output.producer != spec::CellProducer::Node(node.node_id.clone())
+        || output.scope_id != node.scope_id
+        || output.schema_id != descriptor.output_schema_id
+        || output.semantic_type_id != descriptor.output_semantic_type_id
+    {
+        return Err(problem(
+            ProblemClass::InvalidInterfaceWiring,
+            format!(
+                "remediation node {} output cell metadata mismatch",
+                node.node_id
+            ),
+        ));
+    }
+    let lineage = lineages
+        .get(output.value_lineage.lineage_digest.as_str())
+        .ok_or_else(|| {
+            problem(
+                ProblemClass::InvalidDataMeaning,
+                format!(
+                    "remediation node {} output lineage is missing",
+                    node.node_id
+                ),
+            )
+        })?;
+    if lineage.producer != spec::CellProducer::Node(node.node_id.clone()) {
+        return Err(problem(
+            ProblemClass::InvalidDataMeaning,
+            format!(
+                "remediation node {} output lineage producer mismatch",
+                node.node_id
+            ),
+        ));
+    }
+    let expected_lineage = expected_node_lineage(node, &input_cells, &config_ref_digest)?;
+    if lineage.config_ref_digest != expected_lineage.config_ref_digest
+        || sorted_cell_ids(lineage.input_cells.clone())
+            != sorted_cell_ids(expected_lineage.input_cells)
+        || lineage.transform_policy != expected_lineage.transform_policy
+    {
+        return Err(problem(
+            ProblemClass::InvalidDataMeaning,
+            format!(
+                "remediation node {} output lineage input/config mismatch",
+                node.node_id
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_remediation_binding_scope(
+    forward: &spec::NodeSpec,
+    remediation: &spec::NodeSpec,
+    cells: &BTreeMap<String, spec::CellSpec>,
+    forward_nodes: &BTreeMap<String, spec::NodeSpec>,
+) -> Result<()> {
+    let mut allowed = BTreeSet::new();
+    allowed.insert(forward.output_cell.clone());
+    for input_cell in collect_input_cells(&forward.input_bindings.root) {
+        collect_forward_ancestor_cells(input_cell, cells, forward_nodes, &mut allowed)?;
+    }
+
+    for input_cell in collect_input_cells(&remediation.input_bindings.root) {
+        if !allowed.contains(&input_cell) {
+            return Err(problem(
+                ProblemClass::InvalidInterfaceWiring,
+                format!(
+                    "remediation node {} references cell {} outside linked forward node {} scope",
+                    remediation.node_id, input_cell, forward.node_id
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn collect_forward_ancestor_cells(
+    cell_id: CellId,
+    cells: &BTreeMap<String, spec::CellSpec>,
+    forward_nodes: &BTreeMap<String, spec::NodeSpec>,
+    allowed: &mut BTreeSet<CellId>,
+) -> Result<()> {
+    if !allowed.insert(cell_id.clone()) {
+        return Ok(());
+    }
+    let cell = cells.get(cell_id.as_str()).ok_or_else(|| {
+        problem(
+            ProblemClass::InvalidTopology,
+            format!("ancestor cell {cell_id} is missing"),
+        )
+    })?;
+    if let spec::CellProducer::Node(node_id) = &cell.producer {
+        let Some(node) = forward_nodes.get(node_id.as_str()) else {
+            return Ok(());
+        };
+        for input in collect_input_cells(&node.input_bindings.root) {
+            collect_forward_ancestor_cells(input, cells, forward_nodes, allowed)?;
+        }
+    }
+    Ok(())
+}
+
+fn is_apply_side_effect_node(node: &spec::NodeSpec) -> Result<bool> {
+    let (class, _) = effect_class_for_kind(&node.effect_kind)?;
+    Ok(class == EffectClass::ApplySideEffect)
 }
 
 fn validate_operation_lineage(
@@ -2844,6 +3298,9 @@ fn validate_planning_lineage_authority(spec: &spec::TypedExecutionSpec) -> Resul
         validate_planning_lineage_refs(&scope.planning_lineage, &frame_instances, &frame_digests)?;
     }
     for node in &spec.nodes {
+        validate_planning_lineage_refs(&node.planning_lineage, &frame_instances, &frame_digests)?;
+    }
+    for node in spec.remediations.values() {
         validate_planning_lineage_refs(&node.planning_lineage, &frame_instances, &frame_digests)?;
     }
     for lineage in &spec.value_lineages {
@@ -3011,6 +3468,7 @@ fn validate_framework_nodes(
     let mut bootstrap_count = 0_usize;
     let mut retention_count = 0_usize;
     let mut completion_count = 0_usize;
+    let mut resolve_count = 0_usize;
     let mut lifecycle_outputs = BTreeMap::<CellId, &spec::NodeSpec>::new();
     let mut all_input_cells = BTreeMap::<CellId, Vec<NodeId>>::new();
     let mut nodes_by_id = BTreeMap::<NodeId, &spec::NodeSpec>::new();
@@ -3028,6 +3486,7 @@ fn validate_framework_nodes(
                 spec::FrameworkNodeSpec::BootstrapRun(_)
                     | spec::FrameworkNodeSpec::ProjectRetentionManifest(_)
                     | spec::FrameworkNodeSpec::CompleteRun(_)
+                    | spec::FrameworkNodeSpec::ResolveSagaTerminal(_)
             )
         ) {
             lifecycle_outputs.insert(node.output_cell.clone(), node);
@@ -3224,12 +3683,16 @@ fn validate_framework_nodes(
                     node,
                     &all_input_cells,
                     &nodes_by_id,
-                    "complete-run lifecycle node",
+                    "complete-run or resolve-saga-terminal lifecycle node",
                     |consumer| {
                         matches!(
                             &consumer.framework,
                             Some(spec::FrameworkNodeSpec::CompleteRun(complete))
                                 if complete.retention_manifest_receipt_cell == node.output_cell
+                        ) || matches!(
+                            &consumer.framework,
+                            Some(spec::FrameworkNodeSpec::ResolveSagaTerminal(resolve))
+                                if resolve.retention_manifest_receipt_cell == node.output_cell
                         )
                     },
                 )?;
@@ -3306,6 +3769,82 @@ fn validate_framework_nodes(
                 }
                 validate_no_framework_receipt_consumers(node, &all_input_cells)?;
             }
+            Some(spec::FrameworkNodeSpec::ResolveSagaTerminal(resolve)) => {
+                resolve_count += 1;
+                let descriptor = descriptors.state(&node.descriptor_id)?;
+                validate_framework_descriptor_name(
+                    node,
+                    descriptor,
+                    "mfm.framework.resolve_saga_terminal",
+                )?;
+                if resolve.public_schema_id != public_outputs.public_schema_id {
+                    return Err(problem(
+                        ProblemClass::InvalidTerminalShape,
+                        format!(
+                            "resolve-saga-terminal lifecycle node {} public schema mismatch",
+                            node.node_id
+                        ),
+                    ));
+                }
+                validate_framework_output_cell(
+                    node,
+                    cells,
+                    &spec::resolve_saga_terminal_receipt_schema_id()
+                        .map_err(|error| CertifyError::Spec(error.to_string()))?,
+                    &spec::resolve_saga_terminal_receipt_semantic_type_id()
+                        .map_err(|error| CertifyError::Spec(error.to_string()))?,
+                    spec::StoragePolicy::ContentAddressed,
+                )?;
+                let retention_manifest_receipt_cell = cells
+                    .get(resolve.retention_manifest_receipt_cell.as_str())
+                    .ok_or_else(|| {
+                        problem(
+                            ProblemClass::InvalidTopology,
+                            format!(
+                                "resolve-saga-terminal lifecycle node {} missing retention receipt cell",
+                                node.node_id
+                            ),
+                        )
+                    })?;
+                validate_framework_input_binding(
+                    node,
+                    &spec::framework_lifecycle_receipt_input_binding(
+                        "resolve_saga_terminal",
+                        "retention_manifest_receipt",
+                        retention_manifest_receipt_cell,
+                    )
+                    .map_err(|error| CertifyError::Spec(error.to_string()))?,
+                )?;
+                let input_cells = validate_input_binding(&node.input_bindings, cells)?;
+                if input_cells != vec![resolve.retention_manifest_receipt_cell.clone()] {
+                    return Err(problem(
+                        ProblemClass::InvalidTopology,
+                        format!(
+                            "resolve-saga-terminal lifecycle node {} must depend on the retention receipt cell",
+                            node.node_id
+                        ),
+                    ));
+                }
+                let retention_node = lifecycle_outputs
+                    .get(&resolve.retention_manifest_receipt_cell)
+                    .filter(|candidate| {
+                        matches!(
+                            &candidate.framework,
+                            Some(spec::FrameworkNodeSpec::ProjectRetentionManifest(retention))
+                                if retention.public_schema_id == resolve.public_schema_id
+                        )
+                    });
+                if retention_node.is_none() {
+                    return Err(problem(
+                        ProblemClass::InvalidTopology,
+                        format!(
+                            "resolve-saga-terminal lifecycle node {} is not ordered after retention projection",
+                            node.node_id
+                        ),
+                    ));
+                }
+                validate_no_framework_receipt_consumers(node, &all_input_cells)?;
+            }
             None => {}
         }
     }
@@ -3322,6 +3861,14 @@ fn validate_framework_nodes(
             ProblemClass::InvalidTopology,
             format!(
                 "expected exactly one completion lifecycle framework node, found {completion_count}"
+            ),
+        ));
+    }
+    if resolve_count != 1 {
+        return Err(problem(
+            ProblemClass::InvalidTopology,
+            format!(
+                "expected exactly one resolve-saga-terminal lifecycle framework node, found {resolve_count}"
             ),
         ));
     }
@@ -3365,7 +3912,8 @@ fn validate_lifecycle_tail_finality(
             Some(
                 spec::FrameworkNodeSpec::BootstrapRun(_)
                 | spec::FrameworkNodeSpec::ProjectRetentionManifest(_)
-                | spec::FrameworkNodeSpec::CompleteRun(_),
+                | spec::FrameworkNodeSpec::CompleteRun(_)
+                | spec::FrameworkNodeSpec::ResolveSagaTerminal(_),
             ) => {}
             _ => {
                 return Err(problem(
@@ -3476,6 +4024,12 @@ fn validate_framework_descriptor_variant(
             matches!(
                 &node.framework,
                 Some(spec::FrameworkNodeSpec::CompleteRun(_))
+            )
+        }
+        "mfm.framework.resolve_saga_terminal" => {
+            matches!(
+                &node.framework,
+                Some(spec::FrameworkNodeSpec::ResolveSagaTerminal(_))
             )
         }
         _ => return Ok(()),
@@ -3633,6 +4187,11 @@ fn expected_node_lineage(
         }
         Some(spec::FrameworkNodeSpec::CompleteRun(complete)) => Ok(ExpectedNodeLineage {
             input_cells: vec![complete.retention_manifest_receipt_cell.clone()],
+            config_ref_digest: Some(config_ref_digest.clone()),
+            transform_policy: spec::LineageTransformPolicy::StateOutput,
+        }),
+        Some(spec::FrameworkNodeSpec::ResolveSagaTerminal(resolve)) => Ok(ExpectedNodeLineage {
+            input_cells: vec![resolve.retention_manifest_receipt_cell.clone()],
             config_ref_digest: Some(config_ref_digest.clone()),
             transform_policy: spec::LineageTransformPolicy::StateOutput,
         }),
@@ -3913,6 +4472,47 @@ fn lower_input_binding(binding: &program::InputBindingSpec) -> Result<spec::Inpu
         root: lower_input_node(&binding.root)?,
         digest: binding.digest.clone(),
     })
+}
+
+fn lower_saga_policy(policy: &program::SagaPolicy) -> spec::SagaPolicySpec {
+    match policy {
+        program::SagaPolicy::NoSideEffects => spec::SagaPolicySpec::NoSideEffects,
+        program::SagaPolicy::FailWithoutAcdcClaim => spec::SagaPolicySpec::FailWithoutAcdcClaim,
+        program::SagaPolicy::ManualResolution { manual } => {
+            spec::SagaPolicySpec::ManualResolution {
+                manual: lower_manual_resolution_evidence(manual),
+            }
+        }
+        program::SagaPolicy::CompensateCompleted {
+            on_remediation_unresolved,
+        } => spec::SagaPolicySpec::CompensateCompleted {
+            on_remediation_unresolved: lower_remediation_unresolved(on_remediation_unresolved),
+        },
+    }
+}
+
+fn lower_remediation_unresolved(
+    directive: &program::RemediationUnresolved,
+) -> spec::RemediationUnresolvedSpec {
+    match directive {
+        program::RemediationUnresolved::ManualResolution { manual } => {
+            spec::RemediationUnresolvedSpec::ManualResolution {
+                manual: lower_manual_resolution_evidence(manual),
+            }
+        }
+        program::RemediationUnresolved::FailWithoutAcdcClaim => {
+            spec::RemediationUnresolvedSpec::FailWithoutAcdcClaim
+        }
+    }
+}
+
+fn lower_manual_resolution_evidence(
+    manual: &program::ManualResolutionEvidence,
+) -> spec::ManualResolutionEvidenceSpec {
+    spec::ManualResolutionEvidenceSpec {
+        evidence_schema: manual.evidence_schema.clone(),
+        operator_identity_ref_schema: manual.operator_identity_ref_schema.clone(),
+    }
 }
 
 fn lower_operation_input_binding(
@@ -4827,6 +5427,34 @@ fn framework_complete_run_descriptor(
     })
 }
 
+fn framework_resolve_saga_terminal_descriptor(
+    output_schema_id: &SchemaId,
+    output_semantic_type_id: &SemanticTypeId,
+    config_schema_id: &SchemaId,
+    input_schema_id: &SchemaId,
+) -> Result<spec::StateDescriptorIdentity> {
+    let state_kind = state_kind_json(
+        "resolve_saga_terminal",
+        serde_json::json!({ "framework": "resolve_saga_terminal" }),
+    )?;
+    let state_version = StateVersion::new("mfm.framework.state.resolve_saga_terminal.v1")
+        .map_err(|error| lower(error.to_string()))?;
+    framework_lifecycle_descriptor(FrameworkStateDescriptorParts {
+        name: "mfm.framework.resolve_saga_terminal",
+        state_kind,
+        state_version,
+        config_schema_id,
+        input_schema_id,
+        output_schema_id,
+        output_semantic_type_id,
+        effect_kind: ManagedPlatformWrite::descriptor()
+            .map_err(|error| lower(error.to_string()))?
+            .kind,
+        runner: "managed_platform_write",
+        capabilities: NoCaps::descriptor().map_err(|error| lower(error.to_string()))?,
+    })
+}
+
 fn framework_lifecycle_descriptor(
     parts: FrameworkStateDescriptorParts<'_>,
 ) -> Result<spec::StateDescriptorIdentity> {
@@ -4969,6 +5597,25 @@ fn complete_run_node_id_from_spec(
             "lowering_version": spec::LOWERING_VERSION,
             "public_schema_id": complete.public_schema_id.as_str(),
             "retention_manifest_receipt_cell": complete.retention_manifest_receipt_cell.as_str(),
+            "scope_id": scope_id.as_str(),
+        }))?,
+    ))
+}
+
+fn resolve_saga_terminal_node_id_from_spec(
+    scope_id: &ScopeId,
+    key: &str,
+    resolve: &spec::ResolveSagaTerminalNodeSpec,
+) -> Result<NodeId> {
+    Ok(NodeId::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        digest_bytes_json(serde_json::json!({
+            "alg": DigestAlgorithm::Sha256JcsV1.as_str(),
+            "framework": "resolve_saga_terminal",
+            "local_node_key": key,
+            "lowering_version": spec::LOWERING_VERSION,
+            "public_schema_id": resolve.public_schema_id.as_str(),
+            "retention_manifest_receipt_cell": resolve.retention_manifest_receipt_cell.as_str(),
             "scope_id": scope_id.as_str(),
         }))?,
     ))
@@ -5546,6 +6193,7 @@ mod tests {
             states.snapshot(),
             OperationRegistryBuilder::new().snapshot(),
             |root: &mut RootBuilder<'_, '_>| {
+                root.set_saga_policy(program::SagaPolicy::FailWithoutAcdcClaim)?;
                 let seed = root.seed(
                     mfm_program::SeedKey::new("initial").expect("seed key"),
                     CanonicalSeed::from_value(&TestValue { amount: 2 }).expect("seed"),
@@ -5562,6 +6210,44 @@ mod tests {
             },
         )
         .expect("side effect draft")
+    }
+
+    fn compensating_draft() -> program::TypedProgramDraft {
+        let mut states = StateRegistryBuilder::new();
+        states
+            .register::<MutatingState>()
+            .expect("state registration");
+        build_root_with_registries(
+            ScopeKey::new("root").expect("root key"),
+            states.snapshot(),
+            OperationRegistryBuilder::new().snapshot(),
+            |root: &mut RootBuilder<'_, '_>| {
+                root.set_saga_policy(program::SagaPolicy::CompensateCompleted {
+                    on_remediation_unresolved: program::RemediationUnresolved::FailWithoutAcdcClaim,
+                })?;
+                let seed = root.seed(
+                    mfm_program::SeedKey::new("initial").expect("seed key"),
+                    CanonicalSeed::from_value(&TestValue { amount: 2 }).expect("seed"),
+                )?;
+                let (forward, _remediation) = root
+                    .scope()
+                    .side_effect_with_compensation::<MutatingState, MutatingState, _, _, _>(
+                        StateKey::new("mutating-state")?,
+                        TestConfig { multiplier: 3 },
+                        seed,
+                        StateKey::new("compensating-state")?,
+                        TestConfig { multiplier: 1 },
+                        |forward| Ok(forward),
+                    )?;
+                root.bind_public_outputs(
+                    PublicOutputKey::new("terminal")?,
+                    &TestPublicOutputs {
+                        result: forward.into_handle(),
+                    },
+                )
+            },
+        )
+        .expect("compensating draft")
     }
 
     fn config_ref_for_bytes<C: mfm_values::MfmConfig>(
@@ -5690,7 +6376,7 @@ mod tests {
         );
         assert_eq!(
             certified.certificate_hash().as_str(),
-            "content:sha256-jcs-v1:4495a24765acf313c10e43fbf7a9b85f6b3a1b3b6023905e9d99e7d41cdeaba2"
+            "content:sha256-jcs-v1:043101cfebcc73690934c48f0a3b68c12fa4eb2b5e95d82c9ae9a5d0dfccbaa1"
         );
         assert_eq!(
             certified.envelope().spec.public_outputs.public_schema_id,
@@ -5711,6 +6397,10 @@ mod tests {
         assert!(certified.envelope().spec.nodes.iter().any(|node| matches!(
             node.framework,
             Some(spec::FrameworkNodeSpec::CompleteRun(_))
+        )));
+        assert!(certified.envelope().spec.nodes.iter().any(|node| matches!(
+            node.framework,
+            Some(spec::FrameworkNodeSpec::ResolveSagaTerminal(_))
         )));
     }
 
@@ -6205,6 +6895,14 @@ mod tests {
                 clear_lifecycle_framework_metadata::<spec::CompleteRunNodeSpec>(spec);
             },
         );
+        assert_rejects(
+            &registry,
+            &base,
+            ProblemClass::InvalidSemanticTransition,
+            |spec| {
+                clear_lifecycle_framework_metadata::<spec::ResolveSagaTerminalNodeSpec>(spec);
+            },
+        );
     }
 
     #[test]
@@ -6253,6 +6951,27 @@ mod tests {
             ProblemClass::InvalidInterfaceWiring,
             |spec| {
                 let node = find_lifecycle_node_mut::<spec::CompleteRunNodeSpec>(spec);
+                let current = match &node.input_bindings.root {
+                    spec::InputBindingNodeSpec::Cell(cell) => cell.clone(),
+                    _ => panic!("expected cell input"),
+                };
+                node.input_bindings.root =
+                    spec::InputBindingNodeSpec::Struct(vec![spec::NamedInputBindingSpec {
+                        field_path: spec::PublicFieldPath::new("retention_manifest_receipt")
+                            .expect("field path"),
+                        node: spec::InputBindingNodeSpec::Cell(current),
+                    }]);
+                node.input_bindings.digest =
+                    content_digest_json(input_node_json(&node.input_bindings.root))
+                        .expect("input digest");
+            },
+        );
+        assert_rejects(
+            &registry,
+            &base,
+            ProblemClass::InvalidInterfaceWiring,
+            |spec| {
+                let node = find_lifecycle_node_mut::<spec::ResolveSagaTerminalNodeSpec>(spec);
                 let current = match &node.input_bindings.root {
                     spec::InputBindingNodeSpec::Cell(cell) => cell.clone(),
                     _ => panic!("expected cell input"),
@@ -6396,6 +7115,225 @@ mod tests {
         );
     }
 
+    #[test]
+    fn certifies_compensating_draft_with_separate_remediation_collection() {
+        let draft = compensating_draft();
+        let certified = certify_program_draft(&draft).expect("certified compensating draft");
+        assert!(matches!(
+            certified.spec().saga,
+            spec::SagaPolicySpec::CompensateCompleted { .. }
+        ));
+        assert_eq!(certified.spec().remediations.len(), 1);
+        let (forward_id, remediation) = certified
+            .spec()
+            .remediations
+            .iter()
+            .next()
+            .expect("remediation");
+        assert!(certified
+            .spec()
+            .nodes
+            .iter()
+            .any(|node| node.node_id == *forward_id));
+        assert!(!certified
+            .spec()
+            .nodes
+            .iter()
+            .any(|node| node.node_id == remediation.node_id));
+    }
+
+    #[test]
+    fn certification_rejects_saga_policy_graph_disagreement() {
+        let draft = side_effect_draft();
+        let registry = CertificationRegistry::from_program_draft(&draft).expect("registry");
+        let side_effecting = certify_program_draft(&draft)
+            .expect("certified")
+            .spec()
+            .clone();
+
+        assert_rejects(
+            &registry,
+            &side_effecting,
+            ProblemClass::InvalidSemanticTransition,
+            |spec| {
+                spec.saga = spec::SagaPolicySpec::NoSideEffects;
+            },
+        );
+
+        let draft = reference_draft();
+        let registry = CertificationRegistry::from_program_draft(&draft).expect("registry");
+        let pure = certify_program_draft(&draft)
+            .expect("certified")
+            .spec()
+            .clone();
+        assert_rejects(
+            &registry,
+            &pure,
+            ProblemClass::InvalidSemanticTransition,
+            |spec| {
+                spec.saga = spec::SagaPolicySpec::FailWithoutAcdcClaim;
+            },
+        );
+    }
+
+    #[test]
+    fn certification_rejects_invalid_remediation_keys_and_coverage() {
+        let (registry, base) = compensating_registry_and_spec();
+        assert_rejects(&registry, &base, ProblemClass::InvalidTopology, |spec| {
+            let (_, mut remediation) = spec.remediations.pop_first().expect("remediation");
+            remediation.node_id = node_id(0xb1);
+            spec.remediations.insert(node_id(0xb0), remediation);
+        });
+        assert_rejects(
+            &registry,
+            &base,
+            ProblemClass::InvalidSemanticTransition,
+            |spec| {
+                let remediation = spec
+                    .remediations
+                    .values()
+                    .next()
+                    .expect("remediation")
+                    .clone();
+                let mut cloned = remediation;
+                cloned.node_id = node_id(0xb2);
+                let lifecycle_node = spec
+                    .nodes
+                    .iter()
+                    .find(|node| {
+                        matches!(
+                            node.framework,
+                            Some(spec::FrameworkNodeSpec::BootstrapRun(_))
+                        )
+                    })
+                    .expect("bootstrap node")
+                    .node_id
+                    .clone();
+                spec.remediations.insert(lifecycle_node, cloned);
+            },
+        );
+        assert_rejects(&registry, &base, ProblemClass::InvalidTopology, |spec| {
+            spec.remediations.clear();
+        });
+    }
+
+    #[test]
+    fn certification_rejects_invalid_remediation_node_shapes() {
+        let (registry, base) = compensating_registry_and_spec();
+        assert_rejects(
+            &registry,
+            &base,
+            ProblemClass::InvalidSemanticTransition,
+            |spec| {
+                spec.saga = spec::SagaPolicySpec::FailWithoutAcdcClaim;
+            },
+        );
+        assert_rejects(&registry, &base, ProblemClass::InvalidTopology, |spec| {
+            let forward_id = spec
+                .remediations
+                .keys()
+                .next()
+                .expect("forward key")
+                .clone();
+            spec.remediations
+                .get_mut(&forward_id)
+                .expect("remediation")
+                .node_id = forward_id.clone();
+        });
+        assert_rejects(
+            &registry,
+            &base,
+            ProblemClass::InvalidSemanticTransition,
+            |spec| {
+                spec.remediations
+                    .values_mut()
+                    .next()
+                    .expect("remediation")
+                    .side_effect = None;
+            },
+        );
+    }
+
+    #[test]
+    fn certification_rejects_out_of_scope_remediation_bindings() {
+        let (registry, base) = compensating_registry_and_spec();
+        assert_rejects(
+            &registry,
+            &base,
+            ProblemClass::InvalidInterfaceWiring,
+            |spec| {
+                let bootstrap_receipt = lifecycle_bootstrap_receipt_cell(spec);
+                retarget_first_remediation_input(spec, bootstrap_receipt);
+            },
+        );
+    }
+
+    #[test]
+    fn certification_rejects_manual_policy_without_schemas_at_decode_boundary() {
+        let draft = side_effect_draft();
+        let mut typed = certify_program_draft(&draft)
+            .expect("certified")
+            .spec()
+            .clone();
+        let operator_schema = SchemaId::new(
+            "mfm.certify.test.operator_ref",
+            "1",
+            DigestAlgorithm::Sha256JcsV1,
+            digest_byte(0xc1),
+        )
+        .expect("operator schema");
+        typed.saga = spec::SagaPolicySpec::ManualResolution {
+            manual: spec::ManualResolutionEvidenceSpec {
+                evidence_schema: operator_schema.clone(),
+                operator_identity_ref_schema: operator_schema,
+            },
+        };
+        let mut value: serde_json::Value =
+            serde_json::from_str(typed.canonical_json().expect("canonical spec").as_str())
+                .expect("spec JSON");
+        value["saga"]["manual"]
+            .as_object_mut()
+            .expect("manual object")
+            .remove("evidence_schema");
+        let input = serde_json::to_string(&value).expect("JSON");
+        let error = spec::TypedExecutionSpec::from_json_str(&input)
+            .expect_err("missing manual evidence schema rejects");
+        assert!(error.to_string().contains("evidence_schema"), "{error}");
+    }
+
+    #[test]
+    fn certification_rejects_missing_or_duplicate_resolve_saga_terminal_node() {
+        let draft = reference_draft();
+        let registry = CertificationRegistry::from_program_draft(&draft).expect("registry");
+        let base = certify_program_draft(&draft)
+            .expect("certified")
+            .spec()
+            .clone();
+
+        assert_rejects(&registry, &base, ProblemClass::InvalidTopology, |spec| {
+            spec.nodes.retain(|node| {
+                !matches!(
+                    node.framework,
+                    Some(spec::FrameworkNodeSpec::ResolveSagaTerminal(_))
+                )
+            });
+        });
+        assert_rejects(&registry, &base, ProblemClass::InvalidTopology, |spec| {
+            let duplicate = spec
+                .nodes
+                .iter()
+                .find(|node| {
+                    matches!(
+                        node.framework,
+                        Some(spec::FrameworkNodeSpec::ResolveSagaTerminal(_))
+                    )
+                })
+                .expect("resolve node")
+                .clone();
+            spec.nodes.push(duplicate);
+        });
+    }
+
     fn assert_rejects(
         registry: &CertificationRegistry,
         base: &spec::TypedExecutionSpec,
@@ -6406,6 +7344,117 @@ mod tests {
         mutate(&mut mutated);
         let error = certify_typed_spec(mutated, registry).expect_err("mutation must reject");
         assert_eq!(error.problem_class(), Some(expected), "{error}");
+    }
+
+    fn compensating_registry_and_spec() -> (CertificationRegistry, spec::TypedExecutionSpec) {
+        let draft = compensating_draft();
+        let registry = CertificationRegistry::from_program_draft(&draft).expect("registry");
+        let spec = certify_program_draft(&draft)
+            .expect("certified")
+            .spec()
+            .clone();
+        (registry, spec)
+    }
+
+    fn node_id(byte: u8) -> NodeId {
+        NodeId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_byte(byte))
+    }
+
+    fn retarget_first_remediation_input(typed: &mut spec::TypedExecutionSpec, cell_id: CellId) {
+        let input_cell = typed
+            .cells
+            .iter()
+            .find(|cell| cell.cell_id == cell_id)
+            .expect("input cell")
+            .clone();
+        let root = spec::InputBindingNodeSpec::Cell(Box::new(spec::InputBindingCellSpec {
+            field_path: spec::PublicFieldPath::new("input").expect("field path"),
+            cell_id: cell_id.clone(),
+            semantic_type_id: input_cell.semantic_type_id,
+            schema_id: input_cell.schema_id,
+            required_terminal: spec::RequiredTerminal::ProducedOnly,
+            value_lineage: input_cell.value_lineage,
+        }));
+        let digest = content_digest_json(input_node_json(&root)).expect("input digest");
+        let predecessors = predecessors_for_test_inputs(typed, std::slice::from_ref(&cell_id));
+        let original_output_cell = typed
+            .remediations
+            .values()
+            .next()
+            .expect("remediation")
+            .output_cell
+            .clone();
+        let original_output = typed
+            .cells
+            .iter()
+            .find(|cell| cell.cell_id == original_output_cell)
+            .expect("remediation output cell")
+            .clone();
+        let (
+            old_node_id,
+            old_output_cell,
+            node_id,
+            output_cell,
+            scope_id,
+            planning_lineage,
+            config_digest,
+        ) = {
+            let remediation = typed.remediations.values_mut().next().expect("remediation");
+            let old_node_id = remediation.node_id.clone();
+            remediation.input_bindings.root = root;
+            remediation.input_bindings.digest = digest;
+            remediation.deterministic_predecessors = predecessors;
+            let config_digest = config_ref_digest(&remediation.config_ref).expect("config digest");
+            remediation.node_id =
+                state_node_id_from_spec(remediation, &config_digest).expect("remediation node id");
+            remediation.output_cell = cell_id_from_parts(
+                &remediation.scope_id,
+                &spec::CellProducer::Node(remediation.node_id.clone()),
+                &original_output.semantic_type_id,
+                &original_output.schema_id,
+            )
+            .expect("remediation output cell");
+            (
+                old_node_id,
+                original_output_cell,
+                remediation.node_id.clone(),
+                remediation.output_cell.clone(),
+                remediation.scope_id.clone(),
+                remediation.planning_lineage.clone(),
+                config_digest,
+            )
+        };
+        let lineage = render_value_lineage_ref(
+            &scope_id,
+            &node_id,
+            std::slice::from_ref(&cell_id),
+            &planning_lineage,
+            &config_digest,
+        )
+        .expect("lineage");
+        typed
+            .cells
+            .iter_mut()
+            .find(|cell| cell.cell_id == old_output_cell)
+            .expect("remediation output cell")
+            .cell_id = output_cell.clone();
+        let output = typed
+            .cells
+            .iter_mut()
+            .find(|cell| cell.cell_id == output_cell)
+            .expect("retargeted remediation output cell");
+        output.producer = spec::CellProducer::Node(node_id.clone());
+        output.value_lineage = lineage.clone();
+        let value_lineage = typed
+            .value_lineages
+            .iter_mut()
+            .find(|lineage| lineage.producer == spec::CellProducer::Node(old_node_id.clone()))
+            .expect("remediation value lineage");
+        value_lineage.producer = spec::CellProducer::Node(node_id);
+        value_lineage.lineage_ref = lineage;
+        value_lineage.input_cells = vec![cell_id];
+        value_lineage.config_ref_digest = Some(config_digest);
+        value_lineage.planning_lineage = planning_lineage;
     }
 
     fn lifecycle_render_receipt_cell(typed: &spec::TypedExecutionSpec) -> CellId {
@@ -6475,6 +7524,12 @@ mod tests {
     impl LifecycleVariant for spec::CompleteRunNodeSpec {
         fn matches(framework: &spec::FrameworkNodeSpec) -> bool {
             matches!(framework, spec::FrameworkNodeSpec::CompleteRun(_))
+        }
+    }
+
+    impl LifecycleVariant for spec::ResolveSagaTerminalNodeSpec {
+        fn matches(framework: &spec::FrameworkNodeSpec) -> bool {
+            matches!(framework, spec::FrameworkNodeSpec::ResolveSagaTerminal(_))
         }
     }
 

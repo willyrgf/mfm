@@ -17,7 +17,7 @@ use mfm_store::v1 as store;
 #[cfg(test)]
 use mfm_ids::{ArtifactId, CellId};
 #[cfg(test)]
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 #[cfg(test)]
 use std::sync::Arc;
 
