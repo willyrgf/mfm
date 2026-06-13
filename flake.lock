@@ -6,16 +6,15 @@
         "rust-overlay": "rust-overlay"
       },
       "locked": {
-        "lastModified": 1781207804,
-        "narHash": "sha256-pGHMdwKItmFi3JPjUdkGG9S2ylcO20XyrlL6vtSXUBw=",
+        "lastModified": 1781310627,
+        "narHash": "sha256-FqmPrtJmZAqh+J3y4o32pmZSchmXmSdxHDCzRB4SWQg=",
         "owner": "willyrgf",
         "repo": "nixfied",
-        "rev": "edfe201aac13d14e0ec7f45451e8a0171a3a8325",
+        "rev": "79f63c03845e01cdcd2616e0f9f82f81cf6fecd1",
         "type": "github"
       },
       "original": {
         "owner": "willyrgf",
-        "ref": "v2",
         "repo": "nixfied",
         "type": "github"
       }

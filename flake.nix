@@ -1,8 +1,8 @@
 {
-  description = "Nixfied project";
+  description = "MFM";
 
   inputs = {
-    nixfied.url = "github:willyrgf/nixfied?ref=v2";
+    nixfied.url = "github:willyrgf/nixfied";
     nixpkgs.follows = "nixfied/nixpkgs";
   };
 
@@ -35,7 +35,7 @@
         system:
         let
           pkgs = mkPkgs system;
-          rustToolchain = pkgs.rust-bin.stable."1.96.0".minimal;
+          rustToolchain = import ./nix/rust-toolchain.nix { inherit pkgs; };
           rustPlatform = pkgs.makeRustPlatform {
             cargo = rustToolchain;
             rustc = rustToolchain;
@@ -69,40 +69,15 @@
 
       apps = forAllSystems (
         system:
-        let
-          pkgs = mkPkgs system;
-          runtimeBin = "${nixfied.packages.${system}.nixfied-runtime}/bin/nixfied-runtime";
-          modelJson = "${self.packages.${system}.model}/model.json";
-          # MFM's verification surface selects project workflows: `check` is the
-          # source gate (fmt/clippy/contracts), `ci` the full service-backed
-          # gate. Everything else (run/test/ps/down/clean and default state
-          # placement) is the generated nixfied surface.
-          mkWorkflowApp =
-            name: workflow:
-            let
-              app = pkgs.writeShellApplication {
-                inherit name;
-                text = ''
-                  "${runtimeBin}" check --model "${modelJson}"
-                  exec "${runtimeBin}" run --model "${modelJson}" --workflow "${workflow}" "$@"
-                '';
-              };
-            in
-            {
-              type = "app";
-              program = "${app}/bin/${name}";
-            };
-          mfmApp =
-            {
-              type = "app";
-              program = "${self.packages.${system}.mfm}/bin/mfm";
-            };
-        in
+        # The verification surface is generated: MFM's own task names become
+        # the verbs (`.#check`/`.#test`/`.#ci` via nixfied.surface.verbs),
+        # admission lives at `.#admit`. The only override is MFM's own binary.
         (nixfied.lib.${system}.projectApps ./nixfied.nix)
         // {
-          check = mkWorkflowApp "mfm-check" "check";
-          ci = mkWorkflowApp "mfm-ci" "ci";
-          mfm = mfmApp;
+          mfm = {
+            type = "app";
+            program = "${self.packages.${system}.mfm}/bin/mfm";
+          };
         }
       );
     };

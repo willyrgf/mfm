@@ -99,10 +99,13 @@ Nixfied v2 gates are available when changing Nixfied behavior or running the rep
 surface:
 
 ```bash
+nix run .#admit
 nix run .#check
 nix run .#test
 nix run .#ci
 ```
+
+`nix run .#admit` validates the compiled model without executing project tasks.
 
 `nix run .#test` runs `cargo nextest run --workspace` followed by
 `cargo test --workspace --doc`, without managed external services.

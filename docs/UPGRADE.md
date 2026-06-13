@@ -11,13 +11,12 @@ This document tracks downstream expectations when the Nixfied v2 flake input cha
 
 ## Current Local Conventions
 
-- [`nixfied.nix`](../nixfied.nix) is the project-owned model. It declares `check`, `test`, and `ci`
-  workflows and imports upstream Postgres and Reth adapters for full CI.
+- [`nixfied.nix`](../nixfied.nix) is the project-owned model. It exports `check`, `test`, and `ci`
+  composite tasks as project verbs and imports upstream Postgres and Reth adapters for full CI.
 - `.#ci` is full by definition and does not accept v1 `--mode`, `--full`, or `--summary` flags.
 - Reth parity tests use the managed local dev node imported through the upstream adapter.
 - MFM's deterministic service windows start at port `28080`, below common OS ephemeral ranges. Keep
-  this range dedicated because the Reth adapter currently derives `ws`, `authrpc`, and `p2p` as
-  `http+1`, `http+2`, and `http+3` until Nixfied has model-level multi-endpoint reservation.
+  this range dedicated; the upstream Reth adapter models every reserved listener endpoint explicitly.
 
 ## Notes For Future Upgrades
 
