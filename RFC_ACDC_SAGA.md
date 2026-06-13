@@ -20,7 +20,7 @@ saga semantics for external side effects:
 
 1. a certified run-level failure/remediation policy;
 2. side-effect-grade remedial mutations linked to completed forward side effects;
-3. append-only remediation, manual-resolution, resource-evidence, and terminal-resolution events;
+3. append-only remediation, manual-resolution, and terminal-resolution events;
 4. runtime-owned transition from forward failure to remediation or manual resolution;
 5. store-owned projections and preconditions for remediation authority;
 6. replay verification without live IO;
@@ -55,8 +55,8 @@ These constraints are part of the RFC, not implementation preferences.
 
    V1 should add only the concepts needed for the first end-to-end certified saga slice:
    remediation policy, remediation-only nodes, ledger purpose, minimal remediation control events,
-   semantic run mode, bounded manual evidence, and minimal resource claims. Avoid generic callback
-   systems, broad new traits, duplicate side-effect machinery, and speculative correctness classes.
+   semantic run mode, and bounded manual evidence. Avoid generic callback systems, broad new traits,
+   duplicate side-effect machinery, and speculative correctness classes.
 
 3. Break compatibility deliberately.
 
@@ -70,6 +70,31 @@ These constraints are part of the RFC, not implementation preferences.
    mega-commits that mix spec shape, store projection rules, runtime scheduling, replay, and public
    API changes.
 
+## API Review Result
+
+The v1 API should be smaller than the initial sketch.
+
+Cut from the core slice:
+
+- generic retry policy;
+- replan and continuation directives;
+- trigger policy;
+- framework-visible correctness claim APIs;
+- resource-claim APIs;
+- chain finality/reorg semantics;
+- `RecoveringSideEffect`, `Replanning`, and `IrreversibleBlocked` public run modes.
+
+Those concepts remain valid design pressure, but they should not enter the first implementation
+unless the certified saga slice cannot work without them. The core v1 API should prove only:
+
+```text
+confirmed forward side effect
+  -> later non-retryable failure
+  -> certified obligation opens
+  -> remediation-only side effect runs
+  -> run resolves as Compensated, ManualBlocked/ManuallyResolved, or FailedWithoutAcdcClaim
+```
+
 ## Architectural Decision
 
 The v1 implementation should be a certified saga implementation, not a durable bookkeeping layer.
@@ -82,12 +107,12 @@ Layer ownership:
 
 | Layer | V1 responsibility |
 | --- | --- |
-| `mfm-spec` | Hash-defining remediation policy, directives, obligations, resource claims, correctness claims, and remediation-only node metadata. |
+| `mfm-spec` | Hash-defining remediation policy, directives, obligations, manual evidence specs, and remediation-only node metadata. |
 | `mfm-certify` | Builder/lowered-spec validation. Reject ambiguous side-effecting workflows. |
-| `mfm-events` | Typed remediation, manual-resolution, resource-evidence, continuation, and terminal-resolution event payloads. |
+| `mfm-events` | Typed remediation, manual-resolution, and terminal-resolution event payloads. |
 | `mfm-store` | Event admission, preconditions, remediation projections, run-mode projection, side-effect ledger purpose validation. |
 | `mfm-runtime` | Failure-mode transition, obligation opening, remediation frontier scheduling, manual/fail terminal handling. |
-| `mfm-replay` | Evidence-only validation of remediation and resource history. |
+| `mfm-replay` | Evidence-only validation of remediation history. |
 | `mfm-app` | Verified assembly and public status reporting. No remediation semantics. |
 | storage crates | Durable persistence for new typed events/projections. No domain behavior. |
 
@@ -96,8 +121,8 @@ Layer ownership:
 These decisions are intentionally closed for the first implementation slice.
 
 1. `RemediationPolicySpec` lives directly under `TypedExecutionSpec` as hash-defining certified data.
-2. Failure directives and resource-claim decisions are run-level policy.
-3. State and adapter contracts declare derivation and evidence capabilities.
+2. Failure directives are run-level policy.
+3. State and adapter contracts declare the side-effect evidence capabilities remediation can reuse.
 4. V1 uses one certified spec with a forward frontier and a remediation frontier.
 5. Remediation-only nodes are normal certified nodes that the forward scheduler cannot run.
 6. V1 reuses `ApplySideEffect` for remediation.
@@ -106,11 +131,10 @@ These decisions are intentionally closed for the first implementation slice.
 8. Remediation control events are minimal; submission/receipt/confirmation/ambiguity/failure stay in
    the side-effect protocol with ledger purpose.
 9. Manual resolution is typed evidence with certified allowed outcomes.
-10. Domain correctness that depends on external truth requires a certified replay verifier or
-    degrades to `ManualOnly` or `FailWithoutAcdcClaim`.
-11. Continuations are child runs linked by append-only parent events.
-12. Irreversible boundaries are both state/adapter metadata and run policy.
-13. Public status exposes semantic `RunMode`; coarse store `RunState` may remain internal.
+10. Core v1 terminal claims are certified saga claims only. Scoped AC/DC-style correctness claims
+    are deferred until verifier APIs exist.
+11. Continuations, trigger policy, and irreversible-boundary APIs are deferred.
+12. Public status exposes semantic `RunMode`; coarse store `RunState` may remain internal.
 
 ## Strictness Through Types
 
@@ -119,15 +143,14 @@ resulting API stays small.
 
 Preferred mechanisms:
 
-- closed enums for directives, run modes, resource classes, terminal outcomes, and ledger purpose;
+- closed enums for directives, run modes, terminal outcomes, and ledger purpose;
 - private or sealed constructors for lowered semantic records;
 - typestate builders for draft/finalized programs where they materially reduce invalid states;
 - branded node handles for forward side-effect nodes, remediation-only nodes, and policy-covered
   nodes;
-- effect-specific constraints so only side-effect-grade or manual-only nodes can satisfy
+- effect-specific constraints so only remediation-only side-effect-grade nodes can satisfy
   remediation obligations;
-- certified verifier ids and typed evidence inputs instead of opaque correctness strings;
-- explicit degradation variants such as `ManualOnly` and `FailWithoutAcdcClaim`.
+- explicit degradation variants such as `ManualResolution` and `FailWithoutAcdcClaim`.
 
 Lowered specs, persisted bytes, registry inputs, and migration outputs must still be treated as
 hostile. Certification remains the authority check for anything that bypasses the public builder
@@ -164,35 +187,35 @@ pub struct TypedExecutionSpec {
 }
 
 pub struct RemediationPolicySpec {
-    pub default_failure: FailureDirectiveSpec,
-    pub node_overrides: BTreeMap<NodeId, FailureDirectiveSpec>,
+    pub node_failures: BTreeMap<NodeId, FailureDirectiveSpec>,
     pub obligations: BTreeMap<RemediationObligationId, RemediationObligationSpec>,
-    pub resources: BTreeMap<NodeId, ResourceClaimSpec>,
-    pub triggers: Vec<RemediationTriggerSpec>,
-    pub correctness: CorrectnessPolicySpec,
+    pub manual_resolutions: BTreeMap<ManualResolutionSpecId, ManualResolutionEvidenceSpec>,
 }
 
 pub enum FailureDirectiveSpec {
-    RetrySameNode { max_attempts: u32 },
     CompensateCompleted {
-        scope: CompensationScopeSpec,
-        ordering: CompensationOrderingSpec,
+        obligations: NonEmptyVec<RemediationObligationId>,
     },
-    ReplanFromStart { fresh_reads: FreshReadPolicySpec },
-    StartCertifiedContinuation { continuation: ContinuationSpec },
-    ManualResolution { reason_code: ManualResolutionReason },
+    ManualResolution { manual_resolution: ManualResolutionSpecId },
     FailWithoutAcdcClaim,
 }
 
 pub struct RemediationObligationSpec {
     pub forward_node: NodeId,
     pub remediation_node: NodeId,
-    pub strategy: RemediationStrategySpec,
-    pub correctness: CorrectnessClaimSpec,
-    pub required_forward_resource_evidence: ResourceEvidenceRequirementSpec,
-    pub ambiguity_directive: FailureDirectiveSpec,
+    pub on_remediation_unresolved: RemediationUnresolvedDirectiveSpec,
+}
+
+pub enum RemediationUnresolvedDirectiveSpec {
+    ManualResolution { manual_resolution: ManualResolutionSpecId },
+    FailWithoutAcdcClaim,
 }
 ```
+
+Core v1 deliberately has no `default_failure`: side-effecting failure coverage should be explicit so
+authors cannot accidentally apply a broad fallback to a mutating workflow. It also has no trigger,
+resource, continuation, replan, or correctness-claim fields. Those can be added after the core saga
+path works.
 
 ### Side-effect ledger purpose
 
@@ -218,21 +241,17 @@ Public status should expose semantic run modes:
 ```rust
 pub enum RunMode {
     Forward,
-    RecoveringSideEffect,
     Remediating,
-    Replanning,
     ManualBlocked,
     Completed,
     Compensated,
     ManuallyResolved,
-    IrreversibleBlocked,
     FailedWithoutAcdcClaim,
 }
 ```
 
 `Completed` means successful forward output. `Compensated` means certified saga remediation
-obligations completed. It is not automatically an AC/DC-equivalent outcome unless the correctness
-claim says replay can verify that stronger property.
+obligations completed. Core v1 does not mark `Compensated` as an AC/DC-equivalent outcome.
 
 ### Minimal event families
 
@@ -244,10 +263,7 @@ RemediationObligationOpened
 RemediationObligationClosed { outcome }
 ManualResolutionRequested
 ManualResolutionRecorded
-ResourceEvidenceRecorded
 RunTerminalResolved
-ContinuationRunStarted
-ContinuationRunResolved
 ```
 
 Implementation may rename these, but it must preserve the separation:
@@ -264,7 +280,7 @@ Manual resolution must be bounded and typed.
 pub struct ManualResolutionEvidenceSpec {
     pub target: ManualResolutionTargetSpec,
     pub reason_code: ManualResolutionReason,
-    pub allowed_outcomes: Vec<ManualResolutionOutcomeSpec>,
+    pub allowed_outcomes: NonEmptyVec<ManualResolutionOutcomeSpec>,
     pub operator_identity_ref_schema: SchemaId,
     pub evidence_schema: SchemaId,
     pub redaction_policy: RedactionPolicySpec,
@@ -274,9 +290,12 @@ pub struct ManualResolutionEvidenceSpec {
 Manual events should record selected outcome, operator identity reference, evidence artifact, and
 optional redaction-safe note. They must not allow uncatalogued terminal outcomes.
 
-### Resource claims
+## Post-Core Resource Claim Extension
 
-V1 should implement only the small resource-claim subset needed for proof-of-reality:
+Resource claims are important for concurrency correctness, but they should not be part of the core
+certified saga API. Add them only after the first compensation/remediation slice works.
+
+The first resource-claim extension should remain small:
 
 ```rust
 pub enum ResourceConcurrencySpec {
@@ -290,8 +309,8 @@ pub enum ResourceConcurrencySpec {
 is evidence-verifiable when the state/adapter emits the actual touched set. `ManualOnly` is the
 degradation path when MFM cannot prove enough.
 
-Do not implement generic `Commutative`, `EscrowBounded`, `PredicateSnapshotRequired`, or
-`IsolationProof` as framework semantics in v1.
+Do not add generic `Commutative`, `EscrowBounded`, `PredicateSnapshotRequired`, or `IsolationProof`
+as framework semantics in the first resource-claim extension.
 
 ## Certification Rules
 
@@ -304,23 +323,22 @@ The public construction path should make these cases unrepresentable:
   policy-covered failure path;
 - using a remediation-only node as a forward frontier node;
 - constructing `CompensateCompleted` without at least one obligation target;
-- linking a remediation obligation to a node that is not side-effect-grade or manual-only;
-- declaring a platform-certified correctness claim without framework-verifiable evidence or a
-  certified replay verifier;
-- constructing manual resolution without a typed evidence schema and closed allowed outcomes.
+- linking a remediation obligation to a node that is not a remediation-only `ApplySideEffect` node;
+- constructing manual resolution without a typed evidence schema and non-empty closed allowed
+  outcomes;
+- constructing a core-v1 run that claims AC/DC equivalence instead of certified saga resolution.
 
 V1 certification must reject:
 
 - reachable `ApplySideEffect` forward nodes that can reach successful terminal output without a
   policy-covered failure path;
 - `CompensateCompleted` directives without at least one remediation obligation;
-- remediation obligations targeting ordinary forward-only nodes;
+- remediation obligations targeting nodes that are not remediation-only `ApplySideEffect` nodes;
 - remediation-only nodes reachable from the forward frontier;
-- remediation obligations without correctness claim or explicit manual/fail-without-claim
-  degradation;
-- side-effect nodes without a resource-claim class, even if the class is `ManualOnly`;
-- compensation claims across irreversible boundaries without replay-verifiable proof;
+- remediation obligations without an explicit `on_remediation_unresolved` directive;
 - manual resolution paths without typed evidence shape and allowed outcomes;
+- core-v1 specs that attempt to encode resource, trigger, continuation, replan, or AC/DC-equivalence
+  semantics in unsupported extension fields;
 - stale or manually constructed specs that bypass builder invariants.
 
 ## Runtime Semantics
@@ -366,7 +384,6 @@ V1 store work:
 - add run-mode projection;
 - add remediation obligation projection;
 - add manual-resolution projection;
-- add resource-evidence projection;
 - add side-effect ledger purpose to projections;
 - enforce remediation ledger linkage preconditions;
 - enforce once-only obligation open/close;
@@ -388,11 +405,9 @@ V1 replay work:
 - verify remediation ledgers link to opened obligations and eligible forward ledgers;
 - verify obligation close events match certified policy;
 - verify manual resolution evidence shape and allowed outcome;
-- verify resource evidence presence/hash/schema;
 - reject `Compensated` terminal resolution when required obligations or evidence are missing.
 
-Domain truth remains outside framework proof unless a certified replay verifier is named and all
-inputs are recorded typed evidence.
+Domain truth and AC/DC-equivalence proof remain outside core v1.
 
 ## Public Surfaces
 
@@ -403,8 +418,8 @@ App/CLI/API status should expose:
 - opened obligations and their status;
 - linked forward and remediation ledger keys;
 - manual resolution reason and required evidence schema;
-- terminal resolution and whether it carries only certified saga semantics or a scoped
-  AC/DC-style claim.
+- terminal resolution and whether it is successful forward completion, certified saga compensation,
+  manual resolution, or fail-without-claim.
 
 This is a breaking public status change. It is allowed.
 
@@ -425,7 +440,7 @@ Required internal or persisted additions:
 - hash-defining `RemediationPolicySpec`;
 - side-effect ledger purpose/linkage;
 - minimal remediation control events;
-- remediation, manual, run-mode, and resource projections;
+- remediation, manual, and run-mode projections;
 - replay indexes for remediation evidence.
 
 Avoid in v1:
@@ -447,8 +462,7 @@ Purpose: land type skeletons and compile-time contracts without runtime behavior
 
 Scope:
 
-- add spec types for remediation policy, directives, obligations, resource claims, correctness
-  claims, and manual evidence;
+- add spec types for remediation policy, directives, obligations, and manual evidence;
 - add event type skeletons;
 - add ledger purpose type;
 - add run mode type;
@@ -488,7 +502,7 @@ Scope:
 - in-memory store projection updates;
 - Postgres typed storage support;
 - side-effect ledger purpose projection;
-- obligation/run-mode/manual/resource projections;
+- obligation/run-mode/manual projections;
 - preconditions for obligation lifecycle and remediation ledger linkage.
 
 Acceptance:
@@ -529,7 +543,7 @@ Scope:
 - replay broker indexes remediation events and side-effect purpose;
 - verifier checks obligation/ledger linkage;
 - verifier rejects missing remediation evidence;
-- verifier rejects live-IO-only correctness claims.
+- verifier rejects unsupported terminal claims.
 
 Acceptance:
 
@@ -553,9 +567,10 @@ Acceptance:
   `FailedWithoutAcdcClaim`;
 - CLI JSON contract tests if CLI output changes.
 
-### Milestone 6: minimal resource claims
+### Post-Core Milestone: minimal resource claims
 
-Purpose: prove concurrency correctness is not only crash recovery.
+Purpose: prove concurrency correctness is not only crash recovery after the core certified saga path
+works.
 
 Scope:
 
@@ -578,9 +593,8 @@ should stay narrow and lower-case.
 
 1. `spec: add certified saga policy types`
 
-   Add `RemediationPolicySpec`, `FailureDirectiveSpec`, obligation ids/specs, correctness claim
-   skeletons, manual evidence specs, and minimal resource claim specs to the typed spec crate. Make
-   the new policy hash-defining.
+   Add `RemediationPolicySpec`, `FailureDirectiveSpec`, obligation ids/specs, and manual evidence
+   specs to the typed spec crate. Make the new policy hash-defining.
 
 2. `program: add remediation authoring handles`
 
@@ -591,13 +605,13 @@ should stay narrow and lower-case.
 3. `certify: reject ambiguous saga specs`
 
    Add certification checks for missing policy, missing obligations, forward-reachable remediation
-   nodes, manual paths without typed evidence, and compensation claims without verifier/manual/fail
-   degradation.
+   nodes, manual paths without typed evidence, obligations without unresolved-remediation
+   directives, and core-v1 AC/DC-equivalence claims.
 
 4. `events: add remediation control payloads`
 
    Add typed event payloads and schema descriptors for directive selection, obligation open/close,
-   manual resolution, resource evidence, continuation linkage, and terminal resolution.
+   manual resolution, and terminal resolution.
 
 5. `events: add side effect ledger purpose`
 
@@ -606,7 +620,7 @@ should stay narrow and lower-case.
 
 6. `store: project remediation state`
 
-   Add in-memory projections for run mode, obligations, manual resolution, and resource evidence.
+   Add in-memory projections for run mode, obligations, and manual resolution.
    Enforce once-only obligation open/close and terminal-resolution preconditions.
 
 7. `store: validate remedial side effect linkage`
@@ -646,8 +660,8 @@ should stay narrow and lower-case.
 
 14. `runtime: add minimal resource claims`
 
-   Implement `Exclusive`, `ExactTouchedSet`, and `ManualOnly` resource evidence handling and the
-   first cross-run sequencing tests.
+   Post-core extension. Implement `Exclusive`, `ExactTouchedSet`, and `ManualOnly` resource evidence
+   handling and the first cross-run sequencing tests only after the core saga path is proven.
 
 Do not merge commits that add a semantic shape without its corresponding rejection tests unless the
 commit is a pure type skeleton explicitly marked as such. Do not combine runtime remediation,
@@ -659,11 +673,16 @@ The implementation is not credible until these tests exist.
 
 | Area | Required tests |
 | --- | --- |
-| Certification | Missing policy rejected; missing obligation rejected; remediation-only node cannot be forward-reachable; manual path without typed evidence rejected; irreversible compensation claim rejected. |
+| Certification | Missing policy rejected; missing obligation rejected; remediation-only node cannot be forward-reachable; manual path without typed evidence rejected; core-v1 AC/DC-equivalence claim rejected. |
 | Store | Obligation opens once; obligation cannot close before eligible evidence; remediation ledger requires opened obligation; terminal resolution blocked with unresolved obligations; projections rebuild from stream. |
 | Runtime | Forward confirmation then later failure enters `Remediating`; remediation runs in reverse dependency order; crash/resume works at each remediation boundary; ambiguity enters `ManualBlocked`; fail-without-claim is explicit. |
 | Replay | Compensated run verifies; missing remediation confirmation rejects; forged obligation close rejects; wrong forward ledger linkage rejects; manual evidence schema mismatch rejects. |
-| Public status | Status distinguishes `Completed`, `Compensated`, `ManualBlocked`, `ManuallyResolved`, `IrreversibleBlocked`, and `FailedWithoutAcdcClaim`. |
+| Public status | Status distinguishes `Completed`, `Compensated`, `ManualBlocked`, `ManuallyResolved`, and `FailedWithoutAcdcClaim`. |
+
+Post-core resource-claim tests:
+
+| Area | Required tests |
+| --- | --- |
 | Resource claims | Same exclusive key sequences; different keys run independently; exact touched set is required for touched-set claim; missing resource evidence degrades to manual/fail. |
 
 ## First End-to-End Slice
@@ -697,12 +716,13 @@ Required proof:
 - If store projections become semantic authority, append-only correctness is weakened.
 - If public status remains absent/started/completed, operators cannot distinguish failure,
   compensation, manual resolution, or fail-without-claim.
-- If resource claims are skipped, the implementation proves crash recovery but not concurrency
-  correctness.
+- If the post-core resource-claim extension is never built, MFM can claim certified saga crash/resume
+  semantics but not platform-certified concurrency correctness.
 
 ## Deferred Work
 
 - `ApplyCompensation` effect class.
+- Minimal resource claims until after the core saga slice is proven.
 - Generic commutativity and escrow semantics.
 - Predicate isolation and phantom-proof framework semantics.
 - Chain-specific reorg/finality verifiers.
