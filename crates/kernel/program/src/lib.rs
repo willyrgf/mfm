@@ -513,7 +513,7 @@ pub enum RemediationUnresolved {
     /// Block for typed operator evidence.
     ManualResolution {
         /// Required typed manual evidence.
-        manual: ManualResolutionEvidence,
+        manual: Box<ManualResolutionEvidence>,
     },
     /// Terminally fail without a compensation or AC/DC-equivalence claim.
     FailWithoutAcdcClaim,
@@ -3490,6 +3490,7 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
     /// by the forward node id in the draft remediation collection, so the forward scheduler cannot
     /// select it. The remediation input may reference only the linked forward output and cells
     /// that are transitive ancestors of that forward node.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     pub fn side_effect_with_compensation<F, R, I, J, B>(
         &mut self,
         forward_key: StateKey,
@@ -4086,6 +4087,7 @@ impl<'program, 'scope> OperationExpansion<'program, 'scope> {
     }
 
     /// Plans a linked forward/remediation side-effect pair.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     pub fn side_effect_with_compensation<F, R, I, J, B>(
         &mut self,
         forward_key: StateKey,

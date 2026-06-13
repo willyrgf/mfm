@@ -2103,7 +2103,7 @@ fn parse_run_completion_outcome(json: &Value) -> Result<events::RunCompletionOut
     match required_str(json, "kind")? {
         "completed" => {
             let evidence = required_obj(json, "public_output")?;
-            Ok(events::RunCompletionOutcome::Completed(
+            Ok(events::RunCompletionOutcome::Completed(Box::new(
                 events::PublicOutputCompletionEvidence {
                     public_output_schema_id: parse_identity(required_str(
                         evidence,
@@ -2114,7 +2114,7 @@ fn parse_run_completion_outcome(json: &Value) -> Result<events::RunCompletionOut
                         "public_output_event_id",
                     )?)?,
                 },
-            ))
+            )))
         }
         "compensated" => Ok(events::RunCompletionOutcome::Compensated),
         "manually_resolved" => Ok(events::RunCompletionOutcome::ManuallyResolved),
@@ -3471,7 +3471,7 @@ mod tests {
         .batch()
         .clone();
         let submission_result_key = format!(
-            "sidefx:{}:invocation:1:submission_result",
+            "sidefx:forward:{}:invocation:1:submission_result",
             side_effect_ledger_key()
         );
         assert_eq!(

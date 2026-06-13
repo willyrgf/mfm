@@ -2195,7 +2195,8 @@ fn validate_historical_complete_run_batch(
     let retention_manifest = projected_retention_manifest(run_id, &pre_completion_projection)?;
     if completion_payload.run_id != *run_id
         || completion_payload.spec_hash != *runtime_spec.spec_hash()
-        || completion_payload.outcome != events::RunCompletionOutcome::Completed(completion.clone())
+        || completion_payload.outcome
+            != events::RunCompletionOutcome::Completed(Box::new(completion.clone()))
     {
         return Err(RuntimeError::InvalidRunStream(
             "RunCompleted payload does not match sealed CompleteRun evidence".to_owned(),
@@ -2360,6 +2361,7 @@ fn validate_historical_resolve_saga_terminal_batch(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn validate_resolve_saga_terminal_commit_payload_set(
     commit: &[store::KernelEventEnvelope],
     run_id: &RunId,
@@ -2504,7 +2506,7 @@ fn validate_complete_run_commit_payload_set(
             if payload.run_id == *run_id
                 && payload.spec_hash == *spec_hash
                 && payload.outcome
-                    == events::RunCompletionOutcome::Completed(completion.clone()) =>
+                    == events::RunCompletionOutcome::Completed(Box::new(completion.clone())) =>
         {
             Ok(())
         }
@@ -2785,7 +2787,7 @@ fn validate_historical_run_completed(
         )));
     }
     match produced_public_output {
-        Some(produced) if produced == completion => Ok(()),
+        Some(produced) if produced == completion.as_ref() => Ok(()),
         Some(_) => Err(RuntimeError::InvalidRunStream(
             "RunCompleted public-output evidence does not match preceding PublicOutputProduced"
                 .to_owned(),

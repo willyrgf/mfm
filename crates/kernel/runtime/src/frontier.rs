@@ -278,13 +278,11 @@ fn continuing_side_effect_node_if<'a>(
         else {
             continue;
         };
-        if predicate(projection) {
-            if selected.replace(attempt_id.clone()).is_some() {
-                return Err(RuntimeError::InvalidRunStream(format!(
-                    "node {} has multiple side-effect completion candidates",
-                    node.node_id
-                )));
-            }
+        if predicate(projection) && selected.replace(attempt_id.clone()).is_some() {
+            return Err(RuntimeError::InvalidRunStream(format!(
+                "node {} has multiple side-effect completion candidates",
+                node.node_id
+            )));
         }
     }
     let Some(_) = selected else {

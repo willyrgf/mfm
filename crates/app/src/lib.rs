@@ -2975,7 +2975,7 @@ mod tests {
         };
         let policy = spec::SagaPolicySpec::CompensateCompleted {
             on_remediation_unresolved: spec::RemediationUnresolvedSpec::ManualResolution {
-                manual: manual.clone(),
+                manual: Box::new(manual.clone()),
             },
         };
         let manual_blocked = store::SagaProjection {

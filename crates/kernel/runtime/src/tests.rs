@@ -523,7 +523,7 @@ async fn scheduler_completes_run_after_public_output_evidence() {
     };
     assert_eq!(
         completed_payload.outcome,
-        events::RunCompletionOutcome::Completed(events::PublicOutputCompletionEvidence {
+        events::RunCompletionOutcome::Completed(Box::new(events::PublicOutputCompletionEvidence {
             public_output_schema_id: fixture
                 .runtime_spec
                 .spec()
@@ -531,7 +531,7 @@ async fn scheduler_completes_run_after_public_output_evidence() {
                 .public_schema_id
                 .clone(),
             public_output_event_id: public_event.event_id().clone(),
-        })
+        }))
     );
     assert_eq!(completed_pos, stream.len() - 1);
 
@@ -1679,7 +1679,7 @@ async fn runtime_rejects_run_completed_with_active_retention_attempt() {
             events::KernelEventPayload::RunCompleted(events::RunCompleted {
                 run_id: fixture.run_id.clone(),
                 spec_hash: fixture.runtime_spec.spec_hash().clone(),
-                outcome: events::RunCompletionOutcome::Completed(
+                outcome: events::RunCompletionOutcome::Completed(Box::new(
                     events::PublicOutputCompletionEvidence {
                         public_output_schema_id: fixture
                             .runtime_spec
@@ -1689,7 +1689,7 @@ async fn runtime_rejects_run_completed_with_active_retention_attempt() {
                             .clone(),
                         public_output_event_id: public_event_id,
                     },
-                ),
+                )),
             }),
         ],
     );
@@ -2454,7 +2454,7 @@ async fn replay_rejects_run_completed_without_public_output_evidence() {
                 events::RunCompleted {
                     run_id: fixture.run_id.clone(),
                     spec_hash: fixture.runtime_spec.spec_hash().clone(),
-                    outcome: events::RunCompletionOutcome::Completed(
+                    outcome: events::RunCompletionOutcome::Completed(Box::new(
                         events::PublicOutputCompletionEvidence {
                             public_output_schema_id: fixture
                                 .runtime_spec
@@ -2467,7 +2467,7 @@ async fn replay_rejects_run_completed_without_public_output_evidence() {
                                 D9,
                             ),
                         },
-                    ),
+                    )),
                 },
             )],
             required_artifacts: Vec::new(),
@@ -4805,7 +4805,7 @@ async fn runtime_compensated_saga_resume_boundaries_do_not_duplicate_mutations()
         &scheduler,
         &mut store,
         &fixture,
-        &[remediation_b.output_cell.clone()],
+        std::slice::from_ref(&remediation_b.output_cell),
         "first remedial output",
     )
     .await;
@@ -4829,7 +4829,7 @@ async fn runtime_compensated_saga_resume_boundaries_do_not_duplicate_mutations()
         &scheduler,
         &mut store,
         &fixture,
-        &[remediation_a.output_cell.clone()],
+        std::slice::from_ref(&remediation_a.output_cell),
         "second remedial output",
     )
     .await;

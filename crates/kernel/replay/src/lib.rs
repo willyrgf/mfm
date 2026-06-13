@@ -2132,7 +2132,7 @@ pub mod v1 {
             spec::SagaPolicySpec::CompensateCompleted {
                 on_remediation_unresolved:
                     spec::RemediationUnresolvedSpec::ManualResolution { manual },
-            } => Some(manual),
+            } => Some(manual.as_ref()),
             spec::SagaPolicySpec::NoSideEffects
             | spec::SagaPolicySpec::FailWithoutAcdcClaim
             | spec::SagaPolicySpec::CompensateCompleted {
@@ -2670,7 +2670,7 @@ pub mod v1 {
                 KernelEventPayload::RunCompleted(events::RunCompleted {
                     run_id,
                     spec_hash: fixture.envelope.spec_hash.clone(),
-                    outcome: events::RunCompletionOutcome::Completed(
+                    outcome: events::RunCompletionOutcome::Completed(Box::new(
                         events::PublicOutputCompletionEvidence {
                             public_output_schema_id: fixture
                                 .envelope
@@ -2680,7 +2680,7 @@ pub mod v1 {
                                 .clone(),
                             public_output_event_id,
                         },
-                    ),
+                    )),
                 }),
             );
 
@@ -3924,7 +3924,7 @@ pub mod v1 {
                                 node_id: node_id.clone(),
                                 attempt_id: attempt_id.clone(),
                                 ledger_key: ledger_key.clone(),
-                                ledger_purpose: ledger_purpose,
+                                ledger_purpose,
                                 invocation_epoch: 1,
                                 confirmation_schema_id: schema("mfm.test.confirmation", 0x45),
                                 confirmation_hash: confirmation_hash.clone(),

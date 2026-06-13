@@ -701,7 +701,7 @@ pub(crate) fn framework_run_completed_payload(
             }
             let completion = run_completion_evidence(runtime_spec, projections)?;
             projected_retention_manifest(run_id, projections)?;
-            events::RunCompletionOutcome::Completed(completion)
+            events::RunCompletionOutcome::Completed(Box::new(completion))
         }
         Some(spec::FrameworkNodeSpec::ResolveSagaTerminal(resolve)) => {
             let certified_node = certified_resolve_saga_terminal_node(runtime_spec)?;

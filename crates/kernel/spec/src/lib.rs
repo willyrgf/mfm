@@ -920,7 +920,7 @@ pub mod v1 {
         /// Block for typed operator evidence.
         ManualResolution {
             /// Required typed manual evidence.
-            manual: ManualResolutionEvidenceSpec,
+            manual: Box<ManualResolutionEvidenceSpec>,
         },
         /// Terminally fail without a compensation or AC/DC-equivalence claim.
         FailWithoutAcdcClaim,
@@ -2356,7 +2356,9 @@ pub mod v1 {
         let object = object(value, "remediation-unresolved directive")?;
         match required_str(object, "kind")? {
             "manual_resolution" => Ok(RemediationUnresolvedSpec::ManualResolution {
-                manual: parse_manual_resolution_evidence(required(object, "manual")?)?,
+                manual: Box::new(parse_manual_resolution_evidence(required(
+                    object, "manual",
+                )?)?),
             }),
             "fail_without_acdc_claim" => Ok(RemediationUnresolvedSpec::FailWithoutAcdcClaim),
             kind => Err(json_error(format!(
@@ -3719,7 +3721,9 @@ pub mod v1 {
             let mut compensated = base.clone();
             let forward_node = compensated.nodes[0].node_id.clone();
             compensated.saga = SagaPolicySpec::CompensateCompleted {
-                on_remediation_unresolved: RemediationUnresolvedSpec::ManualResolution { manual },
+                on_remediation_unresolved: RemediationUnresolvedSpec::ManualResolution {
+                    manual: Box::new(manual),
+                },
             };
             compensated
                 .remediations

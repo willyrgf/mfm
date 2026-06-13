@@ -4462,7 +4462,7 @@ fn lower_remediation_unresolved(
     match directive {
         program::RemediationUnresolved::ManualResolution { manual } => {
             spec::RemediationUnresolvedSpec::ManualResolution {
-                manual: lower_manual_resolution_evidence(manual),
+                manual: Box::new(lower_manual_resolution_evidence(manual)),
             }
         }
         program::RemediationUnresolved::FailWithoutAcdcClaim => {
@@ -6206,7 +6206,7 @@ mod tests {
                         StateKey::new("compensating-state")?,
                         TestConfig { multiplier: 1 },
                         ResourceClaimSpec::ManualOnly,
-                        |forward| Ok(forward),
+                        Ok,
                     )?;
                 root.bind_public_outputs(
                     PublicOutputKey::new("terminal")?,

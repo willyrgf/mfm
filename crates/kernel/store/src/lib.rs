@@ -1535,6 +1535,7 @@ pub mod v1 {
         }
 
         /// Creates a projection snapshot from storage-owned projection maps, including saga maps.
+        #[allow(clippy::too_many_arguments)]
         pub fn from_parts_with_saga(
             run_states: BTreeMap<RunId, RunState>,
             run_completions: BTreeMap<RunId, RunCompletionProjection>,
@@ -6496,7 +6497,7 @@ pub mod v1 {
         match required_str(json, "kind")? {
             "completed" => {
                 let evidence = required_obj(json, "public_output")?;
-                Ok(events::RunCompletionOutcome::Completed(
+                Ok(events::RunCompletionOutcome::Completed(Box::new(
                     events::PublicOutputCompletionEvidence {
                         public_output_schema_id: parse_identity(required_str(
                             evidence,
@@ -6507,7 +6508,7 @@ pub mod v1 {
                             "public_output_event_id",
                         )?)?,
                     },
-                ))
+                )))
             }
             "compensated" => Ok(events::RunCompletionOutcome::Compensated),
             "manually_resolved" => Ok(events::RunCompletionOutcome::ManuallyResolved),

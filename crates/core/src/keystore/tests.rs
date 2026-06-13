@@ -349,7 +349,7 @@ fn test_secret_exports_disabled_by_default() {
 #[cfg(not(feature = "dangerous-secret-export"))]
 #[test]
 fn test_secret_export_feature_is_disabled_by_default() {
-    assert!(!cfg!(feature = "dangerous-secret-export"));
+    const { assert!(!cfg!(feature = "dangerous-secret-export")) };
 }
 
 #[test]

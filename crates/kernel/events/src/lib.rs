@@ -719,7 +719,7 @@ pub mod v1 {
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub enum RunCompletionOutcome {
         /// Run completed successfully with public-output evidence.
-        Completed(PublicOutputCompletionEvidence),
+        Completed(Box<PublicOutputCompletionEvidence>),
         /// Confirmed forward side effects were remediated.
         Compensated,
         /// Operator evidence manually resolved the run.
