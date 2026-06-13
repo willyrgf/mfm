@@ -16,6 +16,7 @@ pub struct CertifiedRuntimeSpec {
     certificate: CertifiedSpecCertificate,
     state_descriptors: BTreeMap<DescriptorId, spec::StateDescriptorIdentity>,
     nodes: BTreeMap<NodeId, spec::NodeSpec>,
+    remediations: BTreeMap<NodeId, spec::NodeSpec>,
     cells: BTreeMap<CellId, spec::CellSpec>,
     topological_order: Vec<NodeId>,
 }
@@ -104,12 +105,14 @@ impl CertifiedRuntimeSpec {
                 )));
             }
         }
+        let remediations = envelope.spec.remediations.clone();
 
         let runtime = Self {
             envelope,
             certificate,
             state_descriptors,
             nodes,
+            remediations,
             cells,
             topological_order: Vec::new(),
         };
@@ -148,7 +151,36 @@ impl CertifiedRuntimeSpec {
 
     /// Returns a certified node by id.
     pub fn node(&self, node_id: &NodeId) -> Option<&spec::NodeSpec> {
-        self.nodes.get(node_id)
+        self.nodes.get(node_id).or_else(|| {
+            self.remediations
+                .values()
+                .find(|node| node.node_id == *node_id)
+        })
+    }
+
+    /// Returns the remediation node linked to a forward side-effect node.
+    pub(crate) fn remediation_for_forward_node(
+        &self,
+        forward_node_id: &NodeId,
+    ) -> Option<&spec::NodeSpec> {
+        self.remediations.get(forward_node_id)
+    }
+
+    /// Returns the forward node id linked to a remediation node.
+    pub(crate) fn forward_node_for_remediation(
+        &self,
+        remediation_node_id: &NodeId,
+    ) -> Option<&NodeId> {
+        self.remediations
+            .iter()
+            .find_map(|(forward_node_id, remediation)| {
+                (remediation.node_id == *remediation_node_id).then_some(forward_node_id)
+            })
+    }
+
+    /// Iterates certified remediation nodes keyed by their forward side-effect node id.
+    pub(crate) fn remediations(&self) -> impl Iterator<Item = (&NodeId, &spec::NodeSpec)> {
+        self.remediations.iter()
     }
 
     /// Returns a certified cell by id.

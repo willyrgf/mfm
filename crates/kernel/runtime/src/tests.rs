@@ -309,10 +309,12 @@ struct Fixture {
     seed_ref: events::SeedCellRef,
     descriptor_a: DescriptorId,
     descriptor_b: DescriptorId,
+    descriptor_c: Option<DescriptorId>,
     render_node: NodeId,
     render_cell: CellId,
     cell_a: CellId,
     cell_b: CellId,
+    cell_c: Option<CellId>,
     cap_kind: CapabilityKind,
     cap_version: CapabilityVersion,
     adapter_kind: AdapterKind,
@@ -378,6 +380,19 @@ impl ErasedNodeRunner for RecordingRunner {
                     producer_state_version: Some(ctx.node().state_version.clone()),
                 })],
             })
+        })
+    }
+}
+
+struct BlockingRunner;
+
+impl ErasedNodeRunner for BlockingRunner {
+    fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
+        Box::pin(async move {
+            Err(RuntimeError::Blocked(format!(
+                "node {} is failed manually in this fixture",
+                ctx.node().node_id
+            )))
         })
     }
 }
@@ -4524,6 +4539,228 @@ async fn side_effect_scheduler_commits_durable_ledger_phases_before_output() {
 }
 
 #[tokio::test]
+async fn runtime_remediates_confirmed_forward_ledgers_in_reverse_confirmation_order() {
+    let fixture = fixture_with_two_side_effects_and_failing_tail();
+    let forward_a = node_by_output(&fixture, &fixture.cell_a).clone();
+    let forward_b = node_by_output(&fixture, &fixture.cell_b).clone();
+    let failure_node = node_by_output(
+        &fixture,
+        fixture.cell_c.as_ref().expect("failing output cell"),
+    )
+    .clone();
+    let mut registry = ErasedRunnerRegistry::new();
+    registry
+        .register(binding(
+            fixture.descriptor_a.clone(),
+            "sidefx",
+            DeterministicSideEffectRunner::new(&fixture),
+        ))
+        .expect("binding forward a");
+    registry
+        .register(binding(
+            fixture.descriptor_b.clone(),
+            "sidefx",
+            DeterministicSideEffectRunner::new(&fixture),
+        ))
+        .expect("binding forward b");
+    registry
+        .register(binding(
+            fixture
+                .descriptor_c
+                .clone()
+                .expect("failing node descriptor"),
+            "fail",
+            BlockingRunner,
+        ))
+        .expect("binding failure node");
+    let scheduler = test_scheduler(registry);
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+
+    for _ in 0..12 {
+        assert_eq!(
+            scheduler
+                .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+                .await
+                .expect("drive forward side-effect phase"),
+            SchedulerStatus::Advanced
+        );
+    }
+    assert!(store
+        .projection_snapshot()
+        .cell_terminal(&fixture.cell_a)
+        .is_some());
+    assert!(store
+        .projection_snapshot()
+        .cell_terminal(&fixture.cell_b)
+        .is_some());
+    let forward_a_ledger = forward_ledger_for_node(store.projection_snapshot(), &forward_a.node_id);
+    let forward_b_ledger = forward_ledger_for_node(store.projection_snapshot(), &forward_b.node_id);
+
+    let failure_attempt = append_attempt_start(&mut store, &fixture, &failure_node, 1);
+    append_attempt_failure(&mut store, &fixture, &failure_node, &failure_attempt, false);
+    let saga = store
+        .projection_snapshot()
+        .derive_saga_projection(&fixture.run_id, &fixture.runtime_spec.spec().saga);
+    assert_eq!(saga.run_mode, store::RunMode::Remediating);
+    assert_eq!(saga.obligations.len(), 2);
+
+    for _ in 0..12 {
+        assert_eq!(
+            scheduler
+                .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+                .await
+                .expect("drive remediation phase"),
+            SchedulerStatus::Advanced
+        );
+    }
+    let remediation_order = remediation_intent_forward_links(&store, &fixture.run_id);
+    assert_eq!(
+        remediation_order,
+        vec![forward_b_ledger.clone(), forward_a_ledger.clone()]
+    );
+    let saga = store
+        .projection_snapshot()
+        .derive_saga_projection(&fixture.run_id, &fixture.runtime_spec.spec().saga);
+    assert_eq!(saga.run_mode, store::RunMode::Compensated);
+    for forward_ledger in [forward_a_ledger, forward_b_ledger] {
+        let obligation = saga
+            .obligations
+            .get(&forward_ledger)
+            .expect("forward obligation");
+        assert_eq!(
+            obligation.classification,
+            store::ForwardLedgerClassification::Owed
+        );
+        assert!(
+            obligation
+                .remediation
+                .as_ref()
+                .expect("remediation ledger")
+                .closed
+        );
+    }
+    assert_eq!(
+        scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("compensated mode awaits terminal resolution"),
+        SchedulerStatus::Blocked
+    );
+}
+
+#[tokio::test]
+async fn runtime_rejects_forward_node_emitting_remediation_ledger_purpose() {
+    let fixture = fixture_with_first_side_effect_state();
+    let mut registry = ErasedRunnerRegistry::new();
+    registry
+        .register(binding(
+            fixture.descriptor_a.clone(),
+            "sidefx",
+            ForwardEmitsRemediationPurposeRunner,
+        ))
+        .expect("binding a");
+    registry
+        .register(binding(
+            fixture.descriptor_b.clone(),
+            "read",
+            RecordingRunner {
+                expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
+                output_artifact: artifact(0xb1),
+                output_digest: content(0xb2),
+            },
+        ))
+        .expect("binding b");
+    let scheduler = test_scheduler(registry);
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+
+    assert!(matches!(
+        scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await,
+        Err(RuntimeError::InvalidRunnerOutput(message))
+            if message.contains("emitted remediation ledger purpose")
+    ));
+}
+
+#[tokio::test]
+async fn runtime_rejects_remediation_node_emitting_forward_ledger_purpose() {
+    let fixture = fixture_with_two_side_effects_and_failing_tail();
+    let failure_node = node_by_output(
+        &fixture,
+        fixture.cell_c.as_ref().expect("failing output cell"),
+    )
+    .clone();
+    let mut registry = ErasedRunnerRegistry::new();
+    registry
+        .register(binding(
+            fixture.descriptor_a.clone(),
+            "sidefx",
+            RemediationEmitsForwardPurposeRunner::new(&fixture),
+        ))
+        .expect("binding a");
+    registry
+        .register(binding(
+            fixture.descriptor_b.clone(),
+            "sidefx",
+            RemediationEmitsForwardPurposeRunner::new(&fixture),
+        ))
+        .expect("binding b");
+    registry
+        .register(binding(
+            fixture
+                .descriptor_c
+                .clone()
+                .expect("failing node descriptor"),
+            "fail",
+            BlockingRunner,
+        ))
+        .expect("binding failure node");
+    let scheduler = test_scheduler(registry);
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+
+    for _ in 0..12 {
+        scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("drive forward side-effect phase");
+    }
+    let failure_attempt = append_attempt_start(&mut store, &fixture, &failure_node, 1);
+    append_attempt_failure(&mut store, &fixture, &failure_node, &failure_attempt, false);
+
+    assert!(matches!(
+        scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await,
+        Err(RuntimeError::InvalidRunnerOutput(message))
+            if message.contains("emitted forward ledger purpose")
+    ));
+}
+
+#[tokio::test]
 async fn side_effect_not_submitted_resume_claims_next_epoch() {
     let fixture = fixture_with_first_side_effect_state();
     let scheduler = test_scheduler(registered_side_effect_fixture_runners(&fixture));
@@ -4585,7 +4822,7 @@ async fn side_effect_staged_artifact_must_match_payload_ledger_binding() {
     impl ErasedNodeRunner for WrongLedgerStagedSideEffectRunner {
         fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
             Box::pin(async move {
-                let ledger = side_effect_ledger_key(ctx.attempt_no());
+                let ledger = side_effect_ledger_key_for_ctx(&ctx);
                 let staged_ledger =
                     events::SideEffectLedgerKey::new("wrong-ledger").expect("ledger key");
                 let intent_bytes = br#"{"intent":"wrong-ledger"}"#.to_vec();
@@ -4621,7 +4858,7 @@ async fn side_effect_staged_artifact_must_match_payload_ledger_binding() {
                                 scope_id: ctx.node().scope_id.clone(),
                                 attempt_id: ctx.attempt_id().clone(),
                                 ledger_key: ledger.clone(),
-                                ledger_purpose: side_effect_ledger_purpose(),
+                                ledger_purpose: side_effect_ledger_purpose_for_ctx(&ctx),
                                 invocation_epoch: 1,
                                 intent_schema_id: ctx.node().config_ref.schema_id.clone(),
                                 intent_hash,
@@ -4893,8 +5130,6 @@ struct DeterministicSideEffectRunner {
     cap_version: CapabilityVersion,
     adapter_kind: AdapterKind,
     adapter_version: AdapterVersion,
-    output_artifact: ArtifactId,
-    output_digest: ContentDigest,
 }
 
 impl DeterministicSideEffectRunner {
@@ -4904,8 +5139,6 @@ impl DeterministicSideEffectRunner {
             cap_version: side_effect_capability_version(),
             adapter_kind: fixture.adapter_kind.clone(),
             adapter_version: fixture.adapter_version.clone(),
-            output_artifact: artifact(0xa1),
-            output_digest: content(0xa2),
         }
     }
 }
@@ -4913,7 +5146,7 @@ impl DeterministicSideEffectRunner {
 impl ErasedNodeRunner for DeterministicSideEffectRunner {
     fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
         Box::pin(async move {
-            let ledger = side_effect_ledger_key(ctx.attempt_no());
+            let ledger = side_effect_ledger_key_for_ctx(&ctx);
             let phase = side_effect_projection_for_attempt(
                 ctx.projections(),
                 ctx.node(),
@@ -4943,8 +5176,8 @@ impl ErasedNodeRunner for DeterministicSideEffectRunner {
                         | store::SideEffectPhase::SubmissionUnknown { invocation_epoch },
                     ..
                 }) => {
-                    let artifact_id = artifact(0xc5);
-                    let digest = content(0xc4);
+                    let (artifact_id, digest) =
+                        side_effect_fixture_artifact_pair(&ctx, "submission");
                     let staged_artifact = staged_side_effect_artifact(
                         &ctx,
                         side_effect_artifact(
@@ -4986,8 +5219,7 @@ impl ErasedNodeRunner for DeterministicSideEffectRunner {
                     phase: store::SideEffectPhase::SubmissionObserved { invocation_epoch },
                     ..
                 }) => {
-                    let artifact_id = artifact(0xc7);
-                    let digest = content(0xc6);
+                    let (artifact_id, digest) = side_effect_fixture_artifact_pair(&ctx, "receipt");
                     let staged_artifact = staged_side_effect_artifact(
                         &ctx,
                         side_effect_artifact(
@@ -5015,8 +5247,8 @@ impl ErasedNodeRunner for DeterministicSideEffectRunner {
                     phase: store::SideEffectPhase::ReceiptObserved { invocation_epoch },
                     ..
                 }) => {
-                    let artifact_id = artifact(0xc9);
-                    let digest = content(0xc8);
+                    let (artifact_id, digest) =
+                        side_effect_fixture_artifact_pair(&ctx, "confirmation");
                     let staged_artifact = staged_side_effect_artifact(
                         &ctx,
                         side_effect_artifact(
@@ -5044,21 +5276,19 @@ impl ErasedNodeRunner for DeterministicSideEffectRunner {
                     phase: store::SideEffectPhase::ConfirmationObserved { .. },
                     ..
                 }) => {
+                    let (output_artifact, output_digest) =
+                        side_effect_fixture_artifact_pair(&ctx, "state-output");
                     let artifact = state_output_artifact(
                         ctx.node(),
                         ctx.descriptor(),
-                        self.output_artifact.clone(),
-                        self.output_digest.clone(),
+                        output_artifact.clone(),
+                        output_digest.clone(),
                     );
                     let staged_artifact = staged_attempt_artifact(&ctx, artifact)?;
                     Ok(ErasedRunnerOutput {
                         staged_artifacts: vec![staged_artifact],
                         staged_retention_refs: Vec::new(),
-                        payloads: terminal_payloads(
-                            &ctx,
-                            self.output_artifact.clone(),
-                            self.output_digest.clone(),
-                        ),
+                        payloads: terminal_payloads(&ctx, output_artifact, output_digest),
                     })
                 }
                 Some(_) => Err(RuntimeError::Blocked(
@@ -5076,8 +5306,7 @@ impl DeterministicSideEffectRunner {
         ledger: events::SideEffectLedgerKey,
     ) -> Result<ErasedRunnerOutput> {
         assert!(ctx.caps().contains(&self.cap_kind, &self.cap_version));
-        let intent_artifact_id = artifact(0xc2);
-        let intent_hash = content(0xc1);
+        let (intent_artifact_id, intent_hash) = side_effect_fixture_artifact_pair(&ctx, "intent");
         let staged_artifact = staged_side_effect_artifact(
             &ctx,
             side_effect_artifact(
@@ -5100,13 +5329,13 @@ impl DeterministicSideEffectRunner {
                         scope_id: ctx.node().scope_id.clone(),
                         attempt_id: ctx.attempt_id().clone(),
                         ledger_key: ledger.clone(),
-                        ledger_purpose: side_effect_ledger_purpose(),
+                        ledger_purpose: side_effect_ledger_purpose_for_ctx(&ctx),
                         invocation_epoch: 1,
                         intent_schema_id: ctx.node().config_ref.schema_id.clone(),
                         intent_hash,
                         intent_artifact_id,
                         idempotency_input_schema_id: ctx.node().config_ref.schema_id.clone(),
-                        idempotency_input_hash: content(0xc3),
+                        idempotency_input_hash: side_effect_fixture_digest(&ctx, "idempotency"),
                         idempotency_key: events::IdempotencyKeyRef::new("idem-1")
                             .expect("idempotency key"),
                         capability_kind: self.cap_kind.clone(),
@@ -5137,7 +5366,7 @@ impl AmbiguousSideEffectRunner {
 impl ErasedNodeRunner for AmbiguousSideEffectRunner {
     fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
         Box::pin(async move {
-            let ledger = side_effect_ledger_key(ctx.attempt_no());
+            let ledger = side_effect_ledger_key_for_ctx(&ctx);
             let phase = side_effect_projection_for_attempt(
                 ctx.projections(),
                 ctx.node(),
@@ -5169,7 +5398,7 @@ impl ErasedNodeRunner for AmbiguousSideEffectRunner {
                             node_id: ctx.node().node_id.clone(),
                             attempt_id: ctx.attempt_id().clone(),
                             ledger_key: ledger,
-                            ledger_purpose: side_effect_ledger_purpose(),
+                            ledger_purpose: side_effect_ledger_purpose_for_ctx(&ctx),
                             invocation_epoch: 1,
                             ambiguity_code: events::AmbiguityCode::new("unknown_submission")
                                 .expect("ambiguity code"),
@@ -5184,6 +5413,105 @@ impl ErasedNodeRunner for AmbiguousSideEffectRunner {
             }
         })
     }
+}
+
+struct ForwardEmitsRemediationPurposeRunner;
+
+impl ErasedNodeRunner for ForwardEmitsRemediationPurposeRunner {
+    fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
+        Box::pin(async move {
+            let forward_ledger_key =
+                events::SideEffectLedgerKey::new("foreign-forward").expect("forward ledger key");
+            side_effect_intent_with_purpose(
+                ctx,
+                events::SideEffectLedgerPurpose::Remediation { forward_ledger_key },
+            )
+        })
+    }
+}
+
+struct RemediationEmitsForwardPurposeRunner {
+    inner: DeterministicSideEffectRunner,
+}
+
+impl RemediationEmitsForwardPurposeRunner {
+    fn new(fixture: &Fixture) -> Self {
+        Self {
+            inner: DeterministicSideEffectRunner::new(fixture),
+        }
+    }
+}
+
+impl ErasedNodeRunner for RemediationEmitsForwardPurposeRunner {
+    fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
+        Box::pin(async move {
+            if ctx
+                .runtime_spec()
+                .forward_node_for_remediation(&ctx.node().node_id)
+                .is_some()
+            {
+                side_effect_intent_with_purpose(ctx, events::SideEffectLedgerPurpose::Forward)
+            } else {
+                self.inner.run_erased(ctx).await
+            }
+        })
+    }
+}
+
+fn side_effect_intent_with_purpose(
+    ctx: ErasedRunCtx<'_>,
+    ledger_purpose: events::SideEffectLedgerPurpose,
+) -> Result<ErasedRunnerOutput> {
+    let ledger = side_effect_ledger_key_for_ctx(&ctx);
+    let (intent_artifact_id, intent_hash) = side_effect_fixture_artifact_pair(&ctx, "intent");
+    let staged_artifact = staged_side_effect_artifact(
+        &ctx,
+        side_effect_artifact(
+            &ctx,
+            intent_artifact_id.clone(),
+            intent_hash.clone(),
+            events::ArtifactRole::SideEffectIntent,
+        ),
+        ledger.clone(),
+        1,
+    )?;
+    Ok(ErasedRunnerOutput {
+        staged_artifacts: vec![staged_artifact],
+        staged_retention_refs: Vec::new(),
+        payloads: vec![RunnerEventPayload::SideEffectIntentPersisted(
+            events::side_effect::IntentPersisted {
+                spec_hash: ctx.spec_hash().clone(),
+                node_id: ctx.node().node_id.clone(),
+                scope_id: ctx.node().scope_id.clone(),
+                attempt_id: ctx.attempt_id().clone(),
+                ledger_key: ledger,
+                ledger_purpose,
+                invocation_epoch: 1,
+                intent_schema_id: ctx.node().config_ref.schema_id.clone(),
+                intent_hash,
+                intent_artifact_id,
+                idempotency_input_schema_id: ctx.node().config_ref.schema_id.clone(),
+                idempotency_input_hash: side_effect_fixture_digest(&ctx, "idempotency"),
+                idempotency_key: events::IdempotencyKeyRef::new("idem-1").expect("idempotency key"),
+                capability_kind: side_effect_capability_kind(),
+                capability_version: side_effect_capability_version(),
+                adapter_kind: ctx
+                    .node()
+                    .adapter_bindings
+                    .first()
+                    .expect("side-effect adapter")
+                    .adapter_kind
+                    .clone(),
+                adapter_version: ctx
+                    .node()
+                    .adapter_bindings
+                    .first()
+                    .expect("side-effect adapter")
+                    .adapter_version
+                    .clone(),
+            },
+        )],
+    })
 }
 
 struct PrematureSideEffectOutputRunner {
@@ -6133,6 +6461,52 @@ fn append_attempt_start(
     attempt_id
 }
 
+fn append_attempt_failure(
+    store: &mut store::InMemoryTypedRunStore,
+    fixture: &Fixture,
+    node: &spec::NodeSpec,
+    attempt_id: &AttemptId,
+    retryable: bool,
+) {
+    store
+        .append_prepared_commit(store::TypedCommitRequest {
+            run_id: fixture.run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&fixture.run_id),
+            commit_key: store::CommitKey::new(format!(
+                "manual-attempt-failure:{}:{}",
+                node.node_id, attempt_id
+            ))
+            .expect("commit key"),
+            payloads: vec![events::KernelEventPayload::StateAttemptFailed(
+                events::StateAttemptFailed {
+                    spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                    node_id: node.node_id.clone(),
+                    attempt_id: attempt_id.clone(),
+                    retryable,
+                    error: events::MfmErrorInfo {
+                        retryable,
+                        ..public_output_error()
+                    },
+                },
+            )],
+            required_artifacts: Vec::new(),
+            preconditions: store::CommitPreconditions {
+                required_run_state: store::RequiredRunState::NotCompleted,
+                required_present_logical_keys: vec![store::LogicalEventKey::new(format!(
+                    "attempt:{}:{}",
+                    node.node_id, attempt_id
+                ))
+                .expect("attempt logical key")],
+                required_cell_states: vec![store::CellStatePrecondition {
+                    cell_id: node.output_cell.clone(),
+                    required: store::RequiredCellState::Absent,
+                }],
+                ..store::CommitPreconditions::default()
+            },
+        })
+        .expect("append attempt failure");
+}
+
 fn append_fact(
     store: &mut store::InMemoryTypedRunStore,
     fixture: &Fixture,
@@ -6325,6 +6699,12 @@ fn append_not_submitted_proven(
     attempt_id: &AttemptId,
     invocation_epoch: u32,
 ) {
+    let projection =
+        side_effect_projection_for_attempt(store.projection_snapshot(), node, attempt_id)
+            .expect("side-effect projection lookup")
+            .expect("side-effect projection");
+    let ledger_key = projection.ledger_key.clone();
+    let ledger_purpose = projection.ledger_purpose.clone();
     let proof_artifact = artifact(0xd5);
     let proof_hash = content(0xd6);
     let evidence = store::ArtifactEvidenceRef {
@@ -6352,8 +6732,8 @@ fn append_not_submitted_proven(
                     spec_hash: fixture.runtime_spec.spec_hash().clone(),
                     node_id: node.node_id.clone(),
                     attempt_id: attempt_id.clone(),
-                    ledger_key: side_effect_ledger_key(1),
-                    ledger_purpose: side_effect_ledger_purpose(),
+                    ledger_key,
+                    ledger_purpose,
                     invocation_epoch,
                     proof_schema_id: node.config_ref.schema_id.clone(),
                     proof_hash,
@@ -7492,10 +7872,12 @@ fn fixture() -> Fixture {
         seed_ref,
         descriptor_a,
         descriptor_b,
+        descriptor_c: None,
         render_node,
         render_cell,
         cell_a,
         cell_b,
+        cell_c: None,
         cap_kind,
         cap_version,
         adapter_kind,
@@ -7736,6 +8118,342 @@ fn fixture_with_independent_second_node_and_first_side_effect_state() -> Fixture
     fixture
 }
 
+fn fixture_with_two_side_effects_and_failing_tail() -> Fixture {
+    let mut fixture = fixture();
+    let mut envelope = fixture.runtime_spec.envelope().clone();
+    let side_effect = EffectKind::new("mfm.test", "side-effect", DigestAlgorithm::Sha256JcsV1, D8)
+        .expect("side-effect");
+    let side_effect_cap = CapabilityDescriptor::new(
+        side_effect_capability_kind(),
+        side_effect_capability_version(),
+        CapabilityRole::ExternalMutationAuthority,
+        "external-mutation",
+    )
+    .expect("side-effect cap");
+    let side_effect_caps =
+        CapabilitySetDescriptor::new(vec![side_effect_cap]).expect("side-effect caps");
+    let contract_digest = content(0x88);
+    for node in &mut envelope.spec.nodes {
+        if node.descriptor_id == fixture.descriptor_a || node.descriptor_id == fixture.descriptor_b
+        {
+            node.effect_kind = side_effect.clone();
+            node.capability_bindings = side_effect_caps.clone();
+            node.adapter_bindings = vec![spec::AdapterBinding {
+                adapter_kind: fixture.adapter_kind.clone(),
+                adapter_version: fixture.adapter_version.clone(),
+                binding_digest: None,
+            }];
+            node.side_effect = Some(spec::SideEffectContractSpec {
+                contract_digest: contract_digest.clone(),
+            });
+        }
+    }
+    for descriptor in &mut envelope.spec.descriptor_identities {
+        if let spec::DescriptorIdentity::State(identity) = descriptor {
+            if identity.descriptor_id == fixture.descriptor_a
+                || identity.descriptor_id == fixture.descriptor_b
+            {
+                identity.effect_kind = side_effect.clone();
+                identity.effect_class = "sidefx".to_owned();
+                identity.effect_name = "sidefx".to_owned();
+                identity.capabilities = side_effect_caps.clone();
+                identity.runner = "sidefx".to_owned();
+                identity.side_effect_contract_digest = Some(contract_digest.clone());
+            }
+        }
+    }
+
+    let scope = envelope.spec.scopes[0].scope_id.clone();
+    let planning = envelope.spec.scopes[0].planning_lineage.clone();
+    let node_b = envelope
+        .spec
+        .nodes
+        .iter()
+        .find(|node| node.descriptor_id == fixture.descriptor_b)
+        .expect("node b")
+        .clone();
+    let cell_b = envelope
+        .spec
+        .cells
+        .iter()
+        .find(|cell| cell.cell_id == fixture.cell_b)
+        .expect("cell b")
+        .clone();
+    let config_ref = node_b.config_ref.clone();
+    let node_c = NodeId::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        DigestBytes::from_array([0x70; 32]),
+    );
+    let cell_c = CellId::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        DigestBytes::from_array([0x71; 32]),
+    );
+    let descriptor_c = DescriptorId::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        DigestBytes::from_array([0x72; 32]),
+    );
+    let lineage_c = spec::ValueLineageRef {
+        lineage_digest: content(0x74),
+    };
+    let failure_effect = EffectKind::new(
+        "mfm.test",
+        "nonretryable-failure",
+        DigestAlgorithm::Sha256JcsV1,
+        DigestBytes::from_array([0x75; 32]),
+    )
+    .expect("failure effect");
+    let no_caps = CapabilitySetDescriptor::new(Vec::new()).expect("no caps");
+    let node_c_input_root =
+        spec::InputBindingNodeSpec::Cell(Box::new(spec::InputBindingCellSpec {
+            field_path: spec::PublicFieldPath::new("input").expect("field"),
+            cell_id: cell_b.cell_id.clone(),
+            semantic_type_id: cell_b.semantic_type_id.clone(),
+            schema_id: cell_b.schema_id.clone(),
+            required_terminal: spec::RequiredTerminal::ProducedOnly,
+            value_lineage: cell_b.value_lineage.clone(),
+        }));
+    let node_c_spec = spec::NodeSpec {
+        node_id: node_c.clone(),
+        stable_key: spec::StableAuthorKey::new("c").expect("stable key"),
+        scope_id: scope.clone(),
+        state_kind: StateKind::new(
+            "mfm.test",
+            "c",
+            DigestAlgorithm::Sha256JcsV1,
+            DigestBytes::from_array([0x76; 32]),
+        )
+        .expect("state c"),
+        state_version: StateVersion::new("mfm.test.state.c.v1").expect("state version"),
+        descriptor_id: descriptor_c.clone(),
+        config_ref: config_ref.clone(),
+        input_bindings: spec::InputBindingSpec {
+            input_schema_id: cell_b.schema_id.clone(),
+            input_descriptor_id: DescriptorId::from_digest(
+                DigestAlgorithm::Sha256JcsV1,
+                DigestBytes::from_array([0x77; 32]),
+            ),
+            digest: content_digest_json(input_node_json(&node_c_input_root))
+                .expect("node c input digest"),
+            root: node_c_input_root,
+        },
+        output_cell: cell_c.clone(),
+        effect_kind: failure_effect.clone(),
+        capability_bindings: no_caps.clone(),
+        adapter_bindings: Vec::new(),
+        side_effect: None,
+        framework: None,
+        planning_lineage: planning.clone(),
+        deterministic_predecessors: vec![node_b.node_id.clone()],
+    };
+    envelope
+        .spec
+        .descriptor_identities
+        .push(spec::DescriptorIdentity::State(Box::new(
+            spec::StateDescriptorIdentity {
+                descriptor_id: descriptor_c.clone(),
+                name: "mfm.test.state.c".to_owned(),
+                state_kind: node_c_spec.state_kind.clone(),
+                state_version: node_c_spec.state_version.clone(),
+                config_schema_id: config_ref.schema_id.clone(),
+                input_schema_id: node_c_spec.input_bindings.input_schema_id.clone(),
+                output_schema_id: cell_b.schema_id.clone(),
+                output_semantic_type_id: cell_b.semantic_type_id.clone(),
+                effect_kind: failure_effect.clone(),
+                effect_class: "fail".to_owned(),
+                effect_name: "fail".to_owned(),
+                effect_version: EffectVersion::new("mfm.effect.v1").expect("effect version"),
+                capabilities: no_caps.clone(),
+                runner: "fail".to_owned(),
+                side_effect_contract_digest: None,
+            },
+        )));
+    envelope.spec.cells.push(spec::CellSpec {
+        cell_id: cell_c.clone(),
+        producer: spec::CellProducer::Node(node_c.clone()),
+        scope_id: scope.clone(),
+        semantic_type_id: cell_b.semantic_type_id.clone(),
+        schema_id: cell_b.schema_id.clone(),
+        value_lineage: lineage_c.clone(),
+        terminal_policy: spec::CellTerminalPolicy::ProducedOnly,
+        storage_policy: spec::StoragePolicy::ContentAddressed,
+        redaction_policy: spec::RedactionPolicy::Public,
+    });
+    envelope.spec.value_lineages.push(spec::ValueLineage {
+        lineage_ref: lineage_c.clone(),
+        scope_id: scope.clone(),
+        producer: spec::CellProducer::Node(node_c.clone()),
+        input_cells: vec![cell_b.cell_id.clone()],
+        config_ref_digest: Some(config_ref.digest.clone()),
+        planning_lineage: planning.clone(),
+        domain_keys: Vec::new(),
+        transform_policy: spec::LineageTransformPolicy::StateOutput,
+    });
+    envelope.spec.nodes.push(node_c_spec);
+
+    let public_output_cell = spec::PublicOutputCell {
+        public_field_path: spec::PublicFieldPath::new("result").expect("field"),
+        cell_id: cell_c.clone(),
+        producer: spec::CellProducer::Node(node_c.clone()),
+        scope_id: scope.clone(),
+        semantic_type_id: cell_b.semantic_type_id.clone(),
+        schema_id: cell_b.schema_id.clone(),
+        value_lineage: lineage_c,
+        required_terminal: spec::RequiredTerminal::ProducedOnly,
+    };
+    envelope.spec.public_outputs.outputs = vec![public_output_cell.clone()];
+    let public_output_digest = envelope
+        .spec
+        .public_outputs
+        .digest()
+        .expect("public output digest");
+    let render_input_root = spec::InputBindingNodeSpec::Struct(vec![spec::NamedInputBindingSpec {
+        field_path: public_output_cell.public_field_path.clone(),
+        node: spec::InputBindingNodeSpec::Cell(Box::new(spec::InputBindingCellSpec {
+            field_path: public_output_cell.public_field_path.clone(),
+            cell_id: public_output_cell.cell_id.clone(),
+            semantic_type_id: public_output_cell.semantic_type_id.clone(),
+            schema_id: public_output_cell.schema_id.clone(),
+            required_terminal: public_output_cell.required_terminal,
+            value_lineage: public_output_cell.value_lineage.clone(),
+        })),
+    }]);
+    for node in &mut envelope.spec.nodes {
+        if node.node_id == fixture.render_node {
+            if let Some(spec::FrameworkNodeSpec::PublicOutputRender(render)) = &mut node.framework {
+                render.output_spec_digest = public_output_digest.clone();
+                render.required_cells = vec![public_output_cell.clone()];
+            }
+            node.input_bindings.root = render_input_root.clone();
+            node.input_bindings.digest =
+                content_digest_json(input_node_json(&node.input_bindings.root))
+                    .expect("render input digest");
+            node.deterministic_predecessors = vec![node_c.clone()];
+        }
+    }
+    for lineage in &mut envelope.spec.value_lineages {
+        if lineage.producer == spec::CellProducer::Node(fixture.render_node.clone()) {
+            lineage.input_cells = vec![cell_c.clone()];
+        }
+    }
+
+    let forward_a = envelope
+        .spec
+        .nodes
+        .iter()
+        .find(|node| node.descriptor_id == fixture.descriptor_a)
+        .expect("node a")
+        .clone();
+    let forward_b = envelope
+        .spec
+        .nodes
+        .iter()
+        .find(|node| node.descriptor_id == fixture.descriptor_b)
+        .expect("node b")
+        .clone();
+    let cell_a = envelope
+        .spec
+        .cells
+        .iter()
+        .find(|cell| cell.cell_id == fixture.cell_a)
+        .expect("cell a")
+        .clone();
+    let remediation_a = remediation_node_for_forward(
+        &forward_a,
+        &cell_a,
+        DigestBytes::from_array([0x80; 32]),
+        DigestBytes::from_array([0x81; 32]),
+        DigestBytes::from_array([0x82; 32]),
+    );
+    let remediation_b = remediation_node_for_forward(
+        &forward_b,
+        &cell_b,
+        DigestBytes::from_array([0x83; 32]),
+        DigestBytes::from_array([0x84; 32]),
+        DigestBytes::from_array([0x85; 32]),
+    );
+    append_remediation_output_cell(&mut envelope.spec, &remediation_a, content(0x86));
+    append_remediation_output_cell(&mut envelope.spec, &remediation_b, content(0x87));
+    envelope
+        .spec
+        .remediations
+        .insert(forward_a.node_id.clone(), remediation_a);
+    envelope
+        .spec
+        .remediations
+        .insert(forward_b.node_id.clone(), remediation_b);
+    envelope.spec.saga = spec::SagaPolicySpec::CompensateCompleted {
+        on_remediation_unresolved: spec::RemediationUnresolvedSpec::FailWithoutAcdcClaim,
+    };
+
+    let envelope = spec::HashedSpecEnvelope::new(envelope.spec, envelope.audit).expect("rehash");
+    fixture.runtime_spec =
+        CertifiedRuntimeSpec::from_verified_envelope(envelope).expect("runtime spec");
+    fixture.descriptor_c = Some(descriptor_c);
+    fixture.cell_c = Some(cell_c);
+    fixture
+}
+
+fn remediation_node_for_forward(
+    forward: &spec::NodeSpec,
+    forward_output: &spec::CellSpec,
+    node_digest: DigestBytes,
+    cell_digest: DigestBytes,
+    input_descriptor_digest: DigestBytes,
+) -> spec::NodeSpec {
+    let mut remediation = forward.clone();
+    remediation.node_id = NodeId::from_digest(DigestAlgorithm::Sha256JcsV1, node_digest);
+    remediation.stable_key =
+        spec::StableAuthorKey::new(format!("remediation/{}", forward.stable_key.as_str()))
+            .expect("remediation stable key");
+    remediation.output_cell = CellId::from_digest(DigestAlgorithm::Sha256JcsV1, cell_digest);
+    remediation.input_bindings.root =
+        spec::InputBindingNodeSpec::Cell(Box::new(spec::InputBindingCellSpec {
+            field_path: spec::PublicFieldPath::new("input").expect("field"),
+            cell_id: forward.output_cell.clone(),
+            semantic_type_id: forward_output.semantic_type_id.clone(),
+            schema_id: forward_output.schema_id.clone(),
+            required_terminal: spec::RequiredTerminal::ProducedOnly,
+            value_lineage: forward_output.value_lineage.clone(),
+        }));
+    remediation.input_bindings.input_descriptor_id =
+        DescriptorId::from_digest(DigestAlgorithm::Sha256JcsV1, input_descriptor_digest);
+    remediation.input_bindings.digest =
+        content_digest_json(input_node_json(&remediation.input_bindings.root))
+            .expect("remediation input digest");
+    remediation.deterministic_predecessors = Vec::new();
+    remediation
+}
+
+fn append_remediation_output_cell(
+    typed: &mut spec::TypedExecutionSpec,
+    remediation: &spec::NodeSpec,
+    lineage_digest: ContentDigest,
+) {
+    let descriptor = typed
+        .descriptor_identities
+        .iter()
+        .find_map(|identity| match identity {
+            spec::DescriptorIdentity::State(state)
+                if state.descriptor_id == remediation.descriptor_id =>
+            {
+                Some(state)
+            }
+            _ => None,
+        })
+        .expect("remediation descriptor");
+    typed.cells.push(spec::CellSpec {
+        cell_id: remediation.output_cell.clone(),
+        producer: spec::CellProducer::Node(remediation.node_id.clone()),
+        scope_id: remediation.scope_id.clone(),
+        semantic_type_id: descriptor.output_semantic_type_id.clone(),
+        schema_id: descriptor.output_schema_id.clone(),
+        value_lineage: spec::ValueLineageRef { lineage_digest },
+        terminal_policy: spec::CellTerminalPolicy::ProducedOnly,
+        storage_policy: spec::StoragePolicy::ContentAddressed,
+        redaction_policy: spec::RedactionPolicy::Public,
+    });
+}
+
 struct NodeSpecFixture {
     node_id: NodeId,
     descriptor_id: DescriptorId,
@@ -7941,6 +8659,128 @@ fn side_effect_ledger_purpose() -> events::SideEffectLedgerPurpose {
     events::SideEffectLedgerPurpose::Forward
 }
 
+fn forward_ledger_for_node(
+    projections: &store::ProjectionSnapshot,
+    node_id: &NodeId,
+) -> events::SideEffectLedgerKey {
+    let mut found = None;
+    for (_, projection) in projections.side_effects() {
+        if projection.intent.node_id == *node_id
+            && matches!(
+                projection.ledger_purpose,
+                events::SideEffectLedgerPurpose::Forward
+            )
+        {
+            assert!(
+                found.replace(projection.ledger_key.clone()).is_none(),
+                "node {node_id} has multiple forward ledgers"
+            );
+        }
+    }
+    found.expect("forward ledger for node")
+}
+
+fn remediation_intent_forward_links(
+    store: &store::InMemoryTypedRunStore,
+    run_id: &RunId,
+) -> Vec<events::SideEffectLedgerKey> {
+    store
+        .load_run_stream(run_id)
+        .iter()
+        .filter_map(|event| match event.payload() {
+            events::KernelEventPayload::SideEffectIntentPersisted(payload) => {
+                match &payload.ledger_purpose {
+                    events::SideEffectLedgerPurpose::Remediation { forward_ledger_key } => {
+                        Some(forward_ledger_key.clone())
+                    }
+                    events::SideEffectLedgerPurpose::Forward => None,
+                }
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn side_effect_fixture_digest(ctx: &ErasedRunCtx<'_>, role: &str) -> ContentDigest {
+    content_digest_json(serde_json::json!({
+        "attempt": ctx.attempt_id().as_str(),
+        "node": ctx.node().node_id.as_str(),
+        "role": role,
+    }))
+    .expect("side-effect fixture digest")
+}
+
+fn side_effect_fixture_artifact_pair(
+    ctx: &ErasedRunCtx<'_>,
+    role: &str,
+) -> (ArtifactId, ContentDigest) {
+    let digest = side_effect_fixture_digest(ctx, role);
+    (
+        ArtifactId::from_digest(digest.algorithm(), *digest.digest()),
+        digest,
+    )
+}
+
+fn side_effect_ledger_key_for_ctx(ctx: &ErasedRunCtx<'_>) -> events::SideEffectLedgerKey {
+    if let Some(forward_ledger_key) = linked_forward_ledger_for_remediation(ctx) {
+        events::SideEffectLedgerKey::new(format!(
+            "remediation-{}-{}",
+            forward_ledger_key,
+            ctx.attempt_no()
+        ))
+        .expect("remediation ledger key")
+    } else {
+        events::SideEffectLedgerKey::new(format!(
+            "forward-{}-{}",
+            ctx.node().node_id,
+            ctx.attempt_no()
+        ))
+        .expect("forward ledger key")
+    }
+}
+
+fn side_effect_ledger_purpose_for_ctx(ctx: &ErasedRunCtx<'_>) -> events::SideEffectLedgerPurpose {
+    linked_forward_ledger_for_remediation(ctx)
+        .map(
+            |forward_ledger_key| events::SideEffectLedgerPurpose::Remediation {
+                forward_ledger_key,
+            },
+        )
+        .unwrap_or(events::SideEffectLedgerPurpose::Forward)
+}
+
+fn linked_forward_ledger_for_remediation(
+    ctx: &ErasedRunCtx<'_>,
+) -> Option<events::SideEffectLedgerKey> {
+    if let Some(projection) =
+        side_effect_projection_for_attempt(ctx.projections(), ctx.node(), ctx.attempt_id())
+            .expect("remediation projection lookup")
+    {
+        if let events::SideEffectLedgerPurpose::Remediation { forward_ledger_key } =
+            &projection.ledger_purpose
+        {
+            return Some(forward_ledger_key.clone());
+        }
+    }
+    let forward_node_id = ctx
+        .runtime_spec()
+        .forward_node_for_remediation(&ctx.node().node_id)?;
+    ctx.projections()
+        .side_effects()
+        .find_map(|(_, projection)| {
+            (projection.intent.node_id == *forward_node_id
+                && matches!(
+                    &projection.ledger_purpose,
+                    events::SideEffectLedgerPurpose::Forward
+                )
+                && matches!(
+                    projection.phase,
+                    store::SideEffectPhase::ConfirmationObserved { .. }
+                ))
+            .then(|| projection.ledger_key.clone())
+        })
+}
+
 fn side_effect_claim_owner(attempt_no: u32, generation: u32) -> events::RunnerInvocationId {
     events::RunnerInvocationId::new(format!("owner-{attempt_no}-{generation}"))
         .expect("claim owner")
@@ -7984,7 +8824,7 @@ fn side_effect_claimed(
         node_id: ctx.node().node_id.clone(),
         attempt_id: ctx.attempt_id().clone(),
         ledger_key: ledger,
-        ledger_purpose: side_effect_ledger_purpose(),
+        ledger_purpose: side_effect_ledger_purpose_for_ctx(ctx),
         claim_owner: side_effect_claim_owner(ctx.attempt_no(), claim_generation),
         invocation_epoch,
         claim_generation,
@@ -8003,7 +8843,7 @@ fn side_effect_claim_taken_over(
         node_id: ctx.node().node_id.clone(),
         attempt_id: ctx.attempt_id().clone(),
         ledger_key: ledger,
-        ledger_purpose: side_effect_ledger_purpose(),
+        ledger_purpose: side_effect_ledger_purpose_for_ctx(ctx),
         previous_claim_owner: previous.claim_owner.clone(),
         new_claim_owner: side_effect_claim_owner(ctx.attempt_no(), claim_generation),
         invocation_epoch: previous.invocation_epoch,
@@ -8024,7 +8864,7 @@ fn side_effect_prepared(
         node_id: ctx.node().node_id.clone(),
         attempt_id: ctx.attempt_id().clone(),
         ledger_key: ledger,
-        ledger_purpose: side_effect_ledger_purpose(),
+        ledger_purpose: side_effect_ledger_purpose_for_ctx(ctx),
         invocation_epoch,
         claim_generation,
         claim_fencing_token: side_effect_fencing_token(ctx.attempt_no(), claim_generation),
@@ -8044,7 +8884,7 @@ fn side_effect_invocation_started(
         node_id: ctx.node().node_id.clone(),
         attempt_id: ctx.attempt_id().clone(),
         ledger_key: ledger,
-        ledger_purpose: side_effect_ledger_purpose(),
+        ledger_purpose: side_effect_ledger_purpose_for_ctx(ctx),
         invocation_epoch,
         claim_owner: side_effect_claim_owner(ctx.attempt_no(), claim_generation),
         claim_generation,
@@ -8064,7 +8904,7 @@ fn side_effect_submission_observed(
         node_id: ctx.node().node_id.clone(),
         attempt_id: ctx.attempt_id().clone(),
         ledger_key: ledger,
-        ledger_purpose: side_effect_ledger_purpose(),
+        ledger_purpose: side_effect_ledger_purpose_for_ctx(ctx),
         invocation_epoch,
         submission_schema_id: ctx.node().config_ref.schema_id.clone(),
         submission_hash: digest,
@@ -8084,7 +8924,7 @@ fn side_effect_receipt_observed(
         node_id: ctx.node().node_id.clone(),
         attempt_id: ctx.attempt_id().clone(),
         ledger_key: ledger,
-        ledger_purpose: side_effect_ledger_purpose(),
+        ledger_purpose: side_effect_ledger_purpose_for_ctx(ctx),
         invocation_epoch,
         receipt_schema_id: ctx.node().config_ref.schema_id.clone(),
         receipt_hash: digest,
@@ -8105,7 +8945,7 @@ fn side_effect_confirmation_observed(
         node_id: ctx.node().node_id.clone(),
         attempt_id: ctx.attempt_id().clone(),
         ledger_key: ledger,
-        ledger_purpose: side_effect_ledger_purpose(),
+        ledger_purpose: side_effect_ledger_purpose_for_ctx(ctx),
         invocation_epoch,
         confirmation_schema_id: ctx.node().config_ref.schema_id.clone(),
         confirmation_hash: digest,

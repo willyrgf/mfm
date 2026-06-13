@@ -1711,7 +1711,14 @@ fn validate_runner_output(
             | events::KernelEventPayload::SideEffectConfirmationObserved(_)
             | events::KernelEventPayload::SideEffectAmbiguous(_)
             | events::KernelEventPayload::SideEffectFailed(_) => {
-                validate_runner_side_effect_payload(node, attempt_id, caps, projections, payload)?;
+                validate_runner_side_effect_payload(
+                    runtime_spec,
+                    node,
+                    attempt_id,
+                    caps,
+                    projections,
+                    payload,
+                )?;
                 side_effect_payload = true;
                 if let events::KernelEventPayload::SideEffectFailed(payload) = payload {
                     side_effect_failed = true;

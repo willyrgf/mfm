@@ -1,3 +1,4 @@
+use mfm_events::v1 as events;
 use mfm_ids::{AttemptId, NodeId, RunId};
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
@@ -44,6 +45,12 @@ pub(crate) fn scheduler_decision<'a>(
     if view.projections.run_state(run_id) == store::RunState::Completed {
         return Ok(SchedulerDecision::Completed);
     }
+    let saga = view
+        .projections
+        .derive_saga_projection(run_id, &runtime_spec.spec().saga);
+    if saga.engagement.is_some() {
+        return saga_scheduler_decision(runtime_spec, view, &saga);
+    }
     if public_output_is_produced(runtime_spec, &view.projections) {
         return match next_runnable_node(runtime_spec, view)? {
             Some(runnable) => Ok(SchedulerDecision::Run(runnable)),
@@ -56,17 +63,33 @@ pub(crate) fn scheduler_decision<'a>(
     }
 }
 
+fn saga_scheduler_decision<'a>(
+    runtime_spec: &'a CertifiedRuntimeSpec,
+    view: &RuntimeRunView,
+    saga: &store::SagaProjection,
+) -> Result<SchedulerDecision<'a>> {
+    match saga.run_mode {
+        store::RunMode::Forward => match next_forward_completion_node(runtime_spec, view)? {
+            Some(runnable) => Ok(SchedulerDecision::Run(runnable)),
+            None => Ok(SchedulerDecision::Blocked),
+        },
+        store::RunMode::Remediating | store::RunMode::Compensated => {
+            match next_remediation_node(runtime_spec, view, saga)? {
+                Some(runnable) => Ok(SchedulerDecision::Run(runnable)),
+                None => Ok(SchedulerDecision::Blocked),
+            }
+        }
+        store::RunMode::Completed => Ok(SchedulerDecision::Completed),
+        store::RunMode::ManualBlocked
+        | store::RunMode::ManuallyResolved
+        | store::RunMode::FailedWithoutAcdcClaim => Ok(SchedulerDecision::Blocked),
+    }
+}
+
 fn next_runnable_node<'a>(
     runtime_spec: &'a CertifiedRuntimeSpec,
     view: &RuntimeRunView,
 ) -> Result<Option<RunnableNode<'a>>> {
-    if view
-        .projections
-        .side_effects()
-        .any(|(_, projection)| matches!(projection.phase, store::SideEffectPhase::Ambiguous { .. }))
-    {
-        return Ok(None);
-    }
     for node_id in runtime_spec.topological_order() {
         let node = runtime_spec.node(node_id).expect("topological node exists");
         let Some(attempt) = attempt_plan(runtime_spec, node, view)? else {
@@ -77,6 +100,184 @@ fn next_runnable_node<'a>(
         }
     }
     Ok(None)
+}
+
+fn next_forward_completion_node<'a>(
+    runtime_spec: &'a CertifiedRuntimeSpec,
+    view: &RuntimeRunView,
+) -> Result<Option<RunnableNode<'a>>> {
+    for node_id in runtime_spec.topological_order() {
+        let node = runtime_spec.node(node_id).expect("topological node exists");
+        if node.side_effect.is_none() {
+            continue;
+        }
+        let Some(runnable) =
+            continuing_side_effect_node_if(runtime_spec, node, view, |projection| {
+                matches!(
+                    &projection.ledger_purpose,
+                    events::SideEffectLedgerPurpose::Forward
+                ) && matches!(
+                    projection.phase,
+                    store::SideEffectPhase::InvocationStarted { .. }
+                        | store::SideEffectPhase::SubmissionObserved { .. }
+                        | store::SideEffectPhase::SubmissionUnknown { .. }
+                        | store::SideEffectPhase::ReceiptObserved { .. }
+                        | store::SideEffectPhase::ConfirmationObserved { .. }
+                )
+            })?
+        else {
+            continue;
+        };
+        return Ok(Some(runnable));
+    }
+    Ok(None)
+}
+
+fn next_remediation_node<'a>(
+    runtime_spec: &'a CertifiedRuntimeSpec,
+    view: &RuntimeRunView,
+    saga: &store::SagaProjection,
+) -> Result<Option<RunnableNode<'a>>> {
+    for obligation in owed_obligations_reverse_confirmation_order(view, saga)? {
+        let forward = view
+            .projections
+            .side_effect(&obligation.forward_ledger_key)
+            .ok_or_else(|| {
+                RuntimeError::InvalidRunStream(format!(
+                    "owed obligation {} has no forward ledger projection",
+                    obligation.forward_ledger_key
+                ))
+            })?;
+        let remediation_node = runtime_spec
+            .remediation_for_forward_node(&forward.intent.node_id)
+            .ok_or_else(|| {
+                RuntimeError::InvalidSpec(format!(
+                    "forward node {} has no certified remediation node",
+                    forward.intent.node_id
+                ))
+            })?;
+        if let Some(remediation) = &obligation.remediation {
+            if remediation.unresolved.is_some() {
+                return Ok(None);
+            }
+            if remediation.closed
+                && view
+                    .projections
+                    .cell_terminal(&remediation_node.output_cell)
+                    .is_some()
+            {
+                continue;
+            }
+        }
+        let Some(attempt) = attempt_plan(runtime_spec, remediation_node, view)? else {
+            return Ok(None);
+        };
+        if node_inputs_ready(runtime_spec, remediation_node, view)? {
+            return Ok(Some(RunnableNode {
+                node: remediation_node,
+                attempt,
+            }));
+        }
+        return Ok(None);
+    }
+    Ok(None)
+}
+
+fn continuing_side_effect_node_if<'a>(
+    runtime_spec: &'a CertifiedRuntimeSpec,
+    node: &'a spec::NodeSpec,
+    view: &RuntimeRunView,
+    mut predicate: impl FnMut(&store::SideEffectProjection) -> bool,
+) -> Result<Option<RunnableNode<'a>>> {
+    let mut selected = None;
+    for ((attempt_node_id, attempt_id), attempt) in view.projections.attempts() {
+        if attempt_node_id != &node.node_id {
+            continue;
+        }
+        if !matches!(attempt.status, store::AttemptStatus::Started { .. }) {
+            continue;
+        }
+        let Some(projection) =
+            side_effect_projection_for_attempt(&view.projections, node, attempt_id)?
+        else {
+            continue;
+        };
+        if predicate(projection) {
+            if selected.replace(attempt_id.clone()).is_some() {
+                return Err(RuntimeError::InvalidRunStream(format!(
+                    "node {} has multiple side-effect completion candidates",
+                    node.node_id
+                )));
+            }
+        }
+    }
+    let Some(_) = selected else {
+        return Ok(None);
+    };
+    match side_effect_attempt_plan(runtime_spec, node, view)? {
+        Some(AttemptPlan::Continue {
+            attempt_id,
+            attempt_no,
+        }) if node_inputs_ready(runtime_spec, node, view)? => Ok(Some(RunnableNode {
+            node,
+            attempt: AttemptPlan::Continue {
+                attempt_id,
+                attempt_no,
+            },
+        })),
+        Some(AttemptPlan::Continue { .. }) | None => Ok(None),
+        Some(AttemptPlan::StartNew { .. }) => Err(RuntimeError::InvalidRunStream(format!(
+            "engaged saga attempted to start forward side-effect node {}",
+            node.node_id
+        ))),
+    }
+}
+
+fn owed_obligations_reverse_confirmation_order<'a>(
+    view: &RuntimeRunView,
+    saga: &'a store::SagaProjection,
+) -> Result<Vec<&'a store::SagaObligationProjection>> {
+    let mut positioned = Vec::new();
+    for obligation in saga.obligations.values() {
+        if obligation.classification != store::ForwardLedgerClassification::Owed {
+            continue;
+        }
+        let position = forward_confirmation_position(view, &obligation.forward_ledger_key)?;
+        positioned.push((position, obligation));
+    }
+    positioned.sort_by_key(|(position, _)| *position);
+    positioned.reverse();
+    Ok(positioned
+        .into_iter()
+        .map(|(_, obligation)| obligation)
+        .collect())
+}
+
+fn forward_confirmation_position(
+    view: &RuntimeRunView,
+    ledger_key: &events::SideEffectLedgerKey,
+) -> Result<(u64, u32)> {
+    let mut found = None;
+    for event in &view.stream {
+        let events::KernelEventPayload::SideEffectConfirmationObserved(payload) = event.payload()
+        else {
+            continue;
+        };
+        if &payload.ledger_key != ledger_key {
+            continue;
+        }
+        let position = (event.seq().as_u64(), event.ordinal().as_u32());
+        if found.replace(position).is_some() {
+            return Err(RuntimeError::InvalidRunStream(format!(
+                "forward ledger {ledger_key} has multiple confirmation events"
+            )));
+        }
+    }
+    found.ok_or_else(|| {
+        RuntimeError::InvalidRunStream(format!(
+            "owed forward ledger {ledger_key} has no confirmation event"
+        ))
+    })
 }
 
 fn attempt_plan(

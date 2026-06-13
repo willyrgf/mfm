@@ -820,6 +820,7 @@ fn validate_historical_run_stream(
                     runtime_spec,
                     &active_attempts,
                     &mut side_effect_ledgers,
+                    projections,
                     event.payload(),
                 )?;
             }

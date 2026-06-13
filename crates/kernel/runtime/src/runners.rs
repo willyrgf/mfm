@@ -284,6 +284,14 @@ impl ErasedRunnerRegistry {
                 executables.push(binding.executable.clone());
             }
         }
+        for (_, node) in runtime_spec.remediations() {
+            let descriptor = runtime_spec.state_descriptor_for_node(node)?;
+            let binding = self.resolve(node, descriptor)?;
+            let key = binding.executable.factory_id.as_str().to_owned();
+            if seen.insert(key) {
+                executables.push(binding.executable.clone());
+            }
+        }
         Ok(executables)
     }
 }

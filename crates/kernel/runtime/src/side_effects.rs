@@ -37,6 +37,7 @@ pub(crate) fn validate_historical_side_effect_payload(
     runtime_spec: &CertifiedRuntimeSpec,
     active_attempts: &BTreeSet<(NodeId, AttemptId)>,
     ledgers: &mut BTreeMap<events::SideEffectLedgerKey, HistoricalSideEffectLedger>,
+    projections: &store::ProjectionSnapshot,
     payload: &events::KernelEventPayload,
 ) -> Result<()> {
     let (node_id, attempt_id, ledger_key, phase) = side_effect_payload_ref(payload)
@@ -56,6 +57,8 @@ pub(crate) fn validate_historical_side_effect_payload(
             ledger_key, node_id, attempt_id
         )));
     }
+    validate_side_effect_ledger_purpose(runtime_spec, projections, node, payload)
+        .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))?;
 
     match payload {
         events::KernelEventPayload::SideEffectIntentPersisted(payload) => {
@@ -197,6 +200,89 @@ pub(crate) fn side_effect_payload_ref(
             HistoricalSideEffectPhase::Failed,
         )),
         _ => None,
+    }
+}
+
+fn side_effect_payload_ledger_purpose(
+    payload: &events::KernelEventPayload,
+) -> Option<&events::SideEffectLedgerPurpose> {
+    match payload {
+        events::KernelEventPayload::SideEffectIntentPersisted(payload) => {
+            Some(&payload.ledger_purpose)
+        }
+        events::KernelEventPayload::SideEffectClaimed(payload) => Some(&payload.ledger_purpose),
+        events::KernelEventPayload::SideEffectClaimTakenOver(payload) => {
+            Some(&payload.ledger_purpose)
+        }
+        events::KernelEventPayload::SideEffectInvocationPrepared(payload) => {
+            Some(&payload.ledger_purpose)
+        }
+        events::KernelEventPayload::SideEffectInvocationStarted(payload) => {
+            Some(&payload.ledger_purpose)
+        }
+        events::KernelEventPayload::SideEffectNotSubmittedProven(payload) => {
+            Some(&payload.ledger_purpose)
+        }
+        events::KernelEventPayload::SideEffectSubmissionObserved(payload) => {
+            Some(&payload.ledger_purpose)
+        }
+        events::KernelEventPayload::SideEffectSubmissionUnknown(payload) => {
+            Some(&payload.ledger_purpose)
+        }
+        events::KernelEventPayload::SideEffectReceiptObserved(payload) => {
+            Some(&payload.ledger_purpose)
+        }
+        events::KernelEventPayload::SideEffectConfirmationObserved(payload) => {
+            Some(&payload.ledger_purpose)
+        }
+        events::KernelEventPayload::SideEffectAmbiguous(payload) => Some(&payload.ledger_purpose),
+        events::KernelEventPayload::SideEffectFailed(payload) => Some(&payload.ledger_purpose),
+        _ => None,
+    }
+}
+
+fn validate_side_effect_ledger_purpose(
+    runtime_spec: &CertifiedRuntimeSpec,
+    projections: &store::ProjectionSnapshot,
+    node: &spec::NodeSpec,
+    payload: &events::KernelEventPayload,
+) -> Result<()> {
+    let purpose = side_effect_payload_ledger_purpose(payload).ok_or_else(|| {
+        RuntimeError::InvalidRunnerOutput("expected side-effect payload".to_owned())
+    })?;
+    let Some(forward_node_id) = runtime_spec.forward_node_for_remediation(&node.node_id) else {
+        if matches!(purpose, events::SideEffectLedgerPurpose::Forward) {
+            return Ok(());
+        }
+        return Err(RuntimeError::InvalidRunnerOutput(format!(
+            "forward side-effect node {} emitted remediation ledger purpose",
+            node.node_id
+        )));
+    };
+
+    let events::SideEffectLedgerPurpose::Remediation { forward_ledger_key } = purpose else {
+        return Err(RuntimeError::InvalidRunnerOutput(format!(
+            "remediation node {} emitted forward ledger purpose",
+            node.node_id
+        )));
+    };
+    let forward = projections.side_effect(forward_ledger_key).ok_or_else(|| {
+        RuntimeError::InvalidRunnerOutput(format!(
+            "remediation node {} linked missing forward ledger {}",
+            node.node_id, forward_ledger_key
+        ))
+    })?;
+    if matches!(
+        &forward.ledger_purpose,
+        events::SideEffectLedgerPurpose::Forward
+    ) && forward.intent.node_id == *forward_node_id
+    {
+        Ok(())
+    } else {
+        Err(RuntimeError::InvalidRunnerOutput(format!(
+            "remediation node {} linked ledger {} outside certified forward node {}",
+            node.node_id, forward_ledger_key, forward_node_id
+        )))
     }
 }
 
@@ -484,6 +570,7 @@ pub(crate) fn side_effect_artifact_binding(
 }
 
 pub(crate) fn validate_runner_side_effect_payload(
+    runtime_spec: &CertifiedRuntimeSpec,
     node: &spec::NodeSpec,
     attempt_id: &AttemptId,
     caps: &CertifiedRuntimeCapabilities,
@@ -501,6 +588,7 @@ pub(crate) fn validate_runner_side_effect_payload(
             RuntimeError::InvalidRunnerOutput("expected side-effect payload".to_owned())
         })?;
     require_attempt(node, attempt_id, payload_node_id, payload_attempt_id)?;
+    validate_side_effect_ledger_purpose(runtime_spec, projections, node, payload)?;
     match payload {
         events::KernelEventPayload::SideEffectIntentPersisted(payload) => {
             if payload.scope_id != node.scope_id {
