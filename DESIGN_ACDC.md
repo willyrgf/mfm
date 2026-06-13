@@ -4,6 +4,13 @@ Status: design-exploration record. The v1 scope and decisions formerly resolved 
 superseded by `RFC_ACDC_SAGA.md`; where the two disagree, the RFC wins. Sketches in this document
 are design pressure for later slices, not current implementation contract.
 
+Note: the RFC's second review pass departs from this document's sketches in two further ways. The
+remediation control events sketched below were cut entirely — directive selection, obligation
+open/close, and terminal state are derived projections whose timing is pinned by the RFC's
+engagement fence and classification-quiescence rules — and saga admission authority is split
+between spec-blind stream-derivable store checks and runtime-constructed spec-aware
+preconditions, with replay as the policy backstop.
+
 Companion problem statement: `PROBLEM_ACDC.md`.
 
 ## Purpose
@@ -408,6 +415,13 @@ ManualResolutionRecorded
 ResourceEvidenceRecorded
 RunTerminalResolved
 ```
+
+Superseded: `RFC_ACDC_SAGA.md` keeps only `ManualResolutionRecorded` and the extended
+`RunCompleted` from this list. `FailureDirectiveSelected`, `RemediationObligationOpened`,
+`RemediationObligationClosed`, `ManualResolutionRequested`, `ResourceEvidenceRecorded`, and
+`RunTerminalResolved` are not events; they are derived projections (resource evidence rides
+existing side-effect payloads), with derivation timing pinned by the RFC's engagement fence and
+classification-quiescence rules.
 
 The side-effect submission, receipt, confirmation, ambiguity, and failure phases should remain the
 normal side-effect event protocol, distinguished by ledger purpose. The exact names can change. The

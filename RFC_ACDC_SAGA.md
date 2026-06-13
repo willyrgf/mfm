@@ -1,7 +1,10 @@
 # RFC: certified saga vertical slice for MFM
 
-Status: ready for engineering planning. Revised after independent architecture review; this
-revision supersedes the v1 scope in `DESIGN_ACDC.md` where they disagree.
+Status: ready for engineering planning. Revised after two independent architecture reviews; this
+revision supersedes the v1 scope in `DESIGN_ACDC.md` where they disagree. The second review pass
+fixed admission-authority placement, derivation timing (engagement fence and classification
+quiescence), ambiguity engagement, terminal-outcome justification, lane lifecycle, and the
+hostile-bytes disjointness rule.
 
 Source documents:
 
@@ -25,7 +28,8 @@ saga semantics for external side effects:
    terminal resolution;
 4. runtime-owned transition from forward failure to remediation or manual resolution, derived
    deterministically from certified spec plus recorded facts;
-5. store-owned projections and preconditions for remediation authority;
+5. split admission authority: stream-derivable store preconditions plus runtime-constructed
+   spec-aware preconditions, with replay as the policy-agreement backstop;
 6. replay verification without live IO;
 7. public status that reports semantic run modes and per-ledger obligation state;
 8. after the core slice: a minimal cross-run resource-claim surface — `Exclusive` lanes,
@@ -64,9 +68,11 @@ These constraints are part of the RFC, not implementation preferences.
 
    Invalid saga configurations should be impossible to express in the spec data model itself where
    practical, not merely impossible to build through the public API. A remediation node that is
-   structurally outside the forward graph cannot be forward-scheduled even by hostile persisted
-   bytes. Certification still verifies lowered specs, but every invariant that the data shape can
-   carry is one certification rule and one forgery surface deleted.
+   structurally outside the forward graph cannot be forward-scheduled by any builder-authored
+   spec; certification closes the remaining hostile-bytes surface by requiring the forward and
+   remediation node-id sets to be disjoint. Certification still verifies lowered specs, but every
+   invariant that the data shape can carry is one certification rule and one forgery surface
+   deleted.
 
 2. Record facts, derive decisions.
 
@@ -74,6 +80,8 @@ These constraints are part of the RFC, not implementation preferences.
    operator evidence, and sealed terminal resolution. Everything deterministic from certified spec
    plus those facts — selected directive, obligation state, run mode — is a rebuildable projection.
    A decision that is never written cannot be forged and never needs a replay forgery check.
+   A derivation is only as well-defined as its timing rules: the engagement fence and
+   classification quiescence rules below are part of this constraint, not implementation detail.
 
 3. Keep the public API and LOC growth narrow.
 
@@ -139,8 +147,8 @@ Layer ownership:
 | `mfm-spec` | Hash-defining run-level saga policy, remediation node collection, manual evidence spec. |
 | `mfm-certify` | Lowered-spec validation of saga structure. Reject ambiguous side-effecting workflows. |
 | `mfm-events` | Ledger purpose on side-effect evidence, manual-resolution payload, extended terminal outcome. |
-| `mfm-store` | Event admission, preconditions, derived obligation/run-mode projections, ledger purpose validation. |
-| `mfm-runtime` | Failure-mode derivation, remediation frontier scheduling, sealed terminal resolution. |
+| `mfm-store` | Event admission, stream-derivable saga preconditions, the forward-progress fence, ledger purpose validation, derived projections as pure functions of certified policy plus stream. |
+| `mfm-runtime` | Failure-mode derivation, quiescence driving, spec-aware admission preconditions, remediation frontier scheduling, sealed terminal resolution. |
 | `mfm-replay` | Evidence-only validation of saga history. |
 | `mfm-app` | Verified assembly and public status reporting. No remediation semantics. |
 | storage crates | Durable persistence for new typed events/projections. No domain behavior. |
@@ -170,7 +178,8 @@ These decisions are intentionally closed for the first implementation slice.
    per-obligation manual targeting is deferred.
 8. `RunCompletionOutcome` is rewritten to `Completed`, `Compensated`, `ManuallyResolved`, and
    `FailedWithoutAcdcClaim`. `Failed` and `Cancelled` are removed; cancellation is deferred until
-   it is designed against remediation.
+   it is designed against remediation. Non-`Completed` variants carry no payload; the obligation
+   set, block reason, and justification are derivable.
 9. Remediation scheduling is strictly sequential in reverse forward-confirmation order, derived
    from stream order. Concurrent remediation is deferred.
 10. Core v1 terminal claims are certified saga claims only. AC/DC-equivalence claims are deferred
@@ -183,9 +192,20 @@ These decisions are intentionally closed for the first implementation slice.
     derivation enum; adapters derive keys and touched sets as typed evidence under certified
     schemas.
 14. Exclusive lanes are derived cross-run projections: acquisition is the resource key recorded at
-    invocation-prepared, release is the holding ledger's terminal evidence. No lane-control
-    events, no fairness guarantee, no new run mode.
+    invocation-prepared; release is the holding ledger's terminal evidence or the holding run's
+    sealed terminal resolution. A held lane blocks every other ledger, same-run or cross-run. No
+    lane-control events, no fairness guarantee, no new run mode.
 15. Remediation ledgers acquire lanes under the same rules as forward ledgers.
+16. Saga admission authority is split. The store independently enforces every stream-derivable
+    precondition (ledger phases, the forward-progress fence, quiescence at terminal and manual
+    admission, at-most-one remediation ledger per forward key, at-most-one manual record per run)
+    and stays spec-blind; the runtime constructs the spec-aware preconditions (policy variant,
+    run-mode agreement, evidence schemas) from `CertifiedRuntimeSpec`; replay re-verifies all
+    spec-aware conditions as the hostile backstop.
+17. Saga engagement conditions are closed: a recorded non-retryable failure, or a forward ledger
+    entering ambiguity. The first engaging event in stream order anchors engagement. Obligation
+    classification is defined over the full stream at quiescence, never pinned at the engaging
+    event's position.
 
 ## Core Semantic Rules
 
@@ -194,34 +214,78 @@ tests, not as comments.
 
 ### Saga policy engagement
 
-Saga directives engage only when at least one forward side-effect ledger has crossed the durable
-uncertainty boundary (invocation started). If a run fails non-retryably and no forward ledger
-crossed the boundary, the run terminally resolves as `FailedWithoutAcdcClaim` with an empty
-obligation set; public status shows that no external mutation occurred or could have occurred.
+A run becomes saga-engaged at the first engaging event in stream order. Exactly two conditions
+engage: a recorded non-retryable failure (`StateAttemptFailed` / `SideEffectFailed` with
+`retryable = false`) and a forward side-effect ledger entering ambiguity — with or without any
+other failure. Ambiguity must engage on its own: the forward scheduler blocks the whole frontier
+on an ambiguous ledger, so the downstream failure that would otherwise engage may never arrive,
+and without engagement the run would have no path to `ManualBlocked`, manual resolution, or any
+terminal. Later engaging events change nothing; the first one anchors engagement.
+
+Saga directives apply only when at least one forward side-effect ledger has crossed the durable
+uncertainty boundary (invocation started). If the run engages and no forward ledger crossed the
+boundary, the run terminally resolves as `FailedWithoutAcdcClaim` with an empty obligation set;
+public status shows that no external mutation occurred or could have occurred. This clean-failure
+resolution is legal under every policy variant.
+
+### Engagement fence and classification quiescence
+
+The deleted control events had a hidden job: pinning when classification happens. These three
+rules replace it. All are stream-derivable and all are normative.
+
+1. Fence. After the first engaging event, the store admits no new forward boundary crossings: no
+   new forward intent, claim, invocation-prepared, or invocation-started events. Recovery and
+   terminal evidence for forward ledgers already past the boundary — submission results,
+   not-submitted proof, receipt, confirmation, ambiguity, failure — remains admissible. The fence
+   derives from recorded `retryable` flags and ambiguity events alone; the store enforces it with
+   no spec access.
+2. Quiescence. Before the owed and unresolvable sets are final, runtime drives every
+   past-boundary, non-quiescent forward ledger to a quiescent phase: confirmation observed,
+   not-submitted proven (or its legal failure), or ambiguous. An in-flight forward attempt at
+   engagement time is not classified unresolvable while it can still legally progress; it is
+   classified by the quiescent phase it reaches. Existing recovery transitions (for example
+   submission-unknown to not-submitted-proven) run to completion under the fence.
+3. Full-stream classification. Obligation classification and run mode are defined over the entire
+   current stream, never pinned at the engaging event's position. `ResolveSagaTerminal`
+   scheduling, `ManualResolutionRecorded` admission, and `RunCompleted` admission all require
+   quiescence. With the fence, the derived sets are monotone: two readers of the same stream
+   derive the same obligation state, and a longer prefix only refines non-quiescent ledgers
+   toward quiescent phases.
+
+Confirmation evidence committed after the engaging event — a racing claim-takeover worker, an
+in-flight attempt finishing — therefore classifies its ledger as owed, not unresolvable, and the
+obligation joins the reverse-confirmation order at its recorded stream position.
 
 ### Forward ledger eligibility
 
-When a run under `CompensateCompleted` policy fails non-retryably, every forward side-effect ledger
-is classified by its recorded phase:
+When a run under `CompensateCompleted` policy engages, every forward side-effect ledger is
+classified by its recorded phase at quiescence:
 
-| Forward ledger phase at failure | Classification | Consequence |
+| Forward ledger phase at quiescence | Classification | Consequence |
 | --- | --- | --- |
-| Intent / claimed / invocation prepared (before invocation started) | nothing owed | no obligation |
+| Intent / claimed / invocation prepared (never crossed the boundary; frozen by the fence) | nothing owed | no obligation |
 | Not-submitted proven, or failed with phase `BeforeInvocationStarted` / `AfterNotSubmittedProven` | nothing owed | no obligation |
 | Confirmation observed | owed | remediation node scheduled |
-| Invocation started / submission observed / submission unknown / receipt observed / ambiguous | unresolvable | run cannot claim `Compensated`; the `on_remediation_unresolved` directive applies |
+| Ambiguous | unresolvable | run cannot claim `Compensated`; the `on_remediation_unresolved` directive applies |
 
-Only confirmed forward ledgers are compensatable in v1. Any forward ledger past the uncertainty
-boundary that is not confirmed and not proven-unsubmitted makes the run unresolvable by the
-platform: it degrades through `on_remediation_unresolved` to `ManualBlocked` or
-`FailedWithoutAcdcClaim`. `Compensated` is claimable only when the unresolvable set is empty and
-every owed obligation closed with remedial confirmation evidence.
+Invocation started, submission observed, submission unknown, and receipt observed are not
+quiescent phases: runtime drives them to a row above before classification is final. An adapter
+that cannot decide must record ambiguity as evidence, not hang.
+
+Only confirmed forward ledgers are compensatable in v1. Any past-boundary forward ledger that is
+ambiguous at quiescence makes the run unresolvable by the platform: it degrades through
+`on_remediation_unresolved` to `ManualBlocked` or `FailedWithoutAcdcClaim`. `Compensated` is
+claimable only when the owed set is non-empty, every owed obligation closed with remedial
+confirmation evidence, and the unresolvable set is empty. If the boundary was crossed but
+quiescence leaves both sets empty — every past-boundary ledger proved unsubmitted or failed
+legally — the run resolves `FailedWithoutAcdcClaim` with an empty obligation set. `Compensated`
+always means at least one remediation actually ran; it is never claimable vacuously.
 
 ### Uniform unresolved rule
 
 "Remediation unresolved" is one condition with one degradation path, covering all of:
 
-- a forward ledger classified unresolvable at failure time;
+- a forward ledger ambiguous at quiescence, with or without any other failure;
 - a remediation ledger that fails non-retryably;
 - a remediation ledger that ends ambiguous.
 
@@ -237,6 +301,11 @@ linked remediation node. A spec with a compensating policy and an unlinked forwa
 is invalid: it could otherwise terminate `Compensated` while a confirmed mutation stands
 uncompensated. Builders enforce this at finalize; certification re-verifies it on lowered specs.
 
+Authoring guidance: an inherently irreversible forward effect (a sent notification, dispensed
+funds) has no honest compensation. Do not link a no-op remediation node to satisfy coverage; that
+quietly degrades what `Compensated` means. Until per-node directives exist, workflows containing
+such effects should choose run-level `ManualResolution` or `FailWithoutAcdcClaim`.
+
 ### Remediation ordering
 
 Owed obligations are remediated strictly sequentially, in reverse order of the forward
@@ -244,29 +313,51 @@ confirmation events in the run stream. This order is deterministic, total (strea
 ties between incomparable graph nodes), and respects dependencies, because a dependent node's
 ledger confirms after its dependencies' ledgers.
 
+Remediation stops at the first unresolved condition. When a remediation ledger fails non-retryably
+or ends ambiguous, `on_remediation_unresolved` applies immediately; remaining owed obligations are
+not attempted, even though their remediations might have succeeded. This is deliberate and
+conservative. Never-attempted owed obligations stay visible in public status as owed and
+unremediated under the eventual terminal.
+
 ### Remediation node input binding
 
 A remediation node's binding tree may reference only:
 
-- the linked forward node's typed output cell (which exists if and only if the forward ledger
-  confirmed); and
+- the linked forward node's typed output cell (which exists once the forward ledger confirmed
+  and forward completion work finished; see the materialization rule under Runtime Semantics);
+  and
 - cells the linked forward node itself could reference (the forward node's ancestors).
 
-Both are guaranteed materialized whenever the obligation is owed. Bindings to any other cell are
+Both are guaranteed materialized before any remediation node is scheduled. Bindings to any other cell are
 invalid: certification rejects them because the referenced cell may not exist in remediation mode.
 This is how a compensation receives the forward effect's identifiers (operation id, transaction
 hash, amounts) as typed input.
 
 ### Terminal resolution
 
-Terminal resolution reuses the sealed framework lifecycle pattern. A sealed `ResolveSagaTerminal`
-node — scheduled by runtime only when the derived run mode admits a terminal — emits `RunCompleted`
-with the extended outcome. Historical validation extends the existing rule: each outcome variant is
-accepted only when sealed lifecycle evidence exists and the derived projection agrees
-(`Compensated` requires all owed obligations closed and no unresolvable ledgers; `ManuallyResolved`
-and manual `FailedWithoutAcdcClaim` require admitted `ManualResolutionRecorded` evidence; policy
-`FailedWithoutAcdcClaim` requires the certified policy to permit it). Successful forward completion
-keeps the existing sealed `CompleteRun` path unchanged.
+Terminal resolution reuses the sealed framework lifecycle pattern. Lowering inserts exactly one
+sealed `ResolveSagaTerminal` framework node into every spec, alongside the existing exactly-one
+`CompleteRun` node; certification verifies both counts. Runtime schedules `ResolveSagaTerminal`
+only when the derived run mode admits a terminal and quiescence holds; it emits `RunCompleted`
+with the extended outcome. Non-`Completed` outcome variants carry no payload: the obligation set,
+block reason, and justification are all derivable.
+
+Historical validation extends the existing rule: each outcome variant is accepted only when sealed
+lifecycle evidence exists and the derived projection agrees:
+
+- `Completed` requires the existing sealed `CompleteRun` evidence, unchanged;
+- `Compensated` requires a non-empty owed set with every owed obligation closed by remedial
+  confirmation, an empty unresolvable set, and quiescence;
+- `ManuallyResolved` requires an admitted `ManualResolutionRecorded` with outcome
+  `ConfirmRemediated`;
+- `FailedWithoutAcdcClaim` is justified by exactly one of four conditions, and validation must
+  accept all four: (1) the certified policy is `FailWithoutAcdcClaim`; (2) the policy is
+  `CompensateCompleted` with `on_remediation_unresolved: FailWithoutAcdcClaim` and the unresolved
+  set is non-empty; (3) the run engaged with no forward ledger past the uncertainty boundary, or
+  quiescence left both the owed and unresolvable sets empty — legal under every policy variant;
+  (4) an admitted `ManualResolutionRecorded` carries outcome `FailWithoutAcdcClaim`.
+
+Successful forward completion keeps the existing sealed `CompleteRun` path unchanged.
 
 ### Cross-run concurrency
 
@@ -451,12 +542,19 @@ lowered specs as the hostile-bytes authority boundary:
   side-effect contract digest);
 - every remediation node's bindings reference only the linked forward node's output cell and the
   forward node's ancestor cells;
-- manual specs carry resolvable evidence and operator identity schemas.
+- manual specs carry resolvable evidence and operator identity schemas;
+- the forward `nodes` collection and the `remediations` collection have disjoint node-id sets;
+  hostile bytes must not be able to place one node in both graphs;
+- `remediations` is empty unless the policy is `CompensateCompleted`; dead remediation data under
+  a non-compensating policy is rejected;
+- exactly one sealed `ResolveSagaTerminal` framework node exists, under the same exactly-one rule
+  as `CompleteRun`.
 
-Rules that no longer exist because the shape carries them: forward reachability of remediation
-nodes (separate collection), dangling obligation/manual ids (no id namespaces), zero-obligation
-compensate directives (run-level policy plus coverage), unsupported extension fields (closed types,
-deny-unknown-fields).
+Rules that no longer exist because the shape carries them: dangling obligation/manual ids (no id
+namespaces), zero-obligation compensate directives (run-level policy plus coverage), unsupported
+extension fields (closed types, deny-unknown-fields). Forward reachability of remediation nodes is
+carried by the separate collection for builder-authored specs; the disjointness rule above closes
+the hostile-bytes remainder.
 
 ## Runtime Semantics
 
@@ -465,10 +563,13 @@ V1 runtime behavior proves one complete saga path with two forward side effects.
 Happy remediation path:
 
 1. Run executes the forward graph; two forward `ApplySideEffect` ledgers reach confirmation.
-2. A later node fails non-retryably.
+2. A later node fails non-retryably. The fence engages; no new forward boundary crossing is
+   admissible.
 3. Runtime derives the directive from certified policy plus recorded facts; no directive event is
    appended. The run mode projection becomes `Remediating`.
-4. Runtime classifies forward ledgers per the eligibility table; both are owed.
+4. Runtime drives any past-boundary, non-quiescent forward ledger to a quiescent phase, completes
+   forward output-cell materialization for confirmed ledgers, then classifies forward ledgers per
+   the eligibility table; both are owed.
 5. Runtime schedules the linked remediation nodes strictly sequentially in reverse confirmation
    order. Remedial ledgers run the existing side-effect protocol with purpose
    `Remediation { forward_ledger_key }`.
@@ -477,8 +578,8 @@ Happy remediation path:
 
 Manual path:
 
-1. Any unresolved condition under the uniform unresolved rule arises, or policy is
-   `ManualResolution`.
+1. Any unresolved condition under the uniform unresolved rule arises — including a forward
+   ledger that ends ambiguous with no other failure — or policy is `ManualResolution`.
 2. The run mode projection becomes `ManualBlocked` with a derived block reason. Nothing is
    appended.
 3. An operator submits typed evidence; store admits `ManualResolutionRecorded` only while the run
@@ -500,21 +601,51 @@ forward graph. The remediation frontier scheduler runs only in derived `Remediat
 selects forward nodes. A non-retryable failure of a remediation node consults
 `on_remediation_unresolved`, never a forward policy.
 
+Two forward tasks survive engagement, and the frontier-separation rule does not forbid them
+because they are completion work owed to already-recorded evidence, not frontier scheduling:
+
+1. Quiescence driving: recovery and evidence transitions for forward ledgers already past the
+   boundary, until each reaches a quiescent phase.
+2. Output-cell materialization: confirmation evidence and the forward node's terminal output cell
+   commit separately, so a crash can leave a ledger confirmed without its output cell. On resume
+   or on entering `Remediating`, runtime first completes terminal output materialization for every
+   confirmed forward ledger missing its output cell. Remediation bindings depend on it.
+
 ## Store Semantics
 
-Store remains append-only authority. Projections are rebuildable caches.
+Store remains append-only authority and remains spec-blind: it never opens spec or certificate
+artifacts. Projections are rebuildable caches. Saga admission authority is split three ways.
 
-V1 store work:
+Store-enforced independently (stream-derivable, no spec access):
 
 - persist ledger purpose on side-effect events; purpose participates in ledger identity;
+- the forward-progress fence: after the first engaging event, reject new forward intent, claim,
+  invocation-prepared, and invocation-started events; recovery and terminal evidence for
+  past-boundary ledgers stays admissible;
 - admit at most one remediation ledger per forward ledger key;
-- admit a remediation ledger only when its forward ledger is confirmed, the certified policy is
-  compensating, and a qualifying non-retryable failure event exists in the stream;
-- admit `ManualResolutionRecorded` only while the derived run mode is `ManualBlocked`, once per
-  run, with schema-valid payloads;
-- admit `RunCompleted` only with sealed lifecycle evidence and a derived projection that agrees
-  with the claimed outcome;
-- derive obligation and run-mode projections from the stream; projection rebuild parity is tested.
+- admit a remediation ledger only when its forward ledger is confirmed and an engaging event
+  exists in the stream;
+- admit at most one `ManualResolutionRecorded` per run, and only at quiescence;
+- admit `RunCompleted` only for a started, non-terminal run, and only at quiescence (no
+  past-boundary forward ledger in a non-quiescent phase).
+
+Runtime-constructed spec-aware preconditions, built from `CertifiedRuntimeSpec`, validated by the
+store as ordinary preconditions, re-verified by replay:
+
+- the certified policy is compensating before any remediation ledger opens;
+- the derived run mode is `ManualBlocked`, and the manual payload matches the certified evidence
+  and operator-identity schemas, before `ManualResolutionRecorded` is admitted;
+- sealed lifecycle evidence exists and the claimed terminal outcome agrees with the derived
+  projection before `RunCompleted` is admitted.
+
+A buggy or hostile runtime can at worst append events the spec-aware rules forbid; replay's
+recompute-and-compare rejects the run, and the store's independent checks bound the damage. The
+store is not the policy authority and does not pretend to be.
+
+Derived obligation and run-mode projections are pure functions of certified saga policy plus the
+stream. The derivation code lives in `mfm-store` so store callers, runtime, and replay share one
+implementation; the policy input is supplied by callers that hold certified authority. Projection
+rebuild parity is tested.
 
 The existing coarse `RunState` may remain for commit preconditions; it is not the public status
 model.
@@ -528,12 +659,16 @@ V1 replay work:
 - index side-effect evidence by ledger purpose;
 - index `ManualResolutionRecorded` and terminal resolution evidence;
 - recompute the derived obligation classification and run mode from certified spec plus indexed
-  facts, and verify the recorded terminal outcome agrees:
-  - `Compensated` requires every owed obligation closed by remedial confirmation and an empty
-    unresolvable set;
-  - `ManuallyResolved` and manual `FailedWithoutAcdcClaim` require admitted, schema-valid operator
-    evidence;
-  - policy `FailedWithoutAcdcClaim` requires the certified policy to permit it;
+  facts over the full stream, and verify the recorded terminal outcome agrees:
+  - `Compensated` requires a non-empty owed set, every owed obligation closed by remedial
+    confirmation, an empty unresolvable set, and quiescence at the terminal;
+  - `ManuallyResolved` requires admitted, schema-valid operator evidence with outcome
+    `ConfirmRemediated`;
+  - `FailedWithoutAcdcClaim` requires one of its four justifications (policy, unresolved
+    directive, clean failure or empty quiescent sets, manual outcome);
+- verify the fence held: no forward boundary crossing follows the first engaging event;
+- verify quiescence at terminal resolution: every past-boundary forward ledger reached a quiescent
+  phase before `RunCompleted`;
 - verify each remediation ledger links to a confirmed forward ledger of the same run;
 - reject terminal outcomes the recomputation does not support.
 
@@ -548,7 +683,8 @@ App/CLI/API status should expose:
 - `RunMode`;
 - the certified saga policy variant;
 - the derived obligation set: per forward ledger, its classification (nothing owed, owed,
-  unresolvable) and remediation ledger state;
+  unresolvable) and remediation ledger state, including owed obligations never attempted because
+  remediation stopped at an earlier unresolved condition;
 - linked forward and remediation ledger keys;
 - the derived manual-block reason and required evidence schemas when `ManualBlocked`;
 - terminal resolution and which claim it carries;
@@ -594,30 +730,41 @@ EVM transaction intent. Landing the mandatory field is one deliberate breaking s
 - The adapter derives the `Exclusive` key from typed intent during invocation preparation. The key
   is recorded on the existing invocation-prepared event payload; no new event family exists.
 - Lane acquisition is the admission precondition of that same atomic commit: the store rejects an
-  invocation-prepared carrying `(namespace, key)` while another run's ledger holds that lane. The
-  same ledger may re-prepare under a new invocation epoch with the same key; replay verifies key
-  stability across epochs.
-- A lane is held from invocation-prepared until the holding ledger records terminal evidence:
-  confirmation observed, not-submitted proven, failure, or manual resolution covering that ledger.
-  A crashed or ambiguous holder keeps the lane — the external resource genuinely is in an unknown
-  state — until evidence or operator authority resolves it.
-- Lane state is a derived cross-run projection over all run streams, rebuildable like every other
-  projection. Acquisition order is recorded commit order; there are no lane-control events and
-  nothing to forge.
+  invocation-prepared carrying `(namespace, key)` while any other ledger holds that lane — another
+  run's or the same run's. Parallel forward branches in one run race a shared key exactly like two
+  runs do. The same ledger may re-prepare under a new invocation epoch with the same key; replay
+  verifies key stability across epochs.
+- A lane is held from invocation-prepared until the holding ledger records terminal evidence —
+  confirmation observed, not-submitted proven, failure, or manual resolution covering that ledger —
+  or until the holding run records its sealed terminal resolution. Run-terminal release is
+  deliberate: a ledger that never crossed the boundary (frozen at prepared by the fence) records
+  no ledger-terminal evidence at all, and an unresolvable ledger in a run that degraded through
+  policy `FailWithoutAcdcClaim` has its operator path closed once the run is terminal; without
+  run-terminal release both hold their lanes forever with no recourse. `FailedWithoutAcdcClaim`
+  already publicly disclaims the resource state, and a peer acquiring a lane released this way can
+  read the releasing run's terminal outcome and unresolved obligations in public status. A crashed
+  or ambiguous holder in a live run keeps the lane — the external resource genuinely is in an
+  unknown state — until evidence, operator authority, or the holder's sealed terminal resolution.
+- Lane state is a derived cross-run projection, rebuildable like every other projection and
+  bounded to non-terminal runs: a run's sealed terminal resolution releases all its lanes, so
+  rebuild scans live runs only. Acquisition order is recorded commit order; there are no
+  lane-control events and nothing to forge.
 - The scheduler treats a held lane as a per-node blocked condition: that node waits, the rest of
   the frontier and all other runs proceed. No new `RunMode`; blocked-on-lane is projected detail
   inside `Forward`/`Remediating`. No fairness guarantee in this slice.
 - `ExactTouchedSet` sequences nothing. The attempt emits the actual touched set as typed evidence
   on the existing receipt/confirmation evidence, schema-checked at admission. In this slice it is
   captured and replay-checked for presence and schema; the verifier that bounds compensation scope
-  to the recorded set is deferred.
+  to the recorded set is deferred. Its value in this slice is that the evidence schema lands now
+  and evidence accumulates for the deferred verifier to run against; it enforces nothing yet, and
+  public status must not imply it does.
 - Remediation ledgers acquire lanes under exactly the same rules: a compensation transaction races
   concurrent runs the same way a forward one does.
 
 ### Claim discipline
 
 With `Exclusive` lanes MFM may claim: mutations declaring the same `(namespace, key)` are
-serialized across runs at the uncertainty boundary. MFM still may not claim AC/DC equivalence,
+serialized at the uncertainty boundary, within a run and across runs. MFM still may not claim AC/DC equivalence,
 phantom freedom, or anything about keys that were never declared. Keys are adapter-derived
 evidence: schema-checked and stability-checked, not framework-re-derived. Per-run replay verifies
 key evidence; cross-run serialization itself is enforced at store admission and auditable from
@@ -669,6 +816,8 @@ Scope:
 - spec types: `SagaPolicySpec`, `remediations` collection, manual evidence spec;
 - `SideEffectLedgerPurpose` and `ManualResolutionOutcome` types;
 - extended `RunCompletionOutcome` and `RunMode` types;
+- decode-posture audit: persisted spec and event payload deserialization must deny unknown
+  fields, or the closed-types claim does not hold;
 - rustdoc explaining saga-only external semantics and the fact/derivation split.
 
 Acceptance:
@@ -702,9 +851,12 @@ Purpose: persist remediation authority and derive saga state.
 Scope:
 
 - ledger purpose in event payloads and ledger identity;
-- `ManualResolutionRecorded` payload and admission preconditions;
+- the forward-progress fence and quiescence admission checks;
+- `ManualResolutionRecorded` payload and the split admission preconditions (store-derivable plus
+  runtime-constructed, per Store Semantics);
 - extended `RunCompleted` admission preconditions;
-- derived obligation and run-mode projections (in-memory and Postgres);
+- derived obligation and run-mode projections as pure functions of policy plus stream (in-memory
+  and Postgres);
 - append/rebuild projection parity tests.
 
 Acceptance:
@@ -719,20 +871,30 @@ Purpose: prove runtime-owned saga transition.
 
 Scope:
 
-- derive `Remediating` from non-retryable failure after confirmed side effects;
-- eligibility classification;
+- derive `Remediating` from engaging events (non-retryable failure, forward ambiguity) after
+  confirmed side effects;
+- quiescence driving of past-boundary forward ledgers and forward output-cell materialization;
+- eligibility classification at quiescence;
 - sequential reverse-confirmation-order remediation scheduling;
 - uniform unresolved handling into `ManualBlocked` or terminal;
-- sealed `ResolveSagaTerminal` lifecycle node.
+- sealed `ResolveSagaTerminal` lifecycle node (lowered into every spec, exactly one).
 
 Acceptance:
 
 - two confirmed side effects, later failure, both compensated in reverse confirmation order;
-- crash/resume at every boundary: after failure, after first remedial submission, after first
-  remedial confirmation, before terminal resolution — no duplicated mutation;
+- crash/resume at every boundary: after failure, between forward confirmation and forward output
+  cell, after first remedial submission, after first remedial confirmation, before terminal
+  resolution — no duplicated mutation;
 - forward scheduler provably cannot select remediation nodes; remediation scheduler provably
-  cannot select forward nodes;
-- ambiguous forward ledger at failure time degrades per policy, never `Compensated`.
+  cannot select forward nodes (quiescence driving and output-cell materialization excepted as
+  completion work);
+- forward ambiguity with no other failure engages the saga and reaches `ManualBlocked` or a
+  terminal;
+- confirmation committed after the engaging event classifies owed and joins reverse confirmation
+  order;
+- ambiguous forward ledger at quiescence degrades per policy, never `Compensated`;
+- boundary crossed but empty quiescent sets resolves `FailedWithoutAcdcClaim`, never vacuous
+  `Compensated`.
 
 ### Milestone 4: replay
 
@@ -785,7 +947,11 @@ Acceptance:
 
 - two runs declaring the same exclusive key sequence at the uncertainty boundary; unrelated keys
   proceed in parallel;
-- a crashed or ambiguous holder keeps the lane until resolved; manual resolution releases it;
+- parallel branches of one run declaring the same exclusive key sequence like two runs do;
+- a crashed or ambiguous holder in a live run keeps the lane until resolved; manual resolution or
+  the holder's sealed terminal resolution releases it;
+- a lane held by a prepared-but-never-started ledger releases at the holding run's sealed
+  terminal resolution;
 - remediation ledgers acquire lanes identically;
 - missing or schema-invalid key/touched-set evidence is rejected at admission and replay;
 - `ManualOnly` nodes run unsequenced and public status carries no concurrency claim for them.
@@ -813,12 +979,16 @@ narrow and lower-case.
 4. `events: carry ledger purpose and manual resolution`
 
    Ledger purpose on side-effect payloads and ledger identity; `ManualResolutionRecorded`;
-   `RunCompletionOutcome` rewrite.
+   `RunCompletionOutcome` rewrite. Removing `Failed` and `Cancelled` necessarily ripples through
+   runtime history validation, store outcome handling, replay, and app in this commit so the
+   workspace compiles; keep the semantic surface narrow even though the diff is wide.
 
 5. `store: derive saga projections and preconditions`
 
-   Derived obligation/run-mode projections; admission preconditions for remedial ledgers, manual
-   evidence, and terminal outcomes; rebuild parity tests.
+   Derived obligation/run-mode projections as pure functions of policy plus stream; the
+   forward-progress fence and quiescence checks; the store-derivable admission preconditions for
+   remedial ledgers, manual evidence, and terminal outcomes (spec-aware preconditions arrive with
+   the runtime commits); rebuild parity tests.
 
 6. `postgres: persist saga events and projections`
 
@@ -853,7 +1023,8 @@ narrow and lower-case.
 
     Resource key on invocation-prepared, touched-set evidence on receipt/confirmation, the derived
     lane projection, the cross-run admission precondition, and rebuild parity tests (in-memory and
-    Postgres).
+    Postgres). Postgres lane admission must be genuinely serialized across concurrent committers
+    (unique index or equivalent), not check-then-append.
 
 13. `runtime: sequence exclusive lanes`
 
@@ -876,18 +1047,18 @@ The implementation is not credible until these tests exist.
 | Area | Required tests |
 | --- | --- |
 | Builders | Unlinked forward side-effect node under compensating policy fails finalize; remediation handle unusable as forward node (compile-fail); out-of-scope remediation binding fails finalize. |
-| Certification | Policy/graph variant disagreement rejected; remediation key to missing or non-side-effect node rejected; coverage gap rejected; non-side-effect-grade remediation node rejected; manual spec without schemas rejected. |
-| Store | Remediation ledger requires confirmed forward ledger plus qualifying failure; second remediation ledger for same forward key rejected; manual evidence admitted only while derivably `ManualBlocked`, once; terminal outcome disagreeing with derived projection rejected; projections rebuild from stream. |
-| Runtime | Two confirmed effects then later failure remediate in reverse confirmation order; saga engages only past the uncertainty boundary (clean failure otherwise); ambiguous forward ledger degrades per policy; remediation failure/ambiguity follows `on_remediation_unresolved`; crash/resume at every remediation boundary; frontier separation proven both directions. |
-| Replay | Compensated run verifies; `Compensated` with a missing remedial confirmation rejects; remediation ledger with wrong forward linkage rejects; manual evidence schema mismatch rejects; terminal claim unsupported by recomputation rejects. |
+| Certification | Policy/graph variant disagreement rejected; remediation key to missing or non-side-effect node rejected; coverage gap rejected; non-side-effect-grade remediation node rejected; manual spec without schemas rejected; node-id overlap between `nodes` and `remediations` rejected; non-empty `remediations` under a non-compensating policy rejected; missing or duplicate `ResolveSagaTerminal` rejected. |
+| Store | Remediation ledger requires confirmed forward ledger plus an engaging event; second remediation ledger for same forward key rejected; forward boundary-crossing events after an engaging event rejected (fence); manual evidence admitted only while derivably `ManualBlocked`, once, at quiescence; terminal outcome disagreeing with derived projection rejected; terminal or manual admission without quiescence rejected; projections rebuild from stream. |
+| Runtime | Two confirmed effects then later failure remediate in reverse confirmation order; saga engages on forward ambiguity with no other failure; two simultaneous engaging failures anchor at the first in stream order; confirmation after the engaging event classifies owed; clean failure resolves `FailedWithoutAcdcClaim` under every policy variant; boundary crossed with empty quiescent sets resolves `FailedWithoutAcdcClaim`, never vacuous `Compensated`; ambiguous forward ledger at quiescence degrades per policy; remediation failure/ambiguity follows `on_remediation_unresolved` and stops remaining obligations; crash/resume at every remediation boundary including between forward confirmation and output cell; frontier separation proven both directions. |
+| Replay | Compensated run verifies; `Compensated` with a missing remedial confirmation rejects; vacuous `Compensated` (empty owed set) rejects; remediation ledger with wrong forward linkage rejects; manual evidence schema mismatch rejects; terminal without quiescence rejects; fence violation rejects; terminal claim unsupported by recomputation rejects. |
 | Public status | Status distinguishes all seven run modes and shows per-ledger obligation classification, including unresolved obligations under `FailedWithoutAcdcClaim`. |
 
 Milestone 6 resource-claim tests:
 
 | Area | Required tests |
 | --- | --- |
-| Store | Same `(namespace, key)` lane rejects a second run's invocation-prepared while held; lane releases on each terminal evidence kind; lane projection rebuilds from all run streams; touched-set evidence is schema-checked at admission. |
-| Runtime | Two runs on one wallet-nonce lane sequence; unrelated keys run in parallel; remediation ledgers acquire lanes under forward rules; an ambiguous holder blocks peers until manual resolution releases the lane. |
+| Store | Same `(namespace, key)` lane rejects any other ledger's invocation-prepared while held, same-run or cross-run; lane releases on each ledger-terminal evidence kind and on the holding run's sealed terminal resolution; lane projection rebuilds from non-terminal run streams; touched-set evidence is schema-checked at admission. |
+| Runtime | Two runs on one wallet-nonce lane sequence; parallel branches of one run on one lane sequence; unrelated keys run in parallel; remediation ledgers acquire lanes under forward rules; an ambiguous holder blocks peers until manual resolution or the holder's sealed terminal resolution releases the lane; a prepared-but-never-started holder's lane releases at run terminal. |
 | Replay | `Exclusive` ledger without a recorded key rejects; key unstable across invocation epochs rejects; `ExactTouchedSet` ledger without touched-set evidence rejects. |
 
 ## First End-to-End Slice
@@ -920,6 +1091,9 @@ Required proof:
   convention.
 - If derived projections drift from the derivation rules in this RFC, replay and store can
   disagree; the recompute-and-compare replay tests and rebuild parity tests are the guard.
+- If the engagement fence or classification quiescence is weakened, two readers of one stream can
+  derive different obligation sets, and replay loses recompute-and-compare exactness. The fence
+  and quiescence rules are load-bearing for every derived claim.
 - If manual resolution grows spec-authored outcomes, it becomes a generic escape hatch again.
 - If the eligibility table is weakened (e.g., compensating from receipt-only evidence),
   `Compensated` stops being a sound claim.
@@ -927,9 +1101,12 @@ Required proof:
   hole the current history validation closed.
 - Run-level-only policy may prove too coarse for real workflows; per-node overrides are the known
   next step and must come back as certified spec data, not callbacks.
-- A stuck or ambiguous ledger holds its exclusive lane indefinitely. That is correct — the external
-  resource genuinely is in question — but it turns one stuck run into blocked peers until manual
-  resolution; operators need the lane-holder visibility public status provides.
+- A stuck or ambiguous ledger in a live run holds its exclusive lane until evidence, operator
+  authority, or the holder's sealed terminal resolution. That is correct — the external resource
+  genuinely is in question — but it turns one stuck run into blocked peers; operators need the
+  lane-holder visibility public status provides. Run-terminal release trades protection for
+  liveness: a peer acquiring a lane released by a `FailedWithoutAcdcClaim` terminal races a
+  resource in unknown state and must read the releasing run's public status.
 - `Exclusive` keys are adapter-derived evidence: schema- and stability-checked but not
   framework-re-derived in this slice. A wrong adapter key silently weakens sequencing until
   re-derivation verifiers exist.
@@ -940,7 +1117,8 @@ Required proof:
 ## Deferred Work
 
 - Per-node failure directive overrides and retry policy.
-- Per-obligation manual resolution targeting and manual outcome catalogs.
+- Per-obligation manual resolution targeting, per-ledger operator lane release, and manual
+  outcome catalogs.
 - Run cancellation semantics under remediation.
 - Concurrent remediation scheduling.
 - Lane fairness/queueing, cross-run deadlock detection, and multi-run serialization audit
