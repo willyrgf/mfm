@@ -31,8 +31,9 @@ pub mod v1 {
     };
     use mfm_spec::v1::{
         CanonicalizerIdentity, CellProducer, DescriptorIdentity, MediaType,
-        OperationDescriptorIdentity, PublicFieldPath, RendererDescriptorIdentity, RendererKind,
-        RendererVersion, StateDescriptorIdentity, ValueLineageRef,
+        OperationDescriptorIdentity, PublicFieldPath, RemediationUnresolvedSpec,
+        RendererDescriptorIdentity, RendererKind, RendererVersion, SagaPolicySpec,
+        StateDescriptorIdentity, ValueLineageRef,
     };
 
     /// Result type for typed store helpers.
@@ -634,8 +635,158 @@ pub mod v1 {
         Absent,
         /// Run has started and is not terminal.
         Started,
-        /// Run has completed, failed, or been cancelled.
+        /// Run has reached a terminal outcome.
         Completed,
+    }
+
+    /// Stream-derived semantic run mode for saga-aware status and terminal resolution.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub enum RunMode {
+        /// Forward graph execution is still the active frontier.
+        Forward,
+        /// Remediation work is the active frontier.
+        Remediating,
+        /// The run requires typed operator evidence before terminal resolution.
+        ManualBlocked,
+        /// Successful forward public output completed the run.
+        Completed,
+        /// The run completed after closing compensating obligations.
+        Compensated,
+        /// The run completed after accepted manual remediation evidence.
+        ManuallyResolved,
+        /// The run completed without making a compensation or AC/DC-equivalence claim.
+        FailedWithoutAcdcClaim,
+    }
+
+    /// Reason the derived saga mode is manually blocked.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub enum ManualBlockReason {
+        /// Certified run policy requires operator resolution after engagement.
+        PolicyManualResolution,
+        /// A forward ledger is ambiguous at quiescence.
+        ForwardAmbiguous,
+        /// A remediation ledger failed non-retryably.
+        RemediationFailed,
+        /// A remediation ledger is ambiguous.
+        RemediationAmbiguous,
+    }
+
+    /// First stream event that engaged saga handling.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct SagaEngagementProjection {
+        /// Store-owned event id that first engaged saga handling.
+        pub event_id: EventId,
+        /// Reason saga handling engaged.
+        pub reason: SagaEngagementReason,
+    }
+
+    /// Stream-derived reason for saga engagement.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum SagaEngagementReason {
+        /// A non-retryable attempt or side-effect failure was recorded.
+        NonRetryableFailure {
+            /// Node id that failed.
+            node_id: NodeId,
+            /// Attempt id that failed.
+            attempt_id: AttemptId,
+        },
+        /// A forward side-effect ledger became ambiguous.
+        ForwardAmbiguous {
+            /// Forward ledger key.
+            ledger_key: events::SideEffectLedgerKey,
+        },
+    }
+
+    /// Run-scoped manual resolution projection.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct ManualResolutionProjection {
+        /// Store-owned event id that recorded manual resolution.
+        pub event_id: EventId,
+        /// Operator-selected outcome.
+        pub outcome: events::ManualResolutionOutcome,
+        /// Operator identity reference schema id.
+        pub operator_identity_ref_schema_id: SchemaId,
+        /// Operator identity reference hash.
+        pub operator_identity_ref_hash: ContentDigest,
+        /// Operator identity reference artifact id.
+        pub operator_identity_ref_artifact_id: ArtifactId,
+        /// Evidence schema id.
+        pub evidence_schema_id: SchemaId,
+        /// Evidence hash.
+        pub evidence_hash: ContentDigest,
+        /// Evidence artifact id.
+        pub evidence_artifact_id: ArtifactId,
+        /// Optional redaction-safe operator note.
+        pub note: Option<events::ManualResolutionNote>,
+    }
+
+    /// Run completion projection.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct RunCompletionProjection {
+        /// Store-owned event id that recorded completion.
+        pub event_id: EventId,
+        /// Recorded run completion outcome.
+        pub outcome: events::RunCompletionOutcome,
+    }
+
+    /// Forward ledger classification at the current stream prefix.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub enum ForwardLedgerClassification {
+        /// The ledger has not reached a quiescent classification yet.
+        Pending,
+        /// The ledger owes no compensation.
+        NothingOwed,
+        /// The ledger is confirmed and must be remediated under compensating policy.
+        Owed,
+        /// The ledger is ambiguous and cannot be platform-compensated.
+        Unresolvable,
+    }
+
+    /// Remediation state linked to one forward ledger.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct RemediationLedgerProjection {
+        /// Remediation ledger key.
+        pub ledger_key: events::SideEffectLedgerKey,
+        /// Current remediation side-effect phase.
+        pub phase: SideEffectPhase,
+        /// Whether remediation confirmation closed the obligation.
+        pub closed: bool,
+        /// Whether remediation reached an unresolved condition.
+        pub unresolved: Option<ManualBlockReason>,
+    }
+
+    /// Derived obligation state for one forward ledger.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct SagaObligationProjection {
+        /// Forward ledger key.
+        pub forward_ledger_key: events::SideEffectLedgerKey,
+        /// Current forward side-effect phase.
+        pub forward_phase: SideEffectPhase,
+        /// Forward ledger classification at this stream prefix.
+        pub classification: ForwardLedgerClassification,
+        /// Linked remediation ledger state, when one exists.
+        pub remediation: Option<RemediationLedgerProjection>,
+    }
+
+    /// Saga projection derived from certified policy plus the store stream projection.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct SagaProjection {
+        /// Run id this projection describes.
+        pub run_id: RunId,
+        /// Derived semantic run mode.
+        pub run_mode: RunMode,
+        /// First engaging event, if any.
+        pub engagement: Option<SagaEngagementProjection>,
+        /// Whether every past-boundary forward ledger is quiescent.
+        pub forward_quiescent: bool,
+        /// Derived manual block reason, when manually blocked.
+        pub manual_block_reason: Option<ManualBlockReason>,
+        /// Derived forward-ledger obligation state.
+        pub obligations: BTreeMap<events::SideEffectLedgerKey, SagaObligationProjection>,
+        /// Manual resolution evidence recorded for the run, if any.
+        pub manual_resolution: Option<ManualResolutionProjection>,
+        /// Run completion recorded for the run, if any.
+        pub run_completion: Option<RunCompletionProjection>,
     }
 
     /// Required run state for a typed commit.
@@ -909,6 +1060,8 @@ pub mod v1 {
     /// Side-effect projection derived from committed run events.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct SideEffectProjection {
+        /// Run id that owns this ledger.
+        pub run_id: RunId,
         /// Ledger key.
         pub ledger_key: events::SideEffectLedgerKey,
         /// Ledger purpose.
@@ -1301,6 +1454,9 @@ pub mod v1 {
     #[derive(Debug, Clone, PartialEq, Eq, Default)]
     pub struct ProjectionSnapshot {
         run_states: BTreeMap<RunId, RunState>,
+        run_completions: BTreeMap<RunId, RunCompletionProjection>,
+        saga_engagements: BTreeMap<RunId, SagaEngagementProjection>,
+        manual_resolutions: BTreeMap<RunId, ManualResolutionProjection>,
         attempts: BTreeMap<(NodeId, AttemptId), AttemptProjection>,
         cells: BTreeMap<CellId, CellTerminalProjection>,
         facts: BTreeMap<(NodeId, AttemptId, events::FactKey), FactProjection>,
@@ -1322,6 +1478,9 @@ pub mod v1 {
         ) -> Self {
             Self {
                 run_states,
+                run_completions: BTreeMap::new(),
+                saga_engagements: BTreeMap::new(),
+                manual_resolutions: BTreeMap::new(),
                 attempts,
                 cells,
                 facts,
@@ -1352,6 +1511,21 @@ pub mod v1 {
                 .get(run_id)
                 .copied()
                 .unwrap_or(RunState::Absent)
+        }
+
+        /// Returns the run completion projection for a run id.
+        pub fn run_completion(&self, run_id: &RunId) -> Option<&RunCompletionProjection> {
+            self.run_completions.get(run_id)
+        }
+
+        /// Returns the first saga engagement projection for a run id.
+        pub fn saga_engagement(&self, run_id: &RunId) -> Option<&SagaEngagementProjection> {
+            self.saga_engagements.get(run_id)
+        }
+
+        /// Returns the manual resolution projection for a run id.
+        pub fn manual_resolution(&self, run_id: &RunId) -> Option<&ManualResolutionProjection> {
+            self.manual_resolutions.get(run_id)
         }
 
         /// Returns a cell terminal projection.
@@ -1404,9 +1578,42 @@ pub mod v1 {
                 .any(|projection| matches!(projection, PublicOutputProjection::Produced { .. }))
         }
 
+        /// Returns whether all past-boundary forward ledgers for the current projection are quiescent.
+        pub fn forward_ledgers_quiescent(&self, run_id: &RunId) -> bool {
+            forward_ledgers_quiescent(self, run_id)
+        }
+
+        /// Derives saga status from certified saga policy plus the current stream projection.
+        pub fn derive_saga_projection(
+            &self,
+            run_id: &RunId,
+            policy: &SagaPolicySpec,
+        ) -> SagaProjection {
+            derive_saga_projection(self, run_id, policy)
+        }
+
         /// Iterates projected run states.
         pub fn run_states(&self) -> impl Iterator<Item = (&RunId, &RunState)> {
             self.run_states.iter()
+        }
+
+        /// Iterates run completion projections.
+        pub fn run_completions(&self) -> impl Iterator<Item = (&RunId, &RunCompletionProjection)> {
+            self.run_completions.iter()
+        }
+
+        /// Iterates saga engagement projections.
+        pub fn saga_engagements(
+            &self,
+        ) -> impl Iterator<Item = (&RunId, &SagaEngagementProjection)> {
+            self.saga_engagements.iter()
+        }
+
+        /// Iterates manual resolution projections.
+        pub fn manual_resolutions(
+            &self,
+        ) -> impl Iterator<Item = (&RunId, &ManualResolutionProjection)> {
+            self.manual_resolutions.iter()
         }
 
         /// Iterates attempt lifecycle projections.
@@ -1443,6 +1650,285 @@ pub mod v1 {
         pub fn retentions(&self) -> impl Iterator<Item = (&RunId, &RetentionProjection)> {
             self.retentions.iter()
         }
+    }
+
+    fn derive_saga_projection(
+        projections: &ProjectionSnapshot,
+        run_id: &RunId,
+        policy: &SagaPolicySpec,
+    ) -> SagaProjection {
+        let obligations = derive_saga_obligations(projections, run_id);
+        let run_completion = projections.run_completion(run_id).cloned();
+        let manual_resolution = projections.manual_resolution(run_id).cloned();
+        let engagement = projections.saga_engagement(run_id).cloned();
+        let forward_quiescent = forward_ledgers_quiescent(projections, run_id);
+        let has_forward_boundary = obligations
+            .values()
+            .any(|obligation| forward_ledger_crossed_boundary(&obligation.forward_phase));
+        let owed_count = obligations
+            .values()
+            .filter(|obligation| obligation.classification == ForwardLedgerClassification::Owed)
+            .count();
+        let all_owed_closed = owed_count > 0
+            && obligations.values().all(|obligation| {
+                obligation.classification != ForwardLedgerClassification::Owed
+                    || obligation
+                        .remediation
+                        .as_ref()
+                        .map(|remediation| remediation.closed)
+                        .unwrap_or(false)
+            });
+        let unresolved_reason = obligations.values().find_map(obligation_unresolved_reason);
+
+        let (run_mode, manual_block_reason) = if let Some(completion) = run_completion.as_ref() {
+            (run_mode_for_completion_outcome(&completion.outcome), None)
+        } else if engagement.is_none() || !forward_quiescent {
+            (RunMode::Forward, None)
+        } else if !has_forward_boundary || (owed_count == 0 && unresolved_reason.is_none()) {
+            (RunMode::FailedWithoutAcdcClaim, None)
+        } else {
+            run_mode_for_uncompleted_quiescent_saga(
+                policy,
+                manual_resolution.as_ref(),
+                owed_count,
+                all_owed_closed,
+                unresolved_reason,
+            )
+        };
+
+        SagaProjection {
+            run_id: run_id.clone(),
+            run_mode,
+            engagement,
+            forward_quiescent,
+            manual_block_reason,
+            obligations,
+            manual_resolution,
+            run_completion,
+        }
+    }
+
+    fn derive_saga_obligations(
+        projections: &ProjectionSnapshot,
+        run_id: &RunId,
+    ) -> BTreeMap<events::SideEffectLedgerKey, SagaObligationProjection> {
+        projections
+            .side_effects
+            .values()
+            .filter(|projection| {
+                projection.run_id == *run_id
+                    && matches!(
+                        projection.ledger_purpose,
+                        events::SideEffectLedgerPurpose::Forward
+                    )
+            })
+            .map(|forward| {
+                let remediation = remediation_for_forward(projections, run_id, &forward.ledger_key);
+                (
+                    forward.ledger_key.clone(),
+                    SagaObligationProjection {
+                        forward_ledger_key: forward.ledger_key.clone(),
+                        forward_phase: forward.phase.clone(),
+                        classification: forward_ledger_classification(&forward.phase),
+                        remediation,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    fn remediation_for_forward(
+        projections: &ProjectionSnapshot,
+        run_id: &RunId,
+        forward_ledger_key: &events::SideEffectLedgerKey,
+    ) -> Option<RemediationLedgerProjection> {
+        projections
+            .side_effects
+            .values()
+            .find(|projection| {
+                projection.run_id == *run_id
+                    && matches!(
+                        &projection.ledger_purpose,
+                        events::SideEffectLedgerPurpose::Remediation {
+                            forward_ledger_key: linked
+                        } if linked == forward_ledger_key
+                    )
+            })
+            .map(|projection| {
+                let unresolved = remediation_unresolved_reason(projections, projection);
+                RemediationLedgerProjection {
+                    ledger_key: projection.ledger_key.clone(),
+                    phase: projection.phase.clone(),
+                    closed: matches!(
+                        projection.phase,
+                        SideEffectPhase::ConfirmationObserved { .. }
+                    ),
+                    unresolved,
+                }
+            })
+    }
+
+    fn run_mode_for_completion_outcome(outcome: &events::RunCompletionOutcome) -> RunMode {
+        match outcome {
+            events::RunCompletionOutcome::Completed(_) => RunMode::Completed,
+            events::RunCompletionOutcome::Compensated => RunMode::Compensated,
+            events::RunCompletionOutcome::ManuallyResolved => RunMode::ManuallyResolved,
+            events::RunCompletionOutcome::FailedWithoutAcdcClaim => RunMode::FailedWithoutAcdcClaim,
+        }
+    }
+
+    fn run_mode_for_uncompleted_quiescent_saga(
+        policy: &SagaPolicySpec,
+        manual_resolution: Option<&ManualResolutionProjection>,
+        owed_count: usize,
+        all_owed_closed: bool,
+        unresolved_reason: Option<ManualBlockReason>,
+    ) -> (RunMode, Option<ManualBlockReason>) {
+        if let Some(mode) = manual_resolution.map(manual_resolution_run_mode) {
+            return (mode, None);
+        }
+
+        match policy {
+            SagaPolicySpec::NoSideEffects | SagaPolicySpec::FailWithoutAcdcClaim => {
+                (RunMode::FailedWithoutAcdcClaim, None)
+            }
+            SagaPolicySpec::ManualResolution { .. } => (
+                RunMode::ManualBlocked,
+                Some(ManualBlockReason::PolicyManualResolution),
+            ),
+            SagaPolicySpec::CompensateCompleted {
+                on_remediation_unresolved,
+            } => {
+                if let Some(reason) = unresolved_reason {
+                    match on_remediation_unresolved {
+                        RemediationUnresolvedSpec::ManualResolution { .. } => {
+                            (RunMode::ManualBlocked, Some(reason))
+                        }
+                        RemediationUnresolvedSpec::FailWithoutAcdcClaim => {
+                            (RunMode::FailedWithoutAcdcClaim, None)
+                        }
+                    }
+                } else if owed_count > 0 && all_owed_closed {
+                    (RunMode::Compensated, None)
+                } else if owed_count > 0 {
+                    (RunMode::Remediating, None)
+                } else {
+                    (RunMode::FailedWithoutAcdcClaim, None)
+                }
+            }
+        }
+    }
+
+    fn manual_resolution_run_mode(manual: &ManualResolutionProjection) -> RunMode {
+        match manual.outcome {
+            events::ManualResolutionOutcome::ConfirmRemediated => RunMode::ManuallyResolved,
+            events::ManualResolutionOutcome::FailWithoutAcdcClaim => {
+                RunMode::FailedWithoutAcdcClaim
+            }
+        }
+    }
+
+    fn obligation_unresolved_reason(
+        obligation: &SagaObligationProjection,
+    ) -> Option<ManualBlockReason> {
+        if obligation.classification == ForwardLedgerClassification::Unresolvable {
+            Some(ManualBlockReason::ForwardAmbiguous)
+        } else {
+            obligation
+                .remediation
+                .as_ref()
+                .and_then(|remediation| remediation.unresolved)
+        }
+    }
+
+    fn remediation_unresolved_reason(
+        projections: &ProjectionSnapshot,
+        projection: &SideEffectProjection,
+    ) -> Option<ManualBlockReason> {
+        match projection.phase {
+            SideEffectPhase::Ambiguous { .. } => Some(ManualBlockReason::RemediationAmbiguous),
+            SideEffectPhase::Failed { .. } => {
+                if side_effect_failure_retryable(projections, projection) == Some(false) {
+                    Some(ManualBlockReason::RemediationFailed)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn side_effect_failure_retryable(
+        projections: &ProjectionSnapshot,
+        projection: &SideEffectProjection,
+    ) -> Option<bool> {
+        match &projections
+            .attempt(&projection.intent.node_id, &projection.intent.attempt_id)?
+            .status
+        {
+            AttemptStatus::Failed { retryable, .. } => Some(*retryable),
+            _ => None,
+        }
+    }
+
+    fn forward_ledger_classification(phase: &SideEffectPhase) -> ForwardLedgerClassification {
+        match phase {
+            SideEffectPhase::IntentPersisted { .. }
+            | SideEffectPhase::Claimed { .. }
+            | SideEffectPhase::InvocationPrepared { .. }
+            | SideEffectPhase::NotSubmittedProven { .. }
+            | SideEffectPhase::Failed { .. } => ForwardLedgerClassification::NothingOwed,
+            SideEffectPhase::InvocationStarted { .. }
+            | SideEffectPhase::SubmissionObserved { .. }
+            | SideEffectPhase::SubmissionUnknown { .. }
+            | SideEffectPhase::ReceiptObserved { .. } => ForwardLedgerClassification::Pending,
+            SideEffectPhase::ConfirmationObserved { .. } => ForwardLedgerClassification::Owed,
+            SideEffectPhase::Ambiguous { .. } => ForwardLedgerClassification::Unresolvable,
+        }
+    }
+
+    fn forward_ledgers_quiescent(projections: &ProjectionSnapshot, run_id: &RunId) -> bool {
+        projections
+            .side_effects
+            .values()
+            .filter(|projection| {
+                projection.run_id == *run_id
+                    && matches!(
+                        projection.ledger_purpose,
+                        events::SideEffectLedgerPurpose::Forward
+                    )
+            })
+            .all(|projection| {
+                !forward_ledger_crossed_boundary(&projection.phase)
+                    || forward_ledger_phase_is_quiescent(&projection.phase)
+            })
+    }
+
+    fn forward_ledger_crossed_boundary(phase: &SideEffectPhase) -> bool {
+        matches!(
+            phase,
+            SideEffectPhase::InvocationStarted { .. }
+                | SideEffectPhase::SubmissionObserved { .. }
+                | SideEffectPhase::SubmissionUnknown { .. }
+                | SideEffectPhase::ReceiptObserved { .. }
+                | SideEffectPhase::ConfirmationObserved { .. }
+                | SideEffectPhase::Ambiguous { .. }
+                | SideEffectPhase::NotSubmittedProven { .. }
+                | SideEffectPhase::Failed {
+                    failure_phase: side_effect::FailurePhase::AfterNotSubmittedProven,
+                    ..
+                }
+        )
+    }
+
+    fn forward_ledger_phase_is_quiescent(phase: &SideEffectPhase) -> bool {
+        matches!(
+            phase,
+            SideEffectPhase::NotSubmittedProven { .. }
+                | SideEffectPhase::ConfirmationObserved { .. }
+                | SideEffectPhase::Ambiguous { .. }
+                | SideEffectPhase::Failed { .. }
+        )
     }
 
     fn validate_run_stream_order(events: &[KernelEventEnvelope]) -> Result<()> {
@@ -3141,9 +3627,17 @@ pub mod v1 {
                         message: "run must be started and not completed".to_owned(),
                     });
                 }
+                require_forward_quiescence(projections, &payload.run_id)?;
                 projections
                     .run_states
                     .insert(payload.run_id.clone(), RunState::Completed);
+                projections.run_completions.insert(
+                    payload.run_id.clone(),
+                    RunCompletionProjection {
+                        event_id: envelope.event_id.clone(),
+                        outcome: payload.outcome.clone(),
+                    },
+                );
             }
             KernelEventPayload::StateAttemptStarted(payload) => {
                 let key = (payload.node_id.clone(), payload.attempt_id.clone());
@@ -3189,6 +3683,19 @@ pub mod v1 {
                         error: Box::new(payload.error.clone()),
                     },
                 )?;
+                if !payload.retryable {
+                    note_saga_engagement(
+                        projections,
+                        envelope.run_id(),
+                        SagaEngagementProjection {
+                            event_id: envelope.event_id.clone(),
+                            reason: SagaEngagementReason::NonRetryableFailure {
+                                node_id: payload.node_id.clone(),
+                                attempt_id: payload.attempt_id.clone(),
+                            },
+                        },
+                    );
+                }
             }
             KernelEventPayload::CellProduced(payload) => {
                 if projections.cells.contains_key(&payload.cell_id) {
@@ -3230,6 +3737,18 @@ pub mod v1 {
                 );
             }
             KernelEventPayload::SideEffectIntentPersisted(payload) => {
+                require_forward_fence_open(
+                    projections,
+                    envelope.run_id(),
+                    &payload.ledger_key,
+                    &payload.ledger_purpose,
+                )?;
+                require_remediation_intent_admissible(
+                    projections,
+                    envelope.run_id(),
+                    &payload.ledger_key,
+                    &payload.ledger_purpose,
+                )?;
                 require_active_attempt_for_side_effect(
                     projections,
                     &payload.node_id,
@@ -3261,6 +3780,7 @@ pub mod v1 {
                 projections.side_effects.insert(
                     payload.ledger_key.clone(),
                     SideEffectProjection {
+                        run_id: envelope.run_id().clone(),
                         ledger_key: payload.ledger_key.clone(),
                         ledger_purpose: payload.ledger_purpose.clone(),
                         event_id: envelope.event_id.clone(),
@@ -3277,6 +3797,12 @@ pub mod v1 {
                 );
             }
             KernelEventPayload::SideEffectClaimed(payload) => {
+                require_forward_fence_open(
+                    projections,
+                    envelope.run_id(),
+                    &payload.ledger_key,
+                    &payload.ledger_purpose,
+                )?;
                 require_active_attempt_for_side_effect(
                     projections,
                     &payload.node_id,
@@ -3350,6 +3876,7 @@ pub mod v1 {
                     _ => unreachable!("phase predicate checked above"),
                 }
                 let intent = previous.intent.clone();
+                let run_id = previous.run_id.clone();
                 let ledger_purpose = previous.ledger_purpose.clone();
                 let prepared_invocation = previous.prepared_invocation.clone();
                 let submission = previous.submission.clone();
@@ -3366,6 +3893,7 @@ pub mod v1 {
                 projections.side_effects.insert(
                     payload.ledger_key.clone(),
                     SideEffectProjection {
+                        run_id,
                         ledger_key: payload.ledger_key.clone(),
                         ledger_purpose,
                         event_id: envelope.event_id.clone(),
@@ -3385,6 +3913,12 @@ pub mod v1 {
                 );
             }
             KernelEventPayload::SideEffectClaimTakenOver(payload) => {
+                require_forward_fence_open(
+                    projections,
+                    envelope.run_id(),
+                    &payload.ledger_key,
+                    &payload.ledger_purpose,
+                )?;
                 require_active_attempt_for_side_effect(
                     projections,
                     &payload.node_id,
@@ -3411,6 +3945,7 @@ pub mod v1 {
                 let old_claim = previous_claim(previous, &payload.ledger_key)?;
                 require_claim_takeover_matches(&payload.ledger_key, old_claim, payload)?;
                 let intent = previous.intent.clone();
+                let run_id = previous.run_id.clone();
                 let ledger_purpose = previous.ledger_purpose.clone();
                 let prepared_invocation = previous.prepared_invocation.clone();
                 let submission = previous.submission.clone();
@@ -3427,6 +3962,7 @@ pub mod v1 {
                 projections.side_effects.insert(
                     payload.ledger_key.clone(),
                     SideEffectProjection {
+                        run_id,
                         ledger_key: payload.ledger_key.clone(),
                         ledger_purpose,
                         event_id: envelope.event_id.clone(),
@@ -3446,6 +3982,12 @@ pub mod v1 {
                 );
             }
             KernelEventPayload::SideEffectInvocationPrepared(payload) => {
+                require_forward_fence_open(
+                    projections,
+                    envelope.run_id(),
+                    &payload.ledger_key,
+                    &payload.ledger_purpose,
+                )?;
                 require_active_attempt_for_side_effect(
                     projections,
                     &payload.node_id,
@@ -3477,6 +4019,7 @@ pub mod v1 {
                     },
                 )?;
                 let intent = previous.intent.clone();
+                let run_id = previous.run_id.clone();
                 let ledger_purpose = previous.ledger_purpose.clone();
                 let prepared_invocation = prepared_invocation_projection(
                     &payload.prepared_artifact_id,
@@ -3490,6 +4033,7 @@ pub mod v1 {
                 projections.side_effects.insert(
                     payload.ledger_key.clone(),
                     SideEffectProjection {
+                        run_id,
                         ledger_key: payload.ledger_key.clone(),
                         ledger_purpose,
                         event_id: envelope.event_id.clone(),
@@ -3508,6 +4052,12 @@ pub mod v1 {
                 );
             }
             KernelEventPayload::SideEffectInvocationStarted(payload) => {
+                require_forward_fence_open(
+                    projections,
+                    envelope.run_id(),
+                    &payload.ledger_key,
+                    &payload.ledger_purpose,
+                )?;
                 require_active_attempt_for_side_effect(
                     projections,
                     &payload.node_id,
@@ -3541,6 +4091,7 @@ pub mod v1 {
                     },
                 )?;
                 let intent = previous.intent.clone();
+                let run_id = previous.run_id.clone();
                 let ledger_purpose = previous.ledger_purpose.clone();
                 let prepared_invocation = previous.prepared_invocation.clone();
                 let submission = previous.submission.clone();
@@ -3549,6 +4100,7 @@ pub mod v1 {
                 projections.side_effects.insert(
                     payload.ledger_key.clone(),
                     SideEffectProjection {
+                        run_id,
                         ledger_key: payload.ledger_key.clone(),
                         ledger_purpose,
                         event_id: envelope.event_id.clone(),
@@ -3731,6 +4283,21 @@ pub mod v1 {
                     },
                     |_| Ok(()),
                 )?;
+                if matches!(
+                    payload.ledger_purpose,
+                    events::SideEffectLedgerPurpose::Forward
+                ) {
+                    note_saga_engagement(
+                        projections,
+                        envelope.run_id(),
+                        SagaEngagementProjection {
+                            event_id: envelope.event_id.clone(),
+                            reason: SagaEngagementReason::ForwardAmbiguous {
+                                ledger_key: payload.ledger_key.clone(),
+                            },
+                        },
+                    );
+                }
             }
             KernelEventPayload::SideEffectFailed(payload) => {
                 require_active_attempt_for_side_effect(
@@ -3740,6 +4307,19 @@ pub mod v1 {
                     &payload.ledger_key,
                 )?;
                 transition_side_effect_failure(projections, payload, envelope.event_id.clone())?;
+                if !payload.retryable {
+                    note_saga_engagement(
+                        projections,
+                        envelope.run_id(),
+                        SagaEngagementProjection {
+                            event_id: envelope.event_id.clone(),
+                            reason: SagaEngagementReason::NonRetryableFailure {
+                                node_id: payload.node_id.clone(),
+                                attempt_id: payload.attempt_id.clone(),
+                            },
+                        },
+                    );
+                }
             }
             KernelEventPayload::PublicOutputProduced(payload) => {
                 if matches!(
@@ -3778,7 +4358,33 @@ pub mod v1 {
                     },
                 );
             }
-            KernelEventPayload::ManualResolutionRecorded(_) => {}
+            KernelEventPayload::ManualResolutionRecorded(payload) => {
+                if projections.manual_resolutions.contains_key(&payload.run_id) {
+                    return Err(StoreError::ProjectionConflict {
+                        key: "run:manual_resolution".to_owned(),
+                        message: "manual resolution already recorded".to_owned(),
+                    });
+                }
+                require_forward_quiescence(projections, &payload.run_id)?;
+                projections.manual_resolutions.insert(
+                    payload.run_id.clone(),
+                    ManualResolutionProjection {
+                        event_id: envelope.event_id.clone(),
+                        outcome: payload.outcome,
+                        operator_identity_ref_schema_id: payload
+                            .operator_identity_ref_schema_id
+                            .clone(),
+                        operator_identity_ref_hash: payload.operator_identity_ref_hash.clone(),
+                        operator_identity_ref_artifact_id: payload
+                            .operator_identity_ref_artifact_id
+                            .clone(),
+                        evidence_schema_id: payload.evidence_schema_id.clone(),
+                        evidence_hash: payload.evidence_hash.clone(),
+                        evidence_artifact_id: payload.evidence_artifact_id.clone(),
+                        note: payload.note.clone(),
+                    },
+                );
+            }
             KernelEventPayload::RetentionRefsAppended(payload) => {
                 if projections.run_state(&payload.run_id) == RunState::Absent {
                     return Err(StoreError::ProjectionConflict {
@@ -3949,6 +4555,99 @@ pub mod v1 {
         }
         projection.event_id = event_id;
         projection.status = status;
+        Ok(())
+    }
+
+    fn note_saga_engagement(
+        projections: &mut ProjectionSnapshot,
+        run_id: &RunId,
+        engagement: SagaEngagementProjection,
+    ) {
+        projections
+            .saga_engagements
+            .entry(run_id.clone())
+            .or_insert(engagement);
+    }
+
+    fn require_forward_fence_open(
+        projections: &ProjectionSnapshot,
+        run_id: &RunId,
+        ledger_key: &events::SideEffectLedgerKey,
+        purpose: &events::SideEffectLedgerPurpose,
+    ) -> Result<()> {
+        if matches!(purpose, events::SideEffectLedgerPurpose::Forward)
+            && projections.saga_engagement(run_id).is_some()
+        {
+            Err(StoreError::ProjectionConflict {
+                key: format!("sidefx:{ledger_key}"),
+                message: "forward side-effect boundary event rejected after saga engagement"
+                    .to_owned(),
+            })
+        } else {
+            Ok(())
+        }
+    }
+
+    fn require_forward_quiescence(projections: &ProjectionSnapshot, run_id: &RunId) -> Result<()> {
+        if forward_ledgers_quiescent(projections, run_id) {
+            Ok(())
+        } else {
+            Err(StoreError::ProjectionConflict {
+                key: format!("run:{run_id}:quiescence"),
+                message: "past-boundary forward side-effect ledgers must be quiescent".to_owned(),
+            })
+        }
+    }
+
+    fn require_remediation_intent_admissible(
+        projections: &ProjectionSnapshot,
+        run_id: &RunId,
+        remediation_ledger_key: &events::SideEffectLedgerKey,
+        purpose: &events::SideEffectLedgerPurpose,
+    ) -> Result<()> {
+        let events::SideEffectLedgerPurpose::Remediation { forward_ledger_key } = purpose else {
+            return Ok(());
+        };
+        if projections.saga_engagement(run_id).is_none() {
+            return Err(StoreError::ProjectionConflict {
+                key: format!("sidefx:{remediation_ledger_key}"),
+                message: "remediation ledger requires prior saga engagement".to_owned(),
+            });
+        }
+        let Some(forward) = projections.side_effect(forward_ledger_key) else {
+            return Err(StoreError::ProjectionConflict {
+                key: format!("sidefx:{remediation_ledger_key}"),
+                message: "remediation ledger references missing forward ledger".to_owned(),
+            });
+        };
+        if !matches!(
+            forward.ledger_purpose,
+            events::SideEffectLedgerPurpose::Forward
+        ) {
+            return Err(StoreError::ProjectionConflict {
+                key: format!("sidefx:{remediation_ledger_key}"),
+                message: "remediation ledger references a non-forward ledger".to_owned(),
+            });
+        }
+        if !matches!(forward.phase, SideEffectPhase::ConfirmationObserved { .. }) {
+            return Err(StoreError::ProjectionConflict {
+                key: format!("sidefx:{remediation_ledger_key}"),
+                message: "remediation ledger requires confirmed forward ledger".to_owned(),
+            });
+        }
+        if projections.side_effects.values().any(|projection| {
+            matches!(
+                &projection.ledger_purpose,
+                events::SideEffectLedgerPurpose::Remediation {
+                    forward_ledger_key: linked
+                } if linked == forward_ledger_key
+            )
+        }) {
+            return Err(StoreError::ProjectionConflict {
+                key: format!("sidefx:{remediation_ledger_key}"),
+                message: "remediation ledger already exists for forward ledger".to_owned(),
+            });
+        }
         Ok(())
     }
 
@@ -4241,7 +4940,16 @@ pub mod v1 {
         next_phase: impl FnOnce(u32) -> SideEffectPhase,
         update_projection: impl FnOnce(&mut SideEffectProjection) -> Result<()>,
     ) -> Result<()> {
-        let (ledger_purpose, intent, prepared_invocation, submission, receipt, confirmation, claim) = {
+        let (
+            run_id,
+            ledger_purpose,
+            intent,
+            prepared_invocation,
+            submission,
+            receipt,
+            confirmation,
+            claim,
+        ) = {
             let previous = require_side_effect_phase(
                 projections,
                 transition.ledger_key,
@@ -4269,6 +4977,7 @@ pub mod v1 {
                 },
             )?;
             (
+                previous.run_id.clone(),
                 previous.ledger_purpose.clone(),
                 previous.intent.clone(),
                 previous.prepared_invocation.clone(),
@@ -4279,6 +4988,7 @@ pub mod v1 {
             )
         };
         let mut projection = SideEffectProjection {
+            run_id,
             ledger_key: transition.ledger_key.clone(),
             ledger_purpose,
             event_id: transition.event_id,
@@ -4302,7 +5012,16 @@ pub mod v1 {
         payload: &side_effect::Failed,
         event_id: EventId,
     ) -> Result<()> {
-        let (ledger_purpose, intent, prepared_invocation, submission, receipt, confirmation, claim) = {
+        let (
+            run_id,
+            ledger_purpose,
+            intent,
+            prepared_invocation,
+            submission,
+            receipt,
+            confirmation,
+            claim,
+        ) = {
             let Some(previous) = projections.side_effects.get(&payload.ledger_key) else {
                 return Err(side_effect_projection_error(
                     &payload.ledger_key,
@@ -4372,6 +5091,7 @@ pub mod v1 {
                 }
             }
             (
+                previous.run_id.clone(),
                 previous.ledger_purpose.clone(),
                 previous.intent.clone(),
                 previous.prepared_invocation.clone(),
@@ -4384,6 +5104,7 @@ pub mod v1 {
         projections.side_effects.insert(
             payload.ledger_key.clone(),
             SideEffectProjection {
+                run_id,
                 ledger_key: payload.ledger_key.clone(),
                 ledger_purpose,
                 event_id,

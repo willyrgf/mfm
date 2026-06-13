@@ -1269,12 +1269,14 @@ fn side_effect_projection_json(projection: &SideEffectProjection) -> Value {
         "phase": side_effect_phase_json(&projection.phase),
         "prepared_invocation": projection.prepared_invocation.as_ref().map(side_effect_artifact_json),
         "receipt": projection.receipt.as_ref().map(side_effect_artifact_json),
+        "run_id": projection.run_id.as_str(),
         "submission": projection.submission.as_ref().map(side_effect_artifact_json),
     })
 }
 
 fn parse_side_effect_projection(json: &Value) -> Result<SideEffectProjection> {
     Ok(SideEffectProjection {
+        run_id: parse_identity(required_str(json, "run_id")?)?,
         ledger_key: events::SideEffectLedgerKey::new(required_str(json, "ledger_key")?)?,
         ledger_purpose: parse_side_effect_ledger_purpose(required_obj(json, "ledger_purpose")?)?,
         event_id: parse_identity(required_str(json, "event_id")?)?,
