@@ -1000,6 +1000,9 @@ pub mod v1 {
                                 self.authorize_event_artifact_ref(evidence, None, None)?;
                             }
                         }
+                        events::RunCompletionOutcome::Compensated
+                        | events::RunCompletionOutcome::ManuallyResolved
+                        | events::RunCompletionOutcome::FailedWithoutAcdcClaim => {}
                     },
                     KernelEventPayload::RetentionManifestProjected(payload) => {
                         self.authorize_artifact(

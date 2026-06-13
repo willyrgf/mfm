@@ -5781,6 +5781,9 @@ fn referenced_artifact_ids_for_payload(payload: &events::KernelEventPayload) -> 
                 }
             }
             events::RunCompletionOutcome::Completed(_) => {}
+            events::RunCompletionOutcome::Compensated
+            | events::RunCompletionOutcome::ManuallyResolved
+            | events::RunCompletionOutcome::FailedWithoutAcdcClaim => {}
         },
         events::KernelEventPayload::SideEffectIntentPersisted(payload) => {
             artifacts.push(payload.intent_artifact_id.clone());

@@ -2857,6 +2857,9 @@ pub mod v1 {
                     }
                 }
                 events::RunCompletionOutcome::Completed(_) => {}
+                events::RunCompletionOutcome::Compensated
+                | events::RunCompletionOutcome::ManuallyResolved
+                | events::RunCompletionOutcome::FailedWithoutAcdcClaim => {}
             },
             KernelEventPayload::SideEffectIntentPersisted(payload) => {
                 requirements.push(ArtifactRequirement {
@@ -5227,6 +5230,9 @@ pub mod v1 {
                     },
                 ))
             }
+            "compensated" => Ok(events::RunCompletionOutcome::Compensated),
+            "manually_resolved" => Ok(events::RunCompletionOutcome::ManuallyResolved),
+            "failed_without_acdc_claim" => Ok(events::RunCompletionOutcome::FailedWithoutAcdcClaim),
             "failed" => Ok(events::RunCompletionOutcome::Failed(parse_error_info(
                 required_obj(json, "terminal_error")?,
             )?)),
@@ -5634,6 +5640,15 @@ pub mod v1 {
                     "public_output_event_id": evidence.public_output_event_id.as_str(),
                     "public_output_schema_id": evidence.public_output_schema_id.as_str(),
                 },
+            }),
+            events::RunCompletionOutcome::Compensated => serde_json::json!({
+                "kind": "compensated",
+            }),
+            events::RunCompletionOutcome::ManuallyResolved => serde_json::json!({
+                "kind": "manually_resolved",
+            }),
+            events::RunCompletionOutcome::FailedWithoutAcdcClaim => serde_json::json!({
+                "kind": "failed_without_acdc_claim",
             }),
             events::RunCompletionOutcome::Failed(error) => serde_json::json!({
                 "kind": "failed",

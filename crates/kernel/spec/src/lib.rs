@@ -330,6 +330,8 @@ macro_rules! checked_string_type {
 
 /// Versioned v1 typed execution spec contracts.
 pub mod v1 {
+    use std::collections::BTreeMap;
+
     use super::{
         canonical_json, checked_ascii_token, checked_author_key, checked_field_path,
         content_digest, spec_hash_from_canonical, ContentDigest, DigestAlgorithm,
@@ -642,6 +644,11 @@ pub mod v1 {
     }
 
     /// Hash-defining v1 typed execution spec.
+    ///
+    /// Saga policy is certified spec data because external side-effect remediation is a
+    /// saga-only claim derived from certified policy plus recorded stream facts. Directive
+    /// selection, obligation state, manual blocking, and run mode are not spec-authored control
+    /// events; they are rebuildable projections.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct TypedExecutionSpec {
         /// Spec contract version.
@@ -654,6 +661,8 @@ pub mod v1 {
         pub lowering_version: LoweringVersion,
         /// Authoring provenance.
         pub authoring: AuthoringProvenance,
+        /// Certified run-level saga policy.
+        pub saga: SagaPolicySpec,
         /// Persisted scopes.
         pub scopes: Vec<ScopeSpec>,
         /// Declared seed cells.
@@ -664,6 +673,8 @@ pub mod v1 {
         pub config_refs: Vec<ConfigRef>,
         /// State and framework nodes.
         pub nodes: Vec<NodeSpec>,
+        /// Remediation nodes keyed by the forward side-effect node they compensate.
+        pub remediations: BTreeMap<NodeId, NodeSpec>,
         /// Planned cells.
         pub cells: Vec<CellSpec>,
         /// Hash-defining value lineage records referenced by cells and inputs.
@@ -683,11 +694,13 @@ pub mod v1 {
                 canonicalization: DigestAlgorithm::Sha256JcsV1,
                 lowering_version: LoweringVersion::new(LOWERING_VERSION)?,
                 authoring: parts.authoring,
+                saga: SagaPolicySpec::NoSideEffects,
                 scopes: parts.scopes,
                 seeds: parts.seeds,
                 descriptor_identities: parts.descriptor_identities,
                 config_refs: parts.config_refs,
                 nodes: parts.nodes,
+                remediations: BTreeMap::new(),
                 cells: parts.cells,
                 value_lineages: parts.value_lineages,
                 planning_lineage: parts.planning_lineage,
@@ -774,10 +787,98 @@ pub mod v1 {
                     .map(OperationLineageFrameSpec::json)
                     .collect::<Vec<_>>(),
                 "public_outputs": self.public_outputs.json(),
+                "remediations": remediations_json(&self.remediations),
+                "saga": self.saga.json(),
                 "scopes": self.scopes.iter().map(ScopeSpec::json).collect::<Vec<_>>(),
                 "seeds": self.seeds.iter().map(SeedSpec::json).collect::<Vec<_>>(),
                 "spec_version": self.spec_version.as_str(),
                 "value_lineages": self.value_lineages.iter().map(ValueLineage::json).collect::<Vec<_>>(),
+            })
+        }
+    }
+
+    /// Certified run-level saga policy.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum SagaPolicySpec {
+        /// Lowering uses this when the forward graph has no side-effect nodes.
+        NoSideEffects,
+        /// Failure after mutation carries no compensation or AC/DC-equivalence claim.
+        FailWithoutAcdcClaim,
+        /// Failure after mutation blocks for typed operator evidence.
+        ManualResolution {
+            /// Required typed manual evidence.
+            manual: ManualResolutionEvidenceSpec,
+        },
+        /// Failure after confirmed forward side effects compensates linked remediations.
+        CompensateCompleted {
+            /// Directive used when a forward or remediation ledger remains unresolved.
+            on_remediation_unresolved: RemediationUnresolvedSpec,
+        },
+    }
+
+    impl SagaPolicySpec {
+        fn json(&self) -> serde_json::Value {
+            match self {
+                Self::NoSideEffects => serde_json::json!({
+                    "kind": "no_side_effects",
+                }),
+                Self::FailWithoutAcdcClaim => serde_json::json!({
+                    "kind": "fail_without_acdc_claim",
+                }),
+                Self::ManualResolution { manual } => serde_json::json!({
+                    "kind": "manual_resolution",
+                    "manual": manual.json(),
+                }),
+                Self::CompensateCompleted {
+                    on_remediation_unresolved,
+                } => serde_json::json!({
+                    "kind": "compensate_completed",
+                    "on_remediation_unresolved": on_remediation_unresolved.json(),
+                }),
+            }
+        }
+    }
+
+    /// Certified directive for unresolved remediation under compensating policy.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum RemediationUnresolvedSpec {
+        /// Block for typed operator evidence.
+        ManualResolution {
+            /// Required typed manual evidence.
+            manual: ManualResolutionEvidenceSpec,
+        },
+        /// Terminally fail without a compensation or AC/DC-equivalence claim.
+        FailWithoutAcdcClaim,
+    }
+
+    impl RemediationUnresolvedSpec {
+        fn json(&self) -> serde_json::Value {
+            match self {
+                Self::ManualResolution { manual } => serde_json::json!({
+                    "kind": "manual_resolution",
+                    "manual": manual.json(),
+                }),
+                Self::FailWithoutAcdcClaim => serde_json::json!({
+                    "kind": "fail_without_acdc_claim",
+                }),
+            }
+        }
+    }
+
+    /// Typed schema requirements for run-scoped manual saga resolution evidence.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct ManualResolutionEvidenceSpec {
+        /// Schema id for the operator evidence artifact.
+        pub evidence_schema: SchemaId,
+        /// Schema id for the operator identity reference.
+        pub operator_identity_ref_schema: SchemaId,
+    }
+
+    impl ManualResolutionEvidenceSpec {
+        fn json(&self) -> serde_json::Value {
+            serde_json::json!({
+                "evidence_schema": self.evidence_schema.as_str(),
+                "operator_identity_ref_schema": self.operator_identity_ref_schema.as_str(),
             })
         }
     }
@@ -2013,6 +2114,14 @@ pub mod v1 {
         )
     }
 
+    fn remediations_json(remediations: &BTreeMap<NodeId, NodeSpec>) -> serde_json::Value {
+        let object = remediations
+            .iter()
+            .map(|(forward_node_id, node)| (forward_node_id.as_str().to_owned(), node.json()))
+            .collect::<serde_json::Map<_, _>>();
+        serde_json::Value::Object(object)
+    }
+
     fn parse_typed_execution_spec(value: &serde_json::Value) -> Result<TypedExecutionSpec> {
         let object = object(value, "typed execution spec")?;
         let spec_version = version::<SpecVersion>(required_str(object, "spec_version")?)?;
@@ -2046,7 +2155,7 @@ pub mod v1 {
             )));
         }
 
-        TypedExecutionSpec::new(TypedExecutionSpecParts {
+        let mut spec = TypedExecutionSpec::new(TypedExecutionSpecParts {
             authoring: parse_authoring(required(object, "authoring")?)?,
             scopes: parse_vec(required(object, "scopes")?, parse_scope_spec)?,
             seeds: parse_vec(required(object, "seeds")?, parse_seed_spec)?,
@@ -2063,7 +2172,65 @@ pub mod v1 {
                 parse_operation_lineage_frame,
             )?,
             public_outputs: parse_public_output_spec(required(object, "public_outputs")?)?,
+        })?;
+        spec.saga = parse_saga_policy(required(object, "saga")?)?;
+        spec.remediations = parse_remediations(required(object, "remediations")?)?;
+        Ok(spec)
+    }
+
+    fn parse_saga_policy(value: &serde_json::Value) -> Result<SagaPolicySpec> {
+        let object = object(value, "saga policy")?;
+        match required_str(object, "kind")? {
+            "no_side_effects" => Ok(SagaPolicySpec::NoSideEffects),
+            "fail_without_acdc_claim" => Ok(SagaPolicySpec::FailWithoutAcdcClaim),
+            "manual_resolution" => Ok(SagaPolicySpec::ManualResolution {
+                manual: parse_manual_resolution_evidence(required(object, "manual")?)?,
+            }),
+            "compensate_completed" => Ok(SagaPolicySpec::CompensateCompleted {
+                on_remediation_unresolved: parse_remediation_unresolved(required(
+                    object,
+                    "on_remediation_unresolved",
+                )?)?,
+            }),
+            kind => Err(json_error(format!("unsupported saga policy kind {kind:?}"))),
+        }
+    }
+
+    fn parse_remediation_unresolved(
+        value: &serde_json::Value,
+    ) -> Result<RemediationUnresolvedSpec> {
+        let object = object(value, "remediation-unresolved directive")?;
+        match required_str(object, "kind")? {
+            "manual_resolution" => Ok(RemediationUnresolvedSpec::ManualResolution {
+                manual: parse_manual_resolution_evidence(required(object, "manual")?)?,
+            }),
+            "fail_without_acdc_claim" => Ok(RemediationUnresolvedSpec::FailWithoutAcdcClaim),
+            kind => Err(json_error(format!(
+                "unsupported remediation-unresolved kind {kind:?}"
+            ))),
+        }
+    }
+
+    fn parse_manual_resolution_evidence(
+        value: &serde_json::Value,
+    ) -> Result<ManualResolutionEvidenceSpec> {
+        let object = object(value, "manual-resolution evidence")?;
+        Ok(ManualResolutionEvidenceSpec {
+            evidence_schema: identity(required_str(object, "evidence_schema")?)?,
+            operator_identity_ref_schema: identity(required_str(
+                object,
+                "operator_identity_ref_schema",
+            )?)?,
         })
+    }
+
+    fn parse_remediations(value: &serde_json::Value) -> Result<BTreeMap<NodeId, NodeSpec>> {
+        object(value, "remediations")?
+            .iter()
+            .map(|(forward_node_id, node)| {
+                Ok((identity(forward_node_id.as_str())?, parse_node_spec(node)?))
+            })
+            .collect()
     }
 
     fn parse_authoring(value: &serde_json::Value) -> Result<AuthoringProvenance> {
@@ -3305,11 +3472,15 @@ pub mod v1 {
             );
             assert_eq!(
                 spec.spec_hash().expect("spec hash").as_str(),
-                "spec:sha256-jcs-v1:defd7fe1f27684db36ff4f45d5ad6a0f55047f0c35909786e9d0faae121437da"
+                "spec:sha256-jcs-v1:1603ee63d62e17be336938dfc1d244595ae41951567054f7c9121ad9121c3c35"
             );
             assert!(canonical
                 .as_str()
                 .contains(r#""spec_version":"mfm.typed.execution_spec.v1""#));
+            assert!(canonical.as_str().contains(r#""remediations":{}"#));
+            assert!(canonical
+                .as_str()
+                .contains(r#""saga":{"kind":"no_side_effects"}"#));
             let audit = TypedExecutionSpecAudit {
                 source_package_refs: vec![SourcePackageRef {
                     name: "mfm-spec-test".to_owned(),
@@ -3328,6 +3499,45 @@ pub mod v1 {
                 stale.verify_hash(),
                 Err(SpecError::HashMismatch { .. })
             ));
+        }
+
+        #[test]
+        fn saga_policy_and_remediations_are_hash_defining() {
+            let base = test_spec();
+            let base_hash = base.spec_hash().expect("base hash");
+            let manual = ManualResolutionEvidenceSpec {
+                evidence_schema: schema("mfm.spec.test.manual_evidence", 0x91),
+                operator_identity_ref_schema: schema("mfm.spec.test.operator_ref", 0x92),
+            };
+
+            let mut manual_spec = base.clone();
+            manual_spec.saga = SagaPolicySpec::ManualResolution {
+                manual: manual.clone(),
+            };
+            assert_ne!(
+                manual_spec.spec_hash().expect("manual hash"),
+                base_hash,
+                "run-level saga policy must be hash-defining"
+            );
+
+            let mut compensated = base.clone();
+            let forward_node = compensated.nodes[0].node_id.clone();
+            compensated.saga = SagaPolicySpec::CompensateCompleted {
+                on_remediation_unresolved: RemediationUnresolvedSpec::ManualResolution { manual },
+            };
+            compensated
+                .remediations
+                .insert(forward_node, compensated.nodes[0].clone());
+            let canonical = compensated.canonical_json().expect("compensated canonical");
+            let parsed = TypedExecutionSpec::from_json_slice(canonical.as_bytes())
+                .expect("parse compensated saga spec");
+
+            assert_eq!(parsed, compensated);
+            assert_ne!(
+                compensated.spec_hash().expect("compensated hash"),
+                base_hash,
+                "remediation node collection must be hash-defining"
+            );
         }
 
         #[test]

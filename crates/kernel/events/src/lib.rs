@@ -185,6 +185,80 @@ pub mod v1 {
         "error code"
     );
 
+    /// Persisted purpose for a side-effect ledger.
+    ///
+    /// Purpose is part of certified saga semantics: forward ledgers are eligible for
+    /// classification, while remediation ledgers link to the confirmed forward ledger they
+    /// compensate. This type is not yet attached to side-effect payloads in the pure skeleton
+    /// commit.
+    #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub enum SideEffectLedgerPurpose {
+        /// Ordinary forward side-effect ledger.
+        Forward,
+        /// Remediation ledger for the linked forward side-effect ledger.
+        Remediation {
+            /// Forward ledger key whose obligation this remediation addresses.
+            forward_ledger_key: SideEffectLedgerKey,
+        },
+    }
+
+    /// Run-scoped manual resolution outcome.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub enum ManualResolutionOutcome {
+        /// Operator certifies unresolved obligations have been remediated.
+        ConfirmRemediated,
+        /// Operator closes the run without a compensation or AC/DC-equivalence claim.
+        FailWithoutAcdcClaim,
+    }
+
+    impl ManualResolutionOutcome {
+        /// Returns the persisted lowercase outcome tag.
+        pub const fn as_str(self) -> &'static str {
+            match self {
+                Self::ConfirmRemediated => "confirm_remediated",
+                Self::FailWithoutAcdcClaim => "fail_without_acdc_claim",
+            }
+        }
+    }
+
+    /// Stream-derived public run mode.
+    ///
+    /// `RunMode` is a projection type, not an appendable event payload. The stream records facts;
+    /// runtime, store, replay, and public status derive this value from certified saga policy plus
+    /// recorded evidence.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub enum RunMode {
+        /// Forward graph execution is still active.
+        Forward,
+        /// Confirmed forward side effects are being remediated.
+        Remediating,
+        /// The run is blocked for typed manual operator evidence.
+        ManualBlocked,
+        /// Successful forward completion.
+        Completed,
+        /// Confirmed forward side effects were compensated.
+        Compensated,
+        /// Operator evidence manually resolved the run.
+        ManuallyResolved,
+        /// The run ended without a compensation or AC/DC-equivalence claim.
+        FailedWithoutAcdcClaim,
+    }
+
+    impl RunMode {
+        /// Returns the persisted lowercase mode tag.
+        pub const fn as_str(self) -> &'static str {
+            match self {
+                Self::Forward => "forward",
+                Self::Remediating => "remediating",
+                Self::ManualBlocked => "manual_blocked",
+                Self::Completed => "completed",
+                Self::Compensated => "compensated",
+                Self::ManuallyResolved => "manually_resolved",
+                Self::FailedWithoutAcdcClaim => "failed_without_acdc_claim",
+            }
+        }
+    }
+
     /// Closed v1 typed kernel event payload enum.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub enum KernelEventPayload {
@@ -535,6 +609,12 @@ pub mod v1 {
     pub enum RunCompletionOutcome {
         /// Run completed successfully with public-output evidence.
         Completed(PublicOutputCompletionEvidence),
+        /// Confirmed forward side effects were remediated.
+        Compensated,
+        /// Operator evidence manually resolved the run.
+        ManuallyResolved,
+        /// Run ended without a compensation or AC/DC-equivalence claim.
+        FailedWithoutAcdcClaim,
         /// Run failed with a redaction-safe terminal error.
         Failed(MfmErrorInfo),
         /// Run was cancelled with a redaction-safe terminal error.
@@ -1644,6 +1724,9 @@ pub mod v1 {
                             EventFieldCardinality::Required,
                         )],
                     ),
+                    enum_variant("compensated", Vec::new()),
+                    enum_variant("manually_resolved", Vec::new()),
+                    enum_variant("failed_without_acdc_claim", Vec::new()),
                     enum_variant(
                         "failed",
                         vec![schema_field(
@@ -2235,7 +2318,7 @@ mfm_events::v1::PublicOutputProduced schema:mfm.events.v1.public_output_produced
 mfm_events::v1::PublicOutputRenderFailed schema:mfm.events.v1.public_output_render_failed:1:sha256-jcs-v1:daaaa636cc408550ce27e462d0fcc2873e64a74dc73dbd3adc0ad6f39ecaa420\n\
 mfm_events::v1::StateAttemptCompleted schema:mfm.events.v1.state_attempt_completed:1:sha256-jcs-v1:36800f9d3ae748d407bc2ea24339049471c8ffe40aa86c53b35b6c7c6cd6ee80\n\
 mfm_events::v1::StateAttemptFailed schema:mfm.events.v1.state_attempt_failed:1:sha256-jcs-v1:e034fdb67110d1619a6f5cc6fbbfa8faa87c249d7f90ad938dfaa67c76a51a2d\n\
-mfm_events::v1::RunCompleted schema:mfm.events.v1.run_completed:1:sha256-jcs-v1:3408662fb6e2a91cdd4cfc053bac99969297de8731d84642ffb77dd8a1d71be8\n\
+mfm_events::v1::RunCompleted schema:mfm.events.v1.run_completed:1:sha256-jcs-v1:f51347833e211fdd91e74b532967bd2f2e95806c188827b9358bb0feaf62f891\n\
 mfm_events::v1::RetentionRefsAppended schema:mfm.events.v1.retention_refs_appended:1:sha256-jcs-v1:7b0fbde8418cc39d0e234aee9996dd95eb9d6830b2c0a33fde3749881e0e534e\n\
 mfm_events::v1::RetentionManifestProjected schema:mfm.events.v1.retention_manifest_projected:1:sha256-jcs-v1:269a96fc12c7c5004aa4592139f84cd0e4b617e04e494522ce639aeae0b9fed1"
             );
@@ -2265,7 +2348,35 @@ mfm_events::v1::RetentionManifestProjected schema:mfm.events.v1.retention_manife
             assert!(completed_json.contains("\"name\":\"RunCompletionOutcome\""));
             assert!(completed_json.contains("\"name\":\"PublicOutputCompletionEvidence\""));
             assert!(completed_json.contains("\"name\":\"public_output_event_id\""));
+            assert!(completed_json.contains("\"name\":\"compensated\""));
+            assert!(completed_json.contains("\"name\":\"manually_resolved\""));
+            assert!(completed_json.contains("\"name\":\"failed_without_acdc_claim\""));
             assert!(completed_json.contains("\"name\":\"terminal_error\""));
+        }
+
+        #[test]
+        fn saga_projection_type_tags_are_stable() {
+            assert_eq!(
+                ManualResolutionOutcome::ConfirmRemediated.as_str(),
+                "confirm_remediated"
+            );
+            assert_eq!(
+                ManualResolutionOutcome::FailWithoutAcdcClaim.as_str(),
+                "fail_without_acdc_claim"
+            );
+
+            let modes = [
+                (RunMode::Forward, "forward"),
+                (RunMode::Remediating, "remediating"),
+                (RunMode::ManualBlocked, "manual_blocked"),
+                (RunMode::Completed, "completed"),
+                (RunMode::Compensated, "compensated"),
+                (RunMode::ManuallyResolved, "manually_resolved"),
+                (RunMode::FailedWithoutAcdcClaim, "failed_without_acdc_claim"),
+            ];
+            for (mode, tag) in modes {
+                assert_eq!(mode.as_str(), tag);
+            }
         }
 
         #[test]
