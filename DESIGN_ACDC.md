@@ -1,6 +1,8 @@
 # DESIGN: certified saga remediation policy for MFM
 
-Status: draft design note for review and iteration.
+Status: design-exploration record. The v1 scope and decisions formerly resolved here are
+superseded by `RFC_ACDC_SAGA.md`; where the two disagree, the RFC wins. Sketches in this document
+are design pressure for later slices, not current implementation contract.
 
 Companion problem statement: `PROBLEM_ACDC.md`.
 
@@ -558,54 +560,7 @@ Avoid initially:
 If the first vertical slice can reuse existing `ApplySideEffect` nodes as remediation nodes, most
 new work stays in spec, certification, runtime, store, replay, and docs.
 
-## Smallest Vertical Slice
+## V1 Scope
 
-The first implementation target should be deliberately narrow:
-
-1. Add certified `RemediationPolicySpec` with `FailWithoutAcdcClaim`, `ManualResolution`, and
-   `CompensateCompleted` directives.
-2. Let a forward `ApplySideEffect` node link to one dormant remediation `ApplySideEffect` node,
-   using a first-class remediation ledger purpose and obligation id.
-3. Add durable run modes for `Forward`, `Remediating`, `ManualBlocked`, `Compensated`, and
-   `FailedWithoutAcdcClaim`.
-4. Add append-only obligation open/closed, manual-resolution, resource-evidence, and terminal
-   resolution events and projections.
-5. Runtime enters `Remediating` after non-retryable failure following at least one confirmed
-   side-effect obligation.
-6. Runtime schedules linked remediation nodes in reverse dependency order.
-7. Replay indexes and verifies remediation events without live transports.
-8. Public status reports unresolved obligations.
-9. Add a minimal resource-claim contract with `Exclusive`, `ExactTouchedSet`, and `ManualOnly`.
-10. Tests cover one confirmed side effect followed by later failure, compensation crash-resume,
-    manual resolution, replay of compensated evidence, one resource-conflict sequencing case, and
-    one phantom-prone touched-set case.
-
-This would not be the full AC/DC story. It would cross the architectural boundary from durable
-forward execution to durable platform-owned saga remediation, with scoped stronger claims only for
-the tested proof classes.
-
-## Resolved V1 Design Decisions
-
-- `RemediationPolicySpec` lives directly under `TypedExecutionSpec` as hash-defining certified
-  runtime authority.
-- Failure directives and resource-claim decisions are run-level policy. State and adapter contracts
-  declare derivation and evidence capabilities.
-- Remediation uses one certified spec with forward and remediation frontiers. Remediation-only nodes
-  are normal certified nodes that the forward scheduler cannot run.
-- V1 reuses `ApplySideEffect` for remediation and adds persisted ledger purpose/linkage instead of a
-  new `ApplyCompensation` effect class.
-- Remediation control events are minimal; submission/receipt/confirmation/ambiguity/failure stay in
-  the side-effect event protocol with ledger purpose.
-- Manual resolution is a typed protocol with certified allowed outcomes, reason codes, operator
-  identity reference, evidence artifact, and redaction policy.
-- Framework-verifiable v1 correctness is limited to MFM-owned serialization, concrete-key
-  `Exclusive` claims, obligation linkage, once-only progression, reverse-order remediation
-  scheduling, and evidence presence/hash/schema checks.
-- Domain correctness that depends on external truth requires a certified replay verifier or degrades
-  to `ManualOnly`/`FailWithoutAcdcClaim`.
-- Continuations are child runs linked by append-only parent events. Child terminal evidence resolves
-  the parent obligation; child runs do not mutate parent history.
-- Irreversible boundaries are both state/adapter metadata and run policy. Certification rejects
-  compensation claims across them without replay-verifiable proof.
-- Public status should move to semantic `RunMode`; old coarse run state can remain an internal store
-  precondition helper.
+V1 scope, frozen decisions, semantic rules, and the implementation slice are defined in
+`RFC_ACDC_SAGA.md`.
