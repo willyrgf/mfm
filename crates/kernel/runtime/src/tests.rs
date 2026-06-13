@@ -4705,6 +4705,200 @@ async fn runtime_remediates_confirmed_forward_ledgers_in_reverse_confirmation_or
 }
 
 #[tokio::test]
+async fn runtime_compensated_saga_resume_boundaries_do_not_duplicate_mutations() {
+    let fixture = fixture_with_two_side_effects_and_failing_tail();
+    let forward_a = node_by_output(&fixture, &fixture.cell_a).clone();
+    let forward_b = node_by_output(&fixture, &fixture.cell_b).clone();
+    let remediation_a = fixture
+        .runtime_spec
+        .spec()
+        .remediations
+        .get(&forward_a.node_id)
+        .expect("remediation a")
+        .clone();
+    let remediation_b = fixture
+        .runtime_spec
+        .spec()
+        .remediations
+        .get(&forward_b.node_id)
+        .expect("remediation b")
+        .clone();
+    let failure_node = node_by_output(
+        &fixture,
+        fixture.cell_c.as_ref().expect("failing output cell"),
+    )
+    .clone();
+    let mut scheduler = compensated_saga_scheduler(&fixture);
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+
+    drive_until_side_effect_confirmation_without_output(
+        &scheduler,
+        &mut store,
+        &fixture,
+        &forward_a,
+        &fixture.cell_a,
+        "forward a confirmation before output",
+    )
+    .await;
+    assert_no_duplicate_side_effect_submissions(&store, &fixture.run_id);
+
+    scheduler = compensated_saga_scheduler(&fixture);
+    drive_until_cells_terminal(
+        &scheduler,
+        &mut store,
+        &fixture,
+        &[fixture.cell_a.clone(), fixture.cell_b.clone()],
+        "forward outputs",
+    )
+    .await;
+    assert_no_duplicate_side_effect_submissions(&store, &fixture.run_id);
+    let forward_a_ledger = forward_ledger_for_node(store.projection_snapshot(), &forward_a.node_id);
+    let forward_b_ledger = forward_ledger_for_node(store.projection_snapshot(), &forward_b.node_id);
+
+    let failure_attempt = append_attempt_start(&mut store, &fixture, &failure_node, 1);
+    append_attempt_failure(&mut store, &fixture, &failure_node, &failure_attempt, false);
+    let saga = store
+        .projection_snapshot()
+        .derive_saga_projection(&fixture.run_id, &fixture.runtime_spec.spec().saga);
+    assert_eq!(saga.run_mode, store::RunMode::Remediating);
+    assert_eq!(saga.obligations.len(), 2);
+
+    scheduler = compensated_saga_scheduler(&fixture);
+    assert_no_duplicate_side_effect_submissions(&store, &fixture.run_id);
+    drive_until_remediation_phase(
+        &scheduler,
+        &mut store,
+        &fixture,
+        &forward_b_ledger,
+        RemediationPhaseCheckpoint::SubmissionObserved,
+        "first remedial submission",
+    )
+    .await;
+    assert_no_duplicate_side_effect_submissions(&store, &fixture.run_id);
+
+    scheduler = compensated_saga_scheduler(&fixture);
+    drive_until_remediation_phase(
+        &scheduler,
+        &mut store,
+        &fixture,
+        &forward_b_ledger,
+        RemediationPhaseCheckpoint::ConfirmationObserved,
+        "first remedial confirmation",
+    )
+    .await;
+    assert!(store
+        .projection_snapshot()
+        .cell_terminal(&remediation_b.output_cell)
+        .is_none());
+    assert_no_duplicate_side_effect_submissions(&store, &fixture.run_id);
+
+    scheduler = compensated_saga_scheduler(&fixture);
+    drive_until_cells_terminal(
+        &scheduler,
+        &mut store,
+        &fixture,
+        &[remediation_b.output_cell.clone()],
+        "first remedial output",
+    )
+    .await;
+    assert_no_duplicate_side_effect_submissions(&store, &fixture.run_id);
+
+    drive_until_compensated_before_terminal(&scheduler, &mut store, &fixture).await;
+    assert!(matches!(
+        remediation_projection_for_forward_ledger(store.projection_snapshot(), &forward_a_ledger)
+            .expect("second remediation projection")
+            .phase,
+        store::SideEffectPhase::ConfirmationObserved { .. }
+    ));
+    assert!(store
+        .projection_snapshot()
+        .cell_terminal(&remediation_a.output_cell)
+        .is_none());
+    assert_no_duplicate_side_effect_submissions(&store, &fixture.run_id);
+
+    scheduler = compensated_saga_scheduler(&fixture);
+    drive_until_cells_terminal(
+        &scheduler,
+        &mut store,
+        &fixture,
+        &[remediation_a.output_cell.clone()],
+        "second remedial output",
+    )
+    .await;
+    assert!(store
+        .projection_snapshot()
+        .cell_terminal(&remediation_a.output_cell)
+        .is_some());
+    assert_no_duplicate_side_effect_submissions(&store, &fixture.run_id);
+    assert_eq!(
+        store
+            .projection_snapshot()
+            .derive_saga_projection(&fixture.run_id, &fixture.runtime_spec.spec().saga)
+            .run_mode,
+        store::RunMode::Compensated
+    );
+    assert_ne!(
+        store.projection_snapshot().run_state(&fixture.run_id),
+        store::RunState::Completed
+    );
+
+    scheduler = compensated_saga_scheduler(&fixture);
+    assert_eq!(
+        scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("resolve compensated terminal after resume"),
+        SchedulerStatus::Advanced
+    );
+    assert_eq!(
+        store.projection_snapshot().run_state(&fixture.run_id),
+        store::RunState::Completed
+    );
+    assert!(matches!(
+        store
+            .projection_snapshot()
+            .run_completion(&fixture.run_id)
+            .expect("run completion")
+            .outcome,
+        events::RunCompletionOutcome::Compensated
+    ));
+    assert_eq!(
+        scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("completed compensated run"),
+        SchedulerStatus::PublicOutputProjected
+    );
+
+    assert_eq!(
+        remediation_intent_forward_links(&store, &fixture.run_id),
+        vec![forward_b_ledger.clone(), forward_a_ledger.clone()]
+    );
+    for forward_ledger in [&forward_a_ledger, &forward_b_ledger] {
+        assert_eq!(
+            side_effect_submission_count_for_ledger(&store, &fixture.run_id, forward_ledger),
+            1
+        );
+        assert_eq!(
+            remediation_submission_count_for_forward_ledger(
+                &store,
+                &fixture.run_id,
+                forward_ledger
+            ),
+            1
+        );
+    }
+}
+
+#[tokio::test]
 async fn runtime_resolves_clean_failure_without_acdc_claim() {
     let fixture = fixture();
     let failure_node = node_by_output(&fixture, &fixture.cell_a).clone();
@@ -8178,6 +8372,35 @@ fn registered_two_side_effect_runners_with(
     registry
 }
 
+fn compensated_saga_scheduler(fixture: &Fixture) -> SerialTypedScheduler {
+    let mut registry = ErasedRunnerRegistry::new();
+    registry
+        .register(binding(
+            fixture.descriptor_a.clone(),
+            "sidefx",
+            DeterministicSideEffectRunner::new(fixture),
+        ))
+        .expect("binding forward a");
+    registry
+        .register(binding(
+            fixture.descriptor_b.clone(),
+            "sidefx",
+            DeterministicSideEffectRunner::new(fixture),
+        ))
+        .expect("binding forward b");
+    registry
+        .register(binding(
+            fixture
+                .descriptor_c
+                .clone()
+                .expect("failing node descriptor"),
+            "fail",
+            BlockingRunner,
+        ))
+        .expect("binding failure node");
+    test_scheduler(registry)
+}
+
 fn binding<R: ErasedNodeRunner + 'static>(
     descriptor_id: DescriptorId,
     factory: &str,
@@ -10259,6 +10482,42 @@ fn side_effect_projection_for_run_node<'a>(
     })
 }
 
+async fn drive_until_side_effect_confirmation_without_output(
+    scheduler: &SerialTypedScheduler,
+    store: &mut store::InMemoryTypedRunStore,
+    fixture: &Fixture,
+    node: &spec::NodeSpec,
+    output_cell: &CellId,
+    context: &str,
+) {
+    for _ in 0..8 {
+        assert_eq!(
+            scheduler
+                .drive_once(store, &fixture.runtime_spec, &fixture.run_id)
+                .await
+                .expect(context),
+            SchedulerStatus::Advanced
+        );
+        if side_effect_projection_for_run_node(
+            store.projection_snapshot(),
+            &fixture.run_id,
+            &node.node_id,
+        )
+        .is_some_and(|projection| {
+            matches!(
+                projection.phase,
+                store::SideEffectPhase::ConfirmationObserved { .. }
+            ) && store
+                .projection_snapshot()
+                .cell_terminal(output_cell)
+                .is_none()
+        }) {
+            return;
+        }
+    }
+    panic!("{context} was not reached");
+}
+
 async fn drive_side_effect_to_confirmation(
     scheduler: &SerialTypedScheduler,
     store: &mut store::InMemoryTypedRunStore,
@@ -10293,6 +10552,102 @@ async fn drive_side_effect_to_confirmation(
     );
 }
 
+async fn drive_until_cells_terminal(
+    scheduler: &SerialTypedScheduler,
+    store: &mut store::InMemoryTypedRunStore,
+    fixture: &Fixture,
+    cells: &[CellId],
+    context: &str,
+) {
+    for _ in 0..24 {
+        if cells
+            .iter()
+            .all(|cell| store.projection_snapshot().cell_terminal(cell).is_some())
+        {
+            return;
+        }
+        assert_eq!(
+            scheduler
+                .drive_once(store, &fixture.runtime_spec, &fixture.run_id)
+                .await
+                .expect(context),
+            SchedulerStatus::Advanced
+        );
+    }
+    panic!("{context} did not become terminal");
+}
+
+#[derive(Clone, Copy)]
+enum RemediationPhaseCheckpoint {
+    SubmissionObserved,
+    ConfirmationObserved,
+}
+
+async fn drive_until_remediation_phase(
+    scheduler: &SerialTypedScheduler,
+    store: &mut store::InMemoryTypedRunStore,
+    fixture: &Fixture,
+    forward_ledger_key: &events::SideEffectLedgerKey,
+    checkpoint: RemediationPhaseCheckpoint,
+    context: &str,
+) {
+    for _ in 0..8 {
+        assert_eq!(
+            scheduler
+                .drive_once(store, &fixture.runtime_spec, &fixture.run_id)
+                .await
+                .expect(context),
+            SchedulerStatus::Advanced
+        );
+        if remediation_projection_for_forward_ledger(
+            store.projection_snapshot(),
+            forward_ledger_key,
+        )
+        .is_some_and(|projection| match checkpoint {
+            RemediationPhaseCheckpoint::SubmissionObserved => {
+                matches!(
+                    projection.phase,
+                    store::SideEffectPhase::SubmissionObserved { .. }
+                )
+            }
+            RemediationPhaseCheckpoint::ConfirmationObserved => {
+                matches!(
+                    projection.phase,
+                    store::SideEffectPhase::ConfirmationObserved { .. }
+                )
+            }
+        }) {
+            return;
+        }
+    }
+    panic!("{context} was not reached");
+}
+
+async fn drive_until_compensated_before_terminal(
+    scheduler: &SerialTypedScheduler,
+    store: &mut store::InMemoryTypedRunStore,
+    fixture: &Fixture,
+) {
+    for _ in 0..24 {
+        let saga = store
+            .projection_snapshot()
+            .derive_saga_projection(&fixture.run_id, &fixture.runtime_spec.spec().saga);
+        if saga.run_mode == store::RunMode::Compensated
+            && store.projection_snapshot().run_state(&fixture.run_id) != store::RunState::Completed
+        {
+            return;
+        }
+        assert_eq!(
+            scheduler
+                .drive_once(store, &fixture.runtime_spec, &fixture.run_id)
+                .await
+                .expect("drive until compensated before terminal"),
+            SchedulerStatus::Advanced
+        );
+    }
+    panic!("compensated pre-terminal boundary was not reached");
+}
+
 fn remediation_intent_forward_links(
     store: &store::InMemoryTypedRunStore,
     run_id: &RunId,
@@ -10312,6 +10667,98 @@ fn remediation_intent_forward_links(
             _ => None,
         })
         .collect()
+}
+
+fn remediation_projection_for_forward_ledger<'a>(
+    projections: &'a store::ProjectionSnapshot,
+    forward_ledger_key: &events::SideEffectLedgerKey,
+) -> Option<&'a store::SideEffectProjection> {
+    projections.side_effects().find_map(|(_, projection)| {
+        matches!(
+            &projection.ledger_purpose,
+            events::SideEffectLedgerPurpose::Remediation {
+                forward_ledger_key: linked
+            } if linked == forward_ledger_key
+        )
+        .then_some(projection)
+    })
+}
+
+fn assert_no_duplicate_side_effect_submissions(
+    store: &store::InMemoryTypedRunStore,
+    run_id: &RunId,
+) {
+    let mut by_ledger = BTreeMap::<events::SideEffectLedgerKey, usize>::new();
+    let mut forward_by_node = BTreeMap::<NodeId, usize>::new();
+    let mut remediation_by_forward = BTreeMap::<events::SideEffectLedgerKey, usize>::new();
+    for event in store.load_run_stream(run_id) {
+        if let events::KernelEventPayload::SideEffectSubmissionObserved(payload) = event.payload() {
+            *by_ledger.entry(payload.ledger_key.clone()).or_default() += 1;
+            match &payload.ledger_purpose {
+                events::SideEffectLedgerPurpose::Forward => {
+                    *forward_by_node.entry(payload.node_id.clone()).or_default() += 1;
+                }
+                events::SideEffectLedgerPurpose::Remediation { forward_ledger_key } => {
+                    *remediation_by_forward
+                        .entry(forward_ledger_key.clone())
+                        .or_default() += 1;
+                }
+            }
+        }
+    }
+    for (ledger, count) in by_ledger {
+        assert_eq!(count, 1, "duplicate submission for ledger {ledger}");
+    }
+    for (node, count) in forward_by_node {
+        assert_eq!(count, 1, "duplicate forward submission for node {node}");
+    }
+    for (forward_ledger, count) in remediation_by_forward {
+        assert_eq!(
+            count, 1,
+            "duplicate remediation submission for forward ledger {forward_ledger}"
+        );
+    }
+}
+
+fn side_effect_submission_count_for_ledger(
+    store: &store::InMemoryTypedRunStore,
+    run_id: &RunId,
+    ledger_key: &events::SideEffectLedgerKey,
+) -> usize {
+    store
+        .load_run_stream(run_id)
+        .iter()
+        .filter(|event| {
+            matches!(
+                event.payload(),
+                events::KernelEventPayload::SideEffectSubmissionObserved(payload)
+                    if &payload.ledger_key == ledger_key
+            )
+        })
+        .count()
+}
+
+fn remediation_submission_count_for_forward_ledger(
+    store: &store::InMemoryTypedRunStore,
+    run_id: &RunId,
+    forward_ledger_key: &events::SideEffectLedgerKey,
+) -> usize {
+    store
+        .load_run_stream(run_id)
+        .iter()
+        .filter(|event| {
+            matches!(
+                event.payload(),
+                events::KernelEventPayload::SideEffectSubmissionObserved(payload)
+                    if matches!(
+                        &payload.ledger_purpose,
+                        events::SideEffectLedgerPurpose::Remediation {
+                            forward_ledger_key: linked
+                        } if linked == forward_ledger_key
+                    )
+            )
+        })
+        .count()
 }
 
 fn side_effect_fixture_digest(ctx: &ErasedRunCtx<'_>, role: &str) -> ContentDigest {
