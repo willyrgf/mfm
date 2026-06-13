@@ -15,7 +15,7 @@ use mfm_ids::{
 };
 use mfm_spec::v1::{
     CanonicalizerIdentity, CellProducer, DescriptorIdentity, MediaType, PublicFieldPath,
-    ValueLineageRef,
+    ResourceNamespace, ValueLineageRef,
 };
 
 /// Result type for typed kernel event helpers.
@@ -200,6 +200,11 @@ pub mod v1 {
         "side effect ledger key"
     );
     checked_string_type!(
+        /// Resource key recorded for an exclusive cross-run lane.
+        ResourceKey,
+        "resource key"
+    );
+    checked_string_type!(
         /// Runner invocation identity.
         RunnerInvocationId,
         "runner invocation id"
@@ -229,6 +234,30 @@ pub mod v1 {
         ManualResolutionNote,
         "manual resolution note"
     );
+
+    /// Typed evidence for an exclusive resource lane key.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct ResourceKeyEvidence {
+        /// Resource namespace.
+        pub namespace: ResourceNamespace,
+        /// Schema id for the typed key evidence.
+        pub key_schema_id: SchemaId,
+        /// Store-comparable resource key.
+        pub key: ResourceKey,
+    }
+
+    /// Typed evidence for an exact touched resource set.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct ResourceTouchedSetEvidence {
+        /// Resource namespace.
+        pub namespace: ResourceNamespace,
+        /// Schema id for the typed touched-set evidence.
+        pub evidence_schema_id: SchemaId,
+        /// Canonical touched-set evidence hash.
+        pub evidence_hash: ContentDigest,
+        /// Touched-set evidence artifact id.
+        pub evidence_artifact_id: ArtifactId,
+    }
 
     /// Persisted purpose for a side-effect ledger.
     ///
@@ -1038,6 +1067,8 @@ pub mod v1 {
             pub prepared_artifact_id: Option<ArtifactId>,
             /// Optional prepared artifact hash.
             pub prepared_hash: Option<ContentDigest>,
+            /// Optional exclusive resource lane key evidence.
+            pub resource_key: Option<ResourceKeyEvidence>,
         }
 
         /// Side-effect invocation started event payload.
@@ -1155,6 +1186,8 @@ pub mod v1 {
             pub receipt_artifact_id: ArtifactId,
             /// Replay verifier id.
             pub replay_verifier_id: ReplayVerifierId,
+            /// Optional exact touched-set evidence.
+            pub resource_touched_set: Option<ResourceTouchedSetEvidence>,
         }
 
         /// Side-effect confirmation observed event payload.
@@ -1180,6 +1213,8 @@ pub mod v1 {
             pub confirmation_artifact_id: ArtifactId,
             /// Replay verifier id.
             pub replay_verifier_id: ReplayVerifierId,
+            /// Optional exact touched-set evidence.
+            pub resource_touched_set: Option<ResourceTouchedSetEvidence>,
         }
 
         /// Side-effect ambiguous event payload.
@@ -1307,6 +1342,15 @@ pub mod v1 {
         })
     }
 
+    fn resource_namespace_type() -> serde_json::Value {
+        serde_json::json!({
+            "kind": "checked_resource_namespace",
+            "name": "ResourceNamespace",
+            "persisted_as": "string",
+            "segment_charset": "ascii_lower_digit_underscore_dash_dot",
+        })
+    }
+
     fn mfm_identity_type(type_name: &'static str) -> serde_json::Value {
         serde_json::json!({
             "kind": "mfm_ids_identity",
@@ -1385,6 +1429,7 @@ pub mod v1 {
                 checked_token_type(type_name)
             }
             "PublicFieldPath" => public_field_path_type(),
+            "ResourceNamespace" => resource_namespace_type(),
             "RendererKind" => checked_author_key_type(type_name),
             "FrameworkVersion"
             | "SourceRevision"
@@ -1395,6 +1440,7 @@ pub mod v1 {
             | "NixOutputHash"
             | "FactKey"
             | "SideEffectLedgerKey"
+            | "ResourceKey"
             | "RunnerInvocationId"
             | "IdempotencyKeyRef"
             | "ReplayVerifierId"
@@ -1672,6 +1718,43 @@ pub mod v1 {
                     "public_output",
                     "redacted_diagnostic",
                     "retention_manifest",
+                ],
+            ),
+            "ResourceKeyEvidence" => struct_type(
+                "ResourceKeyEvidence",
+                vec![
+                    schema_field(
+                        "namespace",
+                        "ResourceNamespace",
+                        EventFieldCardinality::Required,
+                    ),
+                    schema_field("key_schema_id", "SchemaId", EventFieldCardinality::Required),
+                    schema_field("key", "ResourceKey", EventFieldCardinality::Required),
+                ],
+            ),
+            "ResourceTouchedSetEvidence" => struct_type(
+                "ResourceTouchedSetEvidence",
+                vec![
+                    schema_field(
+                        "namespace",
+                        "ResourceNamespace",
+                        EventFieldCardinality::Required,
+                    ),
+                    schema_field(
+                        "evidence_schema_id",
+                        "SchemaId",
+                        EventFieldCardinality::Required,
+                    ),
+                    schema_field(
+                        "evidence_hash",
+                        "ContentDigest",
+                        EventFieldCardinality::Required,
+                    ),
+                    schema_field(
+                        "evidence_artifact_id",
+                        "ArtifactId",
+                        EventFieldCardinality::Required,
+                    ),
                 ],
             ),
             "NamedTypedCellRef" => struct_type(
@@ -2164,6 +2247,7 @@ pub mod v1 {
             EventFieldDescriptor::required("claim_fencing_token", "ClaimFencingToken"),
             EventFieldDescriptor::optional("prepared_artifact_id", "ArtifactId"),
             EventFieldDescriptor::optional("prepared_hash", "ContentDigest"),
+            EventFieldDescriptor::optional("resource_key", "ResourceKeyEvidence"),
         ],
     };
 
@@ -2250,6 +2334,7 @@ pub mod v1 {
             EventFieldDescriptor::required("receipt_hash", "ContentDigest"),
             EventFieldDescriptor::required("receipt_artifact_id", "ArtifactId"),
             EventFieldDescriptor::required("replay_verifier_id", "ReplayVerifierId"),
+            EventFieldDescriptor::optional("resource_touched_set", "ResourceTouchedSetEvidence",),
         ],
     };
 
@@ -2268,6 +2353,7 @@ pub mod v1 {
             EventFieldDescriptor::required("confirmation_hash", "ContentDigest"),
             EventFieldDescriptor::required("confirmation_artifact_id", "ArtifactId"),
             EventFieldDescriptor::required("replay_verifier_id", "ReplayVerifierId"),
+            EventFieldDescriptor::optional("resource_touched_set", "ResourceTouchedSetEvidence",),
         ],
     };
 
@@ -2448,13 +2534,13 @@ mfm_events::v1::CellSkipped schema:mfm.events.v1.cell_skipped:1:sha256-jcs-v1:e8
 mfm_events::v1::side_effect::IntentPersisted schema:mfm.events.v1.side_effect.intent_persisted:1:sha256-jcs-v1:d2f3042ed5189e6e5081b781b205886e3c7d469e4cadb0fa4a61e460926c7cce\n\
 mfm_events::v1::side_effect::Claimed schema:mfm.events.v1.side_effect.claimed:1:sha256-jcs-v1:264b474d74a9349bbc1b126e0c13ec3b29ec63124d54db6925fa41e2a7e8ef78\n\
 mfm_events::v1::side_effect::ClaimTakenOver schema:mfm.events.v1.side_effect.claim_taken_over:1:sha256-jcs-v1:358052910361a392a93a34fbb8bcccfd3edde420caa19289e1cd6136a7421a9f\n\
-mfm_events::v1::side_effect::InvocationPrepared schema:mfm.events.v1.side_effect.invocation_prepared:1:sha256-jcs-v1:61bc9acea0ae7ead8d31d8a752a5b02ecc6e6c4d0f4118dfef25a21f8dd5c82c\n\
+mfm_events::v1::side_effect::InvocationPrepared schema:mfm.events.v1.side_effect.invocation_prepared:1:sha256-jcs-v1:11e7ee2739d17eea6fa1957d3da20db6eec8a58e15990c5193ba4f532af57f59\n\
 mfm_events::v1::side_effect::InvocationStarted schema:mfm.events.v1.side_effect.invocation_started:1:sha256-jcs-v1:51cbcca15a2cd022b87a78b71e7652f2928e3dcb011f47312cb5becaa8729002\n\
 mfm_events::v1::side_effect::NotSubmittedProven schema:mfm.events.v1.side_effect.not_submitted_proven:1:sha256-jcs-v1:795bf7a92342608ce42e42335ab318b060fce28353e4bf91ca56dda72d4da0f7\n\
 mfm_events::v1::side_effect::SubmissionObserved schema:mfm.events.v1.side_effect.submission_observed:1:sha256-jcs-v1:08c47a5f1a00a0052bdc66fdbf6273eb6dd39670ee7936b9e68c982fa333c714\n\
 mfm_events::v1::side_effect::SubmissionUnknown schema:mfm.events.v1.side_effect.submission_unknown:1:sha256-jcs-v1:ed336ca8c53f4567a1f63f8d911fc82526fb59669f5f8db68ac2745ce1f67ddb\n\
-mfm_events::v1::side_effect::ReceiptObserved schema:mfm.events.v1.side_effect.receipt_observed:1:sha256-jcs-v1:6fde665b12d208b0a016a11325650914918a98ad551053ffcab744e9b119c4cf\n\
-mfm_events::v1::side_effect::ConfirmationObserved schema:mfm.events.v1.side_effect.confirmation_observed:1:sha256-jcs-v1:ad50824f37c77ce4ffceddbb4cb84318439a09a6cb0b76e1424e5957b4ab1847\n\
+mfm_events::v1::side_effect::ReceiptObserved schema:mfm.events.v1.side_effect.receipt_observed:1:sha256-jcs-v1:e8b248201bbd212aa5eeb8a2a6f44cb4bd245b11104fd139d2948d3725fe3450\n\
+mfm_events::v1::side_effect::ConfirmationObserved schema:mfm.events.v1.side_effect.confirmation_observed:1:sha256-jcs-v1:c6bc63539dd02ff1ea441f8313014a8d537f51504ea3ed827fc8c97a5654c601\n\
 mfm_events::v1::side_effect::Ambiguous schema:mfm.events.v1.side_effect.ambiguous:1:sha256-jcs-v1:dfc9030e0d4fbbeb1800317623cecea3fbb1256c5a1b5d0e272bcda5fa4ef823\n\
 mfm_events::v1::side_effect::Failed schema:mfm.events.v1.side_effect.failed:1:sha256-jcs-v1:a42114700400f3a2e13ac86dc432b485299557a62138093134643970ba36d864\n\
 mfm_events::v1::PublicOutputProduced schema:mfm.events.v1.public_output_produced:1:sha256-jcs-v1:00d2531467818398553aa59e62c034fa0cd054e7856b89f425aeb4510f9c6776\n\

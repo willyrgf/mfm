@@ -2721,6 +2721,7 @@ pub mod v1 {
                             .expect("token"),
                             prepared_artifact_id: None,
                             prepared_hash: None,
+                            resource_key: None,
                         },
                     ),
                     KernelEventPayload::SideEffectInvocationStarted(
@@ -2771,6 +2772,7 @@ pub mod v1 {
                         receipt_artifact_id: remediation_receipt_artifact.clone(),
                         replay_verifier_id: events::ReplayVerifierId::new("verifier-1")
                             .expect("verifier"),
+                        resource_touched_set: None,
                     }),
                     KernelEventPayload::SideEffectConfirmationObserved(
                         side_effect::ConfirmationObserved {
@@ -2785,6 +2787,7 @@ pub mod v1 {
                             confirmation_artifact_id: remediation_confirmation_artifact.clone(),
                             replay_verifier_id: events::ReplayVerifierId::new("verifier-1")
                                 .expect("verifier"),
+                            resource_touched_set: None,
                         },
                     ),
                 ],
@@ -3583,6 +3586,7 @@ pub mod v1 {
                                     .expect("token"),
                                 prepared_artifact_id: None,
                                 prepared_hash: None,
+                                resource_key: None,
                             },
                         ),
                         KernelEventPayload::SideEffectInvocationStarted(
@@ -3642,6 +3646,7 @@ pub mod v1 {
                                 receipt_artifact_id: receipt_artifact.clone(),
                                 replay_verifier_id: events::ReplayVerifierId::new("verifier-1")
                                     .expect("verifier"),
+                                resource_touched_set: None,
                             },
                         ),
                         KernelEventPayload::SideEffectConfirmationObserved(
@@ -3657,6 +3662,7 @@ pub mod v1 {
                                 confirmation_artifact_id: confirmation_artifact.clone(),
                                 replay_verifier_id: events::ReplayVerifierId::new("verifier-1")
                                     .expect("verifier"),
+                                resource_touched_set: None,
                             },
                         ),
                     ],
@@ -3760,9 +3766,11 @@ pub mod v1 {
                         adapter_version: self.adapter_version.clone(),
                     },
                     prepared_invocation: None,
+                    resource_key: None,
                     submission: None,
                     receipt: None,
                     confirmation: None,
+                    resource_touched_set: None,
                     claim: None,
                     phase,
                 }

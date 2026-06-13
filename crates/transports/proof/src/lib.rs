@@ -285,6 +285,7 @@ async fn side_effect_prepare(
                 claim_fencing_token: token.clone(),
                 prepared_artifact_id: None,
                 prepared_hash: None,
+                resource_key: None,
             }),
             RunnerEventPayload::SideEffectInvocationStarted(side_effect::InvocationStarted {
                 spec_hash: ctx.spec_hash().clone(),
@@ -361,6 +362,7 @@ async fn side_effect_receipt(
                 receipt_hash: artifact.evidence.digest,
                 receipt_artifact_id: artifact.evidence.artifact_id,
                 replay_verifier_id: replay_verifier_id()?,
+                resource_touched_set: None,
             },
         )],
     })
@@ -395,6 +397,7 @@ async fn side_effect_confirmation(
                 confirmation_hash: artifact.evidence.digest,
                 confirmation_artifact_id: artifact.evidence.artifact_id,
                 replay_verifier_id: replay_verifier_id()?,
+                resource_touched_set: None,
             },
         )],
     })

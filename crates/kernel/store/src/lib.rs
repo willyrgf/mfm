@@ -32,8 +32,8 @@ pub mod v1 {
     use mfm_spec::v1::{
         CanonicalizerIdentity, CellProducer, DescriptorIdentity, MediaType,
         OperationDescriptorIdentity, PublicFieldPath, RemediationUnresolvedSpec,
-        RendererDescriptorIdentity, RendererKind, RendererVersion, SagaPolicySpec,
-        StateDescriptorIdentity, ValueLineageRef,
+        RendererDescriptorIdentity, RendererKind, RendererVersion, ResourceNamespace,
+        SagaPolicySpec, StateDescriptorIdentity, ValueLineageRef,
     };
 
     /// Result type for typed store helpers.
@@ -1072,16 +1072,58 @@ pub mod v1 {
         pub intent: SideEffectIntentProjection,
         /// Prepared invocation artifact evidence, when one has been recorded.
         pub prepared_invocation: Option<SideEffectArtifactProjection>,
+        /// Exclusive resource key evidence recorded at invocation preparation.
+        pub resource_key: Option<events::ResourceKeyEvidence>,
         /// Submission artifact evidence, when one has been recorded.
         pub submission: Option<SideEffectArtifactProjection>,
         /// Receipt artifact evidence, when one has been recorded.
         pub receipt: Option<SideEffectArtifactProjection>,
         /// Confirmation artifact evidence, when one has been recorded.
         pub confirmation: Option<SideEffectArtifactProjection>,
+        /// Exact touched-set evidence recorded on receipt or confirmation.
+        pub resource_touched_set: Option<events::ResourceTouchedSetEvidence>,
         /// Active claim, when one exists.
         pub claim: Option<SideEffectClaimProjection>,
         /// Current projected phase.
         pub phase: SideEffectPhase,
+    }
+
+    /// Cross-run resource lane key derived from resource key evidence.
+    #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub struct ResourceLaneKey {
+        /// Resource namespace.
+        pub namespace: ResourceNamespace,
+        /// Store-comparable resource key.
+        pub key: events::ResourceKey,
+    }
+
+    impl ResourceLaneKey {
+        /// Creates a lane key from typed resource key evidence.
+        pub fn from_evidence(evidence: &events::ResourceKeyEvidence) -> Self {
+            Self {
+                namespace: evidence.namespace.clone(),
+                key: evidence.key.clone(),
+            }
+        }
+    }
+
+    /// Active holder for an exclusive resource lane.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct ResourceLaneProjection {
+        /// Store event id that acquired or refreshed the lane.
+        pub event_id: EventId,
+        /// Run id holding the lane.
+        pub run_id: RunId,
+        /// Ledger holding the lane.
+        pub ledger_key: events::SideEffectLedgerKey,
+        /// Ledger purpose.
+        pub ledger_purpose: events::SideEffectLedgerPurpose,
+        /// Node id that prepared the invocation.
+        pub node_id: NodeId,
+        /// Attempt id that prepared the invocation.
+        pub attempt_id: AttemptId,
+        /// Invocation epoch that prepared the invocation.
+        pub invocation_epoch: u32,
     }
 
     /// Side-effect artifact evidence retained by the projection.
@@ -1461,6 +1503,7 @@ pub mod v1 {
         cells: BTreeMap<CellId, CellTerminalProjection>,
         facts: BTreeMap<(NodeId, AttemptId, events::FactKey), FactProjection>,
         side_effects: BTreeMap<events::SideEffectLedgerKey, SideEffectProjection>,
+        resource_lanes: BTreeMap<ResourceLaneKey, ResourceLaneProjection>,
         public_outputs: BTreeMap<SchemaId, PublicOutputProjection>,
         retentions: BTreeMap<RunId, RetentionProjection>,
     }
@@ -1485,6 +1528,7 @@ pub mod v1 {
                 cells,
                 facts,
                 side_effects,
+                resource_lanes: BTreeMap::new(),
                 public_outputs,
                 retentions,
             }
@@ -1512,6 +1556,37 @@ pub mod v1 {
                 cells,
                 facts,
                 side_effects,
+                resource_lanes: BTreeMap::new(),
+                public_outputs,
+                retentions,
+            }
+        }
+
+        /// Creates a projection snapshot from storage-owned maps, including resource lanes.
+        #[allow(clippy::too_many_arguments)]
+        pub fn from_parts_with_saga_and_resource_lanes(
+            run_states: BTreeMap<RunId, RunState>,
+            run_completions: BTreeMap<RunId, RunCompletionProjection>,
+            saga_engagements: BTreeMap<RunId, SagaEngagementProjection>,
+            manual_resolutions: BTreeMap<RunId, ManualResolutionProjection>,
+            attempts: BTreeMap<(NodeId, AttemptId), AttemptProjection>,
+            cells: BTreeMap<CellId, CellTerminalProjection>,
+            facts: BTreeMap<(NodeId, AttemptId, events::FactKey), FactProjection>,
+            side_effects: BTreeMap<events::SideEffectLedgerKey, SideEffectProjection>,
+            resource_lanes: BTreeMap<ResourceLaneKey, ResourceLaneProjection>,
+            public_outputs: BTreeMap<SchemaId, PublicOutputProjection>,
+            retentions: BTreeMap<RunId, RetentionProjection>,
+        ) -> Self {
+            Self {
+                run_states,
+                run_completions,
+                saga_engagements,
+                manual_resolutions,
+                attempts,
+                cells,
+                facts,
+                side_effects,
+                resource_lanes,
                 public_outputs,
                 retentions,
             }
@@ -1586,6 +1661,11 @@ pub mod v1 {
             ledger_key: &events::SideEffectLedgerKey,
         ) -> Option<&SideEffectProjection> {
             self.side_effects.get(ledger_key)
+        }
+
+        /// Returns an active resource lane holder.
+        pub fn resource_lane(&self, key: &ResourceLaneKey) -> Option<&ResourceLaneProjection> {
+            self.resource_lanes.get(key)
         }
 
         /// Returns a public-output projection.
@@ -1666,6 +1746,13 @@ pub mod v1 {
             &self,
         ) -> impl Iterator<Item = (&events::SideEffectLedgerKey, &SideEffectProjection)> {
             self.side_effects.iter()
+        }
+
+        /// Iterates active resource lane projections.
+        pub fn resource_lanes(
+            &self,
+        ) -> impl Iterator<Item = (&ResourceLaneKey, &ResourceLaneProjection)> {
+            self.resource_lanes.iter()
         }
 
         /// Iterates public-output projections.
@@ -3518,6 +3605,9 @@ pub mod v1 {
                     producer_seed_id: None,
                     artifact_role: Some(ArtifactRole::Receipt),
                 });
+                if let Some(touched_set) = &payload.resource_touched_set {
+                    push_resource_touched_set_requirement(&mut requirements, touched_set);
+                }
             }
             KernelEventPayload::SideEffectConfirmationObserved(payload) => {
                 requirements.push(ArtifactRequirement {
@@ -3531,6 +3621,9 @@ pub mod v1 {
                     producer_seed_id: None,
                     artifact_role: Some(ArtifactRole::Confirmation),
                 });
+                if let Some(touched_set) = &payload.resource_touched_set {
+                    push_resource_touched_set_requirement(&mut requirements, touched_set);
+                }
             }
             KernelEventPayload::SideEffectAmbiguous(payload) => {
                 requirements.push(ArtifactRequirement {
@@ -3622,6 +3715,23 @@ pub mod v1 {
         });
     }
 
+    fn push_resource_touched_set_requirement(
+        requirements: &mut Vec<ArtifactRequirement>,
+        evidence: &events::ResourceTouchedSetEvidence,
+    ) {
+        requirements.push(ArtifactRequirement {
+            artifact_id: evidence.evidence_artifact_id.clone(),
+            digest: Some(evidence.evidence_hash.clone()),
+            byte_len: None,
+            media_type: None,
+            schema_id: Some(evidence.evidence_schema_id.clone()),
+            semantic_type_id: None,
+            producer_node_id: None,
+            producer_seed_id: None,
+            artifact_role: None,
+        });
+    }
+
     fn cell_producer_artifact_owner(producer: &CellProducer) -> (Option<NodeId>, Option<SeedId>) {
         match producer {
             CellProducer::Node(node_id) => (Some(node_id.clone()), None),
@@ -3665,6 +3775,7 @@ pub mod v1 {
                         outcome: payload.outcome.clone(),
                     },
                 );
+                release_resource_lanes_for_run(projections, &payload.run_id);
             }
             KernelEventPayload::StateAttemptStarted(payload) => {
                 let key = (payload.node_id.clone(), payload.attempt_id.clone());
@@ -3813,9 +3924,11 @@ pub mod v1 {
                         event_id: envelope.event_id.clone(),
                         intent,
                         prepared_invocation: None,
+                        resource_key: None,
                         submission: None,
                         receipt: None,
                         confirmation: None,
+                        resource_touched_set: None,
                         claim: None,
                         phase: SideEffectPhase::IntentPersisted {
                             invocation_epoch: payload.invocation_epoch,
@@ -3906,9 +4019,11 @@ pub mod v1 {
                 let run_id = previous.run_id.clone();
                 let ledger_purpose = previous.ledger_purpose.clone();
                 let prepared_invocation = previous.prepared_invocation.clone();
+                let resource_key = previous.resource_key.clone();
                 let submission = previous.submission.clone();
                 let receipt = previous.receipt.clone();
                 let confirmation = previous.confirmation.clone();
+                let resource_touched_set = previous.resource_touched_set.clone();
                 let claim = SideEffectClaimProjection {
                     node_id: payload.node_id.clone(),
                     attempt_id: payload.attempt_id.clone(),
@@ -3926,9 +4041,11 @@ pub mod v1 {
                         event_id: envelope.event_id.clone(),
                         intent,
                         prepared_invocation,
+                        resource_key,
                         submission,
                         receipt,
                         confirmation,
+                        resource_touched_set,
                         claim: Some(claim),
                         phase: SideEffectPhase::Claimed {
                             claim_owner: payload.claim_owner.clone(),
@@ -3975,9 +4092,11 @@ pub mod v1 {
                 let run_id = previous.run_id.clone();
                 let ledger_purpose = previous.ledger_purpose.clone();
                 let prepared_invocation = previous.prepared_invocation.clone();
+                let resource_key = previous.resource_key.clone();
                 let submission = previous.submission.clone();
                 let receipt = previous.receipt.clone();
                 let confirmation = previous.confirmation.clone();
+                let resource_touched_set = previous.resource_touched_set.clone();
                 let claim = SideEffectClaimProjection {
                     node_id: payload.node_id.clone(),
                     attempt_id: payload.attempt_id.clone(),
@@ -3995,9 +4114,11 @@ pub mod v1 {
                         event_id: envelope.event_id.clone(),
                         intent,
                         prepared_invocation,
+                        resource_key,
                         submission,
                         receipt,
                         confirmation,
+                        resource_touched_set,
                         claim: Some(claim),
                         phase: SideEffectPhase::Claimed {
                             claim_owner: payload.new_claim_owner.clone(),
@@ -4054,9 +4175,16 @@ pub mod v1 {
                     &payload.ledger_key,
                 )?
                 .or_else(|| previous.prepared_invocation.clone());
+                let resource_key = payload
+                    .resource_key
+                    .clone()
+                    .or_else(|| previous.resource_key.clone());
                 let submission = previous.submission.clone();
                 let receipt = previous.receipt.clone();
                 let confirmation = previous.confirmation.clone();
+                let resource_touched_set = previous.resource_touched_set.clone();
+                let claim = claim.clone();
+                acquire_resource_lane(projections, envelope.run_id(), &envelope.event_id, payload)?;
                 projections.side_effects.insert(
                     payload.ledger_key.clone(),
                     SideEffectProjection {
@@ -4066,10 +4194,12 @@ pub mod v1 {
                         event_id: envelope.event_id.clone(),
                         intent,
                         prepared_invocation,
+                        resource_key,
                         submission,
                         receipt,
                         confirmation,
-                        claim: Some(claim.clone()),
+                        resource_touched_set,
+                        claim: Some(claim),
                         phase: SideEffectPhase::InvocationPrepared {
                             invocation_epoch: payload.invocation_epoch,
                             claim_generation: payload.claim_generation,
@@ -4121,9 +4251,11 @@ pub mod v1 {
                 let run_id = previous.run_id.clone();
                 let ledger_purpose = previous.ledger_purpose.clone();
                 let prepared_invocation = previous.prepared_invocation.clone();
+                let resource_key = previous.resource_key.clone();
                 let submission = previous.submission.clone();
                 let receipt = previous.receipt.clone();
                 let confirmation = previous.confirmation.clone();
+                let resource_touched_set = previous.resource_touched_set.clone();
                 projections.side_effects.insert(
                     payload.ledger_key.clone(),
                     SideEffectProjection {
@@ -4133,9 +4265,11 @@ pub mod v1 {
                         event_id: envelope.event_id.clone(),
                         intent,
                         prepared_invocation,
+                        resource_key,
                         submission,
                         receipt,
                         confirmation,
+                        resource_touched_set,
                         claim: Some(claim.clone()),
                         phase: SideEffectPhase::InvocationStarted {
                             claim_owner: payload.claim_owner.clone(),
@@ -4169,6 +4303,7 @@ pub mod v1 {
                     },
                     |_| Ok(()),
                 )?;
+                release_resource_lane_for_ledger(projections, &payload.ledger_key);
             }
             KernelEventPayload::SideEffectSubmissionObserved(payload) => {
                 require_active_attempt_for_side_effect(
@@ -4252,6 +4387,9 @@ pub mod v1 {
                             content_digest: payload.receipt_hash.clone(),
                             schema_id: Some(payload.receipt_schema_id.clone()),
                         });
+                        if let Some(touched_set) = payload.resource_touched_set.clone() {
+                            projection.resource_touched_set = Some(touched_set);
+                        }
                         Ok(())
                     },
                 )?;
@@ -4283,9 +4421,13 @@ pub mod v1 {
                             content_digest: payload.confirmation_hash.clone(),
                             schema_id: Some(payload.confirmation_schema_id.clone()),
                         });
+                        if let Some(touched_set) = payload.resource_touched_set.clone() {
+                            projection.resource_touched_set = Some(touched_set);
+                        }
                         Ok(())
                     },
                 )?;
+                release_resource_lane_for_ledger(projections, &payload.ledger_key);
             }
             KernelEventPayload::SideEffectAmbiguous(payload) => {
                 require_active_attempt_for_side_effect(
@@ -4334,6 +4476,7 @@ pub mod v1 {
                     &payload.ledger_key,
                 )?;
                 transition_side_effect_failure(projections, payload, envelope.event_id.clone())?;
+                release_resource_lane_for_ledger(projections, &payload.ledger_key);
                 if !payload.retryable {
                     note_saga_engagement(
                         projections,
@@ -4411,6 +4554,7 @@ pub mod v1 {
                         note: payload.note.clone(),
                     },
                 );
+                release_resource_lanes_for_run(projections, &payload.run_id);
             }
             KernelEventPayload::RetentionRefsAppended(payload) => {
                 if projections.run_state(&payload.run_id) == RunState::Absent {
@@ -4929,6 +5073,85 @@ pub mod v1 {
         }
     }
 
+    fn acquire_resource_lane(
+        projections: &mut ProjectionSnapshot,
+        run_id: &RunId,
+        event_id: &EventId,
+        payload: &side_effect::InvocationPrepared,
+    ) -> Result<()> {
+        let Some(resource_key) = payload.resource_key.as_ref() else {
+            if resource_lane_key_for_ledger(projections, &payload.ledger_key).is_some() {
+                return Err(StoreError::ProjectionConflict {
+                    key: format!("resource_lane:{}", payload.ledger_key),
+                    message: "resource lane holder cannot refresh without key evidence".to_owned(),
+                });
+            }
+            return Ok(());
+        };
+
+        let lane_key = ResourceLaneKey::from_evidence(resource_key);
+        if let Some(existing_key) = resource_lane_key_for_ledger(projections, &payload.ledger_key) {
+            if existing_key != lane_key {
+                return Err(StoreError::ProjectionConflict {
+                    key: format!("resource_lane:{}", payload.ledger_key),
+                    message: "resource lane key changed for ledger".to_owned(),
+                });
+            }
+        }
+        if let Some(existing) = projections.resource_lanes.get(&lane_key) {
+            if existing.ledger_key != payload.ledger_key {
+                return Err(StoreError::ProjectionConflict {
+                    key: format!("resource_lane:{}:{}", lane_key.namespace, lane_key.key),
+                    message: format!(
+                        "resource lane already held by ledger {}",
+                        existing.ledger_key
+                    ),
+                });
+            }
+        }
+
+        projections.resource_lanes.insert(
+            lane_key,
+            ResourceLaneProjection {
+                event_id: event_id.clone(),
+                run_id: run_id.clone(),
+                ledger_key: payload.ledger_key.clone(),
+                ledger_purpose: payload.ledger_purpose.clone(),
+                node_id: payload.node_id.clone(),
+                attempt_id: payload.attempt_id.clone(),
+                invocation_epoch: payload.invocation_epoch,
+            },
+        );
+        Ok(())
+    }
+
+    fn resource_lane_key_for_ledger(
+        projections: &ProjectionSnapshot,
+        ledger_key: &events::SideEffectLedgerKey,
+    ) -> Option<ResourceLaneKey> {
+        projections
+            .resource_lanes
+            .iter()
+            .find_map(|(key, projection)| {
+                (projection.ledger_key == *ledger_key).then(|| key.clone())
+            })
+    }
+
+    fn release_resource_lane_for_ledger(
+        projections: &mut ProjectionSnapshot,
+        ledger_key: &events::SideEffectLedgerKey,
+    ) {
+        if let Some(key) = resource_lane_key_for_ledger(projections, ledger_key) {
+            projections.resource_lanes.remove(&key);
+        }
+    }
+
+    fn release_resource_lanes_for_run(projections: &mut ProjectionSnapshot, run_id: &RunId) {
+        projections
+            .resource_lanes
+            .retain(|_, projection| projection.run_id != *run_id);
+    }
+
     fn phase_matches_expected(phase: &SideEffectPhase, expected: &'static str) -> bool {
         match expected {
             "started" => matches!(phase, SideEffectPhase::InvocationStarted { .. }),
@@ -4972,9 +5195,11 @@ pub mod v1 {
             ledger_purpose,
             intent,
             prepared_invocation,
+            resource_key,
             submission,
             receipt,
             confirmation,
+            resource_touched_set,
             claim,
         ) = {
             let previous = require_side_effect_phase(
@@ -5008,9 +5233,11 @@ pub mod v1 {
                 previous.ledger_purpose.clone(),
                 previous.intent.clone(),
                 previous.prepared_invocation.clone(),
+                previous.resource_key.clone(),
                 previous.submission.clone(),
                 previous.receipt.clone(),
                 previous.confirmation.clone(),
+                previous.resource_touched_set.clone(),
                 claim.clone(),
             )
         };
@@ -5021,9 +5248,11 @@ pub mod v1 {
             event_id: transition.event_id,
             intent,
             prepared_invocation,
+            resource_key,
             submission,
             receipt,
             confirmation,
+            resource_touched_set,
             claim: Some(claim),
             phase: next_phase(transition.invocation_epoch),
         };
@@ -5044,9 +5273,11 @@ pub mod v1 {
             ledger_purpose,
             intent,
             prepared_invocation,
+            resource_key,
             submission,
             receipt,
             confirmation,
+            resource_touched_set,
             claim,
         ) = {
             let Some(previous) = projections.side_effects.get(&payload.ledger_key) else {
@@ -5122,9 +5353,11 @@ pub mod v1 {
                 previous.ledger_purpose.clone(),
                 previous.intent.clone(),
                 previous.prepared_invocation.clone(),
+                previous.resource_key.clone(),
                 previous.submission.clone(),
                 previous.receipt.clone(),
                 previous.confirmation.clone(),
+                previous.resource_touched_set.clone(),
                 previous.claim.clone(),
             )
         };
@@ -5137,9 +5370,11 @@ pub mod v1 {
                 event_id,
                 intent,
                 prepared_invocation,
+                resource_key,
                 submission,
                 receipt,
                 confirmation,
+                resource_touched_set,
                 claim,
                 phase: SideEffectPhase::Failed {
                     invocation_epoch: payload.invocation_epoch,
@@ -5287,6 +5522,7 @@ pub mod v1 {
                 "node_id": payload.node_id.as_str(),
                 "prepared_artifact_id": payload.prepared_artifact_id.as_ref().map(ArtifactId::as_str),
                 "prepared_hash": payload.prepared_hash.as_ref().map(ContentDigest::as_str),
+                "resource_key": payload.resource_key.as_ref().map(resource_key_evidence_json),
                 "spec_hash": payload.spec_hash.as_str(),
                 "variant": "SideEffectInvocationPrepared",
             }),
@@ -5348,6 +5584,7 @@ pub mod v1 {
                 "receipt_hash": payload.receipt_hash.as_str(),
                 "receipt_schema_id": payload.receipt_schema_id.as_str(),
                 "replay_verifier_id": payload.replay_verifier_id.as_str(),
+                "resource_touched_set": payload.resource_touched_set.as_ref().map(resource_touched_set_evidence_json),
                 "spec_hash": payload.spec_hash.as_str(),
                 "variant": "SideEffectReceiptObserved",
             }),
@@ -5361,6 +5598,7 @@ pub mod v1 {
                 "ledger_purpose": side_effect_ledger_purpose_json(&payload.ledger_purpose),
                 "node_id": payload.node_id.as_str(),
                 "replay_verifier_id": payload.replay_verifier_id.as_str(),
+                "resource_touched_set": payload.resource_touched_set.as_ref().map(resource_touched_set_evidence_json),
                 "spec_hash": payload.spec_hash.as_str(),
                 "variant": "SideEffectConfirmationObserved",
             }),
@@ -5694,6 +5932,9 @@ pub mod v1 {
                     prepared_hash: optional_str(json, "prepared_hash")?
                         .map(parse_identity)
                         .transpose()?,
+                    resource_key: optional_obj(json, "resource_key")?
+                        .map(parse_resource_key_evidence)
+                        .transpose()?,
                 },
             )),
             "SideEffectInvocationStarted" => Ok(KernelEventPayload::SideEffectInvocationStarted(
@@ -5811,6 +6052,9 @@ pub mod v1 {
                         json,
                         "replay_verifier_id",
                     )?)?,
+                    resource_touched_set: optional_obj(json, "resource_touched_set")?
+                        .map(parse_resource_touched_set_evidence)
+                        .transpose()?,
                 },
             )),
             "SideEffectConfirmationObserved" => {
@@ -5844,6 +6088,9 @@ pub mod v1 {
                             json,
                             "replay_verifier_id",
                         )?)?,
+                        resource_touched_set: optional_obj(json, "resource_touched_set")?
+                            .map(parse_resource_touched_set_evidence)
+                            .transpose()?,
                     },
                 ))
             }
@@ -6181,6 +6428,29 @@ pub mod v1 {
                 "unknown side-effect ledger purpose {other}"
             ))),
         }
+    }
+
+    fn parse_resource_key_evidence(
+        json: &serde_json::Value,
+    ) -> Result<events::ResourceKeyEvidence> {
+        Ok(events::ResourceKeyEvidence {
+            namespace: ResourceNamespace::new(required_str(json, "namespace")?)
+                .map_err(|error| StoreError::Identity(error.to_string()))?,
+            key_schema_id: parse_identity(required_str(json, "key_schema_id")?)?,
+            key: events::ResourceKey::new(required_str(json, "key")?)?,
+        })
+    }
+
+    fn parse_resource_touched_set_evidence(
+        json: &serde_json::Value,
+    ) -> Result<events::ResourceTouchedSetEvidence> {
+        Ok(events::ResourceTouchedSetEvidence {
+            namespace: ResourceNamespace::new(required_str(json, "namespace")?)
+                .map_err(|error| StoreError::Identity(error.to_string()))?,
+            evidence_schema_id: parse_identity(required_str(json, "evidence_schema_id")?)?,
+            evidence_hash: parse_identity(required_str(json, "evidence_hash")?)?,
+            evidence_artifact_id: parse_identity(required_str(json, "evidence_artifact_id")?)?,
+        })
     }
 
     fn parse_manual_resolution_outcome(value: &str) -> Result<events::ManualResolutionOutcome> {
@@ -6634,6 +6904,25 @@ pub mod v1 {
                 })
             }
         }
+    }
+
+    fn resource_key_evidence_json(evidence: &events::ResourceKeyEvidence) -> serde_json::Value {
+        serde_json::json!({
+            "key": evidence.key.as_str(),
+            "key_schema_id": evidence.key_schema_id.as_str(),
+            "namespace": evidence.namespace.as_str(),
+        })
+    }
+
+    fn resource_touched_set_evidence_json(
+        evidence: &events::ResourceTouchedSetEvidence,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "evidence_artifact_id": evidence.evidence_artifact_id.as_str(),
+            "evidence_hash": evidence.evidence_hash.as_str(),
+            "evidence_schema_id": evidence.evidence_schema_id.as_str(),
+            "namespace": evidence.namespace.as_str(),
+        })
     }
 
     fn manual_resolution_outcome_str(outcome: events::ManualResolutionOutcome) -> &'static str {

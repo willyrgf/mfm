@@ -2500,6 +2500,7 @@ fn side_effect_prepared(
         claim_fencing_token: side_effect_fencing_token(ctx.attempt_no(), claim_generation),
         prepared_artifact_id: None,
         prepared_hash: None,
+        resource_key: None,
     })
 }
 
@@ -2561,6 +2562,7 @@ fn side_effect_receipt_observed(
         receipt_artifact_id: artifact_id,
         replay_verifier_id: events::ReplayVerifierId::new("typed-slice-verifier")
             .expect("valid verifier"),
+        resource_touched_set: None,
     })
 }
 
@@ -2583,6 +2585,7 @@ fn side_effect_confirmation_observed(
         confirmation_artifact_id: artifact_id,
         replay_verifier_id: events::ReplayVerifierId::new("typed-slice-verifier")
             .expect("valid verifier"),
+        resource_touched_set: None,
     })
 }
 

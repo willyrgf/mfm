@@ -8,17 +8,18 @@ use mfm_ids::{
     ArtifactId, CellId, ContentDigest, IdentityError, NodeId, RunId, SchemaId, SeedId,
     SemanticTypeId,
 };
-use mfm_spec::v1::MediaType;
+use mfm_spec::v1::{MediaType, ResourceNamespace};
 use mfm_store::v1::{
     build_prepared_committed_batch, payload_from_json_value, prepared_commit_fingerprint,
     stage_prepared_typed_run_commit, ArtifactEvidenceRef, AsyncStoreFuture,
     AsyncTypedRunEventStore, AttemptProjection, AttemptStatus, CellTerminalProjection, CommitKey,
     CommitOrdinal, CommitOutcome, FactProjection, KernelEventEnvelope, LogicalEventKey,
     ManualResolutionProjection, PersistedKernelEventRecord, PreparedTypedCommit,
-    ProjectionSnapshot, PublicOutputProjection, RetentionManifestProjection, RetentionProjection,
-    RunCompletionProjection, RunState, SagaEngagementProjection, SagaEngagementReason,
-    SideEffectArtifactProjection, SideEffectClaimProjection, SideEffectIntentProjection,
-    SideEffectPhase, SideEffectProjection, StoreError, StreamSeq, TypedCommitBase,
+    ProjectionSnapshot, PublicOutputProjection, ResourceLaneKey, ResourceLaneProjection,
+    RetentionManifestProjection, RetentionProjection, RunCompletionProjection, RunState,
+    SagaEngagementProjection, SagaEngagementReason, SideEffectArtifactProjection,
+    SideEffectClaimProjection, SideEffectIntentProjection, SideEffectPhase, SideEffectProjection,
+    StoreError, StreamSeq, TypedCommitBase,
 };
 use serde_json::Value;
 use tokio::sync::Mutex;
@@ -245,6 +246,18 @@ CREATE TABLE IF NOT EXISTS typed_side_effect_projection (
   PRIMARY KEY (run_id, ledger_key)
 );
 
+CREATE TABLE IF NOT EXISTS typed_resource_lane_projection (
+  namespace TEXT NOT NULL,
+  resource_key TEXT NOT NULL,
+  run_id TEXT NOT NULL,
+  ledger_key TEXT NOT NULL,
+  projection_json JSONB NOT NULL,
+  PRIMARY KEY (namespace, resource_key)
+);
+
+CREATE INDEX IF NOT EXISTS typed_resource_lane_projection_run_idx
+  ON typed_resource_lane_projection (run_id);
+
 CREATE TABLE IF NOT EXISTS typed_public_output_projection (
   run_id TEXT NOT NULL,
   public_schema_id TEXT NOT NULL,
@@ -340,6 +353,7 @@ COMMIT;
 
         let mut artifacts = load_artifacts(&tx).await?;
         admit_artifact_evidence(&mut artifacts, commit.admitted_artifacts())?;
+        lock_resource_lanes_tx(&tx).await?;
         let base = TypedCommitBase {
             artifacts,
             logical_keys: load_logical_keys(&tx, &request.run_id).await?,
@@ -617,6 +631,13 @@ async fn read_head_for_update(tx: &Transaction<'_>, run_id: &RunId) -> Result<u6
     i64_to_nonnegative_u64(head, "typed_run_heads.head_seq")
 }
 
+async fn lock_resource_lanes_tx(tx: &Transaction<'_>) -> Result<()> {
+    tx.batch_execute("LOCK TABLE typed_resource_lane_projection IN SHARE ROW EXCLUSIVE MODE")
+        .await
+        .map_err(|_| PostgresTypedStoreError::Database("failed to lock resource lanes"))?;
+    Ok(())
+}
+
 async fn read_commit_key(
     tx: &Transaction<'_>,
     run_id: &RunId,
@@ -873,6 +894,20 @@ async fn load_projection_snapshot_tx(
         side_effects.insert(projection.ledger_key.clone(), projection);
     }
 
+    let mut resource_lanes = BTreeMap::new();
+    for row in tx
+        .query(
+            "SELECT projection_json FROM typed_resource_lane_projection",
+            &[],
+        )
+        .await
+        .map_err(|_| PostgresTypedStoreError::Database("failed to load resource lanes"))?
+    {
+        let json: Value = row.get(0);
+        let (lane_key, projection) = parse_resource_lane_projection(&json)?;
+        resource_lanes.insert(lane_key, projection);
+    }
+
     let mut public_outputs = BTreeMap::new();
     for row in tx
         .query(
@@ -893,7 +928,7 @@ async fn load_projection_snapshot_tx(
         retentions.insert(run_id.clone(), retention);
     }
 
-    Ok(ProjectionSnapshot::from_parts_with_saga(
+    Ok(ProjectionSnapshot::from_parts_with_saga_and_resource_lanes(
         run_states,
         run_completions,
         saga_engagements,
@@ -902,6 +937,7 @@ async fn load_projection_snapshot_tx(
         cells,
         facts,
         side_effects,
+        resource_lanes,
         public_outputs,
         retentions,
     ))
@@ -1002,6 +1038,7 @@ async fn write_projection_tables(
         "typed_cell_projection",
         "typed_fact_projection",
         "typed_side_effect_projection",
+        "typed_resource_lane_projection",
         "typed_public_output_projection",
         "typed_retention_projection",
         "typed_retention_manifests",
@@ -1127,6 +1164,28 @@ async fn write_projection_tables(
         )
         .await
         .map_err(|_| PostgresTypedStoreError::Database("failed to write side-effect projection"))?;
+    }
+
+    for (lane_key, projection) in snapshot.resource_lanes() {
+        if &projection.run_id == run_id {
+            let json = resource_lane_projection_json(lane_key, projection);
+            tx.execute(
+                "INSERT INTO typed_resource_lane_projection \
+                 (namespace, resource_key, run_id, ledger_key, projection_json) \
+                 VALUES ($1,$2,$3,$4,$5)",
+                &[
+                    &lane_key.namespace.as_str(),
+                    &lane_key.key.as_str(),
+                    &projection.run_id.as_str(),
+                    &projection.ledger_key.as_str(),
+                    &json,
+                ],
+            )
+            .await
+            .map_err(|_| {
+                PostgresTypedStoreError::Database("failed to write resource lane projection")
+            })?;
+        }
     }
 
     for (schema_id, projection) in snapshot.public_outputs() {
@@ -1498,6 +1557,8 @@ fn side_effect_projection_json(projection: &SideEffectProjection) -> Value {
         "phase": side_effect_phase_json(&projection.phase),
         "prepared_invocation": projection.prepared_invocation.as_ref().map(side_effect_artifact_json),
         "receipt": projection.receipt.as_ref().map(side_effect_artifact_json),
+        "resource_key": projection.resource_key.as_ref().map(resource_key_evidence_json),
+        "resource_touched_set": projection.resource_touched_set.as_ref().map(resource_touched_set_evidence_json),
         "run_id": projection.run_id.as_str(),
         "submission": projection.submission.as_ref().map(side_effect_artifact_json),
     })
@@ -1513,6 +1574,9 @@ fn parse_side_effect_projection(json: &Value) -> Result<SideEffectProjection> {
         prepared_invocation: optional_obj(json, "prepared_invocation")?
             .map(parse_side_effect_artifact)
             .transpose()?,
+        resource_key: optional_obj(json, "resource_key")?
+            .map(parse_resource_key_evidence)
+            .transpose()?,
         submission: optional_obj(json, "submission")?
             .map(parse_side_effect_artifact)
             .transpose()?,
@@ -1521,6 +1585,9 @@ fn parse_side_effect_projection(json: &Value) -> Result<SideEffectProjection> {
             .transpose()?,
         confirmation: optional_obj(json, "confirmation")?
             .map(parse_side_effect_artifact)
+            .transpose()?,
+        resource_touched_set: optional_obj(json, "resource_touched_set")?
+            .map(parse_resource_touched_set_evidence)
             .transpose()?,
         claim: optional_obj(json, "claim")?
             .map(parse_side_effect_claim)
@@ -1574,6 +1641,76 @@ fn parse_side_effect_ledger_purpose(json: &Value) -> Result<events::SideEffectLe
             format!("unknown side-effect ledger purpose {other}"),
         ))),
     }
+}
+
+fn resource_key_evidence_json(evidence: &events::ResourceKeyEvidence) -> Value {
+    serde_json::json!({
+        "key": evidence.key.as_str(),
+        "key_schema_id": evidence.key_schema_id.as_str(),
+        "namespace": evidence.namespace.as_str(),
+    })
+}
+
+fn parse_resource_key_evidence(json: &Value) -> Result<events::ResourceKeyEvidence> {
+    Ok(events::ResourceKeyEvidence {
+        namespace: ResourceNamespace::new(required_str(json, "namespace")?)?,
+        key_schema_id: parse_identity(required_str(json, "key_schema_id")?)?,
+        key: events::ResourceKey::new(required_str(json, "key")?)?,
+    })
+}
+
+fn resource_touched_set_evidence_json(evidence: &events::ResourceTouchedSetEvidence) -> Value {
+    serde_json::json!({
+        "evidence_artifact_id": evidence.evidence_artifact_id.as_str(),
+        "evidence_hash": evidence.evidence_hash.as_str(),
+        "evidence_schema_id": evidence.evidence_schema_id.as_str(),
+        "namespace": evidence.namespace.as_str(),
+    })
+}
+
+fn parse_resource_touched_set_evidence(json: &Value) -> Result<events::ResourceTouchedSetEvidence> {
+    Ok(events::ResourceTouchedSetEvidence {
+        namespace: ResourceNamespace::new(required_str(json, "namespace")?)?,
+        evidence_schema_id: parse_identity(required_str(json, "evidence_schema_id")?)?,
+        evidence_hash: parse_identity(required_str(json, "evidence_hash")?)?,
+        evidence_artifact_id: parse_identity(required_str(json, "evidence_artifact_id")?)?,
+    })
+}
+
+fn resource_lane_projection_json(
+    lane_key: &ResourceLaneKey,
+    projection: &ResourceLaneProjection,
+) -> Value {
+    serde_json::json!({
+        "attempt_id": projection.attempt_id.as_str(),
+        "event_id": projection.event_id.as_str(),
+        "invocation_epoch": projection.invocation_epoch,
+        "key": lane_key.key.as_str(),
+        "ledger_key": projection.ledger_key.as_str(),
+        "ledger_purpose": side_effect_ledger_purpose_json(&projection.ledger_purpose),
+        "namespace": lane_key.namespace.as_str(),
+        "node_id": projection.node_id.as_str(),
+        "run_id": projection.run_id.as_str(),
+    })
+}
+
+fn parse_resource_lane_projection(
+    json: &Value,
+) -> Result<(ResourceLaneKey, ResourceLaneProjection)> {
+    let lane_key = ResourceLaneKey {
+        namespace: ResourceNamespace::new(required_str(json, "namespace")?)?,
+        key: events::ResourceKey::new(required_str(json, "key")?)?,
+    };
+    let projection = ResourceLaneProjection {
+        event_id: parse_identity(required_str(json, "event_id")?)?,
+        run_id: parse_identity(required_str(json, "run_id")?)?,
+        ledger_key: events::SideEffectLedgerKey::new(required_str(json, "ledger_key")?)?,
+        ledger_purpose: parse_side_effect_ledger_purpose(required_obj(json, "ledger_purpose")?)?,
+        node_id: parse_identity(required_str(json, "node_id")?)?,
+        attempt_id: parse_identity(required_str(json, "attempt_id")?)?,
+        invocation_epoch: required_u32(json, "invocation_epoch")?,
+    };
+    Ok((lane_key, projection))
 }
 
 fn side_effect_intent_json(intent: &SideEffectIntentProjection) -> Value {
@@ -2210,10 +2347,10 @@ mod tests {
         CellId, ContentDigest, DigestAlgorithm, DigestBytes, LoweringVersion, NodeId, RunId,
         SchemaId, ScopeId, SemanticTypeId, SpecHash, SpecVersion, StateKind, StateVersion,
     };
-    use mfm_spec::v1::{CanonicalizerIdentity, MediaType, ValueLineageRef};
+    use mfm_spec::v1::{CanonicalizerIdentity, MediaType, ResourceNamespace, ValueLineageRef};
     use mfm_store::v1::{
         ArtifactEvidenceRef, CellTerminalProjection, CommitKey, CommitOutcome, CommitPreconditions,
-        RequiredRunState, SideEffectPhase, StoreError, StreamSeq,
+        RequiredRunState, ResourceLaneKey, SideEffectPhase, StoreError, StreamSeq,
     };
     use tokio_postgres::NoTls;
 
@@ -2586,7 +2723,35 @@ mod tests {
                 .expect("token"),
             prepared_artifact_id: None,
             prepared_hash: None,
+            resource_key: None,
         })
+    }
+
+    fn resource_namespace() -> ResourceNamespace {
+        ResourceNamespace::new("mfm.test.account_nonce").expect("resource namespace")
+    }
+
+    fn resource_key(value: &str, schema_byte: u8) -> events::ResourceKeyEvidence {
+        events::ResourceKeyEvidence {
+            namespace: resource_namespace(),
+            key_schema_id: schema_id("mfm.test.resource_key", schema_byte),
+            key: events::ResourceKey::new(value).expect("resource key"),
+        }
+    }
+
+    fn resource_lane_key(value: &str) -> ResourceLaneKey {
+        ResourceLaneKey::from_evidence(&resource_key(value, 200))
+    }
+
+    fn side_effect_prepared_with_resource_key(
+        resource_key: events::ResourceKeyEvidence,
+    ) -> KernelEventPayload {
+        let mut prepared = side_effect_prepared();
+        let KernelEventPayload::SideEffectInvocationPrepared(payload) = &mut prepared else {
+            unreachable!("helper returns invocation-prepared payload");
+        };
+        payload.resource_key = Some(resource_key);
+        prepared
     }
 
     fn side_effect_started() -> KernelEventPayload {
@@ -2909,6 +3074,7 @@ mod tests {
                      DELETE FROM typed_cell_projection;\
                      DELETE FROM typed_fact_projection;\
                      DELETE FROM typed_side_effect_projection;\
+                     DELETE FROM typed_resource_lane_projection;\
                      DELETE FROM typed_public_output_projection;\
                      DELETE FROM typed_retention_projection;\
                      DELETE FROM typed_retention_manifests;",
@@ -2921,6 +3087,106 @@ mod tests {
             .await
             .expect("rebuild projections");
         assert_eq!(rebuilt, before);
+
+        drop_schema(&store, &schema).await;
+    }
+
+    #[tokio::test]
+    async fn typed_resource_lane_projection_persists_and_rebuilds_from_events() {
+        let (store, schema) = test_store().await;
+        let run = run_id(21);
+        let intent_artifact = artifact_id(22);
+        let intent_digest = content_digest(23);
+        let lane_key = resource_lane_key("wallet-1");
+
+        append_prepared(
+            &store,
+            request(
+                run.clone(),
+                1,
+                "resource-run-start",
+                vec![run_started(run.clone())],
+            ),
+            vec![spec_artifact_ref(), certificate_artifact_ref()],
+        )
+        .await
+        .expect("run start");
+        append_prepared(
+            &store,
+            request(
+                run.clone(),
+                2,
+                "resource-attempt-start",
+                vec![side_effect_attempt_started()],
+            ),
+            Vec::new(),
+        )
+        .await
+        .expect("attempt start");
+        append_prepared(
+            &store,
+            request(
+                run.clone(),
+                3,
+                "resource-prepare",
+                vec![
+                    side_effect_intent(intent_artifact.clone(), intent_digest.clone()),
+                    side_effect_claim(),
+                    side_effect_prepared_with_resource_key(resource_key("wallet-1", 201)),
+                ],
+            ),
+            vec![side_effect_artifact_ref(
+                intent_artifact,
+                intent_digest,
+                schema_id("mfm.test.side_effect_intent", 70),
+                ArtifactRole::SideEffectIntent,
+            )],
+        )
+        .await
+        .expect("prepare with resource key");
+
+        let before = store.projection_snapshot(&run).await.expect("projection");
+        let lane = before
+            .resource_lane(&lane_key)
+            .expect("persisted resource lane");
+        assert_eq!(lane.run_id, run);
+        assert_eq!(lane.ledger_key, side_effect_ledger_key());
+
+        let stream = store.load_run_stream(&run).await.expect("typed run stream");
+        assert_eq!(
+            ProjectionSnapshot::rebuild_from_run_stream(&stream).expect("payload rebuild"),
+            before
+        );
+
+        {
+            let client = store.client.lock().await;
+            client
+                .batch_execute(
+                    "DELETE FROM typed_run_projection;\
+                     DELETE FROM typed_run_completion_projection;\
+                     DELETE FROM typed_saga_engagement_projection;\
+                     DELETE FROM typed_manual_resolution_projection;\
+                     DELETE FROM typed_attempt_projection;\
+                     DELETE FROM typed_cell_projection;\
+                     DELETE FROM typed_fact_projection;\
+                     DELETE FROM typed_side_effect_projection;\
+                     DELETE FROM typed_resource_lane_projection;\
+                     DELETE FROM typed_public_output_projection;\
+                     DELETE FROM typed_retention_projection;\
+                     DELETE FROM typed_retention_manifests;",
+                )
+                .await
+                .expect("clear projections");
+        }
+        let rebuilt = store
+            .rebuild_projections_from_events(&run)
+            .await
+            .expect("rebuild projections");
+        assert_eq!(rebuilt, before);
+        assert!(
+            rebuilt.resource_lane(&lane_key).is_some(),
+            "rebuilt projection must retain non-terminal lane"
+        );
 
         drop_schema(&store, &schema).await;
     }
@@ -3039,6 +3305,7 @@ mod tests {
                      DELETE FROM typed_cell_projection;\
                      DELETE FROM typed_fact_projection;\
                      DELETE FROM typed_side_effect_projection;\
+                     DELETE FROM typed_resource_lane_projection;\
                      DELETE FROM typed_public_output_projection;\
                      DELETE FROM typed_retention_projection;\
                      DELETE FROM typed_retention_manifests;",

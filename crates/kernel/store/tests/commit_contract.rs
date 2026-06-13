@@ -8,15 +8,16 @@ use mfm_ids::{
 };
 use mfm_spec::v1::{
     CanonicalizerIdentity, CellProducer, ManualResolutionEvidenceSpec, MediaType, PublicFieldPath,
-    RemediationUnresolvedSpec, SagaPolicySpec, ValueLineageRef,
+    RemediationUnresolvedSpec, ResourceNamespace, SagaPolicySpec, ValueLineageRef,
 };
 use mfm_store::v1::{
     build_committed_batch, payload_canonical_json, payload_from_json_value, ArtifactEvidenceRef,
     CellTerminalProjection, CommitKey, CommitOrdinal, CommitOutcome, CommitPreconditions,
     ForwardLedgerClassification, InMemoryTypedRunStore, KernelEventEnvelope, ManualBlockReason,
-    PersistedKernelEventRecord, PreparedTypedCommit, ProjectionSnapshot, RequiredRunState, RunMode,
-    SideEffectPhase, StoreError, StreamSeq, TypedCommitRequest, TypedProjectionRead,
-    TypedRunEventStore, VerifiedRetentionProjection, VerifiedRetentionProjectionSet,
+    PersistedKernelEventRecord, PreparedTypedCommit, ProjectionSnapshot, RequiredRunState,
+    ResourceLaneKey, RunMode, SideEffectPhase, StoreError, StreamSeq, TypedCommitRequest,
+    TypedProjectionRead, TypedRunEventStore, VerifiedRetentionProjection,
+    VerifiedRetentionProjectionSet,
 };
 
 const SPEC_MEDIA_TYPE: &str = "application/vnd.mfm.typed-execution-spec+json;version=1";
@@ -238,6 +239,14 @@ fn store_artifact_ref(artifact_id: ArtifactId, digest: ContentDigest) -> Artifac
 }
 
 fn intent_artifact_ref(artifact_id: ArtifactId, digest: ContentDigest) -> ArtifactEvidenceRef {
+    intent_artifact_ref_for_node(artifact_id, digest, node_id(70))
+}
+
+fn intent_artifact_ref_for_node(
+    artifact_id: ArtifactId,
+    digest: ContentDigest,
+    producer_node_id: NodeId,
+) -> ArtifactEvidenceRef {
     ArtifactEvidenceRef {
         artifact_id,
         digest,
@@ -245,7 +254,7 @@ fn intent_artifact_ref(artifact_id: ArtifactId, digest: ContentDigest) -> Artifa
         media_type: media_type("application/json"),
         schema_id: Some(schema_id("mfm.test.side_effect_intent", 70)),
         semantic_type_id: None,
-        producer_node_id: Some(node_id(70)),
+        producer_node_id: Some(producer_node_id),
         producer_seed_id: None::<SeedId>,
         artifact_role: ArtifactRole::SideEffectIntent,
     }
@@ -274,6 +283,10 @@ fn side_effect_ledger_key() -> events::SideEffectLedgerKey {
     events::SideEffectLedgerKey::new("ledger-key-1").expect("ledger key")
 }
 
+fn side_effect_ledger_key_with_suffix(suffix: u8) -> events::SideEffectLedgerKey {
+    events::SideEffectLedgerKey::new(format!("ledger-key-{suffix}")).expect("ledger key")
+}
+
 fn remediation_ledger_key(byte: u8) -> events::SideEffectLedgerKey {
     events::SideEffectLedgerKey::new(format!("remediation-ledger-{byte}"))
         .expect("remediation ledger key")
@@ -289,6 +302,47 @@ fn remediation_ledger_purpose() -> events::SideEffectLedgerPurpose {
     }
 }
 
+fn resource_namespace() -> ResourceNamespace {
+    ResourceNamespace::new("mfm.test.account_nonce").expect("resource namespace")
+}
+
+fn resource_key(value: &str, schema_byte: u8) -> events::ResourceKeyEvidence {
+    events::ResourceKeyEvidence {
+        namespace: resource_namespace(),
+        key_schema_id: schema_id("mfm.test.resource_key", schema_byte),
+        key: events::ResourceKey::new(value).expect("resource key"),
+    }
+}
+
+fn resource_lane_key(value: &str) -> ResourceLaneKey {
+    ResourceLaneKey::from_evidence(&resource_key(value, 200))
+}
+
+fn resource_touched_set(byte: u8) -> events::ResourceTouchedSetEvidence {
+    events::ResourceTouchedSetEvidence {
+        namespace: resource_namespace(),
+        evidence_schema_id: schema_id("mfm.test.touched_set", byte),
+        evidence_hash: content_digest(byte),
+        evidence_artifact_id: artifact_id(byte),
+    }
+}
+
+fn resource_touched_set_artifact_ref(
+    evidence: &events::ResourceTouchedSetEvidence,
+) -> ArtifactEvidenceRef {
+    ArtifactEvidenceRef {
+        artifact_id: evidence.evidence_artifact_id.clone(),
+        digest: evidence.evidence_hash.clone(),
+        byte_len: 128,
+        media_type: media_type("application/json"),
+        schema_id: Some(evidence.evidence_schema_id.clone()),
+        semantic_type_id: None,
+        producer_node_id: None,
+        producer_seed_id: None::<SeedId>,
+        artifact_role: ArtifactRole::StateOutput,
+    }
+}
+
 fn payload_json_value(payload: &KernelEventPayload) -> serde_json::Value {
     serde_json::from_str(
         payload_canonical_json(payload)
@@ -299,17 +353,24 @@ fn payload_json_value(payload: &KernelEventPayload) -> serde_json::Value {
 }
 
 fn assert_projection_conflict_contains(error: StoreError, expected: &str) {
-    assert!(matches!(
-        error,
-        StoreError::ProjectionConflict { message, .. } if message.contains(expected)
-    ));
+    assert!(
+        matches!(
+            &error,
+            StoreError::ProjectionConflict { message, .. } if message.contains(expected)
+        ),
+        "unexpected error: {error:?}"
+    );
 }
 
 fn side_effect_attempt_started() -> KernelEventPayload {
+    side_effect_attempt_started_for(node_id(70), attempt_id(72))
+}
+
+fn side_effect_attempt_started_for(node_id: NodeId, attempt_id: AttemptId) -> KernelEventPayload {
     KernelEventPayload::StateAttemptStarted(events::StateAttemptStarted {
         spec_hash: spec_hash(1),
-        node_id: node_id(70),
-        attempt_id: attempt_id(72),
+        node_id,
+        attempt_id,
         attempt_no: 1,
         state_kind: state_kind(70),
         state_version: StateVersion::new("mfm.test.side_effect_state.v1").expect("state version"),
@@ -370,6 +431,14 @@ fn side_effect_claim_taken_over() -> KernelEventPayload {
 }
 
 fn side_effect_claim_taken_over_with_token(token: &str) -> KernelEventPayload {
+    side_effect_claim_taken_over_generation(1, 2, token)
+}
+
+fn side_effect_claim_taken_over_generation(
+    previous_claim_generation: u32,
+    claim_generation: u32,
+    token: &str,
+) -> KernelEventPayload {
     KernelEventPayload::SideEffectClaimTakenOver(side_effect::ClaimTakenOver {
         spec_hash: spec_hash(1),
         node_id: node_id(70),
@@ -379,8 +448,8 @@ fn side_effect_claim_taken_over_with_token(token: &str) -> KernelEventPayload {
         previous_claim_owner: events::RunnerInvocationId::new("owner-1").expect("previous owner"),
         new_claim_owner: events::RunnerInvocationId::new("owner-2").expect("new owner"),
         invocation_epoch: 1,
-        previous_claim_generation: 1,
-        claim_generation: 2,
+        previous_claim_generation,
+        claim_generation,
         claim_fencing_token: side_effect::ClaimFencingToken::new(token).expect("token"),
     })
 }
@@ -397,7 +466,21 @@ fn side_effect_prepared(claim_generation: u32, token: &str) -> KernelEventPayloa
         claim_fencing_token: side_effect::ClaimFencingToken::new(token).expect("token"),
         prepared_artifact_id: None,
         prepared_hash: None,
+        resource_key: None,
     })
+}
+
+fn side_effect_prepared_with_resource_key(
+    claim_generation: u32,
+    token: &str,
+    resource_key: events::ResourceKeyEvidence,
+) -> KernelEventPayload {
+    let mut prepared = side_effect_prepared(claim_generation, token);
+    let KernelEventPayload::SideEffectInvocationPrepared(payload) = &mut prepared else {
+        unreachable!("helper returns invocation-prepared payload");
+    };
+    payload.resource_key = Some(resource_key);
+    prepared
 }
 
 fn side_effect_started(owner: &str, claim_generation: u32, token: &str) -> KernelEventPayload {
@@ -430,6 +513,24 @@ fn unknown_schema() -> SchemaId {
     schema_id("mfm.test.submission_unknown", 83)
 }
 
+fn not_submitted_schema() -> SchemaId {
+    schema_id("mfm.test.not_submitted", 80)
+}
+
+fn side_effect_not_submitted(artifact_id: ArtifactId, digest: ContentDigest) -> KernelEventPayload {
+    KernelEventPayload::SideEffectNotSubmittedProven(side_effect::NotSubmittedProven {
+        spec_hash: spec_hash(1),
+        node_id: node_id(70),
+        attempt_id: attempt_id(72),
+        ledger_key: side_effect_ledger_key(),
+        ledger_purpose: side_effect_ledger_purpose(),
+        invocation_epoch: 1,
+        proof_schema_id: not_submitted_schema(),
+        proof_hash: digest,
+        proof_artifact_id: artifact_id,
+    })
+}
+
 fn side_effect_submission_observed(
     artifact_id: ArtifactId,
     digest: ContentDigest,
@@ -444,6 +545,21 @@ fn side_effect_submission_observed(
         submission_schema_id: submission_schema(),
         submission_hash: digest,
         submission_artifact_id: artifact_id,
+    })
+}
+
+fn side_effect_ambiguous(artifact_id: ArtifactId, digest: ContentDigest) -> KernelEventPayload {
+    KernelEventPayload::SideEffectAmbiguous(side_effect::Ambiguous {
+        spec_hash: spec_hash(1),
+        node_id: node_id(70),
+        attempt_id: attempt_id(72),
+        ledger_key: side_effect_ledger_key(),
+        ledger_purpose: side_effect_ledger_purpose(),
+        invocation_epoch: 1,
+        ambiguity_code: events::AmbiguityCode::new("ambiguous").expect("ambiguity code"),
+        evidence_schema_id: schema_id("mfm.test.ambiguity", 76),
+        evidence_hash: digest,
+        evidence_artifact_id: artifact_id,
     })
 }
 
@@ -476,6 +592,7 @@ fn side_effect_receipt(artifact_id: ArtifactId, digest: ContentDigest) -> Kernel
         receipt_hash: digest,
         receipt_artifact_id: artifact_id,
         replay_verifier_id: events::ReplayVerifierId::new("verifier-1").expect("verifier"),
+        resource_touched_set: None,
     })
 }
 
@@ -491,6 +608,7 @@ fn side_effect_confirmation(artifact_id: ArtifactId, digest: ContentDigest) -> K
         confirmation_hash: digest,
         confirmation_artifact_id: artifact_id,
         replay_verifier_id: events::ReplayVerifierId::new("verifier-1").expect("verifier"),
+        resource_touched_set: None,
     })
 }
 
@@ -550,16 +668,27 @@ fn fact_attempt_failed(retryable: bool) -> KernelEventPayload {
 }
 
 fn run_completed(outcome: events::RunCompletionOutcome) -> KernelEventPayload {
+    run_completed_for_run(run_id(120), outcome)
+}
+
+fn run_completed_for_run(
+    run_id: RunId,
+    outcome: events::RunCompletionOutcome,
+) -> KernelEventPayload {
     KernelEventPayload::RunCompleted(events::RunCompleted {
-        run_id: run_id(120),
+        run_id,
         spec_hash: spec_hash(1),
         outcome,
     })
 }
 
 fn manual_resolution_recorded(byte: u8) -> KernelEventPayload {
+    manual_resolution_recorded_for_run(run_id(120), byte)
+}
+
+fn manual_resolution_recorded_for_run(run_id: RunId, byte: u8) -> KernelEventPayload {
     KernelEventPayload::ManualResolutionRecorded(events::ManualResolutionRecorded {
-        run_id: run_id(120),
+        run_id,
         spec_hash: spec_hash(1),
         outcome: events::ManualResolutionOutcome::ConfirmRemediated,
         operator_identity_ref_schema_id: schema_id("mfm.test.operator_identity", byte),
@@ -603,47 +732,120 @@ fn set_remediation_purpose(
     payload: &mut KernelEventPayload,
     ledger_key: events::SideEffectLedgerKey,
 ) {
-    let purpose = remediation_ledger_purpose();
+    set_side_effect_ledger(payload, ledger_key, remediation_ledger_purpose());
+}
+
+fn set_side_effect_ledger(
+    payload: &mut KernelEventPayload,
+    ledger_key: events::SideEffectLedgerKey,
+    purpose: events::SideEffectLedgerPurpose,
+) {
     match payload {
         KernelEventPayload::SideEffectIntentPersisted(payload) => {
-            payload.ledger_key = ledger_key;
-            payload.ledger_purpose = purpose;
+            payload.ledger_key = ledger_key.clone();
+            payload.ledger_purpose = purpose.clone();
         }
         KernelEventPayload::SideEffectClaimed(payload) => {
-            payload.ledger_key = ledger_key;
-            payload.ledger_purpose = purpose;
+            payload.ledger_key = ledger_key.clone();
+            payload.ledger_purpose = purpose.clone();
         }
         KernelEventPayload::SideEffectClaimTakenOver(payload) => {
-            payload.ledger_key = ledger_key;
-            payload.ledger_purpose = purpose;
+            payload.ledger_key = ledger_key.clone();
+            payload.ledger_purpose = purpose.clone();
         }
         KernelEventPayload::SideEffectInvocationPrepared(payload) => {
-            payload.ledger_key = ledger_key;
-            payload.ledger_purpose = purpose;
+            payload.ledger_key = ledger_key.clone();
+            payload.ledger_purpose = purpose.clone();
         }
         KernelEventPayload::SideEffectInvocationStarted(payload) => {
-            payload.ledger_key = ledger_key;
-            payload.ledger_purpose = purpose;
+            payload.ledger_key = ledger_key.clone();
+            payload.ledger_purpose = purpose.clone();
+        }
+        KernelEventPayload::SideEffectNotSubmittedProven(payload) => {
+            payload.ledger_key = ledger_key.clone();
+            payload.ledger_purpose = purpose.clone();
         }
         KernelEventPayload::SideEffectSubmissionObserved(payload) => {
-            payload.ledger_key = ledger_key;
-            payload.ledger_purpose = purpose;
+            payload.ledger_key = ledger_key.clone();
+            payload.ledger_purpose = purpose.clone();
+        }
+        KernelEventPayload::SideEffectSubmissionUnknown(payload) => {
+            payload.ledger_key = ledger_key.clone();
+            payload.ledger_purpose = purpose.clone();
         }
         KernelEventPayload::SideEffectReceiptObserved(payload) => {
-            payload.ledger_key = ledger_key;
-            payload.ledger_purpose = purpose;
+            payload.ledger_key = ledger_key.clone();
+            payload.ledger_purpose = purpose.clone();
         }
         KernelEventPayload::SideEffectConfirmationObserved(payload) => {
-            payload.ledger_key = ledger_key;
-            payload.ledger_purpose = purpose;
+            payload.ledger_key = ledger_key.clone();
+            payload.ledger_purpose = purpose.clone();
         }
         KernelEventPayload::SideEffectAmbiguous(payload) => {
-            payload.ledger_key = ledger_key;
-            payload.ledger_purpose = purpose;
+            payload.ledger_key = ledger_key.clone();
+            payload.ledger_purpose = purpose.clone();
         }
         KernelEventPayload::SideEffectFailed(payload) => {
             payload.ledger_key = ledger_key;
             payload.ledger_purpose = purpose;
+        }
+        _ => unreachable!("payload is not side-effect evidence"),
+    }
+}
+
+fn set_side_effect_node_attempt(
+    payload: &mut KernelEventPayload,
+    node_id: NodeId,
+    attempt_id: AttemptId,
+) {
+    match payload {
+        KernelEventPayload::SideEffectIntentPersisted(payload) => {
+            payload.node_id = node_id;
+            payload.attempt_id = attempt_id;
+        }
+        KernelEventPayload::SideEffectClaimed(payload) => {
+            payload.node_id = node_id;
+            payload.attempt_id = attempt_id;
+        }
+        KernelEventPayload::SideEffectClaimTakenOver(payload) => {
+            payload.node_id = node_id;
+            payload.attempt_id = attempt_id;
+        }
+        KernelEventPayload::SideEffectInvocationPrepared(payload) => {
+            payload.node_id = node_id;
+            payload.attempt_id = attempt_id;
+        }
+        KernelEventPayload::SideEffectInvocationStarted(payload) => {
+            payload.node_id = node_id;
+            payload.attempt_id = attempt_id;
+        }
+        KernelEventPayload::SideEffectNotSubmittedProven(payload) => {
+            payload.node_id = node_id;
+            payload.attempt_id = attempt_id;
+        }
+        KernelEventPayload::SideEffectSubmissionObserved(payload) => {
+            payload.node_id = node_id;
+            payload.attempt_id = attempt_id;
+        }
+        KernelEventPayload::SideEffectSubmissionUnknown(payload) => {
+            payload.node_id = node_id;
+            payload.attempt_id = attempt_id;
+        }
+        KernelEventPayload::SideEffectReceiptObserved(payload) => {
+            payload.node_id = node_id;
+            payload.attempt_id = attempt_id;
+        }
+        KernelEventPayload::SideEffectConfirmationObserved(payload) => {
+            payload.node_id = node_id;
+            payload.attempt_id = attempt_id;
+        }
+        KernelEventPayload::SideEffectAmbiguous(payload) => {
+            payload.node_id = node_id;
+            payload.attempt_id = attempt_id;
+        }
+        KernelEventPayload::SideEffectFailed(payload) => {
+            payload.node_id = node_id;
+            payload.attempt_id = attempt_id;
         }
         _ => unreachable!("payload is not side-effect evidence"),
     }
@@ -863,6 +1065,85 @@ fn append_side_effect_prepare(store: &mut InMemoryTypedRunStore, run_id: &RunId)
                 side_effect_claim(),
                 side_effect_prepared(1, "token-1"),
             ],
+            required_artifacts: vec![intent_evidence],
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect("append sidefx prepare");
+}
+
+fn append_side_effect_prepare_for_ledger(
+    store: &mut InMemoryTypedRunStore,
+    run_id: &RunId,
+    commit_key: &str,
+    ledger_key: events::SideEffectLedgerKey,
+    resource_key: events::ResourceKeyEvidence,
+    artifact_byte: u8,
+    start_attempt: bool,
+) {
+    append_side_effect_prepare_for_ledger_on_attempt(
+        store,
+        run_id,
+        commit_key,
+        ledger_key,
+        resource_key,
+        artifact_byte,
+        start_attempt,
+        node_id(70),
+        attempt_id(72),
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_side_effect_prepare_for_ledger_on_attempt(
+    store: &mut InMemoryTypedRunStore,
+    run_id: &RunId,
+    commit_key: &str,
+    ledger_key: events::SideEffectLedgerKey,
+    resource_key: events::ResourceKeyEvidence,
+    artifact_byte: u8,
+    start_attempt: bool,
+    node_id: NodeId,
+    attempt_id: AttemptId,
+) {
+    if start_attempt {
+        store
+            .append_prepared_commit(TypedCommitRequest {
+                run_id: run_id.clone(),
+                expected_next_seq: store.expected_next_seq(run_id),
+                commit_key: CommitKey::new(format!("{commit_key}-attempt-start"))
+                    .expect("commit key"),
+                payloads: vec![side_effect_attempt_started_for(
+                    node_id.clone(),
+                    attempt_id.clone(),
+                )],
+                required_artifacts: Vec::new(),
+                preconditions: CommitPreconditions::default(),
+            })
+            .expect("append sidefx attempt start");
+    }
+
+    let artifact_id = artifact_id(artifact_byte);
+    let artifact_digest = content_digest(artifact_byte + 1);
+    let intent_evidence = intent_artifact_ref_for_node(
+        artifact_id.clone(),
+        artifact_digest.clone(),
+        node_id.clone(),
+    );
+    let purpose = events::SideEffectLedgerPurpose::Forward;
+    let mut intent = side_effect_intent(artifact_id, artifact_digest);
+    let mut claim = side_effect_claim();
+    let mut prepared = side_effect_prepared_with_resource_key(1, "token-1", resource_key);
+    for payload in [&mut intent, &mut claim, &mut prepared] {
+        set_side_effect_ledger(payload, ledger_key.clone(), purpose.clone());
+        set_side_effect_node_attempt(payload, node_id.clone(), attempt_id.clone());
+    }
+
+    store
+        .append_prepared_commit(TypedCommitRequest {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(run_id),
+            commit_key: CommitKey::new(commit_key).expect("commit key"),
+            payloads: vec![intent, claim, prepared],
             required_artifacts: vec![intent_evidence],
             preconditions: CommitPreconditions::default(),
         })
@@ -1706,6 +1987,579 @@ fn side_effect_transition_mismatches_are_rejected() {
         })
         .expect_err("prepared token mismatch rejects");
     assert!(matches!(wrong_token, StoreError::ProjectionConflict { .. }));
+}
+
+#[test]
+fn resource_lane_rejects_same_key_for_other_ledgers_same_run_and_cross_run() {
+    let mut store = InMemoryTypedRunStore::new();
+    let run_a = run_id(201);
+    let run_b = run_id(202);
+    store
+        .append_prepared_commit(run_start_request(run_a.clone(), "resource-run-a-start"))
+        .expect("append run a");
+    store
+        .append_prepared_commit(run_start_request(run_b.clone(), "resource-run-b-start"))
+        .expect("append run b");
+
+    append_side_effect_prepare_for_ledger(
+        &mut store,
+        &run_a,
+        "resource-a-prepare",
+        side_effect_ledger_key_with_suffix(1),
+        resource_key("wallet-1", 201),
+        20,
+        true,
+    );
+
+    let same_run_error = {
+        let branch_node = node_id(73);
+        let branch_attempt = attempt_id(74);
+        let mut intent = side_effect_intent(artifact_id(22), content_digest(23));
+        let mut claim = side_effect_claim();
+        let mut prepared =
+            side_effect_prepared_with_resource_key(1, "token-1", resource_key("wallet-1", 201));
+        for payload in [&mut intent, &mut claim, &mut prepared] {
+            set_side_effect_ledger(
+                payload,
+                side_effect_ledger_key_with_suffix(2),
+                events::SideEffectLedgerPurpose::Forward,
+            );
+            set_side_effect_node_attempt(payload, branch_node.clone(), branch_attempt.clone());
+        }
+        store
+            .append_prepared_commit(TypedCommitRequest {
+                run_id: run_a.clone(),
+                expected_next_seq: store.expected_next_seq(&run_a),
+                commit_key: CommitKey::new("resource-a-conflict").expect("commit key"),
+                payloads: vec![
+                    side_effect_attempt_started_for(branch_node.clone(), branch_attempt),
+                    intent,
+                    claim,
+                    prepared,
+                ],
+                required_artifacts: vec![intent_artifact_ref_for_node(
+                    artifact_id(22),
+                    content_digest(23),
+                    branch_node,
+                )],
+                preconditions: CommitPreconditions::default(),
+            })
+            .expect_err("same-run lane conflict rejects")
+    };
+    assert_projection_conflict_contains(same_run_error, "resource lane already held");
+
+    let cross_run_error = {
+        let branch_node = node_id(75);
+        let branch_attempt = attempt_id(76);
+        let mut intent = side_effect_intent(artifact_id(24), content_digest(25));
+        let mut claim = side_effect_claim();
+        let mut prepared =
+            side_effect_prepared_with_resource_key(1, "token-1", resource_key("wallet-1", 201));
+        for payload in [&mut intent, &mut claim, &mut prepared] {
+            set_side_effect_ledger(
+                payload,
+                side_effect_ledger_key_with_suffix(3),
+                events::SideEffectLedgerPurpose::Forward,
+            );
+            set_side_effect_node_attempt(payload, branch_node.clone(), branch_attempt.clone());
+        }
+        store
+            .append_prepared_commit(TypedCommitRequest {
+                run_id: run_b.clone(),
+                expected_next_seq: store.expected_next_seq(&run_b),
+                commit_key: CommitKey::new("resource-b-conflict").expect("commit key"),
+                payloads: vec![
+                    side_effect_attempt_started_for(branch_node.clone(), branch_attempt),
+                    intent,
+                    claim,
+                    prepared,
+                ],
+                required_artifacts: vec![intent_artifact_ref_for_node(
+                    artifact_id(24),
+                    content_digest(25),
+                    branch_node,
+                )],
+                preconditions: CommitPreconditions::default(),
+            })
+            .expect_err("cross-run lane conflict rejects")
+    };
+    assert_projection_conflict_contains(cross_run_error, "resource lane already held");
+}
+
+#[test]
+fn resource_lane_allows_same_ledger_refresh_with_same_key_only() {
+    let mut store = InMemoryTypedRunStore::new();
+    let run = run_id(203);
+    let ledger = side_effect_ledger_key_with_suffix(4);
+    store
+        .append_prepared_commit(run_start_request(run.clone(), "resource-refresh-run-start"))
+        .expect("append run");
+    append_side_effect_prepare_for_ledger(
+        &mut store,
+        &run,
+        "resource-refresh-prepare",
+        ledger.clone(),
+        resource_key("wallet-2", 202),
+        26,
+        true,
+    );
+
+    let mut takeover = side_effect_claim_taken_over_with_token("token-2");
+    set_side_effect_ledger(
+        &mut takeover,
+        ledger.clone(),
+        events::SideEffectLedgerPurpose::Forward,
+    );
+    let mut prepared =
+        side_effect_prepared_with_resource_key(2, "token-2", resource_key("wallet-2", 202));
+    set_side_effect_ledger(
+        &mut prepared,
+        ledger.clone(),
+        events::SideEffectLedgerPurpose::Forward,
+    );
+    store
+        .append_prepared_commit(TypedCommitRequest {
+            run_id: run.clone(),
+            expected_next_seq: store.expected_next_seq(&run),
+            commit_key: CommitKey::new("resource-refresh-same-key").expect("commit key"),
+            payloads: vec![takeover, prepared],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect("same ledger may refresh the same resource key");
+
+    let mut takeover = side_effect_claim_taken_over_generation(2, 3, "token-3");
+    let KernelEventPayload::SideEffectClaimTakenOver(payload) = &mut takeover else {
+        unreachable!("helper returns takeover payload");
+    };
+    payload.previous_claim_owner = events::RunnerInvocationId::new("owner-2").expect("owner");
+    payload.new_claim_owner = events::RunnerInvocationId::new("owner-3").expect("owner");
+    set_side_effect_ledger(
+        &mut takeover,
+        ledger.clone(),
+        events::SideEffectLedgerPurpose::Forward,
+    );
+    let mut changed =
+        side_effect_prepared_with_resource_key(3, "token-3", resource_key("wallet-3", 203));
+    set_side_effect_ledger(
+        &mut changed,
+        ledger,
+        events::SideEffectLedgerPurpose::Forward,
+    );
+    let error = store
+        .append_prepared_commit(TypedCommitRequest {
+            run_id: run.clone(),
+            expected_next_seq: store.expected_next_seq(&run),
+            commit_key: CommitKey::new("resource-refresh-changed-key").expect("commit key"),
+            payloads: vec![takeover, changed],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect_err("same ledger cannot change resource key");
+    assert_projection_conflict_contains(error, "resource lane key changed");
+}
+
+#[test]
+fn resource_lane_releases_on_ledger_terminals_manual_resolution_and_run_terminal() {
+    let run = run_id(204);
+    let lane_key = resource_lane_key("wallet-4");
+
+    let mut not_submitted_store = InMemoryTypedRunStore::new();
+    not_submitted_store
+        .append_prepared_commit(run_start_request(
+            run.clone(),
+            "resource-not-submitted-run-start",
+        ))
+        .expect("append run");
+    append_side_effect_prepare_for_ledger(
+        &mut not_submitted_store,
+        &run,
+        "resource-not-submitted-prepare",
+        side_effect_ledger_key_with_suffix(5),
+        resource_key("wallet-4", 204),
+        28,
+        true,
+    );
+    let mut started = side_effect_started("owner-1", 1, "token-1");
+    set_side_effect_ledger(
+        &mut started,
+        side_effect_ledger_key_with_suffix(5),
+        events::SideEffectLedgerPurpose::Forward,
+    );
+    let mut not_submitted = side_effect_not_submitted(artifact_id(30), content_digest(31));
+    set_side_effect_ledger(
+        &mut not_submitted,
+        side_effect_ledger_key_with_suffix(5),
+        events::SideEffectLedgerPurpose::Forward,
+    );
+    not_submitted_store
+        .append_prepared_commit(TypedCommitRequest {
+            run_id: run.clone(),
+            expected_next_seq: not_submitted_store.expected_next_seq(&run),
+            commit_key: CommitKey::new("resource-not-submitted-terminal").expect("commit key"),
+            payloads: vec![started, not_submitted],
+            required_artifacts: vec![side_effect_evidence(
+                artifact_id(30),
+                content_digest(31),
+                not_submitted_schema(),
+                ArtifactRole::NotSubmittedProof,
+            )],
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect("not-submitted releases lane");
+    assert!(not_submitted_store
+        .projection_snapshot()
+        .resource_lane(&lane_key)
+        .is_none());
+
+    let run = run_id(205);
+    let mut confirmation_store = InMemoryTypedRunStore::new();
+    confirmation_store
+        .append_prepared_commit(run_start_request(
+            run.clone(),
+            "resource-confirmation-run-start",
+        ))
+        .expect("append run");
+    append_side_effect_prepare_for_ledger(
+        &mut confirmation_store,
+        &run,
+        "resource-confirmation-prepare",
+        side_effect_ledger_key_with_suffix(6),
+        resource_key("wallet-4", 204),
+        32,
+        true,
+    );
+    for (commit_key, mut payload, artifact) in [
+        (
+            "resource-confirmation-start",
+            side_effect_started("owner-1", 1, "token-1"),
+            None,
+        ),
+        (
+            "resource-confirmation-submission",
+            side_effect_submission_observed(artifact_id(34), content_digest(35)),
+            Some((
+                artifact_id(34),
+                content_digest(35),
+                submission_schema(),
+                ArtifactRole::Submission,
+            )),
+        ),
+        (
+            "resource-confirmation-receipt",
+            side_effect_receipt(artifact_id(36), content_digest(37)),
+            Some((
+                artifact_id(36),
+                content_digest(37),
+                receipt_schema(),
+                ArtifactRole::Receipt,
+            )),
+        ),
+        (
+            "resource-confirmation-confirmed",
+            side_effect_confirmation(artifact_id(38), content_digest(39)),
+            Some((
+                artifact_id(38),
+                content_digest(39),
+                confirmation_schema(),
+                ArtifactRole::Confirmation,
+            )),
+        ),
+    ] {
+        set_side_effect_ledger(
+            &mut payload,
+            side_effect_ledger_key_with_suffix(6),
+            events::SideEffectLedgerPurpose::Forward,
+        );
+        let required_artifacts = artifact
+            .map(|(artifact_id, digest, schema_id, role)| {
+                vec![side_effect_evidence(artifact_id, digest, schema_id, role)]
+            })
+            .unwrap_or_default();
+        confirmation_store
+            .append_prepared_commit(TypedCommitRequest {
+                run_id: run.clone(),
+                expected_next_seq: confirmation_store.expected_next_seq(&run),
+                commit_key: CommitKey::new(commit_key).expect("commit key"),
+                payloads: vec![payload],
+                required_artifacts,
+                preconditions: CommitPreconditions::default(),
+            })
+            .expect("append confirmation path event");
+    }
+    assert!(confirmation_store
+        .projection_snapshot()
+        .resource_lane(&lane_key)
+        .is_none());
+
+    let run = run_id(206);
+    let mut failure_store = InMemoryTypedRunStore::new();
+    failure_store
+        .append_prepared_commit(run_start_request(run.clone(), "resource-failed-run-start"))
+        .expect("append run");
+    append_side_effect_prepare_for_ledger(
+        &mut failure_store,
+        &run,
+        "resource-failed-prepare",
+        side_effect_ledger_key_with_suffix(7),
+        resource_key("wallet-4", 204),
+        40,
+        true,
+    );
+    let mut failed = side_effect_failed(true);
+    set_side_effect_ledger(
+        &mut failed,
+        side_effect_ledger_key_with_suffix(7),
+        events::SideEffectLedgerPurpose::Forward,
+    );
+    failure_store
+        .append_prepared_commit(TypedCommitRequest {
+            run_id: run.clone(),
+            expected_next_seq: failure_store.expected_next_seq(&run),
+            commit_key: CommitKey::new("resource-failed-terminal").expect("commit key"),
+            payloads: vec![failed, side_effect_attempt_failed(true)],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect("failed releases lane");
+    assert!(failure_store
+        .projection_snapshot()
+        .resource_lane(&lane_key)
+        .is_none());
+
+    let run = run_id(207);
+    let mut manual_store = InMemoryTypedRunStore::new();
+    manual_store
+        .append_prepared_commit(run_start_request(run.clone(), "resource-manual-run-start"))
+        .expect("append run");
+    append_side_effect_prepare_for_ledger(
+        &mut manual_store,
+        &run,
+        "resource-manual-prepare",
+        side_effect_ledger_key_with_suffix(8),
+        resource_key("wallet-4", 204),
+        42,
+        true,
+    );
+    let mut started = side_effect_started("owner-1", 1, "token-1");
+    let mut ambiguous = side_effect_ambiguous(artifact_id(44), content_digest(45));
+    for payload in [&mut started, &mut ambiguous] {
+        set_side_effect_ledger(
+            payload,
+            side_effect_ledger_key_with_suffix(8),
+            events::SideEffectLedgerPurpose::Forward,
+        );
+    }
+    manual_store
+        .append_prepared_commit(TypedCommitRequest {
+            run_id: run.clone(),
+            expected_next_seq: manual_store.expected_next_seq(&run),
+            commit_key: CommitKey::new("resource-manual-ambiguous").expect("commit key"),
+            payloads: vec![started, ambiguous],
+            required_artifacts: vec![side_effect_evidence(
+                artifact_id(44),
+                content_digest(45),
+                schema_id("mfm.test.ambiguity", 76),
+                ArtifactRole::AmbiguityEvidence,
+            )],
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect("append ambiguous ledger");
+    assert!(manual_store
+        .projection_snapshot()
+        .resource_lane(&lane_key)
+        .is_some());
+    manual_store
+        .append_prepared_commit(TypedCommitRequest {
+            run_id: run.clone(),
+            expected_next_seq: manual_store.expected_next_seq(&run),
+            commit_key: CommitKey::new("resource-manual-release").expect("commit key"),
+            payloads: vec![manual_resolution_recorded_for_run(run.clone(), 46)],
+            required_artifacts: manual_resolution_artifacts(46),
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect("manual resolution releases lane");
+    assert!(manual_store
+        .projection_snapshot()
+        .resource_lane(&lane_key)
+        .is_none());
+
+    let run = run_id(208);
+    let mut terminal_store = InMemoryTypedRunStore::new();
+    terminal_store
+        .append_prepared_commit(run_start_request(
+            run.clone(),
+            "resource-run-terminal-start",
+        ))
+        .expect("append run");
+    append_side_effect_prepare_for_ledger(
+        &mut terminal_store,
+        &run,
+        "resource-run-terminal-prepare",
+        side_effect_ledger_key_with_suffix(9),
+        resource_key("wallet-4", 204),
+        48,
+        true,
+    );
+    assert!(terminal_store
+        .projection_snapshot()
+        .resource_lane(&lane_key)
+        .is_some());
+    terminal_store
+        .append_prepared_commit(TypedCommitRequest {
+            run_id: run.clone(),
+            expected_next_seq: terminal_store.expected_next_seq(&run),
+            commit_key: CommitKey::new("resource-run-terminal-release").expect("commit key"),
+            payloads: vec![run_completed_for_run(
+                run.clone(),
+                events::RunCompletionOutcome::FailedWithoutAcdcClaim,
+            )],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect("sealed run terminal releases lane");
+    assert!(terminal_store
+        .projection_snapshot()
+        .resource_lane(&lane_key)
+        .is_none());
+}
+
+#[test]
+fn resource_lane_projection_rebuilds_from_non_terminal_run_stream() {
+    let mut store = InMemoryTypedRunStore::new();
+    let run = run_id(209);
+    let lane_key = resource_lane_key("wallet-5");
+    store
+        .append_prepared_commit(run_start_request(run.clone(), "resource-rebuild-run-start"))
+        .expect("append run");
+    append_side_effect_prepare_for_ledger(
+        &mut store,
+        &run,
+        "resource-rebuild-prepare",
+        side_effect_ledger_key_with_suffix(10),
+        resource_key("wallet-5", 205),
+        50,
+        true,
+    );
+
+    let stream = store.load_run_stream(&run);
+    let rebuilt = ProjectionSnapshot::rebuild_from_run_stream(&stream).expect("rebuild projection");
+    let lane = rebuilt
+        .resource_lane(&lane_key)
+        .expect("rebuilt non-terminal lane");
+    assert_eq!(lane.run_id, run);
+    assert_eq!(lane.ledger_key, side_effect_ledger_key_with_suffix(10));
+}
+
+#[test]
+fn resource_touched_set_evidence_is_schema_checked_at_admission() {
+    let run = run_id(210);
+    let touched = resource_touched_set(52);
+    let mut store = InMemoryTypedRunStore::new();
+    store
+        .append_prepared_commit(run_start_request(run.clone(), "resource-touched-run-start"))
+        .expect("append run");
+    append_side_effect_prepare(&mut store, &run);
+    append_side_effect_started(&mut store, &run);
+    let submission_artifact_id = artifact_id(54);
+    let submission_digest = content_digest(55);
+    store
+        .append_prepared_commit(TypedCommitRequest {
+            run_id: run.clone(),
+            expected_next_seq: store.expected_next_seq(&run),
+            commit_key: CommitKey::new("resource-touched-submission").expect("commit key"),
+            payloads: vec![side_effect_submission_observed(
+                submission_artifact_id.clone(),
+                submission_digest.clone(),
+            )],
+            required_artifacts: vec![side_effect_evidence(
+                submission_artifact_id,
+                submission_digest,
+                submission_schema(),
+                ArtifactRole::Submission,
+            )],
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect("append submission");
+
+    let mut receipt = side_effect_receipt(artifact_id(56), content_digest(57));
+    let KernelEventPayload::SideEffectReceiptObserved(payload) = &mut receipt else {
+        unreachable!("helper returns receipt");
+    };
+    payload.resource_touched_set = Some(touched.clone());
+    let mut wrong_touched_artifact = resource_touched_set_artifact_ref(&touched);
+    wrong_touched_artifact.schema_id = Some(schema_id("mfm.test.wrong_touched_set", 53));
+    let error = store
+        .append_prepared_commit_with_artifacts(
+            TypedCommitRequest {
+                run_id: run.clone(),
+                expected_next_seq: store.expected_next_seq(&run),
+                commit_key: CommitKey::new("resource-touched-wrong-schema").expect("commit key"),
+                payloads: vec![receipt.clone()],
+                required_artifacts: vec![
+                    side_effect_evidence(
+                        artifact_id(56),
+                        content_digest(57),
+                        receipt_schema(),
+                        ArtifactRole::Receipt,
+                    ),
+                    resource_touched_set_artifact_ref(&touched),
+                ],
+                preconditions: CommitPreconditions::default(),
+            },
+            vec![
+                side_effect_evidence(
+                    artifact_id(56),
+                    content_digest(57),
+                    receipt_schema(),
+                    ArtifactRole::Receipt,
+                ),
+                wrong_touched_artifact,
+            ],
+        )
+        .expect_err("touched-set schema mismatch rejects");
+    assert!(matches!(
+        error,
+        StoreError::ArtifactEvidenceMismatch {
+            field: "schema_id",
+            ..
+        }
+    ));
+
+    store
+        .append_prepared_commit_with_artifacts(
+            TypedCommitRequest {
+                run_id: run.clone(),
+                expected_next_seq: store.expected_next_seq(&run),
+                commit_key: CommitKey::new("resource-touched-valid").expect("commit key"),
+                payloads: vec![receipt],
+                required_artifacts: vec![
+                    side_effect_evidence(
+                        artifact_id(56),
+                        content_digest(57),
+                        receipt_schema(),
+                        ArtifactRole::Receipt,
+                    ),
+                    resource_touched_set_artifact_ref(&touched),
+                ],
+                preconditions: CommitPreconditions::default(),
+            },
+            vec![
+                side_effect_evidence(
+                    artifact_id(56),
+                    content_digest(57),
+                    receipt_schema(),
+                    ArtifactRole::Receipt,
+                ),
+                resource_touched_set_artifact_ref(&touched),
+            ],
+        )
+        .expect("valid touched-set evidence admits");
+    let projection = store
+        .projection_snapshot()
+        .side_effect(&side_effect_ledger_key())
+        .expect("side-effect projection");
+    assert_eq!(projection.resource_touched_set, Some(touched));
 }
 
 #[test]
