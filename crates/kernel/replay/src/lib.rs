@@ -371,7 +371,7 @@ pub mod v1 {
         retained_artifacts: BTreeMap<ArtifactId, StoredArtifactEvidenceRef>,
         artifacts: BTreeMap<ArtifactId, StoredArtifactEvidenceRef>,
         facts: BTreeMap<FactKey, events::FactRecorded>,
-        intents: BTreeMap<SideEffectKey, side_effect::IntentPersisted>,
+        intents: BTreeMap<events::SideEffectLedgerKey, side_effect::IntentPersisted>,
         submissions: BTreeMap<SideEffectKey, side_effect::SubmissionObserved>,
         receipts: BTreeMap<SideEffectKey, side_effect::ReceiptObserved>,
         confirmations: BTreeMap<SideEffectKey, side_effect::ConfirmationObserved>,
@@ -711,6 +711,7 @@ pub mod v1 {
         }
 
         fn index_stream(&mut self, stream: &[KernelEventEnvelope]) -> Result<()> {
+            let mut resource_keys = BTreeMap::new();
             for envelope in stream {
                 match envelope.payload() {
                     KernelEventPayload::RunStarted(payload) => {
@@ -787,7 +788,7 @@ pub mod v1 {
                         )?;
                         insert_unique(
                             &mut self.intents,
-                            (payload.ledger_key.clone(), payload.invocation_epoch),
+                            payload.ledger_key.clone(),
                             payload.clone(),
                             ReplayErrorKind::InvalidRunStream,
                             "duplicate side-effect intent replay event",
@@ -846,6 +847,17 @@ pub mod v1 {
                             &payload.node_id,
                             &payload.attempt_id,
                         )?;
+                        self.verify_resource_touched_set(
+                            &payload.node_id,
+                            payload.resource_touched_set.as_ref(),
+                        )?;
+                        if let Some(touched_set) = &payload.resource_touched_set {
+                            self.authorize_artifact_by_schema(
+                                &touched_set.evidence_artifact_id,
+                                &touched_set.evidence_hash,
+                                &touched_set.evidence_schema_id,
+                            )?;
+                        }
                         self.authorize_artifact(
                             &payload.receipt_artifact_id,
                             &payload.receipt_hash,
@@ -868,6 +880,17 @@ pub mod v1 {
                             &payload.node_id,
                             &payload.attempt_id,
                         )?;
+                        self.verify_resource_touched_set(
+                            &payload.node_id,
+                            payload.resource_touched_set.as_ref(),
+                        )?;
+                        if let Some(touched_set) = &payload.resource_touched_set {
+                            self.authorize_artifact_by_schema(
+                                &touched_set.evidence_artifact_id,
+                                &touched_set.evidence_hash,
+                                &touched_set.evidence_schema_id,
+                            )?;
+                        }
                         self.authorize_artifact(
                             &payload.confirmation_artifact_id,
                             &payload.confirmation_hash,
@@ -890,6 +913,7 @@ pub mod v1 {
                             &payload.node_id,
                             &payload.attempt_id,
                         )?;
+                        self.verify_invocation_prepared_resource_key(payload, &mut resource_keys)?;
                         if let (Some(artifact_id), Some(hash)) =
                             (&payload.prepared_artifact_id, &payload.prepared_hash)
                         {
@@ -1059,15 +1083,12 @@ pub mod v1 {
             request: &SideEffectEvidenceReplayRequest,
         ) -> Result<SideEffectIntentReplayEvidence> {
             self.verify_side_effect_intent(request)?;
-            let intent = self
-                .intents
-                .get(&(request.ledger_key.clone(), request.invocation_epoch))
-                .ok_or_else(|| {
-                    ReplayError::new(
-                        ReplayErrorKind::SideEffectMissing,
-                        format!("missing side-effect intent {}", request.ledger_key),
-                    )
-                })?;
+            let intent = self.intents.get(&request.ledger_key).ok_or_else(|| {
+                ReplayError::new(
+                    ReplayErrorKind::SideEffectMissing,
+                    format!("missing side-effect intent {}", request.ledger_key),
+                )
+            })?;
             Ok(SideEffectIntentReplayEvidence {
                 intent: intent.clone(),
                 artifact: self.verify_artifact(
@@ -1138,15 +1159,12 @@ pub mod v1 {
                 &request.adapter_kind,
                 &request.adapter_version,
             )?;
-            let intent = self
-                .intents
-                .get(&(request.ledger_key.clone(), request.invocation_epoch))
-                .ok_or_else(|| {
-                    ReplayError::new(
-                        ReplayErrorKind::SideEffectMissing,
-                        format!("missing side-effect intent {}", request.ledger_key),
-                    )
-                })?;
+            let intent = self.intents.get(&request.ledger_key).ok_or_else(|| {
+                ReplayError::new(
+                    ReplayErrorKind::SideEffectMissing,
+                    format!("missing side-effect intent {}", request.ledger_key),
+                )
+            })?;
             if intent.node_id != request.node_id
                 || intent.attempt_id != request.attempt_id
                 || intent.intent_schema_id != request.intent_schema_id
@@ -1425,6 +1443,100 @@ pub mod v1 {
             Ok(())
         }
 
+        fn verify_invocation_prepared_resource_key(
+            &self,
+            payload: &side_effect::InvocationPrepared,
+            resource_keys: &mut BTreeMap<events::SideEffectLedgerKey, events::ResourceKeyEvidence>,
+        ) -> Result<()> {
+            let node = self.node(&payload.node_id)?;
+            let side_effect = node.side_effect.as_ref().ok_or_else(|| {
+                certified_evidence_mismatch(
+                    "side-effect invocation prepared for non-side-effect node",
+                )
+            })?;
+            match &side_effect.resource_claim {
+                spec::ResourceClaimSpec::Exclusive {
+                    namespace,
+                    key_schema,
+                } => {
+                    let Some(resource_key) = payload.resource_key.as_ref() else {
+                        return Err(certified_evidence_mismatch(
+                            "exclusive side-effect invocation prepared without resource key evidence",
+                        ));
+                    };
+                    if &resource_key.namespace != namespace
+                        || &resource_key.key_schema_id != key_schema
+                    {
+                        return Err(certified_evidence_mismatch(
+                            "exclusive resource key evidence does not match certified claim schema",
+                        ));
+                    }
+                    match resource_keys.get(&payload.ledger_key) {
+                        Some(previous) if previous != resource_key => {
+                            Err(certified_evidence_mismatch(
+                                "exclusive resource key changed across invocation epochs",
+                            ))
+                        }
+                        Some(_) => Ok(()),
+                        None => {
+                            resource_keys.insert(payload.ledger_key.clone(), resource_key.clone());
+                            Ok(())
+                        }
+                    }
+                }
+                spec::ResourceClaimSpec::ExactTouchedSet { .. }
+                | spec::ResourceClaimSpec::ManualOnly => {
+                    if payload.resource_key.is_some() {
+                        return Err(certified_evidence_mismatch(
+                            "resource key evidence recorded without an exclusive resource claim",
+                        ));
+                    }
+                    Ok(())
+                }
+            }
+        }
+
+        fn verify_resource_touched_set(
+            &self,
+            node_id: &NodeId,
+            touched_set: Option<&events::ResourceTouchedSetEvidence>,
+        ) -> Result<()> {
+            let node = self.node(node_id)?;
+            let side_effect = node.side_effect.as_ref().ok_or_else(|| {
+                certified_evidence_mismatch(
+                    "side-effect touched-set evidence for non-side-effect node",
+                )
+            })?;
+            match &side_effect.resource_claim {
+                spec::ResourceClaimSpec::ExactTouchedSet {
+                    namespace,
+                    evidence_schema,
+                } => {
+                    let Some(touched_set) = touched_set else {
+                        return Err(certified_evidence_mismatch(
+                            "exact-touched-set side-effect evidence missing touched-set evidence",
+                        ));
+                    };
+                    if &touched_set.namespace != namespace
+                        || &touched_set.evidence_schema_id != evidence_schema
+                    {
+                        return Err(certified_evidence_mismatch(
+                            "touched-set evidence does not match certified claim schema",
+                        ));
+                    }
+                    Ok(())
+                }
+                spec::ResourceClaimSpec::Exclusive { .. } | spec::ResourceClaimSpec::ManualOnly => {
+                    if touched_set.is_some() {
+                        return Err(certified_evidence_mismatch(
+                            "touched-set evidence recorded without an exact-touched-set resource claim",
+                        ));
+                    }
+                    Ok(())
+                }
+            }
+        }
+
         fn verify_manual_resolution_against_spec(
             &self,
             payload: &events::ManualResolutionRecorded,
@@ -1460,19 +1572,16 @@ pub mod v1 {
         fn verify_side_effect_event_against_intent(
             &self,
             ledger_key: &events::SideEffectLedgerKey,
-            invocation_epoch: u32,
+            _invocation_epoch: u32,
             node_id: &NodeId,
             attempt_id: &AttemptId,
         ) -> Result<()> {
-            let intent = self
-                .intents
-                .get(&(ledger_key.clone(), invocation_epoch))
-                .ok_or_else(|| {
-                    ReplayError::new(
-                        ReplayErrorKind::SideEffectMissing,
-                        format!("missing side-effect intent {ledger_key}"),
-                    )
-                })?;
+            let intent = self.intents.get(ledger_key).ok_or_else(|| {
+                ReplayError::new(
+                    ReplayErrorKind::SideEffectMissing,
+                    format!("missing side-effect intent {ledger_key}"),
+                )
+            })?;
             if intent.node_id != *node_id || intent.attempt_id != *attempt_id {
                 return Err(side_effect_mismatch(
                     "side-effect event does not match persisted intent",
@@ -3069,6 +3178,146 @@ pub mod v1 {
             );
         }
 
+        #[test]
+        fn replay_rejects_exclusive_ledger_without_recorded_key() {
+            let fixture = Fixture::with_resource_claim(exclusive_resource_claim());
+
+            assert_eq!(
+                ReplayBroker::from_validated_parts(fixture.authority())
+                    .expect_err("exclusive key missing")
+                    .kind,
+                ReplayErrorKind::CertifiedEvidenceMismatch
+            );
+        }
+
+        #[test]
+        fn replay_rejects_exclusive_ledger_with_wrong_key_schema() {
+            let fixture = Fixture::with_resource_claim(exclusive_resource_claim());
+            let mut stream = fixture.stream.clone();
+            set_first_prepared_resource_key(
+                &mut stream,
+                Some(resource_key(
+                    "wallet-1",
+                    schema("mfm.test.wrong_resource_key", 0xc1),
+                )),
+            );
+
+            assert_eq!(
+                ReplayBroker::from_validated_parts(fixture.authority_for_stream(&stream))
+                    .expect_err("exclusive key schema mismatch")
+                    .kind,
+                ReplayErrorKind::CertifiedEvidenceMismatch
+            );
+        }
+
+        #[test]
+        fn replay_rejects_exclusive_key_changed_across_invocation_epochs() {
+            let fixture = Fixture::with_resource_claim(exclusive_resource_claim());
+            let mut stream = fixture.stream[..7].to_vec();
+            set_first_prepared_resource_key(
+                &mut stream,
+                Some(resource_key("wallet-1", resource_key_schema())),
+            );
+            let not_submitted_proof_artifact = artifact(0xc2);
+            let not_submitted_proof_hash = content(0xc3);
+            append_payloads_to_stream(
+                &mut stream,
+                "exclusive-epoch-two",
+                vec![
+                    KernelEventPayload::SideEffectNotSubmittedProven(
+                        side_effect::NotSubmittedProven {
+                            spec_hash: fixture.envelope.spec_hash.clone(),
+                            node_id: fixture.node_id.clone(),
+                            attempt_id: fixture.attempt_id.clone(),
+                            ledger_key: fixture.ledger_key.clone(),
+                            ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+                            invocation_epoch: 1,
+                            proof_schema_id: schema("mfm.test.not_submitted", 0xc4),
+                            proof_hash: not_submitted_proof_hash.clone(),
+                            proof_artifact_id: not_submitted_proof_artifact.clone(),
+                        },
+                    ),
+                    KernelEventPayload::SideEffectClaimed(side_effect::Claimed {
+                        spec_hash: fixture.envelope.spec_hash.clone(),
+                        node_id: fixture.node_id.clone(),
+                        attempt_id: fixture.attempt_id.clone(),
+                        ledger_key: fixture.ledger_key.clone(),
+                        ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+                        claim_owner: events::RunnerInvocationId::new("owner-2").expect("owner"),
+                        invocation_epoch: 2,
+                        claim_generation: 2,
+                        claim_fencing_token: side_effect::ClaimFencingToken::new("token-2")
+                            .expect("token"),
+                    }),
+                    KernelEventPayload::SideEffectInvocationPrepared(
+                        side_effect::InvocationPrepared {
+                            spec_hash: fixture.envelope.spec_hash.clone(),
+                            node_id: fixture.node_id.clone(),
+                            attempt_id: fixture.attempt_id.clone(),
+                            ledger_key: fixture.ledger_key.clone(),
+                            ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+                            invocation_epoch: 2,
+                            claim_generation: 2,
+                            claim_fencing_token: side_effect::ClaimFencingToken::new("token-2")
+                                .expect("token"),
+                            prepared_artifact_id: None,
+                            prepared_hash: None,
+                            resource_key: Some(resource_key("wallet-2", resource_key_schema())),
+                        },
+                    ),
+                ],
+            );
+            let mut artifacts = fixture.artifacts[..5].to_vec();
+            artifacts.push(stored_artifact(
+                not_submitted_proof_artifact,
+                not_submitted_proof_hash,
+                Some(schema("mfm.test.not_submitted", 0xc4)),
+                ArtifactRole::NotSubmittedProof,
+                Some(fixture.node_id.clone()),
+            ));
+
+            assert_eq!(
+                ReplayBroker::from_validated_parts(
+                    fixture.authority_for_stream_and_artifacts(&stream, artifacts),
+                )
+                .expect_err("unstable exclusive key")
+                .kind,
+                ReplayErrorKind::CertifiedEvidenceMismatch
+            );
+        }
+
+        #[test]
+        fn replay_rejects_exact_touched_set_ledger_without_evidence() {
+            let fixture = Fixture::with_resource_claim(exact_touched_set_claim());
+
+            assert_eq!(
+                ReplayBroker::from_validated_parts(fixture.authority())
+                    .expect_err("missing touched set")
+                    .kind,
+                ReplayErrorKind::CertifiedEvidenceMismatch
+            );
+        }
+
+        #[test]
+        fn replay_rejects_exact_touched_set_schema_mismatch() {
+            let fixture = Fixture::with_resource_claim(exact_touched_set_claim());
+            let mut stream = fixture.stream.clone();
+            set_first_receipt_touched_set(
+                &mut stream,
+                Some(resource_touched_set(
+                    schema("mfm.test.wrong_touched_set", 0xc4),
+                    0xc5,
+                )),
+            );
+
+            assert_eq!(
+                ReplayBroker::from_validated_parts(fixture.authority_for_stream(&stream))
+                    .expect_err("touched set schema mismatch")
+                    .kind,
+                ReplayErrorKind::CertifiedEvidenceMismatch
+            );
+        }
+
         struct TestReplayVerifier {
             verifier_id: events::ReplayVerifierId,
             submission_hash: ContentDigest,
@@ -3158,6 +3407,14 @@ pub mod v1 {
                 Self::with_saga_policy_internal(saga, false)
             }
 
+            fn with_resource_claim(resource_claim: spec::ResourceClaimSpec) -> Self {
+                Self::with_saga_policy_internal_with_resource_claim(
+                    spec::SagaPolicySpec::NoSideEffects,
+                    false,
+                    resource_claim,
+                )
+            }
+
             fn with_saga_policy_and_remediation(saga: spec::SagaPolicySpec) -> Self {
                 Self::with_saga_policy_internal(saga, true)
             }
@@ -3165,6 +3422,18 @@ pub mod v1 {
             fn with_saga_policy_internal(
                 saga: spec::SagaPolicySpec,
                 include_remediation: bool,
+            ) -> Self {
+                Self::with_saga_policy_internal_with_resource_claim(
+                    saga,
+                    include_remediation,
+                    spec::ResourceClaimSpec::ManualOnly,
+                )
+            }
+
+            fn with_saga_policy_internal_with_resource_claim(
+                saga: spec::SagaPolicySpec,
+                include_remediation: bool,
+                resource_claim: spec::ResourceClaimSpec,
             ) -> Self {
                 let node_id = node(0x10);
                 let attempt_id = attempt(0x11);
@@ -3259,7 +3528,7 @@ pub mod v1 {
                     }],
                     side_effect: Some(spec::SideEffectContractSpec {
                         contract_digest: contract_digest.clone(),
-                        resource_claim: spec::ResourceClaimSpec::ManualOnly,
+                        resource_claim,
                     }),
                     framework: None,
                     planning_lineage: planning.clone(),
@@ -3941,6 +4210,83 @@ pub mod v1 {
             stream.extend(batch.events().iter().cloned());
         }
 
+        fn set_first_prepared_resource_key(
+            stream: &mut [KernelEventEnvelope],
+            resource_key: Option<events::ResourceKeyEvidence>,
+        ) {
+            replace_first_payload(
+                stream,
+                "rewrite-prepared-resource-key",
+                |payload| matches!(payload, KernelEventPayload::SideEffectInvocationPrepared(_)),
+                |payload| {
+                    let KernelEventPayload::SideEffectInvocationPrepared(mut payload) = payload
+                    else {
+                        unreachable!("prepared event")
+                    };
+                    payload.resource_key = resource_key;
+                    KernelEventPayload::SideEffectInvocationPrepared(payload)
+                },
+            );
+        }
+
+        fn set_first_receipt_touched_set(
+            stream: &mut [KernelEventEnvelope],
+            touched_set: Option<events::ResourceTouchedSetEvidence>,
+        ) {
+            replace_first_payload(
+                stream,
+                "rewrite-receipt-touched-set",
+                |payload| matches!(payload, KernelEventPayload::SideEffectReceiptObserved(_)),
+                |payload| {
+                    let KernelEventPayload::SideEffectReceiptObserved(mut payload) = payload else {
+                        unreachable!("receipt event")
+                    };
+                    payload.resource_touched_set = touched_set;
+                    KernelEventPayload::SideEffectReceiptObserved(payload)
+                },
+            );
+        }
+
+        fn replace_first_payload(
+            stream: &mut [KernelEventEnvelope],
+            commit_key: &str,
+            matches_payload: impl Fn(&KernelEventPayload) -> bool,
+            rewrite: impl FnOnce(KernelEventPayload) -> KernelEventPayload,
+        ) {
+            let index = stream
+                .iter()
+                .position(|event| matches_payload(event.payload()))
+                .expect("payload to rewrite");
+            let seq = stream[index].seq();
+            let indices = stream
+                .iter()
+                .enumerate()
+                .filter_map(|(candidate, event)| (event.seq() == seq).then_some(candidate))
+                .collect::<Vec<_>>();
+            let rewrite_index = indices
+                .iter()
+                .position(|candidate| *candidate == index)
+                .expect("rewritten event in sequence batch");
+            let mut payloads = indices
+                .iter()
+                .map(|candidate| stream[*candidate].payload().clone())
+                .collect::<Vec<_>>();
+            payloads[rewrite_index] = rewrite(payloads[rewrite_index].clone());
+            let request = TypedCommitRequest {
+                run_id: stream[index].run_id().clone(),
+                expected_next_seq: seq,
+                commit_key: CommitKey::new(commit_key).expect("commit key"),
+                payloads,
+                required_artifacts: Vec::new(),
+                preconditions: CommitPreconditions::default(),
+            };
+            let batch = build_committed_batch(&request, seq).expect("rebuild envelope");
+            assert_eq!(batch.events().len(), indices.len());
+            for (candidate, event) in indices.into_iter().zip(batch.events()) {
+                stream[candidate] = event.clone();
+            }
+        }
+
         fn projection_with_side_effects(
             side_effects: BTreeMap<events::SideEffectLedgerKey, store::SideEffectProjection>,
         ) -> ProjectionSnapshot {
@@ -4029,6 +4375,52 @@ pub mod v1 {
 
         fn schema(name: &str, byte: u8) -> SchemaId {
             SchemaId::new(name, "1", DigestAlgorithm::Sha256JcsV1, bytes(byte)).expect("schema")
+        }
+
+        fn resource_namespace() -> spec::ResourceNamespace {
+            spec::ResourceNamespace::new("mfm.test.wallet_nonce").expect("namespace")
+        }
+
+        fn resource_key_schema() -> SchemaId {
+            schema("mfm.test.resource_key", 0xc0)
+        }
+
+        fn exclusive_resource_claim() -> spec::ResourceClaimSpec {
+            spec::ResourceClaimSpec::Exclusive {
+                namespace: resource_namespace(),
+                key_schema: resource_key_schema(),
+            }
+        }
+
+        fn exact_touched_set_schema() -> SchemaId {
+            schema("mfm.test.touched_set", 0xc6)
+        }
+
+        fn exact_touched_set_claim() -> spec::ResourceClaimSpec {
+            spec::ResourceClaimSpec::ExactTouchedSet {
+                namespace: resource_namespace(),
+                evidence_schema: exact_touched_set_schema(),
+            }
+        }
+
+        fn resource_key(value: &str, key_schema_id: SchemaId) -> events::ResourceKeyEvidence {
+            events::ResourceKeyEvidence {
+                namespace: resource_namespace(),
+                key_schema_id,
+                key: events::ResourceKey::new(value).expect("resource key"),
+            }
+        }
+
+        fn resource_touched_set(
+            evidence_schema_id: SchemaId,
+            byte: u8,
+        ) -> events::ResourceTouchedSetEvidence {
+            events::ResourceTouchedSetEvidence {
+                namespace: resource_namespace(),
+                evidence_schema_id,
+                evidence_hash: content(byte),
+                evidence_artifact_id: artifact(byte.wrapping_add(1)),
+            }
         }
 
         fn semantic(name: &str, byte: u8) -> SemanticTypeId {

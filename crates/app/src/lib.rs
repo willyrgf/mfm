@@ -443,6 +443,10 @@ pub struct TypedSagaStatus {
     pub policy: TypedSagaPolicyStatus,
     /// Derived per-forward-ledger obligations.
     pub obligations: Vec<TypedSagaObligationStatus>,
+    /// Resource claims and recorded evidence for all projected side-effect ledgers.
+    pub resource_ledgers: Vec<TypedResourceLedgerStatus>,
+    /// Active exclusive resource lane holders visible to this status projection.
+    pub resource_lanes: Vec<TypedResourceLaneHolderStatus>,
     /// Manual-block reason when the derived run mode is `manual_blocked`.
     pub manual_block_reason: Option<String>,
     /// Required manual evidence schemas when manual evidence can resolve the current block.
@@ -480,6 +484,8 @@ pub struct TypedSagaObligationStatus {
     pub forward_phase: String,
     /// Derived forward classification.
     pub classification: String,
+    /// Declared resource claim and recorded evidence for the forward ledger.
+    pub resource: Option<TypedResourceLedgerStatus>,
     /// Linked remediation ledger, when one exists.
     pub remediation: Option<TypedRemediationLedgerStatus>,
 }
@@ -493,10 +499,95 @@ pub struct TypedRemediationLedgerStatus {
     pub forward_ledger_key: String,
     /// Current remediation side-effect phase.
     pub phase: String,
+    /// Declared resource claim and recorded evidence for the remediation ledger.
+    pub resource: Option<TypedResourceLedgerStatus>,
     /// Whether remediation confirmation closed the obligation.
     pub closed: bool,
     /// Unresolved reason if remediation cannot close the obligation.
     pub unresolved: Option<String>,
+}
+
+/// Public resource-claim and evidence status for one side-effect ledger.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TypedResourceLedgerStatus {
+    /// Side-effect ledger key.
+    pub ledger_key: String,
+    /// Ledger purpose.
+    pub ledger_purpose: String,
+    /// Linked forward ledger key when this is a remediation ledger.
+    pub forward_ledger_key: Option<String>,
+    /// Current projected side-effect phase.
+    pub phase: String,
+    /// Certified resource claim declared by the side-effect node.
+    pub claim: TypedResourceClaimStatus,
+    /// Recorded exclusive key evidence, when the claim is `exclusive` and preparation occurred.
+    pub key: Option<TypedResourceKeyStatus>,
+    /// Recorded exact touched-set evidence, when the claim is `exact_touched_set`.
+    pub touched_set: Option<TypedResourceTouchedSetStatus>,
+    /// Active lane holder when this ledger currently owns its exclusive lane.
+    pub active_lane: Option<TypedResourceLaneHolderStatus>,
+    /// Active holder of the same recorded key when this ledger is not the holder.
+    pub blocked_by_lane: Option<TypedResourceLaneHolderStatus>,
+}
+
+/// Public certified resource claim summary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TypedResourceClaimStatus {
+    /// Claim variant: `exclusive`, `exact_touched_set`, or `manual_only`.
+    pub kind: String,
+    /// Resource namespace for `exclusive` and `exact_touched_set` claims.
+    pub namespace: Option<String>,
+    /// Key schema id for `exclusive` claims.
+    pub key_schema_id: Option<String>,
+    /// Evidence schema id for `exact_touched_set` claims.
+    pub evidence_schema_id: Option<String>,
+}
+
+/// Public exclusive resource key evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TypedResourceKeyStatus {
+    /// Resource namespace.
+    pub namespace: String,
+    /// Key schema id.
+    pub key_schema_id: String,
+    /// Store-comparable resource key.
+    pub key: String,
+}
+
+/// Public exact touched-set evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TypedResourceTouchedSetStatus {
+    /// Resource namespace.
+    pub namespace: String,
+    /// Evidence schema id.
+    pub evidence_schema_id: String,
+    /// Canonical touched-set evidence hash.
+    pub evidence_hash: String,
+    /// Touched-set evidence artifact id.
+    pub evidence_artifact_id: String,
+}
+
+/// Public active exclusive resource lane holder.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TypedResourceLaneHolderStatus {
+    /// Resource namespace.
+    pub namespace: String,
+    /// Store-comparable resource key.
+    pub key: String,
+    /// Run id holding the lane.
+    pub holding_run_id: String,
+    /// Ledger key holding the lane.
+    pub holding_ledger_key: String,
+    /// Ledger purpose for the holder.
+    pub holding_ledger_purpose: String,
+    /// Forward ledger key when the holder is a remediation ledger.
+    pub holding_forward_ledger_key: Option<String>,
+    /// Node id that prepared the invocation.
+    pub holding_node_id: String,
+    /// Attempt id that prepared the invocation.
+    pub holding_attempt_id: String,
+    /// Invocation epoch that prepared the invocation.
+    pub invocation_epoch: u32,
 }
 
 /// Public terminal resolution summary.
@@ -1108,7 +1199,7 @@ where
             run_id: run_id.as_str().to_owned(),
             spec_hash: broker.certified_spec().spec_hash.as_str().to_owned(),
             run_mode: typed_run_mode(saga.run_mode),
-            saga: typed_saga_status(&runtime_spec.spec().saga, &saga),
+            saga: typed_saga_status_with_resources(runtime_spec.spec(), projection, &saga),
             head_seq: stream_head(stream),
             retained_artifacts,
         })
@@ -1367,9 +1458,15 @@ fn collect_event_artifact_ids(
         }
         events::KernelEventPayload::SideEffectReceiptObserved(payload) => {
             ids.insert(payload.receipt_artifact_id.clone(), ());
+            if let Some(touched_set) = &payload.resource_touched_set {
+                ids.insert(touched_set.evidence_artifact_id.clone(), ());
+            }
         }
         events::KernelEventPayload::SideEffectConfirmationObserved(payload) => {
             ids.insert(payload.confirmation_artifact_id.clone(), ());
+            if let Some(touched_set) = &payload.resource_touched_set {
+                ids.insert(touched_set.evidence_artifact_id.clone(), ());
+            }
         }
         events::KernelEventPayload::SideEffectAmbiguous(payload) => {
             ids.insert(payload.evidence_artifact_id.clone(), ());
@@ -1913,7 +2010,7 @@ pub fn typed_run_status_from_stream(
         run_id: run_id.as_str().to_owned(),
         spec_hash: spec_hash.as_str().to_owned(),
         run_mode: typed_run_mode(saga.run_mode),
-        saga: typed_saga_status(&runtime_spec.spec().saga, &saga),
+        saga: typed_saga_status_with_resources(runtime_spec.spec(), &projection, &saga),
         scheduler_status: "observed".to_owned(),
         head_seq: stream_head(stream),
     })
@@ -2350,7 +2447,7 @@ fn typed_run_response_from_stream(
         run_id: run_id.as_str().to_owned(),
         spec_hash: runtime_spec.spec_hash().as_str().to_owned(),
         run_mode: typed_run_mode(saga.run_mode),
-        saga: typed_saga_status(&runtime_spec.spec().saga, &saga),
+        saga: typed_saga_status_with_resources(runtime_spec.spec(), &projection, &saga),
         scheduler_status: scheduler_status_str(status).to_owned(),
         head_seq: stream_head(stream),
     })
@@ -2382,8 +2479,31 @@ fn typed_run_mode(mode: store::RunMode) -> TypedRunMode {
     }
 }
 
+#[cfg(test)]
 fn typed_saga_status(
     policy: &spec::SagaPolicySpec,
+    saga: &store::SagaProjection,
+) -> TypedSagaStatus {
+    typed_saga_status_inner(policy, None, None, saga)
+}
+
+fn typed_saga_status_with_resources(
+    certified_spec: &spec::TypedExecutionSpec,
+    projection: &store::ProjectionSnapshot,
+    saga: &store::SagaProjection,
+) -> TypedSagaStatus {
+    typed_saga_status_inner(
+        &certified_spec.saga,
+        Some(certified_spec),
+        Some(projection),
+        saga,
+    )
+}
+
+fn typed_saga_status_inner(
+    policy: &spec::SagaPolicySpec,
+    certified_spec: Option<&spec::TypedExecutionSpec>,
+    projection: Option<&store::ProjectionSnapshot>,
     saga: &store::SagaProjection,
 ) -> TypedSagaStatus {
     TypedSagaStatus {
@@ -2391,8 +2511,15 @@ fn typed_saga_status(
         obligations: saga
             .obligations
             .values()
-            .map(typed_obligation_status)
+            .map(|obligation| typed_obligation_status(obligation, certified_spec, projection))
             .collect(),
+        resource_ledgers: match (certified_spec, projection) {
+            (Some(certified_spec), Some(projection)) => {
+                typed_resource_ledgers(certified_spec, projection)
+            }
+            _ => Vec::new(),
+        },
+        resource_lanes: projection.map(typed_resource_lanes).unwrap_or_default(),
         manual_block_reason: saga.manual_block_reason.map(manual_block_reason_str),
         required_manual_evidence: matches!(saga.run_mode, store::RunMode::ManualBlocked)
             .then(|| manual_evidence_for_policy(policy))
@@ -2469,21 +2596,195 @@ fn typed_manual_evidence_schemas(
 
 fn typed_obligation_status(
     obligation: &store::SagaObligationProjection,
+    certified_spec: Option<&spec::TypedExecutionSpec>,
+    projection: Option<&store::ProjectionSnapshot>,
 ) -> TypedSagaObligationStatus {
+    let forward_resource = projection
+        .and_then(|projection| projection.side_effect(&obligation.forward_ledger_key))
+        .and_then(|side_effect| {
+            typed_resource_ledger_status(certified_spec?, projection?, side_effect)
+        });
     TypedSagaObligationStatus {
         forward_ledger_key: obligation.forward_ledger_key.as_str().to_owned(),
         forward_phase: side_effect_phase_str(&obligation.forward_phase),
         classification: forward_classification_str(obligation.classification),
+        resource: forward_resource,
         remediation: obligation.remediation.as_ref().map(|remediation| {
+            let remediation_resource = projection
+                .and_then(|projection| projection.side_effect(&remediation.ledger_key))
+                .and_then(|side_effect| {
+                    typed_resource_ledger_status(certified_spec?, projection?, side_effect)
+                });
             TypedRemediationLedgerStatus {
                 ledger_key: remediation.ledger_key.as_str().to_owned(),
                 forward_ledger_key: obligation.forward_ledger_key.as_str().to_owned(),
                 phase: side_effect_phase_str(&remediation.phase),
+                resource: remediation_resource,
                 closed: remediation.closed,
                 unresolved: remediation.unresolved.map(manual_block_reason_str),
             }
         }),
     }
+}
+
+fn typed_resource_ledger_status(
+    certified_spec: &spec::TypedExecutionSpec,
+    projection: &store::ProjectionSnapshot,
+    side_effect: &store::SideEffectProjection,
+) -> Option<TypedResourceLedgerStatus> {
+    let node = certified_node(certified_spec, &side_effect.intent.node_id)?;
+    let claim = &node.side_effect.as_ref()?.resource_claim;
+    let key = side_effect
+        .resource_key
+        .as_ref()
+        .map(typed_resource_key_status);
+    let touched_set = side_effect
+        .resource_touched_set
+        .as_ref()
+        .map(typed_resource_touched_set_status);
+    let (active_lane, blocked_by_lane) = side_effect
+        .resource_key
+        .as_ref()
+        .and_then(|resource_key| {
+            let lane_key = store::ResourceLaneKey::from_evidence(resource_key);
+            projection
+                .resource_lane(&lane_key)
+                .map(|lane| (lane_key, lane))
+        })
+        .map(|(lane_key, lane)| {
+            let holder = typed_resource_lane_holder(&lane_key, lane);
+            if lane.ledger_key == side_effect.ledger_key {
+                (Some(holder), None)
+            } else {
+                (None, Some(holder))
+            }
+        })
+        .unwrap_or((None, None));
+    let (ledger_purpose, forward_ledger_key) =
+        typed_ledger_purpose_status(&side_effect.ledger_purpose);
+
+    Some(TypedResourceLedgerStatus {
+        ledger_key: side_effect.ledger_key.as_str().to_owned(),
+        ledger_purpose,
+        forward_ledger_key,
+        phase: side_effect_phase_str(&side_effect.phase),
+        claim: typed_resource_claim_status(claim),
+        key,
+        touched_set,
+        active_lane,
+        blocked_by_lane,
+    })
+}
+
+fn typed_resource_ledgers(
+    certified_spec: &spec::TypedExecutionSpec,
+    projection: &store::ProjectionSnapshot,
+) -> Vec<TypedResourceLedgerStatus> {
+    projection
+        .side_effects()
+        .filter_map(|(_, side_effect)| {
+            typed_resource_ledger_status(certified_spec, projection, side_effect)
+        })
+        .collect()
+}
+
+fn typed_resource_lanes(
+    projection: &store::ProjectionSnapshot,
+) -> Vec<TypedResourceLaneHolderStatus> {
+    projection
+        .resource_lanes()
+        .map(|(lane_key, lane)| typed_resource_lane_holder(lane_key, lane))
+        .collect()
+}
+
+fn typed_resource_claim_status(claim: &spec::ResourceClaimSpec) -> TypedResourceClaimStatus {
+    match claim {
+        spec::ResourceClaimSpec::Exclusive {
+            namespace,
+            key_schema,
+        } => TypedResourceClaimStatus {
+            kind: "exclusive".to_owned(),
+            namespace: Some(namespace.as_str().to_owned()),
+            key_schema_id: Some(key_schema.as_str().to_owned()),
+            evidence_schema_id: None,
+        },
+        spec::ResourceClaimSpec::ExactTouchedSet {
+            namespace,
+            evidence_schema,
+        } => TypedResourceClaimStatus {
+            kind: "exact_touched_set".to_owned(),
+            namespace: Some(namespace.as_str().to_owned()),
+            key_schema_id: None,
+            evidence_schema_id: Some(evidence_schema.as_str().to_owned()),
+        },
+        spec::ResourceClaimSpec::ManualOnly => TypedResourceClaimStatus {
+            kind: "manual_only".to_owned(),
+            namespace: None,
+            key_schema_id: None,
+            evidence_schema_id: None,
+        },
+    }
+}
+
+fn typed_resource_key_status(evidence: &events::ResourceKeyEvidence) -> TypedResourceKeyStatus {
+    TypedResourceKeyStatus {
+        namespace: evidence.namespace.as_str().to_owned(),
+        key_schema_id: evidence.key_schema_id.as_str().to_owned(),
+        key: evidence.key.as_str().to_owned(),
+    }
+}
+
+fn typed_resource_touched_set_status(
+    evidence: &events::ResourceTouchedSetEvidence,
+) -> TypedResourceTouchedSetStatus {
+    TypedResourceTouchedSetStatus {
+        namespace: evidence.namespace.as_str().to_owned(),
+        evidence_schema_id: evidence.evidence_schema_id.as_str().to_owned(),
+        evidence_hash: evidence.evidence_hash.as_str().to_owned(),
+        evidence_artifact_id: evidence.evidence_artifact_id.as_str().to_owned(),
+    }
+}
+
+fn typed_resource_lane_holder(
+    lane_key: &store::ResourceLaneKey,
+    lane: &store::ResourceLaneProjection,
+) -> TypedResourceLaneHolderStatus {
+    let (holding_ledger_purpose, holding_forward_ledger_key) =
+        typed_ledger_purpose_status(&lane.ledger_purpose);
+    TypedResourceLaneHolderStatus {
+        namespace: lane_key.namespace.as_str().to_owned(),
+        key: lane_key.key.as_str().to_owned(),
+        holding_run_id: lane.run_id.as_str().to_owned(),
+        holding_ledger_key: lane.ledger_key.as_str().to_owned(),
+        holding_ledger_purpose,
+        holding_forward_ledger_key,
+        holding_node_id: lane.node_id.as_str().to_owned(),
+        holding_attempt_id: lane.attempt_id.as_str().to_owned(),
+        invocation_epoch: lane.invocation_epoch,
+    }
+}
+
+fn typed_ledger_purpose_status(
+    purpose: &events::SideEffectLedgerPurpose,
+) -> (String, Option<String>) {
+    match purpose {
+        events::SideEffectLedgerPurpose::Forward => ("forward".to_owned(), None),
+        events::SideEffectLedgerPurpose::Remediation { forward_ledger_key } => (
+            "remediation".to_owned(),
+            Some(forward_ledger_key.as_str().to_owned()),
+        ),
+    }
+}
+
+fn certified_node<'a>(
+    certified_spec: &'a spec::TypedExecutionSpec,
+    node_id: &mfm_ids::NodeId,
+) -> Option<&'a spec::NodeSpec> {
+    certified_spec
+        .nodes
+        .iter()
+        .chain(certified_spec.remediations.values())
+        .find(|node| &node.node_id == node_id)
 }
 
 fn typed_terminal_resolution(
@@ -3745,6 +4046,16 @@ mod tests {
         let response = services.launch_run(request).await.expect("start proof run");
 
         assert_eq!(response.run_mode, TypedRunMode::Completed);
+        let resource_ledger = response
+            .saga
+            .resource_ledgers
+            .iter()
+            .find(|ledger| ledger.claim.kind == "manual_only")
+            .expect("manual-only side-effect resource status");
+        assert_eq!(resource_ledger.ledger_purpose, "forward");
+        assert!(resource_ledger.key.is_none());
+        assert!(resource_ledger.active_lane.is_none());
+        assert!(resource_ledger.blocked_by_lane.is_none());
         let replay = services
             .verify_replay_for_run(&RunId::parse(&response.run_id).expect("typed run id"))
             .await

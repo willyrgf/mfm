@@ -27,8 +27,8 @@ pub use mfm_collectors_proof::{
 use mfm_ids::{DigestAlgorithm, OperationKind, OperationVersion};
 use mfm_program::{
     build_root_with_registries, Operation, OperationExpansion, OperationKey,
-    OperationRegistryBuilder, PublicOutputKey, RootBuilder, SagaPolicy, ScopeKey, StateKey,
-    StateRegistryBuilder,
+    OperationRegistryBuilder, PublicOutputKey, ResourceClaimSpec, RootBuilder, SagaPolicy,
+    ScopeKey, StateKey, StateRegistryBuilder,
 };
 
 const PROOF_OPERATION_KIND_NAME: &str = "workflow";
@@ -83,17 +83,21 @@ impl Operation for ProofWorkflowOperation {
             },
             (),
         )?;
-        let side_effect = builder.state::<ProofApplySideEffectState, _>(
+        let side_effect = builder.side_effect::<ProofApplySideEffectState, _>(
             StateKey::new("apply_side_effect")?,
             ProofApplyConfig {
                 action: config.action,
             },
             fact.clone(),
+            ResourceClaimSpec::ManualOnly,
         )?;
         let output = builder.state::<ProofAssembleOutputState, _>(
             StateKey::new("assemble_output")?,
             ProofAssembleConfig { output_version: 1 },
-            ProofAssembleInputHandles { fact, side_effect },
+            ProofAssembleInputHandles {
+                fact,
+                side_effect: side_effect.into_handle(),
+            },
         )?;
         Ok(ProofOperationOutputs { output })
     }

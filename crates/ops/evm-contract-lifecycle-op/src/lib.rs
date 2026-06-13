@@ -28,8 +28,8 @@ use mfm_ids::{
 };
 use mfm_program::{
     build_root_with_registries, CanonicalSeed, Handle, Operation, OperationExpansion, OperationKey,
-    OperationRegistryBuilder, PublicOutputKey, RootBound, RootBuilder, SagaPolicy, ScopeKey,
-    SeedKey, StateKey, StateRegistryBuilder,
+    OperationRegistryBuilder, PublicOutputKey, ResourceClaimSpec, RootBound, RootBuilder,
+    SagaPolicy, ScopeKey, SeedKey, StateKey, StateRegistryBuilder,
 };
 use mfm_program_derive::{MfmConfig, OperationOutput, PublicOutputs};
 use mfm_spec::v1 as spec;
@@ -176,8 +176,14 @@ impl Operation for DeployContractOperation {
         builder: &mut OperationExpansion<'program, 'scope>,
         _dispatch: mfm_program::OperationExpansionDispatch<Self>,
     ) -> mfm_program::Result<Self::Output<'program, 'scope>> {
-        let deployed =
-            builder.state::<DeployContractState, _>(StateKey::new("deploy")?, config, ())?;
+        let deployed = builder
+            .side_effect::<DeployContractState, _>(
+                StateKey::new("deploy")?,
+                config,
+                (),
+                ResourceClaimSpec::ManualOnly,
+            )?
+            .into_handle();
         Ok(ContractDeployOperationOutputs { deployed })
     }
 }
@@ -209,11 +215,14 @@ impl Operation for ConfigureContractOperation {
         builder: &mut OperationExpansion<'program, 'scope>,
         _dispatch: mfm_program::OperationExpansionDispatch<Self>,
     ) -> mfm_program::Result<Self::Output<'program, 'scope>> {
-        let configured = builder.state::<ConfigureContractState, _>(
-            StateKey::new("configure")?,
-            config,
-            ConfigureContractInputHandles { deployed },
-        )?;
+        let configured = builder
+            .side_effect::<ConfigureContractState, _>(
+                StateKey::new("configure")?,
+                config,
+                ConfigureContractInputHandles { deployed },
+                ResourceClaimSpec::ManualOnly,
+            )?
+            .into_handle();
         Ok(ContractConfigureOperationOutputs { configured })
     }
 }
@@ -282,15 +291,24 @@ impl Operation for ContractLifecycleOperation {
         _dispatch: mfm_program::OperationExpansionDispatch<Self>,
     ) -> mfm_program::Result<Self::Output<'program, 'scope>> {
         config.validate()?;
-        let deployed =
-            builder.state::<DeployContractState, _>(StateKey::new("deploy")?, config.deploy, ())?;
-        let configured = builder.state::<ConfigureContractState, _>(
-            StateKey::new("configure")?,
-            config.configure,
-            ConfigureContractInputHandles {
-                deployed: deployed.clone(),
-            },
-        )?;
+        let deployed = builder
+            .side_effect::<DeployContractState, _>(
+                StateKey::new("deploy")?,
+                config.deploy,
+                (),
+                ResourceClaimSpec::ManualOnly,
+            )?
+            .into_handle();
+        let configured = builder
+            .side_effect::<ConfigureContractState, _>(
+                StateKey::new("configure")?,
+                config.configure,
+                ConfigureContractInputHandles {
+                    deployed: deployed.clone(),
+                },
+                ResourceClaimSpec::ManualOnly,
+            )?
+            .into_handle();
         let validation_report = builder.state::<ValidateContractState, _>(
             StateKey::new("validate")?,
             config.validate,

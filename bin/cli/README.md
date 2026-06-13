@@ -338,7 +338,8 @@ Shows certified typed run status without executing states. JSON output uses sema
 `run_mode` is one of `forward`, `remediating`, `manual_blocked`, `completed`, `compensated`,
 `manually_resolved`, or `failed_without_acdc_claim`. The `saga` object reports the certified policy,
 derived obligations per forward ledger, linked remediation ledgers, manual-block reason and required
-manual evidence schemas when applicable, and terminal resolution claim when present.
+manual evidence schemas when applicable, terminal resolution claim when present, projected resource
+ledgers with declared claim/key/touched-set evidence, and active exclusive lane holders.
 
 **Usage:**
 ```sh
