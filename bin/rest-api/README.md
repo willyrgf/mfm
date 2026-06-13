@@ -242,6 +242,12 @@ against the production registry, compare their evidence to `RunStarted`, and reb
 before constructing runtime, replay, or render authority. Rendered public-output JSON is an
 output/cache surface only.
 
+Typed run responses expose semantic status through `run_mode`, not the old absent/started/completed
+phase. `run_mode` is one of `forward`, `remediating`, `manual_blocked`, `completed`, `compensated`,
+`manually_resolved`, or `failed_without_acdc_claim`. The nested `saga` object reports the certified
+policy, derived per-forward-ledger obligations, linked remediation ledgers, manual-block reason and
+required manual evidence schemas when applicable, and terminal resolution claim when present.
+
 ## Removed Dynamic Surfaces
 
 These old REST surfaces are intentionally not part of the typed API:

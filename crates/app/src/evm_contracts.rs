@@ -1490,7 +1490,7 @@ mod tests {
     use crate::{
         make_in_memory_typed_services_with_certification_registry, new_run_id,
         prepare_certified_run_launch, CertifiedRunLaunchInput, DriveMode, RunLaunchConfigArtifact,
-        RunLaunchSeedArtifact, TypedRunPhase,
+        RunLaunchSeedArtifact, TypedRunMode,
     };
     use mfm_capabilities::CapabilitySpec;
     use mfm_certify::CertificationRegistry;
@@ -1587,12 +1587,12 @@ mod tests {
         .expect("launch request");
 
         let started = services.launch_run(request).await.expect("append start");
-        assert_eq!(started.phase, TypedRunPhase::Started);
+        assert_eq!(started.run_mode, TypedRunMode::Forward);
         let resumed = services
             .resume_stored_run(&run_id, DriveMode::UntilBlocked)
             .await
             .expect("resume validate lifecycle");
-        assert_eq!(resumed.phase, TypedRunPhase::Completed);
+        assert_eq!(resumed.run_mode, TypedRunMode::Completed);
         let replay = services
             .replay_broker(&run_id)
             .await
@@ -1682,12 +1682,12 @@ mod tests {
         .expect("launch request");
 
         let started = services.launch_run(request).await.expect("append start");
-        assert_eq!(started.phase, TypedRunPhase::Started);
+        assert_eq!(started.run_mode, TypedRunMode::Forward);
         let resumed = services
             .resume_stored_run(&run_id, DriveMode::UntilBlocked)
             .await
             .expect("resume validate lifecycle");
-        assert_eq!(resumed.phase, TypedRunPhase::Completed);
+        assert_eq!(resumed.run_mode, TypedRunMode::Completed);
         let stream = {
             let store = services.store();
             let store = store.lock().await;
@@ -1771,12 +1771,12 @@ mod tests {
         .expect("launch request");
 
         let started = services.launch_run(request).await.expect("append start");
-        assert_eq!(started.phase, TypedRunPhase::Started);
+        assert_eq!(started.run_mode, TypedRunMode::Forward);
         let resumed = services
             .resume_stored_run(&run_id, DriveMode::UntilBlocked)
             .await
             .expect("resume deploy lifecycle");
-        assert_eq!(resumed.phase, TypedRunPhase::Completed);
+        assert_eq!(resumed.run_mode, TypedRunMode::Completed);
         let replay = services
             .replay_broker(&run_id)
             .await
@@ -1866,12 +1866,12 @@ mod tests {
         .expect("launch request");
 
         let started = services.launch_run(request).await.expect("append start");
-        assert_eq!(started.phase, TypedRunPhase::Started);
+        assert_eq!(started.run_mode, TypedRunMode::Forward);
         let resumed = services
             .resume_stored_run(&run_id, DriveMode::UntilBlocked)
             .await
             .expect("resume full lifecycle");
-        assert_eq!(resumed.phase, TypedRunPhase::Completed);
+        assert_eq!(resumed.run_mode, TypedRunMode::Completed);
         let replay = services
             .replay_broker(&run_id)
             .await

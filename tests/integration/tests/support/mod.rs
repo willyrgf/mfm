@@ -1,6 +1,6 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use mfm_app::{TypedPublicOutputResponse, TypedRunPhase, TypedRunResponse};
+use mfm_app::{TypedPublicOutputResponse, TypedRunMode, TypedRunResponse};
 use mfm_op_portfolio_tracker::certified_portfolio_spec;
 use mfm_portfolio_config::{
     canonicalize_portfolio_snapshot_authored_config, parse_portfolio_snapshot_authored_config,
@@ -58,7 +58,7 @@ pub async fn run_typed_portfolio_snapshot(
             .get("public_output")
             .expect("portfolio snapshot should return public output"),
     );
-    assert_eq!(run.phase, TypedRunPhase::Completed);
+    assert_eq!(run.run_mode, TypedRunMode::Completed);
 
     let authority = replay_and_public_output_authority(&app, &run, &payload).await;
     TypedPortfolioSnapshotResponse {
@@ -78,7 +78,7 @@ pub async fn resume_typed_portfolio_snapshot(
     let app = rest_test_app();
     let response = portfolio_snapshot_post(&app, &payload, "append_only").await;
     let started = parse_typed_run_response(&response["data"]["run"]);
-    assert_eq!(started.phase, TypedRunPhase::Started);
+    assert_eq!(started.run_mode, TypedRunMode::Forward);
 
     let run_id = &started.run_id;
     let resume = app
@@ -161,24 +161,7 @@ async fn response_json(response: axum::response::Response) -> serde_json::Value 
 }
 
 fn parse_typed_run_response(value: &serde_json::Value) -> TypedRunResponse {
-    let phase = match value.get("phase").and_then(|value| value.as_str()) {
-        Some("started") => TypedRunPhase::Started,
-        Some("completed") => TypedRunPhase::Completed,
-        Some("absent") => TypedRunPhase::Absent,
-        Some(other) => panic!("unexpected typed run phase {other}"),
-        None => panic!("typed run phase missing"),
-    };
-
-    TypedRunResponse {
-        run_id: value["run_id"].as_str().expect("typed run id").to_owned(),
-        spec_hash: value["spec_hash"].as_str().expect("spec hash").to_owned(),
-        phase,
-        scheduler_status: value["scheduler_status"]
-            .as_str()
-            .expect("scheduler status")
-            .to_owned(),
-        head_seq: value["head_seq"].as_u64().expect("typed run head seq"),
-    }
+    serde_json::from_value(value.clone()).expect("typed run response")
 }
 
 fn parse_typed_public_output_response(value: &serde_json::Value) -> TypedPublicOutputResponse {

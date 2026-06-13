@@ -381,7 +381,7 @@ async fn proof_http_start_replay_uses_certified_bundle_evidence() {
     assert_eq!(start.status(), StatusCode::OK);
     let start_body = response_json(start).await;
     assert_eq!(start_body["status"], "success");
-    assert_eq!(start_body["data"]["phase"], "completed");
+    assert_eq!(start_body["data"]["run_mode"], "completed");
     assert_eq!(
         start_body["data"]["spec_hash"],
         certified.spec_hash().as_str()
@@ -395,7 +395,7 @@ async fn proof_http_start_replay_uses_certified_bundle_evidence() {
     assert_eq!(replay.status(), StatusCode::OK);
     let replay_body = response_json(replay).await;
     assert_eq!(replay_body["status"], "success");
-    assert_eq!(replay_body["data"]["phase"], "completed");
+    assert_eq!(replay_body["data"]["run_mode"], "completed");
     assert_eq!(
         replay_body["data"]["spec_hash"],
         start_body["data"]["spec_hash"]

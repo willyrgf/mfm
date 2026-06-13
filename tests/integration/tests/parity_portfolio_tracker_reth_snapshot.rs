@@ -1,7 +1,7 @@
 #![cfg(feature = "parity-tests")]
 #![allow(clippy::disallowed_methods)]
 
-use mfm_app::TypedRunPhase;
+use mfm_app::TypedRunMode;
 use serde::Deserialize;
 
 mod support;
@@ -175,7 +175,7 @@ async fn parity_portfolio_snapshot_feature_against_reth_eth_only() {
         &control_scope,
     ))
     .await;
-    assert_eq!(response.run.phase, TypedRunPhase::Completed);
+    assert_eq!(response.run.run_mode, TypedRunMode::Completed);
     let public_output = response
         .public_output
         .json

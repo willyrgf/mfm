@@ -401,38 +401,124 @@ pub struct RunLaunchSeedArtifact {
     pub media_type: spec::MediaType,
 }
 
-/// Stable phase for typed run responses.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+/// Stable semantic run mode for typed run responses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum TypedRunPhase {
-    /// No typed run-start event exists for the requested run id.
-    Absent,
-    /// The run has started and may have more runnable nodes.
-    Started,
+pub enum TypedRunMode {
+    /// Forward graph execution is active.
+    Forward,
+    /// Remediation graph execution is active.
+    Remediating,
+    /// The run is blocked for certified manual evidence.
+    ManualBlocked,
     /// The run completed with public-output evidence.
     Completed,
+    /// Confirmed forward obligations were compensated.
+    Compensated,
+    /// Certified manual evidence resolved the run.
+    ManuallyResolved,
+    /// The run ended without a compensation or AC/DC-equivalence claim.
+    FailedWithoutAcdcClaim,
 }
 
-impl fmt::Display for TypedRunPhase {
+impl fmt::Display for TypedRunMode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let value = match self {
-            Self::Absent => "absent",
-            Self::Started => "started",
+            Self::Forward => "forward",
+            Self::Remediating => "remediating",
+            Self::ManualBlocked => "manual_blocked",
             Self::Completed => "completed",
+            Self::Compensated => "compensated",
+            Self::ManuallyResolved => "manually_resolved",
+            Self::FailedWithoutAcdcClaim => "failed_without_acdc_claim",
         };
         f.write_str(value)
     }
 }
 
+/// Public saga status derived from certified policy and stream evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TypedSagaStatus {
+    /// Certified saga policy variant and manual schema requirements.
+    pub policy: TypedSagaPolicyStatus,
+    /// Derived per-forward-ledger obligations.
+    pub obligations: Vec<TypedSagaObligationStatus>,
+    /// Manual-block reason when the derived run mode is `manual_blocked`.
+    pub manual_block_reason: Option<String>,
+    /// Required manual evidence schemas when manual evidence can resolve the current block.
+    pub required_manual_evidence: Option<TypedManualEvidenceSchemas>,
+    /// Terminal completion evidence, when the run has resolved.
+    pub terminal_resolution: Option<TypedTerminalResolutionStatus>,
+}
+
+/// Public certified saga policy summary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TypedSagaPolicyStatus {
+    /// Certified policy variant.
+    pub variant: String,
+    /// Manual evidence schemas required directly by the policy, when present.
+    pub manual_evidence: Option<TypedManualEvidenceSchemas>,
+    /// Unresolved-remediation directive under compensating policy.
+    pub on_remediation_unresolved: Option<String>,
+}
+
+/// Public manual evidence schema requirements.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TypedManualEvidenceSchemas {
+    /// Schema id for the operator identity reference artifact.
+    pub operator_identity_ref_schema_id: String,
+    /// Schema id for the operator evidence artifact.
+    pub evidence_schema_id: String,
+}
+
+/// Public obligation state for one forward ledger.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TypedSagaObligationStatus {
+    /// Forward ledger key.
+    pub forward_ledger_key: String,
+    /// Current forward side-effect phase.
+    pub forward_phase: String,
+    /// Derived forward classification.
+    pub classification: String,
+    /// Linked remediation ledger, when one exists.
+    pub remediation: Option<TypedRemediationLedgerStatus>,
+}
+
+/// Public remediation state linked to a forward ledger.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TypedRemediationLedgerStatus {
+    /// Remediation ledger key.
+    pub ledger_key: String,
+    /// Forward ledger key this remediation closes.
+    pub forward_ledger_key: String,
+    /// Current remediation side-effect phase.
+    pub phase: String,
+    /// Whether remediation confirmation closed the obligation.
+    pub closed: bool,
+    /// Unresolved reason if remediation cannot close the obligation.
+    pub unresolved: Option<String>,
+}
+
+/// Public terminal resolution summary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TypedTerminalResolutionStatus {
+    /// Terminal outcome.
+    pub outcome: String,
+    /// Public claim carried by the terminal outcome.
+    pub claim: String,
+}
+
 /// Response returned after typed start or resume dispatch.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TypedRunResponse {
     /// Run id.
     pub run_id: String,
     /// Certified spec hash.
     pub spec_hash: String,
-    /// Current run phase.
-    pub phase: TypedRunPhase,
+    /// Current semantic run mode.
+    pub run_mode: TypedRunMode,
+    /// Derived saga status.
+    pub saga: TypedSagaStatus,
     /// Last scheduler status observed by the app dispatch loop.
     pub scheduler_status: String,
     /// Current typed run-stream head sequence.
@@ -443,8 +529,8 @@ impl fmt::Display for TypedRunResponse {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "run {} phase={} spec_hash={} head_seq={} scheduler_status={}",
-            self.run_id, self.phase, self.spec_hash, self.head_seq, self.scheduler_status
+            "run {} run_mode={} spec_hash={} head_seq={} scheduler_status={}",
+            self.run_id, self.run_mode, self.spec_hash, self.head_seq, self.scheduler_status
         )
     }
 }
@@ -568,14 +654,16 @@ pub struct TypedRunEventRef {
 }
 
 /// Response returned after verifying replay authority for a typed run.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TypedReplayResponse {
     /// Run id.
     pub run_id: String,
     /// Certified spec hash.
     pub spec_hash: String,
-    /// Current run phase.
-    pub phase: TypedRunPhase,
+    /// Current semantic run mode.
+    pub run_mode: TypedRunMode,
+    /// Derived saga status.
+    pub saga: TypedSagaStatus,
     /// Current typed run-stream head sequence.
     pub head_seq: u64,
     /// Retained artifact evidence entries supplied to the replay broker.
@@ -586,8 +674,8 @@ impl fmt::Display for TypedReplayResponse {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "run {} replay verified spec_hash={} phase={} head_seq={} retained_artifacts={}",
-            self.run_id, self.spec_hash, self.phase, self.head_seq, self.retained_artifacts
+            "run {} replay verified spec_hash={} run_mode={} head_seq={} retained_artifacts={}",
+            self.run_id, self.spec_hash, self.run_mode, self.head_seq, self.retained_artifacts
         )
     }
 }
@@ -701,14 +789,21 @@ where
             let store = self.store.lock().await;
             store.load_run_stream(run_id)
         };
-        validate_stored_run_stream_for_read(
+        if stream.is_empty() {
+            return Err(AppError::not_found(
+                "RunNotFound",
+                "typed run stream was not found",
+            ));
+        }
+        let runtime_spec = load_runtime_spec_for_run(
             &self.artifacts,
             &self.certification_registry,
             run_id,
             &stream,
         )
         .await?;
-        typed_run_status_from_stream(run_id, &stream)
+        validate_run_stream(&runtime_spec, run_id, &stream)?;
+        typed_run_status_from_stream(run_id, &runtime_spec, &stream)
     }
 
     /// Returns the authoritative typed run stream.
@@ -889,7 +984,7 @@ where
             .load_run_stream(&req.run_id)
             .await
             .map_err(async_app_store_error)?;
-        typed_run_response_from_stream(&req.run_id, runtime_spec.spec_hash(), &stream, status)
+        typed_run_response_from_stream(&req.run_id, &runtime_spec, &stream, status)
     }
 
     /// Resumes a certified typed run from its stored spec artifact.
@@ -923,7 +1018,7 @@ where
             .load_run_stream(run_id)
             .await
             .map_err(async_app_store_error)?;
-        typed_run_response_from_stream(run_id, runtime_spec.spec_hash(), &stream, status)
+        typed_run_response_from_stream(run_id, &runtime_spec, &stream, status)
     }
 
     /// Returns typed run status by rebuilding projection from the authoritative run stream.
@@ -933,14 +1028,21 @@ where
             .load_run_stream(run_id)
             .await
             .map_err(async_app_store_error)?;
-        validate_stored_run_stream_for_read(
+        if stream.is_empty() {
+            return Err(AppError::not_found(
+                "RunNotFound",
+                "typed run stream was not found",
+            ));
+        }
+        let runtime_spec = load_runtime_spec_for_run(
             &self.artifacts,
             &self.certification_registry,
             run_id,
             &stream,
         )
         .await?;
-        typed_run_status_from_stream(run_id, &stream)
+        validate_run_stream(&runtime_spec, run_id, &stream)?;
+        typed_run_status_from_stream(run_id, &runtime_spec, &stream)
     }
 
     /// Returns the authoritative typed run stream.
@@ -997,6 +1099,7 @@ where
         mfm_adapters_evm_contracts::verify_contract_lifecycle_replay(&broker)?;
         mfm_transports_proof::verify_deterministic_proof_replay(&broker)?;
         let projection = broker.projection_snapshot();
+        let saga = projection.derive_saga_projection(run_id, &runtime_spec.spec().saga);
         let retained_artifacts = projection
             .retention(run_id)
             .map(|retention| retention.refs.len())
@@ -1004,7 +1107,8 @@ where
         Ok(TypedReplayResponse {
             run_id: run_id.as_str().to_owned(),
             spec_hash: broker.certified_spec().spec_hash.as_str().to_owned(),
-            phase: typed_phase(projection.run_state(run_id)),
+            run_mode: typed_run_mode(saga.run_mode),
+            saga: typed_saga_status(&runtime_spec.spec().saga, &saga),
             head_seq: stream_head(stream),
             retained_artifacts,
         })
@@ -1124,30 +1228,193 @@ pub async fn replay_read_authority_for_run(
     runtime_spec: &CertifiedRuntimeSpec,
     verified_stream: &VerifiedRunStream,
 ) -> Result<ReplayReadAuthority, AppError> {
-    let Some(retention) = verified_stream
+    let artifact_evidence = if let Some(retention) = verified_stream
         .projection_snapshot()
         .retention(verified_stream.run_id())
-    else {
+    {
+        let mut artifact_evidence = Vec::with_capacity(retention.refs.len());
+        for retained in retention.refs.values() {
+            let (_, evidence) = artifacts.get_artifact_by_id(&retained.artifact_id).await?;
+            if evidence.digest != retained.content_digest || evidence.artifact_role != retained.role
+            {
+                return Err(AppError::new(
+                    ErrorClass::Internal,
+                    "ReplayArtifactMismatch",
+                    "retained artifact metadata does not match retention evidence",
+                ));
+            }
+            artifact_evidence.push(evidence);
+        }
+        artifact_evidence
+    } else if has_saga_terminal_completion(verified_stream) {
+        load_saga_terminal_replay_artifacts(artifacts, runtime_spec, verified_stream).await?
+    } else {
         return Err(AppError::new(
             ErrorClass::Internal,
             "ReplayRetentionMissing",
-            "typed replay requires retained artifact evidence",
+            "typed replay requires retained artifact evidence or saga terminal evidence",
         ));
     };
-    let mut artifact_evidence = Vec::with_capacity(retention.refs.len());
-    for retained in retention.refs.values() {
-        let (_, evidence) = artifacts.get_artifact_by_id(&retained.artifact_id).await?;
-        if evidence.digest != retained.content_digest || evidence.artifact_role != retained.role {
-            return Err(AppError::new(
-                ErrorClass::Internal,
-                "ReplayArtifactMismatch",
-                "retained artifact metadata does not match retention evidence",
-            ));
-        }
-        artifact_evidence.push(evidence);
-    }
     ReplayReadAuthority::from_verified_run_stream(runtime_spec, verified_stream, artifact_evidence)
         .map_err(Into::into)
+}
+
+fn has_saga_terminal_completion(verified_stream: &VerifiedRunStream) -> bool {
+    matches!(
+        verified_stream
+            .projection_snapshot()
+            .run_completion(verified_stream.run_id())
+            .map(|completion| &completion.outcome),
+        Some(
+            events::RunCompletionOutcome::Compensated
+                | events::RunCompletionOutcome::ManuallyResolved
+                | events::RunCompletionOutcome::FailedWithoutAcdcClaim
+        )
+    )
+}
+
+async fn load_saga_terminal_replay_artifacts(
+    artifacts: &FsTypedArtifactStore,
+    runtime_spec: &CertifiedRuntimeSpec,
+    verified_stream: &VerifiedRunStream,
+) -> Result<Vec<store::ArtifactEvidenceRef>, AppError> {
+    let mut ids = BTreeMap::<ArtifactId, ()>::new();
+    for config in &runtime_spec.spec().config_refs {
+        ids.insert(config.artifact_id.clone(), ());
+    }
+    for event in verified_stream.events() {
+        collect_event_artifact_ids(runtime_spec, event.payload(), &mut ids);
+    }
+
+    let mut evidence = Vec::with_capacity(ids.len());
+    for artifact_id in ids.into_keys() {
+        let (_, artifact_evidence) = artifacts.get_artifact_by_id(&artifact_id).await?;
+        evidence.push(artifact_evidence);
+    }
+    Ok(evidence)
+}
+
+fn collect_event_artifact_ids(
+    runtime_spec: &CertifiedRuntimeSpec,
+    payload: &events::KernelEventPayload,
+    ids: &mut BTreeMap<ArtifactId, ()>,
+) {
+    match payload {
+        events::KernelEventPayload::RunStarted(payload) => {
+            ids.insert(payload.spec_artifact_id.clone(), ());
+            ids.insert(payload.certificate_artifact_id.clone(), ());
+            for seed in &payload.seed_cells {
+                ids.insert(seed.seed_artifact.artifact_id.clone(), ());
+            }
+        }
+        events::KernelEventPayload::FactRecorded(payload) => {
+            ids.insert(payload.artifact_id.clone(), ());
+        }
+        events::KernelEventPayload::ArtifactReferenced(payload) => {
+            if !payload.node_id.as_ref().is_some_and(|node_id| {
+                is_terminal_lifecycle_state_output_ref(
+                    runtime_spec,
+                    node_id,
+                    payload.artifact_ref.role,
+                )
+            }) {
+                ids.insert(payload.artifact_ref.artifact_id.clone(), ());
+            }
+        }
+        events::KernelEventPayload::CellProduced(payload) => {
+            if !is_terminal_lifecycle_node_id(runtime_spec, &payload.node_id) {
+                ids.insert(payload.artifact_id.clone(), ());
+            }
+        }
+        events::KernelEventPayload::PublicOutputProduced(payload) => {
+            for cell in &payload.cells {
+                ids.insert(cell.artifact_id.clone(), ());
+            }
+            if let Some(artifact_id) = &payload.rendered_artifact_id {
+                ids.insert(artifact_id.clone(), ());
+            }
+        }
+        events::KernelEventPayload::PublicOutputRenderFailed(payload) => {
+            if let Some(evidence) = &payload.error.diagnostic_ref {
+                ids.insert(evidence.artifact_id.clone(), ());
+            }
+        }
+        events::KernelEventPayload::StateAttemptFailed(payload) => {
+            if let Some(evidence) = &payload.error.diagnostic_ref {
+                ids.insert(evidence.artifact_id.clone(), ());
+            }
+        }
+        events::KernelEventPayload::ManualResolutionRecorded(payload) => {
+            ids.insert(payload.operator_identity_ref_artifact_id.clone(), ());
+            ids.insert(payload.evidence_artifact_id.clone(), ());
+        }
+        events::KernelEventPayload::SideEffectIntentPersisted(payload) => {
+            ids.insert(payload.intent_artifact_id.clone(), ());
+        }
+        events::KernelEventPayload::SideEffectInvocationPrepared(payload) => {
+            if let Some(artifact_id) = &payload.prepared_artifact_id {
+                ids.insert(artifact_id.clone(), ());
+            }
+        }
+        events::KernelEventPayload::SideEffectNotSubmittedProven(payload) => {
+            ids.insert(payload.proof_artifact_id.clone(), ());
+        }
+        events::KernelEventPayload::SideEffectSubmissionObserved(payload) => {
+            ids.insert(payload.submission_artifact_id.clone(), ());
+        }
+        events::KernelEventPayload::SideEffectSubmissionUnknown(payload) => {
+            ids.insert(payload.evidence_artifact_id.clone(), ());
+        }
+        events::KernelEventPayload::SideEffectReceiptObserved(payload) => {
+            ids.insert(payload.receipt_artifact_id.clone(), ());
+        }
+        events::KernelEventPayload::SideEffectConfirmationObserved(payload) => {
+            ids.insert(payload.confirmation_artifact_id.clone(), ());
+        }
+        events::KernelEventPayload::SideEffectAmbiguous(payload) => {
+            ids.insert(payload.evidence_artifact_id.clone(), ());
+        }
+        events::KernelEventPayload::RunCompleted(_)
+        | events::KernelEventPayload::StateAttemptStarted(_)
+        | events::KernelEventPayload::StateAttemptCompleted(_)
+        | events::KernelEventPayload::CellSkipped(_)
+        | events::KernelEventPayload::SideEffectClaimed(_)
+        | events::KernelEventPayload::SideEffectClaimTakenOver(_)
+        | events::KernelEventPayload::SideEffectInvocationStarted(_)
+        | events::KernelEventPayload::RetentionManifestProjected(_)
+        | events::KernelEventPayload::RetentionRefsAppended(_)
+        | events::KernelEventPayload::SideEffectFailed(_) => {}
+    }
+}
+
+fn is_terminal_lifecycle_state_output_ref(
+    runtime_spec: &CertifiedRuntimeSpec,
+    node_id: &mfm_ids::NodeId,
+    role: events::ArtifactRole,
+) -> bool {
+    role == events::ArtifactRole::StateOutput
+        && is_terminal_lifecycle_node_id(runtime_spec, node_id)
+}
+
+fn is_terminal_lifecycle_node_id(
+    runtime_spec: &CertifiedRuntimeSpec,
+    node_id: &mfm_ids::NodeId,
+) -> bool {
+    runtime_spec
+        .spec()
+        .nodes
+        .iter()
+        .chain(runtime_spec.spec().remediations.values())
+        .find(|node| &node.node_id == node_id)
+        .is_some_and(|node| {
+            matches!(
+                &node.framework,
+                Some(
+                    spec::FrameworkNodeSpec::CompleteRun(_)
+                        | spec::FrameworkNodeSpec::ResolveSagaTerminal(_)
+                )
+            )
+        })
 }
 
 fn certified_spec_launch_artifact(
@@ -1630,6 +1897,7 @@ fn async_app_store_error(error: impl fmt::Display) -> AppError {
 /// Derives typed run status from an authoritative store-owned run stream.
 pub fn typed_run_status_from_stream(
     run_id: &RunId,
+    runtime_spec: &CertifiedRuntimeSpec,
     stream: &[store::KernelEventEnvelope],
 ) -> Result<TypedRunResponse, AppError> {
     if stream.is_empty() {
@@ -1640,10 +1908,12 @@ pub fn typed_run_status_from_stream(
     }
     let spec_hash = run_started_spec_hash(stream)?;
     let projection = store::ProjectionSnapshot::rebuild_from_run_stream(stream)?;
+    let saga = projection.derive_saga_projection(run_id, &runtime_spec.spec().saga);
     Ok(TypedRunResponse {
         run_id: run_id.as_str().to_owned(),
         spec_hash: spec_hash.as_str().to_owned(),
-        phase: typed_phase(projection.run_state(run_id)),
+        run_mode: typed_run_mode(saga.run_mode),
+        saga: typed_saga_status(&runtime_spec.spec().saga, &saga),
         scheduler_status: "observed".to_owned(),
         head_seq: stream_head(stream),
     })
@@ -2070,15 +2340,17 @@ fn validate_run_started_matches_spec(
 
 fn typed_run_response_from_stream(
     run_id: &RunId,
-    spec_hash: &SpecHash,
+    runtime_spec: &CertifiedRuntimeSpec,
     stream: &[store::KernelEventEnvelope],
     status: SchedulerStatus,
 ) -> Result<TypedRunResponse, AppError> {
     let projection = store::ProjectionSnapshot::rebuild_from_run_stream(stream)?;
+    let saga = projection.derive_saga_projection(run_id, &runtime_spec.spec().saga);
     Ok(TypedRunResponse {
         run_id: run_id.as_str().to_owned(),
-        spec_hash: spec_hash.as_str().to_owned(),
-        phase: typed_phase(projection.run_state(run_id)),
+        spec_hash: runtime_spec.spec_hash().as_str().to_owned(),
+        run_mode: typed_run_mode(saga.run_mode),
+        saga: typed_saga_status(&runtime_spec.spec().saga, &saga),
         scheduler_status: scheduler_status_str(status).to_owned(),
         head_seq: stream_head(stream),
     })
@@ -2091,11 +2363,193 @@ fn typed_run_response<S: store::TypedRunEventStore + ?Sized>(
     status: SchedulerStatus,
 ) -> Result<TypedRunResponse, AppError> {
     let stream = store.load_run_stream(run_id);
-    typed_run_response_from_stream(run_id, runtime_spec.spec_hash(), &stream, status)
+    typed_run_response_from_stream(run_id, runtime_spec, &stream, status)
 }
 
 fn stream_head(stream: &[store::KernelEventEnvelope]) -> u64 {
     stream.last().map_or(0, |event| event.seq().as_u64())
+}
+
+fn typed_run_mode(mode: store::RunMode) -> TypedRunMode {
+    match mode {
+        store::RunMode::Forward => TypedRunMode::Forward,
+        store::RunMode::Remediating => TypedRunMode::Remediating,
+        store::RunMode::ManualBlocked => TypedRunMode::ManualBlocked,
+        store::RunMode::Completed => TypedRunMode::Completed,
+        store::RunMode::Compensated => TypedRunMode::Compensated,
+        store::RunMode::ManuallyResolved => TypedRunMode::ManuallyResolved,
+        store::RunMode::FailedWithoutAcdcClaim => TypedRunMode::FailedWithoutAcdcClaim,
+    }
+}
+
+fn typed_saga_status(
+    policy: &spec::SagaPolicySpec,
+    saga: &store::SagaProjection,
+) -> TypedSagaStatus {
+    TypedSagaStatus {
+        policy: typed_saga_policy_status(policy),
+        obligations: saga
+            .obligations
+            .values()
+            .map(typed_obligation_status)
+            .collect(),
+        manual_block_reason: saga.manual_block_reason.map(manual_block_reason_str),
+        required_manual_evidence: matches!(saga.run_mode, store::RunMode::ManualBlocked)
+            .then(|| manual_evidence_for_policy(policy))
+            .flatten(),
+        terminal_resolution: saga
+            .run_completion
+            .as_ref()
+            .map(|completion| typed_terminal_resolution(&completion.outcome)),
+    }
+}
+
+fn typed_saga_policy_status(policy: &spec::SagaPolicySpec) -> TypedSagaPolicyStatus {
+    match policy {
+        spec::SagaPolicySpec::NoSideEffects => TypedSagaPolicyStatus {
+            variant: "no_side_effects".to_owned(),
+            manual_evidence: None,
+            on_remediation_unresolved: None,
+        },
+        spec::SagaPolicySpec::FailWithoutAcdcClaim => TypedSagaPolicyStatus {
+            variant: "fail_without_acdc_claim".to_owned(),
+            manual_evidence: None,
+            on_remediation_unresolved: None,
+        },
+        spec::SagaPolicySpec::ManualResolution { manual } => TypedSagaPolicyStatus {
+            variant: "manual_resolution".to_owned(),
+            manual_evidence: Some(typed_manual_evidence_schemas(manual)),
+            on_remediation_unresolved: None,
+        },
+        spec::SagaPolicySpec::CompensateCompleted {
+            on_remediation_unresolved,
+        } => {
+            let (directive, manual_evidence) = match on_remediation_unresolved {
+                spec::RemediationUnresolvedSpec::ManualResolution { manual } => (
+                    "manual_resolution",
+                    Some(typed_manual_evidence_schemas(manual)),
+                ),
+                spec::RemediationUnresolvedSpec::FailWithoutAcdcClaim => {
+                    ("fail_without_acdc_claim", None)
+                }
+            };
+            TypedSagaPolicyStatus {
+                variant: "compensate_completed".to_owned(),
+                manual_evidence,
+                on_remediation_unresolved: Some(directive.to_owned()),
+            }
+        }
+    }
+}
+
+fn manual_evidence_for_policy(policy: &spec::SagaPolicySpec) -> Option<TypedManualEvidenceSchemas> {
+    match policy {
+        spec::SagaPolicySpec::ManualResolution { manual } => {
+            Some(typed_manual_evidence_schemas(manual))
+        }
+        spec::SagaPolicySpec::CompensateCompleted {
+            on_remediation_unresolved: spec::RemediationUnresolvedSpec::ManualResolution { manual },
+        } => Some(typed_manual_evidence_schemas(manual)),
+        spec::SagaPolicySpec::NoSideEffects
+        | spec::SagaPolicySpec::FailWithoutAcdcClaim
+        | spec::SagaPolicySpec::CompensateCompleted {
+            on_remediation_unresolved: spec::RemediationUnresolvedSpec::FailWithoutAcdcClaim,
+        } => None,
+    }
+}
+
+fn typed_manual_evidence_schemas(
+    manual: &spec::ManualResolutionEvidenceSpec,
+) -> TypedManualEvidenceSchemas {
+    TypedManualEvidenceSchemas {
+        operator_identity_ref_schema_id: manual.operator_identity_ref_schema.as_str().to_owned(),
+        evidence_schema_id: manual.evidence_schema.as_str().to_owned(),
+    }
+}
+
+fn typed_obligation_status(
+    obligation: &store::SagaObligationProjection,
+) -> TypedSagaObligationStatus {
+    TypedSagaObligationStatus {
+        forward_ledger_key: obligation.forward_ledger_key.as_str().to_owned(),
+        forward_phase: side_effect_phase_str(&obligation.forward_phase),
+        classification: forward_classification_str(obligation.classification),
+        remediation: obligation.remediation.as_ref().map(|remediation| {
+            TypedRemediationLedgerStatus {
+                ledger_key: remediation.ledger_key.as_str().to_owned(),
+                forward_ledger_key: obligation.forward_ledger_key.as_str().to_owned(),
+                phase: side_effect_phase_str(&remediation.phase),
+                closed: remediation.closed,
+                unresolved: remediation.unresolved.map(manual_block_reason_str),
+            }
+        }),
+    }
+}
+
+fn typed_terminal_resolution(
+    outcome: &events::RunCompletionOutcome,
+) -> TypedTerminalResolutionStatus {
+    TypedTerminalResolutionStatus {
+        outcome: run_completion_outcome_str(outcome),
+        claim: run_completion_claim_str(outcome),
+    }
+}
+
+fn run_completion_outcome_str(outcome: &events::RunCompletionOutcome) -> String {
+    match outcome {
+        events::RunCompletionOutcome::Completed(_) => "completed",
+        events::RunCompletionOutcome::Compensated => "compensated",
+        events::RunCompletionOutcome::ManuallyResolved => "manually_resolved",
+        events::RunCompletionOutcome::FailedWithoutAcdcClaim => "failed_without_acdc_claim",
+    }
+    .to_owned()
+}
+
+fn run_completion_claim_str(outcome: &events::RunCompletionOutcome) -> String {
+    match outcome {
+        events::RunCompletionOutcome::Completed(_) => "public_output",
+        events::RunCompletionOutcome::Compensated => "compensation",
+        events::RunCompletionOutcome::ManuallyResolved => "manual_resolution",
+        events::RunCompletionOutcome::FailedWithoutAcdcClaim => "no_acdc_claim",
+    }
+    .to_owned()
+}
+
+fn manual_block_reason_str(reason: store::ManualBlockReason) -> String {
+    match reason {
+        store::ManualBlockReason::PolicyManualResolution => "policy_manual_resolution",
+        store::ManualBlockReason::ForwardAmbiguous => "forward_ambiguous",
+        store::ManualBlockReason::RemediationFailed => "remediation_failed",
+        store::ManualBlockReason::RemediationAmbiguous => "remediation_ambiguous",
+    }
+    .to_owned()
+}
+
+fn forward_classification_str(classification: store::ForwardLedgerClassification) -> String {
+    match classification {
+        store::ForwardLedgerClassification::Pending => "pending",
+        store::ForwardLedgerClassification::NothingOwed => "nothing_owed",
+        store::ForwardLedgerClassification::Owed => "owed",
+        store::ForwardLedgerClassification::Unresolvable => "unresolvable",
+    }
+    .to_owned()
+}
+
+fn side_effect_phase_str(phase: &store::SideEffectPhase) -> String {
+    match phase {
+        store::SideEffectPhase::IntentPersisted { .. } => "intent_persisted",
+        store::SideEffectPhase::Claimed { .. } => "claimed",
+        store::SideEffectPhase::InvocationPrepared { .. } => "invocation_prepared",
+        store::SideEffectPhase::InvocationStarted { .. } => "invocation_started",
+        store::SideEffectPhase::SubmissionObserved { .. } => "submission_observed",
+        store::SideEffectPhase::NotSubmittedProven { .. } => "not_submitted_proven",
+        store::SideEffectPhase::SubmissionUnknown { .. } => "submission_unknown",
+        store::SideEffectPhase::ReceiptObserved { .. } => "receipt_observed",
+        store::SideEffectPhase::ConfirmationObserved { .. } => "confirmation_observed",
+        store::SideEffectPhase::Ambiguous { .. } => "ambiguous",
+        store::SideEffectPhase::Failed { .. } => "failed",
+    }
+    .to_owned()
 }
 
 fn run_started_spec_hash(stream: &[store::KernelEventEnvelope]) -> Result<SpecHash, AppError> {
@@ -2112,14 +2566,6 @@ fn run_started_spec_hash(stream: &[store::KernelEventEnvelope]) -> Result<SpecHa
                 "typed run stream is missing RunStarted evidence",
             )
         })
-}
-
-fn typed_phase(state: store::RunState) -> TypedRunPhase {
-    match state {
-        store::RunState::Absent => TypedRunPhase::Absent,
-        store::RunState::Started => TypedRunPhase::Started,
-        store::RunState::Completed => TypedRunPhase::Completed,
-    }
 }
 
 fn scheduler_status_str(status: SchedulerStatus) -> &'static str {
@@ -2174,10 +2620,146 @@ mod tests {
     }
 
     #[test]
-    fn typed_phase_names_are_stable() {
-        assert_eq!(TypedRunPhase::Absent.to_string(), "absent");
-        assert_eq!(TypedRunPhase::Started.to_string(), "started");
-        assert_eq!(TypedRunPhase::Completed.to_string(), "completed");
+    fn typed_run_mode_names_are_stable() {
+        assert_eq!(TypedRunMode::Forward.to_string(), "forward");
+        assert_eq!(TypedRunMode::Remediating.to_string(), "remediating");
+        assert_eq!(TypedRunMode::ManualBlocked.to_string(), "manual_blocked");
+        assert_eq!(TypedRunMode::Completed.to_string(), "completed");
+        assert_eq!(TypedRunMode::Compensated.to_string(), "compensated");
+        assert_eq!(
+            TypedRunMode::ManuallyResolved.to_string(),
+            "manually_resolved"
+        );
+        assert_eq!(
+            TypedRunMode::FailedWithoutAcdcClaim.to_string(),
+            "failed_without_acdc_claim"
+        );
+    }
+
+    #[test]
+    fn semantic_status_exposes_run_modes_manual_schema_and_obligations() {
+        assert_eq!(
+            typed_run_mode(store::RunMode::Forward),
+            TypedRunMode::Forward
+        );
+        assert_eq!(
+            typed_run_mode(store::RunMode::Remediating),
+            TypedRunMode::Remediating
+        );
+        assert_eq!(
+            typed_run_mode(store::RunMode::ManualBlocked),
+            TypedRunMode::ManualBlocked
+        );
+        assert_eq!(
+            typed_run_mode(store::RunMode::Completed),
+            TypedRunMode::Completed
+        );
+        assert_eq!(
+            typed_run_mode(store::RunMode::Compensated),
+            TypedRunMode::Compensated
+        );
+        assert_eq!(
+            typed_run_mode(store::RunMode::ManuallyResolved),
+            TypedRunMode::ManuallyResolved
+        );
+        assert_eq!(
+            typed_run_mode(store::RunMode::FailedWithoutAcdcClaim),
+            TypedRunMode::FailedWithoutAcdcClaim
+        );
+
+        let run_id = RunId::from_digest(DigestAlgorithm::Sha256JcsV1, digest(0xa0));
+        let manual = spec::ManualResolutionEvidenceSpec {
+            operator_identity_ref_schema: schema_id("mfm.test.operator", 0xa1),
+            evidence_schema: schema_id("mfm.test.manual", 0xa2),
+        };
+        let policy = spec::SagaPolicySpec::CompensateCompleted {
+            on_remediation_unresolved: spec::RemediationUnresolvedSpec::ManualResolution {
+                manual: manual.clone(),
+            },
+        };
+        let manual_blocked = store::SagaProjection {
+            run_id: run_id.clone(),
+            run_mode: store::RunMode::ManualBlocked,
+            engagement: None,
+            forward_quiescent: true,
+            manual_block_reason: Some(store::ManualBlockReason::RemediationAmbiguous),
+            obligations: BTreeMap::new(),
+            manual_resolution: None,
+            run_completion: None,
+        };
+        let manual_status = typed_saga_status(&policy, &manual_blocked);
+        assert_eq!(manual_status.policy.variant, "compensate_completed");
+        assert_eq!(
+            manual_status.policy.on_remediation_unresolved.as_deref(),
+            Some("manual_resolution")
+        );
+        assert_eq!(
+            manual_status.manual_block_reason.as_deref(),
+            Some("remediation_ambiguous")
+        );
+        assert_eq!(
+            manual_status
+                .required_manual_evidence
+                .as_ref()
+                .expect("manual evidence")
+                .evidence_schema_id,
+            manual.evidence_schema.as_str()
+        );
+
+        let forward_ledger = events::SideEffectLedgerKey::new("forward-ledger").expect("ledger");
+        let remediation_ledger =
+            events::SideEffectLedgerKey::new("remediation-ledger").expect("ledger");
+        let mut obligations = BTreeMap::new();
+        obligations.insert(
+            forward_ledger.clone(),
+            store::SagaObligationProjection {
+                forward_ledger_key: forward_ledger.clone(),
+                forward_phase: store::SideEffectPhase::ConfirmationObserved {
+                    invocation_epoch: 1,
+                },
+                classification: store::ForwardLedgerClassification::Owed,
+                remediation: Some(store::RemediationLedgerProjection {
+                    ledger_key: remediation_ledger,
+                    phase: store::SideEffectPhase::ConfirmationObserved {
+                        invocation_epoch: 1,
+                    },
+                    closed: true,
+                    unresolved: None,
+                }),
+            },
+        );
+        let compensated = store::SagaProjection {
+            run_id,
+            run_mode: store::RunMode::Compensated,
+            engagement: None,
+            forward_quiescent: true,
+            manual_block_reason: None,
+            obligations,
+            manual_resolution: None,
+            run_completion: Some(store::RunCompletionProjection {
+                event_id: EventId::from_digest(DigestAlgorithm::Sha256JcsV1, digest(0xa3)),
+                outcome: events::RunCompletionOutcome::Compensated,
+            }),
+        };
+        let compensated_status = typed_saga_status(&policy, &compensated);
+        assert_eq!(compensated_status.obligations.len(), 1);
+        assert_eq!(compensated_status.obligations[0].classification, "owed");
+        assert_eq!(
+            compensated_status.obligations[0]
+                .remediation
+                .as_ref()
+                .expect("remediation")
+                .forward_ledger_key,
+            forward_ledger.as_str()
+        );
+        assert_eq!(
+            compensated_status
+                .terminal_resolution
+                .as_ref()
+                .expect("terminal")
+                .claim,
+            "compensation"
+        );
     }
 
     #[test]
@@ -2351,21 +2933,23 @@ mod tests {
     #[tokio::test]
     async fn async_typed_services_start_resume_replay_and_render_framework_public_output() {
         let (root, fixture, services, started) = start_framework_fixture_run().await;
-        assert_eq!(started.phase, TypedRunPhase::Completed);
+        assert_eq!(started.run_mode, TypedRunMode::Completed);
+        assert_eq!(started.saga.policy.variant, "no_side_effects");
+        assert!(started.saga.obligations.is_empty());
         assert_eq!(started.scheduler_status, "public_output_projected");
 
         let resumed = services
             .resume_stored_run(&fixture.run_id, DriveMode::UntilBlocked)
             .await
             .expect("resume completed typed run");
-        assert_eq!(resumed.phase, TypedRunPhase::Completed);
+        assert_eq!(resumed.run_mode, TypedRunMode::Completed);
         assert_eq!(resumed.scheduler_status, "public_output_projected");
 
         let replay = services
             .verify_replay_for_run(&fixture.run_id)
             .await
             .expect("verify replay authority");
-        assert_eq!(replay.phase, TypedRunPhase::Completed);
+        assert_eq!(replay.run_mode, TypedRunMode::Completed);
         assert!(replay.retained_artifacts > 0);
 
         let output = services
@@ -3160,12 +3744,12 @@ mod tests {
 
         let response = services.launch_run(request).await.expect("start proof run");
 
-        assert_eq!(response.phase, TypedRunPhase::Completed);
+        assert_eq!(response.run_mode, TypedRunMode::Completed);
         let replay = services
             .verify_replay_for_run(&RunId::parse(&response.run_id).expect("typed run id"))
             .await
             .expect("verify proof replay");
-        assert_eq!(replay.phase, TypedRunPhase::Completed);
+        assert_eq!(replay.run_mode, TypedRunMode::Completed);
         let public_output = services
             .typed_public_output(
                 &RunId::parse(&response.run_id).expect("typed run id"),

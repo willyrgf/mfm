@@ -3,7 +3,7 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use axum::{routing::post, Json, Router};
-use mfm_app::TypedRunPhase;
+use mfm_app::TypedRunMode;
 use serde_json::json;
 use tower::ServiceExt;
 
@@ -19,8 +19,8 @@ async fn typed_portfolio_snapshot_resumes_from_append_only_start() {
     set_rpc_env(rpc_url);
 
     let result = support::resume_typed_portfolio_snapshot(portfolio_payload()).await;
-    assert_eq!(result.started.phase, TypedRunPhase::Started);
-    assert_eq!(result.resumed.phase, TypedRunPhase::Completed);
+    assert_eq!(result.started.run_mode, TypedRunMode::Forward);
+    assert_eq!(result.resumed.run_mode, TypedRunMode::Completed);
     assert_eq!(result.started.spec_hash, result.resumed.spec_hash);
     assert_eq!(result.authority.spec_hash, result.resumed.spec_hash);
     assert!(!result.authority.certificate_hash.is_empty());
@@ -88,7 +88,7 @@ async fn rest_portfolio_snapshot_matches_typed_public_output() {
 
     let body = response_json(response).await;
     assert_eq!(body["status"], "success");
-    assert_eq!(body["data"]["run"]["phase"], "completed");
+    assert_eq!(body["data"]["run"]["run_mode"], "completed");
     assert_eq!(body["data"]["run"]["spec_hash"], expected.run.spec_hash);
     assert!(
         body["data"]["public_output"]["event_id"]

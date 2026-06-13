@@ -334,7 +334,11 @@ stored run without executing states.
 
 ### `run status`
 
-Shows certified typed run status without executing states.
+Shows certified typed run status without executing states. JSON output uses semantic saga status:
+`run_mode` is one of `forward`, `remediating`, `manual_blocked`, `completed`, `compensated`,
+`manually_resolved`, or `failed_without_acdc_claim`. The `saga` object reports the certified policy,
+derived obligations per forward ledger, linked remediation ledgers, manual-block reason and required
+manual evidence schemas when applicable, and terminal resolution claim when present.
 
 **Usage:**
 ```sh

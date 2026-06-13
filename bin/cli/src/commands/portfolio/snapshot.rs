@@ -2,9 +2,7 @@ use std::fmt;
 use std::path::PathBuf;
 
 use clap::Args;
-use mfm_app::{
-    RunLaunchConfigArtifact, TypedPublicOutputResponse, TypedRunPhase, TypedRunResponse,
-};
+use mfm_app::{RunLaunchConfigArtifact, TypedPublicOutputResponse, TypedRunMode, TypedRunResponse};
 use mfm_op_portfolio_tracker::{
     compile_portfolio_snapshot_program, PortfolioConfigArtifact, PortfolioWorkflowConfig,
 };
@@ -100,7 +98,7 @@ async fn execute_internal(args: &SnapshotArgs) -> CommandResult<PortfolioSnapsho
         .launch_run(request)
         .await
         .map_err(command_error_from_app_error)?;
-    let public_output = if run.phase == TypedRunPhase::Completed {
+    let public_output = if run.run_mode == TypedRunMode::Completed {
         Some(
             services
                 .typed_public_output(&run_id, &public_schema_id)

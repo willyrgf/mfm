@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use clap::{Args, Subcommand};
 use mfm_app::{
-    RunLaunchConfigArtifact, RunLaunchSeedArtifact, TypedPublicOutputResponse, TypedRunPhase,
+    RunLaunchConfigArtifact, RunLaunchSeedArtifact, TypedPublicOutputResponse, TypedRunMode,
     TypedRunResponse,
 };
 use mfm_canonical::PlainCanonicalJsonBytes;
@@ -241,7 +241,7 @@ async fn launch_compiled_contract_program(
         .launch_run(request)
         .await
         .map_err(command_error_from_app_error)?;
-    let public_output = if run.phase == TypedRunPhase::Completed {
+    let public_output = if run.run_mode == TypedRunMode::Completed {
         Some(
             services
                 .typed_public_output(&run_id, &public_schema_id)

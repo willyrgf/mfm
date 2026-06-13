@@ -30,7 +30,7 @@ use axum::Router;
 use http::header::HeaderName;
 use mfm_app::{
     AppError, AsyncRunServices, DriveMode, ErrorClass, RunLaunchConfigArtifact,
-    RunLaunchSeedArtifact, TypedPublicOutputResponse, TypedRunPhase, TypedRunResponse,
+    RunLaunchSeedArtifact, TypedPublicOutputResponse, TypedRunMode, TypedRunResponse,
     TypedRunStreamResponse,
 };
 use mfm_artifact_store_fs::{FsTypedArtifactError, FsTypedArtifactStore};
@@ -637,7 +637,7 @@ where
         Vec::new(),
     )?;
     let run = services.launch_run(start).await?;
-    let public_output = if run.phase == TypedRunPhase::Completed {
+    let public_output = if run.run_mode == TypedRunMode::Completed {
         Some(
             services
                 .typed_public_output(&run_id, &public_schema_id)
@@ -962,7 +962,7 @@ where
         seed_inputs,
     )?;
     let run = services.launch_run(start).await?;
-    let public_output = if run.phase == TypedRunPhase::Completed {
+    let public_output = if run.run_mode == TypedRunMode::Completed {
         Some(
             services
                 .typed_public_output(&run_id, &public_schema_id)
@@ -1353,7 +1353,7 @@ mod tests {
             assert_eq!(response.status(), StatusCode::OK, "route {route}");
             let value = response_json(response).await;
             assert_eq!(value["status"], "success");
-            assert_eq!(value["data"]["run"]["phase"], "started");
+            assert_eq!(value["data"]["run"]["run_mode"], "forward");
             assert_eq!(value["data"]["public_output"], serde_json::Value::Null);
         }
     }

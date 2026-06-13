@@ -102,7 +102,7 @@ async fn parity_reth_contract_lifecycle_rest_route_completes_and_replays() {
     assert_eq!(replay.status(), StatusCode::OK);
     let replay_body = response_json(replay).await;
     assert_eq!(replay_body["status"], "success");
-    assert_eq!(replay_body["data"]["phase"], "completed");
+    assert_eq!(replay_body["data"]["run_mode"], "completed");
     assert!(
         replay_body["data"]["retained_artifacts"]
             .as_u64()
@@ -664,9 +664,9 @@ async fn response_json(resp: axum::response::Response) -> serde_json::Value {
 }
 
 fn response_phase(body: &serde_json::Value) -> Option<&str> {
-    body["data"]["run"]["phase"]
+    body["data"]["run"]["run_mode"]
         .as_str()
-        .or_else(|| body["data"]["phase"].as_str())
+        .or_else(|| body["data"]["run_mode"].as_str())
 }
 
 struct EnvRestore {
