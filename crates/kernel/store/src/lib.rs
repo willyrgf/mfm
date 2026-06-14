@@ -36,6 +36,11 @@ pub mod v1 {
         SagaPolicySpec, StateDescriptorIdentity, ValueLineageRef,
     };
 
+    use self::codec::{
+        optional_obj, optional_str, parse_identity, required_bool, required_obj, required_str,
+        required_u32, required_u64,
+    };
+
     /// Result type for typed store helpers.
     pub type Result<T> = std::result::Result<T, StoreError>;
 
@@ -249,6 +254,21 @@ pub mod v1 {
         }
     }
 
+    impl From<CodecError> for StoreError {
+        fn from(error: CodecError) -> Self {
+            match error {
+                CodecError::Field(message) => Self::Event(message),
+                CodecError::Identity(message) => Self::Identity(message),
+            }
+        }
+    }
+
+    impl From<IdentityError> for CodecError {
+        fn from(error: IdentityError) -> Self {
+            Self::Identity(error.to_string())
+        }
+    }
+
     impl From<mfm_events::EventError> for StoreError {
         fn from(error: mfm_events::EventError) -> Self {
             Self::Event(error.to_string())
@@ -258,6 +278,111 @@ pub mod v1 {
     impl From<mfm_capabilities::CapabilityError> for StoreError {
         fn from(error: mfm_capabilities::CapabilityError) -> Self {
             Self::Identity(error.to_string())
+        }
+    }
+
+    /// Backend-neutral error for the shared kernel JSON codec.
+    ///
+    /// The codec is reused by the in-memory store and the Postgres adapter; each backend maps this
+    /// into its own error type via `From`, so the parse/encode logic lives in exactly one place.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum CodecError {
+        /// A required JSON field was missing or had the wrong shape.
+        Field(String),
+        /// A typed identity, digest, or enum tag failed to parse.
+        Identity(String),
+    }
+
+    /// Shared canonical-JSON codec for kernel events, projections, and saga types.
+    ///
+    /// This module exists so the in-memory store and the Postgres adapter share one
+    /// implementation of the JSON parse/encode logic instead of maintaining parallel copies kept
+    /// in lockstep by parity tests. Functions return the backend-neutral [`CodecError`], which each
+    /// store maps into its own error type via `From`.
+    pub mod codec {
+        use super::{CodecError, IdentityError};
+
+        /// Codec result over the backend-neutral [`CodecError`].
+        pub type CodecResult<T> = std::result::Result<T, CodecError>;
+
+        /// Parses a typed identity from its canonical string form.
+        pub fn parse_identity<T>(value: &str) -> CodecResult<T>
+        where
+            T: std::str::FromStr<Err = IdentityError>,
+        {
+            value.parse().map_err(CodecError::from)
+        }
+
+        /// Returns a required string field.
+        pub fn required_str<'a>(
+            json: &'a serde_json::Value,
+            field: &'static str,
+        ) -> CodecResult<&'a str> {
+            json.get(field)
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| CodecError::Field(format!("missing string field {field}")))
+        }
+
+        /// Returns an optional string field, treating null or absent as `None`.
+        pub fn optional_str<'a>(
+            json: &'a serde_json::Value,
+            field: &'static str,
+        ) -> CodecResult<Option<&'a str>> {
+            match json.get(field) {
+                Some(serde_json::Value::Null) | None => Ok(None),
+                Some(value) => value
+                    .as_str()
+                    .map(Some)
+                    .ok_or_else(|| CodecError::Field(format!("field {field} was not a string"))),
+            }
+        }
+
+        /// Returns a required object field.
+        pub fn required_obj<'a>(
+            json: &'a serde_json::Value,
+            field: &'static str,
+        ) -> CodecResult<&'a serde_json::Value> {
+            let value = json
+                .get(field)
+                .ok_or_else(|| CodecError::Field(format!("missing object field {field}")))?;
+            if value.is_object() {
+                Ok(value)
+            } else {
+                Err(CodecError::Field(format!("field {field} was not an object")))
+            }
+        }
+
+        /// Returns an optional object field, treating null or absent as `None`.
+        pub fn optional_obj<'a>(
+            json: &'a serde_json::Value,
+            field: &'static str,
+        ) -> CodecResult<Option<&'a serde_json::Value>> {
+            match json.get(field) {
+                Some(serde_json::Value::Null) | None => Ok(None),
+                Some(value) if value.is_object() => Ok(Some(value)),
+                Some(_) => Err(CodecError::Field(format!("field {field} was not an object"))),
+            }
+        }
+
+        /// Returns a required unsigned 64-bit field.
+        pub fn required_u64(json: &serde_json::Value, field: &'static str) -> CodecResult<u64> {
+            json.get(field)
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| CodecError::Field(format!("missing u64 field {field}")))
+        }
+
+        /// Returns a required unsigned 32-bit field.
+        pub fn required_u32(json: &serde_json::Value, field: &'static str) -> CodecResult<u32> {
+            required_u64(json, field)?
+                .try_into()
+                .map_err(|_| CodecError::Field(format!("{field} overflowed u32")))
+        }
+
+        /// Returns a required boolean field.
+        pub fn required_bool(json: &serde_json::Value, field: &'static str) -> CodecResult<bool> {
+            json.get(field)
+                .and_then(serde_json::Value::as_bool)
+                .ok_or_else(|| CodecError::Field(format!("missing bool field {field}")))
         }
     }
 
@@ -6580,67 +6705,12 @@ pub mod v1 {
         }
     }
 
-    fn parse_identity<T>(value: &str) -> Result<T>
-    where
-        T: std::str::FromStr<Err = IdentityError>,
-    {
-        value.parse().map_err(StoreError::from)
-    }
-
     fn parse_vec<T>(
         json: &serde_json::Value,
         field: &'static str,
         parser: impl Fn(&serde_json::Value) -> Result<T>,
     ) -> Result<Vec<T>> {
         required_array(json, field)?.iter().map(parser).collect()
-    }
-
-    fn required_str<'a>(json: &'a serde_json::Value, field: &'static str) -> Result<&'a str> {
-        json.get(field)
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| StoreError::Event(format!("missing string field {field}")))
-    }
-
-    fn optional_str<'a>(
-        json: &'a serde_json::Value,
-        field: &'static str,
-    ) -> Result<Option<&'a str>> {
-        match json.get(field) {
-            Some(serde_json::Value::Null) | None => Ok(None),
-            Some(value) => value
-                .as_str()
-                .map(Some)
-                .ok_or_else(|| StoreError::Event(format!("field {field} was not a string"))),
-        }
-    }
-
-    fn required_obj<'a>(
-        json: &'a serde_json::Value,
-        field: &'static str,
-    ) -> Result<&'a serde_json::Value> {
-        let value = json
-            .get(field)
-            .ok_or_else(|| StoreError::Event(format!("missing object field {field}")))?;
-        if value.is_object() {
-            Ok(value)
-        } else {
-            Err(StoreError::Event(format!(
-                "field {field} was not an object"
-            )))
-        }
-    }
-
-    fn optional_obj<'a>(
-        json: &'a serde_json::Value,
-        field: &'static str,
-    ) -> Result<Option<&'a serde_json::Value>> {
-        match json.get(field) {
-            Some(serde_json::Value::Null) | None => Ok(None),
-            Some(value) if value.is_object() => Ok(Some(value)),
-            Some(_) => Err(StoreError::Event(format!(
-                "field {field} was not an object"
-            ))),
-        }
     }
 
     fn required_array<'a>(
@@ -6651,24 +6721,6 @@ pub mod v1 {
             .and_then(serde_json::Value::as_array)
             .map(Vec::as_slice)
             .ok_or_else(|| StoreError::Event(format!("missing array field {field}")))
-    }
-
-    fn required_u64(json: &serde_json::Value, field: &'static str) -> Result<u64> {
-        json.get(field)
-            .and_then(serde_json::Value::as_u64)
-            .ok_or_else(|| StoreError::Event(format!("missing u64 field {field}")))
-    }
-
-    fn required_u32(json: &serde_json::Value, field: &'static str) -> Result<u32> {
-        required_u64(json, field)?
-            .try_into()
-            .map_err(|_| StoreError::Event(format!("{field} overflowed u32")))
-    }
-
-    fn required_bool(json: &serde_json::Value, field: &'static str) -> Result<bool> {
-        json.get(field)
-            .and_then(serde_json::Value::as_bool)
-            .ok_or_else(|| StoreError::Event(format!("missing bool field {field}")))
     }
 
     fn preconditions_json(preconditions: &CommitPreconditions) -> serde_json::Value {
