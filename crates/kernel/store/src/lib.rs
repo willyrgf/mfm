@@ -1508,47 +1508,43 @@ pub mod v1 {
         retentions: BTreeMap<RunId, RetentionProjection>,
     }
 
+    /// Storage-owned projection maps used to construct a [`ProjectionSnapshot`].
+    ///
+    /// Hydrating callers fill the projection families they own and default the rest, replacing the
+    /// previous telescoping `from_parts*` constructors.
+    #[derive(Debug, Default)]
+    pub struct ProjectionSnapshotParts {
+        /// Run lifecycle states.
+        pub run_states: BTreeMap<RunId, RunState>,
+        /// Terminal run completion projections.
+        pub run_completions: BTreeMap<RunId, RunCompletionProjection>,
+        /// First saga engagement per run.
+        pub saga_engagements: BTreeMap<RunId, SagaEngagementProjection>,
+        /// Manual resolution evidence per run.
+        pub manual_resolutions: BTreeMap<RunId, ManualResolutionProjection>,
+        /// Attempt projections.
+        pub attempts: BTreeMap<(NodeId, AttemptId), AttemptProjection>,
+        /// Terminal cell projections.
+        pub cells: BTreeMap<CellId, CellTerminalProjection>,
+        /// Recorded fact projections.
+        pub facts: BTreeMap<(NodeId, AttemptId, events::FactKey), FactProjection>,
+        /// Side-effect ledger projections.
+        pub side_effects: BTreeMap<events::SideEffectLedgerKey, SideEffectProjection>,
+        /// Cross-run resource lane projections.
+        pub resource_lanes: BTreeMap<ResourceLaneKey, ResourceLaneProjection>,
+        /// Public output projections.
+        pub public_outputs: BTreeMap<SchemaId, PublicOutputProjection>,
+        /// Retention projections.
+        pub retentions: BTreeMap<RunId, RetentionProjection>,
+    }
+
     impl ProjectionSnapshot {
         /// Creates a projection snapshot from storage-owned projection maps.
-        pub fn from_parts(
-            run_states: BTreeMap<RunId, RunState>,
-            attempts: BTreeMap<(NodeId, AttemptId), AttemptProjection>,
-            cells: BTreeMap<CellId, CellTerminalProjection>,
-            facts: BTreeMap<(NodeId, AttemptId, events::FactKey), FactProjection>,
-            side_effects: BTreeMap<events::SideEffectLedgerKey, SideEffectProjection>,
-            public_outputs: BTreeMap<SchemaId, PublicOutputProjection>,
-            retentions: BTreeMap<RunId, RetentionProjection>,
-        ) -> Self {
-            Self {
-                run_states,
-                run_completions: BTreeMap::new(),
-                saga_engagements: BTreeMap::new(),
-                manual_resolutions: BTreeMap::new(),
-                attempts,
-                cells,
-                facts,
-                side_effects,
-                resource_lanes: BTreeMap::new(),
-                public_outputs,
-                retentions,
-            }
-        }
-
-        /// Creates a projection snapshot from storage-owned projection maps, including saga maps.
-        #[allow(clippy::too_many_arguments)]
-        pub fn from_parts_with_saga(
-            run_states: BTreeMap<RunId, RunState>,
-            run_completions: BTreeMap<RunId, RunCompletionProjection>,
-            saga_engagements: BTreeMap<RunId, SagaEngagementProjection>,
-            manual_resolutions: BTreeMap<RunId, ManualResolutionProjection>,
-            attempts: BTreeMap<(NodeId, AttemptId), AttemptProjection>,
-            cells: BTreeMap<CellId, CellTerminalProjection>,
-            facts: BTreeMap<(NodeId, AttemptId, events::FactKey), FactProjection>,
-            side_effects: BTreeMap<events::SideEffectLedgerKey, SideEffectProjection>,
-            public_outputs: BTreeMap<SchemaId, PublicOutputProjection>,
-            retentions: BTreeMap<RunId, RetentionProjection>,
-        ) -> Self {
-            Self {
+        ///
+        /// Callers populate only the projection families they hydrate and leave the rest empty via
+        /// [`ProjectionSnapshotParts`]'s [`Default`].
+        pub fn from_parts(parts: ProjectionSnapshotParts) -> Self {
+            let ProjectionSnapshotParts {
                 run_states,
                 run_completions,
                 saga_engagements,
@@ -1557,27 +1553,10 @@ pub mod v1 {
                 cells,
                 facts,
                 side_effects,
-                resource_lanes: BTreeMap::new(),
+                resource_lanes,
                 public_outputs,
                 retentions,
-            }
-        }
-
-        /// Creates a projection snapshot from storage-owned maps, including resource lanes.
-        #[allow(clippy::too_many_arguments)]
-        pub fn from_parts_with_saga_and_resource_lanes(
-            run_states: BTreeMap<RunId, RunState>,
-            run_completions: BTreeMap<RunId, RunCompletionProjection>,
-            saga_engagements: BTreeMap<RunId, SagaEngagementProjection>,
-            manual_resolutions: BTreeMap<RunId, ManualResolutionProjection>,
-            attempts: BTreeMap<(NodeId, AttemptId), AttemptProjection>,
-            cells: BTreeMap<CellId, CellTerminalProjection>,
-            facts: BTreeMap<(NodeId, AttemptId, events::FactKey), FactProjection>,
-            side_effects: BTreeMap<events::SideEffectLedgerKey, SideEffectProjection>,
-            resource_lanes: BTreeMap<ResourceLaneKey, ResourceLaneProjection>,
-            public_outputs: BTreeMap<SchemaId, PublicOutputProjection>,
-            retentions: BTreeMap<RunId, RetentionProjection>,
-        ) -> Self {
+            } = parts;
             Self {
                 run_states,
                 run_completions,

@@ -4290,18 +4290,10 @@ pub mod v1 {
         fn projection_with_side_effects(
             side_effects: BTreeMap<events::SideEffectLedgerKey, store::SideEffectProjection>,
         ) -> ProjectionSnapshot {
-            ProjectionSnapshot::from_parts_with_saga(
-                BTreeMap::new(),
-                BTreeMap::new(),
-                BTreeMap::new(),
-                BTreeMap::new(),
-                BTreeMap::new(),
-                BTreeMap::new(),
-                BTreeMap::new(),
+            ProjectionSnapshot::from_parts(store::ProjectionSnapshotParts {
                 side_effects,
-                BTreeMap::new(),
-                BTreeMap::new(),
-            )
+                ..Default::default()
+            })
         }
 
         fn stored_artifact(

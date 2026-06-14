@@ -15,7 +15,8 @@ use mfm_store::v1::{
     AsyncTypedRunEventStore, AttemptProjection, AttemptStatus, CellTerminalProjection, CommitKey,
     CommitOrdinal, CommitOutcome, FactProjection, KernelEventEnvelope, LogicalEventKey,
     ManualResolutionProjection, PersistedKernelEventRecord, PreparedTypedCommit,
-    ProjectionSnapshot, PublicOutputProjection, ResourceLaneKey, ResourceLaneProjection,
+    ProjectionSnapshot, ProjectionSnapshotParts, PublicOutputProjection, ResourceLaneKey,
+    ResourceLaneProjection,
     RetentionManifestProjection, RetentionProjection, RunCompletionProjection, RunState,
     SagaEngagementProjection, SagaEngagementReason, SideEffectArtifactProjection,
     SideEffectClaimProjection, SideEffectIntentProjection, SideEffectPhase, SideEffectProjection,
@@ -928,7 +929,7 @@ async fn load_projection_snapshot_tx(
         retentions.insert(run_id.clone(), retention);
     }
 
-    Ok(ProjectionSnapshot::from_parts_with_saga_and_resource_lanes(
+    Ok(ProjectionSnapshot::from_parts(ProjectionSnapshotParts {
         run_states,
         run_completions,
         saga_engagements,
@@ -940,7 +941,7 @@ async fn load_projection_snapshot_tx(
         resource_lanes,
         public_outputs,
         retentions,
-    ))
+    }))
 }
 
 async fn load_run_stream_client(
