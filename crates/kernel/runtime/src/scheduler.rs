@@ -773,7 +773,10 @@ mod tests {
             events::SideEffectLedgerKey::new("ledger-key-1").expect("ledger key"),
         );
 
-        let typed = store::StoreError::ResourceLaneBlocked { lane_key, holder };
+        let typed = store::StoreError::ResourceLaneBlocked {
+            lane_key: Box::new(lane_key),
+            holder: Box::new(holder),
+        };
         assert!(store_error_is_resource_lane_block(&typed));
         assert!(async_error_is_resource_lane_block(&typed));
 

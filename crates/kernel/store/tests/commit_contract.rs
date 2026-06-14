@@ -372,7 +372,8 @@ fn assert_resource_lane_blocked(error: StoreError, expected_lane_key: &ResourceL
     assert!(
         matches!(
             &error,
-            StoreError::ResourceLaneBlocked { lane_key, .. } if lane_key == expected_lane_key
+            StoreError::ResourceLaneBlocked { lane_key, .. }
+                if lane_key.as_ref() == expected_lane_key
         ),
         "unexpected error: {error:?}"
     );
@@ -2168,6 +2169,89 @@ fn run_mode_strings_and_terminal_outcome_mapping_are_canonical() {
             mfm_store::v1::codec::run_completion_outcome_str(&outcome),
             tag
         );
+    }
+
+    let owner = events::RunnerInvocationId::new("owner-1").expect("owner");
+    let token = side_effect::ClaimFencingToken::new("token-1").expect("token");
+    let phases = [
+        (
+            SideEffectPhase::IntentPersisted {
+                invocation_epoch: 1,
+            },
+            "intent_persisted",
+        ),
+        (
+            SideEffectPhase::Claimed {
+                claim_owner: owner.clone(),
+                invocation_epoch: 1,
+                claim_generation: 1,
+                claim_fencing_token: token.clone(),
+            },
+            "claimed",
+        ),
+        (
+            SideEffectPhase::InvocationPrepared {
+                invocation_epoch: 1,
+                claim_generation: 1,
+                claim_fencing_token: token.clone(),
+            },
+            "invocation_prepared",
+        ),
+        (
+            SideEffectPhase::InvocationStarted {
+                claim_owner: owner,
+                invocation_epoch: 1,
+                claim_generation: 1,
+                claim_fencing_token: token,
+            },
+            "invocation_started",
+        ),
+        (
+            SideEffectPhase::SubmissionObserved {
+                invocation_epoch: 1,
+            },
+            "submission_observed",
+        ),
+        (
+            SideEffectPhase::NotSubmittedProven {
+                invocation_epoch: 1,
+            },
+            "not_submitted_proven",
+        ),
+        (
+            SideEffectPhase::SubmissionUnknown {
+                invocation_epoch: 1,
+            },
+            "submission_unknown",
+        ),
+        (
+            SideEffectPhase::ReceiptObserved {
+                invocation_epoch: 1,
+            },
+            "receipt_observed",
+        ),
+        (
+            SideEffectPhase::ConfirmationObserved {
+                invocation_epoch: 1,
+            },
+            "confirmation_observed",
+        ),
+        (
+            SideEffectPhase::Ambiguous {
+                invocation_epoch: 1,
+            },
+            "ambiguous",
+        ),
+        (
+            SideEffectPhase::Failed {
+                invocation_epoch: 1,
+                failure_phase: side_effect::FailurePhase::BeforeInvocationStarted,
+            },
+            "failed",
+        ),
+    ];
+    for (phase, tag) in phases {
+        assert_eq!(phase.as_str(), tag);
     }
 }
 

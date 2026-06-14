@@ -2757,20 +2757,7 @@ fn forward_classification_str(classification: store::ForwardLedgerClassification
 }
 
 fn side_effect_phase_str(phase: &store::SideEffectPhase) -> String {
-    match phase {
-        store::SideEffectPhase::IntentPersisted { .. } => "intent_persisted",
-        store::SideEffectPhase::Claimed { .. } => "claimed",
-        store::SideEffectPhase::InvocationPrepared { .. } => "invocation_prepared",
-        store::SideEffectPhase::InvocationStarted { .. } => "invocation_started",
-        store::SideEffectPhase::SubmissionObserved { .. } => "submission_observed",
-        store::SideEffectPhase::NotSubmittedProven { .. } => "not_submitted_proven",
-        store::SideEffectPhase::SubmissionUnknown { .. } => "submission_unknown",
-        store::SideEffectPhase::ReceiptObserved { .. } => "receipt_observed",
-        store::SideEffectPhase::ConfirmationObserved { .. } => "confirmation_observed",
-        store::SideEffectPhase::Ambiguous { .. } => "ambiguous",
-        store::SideEffectPhase::Failed { .. } => "failed",
-    }
-    .to_owned()
+    phase.as_str().to_owned()
 }
 
 fn run_started_spec_hash(stream: &[store::KernelEventEnvelope]) -> Result<SpecHash, AppError> {

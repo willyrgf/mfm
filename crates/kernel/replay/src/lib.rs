@@ -1706,8 +1706,8 @@ pub mod v1 {
                     .expect("artifact role checked above"),
                 requirement.producer_node_id.as_ref(),
             )?;
-            if requires_event_artifact_ref_checks(requirement.source) {
-                if requirement
+            if requires_event_artifact_ref_checks(requirement.source)
+                && (requirement
                     .byte_len
                     .is_some_and(|byte_len| evidence.byte_len != byte_len)
                     || requirement
@@ -1722,13 +1722,12 @@ pub mod v1 {
                         })
                     || requirement.producer_seed_id.is_some()
                         && evidence.producer_seed_id.as_ref()
-                            != requirement.producer_seed_id.as_ref()
-                {
-                    return Err(ReplayError::new(
-                        ReplayErrorKind::ArtifactMismatch,
-                        format!("artifact evidence mismatch for {}", requirement.artifact_id),
-                    ));
-                }
+                            != requirement.producer_seed_id.as_ref())
+            {
+                return Err(ReplayError::new(
+                    ReplayErrorKind::ArtifactMismatch,
+                    format!("artifact evidence mismatch for {}", requirement.artifact_id),
+                ));
             }
             Ok(evidence)
         }

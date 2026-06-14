@@ -1303,7 +1303,8 @@ mod tests {
     };
     use mfm_store::v1::{
         ArtifactEvidenceRef, CellTerminalProjection, CommitKey, CommitOutcome, CommitPreconditions,
-        RequiredRunState, ResourceLaneKey, SideEffectPhase, StoreError, StreamSeq,
+        RequiredRunState, ResourceLaneKey, SagaEngagementReason, SideEffectPhase, StoreError,
+        StreamSeq,
     };
     use tokio_postgres::NoTls;
 
@@ -1523,23 +1524,6 @@ mod tests {
             attempt_no: 1,
             state_kind: state_kind(30),
             state_version: StateVersion::new("mfm.test.fact_state.v1").expect("state version"),
-        })
-    }
-
-    fn fact_attempt_failed(retryable: bool) -> KernelEventPayload {
-        KernelEventPayload::StateAttemptFailed(events::StateAttemptFailed {
-            spec_hash: spec_hash(1),
-            node_id: node_id(30),
-            attempt_id: attempt_id(31),
-            retryable,
-            error: events::MfmErrorInfo {
-                code: events::ErrorCode::new("fact_failed").expect("error code"),
-                category: events::ErrorCategory::Runtime,
-                retryable,
-                safe_message: "fact state failed".to_owned(),
-                public_details: None,
-                diagnostic_ref: None,
-            },
         })
     }
 
@@ -2214,9 +2198,10 @@ mod tests {
                     side_effect_prepared(),
                 ],
             ),
-            vec![store_artifact_ref(
+            vec![side_effect_artifact_ref(
                 intent_artifact,
                 intent_digest,
+                schema_id("mfm.test.side_effect_intent", 70),
                 ArtifactRole::SideEffectIntent,
             )],
         )
@@ -2235,9 +2220,10 @@ mod tests {
                     side_effect_ambiguous(ambiguity_artifact.clone(), ambiguity_digest.clone()),
                 ],
             ),
-            vec![store_artifact_ref(
+            vec![side_effect_artifact_ref(
                 ambiguity_artifact,
                 ambiguity_digest,
+                schema_id("mfm.test.ambiguity", 84),
                 ArtifactRole::AmbiguityEvidence,
             )],
         )

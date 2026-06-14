@@ -1746,6 +1746,12 @@ impl<'program, 'scope, T: MfmValue> RemediationHandle<'program, 'scope, T> {
     }
 }
 
+/// Branded forward/remediation handles returned by linked side-effect construction.
+pub type LinkedSideEffectHandles<'program, 'scope, ForwardOutput, RemediationOutput> = (
+    ForwardSideEffectHandle<'program, 'scope, ForwardOutput>,
+    RemediationHandle<'program, 'scope, RemediationOutput>,
+);
+
 /// Parameters for a forward side-effect node in a linked compensation pair.
 pub struct SideEffectNodeParams<S: SideEffectState, I> {
     /// Scope-local author key for the forward node.
@@ -3547,10 +3553,7 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
         forward_params: SideEffectNodeParams<F, I>,
         remediation_params: RemediationNodeParams<R>,
         build_remediation_input: B,
-    ) -> Result<(
-        ForwardSideEffectHandle<'program, 'scope, F::Output>,
-        RemediationHandle<'program, 'scope, R::Output>,
-    )>
+    ) -> Result<LinkedSideEffectHandles<'program, 'scope, F::Output, R::Output>>
     where
         F: SideEffectState,
         F::Caps: CapabilitySetFor<ApplySideEffect>,
@@ -4149,10 +4152,7 @@ impl<'program, 'scope> OperationExpansion<'program, 'scope> {
         forward_params: SideEffectNodeParams<F, I>,
         remediation_params: RemediationNodeParams<R>,
         build_remediation_input: B,
-    ) -> Result<(
-        ForwardSideEffectHandle<'program, 'scope, F::Output>,
-        RemediationHandle<'program, 'scope, R::Output>,
-    )>
+    ) -> Result<LinkedSideEffectHandles<'program, 'scope, F::Output, R::Output>>
     where
         F: SideEffectState,
         F::Caps: CapabilitySetFor<ApplySideEffect>,
