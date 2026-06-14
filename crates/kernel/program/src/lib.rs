@@ -478,11 +478,13 @@ pub struct AdapterBindingSpec {
     pub adapter_version: AdapterVersion,
 }
 
-/// Author-side run-level saga policy.
+/// Finalized run-level saga policy recorded on a typed program draft.
 ///
-/// Program builders record the policy as draft data; certification lowers it into the
-/// hash-defining `mfm-spec` contract and re-verifies the hostile-bytes shape. Runtime decisions
-/// remain derived from this policy plus recorded facts, not from author-emitted control events.
+/// Program builders derive [`SagaPolicy::NoSideEffects`] when the graph has no side-effecting
+/// forward nodes. Authors select only [`SideEffectSagaPolicy`] for side-effecting workflows.
+/// Certification lowers the finalized policy into the hash-defining `mfm-spec` contract and
+/// re-verifies the hostile-bytes shape. Runtime decisions remain derived from this policy plus
+/// recorded facts, not from author-emitted control events.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SagaPolicy {
     /// Derived by finalization when the forward graph has no side-effect nodes.
@@ -501,9 +503,40 @@ pub enum SagaPolicy {
     },
 }
 
-impl SagaPolicy {
+/// Author-selectable saga policy for side-effecting workflows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SideEffectSagaPolicy {
+    /// Failure after mutation carries no compensation or AC/DC-equivalence claim.
+    FailWithoutAcdcClaim,
+    /// Failure after mutation blocks for typed operator evidence.
+    ManualResolution {
+        /// Required typed manual evidence.
+        manual: ManualResolutionEvidence,
+    },
+    /// Failure after confirmed forward side effects compensates linked remediations.
+    CompensateCompleted {
+        /// Directive used when a forward or remediation ledger remains unresolved.
+        on_remediation_unresolved: RemediationUnresolved,
+    },
+}
+
+impl SideEffectSagaPolicy {
     fn is_compensating(&self) -> bool {
         matches!(self, Self::CompensateCompleted { .. })
+    }
+}
+
+impl From<SideEffectSagaPolicy> for SagaPolicy {
+    fn from(policy: SideEffectSagaPolicy) -> Self {
+        match policy {
+            SideEffectSagaPolicy::FailWithoutAcdcClaim => Self::FailWithoutAcdcClaim,
+            SideEffectSagaPolicy::ManualResolution { manual } => Self::ManualResolution { manual },
+            SideEffectSagaPolicy::CompensateCompleted {
+                on_remediation_unresolved,
+            } => Self::CompensateCompleted {
+                on_remediation_unresolved,
+            },
+        }
     }
 }
 
@@ -1711,6 +1744,28 @@ impl<'program, 'scope, T: MfmValue> RemediationHandle<'program, 'scope, T> {
     pub fn typed_ref(&self) -> TypedHandleRef {
         self.handle.typed_ref()
     }
+}
+
+/// Parameters for a forward side-effect node in a linked compensation pair.
+pub struct SideEffectNodeParams<S: SideEffectState, I> {
+    /// Scope-local author key for the forward node.
+    pub key: StateKey,
+    /// Deterministic forward state config.
+    pub config: S::Config,
+    /// Forward state input binding source.
+    pub input: I,
+    /// Resource claim for the forward side-effect ledger.
+    pub resource_claim: ResourceClaimSpec,
+}
+
+/// Parameters for a remediation node in a linked compensation pair.
+pub struct RemediationNodeParams<R: SideEffectState> {
+    /// Scope-local author key for the remediation node.
+    pub key: StateKey,
+    /// Deterministic remediation state config.
+    pub config: R::Config,
+    /// Resource claim for the remediation side-effect ledger.
+    pub resource_claim: ResourceClaimSpec,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3197,7 +3252,7 @@ pub struct RootBuilder<'program, 'scope> {
     seeds: Vec<RootSeedSpec>,
     seed_keys: BTreeSet<String>,
     public_outputs_bound: bool,
-    saga_policy: Option<SagaPolicy>,
+    saga_policy: Option<SideEffectSagaPolicy>,
 }
 
 impl<'program, 'scope> RootBuilder<'program, 'scope> {
@@ -3207,7 +3262,7 @@ impl<'program, 'scope> RootBuilder<'program, 'scope> {
     }
 
     /// Declares the run-level saga policy for side-effecting workflows.
-    pub fn set_saga_policy(&mut self, policy: SagaPolicy) -> Result<()> {
+    pub fn set_saga_policy(&mut self, policy: SideEffectSagaPolicy) -> Result<()> {
         if self.saga_policy.is_some() {
             return Err(PlanError::SagaPolicyAlreadySet);
         }
@@ -3297,7 +3352,6 @@ pub struct ScopeBuilder<'program, 'scope> {
     state_registry: StateRegistrySnapshot,
     operation_registry: OperationRegistrySnapshot,
     state_keys: BTreeSet<String>,
-    remediation_keys: BTreeSet<String>,
     operation_keys: BTreeSet<String>,
     state_nodes: Vec<StateNodeSpec>,
     remediation_nodes: BTreeMap<NodeId, StateNodeSpec>,
@@ -3313,7 +3367,6 @@ pub struct ScopeBuilder<'program, 'scope> {
 #[derive(Debug, Clone)]
 struct ScopeBuilderCheckpoint {
     state_keys: BTreeSet<String>,
-    remediation_keys: BTreeSet<String>,
     operation_keys: BTreeSet<String>,
     state_nodes: Vec<StateNodeSpec>,
     remediation_nodes: BTreeMap<NodeId, StateNodeSpec>,
@@ -3362,7 +3415,6 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
                 state_registry: self.state_registry.clone(),
                 operation_registry: self.operation_registry.clone(),
                 state_keys: BTreeSet::new(),
-                remediation_keys: BTreeSet::new(),
                 operation_keys: BTreeSet::new(),
                 state_nodes: Vec::new(),
                 remediation_nodes: BTreeMap::new(),
@@ -3490,16 +3542,10 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
     /// by the forward node id in the draft remediation collection, so the forward scheduler cannot
     /// select it. The remediation input may reference only the linked forward output and cells
     /// that are transitive ancestors of that forward node.
-    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     pub fn side_effect_with_compensation<F, R, I, J, B>(
         &mut self,
-        forward_key: StateKey,
-        forward_config: F::Config,
-        forward_input: I,
-        forward_resource_claim: ResourceClaimSpec,
-        remediation_key: StateKey,
-        remediation_config: R::Config,
-        remediation_resource_claim: ResourceClaimSpec,
+        forward_params: SideEffectNodeParams<F, I>,
+        remediation_params: RemediationNodeParams<R>,
         build_remediation_input: B,
     ) -> Result<(
         ForwardSideEffectHandle<'program, 'scope, F::Output>,
@@ -3514,6 +3560,17 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
         J: IntoStateInput<'program, 'scope, R::Input>,
         B: FnOnce(ForwardSideEffectHandle<'program, 'scope, F::Output>) -> Result<J>,
     {
+        let SideEffectNodeParams {
+            key: forward_key,
+            config: forward_config,
+            input: forward_input,
+            resource_claim: forward_resource_claim,
+        } = forward_params;
+        let RemediationNodeParams {
+            key: remediation_key,
+            config: remediation_config,
+            resource_claim: remediation_resource_claim,
+        } = remediation_params;
         let checkpoint = self.checkpoint();
         let forward_key_string = forward_key.as_str().to_owned();
         if self.state_keys.contains(&forward_key_string) {
@@ -3522,7 +3579,9 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
             ));
         }
         let remediation_key_string = remediation_key.as_str().to_owned();
-        if self.remediation_keys.contains(&remediation_key_string) {
+        if self.state_keys.contains(&remediation_key_string)
+            || remediation_key_string == forward_key_string
+        {
             return Err(PlanError::DuplicateStateKey(
                 remediation_key.as_str().to_owned(),
             ));
@@ -3582,7 +3641,7 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
         }
 
         self.state_keys.insert(forward_key_string);
-        self.remediation_keys.insert(remediation_key_string);
+        self.state_keys.insert(remediation_key_string);
         self.state_nodes.push(forward_node.clone());
         self.remediation_nodes
             .insert(forward_node.node_id.clone(), remediation_node.clone());
@@ -3915,7 +3974,6 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
     fn checkpoint(&self) -> ScopeBuilderCheckpoint {
         ScopeBuilderCheckpoint {
             state_keys: self.state_keys.clone(),
-            remediation_keys: self.remediation_keys.clone(),
             operation_keys: self.operation_keys.clone(),
             state_nodes: self.state_nodes.clone(),
             remediation_nodes: self.remediation_nodes.clone(),
@@ -3929,7 +3987,6 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
 
     fn restore(&mut self, checkpoint: ScopeBuilderCheckpoint) {
         self.state_keys = checkpoint.state_keys;
-        self.remediation_keys = checkpoint.remediation_keys;
         self.operation_keys = checkpoint.operation_keys;
         self.state_nodes = checkpoint.state_nodes;
         self.remediation_nodes = checkpoint.remediation_nodes;
@@ -4087,16 +4144,10 @@ impl<'program, 'scope> OperationExpansion<'program, 'scope> {
     }
 
     /// Plans a linked forward/remediation side-effect pair.
-    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     pub fn side_effect_with_compensation<F, R, I, J, B>(
         &mut self,
-        forward_key: StateKey,
-        forward_config: F::Config,
-        forward_input: I,
-        forward_resource_claim: ResourceClaimSpec,
-        remediation_key: StateKey,
-        remediation_config: R::Config,
-        remediation_resource_claim: ResourceClaimSpec,
+        forward_params: SideEffectNodeParams<F, I>,
+        remediation_params: RemediationNodeParams<R>,
         build_remediation_input: B,
     ) -> Result<(
         ForwardSideEffectHandle<'program, 'scope, F::Output>,
@@ -4113,13 +4164,8 @@ impl<'program, 'scope> OperationExpansion<'program, 'scope> {
     {
         self.scope_mut()
             .side_effect_with_compensation::<F, R, I, J, B>(
-                forward_key,
-                forward_config,
-                forward_input,
-                forward_resource_claim,
-                remediation_key,
-                remediation_config,
-                remediation_resource_claim,
+                forward_params,
+                remediation_params,
                 build_remediation_input,
             )
     }
@@ -4424,7 +4470,6 @@ where
             state_registry,
             operation_registry,
             state_keys: BTreeSet::new(),
-            remediation_keys: BTreeSet::new(),
             operation_keys: BTreeSet::new(),
             state_nodes: Vec::new(),
             remediation_nodes: BTreeMap::new(),
@@ -4472,7 +4517,7 @@ pub fn public_schema_id<P: PublicOutputDescriptor>() -> Result<SchemaId> {
 }
 
 fn finalize_saga_policy(
-    policy: Option<SagaPolicy>,
+    policy: Option<SideEffectSagaPolicy>,
     scope: &ScopeBuilder<'_, '_>,
 ) -> Result<SagaPolicy> {
     let forward_side_effects = scope
@@ -4488,7 +4533,7 @@ fn finalize_saga_policy(
             ));
         }
         return match policy {
-            None | Some(SagaPolicy::NoSideEffects) => Ok(SagaPolicy::NoSideEffects),
+            None => Ok(SagaPolicy::NoSideEffects),
             Some(_) => Err(PlanError::SagaPolicyGraphMismatch(
                 "non-NoSideEffects policy requires at least one forward side-effect node"
                     .to_owned(),
@@ -4499,12 +4544,6 @@ fn finalize_saga_policy(
     let Some(policy) = policy else {
         return Err(PlanError::MissingSagaPolicy);
     };
-    if matches!(policy, SagaPolicy::NoSideEffects) {
-        return Err(PlanError::SagaPolicyGraphMismatch(
-            "NoSideEffects policy cannot cover forward side-effect nodes".to_owned(),
-        ));
-    }
-
     if policy.is_compensating() {
         for node in &forward_side_effects {
             if !scope.remediation_nodes.contains_key(&node.node_id) {
@@ -4532,7 +4571,7 @@ fn finalize_saga_policy(
         ));
     }
 
-    Ok(policy)
+    Ok(policy.into())
 }
 
 fn checked_key(label: &str, value: &str) -> Result<String> {

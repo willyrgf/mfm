@@ -417,6 +417,7 @@ fn registered_state_registry_plans_state_node() {
     )
     .expect("root builds");
 
+    assert_eq!(draft.saga_policy(), &SagaPolicy::NoSideEffects);
     assert_eq!(draft.state_nodes().len(), 1);
     let node = &draft.state_nodes()[0];
     assert_eq!(node.key.as_str(), "multiply");
@@ -492,7 +493,7 @@ fn linked_compensation_authoring_keeps_remediation_out_of_forward_nodes() {
         ScopeKey::new("root").expect("scope key"),
         registry.snapshot(),
         |root| {
-            root.set_saga_policy(SagaPolicy::CompensateCompleted {
+            root.set_saga_policy(SideEffectSagaPolicy::CompensateCompleted {
                 on_remediation_unresolved: RemediationUnresolved::FailWithoutAcdcClaim,
             })?;
             let seed = CanonicalSeed::from_value(&LaunchValue {
@@ -512,13 +513,17 @@ fn linked_compensation_authoring_keeps_remediation_out_of_forward_nodes() {
                     _,
                     _,
                 >(
-                    StateKey::new("forward")?,
-                    LaunchConfig { multiplier: 5 },
-                    input,
-                    forward_claim.clone(),
-                    StateKey::new("compensate-forward")?,
-                    LaunchConfig { multiplier: 7 },
-                    remediation_claim.clone(),
+                    SideEffectNodeParams {
+                        key: StateKey::new("forward")?,
+                        config: LaunchConfig { multiplier: 5 },
+                        input,
+                        resource_claim: forward_claim.clone(),
+                    },
+                    RemediationNodeParams {
+                        key: StateKey::new("compensate-forward")?,
+                        config: LaunchConfig { multiplier: 7 },
+                        resource_claim: remediation_claim.clone(),
+                    },
                     |forward| Ok(forward.clone()),
                 )?;
             assert_ne!(forward.node_id(), remediation.node_id());
@@ -570,6 +575,58 @@ fn linked_compensation_authoring_keeps_remediation_out_of_forward_nodes() {
 }
 
 #[test]
+fn linked_compensation_rejects_same_forward_and_remediation_key() {
+    let mut registry = StateRegistryBuilder::new();
+    registry
+        .register::<ForwardMutationState>()
+        .expect("forward registers");
+    registry
+        .register::<CompensationMutationState>()
+        .expect("compensation registers");
+
+    let err = build_root_with_registry(
+        ScopeKey::new("root").expect("scope key"),
+        registry.snapshot(),
+        |root| {
+            root.set_saga_policy(SideEffectSagaPolicy::CompensateCompleted {
+                on_remediation_unresolved: RemediationUnresolved::FailWithoutAcdcClaim,
+            })?;
+            let seed = CanonicalSeed::from_value(&LaunchValue {
+                amount: 2,
+                label: "same-key".to_owned(),
+            })?;
+            let input = root.seed(SeedKey::new("input")?, seed)?;
+            let _ = root
+                .scope()
+                .side_effect_with_compensation::<
+                    ForwardMutationState,
+                    CompensationMutationState,
+                    _,
+                    _,
+                    _,
+                >(
+                    SideEffectNodeParams {
+                        key: StateKey::new("forward")?,
+                        config: LaunchConfig { multiplier: 5 },
+                        input,
+                        resource_claim: manual_resource_claim(),
+                    },
+                    RemediationNodeParams {
+                        key: StateKey::new("forward")?,
+                        config: LaunchConfig { multiplier: 7 },
+                        resource_claim: manual_resource_claim(),
+                    },
+                    |forward| Ok(forward.clone()),
+                )?;
+            unreachable!("same-key linked compensation should reject");
+        },
+    )
+    .expect_err("same forward/remediation key rejects");
+
+    assert!(matches!(err, PlanError::DuplicateStateKey(key) if key == "forward"));
+}
+
+#[test]
 fn compensating_policy_requires_every_forward_side_effect_linked() {
     let mut registry = StateRegistryBuilder::new();
     registry
@@ -580,7 +637,7 @@ fn compensating_policy_requires_every_forward_side_effect_linked() {
         ScopeKey::new("root").expect("scope key"),
         registry.snapshot(),
         |root| {
-            root.set_saga_policy(SagaPolicy::CompensateCompleted {
+            root.set_saga_policy(SideEffectSagaPolicy::CompensateCompleted {
                 on_remediation_unresolved: RemediationUnresolved::FailWithoutAcdcClaim,
             })?;
             let seed = CanonicalSeed::from_value(&LaunchValue {
@@ -626,7 +683,7 @@ fn out_of_scope_remediation_binding_fails_finalize() {
         ScopeKey::new("root").expect("scope key"),
         registry.snapshot(),
         |root| {
-            root.set_saga_policy(SagaPolicy::CompensateCompleted {
+            root.set_saga_policy(SideEffectSagaPolicy::CompensateCompleted {
                 on_remediation_unresolved: RemediationUnresolved::FailWithoutAcdcClaim,
             })?;
             let seed = CanonicalSeed::from_value(&LaunchValue {
@@ -648,13 +705,17 @@ fn out_of_scope_remediation_binding_fails_finalize() {
                     _,
                     _,
                 >(
-                    StateKey::new("forward")?,
-                    LaunchConfig { multiplier: 5 },
-                    input,
-                    manual_resource_claim(),
-                    StateKey::new("compensate-forward")?,
-                    LaunchConfig { multiplier: 7 },
-                    manual_resource_claim(),
+                    SideEffectNodeParams {
+                        key: StateKey::new("forward")?,
+                        config: LaunchConfig { multiplier: 5 },
+                        input,
+                        resource_claim: manual_resource_claim(),
+                    },
+                    RemediationNodeParams {
+                        key: StateKey::new("compensate-forward")?,
+                        config: LaunchConfig { multiplier: 7 },
+                        resource_claim: manual_resource_claim(),
+                    },
                     |_forward| Ok(sibling),
                 )?;
             unreachable!("remediation binding should have rejected");

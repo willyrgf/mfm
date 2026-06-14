@@ -27,8 +27,8 @@ pub use mfm_collectors_proof::{
 use mfm_ids::{DigestAlgorithm, OperationKind, OperationVersion};
 use mfm_program::{
     build_root_with_registries, Operation, OperationExpansion, OperationKey,
-    OperationRegistryBuilder, PublicOutputKey, ResourceClaimSpec, RootBuilder, SagaPolicy,
-    ScopeKey, StateKey, StateRegistryBuilder,
+    OperationRegistryBuilder, PublicOutputKey, ResourceClaimSpec, RootBuilder, ScopeKey,
+    SideEffectSagaPolicy, StateKey, StateRegistryBuilder,
 };
 
 const PROOF_OPERATION_KIND_NAME: &str = "workflow";
@@ -157,7 +157,7 @@ pub fn proof_program_draft(
         proof_state_registry()?,
         proof_operation_registry()?,
         |root: &mut RootBuilder<'_, '_>| {
-            root.set_saga_policy(SagaPolicy::FailWithoutAcdcClaim)?;
+            root.set_saga_policy(SideEffectSagaPolicy::FailWithoutAcdcClaim)?;
             let result = root.scope().call::<ProofWorkflowOperation, _>(
                 OperationKey::new(OP_KEY)?,
                 ProofWorkflowOperation,

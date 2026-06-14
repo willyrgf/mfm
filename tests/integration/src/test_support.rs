@@ -24,8 +24,8 @@ use mfm_ids::{
 use mfm_program::{
     build_root_with_registries, AdapterBindingSpec, CanonicalSeed, IdempotencyKey,
     ManagedWriteState, PublicOutputKey, PureState, ReadState, ResourceClaimSpec, RootBuilder,
-    SagaPolicy, ScopeKey, SeedKey, SideEffectState, StateKey, StateRegistryBuilder, StateResult,
-    StateSpec,
+    ScopeKey, SeedKey, SideEffectSagaPolicy, SideEffectState, StateKey, StateRegistryBuilder,
+    StateResult, StateSpec,
 };
 use mfm_program_derive::{MfmConfig, MfmValue, PublicOutputs};
 use mfm_replay::v1 as replay;
@@ -1375,7 +1375,7 @@ fn reference_fixture() -> Result<ReferenceFixture, String> {
         states.snapshot(),
         mfm_program::OperationRegistryBuilder::new().snapshot(),
         |root: &mut RootBuilder<'_, '_>| {
-            root.set_saga_policy(SagaPolicy::FailWithoutAcdcClaim)?;
+            root.set_saga_policy(SideEffectSagaPolicy::FailWithoutAcdcClaim)?;
             let seed = root.seed(SeedKey::new("launch")?, seed.clone())?;
             let pure = root.scope().state::<ReferencePureState, _>(
                 StateKey::new("pure")?,
@@ -1510,7 +1510,7 @@ fn compensated_reference_fixture() -> Result<CompensatedReferenceFixture, String
         states.snapshot(),
         mfm_program::OperationRegistryBuilder::new().snapshot(),
         |root: &mut RootBuilder<'_, '_>| {
-            root.set_saga_policy(SagaPolicy::CompensateCompleted {
+            root.set_saga_policy(SideEffectSagaPolicy::CompensateCompleted {
                 on_remediation_unresolved: mfm_program::RemediationUnresolved::FailWithoutAcdcClaim,
             })?;
             let seed = root.seed(SeedKey::new("launch")?, seed.clone())?;
@@ -1521,13 +1521,17 @@ fn compensated_reference_fixture() -> Result<CompensatedReferenceFixture, String
                 _,
                 _,
             >(
-                StateKey::new("forward-a")?,
-                ReferenceConfig { multiplier: 2 },
-                seed,
-                ResourceClaimSpec::ManualOnly,
-                StateKey::new("remediate-a")?,
-                ReferenceConfig { multiplier: 11 },
-                ResourceClaimSpec::ManualOnly,
+                mfm_program::SideEffectNodeParams {
+                    key: StateKey::new("forward-a")?,
+                    config: ReferenceConfig { multiplier: 2 },
+                    input: seed,
+                    resource_claim: ResourceClaimSpec::ManualOnly,
+                },
+                mfm_program::RemediationNodeParams {
+                    key: StateKey::new("remediate-a")?,
+                    config: ReferenceConfig { multiplier: 11 },
+                    resource_claim: ResourceClaimSpec::ManualOnly,
+                },
                 |forward| Ok(forward.clone()),
             )?;
             let (forward_b, _) = root.scope().side_effect_with_compensation::<
@@ -1537,13 +1541,17 @@ fn compensated_reference_fixture() -> Result<CompensatedReferenceFixture, String
                 _,
                 _,
             >(
-                StateKey::new("forward-b")?,
-                ReferenceConfig { multiplier: 3 },
-                forward_a,
-                ResourceClaimSpec::ManualOnly,
-                StateKey::new("remediate-b")?,
-                ReferenceConfig { multiplier: 13 },
-                ResourceClaimSpec::ManualOnly,
+                mfm_program::SideEffectNodeParams {
+                    key: StateKey::new("forward-b")?,
+                    config: ReferenceConfig { multiplier: 3 },
+                    input: forward_a,
+                    resource_claim: ResourceClaimSpec::ManualOnly,
+                },
+                mfm_program::RemediationNodeParams {
+                    key: StateKey::new("remediate-b")?,
+                    config: ReferenceConfig { multiplier: 13 },
+                    resource_claim: ResourceClaimSpec::ManualOnly,
+                },
                 |forward| Ok(forward.clone()),
             )?;
             let tail = root.scope().state::<ReferenceFailingState, _>(

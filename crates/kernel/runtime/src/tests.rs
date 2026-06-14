@@ -1553,32 +1553,31 @@ async fn runtime_rejects_non_completed_run_completion_without_saga_terminal_auth
         )
         .await
         .expect("start run");
-        store
-            .append_prepared_commit(store::TypedCommitRequest {
-                run_id: fixture.run_id.clone(),
-                expected_next_seq: store.expected_next_seq(&fixture.run_id),
-                commit_key: store::CommitKey::new(format!("forged-{name}-completion"))
-                    .expect("commit key"),
-                payloads: vec![events::KernelEventPayload::RunCompleted(
-                    events::RunCompleted {
-                        run_id: fixture.run_id.clone(),
-                        spec_hash: fixture.runtime_spec.spec_hash().clone(),
-                        outcome,
-                    },
-                )],
-                required_artifacts: Vec::new(),
-                preconditions: store::CommitPreconditions {
-                    required_run_state: store::RequiredRunState::NotCompleted,
-                    ..store::CommitPreconditions::default()
+        let seq = store.expected_next_seq(&fixture.run_id);
+        let request = store::TypedCommitRequest {
+            run_id: fixture.run_id.clone(),
+            expected_next_seq: seq,
+            commit_key: store::CommitKey::new(format!("forged-{name}-completion"))
+                .expect("commit key"),
+            payloads: vec![events::KernelEventPayload::RunCompleted(
+                events::RunCompleted {
+                    run_id: fixture.run_id.clone(),
+                    spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                    outcome,
                 },
-            })
-            .expect("append forged completion");
+            )],
+            required_artifacts: Vec::new(),
+            preconditions: store::CommitPreconditions::default(),
+        };
+        let forged = store::build_committed_batch(&request, seq).expect("forged completion batch");
+        let mut stream = store.load_run_stream(&fixture.run_id);
+        stream.extend(forged.events().iter().cloned());
 
         assert!(matches!(
             validate_run_stream(
                 &fixture.runtime_spec,
                 &fixture.run_id,
-                &store.load_run_stream(&fixture.run_id),
+                &stream,
             ),
             Err(RuntimeError::InvalidRunStream(message))
                 if message.contains("saga terminal resolution requires terminal saga mode")
@@ -5305,6 +5304,7 @@ async fn runtime_sequences_two_runs_on_same_exclusive_lane_until_release() {
             .projection_snapshot()
             .resource_lane(&lane_key)
             .expect("held lane")
+            .holder
             .run_id,
         holder_run_id
     );
@@ -5641,7 +5641,7 @@ async fn runtime_ambiguous_holder_keeps_lane_until_terminal_resolution() {
     )
     .is_none());
 
-    append_synthetic_failed_terminal(
+    append_synthetic_completed_terminal(
         &mut store,
         &fixture,
         &holder_run_id,
@@ -5716,7 +5716,7 @@ async fn runtime_prepared_holder_lane_releases_at_run_terminal() {
         &node.node_id
     )
     .is_none());
-    append_synthetic_failed_terminal(
+    append_synthetic_completed_terminal(
         &mut store,
         &fixture,
         &holder_run_id,
@@ -7903,7 +7903,7 @@ fn append_synthetic_ambiguous(
         .expect("append synthetic ambiguity");
 }
 
-fn append_synthetic_failed_terminal(
+fn append_synthetic_completed_terminal(
     store: &mut store::InMemoryTypedRunStore,
     fixture: &Fixture,
     run_id: &RunId,
@@ -7918,7 +7918,20 @@ fn append_synthetic_failed_terminal(
                 events::RunCompleted {
                     run_id: run_id.clone(),
                     spec_hash: fixture.runtime_spec.spec_hash().clone(),
-                    outcome: events::RunCompletionOutcome::FailedWithoutAcdcClaim,
+                    outcome: events::RunCompletionOutcome::Completed(Box::new(
+                        events::PublicOutputCompletionEvidence {
+                            public_output_schema_id: fixture
+                                .runtime_spec
+                                .spec()
+                                .public_outputs
+                                .public_schema_id
+                                .clone(),
+                            public_output_event_id: EventId::from_digest(
+                                DigestAlgorithm::Sha256JcsV1,
+                                D9,
+                            ),
+                        },
+                    )),
                 },
             )],
             required_artifacts: Vec::new(),
@@ -7990,6 +8003,7 @@ fn append_manual_resolution(
             required_artifacts: vec![operator_identity, evidence],
             preconditions: store::CommitPreconditions {
                 required_run_state: store::RequiredRunState::NotCompleted,
+                saga_policy: Some(fixture.runtime_spec.spec().saga.clone()),
                 ..store::CommitPreconditions::default()
             },
         })

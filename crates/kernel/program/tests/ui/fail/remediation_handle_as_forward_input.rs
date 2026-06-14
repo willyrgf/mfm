@@ -13,7 +13,7 @@ fn main() -> mfm_program::Result<()> {
         mfm_program::ScopeKey::new("root")?,
         registry.snapshot(),
         |root| {
-            root.set_saga_policy(mfm_program::SagaPolicy::CompensateCompleted {
+            root.set_saga_policy(mfm_program::SideEffectSagaPolicy::CompensateCompleted {
                 on_remediation_unresolved: mfm_program::RemediationUnresolved::FailWithoutAcdcClaim,
             })?;
             let seed = root.seed(mfm_program::SeedKey::new("input")?, seed()?)?;
@@ -26,13 +26,17 @@ fn main() -> mfm_program::Result<()> {
                     _,
                     _,
                 >(
-                    mfm_program::StateKey::new("forward")?,
-                    TryConfig { multiplier: 2 },
-                    seed,
-                    mfm_program::ResourceClaimSpec::ManualOnly,
-                    mfm_program::StateKey::new("compensate-forward")?,
-                    TryConfig { multiplier: 3 },
-                    mfm_program::ResourceClaimSpec::ManualOnly,
+                    mfm_program::SideEffectNodeParams {
+                        key: mfm_program::StateKey::new("forward")?,
+                        config: TryConfig { multiplier: 2 },
+                        input: seed,
+                        resource_claim: mfm_program::ResourceClaimSpec::ManualOnly,
+                    },
+                    mfm_program::RemediationNodeParams {
+                        key: mfm_program::StateKey::new("compensate-forward")?,
+                        config: TryConfig { multiplier: 3 },
+                        resource_claim: mfm_program::ResourceClaimSpec::ManualOnly,
+                    },
                     |forward| Ok(forward),
                 )?;
             let result = root.scope().state::<TryPureState, _>(

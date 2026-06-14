@@ -112,9 +112,11 @@ fn resource_lane_block_for_request(
         };
         let resource_key = payload.resource_key.as_ref()?;
         let lane_key = store::ResourceLaneKey::from_evidence(resource_key);
+        let holder =
+            store::SideEffectLedgerRef::new(request.run_id.clone(), payload.ledger_key.clone());
         projections
             .resource_lane(&lane_key)
-            .filter(|holder| holder.ledger_key != payload.ledger_key)
+            .filter(|projection| projection.holder != holder)
             .map(|_| lane_key)
     })
 }
@@ -130,17 +132,13 @@ fn request_has_resource_lane_prepare(request: &store::TypedCommitRequest) -> boo
 }
 
 fn store_error_is_resource_lane_block(error: &store::StoreError) -> bool {
-    matches!(
-        error,
-        store::StoreError::ProjectionConflict { key, message }
-            if key.starts_with("resource_lane:")
-                && message.starts_with("resource lane already held by ledger ")
-    )
+    matches!(error, store::StoreError::ResourceLaneBlocked { .. })
 }
 
-fn async_error_is_resource_lane_block(message: &str) -> bool {
-    message.contains("projection conflict for resource_lane:")
-        && message.contains("resource lane already held by ledger ")
+fn async_error_is_resource_lane_block(error: &impl store::StoreErrorInspection) -> bool {
+    error
+        .as_store_error()
+        .is_some_and(store_error_is_resource_lane_block)
 }
 
 /// Serial typed scheduler.
@@ -674,8 +672,7 @@ impl SerialTypedScheduler {
         {
             Ok(_) => Ok(NodeRunStatus::Advanced),
             Err(error)
-                if has_resource_lane_prepare
-                    && async_error_is_resource_lane_block(&error.to_string()) =>
+                if has_resource_lane_prepare && async_error_is_resource_lane_block(&error) =>
             {
                 Ok(NodeRunStatus::BlockedOnResourceLane {
                     node_id: node.node_id.clone(),
@@ -753,5 +750,38 @@ impl SerialTypedScheduler {
                 .await?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mfm_ids::{DigestAlgorithm, DigestBytes};
+    use mfm_spec::v1::ResourceNamespace;
+
+    #[test]
+    fn resource_lane_block_detection_uses_typed_store_error() {
+        let lane_key = store::ResourceLaneKey {
+            namespace: ResourceNamespace::new("mfm.test.account_nonce").expect("namespace"),
+            key: events::ResourceKey::new("wallet-1").expect("resource key"),
+        };
+        let holder = store::SideEffectLedgerRef::new(
+            RunId::from_digest(
+                DigestAlgorithm::Sha256JcsV1,
+                DigestBytes::from_array([0x7a; 32]),
+            ),
+            events::SideEffectLedgerKey::new("ledger-key-1").expect("ledger key"),
+        );
+
+        let typed = store::StoreError::ResourceLaneBlocked { lane_key, holder };
+        assert!(store_error_is_resource_lane_block(&typed));
+        assert!(async_error_is_resource_lane_block(&typed));
+
+        let prose = store::StoreError::ProjectionConflict {
+            key: "resource_lane:mfm.test.account_nonce:wallet-1".to_owned(),
+            message: "resource lane already held by a different display message".to_owned(),
+        };
+        assert!(!store_error_is_resource_lane_block(&prose));
+        assert!(!async_error_is_resource_lane_block(&prose));
     }
 }

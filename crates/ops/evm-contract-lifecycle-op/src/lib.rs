@@ -28,8 +28,8 @@ use mfm_ids::{
 };
 use mfm_program::{
     build_root_with_registries, CanonicalSeed, Handle, Operation, OperationExpansion, OperationKey,
-    OperationRegistryBuilder, PublicOutputKey, ResourceClaimSpec, RootBound, RootBuilder,
-    SagaPolicy, ScopeKey, SeedKey, StateKey, StateRegistryBuilder,
+    OperationRegistryBuilder, PublicOutputKey, ResourceClaimSpec, RootBound, RootBuilder, ScopeKey,
+    SeedKey, SideEffectSagaPolicy, StateKey, StateRegistryBuilder,
 };
 use mfm_program_derive::{MfmConfig, OperationOutput, PublicOutputs};
 use mfm_spec::v1 as spec;
@@ -395,7 +395,7 @@ pub fn deploy_contract_program_draft(
     config: DeployPhaseConfig,
 ) -> mfm_program::Result<mfm_program::TypedProgramDraft> {
     build_program(|root| {
-        root.set_saga_policy(SagaPolicy::FailWithoutAcdcClaim)?;
+        root.set_saga_policy(SideEffectSagaPolicy::FailWithoutAcdcClaim)?;
         let result = root.scope().call::<DeployContractOperation, _>(
             OperationKey::new(DEPLOY_OP_KEY)?,
             DeployContractOperation,
@@ -418,7 +418,7 @@ pub fn configure_contract_program_draft(
 ) -> mfm_program::Result<mfm_program::TypedProgramDraft> {
     ensure_network_matches_deployed(config.network(), &deployed)?;
     build_program(|root| {
-        root.set_saga_policy(SagaPolicy::FailWithoutAcdcClaim)?;
+        root.set_saga_policy(SideEffectSagaPolicy::FailWithoutAcdcClaim)?;
         let deployed = root.seed(
             SeedKey::new(DEPLOY_SEED_KEY)?,
             CanonicalSeed::from_value(&deployed)?,
@@ -445,7 +445,6 @@ pub fn validate_contract_program_draft(
 ) -> mfm_program::Result<mfm_program::TypedProgramDraft> {
     ensure_network_matches_configured(config.network(), &configured)?;
     build_program(|root| {
-        root.set_saga_policy(SagaPolicy::NoSideEffects)?;
         let configured = root.seed(
             SeedKey::new(CONFIGURED_SEED_KEY)?,
             CanonicalSeed::from_value(&configured)?,
@@ -470,7 +469,7 @@ pub fn contract_lifecycle_program_draft(
     config: ContractLifecycleConfig,
 ) -> mfm_program::Result<mfm_program::TypedProgramDraft> {
     build_program(|root| {
-        root.set_saga_policy(SagaPolicy::FailWithoutAcdcClaim)?;
+        root.set_saga_policy(SideEffectSagaPolicy::FailWithoutAcdcClaim)?;
         let result = root.scope().call::<ContractLifecycleOperation, _>(
             OperationKey::new(LIFECYCLE_OP_KEY)?,
             ContractLifecycleOperation,

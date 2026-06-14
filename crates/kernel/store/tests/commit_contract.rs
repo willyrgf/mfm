@@ -11,11 +11,13 @@ use mfm_spec::v1::{
     RemediationUnresolvedSpec, ResourceNamespace, SagaPolicySpec, ValueLineageRef,
 };
 use mfm_store::v1::{
-    build_committed_batch, payload_canonical_json, payload_from_json_value, ArtifactEvidenceRef,
-    CellTerminalProjection, CommitKey, CommitOrdinal, CommitOutcome, CommitPreconditions,
-    ForwardLedgerClassification, InMemoryTypedRunStore, KernelEventEnvelope, ManualBlockReason,
+    build_committed_batch, event_artifact_requirements, payload_canonical_json,
+    payload_from_json_value, ArtifactEvidenceRef, CellTerminalProjection, CommitKey, CommitOrdinal,
+    CommitOutcome, CommitPreconditions, EventArtifactReferenceSource, ForwardLedgerClassification,
+    InMemoryTypedRunStore, KernelEventEnvelope, ManualBlockReason, ManualResolutionProjection,
     PersistedKernelEventRecord, PreparedTypedCommit, ProjectionSnapshot, RequiredRunState,
-    ResourceLaneKey, RunMode, SideEffectPhase, StoreError, StreamSeq, TypedCommitRequest,
+    ResourceLaneKey, RunCompletionProjection, RunMode, SagaEngagementProjection,
+    SagaEngagementReason, SideEffectPhase, StoreError, StreamSeq, TypedCommitRequest,
     TypedProjectionRead, TypedRunEventStore, VerifiedRetentionProjection,
     VerifiedRetentionProjectionSet,
 };
@@ -48,6 +50,10 @@ fn attempt_id(byte: u8) -> AttemptId {
 
 fn node_id(byte: u8) -> NodeId {
     NodeId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_bytes(byte))
+}
+
+fn event_id(byte: u8) -> EventId {
+    EventId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_bytes(byte))
 }
 
 fn descriptor_id(byte: u8) -> DescriptorId {
@@ -362,6 +368,16 @@ fn assert_projection_conflict_contains(error: StoreError, expected: &str) {
     );
 }
 
+fn assert_resource_lane_blocked(error: StoreError, expected_lane_key: &ResourceLaneKey) {
+    assert!(
+        matches!(
+            &error,
+            StoreError::ResourceLaneBlocked { lane_key, .. } if lane_key == expected_lane_key
+        ),
+        "unexpected error: {error:?}"
+    );
+}
+
 fn side_effect_attempt_started() -> KernelEventPayload {
     side_effect_attempt_started_for(node_id(70), attempt_id(72))
 }
@@ -401,6 +417,14 @@ fn side_effect_intent(artifact_id: ArtifactId, digest: ContentDigest) -> KernelE
 }
 
 fn side_effect_claim() -> KernelEventPayload {
+    side_effect_claim_for_epoch(1, 1, "token-1")
+}
+
+fn side_effect_claim_for_epoch(
+    invocation_epoch: u32,
+    claim_generation: u32,
+    token: &str,
+) -> KernelEventPayload {
     KernelEventPayload::SideEffectClaimed(side_effect::Claimed {
         spec_hash: spec_hash(1),
         node_id: node_id(70),
@@ -408,9 +432,9 @@ fn side_effect_claim() -> KernelEventPayload {
         ledger_key: side_effect_ledger_key(),
         ledger_purpose: side_effect_ledger_purpose(),
         claim_owner: events::RunnerInvocationId::new("owner-1").expect("claim owner"),
-        invocation_epoch: 1,
-        claim_generation: 1,
-        claim_fencing_token: side_effect::ClaimFencingToken::new("token-1").expect("token"),
+        invocation_epoch,
+        claim_generation,
+        claim_fencing_token: side_effect::ClaimFencingToken::new(token).expect("token"),
     })
 }
 
@@ -455,13 +479,21 @@ fn side_effect_claim_taken_over_generation(
 }
 
 fn side_effect_prepared(claim_generation: u32, token: &str) -> KernelEventPayload {
+    side_effect_prepared_for_epoch(1, claim_generation, token)
+}
+
+fn side_effect_prepared_for_epoch(
+    invocation_epoch: u32,
+    claim_generation: u32,
+    token: &str,
+) -> KernelEventPayload {
     KernelEventPayload::SideEffectInvocationPrepared(side_effect::InvocationPrepared {
         spec_hash: spec_hash(1),
         node_id: node_id(70),
         attempt_id: attempt_id(72),
         ledger_key: side_effect_ledger_key(),
         ledger_purpose: side_effect_ledger_purpose(),
-        invocation_epoch: 1,
+        invocation_epoch,
         claim_generation,
         claim_fencing_token: side_effect::ClaimFencingToken::new(token).expect("token"),
         prepared_artifact_id: None,
@@ -475,7 +507,16 @@ fn side_effect_prepared_with_resource_key(
     token: &str,
     resource_key: events::ResourceKeyEvidence,
 ) -> KernelEventPayload {
-    let mut prepared = side_effect_prepared(claim_generation, token);
+    side_effect_prepared_with_resource_key_for_epoch(1, claim_generation, token, resource_key)
+}
+
+fn side_effect_prepared_with_resource_key_for_epoch(
+    invocation_epoch: u32,
+    claim_generation: u32,
+    token: &str,
+    resource_key: events::ResourceKeyEvidence,
+) -> KernelEventPayload {
+    let mut prepared = side_effect_prepared_for_epoch(invocation_epoch, claim_generation, token);
     let KernelEventPayload::SideEffectInvocationPrepared(payload) = &mut prepared else {
         unreachable!("helper returns invocation-prepared payload");
     };
@@ -682,6 +723,13 @@ fn run_completed_for_run(
     })
 }
 
+fn completed_outcome(byte: u8) -> events::RunCompletionOutcome {
+    events::RunCompletionOutcome::Completed(Box::new(events::PublicOutputCompletionEvidence {
+        public_output_schema_id: schema_id("mfm.test.public_output", 3),
+        public_output_event_id: event_id(byte),
+    }))
+}
+
 fn manual_resolution_recorded(byte: u8) -> KernelEventPayload {
     manual_resolution_recorded_for_run(run_id(120), byte)
 }
@@ -726,6 +774,28 @@ fn manual_resolution_artifacts(byte: u8) -> Vec<ArtifactEvidenceRef> {
             artifact_role: ArtifactRole::StateOutput,
         },
     ]
+}
+
+fn manual_saga_policy(byte: u8) -> SagaPolicySpec {
+    SagaPolicySpec::ManualResolution {
+        manual: ManualResolutionEvidenceSpec {
+            evidence_schema: schema_id("mfm.test.manual_evidence", byte + 1),
+            operator_identity_ref_schema: schema_id("mfm.test.operator_identity", byte),
+        },
+    }
+}
+
+fn compensate_saga_policy() -> SagaPolicySpec {
+    SagaPolicySpec::CompensateCompleted {
+        on_remediation_unresolved: RemediationUnresolvedSpec::FailWithoutAcdcClaim,
+    }
+}
+
+fn saga_preconditions(policy: SagaPolicySpec) -> CommitPreconditions {
+    CommitPreconditions {
+        saga_policy: Some(policy),
+        ..CommitPreconditions::default()
+    }
 }
 
 fn set_remediation_purpose(
@@ -963,6 +1033,63 @@ fn retention_manifest_commit_payloads(
             reason: events::RetentionReason::ManifestProjection,
         }),
     ]
+}
+
+#[test]
+fn event_artifact_requirements_mark_filterable_sources() {
+    let cell_requirements =
+        event_artifact_requirements(&cell_produced(artifact_id(31), content_digest(32)));
+    assert_eq!(cell_requirements.len(), 1);
+    assert_eq!(
+        cell_requirements[0].source,
+        EventArtifactReferenceSource::StateOutput
+    );
+    assert!(cell_requirements[0]
+        .source
+        .is_terminal_lifecycle_receipt_candidate());
+    assert_eq!(
+        cell_requirements[0].artifact_role,
+        Some(ArtifactRole::StateOutput)
+    );
+
+    let public_requirements =
+        event_artifact_requirements(&public_output_produced(artifact_id(33), content_digest(34)));
+    assert_eq!(public_requirements.len(), 1);
+    assert_eq!(
+        public_requirements[0].source,
+        EventArtifactReferenceSource::PublicOutputCell
+    );
+    assert!(!public_requirements[0]
+        .source
+        .is_terminal_lifecycle_receipt_candidate());
+
+    let retention_requirements = event_artifact_requirements(&retention_refs_appended(
+        artifact_id(35),
+        content_digest(36),
+        ArtifactRole::FactResponse,
+    ));
+    assert_eq!(retention_requirements.len(), 1);
+    assert_eq!(
+        retention_requirements[0].source,
+        EventArtifactReferenceSource::RetentionRef
+    );
+    assert!(retention_requirements[0].source.is_retention());
+
+    let mut failure = side_effect_failed(false);
+    let KernelEventPayload::SideEffectFailed(payload) = &mut failure else {
+        panic!("side-effect failure payload");
+    };
+    payload.error.diagnostic_ref = Some(event_artifact_ref(artifact_id(37), content_digest(38)));
+    let failure_requirements = event_artifact_requirements(&failure);
+    assert_eq!(failure_requirements.len(), 1);
+    assert_eq!(
+        failure_requirements[0].source,
+        EventArtifactReferenceSource::SideEffectFailureDiagnostic
+    );
+    assert!(!failure_requirements[0].source.is_retention());
+    assert!(!failure_requirements[0]
+        .source
+        .is_terminal_lifecycle_receipt_candidate());
 }
 
 fn spec_artifact_ref() -> ArtifactEvidenceRef {
@@ -1990,6 +2117,61 @@ fn side_effect_transition_mismatches_are_rejected() {
 }
 
 #[test]
+fn run_mode_strings_and_terminal_outcome_mapping_are_canonical() {
+    let modes = [
+        (RunMode::Forward, "forward", None),
+        (RunMode::Remediating, "remediating", None),
+        (RunMode::ManualBlocked, "manual_blocked", None),
+        (RunMode::Completed, "completed", None),
+        (
+            RunMode::Compensated,
+            "compensated",
+            Some(events::RunCompletionOutcome::Compensated),
+        ),
+        (
+            RunMode::ManuallyResolved,
+            "manually_resolved",
+            Some(events::RunCompletionOutcome::ManuallyResolved),
+        ),
+        (
+            RunMode::FailedWithoutAcdcClaim,
+            "failed_without_acdc_claim",
+            Some(events::RunCompletionOutcome::FailedWithoutAcdcClaim),
+        ),
+    ];
+    for (mode, tag, terminal) in modes {
+        assert_eq!(mode.as_str(), tag);
+        assert_eq!(mode.saga_terminal_outcome(), terminal);
+    }
+
+    let outcomes = [
+        (completed_outcome(21), RunMode::Completed, "completed"),
+        (
+            events::RunCompletionOutcome::Compensated,
+            RunMode::Compensated,
+            "compensated",
+        ),
+        (
+            events::RunCompletionOutcome::ManuallyResolved,
+            RunMode::ManuallyResolved,
+            "manually_resolved",
+        ),
+        (
+            events::RunCompletionOutcome::FailedWithoutAcdcClaim,
+            RunMode::FailedWithoutAcdcClaim,
+            "failed_without_acdc_claim",
+        ),
+    ];
+    for (outcome, mode, tag) in outcomes {
+        assert_eq!(RunMode::from_completion_outcome(&outcome), mode);
+        assert_eq!(
+            mfm_store::v1::codec::run_completion_outcome_str(&outcome),
+            tag
+        );
+    }
+}
+
+#[test]
 fn resource_lane_rejects_same_key_for_other_ledgers_same_run_and_cross_run() {
     let mut store = InMemoryTypedRunStore::new();
     let run_a = run_id(201);
@@ -2046,7 +2228,7 @@ fn resource_lane_rejects_same_key_for_other_ledgers_same_run_and_cross_run() {
             })
             .expect_err("same-run lane conflict rejects")
     };
-    assert_projection_conflict_contains(same_run_error, "resource lane already held");
+    assert_resource_lane_blocked(same_run_error, &resource_lane_key("wallet-1"));
 
     let cross_run_error = {
         let branch_node = node_id(75);
@@ -2083,7 +2265,104 @@ fn resource_lane_rejects_same_key_for_other_ledgers_same_run_and_cross_run() {
             })
             .expect_err("cross-run lane conflict rejects")
     };
-    assert_projection_conflict_contains(cross_run_error, "resource lane already held");
+    assert_resource_lane_blocked(cross_run_error, &resource_lane_key("wallet-1"));
+}
+
+#[test]
+fn resource_lane_holder_identity_includes_run_for_same_ledger_key_across_runs() {
+    let mut store = InMemoryTypedRunStore::new();
+    let run_a = run_id(213);
+    let run_b = run_id(214);
+    let shared_ledger = side_effect_ledger_key_with_suffix(11);
+    let lane_a = resource_lane_key("wallet-6");
+    let lane_b = resource_lane_key("wallet-7");
+    store
+        .append_prepared_commit(run_start_request(
+            run_a.clone(),
+            "resource-same-ledger-a-start",
+        ))
+        .expect("append run a");
+    store
+        .append_prepared_commit(run_start_request(
+            run_b.clone(),
+            "resource-same-ledger-b-start",
+        ))
+        .expect("append run b");
+
+    append_side_effect_prepare_for_ledger(
+        &mut store,
+        &run_a,
+        "resource-same-ledger-a-prepare",
+        shared_ledger.clone(),
+        resource_key("wallet-6", 213),
+        28,
+        true,
+    );
+
+    let cross_run_same_resource_error = store
+        .append_prepared_commit({
+            let artifact_id = artifact_id(30);
+            let artifact_digest = content_digest(31);
+            let branch_node = node_id(78);
+            let branch_attempt = attempt_id(79);
+            let mut intent = side_effect_intent(artifact_id.clone(), artifact_digest.clone());
+            let mut claim = side_effect_claim();
+            let mut prepared =
+                side_effect_prepared_with_resource_key(1, "token-1", resource_key("wallet-6", 213));
+            for payload in [&mut intent, &mut claim, &mut prepared] {
+                set_side_effect_ledger(
+                    payload,
+                    shared_ledger.clone(),
+                    events::SideEffectLedgerPurpose::Forward,
+                );
+                set_side_effect_node_attempt(payload, branch_node.clone(), branch_attempt.clone());
+            }
+            TypedCommitRequest {
+                run_id: run_b.clone(),
+                expected_next_seq: store.expected_next_seq(&run_b),
+                commit_key: CommitKey::new("resource-same-ledger-b-conflict").expect("commit key"),
+                payloads: vec![
+                    side_effect_attempt_started_for(branch_node.clone(), branch_attempt),
+                    intent,
+                    claim,
+                    prepared,
+                ],
+                required_artifacts: vec![intent_artifact_ref_for_node(
+                    artifact_id,
+                    artifact_digest,
+                    branch_node,
+                )],
+                preconditions: CommitPreconditions::default(),
+            }
+        })
+        .expect_err("same resource remains exclusive across runs");
+    assert_resource_lane_blocked(cross_run_same_resource_error, &lane_a);
+
+    append_side_effect_prepare_for_ledger_on_attempt(
+        &mut store,
+        &run_b,
+        "resource-same-ledger-b-prepare",
+        shared_ledger.clone(),
+        resource_key("wallet-7", 214),
+        32,
+        true,
+        node_id(80),
+        attempt_id(81),
+    );
+
+    let projection = store.projection_snapshot();
+    let lane_a = projection.resource_lane(&lane_a).expect("run a lane");
+    assert_eq!(lane_a.holder.run_id, run_a);
+    assert_eq!(lane_a.holder.ledger_key, shared_ledger);
+    let lane_b = projection.resource_lane(&lane_b).expect("run b lane");
+    assert_eq!(lane_b.holder.run_id, run_b);
+    assert_eq!(lane_b.holder.ledger_key, shared_ledger);
+    assert!(projection
+        .side_effect_for_run(&run_a, &shared_ledger)
+        .is_some());
+    assert!(projection
+        .side_effect_for_run(&run_b, &shared_ledger)
+        .is_some());
 }
 
 #[test]
@@ -2156,7 +2435,7 @@ fn resource_lane_allows_same_ledger_refresh_with_same_key_only() {
             preconditions: CommitPreconditions::default(),
         })
         .expect_err("same ledger cannot change resource key");
-    assert_projection_conflict_contains(error, "resource lane key changed");
+    assert_projection_conflict_contains(error, "resource key evidence changed");
 }
 
 #[test]
@@ -2376,7 +2655,7 @@ fn resource_lane_releases_on_ledger_terminals_manual_resolution_and_run_terminal
             commit_key: CommitKey::new("resource-manual-release").expect("commit key"),
             payloads: vec![manual_resolution_recorded_for_run(run.clone(), 46)],
             required_artifacts: manual_resolution_artifacts(46),
-            preconditions: CommitPreconditions::default(),
+            preconditions: saga_preconditions(manual_saga_policy(46)),
         })
         .expect("manual resolution releases lane");
     assert!(manual_store
@@ -2410,10 +2689,7 @@ fn resource_lane_releases_on_ledger_terminals_manual_resolution_and_run_terminal
             run_id: run.clone(),
             expected_next_seq: terminal_store.expected_next_seq(&run),
             commit_key: CommitKey::new("resource-run-terminal-release").expect("commit key"),
-            payloads: vec![run_completed_for_run(
-                run.clone(),
-                events::RunCompletionOutcome::FailedWithoutAcdcClaim,
-            )],
+            payloads: vec![run_completed_for_run(run.clone(), completed_outcome(209))],
             required_artifacts: Vec::new(),
             preconditions: CommitPreconditions::default(),
         })
@@ -2422,6 +2698,109 @@ fn resource_lane_releases_on_ledger_terminals_manual_resolution_and_run_terminal
         .projection_snapshot()
         .resource_lane(&lane_key)
         .is_none());
+}
+
+#[test]
+fn resource_lane_reprepare_after_release_requires_stable_resource_key_evidence() {
+    let run = run_id(212);
+    let ledger = side_effect_ledger_key_with_suffix(12);
+    let lane_key = resource_lane_key("wallet-stable");
+    let mut store = InMemoryTypedRunStore::new();
+    store
+        .append_prepared_commit(run_start_request(
+            run.clone(),
+            "resource-stability-run-start",
+        ))
+        .expect("append run");
+    append_side_effect_prepare_for_ledger(
+        &mut store,
+        &run,
+        "resource-stability-prepare",
+        ledger.clone(),
+        resource_key("wallet-stable", 212),
+        52,
+        true,
+    );
+    assert!(store
+        .projection_snapshot()
+        .resource_lane(&lane_key)
+        .is_some());
+
+    let mut started = side_effect_started("owner-1", 1, "token-1");
+    let mut not_submitted = side_effect_not_submitted(artifact_id(54), content_digest(55));
+    for payload in [&mut started, &mut not_submitted] {
+        set_side_effect_ledger(
+            payload,
+            ledger.clone(),
+            events::SideEffectLedgerPurpose::Forward,
+        );
+    }
+    store
+        .append_prepared_commit(TypedCommitRequest {
+            run_id: run.clone(),
+            expected_next_seq: store.expected_next_seq(&run),
+            commit_key: CommitKey::new("resource-stability-release").expect("commit key"),
+            payloads: vec![started, not_submitted],
+            required_artifacts: vec![side_effect_evidence(
+                artifact_id(54),
+                content_digest(55),
+                not_submitted_schema(),
+                ArtifactRole::NotSubmittedProof,
+            )],
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect("not-submitted releases lane");
+    assert!(store
+        .projection_snapshot()
+        .resource_lane(&lane_key)
+        .is_none());
+
+    let mut retry_claim = side_effect_claim_for_epoch(2, 2, "token-2");
+    let mut retry_without_key = side_effect_prepared_for_epoch(2, 2, "token-2");
+    for payload in [&mut retry_claim, &mut retry_without_key] {
+        set_side_effect_ledger(
+            payload,
+            ledger.clone(),
+            events::SideEffectLedgerPurpose::Forward,
+        );
+    }
+    let missing_key = store
+        .append_prepared_commit(TypedCommitRequest {
+            run_id: run.clone(),
+            expected_next_seq: store.expected_next_seq(&run),
+            commit_key: CommitKey::new("resource-stability-missing-key").expect("commit key"),
+            payloads: vec![retry_claim, retry_without_key],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect_err("reprepare without prior resource key evidence rejects");
+    assert_projection_conflict_contains(missing_key, "resource key evidence is required");
+
+    let mut retry_claim = side_effect_claim_for_epoch(2, 2, "token-2");
+    let mut retry_changed_key = side_effect_prepared_with_resource_key_for_epoch(
+        2,
+        2,
+        "token-2",
+        resource_key("wallet-changed", 213),
+    );
+    for payload in [&mut retry_claim, &mut retry_changed_key] {
+        set_side_effect_ledger(
+            payload,
+            ledger.clone(),
+            events::SideEffectLedgerPurpose::Forward,
+        );
+    }
+    let changed_key = store
+        .append_prepared_commit(TypedCommitRequest {
+            run_id: run.clone(),
+            expected_next_seq: store.expected_next_seq(&run),
+            commit_key: CommitKey::new("resource-stability-changed-key").expect("commit key"),
+            payloads: vec![retry_claim, retry_changed_key],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect_err("reprepare with changed resource key evidence rejects");
+    assert_projection_conflict_contains(changed_key, "resource key evidence changed");
 }
 
 #[test]
@@ -2447,8 +2826,11 @@ fn resource_lane_projection_rebuilds_from_non_terminal_run_stream() {
     let lane = rebuilt
         .resource_lane(&lane_key)
         .expect("rebuilt non-terminal lane");
-    assert_eq!(lane.run_id, run);
-    assert_eq!(lane.ledger_key, side_effect_ledger_key_with_suffix(10));
+    assert_eq!(lane.holder.run_id, run);
+    assert_eq!(
+        lane.holder.ledger_key,
+        side_effect_ledger_key_with_suffix(10)
+    );
 }
 
 #[test]
@@ -2939,7 +3321,7 @@ fn remediation_intent_requires_engaged_confirmed_forward_and_unique_link() {
 }
 
 #[test]
-fn manual_resolution_requires_quiescence_and_is_unique() {
+fn manual_resolution_requires_manual_blocked_prefix_and_is_unique() {
     let run_id = run_id(120);
     let mut non_quiescent = InMemoryTypedRunStore::new();
     non_quiescent
@@ -2958,15 +3340,37 @@ fn manual_resolution_requires_quiescence_and_is_unique() {
             commit_key: CommitKey::new("manual-non-quiescent").expect("commit key"),
             payloads: vec![manual_resolution_recorded(150)],
             required_artifacts: manual_resolution_artifacts(150),
-            preconditions: CommitPreconditions::default(),
+            preconditions: saga_preconditions(manual_saga_policy(150)),
         })
-        .expect_err("manual resolution rejects before quiescence");
-    assert_projection_conflict_contains(error, "must be quiescent");
+        .expect_err("manual resolution rejects outside manual-blocked mode");
+    assert_projection_conflict_contains(error, "requires prefix-derived manual_blocked");
+
+    let mut remediating = InMemoryTypedRunStore::new();
+    remediating
+        .append_prepared_commit(run_start_request(
+            run_id.clone(),
+            "manual-remediating-run-start",
+        ))
+        .expect("append run start");
+    append_forward_confirmation(&mut remediating, &run_id);
+    append_generic_nonretryable_failure(&mut remediating, &run_id, "manual-remediating");
+    let error = remediating
+        .append_prepared_commit(TypedCommitRequest {
+            run_id: run_id.clone(),
+            expected_next_seq: remediating.expected_next_seq(&run_id),
+            commit_key: CommitKey::new("manual-remediating-reject").expect("commit key"),
+            payloads: vec![manual_resolution_recorded(151)],
+            required_artifacts: manual_resolution_artifacts(151),
+            preconditions: saga_preconditions(compensate_saga_policy()),
+        })
+        .expect_err("manual resolution rejects while remediating");
+    assert_projection_conflict_contains(error, "requires prefix-derived manual_blocked");
 
     let mut store = InMemoryTypedRunStore::new();
     store
         .append_prepared_commit(run_start_request(run_id.clone(), "manual-run-start"))
         .expect("append run start");
+    append_forward_confirmation(&mut store, &run_id);
     append_generic_nonretryable_failure(&mut store, &run_id, "manual-clean-failure");
     store
         .append_prepared_commit(TypedCommitRequest {
@@ -2975,9 +3379,9 @@ fn manual_resolution_requires_quiescence_and_is_unique() {
             commit_key: CommitKey::new("manual-recorded").expect("commit key"),
             payloads: vec![manual_resolution_recorded(152)],
             required_artifacts: manual_resolution_artifacts(152),
-            preconditions: CommitPreconditions::default(),
+            preconditions: saga_preconditions(manual_saga_policy(152)),
         })
-        .expect("manual resolution admitted at quiescence");
+        .expect("manual resolution admitted in manual-blocked mode");
     let error = store
         .append_prepared_commit(TypedCommitRequest {
             run_id: run_id.clone(),
@@ -2985,7 +3389,7 @@ fn manual_resolution_requires_quiescence_and_is_unique() {
             commit_key: CommitKey::new("manual-duplicate").expect("commit key"),
             payloads: vec![manual_resolution_recorded(154)],
             required_artifacts: manual_resolution_artifacts(154),
-            preconditions: CommitPreconditions::default(),
+            preconditions: saga_preconditions(manual_saga_policy(154)),
         })
         .expect_err("duplicate manual resolution rejects");
     match error {
@@ -2997,7 +3401,7 @@ fn manual_resolution_requires_quiescence_and_is_unique() {
 }
 
 #[test]
-fn run_completed_requires_forward_quiescence() {
+fn saga_run_completed_requires_prefix_derived_terminal_outcome() {
     let run_id = run_id(120);
     let mut store = InMemoryTypedRunStore::new();
     store
@@ -3018,10 +3422,56 @@ fn run_completed_requires_forward_quiescence() {
                 events::RunCompletionOutcome::FailedWithoutAcdcClaim,
             )],
             required_artifacts: Vec::new(),
-            preconditions: CommitPreconditions::default(),
+            preconditions: saga_preconditions(manual_saga_policy(160)),
         })
-        .expect_err("terminal completion rejects before quiescence");
-    assert_projection_conflict_contains(error, "must be quiescent");
+        .expect_err("terminal completion rejects before terminal saga mode");
+    assert_projection_conflict_contains(error, "requires terminal saga mode");
+
+    let mut forged = InMemoryTypedRunStore::new();
+    forged
+        .append_prepared_commit(run_start_request(
+            run_id.clone(),
+            "terminal-forged-run-start",
+        ))
+        .expect("append run start");
+    append_forward_confirmation(&mut forged, &run_id);
+    append_generic_nonretryable_failure(&mut forged, &run_id, "terminal-forged-failure");
+    let error = forged
+        .append_prepared_commit(TypedCommitRequest {
+            run_id: run_id.clone(),
+            expected_next_seq: forged.expected_next_seq(&run_id),
+            commit_key: CommitKey::new("terminal-forged-manual").expect("commit key"),
+            payloads: vec![run_completed(
+                events::RunCompletionOutcome::ManuallyResolved,
+            )],
+            required_artifacts: Vec::new(),
+            preconditions: saga_preconditions(manual_saga_policy(162)),
+        })
+        .expect_err("forged manual terminal rejects before manual resolution");
+    assert_projection_conflict_contains(error, "requires terminal saga mode");
+
+    forged
+        .append_prepared_commit(TypedCommitRequest {
+            run_id: run_id.clone(),
+            expected_next_seq: forged.expected_next_seq(&run_id),
+            commit_key: CommitKey::new("terminal-manual-recorded").expect("commit key"),
+            payloads: vec![manual_resolution_recorded(162)],
+            required_artifacts: manual_resolution_artifacts(162),
+            preconditions: saga_preconditions(manual_saga_policy(162)),
+        })
+        .expect("manual resolution admitted");
+    forged
+        .append_prepared_commit(TypedCommitRequest {
+            run_id: run_id.clone(),
+            expected_next_seq: forged.expected_next_seq(&run_id),
+            commit_key: CommitKey::new("terminal-manual-resolved").expect("commit key"),
+            payloads: vec![run_completed(
+                events::RunCompletionOutcome::ManuallyResolved,
+            )],
+            required_artifacts: Vec::new(),
+            preconditions: saga_preconditions(manual_saga_policy(162)),
+        })
+        .expect("manual terminal completion admitted after manual resolution");
 }
 
 #[test]
@@ -3736,13 +4186,145 @@ fn retention_manifest_projection_requires_same_commit_retention_ref() {
     assert!(matches!(missing_ref, StoreError::ProjectionConflict { .. }));
 }
 
+fn assert_projection_codecs_round_trip(snapshot: &ProjectionSnapshot) {
+    use mfm_store::v1::codec;
+
+    for (_run_id, state) in snapshot.run_states() {
+        assert_eq!(
+            codec::parse_run_state(codec::run_state_str(*state)).expect("parse run state"),
+            *state
+        );
+    }
+    for (run_id, projection) in snapshot.run_completions() {
+        let json = codec::run_completion_projection_json(run_id, projection);
+        assert_eq!(
+            codec::parse_run_completion_projection(&json).expect("parse run completion"),
+            (run_id.clone(), projection.clone())
+        );
+    }
+    for (run_id, projection) in snapshot.saga_engagements() {
+        let json = codec::saga_engagement_projection_json(run_id, projection);
+        assert_eq!(
+            codec::parse_saga_engagement_projection(&json).expect("parse saga engagement"),
+            (run_id.clone(), projection.clone())
+        );
+    }
+    for (run_id, projection) in snapshot.manual_resolutions() {
+        let json = codec::manual_resolution_projection_json(run_id, projection);
+        assert_eq!(
+            codec::parse_manual_resolution_projection(&json).expect("parse manual resolution"),
+            (run_id.clone(), projection.clone())
+        );
+    }
+    for (_key, projection) in snapshot.attempts() {
+        let json = codec::attempt_projection_json(projection);
+        assert_eq!(
+            codec::parse_attempt_projection(&json).expect("parse attempt"),
+            projection.clone()
+        );
+    }
+    for (cell_id, projection) in snapshot.cells() {
+        let json = codec::cell_projection_json(cell_id, projection);
+        assert_eq!(
+            codec::parse_cell_projection(&json).expect("parse cell"),
+            (cell_id.clone(), projection.clone())
+        );
+    }
+    for (_key, projection) in snapshot.facts() {
+        let json = codec::fact_projection_json(projection);
+        assert_eq!(
+            codec::parse_fact_projection(&json).expect("parse fact"),
+            projection.clone()
+        );
+    }
+    for (_ledger_ref, projection) in snapshot.side_effects() {
+        let json = codec::side_effect_projection_json(projection);
+        assert_eq!(
+            codec::parse_side_effect_projection(&json).expect("parse side effect"),
+            projection.clone()
+        );
+    }
+    for (lane_key, projection) in snapshot.resource_lanes() {
+        let json = codec::resource_lane_projection_json(lane_key, projection);
+        assert_eq!(
+            codec::parse_resource_lane_projection(&json).expect("parse resource lane"),
+            (lane_key.clone(), projection.clone())
+        );
+    }
+    for (schema_id, projection) in snapshot.public_outputs() {
+        let json = codec::public_output_projection_json(schema_id, projection);
+        assert_eq!(
+            codec::parse_public_output_projection(&json).expect("parse public output"),
+            (schema_id.clone(), projection.clone())
+        );
+    }
+    for (_run_id, projection) in snapshot.retentions() {
+        for manifest in projection.manifests.values() {
+            let json = codec::retention_manifest_projection_json(manifest);
+            assert_eq!(
+                codec::parse_retention_manifest_projection(&json)
+                    .expect("parse retention manifest"),
+                manifest.clone()
+            );
+        }
+    }
+
+    let synthetic_run_id = run_id(210);
+    let run_completion = RunCompletionProjection {
+        event_id: event_id(211),
+        outcome: completed_outcome(212),
+    };
+    let json = codec::run_completion_projection_json(&synthetic_run_id, &run_completion);
+    assert_eq!(
+        codec::parse_run_completion_projection(&json).expect("parse synthetic run completion"),
+        (synthetic_run_id.clone(), run_completion)
+    );
+
+    let saga_engagement = SagaEngagementProjection {
+        event_id: event_id(213),
+        reason: SagaEngagementReason::ForwardAmbiguous {
+            ledger_key: side_effect_ledger_key_with_suffix(214),
+        },
+    };
+    let json = codec::saga_engagement_projection_json(&synthetic_run_id, &saga_engagement);
+    assert_eq!(
+        codec::parse_saga_engagement_projection(&json).expect("parse synthetic saga engagement"),
+        (synthetic_run_id.clone(), saga_engagement)
+    );
+
+    let manual_resolution = ManualResolutionProjection {
+        event_id: event_id(215),
+        outcome: events::ManualResolutionOutcome::ConfirmRemediated,
+        operator_identity_ref_schema_id: schema_id("mfm.test.operator_identity", 216),
+        operator_identity_ref_hash: content_digest(217),
+        operator_identity_ref_artifact_id: artifact_id(218),
+        evidence_schema_id: schema_id("mfm.test.manual_evidence", 219),
+        evidence_hash: content_digest(220),
+        evidence_artifact_id: artifact_id(221),
+        note: Some(events::ManualResolutionNote::new("operator reviewed").expect("note")),
+    };
+    let json = codec::manual_resolution_projection_json(&synthetic_run_id, &manual_resolution);
+    assert_eq!(
+        codec::parse_manual_resolution_projection(&json)
+            .expect("parse synthetic manual resolution"),
+        (synthetic_run_id, manual_resolution)
+    );
+}
+
 #[test]
 fn projections_rebuild_from_authoritative_run_stream() {
-    let run_id = run_id(60);
-    let artifact_id = artifact_id(61);
-    let artifact_digest = content_digest(62);
+    let run_id = run_id(120);
+    let output_artifact_id = artifact_id(61);
+    let output_digest = content_digest(62);
+    let fact_artifact_id = artifact_id(63);
+    let fact_digest = content_digest(64);
+    let manifest_artifact_id = artifact_id(65);
+    let manifest_digest = content_digest(66);
     let mut store = InMemoryTypedRunStore::new();
-    let evidence = store_artifact_ref(artifact_id.clone(), artifact_digest.clone());
+    let evidence = store_artifact_ref(output_artifact_id.clone(), output_digest.clone());
+    let fact_evidence = fact_artifact_ref(fact_artifact_id.clone(), fact_digest.clone());
+    let manifest_evidence =
+        retention_manifest_artifact_ref(manifest_artifact_id.clone(), manifest_digest.clone());
     store
         .append_prepared_commit(run_start_request(run_id.clone(), "run-start"))
         .expect("append run start");
@@ -3763,8 +4345,49 @@ fn projections_rebuild_from_authoritative_run_stream() {
         .append_prepared_commit(TypedCommitRequest {
             run_id: run_id.clone(),
             expected_next_seq: store.expected_next_seq(&run_id),
+            commit_key: CommitKey::new("fact-attempt-start").expect("commit key"),
+            payloads: vec![fact_attempt_started()],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions {
+                required_run_state: RequiredRunState::NotCompleted,
+                ..CommitPreconditions::default()
+            },
+        })
+        .expect("append fact attempt start");
+    store
+        .append_prepared_commit(TypedCommitRequest {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&run_id),
+            commit_key: CommitKey::new("fact-recorded").expect("commit key"),
+            payloads: vec![fact_recorded(fact_artifact_id, fact_digest)],
+            required_artifacts: vec![fact_evidence],
+            preconditions: CommitPreconditions {
+                required_run_state: RequiredRunState::NotCompleted,
+                ..CommitPreconditions::default()
+            },
+        })
+        .expect("append fact recorded");
+    append_side_effect_prepare_for_ledger(
+        &mut store,
+        &run_id,
+        "projection-sidefx",
+        side_effect_ledger_key_with_suffix(67),
+        resource_key("account-1", 68),
+        69,
+        true,
+    );
+    let mut terminal_payloads =
+        terminal_cell_commit_payloads(output_artifact_id.clone(), output_digest.clone());
+    terminal_payloads.push(public_output_produced(
+        output_artifact_id.clone(),
+        output_digest.clone(),
+    ));
+    store
+        .append_prepared_commit(TypedCommitRequest {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&run_id),
             commit_key: CommitKey::new("cell-produced").expect("commit key"),
-            payloads: terminal_cell_commit_payloads(artifact_id, artifact_digest),
+            payloads: terminal_payloads,
             required_artifacts: vec![evidence],
             preconditions: CommitPreconditions {
                 required_run_state: RequiredRunState::NotCompleted,
@@ -3772,13 +4395,37 @@ fn projections_rebuild_from_authoritative_run_stream() {
             },
         })
         .expect("append cell produced");
+    store
+        .append_prepared_commit(TypedCommitRequest {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&run_id),
+            commit_key: CommitKey::new("retention-manifest").expect("commit key"),
+            payloads: retention_manifest_commit_payloads(
+                1,
+                manifest_digest,
+                None,
+                manifest_artifact_id,
+            ),
+            required_artifacts: vec![manifest_evidence],
+            preconditions: CommitPreconditions {
+                required_run_state: RequiredRunState::NotCompleted,
+                ..CommitPreconditions::default()
+            },
+        })
+        .expect("append retention manifest");
 
     let stream = store.load_run_stream(&run_id);
     let rebuilt =
         ProjectionSnapshot::rebuild_from_run_stream(&stream).expect("rebuild projections");
     assert_eq!(store.projection_snapshot(), &rebuilt);
+    assert_eq!(rebuilt.facts().count(), 1);
+    assert_eq!(rebuilt.side_effects().count(), 1);
+    assert_eq!(rebuilt.resource_lanes().count(), 1);
+    assert_eq!(rebuilt.public_outputs().count(), 1);
+    assert_eq!(rebuilt.retentions().count(), 1);
     assert!(matches!(
         rebuilt.cell_terminal(&cell_id(21)),
         Some(CellTerminalProjection::Produced { .. })
     ));
+    assert_projection_codecs_round_trip(&rebuilt);
 }

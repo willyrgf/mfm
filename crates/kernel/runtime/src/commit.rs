@@ -1398,6 +1398,12 @@ fn runner_output_preconditions(
                 run_id, retention_manifest.manifest_seq
             ))?);
     }
+    if matches!(
+        &node.framework,
+        Some(spec::FrameworkNodeSpec::ResolveSagaTerminal(_))
+    ) {
+        preconditions.saga_policy = Some(runtime_spec.spec().saga.clone());
+    }
 
     if node.side_effect.is_none() {
         return Ok(preconditions);

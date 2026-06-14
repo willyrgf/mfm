@@ -421,18 +421,37 @@ pub enum TypedRunMode {
     FailedWithoutAcdcClaim,
 }
 
+impl TypedRunMode {
+    fn as_store_run_mode(self) -> store::RunMode {
+        match self {
+            Self::Forward => store::RunMode::Forward,
+            Self::Remediating => store::RunMode::Remediating,
+            Self::ManualBlocked => store::RunMode::ManualBlocked,
+            Self::Completed => store::RunMode::Completed,
+            Self::Compensated => store::RunMode::Compensated,
+            Self::ManuallyResolved => store::RunMode::ManuallyResolved,
+            Self::FailedWithoutAcdcClaim => store::RunMode::FailedWithoutAcdcClaim,
+        }
+    }
+}
+
+impl From<store::RunMode> for TypedRunMode {
+    fn from(mode: store::RunMode) -> Self {
+        match mode {
+            store::RunMode::Forward => Self::Forward,
+            store::RunMode::Remediating => Self::Remediating,
+            store::RunMode::ManualBlocked => Self::ManualBlocked,
+            store::RunMode::Completed => Self::Completed,
+            store::RunMode::Compensated => Self::Compensated,
+            store::RunMode::ManuallyResolved => Self::ManuallyResolved,
+            store::RunMode::FailedWithoutAcdcClaim => Self::FailedWithoutAcdcClaim,
+        }
+    }
+}
+
 impl fmt::Display for TypedRunMode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let value = match self {
-            Self::Forward => "forward",
-            Self::Remediating => "remediating",
-            Self::ManualBlocked => "manual_blocked",
-            Self::Completed => "completed",
-            Self::Compensated => "compensated",
-            Self::ManuallyResolved => "manually_resolved",
-            Self::FailedWithoutAcdcClaim => "failed_without_acdc_claim",
-        };
-        f.write_str(value)
+        f.write_str(self.as_store_run_mode().as_str())
     }
 }
 
@@ -1390,107 +1409,32 @@ fn collect_event_artifact_ids(
     payload: &events::KernelEventPayload,
     ids: &mut BTreeMap<ArtifactId, ()>,
 ) {
-    match payload {
-        events::KernelEventPayload::RunStarted(payload) => {
-            ids.insert(payload.spec_artifact_id.clone(), ());
-            ids.insert(payload.certificate_artifact_id.clone(), ());
-            for seed in &payload.seed_cells {
-                ids.insert(seed.seed_artifact.artifact_id.clone(), ());
-            }
+    for requirement in store::event_artifact_requirements(payload) {
+        if should_collect_event_artifact_id(runtime_spec, &requirement) {
+            ids.insert(requirement.artifact_id, ());
         }
-        events::KernelEventPayload::FactRecorded(payload) => {
-            ids.insert(payload.artifact_id.clone(), ());
-        }
-        events::KernelEventPayload::ArtifactReferenced(payload) => {
-            if !payload.node_id.as_ref().is_some_and(|node_id| {
-                is_terminal_lifecycle_state_output_ref(
-                    runtime_spec,
-                    node_id,
-                    payload.artifact_ref.role,
-                )
-            }) {
-                ids.insert(payload.artifact_ref.artifact_id.clone(), ());
-            }
-        }
-        events::KernelEventPayload::CellProduced(payload) => {
-            if !is_terminal_lifecycle_node_id(runtime_spec, &payload.node_id) {
-                ids.insert(payload.artifact_id.clone(), ());
-            }
-        }
-        events::KernelEventPayload::PublicOutputProduced(payload) => {
-            for cell in &payload.cells {
-                ids.insert(cell.artifact_id.clone(), ());
-            }
-            if let Some(artifact_id) = &payload.rendered_artifact_id {
-                ids.insert(artifact_id.clone(), ());
-            }
-        }
-        events::KernelEventPayload::PublicOutputRenderFailed(payload) => {
-            if let Some(evidence) = &payload.error.diagnostic_ref {
-                ids.insert(evidence.artifact_id.clone(), ());
-            }
-        }
-        events::KernelEventPayload::StateAttemptFailed(payload) => {
-            if let Some(evidence) = &payload.error.diagnostic_ref {
-                ids.insert(evidence.artifact_id.clone(), ());
-            }
-        }
-        events::KernelEventPayload::ManualResolutionRecorded(payload) => {
-            ids.insert(payload.operator_identity_ref_artifact_id.clone(), ());
-            ids.insert(payload.evidence_artifact_id.clone(), ());
-        }
-        events::KernelEventPayload::SideEffectIntentPersisted(payload) => {
-            ids.insert(payload.intent_artifact_id.clone(), ());
-        }
-        events::KernelEventPayload::SideEffectInvocationPrepared(payload) => {
-            if let Some(artifact_id) = &payload.prepared_artifact_id {
-                ids.insert(artifact_id.clone(), ());
-            }
-        }
-        events::KernelEventPayload::SideEffectNotSubmittedProven(payload) => {
-            ids.insert(payload.proof_artifact_id.clone(), ());
-        }
-        events::KernelEventPayload::SideEffectSubmissionObserved(payload) => {
-            ids.insert(payload.submission_artifact_id.clone(), ());
-        }
-        events::KernelEventPayload::SideEffectSubmissionUnknown(payload) => {
-            ids.insert(payload.evidence_artifact_id.clone(), ());
-        }
-        events::KernelEventPayload::SideEffectReceiptObserved(payload) => {
-            ids.insert(payload.receipt_artifact_id.clone(), ());
-            if let Some(touched_set) = &payload.resource_touched_set {
-                ids.insert(touched_set.evidence_artifact_id.clone(), ());
-            }
-        }
-        events::KernelEventPayload::SideEffectConfirmationObserved(payload) => {
-            ids.insert(payload.confirmation_artifact_id.clone(), ());
-            if let Some(touched_set) = &payload.resource_touched_set {
-                ids.insert(touched_set.evidence_artifact_id.clone(), ());
-            }
-        }
-        events::KernelEventPayload::SideEffectAmbiguous(payload) => {
-            ids.insert(payload.evidence_artifact_id.clone(), ());
-        }
-        events::KernelEventPayload::RunCompleted(_)
-        | events::KernelEventPayload::StateAttemptStarted(_)
-        | events::KernelEventPayload::StateAttemptCompleted(_)
-        | events::KernelEventPayload::CellSkipped(_)
-        | events::KernelEventPayload::SideEffectClaimed(_)
-        | events::KernelEventPayload::SideEffectClaimTakenOver(_)
-        | events::KernelEventPayload::SideEffectInvocationStarted(_)
-        | events::KernelEventPayload::RetentionManifestProjected(_)
-        | events::KernelEventPayload::RetentionRefsAppended(_)
-        | events::KernelEventPayload::SideEffectFailed(_) => {}
     }
 }
 
-fn is_terminal_lifecycle_state_output_ref(
+fn should_collect_event_artifact_id(
     runtime_spec: &CertifiedRuntimeSpec,
-    node_id: &mfm_ids::NodeId,
-    role: events::ArtifactRole,
+    requirement: &store::EventArtifactRequirement,
 ) -> bool {
-    role == events::ArtifactRole::StateOutput
-        && is_terminal_lifecycle_node_id(runtime_spec, node_id)
+    if requirement.source.is_retention()
+        || requirement.source == store::EventArtifactReferenceSource::SideEffectFailureDiagnostic
+    {
+        return false;
+    }
+    if requirement.source.is_terminal_lifecycle_receipt_candidate()
+        && requirement.artifact_role == Some(events::ArtifactRole::StateOutput)
+        && requirement
+            .producer_node_id
+            .as_ref()
+            .is_some_and(|node_id| is_terminal_lifecycle_node_id(runtime_spec, node_id))
+    {
+        return false;
+    }
+    true
 }
 
 fn is_terminal_lifecycle_node_id(
@@ -2468,15 +2412,7 @@ fn stream_head(stream: &[store::KernelEventEnvelope]) -> u64 {
 }
 
 fn typed_run_mode(mode: store::RunMode) -> TypedRunMode {
-    match mode {
-        store::RunMode::Forward => TypedRunMode::Forward,
-        store::RunMode::Remediating => TypedRunMode::Remediating,
-        store::RunMode::ManualBlocked => TypedRunMode::ManualBlocked,
-        store::RunMode::Completed => TypedRunMode::Completed,
-        store::RunMode::Compensated => TypedRunMode::Compensated,
-        store::RunMode::ManuallyResolved => TypedRunMode::ManuallyResolved,
-        store::RunMode::FailedWithoutAcdcClaim => TypedRunMode::FailedWithoutAcdcClaim,
-    }
+    mode.into()
 }
 
 #[cfg(test)]
@@ -2653,7 +2589,11 @@ fn typed_resource_ledger_status(
         })
         .map(|(lane_key, lane)| {
             let holder = typed_resource_lane_holder(&lane_key, lane);
-            if lane.ledger_key == side_effect.ledger_key {
+            let side_effect_ref = store::SideEffectLedgerRef::new(
+                side_effect.run_id.clone(),
+                side_effect.ledger_key.clone(),
+            );
+            if lane.holder == side_effect_ref {
                 (Some(holder), None)
             } else {
                 (None, Some(holder))
@@ -2754,8 +2694,8 @@ fn typed_resource_lane_holder(
     TypedResourceLaneHolderStatus {
         namespace: lane_key.namespace.as_str().to_owned(),
         key: lane_key.key.as_str().to_owned(),
-        holding_run_id: lane.run_id.as_str().to_owned(),
-        holding_ledger_key: lane.ledger_key.as_str().to_owned(),
+        holding_run_id: lane.holder.run_id.as_str().to_owned(),
+        holding_ledger_key: lane.holder.ledger_key.as_str().to_owned(),
         holding_ledger_purpose,
         holding_forward_ledger_key,
         holding_node_id: lane.node_id.as_str().to_owned(),
@@ -2791,29 +2731,9 @@ fn typed_terminal_resolution(
     outcome: &events::RunCompletionOutcome,
 ) -> TypedTerminalResolutionStatus {
     TypedTerminalResolutionStatus {
-        outcome: run_completion_outcome_str(outcome),
-        claim: run_completion_claim_str(outcome),
+        outcome: store::codec::run_completion_outcome_str(outcome).to_owned(),
+        claim: store::codec::run_completion_claim_str(outcome).to_owned(),
     }
-}
-
-fn run_completion_outcome_str(outcome: &events::RunCompletionOutcome) -> String {
-    match outcome {
-        events::RunCompletionOutcome::Completed(_) => "completed",
-        events::RunCompletionOutcome::Compensated => "compensated",
-        events::RunCompletionOutcome::ManuallyResolved => "manually_resolved",
-        events::RunCompletionOutcome::FailedWithoutAcdcClaim => "failed_without_acdc_claim",
-    }
-    .to_owned()
-}
-
-fn run_completion_claim_str(outcome: &events::RunCompletionOutcome) -> String {
-    match outcome {
-        events::RunCompletionOutcome::Completed(_) => "public_output",
-        events::RunCompletionOutcome::Compensated => "compensation",
-        events::RunCompletionOutcome::ManuallyResolved => "manual_resolution",
-        events::RunCompletionOutcome::FailedWithoutAcdcClaim => "no_acdc_claim",
-    }
-    .to_owned()
 }
 
 fn manual_block_reason_str(reason: store::ManualBlockReason) -> String {

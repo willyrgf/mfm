@@ -615,7 +615,7 @@ pub(crate) fn resolve_saga_terminal_receipt_json(
 ) -> Result<PlainCanonicalJsonBytes> {
     canonical_json(serde_json::json!({
         "public_output_schema_id": runtime_spec.spec().public_outputs.public_schema_id.as_str(),
-        "terminal_outcome": run_completion_outcome_name(outcome),
+        "terminal_outcome": outcome.kind(),
         "pre_resolution_stream_seq": pre_resolution_stream
             .last()
             .map(|event| event.seq().as_u64()),
@@ -627,21 +627,9 @@ pub(crate) fn saga_terminal_completion_outcome(
     run_id: &RunId,
     projections: &store::ProjectionSnapshot,
 ) -> Result<events::RunCompletionOutcome> {
-    let saga = projections.derive_saga_projection(run_id, &runtime_spec.spec().saga);
-    match saga.run_mode {
-        store::RunMode::Compensated => Ok(events::RunCompletionOutcome::Compensated),
-        store::RunMode::ManuallyResolved => Ok(events::RunCompletionOutcome::ManuallyResolved),
-        store::RunMode::FailedWithoutAcdcClaim => {
-            Ok(events::RunCompletionOutcome::FailedWithoutAcdcClaim)
-        }
-        store::RunMode::Forward
-        | store::RunMode::Remediating
-        | store::RunMode::ManualBlocked
-        | store::RunMode::Completed => Err(RuntimeError::InvalidRunStream(format!(
-            "saga terminal resolution requires terminal saga mode, found {:?}",
-            saga.run_mode
-        ))),
-    }
+    projections
+        .saga_terminal_completion_outcome(run_id, &runtime_spec.spec().saga)
+        .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))
 }
 
 pub(crate) fn run_completion_evidence(
@@ -1306,13 +1294,4 @@ pub(crate) fn certified_resolve_saga_terminal_node(
             "RunCompleted lacks a certified ResolveSagaTerminal framework node".to_owned(),
         )
     })
-}
-
-fn run_completion_outcome_name(outcome: &events::RunCompletionOutcome) -> &'static str {
-    match outcome {
-        events::RunCompletionOutcome::Completed(_) => "completed",
-        events::RunCompletionOutcome::Compensated => "compensated",
-        events::RunCompletionOutcome::ManuallyResolved => "manually_resolved",
-        events::RunCompletionOutcome::FailedWithoutAcdcClaim => "failed_without_acdc_claim",
-    }
 }

@@ -304,44 +304,6 @@ pub mod v1 {
         }
     }
 
-    /// Stream-derived public run mode.
-    ///
-    /// `RunMode` is a projection type, not an appendable event payload. The stream records facts;
-    /// runtime, store, replay, and public status derive this value from certified saga policy plus
-    /// recorded evidence.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-    pub enum RunMode {
-        /// Forward graph execution is still active.
-        Forward,
-        /// Confirmed forward side effects are being remediated.
-        Remediating,
-        /// The run is blocked for typed manual operator evidence.
-        ManualBlocked,
-        /// Successful forward completion.
-        Completed,
-        /// Confirmed forward side effects were compensated.
-        Compensated,
-        /// Operator evidence manually resolved the run.
-        ManuallyResolved,
-        /// The run ended without a compensation or AC/DC-equivalence claim.
-        FailedWithoutAcdcClaim,
-    }
-
-    impl RunMode {
-        /// Returns the persisted lowercase mode tag.
-        pub const fn as_str(self) -> &'static str {
-            match self {
-                Self::Forward => "forward",
-                Self::Remediating => "remediating",
-                Self::ManualBlocked => "manual_blocked",
-                Self::Completed => "completed",
-                Self::Compensated => "compensated",
-                Self::ManuallyResolved => "manually_resolved",
-                Self::FailedWithoutAcdcClaim => "failed_without_acdc_claim",
-            }
-        }
-    }
-
     /// Closed v1 typed kernel event payload enum.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub enum KernelEventPayload {
@@ -726,6 +688,18 @@ pub mod v1 {
         ManuallyResolved,
         /// Run ended without a compensation or AC/DC-equivalence claim.
         FailedWithoutAcdcClaim,
+    }
+
+    impl RunCompletionOutcome {
+        /// Returns the canonical lowercase outcome tag.
+        pub const fn kind(&self) -> &'static str {
+            match self {
+                Self::Completed(_) => "completed",
+                Self::Compensated => "compensated",
+                Self::ManuallyResolved => "manually_resolved",
+                Self::FailedWithoutAcdcClaim => "failed_without_acdc_claim",
+            }
+        }
     }
 
     /// Public-output evidence required for a completed run.
@@ -2619,18 +2593,7 @@ mfm_events::v1::RetentionManifestProjected schema:mfm.events.v1.retention_manife
                 "remediation"
             );
 
-            let modes = [
-                (RunMode::Forward, "forward"),
-                (RunMode::Remediating, "remediating"),
-                (RunMode::ManualBlocked, "manual_blocked"),
-                (RunMode::Completed, "completed"),
-                (RunMode::Compensated, "compensated"),
-                (RunMode::ManuallyResolved, "manually_resolved"),
-                (RunMode::FailedWithoutAcdcClaim, "failed_without_acdc_claim"),
-            ];
-            for (mode, tag) in modes {
-                assert_eq!(mode.as_str(), tag);
-            }
+            assert_eq!(RunCompletionOutcome::Compensated.kind(), "compensated");
         }
 
         #[test]

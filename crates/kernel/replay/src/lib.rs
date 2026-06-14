@@ -715,41 +715,17 @@ pub mod v1 {
             for envelope in stream {
                 match envelope.payload() {
                     KernelEventPayload::RunStarted(payload) => {
-                        self.authorize_artifact(
-                            &payload.spec_artifact_id,
-                            &spec_digest(&self.certified_spec.spec_hash),
-                            None,
-                            ArtifactRole::TypedExecutionSpec,
-                            None,
-                        )?;
-                        self.authorize_artifact(
-                            &payload.certificate_artifact_id,
-                            &payload.certificate_artifact_digest,
-                            None,
-                            ArtifactRole::TypedSpecCertificate,
-                            None,
-                        )?;
                         for seed in &payload.seed_cells {
                             self.verify_seed_against_spec(seed)?;
-                            self.authorize_event_artifact_ref(
-                                &seed.seed_artifact,
-                                None,
-                                Some(&seed.seed_id),
-                            )?;
                         }
+                        self.authorize_event_artifacts(envelope.payload())?;
                     }
                     KernelEventPayload::StateAttemptStarted(payload) => {
                         self.verify_state_attempt_started_against_spec(payload)?;
                     }
                     KernelEventPayload::FactRecorded(payload) => {
                         self.verify_fact_against_spec(payload)?;
-                        self.authorize_artifact(
-                            &payload.artifact_id,
-                            &payload.response_hash,
-                            Some(&payload.response_schema_id),
-                            ArtifactRole::FactResponse,
-                            Some(&payload.node_id),
-                        )?;
+                        self.authorize_event_artifacts(envelope.payload())?;
                         insert_unique(
                             &mut self.facts,
                             (
@@ -765,27 +741,12 @@ pub mod v1 {
                     KernelEventPayload::ArtifactReferenced(payload) => {
                         if let Some(node_id) = &payload.node_id {
                             self.node(node_id)?;
-                            if self
-                                .is_terminal_lifecycle_receipt_ref(node_id, &payload.artifact_ref)?
-                            {
-                                continue;
-                            }
                         }
-                        self.authorize_event_artifact_ref(
-                            &payload.artifact_ref,
-                            payload.node_id.as_ref(),
-                            None,
-                        )?;
+                        self.authorize_event_artifacts(envelope.payload())?;
                     }
                     KernelEventPayload::SideEffectIntentPersisted(payload) => {
                         self.verify_side_effect_intent_against_spec(payload)?;
-                        self.authorize_artifact(
-                            &payload.intent_artifact_id,
-                            &payload.intent_hash,
-                            Some(&payload.intent_schema_id),
-                            ArtifactRole::SideEffectIntent,
-                            Some(&payload.node_id),
-                        )?;
+                        self.authorize_event_artifacts(envelope.payload())?;
                         insert_unique(
                             &mut self.intents,
                             payload.ledger_key.clone(),
@@ -825,13 +786,7 @@ pub mod v1 {
                             &payload.node_id,
                             &payload.attempt_id,
                         )?;
-                        self.authorize_artifact(
-                            &payload.submission_artifact_id,
-                            &payload.submission_hash,
-                            Some(&payload.submission_schema_id),
-                            ArtifactRole::Submission,
-                            Some(&payload.node_id),
-                        )?;
+                        self.authorize_event_artifacts(envelope.payload())?;
                         insert_unique(
                             &mut self.submissions,
                             (payload.ledger_key.clone(), payload.invocation_epoch),
@@ -851,20 +806,7 @@ pub mod v1 {
                             &payload.node_id,
                             payload.resource_touched_set.as_ref(),
                         )?;
-                        if let Some(touched_set) = &payload.resource_touched_set {
-                            self.authorize_artifact_by_schema(
-                                &touched_set.evidence_artifact_id,
-                                &touched_set.evidence_hash,
-                                &touched_set.evidence_schema_id,
-                            )?;
-                        }
-                        self.authorize_artifact(
-                            &payload.receipt_artifact_id,
-                            &payload.receipt_hash,
-                            Some(&payload.receipt_schema_id),
-                            ArtifactRole::Receipt,
-                            Some(&payload.node_id),
-                        )?;
+                        self.authorize_event_artifacts(envelope.payload())?;
                         insert_unique(
                             &mut self.receipts,
                             (payload.ledger_key.clone(), payload.invocation_epoch),
@@ -884,20 +826,7 @@ pub mod v1 {
                             &payload.node_id,
                             payload.resource_touched_set.as_ref(),
                         )?;
-                        if let Some(touched_set) = &payload.resource_touched_set {
-                            self.authorize_artifact_by_schema(
-                                &touched_set.evidence_artifact_id,
-                                &touched_set.evidence_hash,
-                                &touched_set.evidence_schema_id,
-                            )?;
-                        }
-                        self.authorize_artifact(
-                            &payload.confirmation_artifact_id,
-                            &payload.confirmation_hash,
-                            Some(&payload.confirmation_schema_id),
-                            ArtifactRole::Confirmation,
-                            Some(&payload.node_id),
-                        )?;
+                        self.authorize_event_artifacts(envelope.payload())?;
                         insert_unique(
                             &mut self.confirmations,
                             (payload.ledger_key.clone(), payload.invocation_epoch),
@@ -914,17 +843,7 @@ pub mod v1 {
                             &payload.attempt_id,
                         )?;
                         self.verify_invocation_prepared_resource_key(payload, &mut resource_keys)?;
-                        if let (Some(artifact_id), Some(hash)) =
-                            (&payload.prepared_artifact_id, &payload.prepared_hash)
-                        {
-                            self.authorize_artifact(
-                                artifact_id,
-                                hash,
-                                None,
-                                ArtifactRole::PreparedInvocation,
-                                Some(&payload.node_id),
-                            )?;
-                        }
+                        self.authorize_event_artifacts(envelope.payload())?;
                     }
                     KernelEventPayload::SideEffectNotSubmittedProven(payload) => {
                         self.verify_side_effect_event_against_intent(
@@ -933,13 +852,7 @@ pub mod v1 {
                             &payload.node_id,
                             &payload.attempt_id,
                         )?;
-                        self.authorize_artifact(
-                            &payload.proof_artifact_id,
-                            &payload.proof_hash,
-                            Some(&payload.proof_schema_id),
-                            ArtifactRole::NotSubmittedProof,
-                            Some(&payload.node_id),
-                        )?;
+                        self.authorize_event_artifacts(envelope.payload())?;
                     }
                     KernelEventPayload::SideEffectSubmissionUnknown(payload) => {
                         self.verify_side_effect_event_against_intent(
@@ -948,13 +861,7 @@ pub mod v1 {
                             &payload.node_id,
                             &payload.attempt_id,
                         )?;
-                        self.authorize_artifact(
-                            &payload.evidence_artifact_id,
-                            &payload.evidence_hash,
-                            Some(&payload.evidence_schema_id),
-                            ArtifactRole::SubmissionUnknownEvidence,
-                            Some(&payload.node_id),
-                        )?;
+                        self.authorize_event_artifacts(envelope.payload())?;
                     }
                     KernelEventPayload::SideEffectAmbiguous(payload) => {
                         self.verify_side_effect_event_against_intent(
@@ -963,65 +870,26 @@ pub mod v1 {
                             &payload.node_id,
                             &payload.attempt_id,
                         )?;
-                        self.authorize_artifact(
-                            &payload.evidence_artifact_id,
-                            &payload.evidence_hash,
-                            Some(&payload.evidence_schema_id),
-                            ArtifactRole::AmbiguityEvidence,
-                            Some(&payload.node_id),
-                        )?;
+                        self.authorize_event_artifacts(envelope.payload())?;
                     }
                     KernelEventPayload::CellProduced(payload) => {
                         self.verify_cell_produced_against_spec(payload)?;
-                        if self.is_terminal_lifecycle_receipt_artifact(
-                            &payload.node_id,
-                            &payload.artifact_id,
-                            &payload.content_digest,
-                        )? {
-                            continue;
-                        }
-                        self.authorize_artifact(
-                            &payload.artifact_id,
-                            &payload.content_digest,
-                            Some(&payload.schema_id),
-                            ArtifactRole::StateOutput,
-                            Some(&payload.node_id),
-                        )?;
+                        self.authorize_event_artifacts(envelope.payload())?;
                     }
                     KernelEventPayload::CellSkipped(payload) => {
                         self.verify_cell_skipped_against_spec(payload)?;
                     }
                     KernelEventPayload::PublicOutputProduced(payload) => {
                         self.verify_public_output_against_spec(payload)?;
-                        if let Some(artifact_id) = &payload.rendered_artifact_id {
-                            self.authorize_artifact(
-                                artifact_id,
-                                &payload.rendered_digest,
-                                Some(&payload.public_schema_id),
-                                ArtifactRole::PublicOutput,
-                                Some(&payload.node_id),
-                            )?;
-                        }
+                        self.authorize_event_artifacts(envelope.payload())?;
                     }
                     KernelEventPayload::PublicOutputRenderFailed(payload) => {
                         self.verify_public_output_render_failure_against_spec(payload)?;
-                        if let Some(evidence) = &payload.error.diagnostic_ref {
-                            self.authorize_event_artifact_ref(
-                                evidence,
-                                Some(&payload.node_id),
-                                None,
-                            )?;
-                        }
+                        self.authorize_event_artifacts(envelope.payload())?;
                     }
                     KernelEventPayload::StateAttemptFailed(payload) => {
                         self.node(&payload.node_id)?;
-                        if let Some(evidence) = &payload.error.diagnostic_ref {
-                            self.authorize_event_artifact_ref(
-                                evidence,
-                                Some(&payload.node_id),
-                                None,
-                            )?;
-                        }
+                        self.authorize_event_artifacts(envelope.payload())?;
                     }
                     KernelEventPayload::StateAttemptCompleted(payload) => {
                         self.verify_state_attempt_completed_against_spec(payload)?;
@@ -1036,34 +904,13 @@ pub mod v1 {
                     },
                     KernelEventPayload::ManualResolutionRecorded(payload) => {
                         self.verify_manual_resolution_against_spec(payload)?;
-                        self.authorize_artifact_by_schema(
-                            &payload.operator_identity_ref_artifact_id,
-                            &payload.operator_identity_ref_hash,
-                            &payload.operator_identity_ref_schema_id,
-                        )?;
-                        self.authorize_artifact_by_schema(
-                            &payload.evidence_artifact_id,
-                            &payload.evidence_hash,
-                            &payload.evidence_schema_id,
-                        )?;
+                        self.authorize_event_artifacts(envelope.payload())?;
                     }
-                    KernelEventPayload::RetentionManifestProjected(payload) => {
-                        self.authorize_artifact(
-                            &payload.manifest_artifact_id,
-                            &payload.manifest_digest,
-                            None,
-                            ArtifactRole::RetentionManifest,
-                            None,
-                        )?;
+                    KernelEventPayload::RetentionManifestProjected(_) => {
+                        self.authorize_event_artifacts(envelope.payload())?;
                     }
-                    KernelEventPayload::RetentionRefsAppended(payload) => {
-                        for retention in &payload.refs {
-                            self.authorize_artifact_partial(
-                                &retention.artifact_id,
-                                &retention.content_digest,
-                                retention.role,
-                            )?;
-                        }
+                    KernelEventPayload::RetentionRefsAppended(_) => {
+                        self.authorize_event_artifacts(envelope.payload())?;
                     }
                     KernelEventPayload::SideEffectFailed(payload) => {
                         self.verify_side_effect_event_against_intent(
@@ -1250,33 +1097,6 @@ pub mod v1 {
                         format!("cell {cell_id} is not present in certified spec"),
                     )
                 })
-        }
-
-        fn is_terminal_lifecycle_receipt_ref(
-            &self,
-            node_id: &NodeId,
-            event_ref: &events::ArtifactEvidenceRef,
-        ) -> Result<bool> {
-            // Terminal lifecycle receipts are deterministic sealed framework evidence. Runtime
-            // validation verifies the receipt digest, and no replayed node can consume the cell.
-            if event_ref.role != ArtifactRole::StateOutput {
-                return Ok(false);
-            }
-            let node = self.node(node_id)?;
-            if !is_terminal_lifecycle_node(node) {
-                return Ok(false);
-            }
-            let cell = self.cell(&node.output_cell)?;
-            if event_ref.schema_id != cell.schema_id
-                || event_ref.semantic_type_id.as_ref() != Some(&cell.semantic_type_id)
-            {
-                return Ok(false);
-            }
-            self.is_terminal_lifecycle_receipt_artifact(
-                node_id,
-                &event_ref.artifact_id,
-                &event_ref.content_digest,
-            )
         }
 
         fn is_terminal_lifecycle_receipt_artifact(
@@ -1554,6 +1374,37 @@ pub mod v1 {
                     "manual resolution evidence schemas do not match certified policy",
                 ));
             }
+            let manual_start = self
+                .stream
+                .iter()
+                .position(|event| {
+                    matches!(
+                        event.payload(),
+                        KernelEventPayload::ManualResolutionRecorded(candidate)
+                            if candidate == payload
+                    )
+                })
+                .ok_or_else(|| {
+                    ReplayError::new(
+                        ReplayErrorKind::InvalidRunStream,
+                        "manual resolution payload was not found in replay stream",
+                    )
+                })?;
+            let prefix_projection =
+                ProjectionSnapshot::rebuild_from_run_stream(&self.stream[..manual_start]).map_err(
+                    |error| ReplayError::new(ReplayErrorKind::InvalidRunStream, error.to_string()),
+                )?;
+            prefix_projection
+                .require_manual_resolution_admissible(
+                    &payload.run_id,
+                    &self.certified_spec.spec.saga,
+                )
+                .map_err(|error| {
+                    ReplayError::new(
+                        ReplayErrorKind::CertifiedEvidenceMismatch,
+                        error.to_string(),
+                    )
+                })?;
             Ok(())
         }
 
@@ -1760,29 +1611,124 @@ pub mod v1 {
             }
         }
 
-        fn authorize_event_artifact_ref(
+        fn authorize_event_artifacts(&mut self, payload: &KernelEventPayload) -> Result<()> {
+            for requirement in store::event_artifact_requirements(payload) {
+                if self.should_skip_event_artifact_requirement(&requirement)? {
+                    continue;
+                }
+                self.authorize_event_artifact_requirement(&requirement)?;
+            }
+            Ok(())
+        }
+
+        fn should_skip_event_artifact_requirement(
+            &self,
+            requirement: &store::EventArtifactRequirement,
+        ) -> Result<bool> {
+            if requirement.source == store::EventArtifactReferenceSource::PublicOutputCell {
+                return Ok(true);
+            }
+            if !requirement.source.is_terminal_lifecycle_receipt_candidate() {
+                return Ok(false);
+            }
+            if requirement.artifact_role != Some(ArtifactRole::StateOutput) {
+                return Ok(false);
+            }
+            let Some(node_id) = requirement.producer_node_id.as_ref() else {
+                return Ok(false);
+            };
+            let node = self.node(node_id)?;
+            if !is_terminal_lifecycle_node(node) {
+                return Ok(false);
+            }
+            if requirement.source == store::EventArtifactReferenceSource::ArtifactReferenced {
+                let cell = self.cell(&node.output_cell)?;
+                if requirement.schema_id.as_ref() != Some(&cell.schema_id)
+                    || requirement.semantic_type_id.as_ref() != Some(&cell.semantic_type_id)
+                {
+                    return Ok(false);
+                }
+            }
+            let Some(digest) = requirement.digest.as_ref() else {
+                return Ok(false);
+            };
+            self.is_terminal_lifecycle_receipt_artifact(node_id, &requirement.artifact_id, digest)
+        }
+
+        fn authorize_event_artifact_requirement(
             &mut self,
-            event_ref: &events::ArtifactEvidenceRef,
-            producer_node_id: Option<&NodeId>,
-            producer_seed_id: Option<&mfm_ids::SeedId>,
+            requirement: &store::EventArtifactRequirement,
         ) -> Result<StoredArtifactEvidenceRef> {
+            let digest = requirement.digest.as_ref().ok_or_else(|| {
+                ReplayError::new(
+                    ReplayErrorKind::InvalidRunStream,
+                    format!(
+                        "artifact requirement for {} does not carry a digest",
+                        requirement.artifact_id
+                    ),
+                )
+            })?;
+            if requirement.source == store::EventArtifactReferenceSource::RetentionRef {
+                let role = requirement.artifact_role.ok_or_else(|| {
+                    ReplayError::new(
+                        ReplayErrorKind::InvalidRunStream,
+                        format!(
+                            "retention requirement for {} does not carry an artifact role",
+                            requirement.artifact_id
+                        ),
+                    )
+                })?;
+                return self.authorize_artifact_partial(&requirement.artifact_id, digest, role);
+            }
+            if requirement.artifact_role.is_none() {
+                let schema_id = requirement.schema_id.as_ref().ok_or_else(|| {
+                    ReplayError::new(
+                        ReplayErrorKind::InvalidRunStream,
+                        format!(
+                            "schema-only requirement for {} does not carry a schema id",
+                            requirement.artifact_id
+                        ),
+                    )
+                })?;
+                return self.authorize_artifact_by_schema(
+                    &requirement.artifact_id,
+                    digest,
+                    schema_id,
+                );
+            }
+
             let evidence = self.authorize_artifact(
-                &event_ref.artifact_id,
-                &event_ref.content_digest,
-                Some(&event_ref.schema_id),
-                event_ref.role,
-                producer_node_id,
+                &requirement.artifact_id,
+                digest,
+                requirement.schema_id.as_ref(),
+                requirement
+                    .artifact_role
+                    .expect("artifact role checked above"),
+                requirement.producer_node_id.as_ref(),
             )?;
-            if evidence.byte_len != event_ref.byte_len
-                || evidence.media_type != event_ref.media_type
-                || evidence.semantic_type_id != event_ref.semantic_type_id
-                || producer_seed_id.is_some()
-                    && evidence.producer_seed_id.as_ref() != producer_seed_id
-            {
-                return Err(ReplayError::new(
-                    ReplayErrorKind::ArtifactMismatch,
-                    format!("artifact evidence mismatch for {}", event_ref.artifact_id),
-                ));
+            if requires_event_artifact_ref_checks(requirement.source) {
+                if requirement
+                    .byte_len
+                    .is_some_and(|byte_len| evidence.byte_len != byte_len)
+                    || requirement
+                        .media_type
+                        .as_ref()
+                        .is_some_and(|media_type| &evidence.media_type != media_type)
+                    || requirement
+                        .semantic_type_id
+                        .as_ref()
+                        .is_some_and(|semantic_type_id| {
+                            evidence.semantic_type_id.as_ref() != Some(semantic_type_id)
+                        })
+                    || requirement.producer_seed_id.is_some()
+                        && evidence.producer_seed_id.as_ref()
+                            != requirement.producer_seed_id.as_ref()
+                {
+                    return Err(ReplayError::new(
+                        ReplayErrorKind::ArtifactMismatch,
+                        format!("artifact evidence mismatch for {}", requirement.artifact_id),
+                    ));
+                }
             }
             Ok(evidence)
         }
@@ -2017,29 +1963,18 @@ pub mod v1 {
             | events::RunCompletionOutcome::FailedWithoutAcdcClaim => {
                 let prefix_projection =
                     ProjectionSnapshot::rebuild_from_run_stream(&stream[..terminal_start])?;
-                let saga = prefix_projection
-                    .derive_saga_projection(&run_started.run_id, &certified_spec.spec.saga);
-                let expected = match saga.run_mode {
-                    store::RunMode::Compensated => events::RunCompletionOutcome::Compensated,
-                    store::RunMode::ManuallyResolved => {
-                        events::RunCompletionOutcome::ManuallyResolved
-                    }
-                    store::RunMode::FailedWithoutAcdcClaim => {
-                        events::RunCompletionOutcome::FailedWithoutAcdcClaim
-                    }
-                    _ => {
-                        return Err(certified_evidence_mismatch(
-                            "saga terminal outcome is unsupported by derived run mode",
-                        ));
-                    }
-                };
-                if payload.outcome == expected {
-                    Ok(())
-                } else {
-                    Err(certified_evidence_mismatch(
-                        "saga terminal outcome does not match derived run mode",
-                    ))
-                }
+                prefix_projection
+                    .require_saga_terminal_outcome_admissible(
+                        &run_started.run_id,
+                        &certified_spec.spec.saga,
+                        &payload.outcome,
+                    )
+                    .map_err(|error| {
+                        ReplayError::new(
+                            ReplayErrorKind::CertifiedEvidenceMismatch,
+                            error.to_string(),
+                        )
+                    })
             }
         }
     }
@@ -2148,6 +2083,16 @@ pub mod v1 {
                 spec::FrameworkNodeSpec::CompleteRun(_)
                     | spec::FrameworkNodeSpec::ResolveSagaTerminal(_)
             )
+        )
+    }
+
+    fn requires_event_artifact_ref_checks(source: store::EventArtifactReferenceSource) -> bool {
+        matches!(
+            source,
+            store::EventArtifactReferenceSource::SeedCell
+                | store::EventArtifactReferenceSource::ArtifactReferenced
+                | store::EventArtifactReferenceSource::PublicOutputRenderFailureDiagnostic
+                | store::EventArtifactReferenceSource::StateAttemptFailureDiagnostic
         )
     }
 
@@ -3179,6 +3124,43 @@ pub mod v1 {
         }
 
         #[test]
+        fn replay_construction_rejects_manual_resolution_before_manual_blocked() {
+            let operator_schema = schema("mfm.test.operator_identity", 0x98);
+            let evidence_schema = schema("mfm.test.manual_evidence", 0x99);
+            let fixture = Fixture::with_saga_policy(spec::SagaPolicySpec::ManualResolution {
+                manual: spec::ManualResolutionEvidenceSpec {
+                    evidence_schema: evidence_schema.clone(),
+                    operator_identity_ref_schema: operator_schema.clone(),
+                },
+            });
+            let mut stream = fixture.stream.clone();
+            let run_id = stream[0].run_id().clone();
+            append_payload_to_stream(
+                &mut stream,
+                "forged-manual-resolution",
+                KernelEventPayload::ManualResolutionRecorded(events::ManualResolutionRecorded {
+                    run_id,
+                    spec_hash: fixture.envelope.spec_hash.clone(),
+                    outcome: events::ManualResolutionOutcome::ConfirmRemediated,
+                    operator_identity_ref_schema_id: operator_schema,
+                    operator_identity_ref_hash: content(0x9a),
+                    operator_identity_ref_artifact_id: artifact(0x9b),
+                    evidence_schema_id: evidence_schema,
+                    evidence_hash: content(0x9c),
+                    evidence_artifact_id: artifact(0x9d),
+                    note: None,
+                }),
+            );
+
+            assert_eq!(
+                ReplayBroker::from_validated_parts(fixture.authority_for_stream(&stream))
+                    .expect_err("manual resolution before manual-blocked")
+                    .kind,
+                ReplayErrorKind::CertifiedEvidenceMismatch
+            );
+        }
+
+        #[test]
         fn replay_rejects_exclusive_ledger_without_recorded_key() {
             let fixture = Fixture::with_resource_claim(exclusive_resource_claim());
 
@@ -3282,7 +3264,7 @@ pub mod v1 {
                 )
                 .expect_err("unstable exclusive key")
                 .kind,
-                ReplayErrorKind::CertifiedEvidenceMismatch
+                ReplayErrorKind::InvalidRunStream
             );
         }
 
@@ -4290,6 +4272,18 @@ pub mod v1 {
         fn projection_with_side_effects(
             side_effects: BTreeMap<events::SideEffectLedgerKey, store::SideEffectProjection>,
         ) -> ProjectionSnapshot {
+            let side_effects = side_effects
+                .into_values()
+                .map(|projection| {
+                    (
+                        store::SideEffectLedgerRef::new(
+                            projection.run_id.clone(),
+                            projection.ledger_key.clone(),
+                        ),
+                        projection,
+                    )
+                })
+                .collect();
             ProjectionSnapshot::from_parts(store::ProjectionSnapshotParts {
                 side_effects,
                 ..Default::default()

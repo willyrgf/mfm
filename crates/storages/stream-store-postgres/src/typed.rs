@@ -3,34 +3,29 @@ use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use mfm_events::v1::{self as events, side_effect};
+use mfm_events::v1 as events;
 use mfm_ids::{
-    ArtifactId, CellId, ContentDigest, IdentityError, NodeId, RunId, SchemaId, SeedId,
-    SemanticTypeId,
+    ArtifactId, ContentDigest, IdentityError, NodeId, RunId, SchemaId, SeedId, SemanticTypeId,
 };
-use mfm_spec::v1::{MediaType, ResourceNamespace};
+use mfm_spec::v1::MediaType;
 use mfm_store::v1::codec::{
-    artifact_role_str, error_info_json, failure_phase_str, manual_resolution_note_json,
-    manual_resolution_outcome_str, optional_obj, optional_str, parse_artifact_role,
-    parse_error_info, parse_failure_phase, parse_identity, parse_manual_resolution_note,
-    parse_manual_resolution_outcome, parse_resource_key_evidence,
-    parse_resource_touched_set_evidence, parse_run_completion_outcome,
-    parse_side_effect_ledger_purpose, parse_skip_reason, required_bool, required_obj, required_str,
-    required_u32, required_u64, resource_key_evidence_json, resource_touched_set_evidence_json,
-    retention_ref_json, run_completion_outcome_json, side_effect_ledger_purpose_json,
-    skip_reason_json,
+    artifact_role_str, attempt_projection_json, cell_projection_json, fact_projection_json,
+    manual_resolution_projection_json, parse_artifact_role, parse_attempt_projection,
+    parse_cell_projection, parse_fact_projection, parse_identity,
+    parse_manual_resolution_projection, parse_public_output_projection,
+    parse_resource_lane_projection, parse_run_completion_projection, parse_run_state,
+    parse_saga_engagement_projection, parse_side_effect_projection, public_output_projection_json,
+    resource_lane_projection_json, retention_manifest_projection_json,
+    run_completion_projection_json, run_state_str, saga_engagement_projection_json,
+    side_effect_projection_json,
 };
 use mfm_store::v1::{
     build_prepared_committed_batch, payload_from_json_value, prepared_commit_fingerprint,
     stage_prepared_typed_run_commit, ArtifactEvidenceRef, AsyncStoreFuture,
-    AsyncTypedRunEventStore, AttemptProjection, AttemptStatus, CellTerminalProjection, CodecError,
-    CommitKey, CommitOrdinal, CommitOutcome, FactProjection, KernelEventEnvelope, LogicalEventKey,
-    ManualResolutionProjection, PersistedKernelEventRecord, PreparedTypedCommit,
-    ProjectionSnapshot, ProjectionSnapshotParts, PublicOutputProjection, ResourceLaneKey,
-    ResourceLaneProjection, RetentionManifestProjection, RetentionProjection,
-    RunCompletionProjection, RunState, SagaEngagementProjection, SagaEngagementReason,
-    SideEffectArtifactProjection, SideEffectClaimProjection, SideEffectIntentProjection,
-    SideEffectPhase, SideEffectProjection, StoreError, StreamSeq, TypedCommitBase,
+    AsyncTypedRunEventStore, CodecError, CommitKey, CommitOrdinal, CommitOutcome,
+    KernelEventEnvelope, LogicalEventKey, PersistedKernelEventRecord, PreparedTypedCommit,
+    ProjectionSnapshot, ProjectionSnapshotParts, RetentionProjection, SideEffectLedgerRef,
+    StoreError, StoreErrorInspection, StreamSeq, TypedCommitBase,
 };
 use serde_json::Value;
 use tokio::sync::Mutex;
@@ -68,6 +63,15 @@ impl fmt::Display for PostgresTypedStoreError {
 }
 
 impl std::error::Error for PostgresTypedStoreError {}
+
+impl StoreErrorInspection for PostgresTypedStoreError {
+    fn as_store_error(&self) -> Option<&StoreError> {
+        match self {
+            Self::Store(error) => Some(error),
+            Self::Database(_) | Self::DatabaseSource { .. } | Self::Corruption(_) => None,
+        }
+    }
+}
 
 impl From<StoreError> for PostgresTypedStoreError {
     fn from(error: StoreError) -> Self {
@@ -281,13 +285,6 @@ CREATE TABLE IF NOT EXISTS typed_public_output_projection (
   public_schema_id TEXT NOT NULL,
   projection_json JSONB NOT NULL,
   PRIMARY KEY (run_id, public_schema_id)
-);
-
-CREATE TABLE IF NOT EXISTS typed_retention_projection (
-  run_id TEXT NOT NULL,
-  artifact_id TEXT NOT NULL,
-  projection_json JSONB NOT NULL,
-  PRIMARY KEY (run_id, artifact_id)
 );
 
 CREATE TABLE IF NOT EXISTS typed_retention_manifests (
@@ -909,7 +906,10 @@ async fn load_projection_snapshot_tx(
     {
         let json: Value = row.get(0);
         let projection = parse_side_effect_projection(&json)?;
-        side_effects.insert(projection.ledger_key.clone(), projection);
+        side_effects.insert(
+            SideEffectLedgerRef::new(projection.run_id.clone(), projection.ledger_key.clone()),
+            projection,
+        );
     }
 
     let mut resource_lanes = BTreeMap::new();
@@ -1058,7 +1058,6 @@ async fn write_projection_tables(
         "typed_side_effect_projection",
         "typed_resource_lane_projection",
         "typed_public_output_projection",
-        "typed_retention_projection",
         "typed_retention_manifests",
     ] {
         tx.execute(
@@ -1173,19 +1172,27 @@ async fn write_projection_tables(
         .map_err(|_| PostgresTypedStoreError::Database("failed to write fact projection"))?;
     }
 
-    for (ledger_key, projection) in snapshot.side_effects() {
-        let json = side_effect_projection_json(projection);
-        tx.execute(
-            "INSERT INTO typed_side_effect_projection (run_id, ledger_key, projection_json) \
-             VALUES ($1,$2,$3)",
-            &[&run_id.as_str(), &ledger_key.as_str(), &json],
-        )
-        .await
-        .map_err(|_| PostgresTypedStoreError::Database("failed to write side-effect projection"))?;
+    for (ledger_ref, projection) in snapshot.side_effects() {
+        if &ledger_ref.run_id == run_id {
+            let json = side_effect_projection_json(projection);
+            tx.execute(
+                "INSERT INTO typed_side_effect_projection (run_id, ledger_key, projection_json) \
+                 VALUES ($1,$2,$3)",
+                &[
+                    &ledger_ref.run_id.as_str(),
+                    &ledger_ref.ledger_key.as_str(),
+                    &json,
+                ],
+            )
+            .await
+            .map_err(|_| {
+                PostgresTypedStoreError::Database("failed to write side-effect projection")
+            })?;
+        }
     }
 
     for (lane_key, projection) in snapshot.resource_lanes() {
-        if &projection.run_id == run_id {
+        if &projection.holder.run_id == run_id {
             let json = resource_lane_projection_json(lane_key, projection);
             tx.execute(
                 "INSERT INTO typed_resource_lane_projection \
@@ -1194,8 +1201,8 @@ async fn write_projection_tables(
                 &[
                     &lane_key.namespace.as_str(),
                     &lane_key.key.as_str(),
-                    &projection.run_id.as_str(),
-                    &projection.ledger_key.as_str(),
+                    &projection.holder.run_id.as_str(),
+                    &projection.holder.ledger_key.as_str(),
                     &json,
                 ],
             )
@@ -1220,18 +1227,6 @@ async fn write_projection_tables(
     }
 
     if let Some(retention) = snapshot.retention(run_id) {
-        for retention_ref in retention.refs.values() {
-            let json = retention_ref_json(retention_ref);
-            tx.execute(
-                "INSERT INTO typed_retention_projection (run_id, artifact_id, projection_json) \
-                 VALUES ($1,$2,$3)",
-                &[&run_id.as_str(), &retention_ref.artifact_id.as_str(), &json],
-            )
-            .await
-            .map_err(|_| {
-                PostgresTypedStoreError::Database("failed to write retention projection")
-            })?;
-        }
         let manifests = if retention.manifests.is_empty() {
             retention.manifest.iter().collect::<Vec<_>>()
         } else {
@@ -1281,669 +1276,6 @@ fn canonical_payload_value(payload: &events::KernelEventPayload) -> Result<Value
     serde_json::from_slice(canonical.as_bytes()).map_err(|error| {
         PostgresTypedStoreError::Corruption(format!("canonical payload was not JSON: {error}"))
     })
-}
-
-fn run_completion_projection_json(run_id: &RunId, projection: &RunCompletionProjection) -> Value {
-    serde_json::json!({
-        "event_id": projection.event_id.as_str(),
-        "outcome": run_completion_outcome_json(&projection.outcome),
-        "run_id": run_id.as_str(),
-    })
-}
-
-fn parse_run_completion_projection(json: &Value) -> Result<(RunId, RunCompletionProjection)> {
-    Ok((
-        parse_identity(required_str(json, "run_id")?)?,
-        RunCompletionProjection {
-            event_id: parse_identity(required_str(json, "event_id")?)?,
-            outcome: parse_run_completion_outcome(required_obj(json, "outcome")?)?,
-        },
-    ))
-}
-
-fn saga_engagement_projection_json(run_id: &RunId, projection: &SagaEngagementProjection) -> Value {
-    serde_json::json!({
-        "event_id": projection.event_id.as_str(),
-        "reason": saga_engagement_reason_json(&projection.reason),
-        "run_id": run_id.as_str(),
-    })
-}
-
-fn parse_saga_engagement_projection(json: &Value) -> Result<(RunId, SagaEngagementProjection)> {
-    Ok((
-        parse_identity(required_str(json, "run_id")?)?,
-        SagaEngagementProjection {
-            event_id: parse_identity(required_str(json, "event_id")?)?,
-            reason: parse_saga_engagement_reason(required_obj(json, "reason")?)?,
-        },
-    ))
-}
-
-fn saga_engagement_reason_json(reason: &SagaEngagementReason) -> Value {
-    match reason {
-        SagaEngagementReason::NonRetryableFailure {
-            node_id,
-            attempt_id,
-        } => serde_json::json!({
-            "attempt_id": attempt_id.as_str(),
-            "kind": "non_retryable_failure",
-            "node_id": node_id.as_str(),
-        }),
-        SagaEngagementReason::ForwardAmbiguous { ledger_key } => serde_json::json!({
-            "kind": "forward_ambiguous",
-            "ledger_key": ledger_key.as_str(),
-        }),
-    }
-}
-
-fn parse_saga_engagement_reason(json: &Value) -> Result<SagaEngagementReason> {
-    match required_str(json, "kind")? {
-        "non_retryable_failure" => Ok(SagaEngagementReason::NonRetryableFailure {
-            node_id: parse_identity(required_str(json, "node_id")?)?,
-            attempt_id: parse_identity(required_str(json, "attempt_id")?)?,
-        }),
-        "forward_ambiguous" => Ok(SagaEngagementReason::ForwardAmbiguous {
-            ledger_key: events::SideEffectLedgerKey::new(required_str(json, "ledger_key")?)?,
-        }),
-        other => Err(PostgresTypedStoreError::Corruption(format!(
-            "unknown saga engagement reason {other}"
-        ))),
-    }
-}
-
-fn manual_resolution_projection_json(
-    run_id: &RunId,
-    projection: &ManualResolutionProjection,
-) -> Value {
-    serde_json::json!({
-        "event_id": projection.event_id.as_str(),
-        "evidence_artifact_id": projection.evidence_artifact_id.as_str(),
-        "evidence_hash": projection.evidence_hash.as_str(),
-        "evidence_schema_id": projection.evidence_schema_id.as_str(),
-        "note": projection.note.as_ref().map(manual_resolution_note_json),
-        "operator_identity_ref_artifact_id": projection.operator_identity_ref_artifact_id.as_str(),
-        "operator_identity_ref_hash": projection.operator_identity_ref_hash.as_str(),
-        "operator_identity_ref_schema_id": projection.operator_identity_ref_schema_id.as_str(),
-        "outcome": manual_resolution_outcome_str(projection.outcome),
-        "run_id": run_id.as_str(),
-    })
-}
-
-fn parse_manual_resolution_projection(json: &Value) -> Result<(RunId, ManualResolutionProjection)> {
-    Ok((
-        parse_identity(required_str(json, "run_id")?)?,
-        ManualResolutionProjection {
-            event_id: parse_identity(required_str(json, "event_id")?)?,
-            outcome: parse_manual_resolution_outcome(required_str(json, "outcome")?)?,
-            operator_identity_ref_schema_id: parse_identity(required_str(
-                json,
-                "operator_identity_ref_schema_id",
-            )?)?,
-            operator_identity_ref_hash: parse_identity(required_str(
-                json,
-                "operator_identity_ref_hash",
-            )?)?,
-            operator_identity_ref_artifact_id: parse_identity(required_str(
-                json,
-                "operator_identity_ref_artifact_id",
-            )?)?,
-            evidence_schema_id: parse_identity(required_str(json, "evidence_schema_id")?)?,
-            evidence_hash: parse_identity(required_str(json, "evidence_hash")?)?,
-            evidence_artifact_id: parse_identity(required_str(json, "evidence_artifact_id")?)?,
-            note: optional_obj(json, "note")?
-                .map(parse_manual_resolution_note)
-                .transpose()?,
-        },
-    ))
-}
-
-fn attempt_projection_json(projection: &AttemptProjection) -> Value {
-    let status = match &projection.status {
-        AttemptStatus::Started {
-            attempt_no,
-            state_kind,
-            state_version,
-        } => serde_json::json!({
-            "variant": "started",
-            "attempt_no": attempt_no,
-            "state_kind": state_kind.as_str(),
-            "state_version": state_version.as_str(),
-        }),
-        AttemptStatus::Completed { output_cell_id } => serde_json::json!({
-            "variant": "completed",
-            "output_cell_id": output_cell_id.as_str(),
-        }),
-        AttemptStatus::Failed { retryable, error } => serde_json::json!({
-            "variant": "failed",
-            "retryable": retryable,
-            "error": error_info_json(error),
-        }),
-    };
-    serde_json::json!({
-        "attempt_id": projection.attempt_id.as_str(),
-        "event_id": projection.event_id.as_str(),
-        "node_id": projection.node_id.as_str(),
-        "status": status,
-    })
-}
-
-fn parse_attempt_projection(json: &Value) -> Result<AttemptProjection> {
-    let status_json = required_obj(json, "status")?;
-    let status = match required_str(status_json, "variant")? {
-        "started" => AttemptStatus::Started {
-            attempt_no: required_u64(status_json, "attempt_no")?
-                .try_into()
-                .map_err(|_| PostgresTypedStoreError::Corruption("attempt_no overflow".into()))?,
-            state_kind: parse_identity(required_str(status_json, "state_kind")?)?,
-            state_version: required_str(status_json, "state_version")?.parse()?,
-        },
-        "completed" => AttemptStatus::Completed {
-            output_cell_id: parse_identity(required_str(status_json, "output_cell_id")?)?,
-        },
-        "failed" => AttemptStatus::Failed {
-            retryable: required_bool(status_json, "retryable")?,
-            error: Box::new(parse_error_info(required_obj(status_json, "error")?)?),
-        },
-        other => {
-            return Err(PostgresTypedStoreError::Corruption(format!(
-                "unknown attempt status {other}"
-            )));
-        }
-    };
-    Ok(AttemptProjection {
-        node_id: parse_identity(required_str(json, "node_id")?)?,
-        attempt_id: parse_identity(required_str(json, "attempt_id")?)?,
-        event_id: parse_identity(required_str(json, "event_id")?)?,
-        status,
-    })
-}
-
-fn cell_projection_json(cell_id: &CellId, projection: &CellTerminalProjection) -> Value {
-    match projection {
-        CellTerminalProjection::Produced {
-            event_id,
-            node_id,
-            attempt_id,
-            schema_id,
-            semantic_type_id,
-            artifact_id,
-            content_digest,
-        } => serde_json::json!({
-            "variant": "produced",
-            "cell_id": cell_id.as_str(),
-            "event_id": event_id.as_str(),
-            "node_id": node_id.as_str(),
-            "attempt_id": attempt_id.as_str(),
-            "schema_id": schema_id.as_str(),
-            "semantic_type_id": semantic_type_id.as_str(),
-            "artifact_id": artifact_id.as_str(),
-            "content_digest": content_digest.as_str(),
-        }),
-        CellTerminalProjection::Skipped {
-            event_id,
-            node_id,
-            attempt_id,
-            schema_id,
-            semantic_type_id,
-            skip_reason,
-        } => serde_json::json!({
-            "variant": "skipped",
-            "cell_id": cell_id.as_str(),
-            "event_id": event_id.as_str(),
-            "node_id": node_id.as_str(),
-            "attempt_id": attempt_id.as_str(),
-            "schema_id": schema_id.as_str(),
-            "semantic_type_id": semantic_type_id.as_str(),
-            "skip_reason": skip_reason_json(skip_reason),
-        }),
-    }
-}
-
-fn parse_cell_projection(json: &Value) -> Result<(CellId, CellTerminalProjection)> {
-    let cell_id = parse_identity(required_str(json, "cell_id")?)?;
-    let projection = match required_str(json, "variant")? {
-        "produced" => CellTerminalProjection::Produced {
-            event_id: parse_identity(required_str(json, "event_id")?)?,
-            node_id: parse_identity(required_str(json, "node_id")?)?,
-            attempt_id: parse_identity(required_str(json, "attempt_id")?)?,
-            schema_id: parse_identity(required_str(json, "schema_id")?)?,
-            semantic_type_id: parse_identity(required_str(json, "semantic_type_id")?)?,
-            artifact_id: parse_identity(required_str(json, "artifact_id")?)?,
-            content_digest: parse_identity(required_str(json, "content_digest")?)?,
-        },
-        "skipped" => CellTerminalProjection::Skipped {
-            event_id: parse_identity(required_str(json, "event_id")?)?,
-            node_id: parse_identity(required_str(json, "node_id")?)?,
-            attempt_id: parse_identity(required_str(json, "attempt_id")?)?,
-            schema_id: parse_identity(required_str(json, "schema_id")?)?,
-            semantic_type_id: parse_identity(required_str(json, "semantic_type_id")?)?,
-            skip_reason: parse_skip_reason(required_obj(json, "skip_reason")?)?,
-        },
-        other => {
-            return Err(PostgresTypedStoreError::Corruption(format!(
-                "unknown cell projection {other}"
-            )));
-        }
-    };
-    Ok((cell_id, projection))
-}
-
-fn fact_projection_json(projection: &FactProjection) -> Value {
-    serde_json::json!({
-        "adapter_kind": projection.adapter_kind.as_str(),
-        "adapter_version": projection.adapter_version.as_str(),
-        "artifact_id": projection.artifact_id.as_str(),
-        "attempt_id": projection.attempt_id.as_str(),
-        "capability_kind": projection.capability_kind.as_str(),
-        "capability_version": projection.capability_version.as_str(),
-        "event_id": projection.event_id.as_str(),
-        "fact_key": projection.fact_key.as_str(),
-        "node_id": projection.node_id.as_str(),
-        "request_hash": projection.request_hash.as_str(),
-        "request_schema_id": projection.request_schema_id.as_str(),
-        "response_hash": projection.response_hash.as_str(),
-        "response_schema_id": projection.response_schema_id.as_str(),
-    })
-}
-
-fn parse_fact_projection(json: &Value) -> Result<FactProjection> {
-    Ok(FactProjection {
-        event_id: parse_identity(required_str(json, "event_id")?)?,
-        node_id: parse_identity(required_str(json, "node_id")?)?,
-        attempt_id: parse_identity(required_str(json, "attempt_id")?)?,
-        fact_key: events::FactKey::new(required_str(json, "fact_key")?)?,
-        request_schema_id: parse_identity(required_str(json, "request_schema_id")?)?,
-        request_hash: parse_identity(required_str(json, "request_hash")?)?,
-        response_schema_id: parse_identity(required_str(json, "response_schema_id")?)?,
-        response_hash: parse_identity(required_str(json, "response_hash")?)?,
-        artifact_id: parse_identity(required_str(json, "artifact_id")?)?,
-        capability_kind: parse_identity(required_str(json, "capability_kind")?)?,
-        capability_version: required_str(json, "capability_version")?.parse()?,
-        adapter_kind: parse_identity(required_str(json, "adapter_kind")?)?,
-        adapter_version: required_str(json, "adapter_version")?.parse()?,
-    })
-}
-
-fn side_effect_projection_json(projection: &SideEffectProjection) -> Value {
-    serde_json::json!({
-        "claim": projection.claim.as_ref().map(side_effect_claim_json),
-        "confirmation": projection.confirmation.as_ref().map(side_effect_artifact_json),
-        "event_id": projection.event_id.as_str(),
-        "intent": side_effect_intent_json(&projection.intent),
-        "ledger_key": projection.ledger_key.as_str(),
-        "ledger_purpose": side_effect_ledger_purpose_json(&projection.ledger_purpose),
-        "phase": side_effect_phase_json(&projection.phase),
-        "prepared_invocation": projection.prepared_invocation.as_ref().map(side_effect_artifact_json),
-        "receipt": projection.receipt.as_ref().map(side_effect_artifact_json),
-        "resource_key": projection.resource_key.as_ref().map(resource_key_evidence_json),
-        "resource_touched_set": projection.resource_touched_set.as_ref().map(resource_touched_set_evidence_json),
-        "run_id": projection.run_id.as_str(),
-        "submission": projection.submission.as_ref().map(side_effect_artifact_json),
-    })
-}
-
-fn parse_side_effect_projection(json: &Value) -> Result<SideEffectProjection> {
-    Ok(SideEffectProjection {
-        run_id: parse_identity(required_str(json, "run_id")?)?,
-        ledger_key: events::SideEffectLedgerKey::new(required_str(json, "ledger_key")?)?,
-        ledger_purpose: parse_side_effect_ledger_purpose(required_obj(json, "ledger_purpose")?)?,
-        event_id: parse_identity(required_str(json, "event_id")?)?,
-        intent: parse_side_effect_intent(required_obj(json, "intent")?)?,
-        prepared_invocation: optional_obj(json, "prepared_invocation")?
-            .map(parse_side_effect_artifact)
-            .transpose()?,
-        resource_key: optional_obj(json, "resource_key")?
-            .map(parse_resource_key_evidence)
-            .transpose()?,
-        submission: optional_obj(json, "submission")?
-            .map(parse_side_effect_artifact)
-            .transpose()?,
-        receipt: optional_obj(json, "receipt")?
-            .map(parse_side_effect_artifact)
-            .transpose()?,
-        confirmation: optional_obj(json, "confirmation")?
-            .map(parse_side_effect_artifact)
-            .transpose()?,
-        resource_touched_set: optional_obj(json, "resource_touched_set")?
-            .map(parse_resource_touched_set_evidence)
-            .transpose()?,
-        claim: optional_obj(json, "claim")?
-            .map(parse_side_effect_claim)
-            .transpose()?,
-        phase: parse_side_effect_phase(required_obj(json, "phase")?)?,
-    })
-}
-
-fn side_effect_artifact_json(artifact: &SideEffectArtifactProjection) -> Value {
-    serde_json::json!({
-        "artifact_id": artifact.artifact_id.as_str(),
-        "content_digest": artifact.content_digest.as_str(),
-        "schema_id": artifact.schema_id.as_ref().map(SchemaId::as_str),
-    })
-}
-
-fn parse_side_effect_artifact(json: &Value) -> Result<SideEffectArtifactProjection> {
-    Ok(SideEffectArtifactProjection {
-        artifact_id: parse_identity(required_str(json, "artifact_id")?)?,
-        content_digest: parse_identity(required_str(json, "content_digest")?)?,
-        schema_id: optional_str(json, "schema_id")?
-            .map(parse_identity)
-            .transpose()?,
-    })
-}
-
-fn resource_lane_projection_json(
-    lane_key: &ResourceLaneKey,
-    projection: &ResourceLaneProjection,
-) -> Value {
-    serde_json::json!({
-        "attempt_id": projection.attempt_id.as_str(),
-        "event_id": projection.event_id.as_str(),
-        "invocation_epoch": projection.invocation_epoch,
-        "key": lane_key.key.as_str(),
-        "ledger_key": projection.ledger_key.as_str(),
-        "ledger_purpose": side_effect_ledger_purpose_json(&projection.ledger_purpose),
-        "namespace": lane_key.namespace.as_str(),
-        "node_id": projection.node_id.as_str(),
-        "run_id": projection.run_id.as_str(),
-    })
-}
-
-fn parse_resource_lane_projection(
-    json: &Value,
-) -> Result<(ResourceLaneKey, ResourceLaneProjection)> {
-    let lane_key = ResourceLaneKey {
-        namespace: ResourceNamespace::new(required_str(json, "namespace")?)?,
-        key: events::ResourceKey::new(required_str(json, "key")?)?,
-    };
-    let projection = ResourceLaneProjection {
-        event_id: parse_identity(required_str(json, "event_id")?)?,
-        run_id: parse_identity(required_str(json, "run_id")?)?,
-        ledger_key: events::SideEffectLedgerKey::new(required_str(json, "ledger_key")?)?,
-        ledger_purpose: parse_side_effect_ledger_purpose(required_obj(json, "ledger_purpose")?)?,
-        node_id: parse_identity(required_str(json, "node_id")?)?,
-        attempt_id: parse_identity(required_str(json, "attempt_id")?)?,
-        invocation_epoch: required_u32(json, "invocation_epoch")?,
-    };
-    Ok((lane_key, projection))
-}
-
-fn side_effect_intent_json(intent: &SideEffectIntentProjection) -> Value {
-    serde_json::json!({
-        "adapter_kind": intent.adapter_kind.as_str(),
-        "adapter_version": intent.adapter_version.as_str(),
-        "attempt_id": intent.attempt_id.as_str(),
-        "capability_kind": intent.capability_kind.as_str(),
-        "capability_version": intent.capability_version.as_str(),
-        "idempotency_input_hash": intent.idempotency_input_hash.as_str(),
-        "idempotency_input_schema_id": intent.idempotency_input_schema_id.as_str(),
-        "idempotency_key": intent.idempotency_key.as_str(),
-        "intent_artifact_id": intent.intent_artifact_id.as_str(),
-        "intent_hash": intent.intent_hash.as_str(),
-        "intent_schema_id": intent.intent_schema_id.as_str(),
-        "invocation_epoch": intent.invocation_epoch,
-        "node_id": intent.node_id.as_str(),
-        "scope_id": intent.scope_id.as_str(),
-    })
-}
-
-fn parse_side_effect_intent(json: &Value) -> Result<SideEffectIntentProjection> {
-    Ok(SideEffectIntentProjection {
-        node_id: parse_identity(required_str(json, "node_id")?)?,
-        attempt_id: parse_identity(required_str(json, "attempt_id")?)?,
-        scope_id: parse_identity(required_str(json, "scope_id")?)?,
-        invocation_epoch: required_u32(json, "invocation_epoch")?,
-        intent_schema_id: parse_identity(required_str(json, "intent_schema_id")?)?,
-        intent_hash: parse_identity(required_str(json, "intent_hash")?)?,
-        intent_artifact_id: parse_identity(required_str(json, "intent_artifact_id")?)?,
-        idempotency_input_schema_id: parse_identity(required_str(
-            json,
-            "idempotency_input_schema_id",
-        )?)?,
-        idempotency_input_hash: parse_identity(required_str(json, "idempotency_input_hash")?)?,
-        idempotency_key: events::IdempotencyKeyRef::new(required_str(json, "idempotency_key")?)?,
-        capability_kind: parse_identity(required_str(json, "capability_kind")?)?,
-        capability_version: required_str(json, "capability_version")?.parse()?,
-        adapter_kind: parse_identity(required_str(json, "adapter_kind")?)?,
-        adapter_version: required_str(json, "adapter_version")?.parse()?,
-    })
-}
-
-fn side_effect_claim_json(claim: &SideEffectClaimProjection) -> Value {
-    serde_json::json!({
-        "attempt_id": claim.attempt_id.as_str(),
-        "claim_fencing_token": claim.claim_fencing_token.as_str(),
-        "claim_generation": claim.claim_generation,
-        "claim_owner": claim.claim_owner.as_str(),
-        "invocation_epoch": claim.invocation_epoch,
-        "node_id": claim.node_id.as_str(),
-    })
-}
-
-fn parse_side_effect_claim(json: &Value) -> Result<SideEffectClaimProjection> {
-    Ok(SideEffectClaimProjection {
-        node_id: parse_identity(required_str(json, "node_id")?)?,
-        attempt_id: parse_identity(required_str(json, "attempt_id")?)?,
-        claim_owner: events::RunnerInvocationId::new(required_str(json, "claim_owner")?)?,
-        invocation_epoch: required_u32(json, "invocation_epoch")?,
-        claim_generation: required_u32(json, "claim_generation")?,
-        claim_fencing_token: side_effect::ClaimFencingToken::new(required_str(
-            json,
-            "claim_fencing_token",
-        )?)?,
-    })
-}
-
-fn side_effect_phase_json(phase: &SideEffectPhase) -> Value {
-    match phase {
-        SideEffectPhase::IntentPersisted { invocation_epoch } => {
-            phase_json("intent_persisted", *invocation_epoch, serde_json::json!({}))
-        }
-        SideEffectPhase::Claimed {
-            claim_owner,
-            invocation_epoch,
-            claim_generation,
-            claim_fencing_token,
-        } => phase_json(
-            "claimed",
-            *invocation_epoch,
-            serde_json::json!({
-                "claim_owner": claim_owner.as_str(),
-                "claim_generation": claim_generation,
-                "claim_fencing_token": claim_fencing_token.as_str(),
-            }),
-        ),
-        SideEffectPhase::InvocationPrepared {
-            invocation_epoch,
-            claim_generation,
-            claim_fencing_token,
-        } => phase_json(
-            "invocation_prepared",
-            *invocation_epoch,
-            serde_json::json!({
-                "claim_generation": claim_generation,
-                "claim_fencing_token": claim_fencing_token.as_str(),
-            }),
-        ),
-        SideEffectPhase::InvocationStarted {
-            claim_owner,
-            invocation_epoch,
-            claim_generation,
-            claim_fencing_token,
-        } => phase_json(
-            "invocation_started",
-            *invocation_epoch,
-            serde_json::json!({
-                "claim_owner": claim_owner.as_str(),
-                "claim_generation": claim_generation,
-                "claim_fencing_token": claim_fencing_token.as_str(),
-            }),
-        ),
-        SideEffectPhase::SubmissionObserved { invocation_epoch } => phase_json(
-            "submission_observed",
-            *invocation_epoch,
-            serde_json::json!({}),
-        ),
-        SideEffectPhase::NotSubmittedProven { invocation_epoch } => phase_json(
-            "not_submitted_proven",
-            *invocation_epoch,
-            serde_json::json!({}),
-        ),
-        SideEffectPhase::SubmissionUnknown { invocation_epoch } => phase_json(
-            "submission_unknown",
-            *invocation_epoch,
-            serde_json::json!({}),
-        ),
-        SideEffectPhase::ReceiptObserved { invocation_epoch } => {
-            phase_json("receipt_observed", *invocation_epoch, serde_json::json!({}))
-        }
-        SideEffectPhase::ConfirmationObserved { invocation_epoch } => phase_json(
-            "confirmation_observed",
-            *invocation_epoch,
-            serde_json::json!({}),
-        ),
-        SideEffectPhase::Ambiguous { invocation_epoch } => {
-            phase_json("ambiguous", *invocation_epoch, serde_json::json!({}))
-        }
-        SideEffectPhase::Failed {
-            invocation_epoch,
-            failure_phase,
-        } => phase_json(
-            "failed",
-            *invocation_epoch,
-            serde_json::json!({
-                "failure_phase": failure_phase_str(*failure_phase),
-            }),
-        ),
-    }
-}
-
-fn phase_json(variant: &'static str, invocation_epoch: u32, mut extra: Value) -> Value {
-    extra["variant"] = serde_json::json!(variant);
-    extra["invocation_epoch"] = serde_json::json!(invocation_epoch);
-    extra
-}
-
-fn parse_side_effect_phase(json: &Value) -> Result<SideEffectPhase> {
-    let invocation_epoch = required_u32(json, "invocation_epoch")?;
-    match required_str(json, "variant")? {
-        "intent_persisted" => Ok(SideEffectPhase::IntentPersisted { invocation_epoch }),
-        "claimed" => Ok(SideEffectPhase::Claimed {
-            claim_owner: events::RunnerInvocationId::new(required_str(json, "claim_owner")?)?,
-            invocation_epoch,
-            claim_generation: required_u32(json, "claim_generation")?,
-            claim_fencing_token: side_effect::ClaimFencingToken::new(required_str(
-                json,
-                "claim_fencing_token",
-            )?)?,
-        }),
-        "invocation_prepared" => Ok(SideEffectPhase::InvocationPrepared {
-            invocation_epoch,
-            claim_generation: required_u32(json, "claim_generation")?,
-            claim_fencing_token: side_effect::ClaimFencingToken::new(required_str(
-                json,
-                "claim_fencing_token",
-            )?)?,
-        }),
-        "invocation_started" => Ok(SideEffectPhase::InvocationStarted {
-            claim_owner: events::RunnerInvocationId::new(required_str(json, "claim_owner")?)?,
-            invocation_epoch,
-            claim_generation: required_u32(json, "claim_generation")?,
-            claim_fencing_token: side_effect::ClaimFencingToken::new(required_str(
-                json,
-                "claim_fencing_token",
-            )?)?,
-        }),
-        "submission_observed" => Ok(SideEffectPhase::SubmissionObserved { invocation_epoch }),
-        "not_submitted_proven" => Ok(SideEffectPhase::NotSubmittedProven { invocation_epoch }),
-        "submission_unknown" => Ok(SideEffectPhase::SubmissionUnknown { invocation_epoch }),
-        "receipt_observed" => Ok(SideEffectPhase::ReceiptObserved { invocation_epoch }),
-        "confirmation_observed" => Ok(SideEffectPhase::ConfirmationObserved { invocation_epoch }),
-        "ambiguous" => Ok(SideEffectPhase::Ambiguous { invocation_epoch }),
-        "failed" => Ok(SideEffectPhase::Failed {
-            invocation_epoch,
-            failure_phase: parse_failure_phase(required_str(json, "failure_phase")?)?,
-        }),
-        other => Err(PostgresTypedStoreError::Corruption(format!(
-            "unknown side-effect phase {other}"
-        ))),
-    }
-}
-
-fn public_output_projection_json(
-    schema_id: &SchemaId,
-    projection: &PublicOutputProjection,
-) -> Value {
-    match projection {
-        PublicOutputProjection::Produced {
-            event_id,
-            rendered_digest,
-            rendered_artifact_id,
-        } => serde_json::json!({
-            "variant": "produced",
-            "public_schema_id": schema_id.as_str(),
-            "event_id": event_id.as_str(),
-            "rendered_digest": rendered_digest.as_str(),
-            "rendered_artifact_id": rendered_artifact_id.as_ref().map(ArtifactId::as_str),
-        }),
-        PublicOutputProjection::RenderFailed { event_id, error } => serde_json::json!({
-            "variant": "render_failed",
-            "public_schema_id": schema_id.as_str(),
-            "event_id": event_id.as_str(),
-            "error": error_info_json(error),
-        }),
-    }
-}
-
-fn parse_public_output_projection(json: &Value) -> Result<(SchemaId, PublicOutputProjection)> {
-    let schema_id = parse_identity(required_str(json, "public_schema_id")?)?;
-    let projection = match required_str(json, "variant")? {
-        "produced" => PublicOutputProjection::Produced {
-            event_id: parse_identity(required_str(json, "event_id")?)?,
-            rendered_digest: parse_identity(required_str(json, "rendered_digest")?)?,
-            rendered_artifact_id: optional_str(json, "rendered_artifact_id")?
-                .map(parse_identity)
-                .transpose()?,
-        },
-        "render_failed" => PublicOutputProjection::RenderFailed {
-            event_id: parse_identity(required_str(json, "event_id")?)?,
-            error: Box::new(parse_error_info(required_obj(json, "error")?)?),
-        },
-        other => {
-            return Err(PostgresTypedStoreError::Corruption(format!(
-                "unknown public output projection {other}"
-            )));
-        }
-    };
-    Ok((schema_id, projection))
-}
-
-fn retention_manifest_projection_json(manifest: &RetentionManifestProjection) -> Value {
-    serde_json::json!({
-        "manifest_artifact_id": manifest.manifest_artifact_id.as_str(),
-        "manifest_digest": manifest.manifest_digest.as_str(),
-        "previous_manifest_digest": manifest.previous_manifest_digest.as_ref().map(ContentDigest::as_str),
-        "manifest_seq": manifest.manifest_seq,
-    })
-}
-
-fn run_state_str(state: RunState) -> &'static str {
-    match state {
-        RunState::Absent => "absent",
-        RunState::Started => "started",
-        RunState::Completed => "completed",
-    }
-}
-
-fn parse_run_state(value: &str) -> Result<RunState> {
-    match value {
-        "absent" => Ok(RunState::Absent),
-        "started" => Ok(RunState::Started),
-        "completed" => Ok(RunState::Completed),
-        other => Err(PostgresTypedStoreError::Corruption(format!(
-            "unknown run state {other}"
-        ))),
-    }
 }
 
 fn is_unique_logical_key(key: &LogicalEventKey) -> bool {
@@ -1999,7 +1331,10 @@ mod tests {
         CellId, ContentDigest, DigestAlgorithm, DigestBytes, LoweringVersion, NodeId, RunId,
         SchemaId, ScopeId, SemanticTypeId, SpecHash, SpecVersion, StateKind, StateVersion,
     };
-    use mfm_spec::v1::{CanonicalizerIdentity, MediaType, ResourceNamespace, ValueLineageRef};
+    use mfm_spec::v1::{
+        CanonicalizerIdentity, ManualResolutionEvidenceSpec, MediaType, ResourceNamespace,
+        SagaPolicySpec, ValueLineageRef,
+    };
     use mfm_store::v1::{
         ArtifactEvidenceRef, CellTerminalProjection, CommitKey, CommitOutcome, CommitPreconditions,
         RequiredRunState, ResourceLaneKey, SideEffectPhase, StoreError, StreamSeq,
@@ -2292,6 +1627,22 @@ mod tests {
         ]
     }
 
+    fn manual_saga_policy(byte: u8) -> SagaPolicySpec {
+        SagaPolicySpec::ManualResolution {
+            manual: ManualResolutionEvidenceSpec {
+                evidence_schema: schema_id("mfm.test.manual_evidence", byte + 1),
+                operator_identity_ref_schema: schema_id("mfm.test.operator_identity", byte),
+            },
+        }
+    }
+
+    fn saga_preconditions(policy: SagaPolicySpec) -> CommitPreconditions {
+        CommitPreconditions {
+            saga_policy: Some(policy),
+            ..CommitPreconditions::default()
+        }
+    }
+
     fn side_effect_ledger_key() -> events::SideEffectLedgerKey {
         events::SideEffectLedgerKey::new("ledger-key-1").expect("ledger key")
     }
@@ -2460,6 +1811,21 @@ mod tests {
             submission_schema_id: submission_schema(),
             submission_hash: digest,
             submission_artifact_id: artifact_id,
+        })
+    }
+
+    fn side_effect_ambiguous(artifact_id: ArtifactId, digest: ContentDigest) -> KernelEventPayload {
+        KernelEventPayload::SideEffectAmbiguous(events::side_effect::Ambiguous {
+            spec_hash: spec_hash(1),
+            node_id: node_id(70),
+            attempt_id: attempt_id(72),
+            ledger_key: side_effect_ledger_key(),
+            ledger_purpose: side_effect_ledger_purpose(),
+            invocation_epoch: 1,
+            ambiguity_code: events::AmbiguityCode::new("ambiguous").expect("ambiguity code"),
+            evidence_schema_id: schema_id("mfm.test.ambiguity", 84),
+            evidence_hash: digest,
+            evidence_artifact_id: artifact_id,
         })
     }
 
@@ -2728,7 +2094,6 @@ mod tests {
                      DELETE FROM typed_side_effect_projection;\
                      DELETE FROM typed_resource_lane_projection;\
                      DELETE FROM typed_public_output_projection;\
-                     DELETE FROM typed_retention_projection;\
                      DELETE FROM typed_retention_manifests;",
                 )
                 .await
@@ -2801,8 +2166,8 @@ mod tests {
         let lane = before
             .resource_lane(&lane_key)
             .expect("persisted resource lane");
-        assert_eq!(lane.run_id, run);
-        assert_eq!(lane.ledger_key, side_effect_ledger_key());
+        assert_eq!(lane.holder.run_id, run);
+        assert_eq!(lane.holder.ledger_key, side_effect_ledger_key());
 
         let stream = store.load_run_stream(&run).await.expect("typed run stream");
         assert_eq!(
@@ -2824,7 +2189,6 @@ mod tests {
                      DELETE FROM typed_side_effect_projection;\
                      DELETE FROM typed_resource_lane_projection;\
                      DELETE FROM typed_public_output_projection;\
-                     DELETE FROM typed_retention_projection;\
                      DELETE FROM typed_retention_manifests;",
                 )
                 .await
@@ -2865,58 +2229,85 @@ mod tests {
             request(
                 run.clone(),
                 2,
-                "saga-attempt-start",
-                vec![fact_attempt_started()],
+                "saga-side-effect-attempt-start",
+                vec![side_effect_attempt_started()],
             ),
             Vec::new(),
         )
         .await
-        .expect("attempt start");
+        .expect("side-effect attempt start");
+        let intent_artifact = artifact_id(40);
+        let intent_digest = content_digest(41);
         append_prepared(
             &store,
             request(
                 run.clone(),
                 3,
-                "saga-attempt-failed",
-                vec![fact_attempt_failed(false)],
+                "saga-side-effect-prepare",
+                vec![
+                    side_effect_intent(intent_artifact.clone(), intent_digest.clone()),
+                    side_effect_claim(),
+                    side_effect_prepared(),
+                ],
             ),
-            Vec::new(),
+            vec![store_artifact_ref(
+                intent_artifact,
+                intent_digest,
+                ArtifactRole::SideEffectIntent,
+            )],
         )
         .await
-        .expect("attempt failed");
+        .expect("side-effect prepare");
+        let ambiguity_artifact = artifact_id(44);
+        let ambiguity_digest = content_digest(45);
         append_prepared(
             &store,
             request(
                 run.clone(),
                 4,
-                "saga-manual-resolution",
-                vec![manual_resolution_recorded(run.clone(), 42)],
+                "saga-side-effect-ambiguous",
+                vec![
+                    side_effect_started(),
+                    side_effect_ambiguous(ambiguity_artifact.clone(), ambiguity_digest.clone()),
+                ],
             ),
-            manual_resolution_artifacts(42),
+            vec![store_artifact_ref(
+                ambiguity_artifact,
+                ambiguity_digest,
+                ArtifactRole::AmbiguityEvidence,
+            )],
         )
         .await
-        .expect("manual resolution");
-        append_prepared(
-            &store,
-            request(
+        .expect("side-effect ambiguous");
+        let mut manual_request = request(
+            run.clone(),
+            5,
+            "saga-manual-resolution",
+            vec![manual_resolution_recorded(run.clone(), 42)],
+        );
+        manual_request.preconditions = saga_preconditions(manual_saga_policy(42));
+        append_prepared(&store, manual_request, manual_resolution_artifacts(42))
+            .await
+            .expect("manual resolution");
+        let mut completion_request = request(
+            run.clone(),
+            6,
+            "saga-run-completed",
+            vec![run_completed(
                 run.clone(),
-                5,
-                "saga-run-completed",
-                vec![run_completed(
-                    run.clone(),
-                    events::RunCompletionOutcome::ManuallyResolved,
-                )],
-            ),
-            Vec::new(),
-        )
-        .await
-        .expect("run completed");
+                events::RunCompletionOutcome::ManuallyResolved,
+            )],
+        );
+        completion_request.preconditions = saga_preconditions(manual_saga_policy(42));
+        append_prepared(&store, completion_request, Vec::new())
+            .await
+            .expect("run completed");
 
         let before = store.projection_snapshot(&run).await.expect("projection");
         let engagement = before.saga_engagement(&run).expect("saga engagement");
         assert!(matches!(
             engagement.reason,
-            SagaEngagementReason::NonRetryableFailure { .. }
+            SagaEngagementReason::ForwardAmbiguous { .. }
         ));
         let manual = before
             .manual_resolution(&run)
@@ -2959,7 +2350,6 @@ mod tests {
                      DELETE FROM typed_side_effect_projection;\
                      DELETE FROM typed_resource_lane_projection;\
                      DELETE FROM typed_public_output_projection;\
-                     DELETE FROM typed_retention_projection;\
                      DELETE FROM typed_retention_manifests;",
                 )
                 .await
