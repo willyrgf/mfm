@@ -38,7 +38,7 @@ pub mod v1 {
 
     use self::codec::{
         optional_obj, optional_str, parse_identity, required_bool, required_obj, required_str,
-        required_u32, required_u64,
+        required_u32, required_u64, CodecResult,
     };
 
     /// Result type for typed store helpers.
@@ -269,6 +269,12 @@ pub mod v1 {
         }
     }
 
+    impl From<mfm_events::EventError> for CodecError {
+        fn from(error: mfm_events::EventError) -> Self {
+            Self::Field(error.to_string())
+        }
+    }
+
     impl From<mfm_events::EventError> for StoreError {
         fn from(error: mfm_events::EventError) -> Self {
             Self::Event(error.to_string())
@@ -301,6 +307,21 @@ pub mod v1 {
     /// store maps into its own error type via `From`.
     pub mod codec {
         use super::{CodecError, IdentityError};
+
+        /// Domain parse/encode functions for kernel events, projections, and saga types.
+        ///
+        /// Defined at the `v1` root (where the surrounding store internals live) and re-exported
+        /// here so the Postgres adapter consumes one implementation through this module.
+        pub use super::{
+            artifact_role_str, error_category_str, error_info_json, event_artifact_json,
+            failure_phase_str, manual_resolution_note_json, manual_resolution_outcome_str,
+            parse_artifact_role, parse_error_category, parse_error_info, parse_event_artifact,
+            parse_failure_phase, parse_manual_resolution_note, parse_manual_resolution_outcome,
+            parse_resource_key_evidence, parse_resource_touched_set_evidence,
+            parse_run_completion_outcome, parse_side_effect_ledger_purpose, parse_skip_reason,
+            resource_key_evidence_json, resource_touched_set_evidence_json, retention_ref_json,
+            run_completion_outcome_json, side_effect_ledger_purpose_json, skip_reason_json,
+        };
 
         /// Codec result over the backend-neutral [`CodecError`].
         pub type CodecResult<T> = std::result::Result<T, CodecError>;
@@ -6500,7 +6521,10 @@ pub mod v1 {
         })
     }
 
-    fn parse_event_artifact(json: &serde_json::Value) -> Result<events::ArtifactEvidenceRef> {
+    /// Parses an artifact evidence reference from canonical JSON.
+    pub fn parse_event_artifact(
+        json: &serde_json::Value,
+    ) -> CodecResult<events::ArtifactEvidenceRef> {
         Ok(events::ArtifactEvidenceRef {
             artifact_id: parse_identity(required_str(json, "artifact_id")?)?,
             role: parse_artifact_role(required_str(json, "role")?)?,
@@ -6511,20 +6535,22 @@ pub mod v1 {
             content_digest: parse_identity(required_str(json, "content_digest")?)?,
             byte_len: required_u64(json, "byte_len")?,
             media_type: MediaType::new(required_str(json, "media_type")?)
-                .map_err(|error| StoreError::Identity(error.to_string()))?,
+                .map_err(|error| CodecError::Identity(error.to_string()))?,
         })
     }
 
-    fn parse_skip_reason(json: &serde_json::Value) -> Result<events::SkipReason> {
+    /// Parses a cell skip reason from canonical JSON.
+    pub fn parse_skip_reason(json: &serde_json::Value) -> CodecResult<events::SkipReason> {
         Ok(events::SkipReason {
             code: events::ErrorCode::new(required_str(json, "code")?)?,
             safe_message: required_str(json, "safe_message")?.to_owned(),
         })
     }
 
-    fn parse_side_effect_ledger_purpose(
+    /// Parses a side-effect ledger purpose from canonical JSON.
+    pub fn parse_side_effect_ledger_purpose(
         json: &serde_json::Value,
-    ) -> Result<events::SideEffectLedgerPurpose> {
+    ) -> CodecResult<events::SideEffectLedgerPurpose> {
         match required_str(json, "kind")? {
             "forward" => Ok(events::SideEffectLedgerPurpose::Forward),
             "remediation" => Ok(events::SideEffectLedgerPurpose::Remediation {
@@ -6533,54 +6559,61 @@ pub mod v1 {
                     "forward_ledger_key",
                 )?)?,
             }),
-            other => Err(StoreError::Identity(format!(
+            other => Err(CodecError::Identity(format!(
                 "unknown side-effect ledger purpose {other}"
             ))),
         }
     }
 
-    fn parse_resource_key_evidence(
+    /// Parses exclusive resource-key evidence from canonical JSON.
+    pub fn parse_resource_key_evidence(
         json: &serde_json::Value,
-    ) -> Result<events::ResourceKeyEvidence> {
+    ) -> CodecResult<events::ResourceKeyEvidence> {
         Ok(events::ResourceKeyEvidence {
             namespace: ResourceNamespace::new(required_str(json, "namespace")?)
-                .map_err(|error| StoreError::Identity(error.to_string()))?,
+                .map_err(|error| CodecError::Identity(error.to_string()))?,
             key_schema_id: parse_identity(required_str(json, "key_schema_id")?)?,
             key: events::ResourceKey::new(required_str(json, "key")?)?,
         })
     }
 
-    fn parse_resource_touched_set_evidence(
+    /// Parses touched-set resource evidence from canonical JSON.
+    pub fn parse_resource_touched_set_evidence(
         json: &serde_json::Value,
-    ) -> Result<events::ResourceTouchedSetEvidence> {
+    ) -> CodecResult<events::ResourceTouchedSetEvidence> {
         Ok(events::ResourceTouchedSetEvidence {
             namespace: ResourceNamespace::new(required_str(json, "namespace")?)
-                .map_err(|error| StoreError::Identity(error.to_string()))?,
+                .map_err(|error| CodecError::Identity(error.to_string()))?,
             evidence_schema_id: parse_identity(required_str(json, "evidence_schema_id")?)?,
             evidence_hash: parse_identity(required_str(json, "evidence_hash")?)?,
             evidence_artifact_id: parse_identity(required_str(json, "evidence_artifact_id")?)?,
         })
     }
 
-    fn parse_manual_resolution_outcome(value: &str) -> Result<events::ManualResolutionOutcome> {
+    /// Parses a manual resolution outcome tag.
+    pub fn parse_manual_resolution_outcome(
+        value: &str,
+    ) -> CodecResult<events::ManualResolutionOutcome> {
         match value {
             "confirm_remediated" => Ok(events::ManualResolutionOutcome::ConfirmRemediated),
             "fail_without_acdc_claim" => Ok(events::ManualResolutionOutcome::FailWithoutAcdcClaim),
-            other => Err(StoreError::Identity(format!(
+            other => Err(CodecError::Identity(format!(
                 "unknown manual resolution outcome {other}"
             ))),
         }
     }
 
-    fn parse_manual_resolution_note(
+    /// Parses a manual resolution note from canonical JSON.
+    pub fn parse_manual_resolution_note(
         json: &serde_json::Value,
-    ) -> Result<events::ManualResolutionNote> {
+    ) -> CodecResult<events::ManualResolutionNote> {
         Ok(events::ManualResolutionNote::new(required_str(
             json, "text",
         )?)?)
     }
 
-    fn parse_error_info(json: &serde_json::Value) -> Result<events::MfmErrorInfo> {
+    /// Parses structured error info from canonical JSON.
+    pub fn parse_error_info(json: &serde_json::Value) -> CodecResult<events::MfmErrorInfo> {
         Ok(events::MfmErrorInfo {
             code: events::ErrorCode::new(required_str(json, "code")?)?,
             category: parse_error_category(required_str(json, "category")?)?,
@@ -6588,7 +6621,7 @@ pub mod v1 {
             safe_message: required_str(json, "safe_message")?.to_owned(),
             public_details: optional_obj(json, "public_details")?
                 .map(|details| {
-                    Ok::<events::RedactedJson, StoreError>(events::RedactedJson {
+                    Ok::<events::RedactedJson, CodecError>(events::RedactedJson {
                         content_digest: parse_identity(required_str(details, "content_digest")?)?,
                     })
                 })
@@ -6599,9 +6632,10 @@ pub mod v1 {
         })
     }
 
-    fn parse_run_completion_outcome(
+    /// Parses a run completion outcome from canonical JSON.
+    pub fn parse_run_completion_outcome(
         json: &serde_json::Value,
-    ) -> Result<events::RunCompletionOutcome> {
+    ) -> CodecResult<events::RunCompletionOutcome> {
         match required_str(json, "kind")? {
             "completed" => {
                 let evidence = required_obj(json, "public_output")?;
@@ -6621,7 +6655,7 @@ pub mod v1 {
             "compensated" => Ok(events::RunCompletionOutcome::Compensated),
             "manually_resolved" => Ok(events::RunCompletionOutcome::ManuallyResolved),
             "failed_without_acdc_claim" => Ok(events::RunCompletionOutcome::FailedWithoutAcdcClaim),
-            other => Err(StoreError::Identity(format!(
+            other => Err(CodecError::Identity(format!(
                 "unknown run completion outcome {other}"
             ))),
         }
@@ -6635,7 +6669,8 @@ pub mod v1 {
         })
     }
 
-    fn parse_artifact_role(value: &str) -> Result<ArtifactRole> {
+    /// Parses an artifact role tag.
+    pub fn parse_artifact_role(value: &str) -> CodecResult<ArtifactRole> {
         match value {
             "typed_execution_spec" => Ok(ArtifactRole::TypedExecutionSpec),
             "typed_spec_certificate" => Ok(ArtifactRole::TypedSpecCertificate),
@@ -6654,7 +6689,7 @@ pub mod v1 {
             "public_output" => Ok(ArtifactRole::PublicOutput),
             "redacted_diagnostic" => Ok(ArtifactRole::RedactedDiagnostic),
             "retention_manifest" => Ok(ArtifactRole::RetentionManifest),
-            other => Err(StoreError::Identity(format!(
+            other => Err(CodecError::Identity(format!(
                 "unknown artifact role {other}"
             ))),
         }
@@ -6672,7 +6707,8 @@ pub mod v1 {
         }
     }
 
-    fn parse_error_category(value: &str) -> Result<events::ErrorCategory> {
+    /// Parses an error category tag.
+    pub fn parse_error_category(value: &str) -> CodecResult<events::ErrorCategory> {
         match value {
             "planning" => Ok(events::ErrorCategory::Planning),
             "validation" => Ok(events::ErrorCategory::Validation),
@@ -6681,17 +6717,18 @@ pub mod v1 {
             "runtime" => Ok(events::ErrorCategory::Runtime),
             "storage" => Ok(events::ErrorCategory::Storage),
             "cancelled" => Ok(events::ErrorCategory::Cancelled),
-            other => Err(StoreError::Identity(format!(
+            other => Err(CodecError::Identity(format!(
                 "unknown error category {other}"
             ))),
         }
     }
 
-    fn parse_failure_phase(value: &str) -> Result<side_effect::FailurePhase> {
+    /// Parses a side-effect failure phase tag.
+    pub fn parse_failure_phase(value: &str) -> CodecResult<side_effect::FailurePhase> {
         match value {
             "before_invocation_started" => Ok(side_effect::FailurePhase::BeforeInvocationStarted),
             "after_not_submitted_proven" => Ok(side_effect::FailurePhase::AfterNotSubmittedProven),
-            other => Err(StoreError::Identity(format!(
+            other => Err(CodecError::Identity(format!(
                 "unknown failure phase {other}"
             ))),
         }
@@ -6786,7 +6823,8 @@ pub mod v1 {
         })
     }
 
-    fn event_artifact_json(evidence: &events::ArtifactEvidenceRef) -> serde_json::Value {
+    /// Encodes an artifact evidence reference as canonical JSON.
+    pub fn event_artifact_json(evidence: &events::ArtifactEvidenceRef) -> serde_json::Value {
         serde_json::json!({
             "artifact_id": evidence.artifact_id.as_str(),
             "byte_len": evidence.byte_len,
@@ -6919,14 +6957,16 @@ pub mod v1 {
         })
     }
 
-    fn skip_reason_json(reason: &events::SkipReason) -> serde_json::Value {
+    /// Encodes a cell skip reason as canonical JSON.
+    pub fn skip_reason_json(reason: &events::SkipReason) -> serde_json::Value {
         serde_json::json!({
             "code": reason.code.as_str(),
             "safe_message": reason.safe_message.as_str(),
         })
     }
 
-    fn side_effect_ledger_purpose_json(
+    /// Encodes a side-effect ledger purpose as canonical JSON.
+    pub fn side_effect_ledger_purpose_json(
         purpose: &events::SideEffectLedgerPurpose,
     ) -> serde_json::Value {
         match purpose {
@@ -6942,7 +6982,8 @@ pub mod v1 {
         }
     }
 
-    fn resource_key_evidence_json(evidence: &events::ResourceKeyEvidence) -> serde_json::Value {
+    /// Encodes exclusive resource-key evidence as canonical JSON.
+    pub fn resource_key_evidence_json(evidence: &events::ResourceKeyEvidence) -> serde_json::Value {
         serde_json::json!({
             "key": evidence.key.as_str(),
             "key_schema_id": evidence.key_schema_id.as_str(),
@@ -6950,7 +6991,8 @@ pub mod v1 {
         })
     }
 
-    fn resource_touched_set_evidence_json(
+    /// Encodes touched-set resource evidence as canonical JSON.
+    pub fn resource_touched_set_evidence_json(
         evidence: &events::ResourceTouchedSetEvidence,
     ) -> serde_json::Value {
         serde_json::json!({
@@ -6961,17 +7003,20 @@ pub mod v1 {
         })
     }
 
-    fn manual_resolution_outcome_str(outcome: events::ManualResolutionOutcome) -> &'static str {
+    /// Returns the canonical tag for a manual resolution outcome.
+    pub fn manual_resolution_outcome_str(outcome: events::ManualResolutionOutcome) -> &'static str {
         outcome.as_str()
     }
 
-    fn manual_resolution_note_json(note: &events::ManualResolutionNote) -> serde_json::Value {
+    /// Encodes a manual resolution note as canonical JSON.
+    pub fn manual_resolution_note_json(note: &events::ManualResolutionNote) -> serde_json::Value {
         serde_json::json!({
             "text": note.as_str(),
         })
     }
 
-    fn error_info_json(error: &events::MfmErrorInfo) -> serde_json::Value {
+    /// Encodes structured error info as canonical JSON.
+    pub fn error_info_json(error: &events::MfmErrorInfo) -> serde_json::Value {
         serde_json::json!({
             "category": error_category_str(error.category),
             "code": error.code.as_str(),
@@ -6986,7 +7031,10 @@ pub mod v1 {
         })
     }
 
-    fn run_completion_outcome_json(outcome: &events::RunCompletionOutcome) -> serde_json::Value {
+    /// Encodes a run completion outcome as canonical JSON.
+    pub fn run_completion_outcome_json(
+        outcome: &events::RunCompletionOutcome,
+    ) -> serde_json::Value {
         match outcome {
             events::RunCompletionOutcome::Completed(evidence) => serde_json::json!({
                 "kind": "completed",
@@ -7007,7 +7055,8 @@ pub mod v1 {
         }
     }
 
-    fn retention_ref_json(retention_ref: &events::RetentionRef) -> serde_json::Value {
+    /// Encodes a retention reference as canonical JSON.
+    pub fn retention_ref_json(retention_ref: &events::RetentionRef) -> serde_json::Value {
         serde_json::json!({
             "artifact_id": retention_ref.artifact_id.as_str(),
             "content_digest": retention_ref.content_digest.as_str(),
@@ -7049,7 +7098,8 @@ pub mod v1 {
         }
     }
 
-    fn artifact_role_str(role: ArtifactRole) -> &'static str {
+    /// Returns the canonical tag for an artifact role.
+    pub fn artifact_role_str(role: ArtifactRole) -> &'static str {
         match role {
             ArtifactRole::TypedExecutionSpec => "typed_execution_spec",
             ArtifactRole::TypedSpecCertificate => "typed_spec_certificate",
@@ -7071,7 +7121,8 @@ pub mod v1 {
         }
     }
 
-    fn error_category_str(category: events::ErrorCategory) -> &'static str {
+    /// Returns the canonical tag for an error category.
+    pub fn error_category_str(category: events::ErrorCategory) -> &'static str {
         match category {
             events::ErrorCategory::Planning => "planning",
             events::ErrorCategory::Validation => "validation",
@@ -7083,7 +7134,8 @@ pub mod v1 {
         }
     }
 
-    fn failure_phase_str(phase: side_effect::FailurePhase) -> &'static str {
+    /// Returns the canonical tag for a side-effect failure phase.
+    pub fn failure_phase_str(phase: side_effect::FailurePhase) -> &'static str {
         match phase {
             side_effect::FailurePhase::BeforeInvocationStarted => "before_invocation_started",
             side_effect::FailurePhase::AfterNotSubmittedProven => "after_not_submitted_proven",

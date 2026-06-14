@@ -3,15 +3,22 @@ use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use mfm_events::v1::{self as events, side_effect, ArtifactRole};
+use mfm_events::v1::{self as events, side_effect};
 use mfm_ids::{
     ArtifactId, CellId, ContentDigest, IdentityError, NodeId, RunId, SchemaId, SeedId,
     SemanticTypeId,
 };
 use mfm_spec::v1::{MediaType, ResourceNamespace};
 use mfm_store::v1::codec::{
-    optional_obj, optional_str, parse_identity, required_bool, required_obj, required_str,
-    required_u32, required_u64,
+    artifact_role_str, error_info_json, failure_phase_str, manual_resolution_note_json,
+    manual_resolution_outcome_str, optional_obj, optional_str, parse_artifact_role,
+    parse_error_info, parse_failure_phase, parse_identity, parse_manual_resolution_note,
+    parse_manual_resolution_outcome, parse_resource_key_evidence,
+    parse_resource_touched_set_evidence, parse_run_completion_outcome,
+    parse_side_effect_ledger_purpose, parse_skip_reason, required_bool, required_obj, required_str,
+    required_u32, required_u64, resource_key_evidence_json, resource_touched_set_evidence_json,
+    retention_ref_json, run_completion_outcome_json, side_effect_ledger_purpose_json,
+    skip_reason_json,
 };
 use mfm_store::v1::{
     build_prepared_committed_batch, payload_from_json_value, prepared_commit_fingerprint,
@@ -1625,69 +1632,6 @@ fn parse_side_effect_artifact(json: &Value) -> Result<SideEffectArtifactProjecti
     })
 }
 
-fn side_effect_ledger_purpose_json(purpose: &events::SideEffectLedgerPurpose) -> Value {
-    match purpose {
-        events::SideEffectLedgerPurpose::Forward => serde_json::json!({
-            "kind": "forward",
-        }),
-        events::SideEffectLedgerPurpose::Remediation { forward_ledger_key } => {
-            serde_json::json!({
-                "forward_ledger_key": forward_ledger_key.as_str(),
-                "kind": "remediation",
-            })
-        }
-    }
-}
-
-fn parse_side_effect_ledger_purpose(json: &Value) -> Result<events::SideEffectLedgerPurpose> {
-    match required_str(json, "kind")? {
-        "forward" => Ok(events::SideEffectLedgerPurpose::Forward),
-        "remediation" => Ok(events::SideEffectLedgerPurpose::Remediation {
-            forward_ledger_key: events::SideEffectLedgerKey::new(required_str(
-                json,
-                "forward_ledger_key",
-            )?)?,
-        }),
-        other => Err(PostgresTypedStoreError::Store(StoreError::Identity(
-            format!("unknown side-effect ledger purpose {other}"),
-        ))),
-    }
-}
-
-fn resource_key_evidence_json(evidence: &events::ResourceKeyEvidence) -> Value {
-    serde_json::json!({
-        "key": evidence.key.as_str(),
-        "key_schema_id": evidence.key_schema_id.as_str(),
-        "namespace": evidence.namespace.as_str(),
-    })
-}
-
-fn parse_resource_key_evidence(json: &Value) -> Result<events::ResourceKeyEvidence> {
-    Ok(events::ResourceKeyEvidence {
-        namespace: ResourceNamespace::new(required_str(json, "namespace")?)?,
-        key_schema_id: parse_identity(required_str(json, "key_schema_id")?)?,
-        key: events::ResourceKey::new(required_str(json, "key")?)?,
-    })
-}
-
-fn resource_touched_set_evidence_json(evidence: &events::ResourceTouchedSetEvidence) -> Value {
-    serde_json::json!({
-        "evidence_artifact_id": evidence.evidence_artifact_id.as_str(),
-        "evidence_hash": evidence.evidence_hash.as_str(),
-        "evidence_schema_id": evidence.evidence_schema_id.as_str(),
-        "namespace": evidence.namespace.as_str(),
-    })
-}
-
-fn parse_resource_touched_set_evidence(json: &Value) -> Result<events::ResourceTouchedSetEvidence> {
-    Ok(events::ResourceTouchedSetEvidence {
-        namespace: ResourceNamespace::new(required_str(json, "namespace")?)?,
-        evidence_schema_id: parse_identity(required_str(json, "evidence_schema_id")?)?,
-        evidence_hash: parse_identity(required_str(json, "evidence_hash")?)?,
-        evidence_artifact_id: parse_identity(required_str(json, "evidence_artifact_id")?)?,
-    })
-}
-
 fn resource_lane_projection_json(
     lane_key: &ResourceLaneKey,
     projection: &ResourceLaneProjection,
@@ -1974,14 +1918,6 @@ fn parse_public_output_projection(json: &Value) -> Result<(SchemaId, PublicOutpu
     Ok((schema_id, projection))
 }
 
-fn retention_ref_json(retention_ref: &events::RetentionRef) -> Value {
-    serde_json::json!({
-        "artifact_id": retention_ref.artifact_id.as_str(),
-        "content_digest": retention_ref.content_digest.as_str(),
-        "role": artifact_role_str(retention_ref.role),
-    })
-}
-
 fn retention_manifest_projection_json(manifest: &RetentionManifestProjection) -> Value {
     serde_json::json!({
         "manifest_artifact_id": manifest.manifest_artifact_id.as_str(),
@@ -1989,151 +1925,6 @@ fn retention_manifest_projection_json(manifest: &RetentionManifestProjection) ->
         "previous_manifest_digest": manifest.previous_manifest_digest.as_ref().map(ContentDigest::as_str),
         "manifest_seq": manifest.manifest_seq,
     })
-}
-
-fn error_info_json(error: &events::MfmErrorInfo) -> Value {
-    serde_json::json!({
-        "category": error_category_str(error.category),
-        "code": error.code.as_str(),
-        "diagnostic_ref": error.diagnostic_ref.as_ref().map(event_artifact_json),
-        "public_details": error.public_details.as_ref().map(|details| {
-            serde_json::json!({ "content_digest": details.content_digest.as_str() })
-        }),
-        "retryable": error.retryable,
-        "safe_message": error.safe_message,
-    })
-}
-
-fn parse_error_info(json: &Value) -> Result<events::MfmErrorInfo> {
-    Ok(events::MfmErrorInfo {
-        code: events::ErrorCode::new(required_str(json, "code")?)?,
-        category: parse_error_category(required_str(json, "category")?)?,
-        retryable: required_bool(json, "retryable")?,
-        safe_message: required_str(json, "safe_message")?.to_owned(),
-        public_details: optional_obj(json, "public_details")?
-            .map(|details| {
-                Ok::<events::RedactedJson, PostgresTypedStoreError>(events::RedactedJson {
-                    content_digest: parse_identity(required_str(details, "content_digest")?)?,
-                })
-            })
-            .transpose()?,
-        diagnostic_ref: optional_obj(json, "diagnostic_ref")?
-            .map(parse_event_artifact)
-            .transpose()?,
-    })
-}
-
-fn skip_reason_json(reason: &events::SkipReason) -> Value {
-    serde_json::json!({
-        "code": reason.code.as_str(),
-        "safe_message": reason.safe_message,
-    })
-}
-
-fn parse_skip_reason(json: &Value) -> Result<events::SkipReason> {
-    Ok(events::SkipReason {
-        code: events::ErrorCode::new(required_str(json, "code")?)?,
-        safe_message: required_str(json, "safe_message")?.to_owned(),
-    })
-}
-
-fn event_artifact_json(evidence: &events::ArtifactEvidenceRef) -> Value {
-    serde_json::json!({
-        "artifact_id": evidence.artifact_id.as_str(),
-        "byte_len": evidence.byte_len,
-        "content_digest": evidence.content_digest.as_str(),
-        "media_type": evidence.media_type.as_str(),
-        "role": artifact_role_str(evidence.role),
-        "schema_id": evidence.schema_id.as_str(),
-        "semantic_type_id": evidence.semantic_type_id.as_ref().map(SemanticTypeId::as_str),
-    })
-}
-
-fn parse_event_artifact(json: &Value) -> Result<events::ArtifactEvidenceRef> {
-    Ok(events::ArtifactEvidenceRef {
-        artifact_id: parse_identity(required_str(json, "artifact_id")?)?,
-        role: parse_artifact_role(required_str(json, "role")?)?,
-        schema_id: parse_identity(required_str(json, "schema_id")?)?,
-        semantic_type_id: optional_str(json, "semantic_type_id")?
-            .map(parse_identity)
-            .transpose()?,
-        content_digest: parse_identity(required_str(json, "content_digest")?)?,
-        byte_len: required_u64(json, "byte_len")?,
-        media_type: MediaType::new(required_str(json, "media_type")?)?,
-    })
-}
-
-fn manual_resolution_outcome_str(outcome: events::ManualResolutionOutcome) -> &'static str {
-    outcome.as_str()
-}
-
-fn parse_manual_resolution_outcome(value: &str) -> Result<events::ManualResolutionOutcome> {
-    match value {
-        "confirm_remediated" => Ok(events::ManualResolutionOutcome::ConfirmRemediated),
-        "fail_without_acdc_claim" => Ok(events::ManualResolutionOutcome::FailWithoutAcdcClaim),
-        other => Err(PostgresTypedStoreError::Corruption(format!(
-            "unknown manual resolution outcome {other}"
-        ))),
-    }
-}
-
-fn manual_resolution_note_json(note: &events::ManualResolutionNote) -> Value {
-    serde_json::json!({
-        "text": note.as_str(),
-    })
-}
-
-fn parse_manual_resolution_note(json: &Value) -> Result<events::ManualResolutionNote> {
-    Ok(events::ManualResolutionNote::new(required_str(
-        json, "text",
-    )?)?)
-}
-
-fn run_completion_outcome_json(outcome: &events::RunCompletionOutcome) -> Value {
-    match outcome {
-        events::RunCompletionOutcome::Completed(evidence) => serde_json::json!({
-            "kind": "completed",
-            "public_output": {
-                "public_output_event_id": evidence.public_output_event_id.as_str(),
-                "public_output_schema_id": evidence.public_output_schema_id.as_str(),
-            },
-        }),
-        events::RunCompletionOutcome::Compensated => serde_json::json!({
-            "kind": "compensated",
-        }),
-        events::RunCompletionOutcome::ManuallyResolved => serde_json::json!({
-            "kind": "manually_resolved",
-        }),
-        events::RunCompletionOutcome::FailedWithoutAcdcClaim => serde_json::json!({
-            "kind": "failed_without_acdc_claim",
-        }),
-    }
-}
-
-fn parse_run_completion_outcome(json: &Value) -> Result<events::RunCompletionOutcome> {
-    match required_str(json, "kind")? {
-        "completed" => {
-            let evidence = required_obj(json, "public_output")?;
-            Ok(events::RunCompletionOutcome::Completed(Box::new(
-                events::PublicOutputCompletionEvidence {
-                    public_output_schema_id: parse_identity(required_str(
-                        evidence,
-                        "public_output_schema_id",
-                    )?)?,
-                    public_output_event_id: parse_identity(required_str(
-                        evidence,
-                        "public_output_event_id",
-                    )?)?,
-                },
-            )))
-        }
-        "compensated" => Ok(events::RunCompletionOutcome::Compensated),
-        "manually_resolved" => Ok(events::RunCompletionOutcome::ManuallyResolved),
-        "failed_without_acdc_claim" => Ok(events::RunCompletionOutcome::FailedWithoutAcdcClaim),
-        other => Err(PostgresTypedStoreError::Corruption(format!(
-            "unknown run completion outcome {other}"
-        ))),
-    }
 }
 
 fn run_state_str(state: RunState) -> &'static str {
@@ -2151,97 +1942,6 @@ fn parse_run_state(value: &str) -> Result<RunState> {
         "completed" => Ok(RunState::Completed),
         other => Err(PostgresTypedStoreError::Corruption(format!(
             "unknown run state {other}"
-        ))),
-    }
-}
-
-fn artifact_role_str(role: ArtifactRole) -> &'static str {
-    match role {
-        ArtifactRole::TypedExecutionSpec => "typed_execution_spec",
-        ArtifactRole::TypedSpecCertificate => "typed_spec_certificate",
-        ArtifactRole::TypedConfig => "typed_config",
-        ArtifactRole::SeedInput => "seed_input",
-        ArtifactRole::StateOutput => "state_output",
-        ArtifactRole::FactResponse => "fact_response",
-        ArtifactRole::SideEffectIntent => "side_effect_intent",
-        ArtifactRole::PreparedInvocation => "prepared_invocation",
-        ArtifactRole::NotSubmittedProof => "not_submitted_proof",
-        ArtifactRole::Submission => "submission",
-        ArtifactRole::SubmissionUnknownEvidence => "submission_unknown_evidence",
-        ArtifactRole::Receipt => "receipt",
-        ArtifactRole::Confirmation => "confirmation",
-        ArtifactRole::AmbiguityEvidence => "ambiguity_evidence",
-        ArtifactRole::PublicOutput => "public_output",
-        ArtifactRole::RedactedDiagnostic => "redacted_diagnostic",
-        ArtifactRole::RetentionManifest => "retention_manifest",
-    }
-}
-
-fn parse_artifact_role(value: &str) -> Result<ArtifactRole> {
-    match value {
-        "typed_execution_spec" => Ok(ArtifactRole::TypedExecutionSpec),
-        "typed_spec_certificate" => Ok(ArtifactRole::TypedSpecCertificate),
-        "typed_config" => Ok(ArtifactRole::TypedConfig),
-        "seed_input" => Ok(ArtifactRole::SeedInput),
-        "state_output" => Ok(ArtifactRole::StateOutput),
-        "fact_response" => Ok(ArtifactRole::FactResponse),
-        "side_effect_intent" => Ok(ArtifactRole::SideEffectIntent),
-        "prepared_invocation" => Ok(ArtifactRole::PreparedInvocation),
-        "not_submitted_proof" => Ok(ArtifactRole::NotSubmittedProof),
-        "submission" => Ok(ArtifactRole::Submission),
-        "submission_unknown_evidence" => Ok(ArtifactRole::SubmissionUnknownEvidence),
-        "receipt" => Ok(ArtifactRole::Receipt),
-        "confirmation" => Ok(ArtifactRole::Confirmation),
-        "ambiguity_evidence" => Ok(ArtifactRole::AmbiguityEvidence),
-        "public_output" => Ok(ArtifactRole::PublicOutput),
-        "redacted_diagnostic" => Ok(ArtifactRole::RedactedDiagnostic),
-        "retention_manifest" => Ok(ArtifactRole::RetentionManifest),
-        other => Err(PostgresTypedStoreError::Corruption(format!(
-            "unknown artifact role {other}"
-        ))),
-    }
-}
-
-fn failure_phase_str(phase: side_effect::FailurePhase) -> &'static str {
-    match phase {
-        side_effect::FailurePhase::BeforeInvocationStarted => "before_invocation_started",
-        side_effect::FailurePhase::AfterNotSubmittedProven => "after_not_submitted_proven",
-    }
-}
-
-fn parse_failure_phase(value: &str) -> Result<side_effect::FailurePhase> {
-    match value {
-        "before_invocation_started" => Ok(side_effect::FailurePhase::BeforeInvocationStarted),
-        "after_not_submitted_proven" => Ok(side_effect::FailurePhase::AfterNotSubmittedProven),
-        other => Err(PostgresTypedStoreError::Corruption(format!(
-            "unknown failure phase {other}"
-        ))),
-    }
-}
-
-fn error_category_str(category: events::ErrorCategory) -> &'static str {
-    match category {
-        events::ErrorCategory::Planning => "planning",
-        events::ErrorCategory::Validation => "validation",
-        events::ErrorCategory::Capability => "capability",
-        events::ErrorCategory::SideEffect => "side_effect",
-        events::ErrorCategory::Runtime => "runtime",
-        events::ErrorCategory::Storage => "storage",
-        events::ErrorCategory::Cancelled => "cancelled",
-    }
-}
-
-fn parse_error_category(value: &str) -> Result<events::ErrorCategory> {
-    match value {
-        "planning" => Ok(events::ErrorCategory::Planning),
-        "validation" => Ok(events::ErrorCategory::Validation),
-        "capability" => Ok(events::ErrorCategory::Capability),
-        "side_effect" => Ok(events::ErrorCategory::SideEffect),
-        "runtime" => Ok(events::ErrorCategory::Runtime),
-        "storage" => Ok(events::ErrorCategory::Storage),
-        "cancelled" => Ok(events::ErrorCategory::Cancelled),
-        other => Err(PostgresTypedStoreError::Corruption(format!(
-            "unknown error category {other}"
         ))),
     }
 }
