@@ -15,9 +15,8 @@ use mfm_store::v1::codec::{
     parse_manual_resolution_projection, parse_public_output_projection,
     parse_resource_lane_projection, parse_run_completion_projection, parse_run_state,
     parse_saga_engagement_projection, parse_side_effect_projection, public_output_projection_json,
-    resource_lane_projection_json, retention_manifest_projection_json,
-    run_completion_projection_json, run_state_str, saga_engagement_projection_json,
-    side_effect_projection_json,
+    resource_lane_projection_json, run_completion_projection_json, run_state_str,
+    saga_engagement_projection_json, side_effect_projection_json,
 };
 use mfm_store::v1::{
     build_prepared_committed_batch, payload_from_json_value, prepared_commit_fingerprint,
@@ -287,13 +286,6 @@ CREATE TABLE IF NOT EXISTS typed_public_output_projection (
   PRIMARY KEY (run_id, public_schema_id)
 );
 
-CREATE TABLE IF NOT EXISTS typed_retention_manifests (
-  run_id TEXT NOT NULL,
-  manifest_seq BIGINT NOT NULL,
-  projection_json JSONB NOT NULL,
-  PRIMARY KEY (run_id, manifest_seq),
-  CONSTRAINT typed_retention_manifests_seq_positive CHECK (manifest_seq >= 1)
-);
 COMMIT;
 "#;
 
@@ -1058,7 +1050,6 @@ async fn write_projection_tables(
         "typed_side_effect_projection",
         "typed_resource_lane_projection",
         "typed_public_output_projection",
-        "typed_retention_manifests",
     ] {
         tx.execute(
             &format!("DELETE FROM {table} WHERE run_id = $1"),
@@ -1224,31 +1215,6 @@ async fn write_projection_tables(
         .map_err(|_| {
             PostgresTypedStoreError::Database("failed to write public-output projection")
         })?;
-    }
-
-    if let Some(retention) = snapshot.retention(run_id) {
-        let manifests = if retention.manifests.is_empty() {
-            retention.manifest.iter().collect::<Vec<_>>()
-        } else {
-            retention.manifests.values().collect::<Vec<_>>()
-        };
-        for manifest in manifests {
-            let json = retention_manifest_projection_json(manifest);
-            tx.execute(
-                "INSERT INTO typed_retention_manifests (run_id, manifest_seq, projection_json) \
-                 VALUES ($1,$2,$3)",
-                &[
-                    &run_id.as_str(),
-                    &u64_to_i64(
-                        manifest.manifest_seq,
-                        "typed_retention_manifests.manifest_seq",
-                    )?,
-                    &json,
-                ],
-            )
-            .await
-            .map_err(|_| PostgresTypedStoreError::Database("failed to write retention manifest"))?;
-        }
     }
 
     Ok(())
@@ -2093,8 +2059,7 @@ mod tests {
                      DELETE FROM typed_fact_projection;\
                      DELETE FROM typed_side_effect_projection;\
                      DELETE FROM typed_resource_lane_projection;\
-                     DELETE FROM typed_public_output_projection;\
-                     DELETE FROM typed_retention_manifests;",
+                     DELETE FROM typed_public_output_projection;",
                 )
                 .await
                 .expect("clear projections");
@@ -2188,8 +2153,7 @@ mod tests {
                      DELETE FROM typed_fact_projection;\
                      DELETE FROM typed_side_effect_projection;\
                      DELETE FROM typed_resource_lane_projection;\
-                     DELETE FROM typed_public_output_projection;\
-                     DELETE FROM typed_retention_manifests;",
+                     DELETE FROM typed_public_output_projection;",
                 )
                 .await
                 .expect("clear projections");
@@ -2349,8 +2313,7 @@ mod tests {
                      DELETE FROM typed_fact_projection;\
                      DELETE FROM typed_side_effect_projection;\
                      DELETE FROM typed_resource_lane_projection;\
-                     DELETE FROM typed_public_output_projection;\
-                     DELETE FROM typed_retention_manifests;",
+                     DELETE FROM typed_public_output_projection;",
                 )
                 .await
                 .expect("clear projections");

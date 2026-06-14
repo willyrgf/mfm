@@ -2056,274 +2056,285 @@ pub mod v1 {
         }
     }
 
-    fn derive_saga_projection(
-        projections: &ProjectionSnapshot,
-        run_id: &RunId,
-        policy: &SagaPolicySpec,
-    ) -> SagaProjection {
-        let obligations = derive_saga_obligations(projections, run_id);
-        let run_completion = projections.run_completion(run_id).cloned();
-        let manual_resolution = projections.manual_resolution(run_id).cloned();
-        let engagement = projections.saga_engagement(run_id).cloned();
-        let forward_quiescent = forward_ledgers_quiescent(projections, run_id);
-        let has_forward_boundary = obligations
-            .values()
-            .any(|obligation| forward_ledger_crossed_boundary(&obligation.forward_phase));
-        let owed_count = obligations
-            .values()
-            .filter(|obligation| obligation.classification == ForwardLedgerClassification::Owed)
-            .count();
-        let all_owed_closed = owed_count > 0
-            && obligations.values().all(|obligation| {
-                obligation.classification != ForwardLedgerClassification::Owed
-                    || obligation
-                        .remediation
-                        .as_ref()
-                        .map(|remediation| remediation.closed)
-                        .unwrap_or(false)
-            });
-        let unresolved_reason = obligations.values().find_map(obligation_unresolved_reason);
+    use self::saga::{derive_saga_projection, forward_ledgers_quiescent};
 
-        let (run_mode, manual_block_reason) = if let Some(completion) = run_completion.as_ref() {
-            (RunMode::from_completion_outcome(&completion.outcome), None)
-        } else if engagement.is_none() || !forward_quiescent {
-            (RunMode::Forward, None)
-        } else if !has_forward_boundary || (owed_count == 0 && unresolved_reason.is_none()) {
-            (RunMode::FailedWithoutAcdcClaim, None)
-        } else {
-            run_mode_for_uncompleted_quiescent_saga(
-                policy,
-                manual_resolution.as_ref(),
-                owed_count,
-                all_owed_closed,
-                unresolved_reason,
-            )
-        };
+    mod saga {
+        use super::*;
 
-        SagaProjection {
-            run_id: run_id.clone(),
-            run_mode,
-            engagement,
-            forward_quiescent,
-            manual_block_reason,
-            obligations,
-            manual_resolution,
-            run_completion,
-        }
-    }
+        pub(super) fn derive_saga_projection(
+            projections: &ProjectionSnapshot,
+            run_id: &RunId,
+            policy: &SagaPolicySpec,
+        ) -> SagaProjection {
+            let obligations = derive_saga_obligations(projections, run_id);
+            let run_completion = projections.run_completion(run_id).cloned();
+            let manual_resolution = projections.manual_resolution(run_id).cloned();
+            let engagement = projections.saga_engagement(run_id).cloned();
+            let forward_quiescent = forward_ledgers_quiescent(projections, run_id);
+            let has_forward_boundary = obligations
+                .values()
+                .any(|obligation| forward_ledger_crossed_boundary(&obligation.forward_phase));
+            let owed_count = obligations
+                .values()
+                .filter(|obligation| obligation.classification == ForwardLedgerClassification::Owed)
+                .count();
+            let all_owed_closed = owed_count > 0
+                && obligations.values().all(|obligation| {
+                    obligation.classification != ForwardLedgerClassification::Owed
+                        || obligation
+                            .remediation
+                            .as_ref()
+                            .map(|remediation| remediation.closed)
+                            .unwrap_or(false)
+                });
+            let unresolved_reason = obligations.values().find_map(obligation_unresolved_reason);
 
-    fn derive_saga_obligations(
-        projections: &ProjectionSnapshot,
-        run_id: &RunId,
-    ) -> BTreeMap<events::SideEffectLedgerKey, SagaObligationProjection> {
-        projections
-            .side_effects
-            .values()
-            .filter(|projection| {
-                projection.run_id == *run_id
-                    && matches!(
-                        projection.ledger_purpose,
-                        events::SideEffectLedgerPurpose::Forward
-                    )
-            })
-            .map(|forward| {
-                let remediation = remediation_for_forward(projections, run_id, &forward.ledger_key);
-                (
-                    forward.ledger_key.clone(),
-                    SagaObligationProjection {
-                        forward_ledger_key: forward.ledger_key.clone(),
-                        forward_phase: forward.phase.clone(),
-                        classification: forward_ledger_classification(&forward.phase),
-                        remediation,
-                    },
-                )
-            })
-            .collect()
-    }
-
-    fn remediation_for_forward(
-        projections: &ProjectionSnapshot,
-        run_id: &RunId,
-        forward_ledger_key: &events::SideEffectLedgerKey,
-    ) -> Option<RemediationLedgerProjection> {
-        projections
-            .side_effects
-            .values()
-            .find(|projection| {
-                projection.run_id == *run_id
-                    && matches!(
-                        &projection.ledger_purpose,
-                        events::SideEffectLedgerPurpose::Remediation {
-                            forward_ledger_key: linked
-                        } if linked == forward_ledger_key
-                    )
-            })
-            .map(|projection| {
-                let unresolved = remediation_unresolved_reason(projections, projection);
-                RemediationLedgerProjection {
-                    ledger_key: projection.ledger_key.clone(),
-                    phase: projection.phase.clone(),
-                    closed: matches!(
-                        projection.phase,
-                        SideEffectPhase::ConfirmationObserved { .. }
-                    ),
-                    unresolved,
-                }
-            })
-    }
-
-    fn run_mode_for_uncompleted_quiescent_saga(
-        policy: &SagaPolicySpec,
-        manual_resolution: Option<&ManualResolutionProjection>,
-        owed_count: usize,
-        all_owed_closed: bool,
-        unresolved_reason: Option<ManualBlockReason>,
-    ) -> (RunMode, Option<ManualBlockReason>) {
-        if let Some(mode) = manual_resolution.map(manual_resolution_run_mode) {
-            return (mode, None);
-        }
-
-        match policy {
-            SagaPolicySpec::NoSideEffects | SagaPolicySpec::FailWithoutAcdcClaim => {
+            let (run_mode, manual_block_reason) = if let Some(completion) = run_completion.as_ref()
+            {
+                (RunMode::from_completion_outcome(&completion.outcome), None)
+            } else if engagement.is_none() || !forward_quiescent {
+                (RunMode::Forward, None)
+            } else if !has_forward_boundary || (owed_count == 0 && unresolved_reason.is_none()) {
                 (RunMode::FailedWithoutAcdcClaim, None)
+            } else {
+                run_mode_for_uncompleted_quiescent_saga(
+                    policy,
+                    manual_resolution.as_ref(),
+                    owed_count,
+                    all_owed_closed,
+                    unresolved_reason,
+                )
+            };
+
+            SagaProjection {
+                run_id: run_id.clone(),
+                run_mode,
+                engagement,
+                forward_quiescent,
+                manual_block_reason,
+                obligations,
+                manual_resolution,
+                run_completion,
             }
-            SagaPolicySpec::ManualResolution { .. } => (
-                RunMode::ManualBlocked,
-                Some(ManualBlockReason::PolicyManualResolution),
-            ),
-            SagaPolicySpec::CompensateCompleted {
-                on_remediation_unresolved,
-            } => {
-                if let Some(reason) = unresolved_reason {
-                    match on_remediation_unresolved {
-                        RemediationUnresolvedSpec::ManualResolution { .. } => {
-                            (RunMode::ManualBlocked, Some(reason))
-                        }
-                        RemediationUnresolvedSpec::FailWithoutAcdcClaim => {
-                            (RunMode::FailedWithoutAcdcClaim, None)
-                        }
+        }
+
+        fn derive_saga_obligations(
+            projections: &ProjectionSnapshot,
+            run_id: &RunId,
+        ) -> BTreeMap<events::SideEffectLedgerKey, SagaObligationProjection> {
+            projections
+                .side_effects
+                .values()
+                .filter(|projection| {
+                    projection.run_id == *run_id
+                        && matches!(
+                            projection.ledger_purpose,
+                            events::SideEffectLedgerPurpose::Forward
+                        )
+                })
+                .map(|forward| {
+                    let remediation =
+                        remediation_for_forward(projections, run_id, &forward.ledger_key);
+                    (
+                        forward.ledger_key.clone(),
+                        SagaObligationProjection {
+                            forward_ledger_key: forward.ledger_key.clone(),
+                            forward_phase: forward.phase.clone(),
+                            classification: forward_ledger_classification(&forward.phase),
+                            remediation,
+                        },
+                    )
+                })
+                .collect()
+        }
+
+        fn remediation_for_forward(
+            projections: &ProjectionSnapshot,
+            run_id: &RunId,
+            forward_ledger_key: &events::SideEffectLedgerKey,
+        ) -> Option<RemediationLedgerProjection> {
+            projections
+                .side_effects
+                .values()
+                .find(|projection| {
+                    projection.run_id == *run_id
+                        && matches!(
+                            &projection.ledger_purpose,
+                            events::SideEffectLedgerPurpose::Remediation {
+                                forward_ledger_key: linked
+                            } if linked == forward_ledger_key
+                        )
+                })
+                .map(|projection| {
+                    let unresolved = remediation_unresolved_reason(projections, projection);
+                    RemediationLedgerProjection {
+                        ledger_key: projection.ledger_key.clone(),
+                        phase: projection.phase.clone(),
+                        closed: matches!(
+                            projection.phase,
+                            SideEffectPhase::ConfirmationObserved { .. }
+                        ),
+                        unresolved,
                     }
-                } else if owed_count > 0 && all_owed_closed {
-                    (RunMode::Compensated, None)
-                } else if owed_count > 0 {
-                    (RunMode::Remediating, None)
-                } else {
+                })
+        }
+
+        fn run_mode_for_uncompleted_quiescent_saga(
+            policy: &SagaPolicySpec,
+            manual_resolution: Option<&ManualResolutionProjection>,
+            owed_count: usize,
+            all_owed_closed: bool,
+            unresolved_reason: Option<ManualBlockReason>,
+        ) -> (RunMode, Option<ManualBlockReason>) {
+            if let Some(mode) = manual_resolution.map(manual_resolution_run_mode) {
+                return (mode, None);
+            }
+
+            match policy {
+                SagaPolicySpec::NoSideEffects | SagaPolicySpec::FailWithoutAcdcClaim => {
                     (RunMode::FailedWithoutAcdcClaim, None)
                 }
-            }
-        }
-    }
-
-    fn manual_resolution_run_mode(manual: &ManualResolutionProjection) -> RunMode {
-        match manual.outcome {
-            events::ManualResolutionOutcome::ConfirmRemediated => RunMode::ManuallyResolved,
-            events::ManualResolutionOutcome::FailWithoutAcdcClaim => {
-                RunMode::FailedWithoutAcdcClaim
-            }
-        }
-    }
-
-    fn obligation_unresolved_reason(
-        obligation: &SagaObligationProjection,
-    ) -> Option<ManualBlockReason> {
-        if obligation.classification == ForwardLedgerClassification::Unresolvable {
-            Some(ManualBlockReason::ForwardAmbiguous)
-        } else {
-            obligation
-                .remediation
-                .as_ref()
-                .and_then(|remediation| remediation.unresolved)
-        }
-    }
-
-    fn remediation_unresolved_reason(
-        projections: &ProjectionSnapshot,
-        projection: &SideEffectProjection,
-    ) -> Option<ManualBlockReason> {
-        match projection.phase {
-            SideEffectPhase::Ambiguous { .. } => Some(ManualBlockReason::RemediationAmbiguous),
-            SideEffectPhase::Failed { .. } => {
-                if side_effect_failure_retryable(projections, projection) == Some(false) {
-                    Some(ManualBlockReason::RemediationFailed)
-                } else {
-                    None
+                SagaPolicySpec::ManualResolution { .. } => (
+                    RunMode::ManualBlocked,
+                    Some(ManualBlockReason::PolicyManualResolution),
+                ),
+                SagaPolicySpec::CompensateCompleted {
+                    on_remediation_unresolved,
+                } => {
+                    if let Some(reason) = unresolved_reason {
+                        match on_remediation_unresolved {
+                            RemediationUnresolvedSpec::ManualResolution { .. } => {
+                                (RunMode::ManualBlocked, Some(reason))
+                            }
+                            RemediationUnresolvedSpec::FailWithoutAcdcClaim => {
+                                (RunMode::FailedWithoutAcdcClaim, None)
+                            }
+                        }
+                    } else if owed_count > 0 && all_owed_closed {
+                        (RunMode::Compensated, None)
+                    } else if owed_count > 0 {
+                        (RunMode::Remediating, None)
+                    } else {
+                        (RunMode::FailedWithoutAcdcClaim, None)
+                    }
                 }
             }
-            _ => None,
         }
-    }
 
-    fn side_effect_failure_retryable(
-        projections: &ProjectionSnapshot,
-        projection: &SideEffectProjection,
-    ) -> Option<bool> {
-        match &projections
-            .attempt(&projection.intent.node_id, &projection.intent.attempt_id)?
-            .status
-        {
-            AttemptStatus::Failed { retryable, .. } => Some(*retryable),
-            _ => None,
+        fn manual_resolution_run_mode(manual: &ManualResolutionProjection) -> RunMode {
+            match manual.outcome {
+                events::ManualResolutionOutcome::ConfirmRemediated => RunMode::ManuallyResolved,
+                events::ManualResolutionOutcome::FailWithoutAcdcClaim => {
+                    RunMode::FailedWithoutAcdcClaim
+                }
+            }
         }
-    }
 
-    fn forward_ledger_classification(phase: &SideEffectPhase) -> ForwardLedgerClassification {
-        match phase {
-            SideEffectPhase::IntentPersisted { .. }
-            | SideEffectPhase::Claimed { .. }
-            | SideEffectPhase::InvocationPrepared { .. }
-            | SideEffectPhase::NotSubmittedProven { .. }
-            | SideEffectPhase::Failed { .. } => ForwardLedgerClassification::NothingOwed,
-            SideEffectPhase::InvocationStarted { .. }
-            | SideEffectPhase::SubmissionObserved { .. }
-            | SideEffectPhase::SubmissionUnknown { .. }
-            | SideEffectPhase::ReceiptObserved { .. } => ForwardLedgerClassification::Pending,
-            SideEffectPhase::ConfirmationObserved { .. } => ForwardLedgerClassification::Owed,
-            SideEffectPhase::Ambiguous { .. } => ForwardLedgerClassification::Unresolvable,
+        fn obligation_unresolved_reason(
+            obligation: &SagaObligationProjection,
+        ) -> Option<ManualBlockReason> {
+            if obligation.classification == ForwardLedgerClassification::Unresolvable {
+                Some(ManualBlockReason::ForwardAmbiguous)
+            } else {
+                obligation
+                    .remediation
+                    .as_ref()
+                    .and_then(|remediation| remediation.unresolved)
+            }
         }
-    }
 
-    fn forward_ledgers_quiescent(projections: &ProjectionSnapshot, run_id: &RunId) -> bool {
-        projections
-            .side_effects
-            .values()
-            .filter(|projection| {
-                projection.run_id == *run_id
-                    && matches!(
-                        projection.ledger_purpose,
-                        events::SideEffectLedgerPurpose::Forward
-                    )
-            })
-            .all(|projection| {
-                !forward_ledger_crossed_boundary(&projection.phase)
-                    || forward_ledger_phase_is_quiescent(&projection.phase)
-            })
-    }
+        fn remediation_unresolved_reason(
+            projections: &ProjectionSnapshot,
+            projection: &SideEffectProjection,
+        ) -> Option<ManualBlockReason> {
+            match projection.phase {
+                SideEffectPhase::Ambiguous { .. } => Some(ManualBlockReason::RemediationAmbiguous),
+                SideEffectPhase::Failed { .. } => {
+                    if side_effect_failure_retryable(projections, projection) == Some(false) {
+                        Some(ManualBlockReason::RemediationFailed)
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            }
+        }
 
-    fn forward_ledger_crossed_boundary(phase: &SideEffectPhase) -> bool {
-        matches!(
-            phase,
-            SideEffectPhase::InvocationStarted { .. }
+        fn side_effect_failure_retryable(
+            projections: &ProjectionSnapshot,
+            projection: &SideEffectProjection,
+        ) -> Option<bool> {
+            match &projections
+                .attempt(&projection.intent.node_id, &projection.intent.attempt_id)?
+                .status
+            {
+                AttemptStatus::Failed { retryable, .. } => Some(*retryable),
+                _ => None,
+            }
+        }
+
+        fn forward_ledger_classification(phase: &SideEffectPhase) -> ForwardLedgerClassification {
+            match phase {
+                SideEffectPhase::IntentPersisted { .. }
+                | SideEffectPhase::Claimed { .. }
+                | SideEffectPhase::InvocationPrepared { .. }
+                | SideEffectPhase::NotSubmittedProven { .. }
+                | SideEffectPhase::Failed { .. } => ForwardLedgerClassification::NothingOwed,
+                SideEffectPhase::InvocationStarted { .. }
                 | SideEffectPhase::SubmissionObserved { .. }
                 | SideEffectPhase::SubmissionUnknown { .. }
-                | SideEffectPhase::ReceiptObserved { .. }
-                | SideEffectPhase::ConfirmationObserved { .. }
-                | SideEffectPhase::Ambiguous { .. }
-                | SideEffectPhase::NotSubmittedProven { .. }
-                | SideEffectPhase::Failed {
-                    failure_phase: side_effect::FailurePhase::AfterNotSubmittedProven,
-                    ..
-                }
-        )
-    }
+                | SideEffectPhase::ReceiptObserved { .. } => ForwardLedgerClassification::Pending,
+                SideEffectPhase::ConfirmationObserved { .. } => ForwardLedgerClassification::Owed,
+                SideEffectPhase::Ambiguous { .. } => ForwardLedgerClassification::Unresolvable,
+            }
+        }
 
-    fn forward_ledger_phase_is_quiescent(phase: &SideEffectPhase) -> bool {
-        matches!(
-            phase,
-            SideEffectPhase::NotSubmittedProven { .. }
-                | SideEffectPhase::ConfirmationObserved { .. }
-                | SideEffectPhase::Ambiguous { .. }
-                | SideEffectPhase::Failed { .. }
-        )
+        pub(super) fn forward_ledgers_quiescent(
+            projections: &ProjectionSnapshot,
+            run_id: &RunId,
+        ) -> bool {
+            projections
+                .side_effects
+                .values()
+                .filter(|projection| {
+                    projection.run_id == *run_id
+                        && matches!(
+                            projection.ledger_purpose,
+                            events::SideEffectLedgerPurpose::Forward
+                        )
+                })
+                .all(|projection| {
+                    !forward_ledger_crossed_boundary(&projection.phase)
+                        || forward_ledger_phase_is_quiescent(&projection.phase)
+                })
+        }
+
+        fn forward_ledger_crossed_boundary(phase: &SideEffectPhase) -> bool {
+            matches!(
+                phase,
+                SideEffectPhase::InvocationStarted { .. }
+                    | SideEffectPhase::SubmissionObserved { .. }
+                    | SideEffectPhase::SubmissionUnknown { .. }
+                    | SideEffectPhase::ReceiptObserved { .. }
+                    | SideEffectPhase::ConfirmationObserved { .. }
+                    | SideEffectPhase::Ambiguous { .. }
+                    | SideEffectPhase::NotSubmittedProven { .. }
+                    | SideEffectPhase::Failed {
+                        failure_phase: side_effect::FailurePhase::AfterNotSubmittedProven,
+                        ..
+                    }
+            )
+        }
+
+        fn forward_ledger_phase_is_quiescent(phase: &SideEffectPhase) -> bool {
+            matches!(
+                phase,
+                SideEffectPhase::NotSubmittedProven { .. }
+                    | SideEffectPhase::ConfirmationObserved { .. }
+                    | SideEffectPhase::Ambiguous { .. }
+                    | SideEffectPhase::Failed { .. }
+            )
+        }
     }
 
     fn validate_run_stream_order(events: &[KernelEventEnvelope]) -> Result<()> {
@@ -3169,43 +3180,50 @@ pub mod v1 {
         }
     }
 
-    fn require_admission_preconditions(
-        projections: &ProjectionSnapshot,
-        payload: &KernelEventPayload,
-        saga_policy: Option<&SagaPolicySpec>,
-    ) -> Result<()> {
-        match payload {
-            KernelEventPayload::ManualResolutionRecorded(payload) => {
-                let policy = require_saga_policy_precondition(&payload.run_id, saga_policy)?;
-                projections.require_manual_resolution_admissible(&payload.run_id, policy)
-            }
-            KernelEventPayload::RunCompleted(payload)
-                if matches!(
-                    &payload.outcome,
-                    events::RunCompletionOutcome::Compensated
-                        | events::RunCompletionOutcome::ManuallyResolved
-                        | events::RunCompletionOutcome::FailedWithoutAcdcClaim
-                ) =>
-            {
-                let policy = require_saga_policy_precondition(&payload.run_id, saga_policy)?;
-                projections.require_saga_terminal_outcome_admissible(
-                    &payload.run_id,
-                    policy,
-                    &payload.outcome,
-                )
-            }
-            _ => Ok(()),
-        }
-    }
+    use self::admission::require_admission_preconditions;
 
-    fn require_saga_policy_precondition<'a>(
-        run_id: &RunId,
-        saga_policy: Option<&'a SagaPolicySpec>,
-    ) -> Result<&'a SagaPolicySpec> {
-        saga_policy.ok_or_else(|| StoreError::ProjectionConflict {
-            key: format!("run:{run_id}:saga_policy"),
-            message: "certified saga policy precondition is required for saga admission".to_owned(),
-        })
+    mod admission {
+        use super::*;
+
+        pub(super) fn require_admission_preconditions(
+            projections: &ProjectionSnapshot,
+            payload: &KernelEventPayload,
+            saga_policy: Option<&SagaPolicySpec>,
+        ) -> Result<()> {
+            match payload {
+                KernelEventPayload::ManualResolutionRecorded(payload) => {
+                    let policy = require_saga_policy_precondition(&payload.run_id, saga_policy)?;
+                    projections.require_manual_resolution_admissible(&payload.run_id, policy)
+                }
+                KernelEventPayload::RunCompleted(payload)
+                    if matches!(
+                        &payload.outcome,
+                        events::RunCompletionOutcome::Compensated
+                            | events::RunCompletionOutcome::ManuallyResolved
+                            | events::RunCompletionOutcome::FailedWithoutAcdcClaim
+                    ) =>
+                {
+                    let policy = require_saga_policy_precondition(&payload.run_id, saga_policy)?;
+                    projections.require_saga_terminal_outcome_admissible(
+                        &payload.run_id,
+                        policy,
+                        &payload.outcome,
+                    )
+                }
+                _ => Ok(()),
+            }
+        }
+
+        fn require_saga_policy_precondition<'a>(
+            run_id: &RunId,
+            saga_policy: Option<&'a SagaPolicySpec>,
+        ) -> Result<&'a SagaPolicySpec> {
+            saga_policy.ok_or_else(|| StoreError::ProjectionConflict {
+                key: format!("run:{run_id}:saga_policy"),
+                message: "certified saga policy precondition is required for saga admission"
+                    .to_owned(),
+            })
+        }
     }
 
     fn validate_payload_run_and_spec(
@@ -3785,399 +3803,410 @@ pub mod v1 {
         pub artifact_role: Option<ArtifactRole>,
     }
 
-    /// Returns artifact evidence requirements referenced by one kernel event payload.
-    pub fn event_artifact_requirements(
-        payload: &KernelEventPayload,
-    ) -> Vec<EventArtifactRequirement> {
-        let mut requirements = Vec::new();
-        match payload {
-            KernelEventPayload::RunStarted(payload) => {
-                requirements.push(EventArtifactRequirement {
-                    source: EventArtifactReferenceSource::RunSpec,
-                    artifact_id: payload.spec_artifact_id.clone(),
-                    digest: Some(ContentDigest::from_digest(
-                        payload.spec_hash.algorithm(),
-                        *payload.spec_hash.digest(),
-                    )),
-                    byte_len: None,
-                    media_type: Some(payload.spec_media_type.clone()),
-                    schema_id: None,
-                    semantic_type_id: None,
-                    producer_node_id: None,
-                    producer_seed_id: None,
-                    artifact_role: Some(ArtifactRole::TypedExecutionSpec),
-                });
-                requirements.push(EventArtifactRequirement {
-                    source: EventArtifactReferenceSource::RunCertificate,
-                    artifact_id: payload.certificate_artifact_id.clone(),
-                    digest: Some(payload.certificate_artifact_digest.clone()),
-                    byte_len: None,
-                    media_type: Some(payload.certificate_media_type.clone()),
-                    schema_id: None,
-                    semantic_type_id: None,
-                    producer_node_id: None,
-                    producer_seed_id: None,
-                    artifact_role: Some(ArtifactRole::TypedSpecCertificate),
-                });
-                for seed in &payload.seed_cells {
-                    push_event_artifact(
-                        &mut requirements,
-                        EventArtifactReferenceSource::SeedCell,
-                        &seed.seed_artifact,
-                        None,
-                        Some(seed.seed_id.clone()),
-                    );
-                }
-            }
-            KernelEventPayload::FactRecorded(payload) => {
-                requirements.push(EventArtifactRequirement {
-                    source: EventArtifactReferenceSource::FactResponse,
-                    artifact_id: payload.artifact_id.clone(),
-                    digest: Some(payload.response_hash.clone()),
-                    byte_len: None,
-                    media_type: None,
-                    schema_id: Some(payload.response_schema_id.clone()),
-                    semantic_type_id: None,
-                    producer_node_id: Some(payload.node_id.clone()),
-                    producer_seed_id: None,
-                    artifact_role: Some(ArtifactRole::FactResponse),
-                })
-            }
-            KernelEventPayload::ArtifactReferenced(payload) => {
-                push_event_artifact(
-                    &mut requirements,
-                    EventArtifactReferenceSource::ArtifactReferenced,
-                    &payload.artifact_ref,
-                    payload.node_id.clone(),
-                    None,
-                );
-            }
-            KernelEventPayload::CellProduced(payload) => {
-                requirements.push(EventArtifactRequirement {
-                    source: EventArtifactReferenceSource::StateOutput,
-                    artifact_id: payload.artifact_id.clone(),
-                    digest: Some(payload.content_digest.clone()),
-                    byte_len: None,
-                    media_type: None,
-                    schema_id: Some(payload.schema_id.clone()),
-                    semantic_type_id: Some(payload.semantic_type_id.clone()),
-                    producer_node_id: Some(payload.node_id.clone()),
-                    producer_seed_id: None,
-                    artifact_role: Some(ArtifactRole::StateOutput),
-                })
-            }
-            KernelEventPayload::PublicOutputProduced(payload) => {
-                for cell in &payload.cells {
-                    let (producer_node_id, producer_seed_id) =
-                        cell_producer_artifact_owner(&cell.producer);
+    pub use self::artifact_refs::event_artifact_requirements;
+    use self::artifact_refs::referenced_artifact_ids;
+
+    mod artifact_refs {
+        use super::*;
+
+        /// Returns artifact evidence requirements referenced by one kernel event payload.
+        pub fn event_artifact_requirements(
+            payload: &KernelEventPayload,
+        ) -> Vec<EventArtifactRequirement> {
+            let mut requirements = Vec::new();
+            match payload {
+                KernelEventPayload::RunStarted(payload) => {
                     requirements.push(EventArtifactRequirement {
-                        source: EventArtifactReferenceSource::PublicOutputCell,
-                        artifact_id: cell.artifact_id.clone(),
-                        digest: Some(cell.content_digest.clone()),
+                        source: EventArtifactReferenceSource::RunSpec,
+                        artifact_id: payload.spec_artifact_id.clone(),
+                        digest: Some(ContentDigest::from_digest(
+                            payload.spec_hash.algorithm(),
+                            *payload.spec_hash.digest(),
+                        )),
+                        byte_len: None,
+                        media_type: Some(payload.spec_media_type.clone()),
+                        schema_id: None,
+                        semantic_type_id: None,
+                        producer_node_id: None,
+                        producer_seed_id: None,
+                        artifact_role: Some(ArtifactRole::TypedExecutionSpec),
+                    });
+                    requirements.push(EventArtifactRequirement {
+                        source: EventArtifactReferenceSource::RunCertificate,
+                        artifact_id: payload.certificate_artifact_id.clone(),
+                        digest: Some(payload.certificate_artifact_digest.clone()),
+                        byte_len: None,
+                        media_type: Some(payload.certificate_media_type.clone()),
+                        schema_id: None,
+                        semantic_type_id: None,
+                        producer_node_id: None,
+                        producer_seed_id: None,
+                        artifact_role: Some(ArtifactRole::TypedSpecCertificate),
+                    });
+                    for seed in &payload.seed_cells {
+                        push_event_artifact(
+                            &mut requirements,
+                            EventArtifactReferenceSource::SeedCell,
+                            &seed.seed_artifact,
+                            None,
+                            Some(seed.seed_id.clone()),
+                        );
+                    }
+                }
+                KernelEventPayload::FactRecorded(payload) => {
+                    requirements.push(EventArtifactRequirement {
+                        source: EventArtifactReferenceSource::FactResponse,
+                        artifact_id: payload.artifact_id.clone(),
+                        digest: Some(payload.response_hash.clone()),
                         byte_len: None,
                         media_type: None,
-                        schema_id: Some(cell.schema_id.clone()),
-                        semantic_type_id: Some(cell.semantic_type_id.clone()),
-                        producer_node_id,
-                        producer_seed_id,
+                        schema_id: Some(payload.response_schema_id.clone()),
+                        semantic_type_id: None,
+                        producer_node_id: Some(payload.node_id.clone()),
+                        producer_seed_id: None,
+                        artifact_role: Some(ArtifactRole::FactResponse),
+                    })
+                }
+                KernelEventPayload::ArtifactReferenced(payload) => {
+                    push_event_artifact(
+                        &mut requirements,
+                        EventArtifactReferenceSource::ArtifactReferenced,
+                        &payload.artifact_ref,
+                        payload.node_id.clone(),
+                        None,
+                    );
+                }
+                KernelEventPayload::CellProduced(payload) => {
+                    requirements.push(EventArtifactRequirement {
+                        source: EventArtifactReferenceSource::StateOutput,
+                        artifact_id: payload.artifact_id.clone(),
+                        digest: Some(payload.content_digest.clone()),
+                        byte_len: None,
+                        media_type: None,
+                        schema_id: Some(payload.schema_id.clone()),
+                        semantic_type_id: Some(payload.semantic_type_id.clone()),
+                        producer_node_id: Some(payload.node_id.clone()),
+                        producer_seed_id: None,
+                        artifact_role: Some(ArtifactRole::StateOutput),
+                    })
+                }
+                KernelEventPayload::PublicOutputProduced(payload) => {
+                    for cell in &payload.cells {
+                        let (producer_node_id, producer_seed_id) =
+                            cell_producer_artifact_owner(&cell.producer);
+                        requirements.push(EventArtifactRequirement {
+                            source: EventArtifactReferenceSource::PublicOutputCell,
+                            artifact_id: cell.artifact_id.clone(),
+                            digest: Some(cell.content_digest.clone()),
+                            byte_len: None,
+                            media_type: None,
+                            schema_id: Some(cell.schema_id.clone()),
+                            semantic_type_id: Some(cell.semantic_type_id.clone()),
+                            producer_node_id,
+                            producer_seed_id,
+                            artifact_role: None,
+                        });
+                    }
+                    if let Some(artifact_id) = &payload.rendered_artifact_id {
+                        requirements.push(EventArtifactRequirement {
+                            source: EventArtifactReferenceSource::PublicOutputRendered,
+                            artifact_id: artifact_id.clone(),
+                            digest: Some(payload.rendered_digest.clone()),
+                            byte_len: None,
+                            media_type: None,
+                            schema_id: Some(payload.public_schema_id.clone()),
+                            semantic_type_id: None,
+                            producer_node_id: Some(payload.node_id.clone()),
+                            producer_seed_id: None,
+                            artifact_role: Some(ArtifactRole::PublicOutput),
+                        });
+                    }
+                }
+                KernelEventPayload::PublicOutputRenderFailed(payload) => {
+                    if let Some(ref evidence) = payload.error.diagnostic_ref {
+                        push_event_artifact(
+                            &mut requirements,
+                            EventArtifactReferenceSource::PublicOutputRenderFailureDiagnostic,
+                            evidence,
+                            Some(payload.node_id.clone()),
+                            None,
+                        );
+                    }
+                }
+                KernelEventPayload::StateAttemptFailed(payload) => {
+                    if let Some(ref evidence) = payload.error.diagnostic_ref {
+                        push_event_artifact(
+                            &mut requirements,
+                            EventArtifactReferenceSource::StateAttemptFailureDiagnostic,
+                            evidence,
+                            Some(payload.node_id.clone()),
+                            None,
+                        );
+                    }
+                }
+                KernelEventPayload::ManualResolutionRecorded(payload) => {
+                    requirements.push(EventArtifactRequirement {
+                        source: EventArtifactReferenceSource::ManualResolutionOperatorIdentity,
+                        artifact_id: payload.operator_identity_ref_artifact_id.clone(),
+                        digest: Some(payload.operator_identity_ref_hash.clone()),
+                        byte_len: None,
+                        media_type: None,
+                        schema_id: Some(payload.operator_identity_ref_schema_id.clone()),
+                        semantic_type_id: None,
+                        producer_node_id: None,
+                        producer_seed_id: None,
+                        artifact_role: None,
+                    });
+                    requirements.push(EventArtifactRequirement {
+                        source: EventArtifactReferenceSource::ManualResolutionEvidence,
+                        artifact_id: payload.evidence_artifact_id.clone(),
+                        digest: Some(payload.evidence_hash.clone()),
+                        byte_len: None,
+                        media_type: None,
+                        schema_id: Some(payload.evidence_schema_id.clone()),
+                        semantic_type_id: None,
+                        producer_node_id: None,
+                        producer_seed_id: None,
                         artifact_role: None,
                     });
                 }
-                if let Some(artifact_id) = &payload.rendered_artifact_id {
+                KernelEventPayload::RunCompleted(payload) => match &payload.outcome {
+                    events::RunCompletionOutcome::Completed(_) => {}
+                    events::RunCompletionOutcome::Compensated
+                    | events::RunCompletionOutcome::ManuallyResolved
+                    | events::RunCompletionOutcome::FailedWithoutAcdcClaim => {}
+                },
+                KernelEventPayload::SideEffectIntentPersisted(payload) => {
                     requirements.push(EventArtifactRequirement {
-                        source: EventArtifactReferenceSource::PublicOutputRendered,
-                        artifact_id: artifact_id.clone(),
-                        digest: Some(payload.rendered_digest.clone()),
+                        source: EventArtifactReferenceSource::SideEffectIntent,
+                        artifact_id: payload.intent_artifact_id.clone(),
+                        digest: Some(payload.intent_hash.clone()),
                         byte_len: None,
                         media_type: None,
-                        schema_id: Some(payload.public_schema_id.clone()),
+                        schema_id: Some(payload.intent_schema_id.clone()),
                         semantic_type_id: None,
                         producer_node_id: Some(payload.node_id.clone()),
                         producer_seed_id: None,
-                        artifact_role: Some(ArtifactRole::PublicOutput),
+                        artifact_role: Some(ArtifactRole::SideEffectIntent),
                     });
                 }
-            }
-            KernelEventPayload::PublicOutputRenderFailed(payload) => {
-                if let Some(ref evidence) = payload.error.diagnostic_ref {
-                    push_event_artifact(
-                        &mut requirements,
-                        EventArtifactReferenceSource::PublicOutputRenderFailureDiagnostic,
-                        evidence,
-                        Some(payload.node_id.clone()),
-                        None,
-                    );
+                KernelEventPayload::SideEffectInvocationPrepared(payload) => {
+                    if let (Some(artifact_id), Some(hash)) =
+                        (&payload.prepared_artifact_id, &payload.prepared_hash)
+                    {
+                        requirements.push(EventArtifactRequirement {
+                            source: EventArtifactReferenceSource::PreparedInvocation,
+                            artifact_id: artifact_id.clone(),
+                            digest: Some(hash.clone()),
+                            byte_len: None,
+                            media_type: None,
+                            schema_id: None,
+                            semantic_type_id: None,
+                            producer_node_id: Some(payload.node_id.clone()),
+                            producer_seed_id: None,
+                            artifact_role: Some(ArtifactRole::PreparedInvocation),
+                        });
+                    }
                 }
-            }
-            KernelEventPayload::StateAttemptFailed(payload) => {
-                if let Some(ref evidence) = payload.error.diagnostic_ref {
-                    push_event_artifact(
-                        &mut requirements,
-                        EventArtifactReferenceSource::StateAttemptFailureDiagnostic,
-                        evidence,
-                        Some(payload.node_id.clone()),
-                        None,
-                    );
-                }
-            }
-            KernelEventPayload::ManualResolutionRecorded(payload) => {
-                requirements.push(EventArtifactRequirement {
-                    source: EventArtifactReferenceSource::ManualResolutionOperatorIdentity,
-                    artifact_id: payload.operator_identity_ref_artifact_id.clone(),
-                    digest: Some(payload.operator_identity_ref_hash.clone()),
-                    byte_len: None,
-                    media_type: None,
-                    schema_id: Some(payload.operator_identity_ref_schema_id.clone()),
-                    semantic_type_id: None,
-                    producer_node_id: None,
-                    producer_seed_id: None,
-                    artifact_role: None,
-                });
-                requirements.push(EventArtifactRequirement {
-                    source: EventArtifactReferenceSource::ManualResolutionEvidence,
-                    artifact_id: payload.evidence_artifact_id.clone(),
-                    digest: Some(payload.evidence_hash.clone()),
-                    byte_len: None,
-                    media_type: None,
-                    schema_id: Some(payload.evidence_schema_id.clone()),
-                    semantic_type_id: None,
-                    producer_node_id: None,
-                    producer_seed_id: None,
-                    artifact_role: None,
-                });
-            }
-            KernelEventPayload::RunCompleted(payload) => match &payload.outcome {
-                events::RunCompletionOutcome::Completed(_) => {}
-                events::RunCompletionOutcome::Compensated
-                | events::RunCompletionOutcome::ManuallyResolved
-                | events::RunCompletionOutcome::FailedWithoutAcdcClaim => {}
-            },
-            KernelEventPayload::SideEffectIntentPersisted(payload) => {
-                requirements.push(EventArtifactRequirement {
-                    source: EventArtifactReferenceSource::SideEffectIntent,
-                    artifact_id: payload.intent_artifact_id.clone(),
-                    digest: Some(payload.intent_hash.clone()),
-                    byte_len: None,
-                    media_type: None,
-                    schema_id: Some(payload.intent_schema_id.clone()),
-                    semantic_type_id: None,
-                    producer_node_id: Some(payload.node_id.clone()),
-                    producer_seed_id: None,
-                    artifact_role: Some(ArtifactRole::SideEffectIntent),
-                });
-            }
-            KernelEventPayload::SideEffectInvocationPrepared(payload) => {
-                if let (Some(artifact_id), Some(hash)) =
-                    (&payload.prepared_artifact_id, &payload.prepared_hash)
-                {
+                KernelEventPayload::SideEffectNotSubmittedProven(payload) => {
                     requirements.push(EventArtifactRequirement {
-                        source: EventArtifactReferenceSource::PreparedInvocation,
-                        artifact_id: artifact_id.clone(),
-                        digest: Some(hash.clone()),
+                        source: EventArtifactReferenceSource::NotSubmittedProof,
+                        artifact_id: payload.proof_artifact_id.clone(),
+                        digest: Some(payload.proof_hash.clone()),
                         byte_len: None,
                         media_type: None,
-                        schema_id: None,
+                        schema_id: Some(payload.proof_schema_id.clone()),
                         semantic_type_id: None,
                         producer_node_id: Some(payload.node_id.clone()),
                         producer_seed_id: None,
-                        artifact_role: Some(ArtifactRole::PreparedInvocation),
+                        artifact_role: Some(ArtifactRole::NotSubmittedProof),
                     });
                 }
-            }
-            KernelEventPayload::SideEffectNotSubmittedProven(payload) => {
-                requirements.push(EventArtifactRequirement {
-                    source: EventArtifactReferenceSource::NotSubmittedProof,
-                    artifact_id: payload.proof_artifact_id.clone(),
-                    digest: Some(payload.proof_hash.clone()),
-                    byte_len: None,
-                    media_type: None,
-                    schema_id: Some(payload.proof_schema_id.clone()),
-                    semantic_type_id: None,
-                    producer_node_id: Some(payload.node_id.clone()),
-                    producer_seed_id: None,
-                    artifact_role: Some(ArtifactRole::NotSubmittedProof),
-                });
-            }
-            KernelEventPayload::SideEffectSubmissionObserved(payload) => {
-                requirements.push(EventArtifactRequirement {
-                    source: EventArtifactReferenceSource::Submission,
-                    artifact_id: payload.submission_artifact_id.clone(),
-                    digest: Some(payload.submission_hash.clone()),
-                    byte_len: None,
-                    media_type: None,
-                    schema_id: Some(payload.submission_schema_id.clone()),
-                    semantic_type_id: None,
-                    producer_node_id: Some(payload.node_id.clone()),
-                    producer_seed_id: None,
-                    artifact_role: Some(ArtifactRole::Submission),
-                });
-            }
-            KernelEventPayload::SideEffectSubmissionUnknown(payload) => {
-                requirements.push(EventArtifactRequirement {
-                    source: EventArtifactReferenceSource::SubmissionUnknownEvidence,
-                    artifact_id: payload.evidence_artifact_id.clone(),
-                    digest: Some(payload.evidence_hash.clone()),
-                    byte_len: None,
-                    media_type: None,
-                    schema_id: Some(payload.evidence_schema_id.clone()),
-                    semantic_type_id: None,
-                    producer_node_id: Some(payload.node_id.clone()),
-                    producer_seed_id: None,
-                    artifact_role: Some(ArtifactRole::SubmissionUnknownEvidence),
-                });
-            }
-            KernelEventPayload::SideEffectReceiptObserved(payload) => {
-                requirements.push(EventArtifactRequirement {
-                    source: EventArtifactReferenceSource::Receipt,
-                    artifact_id: payload.receipt_artifact_id.clone(),
-                    digest: Some(payload.receipt_hash.clone()),
-                    byte_len: None,
-                    media_type: None,
-                    schema_id: Some(payload.receipt_schema_id.clone()),
-                    semantic_type_id: None,
-                    producer_node_id: Some(payload.node_id.clone()),
-                    producer_seed_id: None,
-                    artifact_role: Some(ArtifactRole::Receipt),
-                });
-                if let Some(touched_set) = &payload.resource_touched_set {
-                    push_resource_touched_set_requirement(&mut requirements, touched_set);
-                }
-            }
-            KernelEventPayload::SideEffectConfirmationObserved(payload) => {
-                requirements.push(EventArtifactRequirement {
-                    source: EventArtifactReferenceSource::Confirmation,
-                    artifact_id: payload.confirmation_artifact_id.clone(),
-                    digest: Some(payload.confirmation_hash.clone()),
-                    byte_len: None,
-                    media_type: None,
-                    schema_id: Some(payload.confirmation_schema_id.clone()),
-                    semantic_type_id: None,
-                    producer_node_id: Some(payload.node_id.clone()),
-                    producer_seed_id: None,
-                    artifact_role: Some(ArtifactRole::Confirmation),
-                });
-                if let Some(touched_set) = &payload.resource_touched_set {
-                    push_resource_touched_set_requirement(&mut requirements, touched_set);
-                }
-            }
-            KernelEventPayload::SideEffectAmbiguous(payload) => {
-                requirements.push(EventArtifactRequirement {
-                    source: EventArtifactReferenceSource::AmbiguityEvidence,
-                    artifact_id: payload.evidence_artifact_id.clone(),
-                    digest: Some(payload.evidence_hash.clone()),
-                    byte_len: None,
-                    media_type: None,
-                    schema_id: Some(payload.evidence_schema_id.clone()),
-                    semantic_type_id: None,
-                    producer_node_id: Some(payload.node_id.clone()),
-                    producer_seed_id: None,
-                    artifact_role: Some(ArtifactRole::AmbiguityEvidence),
-                });
-            }
-            KernelEventPayload::SideEffectFailed(payload) => {
-                if let Some(ref evidence) = payload.error.diagnostic_ref {
-                    push_event_artifact(
-                        &mut requirements,
-                        EventArtifactReferenceSource::SideEffectFailureDiagnostic,
-                        evidence,
-                        Some(payload.node_id.clone()),
-                        None,
-                    );
-                }
-            }
-            KernelEventPayload::RetentionRefsAppended(payload) => {
-                for retention_ref in &payload.refs {
+                KernelEventPayload::SideEffectSubmissionObserved(payload) => {
                     requirements.push(EventArtifactRequirement {
-                        source: EventArtifactReferenceSource::RetentionRef,
-                        artifact_id: retention_ref.artifact_id.clone(),
-                        digest: Some(retention_ref.content_digest.clone()),
+                        source: EventArtifactReferenceSource::Submission,
+                        artifact_id: payload.submission_artifact_id.clone(),
+                        digest: Some(payload.submission_hash.clone()),
+                        byte_len: None,
+                        media_type: None,
+                        schema_id: Some(payload.submission_schema_id.clone()),
+                        semantic_type_id: None,
+                        producer_node_id: Some(payload.node_id.clone()),
+                        producer_seed_id: None,
+                        artifact_role: Some(ArtifactRole::Submission),
+                    });
+                }
+                KernelEventPayload::SideEffectSubmissionUnknown(payload) => {
+                    requirements.push(EventArtifactRequirement {
+                        source: EventArtifactReferenceSource::SubmissionUnknownEvidence,
+                        artifact_id: payload.evidence_artifact_id.clone(),
+                        digest: Some(payload.evidence_hash.clone()),
+                        byte_len: None,
+                        media_type: None,
+                        schema_id: Some(payload.evidence_schema_id.clone()),
+                        semantic_type_id: None,
+                        producer_node_id: Some(payload.node_id.clone()),
+                        producer_seed_id: None,
+                        artifact_role: Some(ArtifactRole::SubmissionUnknownEvidence),
+                    });
+                }
+                KernelEventPayload::SideEffectReceiptObserved(payload) => {
+                    requirements.push(EventArtifactRequirement {
+                        source: EventArtifactReferenceSource::Receipt,
+                        artifact_id: payload.receipt_artifact_id.clone(),
+                        digest: Some(payload.receipt_hash.clone()),
+                        byte_len: None,
+                        media_type: None,
+                        schema_id: Some(payload.receipt_schema_id.clone()),
+                        semantic_type_id: None,
+                        producer_node_id: Some(payload.node_id.clone()),
+                        producer_seed_id: None,
+                        artifact_role: Some(ArtifactRole::Receipt),
+                    });
+                    if let Some(touched_set) = &payload.resource_touched_set {
+                        push_resource_touched_set_requirement(&mut requirements, touched_set);
+                    }
+                }
+                KernelEventPayload::SideEffectConfirmationObserved(payload) => {
+                    requirements.push(EventArtifactRequirement {
+                        source: EventArtifactReferenceSource::Confirmation,
+                        artifact_id: payload.confirmation_artifact_id.clone(),
+                        digest: Some(payload.confirmation_hash.clone()),
+                        byte_len: None,
+                        media_type: None,
+                        schema_id: Some(payload.confirmation_schema_id.clone()),
+                        semantic_type_id: None,
+                        producer_node_id: Some(payload.node_id.clone()),
+                        producer_seed_id: None,
+                        artifact_role: Some(ArtifactRole::Confirmation),
+                    });
+                    if let Some(touched_set) = &payload.resource_touched_set {
+                        push_resource_touched_set_requirement(&mut requirements, touched_set);
+                    }
+                }
+                KernelEventPayload::SideEffectAmbiguous(payload) => {
+                    requirements.push(EventArtifactRequirement {
+                        source: EventArtifactReferenceSource::AmbiguityEvidence,
+                        artifact_id: payload.evidence_artifact_id.clone(),
+                        digest: Some(payload.evidence_hash.clone()),
+                        byte_len: None,
+                        media_type: None,
+                        schema_id: Some(payload.evidence_schema_id.clone()),
+                        semantic_type_id: None,
+                        producer_node_id: Some(payload.node_id.clone()),
+                        producer_seed_id: None,
+                        artifact_role: Some(ArtifactRole::AmbiguityEvidence),
+                    });
+                }
+                KernelEventPayload::SideEffectFailed(payload) => {
+                    if let Some(ref evidence) = payload.error.diagnostic_ref {
+                        push_event_artifact(
+                            &mut requirements,
+                            EventArtifactReferenceSource::SideEffectFailureDiagnostic,
+                            evidence,
+                            Some(payload.node_id.clone()),
+                            None,
+                        );
+                    }
+                }
+                KernelEventPayload::RetentionRefsAppended(payload) => {
+                    for retention_ref in &payload.refs {
+                        requirements.push(EventArtifactRequirement {
+                            source: EventArtifactReferenceSource::RetentionRef,
+                            artifact_id: retention_ref.artifact_id.clone(),
+                            digest: Some(retention_ref.content_digest.clone()),
+                            byte_len: None,
+                            media_type: None,
+                            schema_id: None,
+                            semantic_type_id: None,
+                            producer_node_id: None,
+                            producer_seed_id: None,
+                            artifact_role: Some(retention_ref.role),
+                        });
+                    }
+                }
+                KernelEventPayload::RetentionManifestProjected(payload) => {
+                    requirements.push(EventArtifactRequirement {
+                        source: EventArtifactReferenceSource::RetentionManifest,
+                        artifact_id: payload.manifest_artifact_id.clone(),
+                        digest: Some(payload.manifest_digest.clone()),
                         byte_len: None,
                         media_type: None,
                         schema_id: None,
                         semantic_type_id: None,
                         producer_node_id: None,
                         producer_seed_id: None,
-                        artifact_role: Some(retention_ref.role),
+                        artifact_role: Some(ArtifactRole::RetentionManifest),
                     });
                 }
+                KernelEventPayload::StateAttemptStarted(_)
+                | KernelEventPayload::CellSkipped(_)
+                | KernelEventPayload::SideEffectClaimed(_)
+                | KernelEventPayload::SideEffectClaimTakenOver(_)
+                | KernelEventPayload::SideEffectInvocationStarted(_)
+                | KernelEventPayload::StateAttemptCompleted(_) => {}
             }
-            KernelEventPayload::RetentionManifestProjected(payload) => {
-                requirements.push(EventArtifactRequirement {
-                    source: EventArtifactReferenceSource::RetentionManifest,
-                    artifact_id: payload.manifest_artifact_id.clone(),
-                    digest: Some(payload.manifest_digest.clone()),
-                    byte_len: None,
-                    media_type: None,
-                    schema_id: None,
-                    semantic_type_id: None,
-                    producer_node_id: None,
-                    producer_seed_id: None,
-                    artifact_role: Some(ArtifactRole::RetentionManifest),
-                });
-            }
-            KernelEventPayload::StateAttemptStarted(_)
-            | KernelEventPayload::CellSkipped(_)
-            | KernelEventPayload::SideEffectClaimed(_)
-            | KernelEventPayload::SideEffectClaimTakenOver(_)
-            | KernelEventPayload::SideEffectInvocationStarted(_)
-            | KernelEventPayload::StateAttemptCompleted(_) => {}
+            requirements
         }
-        requirements
-    }
 
-    fn referenced_artifact_ids(request: &TypedCommitRequest) -> BTreeSet<ArtifactId> {
-        let mut artifact_ids = BTreeSet::new();
-        for payload in &request.payloads {
-            for requirement in event_artifact_requirements(payload) {
-                artifact_ids.insert(requirement.artifact_id);
+        pub(super) fn referenced_artifact_ids(
+            request: &TypedCommitRequest,
+        ) -> BTreeSet<ArtifactId> {
+            let mut artifact_ids = BTreeSet::new();
+            for payload in &request.payloads {
+                for requirement in event_artifact_requirements(payload) {
+                    artifact_ids.insert(requirement.artifact_id);
+                }
             }
+            artifact_ids
         }
-        artifact_ids
-    }
 
-    fn push_event_artifact(
-        requirements: &mut Vec<EventArtifactRequirement>,
-        source: EventArtifactReferenceSource,
-        evidence: &events::ArtifactEvidenceRef,
-        producer_node_id: Option<NodeId>,
-        producer_seed_id: Option<SeedId>,
-    ) {
-        requirements.push(EventArtifactRequirement {
-            source,
-            artifact_id: evidence.artifact_id.clone(),
-            digest: Some(evidence.content_digest.clone()),
-            byte_len: Some(evidence.byte_len),
-            media_type: Some(evidence.media_type.clone()),
-            schema_id: Some(evidence.schema_id.clone()),
-            semantic_type_id: evidence.semantic_type_id.clone(),
-            producer_node_id,
-            producer_seed_id,
-            artifact_role: Some(evidence.role),
-        });
-    }
+        fn push_event_artifact(
+            requirements: &mut Vec<EventArtifactRequirement>,
+            source: EventArtifactReferenceSource,
+            evidence: &events::ArtifactEvidenceRef,
+            producer_node_id: Option<NodeId>,
+            producer_seed_id: Option<SeedId>,
+        ) {
+            requirements.push(EventArtifactRequirement {
+                source,
+                artifact_id: evidence.artifact_id.clone(),
+                digest: Some(evidence.content_digest.clone()),
+                byte_len: Some(evidence.byte_len),
+                media_type: Some(evidence.media_type.clone()),
+                schema_id: Some(evidence.schema_id.clone()),
+                semantic_type_id: evidence.semantic_type_id.clone(),
+                producer_node_id,
+                producer_seed_id,
+                artifact_role: Some(evidence.role),
+            });
+        }
 
-    fn push_resource_touched_set_requirement(
-        requirements: &mut Vec<EventArtifactRequirement>,
-        evidence: &events::ResourceTouchedSetEvidence,
-    ) {
-        requirements.push(EventArtifactRequirement {
-            source: EventArtifactReferenceSource::ResourceTouchedSet,
-            artifact_id: evidence.evidence_artifact_id.clone(),
-            digest: Some(evidence.evidence_hash.clone()),
-            byte_len: None,
-            media_type: None,
-            schema_id: Some(evidence.evidence_schema_id.clone()),
-            semantic_type_id: None,
-            producer_node_id: None,
-            producer_seed_id: None,
-            artifact_role: None,
-        });
-    }
+        fn push_resource_touched_set_requirement(
+            requirements: &mut Vec<EventArtifactRequirement>,
+            evidence: &events::ResourceTouchedSetEvidence,
+        ) {
+            requirements.push(EventArtifactRequirement {
+                source: EventArtifactReferenceSource::ResourceTouchedSet,
+                artifact_id: evidence.evidence_artifact_id.clone(),
+                digest: Some(evidence.evidence_hash.clone()),
+                byte_len: None,
+                media_type: None,
+                schema_id: Some(evidence.evidence_schema_id.clone()),
+                semantic_type_id: None,
+                producer_node_id: None,
+                producer_seed_id: None,
+                artifact_role: None,
+            });
+        }
 
-    fn cell_producer_artifact_owner(producer: &CellProducer) -> (Option<NodeId>, Option<SeedId>) {
-        match producer {
-            CellProducer::Node(node_id) => (Some(node_id.clone()), None),
-            CellProducer::Seed(seed_id) => (None, Some(seed_id.clone())),
+        fn cell_producer_artifact_owner(
+            producer: &CellProducer,
+        ) -> (Option<NodeId>, Option<SeedId>) {
+            match producer {
+                CellProducer::Node(node_id) => (Some(node_id.clone()), None),
+                CellProducer::Seed(seed_id) => (None, Some(seed_id.clone())),
+            }
         }
     }
 
@@ -5395,602 +5424,673 @@ pub mod v1 {
         }
     }
 
-    fn note_saga_engagement(
-        projections: &mut ProjectionSnapshot,
-        run_id: &RunId,
-        engagement: SagaEngagementProjection,
-    ) {
-        projections
-            .saga_engagements
-            .entry(run_id.clone())
-            .or_insert(engagement);
-    }
+    use self::resource_lanes::{
+        acquire_resource_lane, release_resource_lane_for_holder, release_resource_lanes_for_run,
+    };
+    use self::side_effects::{
+        note_saga_engagement, prepared_invocation_projection, previous_claim,
+        require_active_attempt_for_side_effect, require_claim_context,
+        require_claim_takeover_matches, require_forward_fence_open, require_forward_quiescence,
+        require_intent_attempt_context, require_intent_context,
+        require_remediation_intent_admissible, require_side_effect_phase,
+        require_side_effect_purpose, side_effect_projection_error,
+        transition_side_effect_epoch_only, transition_side_effect_failure, EpochOnlyTransition,
+        ExpectedClaimContext,
+    };
 
-    fn require_forward_fence_open(
-        projections: &ProjectionSnapshot,
-        run_id: &RunId,
-        ledger_key: &events::SideEffectLedgerKey,
-        purpose: &events::SideEffectLedgerPurpose,
-    ) -> Result<()> {
-        if matches!(purpose, events::SideEffectLedgerPurpose::Forward)
-            && projections.saga_engagement(run_id).is_some()
-        {
-            Err(StoreError::ProjectionConflict {
-                key: format!("sidefx:{ledger_key}"),
-                message: "forward side-effect boundary event rejected after saga engagement"
-                    .to_owned(),
-            })
-        } else {
-            Ok(())
-        }
-    }
+    mod resource_lanes {
+        use super::*;
 
-    fn require_forward_quiescence(projections: &ProjectionSnapshot, run_id: &RunId) -> Result<()> {
-        if forward_ledgers_quiescent(projections, run_id) {
-            Ok(())
-        } else {
-            Err(StoreError::ProjectionConflict {
-                key: format!("run:{run_id}:quiescence"),
-                message: "past-boundary forward side-effect ledgers must be quiescent".to_owned(),
-            })
-        }
-    }
+        pub(super) fn acquire_resource_lane(
+            projections: &mut ProjectionSnapshot,
+            run_id: &RunId,
+            event_id: &EventId,
+            payload: &side_effect::InvocationPrepared,
+        ) -> Result<Option<events::ResourceKeyEvidence>> {
+            let holder = SideEffectLedgerRef::new(run_id.clone(), payload.ledger_key.clone());
+            let resource_key = match (
+                projections
+                    .side_effects
+                    .get(&holder)
+                    .and_then(|projection| projection.resource_key.as_ref()),
+                payload.resource_key.as_ref(),
+            ) {
+                (Some(previous), Some(current)) if previous == current => Some(current.clone()),
+                (Some(_), Some(_)) => {
+                    return Err(StoreError::ProjectionConflict {
+                        key: format!("resource_lane:{}", payload.ledger_key),
+                        message: "resource key evidence changed for ledger".to_owned(),
+                    });
+                }
+                (Some(_), None) => {
+                    return Err(StoreError::ProjectionConflict {
+                        key: format!("resource_lane:{}", payload.ledger_key),
+                        message: "resource key evidence is required after prior resource key"
+                            .to_owned(),
+                    });
+                }
+                (None, current) => current.cloned(),
+            };
 
-    fn require_remediation_intent_admissible(
-        projections: &ProjectionSnapshot,
-        run_id: &RunId,
-        remediation_ledger_key: &events::SideEffectLedgerKey,
-        purpose: &events::SideEffectLedgerPurpose,
-    ) -> Result<()> {
-        let events::SideEffectLedgerPurpose::Remediation { forward_ledger_key } = purpose else {
-            return Ok(());
-        };
-        if projections.saga_engagement(run_id).is_none() {
-            return Err(StoreError::ProjectionConflict {
-                key: format!("sidefx:{remediation_ledger_key}"),
-                message: "remediation ledger requires prior saga engagement".to_owned(),
-            });
+            let Some(resource_key) = resource_key.as_ref() else {
+                return Ok(None);
+            };
+
+            let lane_key = ResourceLaneKey::from_evidence(resource_key);
+            if let Some(existing_key) = resource_lane_key_for_holder(projections, &holder) {
+                if existing_key != lane_key {
+                    return Err(StoreError::ProjectionConflict {
+                        key: format!("resource_lane:{}", payload.ledger_key),
+                        message: "resource lane key changed for ledger".to_owned(),
+                    });
+                }
+            }
+            if let Some(existing) = projections.resource_lanes.get(&lane_key) {
+                if existing.holder != holder {
+                    return Err(StoreError::ResourceLaneBlocked {
+                        lane_key,
+                        holder: existing.holder.clone(),
+                    });
+                }
+            }
+
+            projections.resource_lanes.insert(
+                lane_key,
+                ResourceLaneProjection {
+                    event_id: event_id.clone(),
+                    holder,
+                    ledger_purpose: payload.ledger_purpose.clone(),
+                    node_id: payload.node_id.clone(),
+                    attempt_id: payload.attempt_id.clone(),
+                    invocation_epoch: payload.invocation_epoch,
+                },
+            );
+            Ok(Some(resource_key.clone()))
         }
-        let Some(forward) = projections.side_effect_for_run(run_id, forward_ledger_key) else {
-            return Err(StoreError::ProjectionConflict {
-                key: format!("sidefx:{remediation_ledger_key}"),
-                message: "remediation ledger references missing forward ledger".to_owned(),
-            });
-        };
-        if !matches!(
-            forward.ledger_purpose,
-            events::SideEffectLedgerPurpose::Forward
+
+        fn resource_lane_key_for_holder(
+            projections: &ProjectionSnapshot,
+            holder: &SideEffectLedgerRef,
+        ) -> Option<ResourceLaneKey> {
+            projections
+                .resource_lanes
+                .iter()
+                .find_map(|(key, projection)| (projection.holder == *holder).then(|| key.clone()))
+        }
+
+        pub(super) fn release_resource_lane_for_holder(
+            projections: &mut ProjectionSnapshot,
+            holder: &SideEffectLedgerRef,
         ) {
-            return Err(StoreError::ProjectionConflict {
-                key: format!("sidefx:{remediation_ledger_key}"),
-                message: "remediation ledger references a non-forward ledger".to_owned(),
-            });
+            if let Some(key) = resource_lane_key_for_holder(projections, holder) {
+                projections.resource_lanes.remove(&key);
+            }
         }
-        if !matches!(forward.phase, SideEffectPhase::ConfirmationObserved { .. }) {
-            return Err(StoreError::ProjectionConflict {
-                key: format!("sidefx:{remediation_ledger_key}"),
-                message: "remediation ledger requires confirmed forward ledger".to_owned(),
-            });
-        }
-        if projections.side_effects.values().any(|projection| {
-            projection.run_id == *run_id
-                && matches!(
-                    &projection.ledger_purpose,
-                    events::SideEffectLedgerPurpose::Remediation {
-                        forward_ledger_key: linked
-                    } if linked == forward_ledger_key
-                )
-        }) {
-            return Err(StoreError::ProjectionConflict {
-                key: format!("sidefx:{remediation_ledger_key}"),
-                message: "remediation ledger already exists for forward ledger".to_owned(),
-            });
-        }
-        Ok(())
-    }
 
-    fn side_effect_projection_error(
-        ledger_key: &events::SideEffectLedgerKey,
-        message: impl Into<String>,
-    ) -> StoreError {
-        StoreError::ProjectionConflict {
-            key: format!("sidefx:{ledger_key}"),
-            message: message.into(),
+        pub(super) fn release_resource_lanes_for_run(
+            projections: &mut ProjectionSnapshot,
+            run_id: &RunId,
+        ) {
+            projections
+                .resource_lanes
+                .retain(|_, projection| projection.holder.run_id != *run_id);
         }
     }
 
-    fn require_side_effect_phase<'a>(
-        projections: &'a ProjectionSnapshot,
-        run_id: &RunId,
-        ledger_key: &events::SideEffectLedgerKey,
-        expected: &'static str,
-        predicate: impl FnOnce(&SideEffectProjection) -> bool,
-    ) -> Result<&'a SideEffectProjection> {
-        let Some(projection) = projections.side_effect_for_run(run_id, ledger_key) else {
-            return Err(side_effect_projection_error(
-                ledger_key,
-                format!("missing side-effect projection; expected {expected}"),
-            ));
-        };
-        if predicate(projection) {
-            Ok(projection)
-        } else {
-            Err(side_effect_projection_error(
-                ledger_key,
-                format!("illegal side-effect transition; expected {expected}"),
-            ))
-        }
-    }
+    mod side_effects {
+        use super::*;
 
-    fn require_side_effect_purpose(
-        projection: &SideEffectProjection,
-        ledger_key: &events::SideEffectLedgerKey,
-        expected: &events::SideEffectLedgerPurpose,
-    ) -> Result<()> {
-        if projection.ledger_purpose == *expected {
+        pub(super) fn note_saga_engagement(
+            projections: &mut ProjectionSnapshot,
+            run_id: &RunId,
+            engagement: SagaEngagementProjection,
+        ) {
+            projections
+                .saga_engagements
+                .entry(run_id.clone())
+                .or_insert(engagement);
+        }
+
+        pub(super) fn require_forward_fence_open(
+            projections: &ProjectionSnapshot,
+            run_id: &RunId,
+            ledger_key: &events::SideEffectLedgerKey,
+            purpose: &events::SideEffectLedgerPurpose,
+        ) -> Result<()> {
+            if matches!(purpose, events::SideEffectLedgerPurpose::Forward)
+                && projections.saga_engagement(run_id).is_some()
+            {
+                Err(StoreError::ProjectionConflict {
+                    key: format!("sidefx:{ledger_key}"),
+                    message: "forward side-effect boundary event rejected after saga engagement"
+                        .to_owned(),
+                })
+            } else {
+                Ok(())
+            }
+        }
+
+        pub(super) fn require_forward_quiescence(
+            projections: &ProjectionSnapshot,
+            run_id: &RunId,
+        ) -> Result<()> {
+            if forward_ledgers_quiescent(projections, run_id) {
+                Ok(())
+            } else {
+                Err(StoreError::ProjectionConflict {
+                    key: format!("run:{run_id}:quiescence"),
+                    message: "past-boundary forward side-effect ledgers must be quiescent"
+                        .to_owned(),
+                })
+            }
+        }
+
+        pub(super) fn require_remediation_intent_admissible(
+            projections: &ProjectionSnapshot,
+            run_id: &RunId,
+            remediation_ledger_key: &events::SideEffectLedgerKey,
+            purpose: &events::SideEffectLedgerPurpose,
+        ) -> Result<()> {
+            let events::SideEffectLedgerPurpose::Remediation { forward_ledger_key } = purpose
+            else {
+                return Ok(());
+            };
+            if projections.saga_engagement(run_id).is_none() {
+                return Err(StoreError::ProjectionConflict {
+                    key: format!("sidefx:{remediation_ledger_key}"),
+                    message: "remediation ledger requires prior saga engagement".to_owned(),
+                });
+            }
+            let Some(forward) = projections.side_effect_for_run(run_id, forward_ledger_key) else {
+                return Err(StoreError::ProjectionConflict {
+                    key: format!("sidefx:{remediation_ledger_key}"),
+                    message: "remediation ledger references missing forward ledger".to_owned(),
+                });
+            };
+            if !matches!(
+                forward.ledger_purpose,
+                events::SideEffectLedgerPurpose::Forward
+            ) {
+                return Err(StoreError::ProjectionConflict {
+                    key: format!("sidefx:{remediation_ledger_key}"),
+                    message: "remediation ledger references a non-forward ledger".to_owned(),
+                });
+            }
+            if !matches!(forward.phase, SideEffectPhase::ConfirmationObserved { .. }) {
+                return Err(StoreError::ProjectionConflict {
+                    key: format!("sidefx:{remediation_ledger_key}"),
+                    message: "remediation ledger requires confirmed forward ledger".to_owned(),
+                });
+            }
+            if projections.side_effects.values().any(|projection| {
+                projection.run_id == *run_id
+                    && matches!(
+                        &projection.ledger_purpose,
+                        events::SideEffectLedgerPurpose::Remediation {
+                            forward_ledger_key: linked
+                        } if linked == forward_ledger_key
+                    )
+            }) {
+                return Err(StoreError::ProjectionConflict {
+                    key: format!("sidefx:{remediation_ledger_key}"),
+                    message: "remediation ledger already exists for forward ledger".to_owned(),
+                });
+            }
             Ok(())
-        } else {
-            Err(side_effect_projection_error(
-                ledger_key,
-                "side-effect ledger purpose changed",
-            ))
         }
-    }
 
-    fn previous_claim<'a>(
-        projection: &'a SideEffectProjection,
-        ledger_key: &events::SideEffectLedgerKey,
-    ) -> Result<&'a SideEffectClaimProjection> {
-        projection.claim.as_ref().ok_or_else(|| {
-            side_effect_projection_error(ledger_key, "side-effect transition requires active claim")
-        })
-    }
+        pub(super) fn side_effect_projection_error(
+            ledger_key: &events::SideEffectLedgerKey,
+            message: impl Into<String>,
+        ) -> StoreError {
+            StoreError::ProjectionConflict {
+                key: format!("sidefx:{ledger_key}"),
+                message: message.into(),
+            }
+        }
 
-    fn require_active_attempt_for_side_effect(
-        projections: &ProjectionSnapshot,
-        node_id: &NodeId,
-        attempt_id: &AttemptId,
-        ledger_key: &events::SideEffectLedgerKey,
-    ) -> Result<()> {
-        match projections.attempt(node_id, attempt_id) {
-            Some(AttemptProjection {
-                status: AttemptStatus::Started { .. },
-                ..
-            }) => Ok(()),
-            Some(_) => Err(side_effect_projection_error(
-                ledger_key,
-                "side-effect event requires an active started attempt",
-            )),
-            None => Err(side_effect_projection_error(
-                ledger_key,
-                "side-effect event requires a started attempt",
-            )),
-        }
-    }
-
-    fn require_intent_context(
-        projection: &SideEffectProjection,
-        node_id: &NodeId,
-        attempt_id: &AttemptId,
-        invocation_epoch: u32,
-    ) -> Result<()> {
-        let ledger_key = &projection.ledger_key;
-        if projection.intent.node_id != *node_id {
-            return Err(side_effect_projection_error(
-                ledger_key,
-                "node id does not match intent projection",
-            ));
-        }
-        if projection.intent.attempt_id != *attempt_id {
-            return Err(side_effect_projection_error(
-                ledger_key,
-                "attempt id does not match intent projection",
-            ));
-        }
-        if projection.intent.invocation_epoch != invocation_epoch {
-            return Err(side_effect_projection_error(
-                ledger_key,
-                "invocation epoch does not match intent projection",
-            ));
-        }
-        Ok(())
-    }
-
-    fn require_intent_attempt_context(
-        projection: &SideEffectProjection,
-        node_id: &NodeId,
-        attempt_id: &AttemptId,
-    ) -> Result<()> {
-        let ledger_key = &projection.ledger_key;
-        if projection.intent.node_id != *node_id {
-            return Err(side_effect_projection_error(
-                ledger_key,
-                "node id does not match intent projection",
-            ));
-        }
-        if projection.intent.attempt_id != *attempt_id {
-            return Err(side_effect_projection_error(
-                ledger_key,
-                "attempt id does not match intent projection",
-            ));
-        }
-        Ok(())
-    }
-
-    struct ExpectedClaimContext<'a> {
-        node_id: &'a NodeId,
-        attempt_id: &'a AttemptId,
-        invocation_epoch: u32,
-        claim_generation: u32,
-        claim_fencing_token: &'a side_effect::ClaimFencingToken,
-        claim_owner: Option<&'a events::RunnerInvocationId>,
-    }
-
-    fn require_claim_context(
-        ledger_key: &events::SideEffectLedgerKey,
-        claim: &SideEffectClaimProjection,
-        expected: ExpectedClaimContext<'_>,
-    ) -> Result<()> {
-        if claim.node_id != *expected.node_id {
-            return Err(side_effect_projection_error(
-                ledger_key,
-                "node id does not match active claim",
-            ));
-        }
-        if claim.attempt_id != *expected.attempt_id {
-            return Err(side_effect_projection_error(
-                ledger_key,
-                "attempt id does not match active claim",
-            ));
-        }
-        if claim.invocation_epoch != expected.invocation_epoch {
-            return Err(side_effect_projection_error(
-                ledger_key,
-                "invocation epoch does not match active claim",
-            ));
-        }
-        if claim.claim_generation != expected.claim_generation {
-            return Err(side_effect_projection_error(
-                ledger_key,
-                "claim generation does not match active claim",
-            ));
-        }
-        if claim.claim_fencing_token != *expected.claim_fencing_token {
-            return Err(side_effect_projection_error(
-                ledger_key,
-                "claim fencing token does not match active claim",
-            ));
-        }
-        if let Some(claim_owner) = expected.claim_owner {
-            if claim.claim_owner != *claim_owner {
+        pub(super) fn require_side_effect_phase<'a>(
+            projections: &'a ProjectionSnapshot,
+            run_id: &RunId,
+            ledger_key: &events::SideEffectLedgerKey,
+            expected: &'static str,
+            predicate: impl FnOnce(&SideEffectProjection) -> bool,
+        ) -> Result<&'a SideEffectProjection> {
+            let Some(projection) = projections.side_effect_for_run(run_id, ledger_key) else {
                 return Err(side_effect_projection_error(
                     ledger_key,
-                    "claim owner does not match active claim",
-                ));
-            }
-        }
-        Ok(())
-    }
-
-    fn require_claim_takeover_matches(
-        ledger_key: &events::SideEffectLedgerKey,
-        claim: &SideEffectClaimProjection,
-        payload: &side_effect::ClaimTakenOver,
-    ) -> Result<()> {
-        if claim.node_id != payload.node_id {
-            return Err(side_effect_projection_error(
-                ledger_key,
-                "node id does not match active claim",
-            ));
-        }
-        if claim.attempt_id != payload.attempt_id {
-            return Err(side_effect_projection_error(
-                ledger_key,
-                "attempt id does not match active claim",
-            ));
-        }
-        if claim.claim_owner != payload.previous_claim_owner {
-            return Err(side_effect_projection_error(
-                ledger_key,
-                "previous claim owner does not match active claim",
-            ));
-        }
-        if claim.claim_generation != payload.previous_claim_generation {
-            return Err(side_effect_projection_error(
-                ledger_key,
-                "previous claim generation does not match active claim",
-            ));
-        }
-        if payload.claim_generation <= payload.previous_claim_generation {
-            return Err(side_effect_projection_error(
-                ledger_key,
-                "takeover claim generation must increase",
-            ));
-        }
-        if payload.claim_fencing_token == claim.claim_fencing_token {
-            return Err(side_effect_projection_error(
-                ledger_key,
-                "takeover claim fencing token must change",
-            ));
-        }
-        if claim.invocation_epoch != payload.invocation_epoch {
-            return Err(side_effect_projection_error(
-                ledger_key,
-                "invocation epoch does not match active claim",
-            ));
-        }
-        Ok(())
-    }
-
-    fn prepared_invocation_projection(
-        artifact_id: &Option<ArtifactId>,
-        content_digest: &Option<ContentDigest>,
-        ledger_key: &events::SideEffectLedgerKey,
-    ) -> Result<Option<SideEffectArtifactProjection>> {
-        match (artifact_id, content_digest) {
-            (Some(artifact_id), Some(content_digest)) => Ok(Some(SideEffectArtifactProjection {
-                artifact_id: artifact_id.clone(),
-                content_digest: content_digest.clone(),
-                schema_id: None,
-            })),
-            (None, None) => Ok(None),
-            _ => Err(side_effect_projection_error(
-                ledger_key,
-                "prepared invocation artifact id and hash must be recorded together",
-            )),
-        }
-    }
-
-    fn acquire_resource_lane(
-        projections: &mut ProjectionSnapshot,
-        run_id: &RunId,
-        event_id: &EventId,
-        payload: &side_effect::InvocationPrepared,
-    ) -> Result<Option<events::ResourceKeyEvidence>> {
-        let holder = SideEffectLedgerRef::new(run_id.clone(), payload.ledger_key.clone());
-        let resource_key = match (
-            projections
-                .side_effects
-                .get(&holder)
-                .and_then(|projection| projection.resource_key.as_ref()),
-            payload.resource_key.as_ref(),
-        ) {
-            (Some(previous), Some(current)) if previous == current => Some(current.clone()),
-            (Some(_), Some(_)) => {
-                return Err(StoreError::ProjectionConflict {
-                    key: format!("resource_lane:{}", payload.ledger_key),
-                    message: "resource key evidence changed for ledger".to_owned(),
-                });
-            }
-            (Some(_), None) => {
-                return Err(StoreError::ProjectionConflict {
-                    key: format!("resource_lane:{}", payload.ledger_key),
-                    message: "resource key evidence is required after prior resource key"
-                        .to_owned(),
-                });
-            }
-            (None, current) => current.cloned(),
-        };
-
-        let Some(resource_key) = resource_key.as_ref() else {
-            return Ok(None);
-        };
-
-        let lane_key = ResourceLaneKey::from_evidence(resource_key);
-        if let Some(existing_key) = resource_lane_key_for_holder(projections, &holder) {
-            if existing_key != lane_key {
-                return Err(StoreError::ProjectionConflict {
-                    key: format!("resource_lane:{}", payload.ledger_key),
-                    message: "resource lane key changed for ledger".to_owned(),
-                });
-            }
-        }
-        if let Some(existing) = projections.resource_lanes.get(&lane_key) {
-            if existing.holder != holder {
-                return Err(StoreError::ResourceLaneBlocked {
-                    lane_key,
-                    holder: existing.holder.clone(),
-                });
-            }
-        }
-
-        projections.resource_lanes.insert(
-            lane_key,
-            ResourceLaneProjection {
-                event_id: event_id.clone(),
-                holder,
-                ledger_purpose: payload.ledger_purpose.clone(),
-                node_id: payload.node_id.clone(),
-                attempt_id: payload.attempt_id.clone(),
-                invocation_epoch: payload.invocation_epoch,
-            },
-        );
-        Ok(Some(resource_key.clone()))
-    }
-
-    fn resource_lane_key_for_holder(
-        projections: &ProjectionSnapshot,
-        holder: &SideEffectLedgerRef,
-    ) -> Option<ResourceLaneKey> {
-        projections
-            .resource_lanes
-            .iter()
-            .find_map(|(key, projection)| (projection.holder == *holder).then(|| key.clone()))
-    }
-
-    fn release_resource_lane_for_holder(
-        projections: &mut ProjectionSnapshot,
-        holder: &SideEffectLedgerRef,
-    ) {
-        if let Some(key) = resource_lane_key_for_holder(projections, holder) {
-            projections.resource_lanes.remove(&key);
-        }
-    }
-
-    fn release_resource_lanes_for_run(projections: &mut ProjectionSnapshot, run_id: &RunId) {
-        projections
-            .resource_lanes
-            .retain(|_, projection| projection.holder.run_id != *run_id);
-    }
-
-    fn phase_matches_expected(phase: &SideEffectPhase, expected: &'static str) -> bool {
-        match expected {
-            "started" => matches!(phase, SideEffectPhase::InvocationStarted { .. }),
-            "submission_recovery" => matches!(
-                phase,
-                SideEffectPhase::InvocationStarted { .. }
-                    | SideEffectPhase::SubmissionUnknown { .. }
-            ),
-            "submission_observed" => matches!(phase, SideEffectPhase::SubmissionObserved { .. }),
-            "receipt" => matches!(phase, SideEffectPhase::ReceiptObserved { .. }),
-            "not_submitted" => matches!(phase, SideEffectPhase::NotSubmittedProven { .. }),
-            "ambiguity_source" => matches!(
-                phase,
-                SideEffectPhase::InvocationStarted { .. }
-                    | SideEffectPhase::SubmissionUnknown { .. }
-                    | SideEffectPhase::SubmissionObserved { .. }
-                    | SideEffectPhase::ReceiptObserved { .. }
-            ),
-            _ => false,
-        }
-    }
-
-    struct EpochOnlyTransition<'a> {
-        run_id: &'a RunId,
-        ledger_key: &'a events::SideEffectLedgerKey,
-        ledger_purpose: &'a events::SideEffectLedgerPurpose,
-        node_id: &'a NodeId,
-        attempt_id: &'a AttemptId,
-        event_id: EventId,
-        invocation_epoch: u32,
-        required_previous: &'static str,
-    }
-
-    fn transition_side_effect_epoch_only(
-        projections: &mut ProjectionSnapshot,
-        transition: EpochOnlyTransition<'_>,
-        next_phase: impl FnOnce(u32) -> SideEffectPhase,
-        update_projection: impl FnOnce(&mut SideEffectProjection) -> Result<()>,
-    ) -> Result<()> {
-        let (
-            run_id,
-            ledger_purpose,
-            intent,
-            prepared_invocation,
-            resource_key,
-            submission,
-            receipt,
-            confirmation,
-            resource_touched_set,
-            claim,
-        ) = {
-            let previous = require_side_effect_phase(
-                projections,
-                transition.run_id,
-                transition.ledger_key,
-                transition.required_previous,
-                |projection| {
-                    phase_matches_expected(&projection.phase, transition.required_previous)
-                },
-            )?;
-            require_side_effect_purpose(
-                previous,
-                transition.ledger_key,
-                transition.ledger_purpose,
-            )?;
-            let claim = previous_claim(previous, transition.ledger_key)?;
-            require_claim_context(
-                transition.ledger_key,
-                claim,
-                ExpectedClaimContext {
-                    node_id: transition.node_id,
-                    attempt_id: transition.attempt_id,
-                    invocation_epoch: transition.invocation_epoch,
-                    claim_generation: claim.claim_generation,
-                    claim_fencing_token: &claim.claim_fencing_token,
-                    claim_owner: Some(&claim.claim_owner),
-                },
-            )?;
-            (
-                previous.run_id.clone(),
-                previous.ledger_purpose.clone(),
-                previous.intent.clone(),
-                previous.prepared_invocation.clone(),
-                previous.resource_key.clone(),
-                previous.submission.clone(),
-                previous.receipt.clone(),
-                previous.confirmation.clone(),
-                previous.resource_touched_set.clone(),
-                claim.clone(),
-            )
-        };
-        let mut projection = SideEffectProjection {
-            run_id,
-            ledger_key: transition.ledger_key.clone(),
-            ledger_purpose,
-            event_id: transition.event_id,
-            intent,
-            prepared_invocation,
-            resource_key,
-            submission,
-            receipt,
-            confirmation,
-            resource_touched_set,
-            claim: Some(claim),
-            phase: next_phase(transition.invocation_epoch),
-        };
-        update_projection(&mut projection)?;
-        projections.side_effects.insert(
-            SideEffectLedgerRef::new((*transition.run_id).clone(), transition.ledger_key.clone()),
-            projection,
-        );
-        Ok(())
-    }
-
-    fn transition_side_effect_failure(
-        projections: &mut ProjectionSnapshot,
-        run_id: &RunId,
-        payload: &side_effect::Failed,
-        event_id: EventId,
-    ) -> Result<()> {
-        let (
-            run_id,
-            ledger_purpose,
-            intent,
-            prepared_invocation,
-            resource_key,
-            submission,
-            receipt,
-            confirmation,
-            resource_touched_set,
-            claim,
-        ) = {
-            let Some(previous) = projections.side_effect_for_run(run_id, &payload.ledger_key)
-            else {
-                return Err(side_effect_projection_error(
-                    &payload.ledger_key,
-                    "missing side-effect projection",
+                    format!("missing side-effect projection; expected {expected}"),
                 ));
             };
-            require_side_effect_purpose(previous, &payload.ledger_key, &payload.ledger_purpose)?;
-            match payload.failure_phase {
-                side_effect::FailurePhase::BeforeInvocationStarted => match previous.phase {
-                    SideEffectPhase::IntentPersisted { invocation_epoch } => {
-                        if payload.invocation_epoch != invocation_epoch {
+            if predicate(projection) {
+                Ok(projection)
+            } else {
+                Err(side_effect_projection_error(
+                    ledger_key,
+                    format!("illegal side-effect transition; expected {expected}"),
+                ))
+            }
+        }
+
+        pub(super) fn require_side_effect_purpose(
+            projection: &SideEffectProjection,
+            ledger_key: &events::SideEffectLedgerKey,
+            expected: &events::SideEffectLedgerPurpose,
+        ) -> Result<()> {
+            if projection.ledger_purpose == *expected {
+                Ok(())
+            } else {
+                Err(side_effect_projection_error(
+                    ledger_key,
+                    "side-effect ledger purpose changed",
+                ))
+            }
+        }
+
+        pub(super) fn previous_claim<'a>(
+            projection: &'a SideEffectProjection,
+            ledger_key: &events::SideEffectLedgerKey,
+        ) -> Result<&'a SideEffectClaimProjection> {
+            projection.claim.as_ref().ok_or_else(|| {
+                side_effect_projection_error(
+                    ledger_key,
+                    "side-effect transition requires active claim",
+                )
+            })
+        }
+
+        pub(super) fn require_active_attempt_for_side_effect(
+            projections: &ProjectionSnapshot,
+            node_id: &NodeId,
+            attempt_id: &AttemptId,
+            ledger_key: &events::SideEffectLedgerKey,
+        ) -> Result<()> {
+            match projections.attempt(node_id, attempt_id) {
+                Some(AttemptProjection {
+                    status: AttemptStatus::Started { .. },
+                    ..
+                }) => Ok(()),
+                Some(_) => Err(side_effect_projection_error(
+                    ledger_key,
+                    "side-effect event requires an active started attempt",
+                )),
+                None => Err(side_effect_projection_error(
+                    ledger_key,
+                    "side-effect event requires a started attempt",
+                )),
+            }
+        }
+
+        pub(super) fn require_intent_context(
+            projection: &SideEffectProjection,
+            node_id: &NodeId,
+            attempt_id: &AttemptId,
+            invocation_epoch: u32,
+        ) -> Result<()> {
+            let ledger_key = &projection.ledger_key;
+            if projection.intent.node_id != *node_id {
+                return Err(side_effect_projection_error(
+                    ledger_key,
+                    "node id does not match intent projection",
+                ));
+            }
+            if projection.intent.attempt_id != *attempt_id {
+                return Err(side_effect_projection_error(
+                    ledger_key,
+                    "attempt id does not match intent projection",
+                ));
+            }
+            if projection.intent.invocation_epoch != invocation_epoch {
+                return Err(side_effect_projection_error(
+                    ledger_key,
+                    "invocation epoch does not match intent projection",
+                ));
+            }
+            Ok(())
+        }
+
+        pub(super) fn require_intent_attempt_context(
+            projection: &SideEffectProjection,
+            node_id: &NodeId,
+            attempt_id: &AttemptId,
+        ) -> Result<()> {
+            let ledger_key = &projection.ledger_key;
+            if projection.intent.node_id != *node_id {
+                return Err(side_effect_projection_error(
+                    ledger_key,
+                    "node id does not match intent projection",
+                ));
+            }
+            if projection.intent.attempt_id != *attempt_id {
+                return Err(side_effect_projection_error(
+                    ledger_key,
+                    "attempt id does not match intent projection",
+                ));
+            }
+            Ok(())
+        }
+
+        pub(super) struct ExpectedClaimContext<'a> {
+            pub(super) node_id: &'a NodeId,
+            pub(super) attempt_id: &'a AttemptId,
+            pub(super) invocation_epoch: u32,
+            pub(super) claim_generation: u32,
+            pub(super) claim_fencing_token: &'a side_effect::ClaimFencingToken,
+            pub(super) claim_owner: Option<&'a events::RunnerInvocationId>,
+        }
+
+        pub(super) fn require_claim_context(
+            ledger_key: &events::SideEffectLedgerKey,
+            claim: &SideEffectClaimProjection,
+            expected: ExpectedClaimContext<'_>,
+        ) -> Result<()> {
+            if claim.node_id != *expected.node_id {
+                return Err(side_effect_projection_error(
+                    ledger_key,
+                    "node id does not match active claim",
+                ));
+            }
+            if claim.attempt_id != *expected.attempt_id {
+                return Err(side_effect_projection_error(
+                    ledger_key,
+                    "attempt id does not match active claim",
+                ));
+            }
+            if claim.invocation_epoch != expected.invocation_epoch {
+                return Err(side_effect_projection_error(
+                    ledger_key,
+                    "invocation epoch does not match active claim",
+                ));
+            }
+            if claim.claim_generation != expected.claim_generation {
+                return Err(side_effect_projection_error(
+                    ledger_key,
+                    "claim generation does not match active claim",
+                ));
+            }
+            if claim.claim_fencing_token != *expected.claim_fencing_token {
+                return Err(side_effect_projection_error(
+                    ledger_key,
+                    "claim fencing token does not match active claim",
+                ));
+            }
+            if let Some(claim_owner) = expected.claim_owner {
+                if claim.claim_owner != *claim_owner {
+                    return Err(side_effect_projection_error(
+                        ledger_key,
+                        "claim owner does not match active claim",
+                    ));
+                }
+            }
+            Ok(())
+        }
+
+        pub(super) fn require_claim_takeover_matches(
+            ledger_key: &events::SideEffectLedgerKey,
+            claim: &SideEffectClaimProjection,
+            payload: &side_effect::ClaimTakenOver,
+        ) -> Result<()> {
+            if claim.node_id != payload.node_id {
+                return Err(side_effect_projection_error(
+                    ledger_key,
+                    "node id does not match active claim",
+                ));
+            }
+            if claim.attempt_id != payload.attempt_id {
+                return Err(side_effect_projection_error(
+                    ledger_key,
+                    "attempt id does not match active claim",
+                ));
+            }
+            if claim.claim_owner != payload.previous_claim_owner {
+                return Err(side_effect_projection_error(
+                    ledger_key,
+                    "previous claim owner does not match active claim",
+                ));
+            }
+            if claim.claim_generation != payload.previous_claim_generation {
+                return Err(side_effect_projection_error(
+                    ledger_key,
+                    "previous claim generation does not match active claim",
+                ));
+            }
+            if payload.claim_generation <= payload.previous_claim_generation {
+                return Err(side_effect_projection_error(
+                    ledger_key,
+                    "takeover claim generation must increase",
+                ));
+            }
+            if payload.claim_fencing_token == claim.claim_fencing_token {
+                return Err(side_effect_projection_error(
+                    ledger_key,
+                    "takeover claim fencing token must change",
+                ));
+            }
+            if claim.invocation_epoch != payload.invocation_epoch {
+                return Err(side_effect_projection_error(
+                    ledger_key,
+                    "invocation epoch does not match active claim",
+                ));
+            }
+            Ok(())
+        }
+
+        pub(super) fn prepared_invocation_projection(
+            artifact_id: &Option<ArtifactId>,
+            content_digest: &Option<ContentDigest>,
+            ledger_key: &events::SideEffectLedgerKey,
+        ) -> Result<Option<SideEffectArtifactProjection>> {
+            match (artifact_id, content_digest) {
+                (Some(artifact_id), Some(content_digest)) => {
+                    Ok(Some(SideEffectArtifactProjection {
+                        artifact_id: artifact_id.clone(),
+                        content_digest: content_digest.clone(),
+                        schema_id: None,
+                    }))
+                }
+                (None, None) => Ok(None),
+                _ => Err(side_effect_projection_error(
+                    ledger_key,
+                    "prepared invocation artifact id and hash must be recorded together",
+                )),
+            }
+        }
+
+        fn phase_matches_expected(phase: &SideEffectPhase, expected: &'static str) -> bool {
+            match expected {
+                "started" => matches!(phase, SideEffectPhase::InvocationStarted { .. }),
+                "submission_recovery" => matches!(
+                    phase,
+                    SideEffectPhase::InvocationStarted { .. }
+                        | SideEffectPhase::SubmissionUnknown { .. }
+                ),
+                "submission_observed" => {
+                    matches!(phase, SideEffectPhase::SubmissionObserved { .. })
+                }
+                "receipt" => matches!(phase, SideEffectPhase::ReceiptObserved { .. }),
+                "not_submitted" => matches!(phase, SideEffectPhase::NotSubmittedProven { .. }),
+                "ambiguity_source" => matches!(
+                    phase,
+                    SideEffectPhase::InvocationStarted { .. }
+                        | SideEffectPhase::SubmissionUnknown { .. }
+                        | SideEffectPhase::SubmissionObserved { .. }
+                        | SideEffectPhase::ReceiptObserved { .. }
+                ),
+                _ => false,
+            }
+        }
+
+        pub(super) struct EpochOnlyTransition<'a> {
+            pub(super) run_id: &'a RunId,
+            pub(super) ledger_key: &'a events::SideEffectLedgerKey,
+            pub(super) ledger_purpose: &'a events::SideEffectLedgerPurpose,
+            pub(super) node_id: &'a NodeId,
+            pub(super) attempt_id: &'a AttemptId,
+            pub(super) event_id: EventId,
+            pub(super) invocation_epoch: u32,
+            pub(super) required_previous: &'static str,
+        }
+
+        pub(super) fn transition_side_effect_epoch_only(
+            projections: &mut ProjectionSnapshot,
+            transition: EpochOnlyTransition<'_>,
+            next_phase: impl FnOnce(u32) -> SideEffectPhase,
+            update_projection: impl FnOnce(&mut SideEffectProjection) -> Result<()>,
+        ) -> Result<()> {
+            let (
+                run_id,
+                ledger_purpose,
+                intent,
+                prepared_invocation,
+                resource_key,
+                submission,
+                receipt,
+                confirmation,
+                resource_touched_set,
+                claim,
+            ) = {
+                let previous = require_side_effect_phase(
+                    projections,
+                    transition.run_id,
+                    transition.ledger_key,
+                    transition.required_previous,
+                    |projection| {
+                        phase_matches_expected(&projection.phase, transition.required_previous)
+                    },
+                )?;
+                require_side_effect_purpose(
+                    previous,
+                    transition.ledger_key,
+                    transition.ledger_purpose,
+                )?;
+                let claim = previous_claim(previous, transition.ledger_key)?;
+                require_claim_context(
+                    transition.ledger_key,
+                    claim,
+                    ExpectedClaimContext {
+                        node_id: transition.node_id,
+                        attempt_id: transition.attempt_id,
+                        invocation_epoch: transition.invocation_epoch,
+                        claim_generation: claim.claim_generation,
+                        claim_fencing_token: &claim.claim_fencing_token,
+                        claim_owner: Some(&claim.claim_owner),
+                    },
+                )?;
+                (
+                    previous.run_id.clone(),
+                    previous.ledger_purpose.clone(),
+                    previous.intent.clone(),
+                    previous.prepared_invocation.clone(),
+                    previous.resource_key.clone(),
+                    previous.submission.clone(),
+                    previous.receipt.clone(),
+                    previous.confirmation.clone(),
+                    previous.resource_touched_set.clone(),
+                    claim.clone(),
+                )
+            };
+            let mut projection = SideEffectProjection {
+                run_id,
+                ledger_key: transition.ledger_key.clone(),
+                ledger_purpose,
+                event_id: transition.event_id,
+                intent,
+                prepared_invocation,
+                resource_key,
+                submission,
+                receipt,
+                confirmation,
+                resource_touched_set,
+                claim: Some(claim),
+                phase: next_phase(transition.invocation_epoch),
+            };
+            update_projection(&mut projection)?;
+            projections.side_effects.insert(
+                SideEffectLedgerRef::new(
+                    (*transition.run_id).clone(),
+                    transition.ledger_key.clone(),
+                ),
+                projection,
+            );
+            Ok(())
+        }
+
+        pub(super) fn transition_side_effect_failure(
+            projections: &mut ProjectionSnapshot,
+            run_id: &RunId,
+            payload: &side_effect::Failed,
+            event_id: EventId,
+        ) -> Result<()> {
+            let (
+                run_id,
+                ledger_purpose,
+                intent,
+                prepared_invocation,
+                resource_key,
+                submission,
+                receipt,
+                confirmation,
+                resource_touched_set,
+                claim,
+            ) = {
+                let Some(previous) = projections.side_effect_for_run(run_id, &payload.ledger_key)
+                else {
+                    return Err(side_effect_projection_error(
+                        &payload.ledger_key,
+                        "missing side-effect projection",
+                    ));
+                };
+                require_side_effect_purpose(
+                    previous,
+                    &payload.ledger_key,
+                    &payload.ledger_purpose,
+                )?;
+                match payload.failure_phase {
+                    side_effect::FailurePhase::BeforeInvocationStarted => match previous.phase {
+                        SideEffectPhase::IntentPersisted { invocation_epoch } => {
+                            if payload.invocation_epoch != invocation_epoch {
+                                return Err(side_effect_projection_error(
+                                    &payload.ledger_key,
+                                    "failure invocation epoch does not match intent",
+                                ));
+                            }
+                            require_intent_context(
+                                previous,
+                                &payload.node_id,
+                                &payload.attempt_id,
+                                payload.invocation_epoch,
+                            )?;
+                        }
+                        SideEffectPhase::Claimed { .. }
+                        | SideEffectPhase::InvocationPrepared { .. } => {
+                            let claim = previous_claim(previous, &payload.ledger_key)?;
+                            require_claim_context(
+                                &payload.ledger_key,
+                                claim,
+                                ExpectedClaimContext {
+                                    node_id: &payload.node_id,
+                                    attempt_id: &payload.attempt_id,
+                                    invocation_epoch: payload.invocation_epoch,
+                                    claim_generation: claim.claim_generation,
+                                    claim_fencing_token: &claim.claim_fencing_token,
+                                    claim_owner: None,
+                                },
+                            )?;
+                        }
+                        _ => {
                             return Err(side_effect_projection_error(
                                 &payload.ledger_key,
-                                "failure invocation epoch does not match intent",
+                                "before-start failure requires intent, claim, or prepared phase",
                             ));
                         }
-                        require_intent_context(
-                            previous,
-                            &payload.node_id,
-                            &payload.attempt_id,
-                            payload.invocation_epoch,
-                        )?;
-                    }
-                    SideEffectPhase::Claimed { .. }
-                    | SideEffectPhase::InvocationPrepared { .. } => {
+                    },
+                    side_effect::FailurePhase::AfterNotSubmittedProven => {
+                        if !phase_matches_expected(&previous.phase, "not_submitted") {
+                            return Err(side_effect_projection_error(
+                                &payload.ledger_key,
+                                "after-not-submitted failure requires not-submitted phase",
+                            ));
+                        }
                         let claim = previous_claim(previous, &payload.ledger_key)?;
                         require_claim_context(
                             &payload.ledger_key,
@@ -6001,74 +6101,47 @@ pub mod v1 {
                                 invocation_epoch: payload.invocation_epoch,
                                 claim_generation: claim.claim_generation,
                                 claim_fencing_token: &claim.claim_fencing_token,
-                                claim_owner: None,
+                                claim_owner: Some(&claim.claim_owner),
                             },
                         )?;
                     }
-                    _ => {
-                        return Err(side_effect_projection_error(
-                            &payload.ledger_key,
-                            "before-start failure requires intent, claim, or prepared phase",
-                        ));
-                    }
-                },
-                side_effect::FailurePhase::AfterNotSubmittedProven => {
-                    if !phase_matches_expected(&previous.phase, "not_submitted") {
-                        return Err(side_effect_projection_error(
-                            &payload.ledger_key,
-                            "after-not-submitted failure requires not-submitted phase",
-                        ));
-                    }
-                    let claim = previous_claim(previous, &payload.ledger_key)?;
-                    require_claim_context(
-                        &payload.ledger_key,
-                        claim,
-                        ExpectedClaimContext {
-                            node_id: &payload.node_id,
-                            attempt_id: &payload.attempt_id,
-                            invocation_epoch: payload.invocation_epoch,
-                            claim_generation: claim.claim_generation,
-                            claim_fencing_token: &claim.claim_fencing_token,
-                            claim_owner: Some(&claim.claim_owner),
-                        },
-                    )?;
                 }
-            }
-            (
-                previous.run_id.clone(),
-                previous.ledger_purpose.clone(),
-                previous.intent.clone(),
-                previous.prepared_invocation.clone(),
-                previous.resource_key.clone(),
-                previous.submission.clone(),
-                previous.receipt.clone(),
-                previous.confirmation.clone(),
-                previous.resource_touched_set.clone(),
-                previous.claim.clone(),
-            )
-        };
-        projections.side_effects.insert(
-            SideEffectLedgerRef::new(run_id.clone(), payload.ledger_key.clone()),
-            SideEffectProjection {
-                run_id,
-                ledger_key: payload.ledger_key.clone(),
-                ledger_purpose,
-                event_id,
-                intent,
-                prepared_invocation,
-                resource_key,
-                submission,
-                receipt,
-                confirmation,
-                resource_touched_set,
-                claim,
-                phase: SideEffectPhase::Failed {
-                    invocation_epoch: payload.invocation_epoch,
-                    failure_phase: payload.failure_phase,
+                (
+                    previous.run_id.clone(),
+                    previous.ledger_purpose.clone(),
+                    previous.intent.clone(),
+                    previous.prepared_invocation.clone(),
+                    previous.resource_key.clone(),
+                    previous.submission.clone(),
+                    previous.receipt.clone(),
+                    previous.confirmation.clone(),
+                    previous.resource_touched_set.clone(),
+                    previous.claim.clone(),
+                )
+            };
+            projections.side_effects.insert(
+                SideEffectLedgerRef::new(run_id.clone(), payload.ledger_key.clone()),
+                SideEffectProjection {
+                    run_id,
+                    ledger_key: payload.ledger_key.clone(),
+                    ledger_purpose,
+                    event_id,
+                    intent,
+                    prepared_invocation,
+                    resource_key,
+                    submission,
+                    receipt,
+                    confirmation,
+                    resource_touched_set,
+                    claim,
+                    phase: SideEffectPhase::Failed {
+                        invocation_epoch: payload.invocation_epoch,
+                        failure_phase: payload.failure_phase,
+                    },
                 },
-            },
-        );
-        Ok(())
+            );
+            Ok(())
+        }
     }
 
     fn payload_json(payload: &KernelEventPayload) -> serde_json::Value {
