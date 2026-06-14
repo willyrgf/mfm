@@ -9,18 +9,21 @@ use mfm_ids::{
     SemanticTypeId,
 };
 use mfm_spec::v1::{MediaType, ResourceNamespace};
+use mfm_store::v1::codec::{
+    optional_obj, optional_str, parse_identity, required_bool, required_obj, required_str,
+    required_u32, required_u64,
+};
 use mfm_store::v1::{
     build_prepared_committed_batch, payload_from_json_value, prepared_commit_fingerprint,
     stage_prepared_typed_run_commit, ArtifactEvidenceRef, AsyncStoreFuture,
-    AsyncTypedRunEventStore, AttemptProjection, AttemptStatus, CellTerminalProjection, CommitKey,
-    CommitOrdinal, CommitOutcome, FactProjection, KernelEventEnvelope, LogicalEventKey,
+    AsyncTypedRunEventStore, AttemptProjection, AttemptStatus, CellTerminalProjection, CodecError,
+    CommitKey, CommitOrdinal, CommitOutcome, FactProjection, KernelEventEnvelope, LogicalEventKey,
     ManualResolutionProjection, PersistedKernelEventRecord, PreparedTypedCommit,
     ProjectionSnapshot, ProjectionSnapshotParts, PublicOutputProjection, ResourceLaneKey,
-    ResourceLaneProjection,
-    RetentionManifestProjection, RetentionProjection, RunCompletionProjection, RunState,
-    SagaEngagementProjection, SagaEngagementReason, SideEffectArtifactProjection,
-    SideEffectClaimProjection, SideEffectIntentProjection, SideEffectPhase, SideEffectProjection,
-    StoreError, StreamSeq, TypedCommitBase,
+    ResourceLaneProjection, RetentionManifestProjection, RetentionProjection,
+    RunCompletionProjection, RunState, SagaEngagementProjection, SagaEngagementReason,
+    SideEffectArtifactProjection, SideEffectClaimProjection, SideEffectIntentProjection,
+    SideEffectPhase, SideEffectProjection, StoreError, StreamSeq, TypedCommitBase,
 };
 use serde_json::Value;
 use tokio::sync::Mutex;
@@ -80,6 +83,13 @@ impl From<mfm_events::EventError> for PostgresTypedStoreError {
 impl From<mfm_spec::SpecError> for PostgresTypedStoreError {
     fn from(error: mfm_spec::SpecError) -> Self {
         Self::Store(StoreError::Identity(error.to_string()))
+    }
+}
+
+impl From<CodecError> for PostgresTypedStoreError {
+    fn from(error: CodecError) -> Self {
+        let (CodecError::Field(message) | CodecError::Identity(message)) = error;
+        Self::Corruption(message)
     }
 }
 
@@ -2267,74 +2277,15 @@ fn i64_to_positive_u64(value: i64, field: &'static str) -> Result<u64> {
     Ok(value)
 }
 
-fn parse_identity<T>(value: &str) -> Result<T>
-where
-    T: FromStr<Err = IdentityError>,
-{
-    value.parse().map_err(StoreError::from).map_err(Into::into)
-}
-
 fn parse_optional_identity<T>(value: Option<String>) -> Result<Option<T>>
 where
     T: FromStr<Err = IdentityError>,
 {
-    value.as_deref().map(parse_identity).transpose()
-}
-
-fn required_str<'a>(json: &'a Value, field: &'static str) -> Result<&'a str> {
-    json.get(field)
-        .and_then(Value::as_str)
-        .ok_or_else(|| PostgresTypedStoreError::Corruption(format!("missing string field {field}")))
-}
-
-fn optional_str<'a>(json: &'a Value, field: &'static str) -> Result<Option<&'a str>> {
-    match json.get(field) {
-        Some(Value::Null) | None => Ok(None),
-        Some(value) => value.as_str().map(Some).ok_or_else(|| {
-            PostgresTypedStoreError::Corruption(format!("field {field} was not a string"))
-        }),
-    }
-}
-
-fn required_obj<'a>(json: &'a Value, field: &'static str) -> Result<&'a Value> {
-    let value = json.get(field).ok_or_else(|| {
-        PostgresTypedStoreError::Corruption(format!("missing object field {field}"))
-    })?;
-    if value.is_object() {
-        Ok(value)
-    } else {
-        Err(PostgresTypedStoreError::Corruption(format!(
-            "field {field} was not an object"
-        )))
-    }
-}
-
-fn optional_obj<'a>(json: &'a Value, field: &'static str) -> Result<Option<&'a Value>> {
-    match json.get(field) {
-        Some(Value::Null) | None => Ok(None),
-        Some(value) if value.is_object() => Ok(Some(value)),
-        Some(_) => Err(PostgresTypedStoreError::Corruption(format!(
-            "field {field} was not an object"
-        ))),
-    }
-}
-
-fn required_u64(json: &Value, field: &'static str) -> Result<u64> {
-    json.get(field)
-        .and_then(Value::as_u64)
-        .ok_or_else(|| PostgresTypedStoreError::Corruption(format!("missing u64 field {field}")))
-}
-
-fn required_u32(json: &Value, field: &'static str) -> Result<u32> {
-    required_u64(json, field)?
-        .try_into()
-        .map_err(|_| PostgresTypedStoreError::Corruption(format!("{field} overflowed u32")))
-}
-
-fn required_bool(json: &Value, field: &'static str) -> Result<bool> {
-    json.get(field)
-        .and_then(Value::as_bool)
-        .ok_or_else(|| PostgresTypedStoreError::Corruption(format!("missing bool field {field}")))
+    value
+        .as_deref()
+        .map(parse_identity)
+        .transpose()
+        .map_err(Into::into)
 }
 
 #[cfg(all(test, feature = "parity-tests"))]

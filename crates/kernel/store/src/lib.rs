@@ -348,7 +348,9 @@ pub mod v1 {
             if value.is_object() {
                 Ok(value)
             } else {
-                Err(CodecError::Field(format!("field {field} was not an object")))
+                Err(CodecError::Field(format!(
+                    "field {field} was not an object"
+                )))
             }
         }
 
@@ -360,7 +362,9 @@ pub mod v1 {
             match json.get(field) {
                 Some(serde_json::Value::Null) | None => Ok(None),
                 Some(value) if value.is_object() => Ok(Some(value)),
-                Some(_) => Err(CodecError::Field(format!("field {field} was not an object"))),
+                Some(_) => Err(CodecError::Field(format!(
+                    "field {field} was not an object"
+                ))),
             }
         }
 
