@@ -6,7 +6,7 @@ use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
 
 use crate::artifacts::{artifact_role_name, staged_artifact_binding_kind, verify_artifact_bytes};
-use crate::commit::CompleteRunCommitValidation;
+use crate::commit::SealedTerminalCommitValidation;
 use crate::error::async_store_error;
 use crate::framework::{
     bootstrap_run_receipt_artifact, build_retention_manifest_artifact_with_producer,
@@ -2253,13 +2253,15 @@ fn validate_historical_complete_run_batch(
         media_type: spec::MediaType::new("application/json")?,
     };
 
-    validate_complete_run_commit_payload_set(
+    let completed_outcome = events::RunCompletionOutcome::Completed(Box::new(completion.clone()));
+    validate_sealed_terminal_commit_batch(
         commit,
-        CompleteRunCommitValidation {
+        SealedTerminalCommitValidation {
+            label: "CompleteRun",
             run_id,
             spec_hash: runtime_spec.spec_hash(),
-            completion: &completion,
-            completion_node_id: &completion_node.node_id,
+            outcome: &completed_outcome,
+            node_id: &completion_node.node_id,
             attempt_id: &produced.attempt_id,
             receipt_cell_id: &completion_node.output_cell,
             receipt_artifact_id: &receipt_artifact_id,
@@ -2347,173 +2349,83 @@ fn validate_historical_resolve_saga_terminal_batch(
         media_type: spec::MediaType::new("application/json")?,
     };
 
-    validate_resolve_saga_terminal_commit_payload_set(
+    validate_sealed_terminal_commit_batch(
         commit,
-        run_id,
-        runtime_spec.spec_hash(),
-        &outcome,
-        &resolve_node.node_id,
-        &produced.attempt_id,
-        &resolve_node.output_cell,
-        &receipt_artifact_id,
-        &receipt_digest,
-        &expected_receipt_ref,
+        SealedTerminalCommitValidation {
+            label: "ResolveSagaTerminal",
+            run_id,
+            spec_hash: runtime_spec.spec_hash(),
+            outcome: &outcome,
+            node_id: &resolve_node.node_id,
+            attempt_id: &produced.attempt_id,
+            receipt_cell_id: &resolve_node.output_cell,
+            receipt_artifact_id: &receipt_artifact_id,
+            receipt_digest: &receipt_digest,
+            expected_receipt_ref: &expected_receipt_ref,
+        },
     )
 }
 
-#[allow(clippy::too_many_arguments)]
-fn validate_resolve_saga_terminal_commit_payload_set(
+fn validate_sealed_terminal_commit_batch(
     commit: &[store::KernelEventEnvelope],
-    run_id: &RunId,
-    spec_hash: &SpecHash,
-    outcome: &events::RunCompletionOutcome,
-    resolve_node_id: &NodeId,
-    attempt_id: &AttemptId,
-    receipt_cell_id: &CellId,
-    receipt_artifact_id: &ArtifactId,
-    receipt_digest: &ContentDigest,
-    expected_receipt_ref: &events::ArtifactEvidenceRef,
+    expected: SealedTerminalCommitValidation<'_>,
 ) -> Result<()> {
-    if commit.len() != 5 {
-        return Err(RuntimeError::InvalidRunStream(
-            "ResolveSagaTerminal commit does not match the sealed framework batch".to_owned(),
-        ));
-    }
-    match commit[0].payload() {
-        events::KernelEventPayload::StateAttemptStarted(payload)
-            if payload.node_id == *resolve_node_id && payload.attempt_id == *attempt_id => {}
-        _ => {
-            return Err(RuntimeError::InvalidRunStream(
-                "ResolveSagaTerminal commit does not match the sealed framework batch".to_owned(),
-            ));
-        }
-    }
-    match commit[1].payload() {
-        events::KernelEventPayload::CellProduced(payload)
-            if payload.node_id == *resolve_node_id
-                && payload.attempt_id == *attempt_id
-                && payload.cell_id == *receipt_cell_id
-                && payload.artifact_id == *receipt_artifact_id
-                && payload.content_digest == *receipt_digest => {}
-        _ => {
-            return Err(RuntimeError::InvalidRunStream(
-                "ResolveSagaTerminal commit does not match the sealed framework batch".to_owned(),
-            ));
-        }
-    }
-    match commit[2].payload() {
-        events::KernelEventPayload::StateAttemptCompleted(payload)
-            if payload.node_id == *resolve_node_id
-                && payload.attempt_id == *attempt_id
-                && payload.output_cell_id == *receipt_cell_id => {}
-        _ => {
-            return Err(RuntimeError::InvalidRunStream(
-                "ResolveSagaTerminal commit does not match the sealed framework batch".to_owned(),
-            ));
-        }
-    }
-    match commit[3].payload() {
-        events::KernelEventPayload::ArtifactReferenced(payload)
-            if payload.node_id.as_ref() == Some(resolve_node_id)
-                && payload.attempt_id.as_ref() == Some(attempt_id)
-                && payload.artifact_ref == *expected_receipt_ref => {}
-        _ => {
-            return Err(RuntimeError::InvalidRunStream(
-                "ResolveSagaTerminal commit does not match the sealed framework batch".to_owned(),
-            ));
-        }
-    }
-    match commit[4].payload() {
-        events::KernelEventPayload::RunCompleted(payload)
-            if payload.run_id == *run_id
-                && payload.spec_hash == *spec_hash
-                && payload.outcome == *outcome =>
-        {
-            Ok(())
-        }
-        _ => Err(RuntimeError::InvalidRunStream(
-            "ResolveSagaTerminal commit does not match the sealed framework batch".to_owned(),
-        )),
-    }
-}
-
-fn validate_complete_run_commit_payload_set(
-    commit: &[store::KernelEventEnvelope],
-    expected: CompleteRunCommitValidation<'_>,
-) -> Result<()> {
-    let CompleteRunCommitValidation {
+    let SealedTerminalCommitValidation {
+        label,
         run_id,
         spec_hash,
-        completion,
-        completion_node_id,
+        outcome,
+        node_id,
         attempt_id,
         receipt_cell_id,
         receipt_artifact_id,
         receipt_digest,
         expected_receipt_ref,
     } = expected;
+    let mismatch = || {
+        RuntimeError::InvalidRunStream(format!(
+            "{label} commit does not match the sealed framework batch"
+        ))
+    };
     if commit.len() != 5 {
-        return Err(RuntimeError::InvalidRunStream(
-            "CompleteRun commit does not match the sealed framework batch".to_owned(),
-        ));
+        return Err(mismatch());
     }
     match commit[0].payload() {
         events::KernelEventPayload::StateAttemptStarted(payload)
-            if payload.node_id == *completion_node_id && payload.attempt_id == *attempt_id => {}
-        _ => {
-            return Err(RuntimeError::InvalidRunStream(
-                "CompleteRun commit does not match the sealed framework batch".to_owned(),
-            ));
-        }
+            if payload.node_id == *node_id && payload.attempt_id == *attempt_id => {}
+        _ => return Err(mismatch()),
     }
     match commit[1].payload() {
         events::KernelEventPayload::CellProduced(payload)
-            if payload.node_id == *completion_node_id
+            if payload.node_id == *node_id
                 && payload.attempt_id == *attempt_id
                 && payload.cell_id == *receipt_cell_id
                 && payload.artifact_id == *receipt_artifact_id
                 && payload.content_digest == *receipt_digest => {}
-        _ => {
-            return Err(RuntimeError::InvalidRunStream(
-                "CompleteRun commit does not match the sealed framework batch".to_owned(),
-            ));
-        }
+        _ => return Err(mismatch()),
     }
     match commit[2].payload() {
         events::KernelEventPayload::StateAttemptCompleted(payload)
-            if payload.node_id == *completion_node_id
+            if payload.node_id == *node_id
                 && payload.attempt_id == *attempt_id
                 && payload.output_cell_id == *receipt_cell_id => {}
-        _ => {
-            return Err(RuntimeError::InvalidRunStream(
-                "CompleteRun commit does not match the sealed framework batch".to_owned(),
-            ));
-        }
+        _ => return Err(mismatch()),
     }
     match commit[3].payload() {
         events::KernelEventPayload::ArtifactReferenced(payload)
-            if payload.node_id.as_ref() == Some(completion_node_id)
+            if payload.node_id.as_ref() == Some(node_id)
                 && payload.attempt_id.as_ref() == Some(attempt_id)
                 && payload.artifact_ref == *expected_receipt_ref => {}
-        _ => {
-            return Err(RuntimeError::InvalidRunStream(
-                "CompleteRun commit does not match the sealed framework batch".to_owned(),
-            ));
-        }
+        _ => return Err(mismatch()),
     }
     match commit[4].payload() {
         events::KernelEventPayload::RunCompleted(payload)
             if payload.run_id == *run_id
                 && payload.spec_hash == *spec_hash
-                && payload.outcome
-                    == events::RunCompletionOutcome::Completed(Box::new(completion.clone())) =>
-        {
-            Ok(())
-        }
-        _ => Err(RuntimeError::InvalidRunStream(
-            "CompleteRun commit does not match the sealed framework batch".to_owned(),
-        )),
+                && payload.outcome == *outcome => {}
+        _ => return Err(mismatch()),
     }
+    Ok(())
 }
 
 pub(crate) fn require_projected_attempt(

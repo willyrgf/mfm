@@ -89,11 +89,18 @@ pub(crate) struct RunnerOutputCommitInput<'a> {
     pub(crate) output: ErasedRunnerOutput,
 }
 
-pub(crate) struct CompleteRunCommitValidation<'a> {
+/// Validation input for a sealed terminal lifecycle commit batch.
+///
+/// `CompleteRun` and `ResolveSagaTerminal` both emit the same five-event sealed batch
+/// (`StateAttemptStarted`, `CellProduced`, `StateAttemptCompleted`, `ArtifactReferenced`,
+/// `RunCompleted`); they differ only in the committed completion outcome and the diagnostic
+/// label. A single validator over this input keeps the two terminal paths from drifting.
+pub(crate) struct SealedTerminalCommitValidation<'a> {
+    pub(crate) label: &'static str,
     pub(crate) run_id: &'a RunId,
     pub(crate) spec_hash: &'a SpecHash,
-    pub(crate) completion: &'a events::PublicOutputCompletionEvidence,
-    pub(crate) completion_node_id: &'a NodeId,
+    pub(crate) outcome: &'a events::RunCompletionOutcome,
+    pub(crate) node_id: &'a NodeId,
     pub(crate) attempt_id: &'a AttemptId,
     pub(crate) receipt_cell_id: &'a CellId,
     pub(crate) receipt_artifact_id: &'a ArtifactId,
