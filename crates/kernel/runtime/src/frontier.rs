@@ -140,7 +140,11 @@ fn next_forward_completion_node<'a>(
                     events::SideEffectLedgerPurpose::Forward
                 ) && matches!(
                     projection.phase,
-                    store::SideEffectPhase::InvocationStarted { .. }
+                    store::SideEffectPhase::IntentPersisted { .. }
+                        | store::SideEffectPhase::Claimed { .. }
+                        | store::SideEffectPhase::InvocationPrepared { .. }
+                        | store::SideEffectPhase::InvocationStarted { .. }
+                        | store::SideEffectPhase::NotSubmittedProven { .. }
                         | store::SideEffectPhase::SubmissionObserved { .. }
                         | store::SideEffectPhase::SubmissionUnknown { .. }
                         | store::SideEffectPhase::ReceiptObserved { .. }
@@ -223,6 +227,13 @@ fn next_saga_terminal_node<'a>(
             | store::RunMode::ManuallyResolved
             | store::RunMode::FailedWithoutAcdcClaim
     ) {
+        return Ok(None);
+    }
+    if view
+        .projections
+        .attempts()
+        .any(|(_, attempt)| matches!(attempt.status, store::AttemptStatus::Started { .. }))
+    {
         return Ok(None);
     }
     let node = certified_resolve_saga_terminal_node(runtime_spec)?;

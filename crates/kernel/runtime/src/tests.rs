@@ -4686,6 +4686,206 @@ async fn runtime_rejects_touched_set_confirmation_without_exact_claim() {
 }
 
 #[tokio::test]
+async fn runtime_fails_pre_boundary_forward_attempt_before_saga_terminal() {
+    let fixture = fixture_with_independent_second_node_and_first_side_effect_state();
+    let forward_node = node_by_output(&fixture, &fixture.cell_a).clone();
+    let failing_node = node_by_output(&fixture, &fixture.cell_b).clone();
+    let scheduler = test_scheduler(registered_first_side_effect_runners_with(
+        &fixture,
+        FailActiveSideEffectAfterSagaRunner::new(&fixture),
+    ));
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+    let forward_attempt = attempt_id(
+        &fixture.run_id,
+        fixture.runtime_spec.spec_hash(),
+        &forward_node.node_id,
+        1,
+    )
+    .expect("forward attempt id");
+
+    assert_eq!(
+        scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("prepare forward side effect"),
+        SchedulerStatus::Advanced
+    );
+    assert!(matches!(
+        side_effect_projection_for_attempt(
+            store.projection_snapshot(),
+            &forward_node,
+            &forward_attempt
+        )
+        .expect("side-effect lookup")
+        .expect("side-effect projection")
+        .phase,
+        store::SideEffectPhase::InvocationPrepared { .. }
+    ));
+
+    let failing_attempt = append_attempt_start(&mut store, &fixture, &failing_node, 1);
+    append_attempt_failure(&mut store, &fixture, &failing_node, &failing_attempt, false);
+    assert_eq!(
+        store
+            .projection_snapshot()
+            .derive_saga_projection(&fixture.run_id, &fixture.runtime_spec.spec().saga)
+            .run_mode,
+        store::RunMode::FailedWithoutAcdcClaim
+    );
+
+    assert_eq!(
+        scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("fail active pre-boundary forward attempt"),
+        SchedulerStatus::Advanced
+    );
+    assert!(matches!(
+        side_effect_projection_for_attempt(
+            store.projection_snapshot(),
+            &forward_node,
+            &forward_attempt
+        )
+        .expect("side-effect lookup")
+        .expect("side-effect projection")
+        .phase,
+        store::SideEffectPhase::Failed {
+            failure_phase: events::side_effect::FailurePhase::BeforeInvocationStarted,
+            ..
+        }
+    ));
+    assert!(matches!(
+        store
+            .projection_snapshot()
+            .attempt(&forward_node.node_id, &forward_attempt)
+            .expect("forward attempt")
+            .status,
+        store::AttemptStatus::Failed { .. }
+    ));
+    assert!(store
+        .projection_snapshot()
+        .run_completion(&fixture.run_id)
+        .is_none());
+
+    assert_eq!(
+        scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("resolve saga terminal after active attempt closed"),
+        SchedulerStatus::Advanced
+    );
+    assert!(matches!(
+        store
+            .projection_snapshot()
+            .run_completion(&fixture.run_id)
+            .expect("run completion")
+            .outcome,
+        events::RunCompletionOutcome::FailedWithoutAcdcClaim
+    ));
+}
+
+#[tokio::test]
+async fn runtime_fails_not_submitted_forward_attempt_before_saga_terminal() {
+    let fixture = fixture_with_independent_second_node_and_first_side_effect_state();
+    let forward_node = node_by_output(&fixture, &fixture.cell_a).clone();
+    let failing_node = node_by_output(&fixture, &fixture.cell_b).clone();
+    let scheduler = test_scheduler(registered_first_side_effect_runners_with(
+        &fixture,
+        FailActiveSideEffectAfterSagaRunner::new(&fixture),
+    ));
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+    let forward_attempt = attempt_id(
+        &fixture.run_id,
+        fixture.runtime_spec.spec_hash(),
+        &forward_node.node_id,
+        1,
+    )
+    .expect("forward attempt id");
+
+    for _ in 0..2 {
+        assert_eq!(
+            scheduler
+                .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+                .await
+                .expect("advance forward side effect before not-submitted proof"),
+            SchedulerStatus::Advanced
+        );
+    }
+    append_not_submitted_proven(&mut store, &fixture, &forward_node, &forward_attempt, 1);
+    assert!(matches!(
+        side_effect_projection_for_attempt(
+            store.projection_snapshot(),
+            &forward_node,
+            &forward_attempt
+        )
+        .expect("side-effect lookup")
+        .expect("side-effect projection")
+        .phase,
+        store::SideEffectPhase::NotSubmittedProven { .. }
+    ));
+
+    let failing_attempt = append_attempt_start(&mut store, &fixture, &failing_node, 1);
+    append_attempt_failure(&mut store, &fixture, &failing_node, &failing_attempt, false);
+
+    assert_eq!(
+        scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("fail active not-submitted forward attempt"),
+        SchedulerStatus::Advanced
+    );
+    assert!(matches!(
+        side_effect_projection_for_attempt(
+            store.projection_snapshot(),
+            &forward_node,
+            &forward_attempt
+        )
+        .expect("side-effect lookup")
+        .expect("side-effect projection")
+        .phase,
+        store::SideEffectPhase::Failed {
+            failure_phase: events::side_effect::FailurePhase::AfterNotSubmittedProven,
+            ..
+        }
+    ));
+    assert!(store
+        .projection_snapshot()
+        .run_completion(&fixture.run_id)
+        .is_none());
+
+    assert_eq!(
+        scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("resolve saga terminal after not-submitted attempt closed"),
+        SchedulerStatus::Advanced
+    );
+    assert!(matches!(
+        store
+            .projection_snapshot()
+            .run_completion(&fixture.run_id)
+            .expect("run completion")
+            .outcome,
+        events::RunCompletionOutcome::FailedWithoutAcdcClaim
+    ));
+}
+
+#[tokio::test]
 async fn runtime_remediates_confirmed_forward_ledgers_in_reverse_confirmation_order() {
     let fixture = fixture_with_two_side_effects_and_failing_tail();
     let forward_a = node_by_output(&fixture, &fixture.cell_a).clone();
@@ -6762,6 +6962,72 @@ impl ErasedNodeRunner for TouchedSetSideEffectRunner {
             }
             Ok(output)
         })
+    }
+}
+
+struct FailActiveSideEffectAfterSagaRunner {
+    inner: DeterministicSideEffectRunner,
+}
+
+impl FailActiveSideEffectAfterSagaRunner {
+    fn new(fixture: &Fixture) -> Self {
+        Self {
+            inner: DeterministicSideEffectRunner::new(fixture),
+        }
+    }
+}
+
+impl ErasedNodeRunner for FailActiveSideEffectAfterSagaRunner {
+    fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
+        Box::pin(async move {
+            let saga = ctx
+                .projections()
+                .derive_saga_projection(ctx.run_id(), &ctx.runtime_spec().spec().saga);
+            let projected = side_effect_projection_for_attempt(
+                ctx.projections(),
+                ctx.node(),
+                ctx.attempt_id(),
+            )?
+            .map(|projection| (projection.ledger_key.clone(), projection.phase.clone()));
+            if saga.engagement.is_some() {
+                if let Some((ledger, phase)) = projected {
+                    if let Some((invocation_epoch, failure_phase)) =
+                        saga_closure_failure_for_phase(&phase)
+                    {
+                        return Ok(ErasedRunnerOutput::new(vec![side_effect_failed(
+                            &ctx,
+                            ledger,
+                            invocation_epoch,
+                            failure_phase,
+                            false,
+                        )]));
+                    }
+                }
+            }
+            self.inner.run_erased(ctx).await
+        })
+    }
+}
+
+fn saga_closure_failure_for_phase(
+    phase: &store::SideEffectPhase,
+) -> Option<(u32, events::side_effect::FailurePhase)> {
+    match phase {
+        store::SideEffectPhase::IntentPersisted { invocation_epoch }
+        | store::SideEffectPhase::Claimed {
+            invocation_epoch, ..
+        }
+        | store::SideEffectPhase::InvocationPrepared {
+            invocation_epoch, ..
+        } => Some((
+            *invocation_epoch,
+            events::side_effect::FailurePhase::BeforeInvocationStarted,
+        )),
+        store::SideEffectPhase::NotSubmittedProven { invocation_epoch } => Some((
+            *invocation_epoch,
+            events::side_effect::FailurePhase::AfterNotSubmittedProven,
+        )),
+        _ => None,
     }
 }
 
@@ -11406,6 +11672,26 @@ fn side_effect_confirmation_observed(
         confirmation_artifact_id: artifact_id,
         replay_verifier_id: events::ReplayVerifierId::new("verifier-1").expect("verifier"),
         resource_touched_set: None,
+    })
+}
+
+fn side_effect_failed(
+    ctx: &ErasedRunCtx<'_>,
+    ledger: events::SideEffectLedgerKey,
+    invocation_epoch: u32,
+    failure_phase: events::side_effect::FailurePhase,
+    retryable: bool,
+) -> RunnerEventPayload {
+    RunnerEventPayload::SideEffectFailed(events::side_effect::Failed {
+        spec_hash: ctx.spec_hash().clone(),
+        node_id: ctx.node().node_id.clone(),
+        attempt_id: ctx.attempt_id().clone(),
+        ledger_key: ledger,
+        ledger_purpose: side_effect_ledger_purpose_for_ctx(ctx),
+        invocation_epoch,
+        failure_phase,
+        retryable,
+        error: side_effect_error(retryable),
     })
 }
 

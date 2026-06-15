@@ -793,10 +793,16 @@ pub(crate) fn validate_side_effect_resume_output(
                 | events::KernelEventPayload::SideEffectAmbiguous(_)
         )
     });
+    let terminal_failure = payloads.iter().find_map(|payload| match payload {
+        events::KernelEventPayload::SideEffectFailed(payload) => Some(payload),
+        _ => None,
+    });
+    let closes_projection =
+        validate_side_effect_resume_failure(node, &projection.phase, terminal_failure)?;
 
     match projection.phase {
         store::SideEffectPhase::Claimed { .. } => {
-            if !has_takeover && !has_invocation_prepared {
+            if !closes_projection && !has_takeover && !has_invocation_prepared {
                 return Err(RuntimeError::InvalidRunnerOutput(format!(
                     "side-effect node {} resumed claimed ledger {} without takeover or prepared invocation",
                     node.node_id, projection.ledger_key
@@ -804,7 +810,7 @@ pub(crate) fn validate_side_effect_resume_output(
             }
         }
         store::SideEffectPhase::InvocationPrepared { .. } => {
-            if !has_takeover && !has_invocation_started {
+            if !closes_projection && !has_takeover && !has_invocation_started {
                 return Err(RuntimeError::InvalidRunnerOutput(format!(
                     "side-effect node {} resumed prepared ledger {} without takeover or invocation start",
                     node.node_id, projection.ledger_key
@@ -812,7 +818,7 @@ pub(crate) fn validate_side_effect_resume_output(
             }
         }
         store::SideEffectPhase::NotSubmittedProven { .. } => {
-            if !has_claim {
+            if !closes_projection && !has_claim {
                 return Err(RuntimeError::InvalidRunnerOutput(format!(
                     "side-effect node {} resumed not-submitted ledger {} without next-epoch claim",
                     node.node_id, projection.ledger_key
@@ -858,4 +864,34 @@ pub(crate) fn validate_side_effect_resume_output(
     }
 
     Ok(())
+}
+
+fn validate_side_effect_resume_failure(
+    node: &spec::NodeSpec,
+    phase: &store::SideEffectPhase,
+    failure: Option<&events::side_effect::Failed>,
+) -> Result<bool> {
+    let Some(failure) = failure else {
+        return Ok(false);
+    };
+    let failure_matches_phase = matches!(
+        (phase, failure.failure_phase),
+        (
+            store::SideEffectPhase::IntentPersisted { .. }
+                | store::SideEffectPhase::Claimed { .. }
+                | store::SideEffectPhase::InvocationPrepared { .. },
+            events::side_effect::FailurePhase::BeforeInvocationStarted
+        ) | (
+            store::SideEffectPhase::NotSubmittedProven { .. },
+            events::side_effect::FailurePhase::AfterNotSubmittedProven
+        )
+    );
+    if failure_matches_phase {
+        Ok(true)
+    } else {
+        Err(RuntimeError::InvalidRunnerOutput(format!(
+            "side-effect node {} returned terminal failure outside a failure-admissible ledger phase",
+            node.node_id
+        )))
+    }
 }
