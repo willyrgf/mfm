@@ -7,7 +7,9 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 hex = { workspace = true }
+alloy-primitives = { workspace = true, features = ["k256"] }
 mfm-canonical = { path = "../canonical", version = "0.1.0" }
+mfm-evm-signing = { path = "../../evm-signing", version = "0.1.0" }
 mfm-events = { path = "../events", version = "0.1.0" }
 mfm-ids = { path = "../ids", version = "0.1.0" }
 mfm-signing = { path = "../../signing", version = "0.1.0" }

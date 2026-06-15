@@ -18,10 +18,13 @@ path = "src/lib.rs"
 mfm-capabilities = { path = "../capabilities" }
 mfm-events = { path = "../events" }
 mfm-ids = { path = "../ids" }
+mfm-manual-auth = { path = "../manual-auth" }
 mfm-runtime = { path = "../runtime" }
 mfm-spec = { path = "../spec" }
 mfm-store = { path = "../store" }
 
 [dev-dependencies]
 mfm-certify = { path = "../certify" }
+mfm-signing = { path = "../../signing" }
+mfm_core = { path = "../../core" }
 trybuild = "1.0"

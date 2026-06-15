@@ -17,6 +17,11 @@ pub mod v1 {
         AdapterKind, AdapterVersion, ArtifactId, AttemptId, CapabilityKind, CapabilityVersion,
         ContentDigest, NodeId, SchemaId, SpecHash,
     };
+    use mfm_manual_auth::{
+        manual_authorization_proof_schema_id, verify_builtin_manual_resolution_authorization,
+        ManualResolutionAuthorizationClaim, ManualResolutionAuthorizationProof,
+        ManualResolutionEvidenceRef,
+    };
     use mfm_spec::v1::{self as spec, CanonicalizerIdentity, HashedSpecEnvelope};
     use mfm_spec::SpecError;
     use mfm_store::v1::{
@@ -68,6 +73,15 @@ pub mod v1 {
     impl From<store::StoreError> for ReplayError {
         fn from(error: store::StoreError) -> Self {
             Self::new(ReplayErrorKind::InvalidRunStream, error.to_string())
+        }
+    }
+
+    impl From<mfm_runtime::RuntimeError> for ReplayError {
+        fn from(error: mfm_runtime::RuntimeError) -> Self {
+            Self::new(
+                ReplayErrorKind::CertifiedEvidenceMismatch,
+                error.to_string(),
+            )
         }
     }
 
@@ -150,6 +164,7 @@ pub mod v1 {
         runner_executables: Vec<events::ExecutableIdentity>,
         adapter_executables: Vec<events::ExecutableIdentity>,
         artifact_evidence: Vec<StoredArtifactEvidenceRef>,
+        artifact_bytes: BTreeMap<ArtifactId, Vec<u8>>,
     }
 
     impl ReplayReadAuthority {
@@ -160,6 +175,21 @@ pub mod v1 {
             verified_stream: &mfm_runtime::VerifiedRunStream,
             artifact_evidence: Vec<StoredArtifactEvidenceRef>,
         ) -> Result<Self> {
+            Self::from_verified_run_stream_with_artifacts(
+                runtime_spec,
+                verified_stream,
+                artifact_evidence,
+                Vec::new(),
+            )
+        }
+
+        /// Mints replay read authority with retained artifact bytes for proof-bearing artifacts.
+        pub fn from_verified_run_stream_with_artifacts(
+            runtime_spec: &mfm_runtime::CertifiedRuntimeSpec,
+            verified_stream: &mfm_runtime::VerifiedRunStream,
+            artifact_evidence: Vec<StoredArtifactEvidenceRef>,
+            artifact_bytes: Vec<ReplayArtifactBytes>,
+        ) -> Result<Self> {
             if runtime_spec.spec_hash() != verified_stream.spec_hash() {
                 return Err(ReplayError::new(
                     ReplayErrorKind::SpecHashMismatch,
@@ -168,6 +198,7 @@ pub mod v1 {
             }
             let run_started = run_started_payload(verified_stream.events())?;
             let artifacts = artifact_map(artifact_evidence.clone())?;
+            let artifact_bytes = artifact_bytes_map(artifact_bytes)?;
             verify_replay_artifact_authority(verified_stream, &artifacts)?;
             Ok(Self {
                 certified_spec: runtime_spec.envelope().clone(),
@@ -182,8 +213,18 @@ pub mod v1 {
                 runner_executables: run_started.runner_executables,
                 adapter_executables: run_started.adapter_executables,
                 artifact_evidence,
+                artifact_bytes,
             })
         }
+    }
+
+    /// Retained artifact bytes supplied to replay for proof-bearing artifacts.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct ReplayArtifactBytes {
+        /// Artifact id these bytes materialize.
+        pub artifact_id: ArtifactId,
+        /// Artifact content bytes.
+        pub bytes: Vec<u8>,
     }
 
     /// Request for replaying a previously recorded read fact.
@@ -369,6 +410,7 @@ pub mod v1 {
         run_id: events::RunStarted,
         projection: ProjectionSnapshot,
         retained_artifacts: BTreeMap<ArtifactId, StoredArtifactEvidenceRef>,
+        artifact_bytes: BTreeMap<ArtifactId, Vec<u8>>,
         artifacts: BTreeMap<ArtifactId, StoredArtifactEvidenceRef>,
         facts: BTreeMap<FactKey, events::FactRecorded>,
         intents: BTreeMap<events::SideEffectLedgerKey, side_effect::IntentPersisted>,
@@ -422,6 +464,7 @@ pub mod v1 {
                 run_id: run_started,
                 projection,
                 retained_artifacts,
+                artifact_bytes: authority.artifact_bytes.clone(),
                 artifacts: BTreeMap::new(),
                 facts: BTreeMap::new(),
                 intents: BTreeMap::new(),
@@ -903,7 +946,7 @@ pub mod v1 {
                         | events::RunCompletionOutcome::FailedWithoutAcdcClaim => {}
                     },
                     KernelEventPayload::ManualResolutionRecorded(payload) => {
-                        self.verify_manual_resolution_against_spec(payload)?;
+                        self.verify_manual_resolution_against_spec(envelope, payload)?;
                         self.authorize_event_artifacts(envelope.payload())?;
                     }
                     KernelEventPayload::RetentionManifestProjected(_) => {
@@ -1359,6 +1402,7 @@ pub mod v1 {
 
         fn verify_manual_resolution_against_spec(
             &self,
+            envelope: &KernelEventEnvelope,
             payload: &events::ManualResolutionRecorded,
         ) -> Result<()> {
             let manual = certified_manual_resolution_spec(&self.certified_spec.spec.saga)
@@ -1372,15 +1416,25 @@ pub mod v1 {
                     "manual resolution evidence schema does not match certified policy",
                 ));
             }
+            let authorization_schema_id =
+                manual_authorization_proof_schema_id().map_err(|error| {
+                    ReplayError::new(
+                        ReplayErrorKind::CertifiedEvidenceMismatch,
+                        error.to_string(),
+                    )
+                })?;
+            if payload.authorization_schema_id != authorization_schema_id {
+                return Err(certified_evidence_mismatch(
+                    "manual resolution authorization schema does not match certified policy",
+                ));
+            }
             let manual_start = self
                 .stream
                 .iter()
                 .position(|event| {
-                    matches!(
-                        event.payload(),
-                        KernelEventPayload::ManualResolutionRecorded(candidate)
-                            if candidate == payload
-                    )
+                    event.seq() == envelope.seq()
+                        && event.ordinal() == envelope.ordinal()
+                        && event.event_id() == envelope.event_id()
                 })
                 .ok_or_else(|| {
                     ReplayError::new(
@@ -1403,6 +1457,109 @@ pub mod v1 {
                         error.to_string(),
                     )
                 })?;
+            let prefix_saga = prefix_projection
+                .derive_saga_projection(&payload.run_id, &self.certified_spec.spec.saga);
+            let block_reason = prefix_saga.manual_block_reason.ok_or_else(|| {
+                certified_evidence_mismatch("manual resolution prefix lacks block reason")
+            })?;
+            let evidence_artifact = self
+                .retained_artifacts
+                .get(&payload.evidence_artifact_id)
+                .ok_or_else(|| {
+                    ReplayError::new(
+                        ReplayErrorKind::ArtifactMissing,
+                        format!(
+                            "missing manual resolution evidence artifact {}",
+                            payload.evidence_artifact_id
+                        ),
+                    )
+                })?;
+            verify_artifact_fields(
+                evidence_artifact,
+                &payload.evidence_hash,
+                Some(&payload.evidence_schema_id),
+                ArtifactRole::ManualResolutionEvidence,
+                None,
+            )?;
+            let authorization_artifact = self
+                .retained_artifacts
+                .get(&payload.authorization_artifact_id)
+                .ok_or_else(|| {
+                    ReplayError::new(
+                        ReplayErrorKind::ArtifactMissing,
+                        format!(
+                            "missing manual resolution authorization artifact {}",
+                            payload.authorization_artifact_id
+                        ),
+                    )
+                })?;
+            verify_artifact_fields(
+                authorization_artifact,
+                &payload.authorization_hash,
+                Some(&payload.authorization_schema_id),
+                ArtifactRole::ManualResolutionAuthorization,
+                None,
+            )?;
+            let proof_bytes = self
+                .artifact_bytes
+                .get(&payload.authorization_artifact_id)
+                .ok_or_else(|| {
+                    ReplayError::new(
+                        ReplayErrorKind::ArtifactMissing,
+                        format!(
+                            "missing manual resolution authorization artifact bytes {}",
+                            payload.authorization_artifact_id
+                        ),
+                    )
+                })?;
+            let proof = ManualResolutionAuthorizationProof::from_json_slice(proof_bytes).map_err(
+                |error| {
+                    ReplayError::new(
+                        ReplayErrorKind::CertifiedEvidenceMismatch,
+                        format!("manual authorization proof artifact failed to parse: {error}"),
+                    )
+                },
+            )?;
+            if proof.content_digest().map_err(|error| {
+                ReplayError::new(
+                    ReplayErrorKind::CertifiedEvidenceMismatch,
+                    format!("manual authorization proof artifact failed to hash: {error}"),
+                )
+            })? != payload.authorization_hash
+            {
+                return Err(certified_evidence_mismatch(
+                    "manual authorization proof artifact digest does not match event",
+                ));
+            }
+            let expected_claim = ManualResolutionAuthorizationClaim {
+                run_id: payload.run_id.clone(),
+                spec_hash: payload.spec_hash.clone(),
+                expected_next_seq: envelope.seq().as_u64(),
+                stream_prefix_digest: mfm_runtime::manual_resolution_stream_prefix_digest(
+                    &self.stream[..manual_start],
+                )?,
+                manual_block_reason: mfm_runtime::manual_resolution_block_reason(block_reason),
+                unresolved_obligations_digest: mfm_runtime::unresolved_manual_obligations_digest(
+                    &prefix_saga,
+                )?,
+                outcome: payload.outcome,
+                evidence: ManualResolutionEvidenceRef {
+                    schema_id: payload.evidence_schema_id.clone(),
+                    content_hash: payload.evidence_hash.clone(),
+                    artifact_id: payload.evidence_artifact_id.clone(),
+                },
+            };
+            verify_builtin_manual_resolution_authorization(
+                &manual.authorization,
+                expected_claim,
+                proof,
+            )
+            .map_err(|error| {
+                ReplayError::new(
+                    ReplayErrorKind::CertifiedEvidenceMismatch,
+                    format!("manual authorization proof failed verification: {error}"),
+                )
+            })?;
             Ok(())
         }
 
@@ -1858,6 +2015,27 @@ pub mod v1 {
         Ok(map)
     }
 
+    fn artifact_bytes_map(
+        artifacts: Vec<ReplayArtifactBytes>,
+    ) -> Result<BTreeMap<ArtifactId, Vec<u8>>> {
+        let mut map = BTreeMap::new();
+        for artifact in artifacts {
+            if map
+                .insert(artifact.artifact_id.clone(), artifact.bytes)
+                .is_some()
+            {
+                return Err(ReplayError::new(
+                    ReplayErrorKind::ArtifactMismatch,
+                    format!(
+                        "conflicting retained artifact bytes for {}",
+                        artifact.artifact_id
+                    ),
+                ));
+            }
+        }
+        Ok(map)
+    }
+
     fn verify_replay_artifact_authority(
         verified_stream: &mfm_runtime::VerifiedRunStream,
         artifacts: &BTreeMap<ArtifactId, StoredArtifactEvidenceRef>,
@@ -2258,11 +2436,17 @@ pub mod v1 {
     mod tests {
         use super::*;
         use mfm_capabilities::{CapabilityDescriptor, CapabilityRole, CapabilitySetDescriptor};
+        use mfm_core::crypto::EthereumPrivateKey;
         use mfm_ids::{
             DescriptorId, DigestAlgorithm, DigestBytes, EffectKind, EffectVersion, EventId,
             LoweringVersion, RunId, ScopeId, SeedId, SemanticTypeId, SpecVersion, StateKind,
             StateVersion,
         };
+        use mfm_manual_auth::{
+            ManualResolutionAuthorizationClaim, ManualResolutionAuthorizationProof,
+            ManualResolutionAuthorizationSignature, ManualResolutionEvidenceRef,
+        };
+        use mfm_signing::SignatureBytes;
         use mfm_store::v1::{
             build_committed_batch, CommitKey, CommitPreconditions, InMemoryTypedRunStore,
             PreparedTypedCommit, RequiredRunState, StreamSeq, TypedCommitRequest,
@@ -3156,6 +3340,153 @@ pub mod v1 {
         }
 
         #[test]
+        fn replay_construction_accepts_valid_signed_manual_resolution() {
+            let signed = signed_manual_resolution_case(|_| {}, |_| {}, |_| {}, |_, _| {});
+
+            let broker = ReplayBroker::from_validated_parts(
+                signed.fixture.authority_for_stream_artifacts_and_bytes(
+                    &signed.stream,
+                    signed.artifacts,
+                    signed.artifact_bytes,
+                ),
+            )
+            .expect("valid signed manual resolution replay");
+            let saga = broker
+                .projection_snapshot()
+                .derive_saga_projection(&signed.run_id, &signed.fixture.envelope.spec.saga);
+            assert_eq!(saga.run_mode, store::RunMode::ManuallyResolved);
+        }
+
+        #[test]
+        fn replay_construction_rejects_manual_authorization_wrong_outcome() {
+            let signed = signed_manual_resolution_case(
+                |_| {},
+                |_| {},
+                |event| {
+                    event.outcome = events::ManualResolutionOutcome::FailWithoutAcdcClaim;
+                },
+                |_, _| {},
+            );
+
+            assert_eq!(
+                ReplayBroker::from_validated_parts(
+                    signed.fixture.authority_for_stream_artifacts_and_bytes(
+                        &signed.stream,
+                        signed.artifacts,
+                        signed.artifact_bytes,
+                    ),
+                )
+                .expect_err("manual outcome mismatch")
+                .kind,
+                ReplayErrorKind::CertifiedEvidenceMismatch
+            );
+        }
+
+        #[test]
+        fn replay_construction_rejects_manual_authorization_wrong_prefix() {
+            let signed = signed_manual_resolution_case(
+                |claim| {
+                    claim.stream_prefix_digest = content(0xdd);
+                },
+                |_| {},
+                |_| {},
+                |_, _| {},
+            );
+
+            assert_eq!(
+                ReplayBroker::from_validated_parts(
+                    signed.fixture.authority_for_stream_artifacts_and_bytes(
+                        &signed.stream,
+                        signed.artifacts,
+                        signed.artifact_bytes,
+                    ),
+                )
+                .expect_err("manual prefix mismatch")
+                .kind,
+                ReplayErrorKind::CertifiedEvidenceMismatch
+            );
+        }
+
+        #[test]
+        fn replay_construction_rejects_manual_authorization_invalid_signature() {
+            let signed = signed_manual_resolution_case(
+                |_| {},
+                |signature| {
+                    signature[0] ^= 0x80;
+                },
+                |_| {},
+                |_, _| {},
+            );
+
+            assert_eq!(
+                ReplayBroker::from_validated_parts(
+                    signed.fixture.authority_for_stream_artifacts_and_bytes(
+                        &signed.stream,
+                        signed.artifacts,
+                        signed.artifact_bytes,
+                    ),
+                )
+                .expect_err("manual invalid signature")
+                .kind,
+                ReplayErrorKind::CertifiedEvidenceMismatch
+            );
+        }
+
+        #[test]
+        fn replay_construction_rejects_missing_manual_authorization_artifact_bytes() {
+            let signed = signed_manual_resolution_case(
+                |_| {},
+                |_| {},
+                |_| {},
+                |_, artifact_bytes| {
+                    artifact_bytes.clear();
+                },
+            );
+
+            assert_eq!(
+                ReplayBroker::from_validated_parts(
+                    signed.fixture.authority_for_stream_artifacts_and_bytes(
+                        &signed.stream,
+                        signed.artifacts,
+                        signed.artifact_bytes,
+                    ),
+                )
+                .expect_err("missing manual authorization bytes")
+                .kind,
+                ReplayErrorKind::ArtifactMissing
+            );
+        }
+
+        #[test]
+        fn replay_construction_rejects_manual_signer_outside_authority() {
+            let signed = signed_manual_resolution_case_with_proof_edit(
+                |_| {},
+                |_| {},
+                |proof| {
+                    proof.signatures[0].public_identity = spec::OperatorPublicIdentity::new(
+                        "0x0000000000000000000000000000000000000000",
+                    )
+                    .expect("operator public identity");
+                },
+                |_| {},
+                |_, _| {},
+            );
+
+            assert_eq!(
+                ReplayBroker::from_validated_parts(
+                    signed.fixture.authority_for_stream_artifacts_and_bytes(
+                        &signed.stream,
+                        signed.artifacts,
+                        signed.artifact_bytes,
+                    ),
+                )
+                .expect_err("manual signer outside authority")
+                .kind,
+                ReplayErrorKind::CertifiedEvidenceMismatch
+            );
+        }
+
+        #[test]
         fn replay_rejects_exclusive_ledger_without_recorded_key() {
             let fixture = Fixture::with_resource_claim(exclusive_resource_claim());
 
@@ -3346,6 +3677,185 @@ pub mod v1 {
                         "confirmation verifier rejected recorded evidence",
                     ))
                 }
+            }
+        }
+
+        struct SignedManualResolutionCase {
+            fixture: Fixture,
+            run_id: RunId,
+            stream: Vec<KernelEventEnvelope>,
+            artifacts: Vec<StoredArtifactEvidenceRef>,
+            artifact_bytes: Vec<ReplayArtifactBytes>,
+        }
+
+        fn signed_manual_resolution_case(
+            edit_claim: impl FnOnce(&mut ManualResolutionAuthorizationClaim),
+            edit_signature: impl FnOnce(&mut Vec<u8>),
+            edit_event: impl FnOnce(&mut events::ManualResolutionRecorded),
+            edit_materials: impl FnOnce(
+                &mut Vec<StoredArtifactEvidenceRef>,
+                &mut Vec<ReplayArtifactBytes>,
+            ),
+        ) -> SignedManualResolutionCase {
+            signed_manual_resolution_case_with_proof_edit(
+                edit_claim,
+                edit_signature,
+                |_| {},
+                edit_event,
+                edit_materials,
+            )
+        }
+
+        fn signed_manual_resolution_case_with_proof_edit(
+            edit_claim: impl FnOnce(&mut ManualResolutionAuthorizationClaim),
+            edit_signature: impl FnOnce(&mut Vec<u8>),
+            edit_proof: impl FnOnce(&mut ManualResolutionAuthorizationProof),
+            edit_event: impl FnOnce(&mut events::ManualResolutionRecorded),
+            edit_materials: impl FnOnce(
+                &mut Vec<StoredArtifactEvidenceRef>,
+                &mut Vec<ReplayArtifactBytes>,
+            ),
+        ) -> SignedManualResolutionCase {
+            let key = EthereumPrivateKey::from_hex_secret(
+                "0x0000000000000000000000000000000000000000000000000000000000000001",
+            )
+            .expect("test key");
+            let operator_public_identity = format!("{:?}", key.address().expect("address"));
+            let evidence_schema = schema("mfm.test.manual_evidence", 0xd0);
+            let fixture = Fixture::with_saga_policy(spec::SagaPolicySpec::ManualResolution {
+                manual: spec::ManualResolutionEvidenceSpec {
+                    evidence_schema: evidence_schema.clone(),
+                    authorization: manual_authorization_with_public_identity(
+                        0xd1,
+                        operator_public_identity,
+                    ),
+                },
+            });
+            let mut stream = fixture.stream.clone();
+            let run_id = stream[0].run_id().clone();
+            append_payload_to_stream(
+                &mut stream,
+                "manual-blocking-failure",
+                KernelEventPayload::StateAttemptFailed(events::StateAttemptFailed {
+                    spec_hash: fixture.envelope.spec_hash.clone(),
+                    node_id: fixture.node_id.clone(),
+                    attempt_id: fixture.attempt_id.clone(),
+                    retryable: false,
+                    error: test_error(false),
+                }),
+            );
+            let prefix_projection =
+                ProjectionSnapshot::rebuild_from_run_stream(&stream).expect("prefix projection");
+            let prefix_saga =
+                prefix_projection.derive_saga_projection(&run_id, &fixture.envelope.spec.saga);
+            assert_eq!(prefix_saga.run_mode, store::RunMode::ManualBlocked);
+            let block_reason = prefix_saga
+                .manual_block_reason
+                .expect("manual block reason");
+            let expected_next_seq = stream
+                .last()
+                .expect("stream")
+                .seq()
+                .as_u64()
+                .checked_add(1)
+                .expect("next sequence");
+
+            let evidence_hash = content(0xd2);
+            let evidence_artifact_id = artifact(0xd3);
+            let expected_claim = ManualResolutionAuthorizationClaim {
+                run_id: run_id.clone(),
+                spec_hash: fixture.envelope.spec_hash.clone(),
+                expected_next_seq,
+                stream_prefix_digest: mfm_runtime::manual_resolution_stream_prefix_digest(&stream)
+                    .expect("prefix digest"),
+                manual_block_reason: mfm_runtime::manual_resolution_block_reason(block_reason),
+                unresolved_obligations_digest: mfm_runtime::unresolved_manual_obligations_digest(
+                    &prefix_saga,
+                )
+                .expect("obligations digest"),
+                outcome: events::ManualResolutionOutcome::ConfirmRemediated,
+                evidence: ManualResolutionEvidenceRef {
+                    schema_id: evidence_schema,
+                    content_hash: evidence_hash,
+                    artifact_id: evidence_artifact_id,
+                },
+            };
+            let mut proof_claim = expected_claim.clone();
+            edit_claim(&mut proof_claim);
+            let manual = certified_manual_resolution_spec(&fixture.envelope.spec.saga)
+                .expect("manual policy");
+            let operator = manual.authorization.authority.operators[0].clone();
+            let claim_digest = proof_claim.digest().expect("claim digest");
+            let signature = key
+                .sign_hash_recoverable(claim_digest.digest().as_bytes())
+                .expect("manual signature");
+            let mut signature_bytes = signature.as_bytes().to_vec();
+            edit_signature(&mut signature_bytes);
+            let mut proof = ManualResolutionAuthorizationProof {
+                verifier_id: manual.authorization.verifier_id.clone(),
+                signing_scheme: manual.authorization.signing_scheme.clone(),
+                claim: proof_claim,
+                signatures: vec![ManualResolutionAuthorizationSignature {
+                    operator_id: operator.operator_id,
+                    public_identity: operator.public_identity,
+                    signature: SignatureBytes::new(signature_bytes).expect("signature bytes"),
+                }],
+            };
+            edit_proof(&mut proof);
+            let proof_bytes = proof.canonical_json().expect("canonical proof");
+            let authorization_hash = proof_bytes.content_digest();
+            let authorization_artifact_id = ArtifactId::from_digest(
+                authorization_hash.algorithm(),
+                *authorization_hash.digest(),
+            );
+            let mut event = events::ManualResolutionRecorded {
+                run_id: expected_claim.run_id.clone(),
+                spec_hash: expected_claim.spec_hash.clone(),
+                outcome: expected_claim.outcome,
+                evidence_schema_id: expected_claim.evidence.schema_id.clone(),
+                evidence_hash: expected_claim.evidence.content_hash.clone(),
+                evidence_artifact_id: expected_claim.evidence.artifact_id.clone(),
+                authorization_schema_id: manual_authorization_proof_schema_id()
+                    .expect("manual authorization schema"),
+                authorization_hash,
+                authorization_artifact_id,
+                note: None,
+            };
+            edit_event(&mut event);
+            let mut artifacts = fixture.artifacts.clone();
+            artifacts.extend([
+                stored_artifact(
+                    event.evidence_artifact_id.clone(),
+                    event.evidence_hash.clone(),
+                    Some(event.evidence_schema_id.clone()),
+                    ArtifactRole::ManualResolutionEvidence,
+                    None,
+                ),
+                stored_artifact(
+                    event.authorization_artifact_id.clone(),
+                    event.authorization_hash.clone(),
+                    Some(event.authorization_schema_id.clone()),
+                    ArtifactRole::ManualResolutionAuthorization,
+                    None,
+                ),
+            ]);
+            let mut artifact_bytes = vec![ReplayArtifactBytes {
+                artifact_id: event.authorization_artifact_id.clone(),
+                bytes: proof_bytes.to_vec(),
+            }];
+            edit_materials(&mut artifacts, &mut artifact_bytes);
+            append_payload_to_stream(
+                &mut stream,
+                "signed-manual-resolution",
+                KernelEventPayload::ManualResolutionRecorded(event),
+            );
+
+            SignedManualResolutionCase {
+                fixture,
+                run_id,
+                stream,
+                artifacts,
+                artifact_bytes,
             }
         }
 
@@ -4035,6 +4545,15 @@ pub mod v1 {
                 stream: &[KernelEventEnvelope],
                 artifacts: Vec<StoredArtifactEvidenceRef>,
             ) -> ReplayReadAuthority {
+                self.authority_for_stream_artifacts_and_bytes(stream, artifacts, Vec::new())
+            }
+
+            fn authority_for_stream_artifacts_and_bytes(
+                &self,
+                stream: &[KernelEventEnvelope],
+                artifacts: Vec<StoredArtifactEvidenceRef>,
+                artifact_bytes: Vec<ReplayArtifactBytes>,
+            ) -> ReplayReadAuthority {
                 ReplayReadAuthority {
                     certified_spec: self.envelope.clone(),
                     stream: stream.to_vec(),
@@ -4048,6 +4567,7 @@ pub mod v1 {
                     runner_executables: vec![self.runner.clone()],
                     adapter_executables: vec![self.adapter_exec.clone()],
                     artifact_evidence: artifacts,
+                    artifact_bytes: artifact_bytes_map(artifact_bytes).expect("artifact bytes"),
                 }
             }
 
@@ -4359,6 +4879,13 @@ pub mod v1 {
         }
 
         fn manual_authorization(byte: u8) -> spec::ManualResolutionAuthorizationSpec {
+            manual_authorization_with_public_identity(byte, format!("operator-public-{byte}"))
+        }
+
+        fn manual_authorization_with_public_identity(
+            byte: u8,
+            public_identity: String,
+        ) -> spec::ManualResolutionAuthorizationSpec {
             spec::ManualResolutionAuthorizationSpec {
                 verifier_id: spec::ManualAuthorizationVerifierId::new(format!(
                     "mfm.test.manual.verifier.{byte}"
@@ -4376,10 +4903,8 @@ pub mod v1 {
                     operators: vec![spec::OperatorAuthorityMemberSpec {
                         operator_id: spec::OperatorId::new(format!("operator.{byte}"))
                             .expect("operator id"),
-                        public_identity: spec::OperatorPublicIdentity::new(format!(
-                            "operator-public-{byte}"
-                        ))
-                        .expect("operator public identity"),
+                        public_identity: spec::OperatorPublicIdentity::new(public_identity)
+                            .expect("operator public identity"),
                     }],
                 },
                 quorum: spec::ManualAuthorizationQuorumSpec::new(1).expect("quorum"),

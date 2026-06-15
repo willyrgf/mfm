@@ -9,8 +9,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::Arc;
 
+use alloy_primitives::B256;
 use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
 use mfm_events::v1 as events;
+use mfm_evm_signing::{primitive_signature_from_bytes, recover_signing_address};
 use mfm_ids::{ArtifactId, ContentDigest, DigestAlgorithm, RunId, SchemaId, SpecHash};
 use mfm_signing::SignatureBytes;
 use mfm_spec::v1 as spec;
@@ -19,6 +21,9 @@ use mfm_spec::v1 as spec;
 pub const MANUAL_AUTHORIZATION_CLAIM_VERSION: &str = "mfm.manual_resolution.authorization_claim.v1";
 /// Persisted manual authorization proof contract version.
 pub const MANUAL_AUTHORIZATION_PROOF_VERSION: &str = "mfm.manual_resolution.authorization_proof.v1";
+/// Supported v1 digest-signature scheme for manual authorization proofs.
+pub const MANUAL_RESOLUTION_DIGEST_SIGNATURE_SCHEME: &str =
+    "mfm.manual_resolution.digest_signature.v1";
 /// Stable schema name for manual authorization proof artifacts.
 pub const MANUAL_AUTHORIZATION_PROOF_SCHEMA_NAME: &str =
     "mfm.manual_resolution.authorization_proof";
@@ -37,6 +42,17 @@ pub fn manual_authorization_proof_schema_id() -> Result<SchemaId> {
         sha256_digest_bytes(MANUAL_AUTHORIZATION_PROOF_SCHEMA_NAME.as_bytes()),
     )
     .map_err(|error| ManualAuthorizationError::InvalidShape(error.to_string()))
+}
+
+/// Verifies a proof using the built-in v1 digest-signature verifier.
+pub fn verify_builtin_manual_resolution_authorization(
+    policy: &spec::ManualResolutionAuthorizationSpec,
+    claim: ManualResolutionAuthorizationClaim,
+    proof: ManualResolutionAuthorizationProof,
+) -> Result<VerifiedManualResolution> {
+    let mut registry = ManualAuthorizationVerifierRegistry::new();
+    registry.register(policy.verifier_id.clone(), DigestSignatureVerifier)?;
+    registry.verify(policy, claim, proof)
 }
 
 /// Manual block reason bound into a signed manual authorization claim.
@@ -248,6 +264,35 @@ pub struct ManualAuthorizationVerification<'a> {
 pub trait ManualAuthorizationVerifier: Send + Sync {
     /// Verifies proof signatures and scheme-specific constraints.
     fn verify(&self, verification: ManualAuthorizationVerification<'_>) -> Result<()>;
+}
+
+/// Built-in verifier for `mfm.manual_resolution.digest_signature.v1`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DigestSignatureVerifier;
+
+impl ManualAuthorizationVerifier for DigestSignatureVerifier {
+    fn verify(&self, verification: ManualAuthorizationVerification<'_>) -> Result<()> {
+        if verification.proof.signing_scheme.as_str() != MANUAL_RESOLUTION_DIGEST_SIGNATURE_SCHEME {
+            return Err(ManualAuthorizationError::VerificationFailed(
+                "unsupported manual digest-signature scheme".to_owned(),
+            ));
+        }
+        let claim_digest = verification.claim.digest()?;
+        let signing_hash = B256::from(*claim_digest.digest().as_bytes());
+        for signature in &verification.proof.signatures {
+            let primitive = primitive_signature_from_bytes(&signature.signature)
+                .map_err(|error| ManualAuthorizationError::VerificationFailed(error.to_string()))?;
+            let recovered = recover_signing_address(signing_hash, primitive)
+                .map_err(|error| ManualAuthorizationError::VerificationFailed(error.to_string()))?;
+            let recovered_identity = format!("{recovered:?}");
+            if recovered_identity != signature.public_identity.as_str() {
+                return Err(ManualAuthorizationError::VerificationFailed(
+                    "manual signature signer identity mismatch".to_owned(),
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Registry of manual authorization verifiers.

@@ -1,17 +1,19 @@
-error[E0451]: fields `certified_spec`, `stream`, `canonicalizer_identity`, `runner_executables`, `adapter_executables` and `artifact_evidence` of struct `ReplayReadAuthority` are private
-  --> tests/ui/fail/replay_read_authority_fields_private.rs:7:9
+error: cannot construct `ReplayReadAuthority` with struct literal syntax due to private fields
+  --> tests/ui/fail/replay_read_authority_fields_private.rs:6:13
    |
  6 |     let _ = mfm_replay::v1::ReplayReadAuthority {
-   |             ----------------------------------- in this type
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
  7 |         certified_spec: value(),
-   |         ^^^^^^^^^^^^^^ private field
+   |         ----------------------- private field
  8 |         stream: Vec::new(),
-   |         ^^^^^^ private field
+   |         ------------------ private field
  9 |         canonicalizer_identity: value(),
-   |         ^^^^^^^^^^^^^^^^^^^^^^ private field
+   |         ------------------------------- private field
 10 |         runner_executables: Vec::new(),
-   |         ^^^^^^^^^^^^^^^^^^ private field
+   |         ------------------------------ private field
 11 |         adapter_executables: Vec::new(),
-   |         ^^^^^^^^^^^^^^^^^^^ private field
+   |         ------------------------------- private field
 12 |         artifact_evidence: Vec::new(),
-   |         ^^^^^^^^^^^^^^^^^ private field
+   |         ----------------------------- private field
+   |
+   = note: ...and other private field `artifact_bytes` that was not provided

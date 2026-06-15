@@ -2066,9 +2066,11 @@ dependencies = [
 name = "mfm-manual-auth"
 version = "0.1.0"
 dependencies = [
+ "alloy-primitives",
  "hex",
  "mfm-canonical",
  "mfm-events",
+ "mfm-evm-signing",
  "mfm-ids",
  "mfm-signing",
  "mfm-spec",
@@ -2192,9 +2194,12 @@ dependencies = [
  "mfm-certify",
  "mfm-events",
  "mfm-ids",
+ "mfm-manual-auth",
  "mfm-runtime",
+ "mfm-signing",
  "mfm-spec",
  "mfm-store",
+ "mfm_core",
  "trybuild",
 ]
 

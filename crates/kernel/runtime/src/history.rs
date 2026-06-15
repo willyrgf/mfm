@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use mfm_events::v1 as events;
 use mfm_ids::{ArtifactId, AttemptId, CellId, ContentDigest, NodeId, RunId, SpecHash};
+use mfm_manual_auth::manual_authorization_proof_schema_id;
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
 
@@ -554,7 +555,7 @@ fn validate_historical_run_stream(
     let mut produced_public_output = None::<events::PublicOutputCompletionEvidence>;
     let mut retention_manifest_projected_seq = None::<store::StreamSeq>;
     let mut completed = false;
-    for event in stream {
+    for (event_index, event) in stream.iter().enumerate() {
         if completed {
             return Err(RuntimeError::InvalidRunStream(
                 "run stream contains events after RunCompleted".to_owned(),
@@ -595,7 +596,15 @@ fn validate_historical_run_stream(
                 )?;
                 completed = true;
             }
-            events::KernelEventPayload::ManualResolutionRecorded(_) => {}
+            events::KernelEventPayload::ManualResolutionRecorded(payload) => {
+                validate_historical_manual_resolution(
+                    runtime_spec,
+                    event_index,
+                    event,
+                    payload,
+                    stream,
+                )?;
+            }
             events::KernelEventPayload::RetentionRefsAppended(_) => {}
             events::KernelEventPayload::RetentionManifestProjected(payload) => {
                 if &payload.run_id == run_id && payload.spec_hash == *runtime_spec.spec_hash() {
@@ -836,6 +845,72 @@ fn validate_historical_run_stream(
     validate_atomic_side_effect_failure_pairs(runtime_spec, stream)?;
     validate_recovery_frontier(runtime_spec, projections)?;
     Ok(())
+}
+
+fn validate_historical_manual_resolution(
+    runtime_spec: &CertifiedRuntimeSpec,
+    event_index: usize,
+    event: &store::KernelEventEnvelope,
+    payload: &events::ManualResolutionRecorded,
+    stream: &[store::KernelEventEnvelope],
+) -> Result<()> {
+    if event.run_id() != &payload.run_id || payload.spec_hash != *runtime_spec.spec_hash() {
+        return Err(RuntimeError::InvalidRunStream(
+            "manual resolution event identity does not match certified run".to_owned(),
+        ));
+    }
+    let manual = certified_manual_resolution_spec(&runtime_spec.spec().saga).ok_or_else(|| {
+        RuntimeError::InvalidRunStream(
+            "manual resolution was recorded without certified manual policy".to_owned(),
+        )
+    })?;
+    if payload.evidence_schema_id != manual.evidence_schema {
+        return Err(RuntimeError::InvalidRunStream(
+            "manual resolution evidence schema does not match certified policy".to_owned(),
+        ));
+    }
+    let authorization_schema_id = manual_authorization_proof_schema_id()
+        .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))?;
+    if payload.authorization_schema_id != authorization_schema_id {
+        return Err(RuntimeError::InvalidRunStream(
+            "manual resolution authorization schema does not match certified policy".to_owned(),
+        ));
+    }
+
+    let prefix_projection = store::ProjectionSnapshot::rebuild_from_run_stream(
+        stream.get(..event_index).ok_or_else(|| {
+            RuntimeError::InvalidRunStream(
+                "manual resolution prefix index was outside the run stream".to_owned(),
+            )
+        })?,
+    )?;
+    prefix_projection
+        .require_manual_resolution_admissible(&payload.run_id, &runtime_spec.spec().saga)
+        .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))?;
+    if prefix_projection
+        .derive_saga_projection(&payload.run_id, &runtime_spec.spec().saga)
+        .manual_block_reason
+        .is_none()
+    {
+        return Err(RuntimeError::InvalidRunStream(
+            "manual resolution prefix lacks block reason".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn certified_manual_resolution_spec(
+    policy: &spec::SagaPolicySpec,
+) -> Option<&spec::ManualResolutionEvidenceSpec> {
+    match policy {
+        spec::SagaPolicySpec::ManualResolution { manual } => Some(manual),
+        spec::SagaPolicySpec::CompensateCompleted {
+            on_remediation_unresolved: spec::RemediationUnresolvedSpec::ManualResolution { manual },
+        } => Some(manual),
+        spec::SagaPolicySpec::NoSideEffects
+        | spec::SagaPolicySpec::FailWithoutAcdcClaim
+        | spec::SagaPolicySpec::CompensateCompleted { .. } => None,
+    }
 }
 
 fn validate_attempt_start_boundary(
@@ -1647,6 +1722,18 @@ fn same_commit_typed_artifact_keys(
                     payload.confirmation_artifact_id.clone(),
                     payload.confirmation_hash.clone(),
                     events::ArtifactRole::Confirmation,
+                ));
+            }
+            events::KernelEventPayload::ManualResolutionRecorded(payload) => {
+                keys.insert((
+                    payload.evidence_artifact_id.clone(),
+                    payload.evidence_hash.clone(),
+                    events::ArtifactRole::ManualResolutionEvidence,
+                ));
+                keys.insert((
+                    payload.authorization_artifact_id.clone(),
+                    payload.authorization_hash.clone(),
+                    events::ArtifactRole::ManualResolutionAuthorization,
                 ));
             }
             events::KernelEventPayload::SideEffectAmbiguous(payload) => {
