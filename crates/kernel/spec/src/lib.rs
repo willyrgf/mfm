@@ -970,6 +970,11 @@ pub mod v1 {
     }
 
     impl SagaPolicySpec {
+        /// Returns the canonical digest of this saga policy.
+        pub fn saga_policy_digest(&self) -> Result<ContentDigest> {
+            content_digest(self.json())
+        }
+
         fn json(&self) -> serde_json::Value {
             match self {
                 Self::NoSideEffects => serde_json::json!({

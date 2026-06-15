@@ -638,6 +638,8 @@ pub mod v1 {
         pub lowering_version: LoweringVersion,
         /// Public output schema id.
         pub public_output_schema_id: SchemaId,
+        /// Canonical digest of the certified saga policy.
+        pub saga_policy_digest: ContentDigest,
         /// Descriptor identities bound to the run.
         pub descriptor_identities: Vec<DescriptorIdentity>,
         /// Runner executable identities.
@@ -3306,6 +3308,9 @@ pub mod v1 {
                 lowering_version: LoweringVersion::new("mfm.typed.lowering.v1")
                     .expect("lowering version"),
                 public_output_schema_id: schema_id("mfm.test.public_output", 6),
+                saga_policy_digest: mfm_spec::v1::SagaPolicySpec::NoSideEffects
+                    .saga_policy_digest()
+                    .expect("saga policy digest"),
                 descriptor_identities: Vec::new(),
                 runner_executables: Vec::new(),
                 adapter_executables: Vec::new(),

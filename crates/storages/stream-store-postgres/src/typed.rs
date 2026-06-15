@@ -23,8 +23,8 @@ use mfm_store::v1::{
     stage_prepared_typed_run_commit, ArtifactEvidenceRef, AsyncStoreFuture,
     AsyncTypedRunEventStore, CodecError, CommitKey, CommitOrdinal, CommitOutcome,
     KernelEventEnvelope, LogicalEventKey, PersistedKernelEventRecord, PreparedTypedCommit,
-    ProjectionSnapshot, ProjectionSnapshotParts, RetentionProjection, SideEffectLedgerRef,
-    StoreError, StoreErrorInspection, StreamSeq, TypedCommitBase,
+    ProjectionSnapshot, ProjectionSnapshotParts, SideEffectLedgerRef, StoreError,
+    StoreErrorInspection, StreamSeq, TypedCommitBase,
 };
 use serde_json::Value;
 use tokio::sync::Mutex;
@@ -932,7 +932,15 @@ async fn load_projection_snapshot_tx(
         public_outputs.insert(schema_id, projection);
     }
 
-    let retention = retention_projection_from_run_stream_tx(tx, run_id).await?;
+    let rebuilt_projection = rebuild_projection_snapshot_from_events(tx, run_id).await?;
+    let saga_policy_digests = rebuilt_projection
+        .saga_policy_digests()
+        .map(|(run_id, digest)| (run_id.clone(), digest.clone()))
+        .collect();
+    let retention = rebuilt_projection
+        .retention(run_id)
+        .cloned()
+        .unwrap_or_default();
     let mut retentions = BTreeMap::new();
     if !retention.refs.is_empty() || retention.manifest.is_some() {
         retentions.insert(run_id.clone(), retention);
@@ -940,6 +948,7 @@ async fn load_projection_snapshot_tx(
 
     Ok(ProjectionSnapshot::from_parts(ProjectionSnapshotParts {
         run_states,
+        saga_policy_digests,
         run_completions,
         saga_engagements,
         manual_resolutions,
@@ -1228,15 +1237,6 @@ async fn rebuild_projection_snapshot_from_events(
     Ok(ProjectionSnapshot::rebuild_from_run_stream(&stream)?)
 }
 
-async fn retention_projection_from_run_stream_tx(
-    tx: &Transaction<'_>,
-    run_id: &RunId,
-) -> Result<RetentionProjection> {
-    let stream = load_run_stream_tx(tx, run_id).await?;
-    let snapshot = ProjectionSnapshot::rebuild_from_run_stream(&stream)?;
-    Ok(snapshot.retention(run_id).cloned().unwrap_or_default())
-}
-
 fn canonical_payload_value(payload: &events::KernelEventPayload) -> Result<Value> {
     let canonical = mfm_store::v1::payload_canonical_json(payload)?;
     serde_json::from_slice(canonical.as_bytes()).map_err(|error| {
@@ -1420,6 +1420,13 @@ mod tests {
     }
 
     fn run_started(run_id: RunId) -> KernelEventPayload {
+        run_started_with_saga_policy(run_id, &SagaPolicySpec::NoSideEffects)
+    }
+
+    fn run_started_with_saga_policy(
+        run_id: RunId,
+        saga_policy: &SagaPolicySpec,
+    ) -> KernelEventPayload {
         KernelEventPayload::RunStarted(events::RunStarted {
             run_id,
             spec_hash: spec_hash(1),
@@ -1434,6 +1441,9 @@ mod tests {
             lowering_version: LoweringVersion::new("mfm.typed.lowering.v1")
                 .expect("lowering version"),
             public_output_schema_id: schema_id("mfm.test.public_output", 3),
+            saga_policy_digest: saga_policy
+                .saga_policy_digest()
+                .expect("saga policy digest"),
             descriptor_identities: Vec::new(),
             runner_executables: Vec::new(),
             adapter_executables: Vec::new(),
@@ -1614,9 +1624,12 @@ mod tests {
         }
     }
 
-    fn saga_preconditions(policy: SagaPolicySpec) -> CommitPreconditions {
+    fn saga_preconditions(run_id: &RunId, policy: SagaPolicySpec) -> CommitPreconditions {
         CommitPreconditions {
-            saga_policy: Some(policy),
+            saga_admit_token: Some(
+                mfm_store::v1::SagaAdmitToken::new(run_id.clone(), spec_hash(1), policy)
+                    .expect("saga admit token"),
+            ),
             ..CommitPreconditions::default()
         }
     }
@@ -2194,7 +2207,10 @@ mod tests {
                 run.clone(),
                 1,
                 "saga-run-start",
-                vec![run_started(run.clone())],
+                vec![run_started_with_saga_policy(
+                    run.clone(),
+                    &manual_saga_policy(42),
+                )],
             ),
             vec![spec_artifact_ref(), certificate_artifact_ref()],
         )
@@ -2263,7 +2279,7 @@ mod tests {
             "saga-manual-resolution",
             vec![manual_resolution_recorded(run.clone(), 42)],
         );
-        manual_request.preconditions = saga_preconditions(manual_saga_policy(42));
+        manual_request.preconditions = saga_preconditions(&run, manual_saga_policy(42));
         append_prepared(&store, manual_request, manual_resolution_artifacts(42))
             .await
             .expect("manual resolution");
@@ -2276,7 +2292,7 @@ mod tests {
                 events::RunCompletionOutcome::ManuallyResolved,
             )],
         );
-        completion_request.preconditions = saga_preconditions(manual_saga_policy(42));
+        completion_request.preconditions = saga_preconditions(&run, manual_saga_policy(42));
         append_prepared(&store, completion_request, Vec::new())
             .await
             .expect("run completed");

@@ -173,7 +173,11 @@ pub(crate) fn prepare_manual_resolution_commit(
         required_artifacts: vec![evidence_ref.clone(), authorization_ref.clone()],
         preconditions: store::CommitPreconditions {
             required_run_state: store::RequiredRunState::NotCompleted,
-            saga_policy: Some(runtime_spec.spec().saga.clone()),
+            saga_admit_token: Some(store::SagaAdmitToken::new(
+                claim.run_id.clone(),
+                claim.spec_hash.clone(),
+                runtime_spec.spec().saga.clone(),
+            )?),
             ..store::CommitPreconditions::default()
         },
     };

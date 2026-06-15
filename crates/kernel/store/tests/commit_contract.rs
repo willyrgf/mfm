@@ -18,7 +18,7 @@ use mfm_store::v1::{
     InMemoryTypedRunStore, KernelEventEnvelope, ManualBlockReason, ManualResolutionProjection,
     NonEmptyPayloadBatch, PersistedKernelEventRecord, PreparedCommit, PreparedCommitPlan,
     PreparedTypedCommit, ProjectionSnapshot, RequiredRunState, ResourceLaneKey,
-    RunCompletionProjection, RunMode, RunStart, RunState, SagaEngagementProjection,
+    RunCompletionProjection, RunMode, RunStart, RunState, SagaAdmitToken, SagaEngagementProjection,
     SagaEngagementReason, SideEffectPhase, StateAttemptStarted, StoreError, StreamSeq,
     TypedCommitRequest, TypedProjectionRead, TypedRunEventStore, VerifiedRetentionProjection,
     VerifiedRetentionProjectionSet,
@@ -120,6 +120,10 @@ fn media_type(value: &str) -> MediaType {
 }
 
 fn run_started(run_id: RunId) -> KernelEventPayload {
+    run_started_with_saga_policy(run_id, &SagaPolicySpec::NoSideEffects)
+}
+
+fn run_started_with_saga_policy(run_id: RunId, saga_policy: &SagaPolicySpec) -> KernelEventPayload {
     KernelEventPayload::RunStarted(events::RunStarted {
         run_id,
         spec_hash: spec_hash(1),
@@ -131,6 +135,9 @@ fn run_started(run_id: RunId) -> KernelEventPayload {
         spec_version: SpecVersion::new("mfm.typed.execution_spec.v1").expect("spec version"),
         lowering_version: LoweringVersion::new("mfm.typed.lowering.v1").expect("lowering version"),
         public_output_schema_id: schema_id("mfm.test.public_output", 3),
+        saga_policy_digest: saga_policy
+            .saga_policy_digest()
+            .expect("saga policy digest"),
         descriptor_identities: Vec::new(),
         runner_executables: Vec::new(),
         adapter_executables: Vec::new(),
@@ -822,9 +829,11 @@ fn compensate_saga_policy() -> SagaPolicySpec {
     }
 }
 
-fn saga_preconditions(policy: SagaPolicySpec) -> CommitPreconditions {
+fn saga_preconditions(run_id: &RunId, policy: SagaPolicySpec) -> CommitPreconditions {
     CommitPreconditions {
-        saga_policy: Some(policy),
+        saga_admit_token: Some(
+            SagaAdmitToken::new(run_id.clone(), spec_hash(1), policy).expect("saga admit token"),
+        ),
         ..CommitPreconditions::default()
     }
 }
@@ -1407,11 +1416,19 @@ impl TestPreparedCommitExt for InMemoryTypedRunStore {
 }
 
 fn run_start_request(run_id: RunId, commit_key: &str) -> TypedCommitRequest {
+    run_start_request_with_saga_policy(run_id, commit_key, &SagaPolicySpec::NoSideEffects)
+}
+
+fn run_start_request_with_saga_policy(
+    run_id: RunId,
+    commit_key: &str,
+    saga_policy: &SagaPolicySpec,
+) -> TypedCommitRequest {
     TypedCommitRequest {
         run_id: run_id.clone(),
         expected_next_seq: StreamSeq::FIRST,
         commit_key: CommitKey::new(commit_key).expect("commit key"),
-        payloads: vec![run_started(run_id)],
+        payloads: vec![run_started_with_saga_policy(run_id, saga_policy)],
         required_artifacts: vec![spec_artifact_ref(), certificate_artifact_ref()],
         preconditions: CommitPreconditions {
             required_run_state: RequiredRunState::Absent,
@@ -2944,7 +2961,11 @@ fn resource_lane_releases_on_ledger_terminals_manual_resolution_and_run_terminal
     let run = run_id(207);
     let mut manual_store = InMemoryTypedRunStore::new();
     manual_store
-        .append_prepared_commit(run_start_request(run.clone(), "resource-manual-run-start"))
+        .append_prepared_commit(run_start_request_with_saga_policy(
+            run.clone(),
+            "resource-manual-run-start",
+            &manual_saga_policy(46),
+        ))
         .expect("append run");
     append_side_effect_prepare_for_ledger(
         &mut manual_store,
@@ -2990,7 +3011,7 @@ fn resource_lane_releases_on_ledger_terminals_manual_resolution_and_run_terminal
             commit_key: CommitKey::new("resource-manual-release").expect("commit key"),
             payloads: vec![manual_resolution_recorded_for_run(run.clone(), 46)],
             required_artifacts: manual_resolution_artifacts(46),
-            preconditions: saga_preconditions(manual_saga_policy(46)),
+            preconditions: saga_preconditions(&run, manual_saga_policy(46)),
         })
         .expect("manual resolution releases lane");
     assert!(manual_store
@@ -3682,9 +3703,10 @@ fn manual_resolution_requires_manual_blocked_prefix_and_is_unique() {
     let run_id = run_id(120);
     let mut non_quiescent = InMemoryTypedRunStore::new();
     non_quiescent
-        .append_prepared_commit(run_start_request(
+        .append_prepared_commit(run_start_request_with_saga_policy(
             run_id.clone(),
             "manual-quiescence-run-start",
+            &manual_saga_policy(150),
         ))
         .expect("append run start");
     append_side_effect_prepare(&mut non_quiescent, &run_id);
@@ -3697,16 +3719,17 @@ fn manual_resolution_requires_manual_blocked_prefix_and_is_unique() {
             commit_key: CommitKey::new("manual-non-quiescent").expect("commit key"),
             payloads: vec![manual_resolution_recorded(150)],
             required_artifacts: manual_resolution_artifacts(150),
-            preconditions: saga_preconditions(manual_saga_policy(150)),
+            preconditions: saga_preconditions(&run_id, manual_saga_policy(150)),
         })
         .expect_err("manual resolution rejects outside manual-blocked mode");
     assert_projection_conflict_contains(error, "requires prefix-derived manual_blocked");
 
     let mut remediating = InMemoryTypedRunStore::new();
     remediating
-        .append_prepared_commit(run_start_request(
+        .append_prepared_commit(run_start_request_with_saga_policy(
             run_id.clone(),
             "manual-remediating-run-start",
+            &compensate_saga_policy(),
         ))
         .expect("append run start");
     append_forward_confirmation(&mut remediating, &run_id);
@@ -3718,14 +3741,18 @@ fn manual_resolution_requires_manual_blocked_prefix_and_is_unique() {
             commit_key: CommitKey::new("manual-remediating-reject").expect("commit key"),
             payloads: vec![manual_resolution_recorded(151)],
             required_artifacts: manual_resolution_artifacts(151),
-            preconditions: saga_preconditions(compensate_saga_policy()),
+            preconditions: saga_preconditions(&run_id, compensate_saga_policy()),
         })
         .expect_err("manual resolution rejects while remediating");
     assert_projection_conflict_contains(error, "requires prefix-derived manual_blocked");
 
     let mut store = InMemoryTypedRunStore::new();
     store
-        .append_prepared_commit(run_start_request(run_id.clone(), "manual-run-start"))
+        .append_prepared_commit(run_start_request_with_saga_policy(
+            run_id.clone(),
+            "manual-run-start",
+            &manual_saga_policy(152),
+        ))
         .expect("append run start");
     append_forward_confirmation(&mut store, &run_id);
     append_generic_nonretryable_failure(&mut store, &run_id, "manual-clean-failure");
@@ -3736,7 +3763,7 @@ fn manual_resolution_requires_manual_blocked_prefix_and_is_unique() {
             commit_key: CommitKey::new("manual-recorded").expect("commit key"),
             payloads: vec![manual_resolution_recorded(152)],
             required_artifacts: manual_resolution_artifacts(152),
-            preconditions: saga_preconditions(manual_saga_policy(152)),
+            preconditions: saga_preconditions(&run_id, manual_saga_policy(152)),
         })
         .expect("manual resolution admitted in manual-blocked mode");
     let error = store
@@ -3746,7 +3773,7 @@ fn manual_resolution_requires_manual_blocked_prefix_and_is_unique() {
             commit_key: CommitKey::new("manual-duplicate").expect("commit key"),
             payloads: vec![manual_resolution_recorded(154)],
             required_artifacts: manual_resolution_artifacts(154),
-            preconditions: saga_preconditions(manual_saga_policy(154)),
+            preconditions: saga_preconditions(&run_id, manual_saga_policy(152)),
         })
         .expect_err("duplicate manual resolution rejects");
     match error {
@@ -3755,6 +3782,33 @@ fn manual_resolution_requires_manual_blocked_prefix_and_is_unique() {
             if message.contains("manual resolution already recorded") => {}
         other => panic!("unexpected duplicate manual resolution error: {other:?}"),
     }
+}
+
+#[test]
+fn saga_admit_token_must_match_run_start_policy_digest() {
+    let run_id = run_id(121);
+    let mut store = InMemoryTypedRunStore::new();
+    store
+        .append_prepared_commit(run_start_request_with_saga_policy(
+            run_id.clone(),
+            "saga-token-run-start",
+            &manual_saga_policy(170),
+        ))
+        .expect("append run start");
+    append_forward_confirmation(&mut store, &run_id);
+    append_generic_nonretryable_failure(&mut store, &run_id, "saga-token-failure");
+
+    let error = store
+        .append_prepared_commit(TypedCommitRequest {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&run_id),
+            commit_key: CommitKey::new("saga-token-mismatch").expect("commit key"),
+            payloads: vec![manual_resolution_recorded_for_run(run_id.clone(), 170)],
+            required_artifacts: manual_resolution_artifacts(170),
+            preconditions: saga_preconditions(&run_id, manual_saga_policy(171)),
+        })
+        .expect_err("mismatched saga token rejects");
+    assert_projection_conflict_contains(error, "digest does not match run start");
 }
 
 #[test]
@@ -3767,9 +3821,10 @@ fn manual_resolution_artifacts_require_dedicated_roles() {
         let run_id = run_id(120);
         let mut store = InMemoryTypedRunStore::new();
         store
-            .append_prepared_commit(run_start_request(
+            .append_prepared_commit(run_start_request_with_saga_policy(
                 run_id.clone(),
                 "manual-artifact-role-run-start",
+                &manual_saga_policy(156),
             ))
             .expect("append run start");
         append_forward_confirmation(&mut store, &run_id);
@@ -3783,7 +3838,7 @@ fn manual_resolution_artifacts_require_dedicated_roles() {
                 commit_key: CommitKey::new(commit_key).expect("commit key"),
                 payloads: vec![manual_resolution_recorded(156)],
                 required_artifacts: artifacts,
-                preconditions: saga_preconditions(manual_saga_policy(156)),
+                preconditions: saga_preconditions(&run_id, manual_saga_policy(156)),
             })
             .expect_err("manual artifact mismatch rejects");
         assert!(matches!(
@@ -3819,9 +3874,10 @@ fn saga_run_completed_requires_prefix_derived_terminal_outcome() {
     let run_id = run_id(120);
     let mut store = InMemoryTypedRunStore::new();
     store
-        .append_prepared_commit(run_start_request(
+        .append_prepared_commit(run_start_request_with_saga_policy(
             run_id.clone(),
             "terminal-quiescence-run-start",
+            &manual_saga_policy(160),
         ))
         .expect("append run start");
     append_side_effect_prepare(&mut store, &run_id);
@@ -3836,16 +3892,17 @@ fn saga_run_completed_requires_prefix_derived_terminal_outcome() {
                 events::RunCompletionOutcome::FailedWithoutAcdcClaim,
             )],
             required_artifacts: Vec::new(),
-            preconditions: saga_preconditions(manual_saga_policy(160)),
+            preconditions: saga_preconditions(&run_id, manual_saga_policy(160)),
         })
         .expect_err("terminal completion rejects before terminal saga mode");
     assert_projection_conflict_contains(error, "requires terminal saga mode");
 
     let mut forged = InMemoryTypedRunStore::new();
     forged
-        .append_prepared_commit(run_start_request(
+        .append_prepared_commit(run_start_request_with_saga_policy(
             run_id.clone(),
             "terminal-forged-run-start",
+            &manual_saga_policy(162),
         ))
         .expect("append run start");
     append_forward_confirmation(&mut forged, &run_id);
@@ -3859,7 +3916,7 @@ fn saga_run_completed_requires_prefix_derived_terminal_outcome() {
                 events::RunCompletionOutcome::ManuallyResolved,
             )],
             required_artifacts: Vec::new(),
-            preconditions: saga_preconditions(manual_saga_policy(162)),
+            preconditions: saga_preconditions(&run_id, manual_saga_policy(162)),
         })
         .expect_err("forged manual terminal rejects before manual resolution");
     assert_projection_conflict_contains(error, "requires terminal saga mode");
@@ -3871,7 +3928,7 @@ fn saga_run_completed_requires_prefix_derived_terminal_outcome() {
             commit_key: CommitKey::new("terminal-manual-recorded").expect("commit key"),
             payloads: vec![manual_resolution_recorded(162)],
             required_artifacts: manual_resolution_artifacts(162),
-            preconditions: saga_preconditions(manual_saga_policy(162)),
+            preconditions: saga_preconditions(&run_id, manual_saga_policy(162)),
         })
         .expect("manual resolution admitted");
     forged
@@ -3883,7 +3940,7 @@ fn saga_run_completed_requires_prefix_derived_terminal_outcome() {
                 events::RunCompletionOutcome::ManuallyResolved,
             )],
             required_artifacts: Vec::new(),
-            preconditions: saga_preconditions(manual_saga_policy(162)),
+            preconditions: saga_preconditions(&run_id, manual_saga_policy(162)),
         })
         .expect("manual terminal completion admitted after manual resolution");
 }

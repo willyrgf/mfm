@@ -377,3 +377,58 @@ Checks run:
 - `cargo test -p mfm-replay`
 - `cargo test -p mfm-integration-tests --test cargo_metadata_contract`
 - `cargo test -p mfm-integration-tests --test architecture_namespace_contract`
+
+## Phase 9: Run-Start Saga Policy Ref and SagaAdmitToken
+
+Status: completed.
+
+Files changed:
+
+- `crates/kernel/spec/src/lib.rs`
+- `crates/kernel/events/src/lib.rs`
+- `crates/kernel/store/src/lib.rs`
+- `crates/kernel/store/src/v1/admission.rs`
+- `crates/kernel/store/src/v1/projection.rs`
+- `crates/kernel/store/tests/commit_contract.rs`
+- `crates/kernel/runtime/src/commit.rs`
+- `crates/kernel/runtime/src/history.rs`
+- `crates/kernel/runtime/src/manual_resolution.rs`
+- `crates/kernel/runtime/src/tests.rs`
+- `crates/kernel/replay/src/lib.rs`
+- `crates/storages/stream-store-postgres/src/typed.rs`
+- `crates/storages/artifact-store-fs/tests/contract.rs`
+- `IMPLEMENTATION_ACDC_SAGA_PRE_MERGE.md`
+
+Validators deleted or replaced:
+
+- Added canonical `SagaPolicySpec::saga_policy_digest` as the reusable policy identity.
+- Added `RunStarted::saga_policy_digest` and projected the digest as run-start authority.
+- Added `SagaAdmitToken`, binding run id, spec hash, saga policy digest, and certified saga policy.
+- Replaced raw `CommitPreconditions::saga_policy` with `CommitPreconditions::saga_admit_token`.
+- Replaced manual-resolution and saga-terminal admission checks that trusted a raw policy
+  precondition with token checks against the run-start digest projection.
+- Replaced Postgres projection snapshot loading for saga policy authority with an event-stream
+  rebuild path so rebuilt projections retain the run-start policy digest.
+- Replaced runtime manual and terminal saga commits with minted `SagaAdmitToken` authority from
+  certified runtime spec state.
+
+Tests added or updated:
+
+- Added store contract coverage proving a saga admit token with a different policy digest than the
+  run-start digest is rejected.
+- Updated store, events, runtime, replay, artifact-store, and Postgres fixtures to include
+  run-start saga policy digests.
+- Updated Postgres parity fixture to start saga runs with the manual saga policy used by later
+  manual-resolution and terminal preconditions.
+
+Checks run:
+
+- `cargo fmt --all -- --check`
+- `cargo check -p mfm-events -p mfm-spec -p mfm-store -p mfm-runtime -p mfm-replay -p mfm-stream-store-postgres -p mfm-artifact-store-fs`
+- `cargo test -p mfm-store`
+- `cargo test -p mfm-events -p mfm-runtime -p mfm-replay -p mfm-artifact-store-fs`
+- `cargo test -p mfm-spec`
+- `cargo test -p mfm-stream-store-postgres typed_saga_projection_tables_persist_and_rebuild_from_events`
+- `cargo test -p mfm-stream-store-postgres --features parity-tests typed_saga_projection_tables_persist_and_rebuild_from_events` (compiled, then stopped because `DATABASE_URL` is unset for parity tests)
+- `cargo test -p mfm-integration-tests --test cargo_metadata_contract`
+- `cargo test -p mfm-integration-tests --test architecture_namespace_contract`

@@ -7832,6 +7832,12 @@ fn append_synthetic_run_started(
                     .public_outputs
                     .public_schema_id
                     .clone(),
+                saga_policy_digest: fixture
+                    .runtime_spec
+                    .spec()
+                    .saga
+                    .saga_policy_digest()
+                    .expect("saga policy digest"),
                 descriptor_identities: Vec::new(),
                 runner_executables: Vec::new(),
                 adapter_executables: Vec::new(),

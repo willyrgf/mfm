@@ -4363,6 +4363,11 @@ pub mod v1 {
                             .public_outputs
                             .public_schema_id
                             .clone(),
+                        saga_policy_digest: envelope
+                            .spec
+                            .saga
+                            .saga_policy_digest()
+                            .expect("saga policy digest"),
                         descriptor_identities: envelope.spec.descriptor_identities.clone(),
                         runner_executables: vec![runner.clone()],
                         adapter_executables: vec![adapter_exec.clone()],

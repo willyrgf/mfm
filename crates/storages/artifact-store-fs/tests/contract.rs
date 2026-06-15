@@ -8,7 +8,7 @@ use mfm_ids::{
     ArtifactId, CellId, ContentDigest, DigestAlgorithm, DigestBytes, LoweringVersion, NodeId,
     RunId, SchemaId, ScopeId, SeedId, SemanticTypeId, SpecHash, SpecVersion,
 };
-use mfm_spec::v1::{CanonicalizerIdentity, MediaType};
+use mfm_spec::v1::{CanonicalizerIdentity, MediaType, SagaPolicySpec};
 use mfm_store::v1::{
     ArtifactEvidenceRef, CommitKey, CommitPreconditions, InMemoryTypedRunStore,
     PreparedTypedCommit, RequiredRunState, StreamSeq, TypedCommitRequest, TypedRunEventStore,
@@ -172,6 +172,9 @@ fn verified_retention_projection_for(
             lowering_version: LoweringVersion::new("mfm.typed.lowering.v1")
                 .expect("lowering version"),
             public_output_schema_id: schema_id("mfm.test.public_output", 82),
+            saga_policy_digest: SagaPolicySpec::NoSideEffects
+                .saga_policy_digest()
+                .expect("saga policy digest"),
             descriptor_identities: Vec::new(),
             runner_executables: Vec::new(),
             adapter_executables: Vec::new(),

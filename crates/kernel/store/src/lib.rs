@@ -31,8 +31,8 @@ pub mod v1 {
         ScopeId, SeedId, SemanticTypeId, SpecHash, StateKind, StateVersion,
     };
     use mfm_spec::v1::{
-        CanonicalizerIdentity, CellProducer, DescriptorIdentity, ManualResolutionEvidenceSpec,
-        MediaType, OperationDescriptorIdentity, PublicFieldPath, RemediationUnresolvedSpec,
+        CanonicalizerIdentity, CellProducer, DescriptorIdentity, MediaType,
+        OperationDescriptorIdentity, PublicFieldPath, RemediationUnresolvedSpec,
         RendererDescriptorIdentity, RendererKind, RendererVersion, ResourceNamespace,
         SagaPolicySpec, StateDescriptorIdentity, ValueLineageRef,
     };
@@ -981,6 +981,54 @@ pub mod v1 {
         pub required: RequiredSideEffectState,
     }
 
+    /// Certified saga admission authority for a run.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct SagaAdmitToken {
+        run_id: RunId,
+        spec_hash: SpecHash,
+        saga_policy_digest: ContentDigest,
+        saga_policy: SagaPolicySpec,
+    }
+
+    impl SagaAdmitToken {
+        /// Mints a saga admission token from certified runtime policy authority.
+        pub fn new(
+            run_id: RunId,
+            spec_hash: SpecHash,
+            saga_policy: SagaPolicySpec,
+        ) -> Result<Self> {
+            let saga_policy_digest = saga_policy
+                .saga_policy_digest()
+                .map_err(|error| StoreError::Canonical(error.to_string()))?;
+            Ok(Self {
+                run_id,
+                spec_hash,
+                saga_policy_digest,
+                saga_policy,
+            })
+        }
+
+        /// Returns the token run id.
+        pub fn run_id(&self) -> &RunId {
+            &self.run_id
+        }
+
+        /// Returns the certified spec hash bound by this token.
+        pub fn spec_hash(&self) -> &SpecHash {
+            &self.spec_hash
+        }
+
+        /// Returns the canonical saga policy digest bound by this token.
+        pub fn saga_policy_digest(&self) -> &ContentDigest {
+            &self.saga_policy_digest
+        }
+
+        /// Returns the certified saga policy carried by this token.
+        pub fn saga_policy(&self) -> &SagaPolicySpec {
+            &self.saga_policy
+        }
+    }
+
     /// Commit preconditions checked atomically with appending the payload batch.
     #[derive(Debug, Clone, PartialEq, Eq, Default)]
     pub struct CommitPreconditions {
@@ -996,8 +1044,8 @@ pub mod v1 {
         pub required_side_effect_states: Vec<SideEffectStatePrecondition>,
         /// Whether no public-output projection may exist.
         pub required_public_output_absent: bool,
-        /// Certified saga policy used by store admission for saga manual and terminal events.
-        pub saga_policy: Option<SagaPolicySpec>,
+        /// Certified saga admission authority used by manual and terminal saga events.
+        pub saga_admit_token: Option<SagaAdmitToken>,
     }
 
     /// Payload-level typed commit request.
@@ -1291,7 +1339,7 @@ pub mod v1 {
         ) -> Result<Self> {
             let payloads = request.payloads.as_slice();
             if payloads.iter().any(is_saga_terminal_payload)
-                && request.preconditions.saga_policy.is_some()
+                && request.preconditions.saga_admit_token.is_some()
             {
                 return Ok(Self::SagaTerminal(PreparedCommit::<SagaTerminal>::new(
                     request, artifacts,
@@ -2002,6 +2050,7 @@ pub mod v1 {
     #[derive(Debug, Clone, PartialEq, Eq, Default)]
     pub struct ProjectionSnapshot {
         run_states: BTreeMap<RunId, RunState>,
+        saga_policy_digests: BTreeMap<RunId, ContentDigest>,
         run_completions: BTreeMap<RunId, RunCompletionProjection>,
         saga_engagements: BTreeMap<RunId, SagaEngagementProjection>,
         manual_resolutions: BTreeMap<RunId, ManualResolutionProjection>,
@@ -2022,6 +2071,8 @@ pub mod v1 {
     pub struct ProjectionSnapshotParts {
         /// Run lifecycle states.
         pub run_states: BTreeMap<RunId, RunState>,
+        /// Saga policy digest recorded at run start.
+        pub saga_policy_digests: BTreeMap<RunId, ContentDigest>,
         /// Terminal run completion projections.
         pub run_completions: BTreeMap<RunId, RunCompletionProjection>,
         /// First saga engagement per run.
@@ -2052,6 +2103,7 @@ pub mod v1 {
         pub fn from_parts(parts: ProjectionSnapshotParts) -> Self {
             let ProjectionSnapshotParts {
                 run_states,
+                saga_policy_digests,
                 run_completions,
                 saga_engagements,
                 manual_resolutions,
@@ -2065,6 +2117,7 @@ pub mod v1 {
             } = parts;
             Self {
                 run_states,
+                saga_policy_digests,
                 run_completions,
                 saga_engagements,
                 manual_resolutions,
@@ -2099,6 +2152,11 @@ pub mod v1 {
                 .get(run_id)
                 .copied()
                 .unwrap_or(RunState::Absent)
+        }
+
+        /// Returns the saga policy digest recorded at run start.
+        pub fn saga_policy_digest(&self, run_id: &RunId) -> Option<&ContentDigest> {
+            self.saga_policy_digests.get(run_id)
         }
 
         /// Returns the run completion projection for a run id.
@@ -2259,6 +2317,11 @@ pub mod v1 {
         /// Iterates projected run states.
         pub fn run_states(&self) -> impl Iterator<Item = (&RunId, &RunState)> {
             self.run_states.iter()
+        }
+
+        /// Iterates run-start saga policy digests.
+        pub fn saga_policy_digests(&self) -> impl Iterator<Item = (&RunId, &ContentDigest)> {
+            self.saga_policy_digests.iter()
         }
 
         /// Iterates run completion projections.
@@ -3098,7 +3161,7 @@ pub mod v1 {
             require_admission_preconditions(
                 &staged_projections,
                 &envelope.payload,
-                request.preconditions.saga_policy.as_ref(),
+                request.preconditions.saga_admit_token.as_ref(),
             )?;
             projection::apply_projection(&mut staged_projections, &envelope)?;
             events.push(envelope);
@@ -3589,10 +3652,10 @@ pub mod v1 {
                 "manual resolution requires not-completed run precondition",
             ));
         }
-        if request.preconditions.saga_policy.is_none() {
+        if request.preconditions.saga_admit_token.is_none() {
             return Err(invalid_prepared_commit_purpose(
                 ManualResolution::NAME,
-                "manual resolution requires saga policy authority",
+                "manual resolution requires saga admit token",
             ));
         }
         Ok(())
@@ -3605,10 +3668,10 @@ pub mod v1 {
             is_saga_terminal_payload,
             "missing RunCompleted payload",
         )?;
-        if request.preconditions.saga_policy.is_none() {
+        if request.preconditions.saga_admit_token.is_none() {
             return Err(invalid_prepared_commit_purpose(
                 SagaTerminal::NAME,
-                "saga terminal resolution requires saga policy authority",
+                "saga terminal resolution requires saga admit token",
             ));
         }
         validate_terminal_attempt_cell_pairs(&request.payloads)
@@ -4254,6 +4317,7 @@ pub mod v1 {
                 "public_output_schema_id": payload.public_output_schema_id.as_str(),
                 "run_id": payload.run_id.as_str(),
                 "runner_executables": payload.runner_executables.iter().map(executable_identity_json).collect::<Vec<_>>(),
+                "saga_policy_digest": payload.saga_policy_digest.as_str(),
                 "seed_cells": payload.seed_cells.iter().map(seed_cell_ref_json).collect::<Vec<_>>(),
                 "source_revision": payload.source_revision.as_str(),
                 "spec_artifact_id": payload.spec_artifact_id.as_str(),
@@ -4585,6 +4649,7 @@ pub mod v1 {
                     json,
                     "public_output_schema_id",
                 )?)?,
+                saga_policy_digest: parse_identity(required_str(json, "saga_policy_digest")?)?,
                 descriptor_identities: parse_vec(json, "descriptor_identities", |item| {
                     parse_descriptor_identity(item)
                 })?,
@@ -5530,76 +5595,15 @@ pub mod v1 {
             "required_public_output_absent": preconditions.required_public_output_absent,
             "required_run_state": required_run_state_str(preconditions.required_run_state),
             "required_side_effect_states": side_effects,
-            "saga_policy": preconditions.saga_policy.as_ref().map(saga_policy_json),
+            "saga_admit_token": preconditions.saga_admit_token.as_ref().map(saga_admit_token_json),
         })
     }
 
-    fn saga_policy_json(policy: &SagaPolicySpec) -> serde_json::Value {
-        match policy {
-            SagaPolicySpec::NoSideEffects => serde_json::json!({
-                "kind": "no_side_effects",
-            }),
-            SagaPolicySpec::FailWithoutAcdcClaim => serde_json::json!({
-                "kind": "fail_without_acdc_claim",
-            }),
-            SagaPolicySpec::ManualResolution { manual } => serde_json::json!({
-                "kind": "manual_resolution",
-                "manual": manual_resolution_evidence_spec_json(manual),
-            }),
-            SagaPolicySpec::CompensateCompleted {
-                on_remediation_unresolved,
-            } => serde_json::json!({
-                "kind": "compensate_completed",
-                "on_remediation_unresolved": remediation_unresolved_spec_json(on_remediation_unresolved),
-            }),
-        }
-    }
-
-    fn remediation_unresolved_spec_json(policy: &RemediationUnresolvedSpec) -> serde_json::Value {
-        match policy {
-            RemediationUnresolvedSpec::ManualResolution { manual } => serde_json::json!({
-                "kind": "manual_resolution",
-                "manual": manual_resolution_evidence_spec_json(manual),
-            }),
-            RemediationUnresolvedSpec::FailWithoutAcdcClaim => serde_json::json!({
-                "kind": "fail_without_acdc_claim",
-            }),
-        }
-    }
-
-    fn manual_resolution_evidence_spec_json(
-        manual: &ManualResolutionEvidenceSpec,
-    ) -> serde_json::Value {
+    fn saga_admit_token_json(token: &SagaAdmitToken) -> serde_json::Value {
         serde_json::json!({
-            "authorization": manual_resolution_authorization_spec_json(&manual.authorization),
-            "evidence_schema": manual.evidence_schema.as_str(),
-        })
-    }
-
-    fn manual_resolution_authorization_spec_json(
-        authorization: &mfm_spec::v1::ManualResolutionAuthorizationSpec,
-    ) -> serde_json::Value {
-        serde_json::json!({
-            "authority": {
-                "authority_id": authorization.authority.authority_id.as_str(),
-                "operators": authorization
-                    .authority
-                    .operators
-                    .iter()
-                    .map(|operator| {
-                        serde_json::json!({
-                            "operator_id": operator.operator_id.as_str(),
-                            "public_identity": operator.public_identity.as_str(),
-                        })
-                    })
-                    .collect::<Vec<_>>(),
-            },
-            "quorum": {
-                "kind": "threshold",
-                "required_signatures": authorization.quorum.required_signatures(),
-            },
-            "signing_scheme": authorization.signing_scheme.as_str(),
-            "verifier_id": authorization.verifier_id.as_str(),
+            "run_id": token.run_id().as_str(),
+            "saga_policy_digest": token.saga_policy_digest().as_str(),
+            "spec_hash": token.spec_hash().as_str(),
         })
     }
 

@@ -191,6 +191,7 @@ impl CommitPlanner {
             spec_version: runtime_spec.spec().spec_version.clone(),
             lowering_version: runtime_spec.spec().lowering_version.clone(),
             public_output_schema_id: runtime_spec.spec().public_outputs.public_schema_id.clone(),
+            saga_policy_digest: runtime_spec.spec().saga.saga_policy_digest()?,
             descriptor_identities: runtime_spec.spec().descriptor_identities.clone(),
             runner_executables,
             adapter_executables: evidence.adapter_executables,
@@ -1458,7 +1459,11 @@ fn runner_output_preconditions(
         &node.framework,
         Some(spec::FrameworkNodeSpec::ResolveSagaTerminal(_))
     ) {
-        preconditions.saga_policy = Some(runtime_spec.spec().saga.clone());
+        preconditions.saga_admit_token = Some(store::SagaAdmitToken::new(
+            run_id.clone(),
+            runtime_spec.spec_hash().clone(),
+            runtime_spec.spec().saga.clone(),
+        )?);
     }
 
     if node.side_effect.is_none() {

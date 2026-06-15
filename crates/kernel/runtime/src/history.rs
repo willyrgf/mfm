@@ -1330,6 +1330,7 @@ fn validate_run_started_matches_certified_spec(
         || run_started.lowering_version != runtime_spec.spec().lowering_version
         || run_started.public_output_schema_id
             != runtime_spec.spec().public_outputs.public_schema_id
+        || run_started.saga_policy_digest != runtime_spec.spec().saga.saga_policy_digest()?
         || run_started.canonicalizer_identity
             != runtime_spec
                 .spec()

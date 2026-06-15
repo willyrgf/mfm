@@ -97,6 +97,9 @@ fn apply_run_started(
     projections
         .run_states
         .insert(payload.run_id.clone(), RunState::Started);
+    projections
+        .saga_policy_digests
+        .insert(payload.run_id.clone(), payload.saga_policy_digest.clone());
     Ok(())
 }
 
