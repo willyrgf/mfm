@@ -20,6 +20,7 @@ mfm-capabilities = { path = "../capabilities" }
 mfm-certify = { path = "../certify" }
 mfm-events = { path = "../events" }
 mfm-ids = { path = "../ids" }
+mfm-manual-auth = { path = "../manual-auth" }
 mfm-spec = { path = "../spec" }
 mfm-store = { path = "../store" }
 serde_json = { workspace = true }
@@ -28,6 +29,7 @@ serde_json = { workspace = true }
 mfm-effects = { path = "../effects" }
 mfm-program = { path = "../program" }
 mfm-program-derive = { path = "../program-derive" }
+mfm-signing = { path = "../../signing" }
 mfm-values = { path = "../values" }
 serde = { workspace = true }
 tokio = { workspace = true }

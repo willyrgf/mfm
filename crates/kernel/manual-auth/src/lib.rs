@@ -9,9 +9,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::Arc;
 
-use mfm_canonical::PlainCanonicalJsonBytes;
+use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
 use mfm_events::v1 as events;
-use mfm_ids::{ArtifactId, ContentDigest, RunId, SchemaId, SpecHash};
+use mfm_ids::{ArtifactId, ContentDigest, DigestAlgorithm, RunId, SchemaId, SpecHash};
 use mfm_signing::SignatureBytes;
 use mfm_spec::v1 as spec;
 
@@ -19,9 +19,25 @@ use mfm_spec::v1 as spec;
 pub const MANUAL_AUTHORIZATION_CLAIM_VERSION: &str = "mfm.manual_resolution.authorization_claim.v1";
 /// Persisted manual authorization proof contract version.
 pub const MANUAL_AUTHORIZATION_PROOF_VERSION: &str = "mfm.manual_resolution.authorization_proof.v1";
+/// Stable schema name for manual authorization proof artifacts.
+pub const MANUAL_AUTHORIZATION_PROOF_SCHEMA_NAME: &str =
+    "mfm.manual_resolution.authorization_proof";
+/// Stable schema version for manual authorization proof artifacts.
+pub const MANUAL_AUTHORIZATION_PROOF_SCHEMA_VERSION: &str = "1";
 
 /// Result type for manual authorization contracts.
 pub type Result<T> = std::result::Result<T, ManualAuthorizationError>;
+
+/// Returns the schema id for manual authorization proof artifacts.
+pub fn manual_authorization_proof_schema_id() -> Result<SchemaId> {
+    SchemaId::new(
+        MANUAL_AUTHORIZATION_PROOF_SCHEMA_NAME,
+        MANUAL_AUTHORIZATION_PROOF_SCHEMA_VERSION,
+        DigestAlgorithm::Sha256JcsV1,
+        sha256_digest_bytes(MANUAL_AUTHORIZATION_PROOF_SCHEMA_NAME.as_bytes()),
+    )
+    .map_err(|error| ManualAuthorizationError::InvalidShape(error.to_string()))
+}
 
 /// Manual block reason bound into a signed manual authorization claim.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

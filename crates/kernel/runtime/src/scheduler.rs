@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use mfm_events::v1 as events;
 use mfm_ids::{AttemptId, NodeId, RunId};
+use mfm_manual_auth::VerifiedManualResolution;
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
 
@@ -19,6 +20,9 @@ use crate::history::{
     committed_config_artifact, materialize_inputs, recorded_facts_for_attempt, RuntimeRunView,
 };
 use crate::invocation::{CertifiedRuntimeCapabilities, ErasedRunCtx, PreparedRunnerInvocation};
+use crate::manual_resolution::{
+    prepare_manual_resolution_commit, ManualResolutionEvidenceArtifact,
+};
 use crate::runners::{ErasedRunnerBinding, ErasedRunnerRegistry};
 use crate::{attempt_id, CertifiedRuntimeSpec, Result, RuntimeError};
 
@@ -200,6 +204,34 @@ impl SerialTypedScheduler {
             .append_prepared_typed_commit(launch.commit)
             .await
             .map_err(async_store_error)
+    }
+
+    /// Appends a verified manual resolution after staging evidence and authorization artifacts.
+    pub async fn record_manual_resolution<S: store::TypedRunEventStore + ?Sized>(
+        &self,
+        store: &mut S,
+        runtime_spec: &CertifiedRuntimeSpec,
+        verified: VerifiedManualResolution,
+        evidence_artifact: ManualResolutionEvidenceArtifact,
+        note: Option<events::ManualResolutionNote>,
+    ) -> Result<store::CommitOutcome> {
+        let run_id = verified.claim().run_id.clone();
+        let stream = store.load_run_stream(&run_id);
+        let saga = store
+            .projection_snapshot()
+            .derive_saga_projection(&run_id, &runtime_spec.spec().saga);
+        let expected_next_seq = store.expected_next_seq(&run_id);
+        let (commit, artifacts_to_stage) = prepare_manual_resolution_commit(
+            runtime_spec,
+            &stream,
+            &saga,
+            expected_next_seq,
+            verified,
+            evidence_artifact,
+            note,
+        )?;
+        self.stage_prepared_artifacts(&artifacts_to_stage).await?;
+        Ok(store.append_prepared_typed_commit(commit)?)
     }
 
     /// Runs one deterministic runnable node, if any.

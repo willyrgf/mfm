@@ -28,6 +28,7 @@ mod framework;
 mod frontier;
 mod history;
 mod invocation;
+mod manual_resolution;
 mod runners;
 mod scheduler;
 mod side_effects;
@@ -45,6 +46,11 @@ pub use invocation::{
     CertifiedRuntimeCapabilities, ErasedRunCtx, MaterializedCell, MaterializedCellTerminal,
     MaterializedInputNode, MaterializedInputs, NamedMaterializedInput, PreparedRunnerInvocation,
     RecordedFact, RecordedFacts,
+};
+pub use manual_resolution::{
+    build_manual_resolution_claim, manual_resolution_block_reason,
+    manual_resolution_stream_prefix_digest, unresolved_manual_obligations_digest,
+    ManualResolutionEvidenceArtifact,
 };
 pub use runners::{
     ErasedNodeRunner, ErasedRunnerBinding, ErasedRunnerFuture, ErasedRunnerOutput,

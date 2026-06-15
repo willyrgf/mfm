@@ -11,11 +11,17 @@ use mfm_ids::{
     DigestBytes, EffectKind, EffectVersion, EventId, LoweringVersion, ScopeId, SeedId,
     SemanticTypeId, SpecVersion, StateKind, StateVersion,
 };
+use mfm_manual_auth::{
+    ManualAuthorizationVerification, ManualAuthorizationVerifier,
+    ManualAuthorizationVerifierRegistry, ManualResolutionAuthorizationProof,
+    ManualResolutionAuthorizationSignature, ManualResolutionEvidenceRef,
+};
 use mfm_program::{
     build_root_with_registries, CanonicalSeed, PublicOutputKey, PureState, RootBuilder, ScopeKey,
     StateKey, StateRegistryBuilder, StateResult, StateSpec,
 };
 use mfm_program_derive::{MfmConfig, MfmValue, PublicOutputs};
+use mfm_signing::SignatureBytes;
 use mfm_store::v1::{TypedProjectionRead, TypedRunEventStore};
 use serde::{Deserialize, Serialize};
 
@@ -116,6 +122,17 @@ impl RuntimeArtifactStager for TestRuntimeArtifactStager {
             verify_artifact_bytes(&bytes, &evidence)?;
             Ok(())
         })
+    }
+}
+
+struct AcceptingManualVerifier;
+
+impl ManualAuthorizationVerifier for AcceptingManualVerifier {
+    fn verify(
+        &self,
+        _verification: ManualAuthorizationVerification<'_>,
+    ) -> mfm_manual_auth::Result<()> {
+        Ok(())
     }
 }
 
@@ -5113,10 +5130,12 @@ async fn runtime_resolves_manual_resolution_terminal() {
     );
 
     append_manual_resolution(
+        &scheduler,
         &mut store,
         &fixture,
         events::ManualResolutionOutcome::ConfirmRemediated,
-    );
+    )
+    .await;
     let saga = store
         .projection_snapshot()
         .derive_saga_projection(&fixture.run_id, &fixture.runtime_spec.spec().saga);
@@ -5137,6 +5156,104 @@ async fn runtime_resolves_manual_resolution_terminal() {
             .outcome,
         events::RunCompletionOutcome::ManuallyResolved
     ));
+}
+
+#[tokio::test]
+async fn runtime_rejects_manual_resolution_before_manual_blocked() {
+    let fixture = fixture_with_manual_resolution_side_effect_state();
+    let mut registry = ErasedRunnerRegistry::new();
+    registry
+        .register(binding(
+            fixture.descriptor_a.clone(),
+            "sidefx",
+            AmbiguousSideEffectRunner::new(&fixture),
+        ))
+        .expect("binding side effect");
+    registry
+        .register(binding(
+            fixture.descriptor_b.clone(),
+            "read",
+            RecordingRunner {
+                expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
+                output_artifact: artifact(0xb1),
+                output_digest: content(0xb2),
+            },
+        ))
+        .expect("binding read");
+    let scheduler = test_scheduler(registry);
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+    let manual = match &fixture.runtime_spec.spec().saga {
+        spec::SagaPolicySpec::ManualResolution { manual } => manual,
+        _ => panic!("fixture does not carry manual resolution schemas"),
+    };
+    let evidence_bytes = br#"{"operator_note":"too_early"}"#.to_vec();
+    let evidence_hash = ContentDigest::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        sha256_digest_bytes(&evidence_bytes),
+    );
+    let evidence = ManualResolutionEvidenceRef {
+        schema_id: manual.evidence_schema.clone(),
+        content_hash: evidence_hash.clone(),
+        artifact_id: ArtifactId::from_digest(evidence_hash.algorithm(), *evidence_hash.digest()),
+    };
+    let claim = mfm_manual_auth::ManualResolutionAuthorizationClaim {
+        run_id: fixture.run_id.clone(),
+        spec_hash: fixture.runtime_spec.spec_hash().clone(),
+        expected_next_seq: store.expected_next_seq(&fixture.run_id).as_u64(),
+        stream_prefix_digest: content(0xe7),
+        manual_block_reason: mfm_manual_auth::ManualResolutionBlockReason::PolicyManualResolution,
+        unresolved_obligations_digest: content(0xe8),
+        outcome: events::ManualResolutionOutcome::ConfirmRemediated,
+        evidence,
+    };
+    let operator = manual.authorization.authority.operators[0].clone();
+    let proof = ManualResolutionAuthorizationProof {
+        verifier_id: manual.authorization.verifier_id.clone(),
+        signing_scheme: manual.authorization.signing_scheme.clone(),
+        claim: claim.clone(),
+        signatures: vec![ManualResolutionAuthorizationSignature {
+            operator_id: operator.operator_id,
+            public_identity: operator.public_identity,
+            signature: SignatureBytes::new(vec![0x5b; 65]).expect("signature"),
+        }],
+    };
+    let mut verifiers = ManualAuthorizationVerifierRegistry::new();
+    verifiers
+        .register(
+            manual.authorization.verifier_id.clone(),
+            AcceptingManualVerifier,
+        )
+        .expect("register verifier");
+    let verified = verifiers
+        .verify(&manual.authorization, claim, proof)
+        .expect("verified manual resolution");
+
+    let error = scheduler
+        .record_manual_resolution(
+            &mut store,
+            &fixture.runtime_spec,
+            verified,
+            ManualResolutionEvidenceArtifact {
+                bytes: evidence_bytes,
+                media_type: spec::MediaType::new("application/json").expect("media"),
+            },
+            None,
+        )
+        .await
+        .expect_err("manual resolution before block rejects");
+
+    assert!(
+        matches!(error, RuntimeError::InvalidRunStream(_)),
+        "{error}"
+    );
 }
 
 #[tokio::test]
@@ -7943,7 +8060,8 @@ fn append_synthetic_completed_terminal(
         .expect("append synthetic terminal");
 }
 
-fn append_manual_resolution(
+async fn append_manual_resolution(
+    scheduler: &SerialTypedScheduler,
     store: &mut store::InMemoryTypedRunStore,
     fixture: &Fixture,
     outcome: events::ManualResolutionOutcome,
@@ -7955,58 +8073,59 @@ fn append_manual_resolution(
         } => manual,
         _ => panic!("fixture does not carry manual resolution schemas"),
     };
-    let evidence_hash = content(0xe3);
-    let evidence_artifact_id = artifact(0xe4);
-    let authorization_hash = content(0xe5);
-    let authorization_artifact_id = artifact(0xe6);
-    let evidence = store::ArtifactEvidenceRef {
-        artifact_id: evidence_artifact_id.clone(),
-        digest: evidence_hash.clone(),
-        byte_len: 29,
-        media_type: spec::MediaType::new("application/json").expect("media"),
-        schema_id: Some(manual.evidence_schema.clone()),
-        semantic_type_id: None,
-        producer_node_id: None,
-        producer_seed_id: None,
-        artifact_role: events::ArtifactRole::ManualResolutionEvidence,
+    let evidence_bytes = br#"{"operator_note":"reviewed"}"#.to_vec();
+    let evidence_hash = ContentDigest::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        sha256_digest_bytes(&evidence_bytes),
+    );
+    let evidence_artifact_id =
+        ArtifactId::from_digest(evidence_hash.algorithm(), *evidence_hash.digest());
+    let evidence = ManualResolutionEvidenceRef {
+        schema_id: manual.evidence_schema.clone(),
+        content_hash: evidence_hash,
+        artifact_id: evidence_artifact_id,
     };
-    let authorization = store::ArtifactEvidenceRef {
-        artifact_id: authorization_artifact_id.clone(),
-        digest: authorization_hash.clone(),
-        byte_len: 31,
-        media_type: spec::MediaType::new("application/json").expect("media"),
-        schema_id: Some(fixture.seed_ref.schema_id.clone()),
-        semantic_type_id: None,
-        producer_node_id: None,
-        producer_seed_id: None,
-        artifact_role: events::ArtifactRole::ManualResolutionAuthorization,
+    let claim = build_manual_resolution_claim(
+        store,
+        &fixture.runtime_spec,
+        &fixture.run_id,
+        outcome,
+        evidence,
+    )
+    .expect("manual claim");
+    let operator = manual.authorization.authority.operators[0].clone();
+    let proof = ManualResolutionAuthorizationProof {
+        verifier_id: manual.authorization.verifier_id.clone(),
+        signing_scheme: manual.authorization.signing_scheme.clone(),
+        claim: claim.clone(),
+        signatures: vec![ManualResolutionAuthorizationSignature {
+            operator_id: operator.operator_id,
+            public_identity: operator.public_identity,
+            signature: SignatureBytes::new(vec![0x5a; 65]).expect("signature"),
+        }],
     };
-    store
-        .append_prepared_commit(store::TypedCommitRequest {
-            run_id: fixture.run_id.clone(),
-            expected_next_seq: store.expected_next_seq(&fixture.run_id),
-            commit_key: store::CommitKey::new("manual-resolution:confirm").expect("commit key"),
-            payloads: vec![events::KernelEventPayload::ManualResolutionRecorded(
-                events::ManualResolutionRecorded {
-                    run_id: fixture.run_id.clone(),
-                    spec_hash: fixture.runtime_spec.spec_hash().clone(),
-                    outcome,
-                    evidence_schema_id: manual.evidence_schema.clone(),
-                    evidence_hash,
-                    evidence_artifact_id,
-                    authorization_schema_id: fixture.seed_ref.schema_id.clone(),
-                    authorization_hash,
-                    authorization_artifact_id,
-                    note: None,
-                },
-            )],
-            required_artifacts: vec![evidence, authorization],
-            preconditions: store::CommitPreconditions {
-                required_run_state: store::RequiredRunState::NotCompleted,
-                saga_policy: Some(fixture.runtime_spec.spec().saga.clone()),
-                ..store::CommitPreconditions::default()
+    let mut verifiers = ManualAuthorizationVerifierRegistry::new();
+    verifiers
+        .register(
+            manual.authorization.verifier_id.clone(),
+            AcceptingManualVerifier,
+        )
+        .expect("register verifier");
+    let verified = verifiers
+        .verify(&manual.authorization, claim, proof)
+        .expect("verified manual resolution");
+    scheduler
+        .record_manual_resolution(
+            store,
+            &fixture.runtime_spec,
+            verified,
+            ManualResolutionEvidenceArtifact {
+                bytes: evidence_bytes,
+                media_type: spec::MediaType::new("application/json").expect("media"),
             },
-        })
+            None,
+        )
+        .await
         .expect("append manual resolution");
 }
 
