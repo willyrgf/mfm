@@ -26,6 +26,26 @@ pub(crate) enum HistoricalSideEffectPhase {
     Failed,
 }
 
+impl From<events::SideEffectEventKind> for HistoricalSideEffectPhase {
+    fn from(kind: events::SideEffectEventKind) -> Self {
+        match kind {
+            events::SideEffectEventKind::IntentPersisted => Self::IntentPersisted,
+            events::SideEffectEventKind::Claimed | events::SideEffectEventKind::ClaimTakenOver => {
+                Self::Claimed
+            }
+            events::SideEffectEventKind::InvocationPrepared => Self::InvocationPrepared,
+            events::SideEffectEventKind::InvocationStarted => Self::InvocationStarted,
+            events::SideEffectEventKind::NotSubmittedProven => Self::NotSubmittedProven,
+            events::SideEffectEventKind::SubmissionObserved => Self::SubmissionObserved,
+            events::SideEffectEventKind::SubmissionUnknown => Self::SubmissionUnknown,
+            events::SideEffectEventKind::ReceiptObserved => Self::ReceiptObserved,
+            events::SideEffectEventKind::ConfirmationObserved => Self::ConfirmationObserved,
+            events::SideEffectEventKind::Ambiguous => Self::Ambiguous,
+            events::SideEffectEventKind::Failed => Self::Failed,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct HistoricalSideEffectLedger {
     node_id: NodeId,
@@ -126,119 +146,22 @@ pub(crate) fn side_effect_payload_ref(
     &events::SideEffectLedgerKey,
     HistoricalSideEffectPhase,
 )> {
-    match payload {
-        events::KernelEventPayload::SideEffectIntentPersisted(payload) => Some((
-            &payload.node_id,
-            &payload.attempt_id,
-            &payload.ledger_key,
-            HistoricalSideEffectPhase::IntentPersisted,
-        )),
-        events::KernelEventPayload::SideEffectClaimed(payload) => Some((
-            &payload.node_id,
-            &payload.attempt_id,
-            &payload.ledger_key,
-            HistoricalSideEffectPhase::Claimed,
-        )),
-        events::KernelEventPayload::SideEffectClaimTakenOver(payload) => Some((
-            &payload.node_id,
-            &payload.attempt_id,
-            &payload.ledger_key,
-            HistoricalSideEffectPhase::Claimed,
-        )),
-        events::KernelEventPayload::SideEffectInvocationPrepared(payload) => Some((
-            &payload.node_id,
-            &payload.attempt_id,
-            &payload.ledger_key,
-            HistoricalSideEffectPhase::InvocationPrepared,
-        )),
-        events::KernelEventPayload::SideEffectInvocationStarted(payload) => Some((
-            &payload.node_id,
-            &payload.attempt_id,
-            &payload.ledger_key,
-            HistoricalSideEffectPhase::InvocationStarted,
-        )),
-        events::KernelEventPayload::SideEffectNotSubmittedProven(payload) => Some((
-            &payload.node_id,
-            &payload.attempt_id,
-            &payload.ledger_key,
-            HistoricalSideEffectPhase::NotSubmittedProven,
-        )),
-        events::KernelEventPayload::SideEffectSubmissionObserved(payload) => Some((
-            &payload.node_id,
-            &payload.attempt_id,
-            &payload.ledger_key,
-            HistoricalSideEffectPhase::SubmissionObserved,
-        )),
-        events::KernelEventPayload::SideEffectSubmissionUnknown(payload) => Some((
-            &payload.node_id,
-            &payload.attempt_id,
-            &payload.ledger_key,
-            HistoricalSideEffectPhase::SubmissionUnknown,
-        )),
-        events::KernelEventPayload::SideEffectReceiptObserved(payload) => Some((
-            &payload.node_id,
-            &payload.attempt_id,
-            &payload.ledger_key,
-            HistoricalSideEffectPhase::ReceiptObserved,
-        )),
-        events::KernelEventPayload::SideEffectConfirmationObserved(payload) => Some((
-            &payload.node_id,
-            &payload.attempt_id,
-            &payload.ledger_key,
-            HistoricalSideEffectPhase::ConfirmationObserved,
-        )),
-        events::KernelEventPayload::SideEffectAmbiguous(payload) => Some((
-            &payload.node_id,
-            &payload.attempt_id,
-            &payload.ledger_key,
-            HistoricalSideEffectPhase::Ambiguous,
-        )),
-        events::KernelEventPayload::SideEffectFailed(payload) => Some((
-            &payload.node_id,
-            &payload.attempt_id,
-            &payload.ledger_key,
-            HistoricalSideEffectPhase::Failed,
-        )),
-        _ => None,
-    }
+    payload.side_effect_ref().map(|side_effect| {
+        (
+            side_effect.node_id,
+            side_effect.attempt_id,
+            side_effect.ledger_key,
+            HistoricalSideEffectPhase::from(side_effect.kind),
+        )
+    })
 }
 
 fn side_effect_payload_ledger_purpose(
     payload: &events::KernelEventPayload,
 ) -> Option<&events::SideEffectLedgerPurpose> {
-    match payload {
-        events::KernelEventPayload::SideEffectIntentPersisted(payload) => {
-            Some(&payload.ledger_purpose)
-        }
-        events::KernelEventPayload::SideEffectClaimed(payload) => Some(&payload.ledger_purpose),
-        events::KernelEventPayload::SideEffectClaimTakenOver(payload) => {
-            Some(&payload.ledger_purpose)
-        }
-        events::KernelEventPayload::SideEffectInvocationPrepared(payload) => {
-            Some(&payload.ledger_purpose)
-        }
-        events::KernelEventPayload::SideEffectInvocationStarted(payload) => {
-            Some(&payload.ledger_purpose)
-        }
-        events::KernelEventPayload::SideEffectNotSubmittedProven(payload) => {
-            Some(&payload.ledger_purpose)
-        }
-        events::KernelEventPayload::SideEffectSubmissionObserved(payload) => {
-            Some(&payload.ledger_purpose)
-        }
-        events::KernelEventPayload::SideEffectSubmissionUnknown(payload) => {
-            Some(&payload.ledger_purpose)
-        }
-        events::KernelEventPayload::SideEffectReceiptObserved(payload) => {
-            Some(&payload.ledger_purpose)
-        }
-        events::KernelEventPayload::SideEffectConfirmationObserved(payload) => {
-            Some(&payload.ledger_purpose)
-        }
-        events::KernelEventPayload::SideEffectAmbiguous(payload) => Some(&payload.ledger_purpose),
-        events::KernelEventPayload::SideEffectFailed(payload) => Some(&payload.ledger_purpose),
-        _ => None,
-    }
+    payload
+        .side_effect_ref()
+        .map(|side_effect| side_effect.ledger_purpose)
 }
 
 fn validate_side_effect_ledger_purpose(
@@ -353,9 +276,44 @@ pub(crate) fn validate_atomic_side_effect_failure_pairs(
     let mut side_effect_failures = BTreeMap::new();
     let mut attempt_failures = BTreeMap::new();
     for event in stream {
-        match event.payload() {
-            events::KernelEventPayload::SideEffectFailed(payload) => {
-                side_effect_failures.insert(
+        if let Some(side_effect) = event.payload().side_effect_ref() {
+            match side_effect.kind {
+                events::SideEffectEventKind::Failed => {
+                    let events::KernelEventPayload::SideEffectFailed(payload) = event.payload()
+                    else {
+                        unreachable!("side-effect kind came from payload variant");
+                    };
+                    side_effect_failures.insert(
+                        (
+                            event.seq(),
+                            side_effect.node_id.clone(),
+                            side_effect.attempt_id.clone(),
+                        ),
+                        payload.retryable,
+                    );
+                }
+                events::SideEffectEventKind::Ambiguous => {
+                    side_effect_failures.insert(
+                        (
+                            event.seq(),
+                            side_effect.node_id.clone(),
+                            side_effect.attempt_id.clone(),
+                        ),
+                        false,
+                    );
+                }
+                _ => {}
+            }
+        }
+        if let events::KernelEventPayload::StateAttemptFailed(payload) = event.payload() {
+            let node = runtime_spec.node(&payload.node_id).ok_or_else(|| {
+                RuntimeError::InvalidRunStream(format!(
+                    "attempt failed for uncertified node {}",
+                    payload.node_id
+                ))
+            })?;
+            if node.side_effect.is_some() {
+                attempt_failures.insert(
                     (
                         event.seq(),
                         payload.node_id.clone(),
@@ -364,35 +322,6 @@ pub(crate) fn validate_atomic_side_effect_failure_pairs(
                     payload.retryable,
                 );
             }
-            events::KernelEventPayload::SideEffectAmbiguous(payload) => {
-                side_effect_failures.insert(
-                    (
-                        event.seq(),
-                        payload.node_id.clone(),
-                        payload.attempt_id.clone(),
-                    ),
-                    false,
-                );
-            }
-            events::KernelEventPayload::StateAttemptFailed(payload) => {
-                let node = runtime_spec.node(&payload.node_id).ok_or_else(|| {
-                    RuntimeError::InvalidRunStream(format!(
-                        "attempt failed for uncertified node {}",
-                        payload.node_id
-                    ))
-                })?;
-                if node.side_effect.is_some() {
-                    attempt_failures.insert(
-                        (
-                            event.seq(),
-                            payload.node_id.clone(),
-                            payload.attempt_id.clone(),
-                        ),
-                        payload.retryable,
-                    );
-                }
-            }
-            _ => {}
         }
     }
     for (failure, side_effect_retryable) in &side_effect_failures {

@@ -3080,47 +3080,11 @@ pub mod v1 {
     }
 
     fn payload_run_id(payload: &KernelEventPayload) -> Option<RunId> {
-        match payload {
-            KernelEventPayload::RunStarted(payload) => Some(payload.run_id.clone()),
-            KernelEventPayload::ManualResolutionRecorded(payload) => Some(payload.run_id.clone()),
-            KernelEventPayload::RunCompleted(payload) => Some(payload.run_id.clone()),
-            KernelEventPayload::RetentionRefsAppended(payload) => Some(payload.run_id.clone()),
-            KernelEventPayload::RetentionManifestProjected(payload) => Some(payload.run_id.clone()),
-            _ => None,
-        }
+        payload.run_id().cloned()
     }
 
     fn payload_spec_hash(payload: &KernelEventPayload) -> SpecHash {
-        match payload {
-            KernelEventPayload::RunStarted(payload) => payload.spec_hash.clone(),
-            KernelEventPayload::StateAttemptStarted(payload) => payload.spec_hash.clone(),
-            KernelEventPayload::FactRecorded(payload) => payload.spec_hash.clone(),
-            KernelEventPayload::ArtifactReferenced(payload) => payload.spec_hash.clone(),
-            KernelEventPayload::CellProduced(payload) => payload.spec_hash.clone(),
-            KernelEventPayload::CellSkipped(payload) => payload.spec_hash.clone(),
-            KernelEventPayload::SideEffectIntentPersisted(payload) => payload.spec_hash.clone(),
-            KernelEventPayload::SideEffectClaimed(payload) => payload.spec_hash.clone(),
-            KernelEventPayload::SideEffectClaimTakenOver(payload) => payload.spec_hash.clone(),
-            KernelEventPayload::SideEffectInvocationPrepared(payload) => payload.spec_hash.clone(),
-            KernelEventPayload::SideEffectInvocationStarted(payload) => payload.spec_hash.clone(),
-            KernelEventPayload::SideEffectNotSubmittedProven(payload) => payload.spec_hash.clone(),
-            KernelEventPayload::SideEffectSubmissionObserved(payload) => payload.spec_hash.clone(),
-            KernelEventPayload::SideEffectSubmissionUnknown(payload) => payload.spec_hash.clone(),
-            KernelEventPayload::SideEffectReceiptObserved(payload) => payload.spec_hash.clone(),
-            KernelEventPayload::SideEffectConfirmationObserved(payload) => {
-                payload.spec_hash.clone()
-            }
-            KernelEventPayload::SideEffectAmbiguous(payload) => payload.spec_hash.clone(),
-            KernelEventPayload::SideEffectFailed(payload) => payload.spec_hash.clone(),
-            KernelEventPayload::PublicOutputProduced(payload) => payload.spec_hash.clone(),
-            KernelEventPayload::PublicOutputRenderFailed(payload) => payload.spec_hash.clone(),
-            KernelEventPayload::StateAttemptCompleted(payload) => payload.spec_hash.clone(),
-            KernelEventPayload::StateAttemptFailed(payload) => payload.spec_hash.clone(),
-            KernelEventPayload::ManualResolutionRecorded(payload) => payload.spec_hash.clone(),
-            KernelEventPayload::RunCompleted(payload) => payload.spec_hash.clone(),
-            KernelEventPayload::RetentionRefsAppended(payload) => payload.spec_hash.clone(),
-            KernelEventPayload::RetentionManifestProjected(payload) => payload.spec_hash.clone(),
-        }
+        payload.spec_hash().clone()
     }
 
     /// Returns canonical JSON bytes for a typed event payload.
@@ -3382,95 +3346,7 @@ pub mod v1 {
         }
     }
 
-    /// Source of an artifact reference carried by a kernel event.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-    pub enum EventArtifactReferenceSource {
-        /// Typed execution spec artifact from `RunStarted`.
-        RunSpec,
-        /// Typed spec certificate artifact from `RunStarted`.
-        RunCertificate,
-        /// Seed-cell artifact reference from `RunStarted`.
-        SeedCell,
-        /// Read-fact response artifact.
-        FactResponse,
-        /// Explicit event artifact reference.
-        ArtifactReferenced,
-        /// State-output cell artifact.
-        StateOutput,
-        /// Public-output source cell artifact.
-        PublicOutputCell,
-        /// Rendered public-output artifact.
-        PublicOutputRendered,
-        /// Public-output render-failure diagnostic artifact reference.
-        PublicOutputRenderFailureDiagnostic,
-        /// State-attempt failure diagnostic artifact reference.
-        StateAttemptFailureDiagnostic,
-        /// Side-effect failure diagnostic artifact reference.
-        SideEffectFailureDiagnostic,
-        /// Manual-resolution evidence artifact.
-        ManualResolutionEvidence,
-        /// Manual-resolution authorization proof artifact.
-        ManualResolutionAuthorization,
-        /// Side-effect intent artifact.
-        SideEffectIntent,
-        /// Prepared side-effect invocation artifact.
-        PreparedInvocation,
-        /// Not-submitted proof artifact.
-        NotSubmittedProof,
-        /// Side-effect submission artifact.
-        Submission,
-        /// Side-effect submission-unknown evidence artifact.
-        SubmissionUnknownEvidence,
-        /// Side-effect receipt artifact.
-        Receipt,
-        /// Side-effect confirmation artifact.
-        Confirmation,
-        /// Side-effect resource touched-set evidence artifact.
-        ResourceTouchedSet,
-        /// Side-effect ambiguity evidence artifact.
-        AmbiguityEvidence,
-        /// Retention reference artifact.
-        RetentionRef,
-        /// Retention manifest artifact.
-        RetentionManifest,
-    }
-
-    impl EventArtifactReferenceSource {
-        /// Returns true when this source may be the framework terminal-lifecycle receipt.
-        pub fn is_terminal_lifecycle_receipt_candidate(self) -> bool {
-            matches!(self, Self::ArtifactReferenced | Self::StateOutput)
-        }
-
-        /// Returns true when this source belongs to retention-only metadata events.
-        pub fn is_retention(self) -> bool {
-            matches!(self, Self::RetentionRef | Self::RetentionManifest)
-        }
-    }
-
-    /// Artifact evidence requirement derived from a single kernel event payload.
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    pub struct EventArtifactRequirement {
-        /// Event field that referenced the artifact.
-        pub source: EventArtifactReferenceSource,
-        /// Referenced artifact id.
-        pub artifact_id: ArtifactId,
-        /// Expected content digest, when the event carries one.
-        pub digest: Option<ContentDigest>,
-        /// Expected byte length, when the event carries one.
-        pub byte_len: Option<u64>,
-        /// Expected media type, when the event carries one.
-        pub media_type: Option<MediaType>,
-        /// Expected schema id, when the event carries one.
-        pub schema_id: Option<SchemaId>,
-        /// Expected semantic type id, when the event carries one.
-        pub semantic_type_id: Option<SemanticTypeId>,
-        /// Expected producer node id, when applicable.
-        pub producer_node_id: Option<NodeId>,
-        /// Expected producer seed id, when applicable.
-        pub producer_seed_id: Option<SeedId>,
-        /// Expected artifact role, when the event carries or implies one.
-        pub artifact_role: Option<ArtifactRole>,
-    }
+    pub use mfm_events::v1::{EventArtifactReferenceSource, EventArtifactRequirement};
 
     pub use self::artifact_refs::event_artifact_requirements;
     use self::artifact_refs::referenced_artifact_ids;

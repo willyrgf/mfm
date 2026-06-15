@@ -8438,8 +8438,8 @@ fn append_synthetic_ambiguous(
             run_id: run_id.clone(),
             expected_next_seq: store.expected_next_seq(run_id),
             commit_key: store::CommitKey::new(commit_key).expect("commit key"),
-            payloads: vec![events::KernelEventPayload::SideEffectAmbiguous(
-                events::side_effect::Ambiguous {
+            payloads: vec![
+                events::KernelEventPayload::SideEffectAmbiguous(events::side_effect::Ambiguous {
                     spec_hash: fixture.runtime_spec.spec_hash().clone(),
                     node_id: node.node_id.clone(),
                     attempt_id: attempt_id.clone(),
@@ -8450,8 +8450,15 @@ fn append_synthetic_ambiguous(
                     evidence_schema_id: node.config_ref.schema_id.clone(),
                     evidence_hash,
                     evidence_artifact_id,
-                },
-            )],
+                }),
+                events::KernelEventPayload::StateAttemptFailed(events::StateAttemptFailed {
+                    spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                    node_id: node.node_id.clone(),
+                    attempt_id: attempt_id.clone(),
+                    retryable: false,
+                    error: side_effect_error(false),
+                }),
+            ],
             required_artifacts: vec![evidence],
             preconditions: store::CommitPreconditions {
                 required_run_state: store::RequiredRunState::NotCompleted,

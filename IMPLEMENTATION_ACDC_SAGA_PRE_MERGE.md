@@ -61,3 +61,43 @@ Checks run:
 - `cargo test -p mfm-store`
 - `cargo test -p mfm-integration-tests --test cargo_metadata_contract`
 - `cargo test -p mfm-integration-tests --test architecture_namespace_contract`
+
+## Phase 2: Event Accessors And Artifact Role Views
+
+Status: completed.
+
+Files changed:
+
+- `crates/kernel/events/src/lib.rs`
+- `crates/kernel/store/src/lib.rs`
+- `crates/kernel/store/src/v1/artifact_refs.rs`
+- `crates/kernel/runtime/src/side_effects.rs`
+- `crates/kernel/runtime/src/history.rs`
+- `crates/kernel/runtime/src/tests.rs`
+- `IMPLEMENTATION_ACDC_SAGA_PRE_MERGE.md`
+
+Validators deleted or replaced:
+
+- Moved artifact requirement extraction from `mfm-store` into event-owned `KernelEventPayload::artifact_requirements`.
+- Replaced store-local artifact requirement/source DTOs with re-exports of the event-owned view.
+- Replaced store-local run id and spec hash match ladders with `KernelEventPayload::{run_id,spec_hash}`.
+- Replaced runtime side-effect payload identity and ledger-purpose match ladders with `KernelEventPayload::side_effect_ref`.
+- Replaced runtime local spec hash helper body with `KernelEventPayload::spec_hash`.
+
+Tests added or updated:
+
+- Added event accessor tests for run id, spec hash, and side-effect refs.
+- Added event artifact requirement coverage for every artifact-bearing payload variant.
+- Kept event schema golden tests unchanged to prove serialized event schema/hash output did not change.
+- Updated a runtime synthetic ambiguity fixture to use the legal store-admitted terminal batch with same-commit non-retryable `StateAttemptFailed`.
+
+Checks run:
+
+- `cargo fmt --all -- --check`
+- `cargo check -p mfm-events -p mfm-store -p mfm-runtime -p mfm-replay`
+- `cargo test -p mfm-events`
+- `cargo test -p mfm-store`
+- `cargo test -p mfm-runtime`
+- `cargo test -p mfm-replay`
+- `cargo test -p mfm-integration-tests --test cargo_metadata_contract`
+- `cargo test -p mfm-integration-tests --test architecture_namespace_contract`

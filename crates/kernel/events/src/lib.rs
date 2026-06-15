@@ -398,6 +398,221 @@ pub mod v1 {
         pub fn event_schema_id(&self) -> Result<SchemaId> {
             self.schema_descriptor().schema_id()
         }
+
+        /// Returns the run id carried directly by run-scoped payloads.
+        ///
+        /// Most node-scoped events rely on the store-owned envelope for run identity, so they
+        /// return `None` here.
+        pub fn run_id(&self) -> Option<&RunId> {
+            match self {
+                Self::RunStarted(payload) => Some(&payload.run_id),
+                Self::ManualResolutionRecorded(payload) => Some(&payload.run_id),
+                Self::RunCompleted(payload) => Some(&payload.run_id),
+                Self::RetentionRefsAppended(payload) => Some(&payload.run_id),
+                Self::RetentionManifestProjected(payload) => Some(&payload.run_id),
+                _ => None,
+            }
+        }
+
+        /// Returns the certified spec hash carried by this payload.
+        pub fn spec_hash(&self) -> &SpecHash {
+            match self {
+                Self::RunStarted(payload) => &payload.spec_hash,
+                Self::StateAttemptStarted(payload) => &payload.spec_hash,
+                Self::FactRecorded(payload) => &payload.spec_hash,
+                Self::ArtifactReferenced(payload) => &payload.spec_hash,
+                Self::CellProduced(payload) => &payload.spec_hash,
+                Self::CellSkipped(payload) => &payload.spec_hash,
+                Self::SideEffectIntentPersisted(payload) => &payload.spec_hash,
+                Self::SideEffectClaimed(payload) => &payload.spec_hash,
+                Self::SideEffectClaimTakenOver(payload) => &payload.spec_hash,
+                Self::SideEffectInvocationPrepared(payload) => &payload.spec_hash,
+                Self::SideEffectInvocationStarted(payload) => &payload.spec_hash,
+                Self::SideEffectNotSubmittedProven(payload) => &payload.spec_hash,
+                Self::SideEffectSubmissionObserved(payload) => &payload.spec_hash,
+                Self::SideEffectSubmissionUnknown(payload) => &payload.spec_hash,
+                Self::SideEffectReceiptObserved(payload) => &payload.spec_hash,
+                Self::SideEffectConfirmationObserved(payload) => &payload.spec_hash,
+                Self::SideEffectAmbiguous(payload) => &payload.spec_hash,
+                Self::SideEffectFailed(payload) => &payload.spec_hash,
+                Self::PublicOutputProduced(payload) => &payload.spec_hash,
+                Self::PublicOutputRenderFailed(payload) => &payload.spec_hash,
+                Self::StateAttemptCompleted(payload) => &payload.spec_hash,
+                Self::StateAttemptFailed(payload) => &payload.spec_hash,
+                Self::ManualResolutionRecorded(payload) => &payload.spec_hash,
+                Self::RunCompleted(payload) => &payload.spec_hash,
+                Self::RetentionRefsAppended(payload) => &payload.spec_hash,
+                Self::RetentionManifestProjected(payload) => &payload.spec_hash,
+            }
+        }
+
+        /// Returns the side-effect event view for payloads in the side-effect ledger family.
+        pub fn side_effect_ref(&self) -> Option<SideEffectEventRef<'_>> {
+            match self {
+                Self::SideEffectIntentPersisted(payload) => Some(SideEffectEventRef {
+                    node_id: &payload.node_id,
+                    attempt_id: &payload.attempt_id,
+                    ledger_key: &payload.ledger_key,
+                    ledger_purpose: &payload.ledger_purpose,
+                    invocation_epoch: Some(payload.invocation_epoch),
+                    claim_generation: None,
+                    kind: SideEffectEventKind::IntentPersisted,
+                }),
+                Self::SideEffectClaimed(payload) => Some(SideEffectEventRef {
+                    node_id: &payload.node_id,
+                    attempt_id: &payload.attempt_id,
+                    ledger_key: &payload.ledger_key,
+                    ledger_purpose: &payload.ledger_purpose,
+                    invocation_epoch: Some(payload.invocation_epoch),
+                    claim_generation: Some(payload.claim_generation),
+                    kind: SideEffectEventKind::Claimed,
+                }),
+                Self::SideEffectClaimTakenOver(payload) => Some(SideEffectEventRef {
+                    node_id: &payload.node_id,
+                    attempt_id: &payload.attempt_id,
+                    ledger_key: &payload.ledger_key,
+                    ledger_purpose: &payload.ledger_purpose,
+                    invocation_epoch: Some(payload.invocation_epoch),
+                    claim_generation: Some(payload.claim_generation),
+                    kind: SideEffectEventKind::ClaimTakenOver,
+                }),
+                Self::SideEffectInvocationPrepared(payload) => Some(SideEffectEventRef {
+                    node_id: &payload.node_id,
+                    attempt_id: &payload.attempt_id,
+                    ledger_key: &payload.ledger_key,
+                    ledger_purpose: &payload.ledger_purpose,
+                    invocation_epoch: Some(payload.invocation_epoch),
+                    claim_generation: Some(payload.claim_generation),
+                    kind: SideEffectEventKind::InvocationPrepared,
+                }),
+                Self::SideEffectInvocationStarted(payload) => Some(SideEffectEventRef {
+                    node_id: &payload.node_id,
+                    attempt_id: &payload.attempt_id,
+                    ledger_key: &payload.ledger_key,
+                    ledger_purpose: &payload.ledger_purpose,
+                    invocation_epoch: Some(payload.invocation_epoch),
+                    claim_generation: Some(payload.claim_generation),
+                    kind: SideEffectEventKind::InvocationStarted,
+                }),
+                Self::SideEffectNotSubmittedProven(payload) => Some(SideEffectEventRef {
+                    node_id: &payload.node_id,
+                    attempt_id: &payload.attempt_id,
+                    ledger_key: &payload.ledger_key,
+                    ledger_purpose: &payload.ledger_purpose,
+                    invocation_epoch: Some(payload.invocation_epoch),
+                    claim_generation: None,
+                    kind: SideEffectEventKind::NotSubmittedProven,
+                }),
+                Self::SideEffectSubmissionObserved(payload) => Some(SideEffectEventRef {
+                    node_id: &payload.node_id,
+                    attempt_id: &payload.attempt_id,
+                    ledger_key: &payload.ledger_key,
+                    ledger_purpose: &payload.ledger_purpose,
+                    invocation_epoch: Some(payload.invocation_epoch),
+                    claim_generation: None,
+                    kind: SideEffectEventKind::SubmissionObserved,
+                }),
+                Self::SideEffectSubmissionUnknown(payload) => Some(SideEffectEventRef {
+                    node_id: &payload.node_id,
+                    attempt_id: &payload.attempt_id,
+                    ledger_key: &payload.ledger_key,
+                    ledger_purpose: &payload.ledger_purpose,
+                    invocation_epoch: Some(payload.invocation_epoch),
+                    claim_generation: None,
+                    kind: SideEffectEventKind::SubmissionUnknown,
+                }),
+                Self::SideEffectReceiptObserved(payload) => Some(SideEffectEventRef {
+                    node_id: &payload.node_id,
+                    attempt_id: &payload.attempt_id,
+                    ledger_key: &payload.ledger_key,
+                    ledger_purpose: &payload.ledger_purpose,
+                    invocation_epoch: Some(payload.invocation_epoch),
+                    claim_generation: None,
+                    kind: SideEffectEventKind::ReceiptObserved,
+                }),
+                Self::SideEffectConfirmationObserved(payload) => Some(SideEffectEventRef {
+                    node_id: &payload.node_id,
+                    attempt_id: &payload.attempt_id,
+                    ledger_key: &payload.ledger_key,
+                    ledger_purpose: &payload.ledger_purpose,
+                    invocation_epoch: Some(payload.invocation_epoch),
+                    claim_generation: None,
+                    kind: SideEffectEventKind::ConfirmationObserved,
+                }),
+                Self::SideEffectAmbiguous(payload) => Some(SideEffectEventRef {
+                    node_id: &payload.node_id,
+                    attempt_id: &payload.attempt_id,
+                    ledger_key: &payload.ledger_key,
+                    ledger_purpose: &payload.ledger_purpose,
+                    invocation_epoch: Some(payload.invocation_epoch),
+                    claim_generation: None,
+                    kind: SideEffectEventKind::Ambiguous,
+                }),
+                Self::SideEffectFailed(payload) => Some(SideEffectEventRef {
+                    node_id: &payload.node_id,
+                    attempt_id: &payload.attempt_id,
+                    ledger_key: &payload.ledger_key,
+                    ledger_purpose: &payload.ledger_purpose,
+                    invocation_epoch: Some(payload.invocation_epoch),
+                    claim_generation: None,
+                    kind: SideEffectEventKind::Failed,
+                }),
+                _ => None,
+            }
+        }
+
+        /// Returns artifact evidence requirements referenced by this payload.
+        pub fn artifact_requirements(&self) -> Vec<EventArtifactRequirement> {
+            event_artifact_requirements(self)
+        }
+    }
+
+    /// Side-effect payload kind used by read-only event views.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub enum SideEffectEventKind {
+        /// Intent persisted.
+        IntentPersisted,
+        /// Claim acquired.
+        Claimed,
+        /// Claim taken over.
+        ClaimTakenOver,
+        /// Invocation prepared.
+        InvocationPrepared,
+        /// Invocation started.
+        InvocationStarted,
+        /// Not-submitted proof recorded.
+        NotSubmittedProven,
+        /// Submission observed.
+        SubmissionObserved,
+        /// Submission status unknown.
+        SubmissionUnknown,
+        /// Receipt observed.
+        ReceiptObserved,
+        /// Confirmation observed.
+        ConfirmationObserved,
+        /// Side effect became ambiguous.
+        Ambiguous,
+        /// Side effect failed.
+        Failed,
+    }
+
+    /// Borrowed side-effect fields common to side-effect event payloads.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct SideEffectEventRef<'a> {
+        /// Node id associated with the side-effect event.
+        pub node_id: &'a NodeId,
+        /// Attempt id associated with the side-effect event.
+        pub attempt_id: &'a AttemptId,
+        /// Side-effect ledger key.
+        pub ledger_key: &'a SideEffectLedgerKey,
+        /// Side-effect ledger purpose.
+        pub ledger_purpose: &'a SideEffectLedgerPurpose,
+        /// Invocation epoch when the payload carries one.
+        pub invocation_epoch: Option<u32>,
+        /// Claim generation when the payload carries one.
+        pub claim_generation: Option<u32>,
+        /// Side-effect payload kind.
+        pub kind: SideEffectEventKind,
     }
 
     /// Run start event payload.
@@ -822,6 +1037,479 @@ pub mod v1 {
         RedactedDiagnostic,
         /// Retention manifest artifact.
         RetentionManifest,
+    }
+
+    /// Source of an artifact reference carried by a kernel event.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub enum EventArtifactReferenceSource {
+        /// Typed execution spec artifact from `RunStarted`.
+        RunSpec,
+        /// Typed spec certificate artifact from `RunStarted`.
+        RunCertificate,
+        /// Seed-cell artifact reference from `RunStarted`.
+        SeedCell,
+        /// Read-fact response artifact.
+        FactResponse,
+        /// Explicit event artifact reference.
+        ArtifactReferenced,
+        /// State-output cell artifact.
+        StateOutput,
+        /// Public-output source cell artifact.
+        PublicOutputCell,
+        /// Rendered public-output artifact.
+        PublicOutputRendered,
+        /// Public-output render-failure diagnostic artifact reference.
+        PublicOutputRenderFailureDiagnostic,
+        /// State-attempt failure diagnostic artifact reference.
+        StateAttemptFailureDiagnostic,
+        /// Side-effect failure diagnostic artifact reference.
+        SideEffectFailureDiagnostic,
+        /// Manual-resolution evidence artifact.
+        ManualResolutionEvidence,
+        /// Manual-resolution authorization proof artifact.
+        ManualResolutionAuthorization,
+        /// Side-effect intent artifact.
+        SideEffectIntent,
+        /// Prepared side-effect invocation artifact.
+        PreparedInvocation,
+        /// Not-submitted proof artifact.
+        NotSubmittedProof,
+        /// Side-effect submission artifact.
+        Submission,
+        /// Side-effect submission-unknown evidence artifact.
+        SubmissionUnknownEvidence,
+        /// Side-effect receipt artifact.
+        Receipt,
+        /// Side-effect confirmation artifact.
+        Confirmation,
+        /// Side-effect resource touched-set evidence artifact.
+        ResourceTouchedSet,
+        /// Side-effect ambiguity evidence artifact.
+        AmbiguityEvidence,
+        /// Retention reference artifact.
+        RetentionRef,
+        /// Retention manifest artifact.
+        RetentionManifest,
+    }
+
+    impl EventArtifactReferenceSource {
+        /// Returns true when this source may be the framework terminal-lifecycle receipt.
+        pub fn is_terminal_lifecycle_receipt_candidate(self) -> bool {
+            matches!(self, Self::ArtifactReferenced | Self::StateOutput)
+        }
+
+        /// Returns true when this source belongs to retention-only metadata events.
+        pub fn is_retention(self) -> bool {
+            matches!(self, Self::RetentionRef | Self::RetentionManifest)
+        }
+    }
+
+    /// Artifact evidence requirement derived from a single kernel event payload.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct EventArtifactRequirement {
+        /// Event field that referenced the artifact.
+        pub source: EventArtifactReferenceSource,
+        /// Referenced artifact id.
+        pub artifact_id: ArtifactId,
+        /// Expected content digest, when the event carries one.
+        pub digest: Option<ContentDigest>,
+        /// Expected byte length, when the event carries one.
+        pub byte_len: Option<u64>,
+        /// Expected media type, when the event carries one.
+        pub media_type: Option<MediaType>,
+        /// Expected schema id, when the event carries one.
+        pub schema_id: Option<SchemaId>,
+        /// Expected semantic type id, when the event carries one.
+        pub semantic_type_id: Option<SemanticTypeId>,
+        /// Expected producer node id, when applicable.
+        pub producer_node_id: Option<NodeId>,
+        /// Expected producer seed id, when applicable.
+        pub producer_seed_id: Option<SeedId>,
+        /// Expected artifact role, when the event carries or implies one.
+        pub artifact_role: Option<ArtifactRole>,
+    }
+
+    fn event_artifact_requirements(payload: &KernelEventPayload) -> Vec<EventArtifactRequirement> {
+        let mut requirements = Vec::new();
+        match payload {
+            KernelEventPayload::RunStarted(payload) => {
+                requirements.push(EventArtifactRequirement {
+                    source: EventArtifactReferenceSource::RunSpec,
+                    artifact_id: payload.spec_artifact_id.clone(),
+                    digest: Some(ContentDigest::from_digest(
+                        payload.spec_hash.algorithm(),
+                        *payload.spec_hash.digest(),
+                    )),
+                    byte_len: None,
+                    media_type: Some(payload.spec_media_type.clone()),
+                    schema_id: None,
+                    semantic_type_id: None,
+                    producer_node_id: None,
+                    producer_seed_id: None,
+                    artifact_role: Some(ArtifactRole::TypedExecutionSpec),
+                });
+                requirements.push(EventArtifactRequirement {
+                    source: EventArtifactReferenceSource::RunCertificate,
+                    artifact_id: payload.certificate_artifact_id.clone(),
+                    digest: Some(payload.certificate_artifact_digest.clone()),
+                    byte_len: None,
+                    media_type: Some(payload.certificate_media_type.clone()),
+                    schema_id: None,
+                    semantic_type_id: None,
+                    producer_node_id: None,
+                    producer_seed_id: None,
+                    artifact_role: Some(ArtifactRole::TypedSpecCertificate),
+                });
+                for seed in &payload.seed_cells {
+                    push_event_artifact(
+                        &mut requirements,
+                        EventArtifactReferenceSource::SeedCell,
+                        &seed.seed_artifact,
+                        None,
+                        Some(seed.seed_id.clone()),
+                    );
+                }
+            }
+            KernelEventPayload::FactRecorded(payload) => {
+                requirements.push(EventArtifactRequirement {
+                    source: EventArtifactReferenceSource::FactResponse,
+                    artifact_id: payload.artifact_id.clone(),
+                    digest: Some(payload.response_hash.clone()),
+                    byte_len: None,
+                    media_type: None,
+                    schema_id: Some(payload.response_schema_id.clone()),
+                    semantic_type_id: None,
+                    producer_node_id: Some(payload.node_id.clone()),
+                    producer_seed_id: None,
+                    artifact_role: Some(ArtifactRole::FactResponse),
+                });
+            }
+            KernelEventPayload::ArtifactReferenced(payload) => {
+                push_event_artifact(
+                    &mut requirements,
+                    EventArtifactReferenceSource::ArtifactReferenced,
+                    &payload.artifact_ref,
+                    payload.node_id.clone(),
+                    None,
+                );
+            }
+            KernelEventPayload::CellProduced(payload) => {
+                requirements.push(EventArtifactRequirement {
+                    source: EventArtifactReferenceSource::StateOutput,
+                    artifact_id: payload.artifact_id.clone(),
+                    digest: Some(payload.content_digest.clone()),
+                    byte_len: None,
+                    media_type: None,
+                    schema_id: Some(payload.schema_id.clone()),
+                    semantic_type_id: Some(payload.semantic_type_id.clone()),
+                    producer_node_id: Some(payload.node_id.clone()),
+                    producer_seed_id: None,
+                    artifact_role: Some(ArtifactRole::StateOutput),
+                });
+            }
+            KernelEventPayload::PublicOutputProduced(payload) => {
+                for cell in &payload.cells {
+                    let (producer_node_id, producer_seed_id) =
+                        cell_producer_artifact_owner(&cell.producer);
+                    requirements.push(EventArtifactRequirement {
+                        source: EventArtifactReferenceSource::PublicOutputCell,
+                        artifact_id: cell.artifact_id.clone(),
+                        digest: Some(cell.content_digest.clone()),
+                        byte_len: None,
+                        media_type: None,
+                        schema_id: Some(cell.schema_id.clone()),
+                        semantic_type_id: Some(cell.semantic_type_id.clone()),
+                        producer_node_id,
+                        producer_seed_id,
+                        artifact_role: None,
+                    });
+                }
+                if let Some(artifact_id) = &payload.rendered_artifact_id {
+                    requirements.push(EventArtifactRequirement {
+                        source: EventArtifactReferenceSource::PublicOutputRendered,
+                        artifact_id: artifact_id.clone(),
+                        digest: Some(payload.rendered_digest.clone()),
+                        byte_len: None,
+                        media_type: None,
+                        schema_id: Some(payload.public_schema_id.clone()),
+                        semantic_type_id: None,
+                        producer_node_id: Some(payload.node_id.clone()),
+                        producer_seed_id: None,
+                        artifact_role: Some(ArtifactRole::PublicOutput),
+                    });
+                }
+            }
+            KernelEventPayload::PublicOutputRenderFailed(payload) => {
+                if let Some(ref evidence) = payload.error.diagnostic_ref {
+                    push_event_artifact(
+                        &mut requirements,
+                        EventArtifactReferenceSource::PublicOutputRenderFailureDiagnostic,
+                        evidence,
+                        Some(payload.node_id.clone()),
+                        None,
+                    );
+                }
+            }
+            KernelEventPayload::StateAttemptFailed(payload) => {
+                if let Some(ref evidence) = payload.error.diagnostic_ref {
+                    push_event_artifact(
+                        &mut requirements,
+                        EventArtifactReferenceSource::StateAttemptFailureDiagnostic,
+                        evidence,
+                        Some(payload.node_id.clone()),
+                        None,
+                    );
+                }
+            }
+            KernelEventPayload::ManualResolutionRecorded(payload) => {
+                requirements.push(EventArtifactRequirement {
+                    source: EventArtifactReferenceSource::ManualResolutionEvidence,
+                    artifact_id: payload.evidence_artifact_id.clone(),
+                    digest: Some(payload.evidence_hash.clone()),
+                    byte_len: None,
+                    media_type: None,
+                    schema_id: Some(payload.evidence_schema_id.clone()),
+                    semantic_type_id: None,
+                    producer_node_id: None,
+                    producer_seed_id: None,
+                    artifact_role: Some(ArtifactRole::ManualResolutionEvidence),
+                });
+                requirements.push(EventArtifactRequirement {
+                    source: EventArtifactReferenceSource::ManualResolutionAuthorization,
+                    artifact_id: payload.authorization_artifact_id.clone(),
+                    digest: Some(payload.authorization_hash.clone()),
+                    byte_len: None,
+                    media_type: None,
+                    schema_id: Some(payload.authorization_schema_id.clone()),
+                    semantic_type_id: None,
+                    producer_node_id: None,
+                    producer_seed_id: None,
+                    artifact_role: Some(ArtifactRole::ManualResolutionAuthorization),
+                });
+            }
+            KernelEventPayload::RunCompleted(payload) => match &payload.outcome {
+                RunCompletionOutcome::Completed(_) => {}
+                RunCompletionOutcome::Compensated
+                | RunCompletionOutcome::ManuallyResolved
+                | RunCompletionOutcome::FailedWithoutAcdcClaim => {}
+            },
+            KernelEventPayload::SideEffectIntentPersisted(payload) => {
+                requirements.push(EventArtifactRequirement {
+                    source: EventArtifactReferenceSource::SideEffectIntent,
+                    artifact_id: payload.intent_artifact_id.clone(),
+                    digest: Some(payload.intent_hash.clone()),
+                    byte_len: None,
+                    media_type: None,
+                    schema_id: Some(payload.intent_schema_id.clone()),
+                    semantic_type_id: None,
+                    producer_node_id: Some(payload.node_id.clone()),
+                    producer_seed_id: None,
+                    artifact_role: Some(ArtifactRole::SideEffectIntent),
+                });
+            }
+            KernelEventPayload::SideEffectInvocationPrepared(payload) => {
+                if let (Some(artifact_id), Some(hash)) =
+                    (&payload.prepared_artifact_id, &payload.prepared_hash)
+                {
+                    requirements.push(EventArtifactRequirement {
+                        source: EventArtifactReferenceSource::PreparedInvocation,
+                        artifact_id: artifact_id.clone(),
+                        digest: Some(hash.clone()),
+                        byte_len: None,
+                        media_type: None,
+                        schema_id: None,
+                        semantic_type_id: None,
+                        producer_node_id: Some(payload.node_id.clone()),
+                        producer_seed_id: None,
+                        artifact_role: Some(ArtifactRole::PreparedInvocation),
+                    });
+                }
+            }
+            KernelEventPayload::SideEffectNotSubmittedProven(payload) => {
+                requirements.push(EventArtifactRequirement {
+                    source: EventArtifactReferenceSource::NotSubmittedProof,
+                    artifact_id: payload.proof_artifact_id.clone(),
+                    digest: Some(payload.proof_hash.clone()),
+                    byte_len: None,
+                    media_type: None,
+                    schema_id: Some(payload.proof_schema_id.clone()),
+                    semantic_type_id: None,
+                    producer_node_id: Some(payload.node_id.clone()),
+                    producer_seed_id: None,
+                    artifact_role: Some(ArtifactRole::NotSubmittedProof),
+                });
+            }
+            KernelEventPayload::SideEffectSubmissionObserved(payload) => {
+                requirements.push(EventArtifactRequirement {
+                    source: EventArtifactReferenceSource::Submission,
+                    artifact_id: payload.submission_artifact_id.clone(),
+                    digest: Some(payload.submission_hash.clone()),
+                    byte_len: None,
+                    media_type: None,
+                    schema_id: Some(payload.submission_schema_id.clone()),
+                    semantic_type_id: None,
+                    producer_node_id: Some(payload.node_id.clone()),
+                    producer_seed_id: None,
+                    artifact_role: Some(ArtifactRole::Submission),
+                });
+            }
+            KernelEventPayload::SideEffectSubmissionUnknown(payload) => {
+                requirements.push(EventArtifactRequirement {
+                    source: EventArtifactReferenceSource::SubmissionUnknownEvidence,
+                    artifact_id: payload.evidence_artifact_id.clone(),
+                    digest: Some(payload.evidence_hash.clone()),
+                    byte_len: None,
+                    media_type: None,
+                    schema_id: Some(payload.evidence_schema_id.clone()),
+                    semantic_type_id: None,
+                    producer_node_id: Some(payload.node_id.clone()),
+                    producer_seed_id: None,
+                    artifact_role: Some(ArtifactRole::SubmissionUnknownEvidence),
+                });
+            }
+            KernelEventPayload::SideEffectReceiptObserved(payload) => {
+                requirements.push(EventArtifactRequirement {
+                    source: EventArtifactReferenceSource::Receipt,
+                    artifact_id: payload.receipt_artifact_id.clone(),
+                    digest: Some(payload.receipt_hash.clone()),
+                    byte_len: None,
+                    media_type: None,
+                    schema_id: Some(payload.receipt_schema_id.clone()),
+                    semantic_type_id: None,
+                    producer_node_id: Some(payload.node_id.clone()),
+                    producer_seed_id: None,
+                    artifact_role: Some(ArtifactRole::Receipt),
+                });
+                if let Some(touched_set) = &payload.resource_touched_set {
+                    push_resource_touched_set_requirement(&mut requirements, touched_set);
+                }
+            }
+            KernelEventPayload::SideEffectConfirmationObserved(payload) => {
+                requirements.push(EventArtifactRequirement {
+                    source: EventArtifactReferenceSource::Confirmation,
+                    artifact_id: payload.confirmation_artifact_id.clone(),
+                    digest: Some(payload.confirmation_hash.clone()),
+                    byte_len: None,
+                    media_type: None,
+                    schema_id: Some(payload.confirmation_schema_id.clone()),
+                    semantic_type_id: None,
+                    producer_node_id: Some(payload.node_id.clone()),
+                    producer_seed_id: None,
+                    artifact_role: Some(ArtifactRole::Confirmation),
+                });
+                if let Some(touched_set) = &payload.resource_touched_set {
+                    push_resource_touched_set_requirement(&mut requirements, touched_set);
+                }
+            }
+            KernelEventPayload::SideEffectAmbiguous(payload) => {
+                requirements.push(EventArtifactRequirement {
+                    source: EventArtifactReferenceSource::AmbiguityEvidence,
+                    artifact_id: payload.evidence_artifact_id.clone(),
+                    digest: Some(payload.evidence_hash.clone()),
+                    byte_len: None,
+                    media_type: None,
+                    schema_id: Some(payload.evidence_schema_id.clone()),
+                    semantic_type_id: None,
+                    producer_node_id: Some(payload.node_id.clone()),
+                    producer_seed_id: None,
+                    artifact_role: Some(ArtifactRole::AmbiguityEvidence),
+                });
+            }
+            KernelEventPayload::SideEffectFailed(payload) => {
+                if let Some(ref evidence) = payload.error.diagnostic_ref {
+                    push_event_artifact(
+                        &mut requirements,
+                        EventArtifactReferenceSource::SideEffectFailureDiagnostic,
+                        evidence,
+                        Some(payload.node_id.clone()),
+                        None,
+                    );
+                }
+            }
+            KernelEventPayload::RetentionRefsAppended(payload) => {
+                for retention_ref in &payload.refs {
+                    requirements.push(EventArtifactRequirement {
+                        source: EventArtifactReferenceSource::RetentionRef,
+                        artifact_id: retention_ref.artifact_id.clone(),
+                        digest: Some(retention_ref.content_digest.clone()),
+                        byte_len: None,
+                        media_type: None,
+                        schema_id: None,
+                        semantic_type_id: None,
+                        producer_node_id: None,
+                        producer_seed_id: None,
+                        artifact_role: Some(retention_ref.role),
+                    });
+                }
+            }
+            KernelEventPayload::RetentionManifestProjected(payload) => {
+                requirements.push(EventArtifactRequirement {
+                    source: EventArtifactReferenceSource::RetentionManifest,
+                    artifact_id: payload.manifest_artifact_id.clone(),
+                    digest: Some(payload.manifest_digest.clone()),
+                    byte_len: None,
+                    media_type: None,
+                    schema_id: None,
+                    semantic_type_id: None,
+                    producer_node_id: None,
+                    producer_seed_id: None,
+                    artifact_role: Some(ArtifactRole::RetentionManifest),
+                });
+            }
+            KernelEventPayload::StateAttemptStarted(_)
+            | KernelEventPayload::CellSkipped(_)
+            | KernelEventPayload::SideEffectClaimed(_)
+            | KernelEventPayload::SideEffectClaimTakenOver(_)
+            | KernelEventPayload::SideEffectInvocationStarted(_)
+            | KernelEventPayload::StateAttemptCompleted(_) => {}
+        }
+        requirements
+    }
+
+    fn push_event_artifact(
+        requirements: &mut Vec<EventArtifactRequirement>,
+        source: EventArtifactReferenceSource,
+        evidence: &ArtifactEvidenceRef,
+        producer_node_id: Option<NodeId>,
+        producer_seed_id: Option<SeedId>,
+    ) {
+        requirements.push(EventArtifactRequirement {
+            source,
+            artifact_id: evidence.artifact_id.clone(),
+            digest: Some(evidence.content_digest.clone()),
+            byte_len: Some(evidence.byte_len),
+            media_type: Some(evidence.media_type.clone()),
+            schema_id: Some(evidence.schema_id.clone()),
+            semantic_type_id: evidence.semantic_type_id.clone(),
+            producer_node_id,
+            producer_seed_id,
+            artifact_role: Some(evidence.role),
+        });
+    }
+
+    fn push_resource_touched_set_requirement(
+        requirements: &mut Vec<EventArtifactRequirement>,
+        evidence: &ResourceTouchedSetEvidence,
+    ) {
+        requirements.push(EventArtifactRequirement {
+            source: EventArtifactReferenceSource::ResourceTouchedSet,
+            artifact_id: evidence.evidence_artifact_id.clone(),
+            digest: Some(evidence.evidence_hash.clone()),
+            byte_len: None,
+            media_type: None,
+            schema_id: Some(evidence.evidence_schema_id.clone()),
+            semantic_type_id: None,
+            producer_node_id: None,
+            producer_seed_id: None,
+            artifact_role: None,
+        });
+    }
+
+    fn cell_producer_artifact_owner(producer: &CellProducer) -> (Option<NodeId>, Option<SeedId>) {
+        match producer {
+            CellProducer::Node(node_id) => (Some(node_id.clone()), None),
+            CellProducer::Seed(seed_id) => (None, Some(seed_id.clone())),
+        }
     }
 
     /// Named typed cell reference used by public output events.
@@ -2487,6 +3175,160 @@ pub mod v1 {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use mfm_ids::DigestBytes;
+
+        fn digest_bytes(byte: u8) -> DigestBytes {
+            DigestBytes::from_array([byte; 32])
+        }
+
+        fn content_digest(byte: u8) -> ContentDigest {
+            ContentDigest::from_digest(DigestAlgorithm::Sha256JcsV1, digest_bytes(byte))
+        }
+
+        fn spec_hash(byte: u8) -> SpecHash {
+            SpecHash::from_digest(DigestAlgorithm::Sha256JcsV1, digest_bytes(byte))
+        }
+
+        fn run_id(byte: u8) -> RunId {
+            RunId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_bytes(byte))
+        }
+
+        fn artifact_id(byte: u8) -> ArtifactId {
+            ArtifactId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_bytes(byte))
+        }
+
+        fn attempt_id(byte: u8) -> AttemptId {
+            AttemptId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_bytes(byte))
+        }
+
+        fn node_id(byte: u8) -> NodeId {
+            NodeId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_bytes(byte))
+        }
+
+        fn descriptor_id(byte: u8) -> DescriptorId {
+            DescriptorId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_bytes(byte))
+        }
+
+        fn cell_id(byte: u8) -> CellId {
+            CellId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_bytes(byte))
+        }
+
+        fn scope_id(byte: u8) -> ScopeId {
+            ScopeId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_bytes(byte))
+        }
+
+        fn seed_id(byte: u8) -> SeedId {
+            SeedId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_bytes(byte))
+        }
+
+        fn schema_id(name: &str, byte: u8) -> SchemaId {
+            SchemaId::new(name, "1", DigestAlgorithm::Sha256JcsV1, digest_bytes(byte))
+                .expect("schema id")
+        }
+
+        fn semantic_id(name: &str, byte: u8) -> SemanticTypeId {
+            SemanticTypeId::new(
+                "mfm.test",
+                name,
+                "1",
+                DigestAlgorithm::Sha256JcsV1,
+                digest_bytes(byte),
+            )
+            .expect("semantic id")
+        }
+
+        fn media_type(value: &str) -> MediaType {
+            MediaType::new(value).expect("media type")
+        }
+
+        fn event_artifact_ref(
+            artifact_id: ArtifactId,
+            role: ArtifactRole,
+            schema_id: SchemaId,
+            content_digest: ContentDigest,
+        ) -> ArtifactEvidenceRef {
+            ArtifactEvidenceRef {
+                artifact_id,
+                role,
+                schema_id,
+                semantic_type_id: None,
+                content_digest,
+                byte_len: 64,
+                media_type: media_type("application/json"),
+            }
+        }
+
+        fn error_with_diagnostic(
+            artifact_id: ArtifactId,
+            role: ArtifactRole,
+            schema_id: SchemaId,
+            content_digest: ContentDigest,
+        ) -> MfmErrorInfo {
+            MfmErrorInfo {
+                code: ErrorCode::new("event_accessor_test").expect("error code"),
+                category: ErrorCategory::Runtime,
+                retryable: false,
+                safe_message: "event accessor test".to_owned(),
+                public_details: None,
+                diagnostic_ref: Some(event_artifact_ref(
+                    artifact_id,
+                    role,
+                    schema_id,
+                    content_digest,
+                )),
+            }
+        }
+
+        fn touched_set(byte: u8) -> ResourceTouchedSetEvidence {
+            ResourceTouchedSetEvidence {
+                namespace: ResourceNamespace::new("mfm.test.resource").expect("namespace"),
+                evidence_schema_id: schema_id("mfm.test.touched_set", byte),
+                evidence_hash: content_digest(byte.wrapping_add(1)),
+                evidence_artifact_id: artifact_id(byte.wrapping_add(2)),
+            }
+        }
+
+        fn run_started_payload() -> KernelEventPayload {
+            KernelEventPayload::RunStarted(RunStarted {
+                run_id: run_id(1),
+                spec_hash: spec_hash(2),
+                spec_artifact_id: artifact_id(3),
+                certificate_artifact_id: artifact_id(4),
+                certificate_artifact_digest: content_digest(5),
+                certificate_media_type: media_type(
+                    "application/vnd.mfm.typed-spec-certificate+json;version=1",
+                ),
+                spec_media_type: media_type(
+                    "application/vnd.mfm.typed-execution-spec+json;version=1",
+                ),
+                spec_version: SpecVersion::new("mfm.typed.execution_spec.v1")
+                    .expect("spec version"),
+                lowering_version: LoweringVersion::new("mfm.typed.lowering.v1")
+                    .expect("lowering version"),
+                public_output_schema_id: schema_id("mfm.test.public_output", 6),
+                descriptor_identities: Vec::new(),
+                runner_executables: Vec::new(),
+                adapter_executables: Vec::new(),
+                canonicalizer_identity: CanonicalizerIdentity::new("mfm.jcs.v1")
+                    .expect("canonicalizer"),
+                framework_version: FrameworkVersion::new("mfm.test.1").expect("framework"),
+                source_revision: SourceRevision::new("test-revision").expect("source"),
+                seed_cells: vec![SeedCellRef {
+                    seed_id: seed_id(7),
+                    cell_id: cell_id(8),
+                    scope_id: scope_id(9),
+                    semantic_type_id: semantic_id("seed", 10),
+                    schema_id: schema_id("mfm.test.seed", 11),
+                    digest: content_digest(12),
+                    seed_artifact: event_artifact_ref(
+                        artifact_id(13),
+                        ArtifactRole::SeedInput,
+                        schema_id("mfm.test.seed", 11),
+                        content_digest(12),
+                    ),
+                }],
+            })
+        }
 
         #[test]
         fn v1_event_schema_golden() {
@@ -2628,6 +3470,410 @@ mfm_events::v1::RetentionManifestProjected schema:mfm.events.v1.retention_manife
 
             assert_eq!(original_len, 26);
             assert_eq!(schema_names.len(), original_len);
+        }
+
+        #[test]
+        fn payload_accessors_expose_authority_fields_without_serialization_changes() {
+            let run_started = run_started_payload();
+            assert_eq!(run_started.run_id(), Some(&run_id(1)));
+            assert_eq!(run_started.spec_hash(), &spec_hash(2));
+
+            let side_effect =
+                KernelEventPayload::SideEffectSubmissionObserved(side_effect::SubmissionObserved {
+                    spec_hash: spec_hash(30),
+                    node_id: node_id(31),
+                    attempt_id: attempt_id(32),
+                    ledger_key: SideEffectLedgerKey::new("ledger-1").expect("ledger"),
+                    ledger_purpose: SideEffectLedgerPurpose::Forward,
+                    invocation_epoch: 3,
+                    submission_schema_id: schema_id("mfm.test.submission", 33),
+                    submission_hash: content_digest(34),
+                    submission_artifact_id: artifact_id(35),
+                });
+            let side_effect_ref = side_effect.side_effect_ref().expect("side-effect ref");
+            assert_eq!(side_effect.run_id(), None);
+            assert_eq!(side_effect.spec_hash(), &spec_hash(30));
+            assert_eq!(side_effect_ref.node_id, &node_id(31));
+            assert_eq!(side_effect_ref.attempt_id, &attempt_id(32));
+            assert_eq!(
+                side_effect_ref.kind,
+                SideEffectEventKind::SubmissionObserved
+            );
+            assert_eq!(side_effect_ref.invocation_epoch, Some(3));
+        }
+
+        #[test]
+        fn artifact_requirement_accessor_covers_artifact_bearing_variants() {
+            let cases = vec![
+                (
+                    run_started_payload(),
+                    vec![
+                        EventArtifactReferenceSource::RunSpec,
+                        EventArtifactReferenceSource::RunCertificate,
+                        EventArtifactReferenceSource::SeedCell,
+                    ],
+                ),
+                (
+                    KernelEventPayload::FactRecorded(FactRecorded {
+                        spec_hash: spec_hash(40),
+                        node_id: node_id(41),
+                        attempt_id: attempt_id(42),
+                        capability_kind: CapabilityKind::new(
+                            "mfm.test",
+                            "capability",
+                            DigestAlgorithm::Sha256JcsV1,
+                            digest_bytes(43),
+                        )
+                        .expect("capability kind"),
+                        capability_version: CapabilityVersion::new("mfm.test.capability.v1")
+                            .expect("capability version"),
+                        adapter_kind: AdapterKind::new(
+                            "mfm.test",
+                            "adapter",
+                            DigestAlgorithm::Sha256JcsV1,
+                            digest_bytes(44),
+                        )
+                        .expect("adapter kind"),
+                        adapter_version: AdapterVersion::new("mfm.test.adapter.v1")
+                            .expect("adapter version"),
+                        request_schema_id: schema_id("mfm.test.fact_request", 45),
+                        request_hash: content_digest(46),
+                        response_schema_id: schema_id("mfm.test.fact_response", 47),
+                        response_hash: content_digest(48),
+                        fact_key: FactKey::new("fact-key-1").expect("fact key"),
+                        artifact_id: artifact_id(49),
+                    }),
+                    vec![EventArtifactReferenceSource::FactResponse],
+                ),
+                (
+                    KernelEventPayload::ArtifactReferenced(ArtifactReferenced {
+                        spec_hash: spec_hash(50),
+                        node_id: Some(node_id(51)),
+                        attempt_id: Some(attempt_id(52)),
+                        artifact_ref: event_artifact_ref(
+                            artifact_id(53),
+                            ArtifactRole::TypedConfig,
+                            schema_id("mfm.test.config", 54),
+                            content_digest(55),
+                        ),
+                    }),
+                    vec![EventArtifactReferenceSource::ArtifactReferenced],
+                ),
+                (
+                    KernelEventPayload::CellProduced(CellProduced {
+                        spec_hash: spec_hash(56),
+                        node_id: node_id(57),
+                        cell_id: cell_id(58),
+                        scope_id: scope_id(59),
+                        attempt_id: attempt_id(60),
+                        semantic_type_id: semantic_id("state_output", 61),
+                        schema_id: schema_id("mfm.test.state_output", 62),
+                        value_lineage: ValueLineageRef {
+                            lineage_digest: content_digest(63),
+                        },
+                        artifact_id: artifact_id(64),
+                        content_digest: content_digest(65),
+                        producer_state_kind: None,
+                        producer_state_version: None,
+                    }),
+                    vec![EventArtifactReferenceSource::StateOutput],
+                ),
+                (
+                    KernelEventPayload::PublicOutputProduced(PublicOutputProduced {
+                        spec_hash: spec_hash(66),
+                        node_id: node_id(67),
+                        attempt_id: attempt_id(68),
+                        receipt_cell_id: cell_id(69),
+                        public_schema_id: schema_id("mfm.test.public_output", 70),
+                        output_spec_digest: content_digest(71),
+                        cells: vec![NamedTypedCellRef {
+                            public_field_path: PublicFieldPath::new("result").expect("field"),
+                            cell_id: cell_id(72),
+                            producer: CellProducer::Node(node_id(73)),
+                            scope_id: scope_id(74),
+                            semantic_type_id: semantic_id("public_cell", 75),
+                            schema_id: schema_id("mfm.test.public_cell", 76),
+                            value_lineage: ValueLineageRef {
+                                lineage_digest: content_digest(77),
+                            },
+                            content_digest: content_digest(78),
+                            artifact_id: artifact_id(79),
+                        }],
+                        rendered_digest: content_digest(80),
+                        rendered_artifact_id: Some(artifact_id(81)),
+                        renderer_descriptor_id: descriptor_id(82),
+                    }),
+                    vec![
+                        EventArtifactReferenceSource::PublicOutputCell,
+                        EventArtifactReferenceSource::PublicOutputRendered,
+                    ],
+                ),
+                (
+                    KernelEventPayload::PublicOutputRenderFailed(PublicOutputRenderFailed {
+                        spec_hash: spec_hash(83),
+                        node_id: node_id(84),
+                        attempt_id: attempt_id(85),
+                        public_schema_id: schema_id("mfm.test.public_output", 86),
+                        renderer_descriptor_id: descriptor_id(87),
+                        error: error_with_diagnostic(
+                            artifact_id(88),
+                            ArtifactRole::RedactedDiagnostic,
+                            schema_id("mfm.test.diagnostic", 89),
+                            content_digest(90),
+                        ),
+                    }),
+                    vec![EventArtifactReferenceSource::PublicOutputRenderFailureDiagnostic],
+                ),
+                (
+                    KernelEventPayload::StateAttemptFailed(StateAttemptFailed {
+                        spec_hash: spec_hash(91),
+                        node_id: node_id(92),
+                        attempt_id: attempt_id(93),
+                        retryable: false,
+                        error: error_with_diagnostic(
+                            artifact_id(94),
+                            ArtifactRole::RedactedDiagnostic,
+                            schema_id("mfm.test.diagnostic", 95),
+                            content_digest(96),
+                        ),
+                    }),
+                    vec![EventArtifactReferenceSource::StateAttemptFailureDiagnostic],
+                ),
+                (
+                    KernelEventPayload::ManualResolutionRecorded(ManualResolutionRecorded {
+                        run_id: run_id(97),
+                        spec_hash: spec_hash(98),
+                        outcome: ManualResolutionOutcome::ConfirmRemediated,
+                        evidence_schema_id: schema_id("mfm.test.manual_evidence", 99),
+                        evidence_hash: content_digest(100),
+                        evidence_artifact_id: artifact_id(101),
+                        authorization_schema_id: schema_id("mfm.test.manual_authorization", 102),
+                        authorization_hash: content_digest(103),
+                        authorization_artifact_id: artifact_id(104),
+                        note: None,
+                    }),
+                    vec![
+                        EventArtifactReferenceSource::ManualResolutionEvidence,
+                        EventArtifactReferenceSource::ManualResolutionAuthorization,
+                    ],
+                ),
+                (
+                    KernelEventPayload::SideEffectIntentPersisted(side_effect::IntentPersisted {
+                        spec_hash: spec_hash(105),
+                        node_id: node_id(106),
+                        scope_id: scope_id(107),
+                        attempt_id: attempt_id(108),
+                        ledger_key: SideEffectLedgerKey::new("ledger-intent").expect("ledger"),
+                        ledger_purpose: SideEffectLedgerPurpose::Forward,
+                        invocation_epoch: 1,
+                        intent_schema_id: schema_id("mfm.test.intent", 109),
+                        intent_hash: content_digest(110),
+                        intent_artifact_id: artifact_id(111),
+                        idempotency_input_schema_id: schema_id("mfm.test.idempotency", 112),
+                        idempotency_input_hash: content_digest(113),
+                        idempotency_key: IdempotencyKeyRef::new("idem-key-1").expect("idempotency"),
+                        capability_kind: CapabilityKind::new(
+                            "mfm.test",
+                            "capability",
+                            DigestAlgorithm::Sha256JcsV1,
+                            digest_bytes(114),
+                        )
+                        .expect("capability kind"),
+                        capability_version: CapabilityVersion::new("mfm.test.capability.v1")
+                            .expect("capability version"),
+                        adapter_kind: AdapterKind::new(
+                            "mfm.test",
+                            "adapter",
+                            DigestAlgorithm::Sha256JcsV1,
+                            digest_bytes(115),
+                        )
+                        .expect("adapter kind"),
+                        adapter_version: AdapterVersion::new("mfm.test.adapter.v1")
+                            .expect("adapter version"),
+                    }),
+                    vec![EventArtifactReferenceSource::SideEffectIntent],
+                ),
+                (
+                    KernelEventPayload::SideEffectInvocationPrepared(
+                        side_effect::InvocationPrepared {
+                            spec_hash: spec_hash(116),
+                            node_id: node_id(117),
+                            attempt_id: attempt_id(118),
+                            ledger_key: SideEffectLedgerKey::new("ledger-prepared")
+                                .expect("ledger"),
+                            ledger_purpose: SideEffectLedgerPurpose::Forward,
+                            invocation_epoch: 1,
+                            claim_generation: 1,
+                            claim_fencing_token: side_effect::ClaimFencingToken::new("token-1")
+                                .expect("token"),
+                            prepared_artifact_id: Some(artifact_id(119)),
+                            prepared_hash: Some(content_digest(120)),
+                            resource_key: None,
+                        },
+                    ),
+                    vec![EventArtifactReferenceSource::PreparedInvocation],
+                ),
+                (
+                    KernelEventPayload::SideEffectNotSubmittedProven(
+                        side_effect::NotSubmittedProven {
+                            spec_hash: spec_hash(121),
+                            node_id: node_id(122),
+                            attempt_id: attempt_id(123),
+                            ledger_key: SideEffectLedgerKey::new("ledger-not-submitted")
+                                .expect("ledger"),
+                            ledger_purpose: SideEffectLedgerPurpose::Forward,
+                            invocation_epoch: 1,
+                            proof_schema_id: schema_id("mfm.test.not_submitted", 124),
+                            proof_hash: content_digest(125),
+                            proof_artifact_id: artifact_id(126),
+                        },
+                    ),
+                    vec![EventArtifactReferenceSource::NotSubmittedProof],
+                ),
+                (
+                    KernelEventPayload::SideEffectSubmissionObserved(
+                        side_effect::SubmissionObserved {
+                            spec_hash: spec_hash(127),
+                            node_id: node_id(128),
+                            attempt_id: attempt_id(129),
+                            ledger_key: SideEffectLedgerKey::new("ledger-submission")
+                                .expect("ledger"),
+                            ledger_purpose: SideEffectLedgerPurpose::Forward,
+                            invocation_epoch: 1,
+                            submission_schema_id: schema_id("mfm.test.submission", 130),
+                            submission_hash: content_digest(131),
+                            submission_artifact_id: artifact_id(132),
+                        },
+                    ),
+                    vec![EventArtifactReferenceSource::Submission],
+                ),
+                (
+                    KernelEventPayload::SideEffectSubmissionUnknown(
+                        side_effect::SubmissionUnknown {
+                            spec_hash: spec_hash(133),
+                            node_id: node_id(134),
+                            attempt_id: attempt_id(135),
+                            ledger_key: SideEffectLedgerKey::new("ledger-submission-unknown")
+                                .expect("ledger"),
+                            ledger_purpose: SideEffectLedgerPurpose::Forward,
+                            invocation_epoch: 1,
+                            evidence_schema_id: schema_id("mfm.test.submission_unknown", 136),
+                            evidence_hash: content_digest(137),
+                            evidence_artifact_id: artifact_id(138),
+                        },
+                    ),
+                    vec![EventArtifactReferenceSource::SubmissionUnknownEvidence],
+                ),
+                (
+                    KernelEventPayload::SideEffectReceiptObserved(side_effect::ReceiptObserved {
+                        spec_hash: spec_hash(139),
+                        node_id: node_id(140),
+                        attempt_id: attempt_id(141),
+                        ledger_key: SideEffectLedgerKey::new("ledger-receipt").expect("ledger"),
+                        ledger_purpose: SideEffectLedgerPurpose::Forward,
+                        invocation_epoch: 1,
+                        receipt_schema_id: schema_id("mfm.test.receipt", 142),
+                        receipt_hash: content_digest(143),
+                        receipt_artifact_id: artifact_id(144),
+                        replay_verifier_id: ReplayVerifierId::new("verifier-1").expect("verifier"),
+                        resource_touched_set: Some(touched_set(145)),
+                    }),
+                    vec![
+                        EventArtifactReferenceSource::Receipt,
+                        EventArtifactReferenceSource::ResourceTouchedSet,
+                    ],
+                ),
+                (
+                    KernelEventPayload::SideEffectConfirmationObserved(
+                        side_effect::ConfirmationObserved {
+                            spec_hash: spec_hash(148),
+                            node_id: node_id(149),
+                            attempt_id: attempt_id(150),
+                            ledger_key: SideEffectLedgerKey::new("ledger-confirmation")
+                                .expect("ledger"),
+                            ledger_purpose: SideEffectLedgerPurpose::Forward,
+                            invocation_epoch: 1,
+                            confirmation_schema_id: schema_id("mfm.test.confirmation", 151),
+                            confirmation_hash: content_digest(152),
+                            confirmation_artifact_id: artifact_id(153),
+                            replay_verifier_id: ReplayVerifierId::new("verifier-1")
+                                .expect("verifier"),
+                            resource_touched_set: Some(touched_set(154)),
+                        },
+                    ),
+                    vec![
+                        EventArtifactReferenceSource::Confirmation,
+                        EventArtifactReferenceSource::ResourceTouchedSet,
+                    ],
+                ),
+                (
+                    KernelEventPayload::SideEffectAmbiguous(side_effect::Ambiguous {
+                        spec_hash: spec_hash(157),
+                        node_id: node_id(158),
+                        attempt_id: attempt_id(159),
+                        ledger_key: SideEffectLedgerKey::new("ledger-ambiguous").expect("ledger"),
+                        ledger_purpose: SideEffectLedgerPurpose::Forward,
+                        invocation_epoch: 1,
+                        ambiguity_code: AmbiguityCode::new("ambiguous").expect("ambiguity"),
+                        evidence_schema_id: schema_id("mfm.test.ambiguity", 160),
+                        evidence_hash: content_digest(161),
+                        evidence_artifact_id: artifact_id(162),
+                    }),
+                    vec![EventArtifactReferenceSource::AmbiguityEvidence],
+                ),
+                (
+                    KernelEventPayload::SideEffectFailed(side_effect::Failed {
+                        spec_hash: spec_hash(163),
+                        node_id: node_id(164),
+                        attempt_id: attempt_id(165),
+                        ledger_key: SideEffectLedgerKey::new("ledger-failed").expect("ledger"),
+                        ledger_purpose: SideEffectLedgerPurpose::Forward,
+                        invocation_epoch: 1,
+                        failure_phase: side_effect::FailurePhase::BeforeInvocationStarted,
+                        retryable: false,
+                        error: error_with_diagnostic(
+                            artifact_id(166),
+                            ArtifactRole::RedactedDiagnostic,
+                            schema_id("mfm.test.diagnostic", 167),
+                            content_digest(168),
+                        ),
+                    }),
+                    vec![EventArtifactReferenceSource::SideEffectFailureDiagnostic],
+                ),
+                (
+                    KernelEventPayload::RetentionRefsAppended(RetentionRefsAppended {
+                        run_id: run_id(169),
+                        spec_hash: spec_hash(170),
+                        refs: vec![RetentionRef {
+                            artifact_id: artifact_id(171),
+                            role: ArtifactRole::FactResponse,
+                            content_digest: content_digest(172),
+                        }],
+                        reason: RetentionReason::RuntimeEvidence,
+                    }),
+                    vec![EventArtifactReferenceSource::RetentionRef],
+                ),
+                (
+                    KernelEventPayload::RetentionManifestProjected(RetentionManifestProjected {
+                        run_id: run_id(173),
+                        spec_hash: spec_hash(174),
+                        manifest_seq: 1,
+                        manifest_digest: content_digest(175),
+                        previous_manifest_digest: None,
+                        manifest_artifact_id: artifact_id(176),
+                    }),
+                    vec![EventArtifactReferenceSource::RetentionManifest],
+                ),
+            ];
+
+            for (payload, expected_sources) in cases {
+                let sources = payload
+                    .artifact_requirements()
+                    .into_iter()
+                    .map(|requirement| requirement.source)
+                    .collect::<Vec<_>>();
+                assert_eq!(sources, expected_sources);
+            }
         }
 
         #[test]

@@ -3256,48 +3256,7 @@ pub(crate) fn event_artifact_ref_from_store(
 }
 
 pub(crate) fn payload_spec_hash(payload: &events::KernelEventPayload) -> SpecHash {
-    match payload {
-        events::KernelEventPayload::RunStarted(payload) => payload.spec_hash.clone(),
-        events::KernelEventPayload::StateAttemptStarted(payload) => payload.spec_hash.clone(),
-        events::KernelEventPayload::FactRecorded(payload) => payload.spec_hash.clone(),
-        events::KernelEventPayload::ArtifactReferenced(payload) => payload.spec_hash.clone(),
-        events::KernelEventPayload::CellProduced(payload) => payload.spec_hash.clone(),
-        events::KernelEventPayload::CellSkipped(payload) => payload.spec_hash.clone(),
-        events::KernelEventPayload::SideEffectIntentPersisted(payload) => payload.spec_hash.clone(),
-        events::KernelEventPayload::SideEffectClaimed(payload) => payload.spec_hash.clone(),
-        events::KernelEventPayload::SideEffectClaimTakenOver(payload) => payload.spec_hash.clone(),
-        events::KernelEventPayload::SideEffectInvocationPrepared(payload) => {
-            payload.spec_hash.clone()
-        }
-        events::KernelEventPayload::SideEffectInvocationStarted(payload) => {
-            payload.spec_hash.clone()
-        }
-        events::KernelEventPayload::SideEffectNotSubmittedProven(payload) => {
-            payload.spec_hash.clone()
-        }
-        events::KernelEventPayload::SideEffectSubmissionObserved(payload) => {
-            payload.spec_hash.clone()
-        }
-        events::KernelEventPayload::SideEffectSubmissionUnknown(payload) => {
-            payload.spec_hash.clone()
-        }
-        events::KernelEventPayload::SideEffectReceiptObserved(payload) => payload.spec_hash.clone(),
-        events::KernelEventPayload::SideEffectConfirmationObserved(payload) => {
-            payload.spec_hash.clone()
-        }
-        events::KernelEventPayload::SideEffectAmbiguous(payload) => payload.spec_hash.clone(),
-        events::KernelEventPayload::SideEffectFailed(payload) => payload.spec_hash.clone(),
-        events::KernelEventPayload::PublicOutputProduced(payload) => payload.spec_hash.clone(),
-        events::KernelEventPayload::PublicOutputRenderFailed(payload) => payload.spec_hash.clone(),
-        events::KernelEventPayload::StateAttemptCompleted(payload) => payload.spec_hash.clone(),
-        events::KernelEventPayload::StateAttemptFailed(payload) => payload.spec_hash.clone(),
-        events::KernelEventPayload::ManualResolutionRecorded(payload) => payload.spec_hash.clone(),
-        events::KernelEventPayload::RunCompleted(payload) => payload.spec_hash.clone(),
-        events::KernelEventPayload::RetentionRefsAppended(payload) => payload.spec_hash.clone(),
-        events::KernelEventPayload::RetentionManifestProjected(payload) => {
-            payload.spec_hash.clone()
-        }
-    }
+    payload.spec_hash().clone()
 }
 
 pub(crate) fn store_seed_artifact(seed: &events::SeedCellRef) -> store::ArtifactEvidenceRef {
