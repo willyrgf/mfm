@@ -26,14 +26,6 @@ struct InMemoryProofArtifacts {
 }
 
 impl InMemoryProofArtifacts {
-    fn evidence_for(&self, artifact_id: &ArtifactId) -> Option<store::ArtifactEvidenceRef> {
-        self.artifacts.lock().ok().and_then(|artifacts| {
-            artifacts
-                .get(artifact_id)
-                .map(|(_, evidence)| evidence.clone())
-        })
-    }
-
     async fn store_verified_artifact(
         &self,
         bytes: Vec<u8>,
@@ -73,6 +65,28 @@ impl RuntimeArtifactStager for InMemoryProofArtifacts {
         evidence: store::ArtifactEvidenceRef,
     ) -> RuntimeArtifactStageFuture<'a> {
         Box::pin(async move { self.store_verified_artifact(bytes, evidence).await })
+    }
+}
+
+impl store::RetainedArtifactReadProvider for InMemoryProofArtifacts {
+    fn read_retained_artifact<'a>(
+        &'a self,
+        requirement: &'a store::EventArtifactRequirement,
+    ) -> store::RetainedArtifactReadFuture<'a> {
+        Box::pin(async move {
+            let (bytes, evidence) = self
+                .artifacts
+                .lock()
+                .map_err(|_| store::StoreError::ArtifactReadFailed {
+                    artifact_id: requirement.artifact_id.clone(),
+                })?
+                .get(&requirement.artifact_id)
+                .cloned()
+                .ok_or_else(|| store::StoreError::MissingArtifact {
+                    artifact_id: requirement.artifact_id.clone(),
+                })?;
+            store::VerifiedRunArtifactBytes::new(bytes, evidence, requirement)
+        })
     }
 }
 
@@ -368,8 +382,29 @@ async fn verify_conformance_replay(
     store: &impl store::TypedRunEventStore,
     artifacts: &InMemoryProofArtifacts,
 ) -> replay::Result<bool> {
-    let verified_stream = mfm_runtime::VerifiedRunStream::from_store(runtime_spec, run_id, store)
-        .map_err(|error| {
+    let committed =
+        store::CommittedRunStream::from_events(run_id.clone(), store.load_run_stream(run_id))
+            .map_err(|error| {
+                replay::ReplayError::new(
+                    replay::ReplayErrorKind::InvalidRunStream,
+                    error.to_string(),
+                )
+            })?;
+    let retained_artifacts =
+        store::VerifiedRunArtifactStore::from_committed_stream(&committed, artifacts)
+            .await
+            .map_err(|error| {
+                replay::ReplayError::new(
+                    replay::ReplayErrorKind::ArtifactMissing,
+                    error.to_string(),
+                )
+            })?;
+    let verified_stream = mfm_runtime::VerifiedRunStream::from_committed_stream(
+        runtime_spec,
+        committed,
+        retained_artifacts,
+    )
+    .map_err(|error| {
         replay::ReplayError::new(replay::ReplayErrorKind::InvalidRunStream, error.to_string())
     })?;
     let run_started = verified_stream
@@ -386,29 +421,14 @@ async fn verify_conformance_replay(
             )
         })?;
     let projection = verified_stream.projection_snapshot();
-    let retention = projection.retention(&run_started.run_id).ok_or_else(|| {
+    let _retention = projection.retention(&run_started.run_id).ok_or_else(|| {
         replay::ReplayError::new(
             replay::ReplayErrorKind::ArtifactMissing,
             "proof conformance stream has no retained artifact evidence",
         )
     })?;
-    let mut artifact_evidence = Vec::with_capacity(retention.refs.len());
-    for retained in retention.refs.values() {
-        let evidence = artifacts
-            .evidence_for(&retained.artifact_id)
-            .ok_or_else(|| {
-                replay::ReplayError::new(
-                    replay::ReplayErrorKind::ArtifactMissing,
-                    format!("missing proof artifact {}", retained.artifact_id),
-                )
-            })?;
-        artifact_evidence.push(evidence);
-    }
-    let authority = replay::ReplayReadAuthority::from_verified_run_stream(
-        runtime_spec,
-        &verified_stream,
-        artifact_evidence,
-    )?;
+    let authority =
+        replay::ReplayReadAuthority::from_verified_run_stream(runtime_spec, &verified_stream)?;
     let broker = replay::ReplayBroker::from_read_authority(authority)?;
     let proof_verified = mfm_transports_proof::verify_deterministic_proof_replay(&broker)?;
     Ok(proof_verified

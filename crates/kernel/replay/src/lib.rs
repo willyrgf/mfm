@@ -169,26 +169,10 @@ pub mod v1 {
 
     impl ReplayReadAuthority {
         /// Mints replay read authority from certifier-backed runtime authority, verified stream
-        /// evidence, and retained artifacts from committed retention projection history.
+        /// evidence, and verified retained artifacts.
         pub fn from_verified_run_stream(
             runtime_spec: &mfm_runtime::CertifiedRuntimeSpec,
             verified_stream: &mfm_runtime::VerifiedRunStream,
-            artifact_evidence: Vec<StoredArtifactEvidenceRef>,
-        ) -> Result<Self> {
-            Self::from_verified_run_stream_with_artifacts(
-                runtime_spec,
-                verified_stream,
-                artifact_evidence,
-                Vec::new(),
-            )
-        }
-
-        /// Mints replay read authority with retained artifact bytes for proof-bearing artifacts.
-        pub fn from_verified_run_stream_with_artifacts(
-            runtime_spec: &mfm_runtime::CertifiedRuntimeSpec,
-            verified_stream: &mfm_runtime::VerifiedRunStream,
-            artifact_evidence: Vec<StoredArtifactEvidenceRef>,
-            artifact_bytes: Vec<ReplayArtifactBytes>,
         ) -> Result<Self> {
             if runtime_spec.spec_hash() != verified_stream.spec_hash() {
                 return Err(ReplayError::new(
@@ -197,6 +181,19 @@ pub mod v1 {
                 ));
             }
             let run_started = run_started_payload(verified_stream.events())?;
+            let artifact_evidence = verified_stream
+                .artifact_store()
+                .artifacts()
+                .map(|(_, artifact)| artifact.evidence().clone())
+                .collect::<Vec<_>>();
+            let artifact_bytes = verified_stream
+                .artifact_store()
+                .artifacts()
+                .map(|(artifact_id, artifact)| ReplayArtifactBytes {
+                    artifact_id: artifact_id.clone(),
+                    bytes: artifact.bytes().to_vec(),
+                })
+                .collect::<Vec<_>>();
             let artifacts = artifact_map(artifact_evidence.clone())?;
             let artifact_bytes = artifact_bytes_map(artifact_bytes)?;
             verify_replay_artifact_authority(verified_stream, &artifacts)?;
@@ -1564,11 +1561,13 @@ pub mod v1 {
         }
 
         fn reject_unauthorized_artifact_evidence(&self) -> Result<()> {
-            for artifact_id in self.retained_artifacts.keys() {
-                if !self.artifacts.contains_key(artifact_id) {
+            for artifact_id in self.artifact_bytes.keys() {
+                if !self.retained_artifacts.contains_key(artifact_id) {
                     return Err(ReplayError::new(
                         ReplayErrorKind::ArtifactMismatch,
-                        format!("unreferenced replay artifact evidence supplied for {artifact_id}"),
+                        format!(
+                            "artifact bytes supplied without verified evidence for {artifact_id}"
+                        ),
                     ));
                 }
             }
@@ -2040,75 +2039,30 @@ pub mod v1 {
         verified_stream: &mfm_runtime::VerifiedRunStream,
         artifacts: &BTreeMap<ArtifactId, StoredArtifactEvidenceRef>,
     ) -> Result<()> {
-        if let Some(retention) = verified_stream
-            .projection_snapshot()
-            .retention(verified_stream.run_id())
-        {
-            verify_retained_artifacts(retention, artifacts)
-        } else if has_saga_terminal_completion(verified_stream) {
-            Ok(())
-        } else {
-            Err(ReplayError::new(
-                ReplayErrorKind::ArtifactMissing,
-                "replay read authority requires committed retention or saga terminal evidence",
-            ))
-        }
-    }
-
-    fn verify_retained_artifacts(
-        retention: &store::RetentionProjection,
-        artifacts: &BTreeMap<ArtifactId, StoredArtifactEvidenceRef>,
-    ) -> Result<()> {
-        if retention.refs.is_empty() {
-            return Err(ReplayError::new(
-                ReplayErrorKind::ArtifactMissing,
-                "replay read authority requires committed retention evidence",
-            ));
-        }
-        for retained in retention.refs.values() {
-            let evidence = artifacts.get(&retained.artifact_id).ok_or_else(|| {
+        let verified_artifacts = verified_stream.artifact_store();
+        for (artifact_id, artifact) in verified_artifacts.artifacts() {
+            let evidence = artifacts.get(artifact_id).ok_or_else(|| {
                 ReplayError::new(
                     ReplayErrorKind::ArtifactMissing,
-                    format!(
-                        "missing retained artifact evidence for {}",
-                        retained.artifact_id
-                    ),
+                    format!("missing verified artifact evidence for {artifact_id}"),
                 )
             })?;
-            if evidence.digest != retained.content_digest || evidence.artifact_role != retained.role
-            {
+            if evidence != artifact.evidence() {
                 return Err(ReplayError::new(
                     ReplayErrorKind::ArtifactMismatch,
-                    format!(
-                        "retained artifact evidence mismatch for {}",
-                        retained.artifact_id
-                    ),
+                    format!("verified artifact evidence mismatch for {artifact_id}"),
                 ));
             }
         }
         for artifact_id in artifacts.keys() {
-            if !retention.refs.contains_key(artifact_id) {
+            if verified_artifacts.artifact(artifact_id).is_none() {
                 return Err(ReplayError::new(
                     ReplayErrorKind::ArtifactMismatch,
-                    format!("unretained artifact evidence supplied for {artifact_id}"),
+                    format!("unverified artifact evidence supplied for {artifact_id}"),
                 ));
             }
         }
         Ok(())
-    }
-
-    fn has_saga_terminal_completion(verified_stream: &mfm_runtime::VerifiedRunStream) -> bool {
-        matches!(
-            verified_stream
-                .projection_snapshot()
-                .run_completion(verified_stream.run_id())
-                .map(|completion| &completion.outcome),
-            Some(
-                events::RunCompletionOutcome::Compensated
-                    | events::RunCompletionOutcome::ManuallyResolved
-                    | events::RunCompletionOutcome::FailedWithoutAcdcClaim
-            )
-        )
     }
 
     fn verify_terminal_outcome_agreement(

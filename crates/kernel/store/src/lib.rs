@@ -22,7 +22,7 @@ pub mod v1 {
     use std::marker::PhantomData;
     use std::pin::Pin;
 
-    use mfm_canonical::PlainCanonicalJsonBytes;
+    use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
     use mfm_capabilities::{CapabilityDescriptor, CapabilityRole, CapabilitySetDescriptor};
     use mfm_events::v1::{self as events, side_effect, ArtifactRole, KernelEventPayload};
     use mfm_ids::{
@@ -131,6 +131,11 @@ pub mod v1 {
             /// Mismatched field label.
             field: &'static str,
         },
+        /// Artifact bytes or metadata could not be loaded from retained evidence storage.
+        ArtifactReadFailed {
+            /// Artifact id whose retained bytes could not be loaded.
+            artifact_id: ArtifactId,
+        },
         /// A prepared commit tried to admit artifact evidence that no event in the commit
         /// references.
         UnreferencedArtifactEvidence {
@@ -237,6 +242,9 @@ pub mod v1 {
                         f,
                         "artifact evidence mismatch for {artifact_id} field {field}"
                     )
+                }
+                Self::ArtifactReadFailed { artifact_id } => {
+                    write!(f, "failed to read retained artifact {artifact_id}")
                 }
                 Self::UnreferencedArtifactEvidence { artifact_id } => {
                     write!(
@@ -2535,6 +2543,185 @@ pub mod v1 {
         }
     }
 
+    /// Boxed future returned by retained artifact read providers.
+    pub type RetainedArtifactReadFuture<'a> =
+        Pin<Box<dyn Future<Output = Result<VerifiedRunArtifactBytes>> + Send + 'a>>;
+
+    /// Store-owned retained artifact reader for verified run-history construction.
+    pub trait RetainedArtifactReadProvider: Send + Sync {
+        /// Reads artifact bytes and full evidence for one event-derived artifact requirement.
+        fn read_retained_artifact<'a>(
+            &'a self,
+            requirement: &'a EventArtifactRequirement,
+        ) -> RetainedArtifactReadFuture<'a>;
+    }
+
+    /// Verified retained artifact bytes and full typed evidence for one run-history artifact.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct VerifiedRunArtifactBytes {
+        bytes: Vec<u8>,
+        evidence: ArtifactEvidenceRef,
+    }
+
+    impl VerifiedRunArtifactBytes {
+        /// Verifies bytes and evidence against one event-derived artifact requirement.
+        pub fn new(
+            bytes: Vec<u8>,
+            evidence: ArtifactEvidenceRef,
+            requirement: &EventArtifactRequirement,
+        ) -> Result<Self> {
+            validate_artifact_requirement_against_evidence(requirement, &evidence)?;
+            verify_retained_artifact_bytes(&bytes, &evidence)?;
+            Ok(Self { bytes, evidence })
+        }
+
+        /// Returns verified retained bytes.
+        pub fn bytes(&self) -> &[u8] {
+            &self.bytes
+        }
+
+        /// Consumes this proof object into verified retained bytes.
+        pub fn into_bytes(self) -> Vec<u8> {
+            self.bytes
+        }
+
+        /// Returns full typed artifact evidence.
+        pub fn evidence(&self) -> &ArtifactEvidenceRef {
+            &self.evidence
+        }
+    }
+
+    /// Verified retained evidence for every artifact required by one committed run stream.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct VerifiedRunArtifactStore {
+        run_id: RunId,
+        requirements: Vec<EventArtifactRequirement>,
+        artifacts: BTreeMap<ArtifactId, VerifiedRunArtifactBytes>,
+    }
+
+    impl VerifiedRunArtifactStore {
+        /// Loads and verifies all retained artifacts required by a committed run stream.
+        pub async fn from_committed_stream<P>(
+            committed: &CommittedRunStream,
+            provider: &P,
+        ) -> Result<Self>
+        where
+            P: RetainedArtifactReadProvider + ?Sized,
+        {
+            let mut artifacts = BTreeMap::new();
+            for requirement in committed.artifact_requirements() {
+                let artifact = provider.read_retained_artifact(requirement).await?;
+                validate_artifact_requirement_against_evidence(requirement, artifact.evidence())?;
+                insert_verified_run_artifact(&mut artifacts, artifact)?;
+            }
+            Ok(Self {
+                run_id: committed.run_id().clone(),
+                requirements: committed.artifact_requirements().to_vec(),
+                artifacts,
+            })
+        }
+
+        /// Constructs a verified retained artifact store from pre-verified retained bytes.
+        pub fn from_verified_artifacts<I>(
+            run_id: RunId,
+            requirements: &[EventArtifactRequirement],
+            artifacts: I,
+        ) -> Result<Self>
+        where
+            I: IntoIterator<Item = VerifiedRunArtifactBytes>,
+        {
+            let mut by_artifact = BTreeMap::new();
+            for artifact in artifacts {
+                insert_verified_run_artifact(&mut by_artifact, artifact)?;
+            }
+            let store = Self {
+                run_id,
+                requirements: requirements.to_vec(),
+                artifacts: by_artifact,
+            };
+            store.validate_requirements(requirements)?;
+            Ok(store)
+        }
+
+        /// Run id covered by this verified artifact store.
+        pub fn run_id(&self) -> &RunId {
+            &self.run_id
+        }
+
+        /// Returns true when the committed stream required no retained artifacts.
+        pub fn is_empty(&self) -> bool {
+            self.requirements.is_empty()
+        }
+
+        /// Returns the event-derived artifact requirements covered by this proof object.
+        pub fn requirements(&self) -> &[EventArtifactRequirement] {
+            &self.requirements
+        }
+
+        /// Returns verified retained artifact bytes by artifact id.
+        pub fn artifact(&self, artifact_id: &ArtifactId) -> Option<&VerifiedRunArtifactBytes> {
+            self.artifacts.get(artifact_id)
+        }
+
+        /// Iterates verified retained artifacts by artifact id.
+        pub fn artifacts(&self) -> impl Iterator<Item = (&ArtifactId, &VerifiedRunArtifactBytes)> {
+            self.artifacts.iter()
+        }
+
+        /// Verifies this retained artifact store covers a committed run stream exactly.
+        pub fn validate_committed_stream(&self, committed: &CommittedRunStream) -> Result<()> {
+            if self.run_id != *committed.run_id() {
+                return Err(StoreError::PersistedEventMismatch {
+                    field: "run_id",
+                    message: format!(
+                        "retained artifact store for {} cannot verify run {}",
+                        self.run_id,
+                        committed.run_id()
+                    ),
+                });
+            }
+            if self.requirements != committed.artifact_requirements() {
+                return Err(StoreError::ProjectionConflict {
+                    key: "retained_artifacts:requirements".to_owned(),
+                    message:
+                        "retained artifact store requirements do not match committed run stream"
+                            .to_owned(),
+                });
+            }
+            self.validate_requirements(committed.artifact_requirements())
+        }
+
+        fn validate_requirements(&self, requirements: &[EventArtifactRequirement]) -> Result<()> {
+            for requirement in requirements {
+                let artifact = self
+                    .artifacts
+                    .get(&requirement.artifact_id)
+                    .ok_or_else(|| StoreError::MissingArtifact {
+                        artifact_id: requirement.artifact_id.clone(),
+                    })?;
+                validate_artifact_requirement_against_evidence(requirement, artifact.evidence())?;
+            }
+            Ok(())
+        }
+    }
+
+    fn insert_verified_run_artifact(
+        artifacts: &mut BTreeMap<ArtifactId, VerifiedRunArtifactBytes>,
+        artifact: VerifiedRunArtifactBytes,
+    ) -> Result<()> {
+        if let Some(existing) = artifacts.get(&artifact.evidence().artifact_id) {
+            if existing != &artifact {
+                return Err(StoreError::ArtifactEvidenceMismatch {
+                    artifact_id: artifact.evidence().artifact_id.clone(),
+                    field: "retained_artifact",
+                });
+            }
+            return Ok(());
+        }
+        artifacts.insert(artifact.evidence().artifact_id.clone(), artifact);
+        Ok(())
+    }
+
     fn committed_run_stream_commits(
         events: &[KernelEventEnvelope],
     ) -> Vec<CommittedRunStreamCommit> {
@@ -2892,71 +3079,7 @@ pub mod v1 {
                     artifact_id: requirement.artifact_id.clone(),
                 });
             };
-            if let Some(digest) = &requirement.digest {
-                compare_artifact_field(
-                    &requirement.artifact_id,
-                    "digest",
-                    stored.digest.as_str(),
-                    digest.as_str(),
-                )?;
-            }
-            if let Some(byte_len) = requirement.byte_len {
-                compare_artifact_field(
-                    &requirement.artifact_id,
-                    "byte_len",
-                    stored.byte_len,
-                    byte_len,
-                )?;
-            }
-            if let Some(media_type) = &requirement.media_type {
-                compare_artifact_field(
-                    &requirement.artifact_id,
-                    "media_type",
-                    stored.media_type.as_str(),
-                    media_type.as_str(),
-                )?;
-            }
-            if let Some(schema_id) = &requirement.schema_id {
-                compare_artifact_option(
-                    &requirement.artifact_id,
-                    "schema_id",
-                    stored.schema_id.as_ref().map(SchemaId::as_str),
-                    Some(schema_id.as_str()),
-                )?;
-            }
-            if let Some(semantic_type_id) = &requirement.semantic_type_id {
-                compare_artifact_option(
-                    &requirement.artifact_id,
-                    "semantic_type_id",
-                    stored.semantic_type_id.as_ref().map(SemanticTypeId::as_str),
-                    Some(semantic_type_id.as_str()),
-                )?;
-            }
-            if let Some(producer_node_id) = &requirement.producer_node_id {
-                compare_artifact_option(
-                    &requirement.artifact_id,
-                    "producer_node_id",
-                    stored.producer_node_id.as_ref().map(NodeId::as_str),
-                    Some(producer_node_id.as_str()),
-                )?;
-            }
-            if let Some(producer_seed_id) = &requirement.producer_seed_id {
-                compare_artifact_option(
-                    &requirement.artifact_id,
-                    "producer_seed_id",
-                    stored.producer_seed_id.as_ref().map(SeedId::as_str),
-                    Some(producer_seed_id.as_str()),
-                )?;
-            }
-            if let Some(role) = requirement.artifact_role {
-                compare_artifact_field(
-                    &requirement.artifact_id,
-                    "artifact_role",
-                    artifact_role_str(stored.artifact_role),
-                    artifact_role_str(role),
-                )?;
-            }
-            Ok(())
+            validate_artifact_requirement_against_evidence(requirement, stored)
         }
 
         fn validate_preconditions(&self, request: &TypedCommitRequest) -> Result<()> {
@@ -3561,6 +3684,96 @@ pub mod v1 {
                 ),
             ))
         }
+    }
+
+    fn validate_artifact_requirement_against_evidence(
+        requirement: &EventArtifactRequirement,
+        evidence: &ArtifactEvidenceRef,
+    ) -> Result<()> {
+        if let Some(digest) = &requirement.digest {
+            compare_artifact_field(
+                &requirement.artifact_id,
+                "digest",
+                evidence.digest.as_str(),
+                digest.as_str(),
+            )?;
+        }
+        if let Some(byte_len) = requirement.byte_len {
+            compare_artifact_field(
+                &requirement.artifact_id,
+                "byte_len",
+                evidence.byte_len,
+                byte_len,
+            )?;
+        }
+        if let Some(media_type) = &requirement.media_type {
+            compare_artifact_field(
+                &requirement.artifact_id,
+                "media_type",
+                evidence.media_type.as_str(),
+                media_type.as_str(),
+            )?;
+        }
+        if let Some(schema_id) = &requirement.schema_id {
+            compare_artifact_option(
+                &requirement.artifact_id,
+                "schema_id",
+                evidence.schema_id.as_ref().map(SchemaId::as_str),
+                Some(schema_id.as_str()),
+            )?;
+        }
+        if let Some(semantic_type_id) = &requirement.semantic_type_id {
+            compare_artifact_option(
+                &requirement.artifact_id,
+                "semantic_type_id",
+                evidence
+                    .semantic_type_id
+                    .as_ref()
+                    .map(SemanticTypeId::as_str),
+                Some(semantic_type_id.as_str()),
+            )?;
+        }
+        if let Some(producer_node_id) = &requirement.producer_node_id {
+            compare_artifact_option(
+                &requirement.artifact_id,
+                "producer_node_id",
+                evidence.producer_node_id.as_ref().map(NodeId::as_str),
+                Some(producer_node_id.as_str()),
+            )?;
+        }
+        if let Some(producer_seed_id) = &requirement.producer_seed_id {
+            compare_artifact_option(
+                &requirement.artifact_id,
+                "producer_seed_id",
+                evidence.producer_seed_id.as_ref().map(SeedId::as_str),
+                Some(producer_seed_id.as_str()),
+            )?;
+        }
+        if let Some(role) = requirement.artifact_role {
+            compare_artifact_field(
+                &requirement.artifact_id,
+                "artifact_role",
+                artifact_role_str(evidence.artifact_role),
+                artifact_role_str(role),
+            )?;
+        }
+        Ok(())
+    }
+
+    fn verify_retained_artifact_bytes(bytes: &[u8], evidence: &ArtifactEvidenceRef) -> Result<()> {
+        let digest =
+            ContentDigest::from_digest(DigestAlgorithm::Sha256JcsV1, sha256_digest_bytes(bytes));
+        let artifact_id = ArtifactId::from_digest(digest.algorithm(), *digest.digest());
+        if evidence.digest != digest
+            || evidence.artifact_id != artifact_id
+            || evidence.byte_len != bytes.len() as u64
+        {
+            return Err(StoreError::ArtifactEvidenceMismatch {
+                artifact_id: evidence.artifact_id.clone(),
+                field: "bytes",
+            });
+        }
+        Ok(())
     }
 
     fn validate_run_start_commit(request: &TypedCommitRequest) -> Result<()> {

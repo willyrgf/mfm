@@ -29,7 +29,11 @@ use mfm_ids::{
     SemanticTypeId,
 };
 use mfm_spec::v1::MediaType;
-use mfm_store::v1::{ArtifactEvidenceRef, VerifiedRetentionProjectionSet};
+use mfm_store::v1::{
+    ArtifactEvidenceRef, EventArtifactRequirement, RetainedArtifactReadFuture,
+    RetainedArtifactReadProvider, StoreError, VerifiedRetentionProjectionSet,
+    VerifiedRunArtifactBytes,
+};
 use serde_json::Value;
 use tokio::io::AsyncWriteExt;
 
@@ -360,6 +364,21 @@ impl FsTypedArtifactStore {
     }
 }
 
+impl RetainedArtifactReadProvider for FsTypedArtifactStore {
+    fn read_retained_artifact<'a>(
+        &'a self,
+        requirement: &'a EventArtifactRequirement,
+    ) -> RetainedArtifactReadFuture<'a> {
+        Box::pin(async move {
+            let (bytes, evidence) = self
+                .get_artifact_by_id(&requirement.artifact_id)
+                .await
+                .map_err(|error| retained_artifact_store_error(requirement, error))?;
+            VerifiedRunArtifactBytes::new(bytes, evidence, requirement)
+        })
+    }
+}
+
 fn temp_path_for(path: &Path) -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -537,6 +556,30 @@ fn redact_artifact_capability_error(
         | FsTypedArtifactError::Io { .. }) => {
             mfm_artifact_capabilities::ArtifactReadError::redacted_backend_failure(error)
         }
+    }
+}
+
+fn retained_artifact_store_error(
+    requirement: &EventArtifactRequirement,
+    error: FsTypedArtifactError,
+) -> StoreError {
+    match error {
+        FsTypedArtifactError::NotFound { artifact_id } => StoreError::MissingArtifact {
+            artifact_id: *artifact_id,
+        },
+        FsTypedArtifactError::EvidenceMismatch { artifact_id, field } => {
+            StoreError::ArtifactEvidenceMismatch {
+                artifact_id: *artifact_id,
+                field,
+            }
+        }
+        FsTypedArtifactError::Corruption { .. }
+        | FsTypedArtifactError::InvalidEvidence { .. }
+        | FsTypedArtifactError::InvalidIdentity { .. }
+        | FsTypedArtifactError::RetainedArtifactRefused { .. }
+        | FsTypedArtifactError::Io { .. } => StoreError::ArtifactReadFailed {
+            artifact_id: requirement.artifact_id.clone(),
+        },
     }
 }
 

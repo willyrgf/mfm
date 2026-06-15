@@ -432,3 +432,57 @@ Checks run:
 - `cargo test -p mfm-stream-store-postgres --features parity-tests typed_saga_projection_tables_persist_and_rebuild_from_events` (compiled, then stopped because `DATABASE_URL` is unset for parity tests)
 - `cargo test -p mfm-integration-tests --test cargo_metadata_contract`
 - `cargo test -p mfm-integration-tests --test architecture_namespace_contract`
+
+## Phase 10: Standard Retained Evidence Store For All State Executions
+
+Status: completed.
+
+Files changed:
+
+- `crates/kernel/store/src/lib.rs`
+- `crates/storages/artifact-store-fs/src/lib.rs`
+- `crates/kernel/runtime/src/history.rs`
+- `crates/kernel/runtime/src/tests.rs`
+- `crates/kernel/replay/src/lib.rs`
+- `crates/app/src/lib.rs`
+- `tests/integration/src/test_support.rs`
+- `tests/integration/tests/proof_transport_conformance.rs`
+- `tests/integration/tests/rest_api_run_control.rs`
+- `IMPLEMENTATION_ACDC_SAGA_PRE_MERGE.md`
+
+Validators deleted or replaced:
+
+- Added store-owned `RetainedArtifactReadProvider`, `VerifiedRunArtifactBytes`, and
+  `VerifiedRunArtifactStore` authority.
+- Replaced runtime public `VerifiedRunStream` construction that accepted only certified spec plus
+  stream with constructors requiring `VerifiedRunArtifactStore`.
+- Replaced app status/resume/replay/public-output read paths that validated raw streams with a
+  helper that first loads and verifies all event-required artifact bytes from `FsTypedArtifactStore`.
+- Replaced replay authority's caller-supplied artifact evidence/proof-byte bags with derivation
+  from `VerifiedRunStream::artifact_store`.
+- Replaced replay's retention-only artifact evidence validator with verification against the full
+  store-verified artifact set carried by the run history.
+- Deleted app saga/manual terminal artifact collection exceptions; replay now consumes retained
+  evidence through the same verified artifact authority.
+- Replaced integration test stagers that discarded bytes with retained artifact stores used by
+  replay verification.
+
+Tests added or updated:
+
+- Added app coverage proving missing retained artifact bytes reject verified run stream
+  construction before replay/status authority can be minted.
+- Updated app tamper tests to expect retained-artifact verification failures when corrupt histories
+  reference missing or mismatched artifact evidence.
+- Updated proof conformance and typed slice integration support to retain staged artifact bytes and
+  replay through `VerifiedRunArtifactStore`.
+- Updated REST run-control fixture for the current certified spec authority accessor.
+
+Checks run:
+
+- `cargo fmt --all -- --check`
+- `cargo check -p mfm-store -p mfm-runtime -p mfm-replay -p mfm-artifact-store-fs -p mfm-app -p mfm-integration-tests`
+- `cargo test -p mfm-store -p mfm-runtime -p mfm-replay -p mfm-artifact-store-fs`
+- `cargo test -p mfm-app`
+- `cargo test -p mfm-integration-tests`
+- `cargo test -p mfm-integration-tests --test cargo_metadata_contract`
+- `cargo test -p mfm-integration-tests --test architecture_namespace_contract`

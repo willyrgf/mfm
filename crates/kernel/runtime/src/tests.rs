@@ -54,6 +54,14 @@ impl TestPreparedCommitExt for store::InMemoryTypedRunStore {
     }
 }
 
+fn validate_runtime_stream_for_tests(
+    runtime_spec: &CertifiedRuntimeSpec,
+    run_id: &RunId,
+    stream: &[store::KernelEventEnvelope],
+) -> Result<()> {
+    RuntimeRunView::from_stream(runtime_spec, run_id, stream).map(|_| ())
+}
+
 struct RecordedPreparedCommit {
     seq: store::StreamSeq,
     commit_key: store::CommitKey,
@@ -703,7 +711,7 @@ async fn no_second_authority_full_run_stages_and_admits_first_artifact_reference
     );
 
     let stream = store.load_run_stream(&fixture.run_id);
-    validate_run_stream(&fixture.runtime_spec, &fixture.run_id, &stream)
+    validate_runtime_stream_for_tests(&fixture.runtime_spec, &fixture.run_id, &stream)
         .expect("representative stream validates");
     assert_every_certified_node_has_attempt(&fixture.runtime_spec, &stream);
     assert!(node_by_output(&fixture, &fixture.cell_a)
@@ -953,7 +961,7 @@ async fn runtime_rejects_bootstrap_receipt_artifact_ref_metadata_tampering() {
     );
 
     assert!(matches!(
-        validate_run_stream(&fixture.runtime_spec, &fixture.run_id, &corrupt_stream),
+        validate_runtime_stream_for_tests(&fixture.runtime_spec, &fixture.run_id, &corrupt_stream),
         Err(RuntimeError::InvalidRunStream(message))
             if message.contains("bootstrap receipt artifact reference")
                 || message.contains("sealed BootstrapRun genesis commit")
@@ -1005,7 +1013,12 @@ async fn runtime_rejects_run_start_without_bootstrap_attempt() {
         Err(RuntimeError::InvalidRunStream(message))
             if message.contains("unexpected payload count")
     ));
-    assert!(validate_run_stream(&fixture.runtime_spec, &fixture.run_id, &corrupt_stream).is_err());
+    assert!(validate_runtime_stream_for_tests(
+        &fixture.runtime_spec,
+        &fixture.run_id,
+        &corrupt_stream
+    )
+    .is_err());
 }
 
 #[tokio::test]
@@ -1340,7 +1353,7 @@ async fn runtime_rejects_completed_history_without_retention_projection() {
     });
 
     assert!(matches!(
-        validate_run_stream(&fixture.runtime_spec, &fixture.run_id, &corrupt_stream),
+        validate_runtime_stream_for_tests(&fixture.runtime_spec, &fixture.run_id, &corrupt_stream),
         Err(RuntimeError::InvalidRunStream(message))
             if message.contains("started before certified input cell")
     ));
@@ -1383,7 +1396,7 @@ async fn runtime_rejects_standalone_run_completed_after_retention_projection() {
     );
 
     assert!(matches!(
-        validate_run_stream(&fixture.runtime_spec, &fixture.run_id, &corrupt_stream),
+        validate_runtime_stream_for_tests(&fixture.runtime_spec, &fixture.run_id, &corrupt_stream),
         Err(RuntimeError::InvalidRunStream(message))
             if message.contains("CompleteRun commit was not produced")
     ));
@@ -1413,7 +1426,7 @@ async fn runtime_rejects_complete_run_receipt_commit_without_run_completed() {
     });
 
     assert!(matches!(
-        validate_run_stream(&fixture.runtime_spec, &fixture.run_id, &corrupt_stream),
+        validate_runtime_stream_for_tests(&fixture.runtime_spec, &fixture.run_id, &corrupt_stream),
         Err(RuntimeError::InvalidRunStream(message))
             if message.contains("missing RunCompleted")
     ));
@@ -1470,7 +1483,7 @@ async fn runtime_rejects_complete_run_receipt_artifact_ref_metadata_tampering() 
         );
 
         assert!(matches!(
-            validate_run_stream(&fixture.runtime_spec, &fixture.run_id, &corrupt_stream),
+            validate_runtime_stream_for_tests(&fixture.runtime_spec, &fixture.run_id, &corrupt_stream),
             Err(RuntimeError::InvalidRunStream(message))
                 if message.contains("sealed framework batch")
         ));
@@ -1508,7 +1521,7 @@ async fn runtime_rejects_bare_retention_refs_before_completion() {
     );
 
     assert!(matches!(
-        validate_run_stream(&fixture.runtime_spec, &fixture.run_id, &corrupt_stream),
+        validate_runtime_stream_for_tests(&fixture.runtime_spec, &fixture.run_id, &corrupt_stream),
         Err(RuntimeError::InvalidRunStream(message))
             if message.contains("same-commit typed payload evidence")
     ));
@@ -1540,7 +1553,7 @@ async fn runtime_rejects_missing_run_start_retention_refs() {
     });
 
     assert!(matches!(
-        validate_run_stream(&fixture.runtime_spec, &fixture.run_id, &corrupt_stream),
+        validate_runtime_stream_for_tests(&fixture.runtime_spec, &fixture.run_id, &corrupt_stream),
         Err(RuntimeError::InvalidRunStream(message))
             if message.contains("sealed BootstrapRun genesis commit")
     ));
@@ -1591,7 +1604,7 @@ async fn runtime_rejects_non_completed_run_completion_without_saga_terminal_auth
         stream.extend(forged.events().iter().cloned());
 
         assert!(matches!(
-            validate_run_stream(
+            validate_runtime_stream_for_tests(
                 &fixture.runtime_spec,
                 &fixture.run_id,
                 &stream,
@@ -1641,7 +1654,7 @@ async fn runtime_rejects_post_completion_retention_refs() {
     );
 
     assert!(matches!(
-        validate_run_stream(&fixture.runtime_spec, &fixture.run_id, &corrupt_stream),
+        validate_runtime_stream_for_tests(&fixture.runtime_spec, &fixture.run_id, &corrupt_stream),
         Err(RuntimeError::InvalidRunStream(message))
             if message.contains("events after RunCompleted")
     ));
@@ -1711,7 +1724,7 @@ async fn runtime_rejects_run_completed_with_active_retention_attempt() {
     );
 
     assert!(matches!(
-        validate_run_stream(&fixture.runtime_spec, &fixture.run_id, &corrupt_stream),
+        validate_runtime_stream_for_tests(&fixture.runtime_spec, &fixture.run_id, &corrupt_stream),
         Err(RuntimeError::InvalidRunStream(message))
             if message.contains("attempts are active")
     ));
@@ -1813,7 +1826,7 @@ async fn runtime_rejects_retained_evidence_between_retention_projection_and_comp
     );
 
     assert!(matches!(
-        validate_run_stream(&fixture.runtime_spec, &fixture.run_id, &corrupt_stream),
+        validate_runtime_stream_for_tests(&fixture.runtime_spec, &fixture.run_id, &corrupt_stream),
         Err(RuntimeError::InvalidRunStream(message))
             if message.contains("after retention manifest projection")
     ));
@@ -1887,7 +1900,7 @@ async fn runtime_rejects_extra_attempt_evidence_in_retention_projection_commit()
     );
 
     assert!(matches!(
-        validate_run_stream(&fixture.runtime_spec, &fixture.run_id, &corrupt_stream),
+        validate_runtime_stream_for_tests(&fixture.runtime_spec, &fixture.run_id, &corrupt_stream),
         Err(RuntimeError::InvalidRunStream(message))
             if message.contains(
                 "retention manifest projection commit contains unsupported payload"
@@ -1918,7 +1931,7 @@ async fn runtime_rejects_same_sequence_sidecar_commit_at_retention_projection() 
         append_same_sequence_sidecar_to_retention_projection_for_tests(&valid_stream);
 
     assert!(matches!(
-        validate_run_stream(&fixture.runtime_spec, &fixture.run_id, &corrupt_stream),
+        validate_runtime_stream_for_tests(&fixture.runtime_spec, &fixture.run_id, &corrupt_stream),
         Err(RuntimeError::Store(message)) if message.contains("multiple commit keys")
     ));
 }
@@ -1962,7 +1975,7 @@ async fn runtime_rejects_post_completion_retention_attempt() {
     );
 
     assert!(matches!(
-        validate_run_stream(&fixture.runtime_spec, &fixture.run_id, &corrupt_stream),
+        validate_runtime_stream_for_tests(&fixture.runtime_spec, &fixture.run_id, &corrupt_stream),
         Err(RuntimeError::InvalidRunStream(message))
             if message.contains("events after RunCompleted")
     ));
@@ -2006,7 +2019,7 @@ async fn runtime_rejects_started_attempt_for_terminal_retention_node() {
     );
 
     assert!(matches!(
-        validate_run_stream(&fixture.runtime_spec, &fixture.run_id, &corrupt_stream),
+        validate_runtime_stream_for_tests(&fixture.runtime_spec, &fixture.run_id, &corrupt_stream),
         Err(RuntimeError::InvalidRunStream(message))
             if message.contains("after its output cell became terminal")
     ));
@@ -2664,7 +2677,7 @@ async fn runtime_rejects_public_output_retention_reason_on_user_commit() {
     );
 
     assert!(matches!(
-        validate_run_stream(&fixture.runtime_spec, &fixture.run_id, &corrupt_stream),
+        validate_runtime_stream_for_tests(&fixture.runtime_spec, &fixture.run_id, &corrupt_stream),
         Err(RuntimeError::InvalidRunStream(message))
             if message.contains("public-output retention refs must be appended")
     ));

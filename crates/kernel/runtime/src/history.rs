@@ -56,30 +56,33 @@ pub struct VerifiedRunStream {
     run_id: RunId,
     spec_hash: SpecHash,
     committed: store::CommittedRunStream,
+    artifacts: store::VerifiedRunArtifactStore,
 }
 
 impl VerifiedRunStream {
     /// Loads the authoritative run stream from a typed store and validates it against certified
-    /// runtime authority.
+    /// runtime authority and verified retained artifact evidence.
     pub fn from_store<S>(
         runtime_spec: &CertifiedRuntimeSpec,
         run_id: &RunId,
         store: &S,
+        artifacts: store::VerifiedRunArtifactStore,
     ) -> Result<Self>
     where
         S: store::TypedRunEventStore + ?Sized,
     {
         let committed =
             store::CommittedRunStream::from_events(run_id.clone(), store.load_run_stream(run_id))?;
-        Self::from_committed_stream(runtime_spec, committed)
+        Self::from_committed_stream(runtime_spec, committed, artifacts)
     }
 
     /// Loads the authoritative run stream from an async typed store and validates it against
-    /// certified runtime authority.
+    /// certified runtime authority and verified retained artifact evidence.
     pub async fn from_async_store<S>(
         runtime_spec: &CertifiedRuntimeSpec,
         run_id: &RunId,
         store: &S,
+        artifacts: store::VerifiedRunArtifactStore,
     ) -> Result<Self>
     where
         S: store::AsyncTypedRunEventStore + ?Sized,
@@ -91,27 +94,33 @@ impl VerifiedRunStream {
                 .await
                 .map_err(async_store_error)?,
         )?;
-        Self::from_committed_stream(runtime_spec, committed)
+        Self::from_committed_stream(runtime_spec, committed, artifacts)
     }
 
     pub(crate) fn from_stream(
         runtime_spec: &CertifiedRuntimeSpec,
         run_id: &RunId,
         stream: &[store::KernelEventEnvelope],
+        artifacts: store::VerifiedRunArtifactStore,
     ) -> Result<Self> {
         let committed = store::CommittedRunStream::from_events(run_id.clone(), stream.to_vec())?;
-        Self::from_committed_stream(runtime_spec, committed)
+        Self::from_committed_stream(runtime_spec, committed, artifacts)
     }
 
-    pub(crate) fn from_committed_stream(
+    /// Validates a committed stream against certified runtime authority and verified retained
+    /// artifact evidence.
+    pub fn from_committed_stream(
         runtime_spec: &CertifiedRuntimeSpec,
         committed: store::CommittedRunStream,
+        artifacts: store::VerifiedRunArtifactStore,
     ) -> Result<Self> {
         RuntimeRunView::from_committed_stream(runtime_spec, &committed)?;
+        artifacts.validate_committed_stream(&committed)?;
         Ok(Self {
             run_id: committed.run_id().clone(),
             spec_hash: runtime_spec.spec_hash().clone(),
             committed,
+            artifacts,
         })
     }
 
@@ -138,6 +147,11 @@ impl VerifiedRunStream {
     /// Store-owned stream authority covered by this runtime verification.
     pub fn committed_stream(&self) -> &store::CommittedRunStream {
         &self.committed
+    }
+
+    /// Verified retained artifacts required by this run history.
+    pub fn artifact_store(&self) -> &store::VerifiedRunArtifactStore {
+        &self.artifacts
     }
 }
 
@@ -230,8 +244,9 @@ pub fn validate_run_stream(
     runtime_spec: &CertifiedRuntimeSpec,
     run_id: &RunId,
     stream: &[store::KernelEventEnvelope],
+    artifacts: store::VerifiedRunArtifactStore,
 ) -> Result<()> {
-    VerifiedRunStream::from_stream(runtime_spec, run_id, stream).map(|_| ())
+    VerifiedRunStream::from_stream(runtime_spec, run_id, stream, artifacts).map(|_| ())
 }
 
 pub(crate) fn recorded_facts_for_attempt(

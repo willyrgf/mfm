@@ -253,7 +253,7 @@ async fn start_rejects_certifier_invalid_runtime_shape_valid_bundle_before_strea
     let certified =
         mfm_op_proof::certified_proof_spec(mfm_op_proof::ProofWorkflowConfig::default())
             .expect("proof spec");
-    let mut invalid_spec = certified.spec().clone();
+    let mut invalid_spec = certified.validated_spec().spec().clone();
     invalid_spec.config_refs.clear();
     let invalid_spec_bytes = invalid_spec
         .canonical_json()

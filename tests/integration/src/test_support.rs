@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
 use mfm_capabilities::{
@@ -16,10 +16,12 @@ use mfm_capabilities::{
 };
 use mfm_core::keystore::{Keystore, KeystoreConfig};
 use mfm_events::v1 as events;
+#[cfg(test)]
+use mfm_ids::SemanticTypeId;
 use mfm_ids::{
     AdapterKind, AdapterVersion, ArtifactId, AttemptId, CapabilityKind, CapabilityVersion, CellId,
-    ContentDigest, DescriptorId, DigestAlgorithm, DigestBytes, NodeId, RunId, SchemaId,
-    SemanticTypeId, SpecHash, StateKind, StateVersion,
+    ContentDigest, DescriptorId, DigestAlgorithm, DigestBytes, NodeId, RunId, SchemaId, SpecHash,
+    StateKind, StateVersion,
 };
 use mfm_program::{
     build_root_with_registries, AdapterBindingSpec, CanonicalSeed, IdempotencyKey,
@@ -234,10 +236,14 @@ fn parse_u128_hex_quantity(raw: &str) -> u128 {
     u128::from_str_radix(trimmed, 16).expect("hex quantity must parse as u128")
 }
 
-#[derive(Clone)]
-struct TestRuntimeArtifactStager;
+type TestRuntimeArtifactMap = BTreeMap<ArtifactId, (Vec<u8>, store::ArtifactEvidenceRef)>;
 
-impl RuntimeArtifactStager for TestRuntimeArtifactStager {
+#[derive(Clone, Default)]
+struct TestRuntimeArtifactStore {
+    artifacts: Arc<Mutex<TestRuntimeArtifactMap>>,
+}
+
+impl RuntimeArtifactStager for TestRuntimeArtifactStore {
     fn stage_verified_artifact<'a>(
         &'a self,
         bytes: Vec<u8>,
@@ -257,13 +263,52 @@ impl RuntimeArtifactStager for TestRuntimeArtifactStager {
                     "staged artifact bytes do not match evidence".to_owned(),
                 ));
             }
+            let mut artifacts = self.artifacts.lock().map_err(|_| {
+                RuntimeError::Store("test artifact store lock was poisoned".to_owned())
+            })?;
+            if let Some((existing_bytes, existing_evidence)) = artifacts.get(&evidence.artifact_id)
+            {
+                if existing_bytes != &bytes || existing_evidence != &evidence {
+                    return Err(RuntimeError::Store(format!(
+                        "conflicting test artifact evidence for {}",
+                        evidence.artifact_id
+                    )));
+                }
+                return Ok(());
+            }
+            artifacts.insert(evidence.artifact_id.clone(), (bytes, evidence));
             Ok(())
         })
     }
 }
 
-fn test_scheduler(registry: ErasedRunnerRegistry) -> SerialTypedScheduler {
-    SerialTypedScheduler::new(registry, Arc::new(TestRuntimeArtifactStager))
+impl store::RetainedArtifactReadProvider for TestRuntimeArtifactStore {
+    fn read_retained_artifact<'a>(
+        &'a self,
+        requirement: &'a store::EventArtifactRequirement,
+    ) -> store::RetainedArtifactReadFuture<'a> {
+        Box::pin(async move {
+            let (bytes, evidence) = self
+                .artifacts
+                .lock()
+                .map_err(|_| store::StoreError::ArtifactReadFailed {
+                    artifact_id: requirement.artifact_id.clone(),
+                })?
+                .get(&requirement.artifact_id)
+                .cloned()
+                .ok_or_else(|| store::StoreError::MissingArtifact {
+                    artifact_id: requirement.artifact_id.clone(),
+                })?;
+            store::VerifiedRunArtifactBytes::new(bytes, evidence, requirement)
+        })
+    }
+}
+
+fn test_scheduler(
+    registry: ErasedRunnerRegistry,
+    artifacts: TestRuntimeArtifactStore,
+) -> SerialTypedScheduler {
+    SerialTypedScheduler::new(registry, Arc::new(artifacts))
 }
 
 /// Coverage produced by the synthetic typed certified slice acceptance fixture.
@@ -367,7 +412,7 @@ impl TypedCertifiedSliceCoverage {
 pub async fn typed_certified_slice_coverage() -> Result<TypedCertifiedSliceCoverage, String> {
     let mut run = run_reference_certified_workflow().await?;
     let side_effect_logical_key_conflicts_rejected = duplicate_submit_rejected(&mut run)?;
-    let replay_live_cap_requests_count = replay_without_live_capabilities(&run)?;
+    let replay_live_cap_requests_count = replay_without_live_capabilities(&run).await?;
     let resume_drift_rejected = resume_drift_is_rejected().await?;
     if !side_effect_ambiguity_degrades_without_public_output().await? {
         return Err(
@@ -518,12 +563,14 @@ fn reference_adapter_binding() -> mfm_program::Result<AdapterBindingSpec> {
 struct ReferenceRun {
     fixture: ReferenceFixture,
     store: store::InMemoryTypedRunStore,
+    artifacts: TestRuntimeArtifactStore,
 }
 
 #[cfg(test)]
 struct CompensatedReferenceRun {
     fixture: CompensatedReferenceFixture,
     store: store::InMemoryTypedRunStore,
+    artifacts: TestRuntimeArtifactStore,
 }
 
 #[derive(Clone)]
@@ -899,7 +946,8 @@ impl PureState for ReferenceFailingState {
 
 async fn run_reference_certified_workflow() -> Result<ReferenceRun, String> {
     let fixture = reference_fixture()?;
-    let scheduler = test_scheduler(reference_registry(&fixture)?);
+    let artifacts = TestRuntimeArtifactStore::default();
+    let scheduler = test_scheduler(reference_registry(&fixture)?, artifacts.clone());
     let mut store = store::InMemoryTypedRunStore::new();
     start_reference_run(&scheduler, &mut store, &fixture).await?;
 
@@ -911,7 +959,11 @@ async fn run_reference_certified_workflow() -> Result<ReferenceRun, String> {
         {
             SchedulerStatus::Advanced => {}
             SchedulerStatus::PublicOutputProjected => {
-                return Ok(ReferenceRun { fixture, store });
+                return Ok(ReferenceRun {
+                    fixture,
+                    store,
+                    artifacts,
+                });
             }
             SchedulerStatus::Blocked => return Err("reference workflow blocked".to_owned()),
         }
@@ -923,7 +975,8 @@ async fn run_reference_certified_workflow() -> Result<ReferenceRun, String> {
 #[cfg(test)]
 async fn run_compensated_reference_workflow() -> Result<CompensatedReferenceRun, String> {
     let fixture = compensated_reference_fixture()?;
-    let scheduler = test_scheduler(compensated_reference_registry(&fixture)?);
+    let artifacts = TestRuntimeArtifactStore::default();
+    let scheduler = test_scheduler(compensated_reference_registry(&fixture)?, artifacts.clone());
     let mut store = store::InMemoryTypedRunStore::new();
     start_compensated_reference_run(&scheduler, &mut store, &fixture).await?;
 
@@ -967,7 +1020,11 @@ async fn run_compensated_reference_workflow() -> Result<CompensatedReferenceRun,
         {
             SchedulerStatus::Advanced => {}
             SchedulerStatus::PublicOutputProjected => {
-                return Ok(CompensatedReferenceRun { fixture, store });
+                return Ok(CompensatedReferenceRun {
+                    fixture,
+                    store,
+                    artifacts,
+                });
             }
             SchedulerStatus::Blocked => {
                 return Err("compensated reference workflow blocked".to_owned())
@@ -1734,7 +1791,8 @@ fn retention_projection_complete(
 
 async fn incomplete_retention_projection_is_rejected() -> Result<bool, String> {
     let fixture = reference_fixture()?;
-    let scheduler = test_scheduler(reference_registry(&fixture)?);
+    let artifacts = TestRuntimeArtifactStore::default();
+    let scheduler = test_scheduler(reference_registry(&fixture)?, artifacts.clone());
     let mut store = store::InMemoryTypedRunStore::new();
     start_reference_run(&scheduler, &mut store, &fixture).await?;
     let stream = store.load_run_stream(&fixture.run_id);
@@ -1744,7 +1802,14 @@ async fn incomplete_retention_projection_is_rejected() -> Result<bool, String> {
             &[store::KernelEventEnvelope],
         )>())
         .is_err()
-            && !retention_projection_complete(&ReferenceRun { fixture, store }, &stream)?,
+            && !retention_projection_complete(
+                &ReferenceRun {
+                    fixture,
+                    store,
+                    artifacts,
+                },
+                &stream,
+            )?,
     )
 }
 
@@ -1801,22 +1866,29 @@ fn duplicate_submit_rejected(run: &mut ReferenceRun) -> Result<bool, String> {
     ))
 }
 
-fn replay_without_live_capabilities(run: &ReferenceRun) -> Result<u64, String> {
+async fn replay_without_live_capabilities(run: &ReferenceRun) -> Result<u64, String> {
     let stream = run.store.load_run_stream(&run.fixture.run_id);
-    replay_without_live_capabilities_for(&run.fixture.runtime_spec, &run.store, &run.fixture.run_id)
-        .map(|()| 0)
-        .map_err(|error| {
-            if stream.is_empty() {
-                "missing run stream for replay fixture".to_owned()
-            } else {
-                error
-            }
-        })
+    replay_without_live_capabilities_for(
+        &run.fixture.runtime_spec,
+        &run.store,
+        &run.artifacts,
+        &run.fixture.run_id,
+    )
+    .await
+    .map(|()| 0)
+    .map_err(|error| {
+        if stream.is_empty() {
+            "missing run stream for replay fixture".to_owned()
+        } else {
+            error
+        }
+    })
 }
 
-fn replay_without_live_capabilities_for(
+async fn replay_without_live_capabilities_for(
     runtime_spec: &CertifiedRuntimeSpec,
     store: &store::InMemoryTypedRunStore,
+    artifacts: &TestRuntimeArtifactStore,
     run_id: &RunId,
 ) -> Result<(), String> {
     let stream = store.load_run_stream(run_id);
@@ -1827,21 +1899,21 @@ fn replay_without_live_capabilities_for(
             _ => None,
         })
         .ok_or_else(|| "missing RunStarted for replay fixture".to_owned())?;
-    let verified_stream =
-        mfm_runtime::VerifiedRunStream::from_store(runtime_spec, &run_started.run_id, store)
+    let committed = store::CommittedRunStream::from_events(run_started.run_id.clone(), stream)
+        .map_err(display_error)?;
+    let retained_artifacts =
+        store::VerifiedRunArtifactStore::from_committed_stream(&committed, artifacts)
+            .await
             .map_err(display_error)?;
-    let artifacts = retained_replay_artifacts_for(
+    let verified_stream = mfm_runtime::VerifiedRunStream::from_committed_stream(
         runtime_spec,
-        &stream,
-        verified_stream.projection_snapshot(),
-        &run_started.run_id,
-    )?;
-    let authority = replay::ReplayReadAuthority::from_verified_run_stream(
-        runtime_spec,
-        &verified_stream,
-        artifacts,
+        committed,
+        retained_artifacts,
     )
     .map_err(display_error)?;
+    let authority =
+        replay::ReplayReadAuthority::from_verified_run_stream(runtime_spec, &verified_stream)
+            .map_err(display_error)?;
     let broker = replay::ReplayBroker::from_read_authority(authority).map_err(display_error)?;
     let live_cap_rejected = matches!(
         broker.reject_live_capability_request(),
@@ -1859,7 +1931,10 @@ fn replay_without_live_capabilities_for(
 
 async fn resume_drift_is_rejected() -> Result<bool, String> {
     let fixture = reference_fixture()?;
-    let scheduler = test_scheduler(reference_registry(&fixture)?);
+    let scheduler = test_scheduler(
+        reference_registry(&fixture)?,
+        TestRuntimeArtifactStore::default(),
+    );
     let mut store = store::InMemoryTypedRunStore::new();
     start_reference_run(&scheduler, &mut store, &fixture).await?;
     let read_node = node_by_output(&fixture, &fixture.read_cell).clone();
@@ -1879,7 +1954,7 @@ async fn side_effect_failure_semantics_are_covered() -> Result<bool, String> {
         "apply_side_effect",
         FailingSideEffectRunner::new(&fixture),
     )?;
-    let scheduler = test_scheduler(registry);
+    let scheduler = test_scheduler(registry, TestRuntimeArtifactStore::default());
     let mut store = store::InMemoryTypedRunStore::new();
     start_reference_run(&scheduler, &mut store, &fixture).await?;
     for _ in 0..4 {
@@ -1904,7 +1979,7 @@ async fn side_effect_ambiguity_degrades_without_public_output() -> Result<bool, 
         "apply_side_effect",
         AmbiguousSideEffectRunner::new(&fixture),
     )?;
-    let scheduler = test_scheduler(registry);
+    let scheduler = test_scheduler(registry, TestRuntimeArtifactStore::default());
     let mut store = store::InMemoryTypedRunStore::new();
     start_reference_run(&scheduler, &mut store, &fixture).await?;
 
@@ -2087,6 +2162,7 @@ fn replay_artifacts(
     replay_artifacts_for(&fixture.runtime_spec, stream)
 }
 
+#[cfg(test)]
 fn replay_artifacts_for(
     runtime_spec: &CertifiedRuntimeSpec,
     stream: &[store::KernelEventEnvelope],
@@ -2232,43 +2308,7 @@ fn replay_artifacts_for(
     Ok(artifacts.into_values().collect())
 }
 
-fn retained_replay_artifacts_for(
-    runtime_spec: &CertifiedRuntimeSpec,
-    stream: &[store::KernelEventEnvelope],
-    projection: &store::ProjectionSnapshot,
-    run_id: &RunId,
-) -> Result<Vec<store::ArtifactEvidenceRef>, String> {
-    let mut discovered = replay_artifacts_for(runtime_spec, stream)?
-        .into_iter()
-        .map(|artifact| (artifact.artifact_id.clone(), artifact))
-        .collect::<BTreeMap<_, _>>();
-    let retention = projection
-        .retention(run_id)
-        .ok_or_else(|| "missing retained artifact evidence for replay fixture".to_owned())?;
-    let mut retained = Vec::with_capacity(retention.refs.len());
-    for retention_ref in retention.refs.values() {
-        let artifact = discovered
-            .remove(&retention_ref.artifact_id)
-            .unwrap_or_else(|| retention_artifact_evidence(retention_ref));
-        retained.push(artifact);
-    }
-    Ok(retained)
-}
-
-fn retention_artifact_evidence(retention_ref: &events::RetentionRef) -> store::ArtifactEvidenceRef {
-    store::ArtifactEvidenceRef {
-        artifact_id: retention_ref.artifact_id.clone(),
-        digest: retention_ref.content_digest.clone(),
-        byte_len: 0,
-        media_type: spec::MediaType::new("application/octet-stream").expect("media"),
-        schema_id: None,
-        semantic_type_id: None,
-        producer_node_id: None,
-        producer_seed_id: None,
-        artifact_role: retention_ref.role,
-    }
-}
-
+#[cfg(test)]
 fn referenced_artifacts_from_stream(
     runtime_spec: &CertifiedRuntimeSpec,
     stream: &[store::KernelEventEnvelope],
@@ -2362,6 +2402,7 @@ fn referenced_artifacts_from_stream(
     Ok(artifacts)
 }
 
+#[cfg(test)]
 fn validate_referenced_config_artifacts(
     runtime_spec: &CertifiedRuntimeSpec,
     artifacts: Vec<store::ArtifactEvidenceRef>,
@@ -2407,6 +2448,7 @@ fn validate_referenced_config_artifacts(
     Ok(validated.into_values().collect())
 }
 
+#[cfg(test)]
 fn payload_has_required_reference(
     commit: &[store::KernelEventEnvelope],
     payload: &events::KernelEventPayload,
@@ -2510,6 +2552,7 @@ fn payload_has_required_reference(
     }
 }
 
+#[cfg(test)]
 fn config_artifact_key(artifact: &store::ArtifactEvidenceRef) -> Result<String, String> {
     let Some(schema_id) = &artifact.schema_id else {
         return Err(format!(
@@ -2520,6 +2563,7 @@ fn config_artifact_key(artifact: &store::ArtifactEvidenceRef) -> Result<String, 
     Ok(format!("{}:{}", schema_id, artifact.digest))
 }
 
+#[cfg(test)]
 fn reference_matches_same_commit_payload(
     commit: &[store::KernelEventEnvelope],
     reference: &events::ArtifactReferenced,
@@ -2599,6 +2643,7 @@ fn reference_matches_same_commit_payload(
     })
 }
 
+#[cfg(test)]
 fn manual_resolution_artifact_ref_matches(
     payload: &events::ManualResolutionRecorded,
     reference: &events::ArtifactReferenced,
@@ -2627,6 +2672,7 @@ fn manual_resolution_artifact_ref_matches(
     }
 }
 
+#[cfg(test)]
 fn event_artifact_refs_match(
     diagnostic: &events::ArtifactEvidenceRef,
     reference: &events::ArtifactReferenced,
@@ -2640,6 +2686,7 @@ fn event_artifact_refs_match(
         && diagnostic.media_type == reference.artifact_ref.media_type
 }
 
+#[cfg(test)]
 fn referenced_artifact(payload: &events::ArtifactReferenced) -> store::ArtifactEvidenceRef {
     store::ArtifactEvidenceRef {
         artifact_id: payload.artifact_ref.artifact_id.clone(),
@@ -2654,6 +2701,7 @@ fn referenced_artifact(payload: &events::ArtifactReferenced) -> store::ArtifactE
     }
 }
 
+#[cfg(test)]
 fn insert_artifact(
     artifacts: &mut BTreeMap<ArtifactId, store::ArtifactEvidenceRef>,
     artifact: store::ArtifactEvidenceRef,
@@ -2663,6 +2711,7 @@ fn insert_artifact(
         .or_insert(artifact);
 }
 
+#[cfg(test)]
 fn event_artifact(
     artifact_id: ArtifactId,
     digest: ContentDigest,
@@ -2926,6 +2975,7 @@ fn config_bytes_for_draft_and_spec(
     Ok(configs)
 }
 
+#[cfg(test)]
 fn seed_artifact(seed: &events::SeedCellRef) -> store::ArtifactEvidenceRef {
     store::ArtifactEvidenceRef {
         artifact_id: seed.seed_artifact.artifact_id.clone(),
@@ -3726,8 +3776,10 @@ mod tests {
         replay_without_live_capabilities_for(
             &run.fixture.runtime_spec,
             &run.store,
+            &run.artifacts,
             &run.fixture.run_id,
         )
+        .await
         .expect("replay without live capabilities");
 
         let status = mfm_app::typed_run_status_from_stream(
@@ -3759,7 +3811,10 @@ mod tests {
     #[tokio::test]
     async fn replay_artifacts_reject_extra_config_reference_in_start_commit() {
         let fixture = reference_fixture().expect("fixture");
-        let scheduler = test_scheduler(reference_registry(&fixture).expect("registry"));
+        let scheduler = test_scheduler(
+            reference_registry(&fixture).expect("registry"),
+            TestRuntimeArtifactStore::default(),
+        );
         let mut store = store::InMemoryTypedRunStore::new();
         start_reference_run(&scheduler, &mut store, &fixture)
             .await
