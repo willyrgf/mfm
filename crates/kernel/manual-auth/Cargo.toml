@@ -1,0 +1,15 @@
+[package]
+name = "mfm-manual-auth"
+version = "0.1.0"
+edition = "2021"
+description = "Manual resolution authorization claim and verifier contracts for MFM"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+hex = { workspace = true }
+mfm-canonical = { path = "../canonical", version = "0.1.0" }
+mfm-events = { path = "../events", version = "0.1.0" }
+mfm-ids = { path = "../ids", version = "0.1.0" }
+mfm-signing = { path = "../../signing", version = "0.1.0" }
+mfm-spec = { path = "../spec", version = "0.1.0" }
+serde_json = { workspace = true }

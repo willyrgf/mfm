@@ -17,6 +17,7 @@ members = [
 	"crates/kernel/effects",
 	"crates/kernel/events",
 	"crates/kernel/ids",
+	"crates/kernel/manual-auth",
 	"crates/kernel/program",
 	"crates/kernel/program-derive",
 	"crates/kernel/replay",

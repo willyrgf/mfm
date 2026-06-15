@@ -2063,6 +2063,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "mfm-manual-auth"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "mfm-canonical",
+ "mfm-events",
+ "mfm-ids",
+ "mfm-signing",
+ "mfm-spec",
+ "serde_json",
+]
+
+[[package]]
 name = "mfm-op-evm-contract-lifecycle"
 version = "0.1.0"
 dependencies = [
