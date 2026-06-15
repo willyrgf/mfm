@@ -4556,12 +4556,9 @@ fn lower_remediation_unresolved(
 }
 
 fn lower_manual_resolution_evidence(
-    manual: &program::ManualResolutionEvidence,
+    manual: &program::ManualResolutionPolicyDraft,
 ) -> spec::ManualResolutionEvidenceSpec {
-    spec::ManualResolutionEvidenceSpec {
-        evidence_schema: manual.evidence_schema.clone(),
-        authorization: manual.authorization.clone(),
-    }
+    manual.to_spec()
 }
 
 fn lower_operation_input_binding(
@@ -5963,8 +5960,8 @@ mod tests {
     };
     use mfm_program::{
         build_root_with_registries, CanonicalSeed, IdempotencyKey, Operation, OperationKey,
-        OperationRegistryBuilder, PublicOutputKey, PureState, ResourceClaimSpec, RootBuilder,
-        ScopeKey, SideEffectState, StateKey, StateRegistryBuilder, StateResult, StateSpec,
+        OperationRegistryBuilder, PublicOutputKey, PureState, ResourceClaim, RootBuilder, ScopeKey,
+        SideEffectState, StateKey, StateRegistryBuilder, StateResult, StateSpec,
     };
     use mfm_program_derive::{MfmConfig, MfmValue, OperationOutput, PublicOutputs};
     use serde::{Deserialize, Serialize};
@@ -6257,7 +6254,7 @@ mod tests {
                     StateKey::new("mutating-state")?,
                     TestConfig { multiplier: 3 },
                     seed,
-                    ResourceClaimSpec::ManualOnly,
+                    ResourceClaim::manual_only(),
                 )?;
                 root.bind_public_outputs(
                     PublicOutputKey::new("terminal")?,
@@ -6294,12 +6291,12 @@ mod tests {
                             key: StateKey::new("mutating-state")?,
                             config: TestConfig { multiplier: 3 },
                             input: seed,
-                            resource_claim: ResourceClaimSpec::ManualOnly,
+                            resource_claim: ResourceClaim::manual_only(),
                         },
                         program::RemediationNodeParams {
                             key: StateKey::new("compensating-state")?,
                             config: TestConfig { multiplier: 1 },
-                            resource_claim: ResourceClaimSpec::ManualOnly,
+                            resource_claim: ResourceClaim::manual_only(),
                         },
                         Ok,
                     )?;

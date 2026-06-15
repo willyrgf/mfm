@@ -24,11 +24,13 @@ use mfm_ids::{
     EffectKind, NodeId, OperationInstanceId, OperationKind, OperationVersion, SchemaId, ScopeId,
     SeedId, SemanticTypeId, StateKind, StateVersion,
 };
+use mfm_spec::v1::{
+    ManualAuthorizationQuorumSpec, ManualResolutionAuthorizationSpec, ManualResolutionEvidenceSpec,
+    OperatorAuthoritySnapshotSpec, ResourceClaimSpec,
+};
 pub use mfm_spec::v1::{
-    ManualAuthorizationQuorumSpec, ManualAuthorizationVerifierId,
-    ManualResolutionAuthorizationSpec, ManualSigningSchemeSpec, OperatorAuthorityId,
-    OperatorAuthorityMemberSpec, OperatorAuthoritySnapshotSpec, OperatorId, OperatorPublicIdentity,
-    ResourceClaimSpec, ResourceNamespace,
+    ManualAuthorizationVerifierId, ManualSigningSchemeSpec, OperatorAuthorityId,
+    OperatorAuthorityMemberSpec, OperatorId, OperatorPublicIdentity, ResourceNamespace,
 };
 pub use mfm_values::NonEmpty;
 use mfm_values::{
@@ -99,6 +101,10 @@ pub enum PlanError {
     SagaCoverageGap(String),
     /// A remediation node binding referenced cells outside the linked forward node scope.
     RemediationBindingScope(String),
+    /// Manual-resolution policy construction failed.
+    ManualPolicy(String),
+    /// Resource claim construction failed.
+    ResourceClaim(String),
 }
 
 impl fmt::Display for PlanError {
@@ -148,6 +154,8 @@ impl fmt::Display for PlanError {
             Self::RemediationBindingScope(message) => {
                 write!(f, "remediation binding scope violation: {message}")
             }
+            Self::ManualPolicy(message) => write!(f, "manual policy error: {message}"),
+            Self::ResourceClaim(message) => write!(f, "resource claim error: {message}"),
         }
     }
 }
@@ -499,7 +507,7 @@ pub enum SagaPolicy {
     /// Failure after mutation blocks for typed operator evidence.
     ManualResolution {
         /// Required typed manual evidence.
-        manual: ManualResolutionEvidence,
+        manual: ManualResolutionPolicyDraft,
     },
     /// Failure after confirmed forward side effects compensates linked remediations.
     CompensateCompleted {
@@ -516,7 +524,7 @@ pub enum SideEffectSagaPolicy {
     /// Failure after mutation blocks for typed operator evidence.
     ManualResolution {
         /// Required typed manual evidence.
-        manual: ManualResolutionEvidence,
+        manual: ManualResolutionPolicyDraft,
     },
     /// Failure after confirmed forward side effects compensates linked remediations.
     CompensateCompleted {
@@ -551,7 +559,7 @@ pub enum RemediationUnresolved {
     /// Block for typed operator evidence.
     ManualResolution {
         /// Required typed manual evidence.
-        manual: Box<ManualResolutionEvidence>,
+        manual: Box<ManualResolutionPolicyDraft>,
     },
     /// Terminally fail without a compensation or AC/DC-equivalence claim.
     FailWithoutAcdcClaim,
@@ -559,11 +567,254 @@ pub enum RemediationUnresolved {
 
 /// Typed schema requirements for run-scoped manual saga resolution evidence.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ManualResolutionEvidence {
-    /// Schema id for the operator evidence artifact.
-    pub evidence_schema: SchemaId,
-    /// Certified authorization policy required for the manual decision.
-    pub authorization: ManualResolutionAuthorizationSpec,
+pub struct ManualResolutionPolicyDraft {
+    evidence_schema: SchemaId,
+    authorization: ManualAuthorizationDraft,
+}
+
+impl ManualResolutionPolicyDraft {
+    /// Creates a manual-resolution policy draft from typed evidence and authorization authority.
+    pub fn new(evidence_schema: SchemaId, authorization: ManualAuthorizationDraft) -> Self {
+        Self {
+            evidence_schema,
+            authorization,
+        }
+    }
+
+    /// Returns the schema id required for the operator evidence artifact.
+    pub fn evidence_schema(&self) -> &SchemaId {
+        &self.evidence_schema
+    }
+
+    /// Returns the authorization policy draft required for the manual decision.
+    pub fn authorization(&self) -> &ManualAuthorizationDraft {
+        &self.authorization
+    }
+
+    /// Returns the lowered manual-resolution evidence spec.
+    pub fn to_spec(&self) -> ManualResolutionEvidenceSpec {
+        ManualResolutionEvidenceSpec {
+            evidence_schema: self.evidence_schema.clone(),
+            authorization: self.authorization.to_spec(),
+        }
+    }
+}
+
+/// Certified authorization policy draft for run-scoped manual saga resolution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManualAuthorizationDraft {
+    verifier_id: ManualAuthorizationVerifierId,
+    signing_scheme: ManualSigningSchemeSpec,
+    authority: OperatorAuthoritySnapshotDraft,
+    quorum: ThresholdQuorum,
+}
+
+impl ManualAuthorizationDraft {
+    /// Creates a threshold manual authorization draft.
+    pub fn threshold(
+        verifier_id: ManualAuthorizationVerifierId,
+        signing_scheme: ManualSigningSchemeSpec,
+        authority: OperatorAuthoritySnapshotDraft,
+        quorum: ThresholdQuorum,
+    ) -> Result<Self> {
+        if quorum.required_signatures() as usize > authority.operator_count() {
+            return Err(PlanError::ManualPolicy(format!(
+                "manual authorization quorum {} exceeds operator authority size {}",
+                quorum.required_signatures(),
+                authority.operator_count()
+            )));
+        }
+        Ok(Self {
+            verifier_id,
+            signing_scheme,
+            authority,
+            quorum,
+        })
+    }
+
+    /// Returns the verifier identity.
+    pub fn verifier_id(&self) -> &ManualAuthorizationVerifierId {
+        &self.verifier_id
+    }
+
+    /// Returns the signing scheme.
+    pub fn signing_scheme(&self) -> &ManualSigningSchemeSpec {
+        &self.signing_scheme
+    }
+
+    /// Returns the operator authority snapshot draft.
+    pub fn authority(&self) -> &OperatorAuthoritySnapshotDraft {
+        &self.authority
+    }
+
+    /// Returns the threshold quorum.
+    pub fn quorum(&self) -> ThresholdQuorum {
+        self.quorum
+    }
+
+    fn to_spec(&self) -> ManualResolutionAuthorizationSpec {
+        ManualResolutionAuthorizationSpec {
+            verifier_id: self.verifier_id.clone(),
+            signing_scheme: self.signing_scheme.clone(),
+            authority: self.authority.to_spec(),
+            quorum: ManualAuthorizationQuorumSpec::new(self.quorum.required_signatures())
+                .expect("ThresholdQuorum is non-zero"),
+        }
+    }
+}
+
+/// Non-empty, operator-id-unique collection for manual authorization snapshots.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NonEmptyUniqueOperators {
+    operators: Vec<OperatorAuthorityMemberSpec>,
+}
+
+impl NonEmptyUniqueOperators {
+    /// Creates a non-empty unique collection from a first operator and optional rest.
+    pub fn new(
+        first: OperatorAuthorityMemberSpec,
+        mut rest: Vec<OperatorAuthorityMemberSpec>,
+    ) -> Result<Self> {
+        let mut operators = Vec::with_capacity(rest.len() + 1);
+        operators.push(first);
+        operators.append(&mut rest);
+        Self::try_from_vec(operators)
+    }
+
+    /// Attempts to create a non-empty unique operator collection from a vector.
+    pub fn try_from_vec(operators: Vec<OperatorAuthorityMemberSpec>) -> Result<Self> {
+        if operators.is_empty() {
+            return Err(PlanError::ManualPolicy(
+                "manual operator authority must contain at least one operator".to_owned(),
+            ));
+        }
+        let mut seen = BTreeSet::new();
+        for operator in &operators {
+            if !seen.insert(operator.operator_id.as_str().to_owned()) {
+                return Err(PlanError::ManualPolicy(format!(
+                    "duplicate manual operator id {}",
+                    operator.operator_id
+                )));
+            }
+        }
+        Ok(Self { operators })
+    }
+
+    /// Returns the operators in retained snapshot order.
+    pub fn operators(&self) -> &[OperatorAuthorityMemberSpec] {
+        &self.operators
+    }
+
+    fn into_vec(self) -> Vec<OperatorAuthorityMemberSpec> {
+        self.operators
+    }
+}
+
+/// Manual authorization threshold that requires at least one signature.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ThresholdQuorum {
+    required_signatures: u32,
+}
+
+impl ThresholdQuorum {
+    /// Creates a non-zero threshold quorum.
+    pub fn new(required_signatures: u32) -> Result<Self> {
+        if required_signatures == 0 {
+            return Err(PlanError::ManualPolicy(
+                "manual authorization quorum must require at least one signature".to_owned(),
+            ));
+        }
+        Ok(Self {
+            required_signatures,
+        })
+    }
+
+    /// Returns the required signature count.
+    pub fn required_signatures(self) -> u32 {
+        self.required_signatures
+    }
+}
+
+/// Operator authority snapshot draft with a non-empty unique operator set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OperatorAuthoritySnapshotDraft {
+    authority_id: OperatorAuthorityId,
+    operators: NonEmptyUniqueOperators,
+}
+
+impl OperatorAuthoritySnapshotDraft {
+    /// Creates an operator authority snapshot draft.
+    pub fn new(authority_id: OperatorAuthorityId, operators: NonEmptyUniqueOperators) -> Self {
+        Self {
+            authority_id,
+            operators,
+        }
+    }
+
+    /// Returns the authority id.
+    pub fn authority_id(&self) -> &OperatorAuthorityId {
+        &self.authority_id
+    }
+
+    /// Returns operators in retained snapshot order.
+    pub fn operators(&self) -> &[OperatorAuthorityMemberSpec] {
+        self.operators.operators()
+    }
+
+    fn operator_count(&self) -> usize {
+        self.operators.operators().len()
+    }
+
+    fn to_spec(&self) -> OperatorAuthoritySnapshotSpec {
+        OperatorAuthoritySnapshotSpec {
+            authority_id: self.authority_id.clone(),
+            operators: self.operators.clone().into_vec(),
+        }
+    }
+}
+
+/// Resource claim declared by a side-effect node.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResourceClaim {
+    spec: ResourceClaimSpec,
+}
+
+impl ResourceClaim {
+    /// Creates an exclusive resource key claim.
+    pub fn exclusive(namespace: ResourceNamespace, key_schema: SchemaId) -> Self {
+        Self {
+            spec: ResourceClaimSpec::Exclusive {
+                namespace,
+                key_schema,
+            },
+        }
+    }
+
+    /// Creates an exact touched-set evidence claim.
+    pub fn exact_touched_set(namespace: ResourceNamespace, evidence_schema: SchemaId) -> Self {
+        Self {
+            spec: ResourceClaimSpec::ExactTouchedSet {
+                namespace,
+                evidence_schema,
+            },
+        }
+    }
+
+    /// Creates a claim that makes no framework-derived cross-run concurrency assertion.
+    pub fn manual_only() -> Self {
+        Self {
+            spec: ResourceClaimSpec::ManualOnly,
+        }
+    }
+
+    /// Returns the lowered resource claim spec.
+    pub fn as_spec(&self) -> &ResourceClaimSpec {
+        &self.spec
+    }
+
+    fn into_spec(self) -> ResourceClaimSpec {
+        self.spec
+    }
 }
 
 /// Effect-specific runner kind recorded by a registered state.
@@ -1766,7 +2017,7 @@ pub struct SideEffectNodeParams<S: SideEffectState, I> {
     /// Forward state input binding source.
     pub input: I,
     /// Resource claim for the forward side-effect ledger.
-    pub resource_claim: ResourceClaimSpec,
+    pub resource_claim: ResourceClaim,
 }
 
 /// Parameters for a remediation node in a linked compensation pair.
@@ -1776,7 +2027,7 @@ pub struct RemediationNodeParams<R: SideEffectState> {
     /// Deterministic remediation state config.
     pub config: R::Config,
     /// Resource claim for the remediation side-effect ledger.
-    pub resource_claim: ResourceClaimSpec,
+    pub resource_claim: ResourceClaim,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3690,7 +3941,7 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
         key: StateKey,
         config: S::Config,
         input: I,
-        resource_claim: ResourceClaimSpec,
+        resource_claim: ResourceClaim,
     ) -> Result<ForwardSideEffectHandle<'program, 'scope, S::Output>>
     where
         S: SideEffectState,
@@ -3722,7 +3973,7 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
         config: S::Config,
         input: I,
         output_domain_keys: Vec<StableDomainKeyRef>,
-        resource_claim: Option<ResourceClaimSpec>,
+        resource_claim: Option<ResourceClaim>,
     ) -> Result<(StateNodeSpec, Handle<'program, 'scope, S::Output>)>
     where
         S: StateSpec,
@@ -3738,6 +3989,7 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
 
         let descriptor = registered.descriptor();
         let side_effect_contract_digest = descriptor.side_effect_contract_digest().cloned();
+        let resource_claim = resource_claim.map(ResourceClaim::into_spec);
         match (&side_effect_contract_digest, &resource_claim) {
             (Some(_), Some(_)) | (None, None) => {}
             (Some(_), None) => {
@@ -4140,7 +4392,7 @@ impl<'program, 'scope> OperationExpansion<'program, 'scope> {
         key: StateKey,
         config: S::Config,
         input: I,
-        resource_claim: ResourceClaimSpec,
+        resource_claim: ResourceClaim,
     ) -> Result<ForwardSideEffectHandle<'program, 'scope, S::Output>>
     where
         S: SideEffectState,

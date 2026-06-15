@@ -28,7 +28,7 @@ use mfm_ids::{
 };
 use mfm_program::{
     build_root_with_registries, CanonicalSeed, Handle, Operation, OperationExpansion, OperationKey,
-    OperationRegistryBuilder, PublicOutputKey, ResourceClaimSpec, RootBound, RootBuilder, ScopeKey,
+    OperationRegistryBuilder, PublicOutputKey, ResourceClaim, RootBound, RootBuilder, ScopeKey,
     SeedKey, SideEffectSagaPolicy, StateKey, StateRegistryBuilder,
 };
 use mfm_program_derive::{MfmConfig, OperationOutput, PublicOutputs};
@@ -181,7 +181,7 @@ impl Operation for DeployContractOperation {
                 StateKey::new("deploy")?,
                 config,
                 (),
-                ResourceClaimSpec::ManualOnly,
+                ResourceClaim::manual_only(),
             )?
             .into_handle();
         Ok(ContractDeployOperationOutputs { deployed })
@@ -220,7 +220,7 @@ impl Operation for ConfigureContractOperation {
                 StateKey::new("configure")?,
                 config,
                 ConfigureContractInputHandles { deployed },
-                ResourceClaimSpec::ManualOnly,
+                ResourceClaim::manual_only(),
             )?
             .into_handle();
         Ok(ContractConfigureOperationOutputs { configured })
@@ -296,7 +296,7 @@ impl Operation for ContractLifecycleOperation {
                 StateKey::new("deploy")?,
                 config.deploy,
                 (),
-                ResourceClaimSpec::ManualOnly,
+                ResourceClaim::manual_only(),
             )?
             .into_handle();
         let configured = builder
@@ -306,7 +306,7 @@ impl Operation for ContractLifecycleOperation {
                 ConfigureContractInputHandles {
                     deployed: deployed.clone(),
                 },
-                ResourceClaimSpec::ManualOnly,
+                ResourceClaim::manual_only(),
             )?
             .into_handle();
         let validation_report = builder.state::<ValidateContractState, _>(

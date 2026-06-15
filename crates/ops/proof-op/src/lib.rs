@@ -27,7 +27,7 @@ pub use mfm_collectors_proof::{
 use mfm_ids::{DigestAlgorithm, OperationKind, OperationVersion};
 use mfm_program::{
     build_root_with_registries, Operation, OperationExpansion, OperationKey,
-    OperationRegistryBuilder, PublicOutputKey, ResourceClaimSpec, RootBuilder, ScopeKey,
+    OperationRegistryBuilder, PublicOutputKey, ResourceClaim, RootBuilder, ScopeKey,
     SideEffectSagaPolicy, StateKey, StateRegistryBuilder,
 };
 
@@ -89,7 +89,7 @@ impl Operation for ProofWorkflowOperation {
                 action: config.action,
             },
             fact.clone(),
-            ResourceClaimSpec::ManualOnly,
+            ResourceClaim::manual_only(),
         )?;
         let output = builder.state::<ProofAssembleOutputState, _>(
             StateKey::new("assemble_output")?,

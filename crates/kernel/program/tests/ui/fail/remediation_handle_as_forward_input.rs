@@ -30,12 +30,12 @@ fn main() -> mfm_program::Result<()> {
                         key: mfm_program::StateKey::new("forward")?,
                         config: TryConfig { multiplier: 2 },
                         input: seed,
-                        resource_claim: mfm_program::ResourceClaimSpec::ManualOnly,
+                        resource_claim: mfm_program::ResourceClaim::manual_only(),
                     },
                     mfm_program::RemediationNodeParams {
                         key: mfm_program::StateKey::new("compensate-forward")?,
                         config: TryConfig { multiplier: 3 },
-                        resource_claim: mfm_program::ResourceClaimSpec::ManualOnly,
+                        resource_claim: mfm_program::ResourceClaim::manual_only(),
                     },
                     |forward| Ok(forward),
                 )?;

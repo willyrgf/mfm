@@ -23,9 +23,9 @@ use mfm_ids::{
 };
 use mfm_program::{
     build_root_with_registries, AdapterBindingSpec, CanonicalSeed, IdempotencyKey,
-    ManagedWriteState, PublicOutputKey, PureState, ReadState, ResourceClaimSpec, RootBuilder,
-    ScopeKey, SeedKey, SideEffectSagaPolicy, SideEffectState, StateKey, StateRegistryBuilder,
-    StateResult, StateSpec,
+    ManagedWriteState, PublicOutputKey, PureState, ReadState, ResourceClaim, RootBuilder, ScopeKey,
+    SeedKey, SideEffectSagaPolicy, SideEffectState, StateKey, StateRegistryBuilder, StateResult,
+    StateSpec,
 };
 use mfm_program_derive::{MfmConfig, MfmValue, PublicOutputs};
 use mfm_replay::v1 as replay;
@@ -1396,7 +1396,7 @@ fn reference_fixture() -> Result<ReferenceFixture, String> {
                 StateKey::new("side-effect")?,
                 ReferenceConfig { multiplier: 5 },
                 managed,
-                ResourceClaimSpec::ManualOnly,
+                ResourceClaim::manual_only(),
             )?;
             root.bind_public_outputs(
                 PublicOutputKey::new("public-output")?,
@@ -1525,12 +1525,12 @@ fn compensated_reference_fixture() -> Result<CompensatedReferenceFixture, String
                     key: StateKey::new("forward-a")?,
                     config: ReferenceConfig { multiplier: 2 },
                     input: seed,
-                    resource_claim: ResourceClaimSpec::ManualOnly,
+                    resource_claim: ResourceClaim::manual_only(),
                 },
                 mfm_program::RemediationNodeParams {
                     key: StateKey::new("remediate-a")?,
                     config: ReferenceConfig { multiplier: 11 },
-                    resource_claim: ResourceClaimSpec::ManualOnly,
+                    resource_claim: ResourceClaim::manual_only(),
                 },
                 |forward| Ok(forward.clone()),
             )?;
@@ -1545,12 +1545,12 @@ fn compensated_reference_fixture() -> Result<CompensatedReferenceFixture, String
                     key: StateKey::new("forward-b")?,
                     config: ReferenceConfig { multiplier: 3 },
                     input: forward_a,
-                    resource_claim: ResourceClaimSpec::ManualOnly,
+                    resource_claim: ResourceClaim::manual_only(),
                 },
                 mfm_program::RemediationNodeParams {
                     key: StateKey::new("remediate-b")?,
                     config: ReferenceConfig { multiplier: 13 },
-                    resource_claim: ResourceClaimSpec::ManualOnly,
+                    resource_claim: ResourceClaim::manual_only(),
                 },
                 |forward| Ok(forward.clone()),
             )?;

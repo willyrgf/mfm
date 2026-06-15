@@ -7,8 +7,8 @@ use mfm_program_derive::{
 };
 use serde::{Deserialize, Serialize};
 
-fn manual_resource_claim() -> ResourceClaimSpec {
-    ResourceClaimSpec::ManualOnly
+fn manual_resource_claim() -> ResourceClaim {
+    ResourceClaim::manual_only()
 }
 
 fn schema_id(name: &'static str, byte: u8) -> SchemaId {
@@ -21,11 +21,99 @@ fn schema_id(name: &'static str, byte: u8) -> SchemaId {
     .expect("schema id")
 }
 
-fn exclusive_resource_claim(name: &'static str, byte: u8) -> ResourceClaimSpec {
-    ResourceClaimSpec::Exclusive {
-        namespace: ResourceNamespace::new(name).expect("resource namespace"),
-        key_schema: schema_id(name, byte),
+fn exclusive_resource_claim(name: &'static str, byte: u8) -> ResourceClaim {
+    ResourceClaim::exclusive(
+        ResourceNamespace::new(name).expect("resource namespace"),
+        schema_id(name, byte),
+    )
+}
+
+fn operator_member(name: &str, byte: u8) -> OperatorAuthorityMemberSpec {
+    OperatorAuthorityMemberSpec {
+        operator_id: OperatorId::new(format!("mfm.program.test.operator.{name}"))
+            .expect("operator id"),
+        public_identity: OperatorPublicIdentity::new(format!(
+            "mfm.program.test.operator.identity.{byte:02x}"
+        ))
+        .expect("operator identity"),
     }
+}
+
+#[test]
+fn manual_authority_builders_reject_empty_duplicates_and_oversized_quorum() {
+    assert!(matches!(
+        NonEmptyUniqueOperators::try_from_vec(Vec::new()),
+        Err(PlanError::ManualPolicy(_))
+    ));
+
+    let duplicate = operator_member("duplicate", 0x11);
+    assert!(matches!(
+        NonEmptyUniqueOperators::try_from_vec(vec![duplicate.clone(), duplicate]),
+        Err(PlanError::ManualPolicy(_))
+    ));
+
+    assert!(matches!(
+        ThresholdQuorum::new(0),
+        Err(PlanError::ManualPolicy(_))
+    ));
+
+    let operators =
+        NonEmptyUniqueOperators::new(operator_member("a", 0x21), vec![operator_member("b", 0x22)])
+            .expect("operators");
+    let authority = OperatorAuthoritySnapshotDraft::new(
+        OperatorAuthorityId::new("mfm.program.test.manual.authority").expect("authority"),
+        operators,
+    );
+    let oversized = ThresholdQuorum::new(3).expect("quorum");
+    assert!(matches!(
+        ManualAuthorizationDraft::threshold(
+            ManualAuthorizationVerifierId::new("mfm.program.test.manual.verifier")
+                .expect("verifier"),
+            ManualSigningSchemeSpec::new("mfm.manual_resolution.digest_signature.v1")
+                .expect("signing scheme"),
+            authority.clone(),
+            oversized,
+        ),
+        Err(PlanError::ManualPolicy(_))
+    ));
+
+    let auth_policy = ManualAuthorizationDraft::threshold(
+        ManualAuthorizationVerifierId::new("mfm.program.test.manual.verifier").expect("verifier"),
+        ManualSigningSchemeSpec::new("mfm.manual_resolution.digest_signature.v1")
+            .expect("signing scheme"),
+        authority,
+        ThresholdQuorum::new(2).expect("quorum"),
+    )
+    .expect("auth policy");
+    let policy = ManualResolutionPolicyDraft::new(
+        schema_id("mfm.program.test.manual_evidence", 0x23),
+        auth_policy,
+    );
+    let lowered = policy.to_spec();
+    assert_eq!(
+        lowered.evidence_schema,
+        schema_id("mfm.program.test.manual_evidence", 0x23)
+    );
+}
+
+#[test]
+fn resource_claim_constructors_lower_to_spec_shapes() {
+    assert!(matches!(
+        ResourceClaim::manual_only().as_spec(),
+        mfm_spec::v1::ResourceClaimSpec::ManualOnly
+    ));
+    assert!(matches!(
+        exclusive_resource_claim("mfm.program.test.exclusive", 0x31).as_spec(),
+        mfm_spec::v1::ResourceClaimSpec::Exclusive { .. }
+    ));
+    assert!(matches!(
+        ResourceClaim::exact_touched_set(
+            ResourceNamespace::new("mfm.program.test.touched").expect("namespace"),
+            schema_id("mfm.program.test.touched", 0x32),
+        )
+        .as_spec(),
+        mfm_spec::v1::ResourceClaimSpec::ExactTouchedSet { .. }
+    ));
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
@@ -545,12 +633,10 @@ fn linked_compensation_authoring_keeps_remediation_out_of_forward_nodes() {
     let forward = &draft.state_nodes()[0];
     assert_eq!(forward.key.as_str(), "forward");
     assert_eq!(forward.runner, RunnerKind::ApplySideEffect);
+    let expected_forward_claim = exclusive_resource_claim("mfm.program.test.forward_nonce", 0x61);
     assert_eq!(
         forward.side_effect_resource_claim.as_ref(),
-        Some(&exclusive_resource_claim(
-            "mfm.program.test.forward_nonce",
-            0x61
-        ))
+        Some(expected_forward_claim.as_spec())
     );
     let remediation = draft
         .remediation_nodes()
@@ -558,12 +644,11 @@ fn linked_compensation_authoring_keeps_remediation_out_of_forward_nodes() {
         .expect("linked remediation");
     assert_eq!(remediation.key.as_str(), "compensate-forward");
     assert_eq!(remediation.runner, RunnerKind::ApplySideEffect);
+    let expected_remediation_claim =
+        exclusive_resource_claim("mfm.program.test.remediation_nonce", 0x62);
     assert_eq!(
         remediation.side_effect_resource_claim.as_ref(),
-        Some(&exclusive_resource_claim(
-            "mfm.program.test.remediation_nonce",
-            0x62
-        ))
+        Some(expected_remediation_claim.as_spec())
     );
     assert!(
         draft

@@ -231,3 +231,51 @@ Checks run:
 - `cargo test -p mfm-runtime`
 - `cargo test -p mfm-integration-tests --test cargo_metadata_contract`
 - `cargo test -p mfm-integration-tests --test architecture_namespace_contract`
+
+## Phase 6: Program Authoring Builders For Manual And Resource Policy
+
+Status: completed.
+
+Files changed:
+
+- `crates/kernel/program/src/lib.rs`
+- `crates/kernel/program/src/tests.rs`
+- `crates/kernel/program/tests/ui/fail/remediation_handle_as_forward_input.rs`
+- `crates/kernel/certify/src/lib.rs`
+- `crates/ops/evm-contract-lifecycle-op/src/lib.rs`
+- `crates/ops/proof-op/src/lib.rs`
+- `tests/integration/src/test_support.rs`
+- `tests/integration/tests/architecture_namespace_contract.rs`
+- `IMPLEMENTATION_ACDC_SAGA_PRE_MERGE.md`
+
+Validators deleted or replaced:
+
+- Replaced program-authoring `ResourceClaimSpec` inputs with `ResourceClaim` constructors:
+  `manual_only`, `exclusive`, and `exact_touched_set`.
+- Added `ManualResolutionPolicyDraft`, `ManualAuthorizationDraft`, `OperatorAuthoritySnapshotDraft`,
+  `NonEmptyUniqueOperators`, and `ThresholdQuorum`.
+- Made empty manual authorities, duplicate operator ids, zero quorum, and quorum greater than
+  authority size fail at program-authoring construction.
+- Kept registry membership, signing scheme support, and verifier/operator authority checks in
+  certification.
+- Updated certifier lowering to consume the validated manual policy draft instead of reading raw
+  public fields.
+
+Tests added or updated:
+
+- Added program unit tests for manual authority builder invariants.
+- Added program unit tests for resource claim constructors.
+- Updated program compile-fail fixture to use `ResourceClaim`.
+- Updated ops and integration authoring fixtures to use `ResourceClaim`.
+- Updated namespace guard allowlist counts for the manual policy builder terminology move.
+
+Checks run:
+
+- `cargo check -p mfm-program -p mfm-certify -p mfm-op-proof -p mfm-op-evm-contract-lifecycle -p mfm-integration-tests`
+- `cargo test -p mfm-program`
+- `cargo test -p mfm-certify certification_rejects_unsupported_manual_signing_scheme_and_quorum`
+- `cargo test -p mfm-certify`
+- `cargo test -p mfm-op-proof -p mfm-op-evm-contract-lifecycle`
+- `cargo fmt --all -- --check`
+- `cargo test -p mfm-integration-tests --test cargo_metadata_contract`
+- `cargo test -p mfm-integration-tests --test architecture_namespace_contract`
