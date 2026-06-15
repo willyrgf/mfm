@@ -18,9 +18,8 @@ pub mod v1 {
         ContentDigest, NodeId, SchemaId, SpecHash,
     };
     use mfm_manual_auth::{
-        manual_authorization_proof_schema_id, verify_builtin_manual_resolution_authorization,
-        ManualResolutionAuthorizationClaim, ManualResolutionAuthorizationProof,
-        ManualResolutionEvidenceRef,
+        manual_authorization_proof_schema_id, ManualResolutionEvidenceRef,
+        ManualResolutionPrefixAuthority, ManualResolutionProofAuthority,
     };
     use mfm_spec::v1::{self as spec, CanonicalizerIdentity, HashedSpecEnvelope};
     use mfm_spec::SpecError;
@@ -1509,48 +1508,37 @@ pub mod v1 {
                         ),
                     )
                 })?;
-            let proof = ManualResolutionAuthorizationProof::from_json_slice(proof_bytes).map_err(
-                |error| {
-                    ReplayError::new(
-                        ReplayErrorKind::CertifiedEvidenceMismatch,
-                        format!("manual authorization proof artifact failed to parse: {error}"),
-                    )
-                },
-            )?;
-            if proof.content_digest().map_err(|error| {
+            let prefix = ManualResolutionPrefixAuthority::new(
+                payload.run_id.clone(),
+                payload.spec_hash.clone(),
+                envelope.seq().as_u64(),
+                mfm_runtime::manual_resolution_stream_prefix_digest(&self.stream[..manual_start])?,
+                mfm_runtime::manual_resolution_block_reason(block_reason),
+                mfm_runtime::unresolved_manual_obligations_digest(&prefix_saga)?,
+                manual.clone(),
+            )
+            .map_err(|error| {
                 ReplayError::new(
                     ReplayErrorKind::CertifiedEvidenceMismatch,
-                    format!("manual authorization proof artifact failed to hash: {error}"),
+                    format!("manual authorization prefix failed validation: {error}"),
                 )
-            })? != payload.authorization_hash
-            {
-                return Err(certified_evidence_mismatch(
-                    "manual authorization proof artifact digest does not match event",
-                ));
-            }
-            let expected_claim = ManualResolutionAuthorizationClaim {
-                run_id: payload.run_id.clone(),
-                spec_hash: payload.spec_hash.clone(),
-                expected_next_seq: envelope.seq().as_u64(),
-                stream_prefix_digest: mfm_runtime::manual_resolution_stream_prefix_digest(
-                    &self.stream[..manual_start],
-                )?,
-                manual_block_reason: mfm_runtime::manual_resolution_block_reason(block_reason),
-                unresolved_obligations_digest: mfm_runtime::unresolved_manual_obligations_digest(
-                    &prefix_saga,
-                )?,
-                outcome: payload.outcome,
-                evidence: ManualResolutionEvidenceRef {
+            })?;
+            ManualResolutionProofAuthority::new(
+                prefix,
+                payload.outcome,
+                ManualResolutionEvidenceRef {
                     schema_id: payload.evidence_schema_id.clone(),
                     content_hash: payload.evidence_hash.clone(),
                     artifact_id: payload.evidence_artifact_id.clone(),
                 },
-            };
-            verify_builtin_manual_resolution_authorization(
-                &manual.authorization,
-                expected_claim,
-                proof,
+                ManualResolutionEvidenceRef {
+                    schema_id: payload.authorization_schema_id.clone(),
+                    content_hash: payload.authorization_hash.clone(),
+                    artifact_id: payload.authorization_artifact_id.clone(),
+                },
+                proof_bytes.clone(),
             )
+            .and_then(ManualResolutionProofAuthority::verify)
             .map_err(|error| {
                 ReplayError::new(
                     ReplayErrorKind::CertifiedEvidenceMismatch,
@@ -1561,6 +1549,16 @@ pub mod v1 {
         }
 
         fn reject_unauthorized_artifact_evidence(&self) -> Result<()> {
+            for artifact_id in self.retained_artifacts.keys() {
+                if !self.artifacts.contains_key(artifact_id) {
+                    return Err(ReplayError::new(
+                        ReplayErrorKind::ArtifactMismatch,
+                        format!(
+                            "retained artifact evidence supplied without replay authorization for {artifact_id}"
+                        ),
+                    ));
+                }
+            }
             for artifact_id in self.artifact_bytes.keys() {
                 if !self.retained_artifacts.contains_key(artifact_id) {
                     return Err(ReplayError::new(

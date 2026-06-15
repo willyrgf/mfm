@@ -486,3 +486,56 @@ Checks run:
 - `cargo test -p mfm-integration-tests`
 - `cargo test -p mfm-integration-tests --test cargo_metadata_contract`
 - `cargo test -p mfm-integration-tests --test architecture_namespace_contract`
+
+## Phase 11: Manual-Resolution Proof Authority
+
+Status: completed.
+
+Files changed:
+
+- `crates/kernel/manual-auth/Cargo.toml`
+- `crates/kernel/manual-auth/src/lib.rs`
+- `crates/kernel/runtime/Cargo.toml`
+- `crates/kernel/runtime/src/lib.rs`
+- `crates/kernel/runtime/src/manual_resolution.rs`
+- `crates/kernel/runtime/src/scheduler.rs`
+- `crates/kernel/runtime/src/tests.rs`
+- `crates/kernel/replay/src/lib.rs`
+- `tests/integration/tests/architecture_namespace_contract.rs`
+- `Cargo.lock`
+- `IMPLEMENTATION_ACDC_SAGA_PRE_MERGE.md`
+
+Validators deleted or replaced:
+
+- Introduced `ManualResolutionPrefixAuthority`, `ManualResolutionProofAuthority`, and
+  `VerifiedManualResolutionForPrefix` in `mfm-manual-auth`.
+- Replaced public runtime `build_manual_resolution_claim` with
+  `build_manual_resolution_prefix_authority`; expected manual claims are now built only behind
+  prefix authority.
+- Changed runtime manual-resolution recording to accept run id, outcome, evidence artifact bytes,
+  and authorization proof bytes, then mint prefix/proof authority before preparing the store
+  commit.
+- Changed manual-resolution prepared commits to require `VerifiedManualResolutionForPrefix`.
+- Deleted replay's duplicate manual expected-claim construction and direct proof parsing; replay
+  now verifies manual authorization through the same `ManualResolutionProofAuthority`.
+- Replaced the old fake pre-verified runtime test path with canonical signed proof bytes.
+- Restored replay rejection for retained artifact evidence that was not authorized by the certified
+  spec or stream, while preserving the retained-bytes evidence check.
+
+Tests added or updated:
+
+- Added `mfm-manual-auth` unit coverage proving prefix/proof authority verifies canonical proof
+  bytes with a real digest signature.
+- Updated runtime manual-resolution tests to sign the prefix claim and submit proof bytes through
+  the scheduler API.
+- Kept replay signed manual-resolution coverage on the shared authority path.
+- Updated the temporary namespace guard allowlist after deleting stale runtime-test
+  `authorization` field occurrences.
+
+Checks run:
+
+- `cargo fmt --all -- --check`
+- `cargo check -p mfm-manual-auth -p mfm-runtime -p mfm-replay`
+- `cargo test -p mfm-manual-auth -p mfm-runtime -p mfm-replay`
+- `cargo test -p mfm-integration-tests --test cargo_metadata_contract`
+- `cargo test -p mfm-integration-tests --test architecture_namespace_contract`

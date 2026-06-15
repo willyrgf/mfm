@@ -48,7 +48,7 @@ pub use invocation::{
     RecordedFact, RecordedFacts,
 };
 pub use manual_resolution::{
-    build_manual_resolution_claim, manual_resolution_block_reason,
+    build_manual_resolution_prefix_authority, manual_resolution_block_reason,
     manual_resolution_stream_prefix_digest, unresolved_manual_obligations_digest,
     ManualResolutionEvidenceArtifact,
 };

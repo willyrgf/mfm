@@ -3,7 +3,6 @@ use std::sync::Arc;
 
 use mfm_events::v1 as events;
 use mfm_ids::{AttemptId, NodeId, RunId};
-use mfm_manual_auth::VerifiedManualResolution;
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
 
@@ -21,7 +20,8 @@ use crate::history::{
 };
 use crate::invocation::{CertifiedRuntimeCapabilities, ErasedRunCtx, PreparedRunnerInvocation};
 use crate::manual_resolution::{
-    prepare_manual_resolution_commit, ManualResolutionEvidenceArtifact,
+    build_manual_resolution_prefix_authority, prepare_manual_resolution_commit,
+    verify_manual_resolution_for_prefix, ManualResolutionEvidenceArtifact,
 };
 use crate::runners::{ErasedRunnerBinding, ErasedRunnerRegistry};
 use crate::{attempt_id, CertifiedRuntimeSpec, Result, RuntimeError};
@@ -211,16 +211,26 @@ impl SerialTypedScheduler {
         &self,
         store: &mut S,
         runtime_spec: &CertifiedRuntimeSpec,
-        verified: VerifiedManualResolution,
+        run_id: &RunId,
+        outcome: events::ManualResolutionOutcome,
         evidence_artifact: ManualResolutionEvidenceArtifact,
+        authorization_proof_bytes: Vec<u8>,
         note: Option<events::ManualResolutionNote>,
     ) -> Result<store::CommitOutcome> {
-        let run_id = verified.claim().run_id.clone();
-        let stream = store.load_run_stream(&run_id);
+        let manual = certified_manual_resolution_spec(&runtime_spec.spec().saga)?;
+        let prefix =
+            build_manual_resolution_prefix_authority(store, runtime_spec, run_id, manual.clone())?;
+        let verified = verify_manual_resolution_for_prefix(
+            prefix,
+            outcome,
+            &evidence_artifact,
+            authorization_proof_bytes,
+        )?;
+        let stream = store.load_run_stream(run_id);
         let saga = store
             .projection_snapshot()
-            .derive_saga_projection(&run_id, &runtime_spec.spec().saga);
-        let expected_next_seq = store.expected_next_seq(&run_id);
+            .derive_saga_projection(run_id, &runtime_spec.spec().saga);
+        let expected_next_seq = store.expected_next_seq(run_id);
         let (commit, artifacts_to_stage) = prepare_manual_resolution_commit(
             runtime_spec,
             &stream,
@@ -782,6 +792,20 @@ impl SerialTypedScheduler {
                 .await?;
         }
         Ok(())
+    }
+}
+
+fn certified_manual_resolution_spec(
+    saga: &spec::SagaPolicySpec,
+) -> Result<&spec::ManualResolutionEvidenceSpec> {
+    match saga {
+        spec::SagaPolicySpec::ManualResolution { manual } => Ok(manual),
+        spec::SagaPolicySpec::CompensateCompleted {
+            on_remediation_unresolved: spec::RemediationUnresolvedSpec::ManualResolution { manual },
+        } => Ok(manual.as_ref()),
+        _ => Err(RuntimeError::InvalidRunStream(
+            "manual resolution requires certified manual policy".to_owned(),
+        )),
     }
 }
 

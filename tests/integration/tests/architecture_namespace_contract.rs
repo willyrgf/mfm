@@ -28,7 +28,7 @@ const TEMPORARY_TYPED_FIELD_ALLOWLIST: &[(&str, &str, usize)] = &[
     ("crates/app/src/lib.rs", "authorization", 51),
     ("crates/kernel/certify/src/lib.rs", "authorization", 79),
     ("crates/kernel/program/src/lib.rs", "authorization", 15),
-    ("crates/kernel/runtime/src/tests.rs", "authorization", 14),
+    ("crates/kernel/runtime/src/tests.rs", "authorization", 8),
     ("tests/integration/src/test_support.rs", "authorization", 6),
     ("tests/integration/src/test_support.rs", "rpc_url", 4),
     (

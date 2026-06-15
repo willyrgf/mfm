@@ -12,10 +12,8 @@ use mfm_ids::{
     SemanticTypeId, SpecVersion, StateKind, StateVersion,
 };
 use mfm_manual_auth::{
-    ManualAuthorizationSignatureBytes, ManualAuthorizationVerification,
-    ManualAuthorizationVerifier, ManualAuthorizationVerifierRegistry,
-    ManualResolutionAuthorizationProof, ManualResolutionAuthorizationSignature,
-    ManualResolutionEvidenceRef,
+    ManualAuthorizationSignatureBytes, ManualResolutionAuthorizationProof,
+    ManualResolutionAuthorizationSignature, ManualResolutionEvidenceRef,
 };
 use mfm_program::{
     build_root_with_registries, CanonicalSeed, PublicOutputKey, PureState, RootBuilder, ScopeKey,
@@ -130,17 +128,6 @@ impl RuntimeArtifactStager for TestRuntimeArtifactStager {
             verify_artifact_bytes(&bytes, &evidence)?;
             Ok(())
         })
-    }
-}
-
-struct AcceptingManualVerifier;
-
-impl ManualAuthorizationVerifier for AcceptingManualVerifier {
-    fn verify(
-        &self,
-        _verification: ManualAuthorizationVerification<'_>,
-    ) -> mfm_manual_auth::Result<()> {
-        Ok(())
     }
 }
 
@@ -5156,61 +5143,19 @@ async fn runtime_rejects_manual_resolution_before_manual_blocked() {
     )
     .await
     .expect("start run");
-    let manual = match &fixture.runtime_spec.spec().saga {
-        spec::SagaPolicySpec::ManualResolution { manual } => manual,
-        _ => panic!("fixture does not carry manual resolution schemas"),
-    };
     let evidence_bytes = br#"{"operator_note":"too_early"}"#.to_vec();
-    let evidence_hash = ContentDigest::from_digest(
-        DigestAlgorithm::Sha256JcsV1,
-        sha256_digest_bytes(&evidence_bytes),
-    );
-    let evidence = ManualResolutionEvidenceRef {
-        schema_id: manual.evidence_schema.clone(),
-        content_hash: evidence_hash.clone(),
-        artifact_id: ArtifactId::from_digest(evidence_hash.algorithm(), *evidence_hash.digest()),
-    };
-    let claim = mfm_manual_auth::ManualResolutionAuthorizationClaim {
-        run_id: fixture.run_id.clone(),
-        spec_hash: fixture.runtime_spec.spec_hash().clone(),
-        expected_next_seq: store.expected_next_seq(&fixture.run_id).as_u64(),
-        stream_prefix_digest: content(0xe7),
-        manual_block_reason: mfm_manual_auth::ManualResolutionBlockReason::PolicyManualResolution,
-        unresolved_obligations_digest: content(0xe8),
-        outcome: events::ManualResolutionOutcome::ConfirmRemediated,
-        evidence,
-    };
-    let operator = manual.authorization.authority.operators[0].clone();
-    let proof = ManualResolutionAuthorizationProof {
-        verifier_id: manual.authorization.verifier_id.clone(),
-        signing_scheme: manual.authorization.signing_scheme.clone(),
-        claim: claim.clone(),
-        signatures: vec![ManualResolutionAuthorizationSignature {
-            operator_id: operator.operator_id,
-            public_identity: operator.public_identity,
-            signature: ManualAuthorizationSignatureBytes::new(vec![0x5b; 65]).expect("signature"),
-        }],
-    };
-    let mut verifiers = ManualAuthorizationVerifierRegistry::new();
-    verifiers
-        .register(
-            manual.authorization.verifier_id.clone(),
-            AcceptingManualVerifier,
-        )
-        .expect("register verifier");
-    let verified = verifiers
-        .verify(&manual.authorization, claim, proof)
-        .expect("verified manual resolution");
 
     let error = scheduler
         .record_manual_resolution(
             &mut store,
             &fixture.runtime_spec,
-            verified,
+            &fixture.run_id,
+            events::ManualResolutionOutcome::ConfirmRemediated,
             ManualResolutionEvidenceArtifact {
                 bytes: evidence_bytes,
                 media_type: spec::MediaType::new("application/json").expect("media"),
             },
+            br#"{}"#.to_vec(),
             None,
         )
         .await
@@ -8216,15 +8161,18 @@ async fn append_manual_resolution(
         content_hash: evidence_hash,
         artifact_id: evidence_artifact_id,
     };
-    let claim = build_manual_resolution_claim(
+    let prefix = build_manual_resolution_prefix_authority(
         store,
         &fixture.runtime_spec,
         &fixture.run_id,
-        outcome,
-        evidence,
+        manual.clone(),
     )
-    .expect("manual claim");
+    .expect("manual prefix authority");
+    let claim = prefix
+        .authorization_claim(outcome, evidence)
+        .expect("manual claim");
     let operator = manual.authorization.authority.operators[0].clone();
+    let claim_digest = claim.digest().expect("claim digest");
     let proof = ManualResolutionAuthorizationProof {
         verifier_id: manual.authorization.verifier_id.clone(),
         signing_scheme: manual.authorization.signing_scheme.clone(),
@@ -8232,32 +8180,48 @@ async fn append_manual_resolution(
         signatures: vec![ManualResolutionAuthorizationSignature {
             operator_id: operator.operator_id,
             public_identity: operator.public_identity,
-            signature: ManualAuthorizationSignatureBytes::new(vec![0x5a; 65]).expect("signature"),
+            signature: ManualAuthorizationSignatureBytes::new(sign_manual_claim_digest(
+                &test_manual_signing_key(),
+                claim_digest.digest().as_bytes(),
+            ))
+            .expect("signature"),
         }],
     };
-    let mut verifiers = ManualAuthorizationVerifierRegistry::new();
-    verifiers
-        .register(
-            manual.authorization.verifier_id.clone(),
-            AcceptingManualVerifier,
-        )
-        .expect("register verifier");
-    let verified = verifiers
-        .verify(&manual.authorization, claim, proof)
-        .expect("verified manual resolution");
+    let proof_bytes = proof
+        .canonical_json()
+        .expect("canonical manual proof")
+        .to_vec();
     scheduler
         .record_manual_resolution(
             store,
             &fixture.runtime_spec,
-            verified,
+            &fixture.run_id,
+            outcome,
             ManualResolutionEvidenceArtifact {
                 bytes: evidence_bytes,
                 media_type: spec::MediaType::new("application/json").expect("media"),
             },
+            proof_bytes,
             None,
         )
         .await
         .expect("append manual resolution");
+}
+
+fn test_manual_signing_key() -> k256::ecdsa::SigningKey {
+    let mut key_bytes = [0u8; 32];
+    key_bytes[31] = 1;
+    let secret_key = k256::SecretKey::from_slice(&key_bytes).expect("test key");
+    k256::ecdsa::SigningKey::from(&secret_key)
+}
+
+fn sign_manual_claim_digest(signing_key: &k256::ecdsa::SigningKey, digest: &[u8; 32]) -> Vec<u8> {
+    let (signature, recovery_id) = signing_key
+        .sign_prehash_recoverable(digest)
+        .expect("manual signature");
+    let mut signature_bytes = signature.to_bytes().to_vec();
+    signature_bytes.push(u8::from(recovery_id.is_y_odd()));
+    signature_bytes
 }
 
 fn append_fact(
@@ -9717,9 +9681,9 @@ fn manual_authorization(byte: u8) -> spec::ManualResolutionAuthorizationSpec {
             operators: vec![spec::OperatorAuthorityMemberSpec {
                 operator_id: spec::OperatorId::new(format!("operator.{byte}"))
                     .expect("operator id"),
-                public_identity: spec::OperatorPublicIdentity::new(format!(
-                    "operator-public-{byte}"
-                ))
+                public_identity: spec::OperatorPublicIdentity::new(
+                    "0x7e5f4552091a69125d5dfcb7b8c2659029395bdf",
+                )
                 .expect("operator public identity"),
             }],
         },

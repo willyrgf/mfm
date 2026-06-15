@@ -112,6 +112,203 @@ impl ManualResolutionEvidenceRef {
     }
 }
 
+/// Authority over the manually blocked run prefix that operators are allowed to resolve.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManualResolutionPrefixAuthority {
+    run_id: RunId,
+    spec_hash: SpecHash,
+    expected_next_seq: u64,
+    stream_prefix_digest: ContentDigest,
+    manual_block_reason: ManualResolutionBlockReason,
+    unresolved_obligations_digest: ContentDigest,
+    manual_policy: spec::ManualResolutionEvidenceSpec,
+}
+
+impl ManualResolutionPrefixAuthority {
+    /// Creates prefix authority from store/replay-derived prefix facts and certified policy.
+    pub fn new(
+        run_id: RunId,
+        spec_hash: SpecHash,
+        expected_next_seq: u64,
+        stream_prefix_digest: ContentDigest,
+        manual_block_reason: ManualResolutionBlockReason,
+        unresolved_obligations_digest: ContentDigest,
+        manual_policy: spec::ManualResolutionEvidenceSpec,
+    ) -> Result<Self> {
+        if expected_next_seq == 0 {
+            return Err(ManualAuthorizationError::InvalidShape(
+                "manual prefix expected_next_seq must be non-zero".to_owned(),
+            ));
+        }
+        Ok(Self {
+            run_id,
+            spec_hash,
+            expected_next_seq,
+            stream_prefix_digest,
+            manual_block_reason,
+            unresolved_obligations_digest,
+            manual_policy,
+        })
+    }
+
+    /// Returns the run id bound into this prefix.
+    pub const fn run_id(&self) -> &RunId {
+        &self.run_id
+    }
+
+    /// Returns the certified spec hash bound into this prefix.
+    pub const fn spec_hash(&self) -> &SpecHash {
+        &self.spec_hash
+    }
+
+    /// Returns the expected sequence for the manual-resolution append.
+    pub const fn expected_next_seq(&self) -> u64 {
+        self.expected_next_seq
+    }
+
+    /// Returns the digest of the event prefix being resolved.
+    pub const fn stream_prefix_digest(&self) -> &ContentDigest {
+        &self.stream_prefix_digest
+    }
+
+    /// Returns the manual block reason derived from the prefix projection.
+    pub const fn manual_block_reason(&self) -> ManualResolutionBlockReason {
+        self.manual_block_reason
+    }
+
+    /// Returns the digest of unresolved obligations at the manual block.
+    pub const fn unresolved_obligations_digest(&self) -> &ContentDigest {
+        &self.unresolved_obligations_digest
+    }
+
+    /// Returns the certified manual policy bound into this prefix.
+    pub const fn manual_policy(&self) -> &spec::ManualResolutionEvidenceSpec {
+        &self.manual_policy
+    }
+
+    /// Builds the unique authorization claim for this prefix, outcome, and evidence artifact.
+    pub fn authorization_claim(
+        &self,
+        outcome: events::ManualResolutionOutcome,
+        evidence: ManualResolutionEvidenceRef,
+    ) -> Result<ManualResolutionAuthorizationClaim> {
+        if evidence.schema_id != self.manual_policy.evidence_schema {
+            return Err(ManualAuthorizationError::PolicyMismatch("evidence_schema"));
+        }
+        Ok(ManualResolutionAuthorizationClaim {
+            run_id: self.run_id.clone(),
+            spec_hash: self.spec_hash.clone(),
+            expected_next_seq: self.expected_next_seq,
+            stream_prefix_digest: self.stream_prefix_digest.clone(),
+            manual_block_reason: self.manual_block_reason,
+            unresolved_obligations_digest: self.unresolved_obligations_digest.clone(),
+            outcome,
+            evidence,
+        })
+    }
+}
+
+/// Authority over proof bytes and artifact refs for one manual resolution decision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManualResolutionProofAuthority {
+    prefix: ManualResolutionPrefixAuthority,
+    outcome: events::ManualResolutionOutcome,
+    evidence: ManualResolutionEvidenceRef,
+    authorization: ManualResolutionEvidenceRef,
+    proof_bytes: Vec<u8>,
+}
+
+impl ManualResolutionProofAuthority {
+    /// Creates proof authority after binding proof bytes to their authorization artifact ref.
+    pub fn new(
+        prefix: ManualResolutionPrefixAuthority,
+        outcome: events::ManualResolutionOutcome,
+        evidence: ManualResolutionEvidenceRef,
+        authorization: ManualResolutionEvidenceRef,
+        proof_bytes: Vec<u8>,
+    ) -> Result<Self> {
+        verify_authorization_artifact_bytes(&authorization, &proof_bytes)?;
+        Ok(Self {
+            prefix,
+            outcome,
+            evidence,
+            authorization,
+            proof_bytes,
+        })
+    }
+
+    /// Verifies the proof against the certified prefix authority.
+    pub fn verify(self) -> Result<VerifiedManualResolutionForPrefix> {
+        let expected_claim = self
+            .prefix
+            .authorization_claim(self.outcome, self.evidence.clone())?;
+        let proof = ManualResolutionAuthorizationProof::from_json_slice(&self.proof_bytes)?;
+        let verified = verify_builtin_manual_resolution_authorization(
+            &self.prefix.manual_policy.authorization,
+            expected_claim,
+            proof,
+        )?;
+        Ok(VerifiedManualResolutionForPrefix {
+            prefix: self.prefix,
+            outcome: self.outcome,
+            evidence: self.evidence,
+            authorization: self.authorization,
+            proof_bytes: self.proof_bytes,
+            verified,
+            _seal: sealed::VerifiedManualResolutionForPrefixSeal,
+        })
+    }
+}
+
+/// Verified manual resolution proof for one concrete run prefix.
+#[derive(Debug, Clone)]
+pub struct VerifiedManualResolutionForPrefix {
+    prefix: ManualResolutionPrefixAuthority,
+    outcome: events::ManualResolutionOutcome,
+    evidence: ManualResolutionEvidenceRef,
+    authorization: ManualResolutionEvidenceRef,
+    proof_bytes: Vec<u8>,
+    verified: VerifiedManualResolution,
+    _seal: sealed::VerifiedManualResolutionForPrefixSeal,
+}
+
+impl VerifiedManualResolutionForPrefix {
+    /// Returns the verified prefix authority.
+    pub const fn prefix(&self) -> &ManualResolutionPrefixAuthority {
+        &self.prefix
+    }
+
+    /// Returns the authorized outcome.
+    pub const fn outcome(&self) -> events::ManualResolutionOutcome {
+        self.outcome
+    }
+
+    /// Returns the manual evidence artifact ref.
+    pub const fn evidence(&self) -> &ManualResolutionEvidenceRef {
+        &self.evidence
+    }
+
+    /// Returns the authorization proof artifact ref.
+    pub const fn authorization(&self) -> &ManualResolutionEvidenceRef {
+        &self.authorization
+    }
+
+    /// Returns the canonical proof bytes that were verified.
+    pub fn proof_bytes(&self) -> &[u8] {
+        &self.proof_bytes
+    }
+
+    /// Returns the verified authorization claim.
+    pub const fn claim(&self) -> &ManualResolutionAuthorizationClaim {
+        self.verified.claim()
+    }
+
+    /// Returns the verified authorization proof.
+    pub const fn proof(&self) -> &ManualResolutionAuthorizationProof {
+        self.verified.proof()
+    }
+}
+
 /// Canonical manual-resolution authorization claim signed by operators.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManualResolutionAuthorizationClaim {
@@ -498,6 +695,29 @@ fn validate_policy_claim_proof(
     Ok(())
 }
 
+fn verify_authorization_artifact_bytes(
+    authorization: &ManualResolutionEvidenceRef,
+    proof_bytes: &[u8],
+) -> Result<()> {
+    let authorization_schema_id = manual_authorization_proof_schema_id()?;
+    if authorization.schema_id != authorization_schema_id {
+        return Err(ManualAuthorizationError::PolicyMismatch(
+            "authorization_schema",
+        ));
+    }
+    let content_hash = ContentDigest::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        sha256_digest_bytes(proof_bytes),
+    );
+    let artifact_id = ArtifactId::from_digest(content_hash.algorithm(), *content_hash.digest());
+    if authorization.content_hash != content_hash || authorization.artifact_id != artifact_id {
+        return Err(ManualAuthorizationError::InvalidShape(
+            "manual authorization proof bytes do not match artifact ref".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 fn canonical_json(value: serde_json::Value) -> Result<PlainCanonicalJsonBytes> {
     let json = serde_json::to_string(&value)
         .map_err(|error| ManualAuthorizationError::InvalidShape(error.to_string()))?;
@@ -683,6 +903,8 @@ fn required_u64(
 mod sealed {
     #[derive(Debug, Clone)]
     pub(super) struct VerifiedManualResolutionSeal;
+    #[derive(Debug, Clone)]
+    pub(super) struct VerifiedManualResolutionForPrefixSeal;
 }
 
 #[cfg(test)]
@@ -774,6 +996,43 @@ mod tests {
         );
     }
 
+    #[test]
+    fn proof_authority_verifies_canonical_proof_bytes_for_prefix() {
+        let policy = policy();
+        let claim = claim();
+        let manual_policy = spec::ManualResolutionEvidenceSpec {
+            evidence_schema: claim.evidence.schema_id.clone(),
+            authorization: policy.clone(),
+        };
+        let prefix = ManualResolutionPrefixAuthority::new(
+            claim.run_id.clone(),
+            claim.spec_hash.clone(),
+            claim.expected_next_seq,
+            claim.stream_prefix_digest.clone(),
+            claim.manual_block_reason,
+            claim.unresolved_obligations_digest.clone(),
+            manual_policy,
+        )
+        .expect("prefix authority");
+        let proof = signed_proof(&policy, claim.clone());
+        let proof_bytes = proof.canonical_json().expect("canonical proof").to_vec();
+        let authorization = authorization_ref(&proof_bytes);
+
+        let verified = ManualResolutionProofAuthority::new(
+            prefix,
+            claim.outcome,
+            claim.evidence.clone(),
+            authorization,
+            proof_bytes,
+        )
+        .expect("proof authority")
+        .verify()
+        .expect("verified for prefix");
+
+        assert_eq!(verified.claim(), &claim);
+        assert_eq!(verified.proof(), &proof);
+    }
+
     fn proof() -> ManualResolutionAuthorizationProof {
         let policy = policy();
         let operator = policy.authority.operators[0].clone();
@@ -805,7 +1064,7 @@ mod tests {
                     operator_id: spec::OperatorId::new("operator.manual-auth")
                         .expect("operator id"),
                     public_identity: spec::OperatorPublicIdentity::new(
-                        "operator-manual-auth-public",
+                        "0x7e5f4552091a69125d5dfcb7b8c2659029395bdf",
                     )
                     .expect("public identity"),
                 }],
@@ -851,6 +1110,59 @@ mod tests {
 
     fn run_id(byte: u8) -> RunId {
         RunId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_byte(byte))
+    }
+
+    fn signed_proof(
+        policy: &spec::ManualResolutionAuthorizationSpec,
+        claim: ManualResolutionAuthorizationClaim,
+    ) -> ManualResolutionAuthorizationProof {
+        let operator = policy.authority.operators[0].clone();
+        let claim_digest = claim.digest().expect("claim digest");
+        ManualResolutionAuthorizationProof {
+            verifier_id: policy.verifier_id.clone(),
+            signing_scheme: policy.signing_scheme.clone(),
+            claim,
+            signatures: vec![ManualResolutionAuthorizationSignature {
+                operator_id: operator.operator_id,
+                public_identity: operator.public_identity,
+                signature: ManualAuthorizationSignatureBytes::new(sign_manual_claim_digest(
+                    &test_manual_signing_key(),
+                    claim_digest.digest().as_bytes(),
+                ))
+                .expect("signature"),
+            }],
+        }
+    }
+
+    fn authorization_ref(proof_bytes: &[u8]) -> ManualResolutionEvidenceRef {
+        let content_hash = ContentDigest::from_digest(
+            DigestAlgorithm::Sha256JcsV1,
+            sha256_digest_bytes(proof_bytes),
+        );
+        ManualResolutionEvidenceRef {
+            schema_id: manual_authorization_proof_schema_id().expect("authorization schema"),
+            artifact_id: ArtifactId::from_digest(content_hash.algorithm(), *content_hash.digest()),
+            content_hash,
+        }
+    }
+
+    fn test_manual_signing_key() -> k256::ecdsa::SigningKey {
+        let mut key_bytes = [0u8; 32];
+        key_bytes[31] = 1;
+        let secret_key = k256::SecretKey::from_slice(&key_bytes).expect("test key");
+        k256::ecdsa::SigningKey::from(&secret_key)
+    }
+
+    fn sign_manual_claim_digest(
+        signing_key: &k256::ecdsa::SigningKey,
+        digest: &[u8; 32],
+    ) -> Vec<u8> {
+        let (signature, recovery_id) = signing_key
+            .sign_prehash_recoverable(digest)
+            .expect("manual signature");
+        let mut signature_bytes = signature.to_bytes().to_vec();
+        signature_bytes.push(u8::from(recovery_id.is_y_odd()));
+        signature_bytes
     }
 
     fn digest_byte(byte: u8) -> DigestBytes {

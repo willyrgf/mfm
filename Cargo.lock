@@ -2069,6 +2069,7 @@ version = "0.1.0"
 dependencies = [
  "alloy-primitives",
  "hex",
+ "k256",
  "mfm-canonical",
  "mfm-events",
  "mfm-ids",
@@ -2233,6 +2234,7 @@ dependencies = [
 name = "mfm-runtime"
 version = "0.1.0"
 dependencies = [
+ "k256",
  "mfm-canonical",
  "mfm-capabilities",
  "mfm-certify",

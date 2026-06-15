@@ -1,8 +1,10 @@
+use mfm_canonical::sha256_digest_bytes;
 use mfm_events::v1 as events;
-use mfm_ids::{ArtifactId, ContentDigest, RunId};
+use mfm_ids::{ArtifactId, ContentDigest, DigestAlgorithm, RunId};
 use mfm_manual_auth::{
-    manual_authorization_proof_schema_id, ManualResolutionAuthorizationClaim,
-    ManualResolutionBlockReason, ManualResolutionEvidenceRef, VerifiedManualResolution,
+    manual_authorization_proof_schema_id, ManualResolutionBlockReason, ManualResolutionEvidenceRef,
+    ManualResolutionPrefixAuthority, ManualResolutionProofAuthority,
+    VerifiedManualResolutionForPrefix,
 };
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
@@ -24,14 +26,13 @@ pub struct ManualResolutionEvidenceArtifact {
     pub media_type: spec::MediaType,
 }
 
-/// Builds the manual authorization claim for the current store prefix.
-pub fn build_manual_resolution_claim<S: store::TypedRunEventStore + ?Sized>(
+/// Builds manual resolution prefix authority for the current store prefix.
+pub fn build_manual_resolution_prefix_authority<S: store::TypedRunEventStore + ?Sized>(
     store: &S,
     runtime_spec: &CertifiedRuntimeSpec,
     run_id: &RunId,
-    outcome: events::ManualResolutionOutcome,
-    evidence: ManualResolutionEvidenceRef,
-) -> Result<ManualResolutionAuthorizationClaim> {
+    manual: spec::ManualResolutionEvidenceSpec,
+) -> Result<ManualResolutionPrefixAuthority> {
     let stream = store.load_run_stream(run_id);
     let expected_next_seq = store.expected_next_seq(run_id);
     let saga = store
@@ -48,15 +49,43 @@ pub fn build_manual_resolution_claim<S: store::TypedRunEventStore + ?Sized>(
             saga.run_mode.as_str()
         )));
     }
-    Ok(ManualResolutionAuthorizationClaim {
-        run_id: run_id.clone(),
-        spec_hash: runtime_spec.spec_hash().clone(),
-        expected_next_seq: expected_next_seq.as_u64(),
-        stream_prefix_digest: manual_resolution_stream_prefix_digest(&stream)?,
-        manual_block_reason: manual_resolution_block_reason(reason),
-        unresolved_obligations_digest: unresolved_manual_obligations_digest(&saga)?,
+    ManualResolutionPrefixAuthority::new(
+        run_id.clone(),
+        runtime_spec.spec_hash().clone(),
+        expected_next_seq.as_u64(),
+        manual_resolution_stream_prefix_digest(&stream)?,
+        manual_resolution_block_reason(reason),
+        unresolved_manual_obligations_digest(&saga)?,
+        manual,
+    )
+    .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))
+}
+
+pub(crate) fn verify_manual_resolution_for_prefix(
+    prefix: ManualResolutionPrefixAuthority,
+    outcome: events::ManualResolutionOutcome,
+    evidence_artifact: &ManualResolutionEvidenceArtifact,
+    authorization_proof_bytes: Vec<u8>,
+) -> Result<VerifiedManualResolutionForPrefix> {
+    let evidence = manual_resolution_evidence_ref(prefix.manual_policy(), &evidence_artifact.bytes);
+    let authorization =
+        manual_resolution_authorization_ref(&authorization_proof_bytes).map_err(|error| {
+            RuntimeError::InvalidRunStream(format!(
+                "manual authorization proof schema failed: {error}"
+            ))
+        })?;
+    ManualResolutionProofAuthority::new(
+        prefix,
         outcome,
         evidence,
+        authorization,
+        authorization_proof_bytes,
+    )
+    .and_then(ManualResolutionProofAuthority::verify)
+    .map_err(|error| {
+        RuntimeError::InvalidRunStream(format!(
+            "manual authorization proof failed verification: {error}"
+        ))
     })
 }
 
@@ -65,7 +94,7 @@ pub(crate) fn prepare_manual_resolution_commit(
     stream: &[store::KernelEventEnvelope],
     saga: &store::SagaProjection,
     expected_next_seq: store::StreamSeq,
-    verified: VerifiedManualResolution,
+    verified: VerifiedManualResolutionForPrefix,
     evidence_artifact: ManualResolutionEvidenceArtifact,
     note: Option<events::ManualResolutionNote>,
 ) -> Result<(
@@ -73,6 +102,7 @@ pub(crate) fn prepare_manual_resolution_commit(
     Vec<PreparedStagedArtifact>,
 )> {
     let claim = verified.claim();
+    let prefix = verified.prefix();
     if saga.run_mode != store::RunMode::ManualBlocked {
         return Err(RuntimeError::InvalidRunStream(format!(
             "manual resolution requires ManualBlocked prefix, found {}",
@@ -112,6 +142,11 @@ pub(crate) fn prepare_manual_resolution_commit(
             "manual authorization claim obligations digest does not match prefix".to_owned(),
         ));
     }
+    if prefix.manual_policy() != certified_manual_resolution_spec(&runtime_spec.spec().saga)? {
+        return Err(RuntimeError::InvalidRunStream(
+            "manual authorization prefix policy does not match runtime spec".to_owned(),
+        ));
+    }
 
     let evidence_ref = store::ArtifactEvidenceRef {
         artifact_id: claim.evidence.artifact_id.clone(),
@@ -126,19 +161,14 @@ pub(crate) fn prepare_manual_resolution_commit(
     };
     verify_artifact_bytes(&evidence_artifact.bytes, &evidence_ref)?;
 
-    let proof_bytes = verified.proof().canonical_json().map_err(|error| {
-        RuntimeError::InvalidRunStream(format!("manual authorization proof is invalid: {error}"))
-    })?;
-    let authorization_hash = proof_bytes.content_digest();
-    let authorization_artifact_id =
-        ArtifactId::from_digest(authorization_hash.algorithm(), *authorization_hash.digest());
-    let authorization_schema_id = manual_authorization_proof_schema_id().map_err(|error| {
-        RuntimeError::InvalidRunStream(format!("manual authorization proof schema failed: {error}"))
-    })?;
+    let authorization = verified.authorization();
+    let authorization_hash = authorization.content_hash.clone();
+    let authorization_artifact_id = authorization.artifact_id.clone();
+    let authorization_schema_id = authorization.schema_id.clone();
     let authorization_ref = store::ArtifactEvidenceRef {
         artifact_id: authorization_artifact_id.clone(),
         digest: authorization_hash.clone(),
-        byte_len: proof_bytes.as_bytes().len() as u64,
+        byte_len: verified.proof_bytes().len() as u64,
         media_type: spec::MediaType::new("application/json")?,
         schema_id: Some(authorization_schema_id.clone()),
         semantic_type_id: None,
@@ -146,7 +176,7 @@ pub(crate) fn prepare_manual_resolution_commit(
         producer_seed_id: None,
         artifact_role: events::ArtifactRole::ManualResolutionAuthorization,
     };
-    verify_artifact_bytes(proof_bytes.as_bytes(), &authorization_ref)?;
+    verify_artifact_bytes(verified.proof_bytes(), &authorization_ref)?;
 
     let request = store::TypedCommitRequest {
         run_id: claim.run_id.clone(),
@@ -196,7 +226,7 @@ pub(crate) fn prepare_manual_resolution_commit(
                 evidence: evidence_ref,
             },
             PreparedStagedArtifact {
-                bytes: proof_bytes.to_vec(),
+                bytes: verified.proof_bytes().to_vec(),
                 evidence: authorization_ref,
             },
         ],
@@ -259,6 +289,49 @@ pub const fn manual_resolution_block_reason(
         store::ManualBlockReason::RemediationAmbiguous => {
             ManualResolutionBlockReason::RemediationAmbiguous
         }
+    }
+}
+
+fn manual_resolution_evidence_ref(
+    manual: &spec::ManualResolutionEvidenceSpec,
+    evidence_bytes: &[u8],
+) -> ManualResolutionEvidenceRef {
+    let content_hash = ContentDigest::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        sha256_digest_bytes(evidence_bytes),
+    );
+    ManualResolutionEvidenceRef {
+        schema_id: manual.evidence_schema.clone(),
+        artifact_id: ArtifactId::from_digest(content_hash.algorithm(), *content_hash.digest()),
+        content_hash,
+    }
+}
+
+fn manual_resolution_authorization_ref(
+    proof_bytes: &[u8],
+) -> mfm_manual_auth::Result<ManualResolutionEvidenceRef> {
+    let content_hash = ContentDigest::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        sha256_digest_bytes(proof_bytes),
+    );
+    Ok(ManualResolutionEvidenceRef {
+        schema_id: manual_authorization_proof_schema_id()?,
+        artifact_id: ArtifactId::from_digest(content_hash.algorithm(), *content_hash.digest()),
+        content_hash,
+    })
+}
+
+fn certified_manual_resolution_spec(
+    saga: &spec::SagaPolicySpec,
+) -> Result<&spec::ManualResolutionEvidenceSpec> {
+    match saga {
+        spec::SagaPolicySpec::ManualResolution { manual } => Ok(manual),
+        spec::SagaPolicySpec::CompensateCompleted {
+            on_remediation_unresolved: spec::RemediationUnresolvedSpec::ManualResolution { manual },
+        } => Ok(manual.as_ref()),
+        _ => Err(RuntimeError::InvalidRunStream(
+            "manual resolution was recorded without certified manual policy".to_owned(),
+        )),
     }
 }
 
