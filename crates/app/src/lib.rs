@@ -458,7 +458,7 @@ impl fmt::Display for TypedRunMode {
 /// Public saga status derived from certified policy and stream evidence.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TypedSagaStatus {
-    /// Certified saga policy variant and manual schema requirements.
+    /// Certified saga policy variant and manual authorization requirements.
     pub policy: TypedSagaPolicyStatus,
     /// Derived per-forward-ledger obligations.
     pub obligations: Vec<TypedSagaObligationStatus>,
@@ -468,8 +468,8 @@ pub struct TypedSagaStatus {
     pub resource_lanes: Vec<TypedResourceLaneHolderStatus>,
     /// Manual-block reason when the derived run mode is `manual_blocked`.
     pub manual_block_reason: Option<String>,
-    /// Required manual evidence schemas when manual evidence can resolve the current block.
-    pub required_manual_evidence: Option<TypedManualEvidenceSchemas>,
+    /// Required manual authorization when an authorized decision can resolve the current block.
+    pub required_manual_authorization: Option<TypedManualAuthorizationRequirements>,
     /// Terminal completion evidence, when the run has resolved.
     pub terminal_resolution: Option<TypedTerminalResolutionStatus>,
 }
@@ -479,15 +479,15 @@ pub struct TypedSagaStatus {
 pub struct TypedSagaPolicyStatus {
     /// Certified policy variant.
     pub variant: String,
-    /// Manual evidence schemas required directly by the policy, when present.
-    pub manual_evidence: Option<TypedManualEvidenceSchemas>,
+    /// Manual authorization requirements certified directly by the policy, when present.
+    pub manual_authorization: Option<TypedManualAuthorizationRequirements>,
     /// Unresolved-remediation directive under compensating policy.
     pub on_remediation_unresolved: Option<String>,
 }
 
-/// Public manual evidence schema requirements.
+/// Public manual authorization requirements.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TypedManualEvidenceSchemas {
+pub struct TypedManualAuthorizationRequirements {
     /// Schema id for the operator evidence artifact.
     pub evidence_schema_id: String,
     /// Manual authorization verifier id.
@@ -2465,8 +2465,8 @@ fn typed_saga_status_inner(
         },
         resource_lanes: projection.map(typed_resource_lanes).unwrap_or_default(),
         manual_block_reason: saga.manual_block_reason.map(manual_block_reason_str),
-        required_manual_evidence: matches!(saga.run_mode, store::RunMode::ManualBlocked)
-            .then(|| manual_evidence_for_policy(policy))
+        required_manual_authorization: matches!(saga.run_mode, store::RunMode::ManualBlocked)
+            .then(|| manual_authorization_for_policy(policy))
             .flatten(),
         terminal_resolution: saga
             .run_completion
@@ -2479,26 +2479,26 @@ fn typed_saga_policy_status(policy: &spec::SagaPolicySpec) -> TypedSagaPolicySta
     match policy {
         spec::SagaPolicySpec::NoSideEffects => TypedSagaPolicyStatus {
             variant: "no_side_effects".to_owned(),
-            manual_evidence: None,
+            manual_authorization: None,
             on_remediation_unresolved: None,
         },
         spec::SagaPolicySpec::FailWithoutAcdcClaim => TypedSagaPolicyStatus {
             variant: "fail_without_acdc_claim".to_owned(),
-            manual_evidence: None,
+            manual_authorization: None,
             on_remediation_unresolved: None,
         },
         spec::SagaPolicySpec::ManualResolution { manual } => TypedSagaPolicyStatus {
             variant: "manual_resolution".to_owned(),
-            manual_evidence: Some(typed_manual_evidence_schemas(manual)),
+            manual_authorization: Some(typed_manual_authorization_requirements(manual)),
             on_remediation_unresolved: None,
         },
         spec::SagaPolicySpec::CompensateCompleted {
             on_remediation_unresolved,
         } => {
-            let (directive, manual_evidence) = match on_remediation_unresolved {
+            let (directive, manual_authorization) = match on_remediation_unresolved {
                 spec::RemediationUnresolvedSpec::ManualResolution { manual } => (
                     "manual_resolution",
-                    Some(typed_manual_evidence_schemas(manual)),
+                    Some(typed_manual_authorization_requirements(manual)),
                 ),
                 spec::RemediationUnresolvedSpec::FailWithoutAcdcClaim => {
                     ("fail_without_acdc_claim", None)
@@ -2506,21 +2506,23 @@ fn typed_saga_policy_status(policy: &spec::SagaPolicySpec) -> TypedSagaPolicySta
             };
             TypedSagaPolicyStatus {
                 variant: "compensate_completed".to_owned(),
-                manual_evidence,
+                manual_authorization,
                 on_remediation_unresolved: Some(directive.to_owned()),
             }
         }
     }
 }
 
-fn manual_evidence_for_policy(policy: &spec::SagaPolicySpec) -> Option<TypedManualEvidenceSchemas> {
+fn manual_authorization_for_policy(
+    policy: &spec::SagaPolicySpec,
+) -> Option<TypedManualAuthorizationRequirements> {
     match policy {
         spec::SagaPolicySpec::ManualResolution { manual } => {
-            Some(typed_manual_evidence_schemas(manual))
+            Some(typed_manual_authorization_requirements(manual))
         }
         spec::SagaPolicySpec::CompensateCompleted {
             on_remediation_unresolved: spec::RemediationUnresolvedSpec::ManualResolution { manual },
-        } => Some(typed_manual_evidence_schemas(manual)),
+        } => Some(typed_manual_authorization_requirements(manual)),
         spec::SagaPolicySpec::NoSideEffects
         | spec::SagaPolicySpec::FailWithoutAcdcClaim
         | spec::SagaPolicySpec::CompensateCompleted {
@@ -2529,10 +2531,10 @@ fn manual_evidence_for_policy(policy: &spec::SagaPolicySpec) -> Option<TypedManu
     }
 }
 
-fn typed_manual_evidence_schemas(
+fn typed_manual_authorization_requirements(
     manual: &spec::ManualResolutionEvidenceSpec,
-) -> TypedManualEvidenceSchemas {
-    TypedManualEvidenceSchemas {
+) -> TypedManualAuthorizationRequirements {
+    TypedManualAuthorizationRequirements {
         evidence_schema_id: manual.evidence_schema.as_str().to_owned(),
         verifier_id: manual.authorization.verifier_id.as_str().to_owned(),
         signing_scheme: manual.authorization.signing_scheme.as_str().to_owned(),
@@ -2868,7 +2870,7 @@ mod tests {
     }
 
     #[test]
-    fn semantic_status_exposes_run_modes_manual_schema_and_obligations() {
+    fn semantic_status_exposes_run_modes_manual_authorization_and_obligations() {
         assert_eq!(
             typed_run_mode(store::RunMode::Forward),
             TypedRunMode::Forward
@@ -2930,17 +2932,48 @@ mod tests {
         );
         assert_eq!(
             manual_status
-                .required_manual_evidence
+                .required_manual_authorization
                 .as_ref()
-                .expect("manual evidence")
+                .expect("manual authorization")
                 .evidence_schema_id,
             manual.evidence_schema.as_str()
         );
+        let manual_authorization = manual_status
+            .required_manual_authorization
+            .as_ref()
+            .expect("manual authorization");
+        assert_eq!(
+            manual_authorization.verifier_id,
+            manual.authorization.verifier_id.as_str()
+        );
+        assert_eq!(
+            manual_authorization.signing_scheme,
+            manual.authorization.signing_scheme.as_str()
+        );
+        assert_eq!(
+            manual_authorization.authority_id,
+            manual.authorization.authority.authority_id.as_str()
+        );
+        assert_eq!(
+            manual_authorization.operator_public_identities,
+            manual
+                .authorization
+                .authority
+                .operators
+                .iter()
+                .map(|operator| operator.public_identity.as_str().to_owned())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            manual_authorization.quorum_required_signatures,
+            manual.authorization.quorum.required_signatures()
+        );
         assert_eq!(
             manual_status
-                .required_manual_evidence
+                .policy
+                .manual_authorization
                 .as_ref()
-                .expect("manual evidence")
+                .expect("manual policy authorization")
                 .authority_id,
             manual.authorization.authority.authority_id.as_str()
         );

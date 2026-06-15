@@ -23,6 +23,11 @@ Resume and replay reload stored spec/certificate artifacts, verify them against 
 registry, compare them to `RunStarted`, and rebuild stream evidence before constructing runtime or
 replay authority.
 
+Run status exposes manual-resolution requirements from certified policy only: evidence schema,
+manual authorization verifier, signing scheme, certified operator authority id, allowed operator
+public identities, and quorum. It does not expose signer runtime sources such as keystore paths,
+environment variables, passwords, or provider configuration.
+
 Public-output JSON is an output/cache surface. `mfm-app` renders it only through
 `PublicOutputReadAuthority`, which is minted after stored certified spec/certificate artifacts are
 verified and the public-output projection is rebuilt from the authoritative typed run stream.
