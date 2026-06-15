@@ -401,7 +401,14 @@ pub enum RemediationUnresolvedSpec {
 
 pub struct ManualResolutionEvidenceSpec {
     pub evidence_schema: SchemaId,
-    pub operator_identity_ref_schema: SchemaId,
+    pub authorization: ManualResolutionAuthorizationSpec,
+}
+
+pub struct ManualResolutionAuthorizationSpec {
+    pub verifier_id: ManualAuthorizationVerifierId,
+    pub signing_scheme: ManualSigningSchemeSpec,
+    pub authority: OperatorAuthoritySnapshotSpec,
+    pub quorum: ManualAuthorizationQuorumSpec,
 }
 ```
 
@@ -411,6 +418,9 @@ Notes:
   set is derived: it is exactly the owed/unresolvable forward ledgers under the eligibility table.
 - Manual specs are inlined where used. There is no manual-resolution ID namespace and nothing to
   dangle.
+- Manual specs require both a typed evidence schema and certified authorization policy. The old
+  `operator_identity_ref_schema` field is invalid; manual resolution no longer trusts an operator
+  identity artifact by itself.
 - `NoSideEffects` is produced by lowering, not authored. Certification rejects a spec whose policy
   variant disagrees with the presence of forward side-effect nodes, in both directions.
 - All spec types are closed: no extension fields, deserialization denies unknown fields. Encoding
@@ -441,11 +451,25 @@ pub enum ManualResolutionOutcome {
 }
 ```
 
-`ManualResolutionRecorded` carries the selected outcome, a typed operator identity reference
-matching `operator_identity_ref_schema`, a typed evidence artifact matching `evidence_schema`, and
-an optional redaction-safe note. The outcome enum is framework-closed: an operator cannot invent a
-terminal meaning, and there is no spec-authored outcome catalog to certify. Manual resolution is
-run-scoped in v1: one admitted record resolves the blocked run.
+`ManualResolutionRecorded` carries the selected outcome, a typed evidence artifact matching
+`evidence_schema`, a signed authorization proof artifact matching the certified authorization
+policy, and an optional redaction-safe note. The signed proof contains a canonical claim that binds
+the run id, spec hash, expected next sequence, prefix digest, manual block reason, unresolved
+obligations digest, outcome, and evidence artifact schema/hash/id. The outcome enum is
+framework-closed: an operator cannot invent a terminal meaning, and there is no spec-authored
+outcome catalog to certify. Manual resolution is run-scoped in v1: one admitted authorized record
+resolves the blocked run.
+
+Certification uses the live `CertificationRegistry` as the only authority for schema roles,
+manual authorization verifier identities, and operator authority snapshots. The resulting
+certificate and spec carry the replay authority: schema role grants, verifier evidence, authority
+snapshot evidence, and registry digest. Replay never calls a live signer, live verifier registry,
+or certification registry to decide whether a manual record is authorized; it verifies from the
+certified spec/certificate, run stream, retained artifacts, and proof bytes only.
+
+`ManuallyResolved` means "an authorized manual decision was recorded." It is not an independent
+platform proof that the external domain truth matches the operator's decision. Domain truth
+requires a separate certified verifier contract and evidence.
 
 The reason a run is `ManualBlocked` is derivable (ambiguous forward ledger, failed remediation,
 ambiguous remediation, or policy `ManualResolution`) and is exposed as a projection field, not
@@ -634,7 +658,7 @@ store as ordinary preconditions, re-verified by replay:
 
 - the certified policy is compensating before any remediation ledger opens;
 - the derived run mode is `ManualBlocked`, and the manual payload matches the certified evidence
-  and operator-identity schemas, before `ManualResolutionRecorded` is admitted;
+  schema plus authorization proof schema, before `ManualResolutionRecorded` is admitted;
 - sealed lifecycle evidence exists and the claimed terminal outcome agrees with the derived
   projection before `RunCompleted` is admitted.
 
@@ -662,8 +686,8 @@ V1 replay work:
   facts over the full stream, and verify the recorded terminal outcome agrees:
   - `Compensated` requires a non-empty owed set, every owed obligation closed by remedial
     confirmation, an empty unresolvable set, and quiescence at the terminal;
-  - `ManuallyResolved` requires admitted, schema-valid operator evidence with outcome
-    `ConfirmRemediated`;
+  - `ManuallyResolved` requires admitted, schema-valid manual evidence and a signature-valid
+    authorization proof with outcome `ConfirmRemediated`;
   - `FailedWithoutAcdcClaim` requires one of its four justifications (policy, unresolved
     directive, clean failure or empty quiescent sets, manual outcome);
 - verify the fence held: no forward boundary crossing follows the first engaging event;

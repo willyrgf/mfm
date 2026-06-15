@@ -367,16 +367,24 @@ pub struct ManualResolutionEvidenceSpec {
     pub target: ManualResolutionTargetSpec,
     pub reason_code: ManualResolutionReason,
     pub allowed_outcomes: Vec<ManualResolutionOutcomeSpec>,
-    pub operator_identity_ref_schema: SchemaId,
     pub evidence_schema: SchemaId,
+    pub authorization: ManualResolutionAuthorizationSpec,
     pub redaction_policy: RedactionPolicySpec,
 }
 ```
 
-The corresponding event should record the selected outcome, operator identity reference, evidence
-artifact reference, and optional redaction-safe note. It should not allow an operator to invent an
-uncertified terminal meaning. Certification decides which manual outcomes are legal for the run or
-obligation; the operator supplies typed evidence for one of those outcomes.
+The corresponding event should record the selected outcome, evidence artifact reference, signed
+authorization proof artifact reference, and optional redaction-safe note. It should not allow an
+operator to invent an uncertified terminal meaning. Certification decides which manual outcomes are
+legal for the run or obligation, which evidence schema is accepted, which verifier is trusted, and
+which operator authority snapshot is bound. The operator supplies typed evidence and a signed
+authorization proof for one of those outcomes.
+
+Registry-backed authority is used only at certification time. The certified spec and certificate
+carry the replay authority: schema role grants, verifier identity, authority snapshot evidence, and
+registry digest. Replay verifies manual resolution from the certified spec/certificate, stream, and
+retained artifacts only; it must not call live signer or registry sources. `ManuallyResolved` means
+an authorized manual decision was recorded, not that MFM independently proved external domain truth.
 
 ## Store And Event Shape
 
