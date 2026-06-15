@@ -38,6 +38,7 @@ use mfm_evm_signing::{
 use mfm_signing::{
     PublicSigningIdentity, RuntimeSecretSource, SignatureBytes, SignerRef, SigningError,
     SigningFuture, SigningProvider, SigningRequest, SigningResult,
+    MANUAL_RESOLUTION_SIGNING_DOMAIN_ID, MANUAL_RESOLUTION_SIGNING_PURPOSE_ID,
 };
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -248,13 +249,23 @@ impl KeystoreSignerProvider {
         if request.algorithm().as_str() != EVM_SIGNING_ALGORITHM_ID {
             return Err(KeystoreSignerError::UnsupportedAlgorithm);
         }
-        if request.domain().as_str() != EVM_TRANSACTION_DOMAIN_ID {
+        if !matches!(
+            request.domain().as_str(),
+            EVM_TRANSACTION_DOMAIN_ID | MANUAL_RESOLUTION_SIGNING_DOMAIN_ID
+        ) {
             return Err(KeystoreSignerError::UnsupportedDomain);
         }
-        if !matches!(
-            request.purpose().as_str(),
-            EVM_LEGACY_TRANSACTION_PURPOSE_ID | EVM_EIP1559_TRANSACTION_PURPOSE_ID
-        ) {
+        let supported_purpose = match request.domain().as_str() {
+            EVM_TRANSACTION_DOMAIN_ID => matches!(
+                request.purpose().as_str(),
+                EVM_LEGACY_TRANSACTION_PURPOSE_ID | EVM_EIP1559_TRANSACTION_PURPOSE_ID
+            ),
+            MANUAL_RESOLUTION_SIGNING_DOMAIN_ID => {
+                request.purpose().as_str() == MANUAL_RESOLUTION_SIGNING_PURPOSE_ID
+            }
+            _ => false,
+        };
+        if !supported_purpose {
             return Err(KeystoreSignerError::UnsupportedPurpose);
         }
         if request.expected_identity().is_none() {
@@ -496,7 +507,10 @@ mod tests {
         evm_signing_algorithm_id, evm_transaction_domain_id, legacy_transaction_purpose_id,
         primitive_signature_from_bytes, recover_signing_address,
     };
-    use mfm_signing::{ExpectedSignerIdentity, SigningDomainId, SigningPurposeId, SigningRequest};
+    use mfm_signing::{
+        manual_resolution_signing_domain_id, manual_resolution_signing_purpose_id,
+        ExpectedSignerIdentity, SigningDomainId, SigningPurposeId, SigningRequest,
+    };
     use tempfile::TempDir;
 
     const TEST_KEY: &str = "0x0000000000000000000000000000000000000000000000000000000000000001";
@@ -600,6 +614,27 @@ mod tests {
             result.public_identity().account_id(),
             Some(account_id.as_str())
         );
+        assert_eq!(result.signature().as_bytes().len(), 65);
+        let signature = primitive_signature_from_bytes(result.signature()).expect("signature");
+        let recovered =
+            recover_signing_address(B256::from(*request.digest().as_bytes()), signature)
+                .expect("recover");
+        assert_eq!(recovered, keystore.address);
+    }
+
+    #[test]
+    fn provider_signs_manual_resolution_digest_with_expected_identity() {
+        let keystore = test_keystore();
+        let provider = provider(registry_entry(&keystore));
+        let request = signing_request_with(
+            keystore.address,
+            manual_resolution_signing_domain_id().expect("domain"),
+            manual_resolution_signing_purpose_id().expect("purpose"),
+            true,
+        );
+
+        let result = provider.sign_request(&request).expect("sign");
+
         assert_eq!(result.signature().as_bytes().len(), 65);
         let signature = primitive_signature_from_bytes(result.signature()).expect("signature");
         let recovered =

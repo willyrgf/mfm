@@ -26,6 +26,11 @@ const MAX_RUNTIME_NAME_LEN: usize = 256;
 const MAX_PUBLIC_KEY_LEN: usize = 4096;
 const MAX_SIGNATURE_LEN: usize = 4096;
 
+/// Manual-resolution signing domain id.
+pub const MANUAL_RESOLUTION_SIGNING_DOMAIN_ID: &str = "mfm.manual_resolution";
+/// Manual-resolution authorization signing purpose id.
+pub const MANUAL_RESOLUTION_SIGNING_PURPOSE_ID: &str = "mfm.manual_resolution.authorization.v1";
+
 /// Stable capability descriptor for signer providers.
 pub struct SigningCapability;
 
@@ -240,6 +245,31 @@ impl From<SigningPurposeId> for String {
     fn from(value: SigningPurposeId) -> Self {
         value.0
     }
+}
+
+/// Returns the manual-resolution signing domain id.
+pub fn manual_resolution_signing_domain_id() -> Result<SigningDomainId> {
+    SigningDomainId::new(MANUAL_RESOLUTION_SIGNING_DOMAIN_ID)
+}
+
+/// Returns the manual-resolution authorization signing purpose id.
+pub fn manual_resolution_signing_purpose_id() -> Result<SigningPurposeId> {
+    SigningPurposeId::new(MANUAL_RESOLUTION_SIGNING_PURPOSE_ID)
+}
+
+/// Builds a manual-resolution signing request over an already canonical claim digest.
+pub fn manual_resolution_signing_request(
+    signer_ref: SignerRef,
+    algorithm: SigningAlgorithmId,
+    digest: DigestBytes,
+) -> Result<SigningRequest> {
+    Ok(SigningRequest::from_digest(
+        signer_ref,
+        algorithm,
+        manual_resolution_signing_domain_id()?,
+        manual_resolution_signing_purpose_id()?,
+        digest,
+    ))
 }
 
 /// Runtime signer provider identifier.
@@ -866,6 +896,22 @@ mod tests {
 
     fn request() -> SigningRequest {
         SigningRequest::from_digest(signer_ref(), algorithm(), domain(), purpose(), digest())
+    }
+
+    #[test]
+    fn manual_resolution_signing_request_is_digest_only_and_domain_separated() {
+        let request = manual_resolution_signing_request(signer_ref(), algorithm(), digest())
+            .expect("manual request");
+
+        assert_eq!(
+            request.domain().as_str(),
+            MANUAL_RESOLUTION_SIGNING_DOMAIN_ID
+        );
+        assert_eq!(
+            request.purpose().as_str(),
+            MANUAL_RESOLUTION_SIGNING_PURPOSE_ID
+        );
+        assert_eq!(request.digest(), &digest());
     }
 
     #[test]
