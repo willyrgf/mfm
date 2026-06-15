@@ -664,31 +664,87 @@ fn validate_side_effect_resource_claim(
             node.node_id
         )));
     };
-    let events::KernelEventPayload::SideEffectInvocationPrepared(payload) = payload else {
-        return Ok(());
-    };
-    match &side_effect.resource_claim {
-        spec::ResourceClaimSpec::Exclusive {
+    match payload {
+        events::KernelEventPayload::SideEffectInvocationPrepared(payload) => {
+            match &side_effect.resource_claim {
+                spec::ResourceClaimSpec::Exclusive {
+                    namespace,
+                    key_schema,
+                } => {
+                    let Some(resource_key) = &payload.resource_key else {
+                        return Err(RuntimeError::InvalidRunnerOutput(format!(
+                            "exclusive side-effect node {} prepared invocation without resource key evidence",
+                            node.node_id
+                        )));
+                    };
+                    if &resource_key.namespace != namespace
+                        || &resource_key.key_schema_id != key_schema
+                    {
+                        return Err(RuntimeError::InvalidRunnerOutput(format!(
+                            "exclusive side-effect node {} prepared invocation with resource key evidence outside certified schema",
+                            node.node_id
+                        )));
+                    }
+                }
+                spec::ResourceClaimSpec::ExactTouchedSet { .. }
+                | spec::ResourceClaimSpec::ManualOnly => {
+                    if payload.resource_key.is_some() {
+                        return Err(RuntimeError::InvalidRunnerOutput(format!(
+                            "side-effect node {} recorded exclusive resource key without an exclusive certified resource claim",
+                            node.node_id
+                        )));
+                    }
+                }
+            }
+        }
+        events::KernelEventPayload::SideEffectReceiptObserved(payload) => {
+            validate_side_effect_resource_touched_set(
+                node,
+                &side_effect.resource_claim,
+                payload.resource_touched_set.as_ref(),
+            )?;
+        }
+        events::KernelEventPayload::SideEffectConfirmationObserved(payload) => {
+            validate_side_effect_resource_touched_set(
+                node,
+                &side_effect.resource_claim,
+                payload.resource_touched_set.as_ref(),
+            )?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn validate_side_effect_resource_touched_set(
+    node: &spec::NodeSpec,
+    resource_claim: &spec::ResourceClaimSpec,
+    touched_set: Option<&events::ResourceTouchedSetEvidence>,
+) -> Result<()> {
+    match resource_claim {
+        spec::ResourceClaimSpec::ExactTouchedSet {
             namespace,
-            key_schema,
+            evidence_schema,
         } => {
-            let Some(resource_key) = &payload.resource_key else {
+            let Some(touched_set) = touched_set else {
                 return Err(RuntimeError::InvalidRunnerOutput(format!(
-                    "exclusive side-effect node {} prepared invocation without resource key evidence",
+                    "exact-touched-set side-effect node {} observed terminal evidence without touched-set evidence",
                     node.node_id
                 )));
             };
-            if &resource_key.namespace != namespace || &resource_key.key_schema_id != key_schema {
+            if &touched_set.namespace != namespace
+                || &touched_set.evidence_schema_id != evidence_schema
+            {
                 return Err(RuntimeError::InvalidRunnerOutput(format!(
-                    "exclusive side-effect node {} prepared invocation with resource key evidence outside certified schema",
+                    "side-effect node {} recorded touched-set evidence outside certified schema",
                     node.node_id
                 )));
             }
         }
-        spec::ResourceClaimSpec::ExactTouchedSet { .. } | spec::ResourceClaimSpec::ManualOnly => {
-            if payload.resource_key.is_some() {
+        spec::ResourceClaimSpec::Exclusive { .. } | spec::ResourceClaimSpec::ManualOnly => {
+            if touched_set.is_some() {
                 return Err(RuntimeError::InvalidRunnerOutput(format!(
-                    "side-effect node {} recorded exclusive resource key without an exclusive certified resource claim",
+                    "side-effect node {} recorded touched-set evidence without an exact-touched-set certified resource claim",
                     node.node_id
                 )));
             }

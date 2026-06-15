@@ -8,7 +8,7 @@ use mfm_capabilities::{
     CapabilityDescriptor, CapabilityRole, CapabilitySetDescriptor, EffectSpec, ManagedPlatformWrite,
 };
 use mfm_ids::{
-    DigestBytes, EffectKind, EffectVersion, EventId, LoweringVersion, ScopeId, SeedId,
+    DigestBytes, EffectKind, EffectVersion, EventId, LoweringVersion, SchemaId, ScopeId, SeedId,
     SemanticTypeId, SpecVersion, StateKind, StateVersion,
 };
 use mfm_manual_auth::{
@@ -4584,6 +4584,108 @@ async fn side_effect_scheduler_commits_durable_ledger_phases_before_output() {
 }
 
 #[tokio::test]
+async fn runtime_rejects_exact_touched_set_receipt_without_evidence() {
+    let fixture = fixture_with_first_exact_touched_set_side_effect_state();
+    let scheduler = test_scheduler(registered_side_effect_fixture_runners(&fixture));
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+
+    for _ in 0..3 {
+        assert_eq!(
+            scheduler
+                .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+                .await
+                .expect("advance before receipt"),
+            SchedulerStatus::Advanced
+        );
+    }
+    assert!(matches!(
+        scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await,
+        Err(RuntimeError::InvalidRunnerOutput(message))
+            if message.contains("without touched-set evidence")
+    ));
+}
+
+#[tokio::test]
+async fn runtime_rejects_exact_touched_set_confirmation_without_evidence() {
+    let fixture = fixture_with_first_exact_touched_set_side_effect_state();
+    let scheduler = test_scheduler(registered_first_side_effect_runners_with(
+        &fixture,
+        TouchedSetSideEffectRunner::with_receipt(&fixture),
+    ));
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+
+    for _ in 0..4 {
+        assert_eq!(
+            scheduler
+                .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+                .await
+                .expect("advance through receipt"),
+            SchedulerStatus::Advanced
+        );
+    }
+    assert!(matches!(
+        scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await,
+        Err(RuntimeError::InvalidRunnerOutput(message))
+            if message.contains("without touched-set evidence")
+    ));
+}
+
+#[tokio::test]
+async fn runtime_rejects_touched_set_confirmation_without_exact_claim() {
+    let fixture = fixture_with_first_side_effect_state();
+    let scheduler = test_scheduler(registered_first_side_effect_runners_with(
+        &fixture,
+        TouchedSetSideEffectRunner::with_confirmation(&fixture),
+    ));
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+
+    for _ in 0..4 {
+        assert_eq!(
+            scheduler
+                .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+                .await
+                .expect("advance through receipt"),
+            SchedulerStatus::Advanced
+        );
+    }
+    assert!(matches!(
+        scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await,
+        Err(RuntimeError::InvalidRunnerOutput(message))
+            if message.contains("without an exact-touched-set certified resource claim")
+    ));
+}
+
+#[tokio::test]
 async fn runtime_remediates_confirmed_forward_ledgers_in_reverse_confirmation_order() {
     let fixture = fixture_with_two_side_effects_and_failing_tail();
     let forward_a = node_by_output(&fixture, &fixture.cell_a).clone();
@@ -6603,6 +6705,83 @@ impl ErasedNodeRunner for AmbiguousSideEffectRunner {
     }
 }
 
+struct TouchedSetSideEffectRunner {
+    inner: DeterministicSideEffectRunner,
+    receipt: TouchedSetEmission,
+    confirmation: TouchedSetEmission,
+}
+
+#[derive(Clone, Copy)]
+enum TouchedSetEmission {
+    None,
+    MatchPayloadSchema,
+}
+
+impl TouchedSetSideEffectRunner {
+    fn with_receipt(fixture: &Fixture) -> Self {
+        Self {
+            inner: DeterministicSideEffectRunner::new(fixture),
+            receipt: TouchedSetEmission::MatchPayloadSchema,
+            confirmation: TouchedSetEmission::None,
+        }
+    }
+
+    fn with_confirmation(fixture: &Fixture) -> Self {
+        Self {
+            inner: DeterministicSideEffectRunner::new(fixture),
+            receipt: TouchedSetEmission::None,
+            confirmation: TouchedSetEmission::MatchPayloadSchema,
+        }
+    }
+}
+
+impl ErasedNodeRunner for TouchedSetSideEffectRunner {
+    fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
+        Box::pin(async move {
+            let mut output = self.inner.run_erased(ctx).await?;
+            for payload in &mut output.payloads {
+                match payload {
+                    RunnerEventPayload::SideEffectReceiptObserved(payload) => {
+                        payload.resource_touched_set = touched_set_for_emission(
+                            self.receipt,
+                            &payload.receipt_schema_id,
+                            &payload.receipt_hash,
+                            &payload.receipt_artifact_id,
+                        );
+                    }
+                    RunnerEventPayload::SideEffectConfirmationObserved(payload) => {
+                        payload.resource_touched_set = touched_set_for_emission(
+                            self.confirmation,
+                            &payload.confirmation_schema_id,
+                            &payload.confirmation_hash,
+                            &payload.confirmation_artifact_id,
+                        );
+                    }
+                    _ => {}
+                }
+            }
+            Ok(output)
+        })
+    }
+}
+
+fn touched_set_for_emission(
+    emission: TouchedSetEmission,
+    evidence_schema_id: &SchemaId,
+    evidence_hash: &ContentDigest,
+    evidence_artifact_id: &ArtifactId,
+) -> Option<events::ResourceTouchedSetEvidence> {
+    match emission {
+        TouchedSetEmission::None => None,
+        TouchedSetEmission::MatchPayloadSchema => Some(events::ResourceTouchedSetEvidence {
+            namespace: exact_touched_set_resource_namespace(),
+            evidence_schema_id: evidence_schema_id.clone(),
+            evidence_hash: evidence_hash.clone(),
+            evidence_artifact_id: evidence_artifact_id.clone(),
+        }),
+    }
+}
+
 struct ForwardEmitsRemediationPurposeRunner;
 
 impl ErasedNodeRunner for ForwardEmitsRemediationPurposeRunner {
@@ -8465,9 +8644,9 @@ fn registered_side_effect_fixture_runners(fixture: &Fixture) -> ErasedRunnerRegi
     registry
 }
 
-fn registered_first_side_effect_runners_with(
+fn registered_first_side_effect_runners_with<R: ErasedNodeRunner + 'static>(
     fixture: &Fixture,
-    runner: DeterministicSideEffectRunner,
+    runner: R,
 ) -> ErasedRunnerRegistry {
     let mut registry = ErasedRunnerRegistry::new();
     registry
@@ -9802,6 +9981,12 @@ fn fixture_with_first_exclusive_side_effect_state() -> Fixture {
     with_exclusive_resource_claims(fixture, &descriptors)
 }
 
+fn fixture_with_first_exact_touched_set_side_effect_state() -> Fixture {
+    let fixture = fixture_with_first_side_effect_state();
+    let descriptors = vec![fixture.descriptor_a.clone()];
+    with_exact_touched_set_resource_claims(fixture, &descriptors)
+}
+
 fn fixture_with_manual_resolution_side_effect_state() -> Fixture {
     let mut fixture = fixture_with_first_side_effect_state();
     let mut envelope = fixture.runtime_spec.envelope().clone();
@@ -10305,6 +10490,37 @@ fn with_exclusive_resource_claims(mut fixture: Fixture, descriptors: &[Descripto
     fixture
 }
 
+fn with_exact_touched_set_resource_claims(
+    mut fixture: Fixture,
+    descriptors: &[DescriptorId],
+) -> Fixture {
+    let mut envelope = fixture.runtime_spec.envelope().clone();
+    for node in envelope
+        .spec
+        .nodes
+        .iter_mut()
+        .chain(envelope.spec.remediations.values_mut())
+    {
+        if descriptors
+            .iter()
+            .any(|descriptor| descriptor == &node.descriptor_id)
+        {
+            let side_effect = node
+                .side_effect
+                .as_mut()
+                .expect("exact touched-set descriptor is a side-effect node");
+            side_effect.resource_claim = spec::ResourceClaimSpec::ExactTouchedSet {
+                namespace: exact_touched_set_resource_namespace(),
+                evidence_schema: node.config_ref.schema_id.clone(),
+            };
+        }
+    }
+    let envelope = spec::HashedSpecEnvelope::new(envelope.spec, envelope.audit).expect("rehash");
+    fixture.runtime_spec =
+        CertifiedRuntimeSpec::from_verified_envelope(envelope).expect("runtime spec");
+    fixture
+}
+
 fn remediation_node_for_forward(
     forward: &spec::NodeSpec,
     forward_output: &spec::CellSpec,
@@ -10564,6 +10780,10 @@ fn side_effect_capability_version() -> CapabilityVersion {
 }
 
 fn exclusive_resource_namespace() -> spec::ResourceNamespace {
+    spec::ResourceNamespace::new("mfm.test.wallet_nonce").expect("resource namespace")
+}
+
+fn exact_touched_set_resource_namespace() -> spec::ResourceNamespace {
     spec::ResourceNamespace::new("mfm.test.wallet_nonce").expect("resource namespace")
 }
 
