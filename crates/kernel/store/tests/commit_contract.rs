@@ -950,6 +950,18 @@ fn set_side_effect_node_attempt(
     }
 }
 
+fn set_attempt_failure_node_attempt(
+    payload: &mut KernelEventPayload,
+    node_id: NodeId,
+    attempt_id: AttemptId,
+) {
+    let KernelEventPayload::StateAttemptFailed(payload) = payload else {
+        unreachable!("payload is not attempt failure evidence");
+    };
+    payload.node_id = node_id;
+    payload.attempt_id = attempt_id;
+}
+
 fn fact_recorded(artifact_id: ArtifactId, digest: ContentDigest) -> KernelEventPayload {
     KernelEventPayload::FactRecorded(events::FactRecorded {
         spec_hash: spec_hash(1),
@@ -2746,7 +2758,7 @@ fn resource_lane_releases_on_ledger_terminals_manual_resolution_and_run_terminal
             run_id: run.clone(),
             expected_next_seq: manual_store.expected_next_seq(&run),
             commit_key: CommitKey::new("resource-manual-ambiguous").expect("commit key"),
-            payloads: vec![started, ambiguous],
+            payloads: vec![started, ambiguous, side_effect_attempt_failed(false)],
             required_artifacts: vec![side_effect_evidence(
                 artifact_id(44),
                 content_digest(45),
@@ -3959,12 +3971,205 @@ fn side_effect_phase_order_and_fencing_are_enforced() {
         mismatched_retryability,
         StoreError::ProjectionConflict { .. }
     ));
+
+    let mut failed_without_attempt_store = InMemoryTypedRunStore::new();
+    let failed_without_attempt_run = run_id(106);
+    append_side_effect_prepare(
+        &mut failed_without_attempt_store,
+        &failed_without_attempt_run,
+    );
+    let failed_without_attempt = failed_without_attempt_store
+        .append_prepared_commit(TypedCommitRequest {
+            run_id: failed_without_attempt_run.clone(),
+            expected_next_seq: failed_without_attempt_store
+                .expected_next_seq(&failed_without_attempt_run),
+            commit_key: CommitKey::new("sidefx-failed-without-attempt").expect("commit key"),
+            payloads: vec![side_effect_failed(false)],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect_err("side-effect failure without attempt failure rejects");
+    assert_projection_conflict_contains(
+        failed_without_attempt,
+        "side-effect failure requires matching StateAttemptFailed",
+    );
+
+    let mut failed_with_attempt_store = InMemoryTypedRunStore::new();
+    let failed_with_attempt_run = run_id(107);
+    append_side_effect_prepare(&mut failed_with_attempt_store, &failed_with_attempt_run);
+    failed_with_attempt_store
+        .append_prepared_commit(TypedCommitRequest {
+            run_id: failed_with_attempt_run.clone(),
+            expected_next_seq: failed_with_attempt_store
+                .expected_next_seq(&failed_with_attempt_run),
+            commit_key: CommitKey::new("sidefx-failed-with-attempt").expect("commit key"),
+            payloads: vec![side_effect_failed(false), side_effect_attempt_failed(false)],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect("side-effect failure with matching attempt failure accepts");
+
+    let mut failed_mismatch_store = InMemoryTypedRunStore::new();
+    let failed_mismatch_run = run_id(108);
+    append_side_effect_prepare(&mut failed_mismatch_store, &failed_mismatch_run);
+    let mut mismatched_attempt = side_effect_attempt_failed(false);
+    set_attempt_failure_node_attempt(&mut mismatched_attempt, node_id(170), attempt_id(172));
+    let failed_mismatched_attempt = failed_mismatch_store
+        .append_prepared_commit(TypedCommitRequest {
+            run_id: failed_mismatch_run.clone(),
+            expected_next_seq: failed_mismatch_store.expected_next_seq(&failed_mismatch_run),
+            commit_key: CommitKey::new("sidefx-failed-mismatched-attempt").expect("commit key"),
+            payloads: vec![side_effect_failed(false), mismatched_attempt],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect_err("side-effect failure with mismatched attempt rejects");
+    assert_projection_conflict_contains(
+        failed_mismatched_attempt,
+        "side-effect failure requires matching StateAttemptFailed",
+    );
+
+    let mut ambiguity_without_attempt_store = InMemoryTypedRunStore::new();
+    let ambiguity_without_attempt_run = run_id(109);
+    append_side_effect_prepare(
+        &mut ambiguity_without_attempt_store,
+        &ambiguity_without_attempt_run,
+    );
+    append_side_effect_started(
+        &mut ambiguity_without_attempt_store,
+        &ambiguity_without_attempt_run,
+    );
+    let ambiguity_artifact = artifact_id(113);
+    let ambiguity_digest = content_digest(114);
+    let ambiguity_evidence = side_effect_evidence(
+        ambiguity_artifact.clone(),
+        ambiguity_digest.clone(),
+        schema_id("mfm.test.ambiguity", 76),
+        ArtifactRole::AmbiguityEvidence,
+    );
+    let ambiguity_without_attempt = ambiguity_without_attempt_store
+        .append_prepared_commit(TypedCommitRequest {
+            run_id: ambiguity_without_attempt_run.clone(),
+            expected_next_seq: ambiguity_without_attempt_store
+                .expected_next_seq(&ambiguity_without_attempt_run),
+            commit_key: CommitKey::new("sidefx-ambiguity-without-attempt").expect("commit key"),
+            payloads: vec![side_effect_ambiguous(ambiguity_artifact, ambiguity_digest)],
+            required_artifacts: vec![ambiguity_evidence],
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect_err("side-effect ambiguity without attempt failure rejects");
+    assert_projection_conflict_contains(
+        ambiguity_without_attempt,
+        "side-effect ambiguity requires matching StateAttemptFailed",
+    );
+
+    let mut ambiguity_with_attempt_store = InMemoryTypedRunStore::new();
+    let ambiguity_with_attempt_run = run_id(110);
+    append_side_effect_prepare(
+        &mut ambiguity_with_attempt_store,
+        &ambiguity_with_attempt_run,
+    );
+    append_side_effect_started(
+        &mut ambiguity_with_attempt_store,
+        &ambiguity_with_attempt_run,
+    );
+    let ambiguity_artifact = artifact_id(115);
+    let ambiguity_digest = content_digest(116);
+    let ambiguity_evidence = side_effect_evidence(
+        ambiguity_artifact.clone(),
+        ambiguity_digest.clone(),
+        schema_id("mfm.test.ambiguity", 76),
+        ArtifactRole::AmbiguityEvidence,
+    );
+    ambiguity_with_attempt_store
+        .append_prepared_commit(TypedCommitRequest {
+            run_id: ambiguity_with_attempt_run.clone(),
+            expected_next_seq: ambiguity_with_attempt_store
+                .expected_next_seq(&ambiguity_with_attempt_run),
+            commit_key: CommitKey::new("sidefx-ambiguity-with-attempt").expect("commit key"),
+            payloads: vec![
+                side_effect_ambiguous(ambiguity_artifact, ambiguity_digest),
+                side_effect_attempt_failed(false),
+            ],
+            required_artifacts: vec![ambiguity_evidence],
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect("side-effect ambiguity with matching non-retryable attempt failure accepts");
+
+    let mut ambiguity_retryable_attempt_store = InMemoryTypedRunStore::new();
+    let ambiguity_retryable_attempt_run = run_id(111);
+    append_side_effect_prepare(
+        &mut ambiguity_retryable_attempt_store,
+        &ambiguity_retryable_attempt_run,
+    );
+    append_side_effect_started(
+        &mut ambiguity_retryable_attempt_store,
+        &ambiguity_retryable_attempt_run,
+    );
+    let ambiguity_artifact = artifact_id(117);
+    let ambiguity_digest = content_digest(118);
+    let ambiguity_evidence = side_effect_evidence(
+        ambiguity_artifact.clone(),
+        ambiguity_digest.clone(),
+        schema_id("mfm.test.ambiguity", 76),
+        ArtifactRole::AmbiguityEvidence,
+    );
+    let retryable_attempt = ambiguity_retryable_attempt_store
+        .append_prepared_commit(TypedCommitRequest {
+            run_id: ambiguity_retryable_attempt_run.clone(),
+            expected_next_seq: ambiguity_retryable_attempt_store
+                .expected_next_seq(&ambiguity_retryable_attempt_run),
+            commit_key: CommitKey::new("sidefx-ambiguity-retryable-attempt").expect("commit key"),
+            payloads: vec![
+                side_effect_ambiguous(ambiguity_artifact, ambiguity_digest),
+                side_effect_attempt_failed(true),
+            ],
+            required_artifacts: vec![ambiguity_evidence],
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect_err("side-effect ambiguity with retryable attempt failure rejects");
+    assert_projection_conflict_contains(
+        retryable_attempt,
+        "side-effect ambiguity retryability must match attempt failure",
+    );
+
+    let mut ambiguity_mismatch_store = InMemoryTypedRunStore::new();
+    let ambiguity_mismatch_run = run_id(112);
+    append_side_effect_prepare(&mut ambiguity_mismatch_store, &ambiguity_mismatch_run);
+    append_side_effect_started(&mut ambiguity_mismatch_store, &ambiguity_mismatch_run);
+    let ambiguity_artifact = artifact_id(119);
+    let ambiguity_digest = content_digest(120);
+    let ambiguity_evidence = side_effect_evidence(
+        ambiguity_artifact.clone(),
+        ambiguity_digest.clone(),
+        schema_id("mfm.test.ambiguity", 76),
+        ArtifactRole::AmbiguityEvidence,
+    );
+    let mut mismatched_attempt = side_effect_attempt_failed(false);
+    set_attempt_failure_node_attempt(&mut mismatched_attempt, node_id(230), attempt_id(232));
+    let ambiguity_mismatched_attempt = ambiguity_mismatch_store
+        .append_prepared_commit(TypedCommitRequest {
+            run_id: ambiguity_mismatch_run.clone(),
+            expected_next_seq: ambiguity_mismatch_store.expected_next_seq(&ambiguity_mismatch_run),
+            commit_key: CommitKey::new("sidefx-ambiguity-mismatched-attempt").expect("commit key"),
+            payloads: vec![
+                side_effect_ambiguous(ambiguity_artifact, ambiguity_digest),
+                mismatched_attempt,
+            ],
+            required_artifacts: vec![ambiguity_evidence],
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect_err("side-effect ambiguity with mismatched attempt rejects");
+    assert_projection_conflict_contains(
+        ambiguity_mismatched_attempt,
+        "side-effect ambiguity requires matching StateAttemptFailed",
+    );
 }
 
 #[test]
 fn side_effect_submission_unknown_recovery_uses_one_submission_result_key() {
     let mut store = InMemoryTypedRunStore::new();
-    let run_id = run_id(106);
+    let run_id = run_id(113);
     append_side_effect_prepare(&mut store, &run_id);
     append_side_effect_started(&mut store, &run_id);
 

@@ -2458,7 +2458,7 @@ pub mod v1 {
 
         validate_payload_run_and_spec(&request.run_id, &request.payloads)?;
         validate_terminal_attempt_cell_pairs(&request.payloads)?;
-        validate_side_effect_attempt_failure_pairs(&request.payloads)?;
+        validate_terminal_side_effect_evidence_pairs(&request.payloads)?;
         validate_retention_manifest_pairs(&request.payloads)?;
 
         let verifier = InMemoryTypedRunStore {
@@ -2595,6 +2595,7 @@ pub mod v1 {
     ) -> Result<CommittedBatch> {
         validate_payload_run_and_spec(&request.run_id, &request.payloads)?;
         validate_terminal_attempt_cell_pairs(&request.payloads)?;
+        validate_terminal_side_effect_evidence_pairs(&request.payloads)?;
         validate_retention_manifest_pairs(&request.payloads)?;
 
         let mut events = Vec::with_capacity(request.payloads.len());
@@ -2915,16 +2916,67 @@ pub mod v1 {
         Ok(())
     }
 
-    fn validate_side_effect_attempt_failure_pairs(payloads: &[KernelEventPayload]) -> Result<()> {
-        let mut side_effect_failures = BTreeMap::new();
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct TerminalSideEffectEvidencePair {
+        node_id: NodeId,
+        attempt_id: AttemptId,
+        retryable: bool,
+        kind: TerminalSideEffectEvidenceKind,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum TerminalSideEffectEvidenceKind {
+        Ambiguous,
+        Failed,
+    }
+
+    impl TerminalSideEffectEvidencePair {
+        fn ambiguous(payload: &side_effect::Ambiguous) -> Self {
+            Self {
+                node_id: payload.node_id.clone(),
+                attempt_id: payload.attempt_id.clone(),
+                retryable: false,
+                kind: TerminalSideEffectEvidenceKind::Ambiguous,
+            }
+        }
+
+        fn failed(payload: &side_effect::Failed) -> Self {
+            Self {
+                node_id: payload.node_id.clone(),
+                attempt_id: payload.attempt_id.clone(),
+                retryable: payload.retryable,
+                kind: TerminalSideEffectEvidenceKind::Failed,
+            }
+        }
+
+        fn node_attempt_key(&self) -> (NodeId, AttemptId) {
+            (self.node_id.clone(), self.attempt_id.clone())
+        }
+
+        fn label(&self) -> &'static str {
+            match self.kind {
+                TerminalSideEffectEvidenceKind::Ambiguous => "ambiguity",
+                TerminalSideEffectEvidenceKind::Failed => "failure",
+            }
+        }
+    }
+
+    fn validate_terminal_side_effect_evidence_pairs(payloads: &[KernelEventPayload]) -> Result<()> {
+        let mut side_effect_terminals = BTreeMap::new();
         let mut attempt_failures = BTreeMap::new();
         for payload in payloads {
             match payload {
+                KernelEventPayload::SideEffectAmbiguous(payload) => {
+                    insert_terminal_side_effect_pair(
+                        &mut side_effect_terminals,
+                        TerminalSideEffectEvidencePair::ambiguous(payload),
+                    )?;
+                }
                 KernelEventPayload::SideEffectFailed(payload) => {
-                    side_effect_failures.insert(
-                        (payload.node_id.clone(), payload.attempt_id.clone()),
-                        payload.retryable,
-                    );
+                    insert_terminal_side_effect_pair(
+                        &mut side_effect_terminals,
+                        TerminalSideEffectEvidencePair::failed(payload),
+                    )?;
                 }
                 KernelEventPayload::StateAttemptFailed(payload) => {
                     attempt_failures.insert(
@@ -2935,24 +2987,55 @@ pub mod v1 {
                 _ => {}
             }
         }
-        for (key, side_effect_retryable) in &side_effect_failures {
-            match attempt_failures.get(key) {
-                Some(attempt_retryable) if attempt_retryable == side_effect_retryable => {}
+        for pair in side_effect_terminals.values() {
+            let key = pair.node_attempt_key();
+            match attempt_failures.get(&key) {
+                Some(attempt_retryable) if *attempt_retryable == pair.retryable => {}
                 Some(_) => {
                     return Err(StoreError::ProjectionConflict {
-                        key: format!("sidefx:{}:{}:failure", key.0, key.1),
-                        message: "side-effect failure retryability must match attempt failure"
-                            .to_owned(),
+                        key: format!(
+                            "sidefx:{}:{}:{}",
+                            pair.node_id,
+                            pair.attempt_id,
+                            pair.label()
+                        ),
+                        message: format!(
+                            "side-effect {} retryability must match attempt failure",
+                            pair.label()
+                        ),
                     });
                 }
                 None => {
                     return Err(StoreError::ProjectionConflict {
-                        key: format!("sidefx:{}:{}:failure", key.0, key.1),
-                        message: "side-effect failure requires matching StateAttemptFailed in same commit"
-                            .to_owned(),
+                        key: format!(
+                            "sidefx:{}:{}:{}",
+                            pair.node_id,
+                            pair.attempt_id,
+                            pair.label()
+                        ),
+                        message: format!(
+                            "side-effect {} requires matching StateAttemptFailed in same commit",
+                            pair.label()
+                        ),
                     });
                 }
             }
+        }
+        Ok(())
+    }
+
+    fn insert_terminal_side_effect_pair(
+        pairs: &mut BTreeMap<(NodeId, AttemptId), TerminalSideEffectEvidencePair>,
+        pair: TerminalSideEffectEvidencePair,
+    ) -> Result<()> {
+        let key = pair.node_attempt_key();
+        if pairs.insert(key.clone(), pair).is_some() {
+            return Err(StoreError::ProjectionConflict {
+                key: format!("sidefx:{}:{}:terminal", key.0, key.1),
+                message:
+                    "terminal side-effect evidence must be unique per node attempt in one commit"
+                        .to_owned(),
+            });
         }
         Ok(())
     }
