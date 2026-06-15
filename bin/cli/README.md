@@ -337,9 +337,12 @@ stored run without executing states.
 Shows certified typed run status without executing states. JSON output uses semantic saga status:
 `run_mode` is one of `forward`, `remediating`, `manual_blocked`, `completed`, `compensated`,
 `manually_resolved`, or `failed_without_acdc_claim`. The `saga` object reports the certified policy,
-derived obligations per forward ledger, linked remediation ledgers, manual-block reason and required
-manual evidence schemas when applicable, terminal resolution claim when present, projected resource
-ledgers with declared claim/key/touched-set evidence, and active exclusive lane holders.
+derived obligations per forward ledger, linked remediation ledgers, manual-block reason and manual
+authorization requirements when applicable, terminal resolution claim when present, projected
+resource ledgers with declared claim/key/touched-set evidence, and active exclusive lane holders.
+Manual authorization requirements include the required evidence schema, signing scheme, authority id,
+allowed operator public identities or a safe summary, and quorum. They never expose signer runtime
+sources, keystore paths, password paths, passwords, or other secrets.
 
 **Usage:**
 ```sh

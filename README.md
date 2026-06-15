@@ -41,6 +41,7 @@ Typed state programs are the semantic executable surface. Ops plan typed program
 
 - Event-sourced certified typed runs with append-only execution history.
 - Crash-resume and replay-aware typed execution semantics.
+- Certified saga remediation with signed manual authorization decisions.
 - Content-addressed manifests, snapshots, facts, and outputs.
 - Deterministic typed-state orchestration for ops/pipelines.
 - Thin CLI and REST transport layers for stable automation surfaces.
@@ -52,6 +53,7 @@ Typed state programs are the semantic executable surface. Ops plan typed program
 Start here:
 
 - Design contract (source of truth): [`docs/design.md`](docs/design.md)
+- Certified saga contract: [`docs/saga.md`](docs/saga.md)
 - Architecture taxonomy + placement rules: [`docs/architecture.md`](docs/architecture.md)
 - Contribution rules / CI parity: [`AGENTS.md`](AGENTS.md)
 - Code quality policy: [`docs/code-quality.md`](docs/code-quality.md)

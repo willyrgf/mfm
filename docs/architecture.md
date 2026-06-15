@@ -11,8 +11,9 @@ and tests.
 
 MFM runs event-sourced typed state-machine workflows: operations plan certified typed specs, states
 own reusable domain semantics, adapters bind state intent to explicit capabilities, transports and
-signers implement reusable platform primitives, runtime schedules from certified authority, store
-commits append-only typed events, and CLI/REST remain transport-only surfaces.
+signers implement reusable platform primitives, runtime schedules certified saga-aware authority,
+store commits append-only typed events, replay verifies from evidence only, and CLI/REST remain
+transport-only surfaces.
 
 ## Core Runtime Shape
 
@@ -56,6 +57,7 @@ capability, public type, CLI command, REST route, or test fixture.
 | Category | Owns | Does Not Own |
 |---|---|---|
 | Platform primitive | Reusable infrastructure such as signing, protocol clients, source routing, artifact access, process execution | Workflow topology or domain-specific semantics |
+| Kernel | Framework-owned typed authority contracts such as specs, events, store, runtime, replay, and manual authorization proof contracts | Domain semantics, live IO, signer providers, storage implementations |
 | Capability contract | Typed authority contracts such as capability specs, request/response evidence types, redacted errors, and traits consumed by states/adapters | Live IO, endpoint routing, signer material resolution, workflow topology |
 | Domain model/config | Pure domain types, validation, canonical config, schema descriptors | Runtime IO, signer resolution, transport clients |
 | State | Reusable executable domain semantics and typed state contracts | Ambient IO, app/store authority, protocol implementation |
@@ -144,7 +146,7 @@ state-owned intent into capability calls and recorded evidence. Transports perfo
 implement capability contracts.
 
 For replay/resume semantics, including pure/read/side-effect behavior, see the authoritative
-`State Capability Boundary` section in `docs/design.md`.
+`State Capability Boundary` and `Certified Saga Semantics` sections in `docs/design.md`.
 
 ### Adapter
 
@@ -383,6 +385,7 @@ Source scans may be useful as guardrails, but they are not architecture proof by
 ## Placement Guide
 
 - New kernel semantic primitive: `crates/kernel/*`, with no domain dependencies.
+- New manual-resolution proof or verifier contract: `crates/kernel/manual-auth`.
 - New protocol/domain capability contract: a capability contract crate such as
   `crates/evm-capabilities`.
 - New pure domain type or canonical config type: domain model/config crate.
@@ -401,7 +404,7 @@ Kernel crates point inward only through the kernel dependency DAG:
 
 ```text
 ids -> canonical -> values -> effects/capabilities
-  -> program/spec -> certify/events/store -> runtime/replay
+  -> program/spec -> certify/events/store/manual-auth -> runtime/replay
 ```
 
 Additional dependency rules:
@@ -498,7 +501,13 @@ Before merging a change, verify:
 - new public values/configs use typed descriptors and no floats/secrets
 - side effects have typed intent, idempotency, receipt/recovery, one mutation authority, and no
   retained signed raw transactions
+- certified saga policy is hash-defining spec data, and compensation/manual outcomes are derived
+  from certified policy plus stream evidence
+- manual resolution uses certified schema roles, certified verifier identity, certified operator
+  authority snapshot, canonical proof bytes, signature verification, and quorum
 - replay paths cannot construct live capabilities
+- replay paths cannot call live signers, verifier registries, certification registries, keystores,
+  or runtime signer sources
 - resume validates stored stream evidence against the certified spec
 - states declare capabilities but do not instantiate live transports or signer providers
 - transports implement capability contracts but do not define state-owned domain semantics
@@ -538,6 +547,8 @@ Required metadata checks should assert:
 ## Companion Docs
 
 - `docs/design.md`: authoritative runtime, store, replay, and secret-handling contract
+- `docs/saga.md`: certified saga, scoped AC/DC language, manual authorization, and resource-claim
+  contract
 - `docs/code-quality.md`: mandatory quality policy for code, test, documentation, build, and
   workflow changes
 - `bin/cli/README.md`: CLI command and JSON output contract

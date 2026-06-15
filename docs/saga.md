@@ -1,0 +1,172 @@
+# Certified Saga Contract
+
+Status: authoritative companion to `docs/design.md` for saga remediation, scoped AC/DC language,
+manual resolution, and cross-run resource claims.
+
+Conceptual source: Michael Stonebraker, Xinjing Zhou, Peter Kraft, and Qian Li,
+["Consistency and Correctness in Data-Oriented Workflow Systems"](https://www.vldb.org/cidrdb/papers/2026/p9-stonebraker.pdf),
+CIDR 2026. That article motivates the AC/DC framing: durable workflow execution is necessary but
+not enough; update-oriented workflows also need explicit error-handling, backout, compensation,
+manual resolution, and concurrency-correctness semantics. MFM adopts that pressure as design
+guidance but intentionally narrows the implemented claim to certified saga semantics unless a
+resource is MFM-owned or replay-verifiable domain proof exists.
+
+MFM implements certified saga semantics for typed external side effects. It does not claim full
+AC/DC semantics for arbitrary external systems. Stronger AC/DC-style claims are honest only when
+MFM owns the affected transactional resource or replay can verify a certified domain proof from
+typed evidence. Core saga v1 records no AC/DC-equivalence proof; `Compensated` and
+`ManuallyResolved` are saga outcomes, not independent external-world truth claims.
+
+## Core Claim
+
+A certified saga run is one append-only typed run whose certified spec, stream, artifacts, and
+certificate prove one of these outcomes:
+
+- forward execution completed with certified public-output evidence;
+- confirmed forward side effects were remediated by linked remediation ledgers;
+- an authorized manual decision resolved the run;
+- the run failed without a compensation or AC/DC-equivalence claim under certified policy.
+
+All saga decisions are derived from the certified spec plus append-only stream facts. Directive
+selection, obligation state, run mode, and manual-block state are projections, not appendable
+control events.
+
+## Certified Policy
+
+`mfm-spec::v1::TypedExecutionSpec` carries hash-defining saga policy:
+
+- `NoSideEffects`: lowering uses this when the forward graph has no side-effect nodes.
+- `FailWithoutAcdcClaim`: after mutation, terminal failure may make no compensation claim.
+- `ManualResolution`: after mutation, the run blocks for signed manual authorization.
+- `CompensateCompleted`: confirmed forward side effects create remediation obligations; unresolved
+  remediation follows the certified `on_remediation_unresolved` directive.
+
+Remediation linkage is structural. Remediation nodes live outside the forward graph and are linked
+to the forward side-effect node they compensate. Remediation reuses the side-effect protocol with
+`SideEffectLedgerPurpose::Remediation { forward_ledger_key }`; forward ledgers use
+`SideEffectLedgerPurpose::Forward`.
+
+## Engagement And Quiescence
+
+Saga handling engages at the first stream event that proves one of these facts:
+
+- a non-retryable attempt or side-effect failure was recorded;
+- a forward side-effect ledger became ambiguous.
+
+After engagement, no new forward side-effect boundary crossings may be admitted. Recovery and
+terminal evidence for already past-boundary forward ledgers may still arrive. Before classifying
+obligations, runtime drives every past-boundary forward ledger to a quiescent phase such as
+confirmation, not-submitted proof, failure, or ambiguity.
+
+Obligation classification is over the full current stream, not the engagement event prefix. With the
+forward fence, all readers of the same stream derive the same obligation set and run mode.
+
+## Run Modes
+
+Public status reports semantic `RunMode`, not raw store phase:
+
+- `forward`
+- `remediating`
+- `manual_blocked`
+- `completed`
+- `compensated`
+- `manually_resolved`
+- `failed_without_acdc_claim`
+
+`Compensated` requires a non-empty owed set with every owed obligation closed by certified remedial
+confirmation evidence. A clean failure with no past-boundary forward mutation resolves as
+`FailedWithoutAcdcClaim`, never vacuous `Compensated`.
+
+## Manual Resolution
+
+Manual resolution is a signed authorization protocol, not a generic escape hatch. A
+`ManualResolutionEvidenceSpec` cannot exist without an authorization policy:
+
+- `evidence_schema`: schema for the operator evidence artifact;
+- `authorization.verifier_id`: certified verifier identity;
+- `authorization.signing_scheme`: digest-only manual-resolution signing scheme;
+- `authorization.authority`: certified operator authority snapshot;
+- `authorization.quorum`: required number of accepted operator signatures.
+
+The old `operator_identity_ref_schema` manual spec shape and old operator-identity manual event
+shape are invalid. There is no compatibility path for those formats.
+
+Certification uses the live registry as authority for:
+
+- schema role grants, including `manual_resolution_evidence` and
+  `manual_resolution_authorization`;
+- manual authorization verifier identities;
+- operator authority snapshots and their digests;
+- supported signing scheme and quorum shape.
+
+The certified spec and certificate carry replay authority. Replay does not call a live signer,
+verifier registry, certification registry, keystore, environment variable, or runtime signer source.
+
+`ManualResolutionRecorded` references exactly two artifacts:
+
+- `ManualResolutionEvidence`: the operator evidence artifact with certified schema and digest;
+- `ManualResolutionAuthorization`: the canonical authorization proof artifact with certified schema
+  and digest.
+
+The proof artifact contains a canonical claim plus signatures. The claim binds:
+
+- run id;
+- certified spec hash;
+- expected next stream sequence;
+- stream prefix digest;
+- manual block reason;
+- unresolved obligations digest;
+- selected manual outcome;
+- evidence artifact schema, content hash, and artifact id.
+
+`ManuallyResolved` means an authorized manual decision was recorded. It does not mean MFM
+independently proved that the external domain state is correct.
+
+## Resource Claims
+
+Every side-effect contract declares a resource claim:
+
+- `Exclusive`: adapter records a concrete exclusive key before crossing the uncertainty boundary.
+- `ExactTouchedSet`: adapter records exact touched-key evidence after execution.
+- `ManualOnly`: MFM makes no framework-derived cross-run concurrency claim.
+
+Exclusive lanes are derived from recorded invocation-prepared resource key evidence. A held lane
+blocks other ledgers for the same `(namespace, key)` across runs. The lane releases when the holding
+ledger records terminal evidence or the holding run reaches sealed terminal resolution. Remediation
+ledgers acquire lanes under the same rules as forward ledgers.
+
+Exact touched-set evidence is schema-checked at admission and replay, but the kernel does not infer
+domain isolation from it without a future domain verifier.
+
+## Layer Authority
+
+`mfm-store` remains append-only and structural. It owns envelopes, sequence numbers, ordinals,
+logical keys, artifact evidence admission, stream-derived preconditions, and projections. It does
+not certify schemas, verify signatures, resolve operators, or decide domain truth.
+
+`mfm-runtime` owns spec-aware saga advancement. It rebuilds verified history from the run stream,
+derives engagement, quiescence, obligations, remediation order, and manual-block state, then
+constructs guarded commits from certified runtime authority.
+
+`mfm-replay` verifies from the certified spec, certificate, stream, retained artifact evidence, and
+retained proof bytes only. A historical manual resolution is rejected unless the prefix derives
+`ManualBlocked`, artifacts match the event and certified roles, the proof claim exactly matches the
+event and prefix, signatures verify, the signers are in the certified authority snapshot, and quorum
+is satisfied.
+
+`mfm-app`, CLI, and REST expose status and assembly surfaces only. Public status may show required
+manual evidence schema, signing scheme, authority id, allowed operator public identities or a safe
+summary, and quorum. It must never expose signer runtime sources, keystore paths, password paths,
+passwords, mnemonics, private keys, RPC authorization material, or secret-bearing environment
+variables.
+
+## Deferred
+
+The following remain outside the current certified saga contract:
+
+- full AC/DC-equivalence claims;
+- domain verifier APIs for commutativity, escrow, predicate snapshots, finality, or isolation;
+- per-obligation manual targeting;
+- generic retry/replan/continuation policy;
+- cancellation semantics against remediation;
+- lane fairness, queueing, deadlock detection, or global scheduling policy.

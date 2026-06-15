@@ -34,6 +34,8 @@ they do not own workflow semantics.
 - Replay adapters must answer only from recorded facts, typed artifacts, and side-effect evidence.
 - Side effects use typed intent, typed idempotency input, durable ledger events, and typed receipt
   or recovery evidence.
+- Certified saga decisions are derived from the certified spec plus append-only stream facts.
+- Manual saga resolution requires certified schema authority and a signed authorization proof.
 - Public output JSON is a render surface. Typed terminal cells plus public-output specs and events
   are the authority.
 - Source scans, naming conventions, hash-only envelopes, persisted summaries, and CI summary keys
@@ -74,6 +76,7 @@ Typed kernel crates are framework-owned and domain-free:
 | `crates/kernel/certify` | Certification checks, non-forgeable certified typed-spec authority, and certificate bundles |
 | `crates/kernel/events` | Versioned typed kernel event schemas |
 | `crates/kernel/store` | Typed commit API, side-effect ledger rules, projection contract, and retention refs |
+| `crates/kernel/manual-auth` | Canonical manual-resolution authorization claims, proofs, and verifier contracts |
 | `crates/kernel/runtime` | Certified typed scheduler and erased runner boundary |
 | `crates/kernel/replay` | Replay authority, brokers, and verifier contracts |
 
@@ -205,6 +208,45 @@ Replay and resume semantics follow the effect class:
   mutations or infer mutation status from unstored state.
 - Replay never constructs live transports or signer providers.
 
+## Certified Saga Semantics
+
+Certified saga behavior is part of the typed runtime contract. The detailed saga and scoped AC/DC
+contract is maintained in `docs/saga.md`; this section summarizes the authority rules that every
+runtime, store, replay, CLI, REST, and app change must preserve.
+
+MFM implements certified saga semantics for external side effects. It does not claim full AC/DC
+semantics for arbitrary external systems. Stronger AC/DC-style claims require MFM-owned
+transactional resources or replay-verifiable domain proof from typed evidence. Core saga outcomes
+therefore mean exactly what the certified stream can prove: forward success, certified
+compensation, authorized manual decision, or failure without an AC/DC-equivalence claim.
+
+`TypedExecutionSpec` carries hash-defining saga policy. `mfm-store` derives saga engagement,
+obligations, run mode, manual-block state, resource lanes, and terminal agreement from the
+certified policy plus the append-only stream. Directive selection, obligation open/close,
+run-mode changes, and manual-block requests are not separate event families.
+
+Saga handling engages at the first non-retryable failure or forward side-effect ambiguity. After
+engagement, no new forward side-effect boundary crossings may be admitted. Runtime drives
+past-boundary forward ledgers to quiescence before resolving obligations or terminal outcomes.
+Remediation ledgers use the same side-effect protocol as forward ledgers and carry
+`SideEffectLedgerPurpose::Remediation { forward_ledger_key }`.
+
+Public status reports semantic `RunMode`: `forward`, `remediating`, `manual_blocked`,
+`completed`, `compensated`, `manually_resolved`, or `failed_without_acdc_claim`.
+`Compensated` is never a vacuous outcome; it requires owed obligations closed by certified remedial
+evidence. `FailedWithoutAcdcClaim` is the honest terminal result when policy permits failure
+without a compensation or AC/DC-equivalence proof.
+
+Manual resolution is a signed authorization protocol. Certification uses the registry as live
+authority for manual evidence schema roles, manual authorization verifier identities, operator
+authority snapshots, supported signing scheme, and quorum. The certified spec and certificate then
+carry replay authority. Runtime and replay verify manual resolution from certified
+spec/certificate, stream prefix, retained artifacts, and canonical proof bytes only; they must not
+call live signer, registry, keystore, environment, or runtime signer sources.
+
+`ManuallyResolved` means an authorized manual decision was recorded. It does not mean MFM
+independently proved external domain truth.
+
 ## Certified Spec
 
 `mfm-spec::v1::TypedExecutionSpec` is the persisted execution contract. It includes:
@@ -319,6 +361,11 @@ Replay loads the stored certified spec and certificate artifacts, verifies them 
 production registry, compares the hashes to `RunStarted`, rebuilds stream evidence, and uses replay
 adapters only. Live capability construction during replay is a contract violation.
 
+Manual-resolution replay additionally verifies that the stream prefix derives `ManualBlocked`, the
+event matches certified policy, evidence and authorization artifacts match certified roles and
+digests, the canonical proof claim matches the event and prefix exactly, signatures verify, signers
+belong to the certified authority snapshot, and quorum is satisfied.
+
 ## Side Effects
 
 Side-effect states are multi-commit protocols. The scheduler/store own:
@@ -387,6 +434,7 @@ Update this document when a change alters:
 - typed event schemas
 - store commit or projection authority
 - resume or replay semantics
+- certified saga or manual-resolution authority
 - effect/capability rules
 - public-output authority
 - crate ownership boundaries

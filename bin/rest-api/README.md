@@ -246,8 +246,11 @@ Typed run responses expose semantic status through `run_mode`, not the old absen
 phase. `run_mode` is one of `forward`, `remediating`, `manual_blocked`, `completed`, `compensated`,
 `manually_resolved`, or `failed_without_acdc_claim`. The nested `saga` object reports the certified
 policy, derived per-forward-ledger obligations, linked remediation ledgers, manual-block reason and
-required manual evidence schemas when applicable, terminal resolution claim when present, projected
-resource ledgers with declared claim/key/touched-set evidence, and active exclusive lane holders.
+manual authorization requirements when applicable, terminal resolution claim when present,
+projected resource ledgers with declared claim/key/touched-set evidence, and active exclusive lane
+holders. Manual authorization requirements include the required evidence schema, signing scheme,
+authority id, allowed operator public identities or a safe summary, and quorum. They never expose
+signer runtime sources, keystore paths, password paths, passwords, or other secrets.
 
 ## Removed Dynamic Surfaces
 
