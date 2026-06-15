@@ -1367,11 +1367,9 @@ pub mod v1 {
                         "manual resolution was recorded without certified manual policy",
                     )
                 })?;
-            if payload.operator_identity_ref_schema_id != manual.operator_identity_ref_schema
-                || payload.evidence_schema_id != manual.evidence_schema
-            {
+            if payload.evidence_schema_id != manual.evidence_schema {
                 return Err(certified_evidence_mismatch(
-                    "manual resolution evidence schemas do not match certified policy",
+                    "manual resolution evidence schema does not match certified policy",
                 ));
             }
             let manual_start = self
@@ -3087,12 +3085,11 @@ pub mod v1 {
 
         #[test]
         fn replay_construction_rejects_manual_resolution_schema_mismatch() {
-            let operator_schema = schema("mfm.test.operator_identity", 0x90);
             let evidence_schema = schema("mfm.test.manual_evidence", 0x91);
             let fixture = Fixture::with_saga_policy(spec::SagaPolicySpec::ManualResolution {
                 manual: spec::ManualResolutionEvidenceSpec {
                     evidence_schema: evidence_schema.clone(),
-                    operator_identity_ref_schema: operator_schema,
+                    authorization: manual_authorization(0x90),
                 },
             });
             let mut stream = fixture.stream.clone();
@@ -3104,12 +3101,12 @@ pub mod v1 {
                     run_id,
                     spec_hash: fixture.envelope.spec_hash.clone(),
                     outcome: events::ManualResolutionOutcome::ConfirmRemediated,
-                    operator_identity_ref_schema_id: schema("mfm.test.wrong_operator", 0x92),
-                    operator_identity_ref_hash: content(0x93),
-                    operator_identity_ref_artifact_id: artifact(0x94),
-                    evidence_schema_id: evidence_schema,
+                    evidence_schema_id: schema("mfm.test.wrong_manual_evidence", 0x92),
                     evidence_hash: content(0x95),
                     evidence_artifact_id: artifact(0x96),
+                    authorization_schema_id: schema("mfm.test.manual_authorization", 0x97),
+                    authorization_hash: content(0x98),
+                    authorization_artifact_id: artifact(0x99),
                     note: None,
                 }),
             );
@@ -3124,12 +3121,11 @@ pub mod v1 {
 
         #[test]
         fn replay_construction_rejects_manual_resolution_before_manual_blocked() {
-            let operator_schema = schema("mfm.test.operator_identity", 0x98);
             let evidence_schema = schema("mfm.test.manual_evidence", 0x99);
             let fixture = Fixture::with_saga_policy(spec::SagaPolicySpec::ManualResolution {
                 manual: spec::ManualResolutionEvidenceSpec {
                     evidence_schema: evidence_schema.clone(),
-                    operator_identity_ref_schema: operator_schema.clone(),
+                    authorization: manual_authorization(0x98),
                 },
             });
             let mut stream = fixture.stream.clone();
@@ -3141,12 +3137,12 @@ pub mod v1 {
                     run_id,
                     spec_hash: fixture.envelope.spec_hash.clone(),
                     outcome: events::ManualResolutionOutcome::ConfirmRemediated,
-                    operator_identity_ref_schema_id: operator_schema,
-                    operator_identity_ref_hash: content(0x9a),
-                    operator_identity_ref_artifact_id: artifact(0x9b),
                     evidence_schema_id: evidence_schema,
                     evidence_hash: content(0x9c),
                     evidence_artifact_id: artifact(0x9d),
+                    authorization_schema_id: schema("mfm.test.manual_authorization", 0x9e),
+                    authorization_hash: content(0x9f),
+                    authorization_artifact_id: artifact(0xa1),
                     note: None,
                 }),
             );
@@ -4360,6 +4356,34 @@ pub mod v1 {
 
         fn schema(name: &str, byte: u8) -> SchemaId {
             SchemaId::new(name, "1", DigestAlgorithm::Sha256JcsV1, bytes(byte)).expect("schema")
+        }
+
+        fn manual_authorization(byte: u8) -> spec::ManualResolutionAuthorizationSpec {
+            spec::ManualResolutionAuthorizationSpec {
+                verifier_id: spec::ManualAuthorizationVerifierId::new(format!(
+                    "mfm.test.manual.verifier.{byte}"
+                ))
+                .expect("verifier id"),
+                signing_scheme: spec::ManualSigningSchemeSpec::new(
+                    "mfm.manual_resolution.digest_signature.v1",
+                )
+                .expect("signing scheme"),
+                authority: spec::OperatorAuthoritySnapshotSpec {
+                    authority_id: spec::OperatorAuthorityId::new(format!(
+                        "mfm.test.manual.authority.{byte}"
+                    ))
+                    .expect("authority id"),
+                    operators: vec![spec::OperatorAuthorityMemberSpec {
+                        operator_id: spec::OperatorId::new(format!("operator.{byte}"))
+                            .expect("operator id"),
+                        public_identity: spec::OperatorPublicIdentity::new(format!(
+                            "operator-public-{byte}"
+                        ))
+                        .expect("operator public identity"),
+                    }],
+                },
+                quorum: spec::ManualAuthorizationQuorumSpec::new(1).expect("quorum"),
+            }
         }
 
         fn resource_namespace() -> spec::ResourceNamespace {

@@ -813,18 +813,18 @@ pub mod v1 {
         pub event_id: EventId,
         /// Operator-selected outcome.
         pub outcome: events::ManualResolutionOutcome,
-        /// Operator identity reference schema id.
-        pub operator_identity_ref_schema_id: SchemaId,
-        /// Operator identity reference hash.
-        pub operator_identity_ref_hash: ContentDigest,
-        /// Operator identity reference artifact id.
-        pub operator_identity_ref_artifact_id: ArtifactId,
         /// Evidence schema id.
         pub evidence_schema_id: SchemaId,
         /// Evidence hash.
         pub evidence_hash: ContentDigest,
         /// Evidence artifact id.
         pub evidence_artifact_id: ArtifactId,
+        /// Authorization proof schema id.
+        pub authorization_schema_id: SchemaId,
+        /// Authorization proof hash.
+        pub authorization_hash: ContentDigest,
+        /// Authorization proof artifact id.
+        pub authorization_artifact_id: ArtifactId,
         /// Optional redaction-safe operator note.
         pub note: Option<events::ManualResolutionNote>,
     }
@@ -3324,10 +3324,10 @@ pub mod v1 {
         StateAttemptFailureDiagnostic,
         /// Side-effect failure diagnostic artifact reference.
         SideEffectFailureDiagnostic,
-        /// Operator identity reference for manual resolution.
-        ManualResolutionOperatorIdentity,
         /// Manual-resolution evidence artifact.
         ManualResolutionEvidence,
+        /// Manual-resolution authorization proof artifact.
+        ManualResolutionAuthorization,
         /// Side-effect intent artifact.
         SideEffectIntent,
         /// Prepared side-effect invocation artifact.
@@ -3694,13 +3694,13 @@ pub mod v1 {
                 "variant": "StateAttemptFailed",
             }),
             KernelEventPayload::ManualResolutionRecorded(payload) => serde_json::json!({
+                "authorization_artifact_id": payload.authorization_artifact_id.as_str(),
+                "authorization_hash": payload.authorization_hash.as_str(),
+                "authorization_schema_id": payload.authorization_schema_id.as_str(),
                 "evidence_artifact_id": payload.evidence_artifact_id.as_str(),
                 "evidence_hash": payload.evidence_hash.as_str(),
                 "evidence_schema_id": payload.evidence_schema_id.as_str(),
                 "note": payload.note.as_ref().map(manual_resolution_note_json),
-                "operator_identity_ref_artifact_id": payload.operator_identity_ref_artifact_id.as_str(),
-                "operator_identity_ref_hash": payload.operator_identity_ref_hash.as_str(),
-                "operator_identity_ref_schema_id": payload.operator_identity_ref_schema_id.as_str(),
                 "outcome": manual_resolution_outcome_str(payload.outcome),
                 "run_id": payload.run_id.as_str(),
                 "spec_hash": payload.spec_hash.as_str(),
@@ -4217,23 +4217,20 @@ pub mod v1 {
                     run_id: parse_identity(required_str(json, "run_id")?)?,
                     spec_hash: parse_identity(required_str(json, "spec_hash")?)?,
                     outcome: parse_manual_resolution_outcome(required_str(json, "outcome")?)?,
-                    operator_identity_ref_schema_id: parse_identity(required_str(
-                        json,
-                        "operator_identity_ref_schema_id",
-                    )?)?,
-                    operator_identity_ref_hash: parse_identity(required_str(
-                        json,
-                        "operator_identity_ref_hash",
-                    )?)?,
-                    operator_identity_ref_artifact_id: parse_identity(required_str(
-                        json,
-                        "operator_identity_ref_artifact_id",
-                    )?)?,
                     evidence_schema_id: parse_identity(required_str(json, "evidence_schema_id")?)?,
                     evidence_hash: parse_identity(required_str(json, "evidence_hash")?)?,
                     evidence_artifact_id: parse_identity(required_str(
                         json,
                         "evidence_artifact_id",
+                    )?)?,
+                    authorization_schema_id: parse_identity(required_str(
+                        json,
+                        "authorization_schema_id",
+                    )?)?,
+                    authorization_hash: parse_identity(required_str(json, "authorization_hash")?)?,
+                    authorization_artifact_id: parse_identity(required_str(
+                        json,
+                        "authorization_artifact_id",
                     )?)?,
                     note: optional_obj(json, "note")?
                         .map(parse_manual_resolution_note)
@@ -4585,6 +4582,8 @@ pub mod v1 {
             "receipt" => Ok(ArtifactRole::Receipt),
             "confirmation" => Ok(ArtifactRole::Confirmation),
             "ambiguity_evidence" => Ok(ArtifactRole::AmbiguityEvidence),
+            "manual_resolution_evidence" => Ok(ArtifactRole::ManualResolutionEvidence),
+            "manual_resolution_authorization" => Ok(ArtifactRole::ManualResolutionAuthorization),
             "public_output" => Ok(ArtifactRole::PublicOutput),
             "redacted_diagnostic" => Ok(ArtifactRole::RedactedDiagnostic),
             "retention_manifest" => Ok(ArtifactRole::RetentionManifest),
@@ -4746,8 +4745,35 @@ pub mod v1 {
         manual: &ManualResolutionEvidenceSpec,
     ) -> serde_json::Value {
         serde_json::json!({
+            "authorization": manual_resolution_authorization_spec_json(&manual.authorization),
             "evidence_schema": manual.evidence_schema.as_str(),
-            "operator_identity_ref_schema": manual.operator_identity_ref_schema.as_str(),
+        })
+    }
+
+    fn manual_resolution_authorization_spec_json(
+        authorization: &mfm_spec::v1::ManualResolutionAuthorizationSpec,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "authority": {
+                "authority_id": authorization.authority.authority_id.as_str(),
+                "operators": authorization
+                    .authority
+                    .operators
+                    .iter()
+                    .map(|operator| {
+                        serde_json::json!({
+                            "operator_id": operator.operator_id.as_str(),
+                            "public_identity": operator.public_identity.as_str(),
+                        })
+                    })
+                    .collect::<Vec<_>>(),
+            },
+            "quorum": {
+                "kind": "threshold",
+                "required_signatures": authorization.quorum.required_signatures(),
+            },
+            "signing_scheme": authorization.signing_scheme.as_str(),
+            "verifier_id": authorization.verifier_id.as_str(),
         })
     }
 
@@ -5100,14 +5126,14 @@ pub mod v1 {
         projection: &ManualResolutionProjection,
     ) -> serde_json::Value {
         serde_json::json!({
+            "authorization_artifact_id": projection.authorization_artifact_id.as_str(),
+            "authorization_hash": projection.authorization_hash.as_str(),
+            "authorization_schema_id": projection.authorization_schema_id.as_str(),
             "event_id": projection.event_id.as_str(),
             "evidence_artifact_id": projection.evidence_artifact_id.as_str(),
             "evidence_hash": projection.evidence_hash.as_str(),
             "evidence_schema_id": projection.evidence_schema_id.as_str(),
             "note": projection.note.as_ref().map(manual_resolution_note_json),
-            "operator_identity_ref_artifact_id": projection.operator_identity_ref_artifact_id.as_str(),
-            "operator_identity_ref_hash": projection.operator_identity_ref_hash.as_str(),
-            "operator_identity_ref_schema_id": projection.operator_identity_ref_schema_id.as_str(),
             "outcome": manual_resolution_outcome_str(projection.outcome),
             "run_id": run_id.as_str(),
         })
@@ -5122,21 +5148,18 @@ pub mod v1 {
             ManualResolutionProjection {
                 event_id: parse_identity(required_str(json, "event_id")?)?,
                 outcome: parse_manual_resolution_outcome(required_str(json, "outcome")?)?,
-                operator_identity_ref_schema_id: parse_identity(required_str(
-                    json,
-                    "operator_identity_ref_schema_id",
-                )?)?,
-                operator_identity_ref_hash: parse_identity(required_str(
-                    json,
-                    "operator_identity_ref_hash",
-                )?)?,
-                operator_identity_ref_artifact_id: parse_identity(required_str(
-                    json,
-                    "operator_identity_ref_artifact_id",
-                )?)?,
                 evidence_schema_id: parse_identity(required_str(json, "evidence_schema_id")?)?,
                 evidence_hash: parse_identity(required_str(json, "evidence_hash")?)?,
                 evidence_artifact_id: parse_identity(required_str(json, "evidence_artifact_id")?)?,
+                authorization_schema_id: parse_identity(required_str(
+                    json,
+                    "authorization_schema_id",
+                )?)?,
+                authorization_hash: parse_identity(required_str(json, "authorization_hash")?)?,
+                authorization_artifact_id: parse_identity(required_str(
+                    json,
+                    "authorization_artifact_id",
+                )?)?,
                 note: optional_obj(json, "note")?
                     .map(parse_manual_resolution_note)
                     .transpose()?,
@@ -5805,6 +5828,8 @@ pub mod v1 {
             ArtifactRole::Receipt => "receipt",
             ArtifactRole::Confirmation => "confirmation",
             ArtifactRole::AmbiguityEvidence => "ambiguity_evidence",
+            ArtifactRole::ManualResolutionEvidence => "manual_resolution_evidence",
+            ArtifactRole::ManualResolutionAuthorization => "manual_resolution_authorization",
             ArtifactRole::PublicOutput => "public_output",
             ArtifactRole::RedactedDiagnostic => "redacted_diagnostic",
             ArtifactRole::RetentionManifest => "retention_manifest",

@@ -411,6 +411,8 @@ fn validate_evidence_shape(evidence: &ArtifactEvidenceRef) -> TypedArtifactResul
         ArtifactRole::TypedExecutionSpec
         | ArtifactRole::TypedSpecCertificate
         | ArtifactRole::TypedConfig
+        | ArtifactRole::ManualResolutionEvidence
+        | ArtifactRole::ManualResolutionAuthorization
         | ArtifactRole::RedactedDiagnostic
         | ArtifactRole::RetentionManifest => {}
         _ => {
@@ -814,6 +816,8 @@ fn artifact_role_str(role: ArtifactRole) -> &'static str {
         ArtifactRole::Receipt => "receipt",
         ArtifactRole::Confirmation => "confirmation",
         ArtifactRole::AmbiguityEvidence => "ambiguity_evidence",
+        ArtifactRole::ManualResolutionEvidence => "manual_resolution_evidence",
+        ArtifactRole::ManualResolutionAuthorization => "manual_resolution_authorization",
         ArtifactRole::PublicOutput => "public_output",
         ArtifactRole::RedactedDiagnostic => "redacted_diagnostic",
         ArtifactRole::RetentionManifest => "retention_manifest",
@@ -836,6 +840,8 @@ fn parse_artifact_role(value: &str) -> TypedArtifactResult<ArtifactRole> {
         "receipt" => Ok(ArtifactRole::Receipt),
         "confirmation" => Ok(ArtifactRole::Confirmation),
         "ambiguity_evidence" => Ok(ArtifactRole::AmbiguityEvidence),
+        "manual_resolution_evidence" => Ok(ArtifactRole::ManualResolutionEvidence),
+        "manual_resolution_authorization" => Ok(ArtifactRole::ManualResolutionAuthorization),
         "public_output" => Ok(ArtifactRole::PublicOutput),
         "redacted_diagnostic" => Ok(ArtifactRole::RedactedDiagnostic),
         "retention_manifest" => Ok(ArtifactRole::RetentionManifest),

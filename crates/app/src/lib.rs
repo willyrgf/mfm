@@ -488,10 +488,18 @@ pub struct TypedSagaPolicyStatus {
 /// Public manual evidence schema requirements.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TypedManualEvidenceSchemas {
-    /// Schema id for the operator identity reference artifact.
-    pub operator_identity_ref_schema_id: String,
     /// Schema id for the operator evidence artifact.
     pub evidence_schema_id: String,
+    /// Manual authorization verifier id.
+    pub verifier_id: String,
+    /// Required manual signing scheme.
+    pub signing_scheme: String,
+    /// Certified operator authority id.
+    pub authority_id: String,
+    /// Allowed operator public identities from the certified authority snapshot.
+    pub operator_public_identities: Vec<String>,
+    /// Required number of operator signatures.
+    pub quorum_required_signatures: u32,
 }
 
 /// Public obligation state for one forward ledger.
@@ -2525,8 +2533,23 @@ fn typed_manual_evidence_schemas(
     manual: &spec::ManualResolutionEvidenceSpec,
 ) -> TypedManualEvidenceSchemas {
     TypedManualEvidenceSchemas {
-        operator_identity_ref_schema_id: manual.operator_identity_ref_schema.as_str().to_owned(),
         evidence_schema_id: manual.evidence_schema.as_str().to_owned(),
+        verifier_id: manual.authorization.verifier_id.as_str().to_owned(),
+        signing_scheme: manual.authorization.signing_scheme.as_str().to_owned(),
+        authority_id: manual
+            .authorization
+            .authority
+            .authority_id
+            .as_str()
+            .to_owned(),
+        operator_public_identities: manual
+            .authorization
+            .authority
+            .operators
+            .iter()
+            .map(|operator| operator.public_identity.as_str().to_owned())
+            .collect(),
+        quorum_required_signatures: manual.authorization.quorum.required_signatures(),
     }
 }
 
@@ -2877,8 +2900,8 @@ mod tests {
 
         let run_id = RunId::from_digest(DigestAlgorithm::Sha256JcsV1, digest(0xa0));
         let manual = spec::ManualResolutionEvidenceSpec {
-            operator_identity_ref_schema: schema_id("mfm.test.operator", 0xa1),
             evidence_schema: schema_id("mfm.test.manual", 0xa2),
+            authorization: manual_authorization(0xa1),
         };
         let policy = spec::SagaPolicySpec::CompensateCompleted {
             on_remediation_unresolved: spec::RemediationUnresolvedSpec::ManualResolution {
@@ -2912,6 +2935,14 @@ mod tests {
                 .expect("manual evidence")
                 .evidence_schema_id,
             manual.evidence_schema.as_str()
+        );
+        assert_eq!(
+            manual_status
+                .required_manual_evidence
+                .as_ref()
+                .expect("manual evidence")
+                .authority_id,
+            manual.authorization.authority.authority_id.as_str()
         );
 
         let forward_ledger = events::SideEffectLedgerKey::new("forward-ledger").expect("ledger");
@@ -4790,6 +4821,34 @@ mod tests {
 
     fn schema_id(name: &str, byte: u8) -> SchemaId {
         SchemaId::new(name, "1", DigestAlgorithm::Sha256JcsV1, digest(byte)).expect("schema id")
+    }
+
+    fn manual_authorization(byte: u8) -> spec::ManualResolutionAuthorizationSpec {
+        spec::ManualResolutionAuthorizationSpec {
+            verifier_id: spec::ManualAuthorizationVerifierId::new(format!(
+                "mfm.test.manual.verifier.{byte}"
+            ))
+            .expect("verifier id"),
+            signing_scheme: spec::ManualSigningSchemeSpec::new(
+                "mfm.manual_resolution.digest_signature.v1",
+            )
+            .expect("signing scheme"),
+            authority: spec::OperatorAuthoritySnapshotSpec {
+                authority_id: spec::OperatorAuthorityId::new(format!(
+                    "mfm.test.manual.authority.{byte}"
+                ))
+                .expect("authority id"),
+                operators: vec![spec::OperatorAuthorityMemberSpec {
+                    operator_id: spec::OperatorId::new(format!("operator.{byte}"))
+                        .expect("operator id"),
+                    public_identity: spec::OperatorPublicIdentity::new(format!(
+                        "operator-public-{byte}"
+                    ))
+                    .expect("operator public identity"),
+                }],
+            },
+            quorum: spec::ManualAuthorizationQuorumSpec::new(1).expect("quorum"),
+        }
     }
 
     fn semantic_id(name: &str, byte: u8) -> SemanticTypeId {

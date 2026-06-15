@@ -131,18 +131,6 @@ pub fn event_artifact_requirements(payload: &KernelEventPayload) -> Vec<EventArt
         }
         KernelEventPayload::ManualResolutionRecorded(payload) => {
             requirements.push(EventArtifactRequirement {
-                source: EventArtifactReferenceSource::ManualResolutionOperatorIdentity,
-                artifact_id: payload.operator_identity_ref_artifact_id.clone(),
-                digest: Some(payload.operator_identity_ref_hash.clone()),
-                byte_len: None,
-                media_type: None,
-                schema_id: Some(payload.operator_identity_ref_schema_id.clone()),
-                semantic_type_id: None,
-                producer_node_id: None,
-                producer_seed_id: None,
-                artifact_role: None,
-            });
-            requirements.push(EventArtifactRequirement {
                 source: EventArtifactReferenceSource::ManualResolutionEvidence,
                 artifact_id: payload.evidence_artifact_id.clone(),
                 digest: Some(payload.evidence_hash.clone()),
@@ -152,7 +140,19 @@ pub fn event_artifact_requirements(payload: &KernelEventPayload) -> Vec<EventArt
                 semantic_type_id: None,
                 producer_node_id: None,
                 producer_seed_id: None,
-                artifact_role: None,
+                artifact_role: Some(ArtifactRole::ManualResolutionEvidence),
+            });
+            requirements.push(EventArtifactRequirement {
+                source: EventArtifactReferenceSource::ManualResolutionAuthorization,
+                artifact_id: payload.authorization_artifact_id.clone(),
+                digest: Some(payload.authorization_hash.clone()),
+                byte_len: None,
+                media_type: None,
+                schema_id: Some(payload.authorization_schema_id.clone()),
+                semantic_type_id: None,
+                producer_node_id: None,
+                producer_seed_id: None,
+                artifact_role: Some(ArtifactRole::ManualResolutionAuthorization),
             });
         }
         KernelEventPayload::RunCompleted(payload) => match &payload.outcome {

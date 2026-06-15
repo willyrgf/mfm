@@ -661,18 +661,18 @@ pub mod v1 {
         pub spec_hash: SpecHash,
         /// Operator-selected manual outcome.
         pub outcome: ManualResolutionOutcome,
-        /// Operator identity reference schema id.
-        pub operator_identity_ref_schema_id: SchemaId,
-        /// Operator identity reference hash.
-        pub operator_identity_ref_hash: ContentDigest,
-        /// Operator identity reference artifact id.
-        pub operator_identity_ref_artifact_id: ArtifactId,
         /// Evidence schema id.
         pub evidence_schema_id: SchemaId,
         /// Evidence hash.
         pub evidence_hash: ContentDigest,
         /// Evidence artifact id.
         pub evidence_artifact_id: ArtifactId,
+        /// Authorization proof schema id.
+        pub authorization_schema_id: SchemaId,
+        /// Authorization proof hash.
+        pub authorization_hash: ContentDigest,
+        /// Authorization proof artifact id.
+        pub authorization_artifact_id: ArtifactId,
         /// Optional redaction-safe operator note.
         pub note: Option<ManualResolutionNote>,
     }
@@ -812,6 +812,10 @@ pub mod v1 {
         Confirmation,
         /// Ambiguity evidence artifact.
         AmbiguityEvidence,
+        /// Manual-resolution evidence artifact.
+        ManualResolutionEvidence,
+        /// Manual-resolution authorization proof artifact.
+        ManualResolutionAuthorization,
         /// Rendered public output artifact.
         PublicOutput,
         /// Redacted diagnostic artifact.
@@ -1689,6 +1693,8 @@ pub mod v1 {
                     "receipt",
                     "confirmation",
                     "ambiguity_evidence",
+                    "manual_resolution_evidence",
+                    "manual_resolution_authorization",
                     "public_output",
                     "redacted_diagnostic",
                     "retention_manifest",
@@ -2431,12 +2437,12 @@ pub mod v1 {
             EventFieldDescriptor::required("run_id", "RunId"),
             EventFieldDescriptor::required("spec_hash", "SpecHash"),
             EventFieldDescriptor::required("outcome", "ManualResolutionOutcome"),
-            EventFieldDescriptor::required("operator_identity_ref_schema_id", "SchemaId"),
-            EventFieldDescriptor::required("operator_identity_ref_hash", "ContentDigest"),
-            EventFieldDescriptor::required("operator_identity_ref_artifact_id", "ArtifactId"),
             EventFieldDescriptor::required("evidence_schema_id", "SchemaId"),
             EventFieldDescriptor::required("evidence_hash", "ContentDigest"),
             EventFieldDescriptor::required("evidence_artifact_id", "ArtifactId"),
+            EventFieldDescriptor::required("authorization_schema_id", "SchemaId"),
+            EventFieldDescriptor::required("authorization_hash", "ContentDigest"),
+            EventFieldDescriptor::required("authorization_artifact_id", "ArtifactId"),
             EventFieldDescriptor::optional("note", "ManualResolutionNote"),
         ],
     };
@@ -2499,10 +2505,10 @@ pub mod v1 {
             assert_eq!(all_event_schema_descriptors().len(), 26);
             assert_eq!(
                 rows,
-                "mfm_events::v1::RunStarted schema:mfm.events.v1.run_started:1:sha256-jcs-v1:72c99b0fab445d1953efe2033b852029213f76cdf3497c4aabb957cfd6c0594b\n\
+                "mfm_events::v1::RunStarted schema:mfm.events.v1.run_started:1:sha256-jcs-v1:0f0bac31971e6a13a205439875771471e79a2580cf9a764927566dadb59c1de3\n\
 mfm_events::v1::StateAttemptStarted schema:mfm.events.v1.state_attempt_started:1:sha256-jcs-v1:986f35aa39938713b9862192cab7d2b9b3a37219f5872bd242f8a06e7957ff1b\n\
 mfm_events::v1::FactRecorded schema:mfm.events.v1.fact_recorded:1:sha256-jcs-v1:e708d591505935c8d5b12e833e34e6883c3e62fc548758a53ed5199e94218f70\n\
-mfm_events::v1::ArtifactReferenced schema:mfm.events.v1.artifact_referenced:1:sha256-jcs-v1:613176b118a4c04c9c6e8a44f6ef7d1e2ca40599aeff76c62e5e7f94f0cf036e\n\
+mfm_events::v1::ArtifactReferenced schema:mfm.events.v1.artifact_referenced:1:sha256-jcs-v1:91b11de7db573b64256f1dad32df11c20ac65676ce86ef305b4add114cb45238\n\
 mfm_events::v1::CellProduced schema:mfm.events.v1.cell_produced:1:sha256-jcs-v1:9a2b250e7a5270bb302ae76a06091873dc50644855bace41bab97dcce311f07a\n\
 mfm_events::v1::CellSkipped schema:mfm.events.v1.cell_skipped:1:sha256-jcs-v1:e82d7230e3ca668b68f1403d3db7c07d36a3373f8e3744e9a41351a7aa5392f4\n\
 mfm_events::v1::side_effect::IntentPersisted schema:mfm.events.v1.side_effect.intent_persisted:1:sha256-jcs-v1:d2f3042ed5189e6e5081b781b205886e3c7d469e4cadb0fa4a61e460926c7cce\n\
@@ -2516,14 +2522,14 @@ mfm_events::v1::side_effect::SubmissionUnknown schema:mfm.events.v1.side_effect.
 mfm_events::v1::side_effect::ReceiptObserved schema:mfm.events.v1.side_effect.receipt_observed:1:sha256-jcs-v1:e8b248201bbd212aa5eeb8a2a6f44cb4bd245b11104fd139d2948d3725fe3450\n\
 mfm_events::v1::side_effect::ConfirmationObserved schema:mfm.events.v1.side_effect.confirmation_observed:1:sha256-jcs-v1:c6bc63539dd02ff1ea441f8313014a8d537f51504ea3ed827fc8c97a5654c601\n\
 mfm_events::v1::side_effect::Ambiguous schema:mfm.events.v1.side_effect.ambiguous:1:sha256-jcs-v1:dfc9030e0d4fbbeb1800317623cecea3fbb1256c5a1b5d0e272bcda5fa4ef823\n\
-mfm_events::v1::side_effect::Failed schema:mfm.events.v1.side_effect.failed:1:sha256-jcs-v1:a42114700400f3a2e13ac86dc432b485299557a62138093134643970ba36d864\n\
+mfm_events::v1::side_effect::Failed schema:mfm.events.v1.side_effect.failed:1:sha256-jcs-v1:5383637d64588098cf57414807ef612bce2dd3c46f18293952b05be463c650fb\n\
 mfm_events::v1::PublicOutputProduced schema:mfm.events.v1.public_output_produced:1:sha256-jcs-v1:00d2531467818398553aa59e62c034fa0cd054e7856b89f425aeb4510f9c6776\n\
-mfm_events::v1::PublicOutputRenderFailed schema:mfm.events.v1.public_output_render_failed:1:sha256-jcs-v1:daaaa636cc408550ce27e462d0fcc2873e64a74dc73dbd3adc0ad6f39ecaa420\n\
+mfm_events::v1::PublicOutputRenderFailed schema:mfm.events.v1.public_output_render_failed:1:sha256-jcs-v1:d6248427c0a4a64f05dc0cd40ddd1b45804554f532433af1d0c1a54f03cd7a53\n\
 mfm_events::v1::StateAttemptCompleted schema:mfm.events.v1.state_attempt_completed:1:sha256-jcs-v1:36800f9d3ae748d407bc2ea24339049471c8ffe40aa86c53b35b6c7c6cd6ee80\n\
-mfm_events::v1::StateAttemptFailed schema:mfm.events.v1.state_attempt_failed:1:sha256-jcs-v1:e034fdb67110d1619a6f5cc6fbbfa8faa87c249d7f90ad938dfaa67c76a51a2d\n\
-mfm_events::v1::ManualResolutionRecorded schema:mfm.events.v1.manual_resolution_recorded:1:sha256-jcs-v1:ec43deb806de6509a7c3e276379d5989c5a339b5f31273c94fd22c9685810932\n\
+mfm_events::v1::StateAttemptFailed schema:mfm.events.v1.state_attempt_failed:1:sha256-jcs-v1:4a954ff6afcc56bae0b9417032e54e8cd87867bc37100392072a00da64ee7b6f\n\
+mfm_events::v1::ManualResolutionRecorded schema:mfm.events.v1.manual_resolution_recorded:1:sha256-jcs-v1:b2b4122abfda77f0a8d087ea929189cd7735ea3e2ffa963e2f600e4ae74c0293\n\
 mfm_events::v1::RunCompleted schema:mfm.events.v1.run_completed:1:sha256-jcs-v1:cda37495cb3c733164ce1a91f58ff6d27bdcfbf9b1f9efe5a7fd48ae68eba479\n\
-mfm_events::v1::RetentionRefsAppended schema:mfm.events.v1.retention_refs_appended:1:sha256-jcs-v1:7b0fbde8418cc39d0e234aee9996dd95eb9d6830b2c0a33fde3749881e0e534e\n\
+mfm_events::v1::RetentionRefsAppended schema:mfm.events.v1.retention_refs_appended:1:sha256-jcs-v1:af3b02a4fd05d983a07f2456a2031e3d6d2ffc602b73aae091acf22f4909c7eb\n\
 mfm_events::v1::RetentionManifestProjected schema:mfm.events.v1.retention_manifest_projected:1:sha256-jcs-v1:269a96fc12c7c5004aa4592139f84cd0e4b617e04e494522ce639aeae0b9fed1"
             );
         }
@@ -2562,7 +2568,7 @@ mfm_events::v1::RetentionManifestProjected schema:mfm.events.v1.retention_manife
                 .expect("manual resolution schema json");
             let manual_json = manual_schema.as_str();
             assert!(manual_json.contains("\"name\":\"ManualResolutionOutcome\""));
-            assert!(manual_json.contains("\"name\":\"operator_identity_ref_schema_id\""));
+            assert!(manual_json.contains("\"name\":\"authorization_schema_id\""));
             assert!(manual_json.contains("\"name\":\"evidence_artifact_id\""));
 
             let side_effect_schema = SIDE_EFFECT_INTENT_PERSISTED_SCHEMA

@@ -264,6 +264,8 @@ pub(crate) fn staged_artifact_binding_kind(
         | events::ArtifactRole::Receipt
         | events::ArtifactRole::Confirmation
         | events::ArtifactRole::AmbiguityEvidence
+        | events::ArtifactRole::ManualResolutionEvidence
+        | events::ArtifactRole::ManualResolutionAuthorization
         | events::ArtifactRole::RetentionManifest => None,
     }
 }
@@ -296,6 +298,8 @@ pub(crate) fn staged_side_effect_artifact_phase(
         | events::ArtifactRole::FactResponse
         | events::ArtifactRole::PublicOutput
         | events::ArtifactRole::RedactedDiagnostic
+        | events::ArtifactRole::ManualResolutionEvidence
+        | events::ArtifactRole::ManualResolutionAuthorization
         | events::ArtifactRole::RetentionManifest => None,
     }
 }
@@ -365,6 +369,8 @@ pub(crate) fn artifact_role_name(role: events::ArtifactRole) -> &'static str {
         events::ArtifactRole::Receipt => "receipt",
         events::ArtifactRole::Confirmation => "confirmation",
         events::ArtifactRole::AmbiguityEvidence => "ambiguity_evidence",
+        events::ArtifactRole::ManualResolutionEvidence => "manual_resolution_evidence",
+        events::ArtifactRole::ManualResolutionAuthorization => "manual_resolution_authorization",
         events::ArtifactRole::PublicOutput => "public_output",
         events::ArtifactRole::RedactedDiagnostic => "redacted_diagnostic",
         events::ArtifactRole::RetentionManifest => "retention_manifest",

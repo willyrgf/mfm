@@ -1298,8 +1298,8 @@ mod tests {
         SchemaId, ScopeId, SemanticTypeId, SpecHash, SpecVersion, StateKind, StateVersion,
     };
     use mfm_spec::v1::{
-        CanonicalizerIdentity, ManualResolutionEvidenceSpec, MediaType, ResourceNamespace,
-        SagaPolicySpec, ValueLineageRef,
+        self as spec, CanonicalizerIdentity, ManualResolutionEvidenceSpec, MediaType,
+        ResourceNamespace, SagaPolicySpec, ValueLineageRef,
     };
     use mfm_store::v1::{
         ArtifactEvidenceRef, CellTerminalProjection, CommitKey, CommitOutcome, CommitPreconditions,
@@ -1540,29 +1540,18 @@ mod tests {
             run_id,
             spec_hash: spec_hash(1),
             outcome: events::ManualResolutionOutcome::ConfirmRemediated,
-            operator_identity_ref_schema_id: schema_id("mfm.test.operator_identity", byte),
-            operator_identity_ref_hash: content_digest(byte),
-            operator_identity_ref_artifact_id: artifact_id(byte),
             evidence_schema_id: schema_id("mfm.test.manual_evidence", byte + 1),
             evidence_hash: content_digest(byte + 1),
             evidence_artifact_id: artifact_id(byte + 1),
+            authorization_schema_id: schema_id("mfm.test.manual_authorization", byte + 2),
+            authorization_hash: content_digest(byte + 2),
+            authorization_artifact_id: artifact_id(byte + 2),
             note: Some(events::ManualResolutionNote::new("reviewed evidence").expect("note")),
         })
     }
 
     fn manual_resolution_artifacts(byte: u8) -> Vec<ArtifactEvidenceRef> {
         vec![
-            ArtifactEvidenceRef {
-                artifact_id: artifact_id(byte),
-                digest: content_digest(byte),
-                byte_len: 64,
-                media_type: media_type("application/json"),
-                schema_id: Some(schema_id("mfm.test.operator_identity", byte)),
-                semantic_type_id: None,
-                producer_node_id: None,
-                producer_seed_id: None,
-                artifact_role: ArtifactRole::StateOutput,
-            },
             ArtifactEvidenceRef {
                 artifact_id: artifact_id(byte + 1),
                 digest: content_digest(byte + 1),
@@ -1572,7 +1561,18 @@ mod tests {
                 semantic_type_id: None,
                 producer_node_id: None,
                 producer_seed_id: None,
-                artifact_role: ArtifactRole::StateOutput,
+                artifact_role: ArtifactRole::ManualResolutionEvidence,
+            },
+            ArtifactEvidenceRef {
+                artifact_id: artifact_id(byte + 2),
+                digest: content_digest(byte + 2),
+                byte_len: 128,
+                media_type: media_type("application/json"),
+                schema_id: Some(schema_id("mfm.test.manual_authorization", byte + 2)),
+                semantic_type_id: None,
+                producer_node_id: None,
+                producer_seed_id: None,
+                artifact_role: ArtifactRole::ManualResolutionAuthorization,
             },
         ]
     }
@@ -1581,8 +1581,36 @@ mod tests {
         SagaPolicySpec::ManualResolution {
             manual: ManualResolutionEvidenceSpec {
                 evidence_schema: schema_id("mfm.test.manual_evidence", byte + 1),
-                operator_identity_ref_schema: schema_id("mfm.test.operator_identity", byte),
+                authorization: manual_authorization(byte),
             },
+        }
+    }
+
+    fn manual_authorization(byte: u8) -> spec::ManualResolutionAuthorizationSpec {
+        spec::ManualResolutionAuthorizationSpec {
+            verifier_id: spec::ManualAuthorizationVerifierId::new(format!(
+                "mfm.test.manual.verifier.{byte}"
+            ))
+            .expect("verifier id"),
+            signing_scheme: spec::ManualSigningSchemeSpec::new(
+                "mfm.manual_resolution.digest_signature.v1",
+            )
+            .expect("signing scheme"),
+            authority: spec::OperatorAuthoritySnapshotSpec {
+                authority_id: spec::OperatorAuthorityId::new(format!(
+                    "mfm.test.manual.authority.{byte}"
+                ))
+                .expect("authority id"),
+                operators: vec![spec::OperatorAuthorityMemberSpec {
+                    operator_id: spec::OperatorId::new(format!("operator.{byte}"))
+                        .expect("operator id"),
+                    public_identity: spec::OperatorPublicIdentity::new(format!(
+                        "operator-public-{byte}"
+                    ))
+                    .expect("operator public identity"),
+                }],
+            },
+            quorum: spec::ManualAuthorizationQuorumSpec::new(1).expect("quorum"),
         }
     }
 

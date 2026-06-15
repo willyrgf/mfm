@@ -7185,8 +7185,8 @@ fn referenced_artifact_ids_for_payload(payload: &events::KernelEventPayload) -> 
             }
         }
         events::KernelEventPayload::ManualResolutionRecorded(payload) => {
-            artifacts.push(payload.operator_identity_ref_artifact_id.clone());
             artifacts.push(payload.evidence_artifact_id.clone());
+            artifacts.push(payload.authorization_artifact_id.clone());
         }
         events::KernelEventPayload::RunCompleted(payload) => match &payload.outcome {
             events::RunCompletionOutcome::Completed(_) => {}
@@ -7955,21 +7955,10 @@ fn append_manual_resolution(
         } => manual,
         _ => panic!("fixture does not carry manual resolution schemas"),
     };
-    let operator_identity_ref_hash = content(0xe1);
-    let operator_identity_ref_artifact_id = artifact(0xe2);
     let evidence_hash = content(0xe3);
     let evidence_artifact_id = artifact(0xe4);
-    let operator_identity = store::ArtifactEvidenceRef {
-        artifact_id: operator_identity_ref_artifact_id.clone(),
-        digest: operator_identity_ref_hash.clone(),
-        byte_len: 17,
-        media_type: spec::MediaType::new("application/json").expect("media"),
-        schema_id: Some(manual.operator_identity_ref_schema.clone()),
-        semantic_type_id: None,
-        producer_node_id: None,
-        producer_seed_id: None,
-        artifact_role: events::ArtifactRole::StateOutput,
-    };
+    let authorization_hash = content(0xe5);
+    let authorization_artifact_id = artifact(0xe6);
     let evidence = store::ArtifactEvidenceRef {
         artifact_id: evidence_artifact_id.clone(),
         digest: evidence_hash.clone(),
@@ -7979,7 +7968,18 @@ fn append_manual_resolution(
         semantic_type_id: None,
         producer_node_id: None,
         producer_seed_id: None,
-        artifact_role: events::ArtifactRole::StateOutput,
+        artifact_role: events::ArtifactRole::ManualResolutionEvidence,
+    };
+    let authorization = store::ArtifactEvidenceRef {
+        artifact_id: authorization_artifact_id.clone(),
+        digest: authorization_hash.clone(),
+        byte_len: 31,
+        media_type: spec::MediaType::new("application/json").expect("media"),
+        schema_id: Some(fixture.seed_ref.schema_id.clone()),
+        semantic_type_id: None,
+        producer_node_id: None,
+        producer_seed_id: None,
+        artifact_role: events::ArtifactRole::ManualResolutionAuthorization,
     };
     store
         .append_prepared_commit(store::TypedCommitRequest {
@@ -7991,16 +7991,16 @@ fn append_manual_resolution(
                     run_id: fixture.run_id.clone(),
                     spec_hash: fixture.runtime_spec.spec_hash().clone(),
                     outcome,
-                    operator_identity_ref_schema_id: manual.operator_identity_ref_schema.clone(),
-                    operator_identity_ref_hash,
-                    operator_identity_ref_artifact_id,
                     evidence_schema_id: manual.evidence_schema.clone(),
                     evidence_hash,
                     evidence_artifact_id,
+                    authorization_schema_id: fixture.seed_ref.schema_id.clone(),
+                    authorization_hash,
+                    authorization_artifact_id,
                     note: None,
                 },
             )],
-            required_artifacts: vec![operator_identity, evidence],
+            required_artifacts: vec![evidence, authorization],
             preconditions: store::CommitPreconditions {
                 required_run_state: store::RequiredRunState::NotCompleted,
                 saga_policy: Some(fixture.runtime_spec.spec().saga.clone()),
@@ -9688,13 +9688,41 @@ fn fixture_with_manual_resolution_side_effect_state() -> Fixture {
     let mut envelope = fixture.runtime_spec.envelope().clone();
     let manual = spec::ManualResolutionEvidenceSpec {
         evidence_schema: fixture.seed_ref.schema_id.clone(),
-        operator_identity_ref_schema: fixture.seed_ref.schema_id.clone(),
+        authorization: manual_authorization(0xe0),
     };
     envelope.spec.saga = spec::SagaPolicySpec::ManualResolution { manual };
     let envelope = spec::HashedSpecEnvelope::new(envelope.spec, envelope.audit).expect("rehash");
     fixture.runtime_spec =
         CertifiedRuntimeSpec::from_verified_envelope(envelope).expect("runtime spec");
     fixture
+}
+
+fn manual_authorization(byte: u8) -> spec::ManualResolutionAuthorizationSpec {
+    spec::ManualResolutionAuthorizationSpec {
+        verifier_id: spec::ManualAuthorizationVerifierId::new(format!(
+            "mfm.test.manual.verifier.{byte}"
+        ))
+        .expect("verifier id"),
+        signing_scheme: spec::ManualSigningSchemeSpec::new(
+            "mfm.manual_resolution.digest_signature.v1",
+        )
+        .expect("signing scheme"),
+        authority: spec::OperatorAuthoritySnapshotSpec {
+            authority_id: spec::OperatorAuthorityId::new(format!(
+                "mfm.test.manual.authority.{byte}"
+            ))
+            .expect("authority id"),
+            operators: vec![spec::OperatorAuthorityMemberSpec {
+                operator_id: spec::OperatorId::new(format!("operator.{byte}"))
+                    .expect("operator id"),
+                public_identity: spec::OperatorPublicIdentity::new(format!(
+                    "operator-public-{byte}"
+                ))
+                .expect("operator public identity"),
+            }],
+        },
+        quorum: spec::ManualAuthorizationQuorumSpec::new(1).expect("quorum"),
+    }
 }
 
 fn fixture_with_independent_second_node_and_first_side_effect_state() -> Fixture {

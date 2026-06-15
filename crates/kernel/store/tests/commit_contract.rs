@@ -7,8 +7,8 @@ use mfm_ids::{
     StateVersion,
 };
 use mfm_spec::v1::{
-    CanonicalizerIdentity, CellProducer, ManualResolutionEvidenceSpec, MediaType, PublicFieldPath,
-    RemediationUnresolvedSpec, ResourceNamespace, SagaPolicySpec, ValueLineageRef,
+    self as spec, CanonicalizerIdentity, CellProducer, ManualResolutionEvidenceSpec, MediaType,
+    PublicFieldPath, RemediationUnresolvedSpec, ResourceNamespace, SagaPolicySpec, ValueLineageRef,
 };
 use mfm_store::v1::{
     build_committed_batch, event_artifact_requirements, payload_canonical_json,
@@ -740,29 +740,18 @@ fn manual_resolution_recorded_for_run(run_id: RunId, byte: u8) -> KernelEventPay
         run_id,
         spec_hash: spec_hash(1),
         outcome: events::ManualResolutionOutcome::ConfirmRemediated,
-        operator_identity_ref_schema_id: schema_id("mfm.test.operator_identity", byte),
-        operator_identity_ref_hash: content_digest(byte),
-        operator_identity_ref_artifact_id: artifact_id(byte),
         evidence_schema_id: schema_id("mfm.test.manual_evidence", byte + 1),
         evidence_hash: content_digest(byte + 1),
         evidence_artifact_id: artifact_id(byte + 1),
+        authorization_schema_id: schema_id("mfm.test.manual_authorization", byte + 2),
+        authorization_hash: content_digest(byte + 2),
+        authorization_artifact_id: artifact_id(byte + 2),
         note: Some(events::ManualResolutionNote::new("reviewed evidence").expect("note")),
     })
 }
 
 fn manual_resolution_artifacts(byte: u8) -> Vec<ArtifactEvidenceRef> {
     vec![
-        ArtifactEvidenceRef {
-            artifact_id: artifact_id(byte),
-            digest: content_digest(byte),
-            byte_len: 64,
-            media_type: media_type("application/json"),
-            schema_id: Some(schema_id("mfm.test.operator_identity", byte)),
-            semantic_type_id: None,
-            producer_node_id: None,
-            producer_seed_id: None,
-            artifact_role: ArtifactRole::StateOutput,
-        },
         ArtifactEvidenceRef {
             artifact_id: artifact_id(byte + 1),
             digest: content_digest(byte + 1),
@@ -772,7 +761,18 @@ fn manual_resolution_artifacts(byte: u8) -> Vec<ArtifactEvidenceRef> {
             semantic_type_id: None,
             producer_node_id: None,
             producer_seed_id: None,
-            artifact_role: ArtifactRole::StateOutput,
+            artifact_role: ArtifactRole::ManualResolutionEvidence,
+        },
+        ArtifactEvidenceRef {
+            artifact_id: artifact_id(byte + 2),
+            digest: content_digest(byte + 2),
+            byte_len: 128,
+            media_type: media_type("application/json"),
+            schema_id: Some(schema_id("mfm.test.manual_authorization", byte + 2)),
+            semantic_type_id: None,
+            producer_node_id: None,
+            producer_seed_id: None,
+            artifact_role: ArtifactRole::ManualResolutionAuthorization,
         },
     ]
 }
@@ -781,8 +781,36 @@ fn manual_saga_policy(byte: u8) -> SagaPolicySpec {
     SagaPolicySpec::ManualResolution {
         manual: ManualResolutionEvidenceSpec {
             evidence_schema: schema_id("mfm.test.manual_evidence", byte + 1),
-            operator_identity_ref_schema: schema_id("mfm.test.operator_identity", byte),
+            authorization: manual_authorization(byte),
         },
+    }
+}
+
+fn manual_authorization(byte: u8) -> spec::ManualResolutionAuthorizationSpec {
+    spec::ManualResolutionAuthorizationSpec {
+        verifier_id: spec::ManualAuthorizationVerifierId::new(format!(
+            "mfm.test.manual.verifier.{byte}"
+        ))
+        .expect("verifier id"),
+        signing_scheme: spec::ManualSigningSchemeSpec::new(
+            "mfm.manual_resolution.digest_signature.v1",
+        )
+        .expect("signing scheme"),
+        authority: spec::OperatorAuthoritySnapshotSpec {
+            authority_id: spec::OperatorAuthorityId::new(format!(
+                "mfm.test.manual.authority.{byte}"
+            ))
+            .expect("authority id"),
+            operators: vec![spec::OperatorAuthorityMemberSpec {
+                operator_id: spec::OperatorId::new(format!("operator.{byte}"))
+                    .expect("operator id"),
+                public_identity: spec::OperatorPublicIdentity::new(format!(
+                    "operator-public-{byte}"
+                ))
+                .expect("operator public identity"),
+            }],
+        },
+        quorum: spec::ManualAuthorizationQuorumSpec::new(1).expect("quorum"),
     }
 }
 
@@ -3141,12 +3169,12 @@ fn manual_resolution_outcome_is_closed() {
         run_id: run_id(96),
         spec_hash: spec_hash(1),
         outcome: events::ManualResolutionOutcome::ConfirmRemediated,
-        operator_identity_ref_schema_id: schema_id("mfm.test.operator", 96),
-        operator_identity_ref_hash: content_digest(96),
-        operator_identity_ref_artifact_id: artifact_id(96),
         evidence_schema_id: schema_id("mfm.test.manual_evidence", 97),
         evidence_hash: content_digest(97),
         evidence_artifact_id: artifact_id(97),
+        authorization_schema_id: schema_id("mfm.test.manual_authorization", 98),
+        authorization_hash: content_digest(98),
+        authorization_artifact_id: artifact_id(98),
         note: Some(events::ManualResolutionNote::new("reviewed evidence").expect("note")),
     });
     assert!(matches!(
@@ -3485,6 +3513,39 @@ fn manual_resolution_requires_manual_blocked_prefix_and_is_unique() {
 }
 
 #[test]
+fn manual_resolution_artifacts_require_dedicated_roles() {
+    let run_id = run_id(120);
+    let mut store = InMemoryTypedRunStore::new();
+    store
+        .append_prepared_commit(run_start_request(
+            run_id.clone(),
+            "manual-artifact-role-run-start",
+        ))
+        .expect("append run start");
+    append_forward_confirmation(&mut store, &run_id);
+    append_generic_nonretryable_failure(&mut store, &run_id, "manual-artifact-role-failure");
+    let mut artifacts = manual_resolution_artifacts(156);
+    artifacts[0].artifact_role = ArtifactRole::StateOutput;
+    let error = store
+        .append_prepared_commit(TypedCommitRequest {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&run_id),
+            commit_key: CommitKey::new("manual-wrong-evidence-role").expect("commit key"),
+            payloads: vec![manual_resolution_recorded(156)],
+            required_artifacts: artifacts,
+            preconditions: saga_preconditions(manual_saga_policy(156)),
+        })
+        .expect_err("wrong manual evidence role rejects");
+    assert!(matches!(
+        error,
+        StoreError::ArtifactEvidenceMismatch {
+            field: "artifact_role",
+            ..
+        }
+    ));
+}
+
+#[test]
 fn saga_run_completed_requires_prefix_derived_terminal_outcome() {
     let run_id = run_id(120);
     let mut store = InMemoryTypedRunStore::new();
@@ -3590,7 +3651,7 @@ fn saga_projection_derives_obligations_and_run_mode_from_policy_and_stream() {
     let manual_policy = SagaPolicySpec::ManualResolution {
         manual: ManualResolutionEvidenceSpec {
             evidence_schema: schema_id("mfm.test.manual_evidence", 180),
-            operator_identity_ref_schema: schema_id("mfm.test.operator_identity", 181),
+            authorization: manual_authorization(181),
         },
     };
     let manual_projection = store
@@ -4379,12 +4440,12 @@ fn assert_projection_codecs_round_trip(snapshot: &ProjectionSnapshot) {
     let manual_resolution = ManualResolutionProjection {
         event_id: event_id(215),
         outcome: events::ManualResolutionOutcome::ConfirmRemediated,
-        operator_identity_ref_schema_id: schema_id("mfm.test.operator_identity", 216),
-        operator_identity_ref_hash: content_digest(217),
-        operator_identity_ref_artifact_id: artifact_id(218),
         evidence_schema_id: schema_id("mfm.test.manual_evidence", 219),
         evidence_hash: content_digest(220),
         evidence_artifact_id: artifact_id(221),
+        authorization_schema_id: schema_id("mfm.test.manual_authorization", 222),
+        authorization_hash: content_digest(223),
+        authorization_artifact_id: artifact_id(224),
         note: Some(events::ManualResolutionNote::new("operator reviewed").expect("note")),
     };
     let json = codec::manual_resolution_projection_json(&synthetic_run_id, &manual_resolution);

@@ -1005,12 +1005,12 @@ fn apply_manual_resolution_recorded(
         ManualResolutionProjection {
             event_id: event_id.clone(),
             outcome: payload.outcome,
-            operator_identity_ref_schema_id: payload.operator_identity_ref_schema_id.clone(),
-            operator_identity_ref_hash: payload.operator_identity_ref_hash.clone(),
-            operator_identity_ref_artifact_id: payload.operator_identity_ref_artifact_id.clone(),
             evidence_schema_id: payload.evidence_schema_id.clone(),
             evidence_hash: payload.evidence_hash.clone(),
             evidence_artifact_id: payload.evidence_artifact_id.clone(),
+            authorization_schema_id: payload.authorization_schema_id.clone(),
+            authorization_hash: payload.authorization_hash.clone(),
+            authorization_artifact_id: payload.authorization_artifact_id.clone(),
             note: payload.note.clone(),
         },
     );

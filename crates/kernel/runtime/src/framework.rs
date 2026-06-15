@@ -964,6 +964,8 @@ fn retained_refs_by_role(retained_refs: &[&events::RetentionRef]) -> RetainedRef
             | events::ArtifactRole::Submission
             | events::ArtifactRole::SubmissionUnknownEvidence
             | events::ArtifactRole::AmbiguityEvidence
+            | events::ArtifactRole::ManualResolutionEvidence
+            | events::ArtifactRole::ManualResolutionAuthorization
             | events::ArtifactRole::RedactedDiagnostic => {
                 value_artifacts.push(retention_ref.artifact_id.as_str().to_owned());
             }
@@ -1075,6 +1077,8 @@ fn retention_role_str(role: events::ArtifactRole) -> &'static str {
         events::ArtifactRole::Receipt => "receipt",
         events::ArtifactRole::Confirmation => "confirmation",
         events::ArtifactRole::AmbiguityEvidence => "ambiguity_evidence",
+        events::ArtifactRole::ManualResolutionEvidence => "manual_resolution_evidence",
+        events::ArtifactRole::ManualResolutionAuthorization => "manual_resolution_authorization",
         events::ArtifactRole::PublicOutput => "public_output",
         events::ArtifactRole::RedactedDiagnostic => "redacted_diagnostic",
         events::ArtifactRole::RetentionManifest => "retention_manifest",
