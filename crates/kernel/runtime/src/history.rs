@@ -855,6 +855,7 @@ fn validate_historical_run_stream(
             | events::KernelEventPayload::SideEffectFailed(_) => {
                 validate_historical_side_effect_payload(
                     runtime_spec,
+                    event.run_id(),
                     &active_attempts,
                     &mut side_effect_ledgers,
                     projections,

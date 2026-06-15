@@ -159,6 +159,7 @@ impl CertifiedRuntimeSpec {
     }
 
     /// Returns the forward node id linked to a remediation node.
+    #[cfg(test)]
     pub(crate) fn forward_node_for_remediation(
         &self,
         remediation_node_id: &NodeId,

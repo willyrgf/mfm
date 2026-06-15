@@ -18,6 +18,7 @@ path = "src/lib.rs"
 mfm-capabilities = { path = "../capabilities" }
 mfm-canonical = { path = "../canonical" }
 mfm-effects = { path = "../effects" }
+mfm-events = { path = "../events" }
 mfm-ids = { path = "../ids" }
 mfm-program = { path = "../program" }
 mfm-spec = { path = "../spec" }

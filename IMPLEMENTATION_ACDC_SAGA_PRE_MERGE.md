@@ -539,3 +539,53 @@ Checks run:
 - `cargo test -p mfm-manual-auth -p mfm-runtime -p mfm-replay`
 - `cargo test -p mfm-integration-tests --test cargo_metadata_contract`
 - `cargo test -p mfm-integration-tests --test architecture_namespace_contract`
+
+## Phase 12: Certified Side-Effect Contract Shared By Live, Resume, Replay
+
+Status: completed.
+
+Files changed:
+
+- `crates/kernel/certify/Cargo.toml`
+- `crates/kernel/certify/src/lib.rs`
+- `crates/kernel/runtime/src/commit.rs`
+- `crates/kernel/runtime/src/history.rs`
+- `crates/kernel/runtime/src/side_effects.rs`
+- `crates/kernel/runtime/src/spec_authority.rs`
+- `crates/kernel/replay/Cargo.toml`
+- `crates/kernel/replay/src/lib.rs`
+- `Cargo.lock`
+- `IMPLEMENTATION_ACDC_SAGA_PRE_MERGE.md`
+
+Validators deleted or replaced:
+
+- Introduced `CertifiedSideEffectContract` and `CertifiedRemediationLink` in `mfm-certify` as
+  the reusable authority for ledger purpose, resource-key evidence, exact touched-set evidence,
+  epoch resource-key consistency, and remediation forward-link checks.
+- Replaced runtime live side-effect resource-claim match arms with calls through the certified
+  contract.
+- Replaced runtime historical side-effect validation that only checked ledger purpose with shared
+  contract checks for resource evidence, touched-set evidence, epoch consistency, and certified
+  remediation links.
+- Replaced replay's duplicate resource-key, touched-set, remediation-node, and remediation-link
+  validators with the same certified contract used by runtime.
+- Moved `mfm-certify` into replay's normal dependency set because replay now consumes certified
+  side-effect authority in production code.
+
+Tests added or updated:
+
+- Added `mfm-certify` unit coverage for certified side-effect resource evidence validation.
+- Added `mfm-certify` unit coverage for certified remediation link validation.
+- Updated replay remediation-link rejection coverage to assert the shared certified-evidence
+  mismatch path.
+- Kept existing runtime and replay acceptance tests for missing resource keys, wrong resource-key
+  schema, missing touched sets, wrong touched-set schema, and invalid remediation links on the
+  shared validator path.
+
+Checks run:
+
+- `cargo fmt --all -- --check`
+- `cargo check -p mfm-certify -p mfm-runtime -p mfm-replay`
+- `cargo test -p mfm-certify -p mfm-runtime -p mfm-replay`
+- `cargo test -p mfm-integration-tests --test cargo_metadata_contract`
+- `cargo test -p mfm-integration-tests --test architecture_namespace_contract`

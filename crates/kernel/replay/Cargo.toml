@@ -16,6 +16,7 @@ path = "src/lib.rs"
 
 [dependencies]
 mfm-capabilities = { path = "../capabilities" }
+mfm-certify = { path = "../certify" }
 mfm-events = { path = "../events" }
 mfm-ids = { path = "../ids" }
 mfm-manual-auth = { path = "../manual-auth" }
@@ -25,5 +26,4 @@ mfm-store = { path = "../store" }
 
 [dev-dependencies]
 k256 = { version = "0.13.0", features = ["ecdsa"] }
-mfm-certify = { path = "../certify" }
 trybuild = "1.0"

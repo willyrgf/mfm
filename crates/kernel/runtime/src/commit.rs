@@ -405,6 +405,7 @@ impl CommitPlanner {
         )?;
         validate_runner_output(
             input.runtime_spec,
+            input.run_id,
             input.node,
             input.attempt_id,
             input.caps,
@@ -1659,6 +1660,7 @@ fn side_effect_ambiguity_error(
 
 fn validate_runner_output(
     runtime_spec: &CertifiedRuntimeSpec,
+    run_id: &RunId,
     node: &spec::NodeSpec,
     attempt_id: &AttemptId,
     caps: &CertifiedRuntimeCapabilities,
@@ -1817,6 +1819,7 @@ fn validate_runner_output(
             | events::KernelEventPayload::SideEffectFailed(_) => {
                 validate_runner_side_effect_payload(
                     runtime_spec,
+                    run_id,
                     node,
                     attempt_id,
                     caps,

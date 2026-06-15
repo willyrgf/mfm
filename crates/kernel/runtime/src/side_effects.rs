@@ -1,7 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use mfm_certify::{CertifiedRemediationLink, CertifiedSideEffectContract};
 use mfm_events::v1 as events;
-use mfm_ids::{AttemptId, NodeId};
+use mfm_ids::{AttemptId, NodeId, RunId};
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
 
@@ -51,10 +52,12 @@ pub(crate) struct HistoricalSideEffectLedger {
     node_id: NodeId,
     attempt_id: AttemptId,
     phase: HistoricalSideEffectPhase,
+    resource_key: Option<events::ResourceKeyEvidence>,
 }
 
 pub(crate) fn validate_historical_side_effect_payload(
     runtime_spec: &CertifiedRuntimeSpec,
+    run_id: &RunId,
     active_attempts: &BTreeSet<(NodeId, AttemptId)>,
     ledgers: &mut BTreeMap<events::SideEffectLedgerKey, HistoricalSideEffectLedger>,
     projections: &store::ProjectionSnapshot,
@@ -77,7 +80,11 @@ pub(crate) fn validate_historical_side_effect_payload(
             ledger_key, node_id, attempt_id
         )));
     }
-    validate_side_effect_ledger_purpose(runtime_spec, projections, node, payload)
+    let contract = certified_side_effect_contract(runtime_spec, node)
+        .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))?;
+    validate_side_effect_ledger_purpose(&contract, projections, run_id, payload)
+        .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))?;
+    validate_side_effect_resource_claim(&contract, payload)
         .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))?;
 
     match payload {
@@ -108,6 +115,7 @@ pub(crate) fn validate_historical_side_effect_payload(
                         node_id: node_id.clone(),
                         attempt_id: attempt_id.clone(),
                         phase,
+                        resource_key: None,
                     },
                 )
                 .is_some()
@@ -130,6 +138,15 @@ pub(crate) fn validate_historical_side_effect_payload(
                     "side-effect ledger {} changed node or attempt authority",
                     ledger_key
                 )));
+            }
+            if let events::KernelEventPayload::SideEffectInvocationPrepared(payload) = payload {
+                contract
+                    .validate_epoch_resource_consistency(
+                        ledger.resource_key.as_ref(),
+                        payload.resource_key.as_ref(),
+                    )
+                    .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))?;
+                ledger.resource_key = payload.resource_key.clone();
             }
             ledger.phase = phase;
         }
@@ -164,49 +181,44 @@ fn side_effect_payload_ledger_purpose(
         .map(|side_effect| side_effect.ledger_purpose)
 }
 
-fn validate_side_effect_ledger_purpose(
+fn certified_side_effect_contract(
     runtime_spec: &CertifiedRuntimeSpec,
-    projections: &store::ProjectionSnapshot,
     node: &spec::NodeSpec,
+) -> mfm_certify::Result<CertifiedSideEffectContract> {
+    CertifiedSideEffectContract::for_node(runtime_spec.spec(), &node.node_id)
+}
+
+fn validate_side_effect_ledger_purpose(
+    contract: &CertifiedSideEffectContract,
+    projections: &store::ProjectionSnapshot,
+    run_id: &RunId,
     payload: &events::KernelEventPayload,
 ) -> Result<()> {
     let purpose = side_effect_payload_ledger_purpose(payload).ok_or_else(|| {
         RuntimeError::InvalidRunnerOutput("expected side-effect payload".to_owned())
     })?;
-    let Some(forward_node_id) = runtime_spec.forward_node_for_remediation(&node.node_id) else {
-        if matches!(purpose, events::SideEffectLedgerPurpose::Forward) {
-            return Ok(());
-        }
-        return Err(RuntimeError::InvalidRunnerOutput(format!(
-            "forward side-effect node {} emitted remediation ledger purpose",
-            node.node_id
-        )));
-    };
-
+    contract
+        .validate_ledger_purpose(purpose)
+        .map_err(|error| RuntimeError::InvalidRunnerOutput(error.to_string()))?;
     let events::SideEffectLedgerPurpose::Remediation { forward_ledger_key } = purpose else {
-        return Err(RuntimeError::InvalidRunnerOutput(format!(
-            "remediation node {} emitted forward ledger purpose",
-            node.node_id
-        )));
+        return Ok(());
     };
-    let forward = projections.side_effect(forward_ledger_key).ok_or_else(|| {
-        RuntimeError::InvalidRunnerOutput(format!(
-            "remediation node {} linked missing forward ledger {}",
-            node.node_id, forward_ledger_key
-        ))
-    })?;
-    if matches!(
-        &forward.ledger_purpose,
-        events::SideEffectLedgerPurpose::Forward
-    ) && forward.intent.node_id == *forward_node_id
-    {
-        Ok(())
-    } else {
-        Err(RuntimeError::InvalidRunnerOutput(format!(
-            "remediation node {} linked ledger {} outside certified forward node {}",
-            node.node_id, forward_ledger_key, forward_node_id
-        )))
-    }
+    let forward = projections.side_effect_for_run(run_id, forward_ledger_key);
+    contract
+        .validate_remediation_link(CertifiedRemediationLink {
+            remediation_run_id: run_id,
+            ledger_purpose: purpose,
+            forward_run_id: forward.map(|projection| &projection.run_id),
+            forward_node_id: forward.map(|projection| &projection.intent.node_id),
+            forward_ledger_purpose: forward.map(|projection| &projection.ledger_purpose),
+            forward_confirmed: forward.is_some_and(|projection| {
+                matches!(
+                    projection.phase,
+                    store::SideEffectPhase::ConfirmationObserved { .. }
+                )
+            }),
+        })
+        .map_err(|error| RuntimeError::InvalidRunnerOutput(error.to_string()))
 }
 
 pub(crate) fn validate_historical_side_effect_confirmation(
@@ -513,6 +525,7 @@ pub(crate) fn side_effect_artifact_binding(
 
 pub(crate) fn validate_runner_side_effect_payload(
     runtime_spec: &CertifiedRuntimeSpec,
+    run_id: &RunId,
     node: &spec::NodeSpec,
     attempt_id: &AttemptId,
     caps: &CertifiedRuntimeCapabilities,
@@ -530,8 +543,10 @@ pub(crate) fn validate_runner_side_effect_payload(
             RuntimeError::InvalidRunnerOutput("expected side-effect payload".to_owned())
         })?;
     require_attempt(node, attempt_id, payload_node_id, payload_attempt_id)?;
-    validate_side_effect_ledger_purpose(runtime_spec, projections, node, payload)?;
-    validate_side_effect_resource_claim(node, payload)?;
+    let contract = certified_side_effect_contract(runtime_spec, node)
+        .map_err(|error| RuntimeError::InvalidRunnerOutput(error.to_string()))?;
+    validate_side_effect_ledger_purpose(&contract, projections, run_id, payload)?;
+    validate_side_effect_resource_claim(&contract, payload)?;
     match payload {
         events::KernelEventPayload::SideEffectIntentPersisted(payload) => {
             if payload.scope_id != node.scope_id {
@@ -584,100 +599,26 @@ pub(crate) fn validate_runner_side_effect_payload(
 }
 
 fn validate_side_effect_resource_claim(
-    node: &spec::NodeSpec,
+    contract: &CertifiedSideEffectContract,
     payload: &events::KernelEventPayload,
 ) -> Result<()> {
-    let Some(side_effect) = &node.side_effect else {
-        return Err(RuntimeError::InvalidRunnerOutput(format!(
-            "non-side-effect node {} emitted side-effect ledger event",
-            node.node_id
-        )));
-    };
     match payload {
         events::KernelEventPayload::SideEffectInvocationPrepared(payload) => {
-            match &side_effect.resource_claim {
-                spec::ResourceClaimSpec::Exclusive {
-                    namespace,
-                    key_schema,
-                } => {
-                    let Some(resource_key) = &payload.resource_key else {
-                        return Err(RuntimeError::InvalidRunnerOutput(format!(
-                            "exclusive side-effect node {} prepared invocation without resource key evidence",
-                            node.node_id
-                        )));
-                    };
-                    if &resource_key.namespace != namespace
-                        || &resource_key.key_schema_id != key_schema
-                    {
-                        return Err(RuntimeError::InvalidRunnerOutput(format!(
-                            "exclusive side-effect node {} prepared invocation with resource key evidence outside certified schema",
-                            node.node_id
-                        )));
-                    }
-                }
-                spec::ResourceClaimSpec::ExactTouchedSet { .. }
-                | spec::ResourceClaimSpec::ManualOnly => {
-                    if payload.resource_key.is_some() {
-                        return Err(RuntimeError::InvalidRunnerOutput(format!(
-                            "side-effect node {} recorded exclusive resource key without an exclusive certified resource claim",
-                            node.node_id
-                        )));
-                    }
-                }
-            }
+            contract
+                .validate_resource_key(payload.resource_key.as_ref())
+                .map_err(|error| RuntimeError::InvalidRunnerOutput(error.to_string()))?;
         }
         events::KernelEventPayload::SideEffectReceiptObserved(payload) => {
-            validate_side_effect_resource_touched_set(
-                node,
-                &side_effect.resource_claim,
-                payload.resource_touched_set.as_ref(),
-            )?;
+            contract
+                .validate_touched_set(payload.resource_touched_set.as_ref())
+                .map_err(|error| RuntimeError::InvalidRunnerOutput(error.to_string()))?;
         }
         events::KernelEventPayload::SideEffectConfirmationObserved(payload) => {
-            validate_side_effect_resource_touched_set(
-                node,
-                &side_effect.resource_claim,
-                payload.resource_touched_set.as_ref(),
-            )?;
+            contract
+                .validate_touched_set(payload.resource_touched_set.as_ref())
+                .map_err(|error| RuntimeError::InvalidRunnerOutput(error.to_string()))?;
         }
         _ => {}
-    }
-    Ok(())
-}
-
-fn validate_side_effect_resource_touched_set(
-    node: &spec::NodeSpec,
-    resource_claim: &spec::ResourceClaimSpec,
-    touched_set: Option<&events::ResourceTouchedSetEvidence>,
-) -> Result<()> {
-    match resource_claim {
-        spec::ResourceClaimSpec::ExactTouchedSet {
-            namespace,
-            evidence_schema,
-        } => {
-            let Some(touched_set) = touched_set else {
-                return Err(RuntimeError::InvalidRunnerOutput(format!(
-                    "exact-touched-set side-effect node {} observed terminal evidence without touched-set evidence",
-                    node.node_id
-                )));
-            };
-            if &touched_set.namespace != namespace
-                || &touched_set.evidence_schema_id != evidence_schema
-            {
-                return Err(RuntimeError::InvalidRunnerOutput(format!(
-                    "side-effect node {} recorded touched-set evidence outside certified schema",
-                    node.node_id
-                )));
-            }
-        }
-        spec::ResourceClaimSpec::Exclusive { .. } | spec::ResourceClaimSpec::ManualOnly => {
-            if touched_set.is_some() {
-                return Err(RuntimeError::InvalidRunnerOutput(format!(
-                    "side-effect node {} recorded touched-set evidence without an exact-touched-set certified resource claim",
-                    node.node_id
-                )));
-            }
-        }
     }
     Ok(())
 }

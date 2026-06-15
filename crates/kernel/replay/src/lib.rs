@@ -12,6 +12,7 @@ pub mod v1 {
     use std::fmt;
 
     use mfm_capabilities::CapabilitySetDescriptor;
+    use mfm_certify::{CertifiedRemediationLink, CertifiedSideEffectContract};
     use mfm_events::v1::{self as events, side_effect, ArtifactRole, KernelEventPayload};
     use mfm_ids::{
         AdapterKind, AdapterVersion, ArtifactId, AttemptId, CapabilityKind, CapabilityVersion,
@@ -1248,47 +1249,30 @@ pub mod v1 {
                     "side-effect intent does not match certified side-effect node",
                 ));
             }
-            match &payload.ledger_purpose {
-                events::SideEffectLedgerPurpose::Forward => {
-                    if self
-                        .certified_spec
-                        .spec
-                        .remediations
-                        .values()
-                        .any(|remediation| remediation.node_id == payload.node_id)
-                    {
-                        return Err(certified_evidence_mismatch(
-                            "forward side-effect intent targets a remediation node",
-                        ));
-                    }
-                }
+            let contract =
+                CertifiedSideEffectContract::for_node(&self.certified_spec.spec, &payload.node_id)
+                    .map_err(certified_contract_mismatch)?;
+            let forward = match &payload.ledger_purpose {
                 events::SideEffectLedgerPurpose::Remediation { forward_ledger_key } => {
-                    let forward =
-                        self.projection
-                            .side_effect(forward_ledger_key)
-                            .ok_or_else(|| {
-                                ReplayError::new(
-                                    ReplayErrorKind::SideEffectMissing,
-                                    format!("missing linked forward ledger {forward_ledger_key}"),
-                                )
-                            })?;
-                    let remediation = self
-                        .certified_spec
-                        .spec
-                        .remediations
-                        .get(&forward.intent.node_id)
-                        .ok_or_else(|| {
-                            certified_evidence_mismatch(
-                                "remediation ledger links to a forward node without remediation",
-                            )
-                        })?;
-                    if remediation.node_id != payload.node_id {
-                        return Err(certified_evidence_mismatch(
-                            "remediation side-effect intent targets the wrong certified node",
-                        ));
-                    }
+                    self.projection.side_effect(forward_ledger_key)
                 }
-            }
+                events::SideEffectLedgerPurpose::Forward => None,
+            };
+            contract
+                .validate_remediation_link(CertifiedRemediationLink {
+                    remediation_run_id: &self.run_id.run_id,
+                    ledger_purpose: &payload.ledger_purpose,
+                    forward_run_id: forward.map(|projection| &projection.run_id),
+                    forward_node_id: forward.map(|projection| &projection.intent.node_id),
+                    forward_ledger_purpose: forward.map(|projection| &projection.ledger_purpose),
+                    forward_confirmed: forward.is_some_and(|projection| {
+                        matches!(
+                            projection.phase,
+                            store::SideEffectPhase::ConfirmationObserved { .. }
+                        )
+                    }),
+                })
+                .map_err(certified_contract_mismatch)?;
             self.verify_node_capability(
                 &payload.node_id,
                 &payload.capability_kind,
@@ -1307,52 +1291,20 @@ pub mod v1 {
             payload: &side_effect::InvocationPrepared,
             resource_keys: &mut BTreeMap<events::SideEffectLedgerKey, events::ResourceKeyEvidence>,
         ) -> Result<()> {
-            let node = self.node(&payload.node_id)?;
-            let side_effect = node.side_effect.as_ref().ok_or_else(|| {
-                certified_evidence_mismatch(
-                    "side-effect invocation prepared for non-side-effect node",
+            self.node(&payload.node_id)?;
+            let contract =
+                CertifiedSideEffectContract::for_node(&self.certified_spec.spec, &payload.node_id)
+                    .map_err(certified_contract_mismatch)?;
+            contract
+                .validate_epoch_resource_consistency(
+                    resource_keys.get(&payload.ledger_key),
+                    payload.resource_key.as_ref(),
                 )
-            })?;
-            match &side_effect.resource_claim {
-                spec::ResourceClaimSpec::Exclusive {
-                    namespace,
-                    key_schema,
-                } => {
-                    let Some(resource_key) = payload.resource_key.as_ref() else {
-                        return Err(certified_evidence_mismatch(
-                            "exclusive side-effect invocation prepared without resource key evidence",
-                        ));
-                    };
-                    if &resource_key.namespace != namespace
-                        || &resource_key.key_schema_id != key_schema
-                    {
-                        return Err(certified_evidence_mismatch(
-                            "exclusive resource key evidence does not match certified claim schema",
-                        ));
-                    }
-                    match resource_keys.get(&payload.ledger_key) {
-                        Some(previous) if previous != resource_key => {
-                            Err(certified_evidence_mismatch(
-                                "exclusive resource key changed across invocation epochs",
-                            ))
-                        }
-                        Some(_) => Ok(()),
-                        None => {
-                            resource_keys.insert(payload.ledger_key.clone(), resource_key.clone());
-                            Ok(())
-                        }
-                    }
-                }
-                spec::ResourceClaimSpec::ExactTouchedSet { .. }
-                | spec::ResourceClaimSpec::ManualOnly => {
-                    if payload.resource_key.is_some() {
-                        return Err(certified_evidence_mismatch(
-                            "resource key evidence recorded without an exclusive resource claim",
-                        ));
-                    }
-                    Ok(())
-                }
+                .map_err(certified_contract_mismatch)?;
+            if let Some(resource_key) = payload.resource_key.as_ref() {
+                resource_keys.insert(payload.ledger_key.clone(), resource_key.clone());
             }
+            Ok(())
         }
 
         fn verify_resource_touched_set(
@@ -1360,40 +1312,10 @@ pub mod v1 {
             node_id: &NodeId,
             touched_set: Option<&events::ResourceTouchedSetEvidence>,
         ) -> Result<()> {
-            let node = self.node(node_id)?;
-            let side_effect = node.side_effect.as_ref().ok_or_else(|| {
-                certified_evidence_mismatch(
-                    "side-effect touched-set evidence for non-side-effect node",
-                )
-            })?;
-            match &side_effect.resource_claim {
-                spec::ResourceClaimSpec::ExactTouchedSet {
-                    namespace,
-                    evidence_schema,
-                } => {
-                    let Some(touched_set) = touched_set else {
-                        return Err(certified_evidence_mismatch(
-                            "exact-touched-set side-effect evidence missing touched-set evidence",
-                        ));
-                    };
-                    if &touched_set.namespace != namespace
-                        || &touched_set.evidence_schema_id != evidence_schema
-                    {
-                        return Err(certified_evidence_mismatch(
-                            "touched-set evidence does not match certified claim schema",
-                        ));
-                    }
-                    Ok(())
-                }
-                spec::ResourceClaimSpec::Exclusive { .. } | spec::ResourceClaimSpec::ManualOnly => {
-                    if touched_set.is_some() {
-                        return Err(certified_evidence_mismatch(
-                            "touched-set evidence recorded without an exact-touched-set resource claim",
-                        ));
-                    }
-                    Ok(())
-                }
-            }
+            self.node(node_id)?;
+            CertifiedSideEffectContract::for_node(&self.certified_spec.spec, node_id)
+                .and_then(|contract| contract.validate_touched_set(touched_set))
+                .map_err(certified_contract_mismatch)
         }
 
         fn verify_manual_resolution_against_spec(
@@ -2143,45 +2065,32 @@ pub mod v1 {
         projection: &ProjectionSnapshot,
     ) -> Result<()> {
         for (_, side_effect) in projection.side_effects() {
-            let events::SideEffectLedgerPurpose::Remediation { forward_ledger_key } =
-                &side_effect.ledger_purpose
-            else {
-                continue;
+            let contract = CertifiedSideEffectContract::for_node(
+                &certified_spec.spec,
+                &side_effect.intent.node_id,
+            )
+            .map_err(certified_contract_mismatch)?;
+            let forward = match &side_effect.ledger_purpose {
+                events::SideEffectLedgerPurpose::Remediation { forward_ledger_key } => {
+                    projection.side_effect(forward_ledger_key)
+                }
+                events::SideEffectLedgerPurpose::Forward => None,
             };
-            let forward = projection.side_effect(forward_ledger_key).ok_or_else(|| {
-                ReplayError::new(
-                    ReplayErrorKind::SideEffectMissing,
-                    format!("missing linked forward ledger {forward_ledger_key}"),
-                )
-            })?;
-            if forward.run_id != side_effect.run_id
-                || !matches!(
-                    forward.ledger_purpose,
-                    events::SideEffectLedgerPurpose::Forward
-                )
-                || !matches!(
-                    forward.phase,
-                    store::SideEffectPhase::ConfirmationObserved { .. }
-                )
-            {
-                return Err(certified_evidence_mismatch(
-                    "remediation ledger is not linked to a confirmed forward ledger",
-                ));
-            }
-            let remediation = certified_spec
-                .spec
-                .remediations
-                .get(&forward.intent.node_id)
-                .ok_or_else(|| {
-                    certified_evidence_mismatch(
-                        "remediation ledger references a forward node without certified remediation",
-                    )
-                })?;
-            if remediation.node_id != side_effect.intent.node_id {
-                return Err(certified_evidence_mismatch(
-                    "remediation ledger node does not match certified linkage",
-                ));
-            }
+            contract
+                .validate_remediation_link(CertifiedRemediationLink {
+                    remediation_run_id: &side_effect.run_id,
+                    ledger_purpose: &side_effect.ledger_purpose,
+                    forward_run_id: forward.map(|projection| &projection.run_id),
+                    forward_node_id: forward.map(|projection| &projection.intent.node_id),
+                    forward_ledger_purpose: forward.map(|projection| &projection.ledger_purpose),
+                    forward_confirmed: forward.is_some_and(|projection| {
+                        matches!(
+                            projection.phase,
+                            store::SideEffectPhase::ConfirmationObserved { .. }
+                        )
+                    }),
+                })
+                .map_err(certified_contract_mismatch)?;
         }
         Ok(())
     }
@@ -2248,6 +2157,13 @@ pub mod v1 {
 
     fn certified_evidence_mismatch(message: &'static str) -> ReplayError {
         ReplayError::new(ReplayErrorKind::CertifiedEvidenceMismatch, message)
+    }
+
+    fn certified_contract_mismatch(error: mfm_certify::CertifyError) -> ReplayError {
+        ReplayError::new(
+            ReplayErrorKind::CertifiedEvidenceMismatch,
+            error.to_string(),
+        )
     }
 
     fn run_started_payload(stream: &[KernelEventEnvelope]) -> Result<events::RunStarted> {
@@ -3214,7 +3130,7 @@ pub mod v1 {
                 verify_remediation_ledger_links(&certified_spec, &projection)
                     .expect_err("foreign forward")
                     .kind,
-                ReplayErrorKind::SideEffectMissing
+                ReplayErrorKind::CertifiedEvidenceMismatch
             );
         }
 
