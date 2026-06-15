@@ -2149,11 +2149,20 @@ fn certified_runtime_spec_rejects_lifecycle_ordering() {
         .expect("public output")
         .cell_id
         .clone();
+    let mut removed_descriptor_ids = Vec::new();
     envelope.spec.nodes.retain(|node| {
         !matches!(
             node.framework,
             Some(spec::FrameworkNodeSpec::ProjectRetentionManifest(_))
-        )
+        ) || {
+            removed_descriptor_ids.push(node.descriptor_id.clone());
+            false
+        }
+    });
+    envelope.spec.descriptor_identities.retain(|descriptor| {
+        !removed_descriptor_ids
+            .iter()
+            .any(|descriptor_id| descriptor.descriptor_id() == descriptor_id)
     });
     append_runtime_retention_lifecycle_node(&mut envelope.spec, public_cell, false);
     let envelope = spec::HashedSpecEnvelope::new(envelope.spec, envelope.audit).expect("rehash");

@@ -149,3 +149,45 @@ Checks run:
 - `cargo test -p mfm-runtime`
 - `cargo test -p mfm-integration-tests --test cargo_metadata_contract`
 - `cargo test -p mfm-integration-tests --test architecture_namespace_contract`
+
+## Phase 4: Descriptor Ref Migration And Spec Hash/Golden Updates
+
+Status: completed.
+
+Files changed:
+
+- `crates/kernel/spec/src/lib.rs`
+- `crates/kernel/certify/src/lib.rs`
+- `crates/kernel/runtime/src/tests.rs`
+- `IMPLEMENTATION_ACDC_SAGA_PRE_MERGE.md`
+
+Validators deleted or replaced:
+
+- Added spec-owned `DescriptorFamily` and `DescriptorRef`.
+- Added spec-owned descriptor reference/fingerprint APIs on `DescriptorIdentity`.
+- Changed persisted node JSON to store `descriptor_ref` instead of repeated `descriptor_id`, `state_kind`, `state_version`, `effect_kind`, and `capability_bindings`.
+- Changed persisted operation lineage and public-output renderer surfaces to use descriptor refs.
+- Changed persisted spec parsing to verify every descriptor ref against the descriptor table before rebuilding in-memory DTO fields.
+- Replaced certifier descriptor evidence hashing with `DescriptorIdentity::descriptor_ref`.
+- Replaced certifier registry digest descriptor payloads with descriptor-ref payloads.
+- Deleted certifier-local full descriptor identity JSON helpers used for descriptor fingerprinting.
+
+Tests added or updated:
+
+- Added spec parser regression for descriptor ref digest/family mismatches.
+- Updated public-output digest, spec hash, and certificate hash goldens for the descriptor-ref shape.
+- Updated a runtime malformed lifecycle fixture to remove stale descriptor table entries before appending replacement lifecycle nodes.
+
+Checks run:
+
+- `cargo check -p mfm-spec`
+- `cargo test -p mfm-spec`
+- `cargo check -p mfm-spec -p mfm-certify`
+- `cargo test -p mfm-certify`
+- `cargo check -p mfm-runtime -p mfm-app`
+- `cargo test -p mfm-runtime`
+- `cargo test -p mfm-app`
+- `cargo fmt --all -- --check`
+- `cargo check -p mfm-spec -p mfm-certify -p mfm-runtime -p mfm-app`
+- `cargo test -p mfm-integration-tests --test cargo_metadata_contract`
+- `cargo test -p mfm-integration-tests --test architecture_namespace_contract`

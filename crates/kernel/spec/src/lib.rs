@@ -859,7 +859,7 @@ pub mod v1 {
 
         /// Returns canonical JSON bytes for the hash-defining spec.
         pub fn canonical_json(&self) -> Result<PlainCanonicalJsonBytes> {
-            canonical_json(self.json())
+            canonical_json(self.json()?)
         }
 
         /// Returns the spec hash over canonical `TypedExecutionSpec` bytes.
@@ -918,8 +918,9 @@ pub mod v1 {
             Self::from_json_str(input)
         }
 
-        fn json(&self) -> serde_json::Value {
-            serde_json::json!({
+        fn json(&self) -> Result<serde_json::Value> {
+            let descriptor_index = DescriptorJsonIndex::new(&self.descriptor_identities)?;
+            Ok(serde_json::json!({
                 "authoring": self.authoring.json(),
                 "canonicalization": self.canonicalization.as_str(),
                 "cells": self.cells.iter().map(CellSpec::json).collect::<Vec<_>>(),
@@ -930,19 +931,22 @@ pub mod v1 {
                     .collect::<Vec<_>>(),
                 "lowering_version": self.lowering_version.as_str(),
                 "media_type": self.media_type.as_str(),
-                "nodes": self.nodes.iter().map(NodeSpec::json).collect::<Vec<_>>(),
+                "nodes": self.nodes
+                    .iter()
+                    .map(|node| node.json(&descriptor_index))
+                    .collect::<Result<Vec<_>>>()?,
                 "planning_lineage": self.planning_lineage
                     .iter()
-                    .map(OperationLineageFrameSpec::json)
-                    .collect::<Vec<_>>(),
-                "public_outputs": self.public_outputs.json(),
-                "remediations": remediations_json(&self.remediations),
+                    .map(|frame| frame.json(&descriptor_index))
+                    .collect::<Result<Vec<_>>>()?,
+                "public_outputs": self.public_outputs.json()?,
+                "remediations": remediations_json(&self.remediations, &descriptor_index)?,
                 "saga": self.saga.json(),
                 "scopes": self.scopes.iter().map(ScopeSpec::json).collect::<Vec<_>>(),
                 "seeds": self.seeds.iter().map(SeedSpec::json).collect::<Vec<_>>(),
                 "spec_version": self.spec_version.as_str(),
                 "value_lineages": self.value_lineages.iter().map(ValueLineage::json).collect::<Vec<_>>(),
-            })
+            }))
         }
     }
 
@@ -1375,6 +1379,38 @@ pub mod v1 {
     }
 
     impl DescriptorIdentity {
+        /// Returns this descriptor's family.
+        pub fn family(&self) -> DescriptorFamily {
+            match self {
+                Self::State(_) => DescriptorFamily::State,
+                Self::Operation(_) => DescriptorFamily::Operation,
+                Self::Renderer(_) => DescriptorFamily::Renderer,
+            }
+        }
+
+        /// Returns this descriptor's content-addressed id.
+        pub fn descriptor_id(&self) -> &DescriptorId {
+            match self {
+                Self::State(identity) => &identity.descriptor_id,
+                Self::Operation(identity) => &identity.descriptor_id,
+                Self::Renderer(identity) => &identity.descriptor_id,
+            }
+        }
+
+        /// Computes the canonical descriptor payload digest.
+        pub fn descriptor_digest(&self) -> Result<ContentDigest> {
+            content_digest(self.json())
+        }
+
+        /// Computes the descriptor reference used by node and contract records.
+        pub fn descriptor_ref(&self) -> Result<DescriptorRef> {
+            Ok(DescriptorRef {
+                family: self.family(),
+                descriptor_id: self.descriptor_id().clone(),
+                descriptor_digest: self.descriptor_digest()?,
+            })
+        }
+
         fn json(&self) -> serde_json::Value {
             match self {
                 Self::State(identity) => {
@@ -1393,6 +1429,97 @@ pub mod v1 {
                     json
                 }
             }
+        }
+    }
+
+    /// Descriptor family for content-addressed descriptor references.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub enum DescriptorFamily {
+        /// State descriptor reference.
+        State,
+        /// Operation descriptor reference.
+        Operation,
+        /// Public-output renderer descriptor reference.
+        Renderer,
+    }
+
+    impl DescriptorFamily {
+        /// Returns the persisted descriptor family string.
+        pub fn as_str(self) -> &'static str {
+            match self {
+                Self::State => "state",
+                Self::Operation => "operation",
+                Self::Renderer => "renderer",
+            }
+        }
+
+        /// Parses a persisted descriptor family string.
+        pub fn parse(value: &str) -> Result<Self> {
+            match value {
+                "state" => Ok(Self::State),
+                "operation" => Ok(Self::Operation),
+                "renderer" => Ok(Self::Renderer),
+                other => Err(json_error(format!(
+                    "unsupported descriptor family {other:?}"
+                ))),
+            }
+        }
+    }
+
+    /// Content-addressed reference to a descriptor table entry.
+    #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub struct DescriptorRef {
+        /// Descriptor family.
+        pub family: DescriptorFamily,
+        /// Descriptor identity.
+        pub descriptor_id: DescriptorId,
+        /// Canonical digest of the descriptor identity payload.
+        pub descriptor_digest: ContentDigest,
+    }
+
+    impl DescriptorRef {
+        fn json(&self) -> serde_json::Value {
+            serde_json::json!({
+                "descriptor_digest": self.descriptor_digest.as_str(),
+                "descriptor_family": self.family.as_str(),
+                "descriptor_id": self.descriptor_id.as_str(),
+            })
+        }
+    }
+
+    struct DescriptorJsonIndex {
+        refs: BTreeMap<String, DescriptorRef>,
+    }
+
+    impl DescriptorJsonIndex {
+        fn new(descriptors: &[DescriptorIdentity]) -> Result<Self> {
+            let mut refs = BTreeMap::new();
+            for descriptor in descriptors {
+                let reference = descriptor.descriptor_ref()?;
+                let key = reference.descriptor_id.as_str().to_owned();
+                if refs.insert(key.clone(), reference).is_some() {
+                    return Err(json_error(format!("duplicate descriptor identity {key}")));
+                }
+            }
+            Ok(Self { refs })
+        }
+
+        fn require(
+            &self,
+            descriptor_id: &DescriptorId,
+            family: DescriptorFamily,
+        ) -> Result<&DescriptorRef> {
+            let reference = self.refs.get(descriptor_id.as_str()).ok_or_else(|| {
+                json_error(format!("missing descriptor identity {descriptor_id}"))
+            })?;
+            if reference.family != family {
+                return Err(json_error(format!(
+                    "descriptor {descriptor_id} is {}, expected {}",
+                    reference.family.as_str(),
+                    family.as_str()
+                )));
+            }
+            Ok(reference)
         }
     }
 
@@ -1505,6 +1632,16 @@ pub mod v1 {
     }
 
     impl RendererDescriptorIdentity {
+        /// Computes the content-addressed renderer descriptor id from descriptor fields.
+        pub fn expected_descriptor_id(&self) -> Result<DescriptorId> {
+            descriptor_id_from_payload(serde_json::json!({
+                "canonicalizer_identity": self.canonicalizer_identity.as_str(),
+                "public_schema_id": self.public_schema_id.as_str(),
+                "renderer_kind": self.renderer_kind.as_str(),
+                "renderer_version": self.renderer_version.as_str(),
+            }))
+        }
+
         fn json(&self) -> serde_json::Value {
             serde_json::json!({
                 "canonicalizer_identity": self.canonicalizer_identity.as_str(),
@@ -1514,6 +1651,13 @@ pub mod v1 {
                 "renderer_version": self.renderer_version.as_str(),
             })
         }
+    }
+
+    fn descriptor_id_from_payload(value: serde_json::Value) -> Result<DescriptorId> {
+        Ok(DescriptorId::from_digest(
+            DigestAlgorithm::Sha256JcsV1,
+            *content_digest(value)?.digest(),
+        ))
     }
 
     /// Typed node spec for state and framework nodes.
@@ -1554,18 +1698,18 @@ pub mod v1 {
     }
 
     impl NodeSpec {
-        fn json(&self) -> serde_json::Value {
-            serde_json::json!({
+        fn json(&self, descriptors: &DescriptorJsonIndex) -> Result<serde_json::Value> {
+            let descriptor_ref =
+                descriptors.require(&self.descriptor_id, DescriptorFamily::State)?;
+            Ok(serde_json::json!({
                 "adapter_bindings": self.adapter_bindings.iter().map(AdapterBinding::json).collect::<Vec<_>>(),
-                "capability_bindings": capability_set_json(&self.capability_bindings),
                 "config_ref": self.config_ref.json(),
-                "descriptor_id": self.descriptor_id.as_str(),
+                "descriptor_ref": descriptor_ref.json(),
                 "deterministic_predecessors": self.deterministic_predecessors
                     .iter()
                     .map(NodeId::as_str)
                     .collect::<Vec<_>>(),
-                "effect_kind": self.effect_kind.as_str(),
-                "framework": self.framework.as_ref().map(FrameworkNodeSpec::json),
+                "framework": self.framework.as_ref().map(FrameworkNodeSpec::json).transpose()?,
                 "input_bindings": self.input_bindings.json(),
                 "node_id": self.node_id.as_str(),
                 "output_cell": self.output_cell.as_str(),
@@ -1573,9 +1717,7 @@ pub mod v1 {
                 "scope_id": self.scope_id.as_str(),
                 "side_effect": self.side_effect.as_ref().map(SideEffectContractSpec::json),
                 "stable_key": self.stable_key.as_str(),
-                "state_kind": self.state_kind.as_str(),
-                "state_version": self.state_version.as_str(),
-            })
+            }))
         }
     }
 
@@ -1699,8 +1841,8 @@ pub mod v1 {
             }
         }
 
-        fn json(&self) -> serde_json::Value {
-            match self {
+        fn json(&self) -> Result<serde_json::Value> {
+            Ok(match self {
                 Self::BootstrapRun(spec) => serde_json::json!({
                     "bootstrap_run": spec.json(),
                     "kind": "bootstrap_run",
@@ -1711,7 +1853,7 @@ pub mod v1 {
                 }),
                 Self::PublicOutputRender(spec) => serde_json::json!({
                     "kind": "public_output_render",
-                    "public_output_render": spec.json(),
+                    "public_output_render": spec.json()?,
                 }),
                 Self::ProjectRetentionManifest(spec) => serde_json::json!({
                     "kind": "project_retention_manifest",
@@ -1725,7 +1867,7 @@ pub mod v1 {
                     "kind": "resolve_saga_terminal",
                     "resolve_saga_terminal": spec.json(),
                 }),
-            }
+            })
         }
     }
 
@@ -1840,13 +1982,16 @@ pub mod v1 {
     }
 
     impl PublicOutputRenderNodeSpec {
-        fn json(&self) -> serde_json::Value {
-            serde_json::json!({
+        fn json(&self) -> Result<serde_json::Value> {
+            let renderer_ref =
+                DescriptorIdentity::Renderer(Box::new(self.renderer_descriptor.clone()))
+                    .descriptor_ref()?;
+            Ok(serde_json::json!({
                 "output_spec_digest": self.output_spec_digest.as_str(),
                 "public_schema_id": self.public_schema_id.as_str(),
-                "renderer_descriptor": self.renderer_descriptor.json(),
+                "renderer_descriptor_ref": renderer_ref.json(),
                 "required_cells": self.required_cells.iter().map(PublicOutputCell::json).collect::<Vec<_>>(),
-            })
+            }))
         }
     }
 
@@ -2326,19 +2471,21 @@ pub mod v1 {
     }
 
     impl OperationLineageFrameSpec {
-        fn json(&self) -> serde_json::Value {
-            serde_json::json!({
+        fn json(&self, descriptors: &DescriptorJsonIndex) -> Result<serde_json::Value> {
+            let descriptor_ref =
+                descriptors.require(&self.operation_descriptor_id, DescriptorFamily::Operation)?;
+            Ok(serde_json::json!({
                 "config_ref_digest": self.config_ref_digest.as_str(),
                 "input_bindings": self.input_bindings.json(),
                 "input_binding_digest": self.input_binding_digest.as_str(),
                 "lineage_digest": self.lineage_digest.as_str(),
-                "operation_descriptor_id": self.operation_descriptor_id.as_str(),
+                "operation_descriptor_ref": descriptor_ref.json(),
                 "operation_instance_id": self.operation_instance_id.as_str(),
                 "operation_key": self.operation_key.as_str(),
                 "output_cells": self.output_cells.iter().map(CellId::as_str).collect::<Vec<_>>(),
                 "parent_planning_lineage": self.parent_planning_lineage.json(),
                 "scope_id": self.scope_id.as_str(),
-            })
+            }))
         }
     }
 
@@ -2356,15 +2503,18 @@ pub mod v1 {
     impl PublicOutputSpec {
         /// Computes the canonical digest of this public output spec.
         pub fn digest(&self) -> Result<ContentDigest> {
-            content_digest(self.json())
+            content_digest(self.json()?)
         }
 
-        fn json(&self) -> serde_json::Value {
-            serde_json::json!({
+        fn json(&self) -> Result<serde_json::Value> {
+            let renderer_ref =
+                DescriptorIdentity::Renderer(Box::new(self.renderer_descriptor.clone()))
+                    .descriptor_ref()?;
+            Ok(serde_json::json!({
                 "outputs": self.outputs.iter().map(PublicOutputCell::json).collect::<Vec<_>>(),
                 "public_schema_id": self.public_schema_id.as_str(),
-                "renderer_descriptor": self.renderer_descriptor.json(),
-            })
+                "renderer_descriptor_ref": renderer_ref.json(),
+            }))
         }
     }
 
@@ -2439,12 +2589,17 @@ pub mod v1 {
         )
     }
 
-    fn remediations_json(remediations: &BTreeMap<NodeId, NodeSpec>) -> serde_json::Value {
+    fn remediations_json(
+        remediations: &BTreeMap<NodeId, NodeSpec>,
+        descriptors: &DescriptorJsonIndex,
+    ) -> Result<serde_json::Value> {
         let object = remediations
             .iter()
-            .map(|(forward_node_id, node)| (forward_node_id.as_str().to_owned(), node.json()))
-            .collect::<serde_json::Map<_, _>>();
-        serde_json::Value::Object(object)
+            .map(|(forward_node_id, node)| {
+                Ok((forward_node_id.as_str().to_owned(), node.json(descriptors)?))
+            })
+            .collect::<Result<serde_json::Map<_, _>>>()?;
+        Ok(serde_json::Value::Object(object))
     }
 
     fn parse_typed_execution_spec(value: &serde_json::Value) -> Result<TypedExecutionSpec> {
@@ -2480,25 +2635,35 @@ pub mod v1 {
             )));
         }
 
+        let descriptor_identities = parse_vec(
+            required(object, "descriptor_identities")?,
+            parse_descriptor_identity,
+        )?;
+        let descriptors = DescriptorParseIndex::new(&descriptor_identities)?;
+        let nodes = parse_vec_with(required(object, "nodes")?, |node| {
+            parse_node_spec(node, &descriptors)
+        })?;
+        let remediations = parse_remediations(required(object, "remediations")?, &descriptors)?;
+        let planning_lineage = parse_vec_with(required(object, "planning_lineage")?, |frame| {
+            parse_operation_lineage_frame(frame, &descriptors)
+        })?;
+        let public_outputs =
+            parse_public_output_spec(required(object, "public_outputs")?, &descriptors)?;
+        drop(descriptors);
+
         TypedExecutionSpec::new(TypedExecutionSpecParts {
             authoring: parse_authoring(required(object, "authoring")?)?,
             saga: parse_saga_policy(required(object, "saga")?)?,
             scopes: parse_vec(required(object, "scopes")?, parse_scope_spec)?,
             seeds: parse_vec(required(object, "seeds")?, parse_seed_spec)?,
-            descriptor_identities: parse_vec(
-                required(object, "descriptor_identities")?,
-                parse_descriptor_identity,
-            )?,
+            descriptor_identities,
             config_refs: parse_vec(required(object, "config_refs")?, parse_config_ref)?,
-            nodes: parse_vec(required(object, "nodes")?, parse_node_spec)?,
-            remediations: parse_remediations(required(object, "remediations")?)?,
+            nodes,
+            remediations,
             cells: parse_vec(required(object, "cells")?, parse_cell_spec)?,
             value_lineages: parse_vec(required(object, "value_lineages")?, parse_value_lineage)?,
-            planning_lineage: parse_vec(
-                required(object, "planning_lineage")?,
-                parse_operation_lineage_frame,
-            )?,
-            public_outputs: parse_public_output_spec(required(object, "public_outputs")?)?,
+            planning_lineage,
+            public_outputs,
         })
     }
 
@@ -2604,11 +2769,17 @@ pub mod v1 {
         }
     }
 
-    fn parse_remediations(value: &serde_json::Value) -> Result<BTreeMap<NodeId, NodeSpec>> {
+    fn parse_remediations(
+        value: &serde_json::Value,
+        descriptors: &DescriptorParseIndex<'_>,
+    ) -> Result<BTreeMap<NodeId, NodeSpec>> {
         object(value, "remediations")?
             .iter()
             .map(|(forward_node_id, node)| {
-                Ok((identity(forward_node_id.as_str())?, parse_node_spec(node)?))
+                Ok((
+                    identity(forward_node_id.as_str())?,
+                    parse_node_spec(node, descriptors)?,
+                ))
             })
             .collect()
     }
@@ -2696,6 +2867,115 @@ pub mod v1 {
         }
     }
 
+    struct DescriptorParseIndex<'a> {
+        states: BTreeMap<String, &'a StateDescriptorIdentity>,
+        operations: BTreeMap<String, &'a OperationDescriptorIdentity>,
+        renderers: BTreeMap<String, &'a RendererDescriptorIdentity>,
+        refs: BTreeMap<String, DescriptorRef>,
+    }
+
+    impl<'a> DescriptorParseIndex<'a> {
+        fn new(descriptors: &'a [DescriptorIdentity]) -> Result<Self> {
+            let mut index = Self {
+                states: BTreeMap::new(),
+                operations: BTreeMap::new(),
+                renderers: BTreeMap::new(),
+                refs: BTreeMap::new(),
+            };
+            for descriptor in descriptors {
+                let reference = descriptor.descriptor_ref()?;
+                let key = reference.descriptor_id.as_str().to_owned();
+                if index.refs.insert(key.clone(), reference).is_some() {
+                    return Err(json_error(format!("duplicate descriptor identity {key}")));
+                }
+                match descriptor {
+                    DescriptorIdentity::State(state) => {
+                        index.states.insert(key, state);
+                    }
+                    DescriptorIdentity::Operation(operation) => {
+                        index.operations.insert(key, operation);
+                    }
+                    DescriptorIdentity::Renderer(renderer) => {
+                        index.renderers.insert(key, renderer);
+                    }
+                }
+            }
+            Ok(index)
+        }
+
+        fn state(&self, reference: &DescriptorRef) -> Result<&'a StateDescriptorIdentity> {
+            self.require_ref(reference, DescriptorFamily::State)?;
+            self.states
+                .get(reference.descriptor_id.as_str())
+                .copied()
+                .ok_or_else(|| {
+                    json_error(format!(
+                        "missing state descriptor identity {}",
+                        reference.descriptor_id
+                    ))
+                })
+        }
+
+        fn operation(&self, reference: &DescriptorRef) -> Result<&'a OperationDescriptorIdentity> {
+            self.require_ref(reference, DescriptorFamily::Operation)?;
+            self.operations
+                .get(reference.descriptor_id.as_str())
+                .copied()
+                .ok_or_else(|| {
+                    json_error(format!(
+                        "missing operation descriptor identity {}",
+                        reference.descriptor_id
+                    ))
+                })
+        }
+
+        fn renderer(&self, reference: &DescriptorRef) -> Result<&'a RendererDescriptorIdentity> {
+            self.require_ref(reference, DescriptorFamily::Renderer)?;
+            self.renderers
+                .get(reference.descriptor_id.as_str())
+                .copied()
+                .ok_or_else(|| {
+                    json_error(format!(
+                        "missing renderer descriptor identity {}",
+                        reference.descriptor_id
+                    ))
+                })
+        }
+
+        fn require_ref(&self, reference: &DescriptorRef, family: DescriptorFamily) -> Result<()> {
+            if reference.family != family {
+                return Err(json_error(format!(
+                    "descriptor {} is {}, expected {}",
+                    reference.descriptor_id,
+                    reference.family.as_str(),
+                    family.as_str()
+                )));
+            }
+            let Some(expected) = self.refs.get(reference.descriptor_id.as_str()) else {
+                return Err(json_error(format!(
+                    "missing descriptor identity {}",
+                    reference.descriptor_id
+                )));
+            };
+            if expected != reference {
+                return Err(json_error(format!(
+                    "descriptor ref mismatch for {}",
+                    reference.descriptor_id
+                )));
+            }
+            Ok(())
+        }
+    }
+
+    fn parse_descriptor_ref(value: &serde_json::Value) -> Result<DescriptorRef> {
+        let object = object(value, "descriptor ref")?;
+        Ok(DescriptorRef {
+            family: DescriptorFamily::parse(required_str(object, "descriptor_family")?)?,
+            descriptor_id: identity(required_str(object, "descriptor_id")?)?,
+            descriptor_digest: identity(required_str(object, "descriptor_digest")?)?,
+        })
+    }
+
     fn parse_state_descriptor_identity(
         value: &serde_json::Value,
     ) -> Result<StateDescriptorIdentity> {
@@ -2751,26 +3031,33 @@ pub mod v1 {
         })
     }
 
-    fn parse_node_spec(value: &serde_json::Value) -> Result<NodeSpec> {
+    fn parse_node_spec(
+        value: &serde_json::Value,
+        descriptors: &DescriptorParseIndex<'_>,
+    ) -> Result<NodeSpec> {
         let object = object(value, "node")?;
+        let descriptor_ref = parse_descriptor_ref(required(object, "descriptor_ref")?)?;
+        let descriptor = descriptors.state(&descriptor_ref)?;
         Ok(NodeSpec {
             node_id: identity(required_str(object, "node_id")?)?,
             stable_key: StableAuthorKey::new(required_str(object, "stable_key")?)?,
             scope_id: identity(required_str(object, "scope_id")?)?,
-            state_kind: identity(required_str(object, "state_kind")?)?,
-            state_version: version(required_str(object, "state_version")?)?,
-            descriptor_id: identity(required_str(object, "descriptor_id")?)?,
+            state_kind: descriptor.state_kind.clone(),
+            state_version: descriptor.state_version.clone(),
+            descriptor_id: descriptor.descriptor_id.clone(),
             config_ref: parse_config_ref(required(object, "config_ref")?)?,
             input_bindings: parse_input_binding_spec(required(object, "input_bindings")?)?,
             output_cell: identity(required_str(object, "output_cell")?)?,
-            effect_kind: identity(required_str(object, "effect_kind")?)?,
-            capability_bindings: parse_capability_set(required(object, "capability_bindings")?)?,
+            effect_kind: descriptor.effect_kind.clone(),
+            capability_bindings: descriptor.capabilities.clone(),
             adapter_bindings: parse_vec(
                 required(object, "adapter_bindings")?,
                 parse_adapter_binding,
             )?,
             side_effect: optional_parse(object, "side_effect", parse_side_effect_contract)?,
-            framework: optional_parse(object, "framework", parse_framework_node)?,
+            framework: optional_parse_with(object, "framework", |framework| {
+                parse_framework_node(framework, descriptors)
+            })?,
             planning_lineage: parse_planning_lineage(required(object, "planning_lineage")?)?,
             deterministic_predecessors: parse_identity_vec(required(
                 object,
@@ -2823,7 +3110,10 @@ pub mod v1 {
         }
     }
 
-    fn parse_framework_node(value: &serde_json::Value) -> Result<FrameworkNodeSpec> {
+    fn parse_framework_node(
+        value: &serde_json::Value,
+        descriptors: &DescriptorParseIndex<'_>,
+    ) -> Result<FrameworkNodeSpec> {
         let object = object(value, "framework node")?;
         match required_str(object, "kind")? {
             "bootstrap_run" => Ok(FrameworkNodeSpec::BootstrapRun(parse_bootstrap_run_node(
@@ -2833,7 +3123,10 @@ pub mod v1 {
                 object, "bridge",
             )?)?)),
             "public_output_render" => Ok(FrameworkNodeSpec::PublicOutputRender(
-                parse_public_output_render_node(required(object, "public_output_render")?)?,
+                parse_public_output_render_node(
+                    required(object, "public_output_render")?,
+                    descriptors,
+                )?,
             )),
             "project_retention_manifest" => Ok(FrameworkNodeSpec::ProjectRetentionManifest(
                 parse_project_retention_manifest_node(required(
@@ -2873,15 +3166,15 @@ pub mod v1 {
 
     fn parse_public_output_render_node(
         value: &serde_json::Value,
+        descriptors: &DescriptorParseIndex<'_>,
     ) -> Result<PublicOutputRenderNodeSpec> {
         let object = object(value, "public-output render node")?;
+        let renderer_ref = parse_descriptor_ref(required(object, "renderer_descriptor_ref")?)?;
+        let renderer_descriptor = descriptors.renderer(&renderer_ref)?.clone();
         Ok(PublicOutputRenderNodeSpec {
             public_schema_id: identity(required_str(object, "public_schema_id")?)?,
             output_spec_digest: identity(required_str(object, "output_spec_digest")?)?,
-            renderer_descriptor: parse_renderer_descriptor_identity(required(
-                object,
-                "renderer_descriptor",
-            )?)?,
+            renderer_descriptor,
             required_cells: parse_vec(required(object, "required_cells")?, parse_public_cell)?,
         })
     }
@@ -3056,13 +3349,16 @@ pub mod v1 {
 
     fn parse_operation_lineage_frame(
         value: &serde_json::Value,
+        descriptors: &DescriptorParseIndex<'_>,
     ) -> Result<OperationLineageFrameSpec> {
         let object = object(value, "operation lineage frame")?;
+        let descriptor_ref = parse_descriptor_ref(required(object, "operation_descriptor_ref")?)?;
+        let descriptor = descriptors.operation(&descriptor_ref)?;
         Ok(OperationLineageFrameSpec {
             operation_instance_id: identity(required_str(object, "operation_instance_id")?)?,
             operation_key: StableAuthorKey::new(required_str(object, "operation_key")?)?,
             scope_id: identity(required_str(object, "scope_id")?)?,
-            operation_descriptor_id: identity(required_str(object, "operation_descriptor_id")?)?,
+            operation_descriptor_id: descriptor.descriptor_id.clone(),
             config_ref_digest: identity(required_str(object, "config_ref_digest")?)?,
             input_bindings: parse_input_binding_spec(required(object, "input_bindings")?)?,
             input_binding_digest: identity(required_str(object, "input_binding_digest")?)?,
@@ -3075,15 +3371,17 @@ pub mod v1 {
         })
     }
 
-    fn parse_public_output_spec(value: &serde_json::Value) -> Result<PublicOutputSpec> {
+    fn parse_public_output_spec(
+        value: &serde_json::Value,
+        descriptors: &DescriptorParseIndex<'_>,
+    ) -> Result<PublicOutputSpec> {
         let object = object(value, "public output spec")?;
+        let renderer_ref = parse_descriptor_ref(required(object, "renderer_descriptor_ref")?)?;
+        let renderer_descriptor = descriptors.renderer(&renderer_ref)?.clone();
         Ok(PublicOutputSpec {
             public_schema_id: identity(required_str(object, "public_schema_id")?)?,
             outputs: parse_vec(required(object, "outputs")?, parse_public_cell)?,
-            renderer_descriptor: parse_renderer_descriptor_identity(required(
-                object,
-                "renderer_descriptor",
-            )?)?,
+            renderer_descriptor,
         })
     }
 
@@ -3219,6 +3517,13 @@ pub mod v1 {
         array(value, "array")?.iter().map(parser).collect()
     }
 
+    fn parse_vec_with<T>(
+        value: &serde_json::Value,
+        parser: impl Fn(&serde_json::Value) -> Result<T>,
+    ) -> Result<Vec<T>> {
+        array(value, "array")?.iter().map(parser).collect()
+    }
+
     fn parse_identity_vec<T>(value: &serde_json::Value) -> Result<Vec<T>>
     where
         T: std::str::FromStr,
@@ -3234,6 +3539,17 @@ pub mod v1 {
         object: &serde_json::Map<String, serde_json::Value>,
         field: &'static str,
         parser: fn(&serde_json::Value) -> Result<T>,
+    ) -> Result<Option<T>> {
+        match object.get(field) {
+            Some(serde_json::Value::Null) | None => Ok(None),
+            Some(value) => parser(value).map(Some),
+        }
+    }
+
+    fn optional_parse_with<T>(
+        object: &serde_json::Map<String, serde_json::Value>,
+        field: &'static str,
+        parser: impl Fn(&serde_json::Value) -> Result<T>,
     ) -> Result<Option<T>> {
         match object.get(field) {
             Some(serde_json::Value::Null) | None => Ok(None),
@@ -3890,11 +4206,11 @@ pub mod v1 {
             let canonical = spec.canonical_json().expect("canonical spec");
             assert_eq!(
                 spec.public_outputs.digest().expect("public output digest").as_str(),
-                "content:sha256-jcs-v1:ce8334d18cfaebc951fd241a39cb87168bf5d283bd6c27a98de081c5492458f1"
+                "content:sha256-jcs-v1:e8d43ce660104518546731c9e7120d4df954e4f610e3c295996fceb377d27f4e"
             );
             assert_eq!(
                 spec.spec_hash().expect("spec hash").as_str(),
-                "spec:sha256-jcs-v1:1603ee63d62e17be336938dfc1d244595ae41951567054f7c9121ad9121c3c35"
+                "spec:sha256-jcs-v1:87d706df0b869b002f44c3de373d2825969c828dcaa315b355997cc23ab32857"
             );
             assert!(canonical
                 .as_str()
@@ -4093,6 +4409,38 @@ pub mod v1 {
                 parsed.spec_hash().expect("parsed hash"),
                 spec.spec_hash().expect("spec hash")
             );
+        }
+
+        #[test]
+        fn persisted_node_descriptor_refs_are_checked_against_descriptor_table() {
+            let spec = test_spec();
+            let canonical = spec.canonical_json().expect("canonical spec");
+            let value: serde_json::Value =
+                serde_json::from_str(canonical.as_str()).expect("spec JSON");
+            let first_node = &value["nodes"][0];
+
+            assert!(first_node.get("descriptor_ref").is_some());
+            assert!(first_node.get("descriptor_id").is_none());
+            assert!(first_node.get("state_kind").is_none());
+            assert!(first_node.get("state_version").is_none());
+            assert!(first_node.get("effect_kind").is_none());
+            assert!(first_node.get("capability_bindings").is_none());
+
+            let mut wrong_digest = value.clone();
+            wrong_digest["nodes"][0]["descriptor_ref"]["descriptor_digest"] =
+                serde_json::json!(content(0xfe).as_str());
+            let input = serde_json::to_string(&wrong_digest).expect("JSON");
+            let err = TypedExecutionSpec::from_json_str(&input)
+                .expect_err("descriptor digest mismatch rejects");
+            assert!(err.to_string().contains("descriptor ref mismatch"), "{err}");
+
+            let mut wrong_family = value;
+            wrong_family["nodes"][0]["descriptor_ref"]["descriptor_family"] =
+                serde_json::json!("operation");
+            let input = serde_json::to_string(&wrong_family).expect("JSON");
+            let err = TypedExecutionSpec::from_json_str(&input)
+                .expect_err("descriptor family mismatch rejects");
+            assert!(err.to_string().contains("expected state"), "{err}");
         }
 
         #[test]

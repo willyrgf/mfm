@@ -527,36 +527,7 @@ impl CertifiedOperatorAuthorityMemberEvidence {
 }
 
 /// Descriptor family covered by a certificate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum CertifiedDescriptorFamily {
-    /// State descriptor evidence.
-    State,
-    /// Operation descriptor evidence.
-    Operation,
-    /// Public-output renderer descriptor evidence.
-    Renderer,
-}
-
-impl CertifiedDescriptorFamily {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::State => "state",
-            Self::Operation => "operation",
-            Self::Renderer => "renderer",
-        }
-    }
-
-    fn parse(value: &str) -> Result<Self> {
-        match value {
-            "state" => Ok(Self::State),
-            "operation" => Ok(Self::Operation),
-            "renderer" => Ok(Self::Renderer),
-            _ => Err(certificate(format!(
-                "unsupported descriptor family {value:?}"
-            ))),
-        }
-    }
-}
+pub type CertifiedDescriptorFamily = spec::DescriptorFamily;
 
 /// Descriptor identity and digest covered by a certificate.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -740,13 +711,19 @@ impl CertificationRegistry {
 
     /// Returns the deterministic digest of this registry authority.
     pub fn digest(&self) -> Result<ContentDigest> {
+        let operations = self
+            .operations
+            .values()
+            .map(operation_descriptor_ref_json)
+            .collect::<Result<Vec<_>>>()?;
+        let states = self
+            .states
+            .values()
+            .map(state_descriptor_ref_json)
+            .collect::<Result<Vec<_>>>()?;
         content_digest_json(serde_json::json!({
             "algorithm": REGISTRY_DIGEST_ALGORITHM,
-            "operations": self
-                .operations
-                .values()
-                .map(operation_descriptor_identity_json)
-                .collect::<Vec<_>>(),
+            "operations": operations,
             "manual_authorization_verifiers": self
                 .manual_authorization_verifiers
                 .iter()
@@ -768,11 +745,7 @@ impl CertificationRegistry {
                     })
                 })
                 .collect::<Vec<_>>(),
-            "states": self
-                .states
-                .values()
-                .map(state_descriptor_identity_json)
-                .collect::<Vec<_>>(),
+            "states": states,
         }))
     }
 
@@ -1398,10 +1371,13 @@ fn descriptor_evidence_for_spec(
         .descriptor_identities
         .iter()
         .map(|descriptor| {
+            let reference = descriptor
+                .descriptor_ref()
+                .map_err(|error| CertifyError::Spec(error.to_string()))?;
             Ok(CertifiedDescriptorEvidence {
-                descriptor_family: certified_descriptor_family(descriptor),
-                descriptor_id: descriptor_id(descriptor).clone(),
-                descriptor_digest: content_digest_json(descriptor_identity_json(descriptor))?,
+                descriptor_family: reference.family,
+                descriptor_id: reference.descriptor_id,
+                descriptor_digest: reference.descriptor_digest,
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -2550,7 +2526,7 @@ impl<'a> DraftLowerer<'a> {
     }
 
     fn insert_descriptor(&mut self, descriptor: spec::DescriptorIdentity) -> Result<()> {
-        let key = descriptor_id(&descriptor).as_str().to_owned();
+        let key = descriptor.descriptor_id().as_str().to_owned();
         if let Some(existing) = self.descriptor_identities.get(&key) {
             if existing != &descriptor {
                 return Err(problem(
@@ -2880,7 +2856,7 @@ impl<'a> DescriptorIndex<'a> {
         };
         let mut all = BTreeSet::new();
         for descriptor in descriptors {
-            let id = descriptor_id(descriptor).as_str().to_owned();
+            let id = descriptor.descriptor_id().as_str().to_owned();
             if !all.insert(id.clone()) {
                 return Err(problem(
                     ProblemClass::InvalidSemanticTransition,
@@ -2980,7 +2956,9 @@ fn validate_descriptor_authority(
         }
     }
     for descriptor in descriptors.renderers.values() {
-        let expected = renderer_descriptor_id(descriptor)?;
+        let expected = descriptor
+            .expected_descriptor_id()
+            .map_err(|error| CertifyError::Spec(error.to_string()))?;
         if descriptor.descriptor_id != expected {
             return Err(problem(
                 ProblemClass::InvalidTerminalShape,
@@ -4759,90 +4737,30 @@ fn collect_input_cells_into(root: &spec::InputBindingNodeSpec, output: &mut Vec<
     }
 }
 
-fn descriptor_id(descriptor: &spec::DescriptorIdentity) -> &DescriptorId {
-    match descriptor {
-        spec::DescriptorIdentity::State(identity) => &identity.descriptor_id,
-        spec::DescriptorIdentity::Operation(identity) => &identity.descriptor_id,
-        spec::DescriptorIdentity::Renderer(identity) => &identity.descriptor_id,
-    }
-}
-
-fn certified_descriptor_family(descriptor: &spec::DescriptorIdentity) -> CertifiedDescriptorFamily {
-    match descriptor {
-        spec::DescriptorIdentity::State(_) => CertifiedDescriptorFamily::State,
-        spec::DescriptorIdentity::Operation(_) => CertifiedDescriptorFamily::Operation,
-        spec::DescriptorIdentity::Renderer(_) => CertifiedDescriptorFamily::Renderer,
-    }
-}
-
-fn descriptor_identity_json(descriptor: &spec::DescriptorIdentity) -> serde_json::Value {
-    match descriptor {
-        spec::DescriptorIdentity::State(identity) => {
-            let mut json = state_descriptor_identity_json(identity);
-            json["descriptor_family"] = serde_json::json!("state");
-            json
-        }
-        spec::DescriptorIdentity::Operation(identity) => {
-            let mut json = operation_descriptor_identity_json(identity);
-            json["descriptor_family"] = serde_json::json!("operation");
-            json
-        }
-        spec::DescriptorIdentity::Renderer(identity) => {
-            let mut json = renderer_descriptor_identity_json(identity);
-            json["descriptor_family"] = serde_json::json!("renderer");
-            json
-        }
-    }
-}
-
-fn state_descriptor_identity_json(descriptor: &spec::StateDescriptorIdentity) -> serde_json::Value {
+fn descriptor_ref_json(reference: spec::DescriptorRef) -> serde_json::Value {
     serde_json::json!({
-        "capabilities": capability_set_json(&descriptor.capabilities),
-        "config_schema_id": descriptor.config_schema_id.as_str(),
-        "descriptor_id": descriptor.descriptor_id.as_str(),
-        "effect_class": descriptor.effect_class.as_str(),
-        "effect_kind": descriptor.effect_kind.as_str(),
-        "effect_name": descriptor.effect_name.as_str(),
-        "effect_version": descriptor.effect_version.as_str(),
-        "input_schema_id": descriptor.input_schema_id.as_str(),
-        "name": descriptor.name.as_str(),
-        "output_schema_id": descriptor.output_schema_id.as_str(),
-        "output_semantic_type_id": descriptor.output_semantic_type_id.as_str(),
-        "runner": descriptor.runner.as_str(),
-        "side_effect_contract_digest": descriptor
-            .side_effect_contract_digest
-            .as_ref()
-            .map(ContentDigest::as_str),
-        "state_kind": descriptor.state_kind.as_str(),
-        "state_version": descriptor.state_version.as_str(),
+        "descriptor_digest": reference.descriptor_digest.as_str(),
+        "descriptor_family": reference.family.as_str(),
+        "descriptor_id": reference.descriptor_id.as_str(),
     })
 }
 
-fn operation_descriptor_identity_json(
+fn state_descriptor_ref_json(
+    descriptor: &spec::StateDescriptorIdentity,
+) -> Result<serde_json::Value> {
+    let reference = spec::DescriptorIdentity::State(Box::new(descriptor.clone()))
+        .descriptor_ref()
+        .map_err(|error| CertifyError::Spec(error.to_string()))?;
+    Ok(descriptor_ref_json(reference))
+}
+
+fn operation_descriptor_ref_json(
     descriptor: &spec::OperationDescriptorIdentity,
-) -> serde_json::Value {
-    serde_json::json!({
-        "config_schema_id": descriptor.config_schema_id.as_str(),
-        "descriptor_id": descriptor.descriptor_id.as_str(),
-        "expansion_abi": descriptor.expansion_abi.as_str(),
-        "input_schema_id": descriptor.input_schema_id.as_str(),
-        "name": descriptor.name.as_str(),
-        "operation_kind": descriptor.operation_kind.as_str(),
-        "operation_version": descriptor.operation_version.as_str(),
-        "output_schema_id": descriptor.output_schema_id.as_str(),
-    })
-}
-
-fn renderer_descriptor_identity_json(
-    descriptor: &spec::RendererDescriptorIdentity,
-) -> serde_json::Value {
-    serde_json::json!({
-        "canonicalizer_identity": descriptor.canonicalizer_identity.as_str(),
-        "descriptor_id": descriptor.descriptor_id.as_str(),
-        "public_schema_id": descriptor.public_schema_id.as_str(),
-        "renderer_kind": descriptor.renderer_kind.as_str(),
-        "renderer_version": descriptor.renderer_version.as_str(),
-    })
+) -> Result<serde_json::Value> {
+    let reference = spec::DescriptorIdentity::Operation(Box::new(descriptor.clone()))
+        .descriptor_ref()
+        .map_err(|error| CertifyError::Spec(error.to_string()))?;
+    Ok(descriptor_ref_json(reference))
 }
 
 fn canonical_json_bytes(value: serde_json::Value) -> Result<PlainCanonicalJsonBytes> {
@@ -4984,7 +4902,8 @@ fn parse_descriptor_evidence(value: &serde_json::Value) -> Result<CertifiedDescr
         descriptor_family: CertifiedDescriptorFamily::parse(required_str(
             object,
             "descriptor_family",
-        )?)?,
+        )?)
+        .map_err(|error| certificate(error.to_string()))?,
         descriptor_id: parse_identity(required_str(object, "descriptor_id")?)?,
         descriptor_digest: parse_identity(required_str(object, "descriptor_digest")?)?,
     })
@@ -5120,15 +5039,6 @@ fn operation_descriptor_id_from_spec(
     }))
 }
 
-fn renderer_descriptor_id(descriptor: &spec::RendererDescriptorIdentity) -> Result<DescriptorId> {
-    descriptor_id_json(serde_json::json!({
-        "canonicalizer_identity": descriptor.canonicalizer_identity.as_str(),
-        "public_schema_id": descriptor.public_schema_id.as_str(),
-        "renderer_kind": descriptor.renderer_kind.as_str(),
-        "renderer_version": descriptor.renderer_version.as_str(),
-    }))
-}
-
 fn state_kind_json(name: &str, value: serde_json::Value) -> Result<StateKind> {
     StateKind::new(
         "mfm.framework",
@@ -5150,12 +5060,18 @@ fn renderer_descriptor(public_schema_id: &SchemaId) -> Result<spec::RendererDesc
         .map_err(|error| lower(error.to_string()))?;
     let canonicalizer_identity = spec::CanonicalizerIdentity::new("sha256-jcs-v1")
         .map_err(|error| lower(error.to_string()))?;
-    let descriptor_id = descriptor_id_json(serde_json::json!({
-        "canonicalizer_identity": canonicalizer_identity.as_str(),
-        "public_schema_id": public_schema_id.as_str(),
-        "renderer_kind": renderer_kind.as_str(),
-        "renderer_version": renderer_version.as_str(),
-    }))?;
+    let descriptor_id = spec::RendererDescriptorIdentity {
+        descriptor_id: DescriptorId::from_digest(
+            DigestAlgorithm::Sha256JcsV1,
+            DigestBytes::from_array([0; 32]),
+        ),
+        renderer_kind: renderer_kind.clone(),
+        renderer_version: renderer_version.clone(),
+        public_schema_id: public_schema_id.clone(),
+        canonicalizer_identity: canonicalizer_identity.clone(),
+    }
+    .expected_descriptor_id()
+    .map_err(|error| CertifyError::Spec(error.to_string()))?;
     Ok(spec::RendererDescriptorIdentity {
         descriptor_id,
         renderer_kind,
@@ -6269,7 +6185,7 @@ mod tests {
         );
         assert_eq!(
             certified.certificate_hash().as_str(),
-            "content:sha256-jcs-v1:471a6f8b24c101ea979a9d2c65161dc0a099e6101765011ea6597727ce182aaf"
+            "content:sha256-jcs-v1:a281b7951f020fca33c118e9e7dd53144832c957346237a013e6487851711b51"
         );
         assert_eq!(
             certified.envelope().spec.public_outputs.public_schema_id,
