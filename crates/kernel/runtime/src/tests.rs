@@ -7026,7 +7026,7 @@ where
             index = end;
             continue;
         }
-        let seq = next_seq_after_stream(&rewritten).expect("next rewritten stream seq");
+        let seq = next_seq_for_stream_for_tests(first.run_id(), &rewritten);
         let request = store::TypedCommitRequest {
             run_id: first.run_id().clone(),
             expected_next_seq: seq,
@@ -7255,6 +7255,15 @@ fn increment_stream_seq_for_tests(seq: store::StreamSeq) -> store::StreamSeq {
     store::StreamSeq::new(seq.as_u64() + 1).expect("next shifted seq")
 }
 
+fn next_seq_for_stream_for_tests(
+    run_id: &RunId,
+    stream: &[store::KernelEventEnvelope],
+) -> store::StreamSeq {
+    store::CommittedRunStream::from_events(run_id.clone(), stream.to_vec())
+        .expect("committed stream")
+        .next_seq()
+}
+
 fn append_payload_commit_for_tests(
     stream: &mut Vec<store::KernelEventEnvelope>,
     run_id: &RunId,
@@ -7270,7 +7279,7 @@ fn append_payloads_commit_for_tests(
     commit_key: &str,
     payloads: Vec<events::KernelEventPayload>,
 ) {
-    let seq = next_seq_after_stream(stream).expect("next stream seq");
+    let seq = next_seq_for_stream_for_tests(run_id, stream);
     let request = store::TypedCommitRequest {
         run_id: run_id.clone(),
         expected_next_seq: seq,

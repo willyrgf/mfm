@@ -279,3 +279,51 @@ Checks run:
 - `cargo fmt --all -- --check`
 - `cargo test -p mfm-integration-tests --test cargo_metadata_contract`
 - `cargo test -p mfm-integration-tests --test architecture_namespace_contract`
+
+## Phase 7: Store-Owned Committed Run Stream Authority
+
+Status: completed.
+
+Files changed:
+
+- `crates/kernel/store/src/lib.rs`
+- `crates/kernel/store/tests/commit_contract.rs`
+- `crates/kernel/runtime/src/history.rs`
+- `crates/kernel/runtime/src/lib.rs`
+- `crates/kernel/runtime/src/tests.rs`
+- `IMPLEMENTATION_ACDC_SAGA_PRE_MERGE.md`
+
+Validators deleted or replaced:
+
+- Added `CommittedRunStream` as the store-owned authority for one run stream's ordering, atomic
+  commit grouping, projection rebuild, next sequence, and artifact role requirements.
+- Added `CommittedRunStreamCommit` read views so callers can inspect commit grouping without
+  reconstructing it from loose event vectors.
+- Added `VerifiedProjectionSnapshot` as the internal projection authority carried by
+  `CommittedRunStream`.
+- Replaced runtime-local next-sequence reconstruction with `CommittedRunStream::next_seq`.
+- Replaced runtime-local stream validation/projection rebuild entry paths with
+  `CommittedRunStream::from_events` and `RuntimeRunView::from_committed_stream`.
+- Kept runtime validation focused on certified-spec agreement and historical runtime semantics
+  after store validation has established stream shape and projection authority.
+
+Tests added or updated:
+
+- Added store contract tests proving `CommittedRunStream` exposes run id, committed events,
+  commit grouping, projection state, next sequence, side-effect views, and artifact role
+  requirements.
+- Added store contract test proving `CommittedRunStream` rejects persisted events for a different
+  requested run id.
+- Updated runtime test helpers to derive synthetic next sequence through `CommittedRunStream`
+  instead of runtime-local reconstruction.
+
+Checks run:
+
+- `cargo fmt --all -- --check`
+- `cargo check -p mfm-store -p mfm-runtime -p mfm-replay`
+- `cargo test -p mfm-store committed_run_stream`
+- `cargo test -p mfm-store`
+- `cargo test -p mfm-runtime`
+- `cargo test -p mfm-replay`
+- `cargo test -p mfm-integration-tests --test cargo_metadata_contract`
+- `cargo test -p mfm-integration-tests --test architecture_namespace_contract`

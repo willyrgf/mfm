@@ -13,13 +13,13 @@ use mfm_spec::v1::{
 use mfm_store::v1::{
     build_committed_batch, event_artifact_requirements, payload_canonical_json,
     payload_from_json_value, ArtifactEvidenceRef, CellTerminalProjection, CommitKey, CommitOrdinal,
-    CommitOutcome, CommitPreconditions, EventArtifactReferenceSource, ForwardLedgerClassification,
-    InMemoryTypedRunStore, KernelEventEnvelope, ManualBlockReason, ManualResolutionProjection,
-    PersistedKernelEventRecord, PreparedTypedCommit, ProjectionSnapshot, RequiredRunState,
-    ResourceLaneKey, RunCompletionProjection, RunMode, SagaEngagementProjection,
-    SagaEngagementReason, SideEffectPhase, StoreError, StreamSeq, TypedCommitRequest,
-    TypedProjectionRead, TypedRunEventStore, VerifiedRetentionProjection,
-    VerifiedRetentionProjectionSet,
+    CommitOutcome, CommitPreconditions, CommittedRunStream, EventArtifactReferenceSource,
+    ForwardLedgerClassification, InMemoryTypedRunStore, KernelEventEnvelope, ManualBlockReason,
+    ManualResolutionProjection, PersistedKernelEventRecord, PreparedTypedCommit,
+    ProjectionSnapshot, RequiredRunState, ResourceLaneKey, RunCompletionProjection, RunMode,
+    RunState, SagaEngagementProjection, SagaEngagementReason, SideEffectPhase, StoreError,
+    StreamSeq, TypedCommitRequest, TypedProjectionRead, TypedRunEventStore,
+    VerifiedRetentionProjection, VerifiedRetentionProjectionSet,
 };
 
 const SPEC_MEDIA_TYPE: &str = "application/vnd.mfm.typed-execution-spec+json;version=1";
@@ -1131,6 +1131,81 @@ fn event_artifact_requirements_mark_filterable_sources() {
     assert!(!failure_requirements[0]
         .source
         .is_terminal_lifecycle_receipt_candidate());
+}
+
+#[test]
+fn committed_run_stream_exposes_store_owned_authority() {
+    let run_id = run_id(141);
+    let mut store = InMemoryTypedRunStore::new();
+    store
+        .append_prepared_commit(run_start_request(
+            run_id.clone(),
+            "committed-stream-run-start",
+        ))
+        .expect("append run start");
+    append_side_effect_prepare(&mut store, &run_id);
+
+    let stream = store.load_run_stream(&run_id);
+    let committed =
+        CommittedRunStream::from_events(run_id.clone(), stream.clone()).expect("committed stream");
+
+    assert_eq!(committed.run_id(), &run_id);
+    assert_eq!(committed.events(), stream.as_slice());
+    assert_eq!(committed.next_seq(), store.expected_next_seq(&run_id));
+    assert_eq!(committed.commits().len(), 3);
+    assert_eq!(committed.commits()[0].seq(), StreamSeq::FIRST);
+    assert_eq!(committed.commits()[0].events().len(), 1);
+    assert_eq!(committed.commits()[1].events().len(), 1);
+    assert_eq!(committed.commits()[2].events().len(), 3);
+    assert_eq!(
+        committed.commits()[2].commit_key().as_str(),
+        "sidefx-prepare"
+    );
+    assert_eq!(committed.projection().run_state(&run_id), RunState::Started);
+    assert!(committed.saga_projection().is_none());
+    assert_eq!(
+        committed
+            .side_effect_projection(&side_effect_ledger_key())
+            .expect("side-effect projection")
+            .phase,
+        SideEffectPhase::InvocationPrepared {
+            invocation_epoch: 1,
+            claim_generation: 1,
+            claim_fencing_token: side_effect::ClaimFencingToken::new("token-1").expect("token"),
+        }
+    );
+    assert!(committed.artifact_requirements().iter().any(|requirement| {
+        requirement.source == EventArtifactReferenceSource::RunSpec
+            && requirement.artifact_role == Some(ArtifactRole::TypedExecutionSpec)
+    }));
+    assert!(committed.artifact_requirements().iter().any(|requirement| {
+        requirement.source == EventArtifactReferenceSource::SideEffectIntent
+            && requirement.artifact_role == Some(ArtifactRole::SideEffectIntent)
+    }));
+}
+
+#[test]
+fn committed_run_stream_rejects_events_for_a_different_run() {
+    let requested_run_id = run_id(142);
+    let other_run_id = run_id(143);
+    let mut store = InMemoryTypedRunStore::new();
+    store
+        .append_prepared_commit(run_start_request(
+            requested_run_id.clone(),
+            "committed-stream-wrong-run-start",
+        ))
+        .expect("append run start");
+
+    let error =
+        CommittedRunStream::from_events(other_run_id, store.load_run_stream(&requested_run_id))
+            .expect_err("wrong run id rejects");
+    assert!(matches!(
+        error,
+        StoreError::PersistedEventMismatch {
+            field: "run_id",
+            ..
+        }
+    ));
 }
 
 fn spec_artifact_ref() -> ArtifactEvidenceRef {

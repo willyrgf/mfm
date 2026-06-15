@@ -72,9 +72,9 @@ use framework::{
     certified_complete_run_node, certified_retention_manifest_node,
 };
 #[cfg(test)]
-use history::RuntimeRunView;
+use history::validate_historical_bootstrap_run_batch;
 #[cfg(test)]
-use history::{next_seq_after_stream, validate_historical_bootstrap_run_batch};
+use history::RuntimeRunView;
 #[cfg(test)]
 use side_effects::side_effect_projection_for_attempt;
 

@@ -1961,6 +1961,182 @@ pub mod v1 {
         }
     }
 
+    /// One atomically committed run-stream batch reconstructed from persisted envelopes.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct CommittedRunStreamCommit {
+        seq: StreamSeq,
+        commit_key: CommitKey,
+        events: Vec<KernelEventEnvelope>,
+    }
+
+    impl CommittedRunStreamCommit {
+        /// Returns the stream sequence shared by this committed batch.
+        pub fn seq(&self) -> StreamSeq {
+            self.seq
+        }
+
+        /// Returns the commit key shared by this committed batch.
+        pub fn commit_key(&self) -> &CommitKey {
+            &self.commit_key
+        }
+
+        /// Returns the events committed atomically in ordinal order.
+        pub fn events(&self) -> &[KernelEventEnvelope] {
+            &self.events
+        }
+    }
+
+    /// Store-verified projection snapshot.
+    ///
+    /// The snapshot is produced by store-owned commit/staging or committed-stream validation.
+    /// Consumers use this as read authority instead of reconstructing independent projection
+    /// views from raw event vectors.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct VerifiedProjectionSnapshot {
+        snapshot: ProjectionSnapshot,
+    }
+
+    impl VerifiedProjectionSnapshot {
+        fn from_rebuilt(snapshot: ProjectionSnapshot) -> Self {
+            Self { snapshot }
+        }
+
+        /// Returns the verified projection snapshot.
+        pub fn snapshot(&self) -> &ProjectionSnapshot {
+            &self.snapshot
+        }
+
+        /// Consumes this authority into the verified snapshot.
+        pub fn into_snapshot(self) -> ProjectionSnapshot {
+            self.snapshot
+        }
+    }
+
+    /// Store-owned verified run-stream authority.
+    ///
+    /// This type proves store-level ordering, commit grouping, projection rebuild, next sequence,
+    /// and artifact role requirements for one run stream.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct CommittedRunStream {
+        run_id: RunId,
+        events: Vec<KernelEventEnvelope>,
+        commits: Vec<CommittedRunStreamCommit>,
+        projection: VerifiedProjectionSnapshot,
+        next_seq: StreamSeq,
+        artifact_requirements: Vec<EventArtifactRequirement>,
+    }
+
+    impl CommittedRunStream {
+        /// Rebuilds store-owned stream authority from persisted event envelopes.
+        pub fn from_events(run_id: RunId, events: Vec<KernelEventEnvelope>) -> Result<Self> {
+            if let Some(event) = events.iter().find(|event| event.run_id() != &run_id) {
+                return Err(StoreError::PersistedEventMismatch {
+                    field: "run_id",
+                    message: format!(
+                        "run stream requested run {} but stream contains {}",
+                        run_id,
+                        event.run_id()
+                    ),
+                });
+            }
+            ProjectionSnapshot::validate_run_stream(&events)?;
+            let commits = committed_run_stream_commits(&events);
+            let projection = VerifiedProjectionSnapshot::from_rebuilt(
+                ProjectionSnapshot::rebuild_from_run_stream(&events)?,
+            );
+            let next_seq = next_seq_after_committed_stream(&events)?;
+            let artifact_requirements = events
+                .iter()
+                .flat_map(|event| event_artifact_requirements(event.payload()))
+                .collect();
+            Ok(Self {
+                run_id,
+                events,
+                commits,
+                projection,
+                next_seq,
+                artifact_requirements,
+            })
+        }
+
+        /// Returns the run id covered by this stream.
+        pub fn run_id(&self) -> &RunId {
+            &self.run_id
+        }
+
+        /// Returns the committed envelopes in stream order.
+        pub fn events(&self) -> &[KernelEventEnvelope] {
+            &self.events
+        }
+
+        /// Returns atomically committed batches reconstructed from sequence and commit key.
+        pub fn commits(&self) -> &[CommittedRunStreamCommit] {
+            &self.commits
+        }
+
+        /// Returns the projection rebuilt from this verified stream.
+        pub fn projection(&self) -> &ProjectionSnapshot {
+            self.projection.snapshot()
+        }
+
+        /// Returns the verified projection authority for this stream.
+        pub fn verified_projection(&self) -> &VerifiedProjectionSnapshot {
+            &self.projection
+        }
+
+        /// Returns the next store-owned stream sequence for this run.
+        pub fn next_seq(&self) -> StreamSeq {
+            self.next_seq
+        }
+
+        /// Returns artifact role requirements referenced by this stream.
+        pub fn artifact_requirements(&self) -> &[EventArtifactRequirement] {
+            &self.artifact_requirements
+        }
+
+        /// Returns the saga engagement projection for this run, when any.
+        pub fn saga_projection(&self) -> Option<&SagaEngagementProjection> {
+            self.projection.snapshot().saga_engagement(&self.run_id)
+        }
+
+        /// Returns the side-effect projection for a run-scoped ledger.
+        pub fn side_effect_projection(
+            &self,
+            ledger_key: &events::SideEffectLedgerKey,
+        ) -> Option<&SideEffectProjection> {
+            self.projection
+                .snapshot()
+                .side_effect_for_run(&self.run_id, ledger_key)
+        }
+    }
+
+    fn committed_run_stream_commits(
+        events: &[KernelEventEnvelope],
+    ) -> Vec<CommittedRunStreamCommit> {
+        let mut commits = Vec::<CommittedRunStreamCommit>::new();
+        for event in events {
+            if let Some(current) = commits.last_mut() {
+                if current.seq == event.seq() && &current.commit_key == event.commit_key() {
+                    current.events.push(event.clone());
+                    continue;
+                }
+            }
+            commits.push(CommittedRunStreamCommit {
+                seq: event.seq(),
+                commit_key: event.commit_key().clone(),
+                events: vec![event.clone()],
+            });
+        }
+        commits
+    }
+
+    fn next_seq_after_committed_stream(events: &[KernelEventEnvelope]) -> Result<StreamSeq> {
+        let Some(event) = events.last() else {
+            return Ok(StreamSeq::FIRST);
+        };
+        event.seq().checked_next()
+    }
+
     use self::saga::{derive_saga_projection, forward_ledgers_quiescent};
 
     mod saga;

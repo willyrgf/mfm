@@ -55,8 +55,7 @@ pub(crate) struct CommittedArtifactReference {
 pub struct VerifiedRunStream {
     run_id: RunId,
     spec_hash: SpecHash,
-    pub(crate) stream: Vec<store::KernelEventEnvelope>,
-    projection: store::ProjectionSnapshot,
+    committed: store::CommittedRunStream,
 }
 
 impl VerifiedRunStream {
@@ -70,8 +69,9 @@ impl VerifiedRunStream {
     where
         S: store::TypedRunEventStore + ?Sized,
     {
-        let stream = store.load_run_stream(run_id);
-        Self::from_stream(runtime_spec, run_id, &stream)
+        let committed =
+            store::CommittedRunStream::from_events(run_id.clone(), store.load_run_stream(run_id))?;
+        Self::from_committed_stream(runtime_spec, committed)
     }
 
     /// Loads the authoritative run stream from an async typed store and validates it against
@@ -84,11 +84,14 @@ impl VerifiedRunStream {
     where
         S: store::AsyncTypedRunEventStore + ?Sized,
     {
-        let stream = store
-            .load_run_stream(run_id)
-            .await
-            .map_err(async_store_error)?;
-        Self::from_stream(runtime_spec, run_id, &stream)
+        let committed = store::CommittedRunStream::from_events(
+            run_id.clone(),
+            store
+                .load_run_stream(run_id)
+                .await
+                .map_err(async_store_error)?,
+        )?;
+        Self::from_committed_stream(runtime_spec, committed)
     }
 
     pub(crate) fn from_stream(
@@ -96,12 +99,19 @@ impl VerifiedRunStream {
         run_id: &RunId,
         stream: &[store::KernelEventEnvelope],
     ) -> Result<Self> {
-        let view = RuntimeRunView::from_stream(runtime_spec, run_id, stream)?;
+        let committed = store::CommittedRunStream::from_events(run_id.clone(), stream.to_vec())?;
+        Self::from_committed_stream(runtime_spec, committed)
+    }
+
+    pub(crate) fn from_committed_stream(
+        runtime_spec: &CertifiedRuntimeSpec,
+        committed: store::CommittedRunStream,
+    ) -> Result<Self> {
+        RuntimeRunView::from_committed_stream(runtime_spec, &committed)?;
         Ok(Self {
-            run_id: run_id.clone(),
+            run_id: committed.run_id().clone(),
             spec_hash: runtime_spec.spec_hash().clone(),
-            stream: view.stream,
-            projection: view.projections,
+            committed,
         })
     }
 
@@ -117,12 +127,17 @@ impl VerifiedRunStream {
 
     /// Authoritative committed event envelopes covered by this verified stream.
     pub fn events(&self) -> &[store::KernelEventEnvelope] {
-        &self.stream
+        self.committed.events()
     }
 
     /// Projection rebuilt from the verified committed stream.
     pub fn projection_snapshot(&self) -> &store::ProjectionSnapshot {
-        &self.projection
+        self.committed.projection()
+    }
+
+    /// Store-owned stream authority covered by this runtime verification.
+    pub fn committed_stream(&self) -> &store::CommittedRunStream {
+        &self.committed
     }
 }
 
@@ -132,8 +147,9 @@ impl RuntimeRunView {
         run_id: &RunId,
         store: &S,
     ) -> Result<Self> {
-        let stream = store.load_run_stream(run_id);
-        Self::from_stream(runtime_spec, run_id, &stream)
+        let committed =
+            store::CommittedRunStream::from_events(run_id.clone(), store.load_run_stream(run_id))?;
+        Self::from_committed_stream(runtime_spec, &committed)
     }
 
     pub(crate) fn from_stream(
@@ -141,17 +157,25 @@ impl RuntimeRunView {
         run_id: &RunId,
         stream: &[store::KernelEventEnvelope],
     ) -> Result<Self> {
-        store::ProjectionSnapshot::validate_run_stream(stream)?;
-        let next_seq = next_seq_after_stream(stream)?;
-        let projections = store::ProjectionSnapshot::rebuild_from_run_stream(stream)?;
+        let committed = store::CommittedRunStream::from_events(run_id.clone(), stream.to_vec())?;
+        Self::from_committed_stream(runtime_spec, &committed)
+    }
+
+    pub(crate) fn from_committed_stream(
+        runtime_spec: &CertifiedRuntimeSpec,
+        committed: &store::CommittedRunStream,
+    ) -> Result<Self> {
+        let stream = committed.events();
+        let projections = committed.projection().clone();
         let mut run_started = None;
         for event in stream {
             match event.payload() {
                 events::KernelEventPayload::RunStarted(payload) => {
-                    if &payload.run_id != run_id {
+                    if &payload.run_id != committed.run_id() {
                         return Err(RuntimeError::InvalidRunStream(format!(
                             "run stream contains RunStarted for {} while executing {}",
-                            payload.run_id, run_id
+                            payload.run_id,
+                            committed.run_id()
                         )));
                     }
                     if &payload.spec_hash != runtime_spec.spec_hash() {
@@ -182,7 +206,7 @@ impl RuntimeRunView {
                 "run has not started with certified RunStarted evidence".to_owned(),
             ));
         };
-        validate_historical_run_stream(runtime_spec, run_id, stream, &projections)?;
+        validate_historical_run_stream(runtime_spec, committed.run_id(), stream, &projections)?;
         let seed_cells = validate_seed_cells(runtime_spec, &run_started.seed_cells)?;
         let config_artifacts = config_artifacts_from_stream(runtime_spec, stream)?;
         let artifact_refs = artifact_refs_from_stream(stream)?;
@@ -192,22 +216,9 @@ impl RuntimeRunView {
             seed_cells,
             config_artifacts,
             artifact_refs,
-            next_seq,
+            next_seq: committed.next_seq(),
         })
     }
-}
-
-pub(crate) fn next_seq_after_stream(
-    stream: &[store::KernelEventEnvelope],
-) -> Result<store::StreamSeq> {
-    let Some(event) = stream.last() else {
-        return Ok(store::StreamSeq::FIRST);
-    };
-    let next =
-        event.seq().as_u64().checked_add(1).ok_or_else(|| {
-            RuntimeError::InvalidRunStream("run stream sequence overflow".to_owned())
-        })?;
-    store::StreamSeq::new(next).map_err(RuntimeError::from)
 }
 
 /// Validates a stored typed run stream against the certified runtime spec without executing work.
