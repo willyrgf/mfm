@@ -101,3 +101,51 @@ Checks run:
 - `cargo test -p mfm-replay`
 - `cargo test -p mfm-integration-tests --test cargo_metadata_contract`
 - `cargo test -p mfm-integration-tests --test architecture_namespace_contract`
+
+## Phase 3: Raw, Lowered, Validated, Certified Spec Split
+
+Status: completed.
+
+Files changed:
+
+- `Cargo.lock`
+- `crates/kernel/spec/src/lib.rs`
+- `crates/kernel/certify/Cargo.toml`
+- `crates/kernel/certify/src/lib.rs`
+- `crates/kernel/certify/tests/certify_authority_ui.rs`
+- `crates/kernel/certify/tests/ui/fail/certified_spec_fields_private.rs`
+- `crates/kernel/certify/tests/ui/fail/lowered_spec_is_read_only.rs`
+- `crates/kernel/certify/tests/ui/fail/raw_typed_spec_not_certification_input.rs`
+- `crates/kernel/certify/tests/ui/fail/validated_spec_fields_private.rs`
+- `crates/app/src/lib.rs`
+- `IMPLEMENTATION_ACDC_SAGA_PRE_MERGE.md`
+
+Validators deleted or replaced:
+
+- Added `spec::UntrustedTypedSpec` as the hostile parsed/constructed spec wrapper.
+- Added `LoweredTypedSpec` for deterministic program-lowered specs that are not runtime authority.
+- Added `ValidatedTypedExecutionSpec` with private fields and private constructor.
+- Changed `certify_typed_spec` so plain `TypedExecutionSpec` no longer satisfies the public certification input type.
+- Changed `CertifiedTypedSpec` to contain validated authority and removed the raw `CertifiedTypedSpec::spec()` shortcut.
+- Changed parsed certified bundles to carry `UntrustedTypedSpec` until verifier-backed certification succeeds.
+
+Tests added or updated:
+
+- Added certifier compile-fail tests proving callers cannot pass raw typed specs to certification.
+- Added certifier compile-fail tests proving callers cannot literal-construct validated or certified authority.
+- Added certifier compile-fail test proving lowered specs expose read-only data and cannot be mutated into authority.
+- Updated certifier mutation tests to wrap hostile raw specs explicitly before certification.
+- Updated app invalid-bundle test to read through `validated_spec()`.
+
+Checks run:
+
+- `cargo check -p mfm-certify`
+- `cargo test -p mfm-certify --test certify_authority_ui`
+- `cargo check -p mfm-spec -p mfm-certify -p mfm-runtime -p mfm-app`
+- `cargo fmt --all -- --check`
+- `cargo test -p mfm-spec`
+- `cargo test -p mfm-certify`
+- `cargo test -p mfm-app`
+- `cargo test -p mfm-runtime`
+- `cargo test -p mfm-integration-tests --test cargo_metadata_contract`
+- `cargo test -p mfm-integration-tests --test architecture_namespace_contract`

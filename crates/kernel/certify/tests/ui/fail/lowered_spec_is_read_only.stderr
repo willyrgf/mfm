@@ -1,0 +1,5 @@
+error[E0596]: cannot borrow data in a `&` reference as mutable
+ --> tests/ui/fail/lowered_spec_is_read_only.rs:9:5
+  |
+9 |     lowered.spec().nodes.clear();
+  |     ^^^^^^^^^^^^^^^^^^^^ cannot borrow as mutable

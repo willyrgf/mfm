@@ -3660,7 +3660,7 @@ mod tests {
         ));
         let artifacts = FsTypedArtifactStore::new(&root);
         let fixture = framework_seed_public_output_fixture();
-        let mut invalid_spec = fixture.certified_spec.spec().clone();
+        let mut invalid_spec = fixture.certified_spec.validated_spec().spec().clone();
         invalid_spec.config_refs.clear();
         let spec_bytes = invalid_spec
             .canonical_json()

@@ -124,29 +124,124 @@ impl fmt::Display for CertifyError {
 
 impl std::error::Error for CertifyError {}
 
+/// Program-lowered typed spec data.
+///
+/// This is the output of deterministic program lowering. It is still not certification or runtime
+/// authority because the registry-backed certificate has not been minted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoweredTypedSpec {
+    spec: spec::TypedExecutionSpec,
+}
+
+impl LoweredTypedSpec {
+    fn new(spec: spec::TypedExecutionSpec) -> Self {
+        Self { spec }
+    }
+
+    /// Returns the lowered spec data without granting runtime authority.
+    pub fn spec(&self) -> &spec::TypedExecutionSpec {
+        &self.spec
+    }
+
+    fn into_raw_spec(self) -> spec::TypedExecutionSpec {
+        self.spec
+    }
+}
+
+/// Certifier-validated typed spec body.
+///
+/// The fields and constructor are private so only registry-backed certification in this crate can
+/// mint this authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidatedTypedExecutionSpec {
+    envelope: spec::HashedSpecEnvelope,
+    _seal: ValidatedSpecSeal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ValidatedSpecSeal;
+
+impl ValidatedTypedExecutionSpec {
+    fn new(envelope: spec::HashedSpecEnvelope) -> Self {
+        Self {
+            envelope,
+            _seal: ValidatedSpecSeal,
+        }
+    }
+
+    /// Returns the hash-only spec envelope that was validated by the certifier.
+    pub fn envelope(&self) -> &spec::HashedSpecEnvelope {
+        &self.envelope
+    }
+
+    /// Returns the validated hash-defining spec data.
+    pub fn spec(&self) -> &spec::TypedExecutionSpec {
+        &self.envelope.spec
+    }
+
+    /// Returns the validated canonical spec hash.
+    pub fn spec_hash(&self) -> &SpecHash {
+        &self.envelope.spec_hash
+    }
+
+    fn into_envelope(self) -> spec::HashedSpecEnvelope {
+        self.envelope
+    }
+}
+
+/// Input accepted by typed-spec certification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TypedSpecCertificationInput {
+    /// Hostile parsed or constructed spec data.
+    Untrusted(spec::UntrustedTypedSpec),
+    /// Deterministically lowered program output.
+    Lowered(LoweredTypedSpec),
+}
+
+impl From<spec::UntrustedTypedSpec> for TypedSpecCertificationInput {
+    fn from(spec: spec::UntrustedTypedSpec) -> Self {
+        Self::Untrusted(spec)
+    }
+}
+
+impl From<LoweredTypedSpec> for TypedSpecCertificationInput {
+    fn from(spec: LoweredTypedSpec) -> Self {
+        Self::Lowered(spec)
+    }
+}
+
+impl TypedSpecCertificationInput {
+    fn into_raw_spec(self) -> spec::TypedExecutionSpec {
+        match self {
+            Self::Untrusted(spec) => spec.into_raw_spec(),
+            Self::Lowered(spec) => spec.into_raw_spec(),
+        }
+    }
+}
+
 /// Non-forgeable certified typed spec ready to become runtime authority.
 ///
 /// The fields are private so only this crate's certifier and verifier can mint the authority.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CertifiedTypedSpec {
-    envelope: spec::HashedSpecEnvelope,
+    validated: ValidatedTypedExecutionSpec,
     certificate: CertifiedSpecCertificate,
 }
 
 impl CertifiedTypedSpec {
-    /// Returns the hash-only spec envelope carried by this certified authority.
-    pub fn envelope(&self) -> &spec::HashedSpecEnvelope {
-        &self.envelope
+    /// Returns the validated typed spec authority.
+    pub fn validated_spec(&self) -> &ValidatedTypedExecutionSpec {
+        &self.validated
     }
 
-    /// Returns the hash-defining typed execution spec.
-    pub fn spec(&self) -> &spec::TypedExecutionSpec {
-        &self.envelope.spec
+    /// Returns the hash-only spec envelope carried by this certified authority.
+    pub fn envelope(&self) -> &spec::HashedSpecEnvelope {
+        self.validated.envelope()
     }
 
     /// Returns the canonical spec hash.
     pub fn spec_hash(&self) -> &SpecHash {
-        &self.envelope.spec_hash
+        self.validated.spec_hash()
     }
 
     /// Returns the persisted certificate evidence that was verified or emitted.
@@ -161,7 +256,7 @@ impl CertifiedTypedSpec {
 
     /// Consumes the authority and returns the hash-only envelope plus certificate evidence.
     pub fn into_parts(self) -> (spec::HashedSpecEnvelope, CertifiedSpecCertificate) {
-        (self.envelope, self.certificate)
+        (self.validated.into_envelope(), self.certificate)
     }
 
     /// Builds canonical persisted spec and certificate bytes for storage.
@@ -532,6 +627,7 @@ impl CertifiedSpecBundle {
     pub fn from_certified(certified: &CertifiedTypedSpec) -> Result<Self> {
         Ok(Self {
             spec_bytes: certified
+                .validated_spec()
                 .spec()
                 .canonical_json()
                 .map_err(|error| CertifyError::Spec(error.to_string()))?
@@ -560,7 +656,7 @@ impl CertifiedSpecBundle {
 
     /// Parses the persisted bytes as hostile data.
     pub fn parse_untrusted(&self) -> Result<UntrustedCertifiedSpecBundle> {
-        let spec = spec::TypedExecutionSpec::from_json_slice(&self.spec_bytes)
+        let spec = spec::UntrustedTypedSpec::from_json_slice(&self.spec_bytes)
             .map_err(|error| CertifyError::Spec(error.to_string()))?;
         let certificate = CertifiedSpecCertificate::from_json_slice(&self.certificate_bytes)?;
         Ok(UntrustedCertifiedSpecBundle { spec, certificate })
@@ -570,14 +666,14 @@ impl CertifiedSpecBundle {
 /// Parsed persisted spec and certificate data that has not been verified.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UntrustedCertifiedSpecBundle {
-    spec: spec::TypedExecutionSpec,
+    spec: spec::UntrustedTypedSpec,
     certificate: CertifiedSpecCertificate,
 }
 
 impl UntrustedCertifiedSpecBundle {
     /// Returns the parsed typed spec data.
     pub fn spec(&self) -> &spec::TypedExecutionSpec {
-        &self.spec
+        self.spec.spec()
     }
 
     /// Returns the parsed certificate data.
@@ -1126,20 +1222,15 @@ pub fn certify_program_draft(draft: &program::TypedProgramDraft) -> Result<Certi
     certify_typed_spec(spec, &registry)
 }
 
-/// Certifies an already-lowered v1 typed execution spec.
+/// Certifies typed spec input with registry-backed validation.
 pub fn certify_typed_spec(
-    spec: spec::TypedExecutionSpec,
+    input: impl Into<TypedSpecCertificationInput>,
     registry: &CertificationRegistry,
 ) -> Result<CertifiedTypedSpec> {
-    validate_typed_spec(&spec, registry)?;
-    let envelope = spec::HashedSpecEnvelope::new(spec, spec::TypedExecutionSpecAudit::default())
-        .map_err(|error| CertifyError::Spec(error.to_string()))?;
-    envelope
-        .verify_hash()
-        .map_err(|error| CertifyError::Spec(error.to_string()))?;
-    let certificate = certificate_for_envelope(&envelope, registry)?;
+    let validated = validate_typed_spec(input.into().into_raw_spec(), registry)?;
+    let certificate = certificate_for_envelope(validated.envelope(), registry)?;
     Ok(CertifiedTypedSpec {
-        envelope,
+        validated,
         certificate,
     })
 }
@@ -1175,8 +1266,8 @@ pub fn verify_certified_bundle_with_trusted_registry(
     verify_untrusted_bundle(untrusted, &scoped)
 }
 
-/// Lowers a typed program draft into a v1 spec without skipping validation.
-pub fn lower_program_draft(draft: &program::TypedProgramDraft) -> Result<spec::TypedExecutionSpec> {
+/// Lowers a typed program draft into a v1 spec without minting certification authority.
+pub fn lower_program_draft(draft: &program::TypedProgramDraft) -> Result<LoweredTypedSpec> {
     let registry = CertificationRegistry::from_program_draft(draft)?;
     lower_program_draft_with_registry(draft, &registry)
 }
@@ -1185,67 +1276,70 @@ fn verify_untrusted_bundle(
     bundle: UntrustedCertifiedSpecBundle,
     registry: &CertificationRegistry,
 ) -> Result<CertifiedTypedSpec> {
-    bundle.certificate.verify_hash()?;
-    let actual_spec_hash = bundle
-        .spec
+    let UntrustedCertifiedSpecBundle {
+        spec,
+        certificate: expected_certificate,
+    } = bundle;
+    expected_certificate.verify_hash()?;
+    let actual_spec_hash = spec
+        .spec()
         .spec_hash()
         .map_err(|error| CertifyError::Spec(error.to_string()))?;
-    if bundle.certificate.evidence.spec_hash != actual_spec_hash {
+    if expected_certificate.evidence.spec_hash != actual_spec_hash {
         return Err(certificate(format!(
             "certificate/spec hash mismatch: certificate {}, recomputed {}",
-            bundle.certificate.evidence.spec_hash, actual_spec_hash
+            expected_certificate.evidence.spec_hash, actual_spec_hash
         )));
     }
 
     let expected_registry_digest = registry.digest()?;
-    if bundle.certificate.evidence.registry_digest != expected_registry_digest {
+    if expected_certificate.evidence.registry_digest != expected_registry_digest {
         return Err(certificate(format!(
             "registry digest mismatch: certificate {}, current {}",
-            bundle.certificate.evidence.registry_digest, expected_registry_digest
+            expected_certificate.evidence.registry_digest, expected_registry_digest
         )));
     }
 
-    let expected_descriptor_evidence = descriptor_evidence_for_spec(&bundle.spec)?;
-    if bundle.certificate.evidence.descriptor_identities != expected_descriptor_evidence {
+    let spec_ref = spec.spec();
+    let expected_descriptor_evidence = descriptor_evidence_for_spec(spec_ref)?;
+    if expected_certificate.evidence.descriptor_identities != expected_descriptor_evidence {
         return Err(certificate(
             "descriptor identity evidence does not match persisted spec",
         ));
     }
-    let expected_schema_role_grants = schema_role_grants_for_spec(&bundle.spec, registry)?;
-    if bundle.certificate.evidence.schema_role_grants != expected_schema_role_grants {
+    let expected_schema_role_grants = schema_role_grants_for_spec(spec_ref, registry)?;
+    if expected_certificate.evidence.schema_role_grants != expected_schema_role_grants {
         return Err(certificate(
             "schema role grant evidence does not match persisted spec",
         ));
     }
-    let expected_verifiers = manual_authorization_verifiers_for_spec(&bundle.spec, registry)?;
-    if bundle.certificate.evidence.manual_authorization_verifiers != expected_verifiers {
+    let expected_verifiers = manual_authorization_verifiers_for_spec(spec_ref, registry)?;
+    if expected_certificate.evidence.manual_authorization_verifiers != expected_verifiers {
         return Err(certificate(
             "manual authorization verifier evidence does not match persisted spec",
         ));
     }
-    let expected_authorities = operator_authority_snapshots_for_spec(&bundle.spec, registry)?;
-    if bundle.certificate.evidence.operator_authority_snapshots != expected_authorities {
+    let expected_authorities = operator_authority_snapshots_for_spec(spec_ref, registry)?;
+    if expected_certificate.evidence.operator_authority_snapshots != expected_authorities {
         return Err(certificate(
             "operator authority snapshot evidence does not match persisted spec",
         ));
     }
-    if bundle.certificate.evidence.spec_canonicalization != bundle.spec.canonicalization {
+    if expected_certificate.evidence.spec_canonicalization != spec_ref.canonicalization {
         return Err(certificate("spec canonicalization mismatch"));
     }
-    if bundle.certificate.evidence.lowering_version != bundle.spec.lowering_version {
+    if expected_certificate.evidence.lowering_version != spec_ref.lowering_version {
         return Err(certificate("lowering version mismatch"));
     }
-    if bundle.certificate.evidence.public_output_schema_id
-        != bundle.spec.public_outputs.public_schema_id
+    if expected_certificate.evidence.public_output_schema_id
+        != spec_ref.public_outputs.public_schema_id
     {
         return Err(certificate("public output schema mismatch"));
     }
-    if bundle
-        .certificate
+    if expected_certificate
         .evidence
         .public_output_canonicalizer_identity
-        != bundle
-            .spec
+        != spec_ref
             .public_outputs
             .renderer_descriptor
             .canonicalizer_identity
@@ -1253,8 +1347,8 @@ fn verify_untrusted_bundle(
         return Err(certificate("public output canonicalizer mismatch"));
     }
 
-    let certified = certify_typed_spec(bundle.spec, registry)?;
-    if certified.certificate != bundle.certificate {
+    let certified = certify_typed_spec(spec, registry)?;
+    if certified.certificate != expected_certificate {
         return Err(certificate(
             "persisted certificate does not match registry-backed certification",
         ));
@@ -1498,12 +1592,11 @@ fn certificate_audit_for_spec(spec: &spec::TypedExecutionSpec) -> CertifiedSpecA
 
 fn lower_program_draft_with_registry(
     draft: &program::TypedProgramDraft,
-    registry: &CertificationRegistry,
-) -> Result<spec::TypedExecutionSpec> {
+    _registry: &CertificationRegistry,
+) -> Result<LoweredTypedSpec> {
     let mut lowerer = DraftLowerer::new(draft)?;
     let lowered = lowerer.lower()?;
-    validate_typed_spec(&lowered, registry)?;
-    Ok(lowered)
+    Ok(LoweredTypedSpec::new(lowered))
 }
 
 fn problem(class: ProblemClass, message: impl Into<String>) -> CertifyError {
@@ -2567,9 +2660,15 @@ impl<'a> DraftLowerer<'a> {
 }
 
 fn validate_typed_spec(
-    spec: &spec::TypedExecutionSpec,
+    spec: spec::TypedExecutionSpec,
     registry: &CertificationRegistry,
-) -> Result<()> {
+) -> Result<ValidatedTypedExecutionSpec> {
+    let envelope = spec::HashedSpecEnvelope::new(spec, spec::TypedExecutionSpecAudit::default())
+        .map_err(|error| CertifyError::Spec(error.to_string()))?;
+    envelope
+        .verify_hash()
+        .map_err(|error| CertifyError::Spec(error.to_string()))?;
+    let spec = &envelope.spec;
     spec.spec_hash()
         .map_err(|error| CertifyError::Spec(error.to_string()))?;
     validate_contract_header(spec)?;
@@ -2613,7 +2712,7 @@ fn validate_typed_spec(
         &node_index,
     )?;
     validate_lineage_references(&spec.value_lineages, &cell_index, &config_refs)?;
-    Ok(())
+    Ok(ValidatedTypedExecutionSpec::new(envelope))
 }
 
 fn validate_contract_header(spec: &spec::TypedExecutionSpec) -> Result<()> {
@@ -5699,6 +5798,13 @@ mod tests {
     use mfm_program_derive::{MfmConfig, MfmValue, OperationOutput, PublicOutputs};
     use serde::{Deserialize, Serialize};
 
+    fn certify_raw_typed_spec(
+        typed: spec::TypedExecutionSpec,
+        registry: &CertificationRegistry,
+    ) -> Result<CertifiedTypedSpec> {
+        certify_typed_spec(spec::UntrustedTypedSpec::from_raw_spec(typed), registry)
+    }
+
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
     #[mfm(
         namespace = "mfm.certify.test",
@@ -6286,6 +6392,7 @@ mod tests {
         let registry = CertificationRegistry::from_program_draft(&draft).expect("registry");
         let base = certify_program_draft(&draft)
             .expect("certified")
+            .validated_spec()
             .spec()
             .clone();
 
@@ -6361,10 +6468,11 @@ mod tests {
     fn typed_spec_requires_registry_authority() {
         let spec = certify_program_draft(&reference_draft())
             .expect("certified")
+            .validated_spec()
             .spec()
             .clone();
         let error =
-            certify_typed_spec(spec, &CertificationRegistry::new()).expect_err("must reject");
+            certify_raw_typed_spec(spec, &CertificationRegistry::new()).expect_err("must reject");
         assert_eq!(
             error.problem_class(),
             Some(ProblemClass::InvalidSemanticTransition)
@@ -6377,6 +6485,7 @@ mod tests {
         let registry = CertificationRegistry::from_program_draft(&draft).expect("registry");
         let base = certify_program_draft(&draft)
             .expect("certified")
+            .validated_spec()
             .spec()
             .clone();
 
@@ -6413,10 +6522,11 @@ mod tests {
         let registry = CertificationRegistry::from_program_draft(&draft).expect("registry");
         let spec = certify_program_draft(&draft)
             .expect("certified")
+            .validated_spec()
             .spec()
             .clone();
 
-        certify_typed_spec(spec, &registry).expect("lifecycle framework nodes certify");
+        certify_raw_typed_spec(spec, &registry).expect("lifecycle framework nodes certify");
     }
 
     #[test]
@@ -6425,6 +6535,7 @@ mod tests {
         let registry = CertificationRegistry::from_program_draft(&draft).expect("registry");
         let base = certify_program_draft(&draft)
             .expect("certified")
+            .validated_spec()
             .spec()
             .clone();
 
@@ -6444,6 +6555,7 @@ mod tests {
         let registry = CertificationRegistry::from_program_draft(&draft).expect("registry");
         let base = certify_program_draft(&draft)
             .expect("certified")
+            .validated_spec()
             .spec()
             .clone();
 
@@ -6463,6 +6575,7 @@ mod tests {
         let registry = CertificationRegistry::from_program_draft(&draft).expect("registry");
         let base = certify_program_draft(&draft)
             .expect("certified")
+            .validated_spec()
             .spec()
             .clone();
 
@@ -6489,6 +6602,7 @@ mod tests {
         let registry = CertificationRegistry::from_program_draft(&draft).expect("registry");
         let base = certify_program_draft(&draft)
             .expect("certified")
+            .validated_spec()
             .spec()
             .clone();
 
@@ -6528,6 +6642,7 @@ mod tests {
         let registry = CertificationRegistry::from_program_draft(&draft).expect("registry");
         let base = certify_program_draft(&draft)
             .expect("certified")
+            .validated_spec()
             .spec()
             .clone();
 
@@ -6549,6 +6664,7 @@ mod tests {
         let registry = CertificationRegistry::from_program_draft(&draft).expect("registry");
         let base = certify_program_draft(&draft)
             .expect("certified")
+            .validated_spec()
             .spec()
             .clone();
 
@@ -6589,6 +6705,7 @@ mod tests {
         let registry = CertificationRegistry::from_program_draft(&draft).expect("registry");
         let base = certify_program_draft(&draft)
             .expect("certified")
+            .validated_spec()
             .spec()
             .clone();
 
@@ -6612,6 +6729,7 @@ mod tests {
         let registry = CertificationRegistry::from_program_draft(&draft).expect("registry");
         let base = certify_program_draft(&draft)
             .expect("certified")
+            .validated_spec()
             .spec()
             .clone();
 
@@ -6626,6 +6744,7 @@ mod tests {
         let registry = CertificationRegistry::from_program_draft(&draft).expect("registry");
         let base = certify_program_draft(&draft)
             .expect("certified")
+            .validated_spec()
             .spec()
             .clone();
 
@@ -6655,6 +6774,7 @@ mod tests {
         let registry = CertificationRegistry::from_program_draft(&draft).expect("registry");
         let base = certify_program_draft(&draft)
             .expect("certified")
+            .validated_spec()
             .spec()
             .clone();
 
@@ -6698,6 +6818,7 @@ mod tests {
         let registry = CertificationRegistry::from_program_draft(&draft).expect("registry");
         let base = certify_program_draft(&draft)
             .expect("certified")
+            .validated_spec()
             .spec()
             .clone();
 
@@ -6791,6 +6912,7 @@ mod tests {
         let registry = CertificationRegistry::from_program_draft(&draft).expect("registry");
         let base = certify_program_draft(&draft)
             .expect("certified")
+            .validated_spec()
             .spec()
             .clone();
 
@@ -6818,6 +6940,7 @@ mod tests {
         let registry = CertificationRegistry::from_program_draft(&draft).expect("registry");
         let base = certify_program_draft(&draft)
             .expect("certified")
+            .validated_spec()
             .spec()
             .clone();
 
@@ -6836,6 +6959,7 @@ mod tests {
         let registry = CertificationRegistry::from_program_draft(&draft).expect("registry");
         let base = certify_program_draft(&draft)
             .expect("certified")
+            .validated_spec()
             .spec()
             .clone();
 
@@ -6888,6 +7012,7 @@ mod tests {
         let registry = CertificationRegistry::from_program_draft(&draft).expect("registry");
         let base = certify_program_draft(&draft)
             .expect("certified")
+            .validated_spec()
             .spec()
             .clone();
 
@@ -6917,23 +7042,17 @@ mod tests {
         let draft = compensating_draft();
         let certified = certify_program_draft(&draft).expect("certified compensating draft");
         assert!(matches!(
-            certified.spec().saga,
+            certified.validated_spec().spec().saga,
             spec::SagaPolicySpec::CompensateCompleted { .. }
         ));
-        assert_eq!(certified.spec().remediations.len(), 1);
-        let (forward_id, remediation) = certified
-            .spec()
-            .remediations
-            .iter()
-            .next()
-            .expect("remediation");
-        assert!(certified
-            .spec()
+        assert_eq!(certified.validated_spec().spec().remediations.len(), 1);
+        let validated = certified.validated_spec().spec();
+        let (forward_id, remediation) = validated.remediations.iter().next().expect("remediation");
+        assert!(validated
             .nodes
             .iter()
             .any(|node| node.node_id == *forward_id));
-        assert!(!certified
-            .spec()
+        assert!(!validated
             .nodes
             .iter()
             .any(|node| node.node_id == remediation.node_id));
@@ -6945,6 +7064,7 @@ mod tests {
         let registry = CertificationRegistry::from_program_draft(&draft).expect("registry");
         let side_effecting = certify_program_draft(&draft)
             .expect("certified")
+            .validated_spec()
             .spec()
             .clone();
 
@@ -6961,6 +7081,7 @@ mod tests {
         let registry = CertificationRegistry::from_program_draft(&draft).expect("registry");
         let pure = certify_program_draft(&draft)
             .expect("certified")
+            .validated_spec()
             .spec()
             .clone();
         assert_rejects(
@@ -7083,6 +7204,7 @@ mod tests {
         let draft = side_effect_draft();
         let mut typed = certify_program_draft(&draft)
             .expect("certified")
+            .validated_spec()
             .spec()
             .clone();
         let operator_schema = SchemaId::new(
@@ -7141,7 +7263,7 @@ mod tests {
         let (mut registry, typed) = side_effect_spec_with_manual(manual.clone());
         register_manual_authority(&mut registry, &manual);
 
-        let certified = certify_typed_spec(typed, &registry).expect("certified manual spec");
+        let certified = certify_raw_typed_spec(typed, &registry).expect("certified manual spec");
 
         assert_eq!(
             certified
@@ -7193,7 +7315,7 @@ mod tests {
             .register_operator_authority_snapshot(manual.authorization.authority.clone())
             .expect("register authority");
 
-        let error = certify_typed_spec(typed, &registry).expect_err("unknown schema rejects");
+        let error = certify_raw_typed_spec(typed, &registry).expect_err("unknown schema rejects");
 
         assert_eq!(
             error.problem_class(),
@@ -7220,7 +7342,7 @@ mod tests {
             .register_operator_authority_snapshot(manual.authorization.authority.clone())
             .expect("register authority");
 
-        let error = certify_typed_spec(typed, &registry).expect_err("wrong role rejects");
+        let error = certify_raw_typed_spec(typed, &registry).expect_err("wrong role rejects");
 
         assert_eq!(
             error.problem_class(),
@@ -7244,7 +7366,7 @@ mod tests {
             .register_operator_authority_snapshot(manual.authorization.authority.clone())
             .expect("register authority");
 
-        let error = certify_typed_spec(typed, &registry).expect_err("unknown verifier rejects");
+        let error = certify_raw_typed_spec(typed, &registry).expect_err("unknown verifier rejects");
 
         assert_eq!(
             error.problem_class(),
@@ -7277,7 +7399,8 @@ mod tests {
             .register_operator_authority_snapshot(mismatched)
             .expect("register mismatched authority");
 
-        let error = certify_typed_spec(typed, &registry).expect_err("authority mismatch rejects");
+        let error =
+            certify_raw_typed_spec(typed, &registry).expect_err("authority mismatch rejects");
 
         assert_eq!(
             error.problem_class(),
@@ -7294,7 +7417,7 @@ mod tests {
         let (mut registry, typed) = side_effect_spec_with_manual(manual.clone());
         register_manual_authority(&mut registry, &manual);
 
-        let error = certify_typed_spec(typed, &registry).expect_err("empty authority rejects");
+        let error = certify_raw_typed_spec(typed, &registry).expect_err("empty authority rejects");
 
         assert_eq!(
             error.problem_class(),
@@ -7313,7 +7436,7 @@ mod tests {
         let (mut registry, typed) = side_effect_spec_with_manual(manual.clone());
         register_manual_authority(&mut registry, &manual);
 
-        let error = certify_typed_spec(typed, &registry).expect_err("signing scheme rejects");
+        let error = certify_raw_typed_spec(typed, &registry).expect_err("signing scheme rejects");
 
         assert_eq!(
             error.problem_class(),
@@ -7329,7 +7452,7 @@ mod tests {
         let (mut registry, typed) = side_effect_spec_with_manual(manual.clone());
         register_manual_authority(&mut registry, &manual);
 
-        let error = certify_typed_spec(typed, &registry).expect_err("quorum rejects");
+        let error = certify_raw_typed_spec(typed, &registry).expect_err("quorum rejects");
 
         assert_eq!(
             error.problem_class(),
@@ -7345,6 +7468,7 @@ mod tests {
         let registry = CertificationRegistry::from_program_draft(&draft).expect("registry");
         let base = certify_program_draft(&draft)
             .expect("certified")
+            .validated_spec()
             .spec()
             .clone();
 
@@ -7380,7 +7504,7 @@ mod tests {
     ) {
         let mut mutated = base.clone();
         mutate(&mut mutated);
-        let error = certify_typed_spec(mutated, registry).expect_err("mutation must reject");
+        let error = certify_raw_typed_spec(mutated, registry).expect_err("mutation must reject");
         assert_eq!(error.problem_class(), Some(expected), "{error}");
     }
 
@@ -7389,6 +7513,7 @@ mod tests {
         let registry = CertificationRegistry::from_program_draft(&draft).expect("registry");
         let spec = certify_program_draft(&draft)
             .expect("certified")
+            .validated_spec()
             .spec()
             .clone();
         (registry, spec)
@@ -7401,6 +7526,7 @@ mod tests {
         let registry = CertificationRegistry::from_program_draft(&draft).expect("registry");
         let mut typed = certify_program_draft(&draft)
             .expect("certified")
+            .validated_spec()
             .spec()
             .clone();
         typed.saga = spec::SagaPolicySpec::ManualResolution { manual };

@@ -710,6 +710,46 @@ pub mod v1 {
         checked_ascii_token
     );
 
+    /// Parsed or constructed typed spec data that has not been certified.
+    ///
+    /// This wrapper is a hostile persistence/interop boundary. It proves only that the contained
+    /// data decoded into typed Rust values and can be re-hashed; it is not runtime authority.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct UntrustedTypedSpec {
+        spec: TypedExecutionSpec,
+    }
+
+    impl UntrustedTypedSpec {
+        /// Wraps raw typed spec data without minting certification authority.
+        pub fn from_raw_spec(spec: TypedExecutionSpec) -> Self {
+            Self { spec }
+        }
+
+        /// Decodes untrusted persisted v1 typed execution spec JSON.
+        pub fn from_json_str(input: &str) -> Result<Self> {
+            Ok(Self::from_raw_spec(TypedExecutionSpec::from_json_str(
+                input,
+            )?))
+        }
+
+        /// Decodes untrusted persisted v1 typed execution spec UTF-8 JSON bytes.
+        pub fn from_json_slice(input: &[u8]) -> Result<Self> {
+            Ok(Self::from_raw_spec(TypedExecutionSpec::from_json_slice(
+                input,
+            )?))
+        }
+
+        /// Returns the hostile typed spec data.
+        pub fn spec(&self) -> &TypedExecutionSpec {
+            &self.spec
+        }
+
+        /// Consumes the wrapper and returns the hostile typed spec data.
+        pub fn into_raw_spec(self) -> TypedExecutionSpec {
+            self.spec
+        }
+    }
+
     /// Hash-only envelope carrying a spec hash and non-semantic audit metadata.
     ///
     /// This type is not certification authority. It only proves that `spec_hash` matches
@@ -748,7 +788,11 @@ pub mod v1 {
         }
     }
 
-    /// Hash-defining v1 typed execution spec.
+    /// Hash-defining v1 typed execution spec data.
+    ///
+    /// Parsed or directly constructed values of this type are not certification or runtime
+    /// authority. Pass them through [`UntrustedTypedSpec`] and `mfm-certify` to obtain validated
+    /// and certified authority.
     ///
     /// Saga policy is certified spec data because external side-effect remediation is a
     /// saga-only claim derived from certified policy plus recorded stream facts. Directive
