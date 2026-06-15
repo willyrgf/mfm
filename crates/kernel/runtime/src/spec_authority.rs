@@ -44,6 +44,9 @@ impl CertifiedRuntimeSpec {
                     mfm_ids::DigestBytes::from_array([0; 32]),
                 ),
                 descriptor_identities: Vec::new(),
+                schema_role_grants: Vec::new(),
+                manual_authorization_verifiers: Vec::new(),
+                operator_authority_snapshots: Vec::new(),
                 lowering_version: envelope.spec.lowering_version.clone(),
                 public_output_schema_id: envelope.spec.public_outputs.public_schema_id.clone(),
                 public_output_canonicalizer_identity: envelope

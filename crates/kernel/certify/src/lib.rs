@@ -33,6 +33,8 @@ pub const CERTIFIER_VERSION: &str = "mfm-certify.v1";
 pub const CERTIFIER_ALGORITHM: &str = "mfm-certify.registry-validation.v1";
 /// Stable identifier for the v1 registry digest payload.
 pub const REGISTRY_DIGEST_ALGORITHM: &str = "mfm-certify.registry-digest.v1";
+/// Supported digest-only signing scheme for certified manual resolution decisions.
+pub const MANUAL_RESOLUTION_SIGNING_SCHEME: &str = "mfm.manual_resolution.digest_signature.v1";
 
 /// Problem taxonomy class rejected by typed certification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -264,6 +266,12 @@ pub struct CertifiedSpecCertificateEvidence {
     pub registry_digest: ContentDigest,
     /// Descriptor identities and digests covered by certification.
     pub descriptor_identities: Vec<CertifiedDescriptorEvidence>,
+    /// Schema role grants resolved during certification.
+    pub schema_role_grants: Vec<CertifiedSchemaRoleGrantEvidence>,
+    /// Manual authorization verifier identities resolved during certification.
+    pub manual_authorization_verifiers: Vec<CertifiedManualAuthorizationVerifierEvidence>,
+    /// Operator authority snapshots resolved during certification.
+    pub operator_authority_snapshots: Vec<CertifiedOperatorAuthoritySnapshotEvidence>,
     /// Public output schema id covered by certification.
     pub public_output_schema_id: SchemaId,
     /// Public output renderer canonicalizer identity covered by certification.
@@ -290,15 +298,135 @@ impl CertifiedSpecCertificateEvidence {
                 .iter()
                 .map(CertifiedDescriptorEvidence::json)
                 .collect::<Vec<_>>(),
+            "manual_authorization_verifiers": self
+                .manual_authorization_verifiers
+                .iter()
+                .map(CertifiedManualAuthorizationVerifierEvidence::json)
+                .collect::<Vec<_>>(),
             "lowering_version": self.lowering_version.as_str(),
             "media_type": self.media_type.as_str(),
+            "operator_authority_snapshots": self
+                .operator_authority_snapshots
+                .iter()
+                .map(CertifiedOperatorAuthoritySnapshotEvidence::json)
+                .collect::<Vec<_>>(),
             "public_output_canonicalizer_identity": self
                 .public_output_canonicalizer_identity
                 .as_str(),
             "public_output_schema_id": self.public_output_schema_id.as_str(),
             "registry_digest": self.registry_digest.as_str(),
+            "schema_role_grants": self
+                .schema_role_grants
+                .iter()
+                .map(CertifiedSchemaRoleGrantEvidence::json)
+                .collect::<Vec<_>>(),
             "spec_canonicalization": self.spec_canonicalization.as_str(),
             "spec_hash": self.spec_hash.as_str(),
+        })
+    }
+}
+
+/// Certified schema role in the certification registry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum CertifiedSchemaRole {
+    /// Schema may be used as manual resolution evidence.
+    ManualResolutionEvidence,
+    /// Schema may be used as manual resolution authorization proof evidence.
+    ManualResolutionAuthorization,
+}
+
+impl CertifiedSchemaRole {
+    /// Returns the stable persisted schema-role string.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ManualResolutionEvidence => "manual_resolution_evidence",
+            Self::ManualResolutionAuthorization => "manual_resolution_authorization",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "manual_resolution_evidence" => Ok(Self::ManualResolutionEvidence),
+            "manual_resolution_authorization" => Ok(Self::ManualResolutionAuthorization),
+            other => Err(certificate(format!(
+                "unknown certified schema role {other:?}"
+            ))),
+        }
+    }
+}
+
+/// Schema role grant resolved from the certification registry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CertifiedSchemaRoleGrantEvidence {
+    /// Schema id that received the grant.
+    pub schema_id: SchemaId,
+    /// Certified schema role.
+    pub role: CertifiedSchemaRole,
+}
+
+impl CertifiedSchemaRoleGrantEvidence {
+    fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "role": self.role.as_str(),
+            "schema_id": self.schema_id.as_str(),
+        })
+    }
+}
+
+/// Manual authorization verifier resolved from the certification registry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CertifiedManualAuthorizationVerifierEvidence {
+    /// Verifier id trusted by the registry.
+    pub verifier_id: spec::ManualAuthorizationVerifierId,
+}
+
+impl CertifiedManualAuthorizationVerifierEvidence {
+    fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "verifier_id": self.verifier_id.as_str(),
+        })
+    }
+}
+
+/// Operator authority snapshot resolved from the certification registry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CertifiedOperatorAuthoritySnapshotEvidence {
+    /// Authority id trusted by the registry.
+    pub authority_id: spec::OperatorAuthorityId,
+    /// Digest of the certified authority snapshot.
+    pub authority_digest: ContentDigest,
+    /// Operators included in the certified snapshot.
+    pub operators: Vec<CertifiedOperatorAuthorityMemberEvidence>,
+}
+
+impl CertifiedOperatorAuthoritySnapshotEvidence {
+    fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "authority_digest": self.authority_digest.as_str(),
+            "authority_id": self.authority_id.as_str(),
+            "operators": self
+                .operators
+                .iter()
+                .map(CertifiedOperatorAuthorityMemberEvidence::json)
+                .collect::<Vec<_>>(),
+        })
+    }
+}
+
+/// Operator member included in certified operator authority snapshot evidence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CertifiedOperatorAuthorityMemberEvidence {
+    /// Stable operator id.
+    pub operator_id: spec::OperatorId,
+    /// Public operator identity.
+    pub public_identity: spec::OperatorPublicIdentity,
+}
+
+impl CertifiedOperatorAuthorityMemberEvidence {
+    fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "operator_id": self.operator_id.as_str(),
+            "public_identity": self.public_identity.as_str(),
         })
     }
 }
@@ -503,6 +631,9 @@ pub struct CertificationRegistry {
     operations: BTreeMap<String, spec::OperationDescriptorIdentity>,
     config_validators: BTreeMap<String, ConfigValidator>,
     trusted_config_refs: BTreeMap<String, TrustedConfigRef>,
+    schema_roles: BTreeMap<String, BTreeSet<CertifiedSchemaRole>>,
+    manual_authorization_verifiers: BTreeSet<String>,
+    operator_authority_snapshots: BTreeMap<String, spec::OperatorAuthoritySnapshotSpec>,
 }
 
 impl CertificationRegistry {
@@ -519,6 +650,27 @@ impl CertificationRegistry {
                 .operations
                 .values()
                 .map(operation_descriptor_identity_json)
+                .collect::<Vec<_>>(),
+            "manual_authorization_verifiers": self
+                .manual_authorization_verifiers
+                .iter()
+                .collect::<Vec<_>>(),
+            "operator_authority_snapshots": self
+                .operator_authority_snapshots
+                .values()
+                .map(operator_authority_snapshot_json)
+                .collect::<Vec<_>>(),
+            "schema_role_grants": self
+                .schema_roles
+                .iter()
+                .flat_map(|(schema_id, roles)| {
+                    roles.iter().map(move |role| {
+                        serde_json::json!({
+                            "role": role.as_str(),
+                            "schema_id": schema_id,
+                        })
+                    })
+                })
                 .collect::<Vec<_>>(),
             "states": self
                 .states
@@ -576,6 +728,34 @@ impl CertificationRegistry {
         descriptor: spec::OperationDescriptorIdentity,
     ) -> Result<()> {
         self.insert_operation(descriptor)
+    }
+
+    /// Grants a schema id a certification role.
+    pub fn register_schema_role(
+        &mut self,
+        schema_id: SchemaId,
+        role: CertifiedSchemaRole,
+    ) -> Result<()> {
+        self.insert_schema_role(schema_id, role);
+        Ok(())
+    }
+
+    /// Registers a manual authorization verifier identity.
+    pub fn register_manual_authorization_verifier(
+        &mut self,
+        verifier_id: spec::ManualAuthorizationVerifierId,
+    ) -> Result<()> {
+        self.manual_authorization_verifiers
+            .insert(verifier_id.as_str().to_owned());
+        Ok(())
+    }
+
+    /// Registers an operator authority snapshot used by manual resolution certification.
+    pub fn register_operator_authority_snapshot(
+        &mut self,
+        snapshot: spec::OperatorAuthoritySnapshotSpec,
+    ) -> Result<()> {
+        self.insert_operator_authority_snapshot(snapshot)
     }
 
     /// Builds the descriptor registry used by a framework-lowered program draft.
@@ -657,6 +837,19 @@ impl CertificationRegistry {
                 scoped.trusted_config_refs.insert(key, trusted.clone());
             }
         }
+        for manual in manual_resolution_specs(spec) {
+            scoped.copy_schema_role_from(
+                self,
+                &manual.evidence_schema,
+                CertifiedSchemaRole::ManualResolutionEvidence,
+            )?;
+            scoped
+                .copy_manual_authorization_verifier_from(self, &manual.authorization.verifier_id)?;
+            scoped.copy_operator_authority_snapshot_from(
+                self,
+                &manual.authorization.authority.authority_id,
+            )?;
+        }
         Ok(scoped)
     }
 
@@ -720,6 +913,90 @@ impl CertificationRegistry {
             }
         } else {
             self.config_validators.insert(key, validator);
+        }
+        Ok(())
+    }
+
+    fn insert_schema_role(&mut self, schema_id: SchemaId, role: CertifiedSchemaRole) {
+        self.schema_roles
+            .entry(schema_id.as_str().to_owned())
+            .or_default()
+            .insert(role);
+    }
+
+    fn copy_schema_role_from(
+        &mut self,
+        trusted: &CertificationRegistry,
+        schema_id: &SchemaId,
+        role: CertifiedSchemaRole,
+    ) -> Result<()> {
+        let Some(roles) = trusted.schema_roles.get(schema_id.as_str()) else {
+            return Err(certificate(format!(
+                "manual schema {} is not present in the trusted registry",
+                schema_id
+            )));
+        };
+        if !roles.contains(&role) {
+            return Err(certificate(format!(
+                "manual schema {} lacks certified role {}",
+                schema_id,
+                role.as_str()
+            )));
+        }
+        self.insert_schema_role(schema_id.clone(), role);
+        Ok(())
+    }
+
+    fn copy_manual_authorization_verifier_from(
+        &mut self,
+        trusted: &CertificationRegistry,
+        verifier_id: &spec::ManualAuthorizationVerifierId,
+    ) -> Result<()> {
+        if !trusted
+            .manual_authorization_verifiers
+            .contains(verifier_id.as_str())
+        {
+            return Err(certificate(format!(
+                "manual authorization verifier {} is not present in the trusted registry",
+                verifier_id
+            )));
+        }
+        self.manual_authorization_verifiers
+            .insert(verifier_id.as_str().to_owned());
+        Ok(())
+    }
+
+    fn copy_operator_authority_snapshot_from(
+        &mut self,
+        trusted: &CertificationRegistry,
+        authority_id: &spec::OperatorAuthorityId,
+    ) -> Result<()> {
+        let Some(snapshot) = trusted
+            .operator_authority_snapshots
+            .get(authority_id.as_str())
+        else {
+            return Err(certificate(format!(
+                "operator authority snapshot {} is not present in the trusted registry",
+                authority_id
+            )));
+        };
+        self.insert_operator_authority_snapshot(snapshot.clone())
+    }
+
+    fn insert_operator_authority_snapshot(
+        &mut self,
+        snapshot: spec::OperatorAuthoritySnapshotSpec,
+    ) -> Result<()> {
+        let key = snapshot.authority_id.as_str().to_owned();
+        if let Some(existing) = self.operator_authority_snapshots.get(&key) {
+            if existing != &snapshot {
+                return Err(problem(
+                    ProblemClass::InvalidSemanticTransition,
+                    format!("conflicting operator authority snapshot {key}"),
+                ));
+            }
+        } else {
+            self.operator_authority_snapshots.insert(key, snapshot);
         }
         Ok(())
     }
@@ -934,6 +1211,24 @@ fn verify_untrusted_bundle(
             "descriptor identity evidence does not match persisted spec",
         ));
     }
+    let expected_schema_role_grants = schema_role_grants_for_spec(&bundle.spec, registry)?;
+    if bundle.certificate.evidence.schema_role_grants != expected_schema_role_grants {
+        return Err(certificate(
+            "schema role grant evidence does not match persisted spec",
+        ));
+    }
+    let expected_verifiers = manual_authorization_verifiers_for_spec(&bundle.spec, registry)?;
+    if bundle.certificate.evidence.manual_authorization_verifiers != expected_verifiers {
+        return Err(certificate(
+            "manual authorization verifier evidence does not match persisted spec",
+        ));
+    }
+    let expected_authorities = operator_authority_snapshots_for_spec(&bundle.spec, registry)?;
+    if bundle.certificate.evidence.operator_authority_snapshots != expected_authorities {
+        return Err(certificate(
+            "operator authority snapshot evidence does not match persisted spec",
+        ));
+    }
     if bundle.certificate.evidence.spec_canonicalization != bundle.spec.canonicalization {
         return Err(certificate("spec canonicalization mismatch"));
     }
@@ -982,6 +1277,15 @@ fn certificate_for_envelope(
         lowering_version: envelope.spec.lowering_version.clone(),
         registry_digest: registry.digest()?,
         descriptor_identities: descriptor_evidence_for_spec(&envelope.spec)?,
+        schema_role_grants: schema_role_grants_for_spec(&envelope.spec, registry)?,
+        manual_authorization_verifiers: manual_authorization_verifiers_for_spec(
+            &envelope.spec,
+            registry,
+        )?,
+        operator_authority_snapshots: operator_authority_snapshots_for_spec(
+            &envelope.spec,
+            registry,
+        )?,
         public_output_schema_id: envelope.spec.public_outputs.public_schema_id.clone(),
         public_output_canonicalizer_identity: envelope
             .spec
@@ -1020,6 +1324,154 @@ fn descriptor_evidence_for_spec(
             ))
     });
     Ok(evidence)
+}
+
+fn schema_role_grants_for_spec(
+    spec: &spec::TypedExecutionSpec,
+    registry: &CertificationRegistry,
+) -> Result<Vec<CertifiedSchemaRoleGrantEvidence>> {
+    let mut seen = BTreeSet::new();
+    let mut evidence = Vec::new();
+    for manual in manual_resolution_specs(spec) {
+        let role = CertifiedSchemaRole::ManualResolutionEvidence;
+        let key = (manual.evidence_schema.as_str().to_owned(), role);
+        if !seen.insert(key) {
+            continue;
+        }
+        let Some(roles) = registry.schema_roles.get(manual.evidence_schema.as_str()) else {
+            return Err(certificate(format!(
+                "manual evidence schema {} is missing from registry",
+                manual.evidence_schema
+            )));
+        };
+        if !roles.contains(&role) {
+            return Err(certificate(format!(
+                "manual evidence schema {} lacks certified role {}",
+                manual.evidence_schema,
+                role.as_str()
+            )));
+        }
+        evidence.push(CertifiedSchemaRoleGrantEvidence {
+            schema_id: manual.evidence_schema.clone(),
+            role,
+        });
+    }
+    evidence.sort_by(|left, right| {
+        (left.schema_id.as_str(), left.role.as_str())
+            .cmp(&(right.schema_id.as_str(), right.role.as_str()))
+    });
+    Ok(evidence)
+}
+
+fn manual_authorization_verifiers_for_spec(
+    spec: &spec::TypedExecutionSpec,
+    registry: &CertificationRegistry,
+) -> Result<Vec<CertifiedManualAuthorizationVerifierEvidence>> {
+    let mut seen = BTreeSet::new();
+    let mut evidence = Vec::new();
+    for manual in manual_resolution_specs(spec) {
+        let verifier_id = &manual.authorization.verifier_id;
+        if !seen.insert(verifier_id.as_str().to_owned()) {
+            continue;
+        }
+        if !registry
+            .manual_authorization_verifiers
+            .contains(verifier_id.as_str())
+        {
+            return Err(certificate(format!(
+                "manual authorization verifier {} is missing from registry",
+                verifier_id
+            )));
+        }
+        evidence.push(CertifiedManualAuthorizationVerifierEvidence {
+            verifier_id: verifier_id.clone(),
+        });
+    }
+    evidence.sort_by(|left, right| left.verifier_id.as_str().cmp(right.verifier_id.as_str()));
+    Ok(evidence)
+}
+
+fn operator_authority_snapshots_for_spec(
+    spec: &spec::TypedExecutionSpec,
+    registry: &CertificationRegistry,
+) -> Result<Vec<CertifiedOperatorAuthoritySnapshotEvidence>> {
+    let mut seen = BTreeSet::new();
+    let mut evidence = Vec::new();
+    for manual in manual_resolution_specs(spec) {
+        let authority_id = &manual.authorization.authority.authority_id;
+        if !seen.insert(authority_id.as_str().to_owned()) {
+            continue;
+        }
+        let Some(snapshot) = registry
+            .operator_authority_snapshots
+            .get(authority_id.as_str())
+        else {
+            return Err(certificate(format!(
+                "operator authority snapshot {} is missing from registry",
+                authority_id
+            )));
+        };
+        evidence.push(operator_authority_snapshot_evidence(snapshot)?);
+    }
+    evidence.sort_by(|left, right| left.authority_id.as_str().cmp(right.authority_id.as_str()));
+    Ok(evidence)
+}
+
+fn operator_authority_snapshot_evidence(
+    snapshot: &spec::OperatorAuthoritySnapshotSpec,
+) -> Result<CertifiedOperatorAuthoritySnapshotEvidence> {
+    Ok(CertifiedOperatorAuthoritySnapshotEvidence {
+        authority_id: snapshot.authority_id.clone(),
+        authority_digest: operator_authority_snapshot_digest(snapshot)?,
+        operators: snapshot
+            .operators
+            .iter()
+            .map(|operator| CertifiedOperatorAuthorityMemberEvidence {
+                operator_id: operator.operator_id.clone(),
+                public_identity: operator.public_identity.clone(),
+            })
+            .collect(),
+    })
+}
+
+fn operator_authority_snapshot_digest(
+    snapshot: &spec::OperatorAuthoritySnapshotSpec,
+) -> Result<ContentDigest> {
+    content_digest_json(operator_authority_snapshot_json(snapshot))
+}
+
+fn operator_authority_snapshot_json(
+    snapshot: &spec::OperatorAuthoritySnapshotSpec,
+) -> serde_json::Value {
+    serde_json::json!({
+        "authority_id": snapshot.authority_id.as_str(),
+        "operators": snapshot
+            .operators
+            .iter()
+            .map(|operator| {
+                serde_json::json!({
+                    "operator_id": operator.operator_id.as_str(),
+                    "public_identity": operator.public_identity.as_str(),
+                })
+            })
+            .collect::<Vec<_>>(),
+    })
+}
+
+fn manual_resolution_specs(
+    spec: &spec::TypedExecutionSpec,
+) -> Vec<&spec::ManualResolutionEvidenceSpec> {
+    let mut manuals = Vec::new();
+    match &spec.saga {
+        spec::SagaPolicySpec::ManualResolution { manual } => manuals.push(manual),
+        spec::SagaPolicySpec::CompensateCompleted {
+            on_remediation_unresolved: spec::RemediationUnresolvedSpec::ManualResolution { manual },
+        } => manuals.push(manual.as_ref()),
+        spec::SagaPolicySpec::NoSideEffects
+        | spec::SagaPolicySpec::FailWithoutAcdcClaim
+        | spec::SagaPolicySpec::CompensateCompleted { .. } => {}
+    }
+    manuals
 }
 
 fn certificate_audit_for_spec(spec: &spec::TypedExecutionSpec) -> CertifiedSpecAuditMetadata {
@@ -2145,6 +2597,7 @@ fn validate_typed_spec(
         &cell_index,
         &lineage_index,
         &node_index,
+        registry,
     )?;
     validate_operation_lineage(
         &spec.planning_lineage,
@@ -2812,6 +3265,7 @@ fn validate_saga_structure(
     cells: &BTreeMap<String, spec::CellSpec>,
     lineages: &BTreeMap<String, spec::ValueLineage>,
     forward_nodes: &BTreeMap<String, spec::NodeSpec>,
+    registry: &CertificationRegistry,
 ) -> Result<()> {
     let forward_side_effects = forward_nodes
         .values()
@@ -2908,6 +3362,131 @@ fn validate_saga_structure(
         }
     }
 
+    validate_manual_resolution_authority(typed, registry)?;
+
+    Ok(())
+}
+
+fn validate_manual_resolution_authority(
+    typed: &spec::TypedExecutionSpec,
+    registry: &CertificationRegistry,
+) -> Result<()> {
+    for manual in manual_resolution_specs(typed) {
+        validate_manual_evidence_schema(&manual.evidence_schema, registry)?;
+        validate_manual_authorization_spec(&manual.authorization, registry)?;
+    }
+    Ok(())
+}
+
+fn validate_manual_evidence_schema(
+    schema_id: &SchemaId,
+    registry: &CertificationRegistry,
+) -> Result<()> {
+    let Some(roles) = registry.schema_roles.get(schema_id.as_str()) else {
+        return Err(problem(
+            ProblemClass::InvalidSemanticTransition,
+            format!("unknown manual evidence schema {schema_id}"),
+        ));
+    };
+    if !roles.contains(&CertifiedSchemaRole::ManualResolutionEvidence) {
+        return Err(problem(
+            ProblemClass::InvalidSemanticTransition,
+            format!("manual evidence schema {schema_id} has wrong certified role"),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_manual_authorization_spec(
+    authorization: &spec::ManualResolutionAuthorizationSpec,
+    registry: &CertificationRegistry,
+) -> Result<()> {
+    if authorization.signing_scheme.as_str() != MANUAL_RESOLUTION_SIGNING_SCHEME {
+        return Err(problem(
+            ProblemClass::InvalidSemanticTransition,
+            format!(
+                "unsupported manual authorization signing scheme {}",
+                authorization.signing_scheme
+            ),
+        ));
+    }
+    if !registry
+        .manual_authorization_verifiers
+        .contains(authorization.verifier_id.as_str())
+    {
+        return Err(problem(
+            ProblemClass::InvalidSemanticTransition,
+            format!(
+                "unknown manual authorization verifier {}",
+                authorization.verifier_id
+            ),
+        ));
+    }
+    validate_operator_authority_snapshot(&authorization.authority)?;
+    let required_signatures = authorization.quorum.required_signatures() as usize;
+    if required_signatures > authorization.authority.operators.len() {
+        return Err(problem(
+            ProblemClass::InvalidSemanticTransition,
+            format!(
+                "manual authorization quorum {} exceeds operator authority size {}",
+                authorization.quorum.required_signatures(),
+                authorization.authority.operators.len()
+            ),
+        ));
+    }
+    let authority_id = &authorization.authority.authority_id;
+    let Some(registered) = registry
+        .operator_authority_snapshots
+        .get(authority_id.as_str())
+    else {
+        return Err(problem(
+            ProblemClass::InvalidSemanticTransition,
+            format!("missing operator authority snapshot {authority_id}"),
+        ));
+    };
+    if registered != &authorization.authority {
+        return Err(problem(
+            ProblemClass::InvalidSemanticTransition,
+            format!("operator authority snapshot {authority_id} does not match registry"),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_operator_authority_snapshot(
+    authority: &spec::OperatorAuthoritySnapshotSpec,
+) -> Result<()> {
+    if authority.operators.is_empty() {
+        return Err(problem(
+            ProblemClass::InvalidSemanticTransition,
+            format!(
+                "operator authority snapshot {} has no operators",
+                authority.authority_id
+            ),
+        ));
+    }
+    let mut operator_ids = BTreeSet::new();
+    let mut public_identities = BTreeSet::new();
+    for operator in &authority.operators {
+        if !operator_ids.insert(operator.operator_id.as_str()) {
+            return Err(problem(
+                ProblemClass::InvalidSemanticTransition,
+                format!(
+                    "operator authority snapshot {} contains duplicate operator {}",
+                    authority.authority_id, operator.operator_id
+                ),
+            ));
+        }
+        if !public_identities.insert(operator.public_identity.as_str()) {
+            return Err(problem(
+                ProblemClass::InvalidSemanticTransition,
+                format!(
+                    "operator authority snapshot {} contains duplicate public identity {}",
+                    authority.authority_id, operator.public_identity
+                ),
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -4228,6 +4807,18 @@ fn parse_certificate_evidence(
             required(object, "descriptor_identities")?,
             parse_descriptor_evidence,
         )?,
+        schema_role_grants: parse_array(
+            required(object, "schema_role_grants")?,
+            parse_schema_role_grant_evidence,
+        )?,
+        manual_authorization_verifiers: parse_array(
+            required(object, "manual_authorization_verifiers")?,
+            parse_manual_authorization_verifier_evidence,
+        )?,
+        operator_authority_snapshots: parse_array(
+            required(object, "operator_authority_snapshots")?,
+            parse_operator_authority_snapshot_evidence,
+        )?,
         public_output_schema_id: parse_identity(required_str(object, "public_output_schema_id")?)?,
         public_output_canonicalizer_identity: spec::CanonicalizerIdentity::new(required_str(
             object,
@@ -4235,6 +4826,56 @@ fn parse_certificate_evidence(
         )?)
         .map_err(|error| certificate(error.to_string()))?,
         audit: parse_certificate_audit(required(object, "audit")?)?,
+    })
+}
+
+fn parse_schema_role_grant_evidence(
+    value: &serde_json::Value,
+) -> Result<CertifiedSchemaRoleGrantEvidence> {
+    let object = json_object(value, "schema role grant evidence")?;
+    Ok(CertifiedSchemaRoleGrantEvidence {
+        schema_id: parse_identity(required_str(object, "schema_id")?)?,
+        role: CertifiedSchemaRole::parse(required_str(object, "role")?)?,
+    })
+}
+
+fn parse_manual_authorization_verifier_evidence(
+    value: &serde_json::Value,
+) -> Result<CertifiedManualAuthorizationVerifierEvidence> {
+    let object = json_object(value, "manual authorization verifier evidence")?;
+    Ok(CertifiedManualAuthorizationVerifierEvidence {
+        verifier_id: spec::ManualAuthorizationVerifierId::new(required_str(object, "verifier_id")?)
+            .map_err(|error| certificate(error.to_string()))?,
+    })
+}
+
+fn parse_operator_authority_snapshot_evidence(
+    value: &serde_json::Value,
+) -> Result<CertifiedOperatorAuthoritySnapshotEvidence> {
+    let object = json_object(value, "operator authority snapshot evidence")?;
+    Ok(CertifiedOperatorAuthoritySnapshotEvidence {
+        authority_id: spec::OperatorAuthorityId::new(required_str(object, "authority_id")?)
+            .map_err(|error| certificate(error.to_string()))?,
+        authority_digest: parse_identity(required_str(object, "authority_digest")?)?,
+        operators: parse_array(
+            required(object, "operators")?,
+            parse_operator_authority_member_evidence,
+        )?,
+    })
+}
+
+fn parse_operator_authority_member_evidence(
+    value: &serde_json::Value,
+) -> Result<CertifiedOperatorAuthorityMemberEvidence> {
+    let object = json_object(value, "operator authority member evidence")?;
+    Ok(CertifiedOperatorAuthorityMemberEvidence {
+        operator_id: spec::OperatorId::new(required_str(object, "operator_id")?)
+            .map_err(|error| certificate(error.to_string()))?,
+        public_identity: spec::OperatorPublicIdentity::new(required_str(
+            object,
+            "public_identity",
+        )?)
+        .map_err(|error| certificate(error.to_string()))?,
     })
 }
 
@@ -5522,7 +6163,7 @@ mod tests {
         );
         assert_eq!(
             certified.certificate_hash().as_str(),
-            "content:sha256-jcs-v1:c36b86e2abca672e0b08201a604ffbd6e304ef8d1d1c63420c780d5b4e8c46bf"
+            "content:sha256-jcs-v1:471a6f8b24c101ea979a9d2c65161dc0a099e6101765011ea6597727ce182aaf"
         );
         assert_eq!(
             certified.envelope().spec.public_outputs.public_schema_id,
@@ -6495,6 +7136,210 @@ mod tests {
     }
 
     #[test]
+    fn certification_records_manual_authority_evidence() {
+        let manual = manual_resolution_spec(0xc1);
+        let (mut registry, typed) = side_effect_spec_with_manual(manual.clone());
+        register_manual_authority(&mut registry, &manual);
+
+        let certified = certify_typed_spec(typed, &registry).expect("certified manual spec");
+
+        assert_eq!(
+            certified
+                .certificate()
+                .evidence
+                .schema_role_grants
+                .as_slice(),
+            &[CertifiedSchemaRoleGrantEvidence {
+                schema_id: manual.evidence_schema.clone(),
+                role: CertifiedSchemaRole::ManualResolutionEvidence,
+            }]
+        );
+        assert_eq!(
+            certified
+                .certificate()
+                .evidence
+                .manual_authorization_verifiers
+                .as_slice(),
+            &[CertifiedManualAuthorizationVerifierEvidence {
+                verifier_id: manual.authorization.verifier_id.clone(),
+            }]
+        );
+        assert_eq!(
+            certified
+                .certificate()
+                .evidence
+                .operator_authority_snapshots
+                .len(),
+            1
+        );
+        assert_eq!(
+            certified
+                .certificate()
+                .evidence
+                .operator_authority_snapshots[0]
+                .authority_id,
+            manual.authorization.authority.authority_id
+        );
+    }
+
+    #[test]
+    fn certification_rejects_unknown_manual_evidence_schema() {
+        let manual = manual_resolution_spec(0xc2);
+        let (mut registry, typed) = side_effect_spec_with_manual(manual.clone());
+        registry
+            .register_manual_authorization_verifier(manual.authorization.verifier_id.clone())
+            .expect("register verifier");
+        registry
+            .register_operator_authority_snapshot(manual.authorization.authority.clone())
+            .expect("register authority");
+
+        let error = certify_typed_spec(typed, &registry).expect_err("unknown schema rejects");
+
+        assert_eq!(
+            error.problem_class(),
+            Some(ProblemClass::InvalidSemanticTransition),
+            "{error}"
+        );
+        assert!(error.to_string().contains("unknown manual evidence schema"));
+    }
+
+    #[test]
+    fn certification_rejects_manual_schema_with_wrong_role() {
+        let manual = manual_resolution_spec(0xc3);
+        let (mut registry, typed) = side_effect_spec_with_manual(manual.clone());
+        registry
+            .register_schema_role(
+                manual.evidence_schema.clone(),
+                CertifiedSchemaRole::ManualResolutionAuthorization,
+            )
+            .expect("register wrong schema role");
+        registry
+            .register_manual_authorization_verifier(manual.authorization.verifier_id.clone())
+            .expect("register verifier");
+        registry
+            .register_operator_authority_snapshot(manual.authorization.authority.clone())
+            .expect("register authority");
+
+        let error = certify_typed_spec(typed, &registry).expect_err("wrong role rejects");
+
+        assert_eq!(
+            error.problem_class(),
+            Some(ProblemClass::InvalidSemanticTransition),
+            "{error}"
+        );
+        assert!(error.to_string().contains("wrong certified role"));
+    }
+
+    #[test]
+    fn certification_rejects_unknown_manual_authorization_verifier() {
+        let manual = manual_resolution_spec(0xc4);
+        let (mut registry, typed) = side_effect_spec_with_manual(manual.clone());
+        registry
+            .register_schema_role(
+                manual.evidence_schema.clone(),
+                CertifiedSchemaRole::ManualResolutionEvidence,
+            )
+            .expect("register schema role");
+        registry
+            .register_operator_authority_snapshot(manual.authorization.authority.clone())
+            .expect("register authority");
+
+        let error = certify_typed_spec(typed, &registry).expect_err("unknown verifier rejects");
+
+        assert_eq!(
+            error.problem_class(),
+            Some(ProblemClass::InvalidSemanticTransition),
+            "{error}"
+        );
+        assert!(error
+            .to_string()
+            .contains("unknown manual authorization verifier"));
+    }
+
+    #[test]
+    fn certification_rejects_operator_authority_snapshot_mismatch() {
+        let manual = manual_resolution_spec(0xc5);
+        let (mut registry, typed) = side_effect_spec_with_manual(manual.clone());
+        registry
+            .register_schema_role(
+                manual.evidence_schema.clone(),
+                CertifiedSchemaRole::ManualResolutionEvidence,
+            )
+            .expect("register schema role");
+        registry
+            .register_manual_authorization_verifier(manual.authorization.verifier_id.clone())
+            .expect("register verifier");
+        let mut mismatched = manual.authorization.authority.clone();
+        mismatched.operators[0].public_identity =
+            spec::OperatorPublicIdentity::new("operator-certify-public-mismatch")
+                .expect("operator public identity");
+        registry
+            .register_operator_authority_snapshot(mismatched)
+            .expect("register mismatched authority");
+
+        let error = certify_typed_spec(typed, &registry).expect_err("authority mismatch rejects");
+
+        assert_eq!(
+            error.problem_class(),
+            Some(ProblemClass::InvalidSemanticTransition),
+            "{error}"
+        );
+        assert!(error.to_string().contains("does not match registry"));
+    }
+
+    #[test]
+    fn certification_rejects_empty_operator_authority() {
+        let mut manual = manual_resolution_spec(0xc6);
+        manual.authorization.authority.operators.clear();
+        let (mut registry, typed) = side_effect_spec_with_manual(manual.clone());
+        register_manual_authority(&mut registry, &manual);
+
+        let error = certify_typed_spec(typed, &registry).expect_err("empty authority rejects");
+
+        assert_eq!(
+            error.problem_class(),
+            Some(ProblemClass::InvalidSemanticTransition),
+            "{error}"
+        );
+        assert!(error.to_string().contains("has no operators"));
+    }
+
+    #[test]
+    fn certification_rejects_unsupported_manual_signing_scheme_and_quorum() {
+        let mut manual = manual_resolution_spec(0xc7);
+        manual.authorization.signing_scheme =
+            spec::ManualSigningSchemeSpec::new("mfm.certify.test.unsupported-signing.v1")
+                .expect("signing scheme");
+        let (mut registry, typed) = side_effect_spec_with_manual(manual.clone());
+        register_manual_authority(&mut registry, &manual);
+
+        let error = certify_typed_spec(typed, &registry).expect_err("signing scheme rejects");
+
+        assert_eq!(
+            error.problem_class(),
+            Some(ProblemClass::InvalidSemanticTransition),
+            "{error}"
+        );
+        assert!(error
+            .to_string()
+            .contains("unsupported manual authorization signing scheme"));
+
+        let mut manual = manual_resolution_spec(0xc8);
+        manual.authorization.quorum = spec::ManualAuthorizationQuorumSpec::new(2).expect("quorum");
+        let (mut registry, typed) = side_effect_spec_with_manual(manual.clone());
+        register_manual_authority(&mut registry, &manual);
+
+        let error = certify_typed_spec(typed, &registry).expect_err("quorum rejects");
+
+        assert_eq!(
+            error.problem_class(),
+            Some(ProblemClass::InvalidSemanticTransition),
+            "{error}"
+        );
+        assert!(error.to_string().contains("quorum 2 exceeds"));
+    }
+
+    #[test]
     fn certification_rejects_missing_or_duplicate_resolve_saga_terminal_node() {
         let draft = reference_draft();
         let registry = CertificationRegistry::from_program_draft(&draft).expect("registry");
@@ -6547,6 +7392,75 @@ mod tests {
             .spec()
             .clone();
         (registry, spec)
+    }
+
+    fn side_effect_spec_with_manual(
+        manual: spec::ManualResolutionEvidenceSpec,
+    ) -> (CertificationRegistry, spec::TypedExecutionSpec) {
+        let draft = side_effect_draft();
+        let registry = CertificationRegistry::from_program_draft(&draft).expect("registry");
+        let mut typed = certify_program_draft(&draft)
+            .expect("certified")
+            .spec()
+            .clone();
+        typed.saga = spec::SagaPolicySpec::ManualResolution { manual };
+        (registry, typed)
+    }
+
+    fn manual_resolution_spec(byte: u8) -> spec::ManualResolutionEvidenceSpec {
+        let evidence_schema = SchemaId::new(
+            "mfm.certify.test.manual_evidence",
+            "1",
+            DigestAlgorithm::Sha256JcsV1,
+            digest_byte(byte),
+        )
+        .expect("manual evidence schema");
+        spec::ManualResolutionEvidenceSpec {
+            evidence_schema,
+            authorization: spec::ManualResolutionAuthorizationSpec {
+                verifier_id: spec::ManualAuthorizationVerifierId::new(format!(
+                    "mfm.certify.test.manual.verifier.{byte:02x}"
+                ))
+                .expect("verifier id"),
+                signing_scheme: spec::ManualSigningSchemeSpec::new(
+                    MANUAL_RESOLUTION_SIGNING_SCHEME,
+                )
+                .expect("signing scheme"),
+                authority: spec::OperatorAuthoritySnapshotSpec {
+                    authority_id: spec::OperatorAuthorityId::new(format!(
+                        "mfm.certify.test.manual.authority.{byte:02x}"
+                    ))
+                    .expect("authority id"),
+                    operators: vec![spec::OperatorAuthorityMemberSpec {
+                        operator_id: spec::OperatorId::new(format!("operator.certify.{byte:02x}"))
+                            .expect("operator id"),
+                        public_identity: spec::OperatorPublicIdentity::new(format!(
+                            "operator-certify-public-{byte:02x}"
+                        ))
+                        .expect("operator public identity"),
+                    }],
+                },
+                quorum: spec::ManualAuthorizationQuorumSpec::new(1).expect("quorum"),
+            },
+        }
+    }
+
+    fn register_manual_authority(
+        registry: &mut CertificationRegistry,
+        manual: &spec::ManualResolutionEvidenceSpec,
+    ) {
+        registry
+            .register_schema_role(
+                manual.evidence_schema.clone(),
+                CertifiedSchemaRole::ManualResolutionEvidence,
+            )
+            .expect("register schema role");
+        registry
+            .register_manual_authorization_verifier(manual.authorization.verifier_id.clone())
+            .expect("register verifier");
+        registry
+            .register_operator_authority_snapshot(manual.authorization.authority.clone())
+            .expect("register authority");
     }
 
     fn node_id(byte: u8) -> NodeId {
