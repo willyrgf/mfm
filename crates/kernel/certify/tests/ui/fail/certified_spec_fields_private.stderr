@@ -1,9 +1,11 @@
-error[E0451]: fields `validated` and `certificate` of struct `CertifiedTypedSpec` are private
-  --> tests/ui/fail/certified_spec_fields_private.rs:13:9
+error: cannot construct `CertifiedTypedSpec` with struct literal syntax due to private fields
+  --> tests/ui/fail/certified_spec_fields_private.rs:12:13
    |
 12 |     let _ = CertifiedTypedSpec {
-   |             ------------------ in this type
+   |             ^^^^^^^^^^^^^^^^^^
 13 |         validated: validated_spec(),
-   |         ^^^^^^^^^ private field
+   |         --------------------------- private field
 14 |         certificate: certificate(),
-   |         ^^^^^^^^^^^ private field
+   |         -------------------------- private field
+   |
+   = note: ...and other private fields `descriptor_set` and `framework_lifecycle` that were not provided

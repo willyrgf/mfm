@@ -1,13 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use mfm_capabilities::{EffectSpec, ManagedPlatformWrite};
-use mfm_certify::{CertifiedSpecCertificate, CertifiedTypedSpec};
-use mfm_ids::{CellId, DescriptorId, NodeId, SchemaId, SemanticTypeId, SpecHash};
+use mfm_certify::{CertifiedDescriptorSet, CertifiedSpecCertificate, CertifiedTypedSpec};
+use mfm_ids::{CellId, DescriptorId, NodeId, SpecHash};
 #[cfg(test)]
 use mfm_ids::{ContentDigest, DigestAlgorithm};
 use mfm_spec::v1 as spec;
 
-use crate::{config_ref_key, Result, RuntimeError};
+use crate::{Result, RuntimeError};
 
 /// Certified executable runtime spec with indexes used by the serial scheduler.
 #[derive(Debug, Clone)]
@@ -24,8 +23,10 @@ pub struct CertifiedRuntimeSpec {
 impl CertifiedRuntimeSpec {
     /// Builds deterministic runtime indexes from certifier-backed typed-spec authority.
     pub fn new(certified: CertifiedTypedSpec) -> Result<Self> {
-        let (envelope, certificate) = certified.into_parts();
-        Self::from_verified_parts(envelope, certificate)
+        let parts = certified.into_parts();
+        let state_descriptors = certified_state_descriptors(&parts.descriptor_set);
+        let _framework_lifecycle = parts.framework_lifecycle;
+        Self::from_verified_parts(parts.envelope, parts.certificate, state_descriptors)
     }
 
     #[cfg(test)]
@@ -67,27 +68,16 @@ impl CertifiedRuntimeSpec {
             },
         )
         .map_err(|error| RuntimeError::InvalidSpec(error.to_string()))?;
-        Self::from_verified_parts(envelope, certificate)
+        let state_descriptors = raw_state_descriptors(&envelope.spec)?;
+        Self::from_verified_parts(envelope, certificate, state_descriptors)
     }
 
     fn from_verified_parts(
         envelope: spec::HashedSpecEnvelope,
         certificate: CertifiedSpecCertificate,
+        state_descriptors: BTreeMap<DescriptorId, spec::StateDescriptorIdentity>,
     ) -> Result<Self> {
         envelope.verify_hash()?;
-        let mut state_descriptors = BTreeMap::new();
-        for descriptor in &envelope.spec.descriptor_identities {
-            if let spec::DescriptorIdentity::State(identity) = descriptor {
-                let previous = state_descriptors
-                    .insert(identity.descriptor_id.clone(), identity.as_ref().clone());
-                if previous.is_some() {
-                    return Err(RuntimeError::InvalidSpec(format!(
-                        "duplicate state descriptor {}",
-                        identity.descriptor_id
-                    )));
-                }
-            }
-        }
 
         let mut cells = BTreeMap::new();
         for cell in &envelope.spec.cells {
@@ -119,7 +109,6 @@ impl CertifiedRuntimeSpec {
             cells,
             topological_order: Vec::new(),
         };
-        runtime.validate_runtime_contract()?;
         let topological_order = runtime.compute_topological_order()?;
         Ok(Self {
             topological_order,
@@ -206,703 +195,6 @@ impl CertifiedRuntimeSpec {
             })
     }
 
-    fn validate_runtime_contract(&self) -> Result<()> {
-        let config_refs = self
-            .spec()
-            .config_refs
-            .iter()
-            .map(config_ref_key)
-            .collect::<BTreeSet<_>>();
-
-        for seed in &self.spec().seeds {
-            let cell = self.cells.get(&seed.cell_id).ok_or_else(|| {
-                RuntimeError::InvalidSpec(format!(
-                    "seed {} references missing cell {}",
-                    seed.seed_id, seed.cell_id
-                ))
-            })?;
-            if cell.producer != spec::CellProducer::Seed(seed.seed_id.clone())
-                || cell.scope_id != seed.scope_id
-                || cell.schema_id != seed.schema_id
-                || cell.semantic_type_id != seed.semantic_type_id
-            {
-                return Err(RuntimeError::InvalidSpec(format!(
-                    "seed {} cell metadata does not match certified cell {}",
-                    seed.seed_id, seed.cell_id
-                )));
-            }
-        }
-
-        for node in self.nodes.values() {
-            let descriptor = self.state_descriptor_for_node(node)?;
-            self.validate_framework_descriptor_variant(node, descriptor)?;
-            if descriptor.state_kind != node.state_kind
-                || descriptor.state_version != node.state_version
-                || descriptor.config_schema_id != node.config_ref.schema_id
-                || descriptor.input_schema_id != node.input_bindings.input_schema_id
-                || descriptor.output_schema_id
-                    != self
-                        .cells
-                        .get(&node.output_cell)
-                        .map(|cell| cell.schema_id.clone())
-                        .ok_or_else(|| {
-                            RuntimeError::InvalidSpec(format!(
-                                "node {} output cell {} is missing",
-                                node.node_id, node.output_cell
-                            ))
-                        })?
-                || descriptor.output_semantic_type_id
-                    != self
-                        .cells
-                        .get(&node.output_cell)
-                        .map(|cell| cell.semantic_type_id.clone())
-                        .expect("checked above")
-                || descriptor.effect_kind != node.effect_kind
-                || descriptor.capabilities != node.capability_bindings
-            {
-                return Err(RuntimeError::InvalidSpec(format!(
-                    "node {} does not match certified state descriptor {}",
-                    node.node_id, node.descriptor_id
-                )));
-            }
-            match (&node.side_effect, &descriptor.side_effect_contract_digest) {
-                (Some(contract), Some(descriptor_digest))
-                    if descriptor_digest == &contract.contract_digest => {}
-                (Some(_), _) => {
-                    return Err(RuntimeError::InvalidSpec(format!(
-                        "side-effect node {} lacks matching descriptor side-effect contract",
-                        node.node_id
-                    )));
-                }
-                (None, Some(_)) => {
-                    return Err(RuntimeError::InvalidSpec(format!(
-                        "non-side-effect node {} references a descriptor with side-effect contract",
-                        node.node_id
-                    )));
-                }
-                (None, None) => {}
-            }
-
-            if !config_refs.contains(&config_ref_key(&node.config_ref)) {
-                return Err(RuntimeError::InvalidSpec(format!(
-                    "node {} references missing config artifact {}",
-                    node.node_id, node.config_ref.artifact_id
-                )));
-            }
-
-            let output = self.cells.get(&node.output_cell).expect("checked above");
-            if output.producer != spec::CellProducer::Node(node.node_id.clone()) {
-                return Err(RuntimeError::InvalidSpec(format!(
-                    "node {} output cell {} has mismatched producer",
-                    node.node_id, node.output_cell
-                )));
-            }
-
-            let input_cells = self.validate_input_binding(&node.input_bindings.root)?;
-            let expected_predecessors = self.predecessors_for_input_cells(&input_cells)?;
-            if node.deterministic_predecessors != expected_predecessors {
-                return Err(RuntimeError::InvalidSpec(format!(
-                    "node {} deterministic predecessors do not match input cells",
-                    node.node_id
-                )));
-            }
-        }
-
-        for output in &self.spec().public_outputs.outputs {
-            let cell = self.cells.get(&output.cell_id).ok_or_else(|| {
-                RuntimeError::InvalidSpec(format!(
-                    "public output {} references missing cell {}",
-                    output.public_field_path.as_str(),
-                    output.cell_id
-                ))
-            })?;
-            if cell.producer != output.producer
-                || cell.scope_id != output.scope_id
-                || cell.semantic_type_id != output.semantic_type_id
-                || cell.schema_id != output.schema_id
-                || cell.value_lineage != output.value_lineage
-            {
-                return Err(RuntimeError::InvalidSpec(format!(
-                    "public output {} does not match certified cell {}",
-                    output.public_field_path.as_str(),
-                    output.cell_id
-                )));
-            }
-        }
-        self.validate_public_output_render_contract()?;
-        self.validate_lifecycle_framework_contract()?;
-
-        Ok(())
-    }
-
-    fn validate_public_output_render_contract(&self) -> Result<()> {
-        let public_outputs = &self.spec().public_outputs;
-        let output_spec_digest = public_outputs.digest()?;
-        let render_nodes = self
-            .nodes
-            .values()
-            .filter_map(|node| match &node.framework {
-                Some(spec::FrameworkNodeSpec::PublicOutputRender(render)) => Some((node, render)),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        if render_nodes.len() != 1 {
-            return Err(RuntimeError::InvalidSpec(format!(
-                "expected exactly one public-output render node, found {}",
-                render_nodes.len()
-            )));
-        }
-        let (node, render) = render_nodes[0];
-        if render.public_schema_id != public_outputs.public_schema_id
-            || render.output_spec_digest != output_spec_digest
-            || render.renderer_descriptor != public_outputs.renderer_descriptor
-            || render.required_cells != public_outputs.outputs
-        {
-            return Err(RuntimeError::InvalidSpec(format!(
-                "public-output render node {} does not match certified public outputs",
-                node.node_id
-            )));
-        }
-        let descriptor = self.state_descriptor_for_node(node)?;
-        let managed_effect = ManagedPlatformWrite::descriptor()
-            .map_err(|error| RuntimeError::InvalidSpec(error.to_string()))?;
-        if descriptor.name != "mfm.framework.render_public_outputs"
-            || descriptor.runner != "managed_platform_write"
-            || descriptor.effect_kind != managed_effect.kind
-            || descriptor.effect_class != managed_effect.class.as_str()
-            || descriptor.effect_name != managed_effect.name
-            || !descriptor.capabilities.capabilities.is_empty()
-        {
-            return Err(RuntimeError::InvalidSpec(format!(
-                "public-output render node {} is not bound to the framework renderer",
-                node.node_id
-            )));
-        }
-        let output_cell = self.cells.get(&node.output_cell).ok_or_else(|| {
-            RuntimeError::InvalidSpec(format!(
-                "public-output render node {} output cell {} is missing",
-                node.node_id, node.output_cell
-            ))
-        })?;
-        let receipt_schema_id = spec::public_output_receipt_schema_id()?;
-        if output_cell.schema_id != receipt_schema_id
-            || output_cell.terminal_policy != spec::CellTerminalPolicy::ProducedOnly
-            || output_cell.storage_policy != spec::StoragePolicy::PublicOutputArtifact
-            || output_cell.redaction_policy != spec::RedactionPolicy::Public
-        {
-            return Err(RuntimeError::InvalidSpec(format!(
-                "public-output render node {} output cell is not a public-output receipt",
-                node.node_id
-            )));
-        }
-        let input_cells = render
-            .required_cells
-            .iter()
-            .map(|cell| cell.cell_id.clone())
-            .collect::<Vec<_>>();
-        let expected_predecessors = self.predecessors_for_input_cells(&input_cells)?;
-        if node.deterministic_predecessors != expected_predecessors {
-            return Err(RuntimeError::InvalidSpec(format!(
-                "public-output render node {} predecessors do not match public cells",
-                node.node_id
-            )));
-        }
-        Ok(())
-    }
-
-    fn validate_lifecycle_framework_contract(&self) -> Result<()> {
-        let mut bootstrap_count = 0_usize;
-        let mut retention_count = 0_usize;
-        let mut completion_count = 0_usize;
-        let mut resolve_count = 0_usize;
-        let mut lifecycle_outputs = BTreeMap::<CellId, &spec::NodeSpec>::new();
-        let mut input_consumers = BTreeMap::<CellId, Vec<NodeId>>::new();
-        for node in self.nodes.values() {
-            for cell_id in self.validate_input_binding(&node.input_bindings.root)? {
-                input_consumers
-                    .entry(cell_id)
-                    .or_default()
-                    .push(node.node_id.clone());
-            }
-            if matches!(
-                &node.framework,
-                Some(
-                    spec::FrameworkNodeSpec::BootstrapRun(_)
-                        | spec::FrameworkNodeSpec::ProjectRetentionManifest(_)
-                        | spec::FrameworkNodeSpec::CompleteRun(_)
-                        | spec::FrameworkNodeSpec::ResolveSagaTerminal(_)
-                )
-            ) {
-                lifecycle_outputs.insert(node.output_cell.clone(), node);
-            }
-        }
-
-        for node in self.nodes.values() {
-            if let Some(framework) = &node.framework {
-                self.validate_framework_permissions(node)?;
-                self.validate_framework_config_ref(node, framework.config_kind())?;
-            }
-            match &node.framework {
-                Some(spec::FrameworkNodeSpec::BootstrapRun(_)) => {
-                    bootstrap_count += 1;
-                    self.validate_framework_descriptor(node, "mfm.framework.bootstrap_run")?;
-                    self.validate_framework_output_cell(
-                        node,
-                        &spec::bootstrap_run_receipt_schema_id()?,
-                        &spec::bootstrap_run_receipt_semantic_type_id()?,
-                        spec::StoragePolicy::ContentAddressed,
-                    )?;
-                    self.validate_framework_input_binding(
-                        node,
-                        &spec::framework_lifecycle_unit_input_binding("bootstrap_run")?,
-                    )?;
-                    let input_cells = self.validate_input_binding(&node.input_bindings.root)?;
-                    if !input_cells.is_empty() || !node.deterministic_predecessors.is_empty() {
-                        return Err(RuntimeError::InvalidSpec(format!(
-                            "bootstrap lifecycle node {} must not have inputs",
-                            node.node_id
-                        )));
-                    }
-                    self.validate_no_framework_receipt_consumers(node, &input_consumers)?;
-                }
-                Some(spec::FrameworkNodeSpec::PublicOutputRender(_)) => {
-                    self.validate_framework_receipt_consumers(
-                        node,
-                        &input_consumers,
-                        "project-retention-manifest lifecycle node",
-                        |consumer| {
-                            matches!(
-                                &consumer.framework,
-                                Some(spec::FrameworkNodeSpec::ProjectRetentionManifest(retention))
-                                    if retention.public_output_receipt_cell == node.output_cell
-                            )
-                        },
-                    )?;
-                }
-                Some(spec::FrameworkNodeSpec::ProjectRetentionManifest(retention)) => {
-                    retention_count += 1;
-                    self.validate_framework_descriptor(
-                        node,
-                        "mfm.framework.project_retention_manifest",
-                    )?;
-                    if retention.public_schema_id != self.spec().public_outputs.public_schema_id {
-                        return Err(RuntimeError::InvalidSpec(format!(
-                            "retention lifecycle node {} public schema mismatch",
-                            node.node_id
-                        )));
-                    }
-                    self.validate_framework_output_cell(
-                        node,
-                        &spec::retention_manifest_receipt_schema_id()?,
-                        &spec::retention_manifest_receipt_semantic_type_id()?,
-                        spec::StoragePolicy::ContentAddressed,
-                    )?;
-                    let public_output_receipt_cell = self
-                        .cells
-                        .get(&retention.public_output_receipt_cell)
-                        .ok_or_else(|| {
-                            RuntimeError::InvalidSpec(format!(
-                                "retention lifecycle node {} missing public-output receipt cell",
-                                node.node_id
-                            ))
-                        })?;
-                    self.validate_framework_input_binding(
-                        node,
-                        &spec::framework_lifecycle_receipt_input_binding(
-                            "project_retention_manifest",
-                            "public_output_receipt",
-                            public_output_receipt_cell,
-                        )?,
-                    )?;
-                    let input_cells = self.validate_input_binding(&node.input_bindings.root)?;
-                    if input_cells != vec![retention.public_output_receipt_cell.clone()] {
-                        return Err(RuntimeError::InvalidSpec(format!(
-                            "retention lifecycle node {} must depend on the public-output receipt cell",
-                            node.node_id
-                        )));
-                    }
-                    let render_node = self.nodes.values().find(|candidate| {
-                        candidate.output_cell == retention.public_output_receipt_cell
-                            && matches!(
-                                &candidate.framework,
-                                Some(spec::FrameworkNodeSpec::PublicOutputRender(render))
-                                    if render.public_schema_id == retention.public_schema_id
-                            )
-                    });
-                    if render_node.is_none() {
-                        return Err(RuntimeError::InvalidSpec(format!(
-                            "retention lifecycle node {} is not ordered after public-output render",
-                            node.node_id
-                        )));
-                    }
-                    self.validate_framework_receipt_consumers(
-                        node,
-                        &input_consumers,
-                        "complete-run lifecycle node",
-                        |consumer| {
-                            matches!(
-                                &consumer.framework,
-                                Some(spec::FrameworkNodeSpec::CompleteRun(complete))
-                                    if complete.retention_manifest_receipt_cell == node.output_cell
-                            )
-                        },
-                    )?;
-                }
-                Some(spec::FrameworkNodeSpec::CompleteRun(complete)) => {
-                    completion_count += 1;
-                    self.validate_framework_descriptor(node, "mfm.framework.complete_run")?;
-                    if complete.public_schema_id != self.spec().public_outputs.public_schema_id {
-                        return Err(RuntimeError::InvalidSpec(format!(
-                            "completion lifecycle node {} public schema mismatch",
-                            node.node_id
-                        )));
-                    }
-                    self.validate_framework_output_cell(
-                        node,
-                        &spec::complete_run_receipt_schema_id()?,
-                        &spec::complete_run_receipt_semantic_type_id()?,
-                        spec::StoragePolicy::ContentAddressed,
-                    )?;
-                    let retention_manifest_receipt_cell = self
-                        .cells
-                        .get(&complete.retention_manifest_receipt_cell)
-                        .ok_or_else(|| {
-                            RuntimeError::InvalidSpec(format!(
-                                "completion lifecycle node {} missing retention receipt cell",
-                                node.node_id
-                            ))
-                        })?;
-                    self.validate_framework_input_binding(
-                        node,
-                        &spec::framework_lifecycle_receipt_input_binding(
-                            "complete_run",
-                            "retention_manifest_receipt",
-                            retention_manifest_receipt_cell,
-                        )?,
-                    )?;
-                    let input_cells = self.validate_input_binding(&node.input_bindings.root)?;
-                    if input_cells != vec![complete.retention_manifest_receipt_cell.clone()] {
-                        return Err(RuntimeError::InvalidSpec(format!(
-                            "completion lifecycle node {} must depend on the retention receipt cell",
-                            node.node_id
-                        )));
-                    }
-                    let retention_node = lifecycle_outputs
-                        .get(&complete.retention_manifest_receipt_cell)
-                        .filter(|candidate| {
-                            matches!(
-                                &candidate.framework,
-                                Some(spec::FrameworkNodeSpec::ProjectRetentionManifest(retention))
-                                    if retention.public_schema_id == complete.public_schema_id
-                            )
-                        });
-                    if retention_node.is_none() {
-                        return Err(RuntimeError::InvalidSpec(format!(
-                            "completion lifecycle node {} is not ordered after retention projection",
-                            node.node_id
-                        )));
-                    }
-                    self.validate_no_framework_receipt_consumers(node, &input_consumers)?;
-                }
-                Some(spec::FrameworkNodeSpec::ResolveSagaTerminal(resolve)) => {
-                    resolve_count += 1;
-                    self.validate_framework_descriptor(
-                        node,
-                        "mfm.framework.resolve_saga_terminal",
-                    )?;
-                    if resolve.public_schema_id != self.spec().public_outputs.public_schema_id {
-                        return Err(RuntimeError::InvalidSpec(format!(
-                            "resolve-saga-terminal lifecycle node {} public schema mismatch",
-                            node.node_id
-                        )));
-                    }
-                    self.validate_framework_output_cell(
-                        node,
-                        &spec::resolve_saga_terminal_receipt_schema_id()?,
-                        &spec::resolve_saga_terminal_receipt_semantic_type_id()?,
-                        spec::StoragePolicy::ContentAddressed,
-                    )?;
-                    self.validate_framework_input_binding(
-                        node,
-                        &spec::framework_lifecycle_unit_input_binding("resolve_saga_terminal")?,
-                    )?;
-                    let input_cells = self.validate_input_binding(&node.input_bindings.root)?;
-                    if !input_cells.is_empty() || !node.deterministic_predecessors.is_empty() {
-                        return Err(RuntimeError::InvalidSpec(format!(
-                            "resolve-saga-terminal lifecycle node {} must not have inputs",
-                            node.node_id
-                        )));
-                    }
-                    self.validate_no_framework_receipt_consumers(node, &input_consumers)?;
-                }
-                Some(spec::FrameworkNodeSpec::Bridge(_)) | None => {}
-            }
-        }
-
-        if retention_count != 1 {
-            return Err(RuntimeError::InvalidSpec(format!(
-                "expected exactly one retention lifecycle framework node, found {retention_count}"
-            )));
-        }
-        if completion_count != 1 {
-            return Err(RuntimeError::InvalidSpec(format!(
-                "expected exactly one completion lifecycle framework node, found {completion_count}"
-            )));
-        }
-        if resolve_count != 1 {
-            return Err(RuntimeError::InvalidSpec(format!(
-                "expected exactly one resolve-saga-terminal lifecycle framework node, found {resolve_count}"
-            )));
-        }
-        if bootstrap_count != 1 {
-            return Err(RuntimeError::InvalidSpec(format!(
-                "expected exactly one bootstrap lifecycle framework node, found {bootstrap_count}"
-            )));
-        }
-        self.validate_lifecycle_tail_finality()?;
-        Ok(())
-    }
-
-    fn validate_lifecycle_tail_finality(&self) -> Result<()> {
-        let render_node = self
-            .nodes
-            .values()
-            .find(|node| {
-                matches!(
-                    node.framework,
-                    Some(spec::FrameworkNodeSpec::PublicOutputRender(_))
-                )
-            })
-            .ok_or_else(|| {
-                RuntimeError::InvalidSpec("missing public-output render node".to_owned())
-            })?;
-        let mut render_ancestors = BTreeSet::new();
-        self.collect_deterministic_ancestors(render_node, &mut render_ancestors)?;
-        for node in self.nodes.values() {
-            if node.node_id == render_node.node_id || render_ancestors.contains(&node.node_id) {
-                continue;
-            }
-            match &node.framework {
-                Some(
-                    spec::FrameworkNodeSpec::BootstrapRun(_)
-                    | spec::FrameworkNodeSpec::ProjectRetentionManifest(_)
-                    | spec::FrameworkNodeSpec::CompleteRun(_)
-                    | spec::FrameworkNodeSpec::ResolveSagaTerminal(_),
-                ) => {}
-                _ => {
-                    return Err(RuntimeError::InvalidSpec(format!(
-                        "node {} is outside the certified public-output lifecycle tail",
-                        node.node_id
-                    )));
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn collect_deterministic_ancestors(
-        &self,
-        node: &spec::NodeSpec,
-        ancestors: &mut BTreeSet<NodeId>,
-    ) -> Result<()> {
-        for predecessor_id in &node.deterministic_predecessors {
-            if ancestors.insert(predecessor_id.clone()) {
-                let predecessor = self.nodes.get(predecessor_id).ok_or_else(|| {
-                    RuntimeError::InvalidSpec(format!(
-                        "node {} references missing predecessor {}",
-                        node.node_id, predecessor_id
-                    ))
-                })?;
-                self.collect_deterministic_ancestors(predecessor, ancestors)?;
-            }
-        }
-        Ok(())
-    }
-
-    fn validate_framework_permissions(&self, node: &spec::NodeSpec) -> Result<()> {
-        if node.side_effect.is_some()
-            || !node.adapter_bindings.is_empty()
-            || !node.capability_bindings.capabilities.is_empty()
-        {
-            return Err(RuntimeError::InvalidSpec(format!(
-                "framework node {} carries user-controlled execution permissions",
-                node.node_id
-            )));
-        }
-        Ok(())
-    }
-
-    fn validate_framework_config_ref(&self, node: &spec::NodeSpec, kind: &str) -> Result<()> {
-        let expected = spec::framework_config_ref(kind, &node.node_id)?;
-        if node.config_ref != expected {
-            return Err(RuntimeError::InvalidSpec(format!(
-                "framework node {} config ref is not deterministic for {kind}",
-                node.node_id
-            )));
-        }
-        Ok(())
-    }
-
-    fn validate_framework_input_binding(
-        &self,
-        node: &spec::NodeSpec,
-        expected: &spec::InputBindingSpec,
-    ) -> Result<()> {
-        if &node.input_bindings != expected {
-            return Err(RuntimeError::InvalidSpec(format!(
-                "framework node {} input binding is not deterministic",
-                node.node_id
-            )));
-        }
-        Ok(())
-    }
-
-    fn validate_framework_descriptor_variant(
-        &self,
-        node: &spec::NodeSpec,
-        descriptor: &spec::StateDescriptorIdentity,
-    ) -> Result<()> {
-        let matches_variant = match descriptor.name.as_str() {
-            "mfm.framework.bootstrap_run" => {
-                matches!(
-                    &node.framework,
-                    Some(spec::FrameworkNodeSpec::BootstrapRun(_))
-                )
-            }
-            "mfm.framework.bridge_same_value" => {
-                matches!(&node.framework, Some(spec::FrameworkNodeSpec::Bridge(_)))
-            }
-            "mfm.framework.render_public_outputs" => {
-                matches!(
-                    &node.framework,
-                    Some(spec::FrameworkNodeSpec::PublicOutputRender(_))
-                )
-            }
-            "mfm.framework.project_retention_manifest" => {
-                matches!(
-                    &node.framework,
-                    Some(spec::FrameworkNodeSpec::ProjectRetentionManifest(_))
-                )
-            }
-            "mfm.framework.complete_run" => {
-                matches!(
-                    &node.framework,
-                    Some(spec::FrameworkNodeSpec::CompleteRun(_))
-                )
-            }
-            "mfm.framework.resolve_saga_terminal" => {
-                matches!(
-                    &node.framework,
-                    Some(spec::FrameworkNodeSpec::ResolveSagaTerminal(_))
-                )
-            }
-            _ => return Ok(()),
-        };
-        if !matches_variant {
-            return Err(RuntimeError::InvalidSpec(format!(
-                "node {} uses built-in framework descriptor {} without matching framework metadata",
-                node.node_id, descriptor.name
-            )));
-        }
-        Ok(())
-    }
-
-    fn validate_no_framework_receipt_consumers(
-        &self,
-        node: &spec::NodeSpec,
-        consumers_by_cell: &BTreeMap<CellId, Vec<NodeId>>,
-    ) -> Result<()> {
-        if consumers_by_cell
-            .get(&node.output_cell)
-            .map(|consumers| !consumers.is_empty())
-            .unwrap_or(false)
-        {
-            return Err(RuntimeError::InvalidSpec(format!(
-                "framework receipt cell {} must not be consumed",
-                node.output_cell
-            )));
-        }
-        Ok(())
-    }
-
-    fn validate_framework_receipt_consumers(
-        &self,
-        node: &spec::NodeSpec,
-        consumers_by_cell: &BTreeMap<CellId, Vec<NodeId>>,
-        expected_consumer: &str,
-        mut allowed: impl FnMut(&spec::NodeSpec) -> bool,
-    ) -> Result<()> {
-        for consumer_id in consumers_by_cell
-            .get(&node.output_cell)
-            .into_iter()
-            .flatten()
-        {
-            let consumer = self.nodes.get(consumer_id).ok_or_else(|| {
-                RuntimeError::InvalidSpec(format!(
-                    "framework receipt cell {} has missing consumer node {}",
-                    node.output_cell, consumer_id
-                ))
-            })?;
-            if !allowed(consumer) {
-                return Err(RuntimeError::InvalidSpec(format!(
-                    "framework receipt cell {} may only feed {expected_consumer}",
-                    node.output_cell
-                )));
-            }
-        }
-        Ok(())
-    }
-
-    fn validate_framework_descriptor(
-        &self,
-        node: &spec::NodeSpec,
-        expected_name: &str,
-    ) -> Result<()> {
-        let descriptor = self.state_descriptor_for_node(node)?;
-        let managed_effect = ManagedPlatformWrite::descriptor()
-            .map_err(|error| RuntimeError::InvalidSpec(error.to_string()))?;
-        if descriptor.name != expected_name
-            || descriptor.runner != "managed_platform_write"
-            || descriptor.effect_kind != managed_effect.kind
-            || descriptor.effect_class != managed_effect.class.as_str()
-            || descriptor.effect_name != managed_effect.name
-            || !descriptor.capabilities.capabilities.is_empty()
-        {
-            return Err(RuntimeError::InvalidSpec(format!(
-                "framework node {} is not bound to {expected_name}",
-                node.node_id
-            )));
-        }
-        Ok(())
-    }
-
-    fn validate_framework_output_cell(
-        &self,
-        node: &spec::NodeSpec,
-        expected_schema_id: &SchemaId,
-        expected_semantic_type_id: &SemanticTypeId,
-        expected_storage_policy: spec::StoragePolicy,
-    ) -> Result<()> {
-        let output = self.cells.get(&node.output_cell).ok_or_else(|| {
-            RuntimeError::InvalidSpec(format!(
-                "framework node {} output cell {} is missing",
-                node.node_id, node.output_cell
-            ))
-        })?;
-        if output.schema_id != *expected_schema_id
-            || output.semantic_type_id != *expected_semantic_type_id
-            || output.terminal_policy != spec::CellTerminalPolicy::ProducedOnly
-            || output.storage_policy != expected_storage_policy
-            || output.redaction_policy != spec::RedactionPolicy::Public
-        {
-            return Err(RuntimeError::InvalidSpec(format!(
-                "framework node {} output cell contract mismatch",
-                node.node_id
-            )));
-        }
-        Ok(())
-    }
-
     pub(crate) fn validate_input_binding(
         &self,
         input: &spec::InputBindingNodeSpec,
@@ -957,19 +249,6 @@ impl CertifiedRuntimeSpec {
         Ok(())
     }
 
-    fn predecessors_for_input_cells(&self, input_cells: &[CellId]) -> Result<Vec<NodeId>> {
-        let mut predecessors = BTreeSet::new();
-        for cell_id in input_cells {
-            let cell = self.cells.get(cell_id).ok_or_else(|| {
-                RuntimeError::InvalidSpec(format!("input cell {cell_id} is missing"))
-            })?;
-            if let spec::CellProducer::Node(node_id) = &cell.producer {
-                predecessors.insert(node_id.clone());
-            }
-        }
-        Ok(predecessors.into_iter().collect())
-    }
-
     fn compute_topological_order(&self) -> Result<Vec<NodeId>> {
         let mut indegree = BTreeMap::<NodeId, usize>::new();
         let mut successors = BTreeMap::<NodeId, BTreeSet<NodeId>>::new();
@@ -1019,4 +298,33 @@ impl CertifiedRuntimeSpec {
         }
         Ok(order)
     }
+}
+
+fn certified_state_descriptors(
+    descriptors: &CertifiedDescriptorSet,
+) -> BTreeMap<DescriptorId, spec::StateDescriptorIdentity> {
+    descriptors
+        .state_descriptors()
+        .map(|(descriptor_id, descriptor)| (descriptor_id.clone(), descriptor.clone()))
+        .collect()
+}
+
+#[cfg(test)]
+fn raw_state_descriptors(
+    spec: &spec::TypedExecutionSpec,
+) -> Result<BTreeMap<DescriptorId, spec::StateDescriptorIdentity>> {
+    let mut state_descriptors = BTreeMap::new();
+    for descriptor in &spec.descriptor_identities {
+        if let spec::DescriptorIdentity::State(identity) = descriptor {
+            let previous =
+                state_descriptors.insert(identity.descriptor_id.clone(), identity.as_ref().clone());
+            if previous.is_some() {
+                return Err(RuntimeError::InvalidSpec(format!(
+                    "duplicate state descriptor {}",
+                    identity.descriptor_id
+                )));
+            }
+        }
+    }
+    Ok(state_descriptors)
 }

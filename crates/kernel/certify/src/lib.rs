@@ -189,6 +189,226 @@ impl ValidatedTypedExecutionSpec {
     }
 }
 
+/// Registry-backed descriptor authority for a certified typed spec.
+///
+/// The fields are private so callers can inspect descriptors only after this crate has validated
+/// descriptor identities against the certification registry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CertifiedDescriptorSet {
+    states: BTreeMap<DescriptorId, spec::StateDescriptorIdentity>,
+    operations: BTreeMap<DescriptorId, spec::OperationDescriptorIdentity>,
+    renderers: BTreeMap<DescriptorId, spec::RendererDescriptorIdentity>,
+}
+
+impl CertifiedDescriptorSet {
+    fn from_validated_spec(validated: &ValidatedTypedExecutionSpec) -> Result<Self> {
+        let mut states = BTreeMap::new();
+        let mut operations = BTreeMap::new();
+        let mut renderers = BTreeMap::new();
+        let mut all = BTreeSet::new();
+
+        for descriptor in &validated.spec().descriptor_identities {
+            let descriptor_id = descriptor.descriptor_id().clone();
+            if !all.insert(descriptor_id.clone()) {
+                return Err(problem(
+                    ProblemClass::InvalidSemanticTransition,
+                    format!("duplicate certified descriptor identity {descriptor_id}"),
+                ));
+            }
+            match descriptor {
+                spec::DescriptorIdentity::State(identity) => {
+                    states.insert(descriptor_id, identity.as_ref().clone());
+                }
+                spec::DescriptorIdentity::Operation(identity) => {
+                    operations.insert(descriptor_id, identity.as_ref().clone());
+                }
+                spec::DescriptorIdentity::Renderer(identity) => {
+                    renderers.insert(descriptor_id, identity.as_ref().clone());
+                }
+            }
+        }
+
+        Ok(Self {
+            states,
+            operations,
+            renderers,
+        })
+    }
+
+    /// Returns a certified state descriptor by id.
+    pub fn state(&self, id: &DescriptorId) -> Option<&spec::StateDescriptorIdentity> {
+        self.states.get(id)
+    }
+
+    /// Returns a certified operation descriptor by id.
+    pub fn operation(&self, id: &DescriptorId) -> Option<&spec::OperationDescriptorIdentity> {
+        self.operations.get(id)
+    }
+
+    /// Returns a certified renderer descriptor by id.
+    pub fn renderer(&self, id: &DescriptorId) -> Option<&spec::RendererDescriptorIdentity> {
+        self.renderers.get(id)
+    }
+
+    /// Iterates certified state descriptors in deterministic id order.
+    pub fn state_descriptors(
+        &self,
+    ) -> impl Iterator<Item = (&DescriptorId, &spec::StateDescriptorIdentity)> {
+        self.states.iter()
+    }
+}
+
+/// Certified framework node role in the static lifecycle tail.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CertifiedFrameworkNodeRole {
+    node_id: NodeId,
+    output_cell: CellId,
+    descriptor_id: DescriptorId,
+}
+
+impl CertifiedFrameworkNodeRole {
+    fn from_node(node: &spec::NodeSpec) -> Self {
+        Self {
+            node_id: node.node_id.clone(),
+            output_cell: node.output_cell.clone(),
+            descriptor_id: node.descriptor_id.clone(),
+        }
+    }
+
+    /// Returns the certified framework node id.
+    pub fn node_id(&self) -> &NodeId {
+        &self.node_id
+    }
+
+    /// Returns the receipt cell produced by the certified framework node.
+    pub fn output_cell(&self) -> &CellId {
+        &self.output_cell
+    }
+
+    /// Returns the certified framework state descriptor id.
+    pub fn descriptor_id(&self) -> &DescriptorId {
+        &self.descriptor_id
+    }
+}
+
+/// Certified static framework lifecycle authority for a typed spec.
+///
+/// This view is minted only after certifier validation has checked lifecycle node roles, receipt
+/// wiring, output contracts, framework config refs, renderer linkage, and lifecycle tail finality.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CertifiedFrameworkLifecycle {
+    bootstrap: CertifiedFrameworkNodeRole,
+    render: CertifiedFrameworkNodeRole,
+    retention: CertifiedFrameworkNodeRole,
+    complete: CertifiedFrameworkNodeRole,
+    resolve: CertifiedFrameworkNodeRole,
+}
+
+impl CertifiedFrameworkLifecycle {
+    fn from_validated_spec(
+        validated: &ValidatedTypedExecutionSpec,
+        descriptors: &CertifiedDescriptorSet,
+    ) -> Result<Self> {
+        let mut bootstrap = None;
+        let mut render = None;
+        let mut retention = None;
+        let mut complete = None;
+        let mut resolve = None;
+
+        for node in &validated.spec().nodes {
+            if descriptors.state(&node.descriptor_id).is_none() {
+                return Err(problem(
+                    ProblemClass::InvalidSemanticTransition,
+                    format!(
+                        "framework lifecycle node {} references missing descriptor {}",
+                        node.node_id, node.descriptor_id
+                    ),
+                ));
+            }
+            match &node.framework {
+                Some(spec::FrameworkNodeSpec::BootstrapRun(_)) => {
+                    set_framework_role(&mut bootstrap, node, "bootstrap lifecycle node")?;
+                }
+                Some(spec::FrameworkNodeSpec::PublicOutputRender(_)) => {
+                    set_framework_role(&mut render, node, "public-output render node")?;
+                }
+                Some(spec::FrameworkNodeSpec::ProjectRetentionManifest(_)) => {
+                    set_framework_role(&mut retention, node, "retention lifecycle node")?;
+                }
+                Some(spec::FrameworkNodeSpec::CompleteRun(_)) => {
+                    set_framework_role(&mut complete, node, "complete-run lifecycle node")?;
+                }
+                Some(spec::FrameworkNodeSpec::ResolveSagaTerminal(_)) => {
+                    set_framework_role(&mut resolve, node, "resolve-saga-terminal lifecycle node")?;
+                }
+                Some(spec::FrameworkNodeSpec::Bridge(_)) | None => {}
+            }
+        }
+
+        Ok(Self {
+            bootstrap: take_framework_role(bootstrap, "bootstrap lifecycle node")?,
+            render: take_framework_role(render, "public-output render node")?,
+            retention: take_framework_role(retention, "retention lifecycle node")?,
+            complete: take_framework_role(complete, "complete-run lifecycle node")?,
+            resolve: take_framework_role(resolve, "resolve-saga-terminal lifecycle node")?,
+        })
+    }
+
+    /// Returns the certified bootstrap receipt producer.
+    pub fn bootstrap(&self) -> &CertifiedFrameworkNodeRole {
+        &self.bootstrap
+    }
+
+    /// Returns the certified public-output render receipt producer.
+    pub fn render(&self) -> &CertifiedFrameworkNodeRole {
+        &self.render
+    }
+
+    /// Returns the certified retention manifest receipt producer.
+    pub fn retention(&self) -> &CertifiedFrameworkNodeRole {
+        &self.retention
+    }
+
+    /// Returns the certified completion receipt producer.
+    pub fn complete(&self) -> &CertifiedFrameworkNodeRole {
+        &self.complete
+    }
+
+    /// Returns the certified saga-terminal resolution receipt producer.
+    pub fn resolve(&self) -> &CertifiedFrameworkNodeRole {
+        &self.resolve
+    }
+}
+
+fn set_framework_role(
+    slot: &mut Option<CertifiedFrameworkNodeRole>,
+    node: &spec::NodeSpec,
+    label: &'static str,
+) -> Result<()> {
+    if slot
+        .replace(CertifiedFrameworkNodeRole::from_node(node))
+        .is_some()
+    {
+        return Err(problem(
+            ProblemClass::InvalidTopology,
+            format!("expected exactly one {label}"),
+        ));
+    }
+    Ok(())
+}
+
+fn take_framework_role(
+    role: Option<CertifiedFrameworkNodeRole>,
+    label: &'static str,
+) -> Result<CertifiedFrameworkNodeRole> {
+    role.ok_or_else(|| {
+        problem(
+            ProblemClass::InvalidTopology,
+            format!("missing certified {label}"),
+        )
+    })
+}
+
 /// Input accepted by typed-spec certification.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TypedSpecCertificationInput {
@@ -226,6 +446,8 @@ impl TypedSpecCertificationInput {
 pub struct CertifiedTypedSpec {
     validated: ValidatedTypedExecutionSpec,
     certificate: CertifiedSpecCertificate,
+    descriptor_set: CertifiedDescriptorSet,
+    framework_lifecycle: CertifiedFrameworkLifecycle,
 }
 
 impl CertifiedTypedSpec {
@@ -254,15 +476,43 @@ impl CertifiedTypedSpec {
         &self.certificate.certificate_hash
     }
 
-    /// Consumes the authority and returns the hash-only envelope plus certificate evidence.
-    pub fn into_parts(self) -> (spec::HashedSpecEnvelope, CertifiedSpecCertificate) {
-        (self.validated.into_envelope(), self.certificate)
+    /// Returns the certified descriptor authority.
+    pub fn descriptor_set(&self) -> &CertifiedDescriptorSet {
+        &self.descriptor_set
+    }
+
+    /// Returns the certified framework lifecycle authority.
+    pub fn framework_lifecycle(&self) -> &CertifiedFrameworkLifecycle {
+        &self.framework_lifecycle
+    }
+
+    /// Consumes the authority and returns runtime construction parts.
+    pub fn into_parts(self) -> CertifiedTypedSpecParts {
+        CertifiedTypedSpecParts {
+            envelope: self.validated.into_envelope(),
+            certificate: self.certificate,
+            descriptor_set: self.descriptor_set,
+            framework_lifecycle: self.framework_lifecycle,
+        }
     }
 
     /// Builds canonical persisted spec and certificate bytes for storage.
     pub fn bundle(&self) -> Result<CertifiedSpecBundle> {
         CertifiedSpecBundle::from_certified(self)
     }
+}
+
+/// Runtime construction parts carried by a certified typed spec.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CertifiedTypedSpecParts {
+    /// Hash-only typed spec envelope covered by the certificate.
+    pub envelope: spec::HashedSpecEnvelope,
+    /// Verified certificate evidence for the typed spec.
+    pub certificate: CertifiedSpecCertificate,
+    /// Certified descriptor authority for the typed spec.
+    pub descriptor_set: CertifiedDescriptorSet,
+    /// Certified static framework lifecycle authority for the typed spec.
+    pub framework_lifecycle: CertifiedFrameworkLifecycle,
 }
 
 /// Persisted typed-spec certificate.
@@ -1202,9 +1452,14 @@ pub fn certify_typed_spec(
 ) -> Result<CertifiedTypedSpec> {
     let validated = validate_typed_spec(input.into().into_raw_spec(), registry)?;
     let certificate = certificate_for_envelope(validated.envelope(), registry)?;
+    let descriptor_set = CertifiedDescriptorSet::from_validated_spec(&validated)?;
+    let framework_lifecycle =
+        CertifiedFrameworkLifecycle::from_validated_spec(&validated, &descriptor_set)?;
     Ok(CertifiedTypedSpec {
         validated,
         certificate,
+        descriptor_set,
+        framework_lifecycle,
     })
 }
 
@@ -6443,6 +6698,42 @@ mod tests {
             .clone();
 
         certify_raw_typed_spec(spec, &registry).expect("lifecycle framework nodes certify");
+    }
+
+    #[test]
+    fn certification_mints_descriptor_set_and_lifecycle_views() {
+        let certified = certify_program_draft(&reference_draft()).expect("certified");
+        let spec = certified.validated_spec().spec();
+        let descriptors = certified.descriptor_set();
+        let lifecycle = certified.framework_lifecycle();
+
+        assert!(descriptors.state_descriptors().count() > 0);
+        assert!(descriptors
+            .renderer(&spec.public_outputs.renderer_descriptor.descriptor_id)
+            .is_some());
+        assert!(descriptors
+            .state(lifecycle.bootstrap().descriptor_id())
+            .is_some());
+        assert!(descriptors
+            .state(lifecycle.render().descriptor_id())
+            .is_some());
+        assert!(descriptors
+            .state(lifecycle.retention().descriptor_id())
+            .is_some());
+        assert!(descriptors
+            .state(lifecycle.complete().descriptor_id())
+            .is_some());
+        assert!(descriptors
+            .state(lifecycle.resolve().descriptor_id())
+            .is_some());
+        assert_ne!(
+            lifecycle.bootstrap().node_id(),
+            lifecycle.render().node_id()
+        );
+        assert_ne!(
+            lifecycle.retention().output_cell(),
+            lifecycle.complete().output_cell()
+        );
     }
 
     #[test]

@@ -191,3 +191,43 @@ Checks run:
 - `cargo check -p mfm-spec -p mfm-certify -p mfm-runtime -p mfm-app`
 - `cargo test -p mfm-integration-tests --test cargo_metadata_contract`
 - `cargo test -p mfm-integration-tests --test architecture_namespace_contract`
+
+## Phase 5: Certified Descriptor Set And Framework Lifecycle Authority
+
+Status: completed.
+
+Files changed:
+
+- `crates/kernel/certify/src/lib.rs`
+- `crates/kernel/certify/tests/ui/fail/certified_spec_fields_private.stderr`
+- `crates/kernel/runtime/src/spec_authority.rs`
+- `crates/kernel/runtime/src/tests.rs`
+- `IMPLEMENTATION_ACDC_SAGA_PRE_MERGE.md`
+
+Validators deleted or replaced:
+
+- Added `CertifiedDescriptorSet` with private fields and certifier-only construction from validated spec authority.
+- Added `CertifiedFrameworkLifecycle` and `CertifiedFrameworkNodeRole` with private fields and certifier-only construction.
+- Changed `CertifiedTypedSpec` to carry certified descriptor and framework lifecycle views.
+- Changed `CertifiedTypedSpec::into_parts` to transfer envelope, certificate, descriptor set, and lifecycle authority as one runtime construction object.
+- Changed production `CertifiedRuntimeSpec::new` to consume descriptor/lifecycle authority from `CertifiedTypedSpec`.
+- Deleted runtime-side duplicate static validation for descriptor/node contracts, public-output render shape, lifecycle node roles, lifecycle receipt consumers, lifecycle config refs, framework output contracts, and lifecycle tail finality.
+- Kept runtime checks focused on hash verification, duplicate index construction, missing/cyclic predecessor detection, runner/capability availability, stream/history agreement, and state advancement.
+
+Tests added or updated:
+
+- Added certifier test proving certification mints descriptor set and lifecycle role views.
+- Updated certifier compile-fail fixture for the expanded private `CertifiedTypedSpec` fields.
+- Removed runtime tests that asserted certifier-owned static lifecycle rejection paths.
+
+Checks run:
+
+- `cargo test -p mfm-certify certification_mints_descriptor_set_and_lifecycle_views`
+- `cargo test -p mfm-certify --test certify_authority_ui`
+- `cargo test -p mfm-runtime certified_runtime_spec_accepts_certifier_authority`
+- `cargo fmt --all -- --check`
+- `cargo check -p mfm-certify -p mfm-runtime`
+- `cargo test -p mfm-certify`
+- `cargo test -p mfm-runtime`
+- `cargo test -p mfm-integration-tests --test cargo_metadata_contract`
+- `cargo test -p mfm-integration-tests --test architecture_namespace_contract`
