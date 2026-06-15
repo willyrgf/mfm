@@ -2436,17 +2436,16 @@ pub mod v1 {
     mod tests {
         use super::*;
         use mfm_capabilities::{CapabilityDescriptor, CapabilityRole, CapabilitySetDescriptor};
-        use mfm_core::crypto::EthereumPrivateKey;
         use mfm_ids::{
             DescriptorId, DigestAlgorithm, DigestBytes, EffectKind, EffectVersion, EventId,
-            LoweringVersion, RunId, ScopeId, SeedId, SemanticTypeId, SpecVersion, StateKind,
-            StateVersion,
+            LoweringVersion, RunId, ScopeId, SeedId, SemanticTypeId, SpecHash, SpecVersion,
+            StateKind, StateVersion,
         };
         use mfm_manual_auth::{
-            ManualResolutionAuthorizationClaim, ManualResolutionAuthorizationProof,
-            ManualResolutionAuthorizationSignature, ManualResolutionEvidenceRef,
+            ManualAuthorizationSignatureBytes, ManualResolutionAuthorizationClaim,
+            ManualResolutionAuthorizationProof, ManualResolutionAuthorizationSignature,
+            ManualResolutionEvidenceRef,
         };
-        use mfm_signing::SignatureBytes;
         use mfm_store::v1::{
             build_committed_batch, CommitKey, CommitPreconditions, InMemoryTypedRunStore,
             PreparedTypedCommit, RequiredRunState, StreamSeq, TypedCommitRequest,
@@ -3383,6 +3382,57 @@ pub mod v1 {
         }
 
         #[test]
+        fn replay_construction_rejects_manual_authorization_wrong_run() {
+            let signed = signed_manual_resolution_case(
+                |claim| {
+                    claim.run_id = RunId::from_digest(DigestAlgorithm::Sha256JcsV1, bytes(0xde));
+                },
+                |_| {},
+                |_| {},
+                |_, _| {},
+            );
+
+            assert_eq!(
+                ReplayBroker::from_validated_parts(
+                    signed.fixture.authority_for_stream_artifacts_and_bytes(
+                        &signed.stream,
+                        signed.artifacts,
+                        signed.artifact_bytes,
+                    ),
+                )
+                .expect_err("manual run mismatch")
+                .kind,
+                ReplayErrorKind::CertifiedEvidenceMismatch
+            );
+        }
+
+        #[test]
+        fn replay_construction_rejects_manual_authorization_wrong_spec() {
+            let signed = signed_manual_resolution_case(
+                |claim| {
+                    claim.spec_hash =
+                        SpecHash::from_digest(DigestAlgorithm::Sha256JcsV1, bytes(0xdf));
+                },
+                |_| {},
+                |_| {},
+                |_, _| {},
+            );
+
+            assert_eq!(
+                ReplayBroker::from_validated_parts(
+                    signed.fixture.authority_for_stream_artifacts_and_bytes(
+                        &signed.stream,
+                        signed.artifacts,
+                        signed.artifact_bytes,
+                    ),
+                )
+                .expect_err("manual spec mismatch")
+                .kind,
+                ReplayErrorKind::CertifiedEvidenceMismatch
+            );
+        }
+
+        #[test]
         fn replay_construction_rejects_manual_authorization_wrong_prefix() {
             let signed = signed_manual_resolution_case(
                 |claim| {
@@ -3402,6 +3452,56 @@ pub mod v1 {
                     ),
                 )
                 .expect_err("manual prefix mismatch")
+                .kind,
+                ReplayErrorKind::CertifiedEvidenceMismatch
+            );
+        }
+
+        #[test]
+        fn replay_construction_rejects_manual_authorization_stale_sequence() {
+            let signed = signed_manual_resolution_case(
+                |claim| {
+                    claim.expected_next_seq = claim.expected_next_seq.saturating_sub(1);
+                },
+                |_| {},
+                |_| {},
+                |_, _| {},
+            );
+
+            assert_eq!(
+                ReplayBroker::from_validated_parts(
+                    signed.fixture.authority_for_stream_artifacts_and_bytes(
+                        &signed.stream,
+                        signed.artifacts,
+                        signed.artifact_bytes,
+                    ),
+                )
+                .expect_err("manual stale sequence")
+                .kind,
+                ReplayErrorKind::CertifiedEvidenceMismatch
+            );
+        }
+
+        #[test]
+        fn replay_construction_rejects_manual_authorization_wrong_evidence_hash() {
+            let signed = signed_manual_resolution_case(
+                |_| {},
+                |_| {},
+                |event| {
+                    event.evidence_hash = content(0xe0);
+                },
+                |_, _| {},
+            );
+
+            assert_eq!(
+                ReplayBroker::from_validated_parts(
+                    signed.fixture.authority_for_stream_artifacts_and_bytes(
+                        &signed.stream,
+                        signed.artifacts,
+                        signed.artifact_bytes,
+                    ),
+                )
+                .expect_err("manual evidence hash mismatch")
                 .kind,
                 ReplayErrorKind::CertifiedEvidenceMismatch
             );
@@ -3429,6 +3529,33 @@ pub mod v1 {
                 .expect_err("manual invalid signature")
                 .kind,
                 ReplayErrorKind::CertifiedEvidenceMismatch
+            );
+        }
+
+        #[test]
+        fn replay_construction_rejects_missing_manual_authorization_artifact() {
+            let signed = signed_manual_resolution_case(
+                |_| {},
+                |_| {},
+                |_| {},
+                |artifacts, _| {
+                    artifacts.retain(|artifact| {
+                        artifact.artifact_role != ArtifactRole::ManualResolutionAuthorization
+                    });
+                },
+            );
+
+            assert_eq!(
+                ReplayBroker::from_validated_parts(
+                    signed.fixture.authority_for_stream_artifacts_and_bytes(
+                        &signed.stream,
+                        signed.artifacts,
+                        signed.artifact_bytes,
+                    ),
+                )
+                .expect_err("missing manual authorization artifact")
+                .kind,
+                ReplayErrorKind::ArtifactMissing
             );
         }
 
@@ -3716,11 +3843,8 @@ pub mod v1 {
                 &mut Vec<ReplayArtifactBytes>,
             ),
         ) -> SignedManualResolutionCase {
-            let key = EthereumPrivateKey::from_hex_secret(
-                "0x0000000000000000000000000000000000000000000000000000000000000001",
-            )
-            .expect("test key");
-            let operator_public_identity = format!("{:?}", key.address().expect("address"));
+            let signing_key = test_manual_signing_key();
+            let operator_public_identity = "0x7e5f4552091a69125d5dfcb7b8c2659029395bdf".to_owned();
             let evidence_schema = schema("mfm.test.manual_evidence", 0xd0);
             let fixture = Fixture::with_saga_policy(spec::SagaPolicySpec::ManualResolution {
                 manual: spec::ManualResolutionEvidenceSpec {
@@ -3786,10 +3910,8 @@ pub mod v1 {
                 .expect("manual policy");
             let operator = manual.authorization.authority.operators[0].clone();
             let claim_digest = proof_claim.digest().expect("claim digest");
-            let signature = key
-                .sign_hash_recoverable(claim_digest.digest().as_bytes())
-                .expect("manual signature");
-            let mut signature_bytes = signature.as_bytes().to_vec();
+            let mut signature_bytes =
+                sign_manual_claim_digest(&signing_key, claim_digest.digest().as_bytes());
             edit_signature(&mut signature_bytes);
             let mut proof = ManualResolutionAuthorizationProof {
                 verifier_id: manual.authorization.verifier_id.clone(),
@@ -3798,7 +3920,8 @@ pub mod v1 {
                 signatures: vec![ManualResolutionAuthorizationSignature {
                     operator_id: operator.operator_id,
                     public_identity: operator.public_identity,
-                    signature: SignatureBytes::new(signature_bytes).expect("signature bytes"),
+                    signature: ManualAuthorizationSignatureBytes::new(signature_bytes)
+                        .expect("signature bytes"),
                 }],
             };
             edit_proof(&mut proof);
@@ -3857,6 +3980,25 @@ pub mod v1 {
                 artifacts,
                 artifact_bytes,
             }
+        }
+
+        fn test_manual_signing_key() -> k256::ecdsa::SigningKey {
+            let mut key_bytes = [0u8; 32];
+            key_bytes[31] = 1;
+            let secret_key = k256::SecretKey::from_slice(&key_bytes).expect("test key");
+            k256::ecdsa::SigningKey::from(&secret_key)
+        }
+
+        fn sign_manual_claim_digest(
+            signing_key: &k256::ecdsa::SigningKey,
+            digest: &[u8; 32],
+        ) -> Vec<u8> {
+            let (signature, recovery_id) = signing_key
+                .sign_prehash_recoverable(digest)
+                .expect("manual signature");
+            let mut signature_bytes = signature.to_bytes().to_vec();
+            signature_bytes.push(u8::from(recovery_id.is_y_odd()));
+            signature_bytes
         }
 
         struct Fixture {

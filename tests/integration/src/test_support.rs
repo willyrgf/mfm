@@ -2185,10 +2185,33 @@ fn replay_artifacts_for(
                     )?,
                 );
             }
+            events::KernelEventPayload::ManualResolutionRecorded(payload) => {
+                insert_artifact(
+                    &mut artifacts,
+                    event_artifact(
+                        payload.evidence_artifact_id.clone(),
+                        payload.evidence_hash.clone(),
+                        Some(payload.evidence_schema_id.clone()),
+                        None,
+                        None,
+                        events::ArtifactRole::ManualResolutionEvidence,
+                    )?,
+                );
+                insert_artifact(
+                    &mut artifacts,
+                    event_artifact(
+                        payload.authorization_artifact_id.clone(),
+                        payload.authorization_hash.clone(),
+                        Some(payload.authorization_schema_id.clone()),
+                        None,
+                        None,
+                        events::ArtifactRole::ManualResolutionAuthorization,
+                    )?,
+                );
+            }
             events::KernelEventPayload::ArtifactReferenced(_)
             | events::KernelEventPayload::FactRecorded(_)
             | events::KernelEventPayload::CellProduced(_)
-            | events::KernelEventPayload::ManualResolutionRecorded(_)
             | events::KernelEventPayload::StateAttemptStarted(_)
             | events::KernelEventPayload::CellSkipped(_)
             | events::KernelEventPayload::SideEffectClaimed(_)
@@ -2292,7 +2315,9 @@ fn referenced_artifacts_from_stream(
                 events::ArtifactRole::StateOutput
                 | events::ArtifactRole::FactResponse
                 | events::ArtifactRole::PublicOutput
-                | events::ArtifactRole::RedactedDiagnostic => {
+                | events::ArtifactRole::RedactedDiagnostic
+                | events::ArtifactRole::ManualResolutionEvidence
+                | events::ArtifactRole::ManualResolutionAuthorization => {
                     if !reference_matches_same_commit_payload(commit, payload) {
                         return Err(format!(
                             "artifact reference {} was not bound to a same-commit typed payload",
@@ -2454,7 +2479,30 @@ fn payload_has_required_reference(
                     events::KernelEventPayload::ArtifactReferenced(reference)
                         if reference.node_id.as_ref() == Some(&payload.node_id)
                             && reference.attempt_id.as_ref() == Some(&payload.attempt_id)
-                            && event_artifact_refs_match(diagnostic, reference)
+                    && event_artifact_refs_match(diagnostic, reference)
+                )
+            })
+        }
+        events::KernelEventPayload::ManualResolutionRecorded(payload) => {
+            commit.iter().any(|event| {
+                matches!(
+                    event.payload(),
+                    events::KernelEventPayload::ArtifactReferenced(reference)
+                        if manual_resolution_artifact_ref_matches(
+                            payload,
+                            reference,
+                            events::ArtifactRole::ManualResolutionEvidence
+                        )
+                )
+            }) && commit.iter().any(|event| {
+                matches!(
+                    event.payload(),
+                    events::KernelEventPayload::ArtifactReferenced(reference)
+                        if manual_resolution_artifact_ref_matches(
+                            payload,
+                            reference,
+                            events::ArtifactRole::ManualResolutionAuthorization
+                        )
                 )
             })
         }
@@ -2476,6 +2524,24 @@ fn reference_matches_same_commit_payload(
     commit: &[store::KernelEventEnvelope],
     reference: &events::ArtifactReferenced,
 ) -> bool {
+    if matches!(
+        reference.artifact_ref.role,
+        events::ArtifactRole::ManualResolutionEvidence
+            | events::ArtifactRole::ManualResolutionAuthorization
+    ) {
+        return commit.iter().any(|event| {
+            matches!(
+                event.payload(),
+                events::KernelEventPayload::ManualResolutionRecorded(payload)
+                    if manual_resolution_artifact_ref_matches(
+                        payload,
+                        reference,
+                        reference.artifact_ref.role
+                    )
+            )
+        });
+    }
+
     let (Some(reference_node_id), Some(reference_attempt_id)) =
         (&reference.node_id, &reference.attempt_id)
     else {
@@ -2531,6 +2597,34 @@ fn reference_matches_same_commit_payload(
         }
         _ => false,
     })
+}
+
+fn manual_resolution_artifact_ref_matches(
+    payload: &events::ManualResolutionRecorded,
+    reference: &events::ArtifactReferenced,
+    role: events::ArtifactRole,
+) -> bool {
+    if reference.node_id.is_some()
+        || reference.attempt_id.is_some()
+        || reference.artifact_ref.semantic_type_id.is_some()
+        || reference.artifact_ref.role != role
+    {
+        return false;
+    }
+
+    match role {
+        events::ArtifactRole::ManualResolutionEvidence => {
+            reference.artifact_ref.artifact_id == payload.evidence_artifact_id
+                && reference.artifact_ref.content_digest == payload.evidence_hash
+                && reference.artifact_ref.schema_id == payload.evidence_schema_id
+        }
+        events::ArtifactRole::ManualResolutionAuthorization => {
+            reference.artifact_ref.artifact_id == payload.authorization_artifact_id
+                && reference.artifact_ref.content_digest == payload.authorization_hash
+                && reference.artifact_ref.schema_id == payload.authorization_schema_id
+        }
+        _ => false,
+    }
 }
 
 fn event_artifact_refs_match(

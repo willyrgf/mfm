@@ -3329,6 +3329,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn append_only_resume_rejects_unauthorized_historical_manual_resolution() {
+        let (root, fixture, services, _started) = start_framework_fixture_run().await;
+        let valid_stream = services
+            .store()
+            .load_run_stream(&fixture.run_id)
+            .await
+            .expect("load valid stream");
+        let terminal_index = valid_stream
+            .iter()
+            .position(|event| {
+                matches!(event.payload(), events::KernelEventPayload::RunCompleted(_))
+            })
+            .expect("terminal event");
+        let corrupt_stream =
+            append_forged_manual_resolution_history(&valid_stream[..terminal_index]);
+        let artifacts = services.artifacts().clone();
+        let registry =
+            CertificationRegistry::from_program_draft(&fixture.draft).expect("fixture registry");
+        let corrupt_services = make_async_typed_services_with_certification_registry(
+            production_typed_runner_registry(artifacts.clone())
+                .expect("production runner registry"),
+            StaticAsyncStore {
+                run_id: fixture.run_id.clone(),
+                stream: corrupt_stream,
+            },
+            artifacts,
+            registry,
+        );
+
+        let resume_err = corrupt_services
+            .resume_stored_run(&fixture.run_id, DriveMode::AppendOnly)
+            .await
+            .expect_err("append-only resume rejects unauthorized manual event");
+        assert_eq!(resume_err.code, "LaunchRuntimeError");
+        assert!(
+            resume_err
+                .message
+                .contains("without certified manual policy"),
+            "{resume_err}"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
     async fn app_read_paths_reject_tampered_bootstrap_genesis_history() {
         let (root, fixture, services, _started) = start_framework_fixture_run().await;
         let valid_stream = services
@@ -4437,6 +4482,47 @@ mod tests {
                 })
                 .cloned(),
         );
+        rewritten
+    }
+
+    fn append_forged_manual_resolution_history(
+        stream: &[store::KernelEventEnvelope],
+    ) -> Vec<store::KernelEventEnvelope> {
+        let first = stream.first().expect("valid stream is non-empty");
+        let run_id = first.run_id().clone();
+        let seq = store::StreamSeq::new(
+            stream
+                .last()
+                .expect("valid stream is non-empty")
+                .seq()
+                .as_u64()
+                + 1,
+        )
+        .expect("next sequence");
+        let request = store::TypedCommitRequest {
+            run_id: run_id.clone(),
+            expected_next_seq: seq,
+            commit_key: store::CommitKey::new("forged-manual-resolution").expect("commit key"),
+            payloads: vec![events::KernelEventPayload::ManualResolutionRecorded(
+                events::ManualResolutionRecorded {
+                    run_id,
+                    spec_hash: first.spec_hash().clone(),
+                    outcome: events::ManualResolutionOutcome::ConfirmRemediated,
+                    evidence_schema_id: schema_id("mfm.test.manual_evidence", 0xe0),
+                    evidence_hash: content_digest(0xe1),
+                    evidence_artifact_id: artifact_id_for_digest(&content_digest(0xe1)),
+                    authorization_schema_id: schema_id("mfm.test.manual_authorization", 0xe3),
+                    authorization_hash: content_digest(0xe4),
+                    authorization_artifact_id: artifact_id_for_digest(&content_digest(0xe4)),
+                    note: None,
+                },
+            )],
+            required_artifacts: Vec::new(),
+            preconditions: store::CommitPreconditions::default(),
+        };
+        let batch = store::build_committed_batch(&request, seq).expect("manual batch");
+        let mut rewritten = stream.to_vec();
+        rewritten.extend(batch.events().iter().cloned());
         rewritten
     }
 

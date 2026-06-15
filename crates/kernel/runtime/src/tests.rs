@@ -12,16 +12,16 @@ use mfm_ids::{
     SemanticTypeId, SpecVersion, StateKind, StateVersion,
 };
 use mfm_manual_auth::{
-    ManualAuthorizationVerification, ManualAuthorizationVerifier,
-    ManualAuthorizationVerifierRegistry, ManualResolutionAuthorizationProof,
-    ManualResolutionAuthorizationSignature, ManualResolutionEvidenceRef,
+    ManualAuthorizationSignatureBytes, ManualAuthorizationVerification,
+    ManualAuthorizationVerifier, ManualAuthorizationVerifierRegistry,
+    ManualResolutionAuthorizationProof, ManualResolutionAuthorizationSignature,
+    ManualResolutionEvidenceRef,
 };
 use mfm_program::{
     build_root_with_registries, CanonicalSeed, PublicOutputKey, PureState, RootBuilder, ScopeKey,
     StateKey, StateRegistryBuilder, StateResult, StateSpec,
 };
 use mfm_program_derive::{MfmConfig, MfmValue, PublicOutputs};
-use mfm_signing::SignatureBytes;
 use mfm_store::v1::{TypedProjectionRead, TypedRunEventStore};
 use serde::{Deserialize, Serialize};
 
@@ -5222,7 +5222,7 @@ async fn runtime_rejects_manual_resolution_before_manual_blocked() {
         signatures: vec![ManualResolutionAuthorizationSignature {
             operator_id: operator.operator_id,
             public_identity: operator.public_identity,
-            signature: SignatureBytes::new(vec![0x5b; 65]).expect("signature"),
+            signature: ManualAuthorizationSignatureBytes::new(vec![0x5b; 65]).expect("signature"),
         }],
     };
     let mut verifiers = ManualAuthorizationVerifierRegistry::new();
@@ -8101,7 +8101,7 @@ async fn append_manual_resolution(
         signatures: vec![ManualResolutionAuthorizationSignature {
             operator_id: operator.operator_id,
             public_identity: operator.public_identity,
-            signature: SignatureBytes::new(vec![0x5a; 65]).expect("signature"),
+            signature: ManualAuthorizationSignatureBytes::new(vec![0x5a; 65]).expect("signature"),
         }],
     };
     let mut verifiers = ManualAuthorizationVerifierRegistry::new();

@@ -2070,9 +2070,7 @@ dependencies = [
  "hex",
  "mfm-canonical",
  "mfm-events",
- "mfm-evm-signing",
  "mfm-ids",
- "mfm-signing",
  "mfm-spec",
  "serde_json",
 ]
@@ -2190,16 +2188,15 @@ dependencies = [
 name = "mfm-replay"
 version = "0.1.0"
 dependencies = [
+ "k256",
  "mfm-capabilities",
  "mfm-certify",
  "mfm-events",
  "mfm-ids",
  "mfm-manual-auth",
  "mfm-runtime",
- "mfm-signing",
  "mfm-spec",
  "mfm-store",
- "mfm_core",
  "trybuild",
 ]
 
@@ -2244,7 +2241,6 @@ dependencies = [
  "mfm-manual-auth",
  "mfm-program",
  "mfm-program-derive",
- "mfm-signing",
  "mfm-spec",
  "mfm-store",
  "mfm-values",

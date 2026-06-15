@@ -3192,6 +3192,28 @@ fn manual_resolution_outcome_is_closed() {
         Err(StoreError::Identity(message))
             if message.contains("unknown manual resolution outcome invented")
     ));
+
+    let mut old = payload_json_value(&payload);
+    let old_object = old.as_object_mut().expect("payload object");
+    old_object.remove("authorization_schema_id");
+    old_object.remove("authorization_hash");
+    old_object.remove("authorization_artifact_id");
+    old_object.insert(
+        "operator_identity_ref_schema_id".to_owned(),
+        serde_json::Value::String(schema_id("mfm.test.operator_identity", 99).to_string()),
+    );
+    old_object.insert(
+        "operator_identity_ref_hash".to_owned(),
+        serde_json::Value::String(content_digest(99).to_string()),
+    );
+    old_object.insert(
+        "operator_identity_ref_artifact_id".to_owned(),
+        serde_json::Value::String(artifact_id(99).to_string()),
+    );
+    assert!(matches!(
+        payload_from_json_value(&old),
+        Err(StoreError::Event(message)) if message.contains("authorization_schema_id")
+    ));
 }
 
 #[test]
@@ -3514,35 +3536,59 @@ fn manual_resolution_requires_manual_blocked_prefix_and_is_unique() {
 
 #[test]
 fn manual_resolution_artifacts_require_dedicated_roles() {
-    let run_id = run_id(120);
-    let mut store = InMemoryTypedRunStore::new();
-    store
-        .append_prepared_commit(run_start_request(
-            run_id.clone(),
-            "manual-artifact-role-run-start",
-        ))
-        .expect("append run start");
-    append_forward_confirmation(&mut store, &run_id);
-    append_generic_nonretryable_failure(&mut store, &run_id, "manual-artifact-role-failure");
-    let mut artifacts = manual_resolution_artifacts(156);
-    artifacts[0].artifact_role = ArtifactRole::StateOutput;
-    let error = store
-        .append_prepared_commit(TypedCommitRequest {
-            run_id: run_id.clone(),
-            expected_next_seq: store.expected_next_seq(&run_id),
-            commit_key: CommitKey::new("manual-wrong-evidence-role").expect("commit key"),
-            payloads: vec![manual_resolution_recorded(156)],
-            required_artifacts: artifacts,
-            preconditions: saga_preconditions(manual_saga_policy(156)),
-        })
-        .expect_err("wrong manual evidence role rejects");
-    assert!(matches!(
-        error,
-        StoreError::ArtifactEvidenceMismatch {
-            field: "artifact_role",
-            ..
-        }
-    ));
+    fn reject_with(
+        commit_key: &str,
+        mut mutate: impl FnMut(&mut Vec<ArtifactEvidenceRef>),
+        expected_field: &'static str,
+    ) {
+        let run_id = run_id(120);
+        let mut store = InMemoryTypedRunStore::new();
+        store
+            .append_prepared_commit(run_start_request(
+                run_id.clone(),
+                "manual-artifact-role-run-start",
+            ))
+            .expect("append run start");
+        append_forward_confirmation(&mut store, &run_id);
+        append_generic_nonretryable_failure(&mut store, &run_id, "manual-artifact-role-failure");
+        let mut artifacts = manual_resolution_artifacts(156);
+        mutate(&mut artifacts);
+        let error = store
+            .append_prepared_commit(TypedCommitRequest {
+                run_id: run_id.clone(),
+                expected_next_seq: store.expected_next_seq(&run_id),
+                commit_key: CommitKey::new(commit_key).expect("commit key"),
+                payloads: vec![manual_resolution_recorded(156)],
+                required_artifacts: artifacts,
+                preconditions: saga_preconditions(manual_saga_policy(156)),
+            })
+            .expect_err("manual artifact mismatch rejects");
+        assert!(matches!(
+            error,
+            StoreError::ArtifactEvidenceMismatch { field, .. } if field == expected_field
+        ));
+    }
+
+    reject_with(
+        "manual-wrong-evidence-role",
+        |artifacts| artifacts[0].artifact_role = ArtifactRole::StateOutput,
+        "artifact_role",
+    );
+    reject_with(
+        "manual-wrong-authorization-role",
+        |artifacts| artifacts[1].artifact_role = ArtifactRole::StateOutput,
+        "artifact_role",
+    );
+    reject_with(
+        "manual-wrong-authorization-schema",
+        |artifacts| artifacts[1].schema_id = Some(schema_id("mfm.test.wrong_authorization", 200)),
+        "schema_id",
+    );
+    reject_with(
+        "manual-wrong-evidence-digest",
+        |artifacts| artifacts[0].digest = content_digest(201),
+        "digest",
+    );
 }
 
 #[test]

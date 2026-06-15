@@ -9,12 +9,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::Arc;
 
-use alloy_primitives::B256;
+use alloy_primitives::{Address, PrimitiveSignature, B256};
 use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
 use mfm_events::v1 as events;
-use mfm_evm_signing::{primitive_signature_from_bytes, recover_signing_address};
 use mfm_ids::{ArtifactId, ContentDigest, DigestAlgorithm, RunId, SchemaId, SpecHash};
-use mfm_signing::SignatureBytes;
 use mfm_spec::v1 as spec;
 
 /// Persisted manual authorization claim contract version.
@@ -29,6 +27,7 @@ pub const MANUAL_AUTHORIZATION_PROOF_SCHEMA_NAME: &str =
     "mfm.manual_resolution.authorization_proof";
 /// Stable schema version for manual authorization proof artifacts.
 pub const MANUAL_AUTHORIZATION_PROOF_SCHEMA_VERSION: &str = "1";
+const MAX_MANUAL_SIGNATURE_LEN: usize = 4096;
 
 /// Result type for manual authorization contracts.
 pub type Result<T> = std::result::Result<T, ManualAuthorizationError>;
@@ -183,7 +182,7 @@ pub struct ManualResolutionAuthorizationSignature {
     /// Public operator identity from the certified authority snapshot.
     pub public_identity: spec::OperatorPublicIdentity,
     /// Signature bytes over the canonical claim digest.
-    pub signature: SignatureBytes,
+    pub signature: ManualAuthorizationSignatureBytes,
 }
 
 impl ManualResolutionAuthorizationSignature {
@@ -193,6 +192,27 @@ impl ManualResolutionAuthorizationSignature {
             "public_identity": self.public_identity.as_str(),
             "signature_hex": hex::encode(self.signature.as_bytes()),
         })
+    }
+}
+
+/// Signature bytes persisted in a manual authorization proof.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManualAuthorizationSignatureBytes(Vec<u8>);
+
+impl ManualAuthorizationSignatureBytes {
+    /// Creates checked persisted manual authorization signature bytes.
+    pub fn new(bytes: Vec<u8>) -> Result<Self> {
+        if bytes.is_empty() || bytes.len() > MAX_MANUAL_SIGNATURE_LEN {
+            return Err(ManualAuthorizationError::InvalidShape(
+                "manual authorization signature length is invalid".to_owned(),
+            ));
+        }
+        Ok(Self(bytes))
+    }
+
+    /// Returns the raw signature bytes.
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
     }
 }
 
@@ -280,10 +300,8 @@ impl ManualAuthorizationVerifier for DigestSignatureVerifier {
         let claim_digest = verification.claim.digest()?;
         let signing_hash = B256::from(*claim_digest.digest().as_bytes());
         for signature in &verification.proof.signatures {
-            let primitive = primitive_signature_from_bytes(&signature.signature)
-                .map_err(|error| ManualAuthorizationError::VerificationFailed(error.to_string()))?;
-            let recovered = recover_signing_address(signing_hash, primitive)
-                .map_err(|error| ManualAuthorizationError::VerificationFailed(error.to_string()))?;
+            let primitive = primitive_signature_from_bytes(&signature.signature)?;
+            let recovered = recover_signing_address(signing_hash, primitive)?;
             let recovered_identity = format!("{recovered:?}");
             if recovered_identity != signature.public_identity.as_str() {
                 return Err(ManualAuthorizationError::VerificationFailed(
@@ -558,9 +576,36 @@ fn parse_signature(value: &serde_json::Value) -> Result<ManualResolutionAuthoriz
             "public_identity",
         )?)
         .map_err(|error| ManualAuthorizationError::InvalidShape(error.to_string()))?,
-        signature: SignatureBytes::new(signature)
-            .map_err(|error| ManualAuthorizationError::InvalidShape(error.to_string()))?,
+        signature: ManualAuthorizationSignatureBytes::new(signature)?,
     })
+}
+
+fn primitive_signature_from_bytes(
+    signature: &ManualAuthorizationSignatureBytes,
+) -> Result<PrimitiveSignature> {
+    let bytes = signature.as_bytes();
+    let raw: &[u8; 65] = bytes.try_into().map_err(|_| {
+        ManualAuthorizationError::VerificationFailed(
+            "manual authorization signature must be 65 bytes".to_owned(),
+        )
+    })?;
+    PrimitiveSignature::from_raw_array(raw)
+        .map(PrimitiveSignature::normalized_s)
+        .map_err(|_| {
+            ManualAuthorizationError::VerificationFailed(
+                "manual authorization signature parity is invalid".to_owned(),
+            )
+        })
+}
+
+fn recover_signing_address(signing_hash: B256, signature: PrimitiveSignature) -> Result<Address> {
+    signature
+        .recover_address_from_prehash(&signing_hash)
+        .map_err(|_| {
+            ManualAuthorizationError::VerificationFailed(
+                "manual authorization signature recovery failed".to_owned(),
+            )
+        })
 }
 
 fn parse_outcome(value: &str) -> Result<events::ManualResolutionOutcome> {
@@ -739,7 +784,8 @@ mod tests {
             signatures: vec![ManualResolutionAuthorizationSignature {
                 operator_id: operator.operator_id,
                 public_identity: operator.public_identity,
-                signature: SignatureBytes::new(vec![0xab; 64]).expect("signature"),
+                signature: ManualAuthorizationSignatureBytes::new(vec![0xab; 64])
+                    .expect("signature"),
             }],
         }
     }

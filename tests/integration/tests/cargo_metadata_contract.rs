@@ -12,6 +12,7 @@ const EXPECTED_KERNEL_MANIFESTS: &[&str] = &[
     "crates/kernel/capabilities/Cargo.toml",
     "crates/kernel/program/Cargo.toml",
     "crates/kernel/program-derive/Cargo.toml",
+    "crates/kernel/manual-auth/Cargo.toml",
     "crates/kernel/replay/Cargo.toml",
     "crates/kernel/runtime/Cargo.toml",
     "crates/kernel/spec/Cargo.toml",

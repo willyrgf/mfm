@@ -24,7 +24,6 @@ mfm-spec = { path = "../spec" }
 mfm-store = { path = "../store" }
 
 [dev-dependencies]
+k256 = { version = "0.13.0", features = ["ecdsa"] }
 mfm-certify = { path = "../certify" }
-mfm-signing = { path = "../../signing" }
-mfm_core = { path = "../../core" }
 trybuild = "1.0"
