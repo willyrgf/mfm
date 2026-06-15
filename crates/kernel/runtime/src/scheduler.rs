@@ -189,7 +189,7 @@ impl SerialTypedScheduler {
     ) -> Result<store::CommitOutcome> {
         self.stage_prepared_artifacts(&launch.artifacts_to_stage)
             .await?;
-        Ok(store.append_prepared_typed_commit(launch.commit)?)
+        Ok(store.append_prepared_commit_plan(launch.commit.into())?)
     }
 
     /// Appends the prepared typed genesis commit through an async typed store.
@@ -201,7 +201,7 @@ impl SerialTypedScheduler {
         self.stage_prepared_artifacts(&launch.artifacts_to_stage)
             .await?;
         store
-            .append_prepared_typed_commit(launch.commit)
+            .append_prepared_commit_plan(launch.commit.into())
             .await
             .map_err(async_store_error)
     }
@@ -231,7 +231,7 @@ impl SerialTypedScheduler {
             note,
         )?;
         self.stage_prepared_artifacts(&artifacts_to_stage).await?;
-        Ok(store.append_prepared_typed_commit(commit)?)
+        Ok(store.append_prepared_commit_plan(commit.into())?)
     }
 
     /// Runs one deterministic runnable node, if any.
@@ -469,7 +469,7 @@ impl SerialTypedScheduler {
                     attempt_no,
                     view,
                 )?;
-                store.append_prepared_typed_commit(start_commit)?;
+                store.append_prepared_commit_plan(start_commit.into())?;
                 advanced = true;
                 (attempt_id, attempt_no)
             }
@@ -520,7 +520,7 @@ impl SerialTypedScheduler {
             request_has_resource_lane_prepare(terminal_output.commit.request());
         self.stage_prepared_artifacts(&terminal_output.artifacts_to_stage)
             .await?;
-        match store.append_prepared_typed_commit(terminal_output.commit) {
+        match store.append_prepared_commit_plan(terminal_output.commit) {
             Ok(_) => Ok(NodeRunStatus::Advanced),
             Err(error)
                 if has_resource_lane_prepare && store_error_is_resource_lane_block(&error) =>
@@ -585,7 +585,7 @@ impl SerialTypedScheduler {
         )?;
         self.stage_prepared_artifacts(&terminal_output.artifacts_to_stage)
             .await?;
-        store.append_prepared_typed_commit(terminal_output.commit)?;
+        store.append_prepared_commit_plan(terminal_output.commit)?;
         Ok(NodeRunStatus::Advanced)
     }
 
@@ -653,7 +653,7 @@ impl SerialTypedScheduler {
                     view,
                 )?;
                 store
-                    .append_prepared_typed_commit(start_commit)
+                    .append_prepared_commit_plan(start_commit.into())
                     .await
                     .map_err(async_store_error)?;
                 advanced = true;
@@ -699,7 +699,7 @@ impl SerialTypedScheduler {
         self.stage_prepared_artifacts(&terminal_output.artifacts_to_stage)
             .await?;
         match store
-            .append_prepared_typed_commit(terminal_output.commit)
+            .append_prepared_commit_plan(terminal_output.commit)
             .await
         {
             Ok(_) => Ok(NodeRunStatus::Advanced),
@@ -769,7 +769,7 @@ impl SerialTypedScheduler {
         self.stage_prepared_artifacts(&terminal_output.artifacts_to_stage)
             .await?;
         store
-            .append_prepared_typed_commit(terminal_output.commit)
+            .append_prepared_commit_plan(terminal_output.commit)
             .await
             .map_err(async_store_error)?;
         Ok(NodeRunStatus::Advanced)

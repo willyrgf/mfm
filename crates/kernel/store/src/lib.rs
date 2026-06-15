@@ -19,6 +19,7 @@ pub mod v1 {
     use std::collections::{BTreeMap, BTreeSet};
     use std::fmt;
     use std::future::Future;
+    use std::marker::PhantomData;
     use std::pin::Pin;
 
     use mfm_canonical::PlainCanonicalJsonBytes;
@@ -68,6 +69,13 @@ pub mod v1 {
             expected: Box<SpecHash>,
             /// Later payload spec hash.
             actual: Box<SpecHash>,
+        },
+        /// A purpose-specific prepared commit constructor rejected the payload/precondition shape.
+        InvalidPreparedCommitPurpose {
+            /// Purpose constructor that rejected the request.
+            purpose: &'static str,
+            /// Stable diagnostic.
+            message: String,
         },
         /// The commit key was reused for a different canonical commit.
         CommitConflict {
@@ -183,6 +191,9 @@ pub mod v1 {
                         f,
                         "payload spec hash mismatch: expected {expected}, got {actual}"
                     )
+                }
+                Self::InvalidPreparedCommitPurpose { purpose, message } => {
+                    write!(f, "invalid prepared {purpose} commit: {message}")
                 }
                 Self::CommitConflict { commit_key } => {
                     write!(f, "commit key reused for different payloads: {commit_key}")
@@ -1004,6 +1015,357 @@ pub mod v1 {
         pub required_artifacts: Vec<ArtifactEvidenceRef>,
         /// Atomic commit preconditions.
         pub preconditions: CommitPreconditions,
+    }
+
+    /// Non-empty ordered kernel payload batch.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct NonEmptyPayloadBatch {
+        payloads: Vec<KernelEventPayload>,
+    }
+
+    impl NonEmptyPayloadBatch {
+        /// Creates a non-empty payload batch.
+        pub fn new(payloads: Vec<KernelEventPayload>) -> Result<Self> {
+            validate_non_empty_payloads(&payloads)?;
+            Ok(Self { payloads })
+        }
+
+        /// Returns the ordered payloads.
+        pub fn as_slice(&self) -> &[KernelEventPayload] {
+            &self.payloads
+        }
+
+        /// Consumes the batch into its ordered payloads.
+        pub fn into_vec(self) -> Vec<KernelEventPayload> {
+            self.payloads
+        }
+    }
+
+    /// Artifact evidence bound to a prepared commit constructor.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct CommitArtifactEvidenceSet {
+        required_artifacts: Vec<ArtifactEvidenceRef>,
+        admitted_artifacts: Vec<ArtifactEvidenceRef>,
+    }
+
+    impl CommitArtifactEvidenceSet {
+        /// Creates the required and admitted artifact evidence set for a commit.
+        pub fn new(
+            required_artifacts: Vec<ArtifactEvidenceRef>,
+            admitted_artifacts: Vec<ArtifactEvidenceRef>,
+        ) -> Result<Self> {
+            validate_unique_artifact_evidence("required", &required_artifacts)?;
+            validate_unique_artifact_evidence("admitted", &admitted_artifacts)?;
+            Ok(Self {
+                required_artifacts,
+                admitted_artifacts,
+            })
+        }
+
+        /// Creates an empty artifact evidence set.
+        pub fn empty() -> Self {
+            Self {
+                required_artifacts: Vec::new(),
+                admitted_artifacts: Vec::new(),
+            }
+        }
+
+        /// Returns the required artifact evidence refs.
+        pub fn required_artifacts(&self) -> &[ArtifactEvidenceRef] {
+            &self.required_artifacts
+        }
+
+        /// Returns the artifact evidence refs to admit atomically.
+        pub fn admitted_artifacts(&self) -> &[ArtifactEvidenceRef] {
+            &self.admitted_artifacts
+        }
+    }
+
+    /// Sealed purpose marker for a run-start commit.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct RunStart;
+
+    /// Sealed purpose marker for a standalone state-attempt-start commit.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct StateAttemptStarted;
+
+    /// Sealed purpose marker for an attempt-terminal commit.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct AttemptTerminal;
+
+    /// Sealed purpose marker for a side-effect terminal commit.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct SideEffectTerminal;
+
+    /// Sealed purpose marker for a side-effect progress commit.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct SideEffectProgress;
+
+    /// Sealed purpose marker for a retention projection commit.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct Retention;
+
+    /// Sealed purpose marker for a manual-resolution commit.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct ManualResolution;
+
+    /// Sealed purpose marker for a saga terminal-resolution commit.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct SagaTerminal;
+
+    /// Commit purpose implemented only by store-owned marker types.
+    pub trait CommitPurpose: private::Sealed {
+        /// Stable purpose name for diagnostics.
+        const NAME: &'static str;
+    }
+
+    macro_rules! impl_commit_purpose {
+        ($purpose:ty, $name:literal) => {
+            impl private::Sealed for $purpose {}
+            impl CommitPurpose for $purpose {
+                const NAME: &'static str = $name;
+            }
+        };
+    }
+
+    impl_commit_purpose!(RunStart, "run_start");
+    impl_commit_purpose!(StateAttemptStarted, "state_attempt_started");
+    impl_commit_purpose!(AttemptTerminal, "attempt_terminal");
+    impl_commit_purpose!(SideEffectTerminal, "side_effect_terminal");
+    impl_commit_purpose!(SideEffectProgress, "side_effect_progress");
+    impl_commit_purpose!(Retention, "retention");
+    impl_commit_purpose!(ManualResolution, "manual_resolution");
+    impl_commit_purpose!(SagaTerminal, "saga_terminal");
+
+    /// Purpose-specific prepared commit authority.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct PreparedCommit<Purpose: CommitPurpose> {
+        inner: PreparedTypedCommit,
+        _purpose: PhantomData<Purpose>,
+    }
+
+    impl<Purpose: CommitPurpose> PreparedCommit<Purpose> {
+        fn prepare_with(
+            request: TypedCommitRequest,
+            artifacts: CommitArtifactEvidenceSet,
+            validate: impl FnOnce(&TypedCommitRequest) -> Result<()>,
+        ) -> Result<Self> {
+            validate_payload_run_and_spec(&request.run_id, &request.payloads)?;
+            if artifacts.required_artifacts != request.required_artifacts {
+                return Err(invalid_prepared_commit_purpose(
+                    Purpose::NAME,
+                    "required artifact evidence set does not match request",
+                ));
+            }
+            validate_required_artifacts_cover_payload_references(Purpose::NAME, &request)?;
+            validate(&request)?;
+            let inner = PreparedTypedCommit::new(request, artifacts.admitted_artifacts)?;
+            Ok(Self {
+                inner,
+                _purpose: PhantomData,
+            })
+        }
+
+        /// Returns the typed request sealed into this prepared commit.
+        pub fn request(&self) -> &TypedCommitRequest {
+            self.inner.request()
+        }
+
+        /// Returns artifact evidence to admit atomically with the event batch.
+        pub fn admitted_artifacts(&self) -> &[ArtifactEvidenceRef] {
+            self.inner.admitted_artifacts()
+        }
+
+        /// Consumes this purpose authority into the low-level prepared commit.
+        pub fn into_typed_commit(self) -> PreparedTypedCommit {
+            self.inner
+        }
+    }
+
+    impl PreparedCommit<RunStart> {
+        /// Prepares a run-start commit.
+        pub fn new(
+            request: TypedCommitRequest,
+            artifacts: CommitArtifactEvidenceSet,
+        ) -> Result<Self> {
+            Self::prepare_with(request, artifacts, validate_run_start_commit)
+        }
+    }
+
+    impl PreparedCommit<StateAttemptStarted> {
+        /// Prepares a standalone state-attempt-start commit.
+        pub fn new(
+            request: TypedCommitRequest,
+            artifacts: CommitArtifactEvidenceSet,
+        ) -> Result<Self> {
+            Self::prepare_with(request, artifacts, validate_state_attempt_started_commit)
+        }
+    }
+
+    impl PreparedCommit<AttemptTerminal> {
+        /// Prepares an attempt-terminal commit.
+        pub fn new(
+            request: TypedCommitRequest,
+            artifacts: CommitArtifactEvidenceSet,
+        ) -> Result<Self> {
+            Self::prepare_with(request, artifacts, validate_attempt_terminal_commit)
+        }
+    }
+
+    impl PreparedCommit<SideEffectTerminal> {
+        /// Prepares a side-effect terminal commit.
+        pub fn new(
+            request: TypedCommitRequest,
+            artifacts: CommitArtifactEvidenceSet,
+        ) -> Result<Self> {
+            Self::prepare_with(request, artifacts, validate_side_effect_terminal_commit)
+        }
+    }
+
+    impl PreparedCommit<SideEffectProgress> {
+        /// Prepares a side-effect progress commit.
+        pub fn new(
+            request: TypedCommitRequest,
+            artifacts: CommitArtifactEvidenceSet,
+        ) -> Result<Self> {
+            Self::prepare_with(request, artifacts, validate_side_effect_progress_commit)
+        }
+    }
+
+    impl PreparedCommit<Retention> {
+        /// Prepares a retention projection commit.
+        pub fn new(
+            request: TypedCommitRequest,
+            artifacts: CommitArtifactEvidenceSet,
+        ) -> Result<Self> {
+            Self::prepare_with(request, artifacts, validate_retention_commit)
+        }
+    }
+
+    impl PreparedCommit<ManualResolution> {
+        /// Prepares a manual-resolution commit.
+        pub fn new(
+            request: TypedCommitRequest,
+            artifacts: CommitArtifactEvidenceSet,
+        ) -> Result<Self> {
+            Self::prepare_with(request, artifacts, validate_manual_resolution_commit)
+        }
+    }
+
+    impl PreparedCommit<SagaTerminal> {
+        /// Prepares a saga terminal-resolution commit.
+        pub fn new(
+            request: TypedCommitRequest,
+            artifacts: CommitArtifactEvidenceSet,
+        ) -> Result<Self> {
+            Self::prepare_with(request, artifacts, validate_saga_terminal_commit)
+        }
+    }
+
+    /// Production prepared commit plan accepted by store mutation APIs.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum PreparedCommitPlan {
+        /// Run-start commit plan.
+        RunStart(PreparedCommit<RunStart>),
+        /// State-attempt-start commit plan.
+        StateAttemptStarted(PreparedCommit<StateAttemptStarted>),
+        /// Attempt-terminal commit plan.
+        AttemptTerminal(PreparedCommit<AttemptTerminal>),
+        /// Side-effect terminal commit plan.
+        SideEffectTerminal(PreparedCommit<SideEffectTerminal>),
+        /// Side-effect progress commit plan.
+        SideEffectProgress(PreparedCommit<SideEffectProgress>),
+        /// Retention projection commit plan.
+        Retention(PreparedCommit<Retention>),
+        /// Manual-resolution commit plan.
+        ManualResolution(PreparedCommit<ManualResolution>),
+        /// Saga terminal-resolution commit plan.
+        SagaTerminal(PreparedCommit<SagaTerminal>),
+    }
+
+    impl PreparedCommitPlan {
+        /// Classifies and prepares a runtime runner-output commit plan.
+        pub fn runner_output(
+            request: TypedCommitRequest,
+            artifacts: CommitArtifactEvidenceSet,
+        ) -> Result<Self> {
+            let payloads = request.payloads.as_slice();
+            if payloads.iter().any(is_saga_terminal_payload)
+                && request.preconditions.saga_policy.is_some()
+            {
+                return Ok(Self::SagaTerminal(PreparedCommit::<SagaTerminal>::new(
+                    request, artifacts,
+                )?));
+            }
+            if payloads.iter().any(is_retention_payload) {
+                return Ok(Self::Retention(PreparedCommit::<Retention>::new(
+                    request, artifacts,
+                )?));
+            }
+            if payloads.iter().any(is_side_effect_terminal_payload) {
+                return Ok(Self::SideEffectTerminal(PreparedCommit::<
+                    SideEffectTerminal,
+                >::new(
+                    request, artifacts
+                )?));
+            }
+            if payloads.iter().any(is_side_effect_payload) {
+                return Ok(Self::SideEffectProgress(PreparedCommit::<
+                    SideEffectProgress,
+                >::new(
+                    request, artifacts
+                )?));
+            }
+            Ok(Self::AttemptTerminal(
+                PreparedCommit::<AttemptTerminal>::new(request, artifacts)?,
+            ))
+        }
+
+        /// Returns the sealed request for read-only planning decisions.
+        pub fn request(&self) -> &TypedCommitRequest {
+            match self {
+                Self::RunStart(commit) => commit.request(),
+                Self::StateAttemptStarted(commit) => commit.request(),
+                Self::AttemptTerminal(commit) => commit.request(),
+                Self::SideEffectTerminal(commit) => commit.request(),
+                Self::SideEffectProgress(commit) => commit.request(),
+                Self::Retention(commit) => commit.request(),
+                Self::ManualResolution(commit) => commit.request(),
+                Self::SagaTerminal(commit) => commit.request(),
+            }
+        }
+
+        /// Consumes this plan into its low-level prepared commit for storage.
+        pub fn into_typed_commit(self) -> PreparedTypedCommit {
+            match self {
+                Self::RunStart(commit) => commit.into_typed_commit(),
+                Self::StateAttemptStarted(commit) => commit.into_typed_commit(),
+                Self::AttemptTerminal(commit) => commit.into_typed_commit(),
+                Self::SideEffectTerminal(commit) => commit.into_typed_commit(),
+                Self::SideEffectProgress(commit) => commit.into_typed_commit(),
+                Self::Retention(commit) => commit.into_typed_commit(),
+                Self::ManualResolution(commit) => commit.into_typed_commit(),
+                Self::SagaTerminal(commit) => commit.into_typed_commit(),
+            }
+        }
+    }
+
+    impl From<PreparedCommit<RunStart>> for PreparedCommitPlan {
+        fn from(commit: PreparedCommit<RunStart>) -> Self {
+            Self::RunStart(commit)
+        }
+    }
+
+    impl From<PreparedCommit<StateAttemptStarted>> for PreparedCommitPlan {
+        fn from(commit: PreparedCommit<StateAttemptStarted>) -> Self {
+            Self::StateAttemptStarted(commit)
+        }
+    }
+
+    impl From<PreparedCommit<ManualResolution>> for PreparedCommitPlan {
+        fn from(commit: PreparedCommit<ManualResolution>) -> Self {
+            Self::ManualResolution(commit)
+        }
     }
 
     /// Runtime-prepared atomic store mutation for typed run streams.
@@ -2229,6 +2591,14 @@ pub mod v1 {
 
     /// Typed run event store commit contract.
     pub trait TypedRunEventStore: TypedProjectionRead {
+        /// Atomically appends one purpose-specific prepared commit plan.
+        fn append_prepared_commit_plan(
+            &mut self,
+            plan: PreparedCommitPlan,
+        ) -> Result<CommitOutcome> {
+            self.append_prepared_typed_commit(plan.into_typed_commit())
+        }
+
         /// Atomically admits artifact evidence and appends one typed run commit, or returns an
         /// idempotent previous batch.
         fn append_prepared_typed_commit(
@@ -2251,6 +2621,14 @@ pub mod v1 {
     pub trait AsyncTypedRunEventStore {
         /// Store-specific error type.
         type Error: StoreErrorInspection + fmt::Display + Send + Sync + 'static;
+
+        /// Atomically appends one purpose-specific prepared commit plan.
+        fn append_prepared_commit_plan<'a>(
+            &'a self,
+            plan: PreparedCommitPlan,
+        ) -> AsyncStoreFuture<'a, CommitOutcome, Self::Error> {
+            self.append_prepared_typed_commit(plan.into_typed_commit())
+        }
 
         /// Atomically admits artifact evidence and appends one typed run commit, or returns an
         /// idempotent previous batch.
@@ -2988,6 +3366,319 @@ pub mod v1 {
     use self::admission::require_admission_preconditions;
 
     mod admission;
+
+    mod private {
+        pub trait Sealed {}
+    }
+
+    fn validate_non_empty_payloads(payloads: &[KernelEventPayload]) -> Result<()> {
+        if payloads.is_empty() {
+            return Err(StoreError::EmptyCommit);
+        }
+        Ok(())
+    }
+
+    fn validate_unique_artifact_evidence(
+        field: &'static str,
+        artifacts: &[ArtifactEvidenceRef],
+    ) -> Result<()> {
+        let mut by_artifact = BTreeMap::<ArtifactId, &ArtifactEvidenceRef>::new();
+        for artifact in artifacts {
+            if let Some(existing) = by_artifact.insert(artifact.artifact_id.clone(), artifact) {
+                if existing != artifact {
+                    return Err(StoreError::ArtifactEvidenceMismatch {
+                        artifact_id: artifact.artifact_id.clone(),
+                        field,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_required_artifacts_cover_payload_references(
+        purpose: &'static str,
+        request: &TypedCommitRequest,
+    ) -> Result<()> {
+        let required = request
+            .required_artifacts
+            .iter()
+            .map(|evidence| (evidence.artifact_id.clone(), evidence))
+            .collect::<BTreeMap<_, _>>();
+        for payload in &request.payloads {
+            for requirement in event_artifact_requirements(payload) {
+                if requirement.source.is_retention() {
+                    continue;
+                }
+                let evidence = required.get(&requirement.artifact_id).ok_or_else(|| {
+                    invalid_prepared_commit_purpose(
+                        purpose,
+                        format!(
+                            "missing required artifact evidence for {}",
+                            requirement.artifact_id
+                        ),
+                    )
+                })?;
+                validate_required_artifact_field(
+                    purpose,
+                    &requirement,
+                    "digest",
+                    requirement.digest.as_ref(),
+                    Some(&evidence.digest),
+                )?;
+                validate_required_artifact_field(
+                    purpose,
+                    &requirement,
+                    "byte_len",
+                    requirement.byte_len.as_ref(),
+                    Some(&evidence.byte_len),
+                )?;
+                validate_required_artifact_field(
+                    purpose,
+                    &requirement,
+                    "media_type",
+                    requirement.media_type.as_ref(),
+                    Some(&evidence.media_type),
+                )?;
+                validate_required_artifact_field(
+                    purpose,
+                    &requirement,
+                    "schema_id",
+                    requirement.schema_id.as_ref(),
+                    evidence.schema_id.as_ref(),
+                )?;
+                validate_required_artifact_field(
+                    purpose,
+                    &requirement,
+                    "semantic_type_id",
+                    requirement.semantic_type_id.as_ref(),
+                    evidence.semantic_type_id.as_ref(),
+                )?;
+                validate_required_artifact_field(
+                    purpose,
+                    &requirement,
+                    "producer_node_id",
+                    requirement.producer_node_id.as_ref(),
+                    evidence.producer_node_id.as_ref(),
+                )?;
+                validate_required_artifact_field(
+                    purpose,
+                    &requirement,
+                    "producer_seed_id",
+                    requirement.producer_seed_id.as_ref(),
+                    evidence.producer_seed_id.as_ref(),
+                )?;
+                validate_required_artifact_field(
+                    purpose,
+                    &requirement,
+                    "artifact_role",
+                    requirement.artifact_role.as_ref(),
+                    Some(&evidence.artifact_role),
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_required_artifact_field<T: PartialEq>(
+        purpose: &'static str,
+        requirement: &EventArtifactRequirement,
+        field: &'static str,
+        expected: Option<&T>,
+        actual: Option<&T>,
+    ) -> Result<()> {
+        if expected.is_none() || expected == actual {
+            Ok(())
+        } else {
+            Err(invalid_prepared_commit_purpose(
+                purpose,
+                format!(
+                    "required artifact {} field {field} does not satisfy payload reference",
+                    requirement.artifact_id
+                ),
+            ))
+        }
+    }
+
+    fn validate_run_start_commit(request: &TypedCommitRequest) -> Result<()> {
+        require_purpose_payload(
+            RunStart::NAME,
+            request,
+            |payload| matches!(payload, KernelEventPayload::RunStarted(_)),
+            "missing RunStarted payload",
+        )?;
+        if request.preconditions.required_run_state != RequiredRunState::Absent {
+            return Err(invalid_prepared_commit_purpose(
+                RunStart::NAME,
+                "run start requires absent-run precondition",
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_state_attempt_started_commit(request: &TypedCommitRequest) -> Result<()> {
+        if request.payloads.len() != 1
+            || !matches!(
+                request.payloads.first(),
+                Some(KernelEventPayload::StateAttemptStarted(_))
+            )
+        {
+            return Err(invalid_prepared_commit_purpose(
+                StateAttemptStarted::NAME,
+                "state-attempt-start commits must contain exactly one StateAttemptStarted payload",
+            ));
+        }
+        if request.preconditions.required_run_state != RequiredRunState::NotCompleted {
+            return Err(invalid_prepared_commit_purpose(
+                StateAttemptStarted::NAME,
+                "state-attempt-start requires not-completed run precondition",
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_attempt_terminal_commit(request: &TypedCommitRequest) -> Result<()> {
+        require_purpose_payload(
+            AttemptTerminal::NAME,
+            request,
+            is_attempt_terminal_payload,
+            "missing attempt-terminal payload",
+        )?;
+        validate_terminal_attempt_cell_pairs(&request.payloads)
+    }
+
+    fn validate_side_effect_terminal_commit(request: &TypedCommitRequest) -> Result<()> {
+        require_purpose_payload(
+            SideEffectTerminal::NAME,
+            request,
+            is_side_effect_terminal_payload,
+            "missing side-effect terminal payload",
+        )?;
+        validate_terminal_attempt_cell_pairs(&request.payloads)
+    }
+
+    fn validate_side_effect_progress_commit(request: &TypedCommitRequest) -> Result<()> {
+        require_purpose_payload(
+            SideEffectProgress::NAME,
+            request,
+            is_side_effect_payload,
+            "missing side-effect payload",
+        )
+    }
+
+    fn validate_retention_commit(request: &TypedCommitRequest) -> Result<()> {
+        require_purpose_payload(
+            Retention::NAME,
+            request,
+            is_retention_payload,
+            "missing retention payload",
+        )?;
+        validate_terminal_attempt_cell_pairs(&request.payloads)
+    }
+
+    fn validate_manual_resolution_commit(request: &TypedCommitRequest) -> Result<()> {
+        require_purpose_payload(
+            ManualResolution::NAME,
+            request,
+            |payload| matches!(payload, KernelEventPayload::ManualResolutionRecorded(_)),
+            "missing ManualResolutionRecorded payload",
+        )?;
+        if request.preconditions.required_run_state != RequiredRunState::NotCompleted {
+            return Err(invalid_prepared_commit_purpose(
+                ManualResolution::NAME,
+                "manual resolution requires not-completed run precondition",
+            ));
+        }
+        if request.preconditions.saga_policy.is_none() {
+            return Err(invalid_prepared_commit_purpose(
+                ManualResolution::NAME,
+                "manual resolution requires saga policy authority",
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_saga_terminal_commit(request: &TypedCommitRequest) -> Result<()> {
+        require_purpose_payload(
+            SagaTerminal::NAME,
+            request,
+            is_saga_terminal_payload,
+            "missing RunCompleted payload",
+        )?;
+        if request.preconditions.saga_policy.is_none() {
+            return Err(invalid_prepared_commit_purpose(
+                SagaTerminal::NAME,
+                "saga terminal resolution requires saga policy authority",
+            ));
+        }
+        validate_terminal_attempt_cell_pairs(&request.payloads)
+    }
+
+    fn require_purpose_payload(
+        purpose: &'static str,
+        request: &TypedCommitRequest,
+        predicate: impl Fn(&KernelEventPayload) -> bool,
+        message: &'static str,
+    ) -> Result<()> {
+        if request.payloads.iter().any(predicate) {
+            Ok(())
+        } else {
+            Err(invalid_prepared_commit_purpose(purpose, message))
+        }
+    }
+
+    fn is_attempt_terminal_payload(payload: &KernelEventPayload) -> bool {
+        matches!(
+            payload,
+            KernelEventPayload::StateAttemptCompleted(_)
+                | KernelEventPayload::StateAttemptFailed(_)
+                | KernelEventPayload::CellProduced(_)
+                | KernelEventPayload::CellSkipped(_)
+                | KernelEventPayload::FactRecorded(_)
+                | KernelEventPayload::PublicOutputProduced(_)
+                | KernelEventPayload::PublicOutputRenderFailed(_)
+                | KernelEventPayload::RunCompleted(_)
+        )
+    }
+
+    fn is_side_effect_terminal_payload(payload: &KernelEventPayload) -> bool {
+        matches!(
+            payload,
+            KernelEventPayload::SideEffectNotSubmittedProven(_)
+                | KernelEventPayload::SideEffectSubmissionObserved(_)
+                | KernelEventPayload::SideEffectSubmissionUnknown(_)
+                | KernelEventPayload::SideEffectReceiptObserved(_)
+                | KernelEventPayload::SideEffectConfirmationObserved(_)
+                | KernelEventPayload::SideEffectAmbiguous(_)
+                | KernelEventPayload::SideEffectFailed(_)
+        )
+    }
+
+    fn is_side_effect_payload(payload: &KernelEventPayload) -> bool {
+        payload.side_effect_ref().is_some()
+    }
+
+    fn is_retention_payload(payload: &KernelEventPayload) -> bool {
+        matches!(
+            payload,
+            KernelEventPayload::RetentionRefsAppended(_)
+                | KernelEventPayload::RetentionManifestProjected(_)
+        )
+    }
+
+    fn is_saga_terminal_payload(payload: &KernelEventPayload) -> bool {
+        matches!(payload, KernelEventPayload::RunCompleted(_))
+    }
+
+    fn invalid_prepared_commit_purpose(
+        purpose: &'static str,
+        message: impl Into<String>,
+    ) -> StoreError {
+        StoreError::InvalidPreparedCommitPurpose {
+            purpose,
+            message: message.into(),
+        }
+    }
 
     fn validate_payload_run_and_spec(
         run_id: &RunId,

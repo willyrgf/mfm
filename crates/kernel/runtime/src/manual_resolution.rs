@@ -68,7 +68,10 @@ pub(crate) fn prepare_manual_resolution_commit(
     verified: VerifiedManualResolution,
     evidence_artifact: ManualResolutionEvidenceArtifact,
     note: Option<events::ManualResolutionNote>,
-) -> Result<(store::PreparedTypedCommit, Vec<PreparedStagedArtifact>)> {
+) -> Result<(
+    store::PreparedCommit<store::ManualResolution>,
+    Vec<PreparedStagedArtifact>,
+)> {
     let claim = verified.claim();
     if saga.run_mode != store::RunMode::ManualBlocked {
         return Err(RuntimeError::InvalidRunStream(format!(
@@ -174,9 +177,12 @@ pub(crate) fn prepare_manual_resolution_commit(
             ..store::CommitPreconditions::default()
         },
     };
-    let prepared = store::PreparedTypedCommit::new(
+    let prepared = store::PreparedCommit::<store::ManualResolution>::new(
         request,
-        vec![evidence_ref.clone(), authorization_ref.clone()],
+        store::CommitArtifactEvidenceSet::new(
+            vec![evidence_ref.clone(), authorization_ref.clone()],
+            vec![evidence_ref.clone(), authorization_ref.clone()],
+        )?,
     )?;
     Ok((
         prepared,

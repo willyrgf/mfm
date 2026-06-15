@@ -74,7 +74,7 @@ pub struct RunLaunchSeedCell {
 
 /// Prepared genesis launch authority accepted by runtime-owned start middleware.
 pub struct PreparedRunLaunch {
-    pub(crate) commit: store::PreparedTypedCommit,
+    pub(crate) commit: store::PreparedCommit<store::RunStart>,
     pub(crate) artifacts_to_stage: Vec<PreparedStagedArtifact>,
 }
 
@@ -109,7 +109,7 @@ pub(crate) struct SealedTerminalCommitValidation<'a> {
 }
 
 pub(crate) struct PreparedRunnerOutput {
-    pub(crate) commit: store::PreparedTypedCommit,
+    pub(crate) commit: store::PreparedCommitPlan,
     pub(crate) artifacts_to_stage: Vec<PreparedStagedArtifact>,
 }
 
@@ -283,13 +283,16 @@ impl CommitPlanner {
                 runtime_spec.spec_hash().as_str()
             ))?,
             payloads,
-            required_artifacts,
+            required_artifacts: required_artifacts.clone(),
             preconditions: store::CommitPreconditions {
                 required_run_state: store::RequiredRunState::Absent,
                 ..store::CommitPreconditions::default()
             },
         };
-        let commit = store::PreparedTypedCommit::new(request, admitted_artifacts)?;
+        let commit = store::PreparedCommit::<store::RunStart>::new(
+            request,
+            store::CommitArtifactEvidenceSet::new(required_artifacts, admitted_artifacts)?,
+        )?;
         let mut artifacts_to_stage =
             Vec::with_capacity(3 + config_artifacts.len() + seed_staged_artifacts.len());
         artifacts_to_stage.push(PreparedStagedArtifact {
@@ -332,7 +335,7 @@ impl CommitPlanner {
         attempt_id: &AttemptId,
         attempt_no: u32,
         view: &RuntimeRunView,
-    ) -> Result<store::PreparedTypedCommit> {
+    ) -> Result<store::PreparedCommit<store::StateAttemptStarted>> {
         let start_payload =
             events::KernelEventPayload::StateAttemptStarted(events::StateAttemptStarted {
                 spec_hash: runtime_spec.spec_hash().clone(),
@@ -364,7 +367,11 @@ impl CommitPlanner {
             required_artifacts: Vec::new(),
             preconditions,
         };
-        store::PreparedTypedCommit::new(request, Vec::new()).map_err(RuntimeError::from)
+        store::PreparedCommit::<store::StateAttemptStarted>::new(
+            request,
+            store::CommitArtifactEvidenceSet::empty(),
+        )
+        .map_err(RuntimeError::from)
     }
 
     pub(crate) fn prepare_runner_output(
@@ -479,10 +486,11 @@ impl CommitPlanner {
                 })
             })
             .collect::<Vec<_>>();
-        let required_artifacts = staged_artifacts
+        let admitted_artifacts = staged_artifacts
             .iter()
             .map(|artifact| artifact.evidence.clone())
             .collect::<Vec<_>>();
+        let required_artifacts = admitted_artifacts.clone();
         payloads.extend(bind_staged_retention_refs(
             input.runtime_spec,
             input.run_id,
@@ -498,7 +506,8 @@ impl CommitPlanner {
         )? {
             payloads.push(run_completed);
         }
-        let admitted_artifacts = required_artifacts.clone();
+        let required_artifacts =
+            required_artifacts_for_payloads(input.view, required_artifacts, &payloads)?;
         let preconditions = runner_output_preconditions(
             input.runtime_spec,
             input.run_id,
@@ -513,15 +522,62 @@ impl CommitPlanner {
             expected_next_seq: input.view.next_seq,
             commit_key: runner_output_commit_key(input.node, input.attempt_id, &payloads)?,
             payloads,
-            required_artifacts,
+            required_artifacts: required_artifacts.clone(),
             preconditions,
         };
-        let commit = store::PreparedTypedCommit::new(request, admitted_artifacts)?;
+        let commit = store::PreparedCommitPlan::runner_output(
+            request,
+            store::CommitArtifactEvidenceSet::new(required_artifacts, admitted_artifacts)?,
+        )?;
         Ok(PreparedRunnerOutput {
             commit,
             artifacts_to_stage,
         })
     }
+}
+
+fn required_artifacts_for_payloads(
+    view: &RuntimeRunView,
+    required_artifacts: Vec<store::ArtifactEvidenceRef>,
+    payloads: &[events::KernelEventPayload],
+) -> Result<Vec<store::ArtifactEvidenceRef>> {
+    let mut by_artifact = required_artifacts
+        .into_iter()
+        .map(|artifact| (artifact.artifact_id.clone(), artifact))
+        .collect::<BTreeMap<_, _>>();
+    for payload in payloads {
+        for requirement in store::event_artifact_requirements(payload) {
+            if by_artifact.contains_key(&requirement.artifact_id) {
+                continue;
+            }
+            let Some(evidence) = committed_artifact_for_requirement(view, &requirement) else {
+                if requirement.source.is_retention() {
+                    continue;
+                }
+                return Err(RuntimeError::InvalidRunnerOutput(format!(
+                    "payload references artifact {} without required evidence",
+                    requirement.artifact_id
+                )));
+            };
+            by_artifact.insert(evidence.artifact_id.clone(), evidence);
+        }
+    }
+    Ok(by_artifact.into_values().collect())
+}
+
+fn committed_artifact_for_requirement(
+    view: &RuntimeRunView,
+    requirement: &store::EventArtifactRequirement,
+) -> Option<store::ArtifactEvidenceRef> {
+    view.artifact_refs
+        .get(&requirement.artifact_id)
+        .map(|reference| reference.evidence.clone())
+        .or_else(|| {
+            view.config_artifacts
+                .values()
+                .find(|artifact| artifact.artifact_id == requirement.artifact_id)
+                .cloned()
+        })
 }
 
 fn launch_artifacts_by_id(

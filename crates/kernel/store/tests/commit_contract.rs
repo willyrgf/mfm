@@ -12,14 +12,16 @@ use mfm_spec::v1::{
 };
 use mfm_store::v1::{
     build_committed_batch, event_artifact_requirements, payload_canonical_json,
-    payload_from_json_value, ArtifactEvidenceRef, CellTerminalProjection, CommitKey, CommitOrdinal,
-    CommitOutcome, CommitPreconditions, CommittedRunStream, EventArtifactReferenceSource,
-    ForwardLedgerClassification, InMemoryTypedRunStore, KernelEventEnvelope, ManualBlockReason,
-    ManualResolutionProjection, PersistedKernelEventRecord, PreparedTypedCommit,
-    ProjectionSnapshot, RequiredRunState, ResourceLaneKey, RunCompletionProjection, RunMode,
-    RunState, SagaEngagementProjection, SagaEngagementReason, SideEffectPhase, StoreError,
-    StreamSeq, TypedCommitRequest, TypedProjectionRead, TypedRunEventStore,
-    VerifiedRetentionProjection, VerifiedRetentionProjectionSet,
+    payload_from_json_value, ArtifactEvidenceRef, CellTerminalProjection,
+    CommitArtifactEvidenceSet, CommitKey, CommitOrdinal, CommitOutcome, CommitPreconditions,
+    CommittedRunStream, EventArtifactReferenceSource, ForwardLedgerClassification,
+    InMemoryTypedRunStore, KernelEventEnvelope, ManualBlockReason, ManualResolutionProjection,
+    NonEmptyPayloadBatch, PersistedKernelEventRecord, PreparedCommit, PreparedCommitPlan,
+    PreparedTypedCommit, ProjectionSnapshot, RequiredRunState, ResourceLaneKey,
+    RunCompletionProjection, RunMode, RunStart, RunState, SagaEngagementProjection,
+    SagaEngagementReason, SideEffectPhase, StateAttemptStarted, StoreError, StreamSeq,
+    TypedCommitRequest, TypedProjectionRead, TypedRunEventStore, VerifiedRetentionProjection,
+    VerifiedRetentionProjectionSet,
 };
 
 const SPEC_MEDIA_TYPE: &str = "application/vnd.mfm.typed-execution-spec+json;version=1";
@@ -1206,6 +1208,140 @@ fn committed_run_stream_rejects_events_for_a_different_run() {
             ..
         }
     ));
+}
+
+#[test]
+fn non_empty_payload_batch_rejects_empty_batches() {
+    assert!(matches!(
+        NonEmptyPayloadBatch::new(Vec::new()),
+        Err(StoreError::EmptyCommit)
+    ));
+    let batch = NonEmptyPayloadBatch::new(vec![run_started(run_id(144))]).expect("payload batch");
+    assert_eq!(batch.as_slice().len(), 1);
+    assert_eq!(batch.into_vec().len(), 1);
+}
+
+#[test]
+fn prepared_commit_plan_mints_valid_run_start_authority() {
+    let run_id = run_id(145);
+    let request = run_start_request(run_id.clone(), "purpose-run-start");
+    let artifacts = CommitArtifactEvidenceSet::new(
+        request.required_artifacts.clone(),
+        request.required_artifacts.clone(),
+    )
+    .expect("artifact evidence set");
+    let commit =
+        PreparedCommit::<RunStart>::new(request.clone(), artifacts).expect("run-start authority");
+    let plan = PreparedCommitPlan::from(commit);
+
+    assert_eq!(&plan.request().run_id, &run_id);
+    assert_eq!(&plan.request().payloads, &request.payloads);
+    assert_eq!(
+        &plan.request().required_artifacts,
+        &request.required_artifacts
+    );
+}
+
+#[test]
+fn prepared_commit_authority_rejects_invalid_request_shapes() {
+    let base_run_id = run_id(146);
+    let empty = TypedCommitRequest {
+        run_id: base_run_id.clone(),
+        expected_next_seq: StreamSeq::FIRST,
+        commit_key: CommitKey::new("purpose-empty").expect("commit key"),
+        payloads: Vec::new(),
+        required_artifacts: Vec::new(),
+        preconditions: CommitPreconditions::default(),
+    };
+    assert!(matches!(
+        PreparedCommit::<RunStart>::new(empty, CommitArtifactEvidenceSet::empty()),
+        Err(StoreError::EmptyCommit)
+    ));
+
+    let mut mixed_run = run_start_request(base_run_id.clone(), "purpose-mixed-run");
+    mixed_run.payloads = vec![run_started(run_id(147))];
+    let mixed_run_artifacts = CommitArtifactEvidenceSet::new(
+        mixed_run.required_artifacts.clone(),
+        mixed_run.required_artifacts.clone(),
+    )
+    .expect("artifact evidence set");
+    assert!(matches!(
+        PreparedCommit::<RunStart>::new(mixed_run, mixed_run_artifacts),
+        Err(StoreError::PayloadRunMismatch { .. })
+    ));
+
+    let mut mixed_spec = run_start_request(base_run_id.clone(), "purpose-mixed-spec");
+    let mut foreign_spec_payload = side_effect_attempt_started();
+    let KernelEventPayload::StateAttemptStarted(payload) = &mut foreign_spec_payload else {
+        panic!("state-attempt-start payload")
+    };
+    payload.spec_hash = spec_hash(148);
+    mixed_spec.payloads.push(foreign_spec_payload);
+    let mixed_spec_artifacts = CommitArtifactEvidenceSet::new(
+        mixed_spec.required_artifacts.clone(),
+        mixed_spec.required_artifacts.clone(),
+    )
+    .expect("artifact evidence set");
+    assert!(matches!(
+        PreparedCommit::<RunStart>::new(mixed_spec, mixed_spec_artifacts),
+        Err(StoreError::PayloadSpecHashMismatch { .. })
+    ));
+
+    let mut missing_artifact = run_start_request(base_run_id.clone(), "purpose-missing-artifact");
+    missing_artifact.required_artifacts = vec![spec_artifact_ref()];
+    let missing_artifact_set = CommitArtifactEvidenceSet::new(
+        missing_artifact.required_artifacts.clone(),
+        missing_artifact.required_artifacts.clone(),
+    )
+    .expect("artifact evidence set");
+    assert!(matches!(
+        PreparedCommit::<RunStart>::new(missing_artifact, missing_artifact_set),
+        Err(StoreError::InvalidPreparedCommitPurpose {
+            purpose: "run_start",
+            ..
+        })
+    ));
+
+    let wrong_purpose = run_start_request(base_run_id, "purpose-wrong-marker");
+    let wrong_purpose_artifacts = CommitArtifactEvidenceSet::new(
+        wrong_purpose.required_artifacts.clone(),
+        wrong_purpose.required_artifacts.clone(),
+    )
+    .expect("artifact evidence set");
+    assert!(matches!(
+        PreparedCommit::<StateAttemptStarted>::new(wrong_purpose, wrong_purpose_artifacts),
+        Err(StoreError::InvalidPreparedCommitPurpose {
+            purpose: "state_attempt_started",
+            ..
+        })
+    ));
+}
+
+#[test]
+fn runner_output_plan_classifies_terminal_attempt_commits() {
+    let artifact_id = artifact_id(149);
+    let digest = content_digest(150);
+    let payloads = terminal_cell_commit_payloads(artifact_id.clone(), digest.clone());
+    let artifact = store_artifact_ref(artifact_id, digest);
+    let request = TypedCommitRequest {
+        run_id: run_id(151),
+        expected_next_seq: StreamSeq::FIRST,
+        commit_key: CommitKey::new("purpose-attempt-terminal").expect("commit key"),
+        payloads,
+        required_artifacts: vec![artifact.clone()],
+        preconditions: CommitPreconditions {
+            required_run_state: RequiredRunState::NotCompleted,
+            ..CommitPreconditions::default()
+        },
+    };
+    let plan = PreparedCommitPlan::runner_output(
+        request,
+        CommitArtifactEvidenceSet::new(vec![artifact.clone()], vec![artifact])
+            .expect("artifact evidence set"),
+    )
+    .expect("runner output plan");
+
+    assert!(matches!(plan, PreparedCommitPlan::AttemptTerminal(_)));
 }
 
 fn spec_artifact_ref() -> ArtifactEvidenceRef {

@@ -327,3 +327,53 @@ Checks run:
 - `cargo test -p mfm-replay`
 - `cargo test -p mfm-integration-tests --test cargo_metadata_contract`
 - `cargo test -p mfm-integration-tests --test architecture_namespace_contract`
+
+## Phase 8: Purpose-Specific Prepared Commits
+
+Status: completed.
+
+Files changed:
+
+- `crates/kernel/store/src/lib.rs`
+- `crates/kernel/store/tests/commit_contract.rs`
+- `crates/kernel/runtime/src/commit.rs`
+- `crates/kernel/runtime/src/manual_resolution.rs`
+- `crates/kernel/runtime/src/scheduler.rs`
+- `IMPLEMENTATION_ACDC_SAGA_PRE_MERGE.md`
+
+Validators deleted or replaced:
+
+- Added `NonEmptyPayloadBatch`, `CommitArtifactEvidenceSet`, `PreparedCommit<Purpose>`, and
+  `PreparedCommitPlan`.
+- Added sealed purpose markers for run start, state-attempt start, attempt terminal,
+  side-effect terminal, side-effect progress, retention, manual resolution, and saga terminal
+  commits.
+- Added plan-based sync and async store append entrypoints. Runtime production mutation now calls
+  `append_prepared_commit_plan` instead of submitting raw `PreparedTypedCommit` values.
+- Added purpose constructors that reject empty batches, mixed-run payloads, mixed-spec payloads,
+  wrong-purpose payload shapes, missing non-retention artifact evidence, and mismatched required
+  artifact evidence sets before store admission.
+- Added runtime required-artifact augmentation from verified run views so commits can require
+  previously committed artifact evidence without re-admitting it.
+- Left low-level `TypedCommitRequest` and `PreparedTypedCommit` available as storage/test DTOs for
+  later deletion phases; production scheduler paths no longer start from them at the mutation
+  boundary.
+
+Tests added or updated:
+
+- Added store contract tests for `NonEmptyPayloadBatch` empty-batch rejection.
+- Added store contract tests for valid run-start purpose authority and invalid empty, mixed-run,
+  mixed-spec, missing-artifact, and wrong-purpose construction attempts.
+- Added store contract test proving runner output plans classify terminal attempt commits.
+- Updated runtime launch, attempt-start, runner-output, and manual-resolution planners to mint
+  purpose-specific prepared commits/plans.
+
+Checks run:
+
+- `cargo fmt --all -- --check`
+- `cargo check -p mfm-store -p mfm-runtime -p mfm-replay -p mfm-stream-store-postgres`
+- `cargo test -p mfm-store`
+- `cargo test -p mfm-runtime`
+- `cargo test -p mfm-replay`
+- `cargo test -p mfm-integration-tests --test cargo_metadata_contract`
+- `cargo test -p mfm-integration-tests --test architecture_namespace_contract`
