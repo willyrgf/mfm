@@ -679,6 +679,36 @@ pub mod v1 {
         "resource namespace",
         checked_resource_namespace
     );
+    checked_string_type!(
+        /// Manual authorization verifier identity certified for manual saga resolution.
+        ManualAuthorizationVerifierId,
+        "manual authorization verifier id",
+        checked_ascii_token
+    );
+    checked_string_type!(
+        /// Operator authority snapshot identity certified for manual saga resolution.
+        OperatorAuthorityId,
+        "operator authority id",
+        checked_ascii_token
+    );
+    checked_string_type!(
+        /// Stable operator identity inside a certified operator authority snapshot.
+        OperatorId,
+        "operator id",
+        checked_ascii_token
+    );
+    checked_string_type!(
+        /// Public operator identity that may authorize a manual saga resolution.
+        OperatorPublicIdentity,
+        "operator public identity",
+        checked_ascii_token
+    );
+    checked_string_type!(
+        /// Manual-resolution signing scheme identifier.
+        ManualSigningSchemeSpec,
+        "manual signing scheme",
+        checked_ascii_token
+    );
 
     /// Hash-only envelope carrying a spec hash and non-semantic audit metadata.
     ///
@@ -945,15 +975,111 @@ pub mod v1 {
     pub struct ManualResolutionEvidenceSpec {
         /// Schema id for the operator evidence artifact.
         pub evidence_schema: SchemaId,
-        /// Schema id for the operator identity reference.
-        pub operator_identity_ref_schema: SchemaId,
+        /// Certified authorization policy required for the manual decision.
+        pub authorization: ManualResolutionAuthorizationSpec,
     }
 
     impl ManualResolutionEvidenceSpec {
         fn json(&self) -> serde_json::Value {
             serde_json::json!({
+                "authorization": self.authorization.json(),
                 "evidence_schema": self.evidence_schema.as_str(),
-                "operator_identity_ref_schema": self.operator_identity_ref_schema.as_str(),
+            })
+        }
+    }
+
+    /// Certified authorization policy for run-scoped manual saga resolution.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct ManualResolutionAuthorizationSpec {
+        /// Verifier that must validate the authorization proof.
+        pub verifier_id: ManualAuthorizationVerifierId,
+        /// Digest-only signing scheme used for manual-resolution claims.
+        pub signing_scheme: ManualSigningSchemeSpec,
+        /// Certified operator authority snapshot.
+        pub authority: OperatorAuthoritySnapshotSpec,
+        /// Required authorization quorum.
+        pub quorum: ManualAuthorizationQuorumSpec,
+    }
+
+    impl ManualResolutionAuthorizationSpec {
+        fn json(&self) -> serde_json::Value {
+            serde_json::json!({
+                "authority": self.authority.json(),
+                "quorum": self.quorum.json(),
+                "signing_scheme": self.signing_scheme.as_str(),
+                "verifier_id": self.verifier_id.as_str(),
+            })
+        }
+    }
+
+    /// Certified operator authority snapshot for manual saga resolution.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct OperatorAuthoritySnapshotSpec {
+        /// Authority snapshot identity.
+        pub authority_id: OperatorAuthorityId,
+        /// Operators allowed by this snapshot.
+        pub operators: Vec<OperatorAuthorityMemberSpec>,
+    }
+
+    impl OperatorAuthoritySnapshotSpec {
+        fn json(&self) -> serde_json::Value {
+            serde_json::json!({
+                "authority_id": self.authority_id.as_str(),
+                "operators": self
+                    .operators
+                    .iter()
+                    .map(OperatorAuthorityMemberSpec::json)
+                    .collect::<Vec<_>>(),
+            })
+        }
+    }
+
+    /// Operator authorized by a certified manual authority snapshot.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct OperatorAuthorityMemberSpec {
+        /// Stable operator id inside the authority snapshot.
+        pub operator_id: OperatorId,
+        /// Public signing identity for this operator.
+        pub public_identity: OperatorPublicIdentity,
+    }
+
+    impl OperatorAuthorityMemberSpec {
+        fn json(&self) -> serde_json::Value {
+            serde_json::json!({
+                "operator_id": self.operator_id.as_str(),
+                "public_identity": self.public_identity.as_str(),
+            })
+        }
+    }
+
+    /// Manual authorization quorum for a signed manual decision.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct ManualAuthorizationQuorumSpec {
+        required_signatures: u32,
+    }
+
+    impl ManualAuthorizationQuorumSpec {
+        /// Creates a quorum requiring at least one signature.
+        pub fn new(required_signatures: u32) -> Result<Self> {
+            if required_signatures == 0 {
+                return Err(SpecError::Json(
+                    "manual authorization quorum must require at least one signature".to_owned(),
+                ));
+            }
+            Ok(Self {
+                required_signatures,
+            })
+        }
+
+        /// Returns the number of required operator signatures.
+        pub const fn required_signatures(&self) -> u32 {
+            self.required_signatures
+        }
+
+        fn json(&self) -> serde_json::Value {
+            serde_json::json!({
+                "kind": "threshold",
+                "required_signatures": self.required_signatures,
             })
         }
     }
@@ -2373,11 +2499,65 @@ pub mod v1 {
         let object = object(value, "manual-resolution evidence")?;
         Ok(ManualResolutionEvidenceSpec {
             evidence_schema: identity(required_str(object, "evidence_schema")?)?,
-            operator_identity_ref_schema: identity(required_str(
+            authorization: parse_manual_resolution_authorization(required(
                 object,
-                "operator_identity_ref_schema",
+                "authorization",
             )?)?,
         })
+    }
+
+    fn parse_manual_resolution_authorization(
+        value: &serde_json::Value,
+    ) -> Result<ManualResolutionAuthorizationSpec> {
+        let object = object(value, "manual-resolution authorization")?;
+        Ok(ManualResolutionAuthorizationSpec {
+            verifier_id: ManualAuthorizationVerifierId::new(required_str(object, "verifier_id")?)?,
+            signing_scheme: ManualSigningSchemeSpec::new(required_str(object, "signing_scheme")?)?,
+            authority: parse_operator_authority_snapshot(required(object, "authority")?)?,
+            quorum: parse_manual_authorization_quorum(required(object, "quorum")?)?,
+        })
+    }
+
+    fn parse_operator_authority_snapshot(
+        value: &serde_json::Value,
+    ) -> Result<OperatorAuthoritySnapshotSpec> {
+        let object = object(value, "operator authority snapshot")?;
+        Ok(OperatorAuthoritySnapshotSpec {
+            authority_id: OperatorAuthorityId::new(required_str(object, "authority_id")?)?,
+            operators: parse_vec(
+                required(object, "operators")?,
+                parse_operator_authority_member,
+            )?,
+        })
+    }
+
+    fn parse_operator_authority_member(
+        value: &serde_json::Value,
+    ) -> Result<OperatorAuthorityMemberSpec> {
+        let object = object(value, "operator authority member")?;
+        Ok(OperatorAuthorityMemberSpec {
+            operator_id: OperatorId::new(required_str(object, "operator_id")?)?,
+            public_identity: OperatorPublicIdentity::new(required_str(object, "public_identity")?)?,
+        })
+    }
+
+    fn parse_manual_authorization_quorum(
+        value: &serde_json::Value,
+    ) -> Result<ManualAuthorizationQuorumSpec> {
+        let object = object(value, "manual authorization quorum")?;
+        match required_str(object, "kind")? {
+            "threshold" => {
+                let required_signatures = required_u64(object, "required_signatures")?
+                    .try_into()
+                    .map_err(|_| {
+                    json_error("manual authorization quorum exceeds supported u32 range")
+                })?;
+                ManualAuthorizationQuorumSpec::new(required_signatures)
+            }
+            kind => Err(json_error(format!(
+                "unsupported manual authorization quorum kind {kind:?}"
+            ))),
+        }
     }
 
     fn parse_remediations(value: &serde_json::Value) -> Result<BTreeMap<NodeId, NodeSpec>> {
@@ -3705,7 +3885,7 @@ pub mod v1 {
             let base_hash = base.spec_hash().expect("base hash");
             let manual = ManualResolutionEvidenceSpec {
                 evidence_schema: schema("mfm.spec.test.manual_evidence", 0x91),
-                operator_identity_ref_schema: schema("mfm.spec.test.operator_ref", 0x92),
+                authorization: manual_authorization(0x92),
             };
 
             let mut manual_spec = base.clone();
@@ -3738,6 +3918,65 @@ pub mod v1 {
                 base_hash,
                 "remediation node collection must be hash-defining"
             );
+        }
+
+        #[test]
+        fn old_manual_operator_identity_spec_json_rejects() {
+            let mut spec = test_spec();
+            spec.saga = SagaPolicySpec::ManualResolution {
+                manual: ManualResolutionEvidenceSpec {
+                    evidence_schema: schema("mfm.spec.test.manual_evidence", 0xa1),
+                    authorization: manual_authorization(0xa2),
+                },
+            };
+            let mut json: serde_json::Value =
+                serde_json::from_str(spec.canonical_json().expect("canonical").as_str())
+                    .expect("json");
+            let manual = json["saga"]["manual"]
+                .as_object_mut()
+                .expect("manual object");
+            manual.remove("authorization");
+            manual.insert(
+                "operator_identity_ref_schema".to_owned(),
+                serde_json::json!(schema("mfm.spec.test.operator_ref", 0xa3).as_str()),
+            );
+            let input = serde_json::to_string(&json).expect("json string");
+            let err = TypedExecutionSpec::from_json_str(&input)
+                .expect_err("old manual operator field rejects");
+            assert!(
+                err.to_string().contains("authorization")
+                    || err.to_string().contains("unknown")
+                    || err.to_string().contains("non-normalized"),
+                "{err}"
+            );
+        }
+
+        fn manual_authorization(byte: u8) -> ManualResolutionAuthorizationSpec {
+            ManualResolutionAuthorizationSpec {
+                verifier_id: ManualAuthorizationVerifierId::new(format!(
+                    "mfm.test.manual.verifier.{byte}"
+                ))
+                .expect("verifier id"),
+                signing_scheme: ManualSigningSchemeSpec::new(
+                    "mfm.manual_resolution.digest_signature.v1",
+                )
+                .expect("signing scheme"),
+                authority: OperatorAuthoritySnapshotSpec {
+                    authority_id: OperatorAuthorityId::new(format!(
+                        "mfm.test.manual.authority.{byte}"
+                    ))
+                    .expect("authority id"),
+                    operators: vec![OperatorAuthorityMemberSpec {
+                        operator_id: OperatorId::new(format!("operator.{byte}"))
+                            .expect("operator id"),
+                        public_identity: OperatorPublicIdentity::new(format!(
+                            "operator-public-{byte}"
+                        ))
+                        .expect("operator public identity"),
+                    }],
+                },
+                quorum: ManualAuthorizationQuorumSpec::new(1).expect("quorum"),
+            }
         }
 
         #[test]

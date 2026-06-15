@@ -3649,7 +3649,7 @@ fn lower_manual_resolution_evidence(
 ) -> spec::ManualResolutionEvidenceSpec {
     spec::ManualResolutionEvidenceSpec {
         evidence_schema: manual.evidence_schema.clone(),
-        operator_identity_ref_schema: manual.operator_identity_ref_schema.clone(),
+        authorization: manual.authorization.clone(),
     }
 }
 
@@ -6454,7 +6454,31 @@ mod tests {
         typed.saga = spec::SagaPolicySpec::ManualResolution {
             manual: spec::ManualResolutionEvidenceSpec {
                 evidence_schema: operator_schema.clone(),
-                operator_identity_ref_schema: operator_schema,
+                authorization: spec::ManualResolutionAuthorizationSpec {
+                    verifier_id: spec::ManualAuthorizationVerifierId::new(
+                        "mfm.certify.test.manual.verifier",
+                    )
+                    .expect("verifier id"),
+                    signing_scheme: spec::ManualSigningSchemeSpec::new(
+                        "mfm.manual_resolution.digest_signature.v1",
+                    )
+                    .expect("signing scheme"),
+                    authority: spec::OperatorAuthoritySnapshotSpec {
+                        authority_id: spec::OperatorAuthorityId::new(
+                            "mfm.certify.test.manual.authority",
+                        )
+                        .expect("authority id"),
+                        operators: vec![spec::OperatorAuthorityMemberSpec {
+                            operator_id: spec::OperatorId::new("operator.certify")
+                                .expect("operator id"),
+                            public_identity: spec::OperatorPublicIdentity::new(
+                                "operator-certify-public",
+                            )
+                            .expect("operator public identity"),
+                        }],
+                    },
+                    quorum: spec::ManualAuthorizationQuorumSpec::new(1).expect("quorum"),
+                },
             },
         };
         let mut value: serde_json::Value =

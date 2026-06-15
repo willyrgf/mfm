@@ -24,7 +24,12 @@ use mfm_ids::{
     EffectKind, NodeId, OperationInstanceId, OperationKind, OperationVersion, SchemaId, ScopeId,
     SeedId, SemanticTypeId, StateKind, StateVersion,
 };
-pub use mfm_spec::v1::{ResourceClaimSpec, ResourceNamespace};
+pub use mfm_spec::v1::{
+    ManualAuthorizationQuorumSpec, ManualAuthorizationVerifierId,
+    ManualResolutionAuthorizationSpec, ManualSigningSchemeSpec, OperatorAuthorityId,
+    OperatorAuthorityMemberSpec, OperatorAuthoritySnapshotSpec, OperatorId, OperatorPublicIdentity,
+    ResourceClaimSpec, ResourceNamespace,
+};
 pub use mfm_values::NonEmpty;
 use mfm_values::{
     MfmConfig, MfmValue, PublicOutputDescriptor, SchemaDescriptor, SchemaShape, StateInput,
@@ -557,8 +562,8 @@ pub enum RemediationUnresolved {
 pub struct ManualResolutionEvidence {
     /// Schema id for the operator evidence artifact.
     pub evidence_schema: SchemaId,
-    /// Schema id for the operator identity reference.
-    pub operator_identity_ref_schema: SchemaId,
+    /// Certified authorization policy required for the manual decision.
+    pub authorization: ManualResolutionAuthorizationSpec,
 }
 
 /// Effect-specific runner kind recorded by a registered state.
