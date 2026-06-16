@@ -968,10 +968,10 @@ mod tests {
     #[test]
     fn decode_config_bytes_rejects_invalid_serialized_config() {
         let error = decode_config_bytes::<ProjectReportConfig>(br#"{"report_version":0}"#)
-            .expect_err("zero report version must fail validation");
+            .expect_err("zero report version must fail decoding");
         let mfm_runtime::RuntimeError::InvalidRunnerOutput(message) = error else {
             panic!("unexpected error: {error}");
         };
-        assert!(message.contains("report schema version must be non-zero"));
+        assert!(message.contains("nonzero u64"));
     }
 }

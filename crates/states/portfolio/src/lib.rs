@@ -18,6 +18,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::{self, Future};
+use std::num::NonZeroU64;
 use std::pin::Pin;
 
 use alloy_primitives::U256;
@@ -482,7 +483,7 @@ impl Default for MergeObservationsConfig {
 )]
 pub struct AssembleSnapshotConfig {
     /// Snapshot schema version to emit.
-    snapshot_version: u64,
+    snapshot_version: NonZeroU64,
     /// Portfolio config carried into the public snapshot.
     portfolio: PortfolioConfig,
 }
@@ -490,6 +491,8 @@ pub struct AssembleSnapshotConfig {
 impl AssembleSnapshotConfig {
     /// Creates validated snapshot-assembly config.
     pub fn new(snapshot_version: u64, portfolio: PortfolioConfig) -> Result<Self, ConfigError> {
+        let snapshot_version = NonZeroU64::new(snapshot_version)
+            .ok_or_else(|| ConfigError::new("snapshot schema version must be non-zero"))?;
         let config = Self {
             snapshot_version,
             portfolio,
@@ -500,7 +503,7 @@ impl AssembleSnapshotConfig {
 
     /// Returns the snapshot schema version to emit.
     pub const fn snapshot_version(&self) -> u64 {
-        self.snapshot_version
+        self.snapshot_version.get()
     }
 
     /// Returns the portfolio config carried into the public snapshot.
@@ -511,26 +514,24 @@ impl AssembleSnapshotConfig {
 
 /// Config for report projection.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmConfig)]
-#[mfm(
-    schema = "mfm.portfolio.config.project_report",
-    validate = "validate_project_report_config"
-)]
+#[mfm(schema = "mfm.portfolio.config.project_report")]
 pub struct ProjectReportConfig {
     /// Report schema version to emit.
-    report_version: u64,
+    report_version: NonZeroU64,
 }
 
 impl ProjectReportConfig {
     /// Creates validated report-projection config.
     pub fn new(report_version: u64) -> Result<Self, ConfigError> {
+        let report_version = NonZeroU64::new(report_version)
+            .ok_or_else(|| ConfigError::new("report schema version must be non-zero"))?;
         let config = Self { report_version };
-        validate_project_report_config(&config).map_err(ConfigError::new)?;
         Ok(config)
     }
 
     /// Returns the report schema version to emit.
     pub const fn report_version(&self) -> u64 {
-        self.report_version
+        self.report_version.get()
     }
 }
 
@@ -570,20 +571,9 @@ fn validate_resolve_valuations_config(config: &ResolveValuationsConfig) -> Resul
 }
 
 fn validate_assemble_snapshot_config(config: &AssembleSnapshotConfig) -> Result<(), String> {
-    if config.snapshot_version == 0 {
-        return Err("snapshot schema version must be non-zero".to_owned());
-    }
     ValidatedPortfolioConfig::new(config.portfolio.clone())
         .map(|_| ())
         .map_err(|error| error.to_string())
-}
-
-fn validate_project_report_config(config: &ProjectReportConfig) -> Result<(), String> {
-    if config.report_version == 0 {
-        Err("report schema version must be non-zero".to_owned())
-    } else {
-        Ok(())
-    }
 }
 
 /// Prepared external source summary for one network.
@@ -1586,7 +1576,7 @@ pub fn assemble_snapshot(
     symbol_configs.sort_by(|left, right| left.symbol_id.cmp(&right.symbol_id));
 
     let mut snapshot = PortfolioSnapshot {
-        schema_version: config.snapshot_version,
+        schema_version: config.snapshot_version(),
         portfolio_id: config.portfolio.portfolio_id.clone(),
         generated_at_ms,
         network_pins,
