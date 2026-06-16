@@ -10,7 +10,6 @@ members = [
 	"crates/collectors/btc-jsonrpc-http",
 	"crates/collectors/proof",
 	"crates/core",
-	"crates/docs",
 	"crates/kernel/canonical",
 	"crates/kernel/capabilities",
 	"crates/kernel/certify",

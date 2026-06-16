@@ -57,7 +57,6 @@ enum CrateCategory {
     App,
     Binary,
     TestSupport,
-    DocsTooling,
 }
 
 impl CrateCategory {
@@ -78,7 +77,6 @@ impl CrateCategory {
             "app" => Some(Self::App),
             "binary" => Some(Self::Binary),
             "test-support" => Some(Self::TestSupport),
-            "docs-tooling" => Some(Self::DocsTooling),
             _ => None,
         }
     }
@@ -100,7 +98,6 @@ impl CrateCategory {
             Self::App => "app",
             Self::Binary => "binary",
             Self::TestSupport => "test-support",
-            Self::DocsTooling => "docs-tooling",
         }
     }
 }
@@ -769,10 +766,6 @@ fn validate_category_path(
         CrateCategory::App => package.manifest_rel == "crates/app/Cargo.toml",
         CrateCategory::Binary => package.manifest_rel.starts_with("bin/"),
         CrateCategory::TestSupport => package.manifest_rel.starts_with("tests/"),
-        CrateCategory::DocsTooling => {
-            package.manifest_rel.starts_with("crates/docs/")
-                || package.manifest_rel.starts_with("crates/tools/")
-        }
     };
 
     if ok {
@@ -789,9 +782,8 @@ fn validate_category_path(
 
 fn category_dependency_allowed(source: CrateCategory, dependency: CrateCategory) -> bool {
     use CrateCategory::{
-        Adapter, AdapterContract, App, Binary, CapabilityContract, DocsTooling, DomainConfig,
-        DomainModel, Kernel, Operation, SignerContract, SignerProvider, State, Storage,
-        TestSupport, Transport,
+        Adapter, AdapterContract, App, Binary, CapabilityContract, DomainConfig, DomainModel,
+        Kernel, Operation, SignerContract, SignerProvider, State, Storage, TestSupport, Transport,
     };
 
     match source {
@@ -840,16 +832,12 @@ fn category_dependency_allowed(source: CrateCategory, dependency: CrateCategory)
             Kernel | DomainModel | SignerContract | SignerProvider
         ),
         Storage => matches!(dependency, Kernel | CapabilityContract),
-        App => !matches!(dependency, Binary | TestSupport | DocsTooling),
+        App => !matches!(dependency, Binary | TestSupport),
         Binary => matches!(
             dependency,
             Kernel | App | Operation | DomainModel | DomainConfig
         ),
         TestSupport => true,
-        DocsTooling => matches!(
-            dependency,
-            Kernel | DomainModel | DomainConfig | DocsTooling
-        ),
     }
 }
 
