@@ -1609,7 +1609,9 @@ pub mod v1 {
     impl NonEmptyPayloadBatch {
         /// Creates a non-empty payload batch.
         pub fn new(payloads: Vec<KernelEventPayload>) -> Result<Self> {
-            validate_non_empty_payloads(&payloads)?;
+            if payloads.is_empty() {
+                return Err(StoreError::EmptyCommit);
+            }
             Ok(Self { payloads })
         }
 
@@ -1734,7 +1736,6 @@ pub mod v1 {
             validate: impl FnOnce(&TypedCommitRequest) -> Result<()>,
             allow_saga_terminal: bool,
         ) -> Result<Self> {
-            validate_payload_run_and_spec(&request.run_id, &request.payloads)?;
             if artifacts.required_artifacts != request.required_artifacts {
                 return Err(invalid_prepared_commit_purpose(
                     Purpose::NAME,
@@ -4949,7 +4950,6 @@ pub mod v1 {
             });
         }
 
-        validate_payload_run_and_spec(&request.run_id, &request.payloads)?;
         validate_terminal_attempt_cell_pairs(&request.payloads)?;
         validate_terminal_side_effect_evidence_pairs(&request.payloads)?;
         validate_retention_manifest_pairs(&request.payloads)?;
@@ -5086,7 +5086,6 @@ pub mod v1 {
         committed_seq: StreamSeq,
         fingerprint: CommitFingerprint,
     ) -> Result<CommittedBatch> {
-        validate_payload_run_and_spec(&request.run_id, &request.payloads)?;
         validate_terminal_attempt_cell_pairs(&request.payloads)?;
         validate_terminal_side_effect_evidence_pairs(&request.payloads)?;
         validate_retention_manifest_pairs(&request.payloads)?;
@@ -5309,13 +5308,6 @@ pub mod v1 {
 
     mod private {
         pub trait Sealed {}
-    }
-
-    fn validate_non_empty_payloads(payloads: &[KernelEventPayload]) -> Result<()> {
-        if payloads.is_empty() {
-            return Err(StoreError::EmptyCommit);
-        }
-        Ok(())
     }
 
     fn validate_unique_artifact_evidence(
