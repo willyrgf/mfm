@@ -191,24 +191,19 @@ fn expand_schema_derive_result(
         )
     };
 
-    let config_validate_method = if let Some(validate_path) = &attrs.validate {
-        if kind != DeriveKind::Config {
-            return Err(syn::Error::new_spanned(
-                &input.ident,
-                "#[mfm(validate = \"...\")] is supported only for MfmConfig",
-            ));
-        }
-        quote! {
-            fn validate(
-                &self,
-            ) -> ::std::result::Result<(), ::mfm_values::ConfigError> {
-                #validate_path(self)
-                    .map_err(|error| ::mfm_values::ConfigError::new(error.to_string()))
+    let config_validate_method =
+        if let (DeriveKind::Config, Some(validate_path)) = (kind, &attrs.validate) {
+            quote! {
+                fn validate(
+                    &self,
+                ) -> ::std::result::Result<(), ::mfm_values::ConfigError> {
+                    #validate_path(self)
+                        .map_err(|error| ::mfm_values::ConfigError::new(error.to_string()))
+                }
             }
-        }
-    } else {
-        quote! {}
-    };
+        } else {
+            quote! {}
+        };
 
     let impl_block = match kind {
         DeriveKind::Value => quote! {

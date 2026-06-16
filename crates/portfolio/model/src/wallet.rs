@@ -53,6 +53,28 @@ pub struct WalletConfig {
 }
 
 impl WalletConfig {
+    /// Creates a normalized and validated wallet config.
+    pub fn new(
+        wallet_id: String,
+        address: String,
+        subject_kind: WalletSubjectKind,
+        network_id: String,
+        implementation: WalletImplementationConfig,
+        symbol_ids: Vec<String>,
+        metadata: BTreeMap<String, String>,
+    ) -> Result<Self, WalletConfigError> {
+        Self {
+            wallet_id,
+            address,
+            subject_kind,
+            network_id,
+            implementation,
+            symbol_ids,
+            metadata,
+        }
+        .validated()
+    }
+
     /// Sorts nested collections into the canonical order used for persistence.
     pub fn normalize(&mut self) {
         self.symbol_ids.sort();
@@ -62,6 +84,13 @@ impl WalletConfig {
     pub fn normalized(mut self) -> Self {
         self.normalize();
         self
+    }
+
+    /// Validates this wallet config, normalizes it, and returns the validated value.
+    pub fn validated(mut self) -> Result<Self, WalletConfigError> {
+        validate_wallet_config(&self)?;
+        self.normalize();
+        Ok(self)
     }
 }
 
@@ -187,10 +216,9 @@ pub enum WalletConfigError {
 
 /// Decodes and validates a canonical wallet config.
 pub fn decode_wallet_config(value: &Value) -> Result<WalletConfig, WalletConfigError> {
-    let cfg = serde_json::from_value(value.clone())
+    let cfg: WalletConfig = serde_json::from_value(value.clone())
         .map_err(|err| WalletConfigError::Decode(err.to_string()))?;
-    validate_wallet_config(&cfg)?;
-    Ok(cfg)
+    cfg.validated()
 }
 
 /// Validates a canonical wallet config.

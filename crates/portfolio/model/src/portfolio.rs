@@ -36,7 +36,8 @@ impl mfm_values::MfmDefault for NetworkFamilyConfig {}
 #[mfm(
     namespace = "mfm.portfolio",
     name = "portfolio-config",
-    schema = "mfm.portfolio.config"
+    schema = "mfm.portfolio.config",
+    validate = "validate_portfolio_config_for_mfm"
 )]
 pub struct PortfolioConfig {
     /// Stable machine identifier for the portfolio.
@@ -55,6 +56,26 @@ pub struct PortfolioConfig {
 }
 
 impl PortfolioConfig {
+    /// Creates a normalized and validated portfolio config.
+    pub fn new(
+        portfolio_id: String,
+        quote_codes: Vec<QuoteCode>,
+        networks: Vec<NetworkConfig>,
+        wallets: Vec<WalletConfig>,
+        symbol_configs: Vec<SymbolConfig>,
+        metadata: BTreeMap<String, String>,
+    ) -> Result<Self, PortfolioConfigError> {
+        Self {
+            portfolio_id,
+            quote_codes,
+            networks,
+            wallets,
+            symbol_configs,
+            metadata,
+        }
+        .validated()
+    }
+
     /// Sorts nested collections into the canonical order used for persistence.
     pub fn normalize(&mut self) {
         self.quote_codes.sort();
@@ -76,6 +97,13 @@ impl PortfolioConfig {
     pub fn normalized(mut self) -> Self {
         self.normalize();
         self
+    }
+
+    /// Validates this config, normalizes it, and returns the validated value.
+    pub fn validated(mut self) -> Result<Self, PortfolioConfigError> {
+        validate_portfolio_config(&self)?;
+        self.normalize();
+        Ok(self)
     }
 }
 
@@ -100,6 +128,32 @@ pub struct NetworkConfig {
     /// Canonical metadata surface.
     #[serde(default)]
     pub metadata: BTreeMap<String, String>,
+}
+
+impl NetworkConfig {
+    /// Creates a validated network config.
+    pub fn new(
+        network_id: String,
+        family: NetworkFamilyConfig,
+        chain_id: Option<u64>,
+        control_scope: String,
+        metadata: BTreeMap<String, String>,
+    ) -> Result<Self, PortfolioConfigError> {
+        Self {
+            network_id,
+            family,
+            chain_id,
+            control_scope,
+            metadata,
+        }
+        .validated()
+    }
+
+    /// Validates this network config and returns it unchanged.
+    pub fn validated(self) -> Result<Self, PortfolioConfigError> {
+        validate_network_config(&self)?;
+        Ok(self)
+    }
 }
 
 /// Concrete execution anchor captured for one pinned network.
@@ -582,10 +636,9 @@ pub enum PortfolioConfigError {
 
 /// Decodes and validates a canonical portfolio config.
 pub fn decode_portfolio_config(value: &Value) -> Result<PortfolioConfig, PortfolioConfigError> {
-    let cfg = serde_json::from_value(value.clone())
+    let cfg: PortfolioConfig = serde_json::from_value(value.clone())
         .map_err(|err| PortfolioConfigError::Decode(err.to_string()))?;
-    validate_portfolio_config(&cfg)?;
-    Ok(cfg)
+    cfg.validated()
 }
 
 /// Validates a canonical portfolio config.
@@ -711,6 +764,10 @@ pub fn validate_portfolio_config(cfg: &PortfolioConfig) -> Result<(), PortfolioC
     }
 
     Ok(())
+}
+
+fn validate_portfolio_config_for_mfm(cfg: &PortfolioConfig) -> Result<(), String> {
+    validate_portfolio_config(cfg).map_err(|error| error.to_string())
 }
 
 /// Validates the canonical portfolio config together with its valuation source registry.
@@ -973,7 +1030,7 @@ mod tests {
         let cfg = decode_portfolio_config(&canonical_config_json()).expect("config should decode");
 
         assert_eq!(cfg.portfolio_id, "portfolio_main");
-        assert_eq!(cfg.quote_codes, vec![QuoteCode::Usd, QuoteCode::Btc]);
+        assert_eq!(cfg.quote_codes, vec![QuoteCode::Btc, QuoteCode::Usd]);
         assert_eq!(cfg.networks.len(), 2);
         assert_eq!(cfg.wallets.len(), 2);
         assert_eq!(cfg.symbol_configs.len(), 3);
@@ -981,9 +1038,10 @@ mod tests {
             cfg.wallets[0].implementation,
             WalletImplementationConfig::AddressOnly {}
         ));
+        assert_eq!(cfg.wallets[0].wallet_id, "wallet_ops_arb");
         assert_eq!(
             cfg.wallets[0].address,
-            "0x000000000000000000000000000000000000dead"
+            "0x000000000000000000000000000000000000beef"
         );
         assert!(matches!(
             cfg.symbol_configs[0].balance_reader,

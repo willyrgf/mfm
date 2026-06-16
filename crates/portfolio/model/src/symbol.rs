@@ -129,6 +129,37 @@ pub struct SymbolConfig {
 }
 
 impl SymbolConfig {
+    /// Creates a normalized and validated symbol config.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        symbol_id: String,
+        display_symbol: Option<String>,
+        kind: SymbolKind,
+        role: SymbolRole,
+        network_id: String,
+        protocol: Option<String>,
+        balance_reader: BalanceReaderConfig,
+        valuation: SymbolValuationConfig,
+        decimals: Option<u8>,
+        underlying_symbol_id: Option<String>,
+        metadata: BTreeMap<String, String>,
+    ) -> Result<Self, SymbolConfigError> {
+        Self {
+            symbol_id,
+            display_symbol,
+            kind,
+            role,
+            network_id,
+            protocol,
+            balance_reader,
+            valuation,
+            decimals,
+            underlying_symbol_id,
+            metadata,
+        }
+        .validated()
+    }
+
     /// Sorts nested collections into the canonical order used for persistence.
     pub fn normalize(&mut self) {
         self.valuation.normalize();
@@ -138,6 +169,13 @@ impl SymbolConfig {
     pub fn normalized(mut self) -> Self {
         self.normalize();
         self
+    }
+
+    /// Validates this symbol config, normalizes it, and returns the validated value.
+    pub fn validated(mut self) -> Result<Self, SymbolConfigError> {
+        validate_symbol_config(&self)?;
+        self.normalize();
+        Ok(self)
     }
 }
 
@@ -234,6 +272,11 @@ pub struct ValuationSourceRegistry {
 }
 
 impl ValuationSourceRegistry {
+    /// Creates a normalized and validated valuation source registry.
+    pub fn new(sources: Vec<ValuationSourceConfig>) -> Result<Self, ValuationSourceRegistryError> {
+        Self { sources }.validated()
+    }
+
     /// Sorts nested collections into the canonical order used for persistence.
     pub fn normalize(&mut self) {
         self.sources
@@ -244,6 +287,13 @@ impl ValuationSourceRegistry {
     pub fn normalized(mut self) -> Self {
         self.normalize();
         self
+    }
+
+    /// Validates this registry, normalizes it, and returns the validated value.
+    pub fn validated(mut self) -> Result<Self, ValuationSourceRegistryError> {
+        validate_valuation_source_registry(&self)?;
+        self.normalize();
+        Ok(self)
     }
 }
 
@@ -268,6 +318,31 @@ pub struct ValuationSourceConfig {
     /// Canonical metadata surface.
     #[serde(default)]
     pub metadata: BTreeMap<String, String>,
+}
+
+impl ValuationSourceConfig {
+    /// Creates a validated valuation source config.
+    pub fn new(
+        source_id: String,
+        network_id: String,
+        base_symbol_id: String,
+        quote: QuoteCode,
+        reader: ValuationSourceReaderConfig,
+        metadata: BTreeMap<String, String>,
+    ) -> Result<Self, ValuationSourceRegistryError> {
+        let registry = ValuationSourceRegistry {
+            sources: vec![Self {
+                source_id,
+                network_id,
+                base_symbol_id,
+                quote,
+                reader,
+                metadata,
+            }],
+        };
+        let mut sources = registry.validated()?.sources;
+        Ok(sources.remove(0))
+    }
 }
 
 /// Resolved balance reader selected by runtime planning.
@@ -629,20 +704,18 @@ pub enum ValuationSourceRegistryError {
 
 /// Decodes and validates a canonical symbol config.
 pub fn decode_symbol_config(value: &Value) -> Result<SymbolConfig, SymbolConfigError> {
-    let cfg = serde_json::from_value(value.clone())
+    let cfg: SymbolConfig = serde_json::from_value(value.clone())
         .map_err(|err| SymbolConfigError::Decode(err.to_string()))?;
-    validate_symbol_config(&cfg)?;
-    Ok(cfg)
+    cfg.validated()
 }
 
 /// Decodes and validates a valuation source registry.
 pub fn decode_valuation_source_registry(
     value: &Value,
 ) -> Result<ValuationSourceRegistry, ValuationSourceRegistryError> {
-    let registry = serde_json::from_value(value.clone())
+    let registry: ValuationSourceRegistry = serde_json::from_value(value.clone())
         .map_err(|err| ValuationSourceRegistryError::Decode(err.to_string()))?;
-    validate_valuation_source_registry(&registry)?;
-    Ok(registry)
+    registry.validated()
 }
 
 /// Validates a canonical symbol config.

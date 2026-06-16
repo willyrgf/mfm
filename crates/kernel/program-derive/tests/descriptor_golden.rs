@@ -40,6 +40,25 @@ fn validate_checked_request(request: &CheckedRequest) -> Result<(), String> {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue, MfmConfig)]
+#[mfm(
+    namespace = "mfm.test",
+    name = "dual_validated_config",
+    schema = "mfm.test.dual_validated_config",
+    validate = "validate_dual_validated_config"
+)]
+struct DualValidatedConfig {
+    account_id: String,
+}
+
+fn validate_dual_validated_config(request: &DualValidatedConfig) -> Result<(), String> {
+    if request.account_id.is_empty() {
+        Err("account_id must be non-empty".to_owned())
+    } else {
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, StateInput)]
 struct SnapshotInput {
     request: PortfolioRequestValue,
@@ -119,6 +138,19 @@ fn generated_config_validation_delegates_to_configured_function() {
     assert!(valid.validate().is_ok());
 
     let invalid = CheckedRequest {
+        account_id: String::new(),
+    };
+    let error = invalid.validate().expect_err("empty account id must fail");
+    assert_eq!(error.message(), "account_id must be non-empty");
+}
+
+#[test]
+fn generated_config_validation_composes_with_value_derive() {
+    let descriptor = <DualValidatedConfig as mfm_values::MfmValue>::schema_descriptor()
+        .expect("value descriptor");
+    assert_eq!(descriptor.identity.schema_kind, SchemaKind::Value);
+
+    let invalid = DualValidatedConfig {
         account_id: String::new(),
     };
     let error = invalid.validate().expect_err("empty account id must fail");
