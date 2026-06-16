@@ -750,10 +750,6 @@ fn completed_outcome(byte: u8) -> events::RunCompletionOutcome {
     }))
 }
 
-fn manual_resolution_recorded(byte: u8) -> KernelEventPayload {
-    manual_resolution_recorded_for_run(run_id(120), byte)
-}
-
 fn manual_resolution_recorded_for_run(run_id: RunId, byte: u8) -> KernelEventPayload {
     KernelEventPayload::ManualResolutionRecorded(events::ManualResolutionRecorded {
         run_id,
@@ -848,6 +844,23 @@ fn saga_preconditions(run_id: &RunId, policy: SagaPolicySpec) -> CommitPrecondit
     }
 }
 
+fn manual_resolution_request(
+    run_id: &RunId,
+    expected_next_seq: StreamSeq,
+    commit_key: &str,
+    byte: u8,
+    policy: SagaPolicySpec,
+) -> TypedCommitRequest {
+    TypedCommitRequest {
+        run_id: run_id.clone(),
+        expected_next_seq,
+        commit_key: CommitKey::new(commit_key).expect("commit key"),
+        payloads: vec![manual_resolution_recorded_for_run(run_id.clone(), byte)],
+        required_artifacts: manual_resolution_artifacts(byte),
+        preconditions: saga_preconditions(run_id, policy),
+    }
+}
+
 fn set_remediation_purpose(
     payload: &mut KernelEventPayload,
     ledger_key: events::SideEffectLedgerKey,
@@ -855,62 +868,35 @@ fn set_remediation_purpose(
     set_side_effect_ledger(payload, ledger_key, remediation_ledger_purpose());
 }
 
+macro_rules! with_side_effect_payload_mut {
+    ($payload:expr, $inner:ident, $body:block) => {
+        match $payload {
+            KernelEventPayload::SideEffectIntentPersisted($inner) => $body,
+            KernelEventPayload::SideEffectClaimed($inner) => $body,
+            KernelEventPayload::SideEffectClaimTakenOver($inner) => $body,
+            KernelEventPayload::SideEffectInvocationPrepared($inner) => $body,
+            KernelEventPayload::SideEffectInvocationStarted($inner) => $body,
+            KernelEventPayload::SideEffectNotSubmittedProven($inner) => $body,
+            KernelEventPayload::SideEffectSubmissionObserved($inner) => $body,
+            KernelEventPayload::SideEffectSubmissionUnknown($inner) => $body,
+            KernelEventPayload::SideEffectReceiptObserved($inner) => $body,
+            KernelEventPayload::SideEffectConfirmationObserved($inner) => $body,
+            KernelEventPayload::SideEffectAmbiguous($inner) => $body,
+            KernelEventPayload::SideEffectFailed($inner) => $body,
+            _ => unreachable!("payload is not side-effect evidence"),
+        }
+    };
+}
+
 fn set_side_effect_ledger(
     payload: &mut KernelEventPayload,
     ledger_key: events::SideEffectLedgerKey,
     purpose: events::SideEffectLedgerPurpose,
 ) {
-    match payload {
-        KernelEventPayload::SideEffectIntentPersisted(payload) => {
-            payload.ledger_key = ledger_key.clone();
-            payload.ledger_purpose = purpose.clone();
-        }
-        KernelEventPayload::SideEffectClaimed(payload) => {
-            payload.ledger_key = ledger_key.clone();
-            payload.ledger_purpose = purpose.clone();
-        }
-        KernelEventPayload::SideEffectClaimTakenOver(payload) => {
-            payload.ledger_key = ledger_key.clone();
-            payload.ledger_purpose = purpose.clone();
-        }
-        KernelEventPayload::SideEffectInvocationPrepared(payload) => {
-            payload.ledger_key = ledger_key.clone();
-            payload.ledger_purpose = purpose.clone();
-        }
-        KernelEventPayload::SideEffectInvocationStarted(payload) => {
-            payload.ledger_key = ledger_key.clone();
-            payload.ledger_purpose = purpose.clone();
-        }
-        KernelEventPayload::SideEffectNotSubmittedProven(payload) => {
-            payload.ledger_key = ledger_key.clone();
-            payload.ledger_purpose = purpose.clone();
-        }
-        KernelEventPayload::SideEffectSubmissionObserved(payload) => {
-            payload.ledger_key = ledger_key.clone();
-            payload.ledger_purpose = purpose.clone();
-        }
-        KernelEventPayload::SideEffectSubmissionUnknown(payload) => {
-            payload.ledger_key = ledger_key.clone();
-            payload.ledger_purpose = purpose.clone();
-        }
-        KernelEventPayload::SideEffectReceiptObserved(payload) => {
-            payload.ledger_key = ledger_key.clone();
-            payload.ledger_purpose = purpose.clone();
-        }
-        KernelEventPayload::SideEffectConfirmationObserved(payload) => {
-            payload.ledger_key = ledger_key.clone();
-            payload.ledger_purpose = purpose.clone();
-        }
-        KernelEventPayload::SideEffectAmbiguous(payload) => {
-            payload.ledger_key = ledger_key.clone();
-            payload.ledger_purpose = purpose.clone();
-        }
-        KernelEventPayload::SideEffectFailed(payload) => {
-            payload.ledger_key = ledger_key;
-            payload.ledger_purpose = purpose;
-        }
-        _ => unreachable!("payload is not side-effect evidence"),
-    }
+    with_side_effect_payload_mut!(payload, inner, {
+        inner.ledger_key = ledger_key.clone();
+        inner.ledger_purpose = purpose.clone();
+    });
 }
 
 fn set_side_effect_node_attempt(
@@ -918,57 +904,10 @@ fn set_side_effect_node_attempt(
     node_id: NodeId,
     attempt_id: AttemptId,
 ) {
-    match payload {
-        KernelEventPayload::SideEffectIntentPersisted(payload) => {
-            payload.node_id = node_id;
-            payload.attempt_id = attempt_id;
-        }
-        KernelEventPayload::SideEffectClaimed(payload) => {
-            payload.node_id = node_id;
-            payload.attempt_id = attempt_id;
-        }
-        KernelEventPayload::SideEffectClaimTakenOver(payload) => {
-            payload.node_id = node_id;
-            payload.attempt_id = attempt_id;
-        }
-        KernelEventPayload::SideEffectInvocationPrepared(payload) => {
-            payload.node_id = node_id;
-            payload.attempt_id = attempt_id;
-        }
-        KernelEventPayload::SideEffectInvocationStarted(payload) => {
-            payload.node_id = node_id;
-            payload.attempt_id = attempt_id;
-        }
-        KernelEventPayload::SideEffectNotSubmittedProven(payload) => {
-            payload.node_id = node_id;
-            payload.attempt_id = attempt_id;
-        }
-        KernelEventPayload::SideEffectSubmissionObserved(payload) => {
-            payload.node_id = node_id;
-            payload.attempt_id = attempt_id;
-        }
-        KernelEventPayload::SideEffectSubmissionUnknown(payload) => {
-            payload.node_id = node_id;
-            payload.attempt_id = attempt_id;
-        }
-        KernelEventPayload::SideEffectReceiptObserved(payload) => {
-            payload.node_id = node_id;
-            payload.attempt_id = attempt_id;
-        }
-        KernelEventPayload::SideEffectConfirmationObserved(payload) => {
-            payload.node_id = node_id;
-            payload.attempt_id = attempt_id;
-        }
-        KernelEventPayload::SideEffectAmbiguous(payload) => {
-            payload.node_id = node_id;
-            payload.attempt_id = attempt_id;
-        }
-        KernelEventPayload::SideEffectFailed(payload) => {
-            payload.node_id = node_id;
-            payload.attempt_id = attempt_id;
-        }
-        _ => unreachable!("payload is not side-effect evidence"),
-    }
+    with_side_effect_payload_mut!(payload, inner, {
+        inner.node_id = node_id.clone();
+        inner.attempt_id = attempt_id.clone();
+    });
 }
 
 fn set_attempt_failure_node_attempt(
@@ -3724,14 +3663,13 @@ fn manual_resolution_requires_manual_blocked_prefix_and_is_unique() {
     append_side_effect_started(&mut non_quiescent, &run_id);
     append_generic_nonretryable_failure(&mut non_quiescent, &run_id, "manual-quiescence");
     let error = non_quiescent
-        .append_prepared_commit(TypedCommitRequest {
-            run_id: run_id.clone(),
-            expected_next_seq: non_quiescent.expected_next_seq(&run_id),
-            commit_key: CommitKey::new("manual-non-quiescent").expect("commit key"),
-            payloads: vec![manual_resolution_recorded(150)],
-            required_artifacts: manual_resolution_artifacts(150),
-            preconditions: saga_preconditions(&run_id, manual_saga_policy(150)),
-        })
+        .append_prepared_commit(manual_resolution_request(
+            &run_id,
+            non_quiescent.expected_next_seq(&run_id),
+            "manual-non-quiescent",
+            150,
+            manual_saga_policy(150),
+        ))
         .expect_err("manual resolution rejects outside manual-blocked mode");
     assert_projection_conflict_contains(error, "requires prefix-derived manual_blocked");
 
@@ -3746,14 +3684,13 @@ fn manual_resolution_requires_manual_blocked_prefix_and_is_unique() {
     append_forward_confirmation(&mut remediating, &run_id);
     append_generic_nonretryable_failure(&mut remediating, &run_id, "manual-remediating");
     let error = remediating
-        .append_prepared_commit(TypedCommitRequest {
-            run_id: run_id.clone(),
-            expected_next_seq: remediating.expected_next_seq(&run_id),
-            commit_key: CommitKey::new("manual-remediating-reject").expect("commit key"),
-            payloads: vec![manual_resolution_recorded(151)],
-            required_artifacts: manual_resolution_artifacts(151),
-            preconditions: saga_preconditions(&run_id, compensate_saga_policy()),
-        })
+        .append_prepared_commit(manual_resolution_request(
+            &run_id,
+            remediating.expected_next_seq(&run_id),
+            "manual-remediating-reject",
+            151,
+            compensate_saga_policy(),
+        ))
         .expect_err("manual resolution rejects while remediating");
     assert_projection_conflict_contains(error, "requires prefix-derived manual_blocked");
 
@@ -3768,24 +3705,22 @@ fn manual_resolution_requires_manual_blocked_prefix_and_is_unique() {
     append_forward_confirmation(&mut store, &run_id);
     append_generic_nonretryable_failure(&mut store, &run_id, "manual-clean-failure");
     store
-        .append_prepared_commit(TypedCommitRequest {
-            run_id: run_id.clone(),
-            expected_next_seq: store.expected_next_seq(&run_id),
-            commit_key: CommitKey::new("manual-recorded").expect("commit key"),
-            payloads: vec![manual_resolution_recorded(152)],
-            required_artifacts: manual_resolution_artifacts(152),
-            preconditions: saga_preconditions(&run_id, manual_saga_policy(152)),
-        })
+        .append_prepared_commit(manual_resolution_request(
+            &run_id,
+            store.expected_next_seq(&run_id),
+            "manual-recorded",
+            152,
+            manual_saga_policy(152),
+        ))
         .expect("manual resolution admitted in manual-blocked mode");
     let error = store
-        .append_prepared_commit(TypedCommitRequest {
-            run_id: run_id.clone(),
-            expected_next_seq: store.expected_next_seq(&run_id),
-            commit_key: CommitKey::new("manual-duplicate").expect("commit key"),
-            payloads: vec![manual_resolution_recorded(154)],
-            required_artifacts: manual_resolution_artifacts(154),
-            preconditions: saga_preconditions(&run_id, manual_saga_policy(152)),
-        })
+        .append_prepared_commit(manual_resolution_request(
+            &run_id,
+            store.expected_next_seq(&run_id),
+            "manual-duplicate",
+            154,
+            manual_saga_policy(152),
+        ))
         .expect_err("duplicate manual resolution rejects");
     match error {
         StoreError::LogicalKeyConflict { .. } | StoreError::DuplicateLogicalKey { .. } => {}
@@ -3810,14 +3745,13 @@ fn saga_admit_token_must_match_run_start_policy_digest() {
     append_generic_nonretryable_failure(&mut store, &run_id, "saga-token-failure");
 
     let error = store
-        .append_prepared_commit(TypedCommitRequest {
-            run_id: run_id.clone(),
-            expected_next_seq: store.expected_next_seq(&run_id),
-            commit_key: CommitKey::new("saga-token-mismatch").expect("commit key"),
-            payloads: vec![manual_resolution_recorded_for_run(run_id.clone(), 170)],
-            required_artifacts: manual_resolution_artifacts(170),
-            preconditions: saga_preconditions(&run_id, manual_saga_policy(171)),
-        })
+        .append_prepared_commit(manual_resolution_request(
+            &run_id,
+            store.expected_next_seq(&run_id),
+            "saga-token-mismatch",
+            170,
+            manual_saga_policy(171),
+        ))
         .expect_err("mismatched saga token rejects");
     assert_projection_conflict_contains(error, "digest does not match run start");
 }
@@ -3842,15 +3776,16 @@ fn manual_resolution_artifacts_require_dedicated_roles() {
         append_generic_nonretryable_failure(&mut store, &run_id, "manual-artifact-role-failure");
         let mut artifacts = manual_resolution_artifacts(156);
         mutate(&mut artifacts);
+        let mut request = manual_resolution_request(
+            &run_id,
+            store.expected_next_seq(&run_id),
+            commit_key,
+            156,
+            manual_saga_policy(156),
+        );
+        request.required_artifacts = artifacts;
         let error = store
-            .append_prepared_commit(TypedCommitRequest {
-                run_id: run_id.clone(),
-                expected_next_seq: store.expected_next_seq(&run_id),
-                commit_key: CommitKey::new(commit_key).expect("commit key"),
-                payloads: vec![manual_resolution_recorded(156)],
-                required_artifacts: artifacts,
-                preconditions: saga_preconditions(&run_id, manual_saga_policy(156)),
-            })
+            .append_prepared_commit(request)
             .expect_err("manual artifact mismatch rejects");
         assert!(matches!(
             error,
@@ -3947,14 +3882,13 @@ fn saga_run_completed_requires_terminal_proof() {
     assert_invalid_prepared_commit_contains(error, "requires SagaTerminalProof");
 
     forged
-        .append_prepared_commit(TypedCommitRequest {
-            run_id: run_id.clone(),
-            expected_next_seq: forged.expected_next_seq(&run_id),
-            commit_key: CommitKey::new("terminal-manual-recorded").expect("commit key"),
-            payloads: vec![manual_resolution_recorded(162)],
-            required_artifacts: manual_resolution_artifacts(162),
-            preconditions: saga_preconditions(&run_id, forged_policy.clone()),
-        })
+        .append_prepared_commit(manual_resolution_request(
+            &run_id,
+            forged.expected_next_seq(&run_id),
+            "terminal-manual-recorded",
+            162,
+            forged_policy.clone(),
+        ))
         .expect("manual resolution admitted");
     let saga = forged
         .projection_snapshot()

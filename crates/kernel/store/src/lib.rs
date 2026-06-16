@@ -1686,75 +1686,55 @@ pub mod v1 {
         }
     }
 
-    impl PreparedCommit<RunStart> {
-        /// Prepares a run-start commit.
-        pub fn new(
-            request: TypedCommitRequest,
-            artifacts: CommitArtifactEvidenceSet,
-        ) -> Result<Self> {
-            Self::prepare_with(request, artifacts, validate_run_start_commit)
-        }
+    macro_rules! impl_prepared_commit_new {
+        ($purpose:ty, $doc:literal, $validator:path) => {
+            impl PreparedCommit<$purpose> {
+                #[doc = $doc]
+                pub fn new(
+                    request: TypedCommitRequest,
+                    artifacts: CommitArtifactEvidenceSet,
+                ) -> Result<Self> {
+                    Self::prepare_with(request, artifacts, $validator)
+                }
+            }
+        };
     }
 
-    impl PreparedCommit<StateAttemptStarted> {
-        /// Prepares a standalone state-attempt-start commit.
-        pub fn new(
-            request: TypedCommitRequest,
-            artifacts: CommitArtifactEvidenceSet,
-        ) -> Result<Self> {
-            Self::prepare_with(request, artifacts, validate_state_attempt_started_commit)
-        }
-    }
-
-    impl PreparedCommit<AttemptTerminal> {
-        /// Prepares an attempt-terminal commit.
-        pub fn new(
-            request: TypedCommitRequest,
-            artifacts: CommitArtifactEvidenceSet,
-        ) -> Result<Self> {
-            Self::prepare_with(request, artifacts, validate_attempt_terminal_commit)
-        }
-    }
-
-    impl PreparedCommit<SideEffectTerminal> {
-        /// Prepares a side-effect terminal commit.
-        pub fn new(
-            request: TypedCommitRequest,
-            artifacts: CommitArtifactEvidenceSet,
-        ) -> Result<Self> {
-            Self::prepare_with(request, artifacts, validate_side_effect_terminal_commit)
-        }
-    }
-
-    impl PreparedCommit<SideEffectProgress> {
-        /// Prepares a side-effect progress commit.
-        pub fn new(
-            request: TypedCommitRequest,
-            artifacts: CommitArtifactEvidenceSet,
-        ) -> Result<Self> {
-            Self::prepare_with(request, artifacts, validate_side_effect_progress_commit)
-        }
-    }
-
-    impl PreparedCommit<Retention> {
-        /// Prepares a retention projection commit.
-        pub fn new(
-            request: TypedCommitRequest,
-            artifacts: CommitArtifactEvidenceSet,
-        ) -> Result<Self> {
-            Self::prepare_with(request, artifacts, validate_retention_commit)
-        }
-    }
-
-    impl PreparedCommit<ManualResolution> {
-        /// Prepares a manual-resolution commit.
-        pub fn new(
-            request: TypedCommitRequest,
-            artifacts: CommitArtifactEvidenceSet,
-        ) -> Result<Self> {
-            Self::prepare_with(request, artifacts, validate_manual_resolution_commit)
-        }
-    }
+    impl_prepared_commit_new!(
+        RunStart,
+        "Prepares a run-start commit.",
+        validate_run_start_commit
+    );
+    impl_prepared_commit_new!(
+        StateAttemptStarted,
+        "Prepares a standalone state-attempt-start commit.",
+        validate_state_attempt_started_commit
+    );
+    impl_prepared_commit_new!(
+        AttemptTerminal,
+        "Prepares an attempt-terminal commit.",
+        validate_attempt_terminal_commit
+    );
+    impl_prepared_commit_new!(
+        SideEffectTerminal,
+        "Prepares a side-effect terminal commit.",
+        validate_side_effect_terminal_commit
+    );
+    impl_prepared_commit_new!(
+        SideEffectProgress,
+        "Prepares a side-effect progress commit.",
+        validate_side_effect_progress_commit
+    );
+    impl_prepared_commit_new!(
+        Retention,
+        "Prepares a retention projection commit.",
+        validate_retention_commit
+    );
+    impl_prepared_commit_new!(
+        ManualResolution,
+        "Prepares a manual-resolution commit.",
+        validate_manual_resolution_commit
+    );
 
     impl PreparedCommit<SagaTerminal> {
         /// Prepares a saga terminal-resolution commit.
@@ -1867,29 +1847,20 @@ pub mod v1 {
         }
     }
 
-    impl From<PreparedCommit<RunStart>> for PreparedCommitPlan {
-        fn from(commit: PreparedCommit<RunStart>) -> Self {
-            Self::RunStart(commit)
-        }
+    macro_rules! impl_prepared_commit_plan_from {
+        ($purpose:ty, $variant:ident) => {
+            impl From<PreparedCommit<$purpose>> for PreparedCommitPlan {
+                fn from(commit: PreparedCommit<$purpose>) -> Self {
+                    Self::$variant(commit)
+                }
+            }
+        };
     }
 
-    impl From<PreparedCommit<StateAttemptStarted>> for PreparedCommitPlan {
-        fn from(commit: PreparedCommit<StateAttemptStarted>) -> Self {
-            Self::StateAttemptStarted(commit)
-        }
-    }
-
-    impl From<PreparedCommit<ManualResolution>> for PreparedCommitPlan {
-        fn from(commit: PreparedCommit<ManualResolution>) -> Self {
-            Self::ManualResolution(commit)
-        }
-    }
-
-    impl From<PreparedCommit<SagaTerminal>> for PreparedCommitPlan {
-        fn from(commit: PreparedCommit<SagaTerminal>) -> Self {
-            Self::SagaTerminal(commit)
-        }
-    }
+    impl_prepared_commit_plan_from!(RunStart, RunStart);
+    impl_prepared_commit_plan_from!(StateAttemptStarted, StateAttemptStarted);
+    impl_prepared_commit_plan_from!(ManualResolution, ManualResolution);
+    impl_prepared_commit_plan_from!(SagaTerminal, SagaTerminal);
 
     /// Runtime-prepared atomic store mutation for typed run streams.
     ///
