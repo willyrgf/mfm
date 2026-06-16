@@ -5237,13 +5237,15 @@ async fn runtime_rejects_manual_resolution_before_manual_blocked() {
             &mut store,
             &fixture.runtime_spec,
             &fixture.run_id,
-            events::ManualResolutionOutcome::ConfirmRemediated,
-            ManualResolutionEvidenceArtifact {
-                bytes: evidence_bytes,
-                media_type: spec::MediaType::new("application/json").expect("media"),
+            ManualResolutionRequest {
+                outcome: events::ManualResolutionOutcome::ConfirmRemediated,
+                evidence_artifact: ManualResolutionEvidenceArtifact {
+                    bytes: evidence_bytes,
+                    media_type: spec::MediaType::new("application/json").expect("media"),
+                },
+                proof_bytes: br#"{}"#.to_vec(),
+                note: None,
             },
-            br#"{}"#.to_vec(),
-            None,
         )
         .await
         .expect_err("manual resolution before block rejects");
@@ -8283,13 +8285,15 @@ async fn append_manual_resolution(
             store,
             &fixture.runtime_spec,
             &fixture.run_id,
-            outcome,
-            ManualResolutionEvidenceArtifact {
-                bytes: evidence_bytes,
-                media_type: spec::MediaType::new("application/json").expect("media"),
+            ManualResolutionRequest {
+                outcome,
+                evidence_artifact: ManualResolutionEvidenceArtifact {
+                    bytes: evidence_bytes,
+                    media_type: spec::MediaType::new("application/json").expect("media"),
+                },
+                proof_bytes,
+                note: None,
             },
-            proof_bytes,
-            None,
         )
         .await
         .expect("append manual resolution");

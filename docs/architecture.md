@@ -42,6 +42,9 @@ The typed boundary separates data, evidence, authority, and implementation artif
 - persisted `CertifiedSpecCertificate` bytes are evidence only until verified
 - `CertifiedTypedSpec` is the non-forgeable authority returned by `mfm-certify`
 - `CertifiedRuntimeSpec` is runtime authority derived only from `CertifiedTypedSpec`
+- `CommittedRunStream` is store-owned append-only stream authority
+- `VerifiedRunHistory` is runtime/replay authority over a committed stream plus verified retained
+  artifact evidence
 - erased runner plans are implementation artifacts
 - rendered public-output JSON is an output/cache surface only
 

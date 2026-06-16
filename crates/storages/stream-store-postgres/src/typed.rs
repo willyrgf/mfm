@@ -1303,8 +1303,9 @@ mod tests {
         ResourceNamespace, SagaPolicySpec, ValueLineageRef,
     };
     use mfm_store::v1::{
-        ArtifactEvidenceRef, CellTerminalProjection, CommitKey, CommitOutcome, CommitPreconditions,
-        RequiredRunState, ResourceLaneKey, SagaEngagementReason, SideEffectPhase, StoreError,
+        ArtifactEvidenceRef, CellTerminalProjection, CommitArtifactEvidenceSet, CommitKey,
+        CommitOutcome, CommitPreconditions, PreparedCommit, RequiredRunState, ResourceLaneKey,
+        SagaEngagementReason, SagaTerminal, SagaTerminalProof, SideEffectPhase, StoreError,
         StreamSeq,
     };
     use tokio_postgres::NoTls;
@@ -1821,6 +1822,23 @@ mod tests {
         })
     }
 
+    fn side_effect_attempt_failed() -> KernelEventPayload {
+        KernelEventPayload::StateAttemptFailed(events::StateAttemptFailed {
+            spec_hash: spec_hash(1),
+            node_id: node_id(70),
+            attempt_id: attempt_id(72),
+            retryable: false,
+            error: events::MfmErrorInfo {
+                code: events::ErrorCode::new("side_effect_ambiguous").expect("error code"),
+                category: events::ErrorCategory::SideEffect,
+                retryable: false,
+                safe_message: "side-effect outcome is ambiguous".to_owned(),
+                public_details: None,
+                diagnostic_ref: None,
+            },
+        })
+    }
+
     fn store_artifact_ref(
         artifact_id: ArtifactId,
         digest: ContentDigest,
@@ -2252,8 +2270,8 @@ mod tests {
         )
         .await
         .expect("side-effect prepare");
-        let ambiguity_artifact = artifact_id(44);
-        let ambiguity_digest = content_digest(45);
+        let ambiguity_artifact = artifact_id(140);
+        let ambiguity_digest = content_digest(141);
         append_prepared(
             &store,
             request(
@@ -2263,6 +2281,7 @@ mod tests {
                 vec![
                     side_effect_started(),
                     side_effect_ambiguous(ambiguity_artifact.clone(), ambiguity_digest.clone()),
+                    side_effect_attempt_failed(),
                 ],
             ),
             vec![side_effect_artifact_ref(
@@ -2284,20 +2303,6 @@ mod tests {
         append_prepared(&store, manual_request, manual_resolution_artifacts(42))
             .await
             .expect("manual resolution");
-        let mut completion_request = request(
-            run.clone(),
-            6,
-            "saga-run-completed",
-            vec![run_completed(
-                run.clone(),
-                events::RunCompletionOutcome::ManuallyResolved,
-            )],
-        );
-        completion_request.preconditions = saga_preconditions(&run, manual_saga_policy(42));
-        append_prepared(&store, completion_request, Vec::new())
-            .await
-            .expect("run completed");
-
         let before = store.projection_snapshot(&run).await.expect("projection");
         let engagement = before.saga_engagement(&run).expect("saga engagement");
         assert!(matches!(
@@ -2318,12 +2323,7 @@ mod tests {
                 .map(events::ManualResolutionNote::as_str),
             Some("reviewed evidence")
         );
-        assert!(matches!(
-            before
-                .run_completion(&run)
-                .map(|projection| &projection.outcome),
-            Some(events::RunCompletionOutcome::ManuallyResolved)
-        ));
+        assert!(before.run_completion(&run).is_none());
 
         let stream = store.load_run_stream(&run).await.expect("typed run stream");
         assert_eq!(
@@ -2354,6 +2354,160 @@ mod tests {
             .await
             .expect("rebuild projections");
         assert_eq!(rebuilt, before);
+
+        let terminal_run = run_id(43);
+        let terminal_policy = SagaPolicySpec::FailWithoutAcdcClaim;
+        append_prepared(
+            &store,
+            request(
+                terminal_run.clone(),
+                1,
+                "saga-terminal-run-start",
+                vec![run_started_with_saga_policy(
+                    terminal_run.clone(),
+                    &terminal_policy,
+                )],
+            ),
+            vec![spec_artifact_ref(), certificate_artifact_ref()],
+        )
+        .await
+        .expect("terminal run start");
+        append_prepared(
+            &store,
+            request(
+                terminal_run.clone(),
+                2,
+                "saga-terminal-side-effect-attempt-start",
+                vec![side_effect_attempt_started()],
+            ),
+            Vec::new(),
+        )
+        .await
+        .expect("terminal side-effect attempt start");
+        let terminal_intent_artifact = artifact_id(150);
+        let terminal_intent_digest = content_digest(151);
+        append_prepared(
+            &store,
+            request(
+                terminal_run.clone(),
+                3,
+                "saga-terminal-side-effect-prepare",
+                vec![
+                    side_effect_intent(
+                        terminal_intent_artifact.clone(),
+                        terminal_intent_digest.clone(),
+                    ),
+                    side_effect_claim(),
+                    side_effect_prepared(),
+                ],
+            ),
+            vec![side_effect_artifact_ref(
+                terminal_intent_artifact,
+                terminal_intent_digest,
+                schema_id("mfm.test.side_effect_intent", 70),
+                ArtifactRole::SideEffectIntent,
+            )],
+        )
+        .await
+        .expect("terminal side-effect prepare");
+        let terminal_ambiguity_artifact = artifact_id(152);
+        let terminal_ambiguity_digest = content_digest(153);
+        append_prepared(
+            &store,
+            request(
+                terminal_run.clone(),
+                4,
+                "saga-terminal-side-effect-ambiguous",
+                vec![
+                    side_effect_started(),
+                    side_effect_ambiguous(
+                        terminal_ambiguity_artifact.clone(),
+                        terminal_ambiguity_digest.clone(),
+                    ),
+                    side_effect_attempt_failed(),
+                ],
+            ),
+            vec![side_effect_artifact_ref(
+                terminal_ambiguity_artifact,
+                terminal_ambiguity_digest,
+                schema_id("mfm.test.ambiguity", 84),
+                ArtifactRole::AmbiguityEvidence,
+            )],
+        )
+        .await
+        .expect("terminal side-effect ambiguous");
+        let terminal_before_completion = store
+            .projection_snapshot(&terminal_run)
+            .await
+            .expect("terminal projection before completion");
+        let terminal_saga =
+            terminal_before_completion.derive_saga_projection(&terminal_run, &terminal_policy);
+        let terminal_proof =
+            SagaTerminalProof::new(&terminal_policy, &terminal_saga, None).expect("terminal proof");
+        let mut terminal_request = request(
+            terminal_run.clone(),
+            5,
+            "saga-terminal-run-completed",
+            vec![run_completed(
+                terminal_run.clone(),
+                events::RunCompletionOutcome::FailedWithoutAcdcClaim,
+            )],
+        );
+        terminal_request.preconditions = saga_preconditions(&terminal_run, terminal_policy);
+        let terminal_commit = PreparedCommit::<SagaTerminal>::new(
+            terminal_request,
+            CommitArtifactEvidenceSet::empty(),
+            &terminal_proof,
+        )
+        .expect("proof-backed terminal commit");
+        store
+            .append_prepared_typed_commit(terminal_commit.into_typed_commit())
+            .await
+            .expect("terminal run completed");
+
+        let terminal_before = store
+            .projection_snapshot(&terminal_run)
+            .await
+            .expect("terminal projection");
+        assert!(matches!(
+            terminal_before
+                .run_completion(&terminal_run)
+                .map(|projection| &projection.outcome),
+            Some(events::RunCompletionOutcome::FailedWithoutAcdcClaim)
+        ));
+        let terminal_stream = store
+            .load_run_stream(&terminal_run)
+            .await
+            .expect("terminal typed run stream");
+        assert_eq!(
+            ProjectionSnapshot::rebuild_from_run_stream(&terminal_stream)
+                .expect("terminal payload rebuild"),
+            terminal_before
+        );
+
+        {
+            let client = store.client.lock().await;
+            client
+                .batch_execute(
+                    "DELETE FROM typed_run_projection;\
+                     DELETE FROM typed_run_completion_projection;\
+                     DELETE FROM typed_saga_engagement_projection;\
+                     DELETE FROM typed_manual_resolution_projection;\
+                     DELETE FROM typed_attempt_projection;\
+                     DELETE FROM typed_cell_projection;\
+                     DELETE FROM typed_fact_projection;\
+                     DELETE FROM typed_side_effect_projection;\
+                     DELETE FROM typed_resource_lane_projection;\
+                     DELETE FROM typed_public_output_projection;",
+                )
+                .await
+                .expect("clear terminal projections");
+        }
+        let terminal_rebuilt = store
+            .rebuild_projections_from_events(&terminal_run)
+            .await
+            .expect("rebuild terminal projections");
+        assert_eq!(terminal_rebuilt, terminal_before);
 
         drop_schema(&store, &schema).await;
     }

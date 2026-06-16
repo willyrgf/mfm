@@ -737,3 +737,65 @@ Checks run:
 - `cargo fmt --all -- --check`
 - `cargo check -p mfm-runtime -p mfm-replay -p mfm-app -p mfm-integration-tests`
 - `cargo test -p mfm-runtime -p mfm-replay -p mfm-app -p mfm-integration-tests`
+
+## Phase 16: Final Boundary Tests, Docs, And Namespace Scans
+
+Status: completed.
+
+Files changed:
+
+- `docs/architecture.md`
+- `docs/design.md`
+- `crates/kernel/store/src/lib.rs`
+- `crates/kernel/certify/src/lib.rs`
+- `crates/kernel/runtime/src/commit.rs`
+- `crates/kernel/runtime/src/lib.rs`
+- `crates/kernel/runtime/src/scheduler.rs`
+- `crates/kernel/runtime/src/tests.rs`
+- `crates/storages/stream-store-postgres/src/typed.rs`
+- `IMPLEMENTATION_ACDC_SAGA_PRE_MERGE.md`
+
+Validators deleted or replaced:
+
+- Documented `CommittedRunStream` as store-owned stream authority and `VerifiedRunHistory` as
+  runtime/replay authority over committed stream evidence plus retained artifact evidence.
+- Documented that read/resume/replay/status paths must construct `VerifiedRunHistory` before
+  trusting run history.
+- Replaced clippy-rejected long validator argument lists with private typed context structs in
+  certifier and runtime validation code.
+- Boxed large manual proof variants in store terminal proof internals without changing the
+  authority-facing proof views.
+- Collapsed duplicate failed side-effect ledger validation branches into a single claim/intention
+  check path.
+- Replaced runtime manual-resolution method arguments with `ManualResolutionRequest` while avoiding
+  new forbidden typed-surface field names.
+- Updated the Postgres parity fixture to honor paired side-effect ambiguity/attempt failure and
+  proof-backed saga terminal commits.
+
+Tests added or updated:
+
+- Updated runtime manual-resolution test call sites for `ManualResolutionRequest`.
+- Updated Postgres state-event parity coverage to persist/rebuild manual-resolution projection and
+  proof-backed failed-without-ACDC run-completion projection separately.
+- Kept namespace allowlist unchanged by renaming the new manual proof field to `proof_bytes`.
+
+Checks run:
+
+- `cargo fmt --all -- --check`
+- `cargo clippy -p mfm-store -p mfm-certify --all-targets -- -D warnings`
+- `cargo check -p mfm-store -p mfm-certify`
+- `cargo test -p mfm-store -p mfm-certify`
+- `cargo clippy -p mfm-runtime --all-targets -- -D warnings`
+- `cargo check -p mfm-runtime`
+- `cargo test -p mfm-runtime`
+- `cargo test -p mfm-integration-tests --test architecture_namespace_contract`
+- `cargo fmt --all -- --check && cargo check --workspace && cargo test --workspace`
+- `nix run .#ci`
+
+Final validation notes:
+
+- Earlier `nix run .#ci` attempts exposed clippy argument-count/large-enum lints, a namespace
+  guard count increase, a full-disk failure in Nixfied cargo target output, and stale Postgres
+  parity fixture assumptions. Each issue was fixed or cleared before the final successful run.
+- Final `nix run .#ci` succeeded with fmt, clippy, cargo metadata contract, architecture namespace
+  contract, workspace nextest, doc tests, Postgres parity, and Reth parity all green.

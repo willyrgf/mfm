@@ -1066,7 +1066,7 @@ pub mod v1 {
     #[derive(Debug, Clone)]
     enum FailedWithoutAcdcClaimSource {
         Policy,
-        Manual(VerifiedManualResolutionForPrefix),
+        Manual(Box<VerifiedManualResolutionForPrefix>),
     }
 
     impl FailedWithoutAcdcClaimProof {
@@ -1096,7 +1096,7 @@ pub mod v1 {
                     events::ManualResolutionOutcome::FailWithoutAcdcClaim,
                 )?;
                 return Ok(Self {
-                    source: FailedWithoutAcdcClaimSource::Manual(verified),
+                    source: FailedWithoutAcdcClaimSource::Manual(Box::new(verified)),
                 });
             }
             if !policy_allows_failed_without_acdc_claim(policy) {
@@ -1141,7 +1141,7 @@ pub mod v1 {
     enum SagaTerminalProofKind {
         Completed(events::PublicOutputCompletionEvidence),
         Compensated(ClosedObligationsNonEmpty),
-        ManuallyResolved(VerifiedManualResolutionForPrefix),
+        ManuallyResolved(Box<VerifiedManualResolutionForPrefix>),
         FailedWithoutAcdcClaim(FailedWithoutAcdcClaimProof),
     }
 
@@ -1170,7 +1170,7 @@ pub mod v1 {
                         events::ManualResolutionOutcome::ConfirmRemediated,
                     )?;
                     Ok(Self {
-                        kind: SagaTerminalProofKind::ManuallyResolved(verified),
+                        kind: SagaTerminalProofKind::ManuallyResolved(Box::new(verified)),
                     })
                 }
                 RunMode::FailedWithoutAcdcClaim => Ok(Self {
@@ -1206,14 +1206,14 @@ pub mod v1 {
         }
 
         /// Returns a read-only view of this terminal proof.
-        pub const fn view(&self) -> SagaTerminalProofView<'_> {
+        pub fn view(&self) -> SagaTerminalProofView<'_> {
             match &self.kind {
                 SagaTerminalProofKind::Completed(_) => SagaTerminalProofView::Completed,
                 SagaTerminalProofKind::Compensated(proof) => {
                     SagaTerminalProofView::Compensated(proof)
                 }
                 SagaTerminalProofKind::ManuallyResolved(proof) => {
-                    SagaTerminalProofView::ManuallyResolved(proof)
+                    SagaTerminalProofView::ManuallyResolved(proof.as_ref())
                 }
                 SagaTerminalProofKind::FailedWithoutAcdcClaim(proof) => {
                     SagaTerminalProofView::FailedWithoutAcdcClaim(proof)
@@ -1239,9 +1239,9 @@ pub mod v1 {
 
         fn verified_manual_resolution(&self) -> Option<&VerifiedManualResolutionForPrefix> {
             match &self.kind {
-                SagaTerminalProofKind::ManuallyResolved(verified) => Some(verified),
+                SagaTerminalProofKind::ManuallyResolved(verified) => Some(verified.as_ref()),
                 SagaTerminalProofKind::FailedWithoutAcdcClaim(proof) => match &proof.source {
-                    FailedWithoutAcdcClaimSource::Manual(verified) => Some(verified),
+                    FailedWithoutAcdcClaimSource::Manual(verified) => Some(verified.as_ref()),
                     FailedWithoutAcdcClaimSource::Policy => None,
                 },
                 SagaTerminalProofKind::Completed(_) | SagaTerminalProofKind::Compensated(_) => None,
@@ -2253,9 +2253,8 @@ pub mod v1 {
                     if matches!(
                         failure_phase,
                         side_effect::FailurePhase::AfterNotSubmittedProven
-                    ) {
-                        require_projected_claim(projection, *invocation_epoch, None, None, None)?;
-                    } else if projection.claim.is_some() {
+                    ) || projection.claim.is_some()
+                    {
                         require_projected_claim(projection, *invocation_epoch, None, None, None)?;
                     } else {
                         require_intent_epoch(projection, *invocation_epoch)?;
@@ -2502,6 +2501,15 @@ pub mod v1 {
         core: SideEffectLedgerCore,
         retained: SideEffectLedgerRetained,
         phase: OwnedSideEffectLedgerPhase,
+    }
+
+    struct SubmissionResultContext<'a> {
+        event_id: EventId,
+        ledger_key: &'a events::SideEffectLedgerKey,
+        ledger_purpose: &'a events::SideEffectLedgerPurpose,
+        node_id: &'a NodeId,
+        attempt_id: &'a AttemptId,
+        invocation_epoch: u32,
     }
 
     #[derive(Debug, Clone)]
@@ -2829,12 +2837,14 @@ pub mod v1 {
             payload: &side_effect::NotSubmittedProven,
         ) -> Result<Self> {
             self.submission_result(
-                event_id,
-                &payload.ledger_key,
-                &payload.ledger_purpose,
-                &payload.node_id,
-                &payload.attempt_id,
-                payload.invocation_epoch,
+                SubmissionResultContext {
+                    event_id,
+                    ledger_key: &payload.ledger_key,
+                    ledger_purpose: &payload.ledger_purpose,
+                    node_id: &payload.node_id,
+                    attempt_id: &payload.attempt_id,
+                    invocation_epoch: payload.invocation_epoch,
+                },
                 |claim| OwnedSideEffectLedgerPhase::NotSubmitted {
                     claim: claim.clone(),
                 },
@@ -2847,12 +2857,14 @@ pub mod v1 {
             payload: &side_effect::SubmissionObserved,
         ) -> Result<Self> {
             let next = self.submission_result(
-                event_id,
-                &payload.ledger_key,
-                &payload.ledger_purpose,
-                &payload.node_id,
-                &payload.attempt_id,
-                payload.invocation_epoch,
+                SubmissionResultContext {
+                    event_id,
+                    ledger_key: &payload.ledger_key,
+                    ledger_purpose: &payload.ledger_purpose,
+                    node_id: &payload.node_id,
+                    attempt_id: &payload.attempt_id,
+                    invocation_epoch: payload.invocation_epoch,
+                },
                 |claim| OwnedSideEffectLedgerPhase::SubmissionObserved {
                     claim: claim.clone(),
                 },
@@ -2872,12 +2884,14 @@ pub mod v1 {
             payload: &side_effect::SubmissionUnknown,
         ) -> Result<Self> {
             self.submission_result(
-                event_id,
-                &payload.ledger_key,
-                &payload.ledger_purpose,
-                &payload.node_id,
-                &payload.attempt_id,
-                payload.invocation_epoch,
+                SubmissionResultContext {
+                    event_id,
+                    ledger_key: &payload.ledger_key,
+                    ledger_purpose: &payload.ledger_purpose,
+                    node_id: &payload.node_id,
+                    attempt_id: &payload.attempt_id,
+                    invocation_epoch: payload.invocation_epoch,
+                },
                 |claim| OwnedSideEffectLedgerPhase::SubmissionUnknown {
                     claim: claim.clone(),
                 },
@@ -3029,24 +3043,19 @@ pub mod v1 {
 
         fn submission_result(
             mut self,
-            event_id: EventId,
-            ledger_key: &events::SideEffectLedgerKey,
-            ledger_purpose: &events::SideEffectLedgerPurpose,
-            node_id: &NodeId,
-            attempt_id: &AttemptId,
-            invocation_epoch: u32,
+            context: SubmissionResultContext<'_>,
             next_phase: impl FnOnce(&SideEffectClaimProjection) -> OwnedSideEffectLedgerPhase,
         ) -> Result<Self> {
-            self.require_purpose(ledger_key, ledger_purpose)?;
+            self.require_purpose(context.ledger_key, context.ledger_purpose)?;
             let claim = self.require_submission_recovery_claim()?.clone();
             require_claim_identity(
                 &self.core.ledger_key,
                 &claim,
-                node_id,
-                attempt_id,
-                invocation_epoch,
+                context.node_id,
+                context.attempt_id,
+                context.invocation_epoch,
             )?;
-            self.core.event_id = event_id;
+            self.core.event_id = context.event_id;
             self.phase = next_phase(&claim);
             Ok(self)
         }

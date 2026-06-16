@@ -327,6 +327,11 @@ runtime-owned spec-aware validation of seeds, configs, artifacts, completed cell
 ledger evidence, public-output events, retention events, and terminal run state. The rebuilt
 projection is derived from the stream; it is not independent semantic authority.
 
+Read, resume, replay, and status paths must construct `VerifiedRunHistory` from a
+`CommittedRunStream` plus `VerifiedRunArtifactStore` before trusting history. Replay authority is
+minted from that verified history and certified runtime authority; raw event vectors or retained
+artifact bytes without committed evidence do not cross the runtime/replay boundary.
+
 The deterministic frontier scheduler is pure. Given the static certified transition graph and
 verified run history, it returns exactly one decision: run a certified node, block because no valid
 frontier is executable, or complete because all certified terminal conditions are satisfied. It does

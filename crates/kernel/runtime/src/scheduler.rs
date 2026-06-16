@@ -38,6 +38,19 @@ pub enum SchedulerStatus {
     PublicOutputProjected,
 }
 
+/// Manual resolution input verified against the certified saga policy and current stream prefix.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManualResolutionRequest {
+    /// Operator-selected terminal resolution outcome.
+    pub outcome: events::ManualResolutionOutcome,
+    /// Artifact containing the retained manual evidence bytes.
+    pub evidence_artifact: ManualResolutionEvidenceArtifact,
+    /// Canonical proof bytes for the manual resolution claim.
+    pub proof_bytes: Vec<u8>,
+    /// Optional retained note attached to the resolution.
+    pub note: Option<events::ManualResolutionNote>,
+}
+
 struct RunnerInvocationInput<'a> {
     runtime_spec: &'a CertifiedRuntimeSpec,
     run_id: &'a RunId,
@@ -215,20 +228,19 @@ impl SerialTypedScheduler {
         store: &mut S,
         runtime_spec: &CertifiedRuntimeSpec,
         run_id: &RunId,
-        outcome: events::ManualResolutionOutcome,
-        evidence_artifact: ManualResolutionEvidenceArtifact,
-        authorization_proof_bytes: Vec<u8>,
-        note: Option<events::ManualResolutionNote>,
+        request: ManualResolutionRequest,
     ) -> Result<store::CommitOutcome> {
+        let ManualResolutionRequest {
+            outcome,
+            evidence_artifact,
+            proof_bytes,
+            note,
+        } = request;
         let manual = certified_manual_resolution_spec(&runtime_spec.spec().saga)?;
         let prefix =
             build_manual_resolution_prefix_authority(store, runtime_spec, run_id, manual.clone())?;
-        let verified = verify_manual_resolution_for_prefix(
-            prefix,
-            outcome,
-            &evidence_artifact,
-            authorization_proof_bytes,
-        )?;
+        let verified =
+            verify_manual_resolution_for_prefix(prefix, outcome, &evidence_artifact, proof_bytes)?;
         self.manual_terminal_proofs
             .lock()
             .map_err(|_| RuntimeError::Store("manual proof cache lock was poisoned".to_owned()))?

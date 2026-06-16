@@ -3188,16 +3188,16 @@ fn validate_typed_spec(
         &lineage_index,
         &spec.public_outputs,
     )?;
-    validate_saga_structure(
-        spec,
-        &scope_ids,
-        &descriptor_index,
-        &config_refs,
-        &cell_index,
-        &lineage_index,
-        &node_index,
+    validate_saga_structure(SagaValidationContext {
+        typed: spec,
+        scope_ids: &scope_ids,
+        descriptors: &descriptor_index,
+        config_refs: &config_refs,
+        cells: &cell_index,
+        lineages: &lineage_index,
+        forward_nodes: &node_index,
         registry,
-    )?;
+    })?;
     validate_operation_lineage(
         &spec.planning_lineage,
         &descriptor_index,
@@ -3858,22 +3858,25 @@ fn validate_nodes(
     Ok(index)
 }
 
-fn validate_saga_structure(
-    typed: &spec::TypedExecutionSpec,
-    scope_ids: &BTreeSet<String>,
-    descriptors: &DescriptorIndex<'_>,
-    config_refs: &ConfigIndex,
-    cells: &BTreeMap<String, spec::CellSpec>,
-    lineages: &BTreeMap<String, spec::ValueLineage>,
-    forward_nodes: &BTreeMap<String, spec::NodeSpec>,
-    registry: &CertificationRegistry,
-) -> Result<()> {
-    let forward_side_effects = forward_nodes
+struct SagaValidationContext<'a, 'd> {
+    typed: &'a spec::TypedExecutionSpec,
+    scope_ids: &'a BTreeSet<String>,
+    descriptors: &'a DescriptorIndex<'d>,
+    config_refs: &'a ConfigIndex,
+    cells: &'a BTreeMap<String, spec::CellSpec>,
+    lineages: &'a BTreeMap<String, spec::ValueLineage>,
+    forward_nodes: &'a BTreeMap<String, spec::NodeSpec>,
+    registry: &'a CertificationRegistry,
+}
+
+fn validate_saga_structure(context: SagaValidationContext<'_, '_>) -> Result<()> {
+    let forward_side_effects = context
+        .forward_nodes
         .values()
         .filter(|node| is_apply_side_effect_node(node).unwrap_or(false))
         .collect::<Vec<_>>();
 
-    match &typed.saga {
+    match &context.typed.saga {
         spec::SagaPolicySpec::NoSideEffects => {
             if !forward_side_effects.is_empty() {
                 return Err(problem(
@@ -3894,8 +3897,10 @@ fn validate_saga_structure(
         }
     }
 
-    if !matches!(typed.saga, spec::SagaPolicySpec::CompensateCompleted { .. })
-        && !typed.remediations.is_empty()
+    if !matches!(
+        context.typed.saga,
+        spec::SagaPolicySpec::CompensateCompleted { .. }
+    ) && !context.typed.remediations.is_empty()
     {
         return Err(problem(
             ProblemClass::InvalidSemanticTransition,
@@ -3908,8 +3913,11 @@ fn validate_saga_structure(
         .map(|node| node.node_id.as_str().to_owned())
         .collect::<BTreeSet<_>>();
     let mut remediation_node_ids = BTreeSet::new();
-    for (forward_node_id, remediation) in &typed.remediations {
-        if forward_nodes.contains_key(remediation.node_id.as_str()) {
+    for (forward_node_id, remediation) in &context.typed.remediations {
+        if context
+            .forward_nodes
+            .contains_key(remediation.node_id.as_str())
+        {
             return Err(problem(
                 ProblemClass::InvalidTopology,
                 format!(
@@ -3924,7 +3932,7 @@ fn validate_saga_structure(
                 format!("duplicate remediation node id {}", remediation.node_id),
             ));
         }
-        let Some(forward) = forward_nodes.get(forward_node_id.as_str()) else {
+        let Some(forward) = context.forward_nodes.get(forward_node_id.as_str()) else {
             return Err(problem(
                 ProblemClass::InvalidTopology,
                 format!("remediation key {forward_node_id} references missing forward node"),
@@ -3940,18 +3948,26 @@ fn validate_saga_structure(
         }
         validate_remediation_node_contract(
             remediation,
-            scope_ids,
-            descriptors,
-            config_refs,
-            cells,
-            lineages,
+            context.scope_ids,
+            context.descriptors,
+            context.config_refs,
+            context.cells,
+            context.lineages,
         )?;
-        validate_remediation_binding_scope(forward, remediation, cells, forward_nodes)?;
+        validate_remediation_binding_scope(
+            forward,
+            remediation,
+            context.cells,
+            context.forward_nodes,
+        )?;
     }
 
-    if matches!(typed.saga, spec::SagaPolicySpec::CompensateCompleted { .. }) {
+    if matches!(
+        context.typed.saga,
+        spec::SagaPolicySpec::CompensateCompleted { .. }
+    ) {
         for node in forward_side_effects {
-            if !typed.remediations.contains_key(&node.node_id) {
+            if !context.typed.remediations.contains_key(&node.node_id) {
                 return Err(problem(
                     ProblemClass::InvalidTopology,
                     format!(
@@ -3963,7 +3979,7 @@ fn validate_saga_structure(
         }
     }
 
-    validate_manual_resolution_authority(typed, registry)?;
+    validate_manual_resolution_authority(context.typed, context.registry)?;
 
     Ok(())
 }

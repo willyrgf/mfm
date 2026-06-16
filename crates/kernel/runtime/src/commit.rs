@@ -404,16 +404,16 @@ impl CommitPlanner {
             input.attempt_id,
             runner_payloads,
         )?;
-        validate_runner_output(
-            input.runtime_spec,
-            input.run_id,
-            input.node,
-            input.attempt_id,
-            input.caps,
-            input.recorded_facts,
-            &input.view.projections,
-            &runner_payloads,
-        )?;
+        validate_runner_output(RunnerOutputValidation {
+            runtime_spec: input.runtime_spec,
+            run_id: input.run_id,
+            node: input.node,
+            attempt_id: input.attempt_id,
+            caps: input.caps,
+            recorded_facts: input.recorded_facts,
+            projections: &input.view.projections,
+            payloads: &runner_payloads,
+        })?;
         if matches!(
             &input.node.framework,
             Some(
@@ -1660,16 +1660,28 @@ fn side_effect_ambiguity_error(
     })
 }
 
-fn validate_runner_output(
-    runtime_spec: &CertifiedRuntimeSpec,
-    run_id: &RunId,
-    node: &spec::NodeSpec,
-    attempt_id: &AttemptId,
-    caps: &CertifiedRuntimeCapabilities,
-    recorded_facts: &RecordedFacts,
-    projections: &store::ProjectionSnapshot,
-    payloads: &[events::KernelEventPayload],
-) -> Result<()> {
+struct RunnerOutputValidation<'a> {
+    runtime_spec: &'a CertifiedRuntimeSpec,
+    run_id: &'a RunId,
+    node: &'a spec::NodeSpec,
+    attempt_id: &'a AttemptId,
+    caps: &'a CertifiedRuntimeCapabilities,
+    recorded_facts: &'a RecordedFacts,
+    projections: &'a store::ProjectionSnapshot,
+    payloads: &'a [events::KernelEventPayload],
+}
+
+fn validate_runner_output(input: RunnerOutputValidation<'_>) -> Result<()> {
+    let RunnerOutputValidation {
+        runtime_spec,
+        run_id,
+        node,
+        attempt_id,
+        caps,
+        recorded_facts,
+        projections,
+        payloads,
+    } = input;
     if payloads.is_empty() {
         return Err(RuntimeError::InvalidRunnerOutput(format!(
             "runner for node {} returned no typed payloads",

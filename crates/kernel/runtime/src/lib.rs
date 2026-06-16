@@ -54,7 +54,7 @@ pub use runners::{
     ErasedNodeRunner, ErasedRunnerBinding, ErasedRunnerFuture, ErasedRunnerOutput,
     ErasedRunnerRegistry, RunnerEventPayload,
 };
-pub use scheduler::{SchedulerStatus, SerialTypedScheduler};
+pub use scheduler::{ManualResolutionRequest, SchedulerStatus, SerialTypedScheduler};
 pub use spec_authority::CertifiedRuntimeSpec;
 
 #[cfg(test)]
