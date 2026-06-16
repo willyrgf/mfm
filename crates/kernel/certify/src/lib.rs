@@ -156,6 +156,7 @@ impl LoweredTypedSpec {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidatedTypedExecutionSpec {
     envelope: spec::HashedSpecEnvelope,
+    graph: CertifiedSpecGraph,
     _seal: ValidatedSpecSeal,
 }
 
@@ -163,9 +164,10 @@ pub struct ValidatedTypedExecutionSpec {
 struct ValidatedSpecSeal;
 
 impl ValidatedTypedExecutionSpec {
-    fn new(envelope: spec::HashedSpecEnvelope) -> Self {
+    fn new(envelope: spec::HashedSpecEnvelope, graph: CertifiedSpecGraph) -> Self {
         Self {
             envelope,
+            graph,
             _seal: ValidatedSpecSeal,
         }
     }
@@ -178,6 +180,11 @@ impl ValidatedTypedExecutionSpec {
     /// Returns the validated hash-defining spec data.
     pub fn spec(&self) -> &spec::TypedExecutionSpec {
         &self.envelope.spec
+    }
+
+    /// Returns the certified graph authority minted for this spec.
+    pub fn graph(&self) -> &CertifiedSpecGraph {
+        &self.graph
     }
 
     /// Returns the validated canonical spec hash.
@@ -203,37 +210,27 @@ pub struct CertifiedDescriptorSet {
 
 impl CertifiedDescriptorSet {
     fn from_validated_spec(validated: &ValidatedTypedExecutionSpec) -> Result<Self> {
-        let mut states = BTreeMap::new();
-        let mut operations = BTreeMap::new();
-        let mut renderers = BTreeMap::new();
-        let mut all = BTreeSet::new();
+        Ok(validated.graph().descriptors().clone())
+    }
 
-        for descriptor in &validated.spec().descriptor_identities {
-            let descriptor_id = descriptor.descriptor_id().clone();
-            if !all.insert(descriptor_id.clone()) {
-                return Err(problem(
-                    ProblemClass::InvalidSemanticTransition,
-                    format!("duplicate certified descriptor identity {descriptor_id}"),
-                ));
-            }
-            match descriptor {
-                spec::DescriptorIdentity::State(identity) => {
-                    states.insert(descriptor_id, identity.as_ref().clone());
-                }
-                spec::DescriptorIdentity::Operation(identity) => {
-                    operations.insert(descriptor_id, identity.as_ref().clone());
-                }
-                spec::DescriptorIdentity::Renderer(identity) => {
-                    renderers.insert(descriptor_id, identity.as_ref().clone());
-                }
-            }
+    fn from_descriptor_index(descriptors: &DescriptorIndex<'_>) -> Self {
+        Self {
+            states: descriptors
+                .states
+                .values()
+                .map(|descriptor| (descriptor.descriptor_id.clone(), (*descriptor).clone()))
+                .collect(),
+            operations: descriptors
+                .operations
+                .values()
+                .map(|descriptor| (descriptor.descriptor_id.clone(), (*descriptor).clone()))
+                .collect(),
+            renderers: descriptors
+                .renderers
+                .values()
+                .map(|descriptor| (descriptor.descriptor_id.clone(), (*descriptor).clone()))
+                .collect(),
         }
-
-        Ok(Self {
-            states,
-            operations,
-            renderers,
-        })
     }
 
     /// Returns a certified state descriptor by id.
@@ -256,6 +253,92 @@ impl CertifiedDescriptorSet {
         &self,
     ) -> impl Iterator<Item = (&DescriptorId, &spec::StateDescriptorIdentity)> {
         self.states.iter()
+    }
+}
+
+/// Certified graph and index authority for one typed execution spec.
+///
+/// This is minted only after the certifier has validated the persisted DTO shape, descriptor
+/// authority, graph topology, lineage references, config references, public outputs, and saga
+/// structure. Consumers that need graph facts should depend on this authority instead of scanning
+/// raw `mfm_spec::v1` vectors.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CertifiedSpecGraph {
+    scope_ids: BTreeSet<String>,
+    descriptors: CertifiedDescriptorSet,
+    config_refs: ConfigIndex,
+    value_lineages: BTreeMap<String, spec::ValueLineage>,
+    cells: BTreeMap<String, spec::CellSpec>,
+    forward_nodes: BTreeMap<String, spec::NodeSpec>,
+}
+
+impl CertifiedSpecGraph {
+    fn from_validated_parts(
+        scope_ids: BTreeSet<String>,
+        descriptors: &DescriptorIndex<'_>,
+        config_refs: ConfigIndex,
+        value_lineages: BTreeMap<String, spec::ValueLineage>,
+        cells: BTreeMap<String, spec::CellSpec>,
+        forward_nodes: BTreeMap<String, spec::NodeSpec>,
+    ) -> Self {
+        Self {
+            scope_ids,
+            descriptors: CertifiedDescriptorSet::from_descriptor_index(descriptors),
+            config_refs,
+            value_lineages,
+            cells,
+            forward_nodes,
+        }
+    }
+
+    /// Returns the certified descriptor authority for this graph.
+    pub fn descriptors(&self) -> &CertifiedDescriptorSet {
+        &self.descriptors
+    }
+
+    /// Returns the number of certified scopes.
+    pub fn scope_count(&self) -> usize {
+        self.scope_ids.len()
+    }
+
+    /// Iterates certified scope ids in deterministic order.
+    pub fn scope_ids(&self) -> impl Iterator<Item = &str> {
+        self.scope_ids.iter().map(String::as_str)
+    }
+
+    /// Returns the number of certified config refs.
+    pub fn config_ref_count(&self) -> usize {
+        self.config_refs.keys.len()
+    }
+
+    /// Returns the number of certified value lineages.
+    pub fn value_lineage_count(&self) -> usize {
+        self.value_lineages.len()
+    }
+
+    /// Returns the number of certified cells.
+    pub fn cell_count(&self) -> usize {
+        self.cells.len()
+    }
+
+    /// Returns the certified cell for `cell_id`, when present.
+    pub fn cell(&self, cell_id: &CellId) -> Option<&spec::CellSpec> {
+        self.cells.get(cell_id.as_str())
+    }
+
+    /// Returns the number of certified forward nodes.
+    pub fn forward_node_count(&self) -> usize {
+        self.forward_nodes.len()
+    }
+
+    /// Returns the certified forward node for `node_id`, when present.
+    pub fn forward_node(&self, node_id: &NodeId) -> Option<&spec::NodeSpec> {
+        self.forward_nodes.get(node_id.as_str())
+    }
+
+    /// Iterates certified forward nodes in deterministic id order.
+    pub fn forward_nodes(&self) -> impl Iterator<Item = &spec::NodeSpec> {
+        self.forward_nodes.values()
     }
 }
 
@@ -316,7 +399,7 @@ impl CertifiedFrameworkLifecycle {
         let mut complete = None;
         let mut resolve = None;
 
-        for node in &validated.spec().nodes {
+        for node in validated.graph().forward_nodes() {
             if descriptors.state(&node.descriptor_id).is_none() {
                 return Err(problem(
                     ProblemClass::InvalidSemanticTransition,
@@ -3212,7 +3295,15 @@ fn validate_typed_spec(
         &node_index,
     )?;
     validate_lineage_references(&spec.value_lineages, &cell_index, &config_refs)?;
-    Ok(ValidatedTypedExecutionSpec::new(envelope))
+    let graph = CertifiedSpecGraph::from_validated_parts(
+        scope_ids,
+        &descriptor_index,
+        config_refs,
+        lineage_index,
+        cell_index,
+        node_index,
+    );
+    Ok(ValidatedTypedExecutionSpec::new(envelope, graph))
 }
 
 fn validate_contract_header(spec: &spec::TypedExecutionSpec) -> Result<()> {
@@ -3316,7 +3407,7 @@ fn validate_scopes(scopes: &[spec::ScopeSpec]) -> Result<BTreeSet<String>> {
     Ok(ids)
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct ConfigIndex {
     keys: BTreeSet<String>,
     ref_digests: BTreeSet<String>,
@@ -6986,9 +7077,20 @@ mod tests {
     fn certification_mints_descriptor_set_and_lifecycle_views() {
         let certified = certify_program_draft(&reference_draft()).expect("certified");
         let spec = certified.validated_spec().spec();
+        let graph = certified.validated_spec().graph();
         let descriptors = certified.descriptor_set();
         let lifecycle = certified.framework_lifecycle();
 
+        assert_eq!(graph.scope_count(), spec.scopes.len());
+        assert_eq!(graph.config_ref_count(), spec.config_refs.len());
+        assert_eq!(graph.value_lineage_count(), spec.value_lineages.len());
+        assert_eq!(graph.cell_count(), spec.cells.len());
+        assert_eq!(graph.forward_node_count(), spec.nodes.len());
+        assert!(graph.cell(lifecycle.bootstrap().output_cell()).is_some());
+        assert!(graph
+            .forward_node(lifecycle.bootstrap().node_id())
+            .is_some());
+        assert_eq!(graph.descriptors(), descriptors);
         assert!(descriptors.state_descriptors().count() > 0);
         assert!(descriptors
             .renderer(&spec.public_outputs.renderer_descriptor.descriptor_id)

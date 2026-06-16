@@ -6,11 +6,11 @@ error: cannot construct `ValidatedTypedExecutionSpec` with struct literal syntax
 10 |         envelope: envelope(),
    |         -------------------- private field
    |
-   = note: ...and other private field `_seal` that was not provided
+   = note: ...and other private fields `graph` and `_seal` that were not provided
 help: you might have meant to use the `new` associated function
    |
  9 -     let _ = ValidatedTypedExecutionSpec {
 10 -         envelope: envelope(),
 11 -     };
- 9 +     let _ = ValidatedTypedExecutionSpec::new(_);
+ 9 +     let _ = ValidatedTypedExecutionSpec::new(_, _);
    |
