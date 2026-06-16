@@ -237,12 +237,6 @@ impl PortfolioWorkflowConfig {
         Ok(config)
     }
 
-    /// Validates this config and returns it unchanged.
-    pub fn validated(self) -> Result<Self, ConfigError> {
-        validate_portfolio_workflow_config(&self).map_err(ConfigError::new)?;
-        Ok(self)
-    }
-
     /// Returns the workflow config contract version.
     pub const fn workflow_version(&self) -> u64 {
         self.workflow_version
@@ -285,12 +279,6 @@ impl PrepareSourcesConfig {
         Ok(config)
     }
 
-    /// Validates this config and returns it unchanged.
-    pub fn validated(self) -> Result<Self, ConfigError> {
-        validate_prepare_sources_config(&self).map_err(ConfigError::new)?;
-        Ok(self)
-    }
-
     /// Returns the networks whose source pools are prepared.
     pub fn networks(&self) -> &[NetworkConfig] {
         &self.networks
@@ -314,12 +302,6 @@ impl ResolveSubjectsConfig {
         let config = Self { wallets };
         validate_resolve_subjects_config(&config).map_err(ConfigError::new)?;
         Ok(config)
-    }
-
-    /// Validates this config and returns it unchanged.
-    pub fn validated(self) -> Result<Self, ConfigError> {
-        validate_resolve_subjects_config(&self).map_err(ConfigError::new)?;
-        Ok(self)
     }
 
     /// Returns the wallets to resolve.
@@ -360,12 +342,6 @@ impl PinViewsConfig {
         Ok(config)
     }
 
-    /// Validates this config and returns it unchanged.
-    pub fn validated(self) -> Result<Self, ConfigError> {
-        validate_pin_views_config(&self).map_err(ConfigError::new)?;
-        Ok(self)
-    }
-
     /// Returns the pinning config contract version.
     pub const fn pin_version(&self) -> u64 {
         self.pin_version
@@ -402,12 +378,6 @@ impl ResolveValuationsConfig {
         };
         validate_resolve_valuations_config(&config).map_err(ConfigError::new)?;
         Ok(config)
-    }
-
-    /// Validates this config and returns it unchanged.
-    pub fn validated(self) -> Result<Self, ConfigError> {
-        validate_resolve_valuations_config(&self).map_err(ConfigError::new)?;
-        Ok(self)
     }
 
     /// Returns the symbols whose valuation routes should be resolved.
@@ -452,12 +422,6 @@ impl ObserveBatchConfig {
         Ok(config)
     }
 
-    /// Validates this config and returns it unchanged.
-    pub fn validated(self) -> Result<Self, ConfigError> {
-        validate_observe_batch_config(&self).map_err(ConfigError::new)?;
-        Ok(self)
-    }
-
     /// Returns the wallet being observed.
     pub const fn wallet(&self) -> &WalletConfig {
         &self.wallet
@@ -498,12 +462,6 @@ impl MergeObservationsConfig {
         Ok(config)
     }
 
-    /// Validates this config and returns it unchanged.
-    pub fn validated(self) -> Result<Self, ConfigError> {
-        validate_merge_observations_config(&self).map_err(ConfigError::new)?;
-        Ok(self)
-    }
-
     /// Returns the merge config contract version.
     pub const fn merge_version(&self) -> u64 {
         self.merge_version
@@ -540,12 +498,6 @@ impl AssembleSnapshotConfig {
         Ok(config)
     }
 
-    /// Validates this config and returns it unchanged.
-    pub fn validated(self) -> Result<Self, ConfigError> {
-        validate_assemble_snapshot_config(&self).map_err(ConfigError::new)?;
-        Ok(self)
-    }
-
     /// Returns the snapshot schema version to emit.
     pub const fn snapshot_version(&self) -> u64 {
         self.snapshot_version
@@ -574,12 +526,6 @@ impl ProjectReportConfig {
         let config = Self { report_version };
         validate_project_report_config(&config).map_err(ConfigError::new)?;
         Ok(config)
-    }
-
-    /// Validates this config and returns it unchanged.
-    pub fn validated(self) -> Result<Self, ConfigError> {
-        validate_project_report_config(&self).map_err(ConfigError::new)?;
-        Ok(self)
     }
 
     /// Returns the report schema version to emit.
@@ -972,9 +918,6 @@ impl StateSpec for PrepareSourcesState {
     }
 
     fn new(config: Self::Config) -> mfm_program::Result<Self> {
-        let config = config
-            .validated()
-            .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?;
         Ok(Self { config })
     }
 }
@@ -1012,9 +955,6 @@ impl StateSpec for ResolveSubjectsState {
     }
 
     fn new(config: Self::Config) -> mfm_program::Result<Self> {
-        let config = config
-            .validated()
-            .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?;
         Ok(Self { config })
     }
 }
@@ -1054,9 +994,6 @@ impl StateSpec for PinViewsState {
     }
 
     fn new(config: Self::Config) -> mfm_program::Result<Self> {
-        let config = config
-            .validated()
-            .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?;
         Ok(Self { config })
     }
 }
@@ -1098,9 +1035,6 @@ impl StateSpec for ResolveValuationsState {
     }
 
     fn new(config: Self::Config) -> mfm_program::Result<Self> {
-        let config = config
-            .validated()
-            .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?;
         Ok(Self { config })
     }
 }
@@ -1140,9 +1074,6 @@ impl StateSpec for ObserveBatchState {
     }
 
     fn new(config: Self::Config) -> mfm_program::Result<Self> {
-        let config = config
-            .validated()
-            .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?;
         Ok(Self { config })
     }
 }
@@ -1185,9 +1116,6 @@ impl StateSpec for MergeObservationsState {
     }
 
     fn new(config: Self::Config) -> mfm_program::Result<Self> {
-        let config = config
-            .validated()
-            .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?;
         Ok(Self { config })
     }
 }
@@ -1224,9 +1152,6 @@ impl StateSpec for AssembleSnapshotState {
     }
 
     fn new(config: Self::Config) -> mfm_program::Result<Self> {
-        let config = config
-            .validated()
-            .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?;
         Ok(Self { config })
     }
 }
@@ -1262,9 +1187,6 @@ impl StateSpec for ProjectReportState {
     }
 
     fn new(config: Self::Config) -> mfm_program::Result<Self> {
-        let config = config
-            .validated()
-            .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?;
         Ok(Self { config })
     }
 }

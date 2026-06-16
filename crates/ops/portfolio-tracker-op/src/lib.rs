@@ -87,9 +87,6 @@ impl Operation for PortfolioTrackerWorkflowOperation {
         builder: &mut OperationExpansion<'program, 'scope>,
         _dispatch: mfm_program::OperationExpansionDispatch<Self>,
     ) -> mfm_program::Result<Self::Output<'program, 'scope>> {
-        let config = config
-            .validated()
-            .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?;
         let portfolio = config.portfolio().clone().normalized();
         let valuation_source_registry = config.valuation_source_registry().clone().normalized();
         let networks_by_id = networks_by_id(&portfolio.networks)?;
