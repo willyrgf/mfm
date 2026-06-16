@@ -35,6 +35,7 @@ let
 
   postgresEnv = {
     DATABASE_URL = "postgresql://postgres@\${host:postgres}:\${port:postgres}/postgres";
+    SQLX_OFFLINE = "true";
   };
   rethEnv = {
     RETH_HTTP_PORT = "\${port:reth}";
@@ -281,6 +282,17 @@ in
       steps.workspace-tests.task = "workspace-tests";
     };
 
+    test-db = {
+      kind = "composite";
+      steps = {
+        parity-postgres-state-events.task = "parity-postgres-state-events";
+        parity-postgres-rest-api = {
+          task = "parity-postgres-rest-api";
+          dependsOn = [ "parity-postgres-state-events" ];
+        };
+      };
+    };
+
     # The full gate, composed from the public verbs: `.#ci` runs the same
     # `check` and `test` composites that `.#check`/`.#test` expose (run-once is
     # per step, so nesting reuses them without duplication), then the parity
@@ -298,17 +310,13 @@ in
           task = "parity-cli-keystore";
           dependsOn = [ "test" ];
         };
-        parity-postgres-rest-api = {
-          task = "parity-postgres-rest-api";
+        test-db = {
+          task = "test-db";
           dependsOn = [ "parity-cli-keystore" ];
-        };
-        parity-postgres-state-events = {
-          task = "parity-postgres-state-events";
-          dependsOn = [ "parity-postgres-rest-api" ];
         };
         parity-reth-contracts = {
           task = "parity-reth-contracts";
-          dependsOn = [ "parity-postgres-state-events" ];
+          dependsOn = [ "test-db" ];
         };
         parity-reth-portfolio = {
           task = "parity-reth-portfolio";
@@ -323,6 +331,7 @@ in
   nixfied.surface.verbs = [
     "check"
     "test"
+    "test-db"
     "ci"
   ];
 }
