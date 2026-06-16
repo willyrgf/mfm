@@ -346,15 +346,17 @@ impl<'de> Deserialize<'de> for EvmTransactionPolicy {
     schema = "mfm.evm.contract.config.receipt_policy"
 )]
 pub struct ReceiptRetryPolicy {
-    poll_interval_ms: u64,
-    max_receipt_polls: u64,
+    poll_interval_ms: NonZeroU64,
+    max_receipt_polls: NonZeroU64,
 }
 
 impl Default for ReceiptRetryPolicy {
     fn default() -> Self {
         Self {
-            poll_interval_ms: default_poll_interval_ms(),
-            max_receipt_polls: default_max_receipt_polls(),
+            poll_interval_ms: nonzero_u64(default_poll_interval_ms(), "poll_interval_ms")
+                .expect("default poll interval is non-zero"),
+            max_receipt_polls: nonzero_u64(default_max_receipt_polls(), "max_receipt_polls")
+                .expect("default receipt polls is non-zero"),
         }
     }
 }
@@ -362,22 +364,20 @@ impl Default for ReceiptRetryPolicy {
 impl ReceiptRetryPolicy {
     /// Creates a validated receipt retry policy.
     pub fn new(poll_interval_ms: u64, max_receipt_polls: u64) -> Result<Self, String> {
-        if poll_interval_ms == 0 {
-            return Err("poll_interval_ms must be non-zero".to_string());
-        }
-        if poll_interval_ms > MAX_RECEIPT_POLL_INTERVAL_MS {
+        let poll_interval_ms = nonzero_u64(poll_interval_ms, "poll_interval_ms")?;
+        let max_receipt_polls = nonzero_u64(max_receipt_polls, "max_receipt_polls")?;
+
+        if poll_interval_ms.get() > MAX_RECEIPT_POLL_INTERVAL_MS {
             return Err(format!(
                 "poll_interval_ms must be <= {MAX_RECEIPT_POLL_INTERVAL_MS}"
             ));
         }
-        if max_receipt_polls == 0 {
-            return Err("max_receipt_polls must be non-zero".to_string());
-        }
-        if max_receipt_polls > MAX_RECEIPT_POLLS {
+        if max_receipt_polls.get() > MAX_RECEIPT_POLLS {
             return Err(format!("max_receipt_polls must be <= {MAX_RECEIPT_POLLS}"));
         }
         let total_wait_ms = poll_interval_ms
-            .checked_mul(max_receipt_polls.saturating_sub(1))
+            .get()
+            .checked_mul(max_receipt_polls.get().saturating_sub(1))
             .ok_or_else(|| "receipt polling wait budget overflowed".to_string())?;
         if total_wait_ms > MAX_RECEIPT_TOTAL_WAIT_MS {
             return Err(format!(
@@ -391,13 +391,13 @@ impl ReceiptRetryPolicy {
     }
 
     /// Returns delay between receipt polls in milliseconds.
-    pub const fn poll_interval_ms(&self) -> u64 {
-        self.poll_interval_ms
+    pub fn poll_interval_ms(&self) -> u64 {
+        self.poll_interval_ms.get()
     }
 
     /// Returns maximum receipt poll attempts.
-    pub const fn max_receipt_polls(&self) -> u64 {
-        self.max_receipt_polls
+    pub fn max_receipt_polls(&self) -> u64 {
+        self.max_receipt_polls.get()
     }
 }
 
