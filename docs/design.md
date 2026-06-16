@@ -47,11 +47,21 @@ Typed-core code distinguishes data, evidence, authority, and implementation arti
 
 | Surface | Runtime authority? | Contract |
 |---|---:|---|
-| Parsed `TypedExecutionSpec` data | no | Persisted/user bytes decoded into typed Rust data. Hostile until certification verifies the spec against the registry. |
+| `mfm_spec::UntrustedTypedSpec` | no | Persisted/user bytes decoded into typed Rust data. Hostile until certification verifies the spec against the registry. |
+| `mfm_certify::LoweredTypedSpec` | no | Program-lowered draft data. It is the certifier input for authored programs, not runtime authority. |
+| `mfm_certify::ValidatedTypedExecutionSpec` | no, certifier-private | Registry-validated spec authority used inside certification to mint certified objects and certificates. It does not cross into runtime as a mutable execution surface. |
 | `mfm_spec::v1::HashedSpecEnvelope` | no | Hash-only envelope for canonical spec bytes and non-semantic audit metadata. It cannot certify a spec. |
 | `CertifiedSpecCertificate` bytes/evidence | no | Persisted certificate evidence. Hostile until the bundle verifier checks spec hash, certificate hash, registry digest, descriptor identities/digests, lowering/canonicalizer identity, public-output schema id, and audit metadata. |
 | `mfm_certify::CertifiedTypedSpec` | yes | Non-forgeable in-memory authority minted only by registry-backed certification or verified persisted bundle input. |
+| `CertifiedDescriptorSet` / `CertifiedFrameworkLifecycle` | yes, within certified spec authority | Certified descriptor and framework lifecycle views derived from a validated spec. Runtime consumes these views instead of recertifying raw descriptor tables. |
 | `mfm_runtime::CertifiedRuntimeSpec` | yes, runtime-only | Runtime wrapper derived only from `CertifiedTypedSpec`; owns scheduler indexes and erased runner derivation. |
+| `PreparedCommit<Purpose>` / `PreparedCommitPlan` | yes, store mutation | Purpose-specific commit authority built by runtime/app authority. The store rejects mismatched payload purpose, missing saga proof, and missing admitted artifact evidence. |
+| `SagaAdmitToken` | yes, store admission | Policy-bound run-start/saga admission token tied to run id and certified spec hash. |
+| `ManualResolutionProofAuthority` / `VerifiedManualResolutionForPrefix` | yes, manual resolution | Prefix-bound proof authority over a certified manual-blocked stream prefix, retained artifacts, canonical proof bytes, and certified operator policy. |
+| `CertifiedSideEffectContract` | yes, side-effect verification | Certified resource-claim and side-effect contract authority shared by live execution, resume, and replay. |
+| `SideEffectLedgerState` | yes, store transition | Typed ledger state used by store/runtime to admit only legal side-effect transitions. |
+| `SagaTerminalProof` | yes, terminal saga | Store-required proof object for completed, compensated, manually resolved, or failed-without-claim terminal saga outcomes. |
+| `CommittedRunStream` / `VerifiedRunArtifactStore` | yes, stream/history evidence | Store-owned committed stream authority plus retained-artifact authority tied to that stream. |
 | Erased runner plans | no | Runtime implementation artifacts reproducibly derived from certified authority and runner registry. |
 | `PublicOutputReadAuthority` | yes, render-only | App authority minted after certified spec/certificate verification and projection rebuild from the authoritative stream. |
 | Rendered public-output JSON/artifacts | no | Output/cache material for users and integrations. They cannot authorize resume, replay, or another render. |
@@ -271,10 +281,11 @@ against a registry and returns `CertifiedTypedSpec`.
 ## Store And Events
 
 `mfm-store` is the only semantic commit contract for certified typed runs. Production execution
-callers submit `PreparedTypedCommit`, which carries typed event payloads, commit preconditions, and
-the artifact evidence that becomes run authority in the same atomic append. The store constructs
-envelopes and maintains projections. Synthetic direct mutation is confined to explicitly named
-non-execution test, migration, repair, corruption, or low-level storage contract fixtures.
+callers submit purpose-specific `PreparedCommit<Purpose>` authority through `PreparedCommitPlan`.
+Each plan carries typed event payloads, commit preconditions, and the artifact evidence that becomes
+run authority in the same atomic append. The store constructs envelopes and maintains projections.
+Synthetic direct mutation is confined to explicitly named non-execution test, migration, repair,
+corruption, or low-level storage contract fixtures.
 
 The authoritative event stream contains:
 
@@ -312,7 +323,11 @@ static certified transition graph + verified run history
 ```
 
 The runtime authority contract starts from `CertifiedTypedSpec`, not from parsed spec JSON or a
-hash-only envelope. `CertifiedRuntimeSpec` is the runtime view of the static certified transition
+hash-only envelope. Authoring and persistence move through explicit stages:
+`UntrustedTypedSpec`, `LoweredTypedSpec`, certifier-private `ValidatedTypedExecutionSpec`, and then
+non-forgeable `CertifiedTypedSpec`. Persisted nodes and renderers refer to descriptor authority by
+`DescriptorRef`; `CertifiedDescriptorSet` and `CertifiedFrameworkLifecycle` are the certified views
+runtime consumes. `CertifiedRuntimeSpec` is the runtime view of the static certified transition
 graph. Before `RunStarted`, the assembly/runtime boundary verifies:
 
 - spec hash and schema/version fields
@@ -346,12 +361,16 @@ but cannot append to the run stream.
 The commit planner owns all production execution appends. Bootstrap verifies and stages launch
 material, executes the sealed `BootstrapRun` genesis state, and commits `RunStarted`, bootstrap
 attempt lifecycle, launch artifact references, retention refs, and admitted artifact evidence in one
-prepared store commit. Ordinary states, `PublicOutputRender`, `ProjectRetentionManifest`, and
-`CompleteRun` use the same guarded commit path: staged artifacts are persisted before the prepared
-commit, output and reference bindings are checked against the certified graph, side-effect protocol
-rules are enforced, commit preconditions are built, and run-store artifact evidence is admitted only
-in the commit that first references it. Failed commits may leave orphan artifact-store bytes, but
-orphan run-store evidence is not authority.
+purpose-specific prepared store commit. Ordinary states, `PublicOutputRender`,
+`ProjectRetentionManifest`, and `CompleteRun` use the same guarded commit path: staged artifacts are
+persisted before the prepared commit, output and reference bindings are checked against the
+certified graph, side-effect protocol rules are enforced, commit preconditions are built, and
+run-store artifact evidence is admitted only in the commit that first references it. Production
+callers submit `PreparedCommit<Purpose>` values through `PreparedCommitPlan`; the store treats the
+inner `PreparedTypedCommit` as a typed batch representation and rejects purpose mismatches, missing
+`SagaAdmitToken`, missing `SagaTerminalProof`, or artifact evidence that was not admitted in the
+same commit. Failed commits may leave orphan artifact-store bytes, but orphan run-store evidence is
+not authority.
 
 Framework lifecycle work is represented by certified graph nodes, not ad hoc runtime side effects.
 `BootstrapRun`, `PublicOutputRender`, `ProjectRetentionManifest`, and `CompleteRun` are sealed
@@ -369,7 +388,10 @@ adapters only. Live capability construction during replay is a contract violatio
 Manual-resolution replay additionally verifies that the stream prefix derives `ManualBlocked`, the
 event matches certified policy, evidence and authorization artifacts match certified roles and
 digests, the canonical proof claim matches the event and prefix exactly, signatures verify, signers
-belong to the certified authority snapshot, and quorum is satisfied.
+belong to the certified authority snapshot, and quorum is satisfied. Runtime and replay build this
+through `ManualResolutionPrefixAuthority` and `ManualResolutionProofAuthority`; only a
+`VerifiedManualResolutionForPrefix` can authorize the corresponding manual-resolution commit or
+terminal saga proof.
 
 ## Side Effects
 
@@ -386,6 +408,12 @@ Side-effect states are multi-commit protocols. The scheduler/store own:
 The durable uncertainty boundary is the invocation-started event. After that boundary, resume must
 recover or block using typed evidence; it must not duplicate an external mutation or guess from
 unstored state.
+
+`CertifiedSideEffectContract` is the single side-effect resource-claim authority shared by live
+execution, resume, and replay. The store exposes legal phase information through
+`SideEffectLedgerState`, so transition admission is a typed state-machine check instead of an
+optional-field projection heuristic. Forward side-effect ambiguity is admissible only when paired in
+the same commit with the non-retryable attempt failure that engages saga handling.
 
 Prepared-invocation artifacts may retain unsigned mutation plans, expected hashes, and non-secret
 signer references. Signed raw transactions are bearer mutation material and remain transient

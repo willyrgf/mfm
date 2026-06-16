@@ -30,7 +30,8 @@ from the append-only run stream authority before the scheduler decides whether t
 completed, or ready to execute one certified node. Runner invocation is sealed by runtime-owned
 materialization, runner identity checks, and capability scoping. The commit planner verifies typed
 payloads, side-effect protocol rules, staged artifacts, references, retention bindings, and commit
-preconditions before building `PreparedTypedCommit`.
+preconditions before building purpose-specific `PreparedCommit<Purpose>` values and submitting them
+through `PreparedCommitPlan`.
 
 Launch, ordinary state attempts, public-output rendering, retention projection, and completion all
 use the same authority path. `RunStarted` is emitted only by the sealed `BootstrapRun` genesis batch,

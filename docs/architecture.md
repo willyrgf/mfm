@@ -20,12 +20,12 @@ transport-only surfaces.
 ```text
 typed or authored input
   -> operation crate builds typed program draft
-  -> mfm-certify emits certified typed execution spec
+  -> mfm-certify lowers, validates, and emits certified typed execution spec
   -> app verifies certified bundle and assembles launch material
   -> runtime rebuilds verified history from the append-only run stream
   -> deterministic frontier scheduler selects one certified node or terminal decision
   -> sealed runner invocation produces typed intent, staged artifacts, or sealed handles
-  -> runtime commit planner builds PreparedTypedCommit
+  -> runtime commit planner builds purpose-specific PreparedCommitPlan
   -> store atomically admits artifact evidence and appends typed events
   -> replay/resume/public-output read from certified spec plus run stream
 ```
@@ -37,12 +37,23 @@ names, source scans, CI summary keys, rendered JSON, and projection rows are not
 
 The typed boundary separates data, evidence, authority, and implementation artifacts:
 
-- parsed typed spec JSON is data only
+- parsed typed spec JSON enters as `UntrustedTypedSpec` and is data only
+- `LoweredTypedSpec` is program-lowered draft data, not runtime authority
+- `ValidatedTypedExecutionSpec` is certifier-private validated authority used to mint certificates
 - `HashedSpecEnvelope` is a hash-only envelope only
 - persisted `CertifiedSpecCertificate` bytes are evidence only until verified
 - `CertifiedTypedSpec` is the non-forgeable authority returned by `mfm-certify`
+- `CertifiedDescriptorSet` and `CertifiedFrameworkLifecycle` are certified spec authority views
 - `CertifiedRuntimeSpec` is runtime authority derived only from `CertifiedTypedSpec`
+- `PreparedCommit<Purpose>` and `PreparedCommitPlan` are store mutation authority built by runtime
+- `SagaAdmitToken` is the store admission authority for policy-bound run-start and saga commits
+- `ManualResolutionProofAuthority` and `VerifiedManualResolutionForPrefix` are manual proof
+  authority over a certified blocked prefix
+- `CertifiedSideEffectContract` is shared live, resume, and replay authority for side-effect claims
+- `SideEffectLedgerState` is the typed store view for legal side-effect ledger transitions
+- `SagaTerminalProof` is required authority for terminal saga outcomes
 - `CommittedRunStream` is store-owned append-only stream authority
+- `VerifiedRunArtifactStore` is retained-artifact authority tied to a committed stream
 - `VerifiedRunHistory` is runtime/replay authority over a committed stream plus verified retained
   artifact evidence
 - erased runner plans are implementation artifacts
@@ -433,8 +444,10 @@ Additional dependency rules:
 ## Store Boundary
 
 `mfm-store` defines the production commit contract. Implementations accept only
-`PreparedTypedCommit` for execution mutation. Each prepared commit carries typed payloads and
-artifact evidence to admit atomically with those payloads.
+`PreparedCommitPlan` values built from purpose-specific `PreparedCommit<Purpose>` authority for
+execution mutation. Each prepared commit carries typed payloads and artifact evidence to admit
+atomically with those payloads. `PreparedTypedCommit` is the inner typed batch representation, not
+the authority production callers should construct directly.
 
 Stores own:
 

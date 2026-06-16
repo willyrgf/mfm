@@ -31,6 +31,20 @@ All saga decisions are derived from the certified spec plus append-only stream f
 selection, obligation state, run mode, and manual-block state are projections, not appendable
 control events.
 
+The kernel encodes saga authority in proof objects instead of repeated validators:
+
+- `SagaAdmitToken` binds run-start and saga admission to the certified run id, spec hash, and
+  policy.
+- `CertifiedSideEffectContract` validates resource claims and side-effect contract evidence for
+  live execution, resume, and replay.
+- `SideEffectLedgerState` is the store-owned typestate view for legal side-effect ledger
+  transitions.
+- `ManualResolutionPrefixAuthority`, `ManualResolutionProofAuthority`, and
+  `VerifiedManualResolutionForPrefix` bind manual authorization to the exact certified blocked
+  prefix and retained proof artifacts.
+- `SagaTerminalProof` is required to commit completed, compensated, manually resolved, and
+  failed-without-claim terminal saga outcomes.
+
 ## Certified Policy
 
 `mfm-spec::v1::TypedExecutionSpec` carries hash-defining saga policy:
@@ -137,6 +151,10 @@ ledgers acquire lanes under the same rules as forward ledgers.
 
 Exact touched-set evidence is schema-checked at admission and replay, but the kernel does not infer
 domain isolation from it without a future domain verifier.
+
+Forward side-effect ambiguity is itself saga-engaging evidence. The store admits it only when the
+same commit also records the non-retryable attempt failure that explains why the run is entering
+saga handling; standalone ambiguity evidence is rejected.
 
 ## Layer Authority
 
