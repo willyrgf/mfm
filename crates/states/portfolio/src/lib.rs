@@ -219,17 +219,8 @@ impl PortfolioWorkflowConfig {
         portfolio: PortfolioConfig,
         valuation_source_registry: ValuationSourceRegistry,
     ) -> Result<Self, ConfigError> {
-        Self::with_version(1, portfolio, valuation_source_registry)
-    }
-
-    /// Creates a portfolio workflow config with an explicit persisted contract version.
-    pub fn with_version(
-        workflow_version: u64,
-        portfolio: PortfolioConfig,
-        valuation_source_registry: ValuationSourceRegistry,
-    ) -> Result<Self, ConfigError> {
         let config = Self {
-            workflow_version,
+            workflow_version: 1,
             portfolio,
             valuation_source_registry,
         };
@@ -326,16 +317,8 @@ pub struct PinViewsConfig {
 impl PinViewsConfig {
     /// Creates validated view-pinning config.
     pub fn new(networks: Vec<NetworkConfig>) -> Result<Self, ConfigError> {
-        Self::with_version(1, networks)
-    }
-
-    /// Creates view-pinning config with an explicit persisted contract version.
-    pub fn with_version(
-        pin_version: u64,
-        networks: Vec<NetworkConfig>,
-    ) -> Result<Self, ConfigError> {
         let config = Self {
-            pin_version,
+            pin_version: 1,
             networks,
         };
         validate_pin_views_config(&config).map_err(ConfigError::new)?;
@@ -453,13 +436,6 @@ impl MergeObservationsConfig {
     /// Creates validated observation-merge config.
     pub fn new() -> Self {
         Self { merge_version: 1 }
-    }
-
-    /// Creates observation-merge config with an explicit persisted contract version.
-    pub fn with_version(merge_version: u64) -> Result<Self, ConfigError> {
-        let config = Self { merge_version };
-        validate_merge_observations_config(&config).map_err(ConfigError::new)?;
-        Ok(config)
     }
 
     /// Returns the merge config contract version.
