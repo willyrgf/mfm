@@ -3,7 +3,6 @@ use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 
 use mfm_program_derive::MfmValue;
-use mfm_values::string_map_secret_marker_key;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
@@ -13,6 +12,7 @@ use crate::ids::{
     NetworkId, NormalizedEvmAddress, OracleKindId, PortfolioScalarError, ProtocolId,
     ProtocolReaderId, SymbolId, UnitPriceDecimal, ValuationSourceId,
 };
+use crate::metadata::PublicMetadata;
 
 /// Supported quote codes for the canonical portfolio snapshot surface.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, MfmValue)]
@@ -128,7 +128,7 @@ pub struct SymbolConfig {
     pub underlying_symbol_id: Option<SymbolId>,
     /// Canonical metadata surface.
     #[serde(default)]
-    pub metadata: BTreeMap<String, String>,
+    pub metadata: PublicMetadata,
 }
 
 impl SymbolConfig {
@@ -159,6 +159,11 @@ impl SymbolConfig {
             .map(ProtocolId::new)
             .transpose()
             .map_err(|source| SymbolConfigError::InvalidProtocol { source })?;
+        let metadata = PublicMetadata::new(metadata).map_err(|source| {
+            SymbolConfigError::MetadataContainsSecret {
+                key: source.key().to_owned(),
+            }
+        })?;
         Self {
             symbol_id,
             display_symbol,
@@ -332,7 +337,7 @@ pub struct ValuationSourceConfig {
     pub reader: ValuationSourceReaderConfig,
     /// Canonical metadata surface.
     #[serde(default)]
-    pub metadata: BTreeMap<String, String>,
+    pub metadata: PublicMetadata,
 }
 
 impl ValuationSourceConfig {
@@ -351,6 +356,12 @@ impl ValuationSourceConfig {
             .map_err(|source| ValuationSourceRegistryError::InvalidNetworkId { source })?;
         let base_symbol_id = SymbolId::new(base_symbol_id)
             .map_err(|source| ValuationSourceRegistryError::InvalidBaseSymbolId { source })?;
+        let metadata = PublicMetadata::new(metadata).map_err(|source| {
+            ValuationSourceRegistryError::MetadataContainsSecret {
+                source_id: source_id.to_string(),
+                key: source.key().to_owned(),
+            }
+        })?;
         let registry = ValuationSourceRegistry {
             sources: vec![Self {
                 source_id,
@@ -484,7 +495,7 @@ pub struct Observation {
     pub source: ObservationSource,
     /// Canonical metadata surface.
     #[serde(default)]
-    pub metadata: BTreeMap<String, String>,
+    pub metadata: PublicMetadata,
 }
 
 impl Observation {
@@ -711,12 +722,6 @@ pub fn decode_valuation_source_registry(
 
 /// Validates a canonical symbol config.
 pub fn validate_symbol_config(cfg: &SymbolConfig) -> Result<(), SymbolConfigError> {
-    if let Some(key) = string_map_secret_marker_key(&cfg.metadata) {
-        return Err(SymbolConfigError::MetadataContainsSecret {
-            key: key.to_string(),
-        });
-    }
-
     match &cfg.balance_reader {
         BalanceReaderConfig::NativeBalance {} => {}
         BalanceReaderConfig::Erc20Balance { .. } => {}
@@ -743,12 +748,6 @@ pub fn validate_valuation_source_registry(
         if !seen_ids.insert(source.source_id.clone()) {
             return Err(ValuationSourceRegistryError::DuplicateSourceId {
                 source_id: source.source_id.to_string(),
-            });
-        }
-        if let Some(key) = string_map_secret_marker_key(&source.metadata) {
-            return Err(ValuationSourceRegistryError::MetadataContainsSecret {
-                source_id: source.source_id.to_string(),
-                key: key.to_string(),
             });
         }
     }
@@ -789,15 +788,13 @@ mod tests {
         let mut metadata = BTreeMap::new();
         metadata.insert("authorization".to_string(), "redacted".to_string());
 
-        let registry = ValuationSourceRegistry {
-            sources: vec![ValuationSourceConfig {
-                source_id: "chainlink_eth_usd".parse().expect("valid source id"),
-                network_id: "ethereum-mainnet".parse().expect("valid network id"),
-                base_symbol_id: "eth.native.ethereum-mainnet"
-                    .parse()
-                    .expect("valid base symbol id"),
-                quote: QuoteCode::Usd,
-                reader: ValuationSourceReaderConfig::EvmOracle {
+        assert_eq!(
+            ValuationSourceConfig::new(
+                "chainlink_eth_usd".to_string(),
+                "ethereum-mainnet".to_string(),
+                "eth.native.ethereum-mainnet".to_string(),
+                QuoteCode::Usd,
+                ValuationSourceReaderConfig::EvmOracle {
                     oracle_kind: "chainlink".parse().expect("valid oracle kind"),
                     config: EvmOracleConfig {
                         contract_address: "0x0000000000000000000000000000000000000001"
@@ -806,11 +803,8 @@ mod tests {
                     },
                 },
                 metadata,
-            }],
-        };
-
-        assert_eq!(
-            validate_valuation_source_registry(&registry).unwrap_err(),
+            )
+            .unwrap_err(),
             ValuationSourceRegistryError::MetadataContainsSecret {
                 source_id: "chainlink_eth_usd".to_string(),
                 key: "authorization".to_string(),

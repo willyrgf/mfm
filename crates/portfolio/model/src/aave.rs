@@ -1,12 +1,12 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::fmt;
 
 use mfm_program_derive::MfmValue;
-use mfm_values::string_map_secret_marker_key;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::ids::{AaveMarketId, AaveReserveId, NetworkId, NormalizedEvmAddress};
+use crate::metadata::PublicMetadata;
 use crate::portfolio::PortfolioConfig;
 use crate::symbol::{BalanceReaderConfig, QuoteCode, SymbolConfig, SymbolKind, SymbolRole};
 
@@ -37,7 +37,7 @@ pub struct AaveMarketConfig {
     pub reserves: Vec<AaveReserveConfig>,
     /// Canonical metadata surface.
     #[serde(default)]
-    pub metadata: BTreeMap<String, String>,
+    pub metadata: PublicMetadata,
 }
 
 impl AaveMarketConfig {
@@ -85,7 +85,7 @@ pub struct AaveReserveConfig {
     pub stable_debt_token_address: Option<NormalizedEvmAddress>,
     /// Canonical metadata surface.
     #[serde(default)]
-    pub metadata: BTreeMap<String, String>,
+    pub metadata: PublicMetadata,
 }
 
 /// Typed reader config for an Aave reserve position.
@@ -495,13 +495,6 @@ fn validate_market_config(
     market: &AaveMarketConfig,
     expected_chain_id: u64,
 ) -> Result<(), AavePortfolioConfigError> {
-    if let Some(key) = string_map_secret_marker_key(&market.metadata) {
-        return Err(AavePortfolioConfigError::MarketMetadataContainsSecret {
-            symbol_id: symbol.symbol_id.to_string(),
-            market_id: market.market_id.to_string(),
-            key: key.to_string(),
-        });
-    }
     if market.network_id != symbol.network_id {
         return Err(invalid_market(
             symbol,
@@ -527,14 +520,6 @@ fn validate_market_config(
     let mut reserve_ids = HashMap::new();
     let mut reserve_indexes = HashMap::new();
     for reserve in &market.reserves {
-        if let Some(key) = string_map_secret_marker_key(&reserve.metadata) {
-            return Err(AavePortfolioConfigError::ReserveMetadataContainsSecret {
-                symbol_id: symbol.symbol_id.to_string(),
-                market_id: market.market_id.to_string(),
-                reserve_id: reserve.reserve_id.to_string(),
-                key: key.to_string(),
-            });
-        }
         if reserve_ids
             .insert(reserve.reserve_id.as_str(), ())
             .is_some()
@@ -603,7 +588,7 @@ mod tests {
                         "0x00000000000000000000000000000000000000b4",
                     )),
                     stable_debt_token_address: None,
-                    metadata: BTreeMap::new(),
+                    metadata: PublicMetadata::default(),
                 },
                 AaveReserveConfig {
                     reserve_id: "usdc".parse().expect("valid reserve id"),
@@ -616,10 +601,10 @@ mod tests {
                         "0x00000000000000000000000000000000000000a3",
                     )),
                     stable_debt_token_address: None,
-                    metadata: BTreeMap::new(),
+                    metadata: PublicMetadata::default(),
                 },
             ],
-            metadata: BTreeMap::new(),
+            metadata: PublicMetadata::default(),
         }
     }
 
@@ -666,7 +651,7 @@ mod tests {
             decimals: Some(6),
             underlying_symbol_id: underlying_symbol_id
                 .map(|symbol_id| symbol_id.parse().expect("valid underlying symbol id")),
-            metadata: BTreeMap::new(),
+            metadata: PublicMetadata::default(),
         }
     }
 
@@ -772,55 +757,36 @@ mod tests {
 
     #[test]
     fn rejects_secret_markers_in_market_and_reserve_metadata() {
-        let mut market_metadata = aave_market();
-        market_metadata
-            .metadata
-            .insert("secret_key".to_string(), "redacted".to_string());
-        let portfolio = portfolio_with_aave_symbols(vec![aave_symbol(
-            "aave_v3.usdc.asset.ethereum-mainnet",
-            SymbolRole::Asset,
-            AAVE_V3_READER_RESERVE_POSITION,
-            json!({
-                "market": market_metadata,
-                "reserve_id": "usdc"
-            }),
-            Some("usdc.wallet.ethereum-mainnet"),
-            "usdc.wallet.ethereum-mainnet",
-        )]);
+        let mut market_metadata = serde_json::to_value(aave_market()).expect("market json");
+        market_metadata["metadata"] = json!({"secret_key": "redacted"});
 
-        assert_eq!(
-            validate_aave_portfolio_config(&portfolio).unwrap_err(),
-            AavePortfolioConfigError::MarketMetadataContainsSecret {
-                symbol_id: "aave_v3.usdc.asset.ethereum-mainnet".to_string(),
-                market_id: "aave-v3-mainnet".to_string(),
-                key: "secret_key".to_string(),
+        assert!(serde_json::from_value::<BalanceReaderConfig>(json!({
+            "kind": "protocol_position",
+            "protocol": AAVE_V3_PROTOCOL_ID,
+            "reader": AAVE_V3_READER_RESERVE_POSITION,
+            "config": {
+                "reserve_position": {
+                    "market": market_metadata,
+                    "reserve_id": "usdc"
+                }
             }
-        );
+        }))
+        .is_err());
 
-        let mut reserve_metadata = aave_market();
-        reserve_metadata.reserves[0]
-            .metadata
-            .insert("label".to_string(), "bearer redacted".to_string());
-        let portfolio = portfolio_with_aave_symbols(vec![aave_symbol(
-            "aave_v3.usdc.asset.ethereum-mainnet",
-            SymbolRole::Asset,
-            AAVE_V3_READER_RESERVE_POSITION,
-            json!({
-                "market": reserve_metadata,
-                "reserve_id": "usdc"
-            }),
-            Some("usdc.wallet.ethereum-mainnet"),
-            "usdc.wallet.ethereum-mainnet",
-        )]);
+        let mut reserve_metadata = serde_json::to_value(aave_market()).expect("market json");
+        reserve_metadata["reserves"][0]["metadata"] = json!({"label": "bearer redacted"});
 
-        assert_eq!(
-            validate_aave_portfolio_config(&portfolio).unwrap_err(),
-            AavePortfolioConfigError::ReserveMetadataContainsSecret {
-                symbol_id: "aave_v3.usdc.asset.ethereum-mainnet".to_string(),
-                market_id: "aave-v3-mainnet".to_string(),
-                reserve_id: "wbtc".to_string(),
-                key: "label".to_string(),
+        assert!(serde_json::from_value::<BalanceReaderConfig>(json!({
+            "kind": "protocol_position",
+            "protocol": AAVE_V3_PROTOCOL_ID,
+            "reader": AAVE_V3_READER_RESERVE_POSITION,
+            "config": {
+                "reserve_position": {
+                    "market": reserve_metadata,
+                    "reserve_id": "usdc"
+                }
             }
-        );
+        }))
+        .is_err());
     }
 }

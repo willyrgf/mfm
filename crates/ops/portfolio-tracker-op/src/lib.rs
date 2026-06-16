@@ -563,6 +563,7 @@ fn observation_targets(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mfm_portfolio_model::metadata::PublicMetadata;
     use mfm_portfolio_model::portfolio::NetworkFamilyConfig;
     use mfm_portfolio_model::symbol::{
         BalanceReaderConfig, QuoteCode, QuoteValuationConfig, SymbolKind, SymbolRole,
@@ -687,7 +688,7 @@ mod tests {
                 symbol_ids: vec!["eth.native.ethereum-mainnet"
                     .parse()
                     .expect("valid symbol id")],
-                metadata: BTreeMap::new(),
+                metadata: PublicMetadata::default(),
             }],
             symbol_configs: vec![SymbolConfig {
                 symbol_id: "eth.native.ethereum-mainnet"
@@ -712,9 +713,9 @@ mod tests {
                 },
                 decimals: Some(18),
                 underlying_symbol_id: None,
-                metadata: BTreeMap::new(),
+                metadata: PublicMetadata::default(),
             }],
-            metadata: BTreeMap::new(),
+            metadata: PublicMetadata::default(),
         }
     }
 }

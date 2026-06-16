@@ -40,6 +40,8 @@ pub mod aave;
 pub mod domain_key;
 /// Strong portfolio scalar identifiers used by config authorities.
 pub mod ids;
+/// Redaction-safe public metadata model used by portfolio surfaces.
+pub mod metadata;
 /// Canonical portfolio-domain models, validation helpers, and normalization utilities.
 pub mod portfolio;
 /// Canonical symbol-domain models, validation helpers, and normalization utilities.

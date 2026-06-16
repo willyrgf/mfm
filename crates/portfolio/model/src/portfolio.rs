@@ -2,7 +2,6 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::num::NonZeroU64;
 
 use mfm_program_derive::{MfmConfig, MfmValue, PublicOutputs};
-use mfm_values::string_map_secret_marker_key;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
@@ -11,6 +10,7 @@ use crate::ids::{
     ControlScopeId, NetworkId, PortfolioId, PortfolioScalarError, SymbolId, ValuationSourceId,
     WalletId,
 };
+use crate::metadata::PublicMetadata;
 use crate::symbol::{
     validate_symbol_config, BalanceReaderConfig, Observation, PriceSourceRef, QuoteCode,
     SymbolConfig, SymbolConfigError, SymbolKind, ValuationReaderConfig, ValuationSourceConfig,
@@ -57,7 +57,7 @@ pub struct PortfolioConfig {
     pub symbol_configs: Vec<SymbolConfig>,
     /// Canonical metadata surface.
     #[serde(default)]
-    pub metadata: BTreeMap<String, String>,
+    pub metadata: PublicMetadata,
 }
 
 impl PortfolioConfig {
@@ -72,6 +72,11 @@ impl PortfolioConfig {
     ) -> Result<Self, PortfolioConfigError> {
         let portfolio_id = PortfolioId::new(portfolio_id)
             .map_err(|source| PortfolioConfigError::InvalidPortfolioId { source })?;
+        let metadata = PublicMetadata::new(metadata).map_err(|source| {
+            PortfolioConfigError::MetadataContainsSecret {
+                key: source.key().to_owned(),
+            }
+        })?;
         Self {
             portfolio_id,
             quote_codes,
@@ -131,7 +136,7 @@ pub enum NetworkConfig {
         control_scope: ControlScopeId,
         /// Canonical metadata surface.
         #[serde(default)]
-        metadata: BTreeMap<String, String>,
+        metadata: PublicMetadata,
     },
     /// Bitcoin-family execution network.
     Bitcoin {
@@ -141,7 +146,7 @@ pub enum NetworkConfig {
         control_scope: ControlScopeId,
         /// Canonical metadata surface.
         #[serde(default)]
-        metadata: BTreeMap<String, String>,
+        metadata: PublicMetadata,
     },
 }
 
@@ -158,6 +163,12 @@ impl NetworkConfig {
             .map_err(|source| PortfolioConfigError::InvalidNetworkId { source })?;
         let control_scope = ControlScopeId::new(control_scope)
             .map_err(|source| PortfolioConfigError::InvalidNetworkControlScope { source })?;
+        let metadata = PublicMetadata::new(metadata).map_err(|source| {
+            PortfolioConfigError::NetworkMetadataContainsSecret {
+                network_id: network_id.to_string(),
+                key: source.key().to_owned(),
+            }
+        })?;
         match family {
             NetworkFamilyConfig::Evm => {
                 let Some(chain_id) = chain_id else {
@@ -240,6 +251,13 @@ impl NetworkConfig {
 
     /// Returns the public metadata associated with this network.
     pub fn metadata(&self) -> &BTreeMap<String, String> {
+        match self {
+            Self::Evm { metadata, .. } | Self::Bitcoin { metadata, .. } => metadata.as_map(),
+        }
+    }
+
+    /// Returns the checked public metadata authority associated with this network.
+    pub fn public_metadata(&self) -> &PublicMetadata {
         match self {
             Self::Evm { metadata, .. } | Self::Bitcoin { metadata, .. } => metadata,
         }
@@ -1003,12 +1021,6 @@ pub fn decode_portfolio_config(value: &Value) -> Result<PortfolioConfig, Portfol
 }
 
 fn validate_portfolio_config_inner(cfg: &PortfolioConfig) -> Result<(), PortfolioConfigError> {
-    if let Some(key) = string_map_secret_marker_key(&cfg.metadata) {
-        return Err(PortfolioConfigError::MetadataContainsSecret {
-            key: key.to_string(),
-        });
-    }
-
     let mut requested_quotes = BTreeSet::new();
     for quote in &cfg.quote_codes {
         if !requested_quotes.insert(*quote) {
@@ -1200,13 +1212,7 @@ fn validate_portfolio_bundle_sources(
 }
 
 /// Validates one canonical network config.
-pub fn validate_network_config(network: &NetworkConfig) -> Result<(), PortfolioConfigError> {
-    if let Some(key) = string_map_secret_marker_key(network.metadata()) {
-        return Err(PortfolioConfigError::NetworkMetadataContainsSecret {
-            network_id: network.network_id().to_string(),
-            key: key.to_string(),
-        });
-    }
+pub fn validate_network_config(_network: &NetworkConfig) -> Result<(), PortfolioConfigError> {
     Ok(())
 }
 
@@ -1368,7 +1374,7 @@ mod tests {
         ObservationAnchor, ObservationQuantity, ObservationSource, ObservationValue,
         ObservationValueSourceRef, SymbolConfigError, SymbolRole,
     };
-    use crate::wallet::{WalletConfigError, WalletImplementationConfig};
+    use crate::wallet::WalletImplementationConfig;
     use serde_json::json;
 
     #[test]
@@ -1629,45 +1635,29 @@ mod tests {
     fn typed_metadata_rejects_secret_markers() {
         let mut portfolio_metadata = canonical_config_json();
         portfolio_metadata["metadata"] = json!({"mnemonic": "redacted"});
-        assert_eq!(
-            decode_portfolio_config(&portfolio_metadata).unwrap_err(),
-            PortfolioConfigError::MetadataContainsSecret {
-                key: "mnemonic".to_string(),
-            }
-        );
+        assert_decode_rejects_public_metadata(&portfolio_metadata, "mnemonic");
 
         let mut network_metadata = canonical_config_json();
         network_metadata["networks"][0]["metadata"] = json!({"label": "password=redacted"});
-        assert_eq!(
-            decode_portfolio_config(&network_metadata).unwrap_err(),
-            PortfolioConfigError::NetworkMetadataContainsSecret {
-                network_id: "ethereum-mainnet".to_string(),
-                key: "label".to_string(),
-            }
-        );
+        assert_decode_rejects_public_metadata(&network_metadata, "label");
 
         let mut wallet_metadata = canonical_config_json();
         wallet_metadata["wallets"][0]["metadata"] = json!({"api_key": "redacted"});
-        assert_eq!(
-            decode_portfolio_config(&wallet_metadata).unwrap_err(),
-            PortfolioConfigError::InvalidWalletConfig {
-                wallet_id: "wallet_treasury_eth".to_string(),
-                source: WalletConfigError::MetadataContainsSecret {
-                    key: "api_key".to_string(),
-                },
-            }
-        );
+        assert_decode_rejects_public_metadata(&wallet_metadata, "api_key");
 
         let mut symbol_metadata = canonical_config_json();
         symbol_metadata["symbol_configs"][0]["metadata"] = json!({"note": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"});
-        assert_eq!(
-            decode_portfolio_config(&symbol_metadata).unwrap_err(),
-            PortfolioConfigError::InvalidSymbolConfig {
-                symbol_id: "eth.native.ethereum-mainnet".to_string(),
-                source: SymbolConfigError::MetadataContainsSecret {
-                    key: "note".to_string(),
-                },
-            }
+        assert_decode_rejects_public_metadata(&symbol_metadata, "note");
+    }
+
+    fn assert_decode_rejects_public_metadata(value: &Value, expected_key: &str) {
+        let error = decode_portfolio_config(value).expect_err("metadata must fail");
+        let PortfolioConfigError::Decode(message) = error else {
+            panic!("expected decode failure, got {error}");
+        };
+        assert!(
+            message.contains(expected_key),
+            "decode message `{message}` did not include `{expected_key}`"
         );
     }
 
@@ -2180,7 +2170,7 @@ mod tests {
                     block_number: 1,
                 },
             },
-            metadata: BTreeMap::new(),
+            metadata: PublicMetadata::default(),
         }
     }
 }

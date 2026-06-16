@@ -5,7 +5,6 @@ use std::str::FromStr;
 
 use bs58;
 use mfm_program_derive::MfmValue;
-use mfm_values::string_map_secret_marker_key;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
@@ -14,6 +13,7 @@ use crate::ids::{
     ExternalSignerId, KeystoreEntryId, NetworkId, NormalizedEvmAddress, PortfolioScalarError,
     SymbolId, WalletId,
 };
+use crate::metadata::PublicMetadata;
 
 /// Canonical subject kind selected for one wallet declaration.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
@@ -209,7 +209,7 @@ pub struct WalletConfig {
     pub symbol_ids: Vec<SymbolId>,
     /// Canonical metadata surface.
     #[serde(default)]
-    pub metadata: BTreeMap<String, String>,
+    pub metadata: PublicMetadata,
 }
 
 impl WalletConfig {
@@ -234,6 +234,11 @@ impl WalletConfig {
                     .map_err(|source| WalletConfigError::InvalidSymbolIdRef { symbol_id, source })
             })
             .collect::<Result<Vec<_>, _>>()?;
+        let metadata = PublicMetadata::new(metadata).map_err(|source| {
+            WalletConfigError::MetadataContainsSecret {
+                key: source.key().to_owned(),
+            }
+        })?;
         Self {
             wallet_id,
             subject: WalletSubject::new(address, subject_kind)?,
@@ -394,12 +399,7 @@ pub fn decode_wallet_config(value: &Value) -> Result<WalletConfig, WalletConfigE
 }
 
 /// Validates a canonical wallet config.
-pub fn validate_wallet_config(cfg: &WalletConfig) -> Result<(), WalletConfigError> {
-    if let Some(key) = string_map_secret_marker_key(&cfg.metadata) {
-        return Err(WalletConfigError::MetadataContainsSecret {
-            key: key.to_string(),
-        });
-    }
+pub fn validate_wallet_config(_cfg: &WalletConfig) -> Result<(), WalletConfigError> {
     Ok(())
 }
 

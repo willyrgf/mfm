@@ -2055,6 +2055,7 @@ fn ten_pow(n: u32) -> BigInt {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mfm_portfolio_model::metadata::PublicMetadata;
     use mfm_portfolio_model::symbol::{SymbolKind, SymbolValuationConfig};
     use mfm_portfolio_model::wallet::WalletSubject;
     use mfm_values::MfmConfig as _;
@@ -2090,7 +2091,7 @@ mod tests {
             symbol_ids: vec!["eth.native.ethereum-mainnet"
                 .parse()
                 .expect("valid symbol id")],
-            metadata: BTreeMap::new(),
+            metadata: PublicMetadata::default(),
         };
         let symbol = SymbolConfig {
             symbol_id: "eth.native.ethereum-mainnet"
@@ -2115,7 +2116,7 @@ mod tests {
             },
             decimals: Some(18),
             underlying_symbol_id: None,
-            metadata: BTreeMap::new(),
+            metadata: PublicMetadata::default(),
         };
         let config = ObserveBatchConfig {
             wallet,
@@ -2162,7 +2163,7 @@ mod tests {
             symbol_ids: vec!["eth.native.ethereum-mainnet"
                 .parse()
                 .expect("valid symbol id")],
-            metadata: BTreeMap::new(),
+            metadata: PublicMetadata::default(),
         };
         let symbol = SymbolConfig {
             symbol_id: "eth.native.ethereum-mainnet"
@@ -2187,7 +2188,7 @@ mod tests {
             },
             decimals: Some(18),
             underlying_symbol_id: None,
-            metadata: BTreeMap::new(),
+            metadata: PublicMetadata::default(),
         };
         let input = ObserveBatchInput {
             subjects: ResolvedSubjects {
@@ -2242,7 +2243,7 @@ mod tests {
                     networks: vec![network],
                     wallets: vec![wallet],
                     symbol_configs: vec![symbol],
-                    metadata: BTreeMap::new(),
+                    metadata: PublicMetadata::default(),
                 },
             )
             .expect("assemble config"),
