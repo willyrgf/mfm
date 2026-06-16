@@ -21,7 +21,7 @@ use mfm_program::{
     StateSpec,
 };
 use mfm_program_derive::{MfmConfig, MfmValue, OperationOutput, PublicOutputs, StateInput};
-use serde::{Deserialize, Serialize};
+use serde::{de, Deserialize, Serialize};
 
 const NAMESPACE: &str = "mfm.proof";
 const ADAPTER_NAME: &str = "deterministic-proof";
@@ -127,27 +127,54 @@ pub struct ProofReadConfig {
 }
 
 /// Config for the proof side-effect state.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmConfig)]
-#[mfm(
-    schema = "mfm.proof.config.apply_side_effect",
-    validate = "validate_proof_apply_config"
-)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, MfmConfig)]
+#[mfm(schema = "mfm.proof.config.apply_side_effect")]
 pub struct ProofApplyConfig {
     /// Stable action name included in the intent and idempotency input.
-    pub action: String,
+    action: String,
+}
+
+impl ProofApplyConfig {
+    /// Creates a proof apply config with a non-empty action.
+    pub fn new(action: impl Into<String>) -> Result<Self, String> {
+        let action = action.into();
+        if action.trim().is_empty() {
+            return Err("proof action must be non-empty".to_owned());
+        }
+        Ok(Self { action })
+    }
+
+    /// Returns the stable proof action.
+    pub fn action(&self) -> &str {
+        &self.action
+    }
+
+    /// Consumes this config into the stable proof action.
+    pub fn into_action(self) -> String {
+        self.action
+    }
+}
+
+impl<'de> Deserialize<'de> for ProofApplyConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawProofApplyConfig {
+            action: String,
+        }
+
+        let raw = RawProofApplyConfig::deserialize(deserializer)?;
+        Self::new(raw.action).map_err(de::Error::custom)
+    }
 }
 
 /// Config for proof output assembly.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmConfig)]
 #[mfm(schema = "mfm.proof.config.assemble_output")]
 pub struct ProofAssembleConfig {}
-
-fn validate_proof_apply_config(config: &ProofApplyConfig) -> Result<(), String> {
-    if config.action.trim().is_empty() {
-        return Err("proof action must be non-empty".to_owned());
-    }
-    Ok(())
-}
 
 /// Root proof workflow config.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmConfig)]
@@ -578,3 +605,14 @@ impl std::fmt::Display for ProofReplayError {
 }
 
 impl std::error::Error for ProofReplayError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn proof_apply_config_rejects_empty_actions_at_construction() {
+        assert!(ProofApplyConfig::new("accept").is_ok());
+        assert!(ProofApplyConfig::new("   ").is_err());
+    }
+}

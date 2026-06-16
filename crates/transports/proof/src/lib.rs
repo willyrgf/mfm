@@ -185,12 +185,9 @@ async fn run_read(ctx: ErasedRunCtx<'_>) -> mfm_runtime::Result<ErasedRunnerOutp
 }
 
 async fn run_side_effect(ctx: ErasedRunCtx<'_>) -> mfm_runtime::Result<ErasedRunnerOutput> {
-    ensure_config::<ProofApplyConfig>(
-        &ctx.node().config_ref,
-        &ProofApplyConfig {
-            action: "accept".to_owned(),
-        },
-    )?;
+    let config =
+        ProofApplyConfig::new("accept").map_err(mfm_runtime::RuntimeError::InvalidRunnerOutput)?;
+    ensure_config::<ProofApplyConfig>(&ctx.node().config_ref, &config)?;
     let ledger_key = events::SideEffectLedgerKey::new("mfm.proof.ledger.default")?;
     let phase = ctx
         .projections()

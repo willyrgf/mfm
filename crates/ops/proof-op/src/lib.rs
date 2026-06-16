@@ -81,9 +81,7 @@ impl Operation for ProofWorkflowOperation {
         )?;
         let side_effect = builder.side_effect::<ProofApplySideEffectState, _>(
             StateKey::new("apply_side_effect")?,
-            ProofApplyConfig {
-                action: config.action,
-            },
+            ProofApplyConfig::new(config.action).map_err(mfm_program::PlanError::Value)?,
             fact.clone(),
             ResourceClaim::manual_only(),
         )?;
