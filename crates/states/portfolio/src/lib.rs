@@ -323,20 +323,22 @@ impl ResolveSubjectsConfig {
 )]
 pub struct PinViewsConfig {
     /// Networks to pin.
-    networks: Vec<NetworkConfig>,
+    pinned_networks: Vec<NetworkConfig>,
 }
 
 impl PinViewsConfig {
     /// Creates validated view-pinning config.
     pub fn new(networks: Vec<NetworkConfig>) -> Result<Self, ConfigError> {
-        let config = Self { networks };
+        let config = Self {
+            pinned_networks: networks,
+        };
         validate_pin_views_config(&config).map_err(ConfigError::new)?;
         Ok(config)
     }
 
     /// Returns the networks to pin.
     pub fn networks(&self) -> &[NetworkConfig] {
-        &self.networks
+        &self.pinned_networks
     }
 }
 
@@ -348,12 +350,12 @@ impl<'de> Deserialize<'de> for PinViewsConfig {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct RawPinViewsConfig {
-            networks: Vec<NetworkConfig>,
+            pinned_networks: Vec<NetworkConfig>,
         }
 
         let raw = RawPinViewsConfig::deserialize(deserializer)?;
         Ok(Self {
-            networks: raw.networks,
+            pinned_networks: raw.pinned_networks,
         })
     }
 }
@@ -557,7 +559,7 @@ fn validate_resolve_subjects_config(config: &ResolveSubjectsConfig) -> Result<()
 }
 
 fn validate_pin_views_config(config: &PinViewsConfig) -> Result<(), String> {
-    ValidatedNetworkConfigs::new(config.networks.clone())
+    ValidatedNetworkConfigs::new(config.pinned_networks.clone())
         .map(|_| ())
         .map_err(|error| error.to_string())
 }
@@ -1239,7 +1241,7 @@ where
     B: PortfolioReadBackend + ?Sized,
 {
     let mut views = Vec::new();
-    for network in &config.networks {
+    for network in config.networks() {
         let block_number = match network.family {
             NetworkFamilyConfig::Evm => backend.evm_block_number(&network.network_id).await?,
             NetworkFamilyConfig::Bitcoin => 0,
@@ -2057,7 +2059,7 @@ mod tests {
         assert!(workflow_error.to_string().contains("unknown field"));
 
         let pin_error =
-            serde_json::from_str::<PinViewsConfig>(r#"{"pin_version":1,"networks":[]}"#)
+            serde_json::from_str::<PinViewsConfig>(r#"{"pin_version":1,"pinned_networks":[]}"#)
                 .expect_err("stale pin version must fail");
         assert!(pin_error.to_string().contains("unknown field"));
 

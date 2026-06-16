@@ -147,8 +147,13 @@ async fn portfolio_snapshot_post(
         ))
         .await
         .expect("portfolio snapshot response");
-    assert_eq!(response.status(), StatusCode::OK);
+    let status = response.status();
     let body = response_json(response).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "portfolio snapshot error response: {body}"
+    );
     assert_eq!(body["status"], "success");
     body
 }
