@@ -5,6 +5,7 @@ use mfm_values::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::num::NonZeroU64;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
 #[mfm(
@@ -22,6 +23,7 @@ struct PricedAsset {
 #[serde(rename_all = "camelCase")]
 struct PortfolioRequest {
     account_id: String,
+    revision: NonZeroU64,
     assets: Vec<PricedAsset>,
     weights: BTreeMap<String, u64>,
 }
@@ -125,6 +127,7 @@ fn generated_config_descriptor_resolves_wire_names_and_value_refs() {
         vec![
             ("accountId", FieldDefaultPolicy::Required),
             ("assets", FieldDefaultPolicy::Required),
+            ("revision", FieldDefaultPolicy::Required),
             ("weights", FieldDefaultPolicy::Required),
         ]
     );

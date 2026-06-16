@@ -1197,6 +1197,7 @@ fn shape_tokens_for_path(
         "u16" => Ok(unsigned_integer(16)),
         "u32" => Ok(unsigned_integer(32)),
         "u64" => Ok(unsigned_integer(64)),
+        "NonZeroU64" => Ok(unsigned_integer(64)),
         "f32" | "f64" => Err(syn::Error::new_spanned(
             type_path,
             "floating point fields are not supported by MFM persisted surfaces",
@@ -1434,8 +1435,8 @@ fn reject_unsupported_state_input_leaf(ty: &Type) -> syn::Result<()> {
     };
     let ident = segment.ident.to_string();
     match ident.as_str() {
-        "bool" | "String" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "f32"
-        | "f64" | "usize" | "isize" | "Option" | "HashMap" | "BTreeMap" => {
+        "bool" | "String" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64"
+        | "NonZeroU64" | "f32" | "f64" | "usize" | "isize" | "Option" | "HashMap" | "BTreeMap" => {
             Err(syn::Error::new_spanned(
                 ty,
                 "state input fields must use MfmValue types or supported typed wrappers",
